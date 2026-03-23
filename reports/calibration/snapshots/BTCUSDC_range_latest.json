@@ -104,7 +104,7 @@
     "ob_freshness": 0.0,
     "trend_proxy": 0.0
   },
-  "generated_at": "2026-03-23T20:08:54+00:00",
+  "generated_at": "2026-03-23T20:23:56+00:00",
   "matched_samples": 0,
   "previous_weights": {
     "fvg_displacement": 0.2,
@@ -122,9 +122,9 @@
     "trend_proxy": 0.05
   },
   "regime_label": "range",
-  "report_path": "reports/calibration/feature_calibration_BTCUSDC_range_20260323T200854Z.md",
+  "report_path": "reports/calibration/feature_calibration_BTCUSDC_range_20260323T202356Z.md",
   "schema_version": "feature_calibration_v2",
-  "snapshot_path": "reports/calibration/snapshots/BTCUSDC_range_20260323T200854Z.json",
+  "snapshot_path": "reports/calibration/snapshots/BTCUSDC_range_20260323T202356Z.json",
   "symbol": "BTCUSDC",
   "zone_type_multipliers": {
     "FLIP": {
