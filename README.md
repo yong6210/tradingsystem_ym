@@ -240,6 +240,16 @@ The funnel matters because candidate quality is only useful if it survives portf
 - Use [run_live_alpha_operating_review.py](/Users/yumin/Documents/trading/scripts/run_live_alpha_operating_review.py) for the combined review and [LIVE_ALPHA_OPERATING_ROUTINE.md](/Users/yumin/Documents/trading/docs/LIVE_ALPHA_OPERATING_ROUTINE.md) for cadence.
 - Reports are written to `reports/validation/live_alpha_reviews/`.
 
+## Replay Evidence Review
+
+`historical closed plans + stress replay lineage + replay assessment -> replay_evidence_review`
+
+- `replay_evidence_review` is the historical replay-proxy context layer for a single symbol.
+- It reuses A/B family edge review, then adds stress replay lineage and replay assessment so historical evidence can be read without pretending it is live confidence.
+- The payload is intentionally marked `do_not_treat_as_live_confidence=true`.
+- Use [run_replay_evidence_review.py](/Users/yumin/Documents/trading/scripts/run_replay_evidence_review.py) for symbol-level replay context and keep it separate from [run_live_alpha_operating_review.py](/Users/yumin/Documents/trading/scripts/run_live_alpha_operating_review.py).
+- Reports are written to `reports/validation/replay_evidence_reviews/`.
+
 ## Promotion Governance
 
 `strategy_lifecycle + rollout_recommendation + positive_evidence_expansion + condition split -> promotion_governance`
@@ -775,6 +785,12 @@ Combined live alpha operating review:
 
 ```bash
 ./.venv/bin/python scripts/run_live_alpha_operating_review.py --days 180
+```
+
+Replay evidence review:
+
+```bash
+./.venv/bin/python scripts/run_replay_evidence_review.py --symbol BTCUSDC --days 180
 ```
 
 ## Execution Friction Measurement

@@ -133,6 +133,7 @@ class Settings(BaseSettings):
     kill_condition_automation_report_dir: str = "reports/operations/kill_condition_automation"
     strategy_family_edge_review_report_dir: str = "reports/validation/edge_reviews"
     live_alpha_operating_review_report_dir: str = "reports/validation/live_alpha_reviews"
+    replay_evidence_review_report_dir: str = "reports/validation/replay_evidence_reviews"
     validation_wf_train_months: int = 3
     validation_wf_test_months: int = 1
     validation_mc_simulations: int = 400

@@ -24,6 +24,17 @@
 - 이 command는 A review, B review, 그리고 `한 달 운영하면 몇 R 구조인지`를 같은 report로 압축한다.
 - report 기본 경로: `reports/validation/live_alpha_reviews/`
 
+### 3.0A Replay Evidence Review
+```bash
+./.venv/bin/python scripts/run_replay_evidence_review.py \
+  --symbol BTCUSDC \
+  --days 180
+```
+
+- 이 command는 `historical closed plans + stress replay lineage/assessment`를 replay-proxy evidence로만 읽는다.
+- `do_not_treat_as_live_confidence=true`가 기본 전제다.
+- report 기본 경로: `reports/validation/replay_evidence_reviews/`
+
 ### 3.1 A Anchor
 ```bash
 ./.venv/bin/python scripts/run_strategy_family_edge_review.py \
@@ -86,6 +97,7 @@
 - B가 `validated_edge`가 아니면 계속 guarded posture로 둔다.
 - `execution_friction_measurement`가 `degraded_friction`이면 edge verdict보다 friction review를 먼저 한다.
 - `kill_condition_automation`이 `observe_only`가 아니면 edge review보다 safety review를 먼저 한다.
+- replay evidence는 참고만 하고, live 표본과 절대 합산하지 않는다.
 
 ## 5. Weekly Routine
 주간 리뷰는 `90d` 창으로 한다.
@@ -110,6 +122,7 @@
 
 1. combined live alpha operating review를 먼저 남긴다.
 2. A/B edge review report를 둘 다 남긴다.
+3. 필요하면 symbol별 replay evidence review를 같이 남긴다.
 2. `promotion_governance`, `promotion_decision_brief`, `promotion_lifecycle_history`를 같이 본다.
 3. `capital_allocator`, `strategy_cluster_balance`, `b_continuation_activation`까지 같이 본다.
 4. 실제 운영 posture를 아래 중 하나로만 정리한다.
@@ -126,6 +139,7 @@
 ## 7. 운영 해석 원칙
 - A review는 `anchor confidence`를 읽는 것이다. approval authority가 아니다.
 - B review는 `diversification evidence`를 읽는 것이다. activation authority가 아니다.
+- replay review는 `historical context`를 읽는 것이다. live confidence나 sizing authority가 아니다.
 - `execution_friction_measurement`, `forward_stress_regime_validation`, `kill_condition_automation`은 edge verdict를 보완하는 safety layer다.
 - `proposal_only`와 `explicit arm` 철학은 유지한다.
 
