@@ -1,0 +1,119 @@
+{
+  "alpha": 0.35,
+  "applied_runtime": true,
+  "available": true,
+  "baseline_generated_plans": 5,
+  "baseline_weights": {
+    "fvg_displacement": 0.2,
+    "htf_alignment": 0.18,
+    "liquidity": 0.38,
+    "ob_freshness": 0.19,
+    "trend_proxy": 0.05
+  },
+  "by_regime": {
+    "range": {
+      "baseline_generated_plans": 5,
+      "current_scores": {
+        "fvg_displacement": -3.445946,
+        "htf_alignment": -1.730434,
+        "liquidity": 2.315116,
+        "ob_freshness": 3.993035,
+        "trend_proxy": -6.8e-05
+      },
+      "ewma_scores": {
+        "fvg_displacement": -3.738683,
+        "htf_alignment": -2.003867,
+        "liquidity": 2.165483,
+        "ob_freshness": 3.839595,
+        "trend_proxy": -0.000186
+      },
+      "feature_weights_active": {
+        "fvg_displacement": 0.191217,
+        "htf_alignment": 0.175399,
+        "liquidity": 0.386605,
+        "ob_freshness": 0.196778,
+        "trend_proxy": 0.05
+      },
+      "feature_weights_base": {
+        "fvg_displacement": 0.2,
+        "htf_alignment": 0.18,
+        "liquidity": 0.38,
+        "ob_freshness": 0.19,
+        "trend_proxy": 0.05
+      },
+      "feature_weights_previous": {
+        "fvg_displacement": 0.191256,
+        "htf_alignment": 0.175399,
+        "liquidity": 0.386609,
+        "ob_freshness": 0.196715,
+        "trend_proxy": 0.050021
+      },
+      "matched_samples": 5,
+      "weight_deltas": {
+        "fvg_displacement": -0.008783,
+        "htf_alignment": -0.004601,
+        "liquidity": 0.006605,
+        "ob_freshness": 0.006778,
+        "trend_proxy": 0.0
+      }
+    }
+  },
+  "current_scores": {
+    "fvg_displacement": -3.445946,
+    "htf_alignment": -1.730434,
+    "liquidity": 2.315116,
+    "ob_freshness": 3.993035,
+    "trend_proxy": -6.8e-05
+  },
+  "ewma_scores": {
+    "fvg_displacement": -3.738683,
+    "htf_alignment": -2.003867,
+    "liquidity": 2.165483,
+    "ob_freshness": 3.839595,
+    "trend_proxy": -0.000186
+  },
+  "generated_at": "2026-03-06T17:07:43+00:00",
+  "matched_samples": 5,
+  "previous_weights": {
+    "fvg_displacement": 0.191256,
+    "htf_alignment": 0.175399,
+    "liquidity": 0.386609,
+    "ob_freshness": 0.196715,
+    "trend_proxy": 0.050021
+  },
+  "reason": "calibrated",
+  "recommended_weights": {
+    "fvg_displacement": 0.191217,
+    "htf_alignment": 0.175399,
+    "liquidity": 0.386605,
+    "ob_freshness": 0.196778,
+    "trend_proxy": 0.05
+  },
+  "regime_label": "range",
+  "report_path": null,
+  "schema_version": "feature_calibration_v1",
+  "snapshot_path": "reports/calibration/snapshots/BTCUSDC_range_20260306T170743Z.json",
+  "symbol": "BTCUSDC",
+  "zone_type_multipliers": {
+    "FLIP": {
+      "active_multiplier": 1.0,
+      "baseline_multiplier": 1.0,
+      "delta": 0.0
+    },
+    "FVG": {
+      "active_multiplier": 1.0,
+      "baseline_multiplier": 1.0,
+      "delta": 0.0
+    },
+    "LP": {
+      "active_multiplier": 1.0,
+      "baseline_multiplier": 1.0,
+      "delta": 0.0
+    },
+    "OB": {
+      "active_multiplier": 1.0,
+      "baseline_multiplier": 1.0,
+      "delta": 0.0
+    }
+  }
+}

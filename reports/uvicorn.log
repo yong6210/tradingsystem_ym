@@ -1,0 +1,7 @@
+INFO:     Will watch for changes in these directories: ['/Users/yumin/Documents/trading']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [90134] using StatReload
+INFO:     Started server process [90137]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:61838 - "GET /execution/operator-ui?symbol=BTCUSDC&universe=usdc_perp_top30&days=7 HTTP/1.1" 200 OK

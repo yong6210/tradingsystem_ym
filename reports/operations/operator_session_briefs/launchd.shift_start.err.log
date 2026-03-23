@@ -1,0 +1,337 @@
+shell-init: error retrieving current directory: getcwd: cannot access parent directories: Operation not permitted
+shell-init: error retrieving current directory: getcwd: cannot access parent directories: Operation not permitted
+/bin/bash: /Users/yumin/Documents/trading/scripts/run_operator_session_brief_tick.sh: Operation not permitted
+Traceback (most recent call last):
+  File "/Users/yumin/Documents/trading/scripts/notify_operator_session_brief.py", line 336, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/yumin/Documents/trading/scripts/notify_operator_session_brief.py", line 268, in main
+    brief = _run_brief(args)
+  File "/Users/yumin/Documents/trading/scripts/notify_operator_session_brief.py", line 114, in _run_brief
+    raise RuntimeError(f"brief script failed: {stderr}")
+RuntimeError: brief script failed: Traceback (most recent call last):
+  File "/Users/yumin/Documents/trading/scripts/generate_operator_session_brief.py", line 206, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/yumin/Documents/trading/scripts/generate_operator_session_brief.py", line 181, in main
+    snapshot = _run_snapshot(args)
+  File "/Users/yumin/Documents/trading/scripts/generate_operator_session_brief.py", line 62, in _run_snapshot
+    raise RuntimeError(f"snapshot script failed: {stderr}")
+RuntimeError: snapshot script failed: Traceback (most recent call last):
+  File "/Users/yumin/Documents/trading/scripts/collect_operator_surface_divergence_snapshot.py", line 290, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/yumin/Documents/trading/scripts/collect_operator_surface_divergence_snapshot.py", line 155, in main
+    client.get(
+    ~~~~~~~~~~^
+        "/execution/operator-dashboard",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+        },
+        ^^
+    ),
+    ^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/testclient.py", line 473, in get
+    return super().get(
+           ~~~~~~~~~~~^
+        url,
+        ^^^^
+    ...<6 lines>...
+        extensions=extensions,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/httpx/_client.py", line 1053, in get
+    return self.request(
+           ~~~~~~~~~~~~^
+        "GET",
+        ^^^^^^
+    ...<7 lines>...
+        extensions=extensions,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/testclient.py", line 445, in request
+    return super().request(
+           ~~~~~~~~~~~~~~~^
+        method,
+        ^^^^^^^
+    ...<11 lines>...
+        extensions=extensions,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/httpx/_client.py", line 825, in request
+    return self.send(request, auth=auth, follow_redirects=follow_redirects)
+           ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/httpx/_client.py", line 914, in send
+    response = self._send_handling_auth(
+        request,
+    ...<2 lines>...
+        history=[],
+    )
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/httpx/_client.py", line 942, in _send_handling_auth
+    response = self._send_handling_redirects(
+        request,
+        follow_redirects=follow_redirects,
+        history=history,
+    )
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/httpx/_client.py", line 979, in _send_handling_redirects
+    response = self._send_single_request(request)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/httpx/_client.py", line 1014, in _send_single_request
+    response = transport.handle_request(request)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/testclient.py", line 348, in handle_request
+    raise exc
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/testclient.py", line 345, in handle_request
+    portal.call(self.app, scope, receive, send)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/anyio/from_thread.py", line 334, in call
+    return cast(T_Retval, self.start_task_soon(func, *args).result())
+                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/concurrent/futures/_base.py", line 450, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/concurrent/futures/_base.py", line 395, in __get_result
+    raise self._exception
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/anyio/from_thread.py", line 259, in _call_func
+    retval = await retval_or_awaitable
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/fastapi/applications.py", line 1160, in __call__
+    await super().__call__(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/applications.py", line 107, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/fastapi/routing.py", line 130, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/fastapi/routing.py", line 116, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/fastapi/routing.py", line 670, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/fastapi/routing.py", line 326, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/anyio/to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        func, args, abandon_on_cancel=abandon_on_cancel, limiter=limiter
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/anyio/_backends/_asyncio.py", line 2502, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/anyio/_backends/_asyncio.py", line 986, in run
+    result = context.run(func, *args)
+  File "/Users/yumin/Documents/trading/app/api/execution_routes.py", line 212, in execution_operator_dashboard
+    result = engine.execution_operator_dashboard(
+        symbol=symbol,
+    ...<4 lines>...
+        days=days,
+    )
+  File "/Users/yumin/Documents/trading/app/services/strategy_engine.py", line 1466, in execution_operator_dashboard
+    return self.execution_operator_dashboard_service.generate(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        symbol=symbol,
+        ^^^^^^^^^^^^^^
+    ...<30 lines>...
+        opportunity_capture_summary=opportunity_capture_summary,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+TypeError: ExecutionOperatorDashboardService.generate() got an unexpected keyword argument 'a_strategy_post_cost_edge_validation_summary'
+Traceback (most recent call last):
+  File "/Users/yumin/Documents/trading/scripts/notify_operator_session_brief.py", line 336, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/yumin/Documents/trading/scripts/notify_operator_session_brief.py", line 268, in main
+    brief = _run_brief(args)
+  File "/Users/yumin/Documents/trading/scripts/notify_operator_session_brief.py", line 114, in _run_brief
+    raise RuntimeError(f"brief script failed: {stderr}")
+RuntimeError: brief script failed: Traceback (most recent call last):
+  File "/Users/yumin/Documents/trading/scripts/generate_operator_session_brief.py", line 206, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/yumin/Documents/trading/scripts/generate_operator_session_brief.py", line 181, in main
+    snapshot = _run_snapshot(args)
+  File "/Users/yumin/Documents/trading/scripts/generate_operator_session_brief.py", line 62, in _run_snapshot
+    raise RuntimeError(f"snapshot script failed: {stderr}")
+RuntimeError: snapshot script failed: Traceback (most recent call last):
+  File "/Users/yumin/Documents/trading/scripts/collect_operator_surface_divergence_snapshot.py", line 290, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/yumin/Documents/trading/scripts/collect_operator_surface_divergence_snapshot.py", line 155, in main
+    client.get(
+    ~~~~~~~~~~^
+        "/execution/operator-dashboard",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+        },
+        ^^
+    ),
+    ^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/testclient.py", line 473, in get
+    return super().get(
+           ~~~~~~~~~~~^
+        url,
+        ^^^^
+    ...<6 lines>...
+        extensions=extensions,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/httpx/_client.py", line 1053, in get
+    return self.request(
+           ~~~~~~~~~~~~^
+        "GET",
+        ^^^^^^
+    ...<7 lines>...
+        extensions=extensions,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/testclient.py", line 445, in request
+    return super().request(
+           ~~~~~~~~~~~~~~~^
+        method,
+        ^^^^^^^
+    ...<11 lines>...
+        extensions=extensions,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/httpx/_client.py", line 825, in request
+    return self.send(request, auth=auth, follow_redirects=follow_redirects)
+           ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/httpx/_client.py", line 914, in send
+    response = self._send_handling_auth(
+        request,
+    ...<2 lines>...
+        history=[],
+    )
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/httpx/_client.py", line 942, in _send_handling_auth
+    response = self._send_handling_redirects(
+        request,
+        follow_redirects=follow_redirects,
+        history=history,
+    )
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/httpx/_client.py", line 979, in _send_handling_redirects
+    response = self._send_single_request(request)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/httpx/_client.py", line 1014, in _send_single_request
+    response = transport.handle_request(request)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/testclient.py", line 348, in handle_request
+    raise exc
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/testclient.py", line 345, in handle_request
+    portal.call(self.app, scope, receive, send)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/anyio/from_thread.py", line 334, in call
+    return cast(T_Retval, self.start_task_soon(func, *args).result())
+                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/concurrent/futures/_base.py", line 450, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/concurrent/futures/_base.py", line 395, in __get_result
+    raise self._exception
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/anyio/from_thread.py", line 259, in _call_func
+    retval = await retval_or_awaitable
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/fastapi/applications.py", line 1160, in __call__
+    await super().__call__(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/applications.py", line 107, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/fastapi/routing.py", line 130, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/fastapi/routing.py", line 116, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/fastapi/routing.py", line 670, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/fastapi/routing.py", line 326, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/starlette/concurrency.py", line 32, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/anyio/to_thread.py", line 63, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        func, args, abandon_on_cancel=abandon_on_cancel, limiter=limiter
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/anyio/_backends/_asyncio.py", line 2502, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/Users/yumin/Documents/trading/.venv/lib/python3.14/site-packages/anyio/_backends/_asyncio.py", line 986, in run
+    result = context.run(func, *args)
+  File "/Users/yumin/Documents/trading/app/api/execution_routes.py", line 212, in execution_operator_dashboard
+    result = engine.execution_operator_dashboard(
+        symbol=symbol,
+    ...<4 lines>...
+        days=days,
+    )
+  File "/Users/yumin/Documents/trading/app/services/strategy_engine.py", line 1616, in execution_operator_dashboard
+    return self.execution_operator_dashboard_service.generate(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        symbol=symbol,
+        ^^^^^^^^^^^^^^
+    ...<33 lines>...
+        forward_stress_regime_validation_summary=forward_stress_regime_validation_summary,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+TypeError: ExecutionOperatorDashboardService.generate() got an unexpected keyword argument 'forward_stress_regime_validation_summary'

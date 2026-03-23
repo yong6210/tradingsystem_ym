@@ -1,0 +1,333 @@
+//@version=6
+indicator("Trading Engine v1 Mirror", overlay=true, max_labels_count=50)
+
+// This script is a TradingView-native mirror of the server strategy.
+// It is not the source of truth for execution. Use the server for plans,
+// deployment gates, portfolio risk, and live order automation.
+
+// Inputs
+regimeTf = input.timeframe("15", "Regime timeframe")
+pivotLen = input.int(3, "Pivot length", minval=2)
+zoneWidthAtr = input.float(0.25, "Zone width (ATR)", minval=0.05, step=0.05)
+zoneMaxAgeBars = input.int(48, "Zone max age (bars)", minval=10)
+fvgMinAtr = input.float(0.25, "FVG min size (ATR)", minval=0.05, step=0.05)
+nearZoneAtr = input.float(0.45, "Near-zone distance (ATR)", minval=0.10, step=0.05)
+minScore = input.float(55.0, "Minimum setup score", minval=0.0, maxval=100.0, step=1.0)
+showZones = input.bool(true, "Show LP/FVG zones")
+showPlan = input.bool(true, "Show best setup plan")
+showTable = input.bool(true, "Show dashboard")
+showBackground = input.bool(true, "Show risk background")
+showMomentumMarkers = input.bool(true, "Show long/short markers")
+dashboardPosInput = input.string("Top Right", "Dashboard position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"])
+dashboardMode = input.string("Compact", "Dashboard mode", options=["Compact", "Detailed"])
+
+clamp(value, lo, hi) =>
+    math.max(lo, math.min(hi, value))
+
+squash(value) =>
+    scaled = clamp(value, -4.0, 4.0)
+    scaled / (1.0 + math.abs(scaled))
+
+gradeFromScore(score) =>
+    score >= 75 ? "A" : score >= 60 ? "B" : score >= 45 ? "C" : "D"
+
+colorFromRisk(riskLabel) =>
+    riskLabel == "blocked" ? color.new(color.red, 82) :
+     riskLabel == "high" ? color.new(color.orange, 84) :
+     riskLabel == "guarded" ? color.new(color.yellow, 86) : color.new(color.green, 88)
+
+textColorFromRisk(riskLabel) =>
+    riskLabel == "blocked" ? color.red :
+     riskLabel == "high" ? color.orange :
+     riskLabel == "guarded" ? color.yellow : color.lime
+
+setupColor(direction) =>
+    direction == "long" ? color.new(color.lime, 0) :
+     direction == "short" ? color.new(color.red, 0) : color.new(color.gray, 0)
+
+setupBgColor(direction) =>
+    direction == "long" ? color.new(color.lime, 86) :
+     direction == "short" ? color.new(color.red, 86) : color.new(color.gray, 88)
+
+compactState(regimeLabel, riskLabel) =>
+    regimeLabel == "transition" ? "TRANSITION" :
+     regimeLabel == "shock" ? "SHOCK" :
+     riskLabel == "blocked" ? "BLOCKED" :
+     regimeLabel == "trend" ? "TREND" : "RANGE"
+
+compactBias(biasLabel) =>
+    biasLabel == "bullish_acceleration" ? "BULL+" :
+     biasLabel == "bearish_acceleration" ? "BEAR+" :
+     biasLabel == "bullish" ? "BULL" :
+     biasLabel == "bearish" ? "BEAR" :
+     biasLabel == "mixed" ? "MIXED" : "NEUTRAL"
+
+compactMomentum(momentumLabel) =>
+    momentumLabel == "building_up" ? "UP" :
+     momentumLabel == "building_down" ? "DOWN" :
+     momentumLabel == "up_but_slowing" ? "UP_SLOW" :
+     momentumLabel == "down_but_slowing" ? "DOWN_SLOW" :
+     momentumLabel == "flat" ? "FLAT" : "MIXED"
+
+tablePosition(pos) =>
+    pos == "Top Left" ? position.top_left :
+     pos == "Bottom Left" ? position.bottom_left :
+     pos == "Bottom Right" ? position.bottom_right : position.top_right
+
+// Core normalized features (execution timeframe)
+atr = ta.atr(14)
+atrSafe = math.max(atr, syminfo.mintick)
+ema8 = ta.ema(close, 8)
+ema21 = ta.ema(close, 21)
+ema55 = ta.ema(close, 55)
+bodyNorm = (close - open) / atrSafe
+slopeNorm = (ema8 - ema21) / atrSafe
+rangeNorm = (high - low) / atrSafe
+volBase = math.max(ta.sma(volume, 20), 1.0)
+volNorm = clamp(math.log(math.max(volume, 1.0) / volBase), -2.0, 2.0)
+wickDen = math.max(high - low, syminfo.mintick)
+upperWick = (high - math.max(open, close)) / wickDen
+lowerWick = (math.min(open, close) - low) / wickDen
+wickReject = close >= open ? upperWick : lowerWick
+sdir = squash(1.1 * bodyNorm) + 0.7 * squash(0.9 * slopeNorm)
+sevt = 0.6 * squash(0.7 * rangeNorm) + 0.6 * squash(0.8 * volNorm) - squash(1.6 * wickReject)
+fState = ta.ema(sdir, 3)
+vState = fState - nz(fState[1], fState)
+aState = vState - nz(vState[1], vState)
+vz = vState / math.max(ta.stdev(vState, 50), 0.0001)
+az = aState / math.max(ta.stdev(aState, 50), 0.0001)
+
+jumpBar = math.abs(close - nz(close[1], close)) / atrSafe > 1.7
+jumpRate = ta.sma(jumpBar ? 1.0 : 0.0, 20)
+friction = clamp(0.55 * jumpRate + 0.20 * wickReject + 0.25 * math.max(0.0, 0.6 - volNorm / 2.0), 0.0, 1.0)
+
+flipSignal = math.sign(close - ema21) != math.sign(nz(close[1], close) - nz(ema21[1], ema21)) ? 1.0 : 0.0
+flipCount = flipSignal + nz(flipSignal[1]) + nz(flipSignal[2]) + nz(flipSignal[3]) + nz(flipSignal[4])
+impulseConflict = (vz > 0 and az < 0) or (vz < 0 and az > 0)
+transitionScore = clamp((impulseConflict ? 25.0 : 0.0) + (math.abs(vz) < 0.35 and math.abs(az) > 0.8 ? 20.0 : 0.0) + flipCount * 8.0 + jumpRate * 25.0, 0.0, 100.0)
+transitionState = transitionScore >= 60 ? "transition_confirmed" : transitionScore >= 35 ? "transition_watch" : "none"
+
+biasLabel = transitionState == "transition_confirmed" ? "mixed" :
+     vz >= 0.8 and az >= 0.1 ? "bullish_acceleration" :
+     vz <= -0.8 and az <= -0.1 ? "bearish_acceleration" :
+     vState > 0.15 ? "bullish" :
+     vState < -0.15 ? "bearish" : "neutral"
+
+riskLabel = transitionState == "transition_confirmed" ? "blocked" :
+     transitionState == "transition_watch" ? "guarded" :
+     friction >= 0.65 or jumpRate >= 0.30 ? "high" :
+     friction >= 0.40 or jumpRate >= 0.18 ? "guarded" : "normal"
+
+momentumLabel = math.abs(vz) < 0.35 and math.abs(az) < 0.35 ? "flat" :
+     vz > 0 and az > 0 ? "building_up" :
+     vz < 0 and az < 0 ? "building_down" :
+     vz > 0 and az < 0 ? "up_but_slowing" :
+     vz < 0 and az > 0 ? "down_but_slowing" : "mixed"
+
+// HTF regime
+htfEma21 = request.security(syminfo.tickerid, regimeTf, ta.ema(close, 21))
+htfEma55 = request.security(syminfo.tickerid, regimeTf, ta.ema(close, 55))
+htfAtr = request.security(syminfo.tickerid, regimeTf, ta.atr(14))
+htfAtrSafe = math.max(htfAtr, syminfo.mintick)
+regimeScore = math.abs(htfEma21 - htfEma55) / htfAtrSafe
+htfBull = htfEma21 > htfEma55
+htfBear = htfEma21 < htfEma55
+regimeLabel = transitionState == "transition_confirmed" ? "transition" : jumpRate >= 0.30 ? "shock" : regimeScore >= 0.85 ? "trend" : "range"
+
+// Recent liquidity-pool zones
+pivotLow = ta.pivotlow(low, pivotLen, pivotLen)
+pivotHigh = ta.pivothigh(high, pivotLen, pivotLen)
+lastSupportMid = ta.valuewhen(not na(pivotLow), pivotLow, 0)
+lastResistanceMid = ta.valuewhen(not na(pivotHigh), pivotHigh, 0)
+supportAge = ta.barssince(not na(pivotLow))
+resistanceAge = ta.barssince(not na(pivotHigh))
+zoneHalfWidth = atrSafe * zoneWidthAtr * 0.5
+supportActive = not na(lastSupportMid) and (na(supportAge) or supportAge <= zoneMaxAgeBars)
+resistanceActive = not na(lastResistanceMid) and (na(resistanceAge) or resistanceAge <= zoneMaxAgeBars)
+supportLow = supportActive ? lastSupportMid - zoneHalfWidth : na
+supportHigh = supportActive ? lastSupportMid + zoneHalfWidth : na
+resistanceLow = resistanceActive ? lastResistanceMid - zoneHalfWidth : na
+resistanceHigh = resistanceActive ? lastResistanceMid + zoneHalfWidth : na
+
+// Recent FVG zones
+bullFvgFound = low > high[2] and (low - high[2]) >= atrSafe * fvgMinAtr
+bearFvgFound = low[2] > high and (low[2] - high) >= atrSafe * fvgMinAtr
+bullFvgTop = ta.valuewhen(bullFvgFound, low, 0)
+bullFvgBottom = ta.valuewhen(bullFvgFound, high[2], 0)
+bearFvgTop = ta.valuewhen(bearFvgFound, low[2], 0)
+bearFvgBottom = ta.valuewhen(bearFvgFound, high, 0)
+bullFvgAge = ta.barssince(bullFvgFound)
+bearFvgAge = ta.barssince(bearFvgFound)
+bullFvgActive = not na(bullFvgTop) and not na(bullFvgBottom) and (na(bullFvgAge) or bullFvgAge <= zoneMaxAgeBars)
+bearFvgActive = not na(bearFvgTop) and not na(bearFvgBottom) and (na(bearFvgAge) or bearFvgAge <= zoneMaxAgeBars)
+bullFvgMid = bullFvgActive ? (bullFvgTop + bullFvgBottom) * 0.5 : na
+bearFvgMid = bearFvgActive ? (bearFvgTop + bearFvgBottom) * 0.5 : na
+
+nearSupport = supportActive and math.abs(close - lastSupportMid) / atrSafe <= nearZoneAtr
+nearResistance = resistanceActive and math.abs(close - lastResistanceMid) / atrSafe <= nearZoneAtr
+supportFvgConfluence = supportActive and bullFvgActive and math.abs(lastSupportMid - bullFvgMid) / atrSafe <= 1.0
+resistanceFvgConfluence = resistanceActive and bearFvgActive and math.abs(lastResistanceMid - bearFvgMid) / atrSafe <= 1.0
+
+bullSweep = nearSupport and lowerWick >= 0.45 and close >= open
+bearSweep = nearResistance and upperWick >= 0.45 and close <= open
+
+float longScore = 0.0
+float shortScore = 0.0
+
+if nearSupport
+    longScore += 35
+if nearResistance
+    shortScore += 35
+
+if supportFvgConfluence
+    longScore += 15
+if resistanceFvgConfluence
+    shortScore += 15
+
+if htfBull and regimeLabel == "trend"
+    longScore += 18
+if htfBear and regimeLabel == "trend"
+    shortScore += 18
+if regimeLabel == "range"
+    longScore += 8
+    shortScore += 8
+
+bullishBias = biasLabel == "bullish" or biasLabel == "bullish_acceleration"
+bearishBias = biasLabel == "bearish" or biasLabel == "bearish_acceleration"
+if bullishBias
+    longScore += 18
+if bearishBias
+    shortScore += 18
+if biasLabel == "mixed"
+    longScore -= 15
+    shortScore -= 15
+
+if bullSweep
+    longScore += 12
+if bearSweep
+    shortScore += 12
+
+longScore -= friction * 18.0
+shortScore -= friction * 18.0
+if transitionState == "transition_watch"
+    longScore -= 10
+    shortScore -= 10
+if transitionState == "transition_confirmed"
+    longScore := 0
+    shortScore := 0
+if regimeLabel == "shock"
+    longScore -= 12
+    shortScore -= 12
+
+longScore := clamp(longScore, 0.0, 100.0)
+shortScore := clamp(shortScore, 0.0, 100.0)
+scoreEdge = math.abs(longScore - shortScore)
+useLong = longScore >= minScore and longScore > shortScore and scoreEdge >= 5 and riskLabel != "blocked"
+useShort = shortScore >= minScore and shortScore > longScore and scoreEdge >= 5 and riskLabel != "blocked"
+confirmedLong = useLong and barstate.isconfirmed
+confirmedShort = useShort and barstate.isconfirmed
+
+activeDirection = confirmedLong ? "long" : confirmedShort ? "short" : "none"
+activeScore = useLong ? longScore : useShort ? shortScore : 0.0
+activeGrade = gradeFromScore(activeScore)
+activeEntryModel = confirmedLong or confirmedShort ? (transitionState == "transition_watch" or riskLabel == "guarded" ? "CONFIRM" : (confirmedLong and bullSweep) or (confirmedShort and bearSweep) ? "SWEEP_CONFIRM" : "LIMIT") : "NONE"
+
+entryPrice = confirmedLong ? lastSupportMid : confirmedShort ? lastResistanceMid : na
+slPrice = confirmedLong ? (supportLow - atrSafe * 0.30) : confirmedShort ? (resistanceHigh + atrSafe * 0.30) : na
+riskPerTrade = confirmedLong ? math.max(entryPrice - slPrice, syminfo.mintick) : confirmedShort ? math.max(slPrice - entryPrice, syminfo.mintick) : na
+tp1Price = confirmedLong ? entryPrice + riskPerTrade : confirmedShort ? entryPrice - riskPerTrade : na
+tp2Price = confirmedLong ? entryPrice + riskPerTrade * 2.0 : confirmedShort ? entryPrice - riskPerTrade * 2.0 : na
+tp3Price = confirmedLong ? entryPrice + riskPerTrade * 3.0 : confirmedShort ? entryPrice - riskPerTrade * 3.0 : na
+
+baseWin = regimeLabel == "trend" ? 0.48 : regimeLabel == "range" ? 0.46 : 0.40
+scoreAdj = clamp((activeScore - 60.0) / 220.0, -0.08, 0.08)
+modelAdj = activeEntryModel == "LIMIT" ? 0.015 : activeEntryModel == "SWEEP_CONFIRM" ? 0.01 : 0.0
+confluenceAdj = ((useLong and supportFvgConfluence) or (useShort and resistanceFvgConfluence)) ? 0.015 : 0.0
+expectedWin = activeDirection == "none" ? na : clamp(baseWin + scoreAdj + modelAdj + confluenceAdj, 0.34, 0.68)
+expectedEv = activeDirection == "none" ? na : (expectedWin * 1.35) - ((1.0 - expectedWin) * 1.0) - 0.08
+
+// Visuals
+bgcolor(showBackground ? colorFromRisk(riskLabel) : na, title="Risk background")
+plot(ema21, "EMA21", color=color.new(color.aqua, 0), linewidth=2)
+plot(ema55, "EMA55", color=color.new(color.blue, 15), linewidth=2)
+plot(close + atrSafe, "ATR upper", color=color.new(color.gray, 70))
+plot(close - atrSafe, "ATR lower", color=color.new(color.gray, 70))
+
+supportTopPlot = plot(showZones and supportActive ? supportHigh : na, "Support zone top", color=color.new(color.lime, 50), linewidth=1, style=plot.style_linebr)
+supportBottomPlot = plot(showZones and supportActive ? supportLow : na, "Support zone bottom", color=color.new(color.lime, 50), linewidth=1, style=plot.style_linebr)
+fill(supportTopPlot, supportBottomPlot, color=color.new(color.lime, 88), title="Support zone")
+
+resistanceTopPlot = plot(showZones and resistanceActive ? resistanceHigh : na, "Resistance zone top", color=color.new(color.red, 50), linewidth=1, style=plot.style_linebr)
+resistanceBottomPlot = plot(showZones and resistanceActive ? resistanceLow : na, "Resistance zone bottom", color=color.new(color.red, 50), linewidth=1, style=plot.style_linebr)
+fill(resistanceTopPlot, resistanceBottomPlot, color=color.new(color.red, 88), title="Resistance zone")
+
+bullFvgTopPlot = plot(showZones and bullFvgActive ? bullFvgTop : na, "Bull FVG top", color=color.new(color.teal, 60), linewidth=1, style=plot.style_linebr)
+bullFvgBottomPlot = plot(showZones and bullFvgActive ? bullFvgBottom : na, "Bull FVG bottom", color=color.new(color.teal, 60), linewidth=1, style=plot.style_linebr)
+fill(bullFvgTopPlot, bullFvgBottomPlot, color=color.new(color.teal, 90), title="Bull FVG")
+
+bearFvgTopPlot = plot(showZones and bearFvgActive ? bearFvgTop : na, "Bear FVG top", color=color.new(color.orange, 60), linewidth=1, style=plot.style_linebr)
+bearFvgBottomPlot = plot(showZones and bearFvgActive ? bearFvgBottom : na, "Bear FVG bottom", color=color.new(color.orange, 60), linewidth=1, style=plot.style_linebr)
+fill(bearFvgTopPlot, bearFvgBottomPlot, color=color.new(color.orange, 90), title="Bear FVG")
+
+plotshape(showMomentumMarkers and confirmedLong, title="Long setup", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.tiny, text="L")
+plotshape(showMomentumMarkers and confirmedShort, title="Short setup", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, text="S")
+
+plot(showPlan and activeDirection != "none" ? entryPrice : na, "Plan entry", color=color.new(color.white, 0), linewidth=2, style=plot.style_linebr)
+plot(showPlan and activeDirection != "none" ? slPrice : na, "Plan stop", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+plot(showPlan and activeDirection != "none" ? tp1Price : na, "Plan TP1", color=color.new(color.green, 0), linewidth=1, style=plot.style_linebr)
+plot(showPlan and activeDirection != "none" ? tp2Price : na, "Plan TP2", color=color.new(color.green, 25), linewidth=1, style=plot.style_linebr)
+plot(showPlan and activeDirection != "none" ? tp3Price : na, "Plan TP3", color=color.new(color.green, 45), linewidth=1, style=plot.style_linebr)
+
+var label planLabel = na
+if barstate.islast
+    if not na(planLabel)
+        label.delete(planLabel)
+    if activeDirection != "none"
+        summary = str.format(
+             "{0} {1} {2}\nE {3} | S {4} | T1 {5}\np(win) {6}% | EV {7}R",
+             str.upper(activeDirection), activeGrade, activeEntryModel,
+             str.tostring(entryPrice, "#.##"), str.tostring(slPrice, "#.##"), str.tostring(tp1Price, "#.##"),
+             str.tostring(expectedWin * 100.0, "#.0"), str.tostring(expectedEv, "#.00")
+         )
+        planLabel := label.new(bar_index, entryPrice, summary, style=label.style_label_left, textcolor=color.white, color=color.new(color.black, 0))
+
+var table dash = table.new(tablePosition(dashboardPosInput), 2, 8, border_width=1)
+if showTable and barstate.islast
+    if dashboardMode == "Compact"
+        table.cell(dash, 0, 0, "Engine", text_color=color.white, bgcolor=color.new(color.black, 0))
+        table.cell(dash, 1, 0, syminfo.ticker, text_color=color.white, bgcolor=color.new(color.black, 0))
+        table.cell(dash, 0, 1, "State", text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 1, 1, compactState(regimeLabel, riskLabel) + " | " + str.upper(transitionState == "none" ? "clear" : transitionState), text_color=textColorFromRisk(riskLabel), bgcolor=color.new(color.black, 10))
+        table.cell(dash, 0, 2, "Bias", text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 1, 2, compactBias(biasLabel) + " | " + compactMomentum(momentumLabel), text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 0, 3, "Setup", text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 1, 3, activeDirection == "none" ? "WAIT" : str.upper(activeDirection) + " " + activeGrade + " " + activeEntryModel, text_color=setupColor(activeDirection), bgcolor=setupBgColor(activeDirection))
+        table.cell(dash, 0, 4, "Entry", text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 1, 4, activeDirection == "none" ? "No active plan" : str.tostring(entryPrice, "#.##") + " / SL " + str.tostring(slPrice, "#.##"), text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 0, 5, "Edge", text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 1, 5, activeDirection == "none" ? "No edge" : "W " + str.tostring(expectedWin * 100.0, "#.0") + "% | EV " + str.tostring(expectedEv, "#.00") + "R", text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 0, 6, "Score", text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 1, 6, "L " + str.tostring(longScore, "#.0") + " / S " + str.tostring(shortScore, "#.0"), text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 0, 7, "Zone", text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 1, 7, nearSupport ? "Near support" : nearResistance ? "Near resistance" : "Away from zone", text_color=color.white, bgcolor=color.new(color.black, 10))
+    else
+        table.cell(dash, 0, 0, "Trading Engine v1", text_color=color.white, bgcolor=color.new(color.black, 0))
+        table.cell(dash, 1, 0, syminfo.ticker, text_color=color.white, bgcolor=color.new(color.black, 0))
+        table.cell(dash, 0, 1, "Regime", text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 1, 1, regimeLabel + " / " + str.tostring(regimeScore, "#.00"), text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 0, 2, "Bias", text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 1, 2, biasLabel, text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 0, 3, "Risk", text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 1, 3, riskLabel + " / tr=" + transitionState, text_color=textColorFromRisk(riskLabel), bgcolor=color.new(color.black, 10))
+        table.cell(dash, 0, 4, "Momentum", text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 1, 4, momentumLabel + " | vz=" + str.tostring(vz, "#.00"), text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 0, 5, "Scores", text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 1, 5, "L=" + str.tostring(longScore, "#.0") + " / S=" + str.tostring(shortScore, "#.0"), text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 0, 6, "Best setup", text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 1, 6, activeDirection == "none" ? "NONE" : str.upper(activeDirection) + " " + activeGrade + " " + activeEntryModel, text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 0, 7, "Expect", text_color=color.white, bgcolor=color.new(color.black, 10))
+        table.cell(dash, 1, 7, activeDirection == "none" ? "No active plan" : "p(win)~" + str.tostring(expectedWin * 100.0, "#.0") + "% | EV~" + str.tostring(expectedEv, "#.00") + "R", text_color=color.white, bgcolor=color.new(color.black, 10))
+
+alertcondition(confirmedLong, title="Trading Engine Mirror Long", message="Trading Engine v1 Mirror: confirmed long setup")
+alertcondition(confirmedShort, title="Trading Engine Mirror Short", message="Trading Engine v1 Mirror: confirmed short setup")
+alertcondition(riskLabel == "blocked", title="Trading Engine Mirror Blocked", message="Trading Engine v1 Mirror: transition/risk blocked")

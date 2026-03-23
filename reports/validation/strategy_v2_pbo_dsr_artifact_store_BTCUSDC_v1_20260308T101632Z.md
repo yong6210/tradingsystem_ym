@@ -1,0 +1,33 @@
+# Strategy v2 PBO / DSR Artifact Store: BTCUSDC
+
+- generated_at_utc: 2026-03-08T10:16:32+00:00
+- strategy_version: v1
+- artifact_store_ready: True
+- available: False
+- implementation_status: artifact_store_schema_ready_empty
+- reason: artifact_store_tables_ready_not_populated
+
+## Counts
+- trial_runs: 0
+- fold_scores: 0
+- snapshots: 0
+- parameter_families_present: []
+- selection_universe_sizes: []
+
+## Latest Snapshot
+- none
+
+## Blockers
+- runtime proxy trial writer has not seeded validation_trial_runs yet
+- fold-level CSCV scores have not been written yet
+- PBO/DSR metrics are not computed yet
+
+## Next Steps
+- run validation/report after enough eligible closed v2 trades
+- keep runtime proxy trial writer enabled or connect threshold-sweep trial writer
+- persist CSCV fold scores into validation_trial_fold_scores
+- write summary snapshots into validation_pbo_dsr_snapshots
+
+## Notes
+- This artifact reports schema and population readiness only.
+- Runtime proxy trial/fold lineage may seed this store before a true threshold sweep exists.

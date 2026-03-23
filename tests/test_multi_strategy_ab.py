@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+from app.services.multi_strategy_ab import MultiStrategyABExpansionService
+
+
+def test_multi_strategy_ab_overlay_marks_b_compare_only_under_a_only() -> None:
+    service = MultiStrategyABExpansionService()
+
+    overlay = service.overlay_for_row(
+        {
+            "strategy_family": "trend_continuation",
+            "strategy_mode": "A_ONLY",
+        }
+    )
+
+    assert overlay is not None
+    assert overlay["cluster"] == "b_continuation"
+    assert overlay["strategy_cluster_status"] == "compare_only"
+    assert overlay["live_eligible"] is False
+    assert overlay["guarded"] is True
+    assert "b_guardrail:mode_a_only" in overlay["guardrail_reasons"]
+
+
+def test_multi_strategy_ab_summary_keeps_b_guarded_when_samples_are_thin() -> None:
+    service = MultiStrategyABExpansionService()
+
+    summary = service.generate(
+        portfolio_budget={
+            "strategy_mode": "A_PLUS_B",
+            "accepted_candidates": [
+                {"strategy_family": "sweep_reversal", "accepted": True},
+                {"strategy_family": "trend_continuation", "accepted": True},
+            ],
+        },
+        score_to_outcome_funnel={
+            "decomposition": {
+                "family": [
+                    {"key": "sweep_reversal", "closed": 8},
+                    {"key": "trend_continuation", "closed": 3},
+                ]
+            }
+        },
+        family_execution_degradation_advisory={
+            "families": [
+                {"family": "trend_continuation", "status": "healthy"},
+            ]
+        },
+        rollout_recommendation={"family": "trend_continuation", "recommendation": "hold"},
+        strategy_lifecycle={"family": "trend_continuation", "state": "probation"},
+    )
+
+    assert summary["available"] is True
+    assert summary["mode"] == "A_PLUS_B"
+    assert summary["b_cluster"]["cluster"] == "b_continuation"
+    assert summary["b_cluster"]["strategy_cluster_status"] == "available_but_guarded"
+    assert summary["b_cluster"]["live_eligible"] is False
+    assert "b_guardrail:thin_sample" in summary["b_cluster"]["guardrail_reasons"]
+
+
+def test_multi_strategy_ab_summary_marks_b_probation_ready_with_cleared_guardrails() -> None:
+    service = MultiStrategyABExpansionService()
+
+    summary = service.generate(
+        portfolio_budget={
+            "strategy_mode": "A_PLUS_B",
+            "accepted_candidates": [
+                {"strategy_family": "sweep_reversal", "accepted": True},
+                {"strategy_family": "trend_continuation", "accepted": True},
+            ],
+        },
+        score_to_outcome_funnel={
+            "decomposition": {
+                "family": [
+                    {"key": "sweep_reversal", "closed": 8},
+                    {"key": "trend_continuation", "closed": 6},
+                ]
+            }
+        },
+        family_execution_degradation_advisory={
+            "families": [
+                {"family": "trend_continuation", "status": "healthy"},
+            ]
+        },
+        rollout_recommendation={"family": "trend_continuation", "recommendation": "hold"},
+        strategy_lifecycle={"family": "trend_continuation", "state": "probation"},
+    )
+
+    assert summary["available"] is True
+    assert summary["mode"] == "A_PLUS_B"
+    assert summary["b_cluster"]["strategy_cluster_status"] == "probation_ready"
+    assert summary["b_cluster"]["live_eligible"] is True
+    assert summary["b_cluster"]["guardrail_reasons"] == []

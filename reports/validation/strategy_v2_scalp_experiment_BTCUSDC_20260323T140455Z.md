@@ -1,0 +1,35 @@
+# Strategy v2 Scalp Experiment: BTCUSDC
+
+- generated_at_utc: 2026-03-23T14:04:55+00:00
+- available: True
+- reason: ok
+
+## Sample Counts
+- candles_1m: 900
+- candles_5m: 300
+- candles_15m: 300
+
+## Baseline (15m zone / 5m execution)
+- regime: range
+- transition_state: none
+- zone_count: 12
+- plan_count: 3
+- top_plan: {'plan_id': 'plan_zone_bd3f4b049a78_limit', 'direction': 'short', 'entry_model': 'LIMIT', 'strategy_family': 'legacy_zone_plan', 'strategy_grade': None, 'expected_win_prob': 0.4818, 'expected_ev_r': 0.2375, 'expected_ev_at_recommended_size_r': 0.095, 'recommended_risk_r': 0.4, 'expected_summary': 'win≈48.2%, EV≈+0.24R, TP1≈56.5%, TP2≈41.2%, TP3≈25.9%', 'final_rank_score': 75.5174, 'friction_penalty': 0.1255}
+
+## Experiment (5m zone / 1m execution)
+- regime: range
+- transition_state: transition_watch
+- zone_count: 19
+- plan_count: 1
+- top_plan: {'plan_id': 'plan_zone_94d1951754fa_confirm', 'direction': 'long', 'entry_model': 'CONFIRM', 'strategy_family': 'legacy_zone_plan', 'strategy_grade': None, 'expected_win_prob': 0.4453, 'expected_ev_r': 0.0222, 'expected_ev_at_recommended_size_r': 0.0, 'recommended_risk_r': 0.0, 'expected_summary': 'win≈44.5%, EV≈+0.02R, TP1≈53.8%, TP2≈39.0%, TP3≈24.3%', 'final_rank_score': 50.4237, 'friction_penalty': 0.3942}
+
+## Comparison
+- preferred_branch: baseline
+- recommendation_reason: baseline_has_higher_sized_ev
+- delta_top_expected_ev_at_size_r: -0.0950
+- delta_top_expected_win_prob: -0.0365
+
+## Next Steps
+- sync 1m candles before trusting the experiment branch live
+- treat the 5m/1m branch as compare-only until execution-quality samples exist
+- promote experiment only if top expected EV at recommended size stays better across multiple sessions

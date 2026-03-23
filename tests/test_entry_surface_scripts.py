@@ -1,0 +1,323 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+
+ROOT_DIR = Path("/Users/yumin/Documents/trading")
+
+
+def _load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"failed to load module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+notify_entry_surface = _load_module(
+    "notify_entry_surface_test_module",
+    ROOT_DIR / "scripts/notify_entry_surface.py",
+)
+
+
+def _budget_payload(*, deployment_go_no_go: str = "GO") -> dict:
+    return {
+        "universe": "usdc_perp_top30",
+        "deployment_go_no_go": deployment_go_no_go,
+        "deployment_code": "go_runtime_gate_open" if deployment_go_no_go == "GO" else "manual_review_risk_gate_throttled",
+        "deployment_message": (
+            "GO: runtime gate is open for candidate review."
+            if deployment_go_no_go == "GO"
+            else "MANUAL_REVIEW: runtime risk gate is throttled. Reduce size and review before acting."
+        ),
+        "playbook_go_no_go": deployment_go_no_go,
+        "playbook_action": "continue_candidate_review_under_portfolio_caps"
+        if deployment_go_no_go == "GO"
+        else "review_throttled_gate_and_reduce_size",
+        "accepted_candidates": [
+            {
+                "symbol": "BTCUSDC",
+                "plan_id": "plan_actionable",
+                "direction": "long",
+                "entry_model": "CONFIRM",
+                "recommended_risk_r": 0.4,
+                "expected_ev_at_recommended_size_r": 0.12,
+                "expected_summary": "win≈54.0%, EV≈+0.30R, TP1≈60.0%, TP2≈42.0%, TP3≈23.0%",
+                "adjusted_rank_score": 88.4,
+                "final_rank_score": 88.4,
+                "thesis_fingerprint": {"strategy_family": "trend_continuation"},
+            }
+        ],
+        "blocked_candidates": [
+            {
+                "symbol": "ETHUSDC",
+                "plan_id": "plan_blocked",
+                "direction": "short",
+                "entry_model": "LIMIT",
+                "recommended_risk_r": 0.2,
+                "expected_ev_at_recommended_size_r": 0.08,
+                "expected_summary": "win≈49.0%, EV≈+0.18R, TP1≈58.0%, TP2≈38.0%, TP3≈20.0%",
+                "base_rank_score": 81.2,
+                "final_rank_score": 78.0,
+                "block_reason": "risk_budget_below_min",
+                "block_reason_message": "Blocked: portfolio risk budget score is below the minimum threshold.",
+                "thesis_fingerprint": {"strategy_family": "sweep_reversal"},
+            },
+            {
+                "symbol": "SOLUSDC",
+                "plan_id": "plan_research",
+                "direction": "long",
+                "entry_model": "CONFIRM",
+                "recommended_risk_r": 0.15,
+                "expected_ev_at_recommended_size_r": 0.06,
+                "expected_summary": "win≈47.0%, EV≈+0.15R, TP1≈52.0%, TP2≈35.0%, TP3≈18.0%",
+                "base_rank_score": 75.5,
+                "final_rank_score": 74.0,
+                "block_reason": "adjusted_score_non_positive",
+                "block_reason_message": "Blocked: adjusted candidate score is non-positive after penalties.",
+                "alpha_research_candidate": True,
+                "alpha_research_reason": "range_rotation_research_only",
+                "alpha_research_reason_message": "Research-only: range reversal is interesting but not live-tradable yet.",
+                "alpha_research_softened_risk_r": 0.1,
+                "thesis_fingerprint": {"strategy_family": "range_rotation"},
+            },
+        ],
+        "alpha_research_candidates": [
+            {
+                "symbol": "SOLUSDC",
+                "plan_id": "plan_research",
+                "direction": "long",
+                "entry_model": "CONFIRM",
+                "recommended_risk_r": 0.15,
+                "expected_ev_at_recommended_size_r": 0.06,
+                "expected_summary": "win≈47.0%, EV≈+0.15R, TP1≈52.0%, TP2≈35.0%, TP3≈18.0%",
+                "alpha_research_reason": "range_rotation_research_only",
+                "alpha_research_reason_message": "Research-only: range reversal is interesting but not live-tradable yet.",
+                "alpha_research_softened_risk_r": 0.1,
+                "thesis_fingerprint": {"strategy_family": "range_rotation"},
+            }
+        ],
+    }
+
+
+def test_build_entry_snapshot_maps_rows_to_three_statuses():
+    snapshot = notify_entry_surface.build_entry_snapshot(_budget_payload(), max_per_status=3)
+
+    assert snapshot["counts"][notify_entry_surface.ACTIONABLE_ENTRY] == 1
+    assert snapshot["counts"][notify_entry_surface.BLOCKED_SETUP] == 1
+    assert snapshot["counts"][notify_entry_surface.RESEARCH_ONLY_SETUP] == 1
+    assert snapshot["sections"][notify_entry_surface.ACTIONABLE_ENTRY][0]["symbol"] == "BTCUSDC"
+    assert snapshot["sections"][notify_entry_surface.BLOCKED_SETUP][0]["symbol"] == "ETHUSDC"
+    assert snapshot["sections"][notify_entry_surface.RESEARCH_ONLY_SETUP][0]["symbol"] == "SOLUSDC"
+
+
+def test_build_entry_snapshot_demotes_accepted_rows_when_topline_is_not_go():
+    snapshot = notify_entry_surface.build_entry_snapshot(
+        _budget_payload(deployment_go_no_go="MANUAL_REVIEW"),
+        max_per_status=3,
+    )
+
+    assert snapshot["counts"][notify_entry_surface.ACTIONABLE_ENTRY] == 0
+    assert snapshot["counts"][notify_entry_surface.BLOCKED_SETUP] == 2
+    blocked_symbols = {row["symbol"] for row in snapshot["sections"][notify_entry_surface.BLOCKED_SETUP]}
+    assert blocked_symbols == {"BTCUSDC", "ETHUSDC"}
+    demoted = next(
+        row for row in snapshot["sections"][notify_entry_surface.BLOCKED_SETUP] if row["symbol"] == "BTCUSDC"
+    )
+    assert demoted["block_reason"] == "runtime_topline_manual_review"
+
+
+def test_render_message_includes_all_sections_and_reasons():
+    snapshot = notify_entry_surface.build_entry_snapshot(_budget_payload(), max_per_status=3)
+
+    message = notify_entry_surface.render_message(snapshot)
+
+    assert "Trading entry surface alert" in message
+    assert notify_entry_surface.ACTIONABLE_ENTRY in message
+    assert notify_entry_surface.BLOCKED_SETUP in message
+    assert notify_entry_surface.RESEARCH_ONLY_SETUP in message
+    assert "family=trend_continuation" in message
+    assert "reason=Blocked: portfolio risk budget score is below the minimum threshold." in message
+    assert "softened_risk=0.10R" in message
+
+
+def test_build_alert_state_ignores_generated_at_and_keeps_judgment_signature():
+    first = notify_entry_surface.build_entry_snapshot(_budget_payload(), max_per_status=3)
+    second = dict(first)
+    second["generated_at"] = "2099-01-01T00:00:00+00:00"
+
+    assert notify_entry_surface.build_alert_state(first) == notify_entry_surface.build_alert_state(second)
+
+
+def test_main_dry_run_prints_snapshot_without_dispatch(monkeypatch, capsys):
+    monkeypatch.setattr(notify_entry_surface, "_request_json", lambda *args, **kwargs: _budget_payload())
+    monkeypatch.setattr(
+        notify_entry_surface,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            universe="usdc_perp_top30",
+            limit=20,
+            symbol="",
+            max_per_status=3,
+            channel="discord",
+            state_file=str(ROOT_DIR / "reports/operations/entry_surface/test_dry_run_state.json"),
+            webhook_url="",
+            force_send=False,
+            dry_run=True,
+        ),
+    )
+
+    exit_code = notify_entry_surface.main()
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["notified"] is False
+    assert payload["channel"] == "discord"
+    assert "message" in payload
+    assert payload["state_written"] is False
+    assert payload["snapshot"]["counts"][notify_entry_surface.ACTIONABLE_ENTRY] == 1
+
+
+def test_main_suppresses_when_alert_state_is_unchanged(monkeypatch, tmp_path, capsys):
+    state_file = tmp_path / "last_alert_state.json"
+    snapshot = notify_entry_surface.build_entry_snapshot(_budget_payload(), max_per_status=3)
+    state_file.write_text(
+        json.dumps(
+            {
+                "updated_at": "2026-03-11T00:00:00+00:00",
+                "alert_state": notify_entry_surface.build_alert_state(snapshot),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(notify_entry_surface, "_request_json", lambda *args, **kwargs: _budget_payload())
+    monkeypatch.setattr(
+        notify_entry_surface,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            universe="usdc_perp_top30",
+            limit=20,
+            symbol="",
+            max_per_status=3,
+            channel="discord",
+            state_file=str(state_file),
+            webhook_url="",
+            force_send=False,
+            dry_run=False,
+        ),
+    )
+
+    class _Dispatcher:
+        def __init__(self, settings):  # noqa: ARG002
+            raise AssertionError("dispatcher should not be constructed when state is unchanged")
+
+    monkeypatch.setattr(notify_entry_surface, "NotificationDispatcher", _Dispatcher)
+
+    exit_code = notify_entry_surface.main()
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["reason"] == "unchanged_surface_state"
+    assert payload["dedupe_suppressed"] is True
+    assert payload["notified"] is False
+
+
+def test_main_writes_state_after_successful_delivery(monkeypatch, tmp_path, capsys):
+    state_file = tmp_path / "last_alert_state.json"
+    monkeypatch.setattr(notify_entry_surface, "_request_json", lambda *args, **kwargs: _budget_payload())
+    monkeypatch.setattr(
+        notify_entry_surface,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            universe="usdc_perp_top30",
+            limit=20,
+            symbol="",
+            max_per_status=3,
+            channel="discord",
+            state_file=str(state_file),
+            webhook_url="",
+            force_send=False,
+            dry_run=False,
+        ),
+    )
+
+    class _Dispatcher:
+        def __init__(self, settings):  # noqa: ARG002
+            pass
+
+        def dispatch(self, *, channel, alert_type, symbol, payload):  # noqa: ANN001
+            return {
+                "channel": channel,
+                "delivered": True,
+                "skipped": False,
+                "reason": "delivered",
+                "target": "discord:webhook",
+                "payload": payload,
+            }
+
+    monkeypatch.setattr(notify_entry_surface, "NotificationDispatcher", _Dispatcher)
+
+    exit_code = notify_entry_surface.main()
+    payload = json.loads(capsys.readouterr().out)
+    stored = json.loads(state_file.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert payload["notified"] is True
+    assert payload["state_written"] is True
+    assert stored["alert_state"]["counts"][notify_entry_surface.ACTIONABLE_ENTRY] == 1
+
+
+def test_main_recovers_from_invalid_state_file(monkeypatch, tmp_path, capsys):
+    state_file = tmp_path / "last_alert_state.json"
+    state_file.write_text("{invalid json", encoding="utf-8")
+    monkeypatch.setattr(notify_entry_surface, "_request_json", lambda *args, **kwargs: _budget_payload())
+    monkeypatch.setattr(
+        notify_entry_surface,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            universe="usdc_perp_top30",
+            limit=20,
+            symbol="",
+            max_per_status=3,
+            channel="discord",
+            state_file=str(state_file),
+            webhook_url="",
+            force_send=False,
+            dry_run=False,
+        ),
+    )
+
+    class _Dispatcher:
+        def __init__(self, settings):  # noqa: ARG002
+            pass
+
+        def dispatch(self, *, channel, alert_type, symbol, payload):  # noqa: ANN001
+            return {
+                "channel": channel,
+                "delivered": True,
+                "skipped": False,
+                "reason": "delivered",
+                "target": "discord:webhook",
+                "payload": payload,
+            }
+
+    monkeypatch.setattr(notify_entry_surface, "NotificationDispatcher", _Dispatcher)
+
+    exit_code = notify_entry_surface.main()
+    payload = json.loads(capsys.readouterr().out)
+    stored = json.loads(state_file.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert payload["notified"] is True
+    assert payload["state_written"] is True
+    assert "state_warning" in payload
+    assert stored["alert_state"]["counts"][notify_entry_surface.ACTIONABLE_ENTRY] == 1

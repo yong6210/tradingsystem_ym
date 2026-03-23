@@ -1,0 +1,16 @@
+{
+  "alpha_research_next_step": "run_shadow_cost_stress_review",
+  "checklist_status": "FAIL",
+  "close_only_active": true,
+  "deployment_go_no_go": null,
+  "eligible_closed_trades": 2,
+  "execution_degradation": "manual_review",
+  "next_step_hint": "resolve approval blocker and execution review before reopening entries",
+  "playbook_go_no_go": "NO_GO",
+  "sample_progress_hint": "lineage sample collection is not sufficient for a selected trial yet",
+  "selected_trial_run_id": null,
+  "stage": "0_BLOCKED",
+  "stage_reason": "close_only_active + NO_GO + manual_review",
+  "top_operator_action": "continue_candidate_review_under_portfolio_caps",
+  "trial_runs_written": 0
+}

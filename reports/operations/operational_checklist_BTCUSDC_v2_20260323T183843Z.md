@@ -1,0 +1,59 @@
+# Operational Checklist: BTCUSDC
+
+- generated_at_utc: 2026-03-23T18:38:43+00:00
+- universe: usdc_perp_top30
+- strategy_version: v2
+- overall_status: FAIL
+- deployment_go_no_go: NO_GO
+- deployment_code: no_go_threshold_lineage_winner_unresolved
+- deployment_message: NO-GO: selected-trial lineage winner is unresolved. Resolve threshold lineage first, then rerun approval.
+- playbook_go_no_go: NO_GO
+- playbook_code: no_go_threshold_lineage_winner_unresolved
+- playbook_action: resolve_selected_trial_lineage_before_rollout
+- playbook_message: NO-GO: selected-trial lineage winner is unresolved. Resolve threshold lineage first, then rerun approval.
+- blocking_failures: 2
+- warnings: 13
+- manual_actions: 0
+
+## Checks
+- [PASS] Health Ready (infra) | blocking=True | all readiness checks passed
+- [WARN] Validation Report (validation) | blocking=False | validation is WARN; operator review required before live start
+- [WARN] Validation Alert Delivery (alerts) | blocking=False | validation alert cooldown active; latest alert should be checked manually
+- [FAIL] Alert Channel SLO (alerts) | blocking=True | alert SLO degraded on ['discord']
+- [FAIL] Recent Alert Test (alerts) | blocking=True | recent alert test failed on ['discord:discord_not_configured']
+- [WARN] Retry Queue (alerts) | blocking=False | retry queue has queued alerts (5)
+- [PASS] Event Outbox (infra) | blocking=False | outbox backlog is clear
+- [PASS] Risk Gate (risk) | blocking=False | risk gate is OPEN
+- [WARN] Session / Dead-Session Guidance (operations) | blocking=False | current window is dead session; live entries are guidance-only discouraged
+- [WARN] Portfolio Headroom (portfolio) | blocking=False | portfolio headroom is constrained
+- [PASS] Execution Quality Coverage (execution) | blocking=False | execution quality coverage available
+- [PASS] Execution Friction Measurement (execution) | blocking=False | Current fill-ledger coverage is too thin to treat execution friction as measured and stable.
+- [WARN] Execution Degradation Advisory (execution) | blocking=False | execution quality is drifting; review cost, fill, and exit-failure mix before scaling
+- [WARN] Operator Action Priority (execution) | blocking=False | GO: runtime gate is open and portfolio headroom review can proceed under current caps.
+- [PASS] Outcome Control Trace (execution) | blocking=False | approval review raised; risk allowance unchanged; portfolio ordering bias stayed neutral
+- [WARN] Rollout Recommendation (execution) | blocking=False | family=trend_continuation should remain compare-only research while evidence matures; keep rollout policy unchanged and collect more outcome data.
+- [PASS] Multi Strategy AB Expansion (execution) | blocking=False | A reversal remains the current production anchor; B continuation is visible as compare-only guarded flow while range rotation stays research-only sidecar.
+- [PASS] B Continuation Activation (execution) | blocking=False | B continuation remains compare-only under the current mode and should stay in research posture.
+- [PASS] B Continuation Edge Validation (execution) | blocking=False | family=trend_continuation sample is still too thin to validate post-cost B edge or diversification value; gather more closed evidence before making stronger claims.
+- [PASS] Strategy Cluster Balance (execution) | blocking=False | A remains the live anchor while B continuation stays compare-only under the current mode.
+- [PASS] A Strategy Post-Cost Edge Validation (execution) | blocking=False | family=sweep_reversal sample is still too thin to validate post-cost A-anchor edge; gather more evidence before treating the anchor as stable.
+- [PASS] Strategy Lifecycle (execution) | blocking=False | family=trend_continuation remains research-led and the current window is still too thin to separate promotion from noise.
+- [WARN] Promotion Governance (execution) | blocking=False | family=trend_continuation promotion review should be deferred while guardrails remain active.
+- [WARN] Promotion Review Queue (execution) | blocking=False | family=trend_continuation should be reviewed first for defer causes before broader promotion review resumes.
+- [PASS] Promotion Remediation Queue (execution) | blocking=False | current family set remains in observe queue while evidence accumulates.
+- [PASS] Promotion Clearance Tracker (execution) | blocking=False | family=trend_continuation keep this family in observe tracking while evidence accumulates.
+- [PASS] Promotion Reopen Queue (execution) | blocking=False | current family set remains in observe re-open queue while evidence accumulates.
+- [PASS] Promotion Decision Brief (execution) | blocking=False | family=trend_continuation remains in observe posture while promotion evidence is still incomplete.
+- [WARN] Auto Promotion Rollout Execution (execution) | blocking=False | family=trend_continuation auto execution remains blocked; keep governance changes advisory-only until guardrails clear.
+- [PASS] Promotion Lifecycle History (execution) | blocking=False | family=trend_continuation now has durable promotion history showing a recent auto_execution_stage_recorded transition.
+- [WARN] Research Promotion Operating Loop (execution) | blocking=False | family=trend_continuation has a concrete shadow-test path; queue the research test before any probation or promotion move.
+- [WARN] Positive Evidence Expansion (execution) | blocking=False | family=trend_continuation is not ready for positive expansion language because evidence or execution guardrails remain incomplete. The current sample is still too thin.
+- [PASS] Outcome Bucket Granularity (execution) | blocking=False | family=trend_continuation remains family-first; condition coverage is still thin or the current condition split is not yet strong enough to treat as a supporting modifier.
+- [PASS] Opportunity Capture (execution) | blocking=False | activity is thin; current window is too small to separate scarcity from degradation; family focus is legacy_zone_plan
+- [PASS] Capital Allocator (execution) | blocking=False | allocator evidence does not justify a family-level capital tilt in the current candidate set
+- [PASS] PBO / DSR Design Contract (validation) | blocking=False | PBO/DSR design contract frozen; artifact store artifact_store_schema_ready_empty
+
+## Notes
+- This checklist aggregates current API/report evidence for live-readiness review.
+- Blocking items with status FAIL or MANUAL should be cleared before live trading.
+- WARN items are non-blocking by default, but require operator review.

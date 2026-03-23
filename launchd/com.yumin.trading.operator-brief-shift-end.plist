@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.yumin.trading.operator-brief-shift-end</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/yumin/Documents/trading/.venv/bin/python</string>
+    <string>/Users/yumin/Documents/trading/scripts/notify_operator_session_brief.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/yumin/Documents/trading</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OPERATOR_BRIEF_MODE</key>
+    <string>shift-end</string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>900</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/launchd.shift_end.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/launchd.shift_end.err.log</string>
+</dict>
+</plist>
