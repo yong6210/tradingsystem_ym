@@ -1,2 +1,0 @@
-shell-init: error retrieving current directory: getcwd: cannot access parent directories: Operation not permitted
-/bin/bash: /Users/yumin/Documents/trading/scripts/run_entry_surface_tick.sh: Operation not permitted

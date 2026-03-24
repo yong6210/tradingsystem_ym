@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+
+.venv/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+trading.db
+reports/
+
+.DS_Store
