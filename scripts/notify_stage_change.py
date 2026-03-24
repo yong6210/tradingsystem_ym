@@ -149,6 +149,62 @@ def _edge_experiment_summary_line(payload: dict[str, Any] | None) -> str:
     )
 
 
+def _edge_evolution_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("edge_evolution_rule") or {})
+    if not source:
+        return {
+            "evolution_state": "unavailable",
+            "recommended_action": "keep_current_baseline",
+            "allocation_bias": "hold_current_baseline",
+            "promotion_candidate_axis": "none",
+            "promotion_candidate_variant": "none",
+        }
+    return {
+        "evolution_state": str(source.get("evolution_state") or "insufficient_sample"),
+        "recommended_action": str(source.get("recommended_action") or "keep_current_baseline"),
+        "allocation_bias": str(source.get("allocation_bias") or "hold_current_baseline"),
+        "promotion_candidate_axis": str(source.get("promotion_candidate_axis") or "none"),
+        "promotion_candidate_variant": str(source.get("promotion_candidate_variant") or "none"),
+    }
+
+
+def _edge_evolution_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _edge_evolution_summary(payload)
+    return (
+        f"edge_evolution: state={summary.get('evolution_state', 'unavailable')} | "
+        f"action={summary.get('recommended_action', 'keep_current_baseline')} | "
+        f"bias={summary.get('allocation_bias', 'hold_current_baseline')} | "
+        f"promotion={summary.get('promotion_candidate_axis', 'none')}/{summary.get('promotion_candidate_variant', 'none')}"
+    )
+
+
+def _review_followup_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("review_followup_ledger") or {})
+    if not source:
+        return {
+            "last_status": "none",
+            "last_action": "none",
+            "recent_entry_count": 0,
+            "last_followup_command": "",
+        }
+    return {
+        "last_status": str(source.get("last_status") or "none"),
+        "last_action": str(source.get("last_action") or "none"),
+        "recent_entry_count": int(source.get("recent_entry_count", 0) or 0),
+        "last_followup_command": str(source.get("last_followup_command") or ""),
+    }
+
+
+def _review_followup_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _review_followup_summary(payload)
+    return (
+        f"review_followup_ledger: status={summary.get('last_status', 'none')} | "
+        f"action={summary.get('last_action', 'none')} | "
+        f"entries={summary.get('recent_entry_count', 0)} | "
+        f"cmd={summary.get('last_followup_command', '') or 'none'}"
+    )
+
+
 def _candidate_focus_summary_line(payload: dict[str, Any] | None, key: str, *, label: str) -> str:
     source = dict((((payload or {}).get("representative_candidates") or {}).get(key) or {}))
     if not source:
@@ -190,6 +246,18 @@ def _edge_experiment_changed(previous: dict[str, Any] | None, current: dict[str,
     if previous is None:
         return False
     return _edge_experiment_summary_line(previous) != _edge_experiment_summary_line(current)
+
+
+def _edge_evolution_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    return _edge_evolution_summary_line(previous) != _edge_evolution_summary_line(current)
+
+
+def _review_followup_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    return _review_followup_summary_line(previous) != _review_followup_summary_line(current)
 
 
 def _candidate_focus_changed(previous: dict[str, Any] | None, current: dict[str, Any], key: str, *, label: str) -> bool:
@@ -291,6 +359,22 @@ def _collect_events(previous: dict[str, Any] | None, current: dict[str, Any]) ->
                 "body": f"{_edge_experiment_summary_line(previous)} -> {_edge_experiment_summary_line(current)}",
             }
         )
+    if _edge_evolution_changed(previous, current):
+        events.append(
+            {
+                "type": "edge_evolution_changed",
+                "title": "Edge evolution recommendation changed",
+                "body": f"{_edge_evolution_summary_line(previous)} -> {_edge_evolution_summary_line(current)}",
+            }
+        )
+    if _review_followup_changed(previous, current):
+        events.append(
+            {
+                "type": "review_followup_changed",
+                "title": "Review followup ledger changed",
+                "body": f"{_review_followup_summary_line(previous)} -> {_review_followup_summary_line(current)}",
+            }
+        )
     if _candidate_focus_changed(previous, current, "accepted", label="accepted_candidate_focus"):
         events.append(
             {
@@ -374,6 +458,8 @@ def _render_message(current: dict[str, Any], events: list[dict[str, str]]) -> st
             _surface_summary_line(current, "validation_approval_strip", label="validation_surface"),
             _surface_summary_line(current, "checklist_approval_strip", label="checklist_surface"),
             _edge_experiment_summary_line(current),
+            _edge_evolution_summary_line(current),
+            _review_followup_summary_line(current),
             _experiment_review_target_summary_line(current, "entry_timing_review_target", label="entry_timing_review_target"),
             _experiment_review_target_summary_line(current, "execution_style_review_target", label="execution_style_review_target"),
             _candidate_focus_summary_line(current, "accepted", label="accepted_candidate_focus"),

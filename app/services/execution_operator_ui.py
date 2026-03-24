@@ -1891,6 +1891,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         ['outcome_attribution', 'Outcome Attribution', validation?.outcome_attribution_summary || {}, 'strongest_drag_source', 'closed_post_cost_delta_r'],
         ['edge_experiment_review', 'Edge Experiment Review', validation?.edge_experiment_review_summary || {}, 'edge_state', 'entry_timing_preferred_variant'],
         ['edge_evolution_rule', 'Edge Evolution Rule', validation?.edge_evolution_rule_summary || {}, 'evolution_state', 'recommended_action'],
+        ['review_followup_ledger', 'Review Followup Ledger', validation?.review_followup_ledger_summary || {}, 'last_status', 'last_action'],
         ['rollout_recommendation', 'Rollout Recommendation', validation?.rollout_recommendation_summary || {}, 'recommendation', 'confidence'],
         ['multi_strategy_ab_expansion', 'Multi Strategy AB', validation?.multi_strategy_ab_summary || {}, 'mode', 'b_cluster.strategy_cluster_status'],
         ['b_continuation_activation', 'B Continuation Activation', validation?.b_continuation_activation_summary || {}, 'activation_state', 'activation_bias'],
@@ -1956,6 +1957,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const attribution = validation?.outcome_attribution_summary || {};
       const edgeExperiment = validation?.edge_experiment_review_summary || {};
       const edgeEvolution = validation?.edge_evolution_rule_summary || {};
+      const reviewLedger = validation?.review_followup_ledger_summary || {};
       const rollout = validation?.rollout_recommendation_summary || {};
       const lifecycle = validation?.strategy_lifecycle_summary || {};
       const multiStrategy = validation?.multi_strategy_ab_summary || {};
@@ -2017,6 +2019,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             ${renderSummaryBox('Outcome Attribution', dragSource, attribution?.summary || `delta=${fmtR(attribution?.closed_post_cost_delta_r)}`)}
             ${renderSummaryBox('Edge Experiment', edgeState, edgeExperiment?.summary || `true_edge=${fmtMaybe(edgeExperiment?.true_edge_ratio)}`)}
             ${renderSummaryBox('Edge Evolution', edgeEvolution?.evolution_state || 'n/a', edgeEvolution?.summary || edgeEvolution?.recommended_action || 'edge evolution rule unavailable')}
+            ${renderSummaryBox('Review Followup Ledger', reviewLedger?.last_status || 'n/a', reviewLedger?.summary || reviewLedger?.last_action || 'review followup ledger unavailable')}
             ${renderSummaryBox('Outcome Control', outcomeControl?.approval_penalty_status || 'n/a', outcomeControl?.summary || outcomeControl?.portfolio_bias_tier || 'outcome control unavailable')}
             ${renderSummaryBox('Rollout Recommendation', rollout?.recommendation || 'n/a', rollout?.summary || rollout?.confidence || 'rollout recommendation unavailable')}
             ${renderSummaryBox('Strategy Lifecycle', lifecycle?.state || 'n/a', lifecycle?.transition_bias || lifecycle?.summary || 'strategy lifecycle unavailable')}
@@ -2040,6 +2043,10 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             <div class="hint-card">
               <div class="title">Edge Split Focus</div>
               <div class="body">${esc(`${edgeState} | timing=${edgeExperiment?.entry_timing_preferred_variant || 'n/a'} | execution=${edgeExperiment?.execution_style_preferred_variant || 'n/a'}`)}</div>
+            </div>
+            <div class="hint-card">
+              <div class="title">Recent Review Packet</div>
+              <div class="body">${esc(`${reviewLedger?.last_status || 'n/a'} | action=${reviewLedger?.last_action || 'none'} | cmd=${reviewLedger?.last_followup_command || 'none'}`)}</div>
             </div>
             <div class="hint-card">
               <div class="title">Top Condition Split</div>
@@ -2136,6 +2143,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const attribution = funnel?.outcome_attribution || {};
       const edgeExperiment = funnel?.edge_experiment_review || {};
       const edgeEvolution = funnel?.edge_evolution_rule || {};
+      const reviewLedger = funnel?.review_followup_ledger || {};
       const hard = funnel?.hard_block_summary || {};
       const soft = funnel?.softening_candidate_summary || {};
       const rollout = funnel?.rollout_block_summary || {};
@@ -2176,6 +2184,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             ${renderSummaryBox('Outcome Attribution', dragSource, attribution?.summary || `delta=${fmtR(attribution?.closed_post_cost_delta_r)}`)}
             ${renderSummaryBox('Edge Experiment', edgeState, edgeExperiment?.summary || `true_edge=${fmtMaybe(edgeExperiment?.true_edge_ratio)}`)}
             ${renderSummaryBox('Edge Evolution', edgeEvolution?.evolution_state || 'n/a', edgeEvolution?.summary || edgeEvolution?.recommended_action || 'edge evolution rule unavailable')}
+            ${renderSummaryBox('Review Followup Ledger', reviewLedger?.last_status || 'n/a', reviewLedger?.summary || reviewLedger?.last_action || 'review followup ledger unavailable')}
             ${renderSummaryBox('Top Family Bottleneck', family?.key || 'n/a', family ? `${fmtPercent(family.pass_rate)} | ${fmtR(family.avg_expected_ev_r)}` : 'family bottleneck unavailable')}
             ${renderSummaryBox('Top Regime Bottleneck', regime?.key || 'n/a', regime ? `${fmtPercent(regime.pass_rate)} | ${fmtR(regime.avg_expected_ev_r)}` : 'regime bottleneck unavailable')}
             ${renderSummaryBox('Top Session Bottleneck', session?.key || 'n/a', session ? `${fmtPercent(session.pass_rate)} | ${fmtR(session.avg_expected_ev_r)}` : 'session bottleneck unavailable')}
@@ -2188,6 +2197,10 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             <div class="hint-card">
               <div class="title">Attribution Focus</div>
               <div class="body">${esc(`${dragSource} | ${attribution?.summary || 'outcome attribution summary unavailable'}`)}</div>
+            </div>
+            <div class="hint-card">
+              <div class="title">Review Packet History</div>
+              <div class="body">${esc(`${reviewLedger?.last_status || 'n/a'} | action=${reviewLedger?.last_action || 'none'} | entries=${fmtMaybe(reviewLedger?.recent_entry_count)}`)}</div>
             </div>
           </div>
           ${renderTable(

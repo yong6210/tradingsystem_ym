@@ -163,6 +163,42 @@ def _edge_experiment_summary_line(summary: dict[str, Any] | None) -> str:
     )
 
 
+def _edge_evolution_summary(
+    *,
+    dashboard_payload: dict[str, Any] | None,
+    validation_payload: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    dashboard_source = dict(((((dashboard_payload or {}).get("signal_funnel") or {}).get("edge_evolution_rule")) or {}))
+    validation_source = dict(
+        (((validation_payload or {}).get("validation_report") or validation_payload or {}).get("edge_evolution_rule_summary") or {})
+    )
+    source = dashboard_source or validation_source
+    if not source:
+        return None
+    return {
+        "available": bool(source.get("available", True)),
+        "advisory_only": bool(source.get("advisory_only", True)),
+        "evolution_state": str(source.get("evolution_state") or "insufficient_sample"),
+        "recommended_action": str(source.get("recommended_action") or "keep_current_baseline"),
+        "allocation_bias": str(source.get("allocation_bias") or "hold_current_baseline"),
+        "summary": str(source.get("summary") or ""),
+        "kill_review_triggered": bool(source.get("kill_review_triggered", False)),
+        "promotion_candidate_axis": str(source.get("promotion_candidate_axis") or "none"),
+        "promotion_candidate_variant": str(source.get("promotion_candidate_variant") or "none"),
+    }
+
+
+def _edge_evolution_summary_line(summary: dict[str, Any] | None) -> str:
+    if not summary:
+        return "edge_evolution: unavailable"
+    return (
+        f"edge_evolution: state={summary.get('evolution_state', 'insufficient_sample')} | "
+        f"action={summary.get('recommended_action', 'keep_current_baseline')} | "
+        f"bias={summary.get('allocation_bias', 'hold_current_baseline')} | "
+        f"promotion={summary.get('promotion_candidate_axis', 'none')}/{summary.get('promotion_candidate_variant', 'none')}"
+    )
+
+
 def _edge_experiment_next_step(summary: dict[str, Any] | None) -> str | None:
     if not summary:
         return None
@@ -181,6 +217,31 @@ def _edge_experiment_next_step(summary: dict[str, Any] | None) -> str | None:
         )
     if edge_state == "insufficient_edge_measurement":
         return "Advisory only: edge evidence is still thin; do not treat pruning cleanup as edge validation."
+    return None
+
+
+def _edge_evolution_next_step(summary: dict[str, Any] | None) -> str | None:
+    if not summary:
+        return None
+    evolution_state = str(summary.get("evolution_state") or "")
+    action = str(summary.get("recommended_action") or "keep_current_baseline")
+    axis = str(summary.get("promotion_candidate_axis") or "none")
+    variant = str(summary.get("promotion_candidate_variant") or "none")
+    if evolution_state == "edge_kill_review":
+        return (
+            "Advisory only: pruning cleanup is secondary while edge kill review is active; "
+            f"run {action} before reopening scope."
+        )
+    if evolution_state == "reduce_candidate":
+        return (
+            "Advisory only: edge evolution still points to baseline reduction; keep pruning separate from "
+            f"{action}."
+        )
+    if evolution_state == "promote_candidate":
+        return (
+            "Advisory only: preferred branch promotion review is now the higher-value follow-up; review "
+            f"{axis}={variant} with {action} after pruning notes are captured."
+        )
     return None
 
 
@@ -267,6 +328,10 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
         lines.append(f"- summary: {edge_experiment.get('summary', '')}")
     else:
         lines.append("- edge experiment unavailable")
+    edge_evolution = payload.get("edge_evolution_rule") or {}
+    if edge_evolution:
+        lines.append(f"- {_edge_evolution_summary_line(edge_evolution)}")
+        lines.append(f"- summary: {edge_evolution.get('summary', '')}")
     representative_candidates = payload.get("representative_candidates") or {}
     lines.append(f"- {_representative_candidate_line('accepted_candidate_focus', representative_candidates.get('accepted'))}")
     lines.append(f"- {_representative_candidate_line('blocked_candidate_focus', representative_candidates.get('blocked'))}")
@@ -337,6 +402,10 @@ def main() -> int:
     validation_strip = _surface_strip_summary(validation, surface_type="validation")
     checklist_strip = _surface_strip_summary(checklist, surface_type="checklist")
     edge_experiment_review = _edge_experiment_summary(
+        dashboard_payload=dashboard,
+        validation_payload=validation,
+    )
+    edge_evolution_rule = _edge_evolution_summary(
         dashboard_payload=dashboard,
         validation_payload=validation,
     )
@@ -414,6 +483,9 @@ def main() -> int:
     advisory_next_step = _edge_experiment_next_step(edge_experiment_review)
     if advisory_next_step:
         next_steps.append(advisory_next_step)
+    edge_evolution_next_step = _edge_evolution_next_step(edge_evolution_rule)
+    if edge_evolution_next_step:
+        next_steps.append(edge_evolution_next_step)
 
     payload = {
         "generated_at": generated_at.isoformat(),
@@ -459,6 +531,7 @@ def main() -> int:
             {"label": "checklist", **checklist_strip},
         ],
         "edge_experiment_review": edge_experiment_review,
+        "edge_evolution_rule": edge_evolution_rule,
         "representative_candidates": representative_candidates,
         "next_steps": next_steps,
     }

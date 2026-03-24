@@ -174,6 +174,21 @@ The funnel matters because candidate quality is only useful if it survives portf
 - `entry_timing_experiment` compares `early_limit` versus `reaction_confirmed`; `execution_style_experiment` compares `passive_limit` versus `market` when both branches have coverage.
 - This layer is advisory-only and is meant to answer "what should we test next?" before anyone rewrites the strategy structure.
 
+## Edge Evolution Rule
+
+`edge_experiment_review + rollout_recommendation + strategy_lifecycle + kill_condition_automation -> edge_evolution_rule`
+
+- `edge_evolution_rule` turns split-test evidence into advisory-only `promote / reduce / research_only / kill-review` language without mutating rollout or safety state by itself.
+- It exists to answer "when should we reduce baseline allocation, keep research-only, or escalate a preferred branch into promotion review?" after the raw split evidence is already visible.
+- `promote / reduce / kill-review` wording is only interpretable after real split observation has produced enough closed post-cost trades; if the sample is still thin, this layer should stay in `insufficient_sample` or `research_only` posture.
+
+## Review Followup Ledger
+
+`run_split_review_followup -> review_followup_ledger -> validation/dashboard/checklist/ui/handoff`
+
+- `review_followup_ledger` records the last split/evolution review packet that was actually generated, so operator surfaces can read recent `last_status + last_action + followup_command` instead of only the current recommendation.
+- This closes the loop between `operator_action_priority`, a runnable `scripts/run_split_review_followup.py` command, and recent packet history without creating a new approval authority.
+
 ## Outcome-Aware Rollout Recommendation
 
 `family outcome + family execution + mode advisory + current rollout policy -> rollout_recommendation`
@@ -406,7 +421,7 @@ The funnel matters because candidate quality is only useful if it survives portf
 - `GET /execution/operator-dashboard`
   Runtime source for safety state, funnel, recent intents, open orders, positions, reconciliation, alert summary, and execution quality summary.
   It now also exposes `approval_strip_summary`, so the runtime dashboard itself can be read with the same `approve -> align -> act` vocabulary as validation, checklist, the operator UI, and session handoff.
-  It also surfaces `signal_funnel.operator_action_priority` with capture-aware review order, `signal_funnel.outcome_control_trace`, `signal_funnel.edge_experiment_review`, `signal_funnel.rollout_recommendation`, `signal_funnel.strategy_lifecycle`, `signal_funnel.promotion_governance`, `signal_funnel.promotion_review_queue`, `signal_funnel.promotion_remediation_queue`, `signal_funnel.promotion_clearance_tracker`, `signal_funnel.promotion_reopen_queue`, `signal_funnel.promotion_decision_brief`, `signal_funnel.auto_promotion_rollout_execution`, `signal_funnel.promotion_lifecycle_history`, `signal_funnel.research_promotion_operating_loop`, `signal_funnel.multi_strategy_ab_expansion`, `signal_funnel.b_continuation_activation`, `signal_funnel.execution_friction_measurement`, `signal_funnel.forward_stress_regime_validation`, `signal_funnel.kill_condition_automation`, `signal_funnel.strategy_cluster_balance`, `signal_funnel.opportunity_capture`, `signal_funnel.capital_allocator`, recent intent `outcome_approval_penalty`, and trimmed portfolio candidate drill-down rows.
+  It also surfaces `signal_funnel.operator_action_priority` with capture-aware review order, `signal_funnel.outcome_control_trace`, `signal_funnel.edge_experiment_review`, `signal_funnel.edge_evolution_rule`, `signal_funnel.rollout_recommendation`, `signal_funnel.strategy_lifecycle`, `signal_funnel.promotion_governance`, `signal_funnel.promotion_review_queue`, `signal_funnel.promotion_remediation_queue`, `signal_funnel.promotion_clearance_tracker`, `signal_funnel.promotion_reopen_queue`, `signal_funnel.promotion_decision_brief`, `signal_funnel.auto_promotion_rollout_execution`, `signal_funnel.promotion_lifecycle_history`, `signal_funnel.research_promotion_operating_loop`, `signal_funnel.multi_strategy_ab_expansion`, `signal_funnel.b_continuation_activation`, `signal_funnel.execution_friction_measurement`, `signal_funnel.forward_stress_regime_validation`, `signal_funnel.kill_condition_automation`, `signal_funnel.strategy_cluster_balance`, `signal_funnel.opportunity_capture`, `signal_funnel.capital_allocator`, recent intent `outcome_approval_penalty`, and trimmed portfolio candidate drill-down rows.
 - `GET /execution/operator-ui`
   Browser operator surface backed by the same runtime payloads, intended for day-to-day operating review.
   It now surfaces `5-Second Operator Kernel` at the top of the home section, so operators can read `money_funnel -> outcome_attribution -> outcome_control_trace -> rollout` before dropping into the broader review stack.
@@ -418,10 +433,10 @@ The funnel matters because candidate quality is only useful if it survives portf
   It also surfaces an `A/B Strategy Posture` home-section panel so operators can read `multi_strategy_ab_expansion`, `b_continuation_activation`, and `strategy_cluster_balance` together without dropping into raw dashboard JSON.
   The same home section now includes `Promotion Operating Stack`, which compresses `promotion_governance`, `promotion_review_queue`, `promotion_remediation_queue`, `promotion_clearance_tracker`, `promotion_reopen_queue`, `promotion_decision_brief`, `auto_promotion_rollout_execution`, `promotion_lifecycle_history`, and `research_promotion_operating_loop` into a single operator review surface.
   It also includes `Promotion Case Inspector`, which re-compresses the current headline promotion family into target posture, write scope, remaining guardrails, cleared guardrails, and next-move language.
-  It also includes `Validation / Checklist Review Stack`, which lines up validation top-level summaries and checklist item statuses for rollout, edge experiments, A/B posture, promotion stack, opportunity capture, and capital allocation without requiring raw payload inspection, and now reads those top lines in the same `approve -> align -> act` vocabulary instead of raw `GO/NO_GO + playbook` wording.
-  It also includes `Validation Case Inspector`, which re-compresses the current symbol validation case into money funnel, outcome attribution, edge experiments, outcome control, rollout, lifecycle, A/B posture, condition split, capture, allocator, and next-move language, while carrying the same validation `approve -> align -> act` strip inside the card.
+  It also includes `Validation / Checklist Review Stack`, which lines up validation top-level summaries and checklist item statuses for rollout, edge experiments, edge evolution, A/B posture, promotion stack, opportunity capture, and capital allocation without requiring raw payload inspection, and now reads those top lines in the same `approve -> align -> act` vocabulary instead of raw `GO/NO_GO + playbook` wording.
+  It also includes `Validation Case Inspector`, which re-compresses the current symbol validation case into money funnel, outcome attribution, edge experiments, edge evolution, outcome control, rollout, lifecycle, A/B posture, condition split, capture, allocator, and next-move language, while carrying the same validation `approve -> align -> act` strip inside the card.
   It also includes `Runtime Quality Inspector`, which re-compresses recent validation alerts, retry queue pressure, execution quality, and reconciliation health into a single runtime operating-quality card, and now labels the latest alert in `Approve / Act` terms so quality escalation wording matches the rest of the operator stack.
-  It also includes `Signal Funnel Inspector`, which re-compresses the current hard gate, softening queue, rollout block, family/regime/session bottlenecks, money funnel, outcome attribution, and edge experiment review into a single funnel review card.
+  It also includes `Signal Funnel Inspector`, which re-compresses the current hard gate, softening queue, rollout block, family/regime/session bottlenecks, money funnel, outcome attribution, edge experiment review, and edge evolution rule into a single funnel review card.
   It also includes `Alpha Research Inspector`, which re-compresses research backlog, recommended research action, top shadow experiment, softening review, and promotion watchlist into one home-section research card.
   It also includes `Kill Condition Inspector`, which re-compresses `signal_funnel.kill_condition_automation` into stop-review verdict, trigger axis, write scope, manual-override state, and current lock posture before any live stop is armed.
   It also includes `Policy / Lock Inspector`, which re-compresses kill switch, close-only, active locks, matching locks, and rollout policies into a single home-section policy card.
@@ -664,7 +679,7 @@ MICRO_LIVE preflight:
 ./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --days 7
 ```
 
-The preflight output now includes `approval_surfaces`, `edge_experiment_review`, and representative accepted/blocked candidate split focus, so dashboard, validation, checklist, and the current entry/execution hypothesis can be read together before final live sign-off.
+The preflight output now includes `approval_surfaces`, `edge_experiment_review`, `edge_evolution_rule`, and representative accepted/blocked candidate split focus, so dashboard, validation, checklist, the current entry/execution hypothesis, and the current allocation/promotion posture can be read together before final live sign-off.
 When split review targets are available, the preflight `next_steps` now also prints a ready-to-run `scripts/run_split_review_followup.py` command for the current symbol.
 
 Split review followup packet:
@@ -673,8 +688,10 @@ Split review followup packet:
 ./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --days 7 --action auto
 ```
 
-The followup packet turns the latest `operator_action_priority` and `edge_experiment_review` into a concrete `selected_action + target_contract + review_steps` bundle, so split review prep stops being a manual copy/paste exercise.
-The operator surface divergence snapshot, session brief, and stage monitor now also carry the same ready-to-run followup command on each `entry_timing_review_target` / `execution_style_review_target` line.
+The followup packet turns the latest `operator_action_priority`, `edge_experiment_review`, and `edge_evolution_rule` into a concrete `selected_action + target_contract + review_steps` bundle, then appends the result to `review_followup_ledger`, so split review prep stops being a manual copy/paste exercise even when the top action is `reduce`, `promote`, or `kill-review`.
+The intended live experiment loop is fixed: generate the packet from `operator_action_priority` or `top_action_followup_command`, run the real split observation in market, accumulate new closed trades, rerun `edge_experiment_review`, rerun `edge_evolution_rule`, and only then interpret `promote / reduce / kill-review`.
+If the packet returns `NO_TARGET` or `NO_REVIEW_ACTION_AVAILABLE`, treat that as a blocker signal rather than an experiment result: clear approval blockers, restore target contract carryover, or wait for enough closed-trade evidence before trying to interpret edge evolution.
+The operator surface divergence snapshot, session brief, and stage monitor now also carry the same ready-to-run followup command on each `entry_timing_review_target` / `execution_style_review_target` line, preserve `top_action_followup_command` for non-split edge-evolution review actions, and surface `review_followup_ledger.last_status / last_action` so recent packet history survives handoff.
 The server-side `operator_action_priority` payload now also carries `top_action_followup_command` plus per-row `next_actions[].followup_command` for split-review actions, so dashboard, validation, checklist, and UI can point to the same runnable packet command.
 
 Paper candidate drill:
@@ -699,7 +716,7 @@ Post-live pruning review:
 ./.venv/bin/python scripts/run_post_live_pruning_review.py --symbol BTCUSDC --days 7
 ```
 
-The pruning review output now includes `approval_surfaces`, `edge_experiment_review`, and representative accepted/blocked candidate split focus, so the reopen decision stays separate from the current split-test focus while still using the same operator vocabulary.
+The pruning review output now includes `approval_surfaces`, `edge_experiment_review`, `edge_evolution_rule`, and representative accepted/blocked candidate split focus, so the reopen decision stays separate from the current split-test focus while still using the same operator vocabulary.
 
 Execution incident drill:
 

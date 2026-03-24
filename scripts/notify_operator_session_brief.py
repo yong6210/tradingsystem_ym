@@ -208,6 +208,7 @@ def _alert_state(brief: dict[str, Any]) -> dict[str, Any]:
     entry_target = dict(funnel.get("entry_timing_review_target") or {})
     execution_target = dict(funnel.get("execution_style_review_target") or {})
     sections = snapshot.get("operator_ui_sections") or {}
+    review_followup = funnel.get("review_followup_ledger") or {}
     return {
         "symbol": str(brief.get("symbol") or ""),
         "universe": str(brief.get("universe") or ""),
@@ -218,6 +219,9 @@ def _alert_state(brief: dict[str, Any]) -> dict[str, Any]:
         "deployment_alignment": str(snapshot.get("deployment_alignment") or ""),
         "playbook_alignment": str(snapshot.get("playbook_alignment") or ""),
         "top_operator_action": str(dashboard.get("top_operator_action") or ""),
+        "top_action_followup_command": str(
+            funnel.get("top_action_followup_command") or dashboard.get("top_action_followup_command") or ""
+        ),
         "dashboard_approve": str(dashboard_strip.get("approve_value") or ""),
         "dashboard_align": str(dashboard_strip.get("align_value") or ""),
         "dashboard_act": str(dashboard_strip.get("act_value") or ""),
@@ -239,6 +243,13 @@ def _alert_state(brief: dict[str, Any]) -> dict[str, Any]:
         "approval_strip_priority": str(approval_strip.get("act_priority_level") or ""),
         "research_action": str(funnel.get("research_action") or ""),
         "edge_state": str(funnel.get("edge_state") or ""),
+        "edge_evolution_state": str(funnel.get("edge_evolution_state") or ""),
+        "edge_evolution_action": str(funnel.get("edge_evolution_action") or ""),
+        "edge_evolution_bias": str(funnel.get("edge_evolution_bias") or ""),
+        "review_followup_status": str(review_followup.get("last_status") or ""),
+        "review_followup_action": str(review_followup.get("last_action") or ""),
+        "review_followup_entries": int(review_followup.get("recent_entry_count", 0) or 0),
+        "review_followup_command": str(review_followup.get("last_followup_command") or ""),
         "entry_timing_focus": str(funnel.get("entry_timing_focus") or ""),
         "execution_style_focus": str(funnel.get("execution_style_focus") or ""),
         "accepted_candidate_symbol": str(accepted_candidate.get("symbol") or ""),
@@ -278,6 +289,7 @@ def _changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
         "deployment_alignment",
         "playbook_alignment",
         "top_operator_action",
+        "top_action_followup_command",
         "dashboard_approve",
         "dashboard_align",
         "dashboard_act",
@@ -299,6 +311,13 @@ def _changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
         "approval_strip_priority",
         "research_action",
         "edge_state",
+        "edge_evolution_state",
+        "edge_evolution_action",
+        "edge_evolution_bias",
+        "review_followup_status",
+        "review_followup_action",
+        "review_followup_entries",
+        "review_followup_command",
         "entry_timing_focus",
         "execution_style_focus",
         "accepted_candidate_symbol",
@@ -342,6 +361,11 @@ def _render_shift_start_message(brief: dict[str, Any]) -> str:
     kernel = snapshot.get("kernel_snapshot") or {}
     sections = snapshot.get("operator_ui_sections") or {}
     funnel = snapshot.get("signal_funnel_snapshot") or {}
+    review_followup = funnel.get("review_followup_ledger") or {}
+    top_action_command = str(funnel.get("top_action_followup_command") or "")
+    top_action_suffix = f" | cmd={top_action_command}" if top_action_command else ""
+    review_command = str(review_followup.get("last_followup_command") or "")
+    review_suffix = f" | cmd={review_command}" if review_command else ""
     lines = [
         "Operator session handoff",
         f"- brief_status: {brief.get('brief_status')}",
@@ -363,15 +387,18 @@ def _render_shift_start_message(brief: dict[str, Any]) -> str:
         _surface_summary_line("dashboard_surface", dashboard_strip),
         _surface_summary_line("validation_surface", validation_strip),
         _surface_summary_line("checklist_surface", checklist_strip),
-        f"- top_operator_action: {dashboard.get('top_operator_action')}",
+        f"- top_operator_action: {dashboard.get('top_operator_action')}{top_action_suffix}",
         (
             f"- research/funnel: action={funnel.get('research_action')} "
             f"| edge_state={funnel.get('edge_state')} "
+            f"| edge_evolution={funnel.get('edge_evolution_state')}:{funnel.get('edge_evolution_action')}:{funnel.get('edge_evolution_bias')} "
+            f"| review_ledger={review_followup.get('last_status')}:{review_followup.get('last_action')}:{review_followup.get('recent_entry_count')} "
             f"| entry_timing={funnel.get('entry_timing_focus')} "
             f"| execution_style={funnel.get('execution_style_focus')} "
             f"| family_bottleneck={funnel.get('top_family_bottleneck')} "
             f"| session_bottleneck={funnel.get('top_session_bottleneck')}"
         ),
+        f"- review_followup_ledger: status={review_followup.get('last_status') or 'none'} | action={review_followup.get('last_action') or 'none'} | entries={review_followup.get('recent_entry_count') or 0}{review_suffix}",
         _review_target_line("entry_timing_review_target", funnel.get("entry_timing_review_target")),
         _review_target_line("execution_style_review_target", funnel.get("execution_style_review_target")),
         _candidate_handoff_line("accepted_candidate_focus", funnel.get("representative_accepted_candidate")),
@@ -395,6 +422,11 @@ def _render_shift_end_message(brief: dict[str, Any]) -> str:
     checklist_strip = _surface_strip_summary(checklist, surface_type="checklist")
     kernel = snapshot.get("kernel_snapshot") or {}
     funnel = snapshot.get("signal_funnel_snapshot") or {}
+    review_followup = funnel.get("review_followup_ledger") or {}
+    top_action_command = str(funnel.get("top_action_followup_command") or "")
+    top_action_suffix = f" | cmd={top_action_command}" if top_action_command else ""
+    review_command = str(review_followup.get("last_followup_command") or "")
+    review_suffix = f" | cmd={review_command}" if review_command else ""
     lines = [
         "Operator shift-end summary",
         f"- closing_status: {brief.get('brief_status')}",
@@ -420,15 +452,18 @@ def _render_shift_end_message(brief: dict[str, Any]) -> str:
         _surface_summary_line("closing_dashboard_surface", dashboard_strip),
         _surface_summary_line("closing_validation_surface", validation_strip),
         _surface_summary_line("closing_checklist_surface", checklist_strip),
-        f"- final_top_action: {dashboard.get('top_operator_action')}",
+        f"- final_top_action: {dashboard.get('top_operator_action')}{top_action_suffix}",
         (
             f"- carryover_focus: research={funnel.get('research_action')} "
             f"| edge_state={funnel.get('edge_state')} "
+            f"| edge_evolution={funnel.get('edge_evolution_state')}:{funnel.get('edge_evolution_action')}:{funnel.get('edge_evolution_bias')} "
+            f"| review_ledger={review_followup.get('last_status')}:{review_followup.get('last_action')}:{review_followup.get('recent_entry_count')} "
             f"| entry_timing={funnel.get('entry_timing_focus')} "
             f"| execution_style={funnel.get('execution_style_focus')} "
             f"| family_bottleneck={funnel.get('top_family_bottleneck')} "
             f"| session_bottleneck={funnel.get('top_session_bottleneck')}"
         ),
+        f"- carryover_review_followup_ledger: status={review_followup.get('last_status') or 'none'} | action={review_followup.get('last_action') or 'none'} | entries={review_followup.get('recent_entry_count') or 0}{review_suffix}",
         _review_target_line("carryover_entry_timing_review_target", funnel.get("entry_timing_review_target")),
         _review_target_line("carryover_execution_style_review_target", funnel.get("execution_style_review_target")),
         _candidate_handoff_line("carryover_accepted_candidate", funnel.get("representative_accepted_candidate")),

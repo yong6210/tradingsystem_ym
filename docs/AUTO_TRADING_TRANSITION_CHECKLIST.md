@@ -309,7 +309,7 @@
 - [x] MICRO_LIVE preflight helper 추가
 - 목적: live 전환 직전 operator가 `health/operator-dashboard/safety/validation/checklist/alerts/scanner`를 한 번에 점검하고, `READY_FOR_MICRO_LIVE` vs `NOT_READY`를 명시적으로 받는다.
 - 구현 방식: `scripts/run_micro_live_preflight.py`를 추가해 `GET /health/ready`, `GET /execution/operator-dashboard`, `GET /execution/safety-state`, `POST /validation/report`, `POST /operations/checklist`, `GET /alerts/metrics`, `GET /scanner/top`를 호출한다.
-- 구현 방식: 결과 payload는 `overall_status`, `summary_line`, `checks`, `candidate`, `approval_surfaces`, `edge_experiment_review`, `experiment_review_targets`, `representative_candidates`, `next_steps`를 고정하고, 옵션으로 `reports/operations/micro_live_preflight/*.md` 리포트를 생성한다.
+- 구현 방식: 결과 payload는 `overall_status`, `summary_line`, `checks`, `candidate`, `approval_surfaces`, `edge_experiment_review`, `edge_evolution_rule`, `experiment_review_targets`, `representative_candidates`, `next_steps`를 고정하고, 옵션으로 `reports/operations/micro_live_preflight/*.md` 리포트를 생성한다.
 - 구현 방식: `experiment_review_targets`가 있으면 `next_steps`에 `scripts/run_split_review_followup.py --action ...` 명령도 같이 싣는다.
 - 구현 방식: stage snapshot과 session brief의 `entry_timing_review_target` / `execution_style_review_target`에도 같은 followup command를 실어 handoff 이후에도 review packet을 바로 생성할 수 있게 한다.
 - 완료 기준: `./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --days 7` 한 번으로 live 전환 전 preflight 상태를 결정할 수 있다.

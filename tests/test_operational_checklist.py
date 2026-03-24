@@ -216,6 +216,33 @@ def test_operational_checklist_generates_report_and_statuses(tmp_path: Path) -> 
                         "execution_style_preferred_variant": "passive_limit",
                     },
                 },
+                "edge_evolution_rule_available": True,
+                "edge_evolution_rule_summary": {
+                    "available": True,
+                    "advisory_only": True,
+                    "evolution_state": "reduce_candidate",
+                    "recommended_action": "reduce_baseline_allocation_review",
+                    "allocation_bias": "reduce_baseline",
+                    "confidence": "medium",
+                    "kill_review_triggered": False,
+                    "true_edge_ratio": 0.75,
+                    "edge_decay_rate": 0.0635,
+                    "closed_trade_count": 6,
+                    "promotion_candidate_axis": "entry_timing",
+                    "promotion_candidate_variant": "early_limit",
+                    "promotion_candidate_reason": "better_fill_capture_ratio",
+                    "summary": "Baseline edge is weak enough that allocation should be reduced until the preferred branch proves durable post-cost.",
+                    "reason_codes": [
+                        "evolution_state:reduce_candidate",
+                        "recommended_action:reduce_baseline_allocation_review",
+                    ],
+                    "source_summary": {
+                        "edge_state": "watch_edge",
+                        "rollout_recommendation": "reduce",
+                        "strategy_lifecycle_state": "degraded",
+                        "kill_condition_state": "close_only_review",
+                    },
+                },
                 "rollout_recommendation_available": True,
                 "rollout_recommendation_summary": {
                     "available": True,
@@ -1082,6 +1109,16 @@ def test_operational_checklist_generates_report_and_statuses(tmp_path: Path) -> 
     assert edge_experiment_item["evidence"]["true_edge_ratio"] == 0.75
     assert edge_experiment_item["evidence"]["entry_timing_preferred_variant"] == "early_limit"
     assert edge_experiment_item["evidence"]["execution_style_preferred_variant"] == "passive_limit"
+    edge_evolution_item = next(item for item in payload["checks"] if item["item_id"] == "edge_evolution_rule")
+    assert edge_evolution_item["status"] == "WARN"
+    assert edge_evolution_item["blocking"] is False
+    assert edge_evolution_item["evidence"]["recommended_action"] == "reduce_baseline_allocation_review"
+    assert edge_evolution_item["evidence"]["allocation_bias"] == "reduce_baseline"
+    review_followup_item = next(item for item in payload["checks"] if item["item_id"] == "review_followup_ledger")
+    assert review_followup_item["status"] == "PASS"
+    assert review_followup_item["blocking"] is False
+    assert review_followup_item["evidence"]["available"] is False
+    assert review_followup_item["evidence"]["last_status"] == "none"
     rollout_item = next(item for item in payload["checks"] if item["item_id"] == "rollout_recommendation")
     assert rollout_item["status"] == "MANUAL"
     assert rollout_item["blocking"] is True

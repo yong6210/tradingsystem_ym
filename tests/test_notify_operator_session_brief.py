@@ -39,6 +39,7 @@ def _fake_brief() -> dict:
             },
             "dashboard_summary": {
                 "top_operator_action": "continue_candidate_review_under_portfolio_caps",
+                "top_action_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review",
                 "deployment_go_no_go": "GO",
                 "playbook_action": "continue_candidate_review_under_portfolio_caps",
                 "approval_strip_summary": {
@@ -69,7 +70,18 @@ def _fake_brief() -> dict:
             },
             "signal_funnel_snapshot": {
                 "research_action": "run_shadow_exit_timing_review",
+                "top_action_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review",
                 "edge_state": "watch_edge",
+                "edge_evolution_state": "reduce_candidate",
+                "edge_evolution_action": "reduce_baseline_allocation_review",
+                "edge_evolution_bias": "reduce_baseline",
+                "review_followup_ledger": {
+                    "available": True,
+                    "last_status": "READY",
+                    "last_action": "reduce_baseline_allocation_review",
+                    "recent_entry_count": 3,
+                    "last_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review",
+                },
                 "entry_timing_focus": "early_limit",
                 "execution_style_focus": "passive_limit",
                 "entry_timing_review_target": {
@@ -165,7 +177,9 @@ def test_main_blocks_live_send_without_allow_flag(monkeypatch, tmp_path: Path, c
     assert "- dashboard_surface: approve=approval usable | align=aligned | act=continue_candidate_review_under_portfolio_caps" in payload["message"]
     assert "- validation_surface: approve=validation no_go | align=playbook_drift | act=review_runtime_execution_drag_before_expansion" in payload["message"]
     assert "- checklist_surface: approve=validation/checklist no_go | align=aligned | act=clear_blocking_operational_items_before_rollout" in payload["message"]
-    assert "- research/funnel: action=run_shadow_exit_timing_review | edge_state=watch_edge | entry_timing=early_limit | execution_style=passive_limit | family_bottleneck=legacy_zone_plan | session_bottleneck=preferred_live_window" in payload["message"]
+    assert "- top_operator_action: continue_candidate_review_under_portfolio_caps | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review" in payload["message"]
+    assert "- research/funnel: action=run_shadow_exit_timing_review | edge_state=watch_edge | edge_evolution=reduce_candidate:reduce_baseline_allocation_review:reduce_baseline | review_ledger=READY:reduce_baseline_allocation_review:3 | entry_timing=early_limit | execution_style=passive_limit | family_bottleneck=legacy_zone_plan | session_bottleneck=preferred_live_window" in payload["message"]
+    assert "- review_followup_ledger: status=READY | action=reduce_baseline_allocation_review | entries=3 | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review" in payload["message"]
     assert "- entry_timing_review_target: action=run_entry_timing_split_review | target=ETHUSDC | variant=early_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review" in payload["message"]
     assert "- execution_style_review_target: action=run_execution_style_split_review | target=ETHUSDC | variant=passive_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_execution_style_split_review" in payload["message"]
     assert "- accepted_candidate_focus: symbol=ETHUSDC | family=sweep_reversal | edge=watch_edge | split=early_limit/passive_limit | status=ACTIONABLE_ENTRY" in payload["message"]
@@ -173,11 +187,23 @@ def test_main_blocks_live_send_without_allow_flag(monkeypatch, tmp_path: Path, c
     assert payload["current"]["kernel_verdict"] == "manual_review"
     assert payload["current"]["money_leak_r"] == 0.33
     assert payload["current"]["candidate_surface_priority"] == "context_only"
+    assert payload["current"]["top_action_followup_command"].endswith(
+        "--symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review"
+    )
     assert payload["current"]["approval_strip_approve"] == "validation/checklist no_go"
     assert payload["current"]["dashboard_approve"] == "approval usable"
     assert payload["current"]["validation_act"] == "review_runtime_execution_drag_before_expansion"
     assert payload["current"]["checklist_act"] == "clear_blocking_operational_items_before_rollout"
     assert payload["current"]["edge_state"] == "watch_edge"
+    assert payload["current"]["edge_evolution_state"] == "reduce_candidate"
+    assert payload["current"]["edge_evolution_action"] == "reduce_baseline_allocation_review"
+    assert payload["current"]["edge_evolution_bias"] == "reduce_baseline"
+    assert payload["current"]["review_followup_status"] == "READY"
+    assert payload["current"]["review_followup_action"] == "reduce_baseline_allocation_review"
+    assert payload["current"]["review_followup_entries"] == 3
+    assert payload["current"]["review_followup_command"].endswith(
+        "--symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review"
+    )
     assert payload["current"]["entry_timing_focus"] == "early_limit"
     assert payload["current"]["execution_style_focus"] == "passive_limit"
     assert payload["current"]["accepted_candidate_symbol"] == "ETHUSDC"
@@ -253,7 +279,9 @@ def test_main_dispatches_when_allow_live_send(monkeypatch, tmp_path: Path, capsy
     assert "- closing_dashboard_surface: approve=approval usable | align=aligned | act=continue_candidate_review_under_portfolio_caps" in payload["message"]
     assert "- closing_validation_surface: approve=validation no_go | align=playbook_drift | act=review_runtime_execution_drag_before_expansion" in payload["message"]
     assert "- closing_checklist_surface: approve=validation/checklist no_go | align=aligned | act=clear_blocking_operational_items_before_rollout" in payload["message"]
-    assert "- carryover_focus: research=run_shadow_exit_timing_review | edge_state=watch_edge | entry_timing=early_limit | execution_style=passive_limit | family_bottleneck=legacy_zone_plan | session_bottleneck=preferred_live_window" in payload["message"]
+    assert "- final_top_action: continue_candidate_review_under_portfolio_caps | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review" in payload["message"]
+    assert "- carryover_focus: research=run_shadow_exit_timing_review | edge_state=watch_edge | edge_evolution=reduce_candidate:reduce_baseline_allocation_review:reduce_baseline | review_ledger=READY:reduce_baseline_allocation_review:3 | entry_timing=early_limit | execution_style=passive_limit | family_bottleneck=legacy_zone_plan | session_bottleneck=preferred_live_window" in payload["message"]
+    assert "- carryover_review_followup_ledger: status=READY | action=reduce_baseline_allocation_review | entries=3 | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review" in payload["message"]
     assert "- carryover_entry_timing_review_target: action=run_entry_timing_split_review | target=ETHUSDC | variant=early_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review" in payload["message"]
     assert "- carryover_execution_style_review_target: action=run_execution_style_split_review | target=ETHUSDC | variant=passive_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_execution_style_split_review" in payload["message"]
     assert "- carryover_accepted_candidate: symbol=ETHUSDC | family=sweep_reversal | edge=watch_edge | split=early_limit/passive_limit | status=ACTIONABLE_ENTRY" in payload["message"]

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +24,19 @@ split_review_followup = _load_module(
     "run_split_review_followup_test_module",
     ROOT_DIR / "scripts/run_split_review_followup.py",
 )
+
+
+def test_cli_entrypoint_bootstraps_repo_imports(tmp_path) -> None:
+    result = subprocess.run(
+        [sys.executable, str(ROOT_DIR / "scripts/run_split_review_followup.py"), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "Build a concrete follow-up packet" in result.stdout
 
 
 def _dashboard_payload() -> dict:
@@ -71,6 +86,14 @@ def _dashboard_payload() -> dict:
                 "execution_style_preferred_variant": "passive_limit",
                 "summary": "Prefer split review before structural rewrites.",
             },
+            "edge_evolution_rule": {
+                "evolution_state": "reduce_candidate",
+                "recommended_action": "reduce_baseline_allocation_review",
+                "allocation_bias": "reduce_baseline",
+                "promotion_candidate_axis": "entry_timing",
+                "promotion_candidate_variant": "early_limit",
+                "summary": "Reduce baseline allocation while split evidence stays fragile.",
+            },
         },
     }
 
@@ -82,12 +105,22 @@ def _validation_payload() -> dict:
                 "approve_value": "approval usable",
                 "align_value": "aligned",
                 "act_value": "run_entry_timing_split_review",
-            }
+            },
+            "edge_evolution_rule_summary": {
+                "evolution_state": "reduce_candidate",
+                "recommended_action": "reduce_baseline_allocation_review",
+                "allocation_bias": "reduce_baseline",
+                "promotion_candidate_axis": "entry_timing",
+                "promotion_candidate_variant": "early_limit",
+                "summary": "Reduce baseline allocation while split evidence stays fragile.",
+            },
         }
     }
 
 
-def test_main_auto_selects_top_split_action(monkeypatch, capsys) -> None:
+def test_main_auto_selects_top_split_action(monkeypatch, capsys, tmp_path) -> None:
+    ledger_path = tmp_path / "review_ledger.jsonl"
+    requests: list[tuple[str, dict]] = []
     monkeypatch.setattr(
         split_review_followup,
         "parse_args",
@@ -98,11 +131,14 @@ def test_main_auto_selects_top_split_action(monkeypatch, capsys) -> None:
             days=7,
             action="auto",
             report_dir="reports/operations/split_review_followups",
+            ledger_path=str(ledger_path),
             no_write_report=True,
+            no_write_ledger=False,
         ),
     )
 
     def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        requests.append((path, kwargs))
         if path == "/execution/operator-dashboard":
             return _dashboard_payload()
         if path == "/validation/report":
@@ -117,13 +153,18 @@ def test_main_auto_selects_top_split_action(monkeypatch, capsys) -> None:
     assert payload["status"] == "READY"
     assert payload["selected_action"] == "run_entry_timing_split_review"
     assert payload["selection_reason"] == "top_action"
+    assert requests[1] == ("/validation/report", {"query": {"symbol": "BTCUSDC"}})
     assert payload["target_contract"]["symbol"] == "BTCUSDC"
     assert payload["target_contract"]["preferred_variant"] == "early_limit"
     assert payload["operator_action_priority"]["priority_source"] == "edge_experiment"
     assert payload["edge_experiment_review"]["edge_state"] == "watch_edge"
+    assert payload["edge_evolution_rule"]["recommended_action"] == "reduce_baseline_allocation_review"
+    assert payload["review_followup_ledger_summary"]["available"] is True
+    assert payload["review_followup_ledger_summary"]["last_action"] == "run_entry_timing_split_review"
 
 
-def test_main_honors_explicit_execution_style_action(monkeypatch, capsys) -> None:
+def test_main_honors_explicit_execution_style_action(monkeypatch, capsys, tmp_path) -> None:
+    ledger_path = tmp_path / "review_ledger.jsonl"
     monkeypatch.setattr(
         split_review_followup,
         "parse_args",
@@ -134,7 +175,9 @@ def test_main_honors_explicit_execution_style_action(monkeypatch, capsys) -> Non
             days=7,
             action="run_execution_style_split_review",
             report_dir="reports/operations/split_review_followups",
+            ledger_path=str(ledger_path),
             no_write_report=True,
+            no_write_ledger=False,
         ),
     )
 
@@ -155,3 +198,50 @@ def test_main_honors_explicit_execution_style_action(monkeypatch, capsys) -> Non
     assert payload["target_contract"]["axis"] == "execution_style"
     assert payload["target_contract"]["preferred_variant"] == "passive_limit"
     assert payload["target_contract"]["symbol"] == "BTCUSDC"
+    assert payload["review_followup_ledger_summary"]["last_action"] == "run_execution_style_split_review"
+
+
+def test_main_auto_selects_edge_evolution_review_when_it_is_top_action(monkeypatch, capsys, tmp_path) -> None:
+    dashboard_payload = _dashboard_payload()
+    dashboard_payload["signal_funnel"]["operator_action_priority"]["top_action"] = "reduce_baseline_allocation_review"
+    dashboard_payload["signal_funnel"]["operator_action_priority"]["priority_source"] = "edge_evolution"
+    dashboard_payload["signal_funnel"]["operator_action_priority"]["top_reason"] = (
+        "Baseline edge is weak enough that allocation should be reduced until the preferred branch proves durable post-cost."
+    )
+
+    monkeypatch.setattr(
+        split_review_followup,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            days=7,
+            action="auto",
+            report_dir="reports/operations/split_review_followups",
+            ledger_path=str(tmp_path / "review_ledger.jsonl"),
+            no_write_report=True,
+            no_write_ledger=False,
+        ),
+    )
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/execution/operator-dashboard":
+            return dashboard_payload
+        if path == "/validation/report":
+            return _validation_payload()
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(split_review_followup, "_request_json", _request_json)
+
+    assert split_review_followup.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["status"] == "READY"
+    assert payload["selected_action"] == "reduce_baseline_allocation_review"
+    assert payload["selection_reason"] == "top_action"
+    assert payload["target_contract"]["axis"] == "entry_timing"
+    assert payload["target_contract"]["preferred_variant"] == "early_limit"
+    assert payload["edge_evolution_rule"]["evolution_state"] == "reduce_candidate"
+    assert payload["review_followup_ledger_summary"]["last_action"] == "reduce_baseline_allocation_review"
+    assert any("reducing any baseline allocation" in step for step in payload["review_steps"])

@@ -182,6 +182,22 @@ def _edge_experiment_summary(payload: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _edge_evolution_summary(payload: dict[str, Any]) -> dict[str, Any] | None:
+    summary = dict(payload.get("edge_evolution_rule") or {})
+    if not summary:
+        return None
+    return {
+        "available": bool(summary.get("available", True)),
+        "advisory_only": bool(summary.get("advisory_only", True)),
+        "evolution_state": str(summary.get("evolution_state") or "insufficient_sample"),
+        "recommended_action": str(summary.get("recommended_action") or "keep_current_baseline"),
+        "allocation_bias": str(summary.get("allocation_bias") or "hold_current_baseline"),
+        "promotion_candidate_axis": str(summary.get("promotion_candidate_axis") or "none"),
+        "promotion_candidate_variant": str(summary.get("promotion_candidate_variant") or "none"),
+        "summary": str(summary.get("summary") or ""),
+    }
+
+
 def _sort_actionable_key(row: dict[str, Any]) -> tuple[float, float, float, str]:
     return (
         float(row.get("adjusted_rank_score", row.get("final_rank_score", 0.0)) or 0.0),
@@ -247,6 +263,7 @@ def build_entry_snapshot(
         "playbook_action": str(payload.get("playbook_action") or ""),
         "approval_strip": _approval_strip_summary(payload),
         "edge_experiment_review": _edge_experiment_summary(payload),
+        "edge_evolution_rule": _edge_evolution_summary(payload),
         "counts": {
             ACTIONABLE_ENTRY: len(actionable_rows),
             BLOCKED_SETUP: len(blocked_non_research),
@@ -264,6 +281,7 @@ def build_alert_state(snapshot: dict[str, Any]) -> dict[str, Any]:
     sections = dict(snapshot.get("sections") or {})
     approval_strip = dict(snapshot.get("approval_strip") or {})
     edge_experiment = dict(snapshot.get("edge_experiment_review") or {})
+    edge_evolution = dict(snapshot.get("edge_evolution_rule") or {})
     return {
         "scope": str(snapshot.get("scope") or ""),
         "deployment_go_no_go": str(snapshot.get("deployment_go_no_go") or ""),
@@ -275,6 +293,9 @@ def build_alert_state(snapshot: dict[str, Any]) -> dict[str, Any]:
         "approval_strip_act": str(approval_strip.get("act_value") or ""),
         "approval_strip_priority": str(approval_strip.get("act_priority_level") or ""),
         "edge_state": str(edge_experiment.get("edge_state") or ""),
+        "edge_evolution_state": str(edge_evolution.get("evolution_state") or ""),
+        "edge_evolution_action": str(edge_evolution.get("recommended_action") or ""),
+        "edge_evolution_bias": str(edge_evolution.get("allocation_bias") or ""),
         "entry_timing_focus": str(edge_experiment.get("entry_timing_preferred_variant") or ""),
         "execution_style_focus": str(edge_experiment.get("execution_style_preferred_variant") or ""),
         "counts": {
@@ -388,6 +409,18 @@ def _format_edge_experiment_trace(snapshot: dict[str, Any]) -> str:
     )
 
 
+def _format_edge_evolution_trace(snapshot: dict[str, Any]) -> str:
+    edge_evolution = dict(snapshot.get("edge_evolution_rule") or {})
+    if not edge_evolution:
+        return "edge_evolution: unavailable"
+    return (
+        f"edge_evolution: state={edge_evolution.get('evolution_state')} "
+        f"| action={edge_evolution.get('recommended_action')} "
+        f"| bias={edge_evolution.get('allocation_bias')} "
+        f"| promotion={edge_evolution.get('promotion_candidate_axis')}/{edge_evolution.get('promotion_candidate_variant')}"
+    )
+
+
 def render_message(snapshot: dict[str, Any]) -> str:
     counts = dict(snapshot.get("counts") or {})
     sections = dict(snapshot.get("sections") or {})
@@ -404,6 +437,7 @@ def render_message(snapshot: dict[str, Any]) -> str:
         f"reason: {approval_strip.get('primary_reason') or snapshot.get('deployment_message')}",
         _format_contract_trace(snapshot),
         _format_edge_experiment_trace(snapshot),
+        _format_edge_evolution_trace(snapshot),
         (
             f"counts: {ACTIONABLE_ENTRY}={counts.get(ACTIONABLE_ENTRY, 0)}, "
             f"{BLOCKED_SETUP}={counts.get(BLOCKED_SETUP, 0)}, "

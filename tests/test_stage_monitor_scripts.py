@@ -58,6 +58,7 @@ def _validation_report(
         },
         "operator_action_priority_summary": {
             "top_action": top_operator_action,
+            "top_action_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review",
             "experiment_context": {
                 "entry_timing_preferred_variant": "early_limit",
                 "execution_style_preferred_variant": "passive_limit",
@@ -86,6 +87,20 @@ def _validation_report(
             "entry_timing_preferred_variant": "early_limit",
             "execution_style_preferred_variant": "passive_limit",
         },
+        "edge_evolution_rule_summary": {
+            "evolution_state": "reduce_candidate",
+            "recommended_action": "reduce_baseline_allocation_review",
+            "allocation_bias": "reduce_baseline",
+            "promotion_candidate_axis": "entry_timing",
+            "promotion_candidate_variant": "early_limit",
+        },
+        "review_followup_ledger_summary": {
+            "available": True,
+            "last_status": "READY",
+            "last_action": "reduce_baseline_allocation_review",
+            "recent_entry_count": 3,
+            "last_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review",
+        },
     }
 
 
@@ -110,6 +125,15 @@ def _dashboard(*, new_entries_allowed: bool = False, close_only_active: bool = T
             "approve_value": "entry gate blocked" if not new_entries_allowed else "approval usable",
             "align_value": "aligned",
             "act_value": "continue_candidate_review_under_portfolio_caps",
+        },
+        "signal_funnel": {
+            "edge_evolution_rule": {
+                "evolution_state": "reduce_candidate",
+                "recommended_action": "reduce_baseline_allocation_review",
+                "allocation_bias": "reduce_baseline",
+                "promotion_candidate_axis": "entry_timing",
+                "promotion_candidate_variant": "early_limit",
+            }
         },
         "portfolio_summary": {
             "accepted_candidates": [
@@ -153,11 +177,18 @@ def test_stage_payload_reports_blocked_state():
     assert payload["trial_runs_written"] == 0
     assert payload["selected_trial_run_id"] is None
     assert payload["execution_degradation"] == "manual_review"
+    assert payload["top_operator_action_followup_command"].endswith(
+        "--symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review"
+    )
     assert payload["dashboard_approval_strip"]["approve_value"] == "entry gate blocked"
     assert payload["validation_approval_strip"]["act_value"] == "review_runtime_execution_drag_before_expansion"
     assert payload["checklist_approval_strip"]["act_value"] == "clear_blocking_operational_items_before_rollout"
     assert payload["edge_experiment_review"]["edge_state"] == "watch_edge"
     assert payload["edge_experiment_review"]["entry_timing_preferred_variant"] == "early_limit"
+    assert payload["edge_evolution_rule"]["evolution_state"] == "reduce_candidate"
+    assert payload["edge_evolution_rule"]["recommended_action"] == "reduce_baseline_allocation_review"
+    assert payload["review_followup_ledger"]["last_status"] == "READY"
+    assert payload["review_followup_ledger"]["last_action"] == "reduce_baseline_allocation_review"
     assert payload["entry_timing_review_target"]["symbol"] == "BTCUSDC"
     assert payload["entry_timing_review_target"]["action"] == "run_entry_timing_split_review"
     assert payload["entry_timing_review_target"]["followup_command"].endswith(
@@ -193,6 +224,7 @@ def test_stage_payload_reports_lineage_ready_when_trial_exists():
     assert payload["validation_approval_strip"]["approve_value"] == "approval usable"
     assert payload["checklist_approval_strip"]["approve_value"] == "approval usable"
     assert payload["edge_experiment_review"]["execution_style_preferred_variant"] == "passive_limit"
+    assert payload["edge_evolution_rule"]["allocation_bias"] == "reduce_baseline"
 
 
 def test_collect_events_emits_transition_events():
@@ -223,6 +255,19 @@ def test_collect_events_emits_transition_events():
             "entry_timing_preferred_variant": "reaction_confirmed",
             "execution_style_preferred_variant": "market",
             "true_edge_ratio": 0.74,
+        },
+        "edge_evolution_rule": {
+            "evolution_state": "hold_baseline",
+            "recommended_action": "keep_current_baseline",
+            "allocation_bias": "hold_current_baseline",
+            "promotion_candidate_axis": "none",
+            "promotion_candidate_variant": "none",
+        },
+        "review_followup_ledger": {
+            "last_status": "NO_TARGET",
+            "last_action": "reduce_baseline_allocation_review",
+            "recent_entry_count": 2,
+            "last_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review",
         },
         "entry_timing_review_target": {
             "action": "run_entry_timing_split_review",
@@ -290,6 +335,19 @@ def test_collect_events_emits_transition_events():
             "execution_style_preferred_variant": "passive_limit",
             "true_edge_ratio": 0.62,
         },
+        "edge_evolution_rule": {
+            "evolution_state": "reduce_candidate",
+            "recommended_action": "reduce_baseline_allocation_review",
+            "allocation_bias": "reduce_baseline",
+            "promotion_candidate_axis": "entry_timing",
+            "promotion_candidate_variant": "early_limit",
+        },
+        "review_followup_ledger": {
+            "last_status": "READY",
+            "last_action": "reduce_baseline_allocation_review",
+            "recent_entry_count": 3,
+            "last_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review",
+        },
         "entry_timing_review_target": {
             "action": "run_entry_timing_split_review",
             "preferred_variant": "early_limit",
@@ -336,6 +394,8 @@ def test_collect_events_emits_transition_events():
     assert "playbook_changed" in event_types
     assert "checklist_surface_changed" in event_types
     assert "edge_experiment_changed" in event_types
+    assert "edge_evolution_changed" in event_types
+    assert "review_followup_changed" in event_types
     assert "accepted_candidate_focus_changed" in event_types
     assert "blocked_candidate_focus_changed" in event_types
     assert "entry_timing_review_target_changed" in event_types
@@ -398,6 +458,19 @@ def test_render_message_uses_approval_surface_lines() -> None:
             "execution_style_preferred_variant": "passive_limit",
             "true_edge_ratio": 0.82,
         },
+        "edge_evolution_rule": {
+            "evolution_state": "reduce_candidate",
+            "recommended_action": "reduce_baseline_allocation_review",
+            "allocation_bias": "reduce_baseline",
+            "promotion_candidate_axis": "entry_timing",
+            "promotion_candidate_variant": "early_limit",
+        },
+        "review_followup_ledger": {
+            "last_status": "READY",
+            "last_action": "reduce_baseline_allocation_review",
+            "recent_entry_count": 3,
+            "last_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review",
+        },
         "entry_timing_review_target": {
             "action": "run_entry_timing_split_review",
             "preferred_variant": "early_limit",
@@ -441,6 +514,8 @@ def test_render_message_uses_approval_surface_lines() -> None:
     assert "validation_surface: approve=approval usable | align=aligned | act=review_runtime_execution_drag_before_expansion" in message
     assert "checklist_surface: approve=approval usable | align=aligned | act=clear_blocking_operational_items_before_rollout" in message
     assert "edge_experiment: state=watch_edge | entry_timing=early_limit | execution_style=passive_limit | true_edge=0.8200" in message
+    assert "edge_evolution: state=reduce_candidate | action=reduce_baseline_allocation_review | bias=reduce_baseline | promotion=entry_timing/early_limit" in message
+    assert "review_followup_ledger: status=READY | action=reduce_baseline_allocation_review | entries=3 | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review" in message
     assert "entry_timing_review_target: action=run_entry_timing_split_review | target=BTCUSDC | variant=early_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review" in message
     assert "execution_style_review_target: action=run_execution_style_split_review | target=BTCUSDC | variant=passive_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_execution_style_split_review" in message
     assert "accepted_candidate_focus: BTCUSDC | family=sweep_reversal | edge=watch_edge | split=early_limit/passive_limit" in message

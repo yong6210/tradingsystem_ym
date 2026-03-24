@@ -39,6 +39,11 @@ TradingView를 triage에 함께 쓴다면, mirror-only 사용법과 chart-side o
 - `validation_report.edge_experiment_review_summary.edge_state`
 - `validation_report.edge_experiment_review_summary.entry_timing_preferred_variant`
 - `validation_report.edge_experiment_review_summary.execution_style_preferred_variant`
+- `validation_report.edge_evolution_rule_summary.evolution_state`
+- `validation_report.edge_evolution_rule_summary.recommended_action`
+- `validation_report.review_followup_ledger_summary.last_status`
+- `validation_report.review_followup_ledger_summary.last_action`
+- `validation_report.review_followup_ledger_summary.last_followup_command`
 - `validation_report.operator_action_priority_summary.experiment_context.entry_timing_target`
 - `validation_report.operator_action_priority_summary.experiment_context.execution_style_target`
 - `new_entries_allowed`
@@ -56,7 +61,23 @@ TradingView를 triage에 함께 쓴다면, mirror-only 사용법과 chart-side o
 - `operator_action_priority.top_action`은 operator reading priority다. live submit instruction이 아니다.
 - `operator_action_priority.top_action_followup_command`와 `next_actions[].followup_command`가 비어 있지 않으면, split review는 그 command를 그대로 쓴다.
 - split review target이 있으면 `./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --days 7 --action auto`로 review packet부터 만든다.
+- `review_followup_ledger.last_status`가 `NO_TARGET` 또는 `NO_REVIEW_ACTION_AVAILABLE`면 새 실험보다 target contract와 command carryover부터 고친다.
 - session brief와 stage monitor의 `entry_timing_review_target` / `execution_style_review_target` 줄에도 같은 followup command가 실린다. handoff에서는 그 command를 source-of-truth로 쓴다.
+- session brief와 stage monitor의 `review_followup_ledger` 줄은 가장 최근 review packet 이력이다. 추천이 아니라 이미 생성된 packet history로 읽는다.
+
+실제 edge 실험 순서:
+1. `operator_action_priority.top_action_followup_command` 또는 `entry_timing_review_target` / `execution_style_review_target` command로 review packet을 만든다.
+2. packet이 가리킨 split을 실제 시장에서 관찰한다. 이 단계는 코드나 backfill로 대체하지 않는다.
+3. 새 closed trade를 누적해서 split별 close sample을 늘린다.
+4. 그 다음에만 `edge_experiment_review`를 다시 읽는다.
+5. 이어서 `edge_evolution_rule`를 다시 읽는다.
+6. `promote / reduce / kill-review` 해석은 위 순서가 끝난 뒤에만 한다.
+
+실험 보류 조건:
+- `close_only_active == true`면 split 실험 확대를 열지 않는다.
+- `validation_report` 또는 `operations/checklist`가 `NO_GO`면 packet generation은 가능해도 실험 해석은 보류한다.
+- `edge_experiment_review.edge_state == insufficient_edge_measurement` 또는 `edge_evolution_rule.evolution_state == insufficient_sample`이면 edge 해석보다 close sample 축적을 우선한다.
+- accepted candidate가 없고 `review_followup_ledger.last_status`가 `NO_REVIEW_ACTION_AVAILABLE`이면, 현재 세션은 실험 실행 단계가 아니라 blocker 정리 단계로 읽는다.
 
 chart-side triage 예시:
 - 차트가 `CONFIRM`을 보여도 server-side `Top Operator Action`이 `review_execution_drag_before_expansion`이면, 차트는 context only로 두고 서버 review를 먼저 따른다.

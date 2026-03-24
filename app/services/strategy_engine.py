@@ -59,6 +59,7 @@ from app.services.deployment_contracts import (
     validation_alert_contract,
     validation_alert_strip_summary,
 )
+from app.services.edge_experiment_review import build_edge_experiment_review, summarize_edge_experiment_review
 from app.services.edge_evolution_rule import build_edge_evolution_rule, summarize_edge_evolution_rule
 from app.services.execution_quality import ExecutionQualityService
 from app.services.execution_friction_measurement import ExecutionFrictionMeasurementService
@@ -87,6 +88,7 @@ from app.services.operational_checklist import OperationalChecklistService
 from app.services.operating_lock import OperatingLockSnapshot, OperatingLockService
 from app.services.operator_action_priority import OperatorActionPriorityService
 from app.services.opportunity_capture import OpportunityCaptureService
+from app.services.split_review_followup_ledger import summarize_split_review_followup_ledger
 from app.services.parameter_changelog import ParameterChangelogService
 from app.services.plan_generator import PlanGenerator, RankedPlan
 from app.services.positive_evidence_expansion import PositiveEvidenceExpansionService
@@ -1479,15 +1481,20 @@ class StrategyEngine:
             portfolio_budget=portfolio_summary,
             execution_quality_summary=execution_quality_summary,
         )
+        edge_experiment_summary = summarize_edge_experiment_review(
+            build_edge_experiment_review(score_to_outcome_funnel=score_to_outcome_funnel_summary)
+        )
         edge_evolution_rule_summary = summarize_edge_evolution_rule(
             build_edge_evolution_rule(
-                edge_experiment_review=summarize_edge_experiment_review(
-                    build_edge_experiment_review(score_to_outcome_funnel=score_to_outcome_funnel_summary)
-                ),
+                edge_experiment_review=edge_experiment_summary,
                 rollout_recommendation=rollout_recommendation_summary,
                 strategy_lifecycle=strategy_lifecycle_summary,
                 kill_condition_automation=kill_condition_automation_summary,
             )
+        )
+        review_followup_ledger_summary = summarize_split_review_followup_ledger(
+            symbol=symbol or "",
+            universe=str(portfolio_summary.get("universe") or "usdc_perp_top30"),
         )
         operator_action_priority_summary = self.operator_action_priority.generate(
             dashboard={
@@ -1499,7 +1506,9 @@ class StrategyEngine:
                     "execution_degradation_advisory": execution_degradation_advisory_summary,
                     "family_execution_degradation_advisory": family_execution_degradation_advisory_summary,
                     "mode_advisory": mode_advisory_summary,
+                    "edge_experiment_review": edge_experiment_summary,
                     "edge_evolution_rule": edge_evolution_rule_summary,
+                    "review_followup_ledger": review_followup_ledger_summary,
                     "alpha_research_recommended_action": (
                         dict(alpha_research_pipeline_summary.get("recommended_action_summary") or {})
                         if alpha_research_pipeline_summary

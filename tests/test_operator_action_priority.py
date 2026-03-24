@@ -153,6 +153,11 @@ def test_operator_action_priority_escalates_edge_evolution_reduce_review() -> No
     assert payload["top_action"] == "reduce_baseline_allocation_review"
     assert payload["priority_source"] == "edge_evolution"
     assert payload["action_family"] == "allocation_review"
-    assert payload["top_action_followup_command"] == ""
+    assert payload["top_action_followup_command"].endswith(
+        "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review"
+    )
+    assert payload["next_actions"][0]["followup_command"].endswith(
+        "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review"
+    )
     assert "edge_evolution:reduce_candidate" in payload["supporting_signals"]
     assert "promotion_candidate:entry_timing:early_limit" in payload["supporting_signals"]

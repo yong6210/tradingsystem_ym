@@ -286,10 +286,23 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append("")
     lines.append(f"- research_action: {funnel.get('research_action', '')}")
     lines.append(f"- shadow_experiment: {funnel.get('shadow_experiment', '')}")
+    lines.append(f"- top_action_followup_command: {funnel.get('top_action_followup_command', '') or 'none'}")
     lines.append(
         f"- edge_experiment: state={funnel.get('edge_state', '')} | "
         f"entry_timing={funnel.get('entry_timing_focus', '')} | "
         f"execution_style={funnel.get('execution_style_focus', '')}"
+    )
+    lines.append(
+        f"- edge_evolution: state={funnel.get('edge_evolution_state', '')} | "
+        f"action={funnel.get('edge_evolution_action', '')} | "
+        f"bias={funnel.get('edge_evolution_bias', '')} | "
+        f"promotion={funnel.get('edge_evolution_promotion_axis', '')}/{funnel.get('edge_evolution_promotion_variant', '')}"
+    )
+    lines.append(
+        f"- review_followup_ledger: status={dict(funnel.get('review_followup_ledger') or {}).get('last_status', 'none')} / "
+        f"action={dict(funnel.get('review_followup_ledger') or {}).get('last_action', 'none')} / "
+        f"entries={dict(funnel.get('review_followup_ledger') or {}).get('recent_entry_count', 0)} / "
+        f"cmd={dict(funnel.get('review_followup_ledger') or {}).get('last_followup_command', '') or 'none'}"
     )
     lines.append(_experiment_review_target_line("entry_timing_review_target", funnel.get("entry_timing_review_target")))
     lines.append(_experiment_review_target_line("execution_style_review_target", funnel.get("execution_style_review_target")))

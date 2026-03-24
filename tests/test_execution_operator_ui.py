@@ -71,7 +71,10 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "Money Funnel" in html
     assert "Outcome Attribution" in html
     assert "Edge Experiment" in html
+    assert "Edge Evolution" in html
+    assert "Review Followup Ledger" in html
     assert "Edge Split Focus" in html
+    assert "Recent Review Packet" in html
     assert "Expected vs Realized R" in html
     assert "Money Leak Focus" in html
     assert "Top Condition Split" in html
@@ -87,10 +90,13 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "Signal Funnel Inspector" in html
     assert "현재 hard gate, softening 후보, rollout block, family/regime/session bottleneck에 money funnel과 outcome attribution까지 묶어서 홈 섹션에서 한 번에 읽도록 압축합니다." in html
     assert "Edge Experiment" in html
+    assert "Edge Evolution" in html
+    assert "Review Followup Ledger" in html
     assert "Top Family Bottleneck" in html
     assert "Top Regime Bottleneck" in html
     assert "Top Session Bottleneck" in html
     assert "Attribution Focus" in html
+    assert "Review Packet History" in html
     assert "Current Gate Reason" in html
     assert "Softening Priority Queue" in html
     assert "Alpha Research Inspector" in html

@@ -1206,6 +1206,58 @@ class OperationalChecklistService:
             },
         )
 
+    def _review_followup_ledger_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
+        report = dict(validation_payload.get("validation_report") or {})
+        summary_payload = dict(report.get("review_followup_ledger_summary") or {})
+        available = bool(report.get("review_followup_ledger_available", False) or summary_payload.get("available", False))
+        last_status = str(summary_payload.get("last_status", "none") or "none")
+        last_action = str(summary_payload.get("last_action", "none") or "none")
+        summary = str(summary_payload.get("summary", "") or "").strip()
+
+        if not available:
+            status = "PASS"
+            message = "review followup ledger is still empty; first split/evolution packet remains advisory only"
+        elif last_status in {"NO_TARGET", "NO_REVIEW_ACTION_AVAILABLE"}:
+            status = "WARN"
+            message = summary or "latest split/evolution review packet could not resolve a runnable target"
+        else:
+            status = "PASS"
+            message = summary or "review followup ledger is informational only"
+
+        return self._item(
+            item_id="review_followup_ledger",
+            title="Review Followup Ledger",
+            category="execution",
+            status=status,
+            summary=message,
+            blocking=False,
+            source={
+                "endpoint": "/validation/report",
+                "fields": [
+                    "validation_report.review_followup_ledger_available",
+                    "validation_report.review_followup_ledger_summary.last_status",
+                    "validation_report.review_followup_ledger_summary.last_action",
+                    "validation_report.review_followup_ledger_summary.last_followup_command",
+                    "validation_report.review_followup_ledger_summary.recent_status_counts",
+                    "validation_report.review_followup_ledger_summary.recent_action_counts",
+                ],
+            },
+            evidence={
+                "available": available,
+                "last_status": last_status,
+                "last_action": last_action,
+                "last_selection_reason": str(summary_payload.get("last_selection_reason", "") or ""),
+                "last_followup_command": str(summary_payload.get("last_followup_command", "") or ""),
+                "last_report_path": str(summary_payload.get("last_report_path", "") or ""),
+                "last_target_contract": dict(summary_payload.get("last_target_contract") or {}),
+                "recent_entry_count": int(summary_payload.get("recent_entry_count", 0) or 0),
+                "recent_status_counts": dict(summary_payload.get("recent_status_counts") or {}),
+                "recent_action_counts": list(summary_payload.get("recent_action_counts") or []),
+                "ledger_path": str(summary_payload.get("ledger_path", "") or ""),
+                "reason_codes": list(summary_payload.get("reason_codes") or []),
+            },
+        )
+
     def _rollout_recommendation_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
         report = dict(validation_payload.get("validation_report") or {})
         summary_payload = dict(report.get("rollout_recommendation_summary") or {})
@@ -2573,6 +2625,7 @@ class OperationalChecklistService:
             self._outcome_attribution_item(validation_payload=validation_payload),
             self._edge_experiment_review_item(validation_payload=validation_payload),
             self._edge_evolution_rule_item(validation_payload=validation_payload),
+            self._review_followup_ledger_item(validation_payload=validation_payload),
             self._rollout_recommendation_item(validation_payload=validation_payload),
             self._multi_strategy_ab_item(validation_payload=validation_payload),
             self._b_continuation_activation_item(validation_payload=validation_payload),

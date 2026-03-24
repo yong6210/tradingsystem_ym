@@ -127,6 +127,18 @@ def _surface_summary_line(label: str, summary: dict[str, str], *, suffix: str = 
     )
 
 
+def _edge_evolution_summary_line(summary: dict[str, Any] | None) -> str:
+    item = dict(summary or {})
+    if not item:
+        return "- edge_evolution: unavailable"
+    return (
+        f"- edge_evolution: state={item.get('evolution_state', 'insufficient_sample')} | "
+        f"action={item.get('recommended_action', 'keep_current_baseline')} | "
+        f"bias={item.get('allocation_bias', 'hold_current_baseline')} | "
+        f"promotion={item.get('promotion_candidate_axis', 'none')}/{item.get('promotion_candidate_variant', 'none')}"
+    )
+
+
 def _representative_candidate_snapshot(row: dict[str, Any] | None, *, status: str) -> dict[str, Any] | None:
     item = dict(row or {})
     if not item:
@@ -418,7 +430,11 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
         _surface_summary_line(
             "dashboard",
             dashboard["approval_strip_summary"],
-            suffix=f"execution_mode={dashboard['execution_mode']} | top_action={dashboard['top_operator_action']}",
+            suffix=(
+                f"execution_mode={dashboard['execution_mode']} | "
+                f"top_action={dashboard['top_operator_action']} | "
+                f"top_action_cmd={dashboard.get('top_action_followup_command') or 'none'}"
+            ),
         )
     )
     lines.append(
@@ -448,10 +464,23 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     funnel = payload["signal_funnel_snapshot"]
     lines.append(f"- research_action: {funnel['research_action']}")
     lines.append(f"- shadow_experiment: {funnel['shadow_experiment']}")
+    lines.append(f"- top_action_followup_command: {funnel.get('top_action_followup_command') or 'none'}")
     lines.append(
         f"- edge_experiment: state={funnel.get('edge_state', '')} | "
         f"entry_timing={funnel.get('entry_timing_focus', '')} | "
         f"execution_style={funnel.get('execution_style_focus', '')}"
+    )
+    lines.append(
+        f"- edge_evolution: state={funnel.get('edge_evolution_state', '')} | "
+        f"action={funnel.get('edge_evolution_action', '')} | "
+        f"bias={funnel.get('edge_evolution_bias', '')} | "
+        f"promotion={funnel.get('edge_evolution_promotion_axis', '')}/{funnel.get('edge_evolution_promotion_variant', '')}"
+    )
+    lines.append(
+        f"- review_followup_ledger: status={dict(funnel.get('review_followup_ledger') or {}).get('last_status', 'none')} | "
+        f"action={dict(funnel.get('review_followup_ledger') or {}).get('last_action', 'none')} | "
+        f"entries={dict(funnel.get('review_followup_ledger') or {}).get('recent_entry_count', 0)} | "
+        f"cmd={dict(funnel.get('review_followup_ledger') or {}).get('last_followup_command', '') or 'none'}"
     )
     lines.append(
         _experiment_review_target_line(
@@ -554,6 +583,8 @@ def main() -> int:
     historical_gap_r = money_funnel.get("historical_gap_r") or {}
     outcome_attribution = signal_funnel.get("outcome_attribution") or {}
     edge_experiment = signal_funnel.get("edge_experiment_review") or {}
+    edge_evolution = signal_funnel.get("edge_evolution_rule") or {}
+    review_followup_ledger = signal_funnel.get("review_followup_ledger") or {}
     outcome_control_trace = signal_funnel.get("outcome_control_trace") or {}
     rollout_recommendation = signal_funnel.get("rollout_recommendation") or {}
     family_bottlenecks = signal_funnel.get("family_bottlenecks") or []
@@ -670,6 +701,17 @@ def main() -> int:
                 "edge experiment review가 약화 상태면 구조 변경보다 split review를 먼저 본다: "
                 f"timing={preferred_timing}, execution={preferred_execution}."
             )
+    evolution_state = str(edge_evolution.get("evolution_state") or "")
+    if evolution_state in {"reduce_candidate", "edge_kill_review", "promote_candidate"}:
+        next_steps.append(
+            "edge evolution rule이 follow-up 우선순위를 바꾼다: "
+            f"state={evolution_state}, action={edge_evolution.get('recommended_action') or 'keep_current_baseline'}, "
+            f"bias={edge_evolution.get('allocation_bias') or 'hold_current_baseline'}."
+        )
+    if str(review_followup_ledger.get("last_status") or "") in {"NO_TARGET", "NO_REVIEW_ACTION_AVAILABLE"}:
+        next_steps.append(
+            "recent review followup ledger가 runnable target을 못 잡았으니, split/evolution action보다 target contract와 command carryover를 먼저 확인한다."
+        )
     if not next_steps:
         next_steps.append("surface alignment와 operator UI home-section coverage가 현재 dry-run 기준으로 안정적이다.")
 
@@ -687,6 +729,7 @@ def main() -> int:
             "playbook_action": dashboard.get("playbook_action", ""),
             "approval_strip_summary": dashboard_strip,
             "top_operator_action": (operator_action_priority.get("top_action") or ""),
+            "top_action_followup_command": (operator_action_priority.get("top_action_followup_command") or ""),
             "recent_intents": len(dashboard.get("recent_intents") or []),
             "open_orders": len(dashboard.get("open_orders") or []),
             "open_positions": len(dashboard.get("open_positions") or []),
@@ -726,7 +769,20 @@ def main() -> int:
         "signal_funnel_snapshot": {
             "research_action": (alpha_research_action.get("recommended_action") or ""),
             "shadow_experiment": (alpha_research_experiment.get("experiment_id") or ""),
+            "top_action_followup_command": (operator_action_priority.get("top_action_followup_command") or ""),
             "edge_state": edge_state,
+            "edge_evolution_state": evolution_state,
+            "edge_evolution_action": (edge_evolution.get("recommended_action") or ""),
+            "edge_evolution_bias": (edge_evolution.get("allocation_bias") or ""),
+            "edge_evolution_promotion_axis": (edge_evolution.get("promotion_candidate_axis") or ""),
+            "edge_evolution_promotion_variant": (edge_evolution.get("promotion_candidate_variant") or ""),
+            "review_followup_ledger": {
+                "available": bool(review_followup_ledger.get("available", False)),
+                "last_status": (review_followup_ledger.get("last_status") or ""),
+                "last_action": (review_followup_ledger.get("last_action") or ""),
+                "recent_entry_count": int(review_followup_ledger.get("recent_entry_count", 0) or 0),
+                "last_followup_command": (review_followup_ledger.get("last_followup_command") or ""),
+            },
             "entry_timing_focus": (edge_experiment.get("entry_timing_preferred_variant") or ""),
             "execution_style_focus": (edge_experiment.get("execution_style_preferred_variant") or ""),
             "entry_timing_review_target": entry_timing_review_target,

@@ -15,6 +15,7 @@ from app.services.outcome_control_trace import (
     build_outcome_control_trace,
     summarize_outcome_control_trace,
 )
+from app.services.split_review_followup_ledger import summarize_split_review_followup_ledger
 
 
 class ValidationReportService:
@@ -2347,6 +2348,10 @@ class ValidationReportService:
                 kill_condition_automation=kill_condition_automation_payload,
             )
         )
+        review_followup_ledger_summary = summarize_split_review_followup_ledger(
+            symbol=symbol,
+            universe=str(getattr(self.settings, "universe_name", "usdc_perp_top30") or "usdc_perp_top30"),
+        )
         edge_evolution_lines: list[str] = []
         if edge_evolution_summary:
             edge_evolution_lines = [
@@ -2373,6 +2378,28 @@ class ValidationReportService:
                 f"- summary: {edge_evolution_summary.get('summary', '')}",
                 f"- reason_codes: {list(edge_evolution_summary.get('reason_codes') or [])}",
                 f"- source_summary: {dict(edge_evolution_summary.get('source_summary') or {})}",
+                "",
+            ]
+        review_followup_ledger_lines: list[str] = []
+        if review_followup_ledger_summary:
+            review_followup_ledger_lines = [
+                "## Review Followup Ledger",
+                f"- available: {bool(review_followup_ledger_summary.get('available', False))}",
+                (
+                    f"- last_status: {review_followup_ledger_summary.get('last_status', 'none')} | "
+                    f"last_action={review_followup_ledger_summary.get('last_action', 'none')} | "
+                    f"recent_entry_count={int(review_followup_ledger_summary.get('recent_entry_count', 0) or 0)}"
+                ),
+                (
+                    f"- last_target: "
+                    f"{dict(review_followup_ledger_summary.get('last_target_contract') or {}).get('symbol', 'n/a')} / "
+                    f"{dict(review_followup_ledger_summary.get('last_target_contract') or {}).get('strategy_family', 'n/a')} | "
+                    f"followup_command={review_followup_ledger_summary.get('last_followup_command', '') or 'none'}"
+                ),
+                f"- recent_status_counts: {dict(review_followup_ledger_summary.get('recent_status_counts') or {})}",
+                f"- recent_action_counts: {list(review_followup_ledger_summary.get('recent_action_counts') or [])}",
+                f"- summary: {review_followup_ledger_summary.get('summary', '')}",
+                f"- ledger_path: {review_followup_ledger_summary.get('ledger_path', '')}",
                 "",
             ]
 
@@ -2540,6 +2567,7 @@ class ValidationReportService:
             *outcome_attribution_lines,
             *edge_experiment_lines,
             *edge_evolution_lines,
+            *review_followup_ledger_lines,
             *rollout_recommendation_lines,
             *strategy_lifecycle_lines,
             *a_strategy_post_cost_edge_validation_lines,
@@ -2745,6 +2773,10 @@ class ValidationReportService:
             if edge_evolution_summary
             else False,
             "edge_evolution_rule_summary": edge_evolution_summary,
+            "review_followup_ledger_available": bool(review_followup_ledger_summary.get("available", False))
+            if review_followup_ledger_summary
+            else False,
+            "review_followup_ledger_summary": review_followup_ledger_summary,
             "rollout_recommendation": rollout_recommendation_payload if rollout_recommendation_payload else None,
             "rollout_recommendation_available": bool(rollout_recommendation_payload.get("available", False))
             if rollout_recommendation_payload

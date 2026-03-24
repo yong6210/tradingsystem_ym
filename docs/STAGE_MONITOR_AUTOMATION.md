@@ -2,7 +2,7 @@
 
 `ops_stage_board.py` and `notify_stage_change.py` are designed to run together.
 Use the wrapper below so the stage snapshot is always written before the Discord notifier runs.
-The stage snapshot now also carries per-surface `approve / align / act` summaries for `dashboard`, `validation`, and `checklist`, plus `edge_experiment_review`, representative accepted/blocked candidate split focus, and explicit `entry_timing_review_target` / `execution_style_review_target` lines.
+The stage snapshot now also carries per-surface `approve / align / act` summaries for `dashboard`, `validation`, and `checklist`, plus `edge_experiment_review`, `edge_evolution_rule`, `review_followup_ledger`, `top_operator_action_followup_command`, representative accepted/blocked candidate split focus, and explicit `entry_timing_review_target` / `execution_style_review_target` lines.
 Those target lines now include the ready-to-run `scripts/run_split_review_followup.py` command, and the notifier message prints the same contract directly before the stage counters.
 
 ## Wrapper

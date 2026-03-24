@@ -18,6 +18,7 @@ from app.services.outcome_control_trace import (
     summarize_outcome_control_trace,
 )
 from app.services.outcome_attribution import build_outcome_attribution, summarize_outcome_attribution
+from app.services.split_review_followup_ledger import summarize_split_review_followup_ledger
 
 
 _SEVERITY_ORDER = {
@@ -1155,6 +1156,10 @@ class ExecutionOperatorDashboardService:
                 kill_condition_automation=kill_condition_automation_summary,
             )
         )
+        review_followup_ledger_summary = summarize_split_review_followup_ledger(
+            symbol=symbol or "",
+            universe=str(portfolio_summary_payload.get("universe") or "usdc_perp_top30"),
+        )
         submit_decision_counts: dict[str, int] = {}
         for item in recent_intents:
             submit_decision = str(item.get("submit_decision") or "")
@@ -1252,6 +1257,7 @@ class ExecutionOperatorDashboardService:
             "outcome_attribution": outcome_attribution_summary,
             "edge_experiment_review": edge_experiment_summary,
             "edge_evolution_rule": edge_evolution_summary,
+            "review_followup_ledger": review_followup_ledger_summary,
             "rollout_recommendation": dict(rollout_recommendation_summary or {}) or None,
             "strategy_lifecycle": dict(strategy_lifecycle_summary or {}) or None,
             "promotion_governance": dict(promotion_governance_summary or {}) or None,

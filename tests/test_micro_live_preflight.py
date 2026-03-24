@@ -55,7 +55,17 @@ def _dashboard_payload() -> dict:
                 "edge_decay_rate": -0.03,
                 "entry_timing_preferred_variant": "early_limit",
                 "execution_style_preferred_variant": "passive_limit",
-            }
+            },
+            "edge_evolution_rule": {
+                "available": True,
+                "advisory_only": True,
+                "evolution_state": "reduce_candidate",
+                "recommended_action": "reduce_baseline_allocation_review",
+                "allocation_bias": "reduce_baseline",
+                "promotion_candidate_axis": "entry_timing",
+                "promotion_candidate_variant": "early_limit",
+                "summary": "Reduce baseline allocation while split evidence stays fragile.",
+            },
         },
         "portfolio_summary": {
             "accepted_candidates": [
@@ -121,6 +131,16 @@ def _validation_payload(*, approve_value: str = "approval usable") -> dict:
                         "focus_source": "accepted_candidate_focus",
                     },
                 },
+            },
+            "edge_evolution_rule_summary": {
+                "available": True,
+                "advisory_only": True,
+                "evolution_state": "reduce_candidate",
+                "recommended_action": "reduce_baseline_allocation_review",
+                "allocation_bias": "reduce_baseline",
+                "promotion_candidate_axis": "entry_timing",
+                "promotion_candidate_variant": "early_limit",
+                "summary": "Reduce baseline allocation while split evidence stays fragile.",
             },
         },
     }
@@ -234,6 +254,8 @@ def test_main_emits_approval_surfaces_and_ready_status(monkeypatch, capsys) -> N
     assert payload["edge_experiment_review"]["edge_state"] == "watch_edge"
     assert payload["edge_experiment_review"]["entry_timing_preferred_variant"] == "early_limit"
     assert payload["edge_experiment_review"]["execution_style_preferred_variant"] == "passive_limit"
+    assert payload["edge_evolution_rule"]["evolution_state"] == "reduce_candidate"
+    assert payload["edge_evolution_rule"]["recommended_action"] == "reduce_baseline_allocation_review"
     assert payload["experiment_review_targets"]["entry_timing"]["symbol"] == "BTCUSDC"
     assert payload["experiment_review_targets"]["entry_timing"]["action"] == "run_entry_timing_split_review"
     assert payload["experiment_review_targets"]["entry_timing"]["followup_command"].endswith(
@@ -245,6 +267,7 @@ def test_main_emits_approval_surfaces_and_ready_status(monkeypatch, capsys) -> N
     assert payload["representative_candidates"]["blocked"]["symbol"] == "ETHUSDC"
     assert payload["representative_candidates"]["blocked"]["edge_state"] == "fragile_edge"
     assert any("Advisory only: post-cost edge is unstable" in step for step in payload["next_steps"])
+    assert any("edge evolution points to baseline reduction" in step for step in payload["next_steps"])
     assert any("scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review" in step for step in payload["next_steps"])
     assert any(
         check["name"] == "validation_language" and "approve=approval usable" in check["message"]

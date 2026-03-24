@@ -69,7 +69,17 @@ def _dashboard_payload(*, approve_value: str = "approval usable") -> dict:
                 "edge_decay_rate": -0.03,
                 "entry_timing_preferred_variant": "early_limit",
                 "execution_style_preferred_variant": "passive_limit",
-            }
+            },
+            "edge_evolution_rule": {
+                "available": True,
+                "advisory_only": True,
+                "evolution_state": "reduce_candidate",
+                "recommended_action": "reduce_baseline_allocation_review",
+                "allocation_bias": "reduce_baseline",
+                "promotion_candidate_axis": "entry_timing",
+                "promotion_candidate_variant": "early_limit",
+                "summary": "Reduce baseline allocation while split evidence stays fragile.",
+            },
         },
         "portfolio_summary": {
             "accepted_candidates": [
@@ -116,7 +126,17 @@ def _validation_payload(*, approve_value: str = "approval usable") -> dict:
                 "act_value": "continue_candidate_review_under_portfolio_caps",
                 "act_reason": "continue candidate review",
                 "act_priority_level": "monitor" if approve_value == "approval usable" else "urgent",
-            }
+            },
+            "edge_evolution_rule_summary": {
+                "available": True,
+                "advisory_only": True,
+                "evolution_state": "reduce_candidate",
+                "recommended_action": "reduce_baseline_allocation_review",
+                "allocation_bias": "reduce_baseline",
+                "promotion_candidate_axis": "entry_timing",
+                "promotion_candidate_variant": "early_limit",
+                "summary": "Reduce baseline allocation while split evidence stays fragile.",
+            },
         },
     }
 
@@ -190,9 +210,11 @@ def test_main_reopens_pruning_review_when_live_cycle_and_surfaces_are_usable(mon
     assert payload["approval_surfaces"][1]["label"] == "validation"
     assert payload["approval_surfaces"][2]["label"] == "checklist"
     assert payload["edge_experiment_review"]["edge_state"] == "watch_edge"
+    assert payload["edge_evolution_rule"]["evolution_state"] == "reduce_candidate"
     assert payload["representative_candidates"]["accepted"]["symbol"] == "BTCUSDC"
     assert payload["representative_candidates"]["blocked"]["symbol"] == "ETHUSDC"
     assert any("Advisory only: unstable post-cost edge" in step for step in payload["next_steps"])
+    assert any("edge evolution still points to baseline reduction" in step for step in payload["next_steps"])
     assert all(check["status"] == "PASS" for check in payload["checks"])
 
 

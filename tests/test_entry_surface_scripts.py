@@ -63,6 +63,16 @@ def _budget_payload(*, deployment_go_no_go: str = "GO") -> dict:
             "focus_status": "ACTIONABLE_ENTRY",
             "summary": "Prefer split tests before structural entry rewrites.",
         },
+        "edge_evolution_rule": {
+            "available": True,
+            "advisory_only": True,
+            "evolution_state": "reduce_candidate",
+            "recommended_action": "reduce_baseline_allocation_review",
+            "allocation_bias": "reduce_baseline",
+            "promotion_candidate_axis": "entry_timing",
+            "promotion_candidate_variant": "early_limit",
+            "summary": "Reduce baseline allocation while split evidence stays fragile.",
+        },
         "accepted_candidates": [
             {
                 "symbol": "BTCUSDC",
@@ -158,6 +168,7 @@ def test_build_entry_snapshot_maps_rows_to_three_statuses():
     assert snapshot["approval_strip"]["approve_value"] == "approval usable"
     assert snapshot["approval_strip"]["act_value"] == "continue_candidate_review_under_portfolio_caps"
     assert snapshot["edge_experiment_review"]["edge_state"] == "watch_edge"
+    assert snapshot["edge_evolution_rule"]["evolution_state"] == "reduce_candidate"
     assert snapshot["sections"][notify_entry_surface.ACTIONABLE_ENTRY][0]["edge_experiment_focus"]["edge_state"] == "watch_edge"
     assert snapshot["sections"][notify_entry_surface.ACTIONABLE_ENTRY][0]["symbol"] == "BTCUSDC"
     assert snapshot["sections"][notify_entry_surface.BLOCKED_SETUP][0]["symbol"] == "ETHUSDC"
@@ -197,6 +208,10 @@ def test_render_message_includes_all_sections_and_reasons():
     assert (
         "edge_experiment: state=watch_edge | entry_timing=early_limit | execution_style=passive_limit | "
         "true_edge=0.8100 | focus=BTCUSDC/ACTIONABLE_ENTRY"
+    ) in message
+    assert (
+        "edge_evolution: state=reduce_candidate | action=reduce_baseline_allocation_review | "
+        "bias=reduce_baseline | promotion=entry_timing/early_limit"
     ) in message
     assert "edge=watch_edge | split=early_limit/passive_limit" in message
     assert "edge=fragile_edge | split=reaction_confirmed/market" in message

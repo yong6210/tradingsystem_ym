@@ -21,9 +21,14 @@ class OperatorActionPriorityService:
         "alpha_research": 0,
         "monitor": 0,
     }
-    _SPLIT_REVIEW_ACTION_TARGETS = {
+    _REVIEW_FOLLOWUP_ACTION_TARGETS = {
         "run_entry_timing_split_review": "entry_timing_target",
         "run_execution_style_split_review": "execution_style_target",
+        "promote_entry_timing_branch_review": "entry_timing_target",
+        "promote_execution_style_branch_review": "execution_style_target",
+        "promote_preferred_branch_review": "",
+        "reduce_baseline_allocation_review": "",
+        "review_edge_kill_condition": "",
     }
 
     @classmethod
@@ -85,7 +90,7 @@ class OperatorActionPriorityService:
         universe: str,
         days: int,
     ) -> str:
-        if action not in self._SPLIT_REVIEW_ACTION_TARGETS or not symbol:
+        if action not in self._REVIEW_FOLLOWUP_ACTION_TARGETS or not symbol:
             return ""
         return (
             f"./.venv/bin/python scripts/run_split_review_followup.py "
@@ -361,6 +366,64 @@ class OperatorActionPriorityService:
                 return candidate
         return None
 
+    def _edge_evolution_target(
+        self,
+        *,
+        action: str,
+        experiment_context: dict[str, Any] | None,
+        promotion_candidate: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        experiment = self._dict(experiment_context)
+        promotion = self._dict(promotion_candidate)
+
+        axis = ""
+        if action == "promote_entry_timing_branch_review":
+            axis = "entry_timing"
+        elif action == "promote_execution_style_branch_review":
+            axis = "execution_style"
+        elif str(promotion.get("axis") or "") in {"entry_timing", "execution_style"}:
+            axis = str(promotion.get("axis") or "")
+        elif self._dict(experiment.get("entry_timing_target")).get("symbol"):
+            axis = "entry_timing"
+        elif self._dict(experiment.get("execution_style_target")).get("symbol"):
+            axis = "execution_style"
+
+        target: dict[str, Any] = {}
+        preferred_variant = str(promotion.get("preferred_variant") or "none")
+        if axis == "entry_timing":
+            target = self._dict(experiment.get("entry_timing_target"))
+            preferred_variant = str(
+                promotion.get("preferred_variant")
+                or experiment.get("entry_timing_preferred_variant")
+                or "none"
+            )
+        elif axis == "execution_style":
+            target = self._dict(experiment.get("execution_style_target"))
+            preferred_variant = str(
+                promotion.get("preferred_variant")
+                or experiment.get("execution_style_preferred_variant")
+                or "none"
+            )
+
+        if not target:
+            target = self._dict(experiment.get("accepted_candidate_focus")) or self._dict(
+                experiment.get("blocked_candidate_focus")
+            )
+
+        if not target:
+            return None
+
+        return {
+            "action": action,
+            "axis": axis or str(promotion.get("axis") or "branch"),
+            "preferred_variant": preferred_variant,
+            "symbol": str(target.get("symbol") or ""),
+            "status": str(target.get("status") or ""),
+            "strategy_family": str(target.get("strategy_family") or ""),
+            "block_reason": str(target.get("block_reason") or ""),
+            "focus_source": str(target.get("focus_source") or ""),
+        }
+
     def _edge_experiment_context(
         self,
         payload: dict[str, Any] | None,
@@ -504,6 +567,7 @@ class OperatorActionPriorityService:
         payload: dict[str, Any] | None,
         *,
         experiment_context: dict[str, Any] | None = None,
+        command_context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         summary = self._dict(payload)
         if not summary or not bool(summary.get("available", False)):
@@ -514,44 +578,76 @@ class OperatorActionPriorityService:
         confidence = str(summary.get("confidence") or "low")
         experiment = self._dict(experiment_context)
         promotion_candidate = self._dict(summary.get("promotion_candidate"))
+        command_context_payload = self._dict(command_context)
 
         if evolution_state == "reduce_candidate":
+            target = self._dict(
+                self._edge_evolution_target(
+                    action="reduce_baseline_allocation_review",
+                    experiment_context=experiment,
+                    promotion_candidate=promotion_candidate,
+                )
+            )
             return [
-                {
-                    "action": "reduce_baseline_allocation_review",
-                    "reason": str(summary.get("summary") or "baseline allocation should be reduced while edge remains weak"),
-                    "priority_level": "watch",
-                    "source": "edge_evolution",
-                    "action_family": "allocation_review",
-                    "advisory_only": True,
-                    "followup_command": "",
-                }
+                self._decorate_action_followup(
+                    {
+                        "action": "reduce_baseline_allocation_review",
+                        "reason": str(
+                            summary.get("summary") or "baseline allocation should be reduced while edge remains weak"
+                        ),
+                        "priority_level": "watch",
+                        "source": "edge_evolution",
+                        "action_family": "allocation_review",
+                        "target_symbol": str(target.get("symbol") or ""),
+                        "target_status": str(target.get("status") or ""),
+                        "target_family": str(target.get("strategy_family") or ""),
+                        "target_block_reason": str(target.get("block_reason") or ""),
+                        "target_focus_source": str(target.get("focus_source") or ""),
+                        "advisory_only": True,
+                    },
+                    command_context=command_context_payload,
+                )
             ]
 
         if evolution_state == "edge_kill_review":
             kill_state = str(self._dict(summary.get("source_summary")).get("kill_condition_state") or "observe_only")
+            target = self._dict(
+                self._edge_evolution_target(
+                    action="review_edge_kill_condition",
+                    experiment_context=experiment,
+                    promotion_candidate=promotion_candidate,
+                )
+            )
             return [
-                {
-                    "action": "review_edge_kill_condition",
-                    "reason": str(summary.get("summary") or "edge deterioration justifies kill-condition review"),
-                    "priority_level": "urgent" if kill_state == "kill_switch_review" else "watch",
-                    "source": "edge_evolution",
-                    "action_family": "risk_review",
-                    "advisory_only": True,
-                    "followup_command": "",
-                }
+                self._decorate_action_followup(
+                    {
+                        "action": "review_edge_kill_condition",
+                        "reason": str(summary.get("summary") or "edge deterioration justifies kill-condition review"),
+                        "priority_level": "urgent" if kill_state == "kill_switch_review" else "watch",
+                        "source": "edge_evolution",
+                        "action_family": "risk_review",
+                        "target_symbol": str(target.get("symbol") or ""),
+                        "target_status": str(target.get("status") or ""),
+                        "target_family": str(target.get("strategy_family") or ""),
+                        "target_block_reason": str(target.get("block_reason") or ""),
+                        "target_focus_source": str(target.get("focus_source") or ""),
+                        "advisory_only": True,
+                    },
+                    command_context=command_context_payload,
+                )
             ]
 
         if evolution_state != "promote_candidate":
             return []
 
         axis = str(promotion_candidate.get("axis") or "")
-        if axis == "entry_timing":
-            target = self._dict(experiment.get("entry_timing_target"))
-        elif axis == "execution_style":
-            target = self._dict(experiment.get("execution_style_target"))
-        else:
-            target = {}
+        target = self._dict(
+            self._edge_evolution_target(
+                action=recommended_action,
+                experiment_context=experiment,
+                promotion_candidate=promotion_candidate,
+            )
+        )
 
         target_reason = ""
         if target.get("symbol"):
@@ -564,19 +660,21 @@ class OperatorActionPriorityService:
             f"promote_{axis}_branch_review" if axis in {"entry_timing", "execution_style"} else "promote_preferred_branch_review"
         )
         return [
-            {
-                "action": action,
-                "reason": f"{summary.get('summary') or 'preferred branch promotion review is justified'}{target_reason}",
-                "priority_level": "watch" if confidence in {"medium", "high"} else "research",
-                "source": "edge_evolution",
-                "action_family": "promotion_review",
-                "target_symbol": str(target.get("symbol") or ""),
-                "target_status": str(target.get("status") or ""),
-                "target_family": str(target.get("strategy_family") or ""),
-                "target_focus_source": str(target.get("focus_source") or ""),
-                "advisory_only": True,
-                "followup_command": "",
-            }
+            self._decorate_action_followup(
+                {
+                    "action": action,
+                    "reason": f"{summary.get('summary') or 'preferred branch promotion review is justified'}{target_reason}",
+                    "priority_level": "watch" if confidence in {"medium", "high"} else "research",
+                    "source": "edge_evolution",
+                    "action_family": "promotion_review",
+                    "target_symbol": str(target.get("symbol") or ""),
+                    "target_status": str(target.get("status") or ""),
+                    "target_family": str(target.get("strategy_family") or ""),
+                    "target_focus_source": str(target.get("focus_source") or ""),
+                    "advisory_only": True,
+                },
+                command_context=command_context_payload,
+            )
         ]
 
     def generate(
@@ -721,6 +819,7 @@ class OperatorActionPriorityService:
                     dashboard_payload=dashboard_payload,
                     command_context=command_context,
                 ),
+                command_context=command_context,
             )
         )
 

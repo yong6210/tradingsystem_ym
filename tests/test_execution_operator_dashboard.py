@@ -26,6 +26,38 @@ from app.repositories.execution import (
 client = TestClient(app)
 
 
+def _empty_review_followup_ledger(*args, **kwargs) -> dict:
+    return {
+        "available": False,
+        "advisory_only": True,
+        "symbol": str(kwargs.get("symbol") or ""),
+        "universe": str(kwargs.get("universe") or ""),
+        "ledger_path": "reports/operations/split_review_followups/review_ledger.jsonl",
+        "total_entry_count": 0,
+        "recent_entry_count": 0,
+        "summary": "No split review follow-up packets have been recorded yet.",
+        "reason_codes": ["recent_entries:0", "ledger:not_recorded"],
+        "last_generated_at": "",
+        "last_recorded_at": "",
+        "last_status": "none",
+        "last_action": "none",
+        "last_selection_reason": "",
+        "last_followup_command": "",
+        "last_report_path": "",
+        "last_target_contract": {},
+        "last_priority_source": "monitor",
+        "last_priority_level": "monitor",
+        "last_edge_state": "insufficient_edge_measurement",
+        "last_true_edge_ratio": 0.0,
+        "last_edge_decay_rate": 0.0,
+        "last_evolution_state": "insufficient_sample",
+        "last_recommended_action": "keep_current_baseline",
+        "last_allocation_bias": "hold_current_baseline",
+        "recent_status_counts": {},
+        "recent_action_counts": [],
+    }
+
+
 def _apply_defaults(monkeypatch) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "auto_trading_enabled", True)
@@ -35,6 +67,10 @@ def _apply_defaults(monkeypatch) -> None:
     monkeypatch.setattr(settings, "alert_push_webhook_url", "")
     monkeypatch.setattr(settings, "alert_telegram_bot_token", "")
     monkeypatch.setattr(settings, "alert_telegram_chat_id", "")
+    monkeypatch.setattr(
+        "app.services.execution_operator_dashboard.summarize_split_review_followup_ledger",
+        _empty_review_followup_ledger,
+    )
 
 
 def _seed_rollout_and_lock(symbol: str) -> None:
@@ -1771,6 +1807,8 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
     assert signal_funnel["edge_evolution_rule"]["available"] is True
     assert signal_funnel["edge_evolution_rule"]["evolution_state"] == "insufficient_sample"
     assert signal_funnel["edge_evolution_rule"]["recommended_action"] == "keep_research_only_until_sample_matures"
+    assert signal_funnel["review_followup_ledger"]["available"] is False
+    assert signal_funnel["review_followup_ledger"]["last_status"] == "none"
     assert signal_funnel["rollout_recommendation"]["family"] == "sweep_reversal"
     assert signal_funnel["rollout_recommendation"]["recommendation"] == "research_only"
     assert signal_funnel["rollout_recommendation"]["suggested_policy_delta"]["action"] == "keep_research_only"

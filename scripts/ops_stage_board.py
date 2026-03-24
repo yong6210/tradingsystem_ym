@@ -181,6 +181,44 @@ def _edge_experiment_summary(
     }
 
 
+def _edge_evolution_summary(
+    validation_report: dict[str, Any],
+    dashboard: dict[str, Any],
+) -> dict[str, Any] | None:
+    dashboard_source = dict((((dashboard or {}).get("signal_funnel") or {}).get("edge_evolution_rule") or {}))
+    validation_source = dict((validation_report or {}).get("edge_evolution_rule_summary") or {})
+    source = dashboard_source or validation_source
+    if not source:
+        return None
+    return {
+        "available": bool(source.get("available", True)),
+        "advisory_only": bool(source.get("advisory_only", True)),
+        "evolution_state": str(source.get("evolution_state") or "insufficient_sample"),
+        "recommended_action": str(source.get("recommended_action") or "keep_current_baseline"),
+        "allocation_bias": str(source.get("allocation_bias") or "hold_current_baseline"),
+        "promotion_candidate_axis": str(source.get("promotion_candidate_axis") or "none"),
+        "promotion_candidate_variant": str(source.get("promotion_candidate_variant") or "none"),
+    }
+
+
+def _review_followup_summary(
+    validation_report: dict[str, Any],
+    dashboard: dict[str, Any],
+) -> dict[str, Any] | None:
+    dashboard_source = dict((((dashboard or {}).get("signal_funnel") or {}).get("review_followup_ledger") or {}))
+    validation_source = dict((validation_report or {}).get("review_followup_ledger_summary") or {})
+    source = dashboard_source or validation_source
+    if not source:
+        return None
+    return {
+        "available": bool(source.get("available", False)),
+        "last_status": str(source.get("last_status") or "none"),
+        "last_action": str(source.get("last_action") or "none"),
+        "recent_entry_count": int(source.get("recent_entry_count", 0) or 0),
+        "last_followup_command": str(source.get("last_followup_command") or ""),
+    }
+
+
 def _edge_experiment_summary_line(summary: dict[str, Any] | None) -> str:
     if not summary:
         return "edge_experiment: unavailable"
@@ -189,6 +227,28 @@ def _edge_experiment_summary_line(summary: dict[str, Any] | None) -> str:
         f"entry_timing={summary.get('entry_timing_preferred_variant', 'none')} | "
         f"execution_style={summary.get('execution_style_preferred_variant', 'none')} | "
         f"true_edge={float(summary.get('true_edge_ratio') or 0.0):.4f}"
+    )
+
+
+def _edge_evolution_summary_line(summary: dict[str, Any] | None) -> str:
+    if not summary:
+        return "edge_evolution: unavailable"
+    return (
+        f"edge_evolution: state={summary.get('evolution_state', 'insufficient_sample')} | "
+        f"action={summary.get('recommended_action', 'keep_current_baseline')} | "
+        f"bias={summary.get('allocation_bias', 'hold_current_baseline')} | "
+        f"promotion={summary.get('promotion_candidate_axis', 'none')}/{summary.get('promotion_candidate_variant', 'none')}"
+    )
+
+
+def _review_followup_summary_line(summary: dict[str, Any] | None) -> str:
+    if not summary:
+        return "review_followup_ledger: unavailable"
+    return (
+        f"review_followup_ledger: status={summary.get('last_status', 'none')} | "
+        f"action={summary.get('last_action', 'none')} | "
+        f"entries={int(summary.get('recent_entry_count', 0) or 0)} | "
+        f"cmd={summary.get('last_followup_command', '') or 'none'}"
     )
 
 
@@ -419,6 +479,8 @@ def _build_stage_payload(
     checklist_strip = _surface_strip_summary(checklist, surface_type="checklist")
     dashboard_strip = _surface_strip_summary(dashboard, surface_type="dashboard")
     edge_experiment_review = _edge_experiment_summary(validation_report, dashboard)
+    edge_evolution_rule = _edge_evolution_summary(validation_report, dashboard)
+    review_followup_ledger = _review_followup_summary(validation_report, dashboard)
     representative_candidates = _representative_candidates(dashboard)
     entry_timing_review_target = _experiment_review_target(
         operator_action_priority,
@@ -449,10 +511,13 @@ def _build_stage_payload(
         "selected_trial_run_id": trial_writer_summary.get("selected_trial_run_id"),
         "execution_degradation": execution_advisory.get("status"),
         "top_operator_action": operator_action_priority.get("top_action"),
+        "top_operator_action_followup_command": operator_action_priority.get("top_action_followup_command") or "",
         "dashboard_approval_strip": dashboard_strip,
         "validation_approval_strip": validation_strip,
         "checklist_approval_strip": checklist_strip,
         "edge_experiment_review": edge_experiment_review,
+        "edge_evolution_rule": edge_evolution_rule,
+        "review_followup_ledger": review_followup_ledger,
         "entry_timing_review_target": entry_timing_review_target,
         "execution_style_review_target": execution_style_review_target,
         "representative_candidates": representative_candidates,
@@ -476,6 +541,8 @@ def _print_human(payload: dict[str, Any]) -> None:
     print(_surface_summary_line("validation_surface", payload.get("validation_approval_strip") or {}))
     print(_surface_summary_line("checklist_surface", payload.get("checklist_approval_strip") or {}))
     print(_edge_experiment_summary_line(payload.get("edge_experiment_review")))
+    print(_edge_evolution_summary_line(payload.get("edge_evolution_rule")))
+    print(_review_followup_summary_line(payload.get("review_followup_ledger")))
     print(_experiment_review_target_line("entry_timing_review_target", payload.get("entry_timing_review_target")))
     print(_experiment_review_target_line("execution_style_review_target", payload.get("execution_style_review_target")))
     representative_candidates = payload.get("representative_candidates") or {}
@@ -487,6 +554,7 @@ def _print_human(payload: dict[str, Any]) -> None:
     print(f"selected_trial_run_id: {payload['selected_trial_run_id']}")
     print(f"execution_degradation: {payload['execution_degradation']}")
     print(f"top_operator_action: {payload['top_operator_action']}")
+    print(f"top_operator_action_followup_command: {payload.get('top_operator_action_followup_command') or 'none'}")
     print(f"alpha_research_next_step: {payload['alpha_research_next_step']}")
 
 

@@ -78,6 +78,7 @@ shift-end handoff message dry-run:
 ## 4. 첫 번째 판단
 - `5-Second Operator Kernel`에서 `money funnel -> outcome attribution -> outcome control -> rollout` 순서를 먼저 읽는다.
 - `Validation / Checklist Review Stack`, `Validation Case Inspector`, `Signal Funnel Inspector`에서는 `edge_experiment_review`가 `watch/fragile`이면 entry timing / execution style split을 먼저 읽고 구조 변경은 뒤로 미룬다.
+- 같은 위치에서 `edge_evolution_rule`가 `reduce_candidate`나 `edge_kill_review`면 split hint보다 먼저 allocation/kill review 언어를 본다.
 - `Portfolio Candidate Drilldown`과 `Portfolio Candidate Inspector`에서는 row-level `edge_experiment_focus`가 있으면 `edge_state -> entry_timing_preferred_variant -> execution_style_preferred_variant` 순서로 보고, candidate attractiveness보다 split-test hint를 먼저 읽는다.
 - 여기서 `Money Leak`, `Drag Source`, `approval_penalty_tier`, `rollout recommendation`이 동시에 악화되면 아래 promotion stack보다 먼저 rollout 보수화 해석을 본다.
 - `Approval Strip`에서 `Approve -> Align -> Act`를 읽고, 진입 허용 여부와 surface drift를 같은 줄에서 끝낸다.
@@ -104,6 +105,7 @@ shift-end handoff message dry-run:
 - `Mode / Deployment Inspector`와 `Approval Alignment Inspector`도 raw `deployment_go_no_go / playbook_action` 조합이 아니라 `approve -> align -> act` wording을 그대로 보여준다.
 - `Validation / Checklist Review Stack`, `Validation Case Inspector`, `Runtime Quality Inspector`에서도 같은 wording이 반복되어야 한다.
 - `Validation / Checklist Review Stack`에는 `Edge Experiment Review`가 보여야 하고 `edge_state`, `entry_timing_preferred_variant`, `execution_style_preferred_variant`를 raw JSON 없이 읽을 수 있어야 한다.
+- 같은 위치에서 `Review Followup Ledger`도 보여야 하고 `last_status`, `last_action`, `last_followup_command`를 raw JSON 없이 읽을 수 있어야 한다.
 
 ### 5.2 홈 inspector 존재 여부
 - `Validation Case Inspector`

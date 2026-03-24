@@ -5,7 +5,43 @@ from pathlib import Path
 from app.services.validation_report import ValidationReportService
 
 
-def test_validation_report_generation() -> None:
+def _empty_review_followup_ledger(*args, **kwargs) -> dict:
+    return {
+        "available": False,
+        "advisory_only": True,
+        "symbol": str(kwargs.get("symbol") or ""),
+        "universe": str(kwargs.get("universe") or ""),
+        "ledger_path": "reports/operations/split_review_followups/review_ledger.jsonl",
+        "total_entry_count": 0,
+        "recent_entry_count": 0,
+        "summary": "No split review follow-up packets have been recorded yet.",
+        "reason_codes": ["recent_entries:0", "ledger:not_recorded"],
+        "last_generated_at": "",
+        "last_recorded_at": "",
+        "last_status": "none",
+        "last_action": "none",
+        "last_selection_reason": "",
+        "last_followup_command": "",
+        "last_report_path": "",
+        "last_target_contract": {},
+        "last_priority_source": "monitor",
+        "last_priority_level": "monitor",
+        "last_edge_state": "insufficient_edge_measurement",
+        "last_true_edge_ratio": 0.0,
+        "last_edge_decay_rate": 0.0,
+        "last_evolution_state": "insufficient_sample",
+        "last_recommended_action": "keep_current_baseline",
+        "last_allocation_bias": "hold_current_baseline",
+        "recent_status_counts": {},
+        "recent_action_counts": [],
+    }
+
+
+def test_validation_report_generation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.validation_report.summarize_split_review_followup_ledger",
+        _empty_review_followup_ledger,
+    )
     service = ValidationReportService()
     result = service.generate(
         symbol="BTCUSDC",
@@ -2162,6 +2198,9 @@ def test_validation_report_generation() -> None:
     assert result["edge_evolution_rule_summary"]["evolution_state"] == "reduce_candidate"
     assert result["edge_evolution_rule_summary"]["recommended_action"] == "reduce_baseline_allocation_review"
     assert result["edge_evolution_rule_summary"]["allocation_bias"] == "reduce_baseline"
+    assert result["review_followup_ledger_available"] is False
+    assert result["review_followup_ledger_summary"]["available"] is False
+    assert result["review_followup_ledger_summary"]["last_status"] == "none"
     assert result["rollout_recommendation_available"] is True
     assert result["rollout_recommendation_summary"]["family"] == "trend_continuation"
     assert result["rollout_recommendation_summary"]["recommendation"] == "research_only"
