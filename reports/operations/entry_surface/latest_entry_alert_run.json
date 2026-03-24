@@ -1,0 +1,769 @@
+{
+  "base_url": "http://127.0.0.1:8000",
+  "universe": "usdc_perp_top30",
+  "symbol": null,
+  "channel": "discord",
+  "state_file": "/Users/yumin/Documents/trading/reports/operations/entry_surface/last_alert_state.json",
+  "dry_run": false,
+  "force_send": false,
+  "snapshot": {
+    "generated_at": "2026-03-24T06:45:20.783240+00:00",
+    "scope": "USDC_PERP_TOP30",
+    "deployment_go_no_go": "GO",
+    "deployment_code": "go_runtime_gate_open",
+    "deployment_message": "GO: runtime gate is open for candidate review.",
+    "playbook_go_no_go": "GO",
+    "playbook_action": "continue_candidate_review_under_portfolio_caps",
+    "counts": {
+      "ACTIONABLE_ENTRY": 0,
+      "BLOCKED_SETUP": 3,
+      "RESEARCH_ONLY_SETUP": 0
+    },
+    "sections": {
+      "ACTIONABLE_ENTRY": [],
+      "BLOCKED_SETUP": [
+        {
+          "symbol": "WIFUSDC",
+          "plan_id": "plan_zone_b05091a8553c_sweep_confirm",
+          "zone_id": "zone_b05091a8553c",
+          "direction": "short",
+          "strategy_mode": "A_ONLY",
+          "strategy_family": "sweep_reversal",
+          "strategy_cluster": "a_reversal",
+          "strategy_cluster_status": "current_anchor",
+          "multi_strategy_overlay": {
+            "available": true,
+            "cluster": "a_reversal",
+            "raw_family": "sweep_reversal",
+            "mode": "A_ONLY",
+            "live_eligible": true,
+            "guarded": false,
+            "guardrail_reasons": [],
+            "summary": "A reversal remains the current production anchor in the first-wave A/B contract.",
+            "strategy_cluster_status": "current_anchor",
+            "reason_codes": [
+              "cluster:a_reversal",
+              "mode:a_only"
+            ]
+          },
+          "b_continuation_activation": null,
+          "strategy_cluster_balance": {
+            "available": true,
+            "cluster": "a_reversal",
+            "balance_state": "research_only_mix",
+            "balance_pressure": "anchor_preserve",
+            "balance_bias": "stay_a_anchor",
+            "headline_cluster": "a_reversal",
+            "summary": "A reversal remains the current anchor cluster in the live mix."
+          },
+          "entry_model": "SWEEP_CONFIRM",
+          "regime": "range",
+          "session_guidance": {
+            "state": "dead_session",
+            "status": "WARN",
+            "summary": "current window is dead session; live entries are guidance-only discouraged",
+            "strategy_mode": "A_ONLY",
+            "current_session": {
+              "name": "inactive",
+              "start": "2026-03-24T06:45:20.700912+00:00",
+              "end": "2026-03-24T06:45:20.700912+00:00",
+              "active": false
+            },
+            "dead_session": true,
+            "session_lock_active": false,
+            "preferred_sessions": [
+              "london",
+              "new_york",
+              "overlap"
+            ],
+            "preferred_windows_utc": {
+              "london": {
+                "start": "2026-03-24T07:00:00+00:00",
+                "end": "2026-03-24T12:00:00+00:00",
+                "active": false
+              },
+              "new_york": {
+                "start": "2026-03-24T13:00:00+00:00",
+                "end": "2026-03-24T18:00:00+00:00",
+                "active": false
+              },
+              "overlap": {
+                "start": "2026-03-24T13:00:00+00:00",
+                "end": "2026-03-24T12:00:00+00:00",
+                "defined": false,
+                "active": false
+              }
+            },
+            "soft_penalty": 6.0,
+            "unlock_at": null,
+            "engine_dead_session_hard_block": false,
+            "routing_policy": "guidance_only_soft_penalty"
+          },
+          "session_penalty": 6.0,
+          "accepted": false,
+          "block_reason": "thesis_duplicate_blocked",
+          "base_rank_score": 31.1234,
+          "adjusted_rank_score": 9.4039,
+          "final_rank_score": 3.4039,
+          "outcome_bias_score": 0.0,
+          "outcome_bias": {
+            "available": true,
+            "applied": false,
+            "tier": "neutral",
+            "score_delta": 0.0,
+            "summary": "outcome data is present but does not justify a portfolio priority change",
+            "reason_codes": [],
+            "source_summary": {
+              "family_closed": 0,
+              "family_baseline_cost_profitable_rate_from_closed": 0.0,
+              "regime_closed": 0,
+              "regime_baseline_cost_profitable_rate_from_closed": 0.0,
+              "session_closed": 0,
+              "session_baseline_cost_profitable_rate_from_closed": 0.0,
+              "family_degradation_status": "healthy",
+              "family_mode_advisory_state": "keep_current_mode",
+              "regime_mode_advisory_state": "keep_current_mode",
+              "session_mode_advisory_state": "keep_current_mode"
+            }
+          },
+          "pre_outcome_final_rank_score": 3.4039,
+          "post_outcome_final_rank_score": 3.4039,
+          "capital_allocator": {
+            "available": true,
+            "applied": false,
+            "tier": "neutral",
+            "family": "sweep_reversal",
+            "maturity": "thin_sample",
+            "allocation_weight": 1.0,
+            "risk_multiplier": 1.0,
+            "base_recommended_risk_r": 0.0,
+            "allocated_risk_r": 0.0,
+            "capital_pressure": "neutral",
+            "summary": "allocator evidence does not justify a capital tilt for this candidate",
+            "reason_codes": [],
+            "source_summary": {}
+          },
+          "allocation_weight": 1.0,
+          "allocated_risk_r": 0.0,
+          "capital_pressure": "neutral",
+          "portfolio_penalty": 21.7195,
+          "portfolio_high_corr_count": 1,
+          "risk_budget_score": 78.2805,
+          "portfolio_volatility": 0.004531,
+          "portfolio_total_cap": 10,
+          "portfolio_directional_cap": 6,
+          "portfolio_cluster_cap": 2,
+          "projected_total_exposure": 5,
+          "projected_directional_exposure": 3,
+          "projected_cluster_exposure": 2,
+          "mode_today_trade_count": 4,
+          "mode_daily_trade_limit": 3,
+          "mode_current_total_risk_r": 1.5,
+          "mode_projected_trade_count": 0,
+          "mode_total_risk_cap_r": 1.5,
+          "mode_projected_total_risk_r": 0.0,
+          "mode_shadow_only": false,
+          "strategy_sizing": {
+            "schema_version": "v2",
+            "strategy_family": "sweep_reversal",
+            "strategy_grade": "A",
+            "grade_source": "strategy_grade",
+            "active_thesis_clusters": 4,
+            "transition_state": "none",
+            "reaction_classification": "rejection_confirmed",
+            "confirm_only": false,
+            "entry_model": "SWEEP_CONFIRM",
+            "factors": {
+              "grade_risk": 1.0,
+              "regime_factor": 0.8,
+              "reaction_factor": 1.0,
+              "thesis_factor": 0.0,
+              "execution_factor": 0.75
+            },
+            "final_risk_r": 0.0,
+            "blocked": true,
+            "blocked_reason": "thesis_cluster_cap_zero_risk",
+            "notes": {
+              "regime": null,
+              "reaction": null,
+              "thesis": "thesis_cluster_cap_zero_risk"
+            },
+            "strategy_mode": "A_ONLY",
+            "shadow_only": false,
+            "mode_policy": {
+              "mode": "A_ONLY",
+              "allowed_families": [
+                "sweep_reversal",
+                "trend_continuation"
+              ],
+              "allowed_grades": [
+                "A"
+              ],
+              "max_daily_trades": 3,
+              "max_total_risk_r": 1.5,
+              "shadow_only": false
+            },
+            "base_final_risk_r": 0.0,
+            "outcome_risk_adjustment": {
+              "available": true,
+              "applied": false,
+              "status": "healthy",
+              "penalty_tier": "none",
+              "base_final_risk_r": 0.0,
+              "multiplier": 1.0,
+              "final_risk_r": 0.0,
+              "reason_codes": [],
+              "summary": "outcome-aware sizing adjustment found no material degradation or post-cost weakness",
+              "source_summary": {}
+            }
+          },
+          "reaction_evidence": {
+            "structure_shift_hint": "rejection_bias",
+            "reclaim_speed_bucket": "fast",
+            "close_outside_bucket": "none",
+            "retest_status": "held",
+            "efficiency_state": "no_inefficiency"
+          },
+          "location_reference": {
+            "primary_type": "range_upper_edge",
+            "primary_label": "range_upper_reject",
+            "secondary_type": "lp",
+            "session_box_role": "refinement_only",
+            "edge_proximity_atr": 0.3
+          },
+          "session_liquidity_reference": {
+            "reference_type": "session_high_reference",
+            "range_high": 0.1873,
+            "range_low": 0.1867,
+            "breakout_side": "above",
+            "outside_close_state": "no_outside_close",
+            "failed_acceptance": false,
+            "as_of_ts": "2026-03-24T06:44:51.035703+00:00"
+          },
+          "recommended_risk_r": 0.0,
+          "expected_win_prob": 0.5312,
+          "expected_ev_r": 0.2993,
+          "expected_tp1_prob": 0.6025,
+          "expected_tp2_prob": 0.442,
+          "expected_tp3_prob": 0.2815,
+          "expected_ev_at_recommended_size_r": 0.0,
+          "expected_summary": "win≈53.1%, EV≈+0.30R, TP1≈60.2%, TP2≈44.2%, TP3≈28.2%",
+          "block_reason_message": "Blocked: an active candidate with the same thesis already exists.",
+          "alpha_research_candidate": false,
+          "alpha_research_reason": null,
+          "alpha_research_reason_message": null,
+          "alpha_research_softened_risk_r": 0.0,
+          "alpha_research_gap": 0.0,
+          "thesis_fingerprint": {
+            "direction": "short",
+            "regime": "range",
+            "strategy_family": "sweep_reversal",
+            "liquidity_narrative": "range_upper_reject",
+            "event_classification": "rejection_confirmed",
+            "time_bucket": "2026-03-24T06:30Z_30m",
+            "correlation_cluster": "others"
+          },
+          "thesis_cluster_id": "short:range:sweep_reversal:range_upper_reject:rejection:2026-03-24T06:30Z_30m:others",
+          "thesis_cluster_size": 2,
+          "thesis_primary_symbol": "WIFUSDC",
+          "thesis_rejected_reason": "duplicate_active_thesis",
+          "thesis_active_cluster_count": 4
+        },
+        {
+          "symbol": "FILUSDC",
+          "plan_id": "plan_zone_bc977b68a245_sweep_confirm",
+          "zone_id": "zone_bc977b68a245",
+          "direction": "short",
+          "strategy_mode": "A_ONLY",
+          "strategy_family": "legacy_zone_plan",
+          "strategy_cluster": null,
+          "strategy_cluster_status": null,
+          "multi_strategy_overlay": null,
+          "b_continuation_activation": null,
+          "strategy_cluster_balance": null,
+          "entry_model": "SWEEP_CONFIRM",
+          "regime": "range",
+          "session_guidance": {
+            "state": "dead_session",
+            "status": "WARN",
+            "summary": "current window is dead session; live entries are guidance-only discouraged",
+            "strategy_mode": "A_ONLY",
+            "current_session": {
+              "name": "inactive",
+              "start": "2026-03-24T06:45:20.700912+00:00",
+              "end": "2026-03-24T06:45:20.700912+00:00",
+              "active": false
+            },
+            "dead_session": true,
+            "session_lock_active": false,
+            "preferred_sessions": [
+              "london",
+              "new_york",
+              "overlap"
+            ],
+            "preferred_windows_utc": {
+              "london": {
+                "start": "2026-03-24T07:00:00+00:00",
+                "end": "2026-03-24T12:00:00+00:00",
+                "active": false
+              },
+              "new_york": {
+                "start": "2026-03-24T13:00:00+00:00",
+                "end": "2026-03-24T18:00:00+00:00",
+                "active": false
+              },
+              "overlap": {
+                "start": "2026-03-24T13:00:00+00:00",
+                "end": "2026-03-24T12:00:00+00:00",
+                "defined": false,
+                "active": false
+              }
+            },
+            "soft_penalty": 6.0,
+            "unlock_at": null,
+            "engine_dead_session_hard_block": false,
+            "routing_policy": "guidance_only_soft_penalty"
+          },
+          "session_penalty": 6.0,
+          "accepted": false,
+          "block_reason": "thesis_duplicate_blocked",
+          "base_rank_score": 16.996,
+          "adjusted_rank_score": 10.1077,
+          "final_rank_score": 4.1077,
+          "outcome_bias_score": 0.0,
+          "outcome_bias": {
+            "available": true,
+            "applied": false,
+            "tier": "neutral",
+            "score_delta": 0.0,
+            "summary": "outcome data is present but does not justify a portfolio priority change",
+            "reason_codes": [],
+            "source_summary": {
+              "family_closed": 0,
+              "family_baseline_cost_profitable_rate_from_closed": 0.0,
+              "regime_closed": 0,
+              "regime_baseline_cost_profitable_rate_from_closed": 0.0,
+              "session_closed": 0,
+              "session_baseline_cost_profitable_rate_from_closed": 0.0,
+              "family_degradation_status": "healthy",
+              "family_mode_advisory_state": "keep_current_mode",
+              "regime_mode_advisory_state": "keep_current_mode",
+              "session_mode_advisory_state": "keep_current_mode"
+            }
+          },
+          "pre_outcome_final_rank_score": 4.1077,
+          "post_outcome_final_rank_score": 4.1077,
+          "capital_allocator": {
+            "available": true,
+            "applied": false,
+            "tier": "neutral",
+            "family": "legacy_zone_plan",
+            "maturity": "thin_sample",
+            "allocation_weight": 1.0,
+            "risk_multiplier": 1.0,
+            "base_recommended_risk_r": 0.0,
+            "allocated_risk_r": 0.0,
+            "capital_pressure": "neutral",
+            "summary": "allocator evidence does not justify a capital tilt for this candidate",
+            "reason_codes": [],
+            "source_summary": {}
+          },
+          "allocation_weight": 1.0,
+          "allocated_risk_r": 0.0,
+          "capital_pressure": "neutral",
+          "portfolio_penalty": 6.8883,
+          "portfolio_high_corr_count": 0,
+          "risk_budget_score": 93.1117,
+          "portfolio_volatility": 0.00392,
+          "portfolio_total_cap": 10,
+          "portfolio_directional_cap": 6,
+          "portfolio_cluster_cap": 2,
+          "projected_total_exposure": 5,
+          "projected_directional_exposure": 3,
+          "projected_cluster_exposure": 1,
+          "mode_today_trade_count": 4,
+          "mode_daily_trade_limit": 3,
+          "mode_current_total_risk_r": 1.5,
+          "mode_projected_trade_count": 0,
+          "mode_total_risk_cap_r": 1.5,
+          "mode_projected_total_risk_r": 0.0,
+          "mode_shadow_only": false,
+          "strategy_sizing": {
+            "schema_version": "v2",
+            "strategy_family": "legacy_zone_plan",
+            "strategy_grade": "B",
+            "grade_source": "legacy_default_b",
+            "active_thesis_clusters": 4,
+            "transition_state": "transition_watch",
+            "reaction_classification": "not_applicable",
+            "confirm_only": false,
+            "entry_model": "SWEEP_CONFIRM",
+            "factors": {
+              "grade_risk": 0.5,
+              "regime_factor": 0.0,
+              "reaction_factor": 1.0,
+              "thesis_factor": 0.0,
+              "execution_factor": 0.75
+            },
+            "final_risk_r": 0.0,
+            "blocked": true,
+            "blocked_reason": "transition_zero_risk",
+            "notes": {
+              "regime": "transition_zero_risk",
+              "reaction": null,
+              "thesis": "thesis_cluster_cap_zero_risk"
+            },
+            "strategy_mode": "A_ONLY",
+            "shadow_only": false,
+            "mode_policy": {
+              "mode": "A_ONLY",
+              "allowed_families": [
+                "sweep_reversal",
+                "trend_continuation"
+              ],
+              "allowed_grades": [
+                "A"
+              ],
+              "max_daily_trades": 3,
+              "max_total_risk_r": 1.5,
+              "shadow_only": false
+            },
+            "base_final_risk_r": 0.0,
+            "outcome_risk_adjustment": {
+              "available": true,
+              "applied": false,
+              "status": "healthy",
+              "penalty_tier": "none",
+              "base_final_risk_r": 0.0,
+              "multiplier": 1.0,
+              "final_risk_r": 0.0,
+              "reason_codes": [],
+              "summary": "outcome-aware sizing adjustment found no material degradation or post-cost weakness",
+              "source_summary": {}
+            }
+          },
+          "reaction_evidence": null,
+          "location_reference": {
+            "primary_type": "range_upper_edge",
+            "primary_label": "range_upper_reject",
+            "secondary_type": "nearby_liquidity_pool",
+            "session_box_role": "refinement_only",
+            "edge_proximity_atr": 0.3333
+          },
+          "session_liquidity_reference": {
+            "reference_type": "session_high_reference",
+            "range_high": 0.863,
+            "range_low": 0.859,
+            "outside_close_state": "no_outside_close",
+            "failed_acceptance": false,
+            "as_of_ts": "2026-03-24T06:44:50.788221+00:00"
+          },
+          "recommended_risk_r": 0.0,
+          "expected_win_prob": 0.4464,
+          "expected_ev_r": 0.1286,
+          "expected_tp1_prob": 0.5389,
+          "expected_tp2_prob": 0.3911,
+          "expected_tp3_prob": 0.2433,
+          "expected_ev_at_recommended_size_r": 0.0,
+          "expected_summary": "win≈44.6%, EV≈+0.13R, TP1≈53.9%, TP2≈39.1%, TP3≈24.3%",
+          "block_reason_message": "Blocked: an active candidate with the same thesis already exists.",
+          "alpha_research_candidate": false,
+          "alpha_research_reason": null,
+          "alpha_research_reason_message": null,
+          "alpha_research_softened_risk_r": 0.0,
+          "alpha_research_gap": 0.0,
+          "thesis_fingerprint": {
+            "direction": "short",
+            "regime": "range",
+            "strategy_family": "legacy_zone_plan",
+            "liquidity_narrative": "range_upper_reject",
+            "event_classification": "mixed",
+            "time_bucket": "2026-03-24T06:30Z_30m",
+            "correlation_cluster": "others"
+          },
+          "thesis_cluster_id": "short:range:legacy_zone_plan:range_upper_reject:mixed:2026-03-24T06:30Z_30m:others",
+          "thesis_cluster_size": 2,
+          "thesis_primary_symbol": "IPUSDC",
+          "thesis_rejected_reason": "duplicate_active_thesis",
+          "thesis_active_cluster_count": 4
+        },
+        {
+          "symbol": "AAVEUSDC",
+          "plan_id": "plan_zone_b373381d3f6a_sweep_confirm",
+          "zone_id": "zone_b373381d3f6a",
+          "direction": "long",
+          "strategy_mode": "A_ONLY",
+          "strategy_family": "legacy_zone_plan",
+          "strategy_cluster": null,
+          "strategy_cluster_status": null,
+          "multi_strategy_overlay": null,
+          "b_continuation_activation": null,
+          "strategy_cluster_balance": null,
+          "entry_model": "SWEEP_CONFIRM",
+          "regime": "range",
+          "session_guidance": {
+            "state": "dead_session",
+            "status": "WARN",
+            "summary": "current window is dead session; live entries are guidance-only discouraged",
+            "strategy_mode": "A_ONLY",
+            "current_session": {
+              "name": "inactive",
+              "start": "2026-03-24T06:45:20.700912+00:00",
+              "end": "2026-03-24T06:45:20.700912+00:00",
+              "active": false
+            },
+            "dead_session": true,
+            "session_lock_active": false,
+            "preferred_sessions": [
+              "london",
+              "new_york",
+              "overlap"
+            ],
+            "preferred_windows_utc": {
+              "london": {
+                "start": "2026-03-24T07:00:00+00:00",
+                "end": "2026-03-24T12:00:00+00:00",
+                "active": false
+              },
+              "new_york": {
+                "start": "2026-03-24T13:00:00+00:00",
+                "end": "2026-03-24T18:00:00+00:00",
+                "active": false
+              },
+              "overlap": {
+                "start": "2026-03-24T13:00:00+00:00",
+                "end": "2026-03-24T12:00:00+00:00",
+                "defined": false,
+                "active": false
+              }
+            },
+            "soft_penalty": 6.0,
+            "unlock_at": null,
+            "engine_dead_session_hard_block": false,
+            "routing_policy": "guidance_only_soft_penalty"
+          },
+          "session_penalty": 6.0,
+          "accepted": false,
+          "block_reason": "thesis_duplicate_blocked",
+          "base_rank_score": 11.2538,
+          "adjusted_rank_score": -10.7688,
+          "final_rank_score": -16.7688,
+          "outcome_bias_score": 0.0,
+          "outcome_bias": {
+            "available": true,
+            "applied": false,
+            "tier": "neutral",
+            "score_delta": 0.0,
+            "summary": "outcome data is present but does not justify a portfolio priority change",
+            "reason_codes": [],
+            "source_summary": {
+              "family_closed": 0,
+              "family_baseline_cost_profitable_rate_from_closed": 0.0,
+              "regime_closed": 0,
+              "regime_baseline_cost_profitable_rate_from_closed": 0.0,
+              "session_closed": 0,
+              "session_baseline_cost_profitable_rate_from_closed": 0.0,
+              "family_degradation_status": "healthy",
+              "family_mode_advisory_state": "keep_current_mode",
+              "regime_mode_advisory_state": "keep_current_mode",
+              "session_mode_advisory_state": "keep_current_mode"
+            }
+          },
+          "pre_outcome_final_rank_score": -16.7688,
+          "post_outcome_final_rank_score": -16.7688,
+          "capital_allocator": {
+            "available": true,
+            "applied": false,
+            "tier": "neutral",
+            "family": "legacy_zone_plan",
+            "maturity": "thin_sample",
+            "allocation_weight": 1.0,
+            "risk_multiplier": 1.0,
+            "base_recommended_risk_r": 0.0,
+            "allocated_risk_r": 0.0,
+            "capital_pressure": "neutral",
+            "summary": "allocator evidence does not justify a capital tilt for this candidate",
+            "reason_codes": [],
+            "source_summary": {}
+          },
+          "allocation_weight": 1.0,
+          "allocated_risk_r": 0.0,
+          "capital_pressure": "neutral",
+          "portfolio_penalty": 22.0226,
+          "portfolio_high_corr_count": 1,
+          "risk_budget_score": 77.9774,
+          "portfolio_volatility": 0.003894,
+          "portfolio_total_cap": 10,
+          "portfolio_directional_cap": 6,
+          "portfolio_cluster_cap": 2,
+          "projected_total_exposure": 5,
+          "projected_directional_exposure": 3,
+          "projected_cluster_exposure": 2,
+          "mode_today_trade_count": 4,
+          "mode_daily_trade_limit": 3,
+          "mode_current_total_risk_r": 1.5,
+          "mode_projected_trade_count": 0,
+          "mode_total_risk_cap_r": 1.5,
+          "mode_projected_total_risk_r": 0.0,
+          "mode_shadow_only": false,
+          "strategy_sizing": {
+            "schema_version": "v2",
+            "strategy_family": "legacy_zone_plan",
+            "strategy_grade": "B",
+            "grade_source": "legacy_default_b",
+            "active_thesis_clusters": 4,
+            "transition_state": "transition_watch",
+            "reaction_classification": "not_applicable",
+            "confirm_only": false,
+            "entry_model": "SWEEP_CONFIRM",
+            "factors": {
+              "grade_risk": 0.5,
+              "regime_factor": 0.0,
+              "reaction_factor": 1.0,
+              "thesis_factor": 0.0,
+              "execution_factor": 0.75
+            },
+            "final_risk_r": 0.0,
+            "blocked": true,
+            "blocked_reason": "transition_zero_risk",
+            "notes": {
+              "regime": "transition_zero_risk",
+              "reaction": null,
+              "thesis": "thesis_cluster_cap_zero_risk"
+            },
+            "strategy_mode": "A_ONLY",
+            "shadow_only": false,
+            "mode_policy": {
+              "mode": "A_ONLY",
+              "allowed_families": [
+                "sweep_reversal",
+                "trend_continuation"
+              ],
+              "allowed_grades": [
+                "A"
+              ],
+              "max_daily_trades": 3,
+              "max_total_risk_r": 1.5,
+              "shadow_only": false
+            },
+            "base_final_risk_r": 0.0,
+            "outcome_risk_adjustment": {
+              "available": true,
+              "applied": false,
+              "status": "healthy",
+              "penalty_tier": "none",
+              "base_final_risk_r": 0.0,
+              "multiplier": 1.0,
+              "final_risk_r": 0.0,
+              "reason_codes": [],
+              "summary": "outcome-aware sizing adjustment found no material degradation or post-cost weakness",
+              "source_summary": {}
+            }
+          },
+          "reaction_evidence": null,
+          "location_reference": {
+            "primary_type": "range_lower_edge",
+            "primary_label": "range_lower_reject",
+            "secondary_type": "nearby_liquidity_pool",
+            "session_box_role": "refinement_only",
+            "edge_proximity_atr": 0.7108
+          },
+          "session_liquidity_reference": {
+            "reference_type": "session_low_reference",
+            "range_high": 110.26,
+            "range_low": 109.67,
+            "outside_close_state": "no_outside_close",
+            "failed_acceptance": false,
+            "as_of_ts": "2026-03-24T06:44:51.171315+00:00"
+          },
+          "recommended_risk_r": 0.0,
+          "expected_win_prob": 0.4595,
+          "expected_ev_r": 0.1152,
+          "expected_tp1_prob": 0.5487,
+          "expected_tp2_prob": 0.399,
+          "expected_tp3_prob": 0.2492,
+          "expected_ev_at_recommended_size_r": 0.0,
+          "expected_summary": "win≈46.0%, EV≈+0.12R, TP1≈54.9%, TP2≈39.9%, TP3≈24.9%",
+          "block_reason_message": "Blocked: an active candidate with the same thesis already exists.",
+          "alpha_research_candidate": false,
+          "alpha_research_reason": null,
+          "alpha_research_reason_message": null,
+          "alpha_research_softened_risk_r": 0.0,
+          "alpha_research_gap": 0.0,
+          "thesis_fingerprint": {
+            "direction": "long",
+            "regime": "range",
+            "strategy_family": "legacy_zone_plan",
+            "liquidity_narrative": "range_lower_reject",
+            "event_classification": "mixed",
+            "time_bucket": "2026-03-24T06:30Z_30m",
+            "correlation_cluster": "others"
+          },
+          "thesis_cluster_id": "long:range:legacy_zone_plan:range_lower_reject:mixed:2026-03-24T06:30Z_30m:others",
+          "thesis_cluster_size": 2,
+          "thesis_primary_symbol": "WIFUSDC",
+          "thesis_rejected_reason": "duplicate_active_thesis",
+          "thesis_active_cluster_count": 4
+        }
+      ],
+      "RESEARCH_ONLY_SETUP": []
+    }
+  },
+  "alert_state": {
+    "scope": "USDC_PERP_TOP30",
+    "deployment_go_no_go": "GO",
+    "deployment_code": "go_runtime_gate_open",
+    "playbook_go_no_go": "GO",
+    "playbook_action": "continue_candidate_review_under_portfolio_caps",
+    "counts": {
+      "ACTIONABLE_ENTRY": 0,
+      "BLOCKED_SETUP": 3,
+      "RESEARCH_ONLY_SETUP": 0
+    },
+    "sections": {
+      "ACTIONABLE_ENTRY": [],
+      "BLOCKED_SETUP": [
+        {
+          "symbol": "WIFUSDC",
+          "plan_id": "plan_zone_b05091a8553c_sweep_confirm",
+          "direction": "short",
+          "entry_model": "SWEEP_CONFIRM",
+          "family": "sweep_reversal",
+          "reason_code": "thesis_duplicate_blocked"
+        },
+        {
+          "symbol": "FILUSDC",
+          "plan_id": "plan_zone_bc977b68a245_sweep_confirm",
+          "direction": "short",
+          "entry_model": "SWEEP_CONFIRM",
+          "family": "legacy_zone_plan",
+          "reason_code": "thesis_duplicate_blocked"
+        },
+        {
+          "symbol": "AAVEUSDC",
+          "plan_id": "plan_zone_b373381d3f6a_sweep_confirm",
+          "direction": "long",
+          "entry_model": "SWEEP_CONFIRM",
+          "family": "legacy_zone_plan",
+          "reason_code": "thesis_duplicate_blocked"
+        }
+      ],
+      "RESEARCH_ONLY_SETUP": []
+    }
+  },
+  "notified": true,
+  "state_written": true,
+  "dedupe_suppressed": false,
+  "message": "Trading entry surface alert\nscope: USDC_PERP_TOP30\ndeployment: GO/go_runtime_gate_open | playbook: GO | action: continue_candidate_review_under_portfolio_caps\nmessage: GO: runtime gate is open for candidate review.\ncounts: ACTIONABLE_ENTRY=0, BLOCKED_SETUP=3, RESEARCH_ONLY_SETUP=0\n\nACTIONABLE_ENTRY\n- none\n\nBLOCKED_SETUP\n- WIFUSDC short SWEEP_CONFIRM | family=sweep_reversal | risk=0.00R | win≈53.1%, EV≈+0.30R, TP1≈60.2%, TP2≈44.2%, TP3≈28.2% | reason=Blocked: an active candidate with the same thesis already exists.\n- FILUSDC short SWEEP_CONFIRM | family=legacy_zone_plan | risk=0.00R | win≈44.6%, EV≈+0.13R, TP1≈53.9%, TP2≈39.1%, TP3≈24.3% | reason=Blocked: an active candidate with the same thesis already exists.\n- AAVEUSDC long SWEEP_CONFIRM | family=legacy_zone_plan | risk=0.00R | win≈46.0%, EV≈+0.12R, TP1≈54.9%, TP2≈39.9%, TP3≈24.9% | reason=Blocked: an active candidate with the same thesis already exists.\n\nRESEARCH_ONLY_SETUP\n- none",
+  "delivery": {
+    "channel": "discord",
+    "delivered": true,
+    "skipped": false,
+    "reason": "delivered",
+    "status_code": 204,
+    "target": "discord:webhook",
+    "latency_ms": 394.231,
+    "ts": "2026-03-24T06:45:21.180630+00:00",
+    "attempts": 1
+  }
+}

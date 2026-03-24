@@ -2,7 +2,7 @@
   "alpha": 0.35,
   "applied_runtime": false,
   "available": false,
-  "baseline_generated_plans": 2,
+  "baseline_generated_plans": 0,
   "baseline_weights": {
     "fvg_displacement": 0.2,
     "htf_alignment": 0.18,
@@ -12,7 +12,7 @@
   },
   "by_regime": {
     "range": {
-      "baseline_generated_plans": 2,
+      "baseline_generated_plans": 0,
       "current_scores": {
         "fvg_displacement": 0.0,
         "htf_alignment": 0.0,
@@ -104,7 +104,7 @@
     "ob_freshness": 0.0,
     "trend_proxy": 0.0
   },
-  "generated_at": "2026-03-23T20:23:56+00:00",
+  "generated_at": "2026-03-24T06:48:49+00:00",
   "matched_samples": 0,
   "previous_weights": {
     "fvg_displacement": 0.2,
@@ -113,7 +113,7 @@
     "ob_freshness": 0.19,
     "trend_proxy": 0.05
   },
-  "reason": "insufficient_generated_plans",
+  "reason": "baseline_empty",
   "recommended_weights": {
     "fvg_displacement": 0.2,
     "htf_alignment": 0.18,
@@ -122,9 +122,9 @@
     "trend_proxy": 0.05
   },
   "regime_label": "range",
-  "report_path": "reports/calibration/feature_calibration_BTCUSDC_range_20260323T202356Z.md",
+  "report_path": "reports/calibration/feature_calibration_BTCUSDC_range_20260324T064849Z.md",
   "schema_version": "feature_calibration_v2",
-  "snapshot_path": "reports/calibration/snapshots/BTCUSDC_range_20260323T202356Z.json",
+  "snapshot_path": "reports/calibration/snapshots/BTCUSDC_range_20260324T064849Z.json",
   "symbol": "BTCUSDC",
   "zone_type_multipliers": {
     "FLIP": {

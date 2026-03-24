@@ -1,6 +1,6 @@
 {
   "brief_mode": "shift-start",
-  "brief_report_path": "reports/operations/operator_session_briefs/operator_session_brief_BTCUSDC_20260323T202355Z.md",
+  "brief_report_path": "reports/operations/operator_session_briefs/operator_session_brief_BTCUSDC_20260324T064847Z.md",
   "brief_status": "DEPLOYMENT_REVIEW_REQUIRED",
   "channel": "system",
   "checklist_go_no_go": "NO_GO",
@@ -11,7 +11,7 @@
   "headline": "dashboard and validation/checklist disagree on deployment posture; dashboard=GO, validation=NO_GO, checklist=NO_GO.",
   "playbook_alignment": "DIVERGED",
   "research_action": "run_shadow_exit_timing_review",
-  "snapshot_report_path": "reports/operations/operator_surface_divergence/operator_surface_divergence_BTCUSDC_20260323T202356Z.md",
+  "snapshot_report_path": "reports/operations/operator_surface_divergence/operator_surface_divergence_BTCUSDC_20260324T064847Z.md",
   "symbol": "BTCUSDC",
   "top_family_bottleneck": "legacy_zone_plan",
   "top_operator_action": "continue_candidate_review_under_portfolio_caps",

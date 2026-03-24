@@ -1,12 +1,12 @@
 {
   "allow_live_send": false,
   "brief_mode": "shift-start",
-  "brief_report_path": "reports/operations/operator_session_briefs/operator_session_brief_BTCUSDC_20260323T202355Z.md",
+  "brief_report_path": "reports/operations/operator_session_briefs/operator_session_brief_BTCUSDC_20260324T064847Z.md",
   "changed": false,
   "channel": "system",
   "current": {
     "brief_mode": "shift-start",
-    "brief_report_path": "reports/operations/operator_session_briefs/operator_session_brief_BTCUSDC_20260323T202355Z.md",
+    "brief_report_path": "reports/operations/operator_session_briefs/operator_session_brief_BTCUSDC_20260324T064847Z.md",
     "brief_status": "DEPLOYMENT_REVIEW_REQUIRED",
     "channel": "system",
     "checklist_go_no_go": "NO_GO",
@@ -17,7 +17,7 @@
     "headline": "dashboard and validation/checklist disagree on deployment posture; dashboard=GO, validation=NO_GO, checklist=NO_GO.",
     "playbook_alignment": "DIVERGED",
     "research_action": "run_shadow_exit_timing_review",
-    "snapshot_report_path": "reports/operations/operator_surface_divergence/operator_surface_divergence_BTCUSDC_20260323T202356Z.md",
+    "snapshot_report_path": "reports/operations/operator_surface_divergence/operator_surface_divergence_BTCUSDC_20260324T064847Z.md",
     "symbol": "BTCUSDC",
     "top_family_bottleneck": "legacy_zone_plan",
     "top_operator_action": "continue_candidate_review_under_portfolio_caps",
@@ -29,11 +29,11 @@
   },
   "dry_run": true,
   "force_send": false,
-  "message": "Operator session handoff\n- brief_status: DEPLOYMENT_REVIEW_REQUIRED\n- headline: dashboard and validation/checklist disagree on deployment posture; dashboard=GO, validation=NO_GO, checklist=NO_GO.\n- deployment: dashboard=GO / validation=NO_GO / checklist=NO_GO\n- playbook: dashboard=continue_candidate_review_under_portfolio_caps / validation=resolve_selected_trial_lineage_before_rollout / checklist=resolve_selected_trial_lineage_before_rollout\n- top_operator_action: continue_candidate_review_under_portfolio_caps\n- research/funnel: action=run_shadow_exit_timing_review | family_bottleneck=legacy_zone_plan | session_bottleneck=dead_session\n- operator_ui_sections_ready: True\n- brief_report: reports/operations/operator_session_briefs/operator_session_brief_BTCUSDC_20260323T202355Z.md\n- snapshot_report: reports/operations/operator_surface_divergence/operator_surface_divergence_BTCUSDC_20260323T202356Z.md\n- next_step: dashboard와 validation/checklist의 deployment_go_no_go 방향을 함께 읽고 Approval Divergence 배너 wording을 먼저 확인한다.\n- next_step: playbook_action drift가 있으면 rollout 승인보다 wording/source drift를 먼저 점검한다.",
+  "message": "Operator session handoff\n- brief_status: DEPLOYMENT_REVIEW_REQUIRED\n- headline: dashboard and validation/checklist disagree on deployment posture; dashboard=GO, validation=NO_GO, checklist=NO_GO.\n- deployment: dashboard=GO / validation=NO_GO / checklist=NO_GO\n- playbook: dashboard=continue_candidate_review_under_portfolio_caps / validation=resolve_selected_trial_lineage_before_rollout / checklist=resolve_selected_trial_lineage_before_rollout\n- top_operator_action: continue_candidate_review_under_portfolio_caps\n- research/funnel: action=run_shadow_exit_timing_review | family_bottleneck=legacy_zone_plan | session_bottleneck=dead_session\n- operator_ui_sections_ready: True\n- brief_report: reports/operations/operator_session_briefs/operator_session_brief_BTCUSDC_20260324T064847Z.md\n- snapshot_report: reports/operations/operator_surface_divergence/operator_surface_divergence_BTCUSDC_20260324T064847Z.md\n- next_step: dashboard와 validation/checklist의 deployment_go_no_go 방향을 함께 읽고 Approval Divergence 배너 wording을 먼저 확인한다.\n- next_step: playbook_action drift가 있으면 rollout 승인보다 wording/source drift를 먼저 점검한다.",
   "notified": false,
   "previous": {
     "brief_mode": "shift-start",
-    "brief_report_path": "reports/operations/operator_session_briefs/operator_session_brief_BTCUSDC_20260323T200853Z.md",
+    "brief_report_path": "reports/operations/operator_session_briefs/operator_session_brief_BTCUSDC_20260324T005435Z.md",
     "brief_status": "DEPLOYMENT_REVIEW_REQUIRED",
     "channel": "system",
     "checklist_go_no_go": "NO_GO",
@@ -44,7 +44,7 @@
     "headline": "dashboard and validation/checklist disagree on deployment posture; dashboard=GO, validation=NO_GO, checklist=NO_GO.",
     "playbook_alignment": "DIVERGED",
     "research_action": "run_shadow_exit_timing_review",
-    "snapshot_report_path": "reports/operations/operator_surface_divergence/operator_surface_divergence_BTCUSDC_20260323T200853Z.md",
+    "snapshot_report_path": "reports/operations/operator_surface_divergence/operator_surface_divergence_BTCUSDC_20260324T005435Z.md",
     "symbol": "BTCUSDC",
     "top_family_bottleneck": "legacy_zone_plan",
     "top_operator_action": "continue_candidate_review_under_portfolio_caps",
@@ -54,6 +54,6 @@
     "validation_go_no_go": "NO_GO",
     "validation_playbook_action": "resolve_selected_trial_lineage_before_rollout"
   },
-  "snapshot_report_path": "reports/operations/operator_surface_divergence/operator_surface_divergence_BTCUSDC_20260323T202356Z.md",
+  "snapshot_report_path": "reports/operations/operator_surface_divergence/operator_surface_divergence_BTCUSDC_20260324T064847Z.md",
   "state_file": "/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/last_alert_state_shift_start_system.json"
 }

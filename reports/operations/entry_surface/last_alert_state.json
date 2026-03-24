@@ -1,0 +1,50 @@
+{
+  "alert_state": {
+    "counts": {
+      "ACTIONABLE_ENTRY": 0,
+      "BLOCKED_SETUP": 3,
+      "RESEARCH_ONLY_SETUP": 0
+    },
+    "deployment_code": "go_runtime_gate_open",
+    "deployment_go_no_go": "GO",
+    "playbook_action": "continue_candidate_review_under_portfolio_caps",
+    "playbook_go_no_go": "GO",
+    "scope": "USDC_PERP_TOP30",
+    "sections": {
+      "ACTIONABLE_ENTRY": [],
+      "BLOCKED_SETUP": [
+        {
+          "direction": "short",
+          "entry_model": "SWEEP_CONFIRM",
+          "family": "sweep_reversal",
+          "plan_id": "plan_zone_b05091a8553c_sweep_confirm",
+          "reason_code": "thesis_duplicate_blocked",
+          "symbol": "WIFUSDC"
+        },
+        {
+          "direction": "short",
+          "entry_model": "SWEEP_CONFIRM",
+          "family": "legacy_zone_plan",
+          "plan_id": "plan_zone_bc977b68a245_sweep_confirm",
+          "reason_code": "thesis_duplicate_blocked",
+          "symbol": "FILUSDC"
+        },
+        {
+          "direction": "long",
+          "entry_model": "SWEEP_CONFIRM",
+          "family": "legacy_zone_plan",
+          "plan_id": "plan_zone_b373381d3f6a_sweep_confirm",
+          "reason_code": "thesis_duplicate_blocked",
+          "symbol": "AAVEUSDC"
+        }
+      ],
+      "RESEARCH_ONLY_SETUP": []
+    }
+  },
+  "delivery": {
+    "channel": "discord",
+    "reason": "delivered",
+    "target": "discord:webhook"
+  },
+  "updated_at": "2026-03-24T06:45:21.180642+00:00"
+}
