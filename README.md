@@ -88,6 +88,14 @@ flowchart TD
 
 The funnel matters because candidate quality is only useful if it survives portfolio filtering, approval, execution friction, and post-cost outcome review.
 
+## Money Funnel
+
+`generated expected R -> submitted expected R -> filled expected R -> closed expected R -> raw realized R -> post-cost realized R`
+
+- `score_to_outcome_funnel` now carries `money_funnel` so count conversion and R conversion can be read together.
+- `expected_ev_at_recommended_size_r` is the first expected-R proxy when available; otherwise the engine falls back to `expected_ev_r x recommended_risk_r`.
+- This layer is explanatory and does not replace approval, sizing, or live execution truth.
+
 ## Key Capabilities
 
 ### Core Runtime
@@ -149,6 +157,22 @@ The funnel matters because candidate quality is only useful if it survives portf
 - Candidate rows can expose `strategy_sizing.outcome_risk_adjustment` to show when live risk allowance was reduced.
 - Portfolio accepted candidates can expose `outcome_bias` to show whether ordering moved toward or away from a bucket.
 - Validation, checklist, and dashboard summarize the same chain through `outcome_control_trace`; this is explanation, not a new source of truth.
+
+## Outcome Attribution
+
+`closed expected R proxy + raw realized R + post-cost realized R -> strategy component + execution component + condition component`
+
+- `outcome_attribution` is a post-trade decomposition helper that separates strategy expectation, execution drag, and condition drift without creating a new approval authority.
+- It also exposes `fill_capture_gap_r` so missed fill conversion can be read as a money leak instead of only a count leak.
+- This layer is advisory-only and should be read together with `money_funnel`, not in isolation.
+
+## Edge Experiment Review
+
+`money_funnel windows + entry_timing split + execution_style split -> true_edge_ratio + edge_decay_rate + preferred experiment branch`
+
+- `edge_experiment_review` turns the same post-cost funnel into `true_edge_ratio`, `recent/prior` edge windows, and compare-only next-test guidance.
+- `entry_timing_experiment` compares `early_limit` versus `reaction_confirmed`; `execution_style_experiment` compares `passive_limit` versus `market` when both branches have coverage.
+- This layer is advisory-only and is meant to answer "what should we test next?" before anyone rewrites the strategy structure.
 
 ## Outcome-Aware Rollout Recommendation
 
@@ -374,23 +398,30 @@ The funnel matters because candidate quality is only useful if it survives portf
 
 - `operator_action_priority` now keeps the existing urgent control ordering, then translates throughput bottlenecks into action families such as `selection_review`, `rollout_review`, `execution_review`, and `observe`.
 - `priority_source`, `action_family`, and `capture_context` let operators see whether the top review item came from playbook/execution controls or from capture-aware throughput context.
+- `experiment_context` also carries representative accepted/blocked candidate focus plus `entry_timing_target` / `execution_style_target`, so split-test follow-up points at a concrete row instead of staying abstract.
 - `thin_activity_window` is treated as `observe`, not as an automatic negative verdict or threshold-relaxation trigger.
 
 ## Operator Surfaces
 
 - `GET /execution/operator-dashboard`
   Runtime source for safety state, funnel, recent intents, open orders, positions, reconciliation, alert summary, and execution quality summary.
-  It also surfaces `signal_funnel.operator_action_priority` with capture-aware review order, `signal_funnel.outcome_control_trace`, `signal_funnel.rollout_recommendation`, `signal_funnel.strategy_lifecycle`, `signal_funnel.promotion_governance`, `signal_funnel.promotion_review_queue`, `signal_funnel.promotion_remediation_queue`, `signal_funnel.promotion_clearance_tracker`, `signal_funnel.promotion_reopen_queue`, `signal_funnel.promotion_decision_brief`, `signal_funnel.auto_promotion_rollout_execution`, `signal_funnel.promotion_lifecycle_history`, `signal_funnel.research_promotion_operating_loop`, `signal_funnel.multi_strategy_ab_expansion`, `signal_funnel.b_continuation_activation`, `signal_funnel.execution_friction_measurement`, `signal_funnel.forward_stress_regime_validation`, `signal_funnel.kill_condition_automation`, `signal_funnel.strategy_cluster_balance`, `signal_funnel.opportunity_capture`, `signal_funnel.capital_allocator`, recent intent `outcome_approval_penalty`, and trimmed portfolio candidate drill-down rows.
+  It now also exposes `approval_strip_summary`, so the runtime dashboard itself can be read with the same `approve -> align -> act` vocabulary as validation, checklist, the operator UI, and session handoff.
+  It also surfaces `signal_funnel.operator_action_priority` with capture-aware review order, `signal_funnel.outcome_control_trace`, `signal_funnel.edge_experiment_review`, `signal_funnel.rollout_recommendation`, `signal_funnel.strategy_lifecycle`, `signal_funnel.promotion_governance`, `signal_funnel.promotion_review_queue`, `signal_funnel.promotion_remediation_queue`, `signal_funnel.promotion_clearance_tracker`, `signal_funnel.promotion_reopen_queue`, `signal_funnel.promotion_decision_brief`, `signal_funnel.auto_promotion_rollout_execution`, `signal_funnel.promotion_lifecycle_history`, `signal_funnel.research_promotion_operating_loop`, `signal_funnel.multi_strategy_ab_expansion`, `signal_funnel.b_continuation_activation`, `signal_funnel.execution_friction_measurement`, `signal_funnel.forward_stress_regime_validation`, `signal_funnel.kill_condition_automation`, `signal_funnel.strategy_cluster_balance`, `signal_funnel.opportunity_capture`, `signal_funnel.capital_allocator`, recent intent `outcome_approval_penalty`, and trimmed portfolio candidate drill-down rows.
 - `GET /execution/operator-ui`
   Browser operator surface backed by the same runtime payloads, intended for day-to-day operating review.
-  It now surfaces an `Approval Divergence` banner directly under `Decision Summary` so operators can see dashboard/checklist/validation/candidate deployment drift before reading deeper inspectors.
+  It now surfaces `5-Second Operator Kernel` at the top of the home section, so operators can read `money_funnel -> outcome_attribution -> outcome_control_trace -> rollout` before dropping into the broader review stack.
+  It now replaces the older `Decision Summary + Approval Divergence` split with a single `Approval Strip`, so operators read `approve -> align -> act` immediately under the kernel.
+  It now groups `A/B Strategy Posture`, `Promotion Operating Stack`, `Promotion Case Inspector`, and `Alpha Research Inspector` under `Deferred Research / Promotion Stack`, which stays collapsed by default whenever the kernel verdict is `hold`, `manual_review`, or `watch`.
+  It now treats `Top Opportunity`, `Portfolio Candidate Drilldown`, and `Portfolio Candidate Inspector` as context-only surfaces whenever the kernel verdict is `hold`, `manual_review`, or `watch`, so approval/alignment/checklist interpretation stays first.
+  `Current Operating State` now acts as the broader `Expanded Operating Context` follow-up layer, and it stays collapsed under strong kernel verdicts until the operator finishes the approval strip read.
+  It now exposes `Experiment Routing` inside `Current Operating State` and `Approval Alignment Inspector`, so the preferred entry/execution split is tied to a representative candidate row before any follow-up review is opened.
   It also surfaces an `A/B Strategy Posture` home-section panel so operators can read `multi_strategy_ab_expansion`, `b_continuation_activation`, and `strategy_cluster_balance` together without dropping into raw dashboard JSON.
   The same home section now includes `Promotion Operating Stack`, which compresses `promotion_governance`, `promotion_review_queue`, `promotion_remediation_queue`, `promotion_clearance_tracker`, `promotion_reopen_queue`, `promotion_decision_brief`, `auto_promotion_rollout_execution`, `promotion_lifecycle_history`, and `research_promotion_operating_loop` into a single operator review surface.
   It also includes `Promotion Case Inspector`, which re-compresses the current headline promotion family into target posture, write scope, remaining guardrails, cleared guardrails, and next-move language.
-  It also includes `Validation / Checklist Review Stack`, which lines up validation top-level summaries and checklist item statuses for rollout, A/B posture, promotion stack, opportunity capture, and capital allocation without requiring raw payload inspection.
-  It also includes `Validation Case Inspector`, which re-compresses the current symbol validation case into outcome control, rollout, lifecycle, A/B posture, condition split, capture, allocator, and next-move language.
-  It also includes `Runtime Quality Inspector`, which re-compresses recent validation alerts, retry queue pressure, execution quality, and reconciliation health into a single runtime operating-quality card.
-  It also includes `Signal Funnel Inspector`, which re-compresses the current hard gate, softening queue, rollout block, and family/regime/session bottlenecks into a single funnel review card.
+  It also includes `Validation / Checklist Review Stack`, which lines up validation top-level summaries and checklist item statuses for rollout, edge experiments, A/B posture, promotion stack, opportunity capture, and capital allocation without requiring raw payload inspection, and now reads those top lines in the same `approve -> align -> act` vocabulary instead of raw `GO/NO_GO + playbook` wording.
+  It also includes `Validation Case Inspector`, which re-compresses the current symbol validation case into money funnel, outcome attribution, edge experiments, outcome control, rollout, lifecycle, A/B posture, condition split, capture, allocator, and next-move language, while carrying the same validation `approve -> align -> act` strip inside the card.
+  It also includes `Runtime Quality Inspector`, which re-compresses recent validation alerts, retry queue pressure, execution quality, and reconciliation health into a single runtime operating-quality card, and now labels the latest alert in `Approve / Act` terms so quality escalation wording matches the rest of the operator stack.
+  It also includes `Signal Funnel Inspector`, which re-compresses the current hard gate, softening queue, rollout block, family/regime/session bottlenecks, money funnel, outcome attribution, and edge experiment review into a single funnel review card.
   It also includes `Alpha Research Inspector`, which re-compresses research backlog, recommended research action, top shadow experiment, softening review, and promotion watchlist into one home-section research card.
   It also includes `Kill Condition Inspector`, which re-compresses `signal_funnel.kill_condition_automation` into stop-review verdict, trigger axis, write scope, manual-override state, and current lock posture before any live stop is armed.
   It also includes `Policy / Lock Inspector`, which re-compresses kill switch, close-only, active locks, matching locks, and rollout policies into a single home-section policy card.
@@ -399,15 +430,18 @@ The funnel matters because candidate quality is only useful if it survives portf
   It also includes `Approval Alignment Inspector`, which re-compresses dashboard/checklist/validation/candidate/operator-priority alignment into a single home-section approval card.
   It also includes `Data Freshness / Source Inspector`, which re-compresses generated timestamps, report windows, and source/report-path readiness for dashboard, validation, checklist, and execution-quality surfaces.
   It now also includes `Portfolio Candidate Drilldown` and `Checklist Evidence Drilldown`, so accepted/blocked candidate overlays and checklist evidence can be reviewed directly from the home section instead of through raw JSON blobs.
-  It also includes a dedicated `Portfolio Candidate Inspector`, which expands one representative accepted row and one representative blocked row into risk, outcome bias, allocator, A/B posture, session, and reaction evidence cards.
+  It also includes a dedicated `Portfolio Candidate Inspector`, which expands one representative accepted row and one representative blocked row into risk, outcome bias, edge focus, allocator, A/B posture, session, and reaction evidence cards.
   It also includes `Report Navigation`, which exposes local validation/checklist/execution-quality report paths as file links for deeper review after the home-section summary.
-  For repeatable browser inspection and dry-run divergence capture, use [docs/OPERATOR_UI_HOME_INSPECTION_CHECKLIST.md](/Users/yumin/Documents/trading/docs/OPERATOR_UI_HOME_INSPECTION_CHECKLIST.md), [scripts/collect_operator_surface_divergence_snapshot.py](/Users/yumin/Documents/trading/scripts/collect_operator_surface_divergence_snapshot.py), [scripts/generate_operator_session_brief.py](/Users/yumin/Documents/trading/scripts/generate_operator_session_brief.py), [scripts/notify_operator_session_brief.py](/Users/yumin/Documents/trading/scripts/notify_operator_session_brief.py), [scripts/check_operator_session_brief_automation.py](/Users/yumin/Documents/trading/scripts/check_operator_session_brief_automation.py), and [scripts/check_operator_session_brief_delivery_preflight.py](/Users/yumin/Documents/trading/scripts/check_operator_session_brief_delivery_preflight.py). The notifier supports `system` or `discord` delivery plus separate `shift-start` and `shift-end` handoff formats, and live delivery now requires both `OPERATOR_BRIEF_DRY_RUN` unset and `OPERATOR_BRIEF_ALLOW_LIVE_SEND=1`. [docs/OPERATOR_SESSION_BRIEF_AUTOMATION.md](/Users/yumin/Documents/trading/docs/OPERATOR_SESSION_BRIEF_AUTOMATION.md) documents the tick wrapper, cron examples, launchd plists, automation health checks, and delivery preflight for split shift handoff loops.
+  For repeatable browser inspection and dry-run divergence capture, use [docs/OPERATOR_UI_HOME_INSPECTION_CHECKLIST.md](/Users/yumin/Documents/trading/docs/OPERATOR_UI_HOME_INSPECTION_CHECKLIST.md), [scripts/collect_operator_surface_divergence_snapshot.py](/Users/yumin/Documents/trading/scripts/collect_operator_surface_divergence_snapshot.py), [scripts/generate_operator_session_brief.py](/Users/yumin/Documents/trading/scripts/generate_operator_session_brief.py), [scripts/notify_operator_session_brief.py](/Users/yumin/Documents/trading/scripts/notify_operator_session_brief.py), [scripts/check_operator_session_brief_automation.py](/Users/yumin/Documents/trading/scripts/check_operator_session_brief_automation.py), and [scripts/check_operator_session_brief_delivery_preflight.py](/Users/yumin/Documents/trading/scripts/check_operator_session_brief_delivery_preflight.py). The notifier supports `system` or `discord` delivery plus separate `shift-start` and `shift-end` handoff formats, now carries both the derived `candidate_surface_priority` field and an `Approval Strip` summary alongside the rest of the `5-Second Operator Kernel`, includes top-level `edge_experiment` focus (`edge_state`, preferred entry timing, preferred execution style), and also preserves representative accepted/blocked row `edge_experiment_focus` so split-test follow-up survives handoff at candidate level. Live delivery requires both `OPERATOR_BRIEF_DRY_RUN` unset and `OPERATOR_BRIEF_ALLOW_LIVE_SEND=1`. [docs/OPERATOR_SESSION_BRIEF_AUTOMATION.md](/Users/yumin/Documents/trading/docs/OPERATOR_SESSION_BRIEF_AUTOMATION.md) documents the tick wrapper, cron examples, launchd plists, automation health checks, and delivery preflight for split shift handoff loops.
 - `GET /portfolio/budget`
   Exposure, headroom, blocked reasons, accepted candidates, and `alpha_research_candidates`.
-  Accepted and blocked candidate rows may include `strategy_family`, `strategy_cluster`, `strategy_cluster_status`, `multi_strategy_overlay`, `b_continuation_activation`, `strategy_cluster_balance`, `strategy_sizing.outcome_risk_adjustment`, `outcome_bias`, and `capital_allocator` with `allocated_risk_r`.
+  It now also exposes top-candidate `edge_experiment_review`, so entry alerts and portfolio review can carry the same split-test focus (`edge_state`, preferred entry timing, preferred execution style) as validation and drill surfaces.
+  Accepted and blocked candidate rows may include `strategy_family`, `strategy_cluster`, `strategy_cluster_status`, `multi_strategy_overlay`, `b_continuation_activation`, `strategy_cluster_balance`, `strategy_sizing.outcome_risk_adjustment`, `outcome_bias`, `edge_experiment_focus`, and `capital_allocator` with `allocated_risk_r`.
 - `POST /validation/report`
   Deployment approval summary plus the full validation and research stack for one symbol.
+  It now also exposes `approval_strip_summary`, so validation topline can be read with the same `approve -> align -> act` vocabulary as the operator UI and session handoff.
   It also includes `operator_action_priority_summary` with `priority_source`, `action_family`, and `capture_context`, plus `outcome_control_trace_summary` to explain how outcome-first controls are tightening approval, sizing, and ordering.
+  It now also includes `money_funnel` and `outcome_attribution_summary` so expected-R leakage and closed-trade post-cost attribution can be read directly from the same validation surface.
   `multi_strategy_ab_summary` is the compare-only A/B coexistence layer for `A remains anchor`, `B available but guarded`, and research-only sidecar language.
   `b_continuation_activation_summary` is the compare-only first-wave B posture layer for whether `trend_continuation` should stay research-only, clear blockers, remain guarded probation, or be reviewed for guarded activation.
   `execution_friction_measurement_summary` is the compare-only execution drag verdict layer for whether measured fill conversion, slippage, latency, fee drag, reconciliation, and coverage are still within current live-confidence tolerance.
@@ -431,7 +465,9 @@ The funnel matters because candidate quality is only useful if it survives portf
   `capital_allocator_summary` explains how family-level scarce capital tilt changes portfolio allowance without changing approval authority.
 - `POST /operations/checklist`
   Operator go/no-go and playbook action based on validation, runtime, and alert evidence.
-  It includes `outcome_control_trace`, `rollout_recommendation`, `strategy_lifecycle`, `promotion_governance`, `promotion_review_queue`, `promotion_remediation_queue`, `promotion_clearance_tracker`, `promotion_reopen_queue`, `promotion_decision_brief`, `auto_promotion_rollout_execution`, `promotion_lifecycle_history`, `research_promotion_operating_loop`, `multi_strategy_ab_expansion`, `b_continuation_activation`, `execution_friction_measurement`, `forward_stress_regime_validation`, `kill_condition_automation`, `b_continuation_edge_validation`, `strategy_cluster_balance`, `a_strategy_post_cost_edge_validation`, `positive_evidence_expansion`, `outcome_bucket_granularity`, `opportunity_capture`, and `capital_allocator` as operator-facing review items.
+  It now also exposes `approval_strip_summary`, so the checklist topline uses the same `approve -> align -> act` vocabulary as validation, the operator UI, and session handoff.
+  It includes `outcome_control_trace`, `money_funnel`, `outcome_attribution`, `rollout_recommendation`, `strategy_lifecycle`, `promotion_governance`, `promotion_review_queue`, `promotion_remediation_queue`, `promotion_clearance_tracker`, `promotion_reopen_queue`, `promotion_decision_brief`, `auto_promotion_rollout_execution`, `promotion_lifecycle_history`, `research_promotion_operating_loop`, `multi_strategy_ab_expansion`, `b_continuation_activation`, `execution_friction_measurement`, `forward_stress_regime_validation`, `kill_condition_automation`, `b_continuation_edge_validation`, `strategy_cluster_balance`, `a_strategy_post_cost_edge_validation`, `positive_evidence_expansion`, `outcome_bucket_granularity`, `opportunity_capture`, and `capital_allocator` as operator-facing review items.
+  `money_funnel` and `outcome_attribution` stay advisory-only inside the checklist: they are there to expose expected-R leakage and post-cost drag decomposition without creating a second approval authority.
 - `GET /validation/alpha-research`
   Research backlog for quality-gate near-miss candidates prioritized by reason, family, regime, and session.
 
@@ -460,6 +496,7 @@ These are compare-only readability aliases for operators. They do not replace `r
   Get rollout-aware approval result for a plan.
 - `POST /alerts/test`
   Send an operator alert smoke test through the configured alert pipeline.
+  The response now also carries `approval_strip_summary`, so manual alert drills can be read in the same `approve -> align -> act` vocabulary before falling back to raw deployment/playbook debug fields.
 
 ## Full API Catalog
 
@@ -627,11 +664,26 @@ MICRO_LIVE preflight:
 ./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --days 7
 ```
 
+The preflight output now includes `approval_surfaces`, `edge_experiment_review`, and representative accepted/blocked candidate split focus, so dashboard, validation, checklist, and the current entry/execution hypothesis can be read together before final live sign-off.
+When split review targets are available, the preflight `next_steps` now also prints a ready-to-run `scripts/run_split_review_followup.py` command for the current symbol.
+
+Split review followup packet:
+
+```bash
+./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --days 7 --action auto
+```
+
+The followup packet turns the latest `operator_action_priority` and `edge_experiment_review` into a concrete `selected_action + target_contract + review_steps` bundle, so split review prep stops being a manual copy/paste exercise.
+The operator surface divergence snapshot, session brief, and stage monitor now also carry the same ready-to-run followup command on each `entry_timing_review_target` / `execution_style_review_target` line.
+The server-side `operator_action_priority` payload now also carries `top_action_followup_command` plus per-row `next_actions[].followup_command` for split-review actions, so dashboard, validation, checklist, and UI can point to the same runnable packet command.
+
 Paper candidate drill:
 
 ```bash
 ./.venv/bin/python scripts/run_paper_candidate_drill.py --submit-paper
 ```
+
+The paper drill output now includes a derived `approval_strip_summary`, top-level `edge_experiment_review`, and `candidate_edge_experiment_focus`, so PAPER submit readiness and the current entry/execution split focus can be read in the same operator vocabulary.
 
 Paper candidate watcher:
 
@@ -639,11 +691,15 @@ Paper candidate watcher:
 ./.venv/bin/python scripts/watch_paper_candidate_drill.py --interval-seconds 900 --max-attempts 8 --submit-paper
 ```
 
+The watcher output now also carries top-level `edge_experiment_review` plus `candidate_edge_experiment_focus`, so the final eligible attempt preserves the same split-test focus without reopening the nested drill payload.
+
 Post-live pruning review:
 
 ```bash
 ./.venv/bin/python scripts/run_post_live_pruning_review.py --symbol BTCUSDC --days 7
 ```
+
+The pruning review output now includes `approval_surfaces`, `edge_experiment_review`, and representative accepted/blocked candidate split focus, so the reopen decision stays separate from the current split-test focus while still using the same operator vocabulary.
 
 Execution incident drill:
 

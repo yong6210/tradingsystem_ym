@@ -10,6 +10,7 @@ from app.core.enums import PlanState, RiskGateState
 from app.db.models import Plan
 from app.db.repositories import PlanRepository
 from app.services.b_continuation_activation import BContinuationActivationService
+from app.services.edge_experiment_review import build_edge_experiment_review, summarize_edge_experiment_review
 from app.services.scanner import ScannerService, _runtime_deployment_language
 from app.services.strategy_mode import StrategyModeService
 from app.services.strategy_cluster_balance import StrategyClusterBalanceService
@@ -78,6 +79,141 @@ def _portfolio_playbook_mapping(deployment_language: dict[str, str]) -> dict[str
 
 
 class PortfolioBudgetReportService:
+    @staticmethod
+    def _edge_experiment_lookup(
+        *,
+        outcome_inputs_by_symbol: dict[str, dict[str, Any]] | None,
+    ) -> dict[str, dict[str, Any]]:
+        lookup: dict[str, dict[str, Any]] = {}
+        for symbol, inputs in dict(outcome_inputs_by_symbol or {}).items():
+            symbol_key = str(symbol or "").upper()
+            if not symbol_key:
+                continue
+            symbol_inputs = dict(inputs or {})
+            review = summarize_edge_experiment_review(
+                build_edge_experiment_review(
+                    score_to_outcome_funnel=dict(symbol_inputs.get("score_to_outcome_funnel_summary") or {})
+                )
+            )
+            if not review:
+                continue
+            lookup[symbol_key] = {
+                "available": bool(review.get("available", False)),
+                "advisory_only": bool(review.get("advisory_only", True)),
+                "edge_state": str(review.get("edge_state") or "insufficient_edge_measurement"),
+                "true_edge_ratio": round(float(review.get("true_edge_ratio", 0.0) or 0.0), 4),
+                "entry_timing_preferred_variant": str(review.get("entry_timing_preferred_variant") or "none"),
+                "execution_style_preferred_variant": str(review.get("execution_style_preferred_variant") or "none"),
+                "entry_timing_comparison_ready": bool(review.get("entry_timing_comparison_ready", False)),
+                "execution_style_comparison_ready": bool(review.get("execution_style_comparison_ready", False)),
+                "summary": str(review.get("summary") or ""),
+            }
+        return lookup
+
+    @staticmethod
+    def _annotate_edge_experiment_rows(
+        rows: list[dict[str, Any]],
+        *,
+        edge_experiment_lookup: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        annotated_rows: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            symbol = str(item.get("symbol") or "").upper()
+            edge_focus = dict(edge_experiment_lookup.get(symbol) or {})
+            item["edge_experiment_focus"] = edge_focus or None
+            annotated_rows.append(item)
+        return annotated_rows
+
+    @staticmethod
+    def _edge_experiment_review(
+        *,
+        accepted_candidates: list[dict[str, Any]],
+        blocked_candidates: list[dict[str, Any]],
+        alpha_research_candidates: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        candidate_groups = (
+            ("ACTIONABLE_ENTRY", accepted_candidates),
+            ("BLOCKED_SETUP", blocked_candidates),
+            ("RESEARCH_ONLY_SETUP", alpha_research_candidates),
+        )
+        for focus_status, rows in candidate_groups:
+            for row in rows:
+                review = dict(row.get("edge_experiment_focus") or {})
+                if not review:
+                    continue
+                symbol = str(row.get("symbol") or "").upper()
+                enriched = dict(review)
+                enriched["focus_symbol"] = symbol
+                enriched["focus_status"] = focus_status
+                enriched["focus_family"] = str(row.get("strategy_family") or "unknown")
+                return enriched
+        return None
+
+    @staticmethod
+    def _approval_strip_summary(
+        *,
+        deployment_language: dict[str, str] | None,
+        playbook: dict[str, str] | None,
+    ) -> dict[str, Any] | None:
+        deployment = dict(deployment_language or {})
+        playbook_payload = dict(playbook or {})
+        if not deployment and not playbook_payload:
+            return None
+
+        deployment_go_no_go = str(deployment.get("deployment_go_no_go") or "")
+        deployment_code = str(deployment.get("deployment_code") or "")
+        deployment_message = str(deployment.get("deployment_message") or "")
+        playbook_go_no_go = str(playbook_payload.get("playbook_go_no_go") or "")
+        playbook_action = str(playbook_payload.get("playbook_action") or "")
+        playbook_message = str(playbook_payload.get("playbook_message") or "")
+
+        approve_value = "approval usable"
+        if deployment_go_no_go == "NO_GO":
+            approve_value = "runtime no_go"
+        elif deployment_go_no_go == "MANUAL_REVIEW":
+            approve_value = "manual review first"
+
+        if deployment_go_no_go and playbook_go_no_go and deployment_go_no_go != playbook_go_no_go:
+            align_value = "playbook_drift"
+            align_reason = " | ".join(
+                part
+                for part in [
+                    f"deployment={deployment_go_no_go}",
+                    f"playbook={playbook_go_no_go}",
+                    deployment_message or playbook_message,
+                ]
+                if part
+            )
+        else:
+            align_value = "aligned"
+            align_reason = " | ".join(
+                part
+                for part in [
+                    f"deployment={deployment_go_no_go}" if deployment_go_no_go else "",
+                    f"playbook={playbook_go_no_go}" if playbook_go_no_go else "",
+                    deployment_message or playbook_message,
+                ]
+                if part
+            ) or "portfolio runtime approval is aligned"
+
+        priority_map = {
+            "NO_GO": "urgent",
+            "MANUAL_REVIEW": "watch",
+            "GO": "monitor",
+        }
+        return {
+            "primary_reason": deployment_message or playbook_message or "portfolio approval strip unavailable",
+            "approve_value": approve_value,
+            "approve_reason": deployment_message or playbook_message or "portfolio runtime approval unavailable",
+            "align_value": align_value,
+            "align_reason": align_reason,
+            "act_value": playbook_action or "review_portfolio_runtime_state",
+            "act_reason": playbook_message or deployment_message or "portfolio runtime action unavailable",
+            "act_priority_level": priority_map.get(deployment_go_no_go or playbook_go_no_go, "monitor"),
+            "deployment_code": deployment_code,
+        }
+
     def __init__(
         self,
         *,
@@ -294,6 +430,12 @@ class PortfolioBudgetReportService:
             f"- playbook_code: {payload['playbook_code']}",
             f"- playbook_action: {payload['playbook_action']}",
             f"- playbook_message: {payload['playbook_message']}",
+            (
+                f"- approval_strip: approve={payload['approval_strip_summary']['approve_value']} | "
+                f"align={payload['approval_strip_summary']['align_value']} | "
+                f"act={payload['approval_strip_summary']['act_value']} | "
+                f"priority={payload['approval_strip_summary']['act_priority_level']}"
+            ),
             f"- risk_state: {payload['risk_state']}",
             f"- risk_reason: {payload['risk_reason']}",
             f"- operating_lock: {payload['operating_lock']}",
@@ -518,6 +660,21 @@ class PortfolioBudgetReportService:
             alpha_research_candidates,
             strategy_cluster_balance_summary=strategy_cluster_balance_summary,
         )
+        edge_experiment_lookup = self._edge_experiment_lookup(
+            outcome_inputs_by_symbol=outcome_inputs_by_symbol,
+        )
+        accepted_candidates = self._annotate_edge_experiment_rows(
+            accepted_candidates,
+            edge_experiment_lookup=edge_experiment_lookup,
+        )
+        blocked_candidates = self._annotate_edge_experiment_rows(
+            blocked_candidates,
+            edge_experiment_lookup=edge_experiment_lookup,
+        )
+        alpha_research_candidates = self._annotate_edge_experiment_rows(
+            alpha_research_candidates,
+            edge_experiment_lookup=edge_experiment_lookup,
+        )
 
         blocked_reason_counts = Counter(str(row.get("block_reason", "unknown")) for row in blocked_candidates)
         deployment_language = _runtime_deployment_language(
@@ -526,6 +683,15 @@ class PortfolioBudgetReportService:
             operating_lock=operating_lock,
         )
         playbook = _portfolio_playbook_mapping(deployment_language)
+        approval_strip_summary = self._approval_strip_summary(
+            deployment_language=deployment_language,
+            playbook=playbook,
+        )
+        edge_experiment_review = self._edge_experiment_review(
+            accepted_candidates=accepted_candidates,
+            blocked_candidates=blocked_candidates,
+            alpha_research_candidates=alpha_research_candidates,
+        )
 
         payload: dict[str, Any] = {
             "generated_at": now.isoformat(),
@@ -538,6 +704,8 @@ class PortfolioBudgetReportService:
             "playbook_code": playbook["playbook_code"],
             "playbook_action": playbook["playbook_action"],
             "playbook_message": playbook["playbook_message"],
+            "approval_strip_summary": approval_strip_summary,
+            "edge_experiment_review": edge_experiment_review,
             "risk_state": risk_state.value,
             "risk_reason": risk_reason,
             "operating_lock": dict(operating_lock or {}),

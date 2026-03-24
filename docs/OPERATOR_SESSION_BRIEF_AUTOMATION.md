@@ -1,6 +1,14 @@
 # Operator Session Brief Automation
 
 `notify_operator_session_brief.py` can already render a dry-run handoff message.
+The handoff now carries the same `5-Second Operator Kernel` fields as the UI home top section: `kernel_verdict`, `money_leak_r`, `strongest_drag_source`, `outcome_control_tier`, `rollout_recommendation`, and the derived `candidate_surface_priority`.
+It now also carries the same `Approval Strip` ordering as the UI home top section, so the brief headline and notifier first lines start with `approve -> align -> act`.
+It now also carries `edge_experiment` focus from the funnel snapshot: `edge_state`, `entry_timing_focus`, and `execution_style_focus`, so split-test follow-up survives shift handoff.
+It now also carries representative accepted and blocked candidate focus from `portfolio_summary`, so the handoff preserves row-level `edge_experiment_focus` instead of only the top-level funnel hint.
+It now also carries `entry_timing_review_target` and `execution_style_review_target`, so the handoff can say which `split review action -> candidate row` pairing should be reviewed next.
+Those target lines now also include the ready-to-run `scripts/run_split_review_followup.py` command, so shift handoff can move straight from review target to review packet generation.
+The markdown brief now uses the same `approve -> align -> act` wording again inside `Surface Alignment`, so `dashboard`, `validation`, and `checklist` detail lines do not fall back to raw `deployment_go_no_go / playbook_action` phrasing.
+The notifier detail lines now follow the same rule, so `dashboard`, `validation`, and `checklist` are summarized as per-surface `approve / align / act` lines instead of raw deployment and playbook dumps.
 Use the wrapper below so channel, brief mode, state file, and latest run artifact stay in one place.
 
 The wrapper prefers `/Users/yumin/Documents/trading/.venv/bin/python` and falls back to `python3` if the virtualenv binary is not present.

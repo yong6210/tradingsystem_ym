@@ -2,6 +2,7 @@ from app.services.deployment_contracts import (
     alert_contract_defaults,
     approval_summary_passthrough,
     validation_alert_contract,
+    validation_alert_strip_summary,
     validation_report_contract,
 )
 
@@ -91,6 +92,25 @@ def test_validation_alert_contract_accepts_plain_playbook_fields() -> None:
     )
     assert contract["approval_playbook_go_no_go"] == "MANUAL_REVIEW"
     assert contract["approval_playbook_action"] == "review_alignment_before_rollout"
+
+
+def test_validation_alert_strip_summary_derives_operator_vocabulary() -> None:
+    summary = validation_alert_strip_summary(
+        {
+            "approval_topline_summary_line": "winner=true_threshold; worst=latency/WARN/approximation; promotion=stay_on_prototype",
+            "deployment_go_no_go": "MANUAL_REVIEW",
+            "deployment_message": "MANUAL_REVIEW: review alignment before rollout.",
+            "approval_playbook_go_no_go": "MANUAL_REVIEW",
+            "approval_playbook_action": "review_alignment_before_rollout",
+            "approval_playbook_message": "MANUAL_REVIEW: review alignment before rollout.",
+        }
+    )
+
+    assert summary["approve_value"] == "manual review first"
+    assert summary["align_value"] == "aligned"
+    assert summary["act_value"] == "review_alignment_before_rollout"
+    assert summary["act_priority_level"] == "watch"
+    assert summary["primary_reason"].startswith("winner=true_threshold;")
 
 
 def test_alert_contract_defaults_fills_manual_review_when_contract_is_missing() -> None:

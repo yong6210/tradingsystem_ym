@@ -91,6 +91,22 @@ def test_operational_checklist_generates_report_and_statuses(tmp_path: Path) -> 
                         "family_focus": {"key": "trend_continuation"},
                         "maturity": "thin_activity",
                     },
+                    "experiment_context": {
+                        "available": True,
+                        "edge_state": "watch_edge",
+                        "entry_timing_preferred_variant": "early_limit",
+                        "execution_style_preferred_variant": "passive_limit",
+                        "entry_timing_target": {
+                            "symbol": "BTCUSDC",
+                            "status": "ACTIONABLE_ENTRY",
+                            "strategy_family": "trend_continuation",
+                        },
+                        "execution_style_target": {
+                            "symbol": "BTCUSDC",
+                            "status": "ACTIONABLE_ENTRY",
+                            "strategy_family": "trend_continuation",
+                        },
+                    },
                     "advisory_only": True,
                 },
                 "outcome_control_trace_available": True,
@@ -105,6 +121,100 @@ def test_operational_checklist_generates_report_and_statuses(tmp_path: Path) -> 
                     "portfolio_bias_tier": "negative",
                     "portfolio_bias_score_delta": -2.5,
                     "top_reason_codes": ["execution_degradation:manual_review", "family_outcome:negative"],
+                },
+                "score_to_outcome_funnel_summary": {
+                    "available": True,
+                    "money_funnel": {
+                        "available": True,
+                        "snapshot_expected_r": {
+                            "runtime_candidates": 1.42,
+                            "accepted_candidates": 0.56,
+                            "blocked_candidates": 0.86,
+                        },
+                        "historical_expected_r": {
+                            "generated": 1.84,
+                            "submitted": 1.29,
+                            "filled": 0.96,
+                            "closed": 0.96,
+                        },
+                        "historical_realized_r": {
+                            "raw_closed": 0.84,
+                            "post_cost_closed": 0.72,
+                            "cost_drag": -0.12,
+                        },
+                        "historical_gap_r": {
+                            "generated_to_submitted": 0.55,
+                            "submitted_to_filled": 0.33,
+                            "filled_to_closed": 0.0,
+                            "closed_expected_to_raw_realized": -0.12,
+                            "closed_expected_to_post_cost_realized": -0.24,
+                        },
+                        "summary": "expected_closed_r=0.9600, post_cost_closed_r=0.7200, submitted_to_filled_gap_r=0.3300",
+                    },
+                },
+                "outcome_attribution_available": True,
+                "outcome_attribution_summary": {
+                    "available": True,
+                    "advisory_only": True,
+                    "confidence": "medium",
+                    "closed_trade_count": 6,
+                    "strategy_component_r": 0.96,
+                    "execution_component_r": -0.12,
+                    "condition_component_r": -0.12,
+                    "fill_capture_gap_r": 0.33,
+                    "closed_expected_r": 0.96,
+                    "closed_post_cost_realized_r": 0.72,
+                    "closed_post_cost_delta_r": -0.24,
+                    "strongest_drag_source": "fill_capture_gap",
+                    "summary": "The largest current money leak is expected edge that never converted from submit to fill; treat execution conversion and missed-fill impact as the first review axis.",
+                    "reason_codes": [
+                        "closed_trades:6",
+                        "strongest_drag:fill_capture_gap",
+                        "friction:watch_friction",
+                        "execution_axis:slippage_state",
+                        "condition_focus:session",
+                        "condition_bucket:dead_session",
+                    ],
+                    "source_summary": {
+                        "friction_state": "watch_friction",
+                        "weakest_execution_axis": "slippage_state",
+                        "condition_focus": "session",
+                        "condition_bucket": "dead_session",
+                        "money_funnel_summary": "expected_closed_r=0.9600, post_cost_closed_r=0.7200, submitted_to_filled_gap_r=0.3300",
+                    },
+                },
+                "edge_experiment_review_available": True,
+                "edge_experiment_review_summary": {
+                    "available": True,
+                    "advisory_only": True,
+                    "edge_state": "watch_edge",
+                    "closed_trade_count": 6,
+                    "true_edge_ratio": 0.75,
+                    "recent_true_edge_ratio": 0.7778,
+                    "prior_true_edge_ratio": 0.7143,
+                    "edge_decay_rate": 0.0635,
+                    "edge_stability": 0.0635,
+                    "entry_timing_available": True,
+                    "entry_timing_comparison_ready": True,
+                    "entry_timing_preferred_variant": "early_limit",
+                    "entry_timing_recommendation_reason": "better_fill_capture_ratio",
+                    "execution_style_available": True,
+                    "execution_style_comparison_ready": True,
+                    "execution_style_preferred_variant": "passive_limit",
+                    "execution_style_recommendation_reason": "better_fill_capture_ratio",
+                    "summary": "Post-cost true edge is positive but unstable; prefer controlled split tests over structural rewrites.",
+                    "reason_codes": [
+                        "edge_state:watch_edge",
+                        "true_edge_ratio:0.7500",
+                        "entry_timing:better_fill_capture_ratio",
+                        "execution_style:better_fill_capture_ratio",
+                    ],
+                    "source_summary": {
+                        "recent_window_closed": 3,
+                        "prior_window_closed": 3,
+                        "entry_timing_preferred_variant": "early_limit",
+                        "execution_style_preferred_variant": "passive_limit",
+                    },
                 },
                 "rollout_recommendation_available": True,
                 "rollout_recommendation_summary": {
@@ -921,6 +1031,12 @@ def test_operational_checklist_generates_report_and_statuses(tmp_path: Path) -> 
     body = path.read_text(encoding="utf-8")
     assert "Operational Checklist" in body
     assert "deployment_go_no_go: NO_GO" in body
+    assert "## Approval Strip" in body
+    assert "- approve=validation/checklist no_go | align=aligned | act=clear_blocking_operational_items_before_rollout | priority=urgent" in body
+    assert payload["approval_strip_summary"]["approve_value"] == "validation/checklist no_go"
+    assert payload["approval_strip_summary"]["align_value"] == "aligned"
+    assert payload["approval_strip_summary"]["act_value"] == "clear_blocking_operational_items_before_rollout"
+    assert payload["approval_strip_summary"]["act_priority_level"] == "urgent"
     assert any(item["item_id"] == "alert_test_recent" and item["status"] == "PASS" for item in payload["checks"])
     assert any(item["item_id"] == "session_guidance" and item["status"] == "PASS" for item in payload["checks"])
     assert any(
@@ -931,13 +1047,41 @@ def test_operational_checklist_generates_report_and_statuses(tmp_path: Path) -> 
     assert operator_action_item["status"] == "WARN"
     assert operator_action_item["blocking"] is False
     assert operator_action_item["evidence"]["top_action"] == "review_runtime_execution_drag_before_expansion"
+    assert operator_action_item["evidence"]["top_action_followup_command"] == ""
     assert operator_action_item["evidence"]["priority_source"] == "execution_degradation"
     assert operator_action_item["evidence"]["action_family"] == "execution_review"
     assert operator_action_item["evidence"]["capture_context"]["family_focus"]["key"] == "trend_continuation"
+    assert operator_action_item["evidence"]["experiment_context"]["entry_timing_target"]["symbol"] == "BTCUSDC"
+    assert operator_action_item["evidence"]["experiment_context"]["entry_timing_target"]["followup_command"].endswith(
+        "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review"
+    )
+    assert operator_action_item["evidence"]["experiment_context"]["execution_style_target"]["symbol"] == "BTCUSDC"
+    assert operator_action_item["evidence"]["experiment_context"]["execution_style_target"]["followup_command"].endswith(
+        "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action run_execution_style_split_review"
+    )
+    assert operator_action_item["evidence"]["next_actions"][0]["followup_command"] == ""
     outcome_control_item = next(item for item in payload["checks"] if item["item_id"] == "outcome_control_trace")
     assert outcome_control_item["status"] == "WARN"
     assert outcome_control_item["blocking"] is False
     assert outcome_control_item["evidence"]["approval_penalty_tier"] == "downgrade_to_manual"
+    money_funnel_item = next(item for item in payload["checks"] if item["item_id"] == "money_funnel")
+    assert money_funnel_item["status"] == "WARN"
+    assert money_funnel_item["blocking"] is False
+    assert money_funnel_item["evidence"]["historical_gap_r"]["submitted_to_filled"] == 0.33
+    assert money_funnel_item["evidence"]["historical_gap_r"]["closed_expected_to_post_cost_realized"] == -0.24
+    outcome_attribution_item = next(item for item in payload["checks"] if item["item_id"] == "outcome_attribution")
+    assert outcome_attribution_item["status"] == "WARN"
+    assert outcome_attribution_item["blocking"] is False
+    assert outcome_attribution_item["evidence"]["strongest_drag_source"] == "fill_capture_gap"
+    assert outcome_attribution_item["evidence"]["fill_capture_gap_r"] == 0.33
+    assert outcome_attribution_item["evidence"]["closed_post_cost_delta_r"] == -0.24
+    edge_experiment_item = next(item for item in payload["checks"] if item["item_id"] == "edge_experiment_review")
+    assert edge_experiment_item["status"] == "WARN"
+    assert edge_experiment_item["blocking"] is False
+    assert edge_experiment_item["evidence"]["edge_state"] == "watch_edge"
+    assert edge_experiment_item["evidence"]["true_edge_ratio"] == 0.75
+    assert edge_experiment_item["evidence"]["entry_timing_preferred_variant"] == "early_limit"
+    assert edge_experiment_item["evidence"]["execution_style_preferred_variant"] == "passive_limit"
     rollout_item = next(item for item in payload["checks"] if item["item_id"] == "rollout_recommendation")
     assert rollout_item["status"] == "MANUAL"
     assert rollout_item["blocking"] is True

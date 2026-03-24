@@ -25,19 +25,44 @@ notify_entry_surface = _load_module(
 
 
 def _budget_payload(*, deployment_go_no_go: str = "GO") -> dict:
+    deployment_message = (
+        "GO: runtime gate is open for candidate review."
+        if deployment_go_no_go == "GO"
+        else "MANUAL_REVIEW: runtime risk gate is throttled. Reduce size and review before acting."
+    )
+    playbook_action = (
+        "continue_candidate_review_under_portfolio_caps"
+        if deployment_go_no_go == "GO"
+        else "review_throttled_gate_and_reduce_size"
+    )
     return {
         "universe": "usdc_perp_top30",
         "deployment_go_no_go": deployment_go_no_go,
         "deployment_code": "go_runtime_gate_open" if deployment_go_no_go == "GO" else "manual_review_risk_gate_throttled",
-        "deployment_message": (
-            "GO: runtime gate is open for candidate review."
-            if deployment_go_no_go == "GO"
-            else "MANUAL_REVIEW: runtime risk gate is throttled. Reduce size and review before acting."
-        ),
+        "deployment_message": deployment_message,
         "playbook_go_no_go": deployment_go_no_go,
-        "playbook_action": "continue_candidate_review_under_portfolio_caps"
-        if deployment_go_no_go == "GO"
-        else "review_throttled_gate_and_reduce_size",
+        "playbook_action": playbook_action,
+        "approval_strip_summary": {
+            "primary_reason": deployment_message,
+            "approve_value": "approval usable" if deployment_go_no_go == "GO" else "manual review first",
+            "approve_reason": deployment_message,
+            "align_value": "aligned",
+            "align_reason": deployment_message,
+            "act_value": playbook_action,
+            "act_reason": deployment_message,
+            "act_priority_level": "monitor" if deployment_go_no_go == "GO" else "watch",
+        },
+        "edge_experiment_review": {
+            "available": True,
+            "advisory_only": True,
+            "edge_state": "watch_edge",
+            "true_edge_ratio": 0.81,
+            "entry_timing_preferred_variant": "early_limit",
+            "execution_style_preferred_variant": "passive_limit",
+            "focus_symbol": "BTCUSDC",
+            "focus_status": "ACTIONABLE_ENTRY",
+            "summary": "Prefer split tests before structural entry rewrites.",
+        },
         "accepted_candidates": [
             {
                 "symbol": "BTCUSDC",
@@ -50,6 +75,11 @@ def _budget_payload(*, deployment_go_no_go: str = "GO") -> dict:
                 "adjusted_rank_score": 88.4,
                 "final_rank_score": 88.4,
                 "thesis_fingerprint": {"strategy_family": "trend_continuation"},
+                "edge_experiment_focus": {
+                    "edge_state": "watch_edge",
+                    "entry_timing_preferred_variant": "early_limit",
+                    "execution_style_preferred_variant": "passive_limit",
+                },
             }
         ],
         "blocked_candidates": [
@@ -66,6 +96,11 @@ def _budget_payload(*, deployment_go_no_go: str = "GO") -> dict:
                 "block_reason": "risk_budget_below_min",
                 "block_reason_message": "Blocked: portfolio risk budget score is below the minimum threshold.",
                 "thesis_fingerprint": {"strategy_family": "sweep_reversal"},
+                "edge_experiment_focus": {
+                    "edge_state": "fragile_edge",
+                    "entry_timing_preferred_variant": "reaction_confirmed",
+                    "execution_style_preferred_variant": "market",
+                },
             },
             {
                 "symbol": "SOLUSDC",
@@ -84,6 +119,11 @@ def _budget_payload(*, deployment_go_no_go: str = "GO") -> dict:
                 "alpha_research_reason_message": "Research-only: range reversal is interesting but not live-tradable yet.",
                 "alpha_research_softened_risk_r": 0.1,
                 "thesis_fingerprint": {"strategy_family": "range_rotation"},
+                "edge_experiment_focus": {
+                    "edge_state": "insufficient_edge_measurement",
+                    "entry_timing_preferred_variant": "none",
+                    "execution_style_preferred_variant": "none",
+                },
             },
         ],
         "alpha_research_candidates": [
@@ -99,6 +139,11 @@ def _budget_payload(*, deployment_go_no_go: str = "GO") -> dict:
                 "alpha_research_reason_message": "Research-only: range reversal is interesting but not live-tradable yet.",
                 "alpha_research_softened_risk_r": 0.1,
                 "thesis_fingerprint": {"strategy_family": "range_rotation"},
+                "edge_experiment_focus": {
+                    "edge_state": "insufficient_edge_measurement",
+                    "entry_timing_preferred_variant": "none",
+                    "execution_style_preferred_variant": "none",
+                },
             }
         ],
     }
@@ -110,6 +155,10 @@ def test_build_entry_snapshot_maps_rows_to_three_statuses():
     assert snapshot["counts"][notify_entry_surface.ACTIONABLE_ENTRY] == 1
     assert snapshot["counts"][notify_entry_surface.BLOCKED_SETUP] == 1
     assert snapshot["counts"][notify_entry_surface.RESEARCH_ONLY_SETUP] == 1
+    assert snapshot["approval_strip"]["approve_value"] == "approval usable"
+    assert snapshot["approval_strip"]["act_value"] == "continue_candidate_review_under_portfolio_caps"
+    assert snapshot["edge_experiment_review"]["edge_state"] == "watch_edge"
+    assert snapshot["sections"][notify_entry_surface.ACTIONABLE_ENTRY][0]["edge_experiment_focus"]["edge_state"] == "watch_edge"
     assert snapshot["sections"][notify_entry_surface.ACTIONABLE_ENTRY][0]["symbol"] == "BTCUSDC"
     assert snapshot["sections"][notify_entry_surface.BLOCKED_SETUP][0]["symbol"] == "ETHUSDC"
     assert snapshot["sections"][notify_entry_surface.RESEARCH_ONLY_SETUP][0]["symbol"] == "SOLUSDC"
@@ -137,6 +186,20 @@ def test_render_message_includes_all_sections_and_reasons():
     message = notify_entry_surface.render_message(snapshot)
 
     assert "Trading entry surface alert" in message
+    assert (
+        "approval_strip: approve=approval usable | align=aligned | "
+        "act=continue_candidate_review_under_portfolio_caps | priority=monitor"
+    ) in message
+    assert (
+        "contract_trace: approve=approval usable | align=aligned | "
+        "act=continue_candidate_review_under_portfolio_caps | runtime=GO/go_runtime_gate_open | playbook=GO"
+    ) in message
+    assert (
+        "edge_experiment: state=watch_edge | entry_timing=early_limit | execution_style=passive_limit | "
+        "true_edge=0.8100 | focus=BTCUSDC/ACTIONABLE_ENTRY"
+    ) in message
+    assert "edge=watch_edge | split=early_limit/passive_limit" in message
+    assert "edge=fragile_edge | split=reaction_confirmed/market" in message
     assert notify_entry_surface.ACTIONABLE_ENTRY in message
     assert notify_entry_surface.BLOCKED_SETUP in message
     assert notify_entry_surface.RESEARCH_ONLY_SETUP in message

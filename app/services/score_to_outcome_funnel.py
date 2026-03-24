@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.core.config import Settings, get_settings
@@ -55,6 +55,54 @@ class ScoreToOutcomeFunnelService:
         validity = dict(getattr(plan, "validity", {}) or {})
         return str(validity.get("regime") or "unknown")
 
+    @staticmethod
+    def _entry_model_from_plan(plan: Plan | None) -> str:
+        return str(getattr(plan, "entry_model", "") or "unknown").upper()
+
+    @staticmethod
+    def _entry_model_from_row(row: dict[str, Any]) -> str:
+        payload = dict(row or {})
+        validity = dict(payload.get("validity") or {})
+        return str(payload.get("entry_model") or validity.get("entry_model") or "unknown").upper()
+
+    @staticmethod
+    def _entry_timing_variant(entry_model: str) -> str:
+        model = str(entry_model or "").upper()
+        if model == "LIMIT":
+            return "early_limit"
+        if model in {"CONFIRM", "SWEEP_CONFIRM"}:
+            return "reaction_confirmed"
+        return "unknown"
+
+    @staticmethod
+    def _execution_mode_from_submission(submission: OrderSubmission | None) -> str:
+        return str(getattr(submission, "execution_mode", "") or "unknown").upper()
+
+    @staticmethod
+    def _execution_mode_from_row(row: dict[str, Any]) -> str:
+        payload = dict(row or {})
+        validity = dict(payload.get("validity") or {})
+        return str(
+            payload.get("allowed_execution_mode")
+            or payload.get("execution_mode")
+            or validity.get("allowed_execution_mode")
+            or "unknown"
+        ).upper()
+
+    @staticmethod
+    def _execution_style(*, order_type: Any = None, entry_model: Any = None) -> str:
+        order_type_value = str(order_type or "").upper()
+        if order_type_value in {"LIMIT", "LIMIT_MAKER"}:
+            return "passive_limit"
+        if order_type_value in {"MARKET", "STOP_MARKET"}:
+            return "market"
+        model = str(entry_model or "").upper()
+        if model == "LIMIT":
+            return "passive_limit"
+        if model in {"CONFIRM", "SWEEP_CONFIRM"}:
+            return "market"
+        return "unknown"
+
     def _historical_session(
         self,
         *,
@@ -99,6 +147,51 @@ class ScoreToOutcomeFunnelService:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+    @classmethod
+    def _expected_r_from_plan(cls, plan: Plan | None) -> float:
+        if plan is None:
+            return 0.0
+        validity = dict(getattr(plan, "validity", {}) or {})
+        expected_at_size = cls._float_or_none(validity.get("expected_ev_at_recommended_size_r"))
+        if expected_at_size is not None:
+            return float(expected_at_size)
+
+        expected_ev = cls._float_or_none(validity.get("expected_ev_r"))
+        recommended_risk = cls._float_or_none(validity.get("recommended_risk_r"))
+        if expected_ev is not None and recommended_risk is not None:
+            return float(expected_ev * recommended_risk)
+        if expected_ev is not None:
+            return float(expected_ev)
+
+        plan_ev = cls._float_or_none(getattr(plan, "ev", None))
+        if plan_ev is None:
+            return 0.0
+        if recommended_risk is not None:
+            return float(plan_ev * recommended_risk)
+        return float(plan_ev)
+
+    @classmethod
+    def _expected_r_from_row(cls, row: dict[str, Any]) -> float:
+        payload = dict(row or {})
+        expected_at_size = cls._float_or_none(
+            payload.get("expected_ev_at_recommended_size_r")
+            or dict(payload.get("validity") or {}).get("expected_ev_at_recommended_size_r")
+        )
+        if expected_at_size is not None:
+            return float(expected_at_size)
+
+        expected_ev = cls._float_or_none(payload.get("expected_ev_r"))
+        if expected_ev is None:
+            expected_ev = cls._float_or_none(dict(payload.get("validity") or {}).get("expected_ev_r"))
+        recommended_risk = cls._float_or_none(payload.get("recommended_risk_r"))
+        if recommended_risk is None:
+            recommended_risk = cls._float_or_none(dict(payload.get("validity") or {}).get("recommended_risk_r"))
+        if expected_ev is not None and recommended_risk is not None:
+            return float(expected_ev * recommended_risk)
+        if expected_ev is not None:
+            return float(expected_ev)
+        return 0.0
 
     @classmethod
     def _volatility_bucket_from_values(
@@ -240,11 +333,80 @@ class ScoreToOutcomeFunnelService:
             "runtime_candidates": 0,
             "accepted_candidates": 0,
             "blocked_candidates": 0,
+            "runtime_expected_r": 0.0,
+            "accepted_expected_r": 0.0,
+            "blocked_expected_r": 0.0,
             "submitted_ids": set(),
             "filled_ids": set(),
             "closed_ids": set(),
             "profitable_ids": set(),
             "baseline_cost_profitable_ids": set(),
+            "submitted_expected_r": 0.0,
+            "filled_expected_r": 0.0,
+            "closed_expected_r": 0.0,
+            "raw_realized_r": 0.0,
+            "baseline_adjusted_r": 0.0,
+        }
+
+    @staticmethod
+    def _money_window_store() -> dict[str, Any]:
+        return {
+            "closed": 0,
+            "closed_expected_r": 0.0,
+            "raw_closed_realized_r": 0.0,
+            "post_cost_closed_realized_r": 0.0,
+        }
+
+    @staticmethod
+    def _ratio(numerator: float, denominator: float) -> float:
+        if abs(float(denominator)) <= 1e-9:
+            return 0.0
+        return round(float(numerator) / float(denominator), 4)
+
+    def _historical_windows(
+        self,
+        *,
+        now: datetime,
+        report_window_days: int,
+        plan_lookup: dict[str, Plan],
+        closed_records: dict[str, ClosedTradeRecord],
+        baseline_adjusted: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        if not closed_records:
+            return {}
+
+        recent_days = max(1, int(round(report_window_days / 2)))
+        recent_cutoff = now - timedelta(days=recent_days)
+        windows: dict[str, dict[str, Any]] = {
+            "recent": self._money_window_store(),
+            "prior": self._money_window_store(),
+        }
+
+        for plan_id, record in closed_records.items():
+            label = "recent" if self.validation._utc(record.closed_ts) >= recent_cutoff else "prior"
+            bucket = windows[label]
+            bucket["closed"] += 1
+            expected_r = self._expected_r_from_plan(plan_lookup.get(plan_id))
+            raw_realized_r = float(record.realized_r)
+            post_cost_realized_r = float(
+                dict(baseline_adjusted.get(plan_id) or {}).get("baseline_adjusted_r", raw_realized_r) or 0.0
+            )
+            bucket["closed_expected_r"] += expected_r
+            bucket["raw_closed_realized_r"] += raw_realized_r
+            bucket["post_cost_closed_realized_r"] += post_cost_realized_r
+
+        return {
+            label: {
+                "closed": int(bucket["closed"]),
+                "closed_expected_r": round(float(bucket["closed_expected_r"]), 4),
+                "raw_closed_realized_r": round(float(bucket["raw_closed_realized_r"]), 4),
+                "post_cost_closed_realized_r": round(float(bucket["post_cost_closed_realized_r"]), 4),
+                "true_edge_ratio": self._ratio(
+                    float(bucket["post_cost_closed_realized_r"]),
+                    float(bucket["closed_expected_r"]),
+                ),
+            }
+            for label, bucket in windows.items()
         }
 
     def _historical_bucket_key(
@@ -262,6 +424,17 @@ class ScoreToOutcomeFunnelService:
             return self._plan_regime(plan)
         if axis == "session":
             return self._historical_session(plan=plan, submission=submission, closed_record=closed_record)
+        if axis == "entry_model":
+            return self._entry_model_from_plan(plan)
+        if axis == "entry_timing_variant":
+            return self._entry_timing_variant(self._entry_model_from_plan(plan))
+        if axis == "execution_mode":
+            return self._execution_mode_from_submission(submission)
+        if axis == "execution_style":
+            return self._execution_style(
+                order_type=getattr(submission, "order_type", None) if submission is not None else None,
+                entry_model=self._entry_model_from_plan(plan),
+            )
         validity = self._validity(plan)
         scorecard_raw_components = self._scorecard_raw_components_from_plan(plan)
         if axis == "volatility_condition":
@@ -288,6 +461,17 @@ class ScoreToOutcomeFunnelService:
             return str(row.get("regime") or "unknown")
         if axis == "session":
             return self._runtime_session_state(row)
+        if axis == "entry_model":
+            return self._entry_model_from_row(row)
+        if axis == "entry_timing_variant":
+            return self._entry_timing_variant(self._entry_model_from_row(row))
+        if axis == "execution_mode":
+            return self._execution_mode_from_row(row)
+        if axis == "execution_style":
+            return self._execution_style(
+                order_type=row.get("order_type"),
+                entry_model=self._entry_model_from_row(row),
+            )
         validity = dict(row.get("validity") or {})
         scorecard_raw_components = self._scorecard_raw_components_from_row(row)
         if axis == "volatility_condition":
@@ -327,12 +511,18 @@ class ScoreToOutcomeFunnelService:
             bucket = buckets[key]
             bucket["runtime_candidates"] += 1
             bucket["accepted_candidates"] += 1
+            expected_r = self._expected_r_from_row(row)
+            bucket["runtime_expected_r"] += expected_r
+            bucket["accepted_expected_r"] += expected_r
 
         for row in blocked_rows:
             key = self._runtime_bucket_key(axis=axis, row=row)
             bucket = buckets[key]
             bucket["runtime_candidates"] += 1
             bucket["blocked_candidates"] += 1
+            expected_r = self._expected_r_from_row(row)
+            bucket["runtime_expected_r"] += expected_r
+            bucket["blocked_expected_r"] += expected_r
 
         closed_ids = set(closed_records)
         profitable_ids = {plan_id for plan_id, record in closed_records.items() if float(record.realized_r) > 0.0}
@@ -354,6 +544,7 @@ class ScoreToOutcomeFunnelService:
                     baseline_adjusted_row=baseline_adjusted.get(plan_id),
                 )
             buckets[key]["submitted_ids"].add(plan_id)
+            buckets[key]["submitted_expected_r"] += self._expected_r_from_plan(plan)
 
         for plan_id in filled_plan_ids:
             plan = plan_lookup.get(plan_id)
@@ -365,6 +556,7 @@ class ScoreToOutcomeFunnelService:
                 baseline_adjusted_row=baseline_adjusted.get(plan_id),
             )
             buckets[key]["filled_ids"].add(plan_id)
+            buckets[key]["filled_expected_r"] += self._expected_r_from_plan(plan)
 
         for plan_id in closed_ids:
             plan = plan_lookup.get(plan_id)
@@ -376,6 +568,13 @@ class ScoreToOutcomeFunnelService:
                 baseline_adjusted_row=baseline_adjusted.get(plan_id),
             )
             buckets[key]["closed_ids"].add(plan_id)
+            buckets[key]["closed_expected_r"] += self._expected_r_from_plan(plan)
+            buckets[key]["raw_realized_r"] += float(closed_records[plan_id].realized_r)
+            baseline_row = dict(baseline_adjusted.get(plan_id) or {})
+            if baseline_row:
+                buckets[key]["baseline_adjusted_r"] += float(baseline_row.get("baseline_adjusted_r", 0.0) or 0.0)
+            else:
+                buckets[key]["baseline_adjusted_r"] += float(closed_records[plan_id].realized_r)
 
         for plan_id in profitable_ids:
             plan = plan_lookup.get(plan_id)
@@ -415,9 +614,22 @@ class ScoreToOutcomeFunnelService:
                     "runtime_candidates": runtime_candidates,
                     "accepted_candidates": accepted_candidates,
                     "blocked_candidates": blocked_candidates,
+                    "runtime_expected_r": round(float(bucket.get("runtime_expected_r", 0.0) or 0.0), 4),
+                    "accepted_expected_r": round(float(bucket.get("accepted_expected_r", 0.0) or 0.0), 4),
+                    "blocked_expected_r": round(float(bucket.get("blocked_expected_r", 0.0) or 0.0), 4),
                     "submitted": len(submitted_ids),
+                    "submitted_expected_r": round(float(bucket.get("submitted_expected_r", 0.0) or 0.0), 4),
                     "filled": len(filled_ids),
+                    "filled_expected_r": round(float(bucket.get("filled_expected_r", 0.0) or 0.0), 4),
                     "closed": len(closed_ids),
+                    "closed_expected_r": round(float(bucket.get("closed_expected_r", 0.0) or 0.0), 4),
+                    "raw_realized_r": round(float(bucket.get("raw_realized_r", 0.0) or 0.0), 4),
+                    "baseline_adjusted_r": round(float(bucket.get("baseline_adjusted_r", 0.0) or 0.0), 4),
+                    "expected_vs_realized_delta_r": round(
+                        float(bucket.get("baseline_adjusted_r", 0.0) or 0.0)
+                        - float(bucket.get("closed_expected_r", 0.0) or 0.0),
+                        4,
+                    ),
                     "profitable": len(profitable_ids),
                     "baseline_cost_profitable": len(baseline_profitable_ids),
                     "accept_rate": round((accepted_candidates / runtime_candidates), 4) if runtime_candidates > 0 else 0.0,
@@ -498,6 +710,41 @@ class ScoreToOutcomeFunnelService:
             for plan_id, payload in baseline_adjusted.items()
             if float(payload.get("baseline_adjusted_r", 0.0) or 0.0) > 0.0
         }
+        generated_expected_r = round(sum(self._expected_r_from_plan(plan) for plan in plans), 4)
+        runtime_expected_r = round(sum(self._expected_r_from_row(row) for row in [*accepted_rows, *blocked_rows]), 4)
+        accepted_expected_r = round(sum(self._expected_r_from_row(row) for row in accepted_rows), 4)
+        blocked_expected_r = round(sum(self._expected_r_from_row(row) for row in blocked_rows), 4)
+        submitted_expected_r = round(
+            sum(self._expected_r_from_plan(plan_lookup.get(plan_id)) for plan_id in submitted_plan_ids),
+            4,
+        )
+        filled_expected_r = round(
+            sum(self._expected_r_from_plan(plan_lookup.get(plan_id)) for plan_id in filled_plan_ids),
+            4,
+        )
+        closed_expected_r = round(
+            sum(self._expected_r_from_plan(plan_lookup.get(plan_id)) for plan_id in closed_plan_ids),
+            4,
+        )
+        raw_closed_realized_r = round(
+            sum(float(record.realized_r) for record in closed_records.values()),
+            4,
+        )
+        post_cost_closed_realized_r = round(
+            sum(
+                float(dict(baseline_adjusted.get(plan_id) or {}).get("baseline_adjusted_r", record.realized_r) or 0.0)
+                for plan_id, record in closed_records.items()
+            ),
+            4,
+        )
+        cost_drag_r = round(post_cost_closed_realized_r - raw_closed_realized_r, 4)
+        historical_windows = self._historical_windows(
+            now=now,
+            report_window_days=report_window_days,
+            plan_lookup=plan_lookup,
+            closed_records=closed_records,
+            baseline_adjusted=baseline_adjusted,
+        )
 
         historical_execution_outcomes = {
             "submitted": len(submitted_plan_ids),
@@ -529,6 +776,42 @@ class ScoreToOutcomeFunnelService:
             "baseline_cost_profitable uses the stress-validation baseline cost proxy and closed counts only cover eligible "
             "closed v2 trades with family/grade metadata."
         )
+        money_funnel = {
+            "available": available,
+            "coverage_note": (
+                "snapshot_expected_r comes from the current accepted/blocked runtime view, while historical_expected_r and "
+                "historical_realized_r come from recent plan history; expected R uses expected_ev_at_recommended_size_r when "
+                "available and otherwise falls back to expected_ev_r x recommended_risk_r."
+            ),
+            "snapshot_expected_r": {
+                "runtime_candidates": runtime_expected_r,
+                "accepted_candidates": accepted_expected_r,
+                "blocked_candidates": blocked_expected_r,
+            },
+            "historical_expected_r": {
+                "generated": generated_expected_r,
+                "submitted": submitted_expected_r,
+                "filled": filled_expected_r,
+                "closed": closed_expected_r,
+            },
+            "historical_realized_r": {
+                "raw_closed": raw_closed_realized_r,
+                "post_cost_closed": post_cost_closed_realized_r,
+                "cost_drag": cost_drag_r,
+            },
+            "historical_windows": historical_windows,
+            "historical_gap_r": {
+                "generated_to_submitted": round(generated_expected_r - submitted_expected_r, 4),
+                "submitted_to_filled": round(submitted_expected_r - filled_expected_r, 4),
+                "filled_to_closed": round(filled_expected_r - closed_expected_r, 4),
+                "closed_expected_to_raw_realized": round(raw_closed_realized_r - closed_expected_r, 4),
+                "closed_expected_to_post_cost_realized": round(post_cost_closed_realized_r - closed_expected_r, 4),
+            },
+            "summary": (
+                f"expected_closed_r={closed_expected_r:.4f}, post_cost_closed_r={post_cost_closed_realized_r:.4f}, "
+                f"submitted_to_filled_gap_r={max(0.0, submitted_expected_r - filled_expected_r):.4f}"
+            ),
+        }
 
         return {
             "available": available,
@@ -537,6 +820,7 @@ class ScoreToOutcomeFunnelService:
             "coverage_note": coverage_note,
             "snapshot_selection": self._selection_snapshot(portfolio_budget),
             "historical_execution_outcomes": historical_execution_outcomes,
+            "money_funnel": money_funnel,
             "decomposition": {
                 axis: self._decomposition_rows(
                     axis=axis,
@@ -552,6 +836,10 @@ class ScoreToOutcomeFunnelService:
                     "family",
                     "regime",
                     "session",
+                    "entry_model",
+                    "entry_timing_variant",
+                    "execution_mode",
+                    "execution_style",
                     "volatility_condition",
                     "cost_condition",
                     "liquidity_condition",

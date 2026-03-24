@@ -118,12 +118,95 @@ def _run_brief(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
+def _surface_strip_summary(payload: dict[str, Any] | None, *, surface_type: str = "generic") -> dict[str, str]:
+    surface = dict(payload or {})
+    if surface_type == "validation":
+        summary = dict((surface.get("validation_report") or {}).get("approval_strip_summary") or {})
+    else:
+        summary = dict(surface.get("approval_strip_summary") or {})
+    if summary:
+        return {
+            "approve_value": str(summary.get("approve_value") or "n/a"),
+            "approve_reason": str(summary.get("approve_reason") or ""),
+            "align_value": str(summary.get("align_value") or "n/a"),
+            "align_reason": str(summary.get("align_reason") or ""),
+            "act_value": str(summary.get("act_value") or "continue_runtime_monitoring"),
+            "act_reason": str(summary.get("act_reason") or ""),
+            "act_priority_level": str(summary.get("act_priority_level") or "monitor"),
+            "primary_reason": str(summary.get("primary_reason") or ""),
+        }
+    return {
+        "approve_value": str(surface.get("deployment_go_no_go") or surface.get("approval_topline_status") or "n/a"),
+        "approve_reason": str(surface.get("deployment_message") or surface.get("approval_topline_summary_line") or ""),
+        "align_value": str(surface.get("playbook_go_no_go") or surface.get("approval_topline_status") or "n/a"),
+        "align_reason": str(surface.get("playbook_message") or surface.get("approval_topline_summary_line") or ""),
+        "act_value": str(surface.get("playbook_action") or "continue_runtime_monitoring"),
+        "act_reason": str(surface.get("playbook_message") or surface.get("deployment_message") or ""),
+        "act_priority_level": "monitor",
+        "primary_reason": str(surface.get("deployment_message") or surface.get("playbook_message") or ""),
+    }
+
+
+def _surface_summary_line(label: str, summary: dict[str, str]) -> str:
+    return (
+        f"- {label}: approve={summary.get('approve_value', 'n/a')} | "
+        f"align={summary.get('align_value', 'n/a')} | "
+        f"act={summary.get('act_value', 'continue_runtime_monitoring')}"
+    )
+
+
+def _candidate_handoff_line(label: str, candidate: dict[str, Any] | None) -> str:
+    item = dict(candidate or {})
+    if not item:
+        return f"- {label}: none"
+    line = (
+        f"- {label}: symbol={item.get('symbol') or 'unknown'} "
+        f"| family={item.get('strategy_family') or 'unknown'} "
+        f"| edge={item.get('edge_state') or 'unknown'} "
+        f"| split={(item.get('entry_timing_focus') or 'none')}/{(item.get('execution_style_focus') or 'none')}"
+    )
+    if item.get("status"):
+        line = f"{line} | status={item.get('status')}"
+    if item.get("block_reason"):
+        line = f"{line} | reason={item.get('block_reason')}"
+    return line
+
+
+def _review_target_line(label: str, target: dict[str, Any] | None) -> str:
+    item = dict(target or {})
+    if not item:
+        return f"- {label}: none"
+    line = (
+        f"- {label}: action={item.get('action') or 'unknown'} "
+        f"| target={item.get('symbol') or 'unknown'} "
+        f"| variant={item.get('preferred_variant') or 'none'} "
+        f"| status={item.get('status') or 'unknown'} "
+        f"| family={item.get('strategy_family') or 'unknown'}"
+    )
+    if item.get("block_reason"):
+        line = f"{line} | reason={item.get('block_reason')}"
+    if item.get("focus_source"):
+        line = f"{line} | focus={item.get('focus_source')}"
+    if item.get("followup_command"):
+        line = f"{line} | cmd={item.get('followup_command')}"
+    return line
+
+
 def _alert_state(brief: dict[str, Any]) -> dict[str, Any]:
     snapshot = brief.get("snapshot") or {}
+    approval_strip = snapshot.get("approval_strip") or {}
     dashboard = snapshot.get("dashboard_summary") or {}
     validation = snapshot.get("validation_summary") or {}
     checklist = snapshot.get("checklist_summary") or {}
+    dashboard_strip = _surface_strip_summary(dashboard, surface_type="dashboard")
+    validation_strip = _surface_strip_summary(validation, surface_type="validation")
+    checklist_strip = _surface_strip_summary(checklist, surface_type="checklist")
+    kernel = snapshot.get("kernel_snapshot") or {}
     funnel = snapshot.get("signal_funnel_snapshot") or {}
+    accepted_candidate = dict(funnel.get("representative_accepted_candidate") or {})
+    blocked_candidate = dict(funnel.get("representative_blocked_candidate") or {})
+    entry_target = dict(funnel.get("entry_timing_review_target") or {})
+    execution_target = dict(funnel.get("execution_style_review_target") or {})
     sections = snapshot.get("operator_ui_sections") or {}
     return {
         "symbol": str(brief.get("symbol") or ""),
@@ -135,13 +218,47 @@ def _alert_state(brief: dict[str, Any]) -> dict[str, Any]:
         "deployment_alignment": str(snapshot.get("deployment_alignment") or ""),
         "playbook_alignment": str(snapshot.get("playbook_alignment") or ""),
         "top_operator_action": str(dashboard.get("top_operator_action") or ""),
-        "dashboard_go_no_go": str(dashboard.get("deployment_go_no_go") or ""),
-        "validation_go_no_go": str(validation.get("deployment_go_no_go") or ""),
-        "checklist_go_no_go": str(checklist.get("deployment_go_no_go") or ""),
-        "dashboard_playbook_action": str(dashboard.get("playbook_action") or ""),
-        "validation_playbook_action": str(validation.get("playbook_action") or ""),
-        "checklist_playbook_action": str(checklist.get("playbook_action") or ""),
+        "dashboard_approve": str(dashboard_strip.get("approve_value") or ""),
+        "dashboard_align": str(dashboard_strip.get("align_value") or ""),
+        "dashboard_act": str(dashboard_strip.get("act_value") or ""),
+        "validation_approve": str(validation_strip.get("approve_value") or ""),
+        "validation_align": str(validation_strip.get("align_value") or ""),
+        "validation_act": str(validation_strip.get("act_value") or ""),
+        "checklist_approve": str(checklist_strip.get("approve_value") or ""),
+        "checklist_align": str(checklist_strip.get("align_value") or ""),
+        "checklist_act": str(checklist_strip.get("act_value") or ""),
+        "kernel_verdict": str(kernel.get("kernel_verdict") or ""),
+        "money_leak_r": float(kernel.get("money_leak_r") or 0.0),
+        "strongest_drag_source": str(kernel.get("strongest_drag_source") or ""),
+        "outcome_control_tier": str(kernel.get("outcome_control_tier") or ""),
+        "rollout_recommendation": str(kernel.get("rollout_recommendation") or ""),
+        "candidate_surface_priority": str(kernel.get("candidate_surface_priority") or ""),
+        "approval_strip_approve": str(approval_strip.get("approve_value") or ""),
+        "approval_strip_align": str(approval_strip.get("align_value") or ""),
+        "approval_strip_act": str(approval_strip.get("act_value") or ""),
+        "approval_strip_priority": str(approval_strip.get("act_priority_level") or ""),
         "research_action": str(funnel.get("research_action") or ""),
+        "edge_state": str(funnel.get("edge_state") or ""),
+        "entry_timing_focus": str(funnel.get("entry_timing_focus") or ""),
+        "execution_style_focus": str(funnel.get("execution_style_focus") or ""),
+        "accepted_candidate_symbol": str(accepted_candidate.get("symbol") or ""),
+        "accepted_candidate_edge_state": str(accepted_candidate.get("edge_state") or ""),
+        "accepted_candidate_entry_timing": str(accepted_candidate.get("entry_timing_focus") or ""),
+        "accepted_candidate_execution_style": str(accepted_candidate.get("execution_style_focus") or ""),
+        "blocked_candidate_symbol": str(blocked_candidate.get("symbol") or ""),
+        "blocked_candidate_edge_state": str(blocked_candidate.get("edge_state") or ""),
+        "blocked_candidate_entry_timing": str(blocked_candidate.get("entry_timing_focus") or ""),
+        "blocked_candidate_execution_style": str(blocked_candidate.get("execution_style_focus") or ""),
+        "entry_target_symbol": str(entry_target.get("symbol") or ""),
+        "entry_target_variant": str(entry_target.get("preferred_variant") or ""),
+        "entry_target_status": str(entry_target.get("status") or ""),
+        "entry_target_family": str(entry_target.get("strategy_family") or ""),
+        "entry_target_followup_command": str(entry_target.get("followup_command") or ""),
+        "execution_target_symbol": str(execution_target.get("symbol") or ""),
+        "execution_target_variant": str(execution_target.get("preferred_variant") or ""),
+        "execution_target_status": str(execution_target.get("status") or ""),
+        "execution_target_family": str(execution_target.get("strategy_family") or ""),
+        "execution_target_followup_command": str(execution_target.get("followup_command") or ""),
         "top_family_bottleneck": str(funnel.get("top_family_bottleneck") or ""),
         "top_session_bottleneck": str(funnel.get("top_session_bottleneck") or ""),
         "ui_all_present": bool(sections.get("all_present")),
@@ -161,13 +278,47 @@ def _changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
         "deployment_alignment",
         "playbook_alignment",
         "top_operator_action",
-        "dashboard_go_no_go",
-        "validation_go_no_go",
-        "checklist_go_no_go",
-        "dashboard_playbook_action",
-        "validation_playbook_action",
-        "checklist_playbook_action",
+        "dashboard_approve",
+        "dashboard_align",
+        "dashboard_act",
+        "validation_approve",
+        "validation_align",
+        "validation_act",
+        "checklist_approve",
+        "checklist_align",
+        "checklist_act",
+        "kernel_verdict",
+        "money_leak_r",
+        "strongest_drag_source",
+        "outcome_control_tier",
+        "rollout_recommendation",
+        "candidate_surface_priority",
+        "approval_strip_approve",
+        "approval_strip_align",
+        "approval_strip_act",
+        "approval_strip_priority",
         "research_action",
+        "edge_state",
+        "entry_timing_focus",
+        "execution_style_focus",
+        "accepted_candidate_symbol",
+        "accepted_candidate_edge_state",
+        "accepted_candidate_entry_timing",
+        "accepted_candidate_execution_style",
+        "blocked_candidate_symbol",
+        "blocked_candidate_edge_state",
+        "blocked_candidate_entry_timing",
+        "blocked_candidate_execution_style",
+        "entry_target_symbol",
+        "entry_target_variant",
+        "entry_target_status",
+        "entry_target_family",
+        "entry_target_followup_command",
+        "execution_target_symbol",
+        "execution_target_variant",
+        "execution_target_status",
+        "execution_target_family",
+        "execution_target_followup_command",
         "top_family_bottleneck",
         "top_session_bottleneck",
         "ui_all_present",
@@ -181,9 +332,14 @@ def _render_message(brief: dict[str, Any]) -> str:
 
 def _render_shift_start_message(brief: dict[str, Any]) -> str:
     snapshot = brief.get("snapshot") or {}
+    approval_strip = snapshot.get("approval_strip") or {}
     dashboard = snapshot.get("dashboard_summary") or {}
     validation = snapshot.get("validation_summary") or {}
     checklist = snapshot.get("checklist_summary") or {}
+    dashboard_strip = _surface_strip_summary(dashboard, surface_type="dashboard")
+    validation_strip = _surface_strip_summary(validation, surface_type="validation")
+    checklist_strip = _surface_strip_summary(checklist, surface_type="checklist")
+    kernel = snapshot.get("kernel_snapshot") or {}
     sections = snapshot.get("operator_ui_sections") or {}
     funnel = snapshot.get("signal_funnel_snapshot") or {}
     lines = [
@@ -191,21 +347,35 @@ def _render_shift_start_message(brief: dict[str, Any]) -> str:
         f"- brief_status: {brief.get('brief_status')}",
         f"- headline: {brief.get('headline')}",
         (
-            f"- deployment: dashboard={dashboard.get('deployment_go_no_go')} "
-            f"/ validation={validation.get('deployment_go_no_go')} "
-            f"/ checklist={checklist.get('deployment_go_no_go')}"
+            f"- approval_strip: approve={approval_strip.get('approve_value')} "
+            f"| align={approval_strip.get('align_value')} "
+            f"| act={approval_strip.get('act_value')} "
+            f"| priority={approval_strip.get('act_priority_level')}"
         ),
         (
-            f"- playbook: dashboard={dashboard.get('playbook_action')} "
-            f"/ validation={validation.get('playbook_action')} "
-            f"/ checklist={checklist.get('playbook_action')}"
+            f"- kernel: verdict={kernel.get('kernel_verdict')} "
+            f"| money_leak_r={kernel.get('money_leak_r')} "
+            f"| drag_source={kernel.get('strongest_drag_source')} "
+            f"| control={kernel.get('outcome_control_tier')} "
+            f"| rollout={kernel.get('rollout_recommendation')} "
+            f"| candidate_surface={kernel.get('candidate_surface_priority')}"
         ),
+        _surface_summary_line("dashboard_surface", dashboard_strip),
+        _surface_summary_line("validation_surface", validation_strip),
+        _surface_summary_line("checklist_surface", checklist_strip),
         f"- top_operator_action: {dashboard.get('top_operator_action')}",
         (
             f"- research/funnel: action={funnel.get('research_action')} "
+            f"| edge_state={funnel.get('edge_state')} "
+            f"| entry_timing={funnel.get('entry_timing_focus')} "
+            f"| execution_style={funnel.get('execution_style_focus')} "
             f"| family_bottleneck={funnel.get('top_family_bottleneck')} "
             f"| session_bottleneck={funnel.get('top_session_bottleneck')}"
         ),
+        _review_target_line("entry_timing_review_target", funnel.get("entry_timing_review_target")),
+        _review_target_line("execution_style_review_target", funnel.get("execution_style_review_target")),
+        _candidate_handoff_line("accepted_candidate_focus", funnel.get("representative_accepted_candidate")),
+        _candidate_handoff_line("blocked_candidate_focus", funnel.get("representative_blocked_candidate")),
         f"- operator_ui_sections_ready: {sections.get('all_present')}",
         f"- brief_report: {brief.get('report_path') or 'missing'}",
         f"- snapshot_report: {snapshot.get('report_path') or 'missing'}",
@@ -216,29 +386,53 @@ def _render_shift_start_message(brief: dict[str, Any]) -> str:
 
 def _render_shift_end_message(brief: dict[str, Any]) -> str:
     snapshot = brief.get("snapshot") or {}
+    approval_strip = snapshot.get("approval_strip") or {}
     dashboard = snapshot.get("dashboard_summary") or {}
     validation = snapshot.get("validation_summary") or {}
     checklist = snapshot.get("checklist_summary") or {}
+    dashboard_strip = _surface_strip_summary(dashboard, surface_type="dashboard")
+    validation_strip = _surface_strip_summary(validation, surface_type="validation")
+    checklist_strip = _surface_strip_summary(checklist, surface_type="checklist")
+    kernel = snapshot.get("kernel_snapshot") or {}
     funnel = snapshot.get("signal_funnel_snapshot") or {}
     lines = [
         "Operator shift-end summary",
         f"- closing_status: {brief.get('brief_status')}",
         f"- closing_headline: {brief.get('headline')}",
         (
+            f"- closing_approval_strip: approve={approval_strip.get('approve_value')} "
+            f"| align={approval_strip.get('align_value')} "
+            f"| act={approval_strip.get('act_value')} "
+            f"| priority={approval_strip.get('act_priority_level')}"
+        ),
+        (
+            f"- closing_kernel: verdict={kernel.get('kernel_verdict')} "
+            f"| money_leak_r={kernel.get('money_leak_r')} "
+            f"| drag_source={kernel.get('strongest_drag_source')} "
+            f"| control={kernel.get('outcome_control_tier')} "
+            f"| rollout={kernel.get('rollout_recommendation')} "
+            f"| candidate_surface={kernel.get('candidate_surface_priority')}"
+        ),
+        (
             f"- closing_alignment: deployment={snapshot.get('deployment_alignment')} "
             f"| playbook={snapshot.get('playbook_alignment')}"
         ),
-        (
-            f"- final_surface: dashboard={dashboard.get('deployment_go_no_go')} "
-            f"/ validation={validation.get('deployment_go_no_go')} "
-            f"/ checklist={checklist.get('deployment_go_no_go')}"
-        ),
+        _surface_summary_line("closing_dashboard_surface", dashboard_strip),
+        _surface_summary_line("closing_validation_surface", validation_strip),
+        _surface_summary_line("closing_checklist_surface", checklist_strip),
         f"- final_top_action: {dashboard.get('top_operator_action')}",
         (
             f"- carryover_focus: research={funnel.get('research_action')} "
+            f"| edge_state={funnel.get('edge_state')} "
+            f"| entry_timing={funnel.get('entry_timing_focus')} "
+            f"| execution_style={funnel.get('execution_style_focus')} "
             f"| family_bottleneck={funnel.get('top_family_bottleneck')} "
             f"| session_bottleneck={funnel.get('top_session_bottleneck')}"
         ),
+        _review_target_line("carryover_entry_timing_review_target", funnel.get("entry_timing_review_target")),
+        _review_target_line("carryover_execution_style_review_target", funnel.get("execution_style_review_target")),
+        _candidate_handoff_line("carryover_accepted_candidate", funnel.get("representative_accepted_candidate")),
+        _candidate_handoff_line("carryover_blocked_candidate", funnel.get("representative_blocked_candidate")),
         f"- handoff_brief: {brief.get('report_path') or 'missing'}",
         f"- supporting_snapshot: {snapshot.get('report_path') or 'missing'}",
     ]

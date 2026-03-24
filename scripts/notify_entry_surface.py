@@ -128,6 +128,60 @@ def _blocked_topline_reason(payload: dict[str, Any]) -> tuple[str, str]:
     return ("runtime_topline_manual_review", message)
 
 
+def _approval_strip_summary(payload: dict[str, Any]) -> dict[str, str]:
+    summary = dict(payload.get("approval_strip_summary") or {})
+    if summary:
+        return {
+            "primary_reason": str(summary.get("primary_reason") or ""),
+            "approve_value": str(summary.get("approve_value") or "n/a"),
+            "approve_reason": str(summary.get("approve_reason") or ""),
+            "align_value": str(summary.get("align_value") or "n/a"),
+            "align_reason": str(summary.get("align_reason") or ""),
+            "act_value": str(summary.get("act_value") or "continue_runtime_monitoring"),
+            "act_reason": str(summary.get("act_reason") or ""),
+            "act_priority_level": str(summary.get("act_priority_level") or "monitor"),
+        }
+
+    deployment_state = str(payload.get("deployment_go_no_go") or "MANUAL_REVIEW").upper()
+    playbook_state = str(payload.get("playbook_go_no_go") or deployment_state).upper()
+    deployment_message = str(payload.get("deployment_message") or "").strip()
+    playbook_message = str(payload.get("playbook_message") or "").strip()
+    approve_value = "approval usable"
+    if deployment_state == "NO_GO":
+        approve_value = "runtime no_go"
+    elif deployment_state == "MANUAL_REVIEW":
+        approve_value = "manual review first"
+    align_value = "aligned" if deployment_state == playbook_state else "playbook_drift"
+    priority_map = {"NO_GO": "urgent", "MANUAL_REVIEW": "watch", "GO": "monitor"}
+    return {
+        "primary_reason": deployment_message or playbook_message,
+        "approve_value": approve_value,
+        "approve_reason": deployment_message or playbook_message,
+        "align_value": align_value,
+        "align_reason": deployment_message or playbook_message,
+        "act_value": str(payload.get("playbook_action") or "review_portfolio_runtime_state"),
+        "act_reason": playbook_message or deployment_message,
+        "act_priority_level": priority_map.get(deployment_state, "monitor"),
+    }
+
+
+def _edge_experiment_summary(payload: dict[str, Any]) -> dict[str, Any] | None:
+    summary = dict(payload.get("edge_experiment_review") or {})
+    if not summary:
+        return None
+    return {
+        "available": bool(summary.get("available", True)),
+        "advisory_only": bool(summary.get("advisory_only", True)),
+        "edge_state": str(summary.get("edge_state") or "insufficient_edge_measurement"),
+        "true_edge_ratio": float(summary.get("true_edge_ratio", 0.0) or 0.0),
+        "entry_timing_preferred_variant": str(summary.get("entry_timing_preferred_variant") or "none"),
+        "execution_style_preferred_variant": str(summary.get("execution_style_preferred_variant") or "none"),
+        "focus_symbol": str(summary.get("focus_symbol") or ""),
+        "focus_status": str(summary.get("focus_status") or ""),
+        "summary": str(summary.get("summary") or ""),
+    }
+
+
 def _sort_actionable_key(row: dict[str, Any]) -> tuple[float, float, float, str]:
     return (
         float(row.get("adjusted_rank_score", row.get("final_rank_score", 0.0)) or 0.0),
@@ -191,6 +245,8 @@ def build_entry_snapshot(
         "deployment_message": str(payload.get("deployment_message") or ""),
         "playbook_go_no_go": str(payload.get("playbook_go_no_go") or ""),
         "playbook_action": str(payload.get("playbook_action") or ""),
+        "approval_strip": _approval_strip_summary(payload),
+        "edge_experiment_review": _edge_experiment_summary(payload),
         "counts": {
             ACTIONABLE_ENTRY: len(actionable_rows),
             BLOCKED_SETUP: len(blocked_non_research),
@@ -206,12 +262,21 @@ def build_entry_snapshot(
 
 def build_alert_state(snapshot: dict[str, Any]) -> dict[str, Any]:
     sections = dict(snapshot.get("sections") or {})
+    approval_strip = dict(snapshot.get("approval_strip") or {})
+    edge_experiment = dict(snapshot.get("edge_experiment_review") or {})
     return {
         "scope": str(snapshot.get("scope") or ""),
         "deployment_go_no_go": str(snapshot.get("deployment_go_no_go") or ""),
         "deployment_code": str(snapshot.get("deployment_code") or ""),
         "playbook_go_no_go": str(snapshot.get("playbook_go_no_go") or ""),
         "playbook_action": str(snapshot.get("playbook_action") or ""),
+        "approval_strip_approve": str(approval_strip.get("approve_value") or ""),
+        "approval_strip_align": str(approval_strip.get("align_value") or ""),
+        "approval_strip_act": str(approval_strip.get("act_value") or ""),
+        "approval_strip_priority": str(approval_strip.get("act_priority_level") or ""),
+        "edge_state": str(edge_experiment.get("edge_state") or ""),
+        "entry_timing_focus": str(edge_experiment.get("entry_timing_preferred_variant") or ""),
+        "execution_style_focus": str(edge_experiment.get("execution_style_preferred_variant") or ""),
         "counts": {
             ACTIONABLE_ENTRY: int((snapshot.get("counts") or {}).get(ACTIONABLE_ENTRY, 0) or 0),
             BLOCKED_SETUP: int((snapshot.get("counts") or {}).get(BLOCKED_SETUP, 0) or 0),
@@ -228,12 +293,16 @@ def build_alert_state(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def _row_alert_identity(status: str, row: dict[str, Any]) -> dict[str, Any]:
+    edge_focus = dict(row.get("edge_experiment_focus") or {})
     payload = {
         "symbol": str(row.get("symbol") or ""),
         "plan_id": str(row.get("plan_id") or ""),
         "direction": str(row.get("direction") or "").lower(),
         "entry_model": str(row.get("entry_model") or "").upper(),
         "family": _candidate_family(row),
+        "edge_state": str(edge_focus.get("edge_state") or ""),
+        "entry_timing_focus": str(edge_focus.get("entry_timing_preferred_variant") or ""),
+        "execution_style_focus": str(edge_focus.get("execution_style_preferred_variant") or ""),
     }
     if status == BLOCKED_SETUP:
         payload["reason_code"] = str(row.get("block_reason") or "")
@@ -263,6 +332,15 @@ def _format_candidate_line(status: str, row: dict[str, Any]) -> str:
     if expected_summary:
         parts.append(expected_summary)
 
+    edge_focus = dict(row.get("edge_experiment_focus") or {})
+    if edge_focus:
+        parts.append(f"edge={edge_focus.get('edge_state', 'insufficient_edge_measurement')}")
+        parts.append(
+            "split="
+            f"{edge_focus.get('entry_timing_preferred_variant', 'none')}"
+            f"/{edge_focus.get('execution_style_preferred_variant', 'none')}"
+        )
+
     if status == BLOCKED_SETUP:
         message = str(row.get("block_reason_message") or row.get("block_reason") or "blocked").strip()
         parts.append(f"reason={message}")
@@ -283,18 +361,49 @@ def _format_candidate_line(status: str, row: dict[str, Any]) -> str:
     return "- " + " | ".join(parts)
 
 
+def _format_contract_trace(snapshot: dict[str, Any]) -> str:
+    approval_strip = dict(snapshot.get("approval_strip") or {})
+    return (
+        f"contract_trace: approve={approval_strip.get('approve_value')} "
+        f"| align={approval_strip.get('align_value')} "
+        f"| act={approval_strip.get('act_value')} "
+        f"| runtime={snapshot.get('deployment_go_no_go')}/{snapshot.get('deployment_code')} "
+        f"| playbook={snapshot.get('playbook_go_no_go')}"
+    )
+
+
+def _format_edge_experiment_trace(snapshot: dict[str, Any]) -> str:
+    edge_experiment = dict(snapshot.get("edge_experiment_review") or {})
+    if not edge_experiment:
+        return "edge_experiment: unavailable"
+    focus = str(edge_experiment.get("focus_symbol") or "")
+    focus_status = str(edge_experiment.get("focus_status") or "")
+    focus_suffix = f" | focus={focus}/{focus_status}" if focus and focus_status else ""
+    return (
+        f"edge_experiment: state={edge_experiment.get('edge_state')} "
+        f"| entry_timing={edge_experiment.get('entry_timing_preferred_variant')} "
+        f"| execution_style={edge_experiment.get('execution_style_preferred_variant')} "
+        f"| true_edge={float(edge_experiment.get('true_edge_ratio') or 0.0):.4f}"
+        f"{focus_suffix}"
+    )
+
+
 def render_message(snapshot: dict[str, Any]) -> str:
     counts = dict(snapshot.get("counts") or {})
     sections = dict(snapshot.get("sections") or {})
+    approval_strip = dict(snapshot.get("approval_strip") or {})
     lines = [
         "Trading entry surface alert",
         f"scope: {snapshot.get('scope')}",
         (
-            f"deployment: {snapshot.get('deployment_go_no_go')}/{snapshot.get('deployment_code')} "
-            f"| playbook: {snapshot.get('playbook_go_no_go')} "
-            f"| action: {snapshot.get('playbook_action')}"
+            f"approval_strip: approve={approval_strip.get('approve_value')} "
+            f"| align={approval_strip.get('align_value')} "
+            f"| act={approval_strip.get('act_value')} "
+            f"| priority={approval_strip.get('act_priority_level')}"
         ),
-        f"message: {snapshot.get('deployment_message')}",
+        f"reason: {approval_strip.get('primary_reason') or snapshot.get('deployment_message')}",
+        _format_contract_trace(snapshot),
+        _format_edge_experiment_trace(snapshot),
         (
             f"counts: {ACTIONABLE_ENTRY}={counts.get(ACTIONABLE_ENTRY, 0)}, "
             f"{BLOCKED_SETUP}={counts.get(BLOCKED_SETUP, 0)}, "

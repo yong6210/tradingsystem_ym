@@ -137,21 +137,21 @@
 21. 현재 validation runtime은 `approval_cross_display.approval_warning_locked/code/message`로 `runtime proxy selected-trial`이 replay-backed downside와 함께 남는 경우 approval template 경고 문구를 직접 고정한다
 22. 현재 validation runtime은 `deployment_approval_summary.topline_status/code/message`로 `replay_output_lineage_alignment_*` 경고를 approval template 최상단 승인 문구에 직접 연결한다
 23. 현재 validation runtime은 `deployment_approval_summary.topline_summary_line`로 `threshold lineage winner / replay-derived worst scenario / true-runner promotion action`을 한 줄로 요약한다
-24. 현재 validation runtime은 `deployment_approval_summary.playbook_go_no_go/code/action/message`로 approval template warning code를 운영 playbook의 `GO / NO_GO / MANUAL_REVIEW` 문구에 직접 매핑한다
-25. 현재 validation runtime은 `deployment_approval_summary.topline_message`를 `GO / NO_GO / MANUAL_REVIEW` prefix로 출력하고, 같은 언어를 `operations/checklist.deployment_*`, `scanner.top[*].deployment_*`와 공유한다
+24. 현재 validation runtime은 `deployment_approval_summary.playbook_go_no_go/code/action/message`로 approval template warning code를 운영 playbook에 직접 매핑하고, operator-facing surface는 `validation_report.approval_strip_summary.approve/align/act`를 우선 사용한다
+25. 현재 validation runtime은 `deployment_approval_summary.topline_message`와 `deployment_* / playbook_*` raw contract를 유지하되, 홈 화면·handoff·dashboard·checklist·validation topline은 같은 `approval_strip_summary` vocabulary를 공유한다
 26. 현재 validation runtime은 `validation_alert.approval_topline_summary_line`로 approval template one-line summary를 alert payload/재시도 payload/채널 메시지까지 동일하게 전달한다
 27. 현재 validation runtime은 `validation_alert.approval_playbook_go_no_go/code/action/message`로 approval template playbook mapping을 alert payload/재시도 payload/outbox payload까지 동일하게 전달한다
-28. 현재 runtime portfolio summary는 `GET /portfolio/budget`의 top-level `deployment_go_no_go/code/message`와 markdown summary로 scanner/operations checklist와 같은 `GO / NO_GO / MANUAL_REVIEW` 언어를 공유한다
-29. 현재 validation runtime은 `validation_alert.deployment_go_no_go/code/message`를 alert payload에 직접 기록하고, `alerts/metrics.latest_validation_alert`, `operations/checklist.validation_alert_delivery.evidence`, `operations/checklist.alert_channel_slo.evidence.latest_validation_alert`도 같은 필드를 직접 노출한다
+28. 현재 runtime portfolio summary는 `GET /portfolio/budget` top-level `deployment_go_no_go/code/message`, `playbook_go_no_go/code/action/message` raw contract를 유지하면서, operator/alert/drill surface가 우선 읽는 `approval_strip_summary`도 함께 노출한다
+29. 현재 validation runtime은 `validation_alert.deployment_go_no_go/code/message`를 alert payload에 직접 기록하고, `alerts/metrics.latest_validation_alert`, `operations/checklist.validation_alert_delivery.evidence`, `operations/checklist.alert_channel_slo.evidence.latest_validation_alert`도 같은 raw 필드를 직접 노출한다
 30. 현재 validation runtime은 `alerts/metrics.latest_validation_alert.approval_playbook_go_no_go/code/action/message`와 `operations/checklist.alert_channel_slo.evidence.latest_validation_alert`로 alert metrics 경로에서도 playbook mapping을 직접 노출한다
 31. 현재 validation runtime은 `operations/checklist.validation_alert_delivery.evidence.approval_playbook_go_no_go/code/action/message`로 validation alert delivery evidence에서도 playbook mapping을 top-level로 직접 노출한다
-32. 현재 runtime portfolio summary는 `operations/checklist.portfolio_headroom.evidence.deployment_go_no_go/code/message`로도 직접 노출되어 checklist portfolio evidence가 `/portfolio/budget` top-level 배포 언어를 그대로 따른다
-33. 현재 runtime portfolio summary는 `GET /portfolio/budget`의 `playbook_go_no_go/code/action/message`와 markdown summary로 runtime deployment code 기반 운영 액션 문구를 직접 노출한다
-34. 현재 validation alert 채널 메시지는 `deployment=<go_no_go>/<code>`를 직접 포함해 `approval=` one-line summary와 같은 메시지에서 배포 언어를 즉시 읽을 수 있게 한다
-35. 현재 validation alert 채널 메시지는 `playbook_action=<approval_playbook_action>`도 직접 포함해 운영 액션 문구를 메시지 단독으로 확인할 수 있게 한다
-36. 현재 `POST /alerts/test` 응답도 `deployment_*`, `approval_playbook_*`를 top-level로 직접 반환해 manual alert drill 경로가 validation alert payload와 같은 contract를 공유한다
+32. 현재 runtime portfolio summary는 `operations/checklist.portfolio_headroom.evidence.deployment_go_no_go/code/message`로도 직접 노출되어 checklist portfolio evidence가 `/portfolio/budget` raw contract를 그대로 따른다. 동시에 `POST /operations/checklist` top-level은 `approval_strip_summary`를 별도로 제공해 operator 판단을 단순화한다
+33. 현재 runtime portfolio summary는 `GET /portfolio/budget`의 `playbook_go_no_go/code/action/message`와 markdown summary로 runtime deployment code 기반 운영 액션 문구를 직접 노출하고, entry alert / paper drill / pruning review는 이를 strip vocabulary에 다시 정렬한다
+34. 현재 validation alert 채널 메시지는 `approval_strip: approve / align / act`를 먼저 보여주고, 그다음 `approval=` one-line summary와 `contract_trace: deployment=... | playbook_action=...` raw payload debugging을 유지한다
+35. 현재 validation alert 채널 메시지는 `playbook_action=<approval_playbook_action>`도 raw debug에 직접 포함해 운영 액션 문구를 메시지 단독으로 확인할 수 있게 한다. 같은 액션은 strip 기준으로는 `act_value`에 해당한다
+36. 현재 `POST /alerts/test` 응답도 `deployment_*`, `approval_playbook_*` raw contract와 함께 `approval_strip_summary`를 반환해 manual alert drill 경로가 validation alert/operator surface와 같은 판단 vocabulary를 공유한다
 37. 현재 `operations/checklist.portfolio_headroom.evidence.playbook_go_no_go/code/action/message`도 `/portfolio/budget` top-level playbook 필드와 동일하게 직접 노출된다
-38. 현재 `POST /operations/checklist` top-level `playbook_go_no_go/code/action/message`도 validation/report/portfolio top-level summary와 같은 수준의 운영 액션 문구를 직접 노출한다
+38. 현재 `POST /operations/checklist` top-level `playbook_go_no_go/code/action/message`도 validation/report/portfolio raw summary와 같은 수준의 운영 액션 문구를 직접 노출하고, 같은 payload 안의 `approval_strip_summary`가 operator-facing headline 역할을 맡는다
 39. 현재 `POST /alerts/subscribe` 응답도 `deployment_*`, `approval_playbook_*`를 top-level로 직접 반환해 manual subscribe 경로가 `alerts/test`와 같은 contract를 공유한다
-40. 현재 `POST /validation/report` top-level도 `deployment_*`, `approval_topline_*`, `playbook_*`를 직접 반환하며, `operations/checklist`는 validation deployment/playbook 해석 시 이 top-level contract를 우선 소비한다
+40. 현재 `POST /validation/report` top-level도 `deployment_*`, `approval_topline_*`, `playbook_*` raw contract를 직접 반환하며, 동시에 `approval_strip_summary`를 함께 노출해 `operations/checklist`, operator UI, dashboard alignment, session brief가 같은 3단 vocabulary를 우선 소비한다
 41. 현재 `app/services/deployment_contracts.py`가 validation top-level/nested summary, validation alert payload, alert/test/subscribe/metrics/checklist/message formatter consumer의 공통 contract helper다

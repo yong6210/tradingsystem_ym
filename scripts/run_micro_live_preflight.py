@@ -73,6 +73,263 @@ def _status(ok: bool) -> str:
     return "PASS" if ok else "FAIL"
 
 
+def _float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _surface_strip_summary(payload: dict[str, Any] | None, *, surface_type: str = "generic") -> dict[str, str]:
+    surface = dict(payload or {})
+    if surface_type == "validation":
+        summary = dict((surface.get("validation_report") or {}).get("approval_strip_summary") or {})
+    else:
+        summary = dict(surface.get("approval_strip_summary") or {})
+    if summary:
+        return {
+            "approve_value": str(summary.get("approve_value") or "n/a"),
+            "approve_reason": str(summary.get("approve_reason") or ""),
+            "align_value": str(summary.get("align_value") or "n/a"),
+            "align_reason": str(summary.get("align_reason") or ""),
+            "act_value": str(summary.get("act_value") or "continue_runtime_monitoring"),
+            "act_reason": str(summary.get("act_reason") or ""),
+            "act_priority_level": str(summary.get("act_priority_level") or "monitor"),
+            "primary_reason": str(summary.get("primary_reason") or ""),
+        }
+
+    deployment_summary = dict(surface.get("deployment_approval_summary") or {})
+    return {
+        "approve_value": str(
+            surface.get("deployment_go_no_go")
+            or deployment_summary.get("deployment_go_no_go")
+            or surface.get("approval_topline_status")
+            or "n/a"
+        ),
+        "approve_reason": str(
+            surface.get("deployment_message")
+            or deployment_summary.get("deployment_message")
+            or surface.get("approval_topline_summary_line")
+            or ""
+        ),
+        "align_value": str(
+            surface.get("playbook_go_no_go")
+            or deployment_summary.get("playbook_go_no_go")
+            or surface.get("approval_topline_status")
+            or "n/a"
+        ),
+        "align_reason": str(
+            surface.get("playbook_message")
+            or deployment_summary.get("playbook_message")
+            or surface.get("approval_topline_summary_line")
+            or ""
+        ),
+        "act_value": str(
+            surface.get("playbook_action")
+            or deployment_summary.get("playbook_action")
+            or "continue_runtime_monitoring"
+        ),
+        "act_reason": str(
+            surface.get("playbook_message")
+            or deployment_summary.get("playbook_message")
+            or surface.get("deployment_message")
+            or deployment_summary.get("deployment_message")
+            or ""
+        ),
+        "act_priority_level": "monitor",
+        "primary_reason": str(
+            surface.get("deployment_message")
+            or deployment_summary.get("deployment_message")
+            or surface.get("playbook_message")
+            or deployment_summary.get("playbook_message")
+            or ""
+        ),
+    }
+
+
+def _surface_summary_line(label: str, summary: dict[str, str]) -> str:
+    return (
+        f"- {label}: approve={summary.get('approve_value', 'n/a')} | "
+        f"align={summary.get('align_value', 'n/a')} | "
+        f"act={summary.get('act_value', 'continue_runtime_monitoring')} | "
+        f"priority={summary.get('act_priority_level', 'monitor')}"
+    )
+
+
+def _surface_allows_preflight(summary: dict[str, str]) -> bool:
+    approve_value = str(summary.get("approve_value") or "").strip().lower()
+    return approve_value not in {"runtime no_go", "validation no_go", "validation/checklist no_go", "entry gate blocked"}
+
+
+def _edge_experiment_summary(
+    *,
+    dashboard_payload: dict[str, Any] | None,
+    validation_payload: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    dashboard_source = dict(
+        (((dashboard_payload or {}).get("signal_funnel") or {}).get("edge_experiment_review") or {})
+    )
+    validation_source = dict(
+        (((validation_payload or {}).get("validation_report") or validation_payload or {}).get("edge_experiment_review_summary") or {})
+    )
+    source = dashboard_source or validation_source
+    if not source:
+        return None
+
+    source_summary = dict(source.get("source_summary") or {})
+    return {
+        "available": bool(source.get("available", True)),
+        "advisory_only": bool(source.get("advisory_only", True)),
+        "edge_state": str(source.get("edge_state") or "insufficient_edge_measurement"),
+        "summary": str(source.get("summary") or ""),
+        "true_edge_ratio": round(_float(source.get("true_edge_ratio")), 4),
+        "edge_decay_rate": round(_float(source.get("edge_decay_rate")), 4),
+        "entry_timing_preferred_variant": str(
+            source.get("entry_timing_preferred_variant") or source_summary.get("entry_timing_preferred_variant") or "none"
+        ),
+        "execution_style_preferred_variant": str(
+            source.get("execution_style_preferred_variant")
+            or source_summary.get("execution_style_preferred_variant")
+            or "none"
+        ),
+    }
+
+
+def _edge_experiment_summary_line(summary: dict[str, Any] | None) -> str:
+    if not summary:
+        return "edge_experiment: unavailable"
+    return (
+        f"edge_experiment: state={summary.get('edge_state', 'insufficient_edge_measurement')} | "
+        f"entry_timing={summary.get('entry_timing_preferred_variant', 'none')} | "
+        f"execution_style={summary.get('execution_style_preferred_variant', 'none')} | "
+        f"true_edge={float(summary.get('true_edge_ratio') or 0.0):.4f}"
+    )
+
+
+def _edge_experiment_next_step(summary: dict[str, Any] | None) -> str | None:
+    if not summary:
+        return None
+    edge_state = str(summary.get("edge_state") or "")
+    entry_timing = str(summary.get("entry_timing_preferred_variant") or "none")
+    execution_style = str(summary.get("execution_style_preferred_variant") or "none")
+    if edge_state == "fragile_edge":
+        return (
+            "Advisory only: post-cost edge is fragile; run controlled split review "
+            f"with entry_timing={entry_timing} and execution_style={execution_style} before widening live scope."
+        )
+    if edge_state == "watch_edge":
+        return (
+            "Advisory only: post-cost edge is unstable; prefer controlled split review "
+            f"with entry_timing={entry_timing} and execution_style={execution_style} over structural rewrites."
+        )
+    if edge_state == "insufficient_edge_measurement":
+        return "Advisory only: collect more closed post-cost trades before treating edge experiment output as decisive."
+    return None
+
+
+def _operator_action_priority_summary(
+    *,
+    dashboard_payload: dict[str, Any] | None,
+    validation_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    dashboard_source = dict((((dashboard_payload or {}).get("signal_funnel") or {}).get("operator_action_priority") or {}))
+    validation_source = dict(
+        (((validation_payload or {}).get("validation_report") or validation_payload or {}).get("operator_action_priority_summary") or {})
+    )
+    return dashboard_source or validation_source
+
+
+def _experiment_review_target(
+    operator_action_priority: dict[str, Any] | None,
+    *,
+    target_key: str,
+    preferred_key: str,
+    action: str,
+) -> dict[str, Any] | None:
+    priority = dict(operator_action_priority or {})
+    context = dict(priority.get("experiment_context") or {})
+    target = dict(context.get(target_key) or {})
+    if not target:
+        return None
+    return {
+        "action": action,
+        "preferred_variant": str(context.get(preferred_key) or "none"),
+        "symbol": str(target.get("symbol") or ""),
+        "status": str(target.get("status") or ""),
+        "strategy_family": str(target.get("strategy_family") or ""),
+        "block_reason": str(target.get("block_reason") or ""),
+        "focus_source": str(target.get("focus_source") or ""),
+    }
+
+
+def _experiment_review_target_line(label: str, target: dict[str, Any] | None) -> str:
+    item = dict(target or {})
+    if not item:
+        return f"{label}: none"
+    line = (
+        f"{label}: action={item.get('action') or 'unknown'} | "
+        f"target={item.get('symbol') or 'unknown'} | "
+        f"variant={item.get('preferred_variant') or 'none'} | "
+        f"status={item.get('status') or 'unknown'} | "
+        f"family={item.get('strategy_family') or 'unknown'}"
+    )
+    if item.get("block_reason"):
+        line = f"{line} | reason={item.get('block_reason')}"
+    if item.get("focus_source"):
+        line = f"{line} | focus={item.get('focus_source')}"
+    return line
+
+
+def _split_review_followup_command(*, symbol: str, universe: str, days: int, action: str) -> str:
+    return (
+        f"./.venv/bin/python scripts/run_split_review_followup.py "
+        f"--symbol {symbol.upper()} --universe {universe} --days {days} --action {action}"
+    )
+
+
+def _representative_candidates(dashboard_payload: dict[str, Any] | None) -> dict[str, Any]:
+    portfolio = dict((dashboard_payload or {}).get("portfolio_summary") or {})
+
+    def _candidate(row: dict[str, Any] | None, *, status: str) -> dict[str, Any] | None:
+        item = dict(row or {})
+        if not item:
+            return None
+        focus = dict(item.get("edge_experiment_focus") or {})
+        return {
+            "symbol": str(item.get("symbol") or ""),
+            "status": status,
+            "strategy_family": str(item.get("strategy_family") or ""),
+            "block_reason": str(item.get("block_reason") or ""),
+            "edge_state": str(focus.get("edge_state") or "insufficient_edge_measurement"),
+            "entry_timing_preferred_variant": str(focus.get("entry_timing_preferred_variant") or "none"),
+            "execution_style_preferred_variant": str(focus.get("execution_style_preferred_variant") or "none"),
+        }
+
+    accepted_rows = list(portfolio.get("accepted_candidates") or [])
+    blocked_rows = list(portfolio.get("blocked_candidates") or [])
+    return {
+        "accepted": _candidate(accepted_rows[0] if accepted_rows else None, status="ACTIONABLE_ENTRY"),
+        "blocked": _candidate(blocked_rows[0] if blocked_rows else None, status="BLOCKED_SETUP"),
+    }
+
+
+def _representative_candidate_line(label: str, candidate: dict[str, Any] | None) -> str:
+    item = dict(candidate or {})
+    if not item:
+        return f"{label}: none"
+    line = (
+        f"{label}: {item.get('symbol') or 'unknown'} | "
+        f"family={item.get('strategy_family') or 'unknown'} | "
+        f"edge={item.get('edge_state') or 'insufficient_edge_measurement'} | "
+        f"split={(item.get('entry_timing_preferred_variant') or 'none')}/{(item.get('execution_style_preferred_variant') or 'none')}"
+    )
+    if item.get("status"):
+        line = f"{line} | status={item.get('status')}"
+    if item.get("block_reason"):
+        line = f"{line} | reason={item.get('block_reason')}"
+    return line
+
+
 def _write_report(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
@@ -93,6 +350,31 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     for item in payload["checks"]:
         lines.append(f"- [{item['status']}] {item['name']}: {item['message']}")
     lines.append("")
+    lines.append("## Approval Surfaces")
+    lines.append("")
+    for row in payload.get("approval_surfaces") or []:
+        lines.append(
+            f"- {row['label']}: approve={row['approve_value']} | "
+            f"align={row['align_value']} | act={row['act_value']} | "
+            f"priority={row['act_priority_level']}"
+        )
+        lines.append(f"  reason={row['primary_reason'] or row['approve_reason'] or row['act_reason']}")
+    lines.append("")
+    lines.append("## Edge Experiment")
+    lines.append("")
+    edge_experiment = payload.get("edge_experiment_review") or {}
+    if edge_experiment:
+        lines.append(f"- {_edge_experiment_summary_line(edge_experiment)}")
+        lines.append(f"- summary: {edge_experiment.get('summary', '')}")
+    else:
+        lines.append("- edge experiment unavailable")
+    experiment_targets = payload.get("experiment_review_targets") or {}
+    lines.append(f"- {_experiment_review_target_line('entry_timing_review_target', experiment_targets.get('entry_timing'))}")
+    lines.append(f"- {_experiment_review_target_line('execution_style_review_target', experiment_targets.get('execution_style'))}")
+    representative_candidates = payload.get("representative_candidates") or {}
+    lines.append(f"- {_representative_candidate_line('accepted_candidate_focus', representative_candidates.get('accepted'))}")
+    lines.append(f"- {_representative_candidate_line('blocked_candidate_focus', representative_candidates.get('blocked'))}")
+    lines.append("")
     lines.append("## Candidate")
     lines.append("")
     candidate = payload.get("candidate") or {}
@@ -100,7 +382,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
         lines.append(f"- plan_id: {candidate.get('plan_id', '')}")
         lines.append(f"- symbol: {candidate.get('symbol', '')}")
         lines.append(f"- family: {candidate.get('strategy_family', '')}")
-        lines.append(f"- deployment: {candidate.get('deployment_go_no_go', '')}")
+        lines.append(f"- candidate_surface: {candidate.get('deployment_go_no_go', '') or candidate.get('operator_status', '')}")
         lines.append(f"- expected_summary: {candidate.get('expected_summary', '')}")
     else:
         lines.append("- no candidate selected")
@@ -171,6 +453,40 @@ def main() -> int:
     if isinstance(scanner, list) and scanner:
         matching = [row for row in scanner if str(row.get("symbol", "")).upper() == args.symbol.upper()]
         candidate = matching[0] if matching else scanner[0]
+    dashboard_strip = _surface_strip_summary(dashboard, surface_type="dashboard")
+    validation_strip = _surface_strip_summary(validation, surface_type="validation")
+    checklist_strip = _surface_strip_summary(checklist, surface_type="checklist")
+    edge_experiment_review = _edge_experiment_summary(
+        dashboard_payload=dashboard,
+        validation_payload=validation,
+    )
+    operator_action_priority = _operator_action_priority_summary(
+        dashboard_payload=dashboard,
+        validation_payload=validation,
+    )
+    experiment_review_targets = {
+        "entry_timing": _experiment_review_target(
+            operator_action_priority,
+            target_key="entry_timing_target",
+            preferred_key="entry_timing_preferred_variant",
+            action="run_entry_timing_split_review",
+        ),
+        "execution_style": _experiment_review_target(
+            operator_action_priority,
+            target_key="execution_style_target",
+            preferred_key="execution_style_preferred_variant",
+            action="run_execution_style_split_review",
+        ),
+    }
+    for target in experiment_review_targets.values():
+        if target:
+            target["followup_command"] = _split_review_followup_command(
+                symbol=args.symbol,
+                universe=args.universe,
+                days=args.days,
+                action=str(target.get("action") or ""),
+            )
+    representative_candidates = _representative_candidates(dashboard)
 
     checks: list[dict[str, str]] = []
     checks.append(
@@ -191,21 +507,36 @@ def main() -> int:
         {
             "name": "new_entries_allowed",
             "status": _status(bool(dashboard.get("new_entries_allowed", False))),
-            "message": str(dashboard.get("blocking_reason_message") or "new entries allowed"),
+            "message": (
+                f"approve={dashboard_strip.get('approve_value', '')} | "
+                f"align={dashboard_strip.get('align_value', '')} | "
+                f"act={dashboard_strip.get('act_value', '')} | "
+                f"reason={dashboard.get('blocking_reason_message') or dashboard_strip.get('approve_reason') or dashboard_strip.get('act_reason') or 'new entries allowed'}"
+            ),
         }
     )
     checks.append(
         {
             "name": "validation_language",
-            "status": _status(str(validation.get("deployment_go_no_go", "")) in {"GO", "MANUAL_REVIEW"}),
-            "message": f"{validation.get('deployment_go_no_go', '')}: {validation.get('deployment_message', '')}",
+            "status": _status(_surface_allows_preflight(validation_strip)),
+            "message": (
+                f"approve={validation_strip.get('approve_value', '')} | "
+                f"align={validation_strip.get('align_value', '')} | "
+                f"act={validation_strip.get('act_value', '')} | "
+                f"reason={validation_strip.get('approve_reason', '') or validation_strip.get('act_reason', '')}"
+            ),
         }
     )
     checks.append(
         {
             "name": "checklist_language",
-            "status": _status(str(checklist.get("deployment_go_no_go", "")) in {"GO", "MANUAL_REVIEW"}),
-            "message": f"{checklist.get('deployment_go_no_go', '')}: {checklist.get('deployment_message', '')}",
+            "status": _status(_surface_allows_preflight(checklist_strip)),
+            "message": (
+                f"approve={checklist_strip.get('approve_value', '')} | "
+                f"align={checklist_strip.get('align_value', '')} | "
+                f"act={checklist_strip.get('act_value', '')} | "
+                f"reason={checklist_strip.get('approve_reason', '') or checklist_strip.get('act_reason', '')}"
+            ),
         }
     )
     checks.append(
@@ -241,7 +572,8 @@ def main() -> int:
             "name": "candidate_available",
             "status": _status(candidate is not None),
             "message": (
-                f"{candidate.get('symbol', '')} {candidate.get('strategy_family', '')} {candidate.get('deployment_go_no_go', '')}"
+                f"{candidate.get('symbol', '')} {candidate.get('strategy_family', '')} "
+                f"{candidate.get('deployment_go_no_go', '') or candidate.get('operator_status', '')}"
                 if candidate
                 else "No accepted scanner candidate available."
             ),
@@ -251,6 +583,16 @@ def main() -> int:
     failed = [item for item in checks if item["status"] != "PASS"]
     overall_status = "READY_FOR_MICRO_LIVE" if not failed else "NOT_READY"
     next_steps = [item["message"] for item in failed] if failed else ["Proceed to the live go-live checklist and final operator sign-off."]
+    advisory_next_step = _edge_experiment_next_step(edge_experiment_review)
+    if advisory_next_step:
+        next_steps.append(advisory_next_step)
+    targeted_reviews = [
+        str(target.get("followup_command") or "")
+        for target in experiment_review_targets.values()
+        if target
+    ]
+    if targeted_reviews:
+        next_steps.append("Advisory only: run split review packet(s) with " + "; ".join(targeted_reviews) + ".")
     summary_line = (
         "All preflight checks passed; MICRO_LIVE can proceed to final operator sign-off."
         if not failed
@@ -267,6 +609,14 @@ def main() -> int:
         "candidate": candidate or {},
         "health_ready": ready,
         "operator_dashboard": dashboard,
+        "operator_dashboard_summary": {
+            "execution_mode": dashboard.get("execution_mode", ""),
+            "auto_trading_enabled": dashboard.get("auto_trading_enabled", False),
+            "new_entries_allowed": dashboard.get("new_entries_allowed", False),
+            "blocking_reason_code": dashboard.get("blocking_reason_code", ""),
+            "blocking_reason_message": dashboard.get("blocking_reason_message", ""),
+            "approval_strip_summary": dashboard_strip,
+        },
         "reconciliation": reconcile,
         "safety_state": safety,
         "validation_report": {
@@ -275,6 +625,7 @@ def main() -> int:
             "deployment_message": validation.get("deployment_message", ""),
             "playbook_go_no_go": validation.get("playbook_go_no_go", ""),
             "playbook_action": validation.get("playbook_action", ""),
+            "approval_strip_summary": validation_strip,
         },
         "operations_checklist": {
             "deployment_go_no_go": checklist.get("deployment_go_no_go", ""),
@@ -282,7 +633,16 @@ def main() -> int:
             "deployment_message": checklist.get("deployment_message", ""),
             "playbook_go_no_go": checklist.get("playbook_go_no_go", ""),
             "playbook_action": checklist.get("playbook_action", ""),
+            "approval_strip_summary": checklist_strip,
         },
+        "approval_surfaces": [
+            {"label": "dashboard", **dashboard_strip},
+            {"label": "validation", **validation_strip},
+            {"label": "checklist", **checklist_strip},
+        ],
+        "edge_experiment_review": edge_experiment_review,
+        "experiment_review_targets": experiment_review_targets,
+        "representative_candidates": representative_candidates,
         "alert_metrics_summary": {
             "latest_validation_alert": latest_validation_alert,
             "overall": (alerts.get("overall") or {}) if isinstance(alerts, dict) else {},

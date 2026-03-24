@@ -7,6 +7,20 @@ def _text(value: Any) -> str:
     return str(value or "")
 
 
+def _approval_strip_summary(summary: Mapping[str, Any] | None) -> dict[str, str]:
+    summary_dict = dict(summary or {})
+    return {
+        "primary_reason": _text(summary_dict.get("primary_reason")),
+        "approve_value": _text(summary_dict.get("approve_value")),
+        "approve_reason": _text(summary_dict.get("approve_reason")),
+        "align_value": _text(summary_dict.get("align_value")),
+        "align_reason": _text(summary_dict.get("align_reason")),
+        "act_value": _text(summary_dict.get("act_value")),
+        "act_reason": _text(summary_dict.get("act_reason")),
+        "act_priority_level": _text(summary_dict.get("act_priority_level")),
+    }
+
+
 def approval_summary_passthrough(summary: Mapping[str, Any] | None) -> dict[str, str]:
     summary_dict = dict(summary or {})
     return {
@@ -77,6 +91,45 @@ def validation_alert_contract(payload: Mapping[str, Any] | None) -> dict[str, st
         "approval_playbook_message": _text(
             payload_dict.get("approval_playbook_message") or payload_dict.get("playbook_message")
         ),
+    }
+
+
+def validation_alert_strip_summary(payload: Mapping[str, Any] | None) -> dict[str, str]:
+    payload_dict = dict(payload or {})
+    existing = _approval_strip_summary(payload_dict.get("approval_strip_summary"))
+    if any(existing.values()):
+        return {
+            "primary_reason": existing.get("primary_reason", ""),
+            "approve_value": existing.get("approve_value") or "n/a",
+            "approve_reason": existing.get("approve_reason", ""),
+            "align_value": existing.get("align_value") or "n/a",
+            "align_reason": existing.get("align_reason", ""),
+            "act_value": existing.get("act_value") or "review_validation_alert_contract",
+            "act_reason": existing.get("act_reason", ""),
+            "act_priority_level": existing.get("act_priority_level") or "monitor",
+        }
+
+    contract = validation_alert_contract(payload_dict)
+    deployment_go_no_go = _text(contract.get("deployment_go_no_go")).upper()
+    playbook_go_no_go = _text(contract.get("approval_playbook_go_no_go")).upper() or deployment_go_no_go
+    approval_summary_line = _text(contract.get("approval_topline_summary_line"))
+    deployment_message = _text(contract.get("deployment_message"))
+    playbook_message = _text(contract.get("approval_playbook_message"))
+    approve_map = {
+        "GO": "approval usable",
+        "MANUAL_REVIEW": "manual review first",
+        "NO_GO": "validation no_go",
+    }
+    priority_map = {"GO": "monitor", "MANUAL_REVIEW": "watch", "NO_GO": "urgent"}
+    return {
+        "primary_reason": approval_summary_line or playbook_message or deployment_message,
+        "approve_value": approve_map.get(deployment_go_no_go, deployment_go_no_go.lower() or "n/a"),
+        "approve_reason": approval_summary_line or deployment_message or playbook_message,
+        "align_value": "aligned" if not playbook_go_no_go or playbook_go_no_go == deployment_go_no_go else "playbook_drift",
+        "align_reason": playbook_message or approval_summary_line or deployment_message,
+        "act_value": _text(contract.get("approval_playbook_action")) or "review_validation_alert_contract",
+        "act_reason": playbook_message or deployment_message or approval_summary_line,
+        "act_priority_level": priority_map.get(deployment_go_no_go, "monitor"),
     }
 
 

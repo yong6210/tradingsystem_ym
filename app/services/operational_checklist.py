@@ -190,6 +190,79 @@ class OperationalChecklistService:
             ),
         }
 
+    @staticmethod
+    def _approval_strip_summary(
+        *,
+        validation_payload: dict[str, Any],
+        deployment_language: dict[str, str],
+        overall_status: str,
+        blocking_failures: int,
+        manual_actions: int,
+        warnings: int,
+    ) -> dict[str, Any]:
+        validation_contract = validation_report_contract(validation_payload)
+        validation_summary = dict((validation_payload.get("validation_report") or {}).get("approval_strip_summary") or {})
+
+        playbook_go_no_go = str(deployment_language.get("playbook_go_no_go") or "")
+        approve_value = "approval usable"
+        if playbook_go_no_go == "NO_GO":
+            approve_value = "validation/checklist no_go"
+        elif playbook_go_no_go == "MANUAL_REVIEW":
+            approve_value = "manual review first"
+
+        approve_reason = str(
+            deployment_language.get("deployment_message")
+            or deployment_language.get("playbook_message")
+            or validation_contract.get("playbook_message")
+            or "operational approval strip unavailable"
+        )
+
+        validation_go_no_go = str(validation_contract.get("playbook_go_no_go") or "")
+        validation_action = str(validation_contract.get("playbook_action") or "")
+        checklist_action = str(deployment_language.get("playbook_action") or "")
+        if validation_go_no_go and playbook_go_no_go and validation_go_no_go != playbook_go_no_go:
+            align_value = "deployment_drift"
+        elif validation_action and checklist_action and validation_action != checklist_action:
+            align_value = "playbook_drift"
+        elif validation_go_no_go or playbook_go_no_go:
+            align_value = "aligned"
+        else:
+            align_value = "not_available"
+
+        align_reason_parts = [
+            f"validation={validation_go_no_go or 'n/a'}",
+            f"checklist={playbook_go_no_go or 'n/a'}",
+            f"validation_action={validation_action or 'n/a'}",
+            f"checklist_action={checklist_action or 'n/a'}",
+        ]
+        validation_align_reason = str(validation_summary.get("align_reason") or "")
+        if validation_align_reason:
+            align_reason_parts.append(f"validation_align={validation_align_reason}")
+        if blocking_failures > 0 or manual_actions > 0 or warnings > 0:
+            align_reason_parts.append(
+                f"checklist_status={overall_status} | blocking_failures={blocking_failures} | manual_actions={manual_actions} | warnings={warnings}"
+            )
+
+        act_value = checklist_action or validation_action or "continue_runtime_monitoring"
+        act_reason = str(
+            deployment_language.get("playbook_message")
+            or validation_contract.get("playbook_message")
+            or validation_summary.get("act_reason")
+            or "operational action unavailable"
+        )
+        priority_map = {"NO_GO": "urgent", "MANUAL_REVIEW": "watch", "GO": "monitor"}
+
+        return {
+            "available": True,
+            "approve_value": approve_value,
+            "approve_reason": approve_reason,
+            "align_value": align_value,
+            "align_reason": " | ".join(part for part in align_reason_parts if part),
+            "act_value": act_value,
+            "act_reason": act_reason,
+            "act_priority_level": priority_map.get(playbook_go_no_go, "monitor"),
+        }
+
     def _health_item(self, *, ready: Any) -> dict[str, Any]:
         checks = dict(getattr(ready, "checks", {}) or {})
         details = dict(getattr(ready, "details", {}) or {})
@@ -699,9 +772,87 @@ class OperationalChecklistService:
             },
         )
 
-    def _operator_action_priority_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _split_review_followup_command(*, action: str, symbol: str, universe: str, days: int) -> str:
+        if action not in {"run_entry_timing_split_review", "run_execution_style_split_review"} or not symbol:
+            return ""
+        return (
+            f"./.venv/bin/python scripts/run_split_review_followup.py "
+            f"--symbol {symbol.upper()} --universe {universe} --days {max(int(days), 1)} --action {action}"
+        )
+
+    def _normalize_operator_action_priority_summary(
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        symbol: str,
+        universe: str,
+        days: int,
+    ) -> dict[str, Any]:
+        summary = dict(payload or {})
+        if not summary:
+            return {}
+
+        experiment_context = dict(summary.get("experiment_context") or {})
+        for key, action in (
+            ("entry_timing_target", "run_entry_timing_split_review"),
+            ("execution_style_target", "run_execution_style_split_review"),
+        ):
+            target = dict(experiment_context.get(key) or {})
+            if target and not target.get("followup_command"):
+                target["followup_command"] = self._split_review_followup_command(
+                    action=action,
+                    symbol=str(target.get("symbol") or symbol or ""),
+                    universe=universe,
+                    days=max(int(days), 1),
+                )
+                experiment_context[key] = target
+        if experiment_context:
+            summary["experiment_context"] = experiment_context
+
+        normalized_actions: list[dict[str, Any]] = []
+        for row in list(summary.get("next_actions") or []):
+            item = dict(row or {})
+            if not item.get("followup_command"):
+                item["followup_command"] = self._split_review_followup_command(
+                    action=str(item.get("action") or ""),
+                    symbol=str(item.get("target_symbol") or symbol or ""),
+                    universe=universe,
+                    days=max(int(days), 1),
+                )
+            normalized_actions.append(item)
+        summary["next_actions"] = normalized_actions
+
+        if not summary.get("top_action_followup_command"):
+            top_action = str(summary.get("top_action") or "")
+            top_target_key = {
+                "run_entry_timing_split_review": "entry_timing_target",
+                "run_execution_style_split_review": "execution_style_target",
+            }.get(top_action, "")
+            top_target = dict(experiment_context.get(top_target_key) or {})
+            summary["top_action_followup_command"] = self._split_review_followup_command(
+                action=top_action,
+                symbol=str(top_target.get("symbol") or symbol or ""),
+                universe=universe,
+                days=max(int(days), 1),
+            )
+        return summary
+
+    def _operator_action_priority_item(
+        self,
+        *,
+        validation_payload: dict[str, Any],
+        symbol: str,
+        universe: str,
+    ) -> dict[str, Any]:
         report = dict(validation_payload.get("validation_report") or {})
-        summary_payload = dict(report.get("operator_action_priority_summary") or {})
+        score_to_outcome_summary = dict(report.get("score_to_outcome_funnel_summary") or {})
+        summary_payload = self._normalize_operator_action_priority_summary(
+            report.get("operator_action_priority_summary"),
+            symbol=symbol,
+            universe=universe,
+            days=int(score_to_outcome_summary.get("report_window_days") or 7),
+        )
         available = bool(summary_payload.get("available", False))
         priority_level = str(summary_payload.get("priority_level", "monitor") or "monitor").lower()
         top_action = str(summary_payload.get("top_action", "") or "").strip()
@@ -736,10 +887,12 @@ class OperationalChecklistService:
                     "validation_report.operator_action_priority_summary.available",
                     "validation_report.operator_action_priority_summary.top_action",
                     "validation_report.operator_action_priority_summary.top_reason",
+                    "validation_report.operator_action_priority_summary.top_action_followup_command",
                     "validation_report.operator_action_priority_summary.priority_level",
                     "validation_report.operator_action_priority_summary.priority_source",
                     "validation_report.operator_action_priority_summary.action_family",
                     "validation_report.operator_action_priority_summary.capture_context",
+                    "validation_report.operator_action_priority_summary.experiment_context",
                     "validation_report.operator_action_priority_summary.next_actions",
                 ],
             },
@@ -747,6 +900,7 @@ class OperationalChecklistService:
                 "available": available,
                 "top_action": top_action,
                 "top_reason": top_reason,
+                "top_action_followup_command": str(summary_payload.get("top_action_followup_command", "") or ""),
                 "priority_level": priority_level,
                 "priority_source": str(summary_payload.get("priority_source", "monitor") or "monitor"),
                 "action_family": str(summary_payload.get("action_family", "monitor") or "monitor"),
@@ -754,6 +908,7 @@ class OperationalChecklistService:
                 "blocking_signals": list(summary_payload.get("blocking_signals") or []),
                 "next_actions": [dict(item) for item in list(summary_payload.get("next_actions") or [])[:3]],
                 "capture_context": dict(summary_payload.get("capture_context") or {}),
+                "experiment_context": dict(summary_payload.get("experiment_context") or {}),
                 "advisory_only": bool(summary_payload.get("advisory_only", True)),
             },
         )
@@ -807,6 +962,247 @@ class OperationalChecklistService:
                 "portfolio_bias_tier": portfolio_tier,
                 "portfolio_bias_score_delta": float(summary_payload.get("portfolio_bias_score_delta", 0.0) or 0.0),
                 "top_reason_codes": list(summary_payload.get("top_reason_codes") or []),
+            },
+        )
+
+    def _money_funnel_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
+        report = dict(validation_payload.get("validation_report") or {})
+        score_to_outcome = dict(report.get("score_to_outcome_funnel_summary") or {})
+        summary_payload = dict(score_to_outcome.get("money_funnel") or {})
+        available = bool(summary_payload.get("available", False))
+        historical_expected = dict(summary_payload.get("historical_expected_r") or {})
+        historical_realized = dict(summary_payload.get("historical_realized_r") or {})
+        historical_gap = dict(summary_payload.get("historical_gap_r") or {})
+        submitted_to_filled_gap_r = float(historical_gap.get("submitted_to_filled", 0.0) or 0.0)
+        closed_post_cost_delta_r = float(historical_gap.get("closed_expected_to_post_cost_realized", 0.0) or 0.0)
+        summary = str(summary_payload.get("summary", "") or "").strip()
+
+        if not available:
+            status = "PASS"
+            message = "money funnel unavailable; keep expected-R conversion review informational only"
+        elif submitted_to_filled_gap_r >= 0.25:
+            status = "WARN"
+            message = summary or "expected R is leaking materially between submit and fill"
+        elif closed_post_cost_delta_r <= -0.15:
+            status = "WARN"
+            message = summary or "closed post-cost realized R is trailing expected closed R"
+        else:
+            status = "PASS"
+            message = summary or "money funnel is informational only"
+
+        return self._item(
+            item_id="money_funnel",
+            title="Money Funnel",
+            category="execution",
+            status=status,
+            summary=message,
+            blocking=False,
+            source={
+                "endpoint": "/validation/report",
+                "fields": [
+                    "validation_report.score_to_outcome_funnel_summary.money_funnel.available",
+                    "validation_report.score_to_outcome_funnel_summary.money_funnel.snapshot_expected_r",
+                    "validation_report.score_to_outcome_funnel_summary.money_funnel.historical_expected_r",
+                    "validation_report.score_to_outcome_funnel_summary.money_funnel.historical_realized_r",
+                    "validation_report.score_to_outcome_funnel_summary.money_funnel.historical_gap_r",
+                ],
+            },
+            evidence={
+                "available": available,
+                "snapshot_expected_r": dict(summary_payload.get("snapshot_expected_r") or {}),
+                "historical_expected_r": historical_expected,
+                "historical_realized_r": historical_realized,
+                "historical_gap_r": historical_gap,
+            },
+        )
+
+    def _outcome_attribution_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
+        report = dict(validation_payload.get("validation_report") or {})
+        summary_payload = dict(report.get("outcome_attribution_summary") or {})
+        available = bool(report.get("outcome_attribution_available", False) or summary_payload.get("available", False))
+        strongest_drag_source = str(summary_payload.get("strongest_drag_source", "none") or "none").lower()
+        closed_post_cost_delta_r = float(summary_payload.get("closed_post_cost_delta_r", 0.0) or 0.0)
+        fill_capture_gap_r = float(summary_payload.get("fill_capture_gap_r", 0.0) or 0.0)
+        closed_trade_count = int(summary_payload.get("closed_trade_count", 0) or 0)
+        summary = str(summary_payload.get("summary", "") or "").strip()
+
+        if not available:
+            status = "PASS"
+            message = "outcome attribution unavailable; keep drag decomposition informational only"
+        elif strongest_drag_source == "fill_capture_gap" and fill_capture_gap_r >= 0.25:
+            status = "WARN"
+            message = summary or "expected edge is leaking before fills are captured"
+        elif strongest_drag_source in {"execution_component", "condition_component"} and closed_post_cost_delta_r <= -0.15:
+            status = "WARN"
+            message = summary or "closed post-cost attribution is drifting below expected edge"
+        elif closed_trade_count >= 4 and closed_post_cost_delta_r <= -0.15:
+            status = "WARN"
+            message = summary or "closed post-cost attribution is drifting below expected edge"
+        else:
+            status = "PASS"
+            message = summary or "outcome attribution is informational only"
+
+        return self._item(
+            item_id="outcome_attribution",
+            title="Outcome Attribution",
+            category="execution",
+            status=status,
+            summary=message,
+            blocking=False,
+            source={
+                "endpoint": "/validation/report",
+                "fields": [
+                    "validation_report.outcome_attribution_available",
+                    "validation_report.outcome_attribution_summary.strongest_drag_source",
+                    "validation_report.outcome_attribution_summary.strategy_component_r",
+                    "validation_report.outcome_attribution_summary.execution_component_r",
+                    "validation_report.outcome_attribution_summary.condition_component_r",
+                    "validation_report.outcome_attribution_summary.fill_capture_gap_r",
+                    "validation_report.outcome_attribution_summary.closed_post_cost_delta_r",
+                ],
+            },
+            evidence={
+                "available": available,
+                "confidence": str(summary_payload.get("confidence", "low") or "low"),
+                "closed_trade_count": closed_trade_count,
+                "strongest_drag_source": strongest_drag_source,
+                "strategy_component_r": float(summary_payload.get("strategy_component_r", 0.0) or 0.0),
+                "execution_component_r": float(summary_payload.get("execution_component_r", 0.0) or 0.0),
+                "condition_component_r": float(summary_payload.get("condition_component_r", 0.0) or 0.0),
+                "fill_capture_gap_r": fill_capture_gap_r,
+                "closed_expected_r": float(summary_payload.get("closed_expected_r", 0.0) or 0.0),
+                "closed_post_cost_realized_r": float(summary_payload.get("closed_post_cost_realized_r", 0.0) or 0.0),
+                "closed_post_cost_delta_r": closed_post_cost_delta_r,
+                "reason_codes": list(summary_payload.get("reason_codes") or []),
+                "source_summary": dict(summary_payload.get("source_summary") or {}),
+            },
+        )
+
+    def _edge_experiment_review_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
+        report = dict(validation_payload.get("validation_report") or {})
+        summary_payload = dict(report.get("edge_experiment_review_summary") or {})
+        available = bool(report.get("edge_experiment_review_available", False) or summary_payload.get("available", False))
+        edge_state = str(summary_payload.get("edge_state", "insufficient_edge_measurement") or "insufficient_edge_measurement")
+        true_edge_ratio = float(summary_payload.get("true_edge_ratio", 0.0) or 0.0)
+        edge_decay_rate = float(summary_payload.get("edge_decay_rate", 0.0) or 0.0)
+        entry_timing_ready = bool(summary_payload.get("entry_timing_comparison_ready", False))
+        execution_style_ready = bool(summary_payload.get("execution_style_comparison_ready", False))
+        summary = str(summary_payload.get("summary", "") or "").strip()
+
+        if not available:
+            status = "PASS"
+            message = "edge experiment review unavailable; keep timing/style experiments informational only"
+        elif edge_state == "fragile_edge":
+            status = "WARN"
+            message = summary or "post-cost true edge is fragile; prefer controlled split tests before rollout changes"
+        elif edge_state == "watch_edge" and (entry_timing_ready or execution_style_ready):
+            status = "WARN"
+            message = summary or "edge is unstable enough that timing/style split tests should precede expansion"
+        else:
+            status = "PASS"
+            message = summary or "edge experiment review is informational only"
+
+        return self._item(
+            item_id="edge_experiment_review",
+            title="Edge Experiment Review",
+            category="execution",
+            status=status,
+            summary=message,
+            blocking=False,
+            source={
+                "endpoint": "/validation/report",
+                "fields": [
+                    "validation_report.edge_experiment_review_available",
+                    "validation_report.edge_experiment_review_summary.edge_state",
+                    "validation_report.edge_experiment_review_summary.true_edge_ratio",
+                    "validation_report.edge_experiment_review_summary.edge_decay_rate",
+                    "validation_report.edge_experiment_review_summary.entry_timing_preferred_variant",
+                    "validation_report.edge_experiment_review_summary.execution_style_preferred_variant",
+                ],
+            },
+            evidence={
+                "available": available,
+                "edge_state": edge_state,
+                "true_edge_ratio": true_edge_ratio,
+                "recent_true_edge_ratio": float(summary_payload.get("recent_true_edge_ratio", 0.0) or 0.0),
+                "prior_true_edge_ratio": float(summary_payload.get("prior_true_edge_ratio", 0.0) or 0.0),
+                "edge_decay_rate": edge_decay_rate,
+                "edge_stability": float(summary_payload.get("edge_stability", 0.0) or 0.0),
+                "closed_trade_count": int(summary_payload.get("closed_trade_count", 0) or 0),
+                "entry_timing_available": bool(summary_payload.get("entry_timing_available", False)),
+                "entry_timing_comparison_ready": entry_timing_ready,
+                "entry_timing_preferred_variant": str(
+                    summary_payload.get("entry_timing_preferred_variant", "none") or "none"
+                ),
+                "entry_timing_recommendation_reason": str(
+                    summary_payload.get("entry_timing_recommendation_reason", "not_available") or "not_available"
+                ),
+                "execution_style_available": bool(summary_payload.get("execution_style_available", False)),
+                "execution_style_comparison_ready": execution_style_ready,
+                "execution_style_preferred_variant": str(
+                    summary_payload.get("execution_style_preferred_variant", "none") or "none"
+                ),
+                "execution_style_recommendation_reason": str(
+                    summary_payload.get("execution_style_recommendation_reason", "not_available") or "not_available"
+                ),
+                "reason_codes": list(summary_payload.get("reason_codes") or []),
+                "source_summary": dict(summary_payload.get("source_summary") or {}),
+            },
+        )
+
+    def _edge_evolution_rule_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
+        report = dict(validation_payload.get("validation_report") or {})
+        summary_payload = dict(report.get("edge_evolution_rule_summary") or {})
+        available = bool(report.get("edge_evolution_rule_available", False) or summary_payload.get("available", False))
+        evolution_state = str(summary_payload.get("evolution_state", "insufficient_sample") or "insufficient_sample")
+        summary = str(summary_payload.get("summary", "") or "").strip()
+
+        if not available:
+            status = "PASS"
+            message = "edge evolution rule unavailable; keep branch promotion and allocation changes advisory only"
+        elif evolution_state == "edge_kill_review":
+            status = "MANUAL"
+            message = summary or "edge deterioration now justifies kill-condition review before trusting further live allocation"
+        elif evolution_state == "reduce_candidate":
+            status = "WARN"
+            message = summary or "baseline allocation should be reduced until preferred branch evidence improves"
+        else:
+            status = "PASS"
+            message = summary or "edge evolution rule is informational only"
+
+        return self._item(
+            item_id="edge_evolution_rule",
+            title="Edge Evolution Rule",
+            category="execution",
+            status=status,
+            summary=message,
+            blocking=False,
+            source={
+                "endpoint": "/validation/report",
+                "fields": [
+                    "validation_report.edge_evolution_rule_available",
+                    "validation_report.edge_evolution_rule_summary.evolution_state",
+                    "validation_report.edge_evolution_rule_summary.recommended_action",
+                    "validation_report.edge_evolution_rule_summary.allocation_bias",
+                    "validation_report.edge_evolution_rule_summary.promotion_candidate_axis",
+                    "validation_report.edge_evolution_rule_summary.promotion_candidate_variant",
+                ],
+            },
+            evidence={
+                "available": available,
+                "evolution_state": evolution_state,
+                "recommended_action": str(summary_payload.get("recommended_action", "keep_current_baseline") or "keep_current_baseline"),
+                "allocation_bias": str(summary_payload.get("allocation_bias", "hold_current_baseline") or "hold_current_baseline"),
+                "confidence": str(summary_payload.get("confidence", "low") or "low"),
+                "true_edge_ratio": float(summary_payload.get("true_edge_ratio", 0.0) or 0.0),
+                "edge_decay_rate": float(summary_payload.get("edge_decay_rate", 0.0) or 0.0),
+                "closed_trade_count": int(summary_payload.get("closed_trade_count", 0) or 0),
+                "kill_review_triggered": bool(summary_payload.get("kill_review_triggered", False)),
+                "promotion_candidate_axis": str(summary_payload.get("promotion_candidate_axis", "none") or "none"),
+                "promotion_candidate_variant": str(summary_payload.get("promotion_candidate_variant", "none") or "none"),
+                "promotion_candidate_reason": str(summary_payload.get("promotion_candidate_reason", "not_available") or "not_available"),
+                "reason_codes": list(summary_payload.get("reason_codes") or []),
+                "source_summary": dict(summary_payload.get("source_summary") or {}),
             },
         )
 
@@ -2104,6 +2500,17 @@ class OperationalChecklistService:
             f"- warnings: {payload['warnings']}",
             f"- manual_actions: {payload['manual_actions']}",
             "",
+            "## Approval Strip",
+            (
+                f"- approve={payload['approval_strip_summary']['approve_value']} | "
+                f"align={payload['approval_strip_summary']['align_value']} | "
+                f"act={payload['approval_strip_summary']['act_value']} | "
+                f"priority={payload['approval_strip_summary']['act_priority_level']}"
+            ),
+            f"- approve_reason: {payload['approval_strip_summary']['approve_reason']}",
+            f"- align_reason: {payload['approval_strip_summary']['align_reason']}",
+            f"- act_reason: {payload['approval_strip_summary']['act_reason']}",
+            "",
             "## Checks",
         ]
         for item in payload["checks"]:
@@ -2156,8 +2563,16 @@ class OperationalChecklistService:
             self._forward_stress_regime_validation_item(validation_payload=validation_payload),
             self._kill_condition_automation_item(validation_payload=validation_payload),
             self._execution_degradation_advisory_item(validation_payload=validation_payload),
-            self._operator_action_priority_item(validation_payload=validation_payload),
+            self._operator_action_priority_item(
+                validation_payload=validation_payload,
+                symbol=symbol,
+                universe=universe,
+            ),
             self._outcome_control_trace_item(validation_payload=validation_payload),
+            self._money_funnel_item(validation_payload=validation_payload),
+            self._outcome_attribution_item(validation_payload=validation_payload),
+            self._edge_experiment_review_item(validation_payload=validation_payload),
+            self._edge_evolution_rule_item(validation_payload=validation_payload),
             self._rollout_recommendation_item(validation_payload=validation_payload),
             self._multi_strategy_ab_item(validation_payload=validation_payload),
             self._b_continuation_activation_item(validation_payload=validation_payload),
@@ -2196,6 +2611,14 @@ class OperationalChecklistService:
             manual_actions=manual_actions,
             warnings=warnings,
         )
+        approval_strip_summary = self._approval_strip_summary(
+            validation_payload=validation_payload,
+            deployment_language=deployment_language,
+            overall_status=overall_status,
+            blocking_failures=blocking_failures,
+            manual_actions=manual_actions,
+            warnings=warnings,
+        )
         payload: dict[str, Any] = {
             "generated_at": now.isoformat(),
             "symbol": symbol,
@@ -2212,6 +2635,7 @@ class OperationalChecklistService:
             "blocking_failures": blocking_failures,
             "warnings": warnings,
             "manual_actions": manual_actions,
+            "approval_strip_summary": approval_strip_summary,
             "checks": checks,
             "report_path": None,
         }

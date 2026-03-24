@@ -309,14 +309,17 @@
 - [x] MICRO_LIVE preflight helper 추가
 - 목적: live 전환 직전 operator가 `health/operator-dashboard/safety/validation/checklist/alerts/scanner`를 한 번에 점검하고, `READY_FOR_MICRO_LIVE` vs `NOT_READY`를 명시적으로 받는다.
 - 구현 방식: `scripts/run_micro_live_preflight.py`를 추가해 `GET /health/ready`, `GET /execution/operator-dashboard`, `GET /execution/safety-state`, `POST /validation/report`, `POST /operations/checklist`, `GET /alerts/metrics`, `GET /scanner/top`를 호출한다.
-- 구현 방식: 결과 payload는 `overall_status`, `summary_line`, `checks`, `candidate`, `next_steps`를 고정하고, 옵션으로 `reports/operations/micro_live_preflight/*.md` 리포트를 생성한다.
+- 구현 방식: 결과 payload는 `overall_status`, `summary_line`, `checks`, `candidate`, `approval_surfaces`, `edge_experiment_review`, `experiment_review_targets`, `representative_candidates`, `next_steps`를 고정하고, 옵션으로 `reports/operations/micro_live_preflight/*.md` 리포트를 생성한다.
+- 구현 방식: `experiment_review_targets`가 있으면 `next_steps`에 `scripts/run_split_review_followup.py --action ...` 명령도 같이 싣는다.
+- 구현 방식: stage snapshot과 session brief의 `entry_timing_review_target` / `execution_style_review_target`에도 같은 followup command를 실어 handoff 이후에도 review packet을 바로 생성할 수 있게 한다.
 - 완료 기준: `./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --days 7` 한 번으로 live 전환 전 preflight 상태를 결정할 수 있다.
+- 완료 기준: split review target이 잡힌 경우 `./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --days 7 --action auto`로 바로 review packet을 만들 수 있다.
 - 검증: `py_compile`, `--help`, `--no-write-report`, markdown report write 경로를 실제로 확인한다.
 
 - [x] post-live pruning review helper 추가
 - 목적: 첫 실제 live 운영 사이클 이후 contract pruning backlog를 다시 열어야 하는지 `filled live activity + reconciliation + validation/checklist` 기준으로 판단한다.
 - 구현 방식: `scripts/run_post_live_pruning_review.py`를 추가해 local DB의 `order_submissions`와 `GET /execution/operator-dashboard`, `POST /validation/report`, `POST /operations/checklist`를 함께 읽는다.
-- 구현 방식: 결과 payload는 `decision`, `rationale`, `checks`, `db_live_activity`, `operator_dashboard_summary`, `validation_summary`, `checklist_summary`, `next_steps`를 고정하고, 옵션으로 `reports/operations/pruning_reviews/*.md` 리포트를 생성한다.
+- 구현 방식: 결과 payload는 `decision`, `rationale`, `checks`, `db_live_activity`, `operator_dashboard_summary`, `validation_summary`, `checklist_summary`, `approval_surfaces`, `next_steps`를 고정하고, 옵션으로 `reports/operations/pruning_reviews/*.md` 리포트를 생성한다.
 - 완료 기준: `./.venv/bin/python scripts/run_post_live_pruning_review.py --symbol BTCUSDC --days 7` 한 번으로 pruning review를 reopen할지 keep hold할지 판단할 수 있다.
 - 검증: `py_compile`, `--help`, `--no-write-report`, markdown report write 경로를 실제로 확인한다.
 

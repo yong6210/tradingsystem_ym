@@ -70,6 +70,234 @@ def _active_close_only(dashboard: dict[str, Any]) -> bool:
     return any(str(item.get("reason_code") or "") == "close_only_active" for item in locks if isinstance(item, dict))
 
 
+def _surface_strip_summary(payload: dict[str, Any] | None, *, surface_type: str = "generic") -> dict[str, str]:
+    surface = dict(payload or {})
+    if surface_type == "validation":
+        summary = dict(surface.get("approval_strip_summary") or {})
+        deployment_summary = dict(surface.get("deployment_approval_summary") or {})
+    else:
+        summary = dict(surface.get("approval_strip_summary") or {})
+        deployment_summary = {}
+    if summary:
+        return {
+            "approve_value": str(summary.get("approve_value") or "n/a"),
+            "approve_reason": str(summary.get("approve_reason") or ""),
+            "align_value": str(summary.get("align_value") or "n/a"),
+            "align_reason": str(summary.get("align_reason") or ""),
+            "act_value": str(summary.get("act_value") or "continue_runtime_monitoring"),
+            "act_reason": str(summary.get("act_reason") or ""),
+            "act_priority_level": str(summary.get("act_priority_level") or "monitor"),
+            "primary_reason": str(summary.get("primary_reason") or ""),
+        }
+    return {
+        "approve_value": str(
+            surface.get("deployment_go_no_go")
+            or deployment_summary.get("deployment_go_no_go")
+            or surface.get("approval_topline_status")
+            or "n/a"
+        ),
+        "approve_reason": str(
+            surface.get("deployment_message")
+            or deployment_summary.get("deployment_message")
+            or surface.get("approval_topline_summary_line")
+            or ""
+        ),
+        "align_value": str(
+            surface.get("playbook_go_no_go")
+            or deployment_summary.get("playbook_go_no_go")
+            or surface.get("approval_topline_status")
+            or "n/a"
+        ),
+        "align_reason": str(
+            surface.get("playbook_message")
+            or deployment_summary.get("playbook_message")
+            or surface.get("approval_topline_summary_line")
+            or ""
+        ),
+        "act_value": str(
+            surface.get("playbook_action")
+            or deployment_summary.get("playbook_action")
+            or "continue_runtime_monitoring"
+        ),
+        "act_reason": str(
+            surface.get("playbook_message")
+            or deployment_summary.get("playbook_message")
+            or surface.get("deployment_message")
+            or deployment_summary.get("deployment_message")
+            or ""
+        ),
+        "act_priority_level": "monitor",
+        "primary_reason": str(
+            surface.get("deployment_message")
+            or deployment_summary.get("deployment_message")
+            or surface.get("playbook_message")
+            or deployment_summary.get("playbook_message")
+            or ""
+        ),
+    }
+
+
+def _surface_summary_line(label: str, summary: dict[str, str]) -> str:
+    return (
+        f"{label}: approve={summary.get('approve_value', 'n/a')} | "
+        f"align={summary.get('align_value', 'n/a')} | "
+        f"act={summary.get('act_value', 'continue_runtime_monitoring')}"
+    )
+
+
+def _float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _edge_experiment_summary(
+    validation_report: dict[str, Any],
+    dashboard: dict[str, Any],
+) -> dict[str, Any] | None:
+    dashboard_source = dict((((dashboard or {}).get("signal_funnel") or {}).get("edge_experiment_review") or {}))
+    validation_source = dict((validation_report or {}).get("edge_experiment_review_summary") or {})
+    source = dashboard_source or validation_source
+    if not source:
+        return None
+
+    source_summary = dict(source.get("source_summary") or {})
+    return {
+        "available": bool(source.get("available", True)),
+        "advisory_only": bool(source.get("advisory_only", True)),
+        "edge_state": str(source.get("edge_state") or "insufficient_edge_measurement"),
+        "summary": str(source.get("summary") or ""),
+        "true_edge_ratio": round(_float(source.get("true_edge_ratio")), 4),
+        "edge_decay_rate": round(_float(source.get("edge_decay_rate")), 4),
+        "entry_timing_preferred_variant": str(
+            source.get("entry_timing_preferred_variant") or source_summary.get("entry_timing_preferred_variant") or "none"
+        ),
+        "execution_style_preferred_variant": str(
+            source.get("execution_style_preferred_variant")
+            or source_summary.get("execution_style_preferred_variant")
+            or "none"
+        ),
+    }
+
+
+def _edge_experiment_summary_line(summary: dict[str, Any] | None) -> str:
+    if not summary:
+        return "edge_experiment: unavailable"
+    return (
+        f"edge_experiment: state={summary.get('edge_state', 'insufficient_edge_measurement')} | "
+        f"entry_timing={summary.get('entry_timing_preferred_variant', 'none')} | "
+        f"execution_style={summary.get('execution_style_preferred_variant', 'none')} | "
+        f"true_edge={float(summary.get('true_edge_ratio') or 0.0):.4f}"
+    )
+
+
+def _representative_candidates(dashboard: dict[str, Any]) -> dict[str, Any]:
+    portfolio = dict((dashboard or {}).get("portfolio_summary") or {})
+
+    def _candidate(row: dict[str, Any] | None, *, status: str) -> dict[str, Any] | None:
+        item = dict(row or {})
+        if not item:
+            return None
+        focus = dict(item.get("edge_experiment_focus") or {})
+        return {
+            "symbol": str(item.get("symbol") or ""),
+            "status": status,
+            "strategy_family": str(item.get("strategy_family") or ""),
+            "block_reason": str(item.get("block_reason") or ""),
+            "edge_state": str(focus.get("edge_state") or "insufficient_edge_measurement"),
+            "entry_timing_preferred_variant": str(focus.get("entry_timing_preferred_variant") or "none"),
+            "execution_style_preferred_variant": str(focus.get("execution_style_preferred_variant") or "none"),
+        }
+
+    accepted_rows = list(portfolio.get("accepted_candidates") or [])
+    blocked_rows = list(portfolio.get("blocked_candidates") or [])
+    return {
+        "accepted": _candidate(accepted_rows[0] if accepted_rows else None, status="ACTIONABLE_ENTRY"),
+        "blocked": _candidate(blocked_rows[0] if blocked_rows else None, status="BLOCKED_SETUP"),
+    }
+
+
+def _representative_candidate_summary_line(label: str, candidate: dict[str, Any] | None) -> str:
+    item = dict(candidate or {})
+    if not item:
+        return f"{label}: none"
+    line = (
+        f"{label}: {item.get('symbol') or 'unknown'} | "
+        f"family={item.get('strategy_family') or 'unknown'} | "
+        f"edge={item.get('edge_state') or 'insufficient_edge_measurement'} | "
+        f"split={(item.get('entry_timing_preferred_variant') or 'none')}/{(item.get('execution_style_preferred_variant') or 'none')}"
+    )
+    if item.get("status"):
+        line = f"{line} | status={item.get('status')}"
+    if item.get("block_reason"):
+        line = f"{line} | reason={item.get('block_reason')}"
+    return line
+
+
+def _split_review_followup_command(*, symbol: str, universe: str, days: int, action: str) -> str:
+    return (
+        f"./.venv/bin/python scripts/run_split_review_followup.py "
+        f"--symbol {symbol.upper()} --universe {universe} --days {max(1, int(days))} --action {action}"
+    )
+
+
+def _experiment_review_target(
+    operator_action_priority: dict[str, Any] | None,
+    *,
+    target_key: str,
+    preferred_key: str,
+    action: str,
+    universe: str,
+    days: int,
+) -> dict[str, Any] | None:
+    priority = dict(operator_action_priority or {})
+    context = dict(priority.get("experiment_context") or {})
+    target = dict(context.get(target_key) or {})
+    if not target:
+        return None
+    symbol = str(target.get("symbol") or "")
+    return {
+        "action": action,
+        "preferred_variant": str(context.get(preferred_key) or "none"),
+        "symbol": symbol,
+        "status": str(target.get("status") or ""),
+        "strategy_family": str(target.get("strategy_family") or ""),
+        "block_reason": str(target.get("block_reason") or ""),
+        "focus_source": str(target.get("focus_source") or ""),
+        "followup_command": (
+            _split_review_followup_command(
+                symbol=symbol,
+                universe=universe,
+                days=days,
+                action=action,
+            )
+            if symbol
+            else ""
+        ),
+    }
+
+
+def _experiment_review_target_line(label: str, target: dict[str, Any] | None) -> str:
+    item = dict(target or {})
+    if not item:
+        return f"{label}: none"
+    line = (
+        f"{label}: action={item.get('action') or 'unknown'} | "
+        f"target={item.get('symbol') or 'unknown'} | "
+        f"variant={item.get('preferred_variant') or 'none'} | "
+        f"status={item.get('status') or 'unknown'} | "
+        f"family={item.get('strategy_family') or 'unknown'}"
+    )
+    if item.get("block_reason"):
+        line = f"{line} | reason={item.get('block_reason')}"
+    if item.get("focus_source"):
+        line = f"{line} | focus={item.get('focus_source')}"
+    if item.get("followup_command"):
+        line = f"{line} | cmd={item.get('followup_command')}"
+    return line
+
+
 def _stage_from_payload(
     validation_report: dict[str, Any],
     checklist: dict[str, Any],
@@ -176,6 +404,10 @@ def _build_stage_payload(
     validation_report: dict[str, Any],
     checklist: dict[str, Any],
     dashboard: dict[str, Any],
+    *,
+    symbol: str = "BTCUSDC",
+    universe: str = "usdc_perp_top30",
+    days: int = 30,
 ) -> dict[str, Any]:
     deployment = validation_report.get("deployment_approval_summary") or {}
     trial_writer_summary = validation_report.get("strategy_v2_pbo_dsr_trial_writer_summary") or {}
@@ -183,6 +415,27 @@ def _build_stage_payload(
     execution_advisory = validation_report.get("execution_degradation_advisory_summary") or {}
     operator_action_priority = validation_report.get("operator_action_priority_summary") or {}
     alpha_research_pipeline = validation_report.get("alpha_research_pipeline_summary") or {}
+    validation_strip = _surface_strip_summary(validation_report, surface_type="validation")
+    checklist_strip = _surface_strip_summary(checklist, surface_type="checklist")
+    dashboard_strip = _surface_strip_summary(dashboard, surface_type="dashboard")
+    edge_experiment_review = _edge_experiment_summary(validation_report, dashboard)
+    representative_candidates = _representative_candidates(dashboard)
+    entry_timing_review_target = _experiment_review_target(
+        operator_action_priority,
+        target_key="entry_timing_target",
+        preferred_key="entry_timing_preferred_variant",
+        action="run_entry_timing_split_review",
+        universe=universe,
+        days=days,
+    )
+    execution_style_review_target = _experiment_review_target(
+        operator_action_priority,
+        target_key="execution_style_target",
+        preferred_key="execution_style_preferred_variant",
+        action="run_execution_style_split_review",
+        universe=universe,
+        days=days,
+    )
 
     stage = _stage_from_payload(validation_report, checklist, dashboard)
     payload = {
@@ -196,6 +449,13 @@ def _build_stage_payload(
         "selected_trial_run_id": trial_writer_summary.get("selected_trial_run_id"),
         "execution_degradation": execution_advisory.get("status"),
         "top_operator_action": operator_action_priority.get("top_action"),
+        "dashboard_approval_strip": dashboard_strip,
+        "validation_approval_strip": validation_strip,
+        "checklist_approval_strip": checklist_strip,
+        "edge_experiment_review": edge_experiment_review,
+        "entry_timing_review_target": entry_timing_review_target,
+        "execution_style_review_target": execution_style_review_target,
+        "representative_candidates": representative_candidates,
         "alpha_research_next_step": (
             alpha_research_pipeline.get("recommended_action")
             or alpha_research_pipeline.get("softening_top_bucket")
@@ -212,8 +472,15 @@ def _print_human(payload: dict[str, Any]) -> None:
     print(f"next_step_hint: {payload['next_step_hint']}")
     print(f"sample_progress_hint: {payload['sample_progress_hint']}")
     print(f"close_only_active: {payload['close_only_active']}")
-    print(f"playbook_go_no_go: {payload['playbook_go_no_go']}")
-    print(f"deployment_go_no_go: {payload['deployment_go_no_go']}")
+    print(_surface_summary_line("dashboard_surface", payload.get("dashboard_approval_strip") or {}))
+    print(_surface_summary_line("validation_surface", payload.get("validation_approval_strip") or {}))
+    print(_surface_summary_line("checklist_surface", payload.get("checklist_approval_strip") or {}))
+    print(_edge_experiment_summary_line(payload.get("edge_experiment_review")))
+    print(_experiment_review_target_line("entry_timing_review_target", payload.get("entry_timing_review_target")))
+    print(_experiment_review_target_line("execution_style_review_target", payload.get("execution_style_review_target")))
+    representative_candidates = payload.get("representative_candidates") or {}
+    print(_representative_candidate_summary_line("accepted_candidate_focus", representative_candidates.get("accepted")))
+    print(_representative_candidate_summary_line("blocked_candidate_focus", representative_candidates.get("blocked")))
     print(f"checklist_status: {payload['checklist_status']}")
     print(f"eligible_closed_trades: {payload['eligible_closed_trades']}")
     print(f"trial_runs_written: {payload['trial_runs_written']}")
@@ -258,7 +525,14 @@ def main() -> int:
     )
 
     validation_report = validation.get("validation_report") or validation
-    payload = _build_stage_payload(validation_report, checklist, dashboard)
+    payload = _build_stage_payload(
+        validation_report,
+        checklist,
+        dashboard,
+        symbol=args.symbol,
+        universe=args.universe,
+        days=args.days,
+    )
     if not args.no_write_stage:
         _write_stage_file(Path(args.stage_file).resolve(), payload)
     if args.json:

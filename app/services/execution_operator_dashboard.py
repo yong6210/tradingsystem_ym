@@ -10,11 +10,14 @@ from app.db.repositories import (
     OrderIntentRepository,
     OrderSubmissionRepository,
 )
+from app.services.edge_experiment_review import build_edge_experiment_review, summarize_edge_experiment_review
+from app.services.edge_evolution_rule import build_edge_evolution_rule, summarize_edge_evolution_rule
 from app.services.outcome_control_trace import (
     build_outcome_control_trace,
     runtime_outcome_control_trace,
     summarize_outcome_control_trace,
 )
+from app.services.outcome_attribution import build_outcome_attribution, summarize_outcome_attribution
 
 
 _SEVERITY_ORDER = {
@@ -84,6 +87,74 @@ class ExecutionOperatorDashboardService:
     def _execution_mode_value(self) -> str:
         mode = self.settings.auto_trading_execution_mode
         return str(getattr(mode, "value", mode))
+
+    @staticmethod
+    def _split_review_followup_command(*, action: str, symbol: str, universe: str, days: int) -> str:
+        if action not in {"run_entry_timing_split_review", "run_execution_style_split_review"} or not symbol:
+            return ""
+        return (
+            f"./.venv/bin/python scripts/run_split_review_followup.py "
+            f"--symbol {symbol.upper()} --universe {universe} --days {max(int(days), 1)} --action {action}"
+        )
+
+    @classmethod
+    def _normalize_operator_action_priority_payload(
+        cls,
+        payload: dict[str, Any] | None,
+        *,
+        symbol: str,
+        universe: str,
+        days: int,
+    ) -> dict[str, Any]:
+        priority = dict(payload or {})
+        if not priority:
+            return {}
+
+        experiment_context = dict(priority.get("experiment_context") or {})
+        for key, action in (
+            ("entry_timing_target", "run_entry_timing_split_review"),
+            ("execution_style_target", "run_execution_style_split_review"),
+        ):
+            target = dict(experiment_context.get(key) or {})
+            target_symbol = str(target.get("symbol") or symbol or "")
+            if target and not target.get("followup_command"):
+                target["followup_command"] = cls._split_review_followup_command(
+                    action=action,
+                    symbol=target_symbol,
+                    universe=universe,
+                    days=max(int(days), 1),
+                )
+                experiment_context[key] = target
+        if experiment_context:
+            priority["experiment_context"] = experiment_context
+
+        normalized_actions: list[dict[str, Any]] = []
+        for row in list(priority.get("next_actions") or []):
+            item = dict(row or {})
+            if not item.get("followup_command"):
+                item["followup_command"] = cls._split_review_followup_command(
+                    action=str(item.get("action") or ""),
+                    symbol=str(item.get("target_symbol") or symbol or ""),
+                    universe=universe,
+                    days=max(int(days), 1),
+                )
+            normalized_actions.append(item)
+        priority["next_actions"] = normalized_actions
+
+        if not priority.get("top_action_followup_command"):
+            top_action = str(priority.get("top_action") or "")
+            top_target_key = {
+                "run_entry_timing_split_review": "entry_timing_target",
+                "run_execution_style_split_review": "execution_style_target",
+            }.get(top_action, "")
+            top_target = dict(experiment_context.get(top_target_key) or {})
+            priority["top_action_followup_command"] = cls._split_review_followup_command(
+                action=top_action,
+                symbol=str(top_target.get("symbol") or symbol or ""),
+                universe=universe,
+                days=max(int(days), 1),
+            )
+        return priority
 
     @staticmethod
     def _gate_group_for_reason(reason: str | None) -> str:
@@ -692,6 +763,7 @@ class ExecutionOperatorDashboardService:
             "allocated_risk_r": float(item.get("allocated_risk_r", item.get("recommended_risk_r", 0.0)) or 0.0),
             "block_reason": item.get("block_reason"),
             "outcome_bias": dict(item.get("outcome_bias") or {}),
+            "edge_experiment_focus": dict(item.get("edge_experiment_focus") or {}),
             "capital_allocator": dict(item.get("capital_allocator") or {}),
             "capital_pressure": str(item.get("capital_pressure", "neutral") or "neutral"),
             "strategy_sizing": {
@@ -763,6 +835,7 @@ class ExecutionOperatorDashboardService:
         snapshot = dict(payload.get("snapshot_selection") or {})
         history = dict(payload.get("historical_execution_outcomes") or {})
         decomposition = dict(payload.get("decomposition") or {})
+        money_funnel = dict(payload.get("money_funnel") or {})
         return {
             "available": bool(payload.get("available", False)),
             "reason": payload.get("reason", "not_available"),
@@ -783,9 +856,14 @@ class ExecutionOperatorDashboardService:
             "baseline_cost_profitable_rate_from_closed": float(
                 history.get("baseline_cost_profitable_rate_from_closed", 0.0) or 0.0
             ),
+            "money_funnel": money_funnel if money_funnel else None,
             "top_family_bucket": dict((list(decomposition.get("family") or [])[:1] or [{}])[0]),
             "top_regime_bucket": dict((list(decomposition.get("regime") or [])[:1] or [{}])[0]),
             "top_session_bucket": dict((list(decomposition.get("session") or [])[:1] or [{}])[0]),
+            "top_entry_model_bucket": dict((list(decomposition.get("entry_model") or [])[:1] or [{}])[0]),
+            "top_entry_timing_bucket": dict((list(decomposition.get("entry_timing_variant") or [])[:1] or [{}])[0]),
+            "top_execution_mode_bucket": dict((list(decomposition.get("execution_mode") or [])[:1] or [{}])[0]),
+            "top_execution_style_bucket": dict((list(decomposition.get("execution_style") or [])[:1] or [{}])[0]),
         }
 
     @staticmethod
@@ -830,21 +908,150 @@ class ExecutionOperatorDashboardService:
         }
 
     @staticmethod
-    def _operator_action_priority_summary(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    def _operator_action_priority_summary(
+        payload: dict[str, Any] | None,
+        *,
+        symbol: str = "",
+        universe: str = "usdc_perp_top30",
+        days: int = 7,
+    ) -> dict[str, Any] | None:
         if not payload:
             return None
+        priority = ExecutionOperatorDashboardService._normalize_operator_action_priority_payload(
+            payload,
+            symbol=symbol,
+            universe=universe,
+            days=days,
+        )
         return {
-            "available": bool(payload.get("available", False)),
-            "top_action": payload.get("top_action", "continue_runtime_monitoring"),
-            "top_reason": payload.get("top_reason", ""),
-            "priority_level": payload.get("priority_level", "monitor"),
-            "priority_source": payload.get("priority_source", "monitor"),
-            "action_family": payload.get("action_family", "monitor"),
-            "supporting_signals": list(payload.get("supporting_signals") or []),
-            "blocking_signals": list(payload.get("blocking_signals") or []),
-            "next_actions": [dict(item) for item in list(payload.get("next_actions") or [])[:3]],
-            "capture_context": dict(payload.get("capture_context") or {}),
-            "advisory_only": bool(payload.get("advisory_only", True)),
+            "available": bool(priority.get("available", False)),
+            "top_action": priority.get("top_action", "continue_runtime_monitoring"),
+            "top_reason": priority.get("top_reason", ""),
+            "top_action_followup_command": priority.get("top_action_followup_command", ""),
+            "priority_level": priority.get("priority_level", "monitor"),
+            "priority_source": priority.get("priority_source", "monitor"),
+            "action_family": priority.get("action_family", "monitor"),
+            "supporting_signals": list(priority.get("supporting_signals") or []),
+            "blocking_signals": list(priority.get("blocking_signals") or []),
+            "next_actions": [dict(item) for item in list(priority.get("next_actions") or [])[:3]],
+            "capture_context": dict(priority.get("capture_context") or {}),
+            "experiment_context": dict(priority.get("experiment_context") or {}),
+            "advisory_only": bool(priority.get("advisory_only", True)),
+        }
+
+    @staticmethod
+    def _approval_strip_summary(
+        *,
+        portfolio_summary: dict[str, Any] | None,
+        operator_action_priority_summary: dict[str, Any] | None,
+        safety_state: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        portfolio = dict(portfolio_summary or {})
+        priority = dict(operator_action_priority_summary or {})
+        safety = dict(safety_state or {})
+        if not portfolio and not priority and not safety:
+            return None
+
+        deployment_go_no_go = str(portfolio.get("deployment_go_no_go") or "")
+        playbook_go_no_go = str(portfolio.get("playbook_go_no_go") or "")
+        playbook_action = str(portfolio.get("playbook_action") or "")
+        playbook_message = str(portfolio.get("playbook_message") or "")
+        deployment_message = str(portfolio.get("deployment_message") or "")
+        blocking_reason_code = str(safety.get("blocking_reason_code") or "")
+        blocking_reason_message = str(safety.get("blocking_reason_message") or "")
+        entries_allowed = safety.get("new_entry_allowed")
+
+        primary_reason = (
+            blocking_reason_message
+            or str(priority.get("top_reason") or "")
+            or deployment_message
+            or playbook_message
+            or "dashboard approval strip unavailable"
+        )
+
+        approve_value = "approval usable"
+        if entries_allowed is False:
+            approve_value = "entry gate blocked"
+        elif deployment_go_no_go == "NO_GO":
+            approve_value = "runtime no_go"
+        elif deployment_go_no_go == "MANUAL_REVIEW":
+            approve_value = "manual review first"
+        approve_reason = (
+            blocking_reason_message
+            or deployment_message
+            or playbook_message
+            or str(priority.get("top_reason") or "")
+            or "dashboard runtime approval unavailable"
+        )
+
+        if deployment_go_no_go and playbook_go_no_go and deployment_go_no_go != playbook_go_no_go:
+            align_value = "playbook_drift"
+            align_reason = " | ".join(
+                part
+                for part in [
+                    f"deployment={deployment_go_no_go}",
+                    f"playbook={playbook_go_no_go}",
+                    deployment_message or playbook_message,
+                ]
+                if part
+            )
+        elif entries_allowed is False and playbook_go_no_go == "GO":
+            align_value = "entry_gate_drift"
+            align_reason = " | ".join(
+                part
+                for part in [
+                    f"blocking_reason={blocking_reason_code}" if blocking_reason_code else "",
+                    blocking_reason_message,
+                    playbook_message,
+                ]
+                if part
+            ) or "dashboard runtime entry gate is blocked while playbook remains GO"
+        elif portfolio or entries_allowed is not None or blocking_reason_code:
+            align_value = "aligned"
+            align_reason = " | ".join(
+                part
+                for part in [
+                    f"deployment={deployment_go_no_go}" if deployment_go_no_go else "",
+                    f"playbook={playbook_go_no_go}" if playbook_go_no_go else "",
+                    f"blocking_reason={blocking_reason_code}" if blocking_reason_code else "",
+                    blocking_reason_message or deployment_message or playbook_message,
+                ]
+                if part
+            ) or "dashboard runtime approval is aligned"
+        else:
+            align_value = "not_available"
+            align_reason = "dashboard runtime alignment unavailable"
+
+        act_value = str(
+            priority.get("top_action")
+            or playbook_action
+            or ("review_entry_gate_block_before_rollout" if entries_allowed is False else "continue_runtime_monitoring")
+        )
+        act_reason = str(
+            priority.get("top_reason")
+            or playbook_message
+            or blocking_reason_message
+            or deployment_message
+            or "dashboard runtime action unavailable"
+        )
+        if priority.get("priority_level"):
+            act_priority_level = str(priority.get("priority_level") or "monitor")
+        elif entries_allowed is False or deployment_go_no_go == "NO_GO":
+            act_priority_level = "urgent"
+        elif deployment_go_no_go == "MANUAL_REVIEW":
+            act_priority_level = "watch"
+        else:
+            act_priority_level = "monitor"
+
+        return {
+            "primary_reason": primary_reason,
+            "approve_value": approve_value,
+            "approve_reason": approve_reason,
+            "align_value": align_value,
+            "align_reason": align_reason,
+            "act_value": act_value,
+            "act_reason": act_reason,
+            "act_priority_level": act_priority_level,
         }
 
     def generate(
@@ -873,6 +1080,7 @@ class ExecutionOperatorDashboardService:
         promotion_reopen_queue_summary: dict[str, Any] | None = None,
         promotion_decision_brief_summary: dict[str, Any] | None = None,
         auto_promotion_rollout_execution_summary: dict[str, Any] | None = None,
+        performance_decomposition_summary: dict[str, Any] | None = None,
         execution_friction_measurement_summary: dict[str, Any] | None = None,
         forward_stress_regime_validation_summary: dict[str, Any] | None = None,
         kill_condition_automation_summary: dict[str, Any] | None = None,
@@ -923,6 +1131,30 @@ class ExecutionOperatorDashboardService:
             runtime_outcome_trace_summary["portfolio_bias_distribution"] = dict(
                 dict(runtime_outcome_trace or {}).get("portfolio_bias", {}).get("distribution") or {}
             )
+        operator_action_priority_payload = self._operator_action_priority_summary(
+            operator_action_priority_summary,
+            symbol=symbol or "",
+            universe=str(portfolio_summary_payload.get("universe") or "usdc_perp_top30"),
+            days=max(int(days), 1),
+        )
+        outcome_attribution_summary = summarize_outcome_attribution(
+            build_outcome_attribution(
+                score_to_outcome_funnel=score_to_outcome_funnel_summary,
+                performance_decomposition_summary=performance_decomposition_summary,
+                execution_friction_measurement=execution_friction_measurement_summary,
+            )
+        )
+        edge_experiment_summary = summarize_edge_experiment_review(
+            build_edge_experiment_review(score_to_outcome_funnel=score_to_outcome_funnel_summary)
+        )
+        edge_evolution_summary = summarize_edge_evolution_rule(
+            build_edge_evolution_rule(
+                edge_experiment_review=edge_experiment_summary,
+                rollout_recommendation=rollout_recommendation_summary,
+                strategy_lifecycle=strategy_lifecycle_summary,
+                kill_condition_automation=kill_condition_automation_summary,
+            )
+        )
         submit_decision_counts: dict[str, int] = {}
         for item in recent_intents:
             submit_decision = str(item.get("submit_decision") or "")
@@ -1015,8 +1247,11 @@ class ExecutionOperatorDashboardService:
                 family_execution_degradation_advisory_summary
             ),
             "mode_advisory": self._mode_advisory_summary(mode_advisory_summary),
-            "operator_action_priority": self._operator_action_priority_summary(operator_action_priority_summary),
+            "operator_action_priority": operator_action_priority_payload,
             "outcome_control_trace": runtime_outcome_trace_summary,
+            "outcome_attribution": outcome_attribution_summary,
+            "edge_experiment_review": edge_experiment_summary,
+            "edge_evolution_rule": edge_evolution_summary,
             "rollout_recommendation": dict(rollout_recommendation_summary or {}) or None,
             "strategy_lifecycle": dict(strategy_lifecycle_summary or {}) or None,
             "promotion_governance": dict(promotion_governance_summary or {}) or None,
@@ -1041,6 +1276,11 @@ class ExecutionOperatorDashboardService:
             "opportunity_capture": dict(opportunity_capture_summary or {}) or None,
             "capital_allocator": dict(portfolio_summary.get("capital_allocator_summary") or {}) or None,
         }
+        approval_strip_summary = self._approval_strip_summary(
+            portfolio_summary=portfolio_summary,
+            operator_action_priority_summary=operator_action_priority_payload,
+            safety_state=safety_state,
+        )
 
         return {
             "generated_at": datetime.now(timezone.utc),
@@ -1059,6 +1299,7 @@ class ExecutionOperatorDashboardService:
             "playbook_code": portfolio_summary.get("playbook_code", ""),
             "playbook_action": portfolio_summary.get("playbook_action", ""),
             "playbook_message": portfolio_summary.get("playbook_message", ""),
+            "approval_strip_summary": approval_strip_summary,
             "kill_switch_active": bool(safety_state.get("kill_switch_active", False)),
             "close_only_active": bool(safety_state.get("close_only_active", False)),
             "config_close_only_active": bool(safety_state.get("config_close_only_active", False)),

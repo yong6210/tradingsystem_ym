@@ -406,6 +406,7 @@ class ExecutionOperatorDashboardResponse(ORMModel):
     playbook_code: str = ""
     playbook_action: str = ""
     playbook_message: str = ""
+    approval_strip_summary: dict[str, Any] | None = None
     kill_switch_active: bool = False
     close_only_active: bool = False
     config_close_only_active: bool = False

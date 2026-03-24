@@ -61,6 +61,88 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _edge_experiment_summary(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    source = dict((payload or {}).get("edge_experiment_review") or {})
+    if not source:
+        return None
+    return {
+        "available": bool(source.get("available", True)),
+        "advisory_only": bool(source.get("advisory_only", True)),
+        "edge_state": str(source.get("edge_state") or "insufficient_edge_measurement"),
+        "true_edge_ratio": float(source.get("true_edge_ratio", 0.0) or 0.0),
+        "entry_timing_preferred_variant": str(source.get("entry_timing_preferred_variant") or "none"),
+        "execution_style_preferred_variant": str(source.get("execution_style_preferred_variant") or "none"),
+        "summary": str(source.get("summary") or ""),
+    }
+
+
+def _edge_experiment_summary_line(summary: dict[str, Any] | None) -> str:
+    if not summary:
+        return "edge_experiment: unavailable"
+    return (
+        f"edge_experiment: state={summary.get('edge_state', 'insufficient_edge_measurement')} | "
+        f"entry_timing={summary.get('entry_timing_preferred_variant', 'none')} | "
+        f"execution_style={summary.get('execution_style_preferred_variant', 'none')} | "
+        f"true_edge={float(summary.get('true_edge_ratio') or 0.0):.4f}"
+    )
+
+
+def _edge_experiment_next_step(summary: dict[str, Any] | None) -> str | None:
+    if not summary:
+        return None
+    edge_state = str(summary.get("edge_state") or "")
+    entry_timing = str(summary.get("entry_timing_preferred_variant") or "none")
+    execution_style = str(summary.get("execution_style_preferred_variant") or "none")
+    if edge_state == "fragile_edge":
+        return (
+            "Advisory only: fragile post-cost edge; keep lineage sampling active but queue a split review "
+            f"for entry_timing={entry_timing} and execution_style={execution_style}."
+        )
+    if edge_state == "watch_edge":
+        return (
+            "Advisory only: unstable post-cost edge; compare next eligible PAPER sample against "
+            f"entry_timing={entry_timing} and execution_style={execution_style}."
+        )
+    if edge_state == "insufficient_edge_measurement":
+        return "Advisory only: edge evidence is still thin; keep accumulating closed PAPER samples."
+    return None
+
+
+def _candidate_edge_experiment_focus(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    source = dict((payload or {}).get("candidate_edge_experiment_focus") or {})
+    if source:
+        return source
+    candidate = dict((payload or {}).get("candidate") or {})
+    edge_experiment = dict((payload or {}).get("edge_experiment_review") or {})
+    if not candidate or not edge_experiment:
+        return None
+    return {
+        "symbol": str(candidate.get("symbol") or ""),
+        "strategy_family": str(candidate.get("strategy_family") or ""),
+        "block_reason": str(candidate.get("block_reason") or ""),
+        "edge_state": str(edge_experiment.get("edge_state") or "insufficient_edge_measurement"),
+        "entry_timing_preferred_variant": str(edge_experiment.get("entry_timing_preferred_variant") or "none"),
+        "execution_style_preferred_variant": str(edge_experiment.get("execution_style_preferred_variant") or "none"),
+        "true_edge_ratio": float(edge_experiment.get("true_edge_ratio", 0.0) or 0.0),
+        "focus_source": "top_level_fallback",
+    }
+
+
+def _candidate_edge_experiment_focus_line(payload: dict[str, Any] | None) -> str:
+    focus = dict(payload or {})
+    if not focus:
+        return "candidate_edge_focus: unavailable"
+    line = (
+        f"candidate_edge_focus: {focus.get('symbol') or 'unknown'} | "
+        f"family={focus.get('strategy_family') or 'unknown'} | "
+        f"edge={focus.get('edge_state') or 'insufficient_edge_measurement'} | "
+        f"split={(focus.get('entry_timing_preferred_variant') or 'none')}/{(focus.get('execution_style_preferred_variant') or 'none')}"
+    )
+    if focus.get("block_reason"):
+        line = f"{line} | reason={focus.get('block_reason')}"
+    return f"{line} | source={focus.get('focus_source') or 'unknown'}"
+
+
 def _run_once(args: argparse.Namespace) -> dict[str, Any]:
     cmd = [
         sys.executable,
@@ -132,6 +214,14 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
         lines.append(
             f"- attempt {attempt['attempt']}: {attempt['overall_status']} / {attempt['summary_line']}"
         )
+    lines.extend(["", "## Edge Experiment", ""])
+    edge_experiment = payload.get("edge_experiment_review") or {}
+    if edge_experiment:
+        lines.append(f"- {_edge_experiment_summary_line(edge_experiment)}")
+        lines.append(f"- summary: {edge_experiment.get('summary', '')}")
+    else:
+        lines.append("- edge experiment unavailable")
+    lines.append(f"- {_candidate_edge_experiment_focus_line(payload.get('candidate_edge_experiment_focus'))}")
     lines.extend(["", "## Raw Payload", "", "```json", json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default), "```"])
     path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -168,6 +258,8 @@ def main() -> int:
 
     found = bool(attempts and attempts[-1]["eligible_candidate_found"])
     overall_status = "FOUND_ELIGIBLE_CANDIDATE" if found else "NO_ELIGIBLE_CANDIDATE"
+    edge_experiment_review = _edge_experiment_summary(final_payload)
+    candidate_edge_experiment_focus = _candidate_edge_experiment_focus(final_payload)
     summary_line = (
         f"Eligible PAPER lineage candidate found on attempt {attempts[-1]['attempt']}."
         if found
@@ -186,6 +278,9 @@ def main() -> int:
             "No PAPER lineage submission occurred because no eligible family candidate appeared.",
         ]
     )
+    advisory_next_step = _edge_experiment_next_step(edge_experiment_review)
+    if advisory_next_step:
+        next_steps.append(advisory_next_step)
 
     result = {
         "generated_at": generated_at,
@@ -198,6 +293,8 @@ def main() -> int:
         "max_attempts": args.max_attempts,
         "attempts": attempts,
         "final_result": final_payload,
+        "edge_experiment_review": edge_experiment_review,
+        "candidate_edge_experiment_focus": candidate_edge_experiment_focus,
         "next_steps": next_steps,
     }
 

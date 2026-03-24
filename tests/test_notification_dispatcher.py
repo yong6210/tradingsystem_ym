@@ -44,9 +44,10 @@ def test_dispatcher_format_message_includes_approval_topline_summary_line() -> N
         },
     )
 
-    assert "deployment=NO_GO/no_go_proxy_selected_trial_against_replay_backed_worst_scenario" in message
-    assert "playbook_action=hold_live_rollout_and_keep_prototype_path" in message
+    assert "approval_strip: approve=validation no_go | align=aligned | act=hold_live_rollout_and_keep_prototype_path | priority=urgent" in message
     assert "approval=winner=runtime_proxy/runtime_validation_proxy_v1;" in message
+    assert "contract_trace: deployment=NO_GO/no_go_proxy_selected_trial_against_replay_backed_worst_scenario" in message
+    assert "playbook_action=hold_live_rollout_and_keep_prototype_path" in message
     assert "status=WARN" in message
     assert "version=v1" in message
 

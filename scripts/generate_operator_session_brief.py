@@ -79,25 +79,136 @@ def _brief_status(snapshot: dict[str, Any]) -> str:
     return "ALIGNED_MONITOR"
 
 
+def _approval_strip_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    approval_strip = snapshot.get("approval_strip") or {}
+    if approval_strip:
+        return approval_strip
+    dashboard = snapshot.get("dashboard_summary") or {}
+    return {
+        "approve_value": "n/a",
+        "align_value": str(snapshot.get("deployment_alignment") or "n/a").lower(),
+        "act_value": str(dashboard.get("top_operator_action") or "continue_runtime_monitoring"),
+        "act_priority_level": "monitor",
+        "primary_reason": "",
+        "approve_reason": "",
+        "align_reason": "",
+        "act_reason": "",
+    }
+
+
+def _surface_strip_summary(surface: dict[str, Any], *, surface_type: str = "generic") -> dict[str, str]:
+    payload = dict(surface or {})
+    if surface_type == "validation":
+        summary = dict((payload.get("validation_report") or {}).get("approval_strip_summary") or {})
+    else:
+        summary = dict(payload.get("approval_strip_summary") or {})
+    if summary:
+        return {
+            "approve_value": str(summary.get("approve_value") or "n/a"),
+            "align_value": str(summary.get("align_value") or "n/a"),
+            "act_value": str(summary.get("act_value") or "n/a"),
+            "approve_reason": str(summary.get("approve_reason") or ""),
+            "align_reason": str(summary.get("align_reason") or ""),
+            "act_reason": str(summary.get("act_reason") or ""),
+        }
+    return {
+        "approve_value": str(payload.get("deployment_go_no_go") or payload.get("approval_topline_status") or "n/a"),
+        "align_value": str(payload.get("playbook_go_no_go") or payload.get("approval_topline_status") or "n/a"),
+        "act_value": str(payload.get("playbook_action") or "continue_runtime_monitoring"),
+        "approve_reason": str(payload.get("deployment_message") or payload.get("approval_topline_summary_line") or ""),
+        "align_reason": str(payload.get("playbook_message") or payload.get("approval_topline_summary_line") or ""),
+        "act_reason": str(payload.get("playbook_message") or payload.get("deployment_message") or ""),
+    }
+
+
+def _surface_summary_line(label: str, surface: dict[str, Any], *, surface_type: str = "generic", suffix: str = "") -> str:
+    summary = _surface_strip_summary(surface, surface_type=surface_type)
+    line = (
+        f"- {label}: approve={summary.get('approve_value', 'n/a')} / "
+        f"align={summary.get('align_value', 'n/a')} / "
+        f"act={summary.get('act_value', 'n/a')}"
+    )
+    if suffix:
+        line = f"{line} / {suffix}"
+    return line
+
+
+def _representative_candidate_line(label: str, candidate: dict[str, Any] | None) -> str:
+    item = dict(candidate or {})
+    if not item:
+        return f"- {label}: none"
+    line = (
+        f"- {label}: {item.get('symbol') or 'unknown'} / "
+        f"family={item.get('strategy_family') or 'unknown'} / "
+        f"edge={item.get('edge_state') or 'unknown'} / "
+        f"split={(item.get('entry_timing_focus') or 'none')}/{(item.get('execution_style_focus') or 'none')}"
+    )
+    if item.get("status"):
+        line = f"{line} / status={item.get('status')}"
+    if item.get("block_reason"):
+        line = f"{line} / reason={item.get('block_reason')}"
+    return line
+
+
+def _experiment_review_target_line(label: str, target: dict[str, Any] | None) -> str:
+    item = dict(target or {})
+    if not item:
+        return f"- {label}: none"
+    line = (
+        f"- {label}: action={item.get('action') or 'unknown'} / "
+        f"target={item.get('symbol') or 'unknown'} / "
+        f"variant={item.get('preferred_variant') or 'none'} / "
+        f"status={item.get('status') or 'unknown'} / "
+        f"family={item.get('strategy_family') or 'unknown'}"
+    )
+    if item.get("block_reason"):
+        line = f"{line} / reason={item.get('block_reason')}"
+    if item.get("focus_source"):
+        line = f"{line} / focus={item.get('focus_source')}"
+    if item.get("followup_command"):
+        line = f"{line} / cmd={item.get('followup_command')}"
+    return line
+
+
 def _headline(snapshot: dict[str, Any], status: str) -> str:
     dashboard = snapshot.get("dashboard_summary") or {}
     validation = snapshot.get("validation_summary") or {}
     checklist = snapshot.get("checklist_summary") or {}
+    approval_strip = _approval_strip_snapshot(snapshot)
+    dashboard_strip = _surface_strip_summary(dashboard, surface_type="dashboard")
+    validation_strip = _surface_strip_summary(validation, surface_type="validation")
+    checklist_strip = _surface_strip_summary(checklist, surface_type="checklist")
+    kernel = snapshot.get("kernel_snapshot") or {}
+    kernel_verdict = str(kernel.get("kernel_verdict") or "")
+    drag_source = str(kernel.get("strongest_drag_source") or "n/a")
+    rollout = str(kernel.get("rollout_recommendation") or "n/a")
+    candidate_surface_priority = str(kernel.get("candidate_surface_priority") or "normal_priority")
+    prefix = (
+        f"approval_strip: approve={approval_strip.get('approve_value', '')} | "
+        f"align={approval_strip.get('align_value', '')} | "
+        f"act={approval_strip.get('act_value', '')}"
+    )
     if status == "UI_REGRESSION_REVIEW":
-        return "operator UI home-section regression review is required before trusting the home surface."
+        return f"{prefix}; operator UI home-section regression review is required before trusting the home surface."
     if status == "DEPLOYMENT_REVIEW_REQUIRED":
         return (
-            "dashboard and validation/checklist disagree on deployment posture; "
-            f"dashboard={dashboard.get('deployment_go_no_go', '')}, "
-            f"validation={validation.get('deployment_go_no_go', '')}, "
-            f"checklist={checklist.get('deployment_go_no_go', '')}."
+            f"{prefix}; dashboard and validation/checklist disagree on deployment posture; "
+            f"dashboard={dashboard_strip.get('approve_value', '')}, "
+            f"validation={validation_strip.get('approve_value', '')}, "
+            f"checklist={checklist_strip.get('approve_value', '')}."
         )
     if status == "PLAYBOOK_REVIEW_REQUIRED":
         return (
-            "deployment posture is aligned but playbook wording differs across surfaces; "
+            f"{prefix}; deployment posture is aligned but playbook wording differs across surfaces; "
             "review operator wording drift before acting."
         )
-    return "dashboard, validation, checklist, and operator UI coverage are aligned enough for normal monitoring."
+    if kernel_verdict in {"hold", "manual_review", "watch"}:
+        return (
+            f"{prefix}; surface alignment is usable, but 5-second kernel still points to "
+            f"{kernel_verdict}; drag_source={drag_source}, rollout={rollout}, "
+            f"candidate_surface={candidate_surface_priority}."
+        )
+    return f"{prefix}; dashboard, validation, checklist, and operator UI coverage are aligned enough for normal monitoring."
 
 
 def _write_report(path: Path, payload: dict[str, Any]) -> None:
@@ -121,22 +232,47 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append("## Headline")
     lines.append("")
     lines.append(f"- summary: {payload['headline']}")
+    approval_strip = _approval_strip_snapshot(snapshot)
+    lines.append(
+        f"- approval_strip: approve={approval_strip.get('approve_value', '')} | "
+        f"align={approval_strip.get('align_value', '')} | "
+        f"act={approval_strip.get('act_value', '')} | "
+        f"priority={approval_strip.get('act_priority_level', '')}"
+    )
     lines.append(f"- top_operator_action: {dashboard.get('top_operator_action', '')}")
     lines.append(f"- snapshot_report: {snapshot.get('report_path', '')}")
+    lines.append("")
+    lines.append("## Approval Strip")
+    lines.append("")
+    lines.append(f"- primary_reason: {approval_strip.get('primary_reason', '')}")
+    lines.append(f"- approve_reason: {approval_strip.get('approve_reason', '')}")
+    lines.append(f"- align_reason: {approval_strip.get('align_reason', '')}")
+    lines.append(f"- act_reason: {approval_strip.get('act_reason', '')}")
+    lines.append("")
+    lines.append("## 5-Second Kernel")
+    lines.append("")
+    kernel = snapshot.get("kernel_snapshot") or {}
+    lines.append(
+        f"- verdict: {kernel.get('kernel_verdict', '')} | "
+        f"money_leak_r={kernel.get('money_leak_r', '')} | "
+        f"drag_source={kernel.get('strongest_drag_source', '')} | "
+        f"approval_tier={kernel.get('outcome_control_tier', '')} | "
+        f"rollout={kernel.get('rollout_recommendation', '')} | "
+        f"candidate_surface_priority={kernel.get('candidate_surface_priority', '')}"
+    )
+    lines.append(
+        f"- expected_vs_realized_r: expected_closed={kernel.get('expected_closed_r', '')} / "
+        f"post_cost_closed={kernel.get('post_cost_closed_r', '')} / "
+        f"delta={kernel.get('closed_post_cost_delta_r', '')}"
+    )
     lines.append("")
     lines.append("## Surface Alignment")
     lines.append("")
     lines.append(f"- deployment_alignment: {snapshot.get('deployment_alignment', '')}")
     lines.append(f"- playbook_alignment: {snapshot.get('playbook_alignment', '')}")
-    lines.append(
-        f"- dashboard: {dashboard.get('deployment_go_no_go', '')} / {dashboard.get('playbook_action', '')} / mode={dashboard.get('execution_mode', '')}"
-    )
-    lines.append(
-        f"- validation: {validation.get('deployment_go_no_go', '')} / {validation.get('playbook_action', '')} / approval_topline_status={validation.get('approval_topline_status', '')}"
-    )
-    lines.append(
-        f"- checklist: {checklist.get('deployment_go_no_go', '')} / {checklist.get('playbook_action', '')} / overall_status={checklist.get('overall_status', '')}"
-    )
+    lines.append(_surface_summary_line("dashboard", dashboard, surface_type="dashboard", suffix=f"mode={dashboard.get('execution_mode', '')}"))
+    lines.append(_surface_summary_line("validation", validation, surface_type="validation", suffix=f"approval_topline_status={validation.get('approval_topline_status', '')}"))
+    lines.append(_surface_summary_line("checklist", checklist, surface_type="checklist", suffix=f"overall_status={checklist.get('overall_status', '')}"))
     lines.append("")
     lines.append("## Operator UI Coverage")
     lines.append("")
@@ -150,6 +286,25 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append("")
     lines.append(f"- research_action: {funnel.get('research_action', '')}")
     lines.append(f"- shadow_experiment: {funnel.get('shadow_experiment', '')}")
+    lines.append(
+        f"- edge_experiment: state={funnel.get('edge_state', '')} | "
+        f"entry_timing={funnel.get('entry_timing_focus', '')} | "
+        f"execution_style={funnel.get('execution_style_focus', '')}"
+    )
+    lines.append(_experiment_review_target_line("entry_timing_review_target", funnel.get("entry_timing_review_target")))
+    lines.append(_experiment_review_target_line("execution_style_review_target", funnel.get("execution_style_review_target")))
+    lines.append(
+        _representative_candidate_line(
+            "representative_accepted_candidate",
+            funnel.get("representative_accepted_candidate"),
+        )
+    )
+    lines.append(
+        _representative_candidate_line(
+            "representative_blocked_candidate",
+            funnel.get("representative_blocked_candidate"),
+        )
+    )
     lines.append(f"- governance_state: {funnel.get('governance_state', '')}")
     lines.append(f"- review_queue: {funnel.get('review_queue', '')}")
     lines.append(f"- remediation_queue: {funnel.get('remediation_queue', '')}")

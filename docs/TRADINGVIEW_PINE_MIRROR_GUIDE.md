@@ -177,6 +177,7 @@ Read the chart first, but confirm runtime truth and approval on the server in th
 For the full operator session flow after chart triage, follow [docs/AUTO_TRADING_OPERATING_RUNBOOK.md](/Users/yumin/Documents/trading/docs/AUTO_TRADING_OPERATING_RUNBOOK.md).
 
 1. `GET /execution/operator-ui`
+   - `5-Second Operator Kernel`
    - `Decision Summary`
    - `Top Operator Action`
    - `Top Opportunity / Top Blocker`
@@ -194,12 +195,13 @@ For the full operator session flow after chart triage, follow [docs/AUTO_TRADING
    - deployment/playbook alignment
    - non-blocking warnings before rollout
 
-When you move from TradingView to the operator surfaces, read them in the same order: Decision Summary, Top Operator Action, Top Opportunity / Top Blocker, and Current Operating State before dropping into plans, guidance, and detailed operations sections.
+When you move from TradingView to the operator surfaces, read them in the same order: 5-Second Operator Kernel, Decision Summary, Top Operator Action, Top Opportunity / Top Blocker, and Current Operating State before dropping into plans, guidance, and detailed operations sections.
 
-1. `Decision Summary`
-2. `Top Operator Action`
-3. `Top Opportunity / Top Blocker`
-4. `Current Operating State`
+1. `5-Second Operator Kernel`
+2. `Decision Summary`
+3. `Top Operator Action`
+4. `Top Opportunity / Top Blocker`
+5. `Current Operating State`
 
 ## How to read chart-side Operator Priority
 

@@ -41,6 +41,11 @@ def _validation_report(
             "playbook_go_no_go": playbook_go_no_go,
             "deployment_go_no_go": None,
         },
+        "approval_strip_summary": {
+            "approve_value": "validation no_go" if playbook_go_no_go == "NO_GO" else "approval usable",
+            "align_value": "aligned",
+            "act_value": "review_runtime_execution_drag_before_expansion",
+        },
         "strategy_v2_pbo_dsr_trial_writer_summary": {
             "selected_trial_run_id": selected_trial_run_id,
             "sample_counts": {
@@ -53,9 +58,33 @@ def _validation_report(
         },
         "operator_action_priority_summary": {
             "top_action": top_operator_action,
+            "experiment_context": {
+                "entry_timing_preferred_variant": "early_limit",
+                "execution_style_preferred_variant": "passive_limit",
+                "entry_timing_target": {
+                    "symbol": "BTCUSDC",
+                    "status": "ACTIONABLE_ENTRY",
+                    "strategy_family": "sweep_reversal",
+                    "focus_source": "accepted_candidate_focus",
+                },
+                "execution_style_target": {
+                    "symbol": "BTCUSDC",
+                    "status": "ACTIONABLE_ENTRY",
+                    "strategy_family": "sweep_reversal",
+                    "focus_source": "accepted_candidate_focus",
+                },
+            },
         },
         "alpha_research_pipeline_summary": {
             "recommended_action": alpha_research_next_step,
+        },
+        "edge_experiment_review_summary": {
+            "edge_state": "watch_edge",
+            "summary": "Run controlled split tests before widening scope.",
+            "true_edge_ratio": 0.88,
+            "edge_decay_rate": -0.04,
+            "entry_timing_preferred_variant": "early_limit",
+            "execution_style_preferred_variant": "passive_limit",
         },
     }
 
@@ -63,6 +92,11 @@ def _validation_report(
 def _checklist(*, overall_status: str = "FAIL"):
     return {
         "overall_status": overall_status,
+        "approval_strip_summary": {
+            "approve_value": "validation/checklist no_go" if overall_status == "FAIL" else "approval usable",
+            "align_value": "aligned",
+            "act_value": "clear_blocking_operational_items_before_rollout",
+        },
     }
 
 
@@ -72,6 +106,36 @@ def _dashboard(*, new_entries_allowed: bool = False, close_only_active: bool = T
         "active_locks": (
             [{"reason_code": "close_only_active"}] if close_only_active else []
         ),
+        "approval_strip_summary": {
+            "approve_value": "entry gate blocked" if not new_entries_allowed else "approval usable",
+            "align_value": "aligned",
+            "act_value": "continue_candidate_review_under_portfolio_caps",
+        },
+        "portfolio_summary": {
+            "accepted_candidates": [
+                {
+                    "symbol": "BTCUSDC",
+                    "strategy_family": "sweep_reversal",
+                    "edge_experiment_focus": {
+                        "edge_state": "watch_edge",
+                        "entry_timing_preferred_variant": "early_limit",
+                        "execution_style_preferred_variant": "passive_limit",
+                    },
+                }
+            ],
+            "blocked_candidates": [
+                {
+                    "symbol": "ETHUSDC",
+                    "strategy_family": "trend_continuation",
+                    "block_reason": "portfolio_cap",
+                    "edge_experiment_focus": {
+                        "edge_state": "fragile_edge",
+                        "entry_timing_preferred_variant": "reaction_confirmed",
+                        "execution_style_preferred_variant": "market",
+                    },
+                }
+            ],
+        },
     }
 
 
@@ -89,6 +153,22 @@ def test_stage_payload_reports_blocked_state():
     assert payload["trial_runs_written"] == 0
     assert payload["selected_trial_run_id"] is None
     assert payload["execution_degradation"] == "manual_review"
+    assert payload["dashboard_approval_strip"]["approve_value"] == "entry gate blocked"
+    assert payload["validation_approval_strip"]["act_value"] == "review_runtime_execution_drag_before_expansion"
+    assert payload["checklist_approval_strip"]["act_value"] == "clear_blocking_operational_items_before_rollout"
+    assert payload["edge_experiment_review"]["edge_state"] == "watch_edge"
+    assert payload["edge_experiment_review"]["entry_timing_preferred_variant"] == "early_limit"
+    assert payload["entry_timing_review_target"]["symbol"] == "BTCUSDC"
+    assert payload["entry_timing_review_target"]["action"] == "run_entry_timing_split_review"
+    assert payload["entry_timing_review_target"]["followup_command"].endswith(
+        "--symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review"
+    )
+    assert payload["execution_style_review_target"]["symbol"] == "BTCUSDC"
+    assert payload["execution_style_review_target"]["followup_command"].endswith(
+        "--symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_execution_style_split_review"
+    )
+    assert payload["representative_candidates"]["accepted"]["symbol"] == "BTCUSDC"
+    assert payload["representative_candidates"]["blocked"]["symbol"] == "ETHUSDC"
 
 
 def test_stage_payload_reports_lineage_ready_when_trial_exists():
@@ -109,6 +189,10 @@ def test_stage_payload_reports_lineage_ready_when_trial_exists():
     assert payload["trial_runs_written"] == 2
     assert payload["selected_trial_run_id"] == "trial_run_001"
     assert payload["execution_degradation"] == "watch"
+    assert payload["dashboard_approval_strip"]["approve_value"] == "approval usable"
+    assert payload["validation_approval_strip"]["approve_value"] == "approval usable"
+    assert payload["checklist_approval_strip"]["approve_value"] == "approval usable"
+    assert payload["edge_experiment_review"]["execution_style_preferred_variant"] == "passive_limit"
 
 
 def test_collect_events_emits_transition_events():
@@ -116,17 +200,131 @@ def test_collect_events_emits_transition_events():
         "stage": "1_SAMPLE_COLLECTION",
         "close_only_active": False,
         "playbook_go_no_go": "MANUAL_REVIEW",
+        "dashboard_approval_strip": {
+            "approve_value": "manual review first",
+            "align_value": "aligned",
+            "act_value": "review_runtime_gate_before_reopen",
+        },
+        "validation_approval_strip": {
+            "approve_value": "manual review first",
+            "align_value": "aligned",
+            "act_value": "review_runtime_execution_drag_before_expansion",
+        },
+        "checklist_approval_strip": {
+            "approve_value": "manual review first",
+            "align_value": "aligned",
+            "act_value": "clear_open_operational_items_before_rollout",
+        },
         "trial_runs_written": 0,
         "selected_trial_run_id": None,
         "execution_degradation": "watch",
+        "edge_experiment_review": {
+            "edge_state": "watch_edge",
+            "entry_timing_preferred_variant": "reaction_confirmed",
+            "execution_style_preferred_variant": "market",
+            "true_edge_ratio": 0.74,
+        },
+        "entry_timing_review_target": {
+            "action": "run_entry_timing_split_review",
+            "preferred_variant": "reaction_confirmed",
+            "symbol": "ETHUSDC",
+            "status": "BLOCKED_SETUP",
+            "strategy_family": "trend_continuation",
+            "block_reason": "portfolio_cap",
+            "focus_source": "blocked_candidate_focus",
+            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review",
+        },
+        "execution_style_review_target": {
+            "action": "run_execution_style_split_review",
+            "preferred_variant": "market",
+            "symbol": "ETHUSDC",
+            "status": "BLOCKED_SETUP",
+            "strategy_family": "trend_continuation",
+            "block_reason": "portfolio_cap",
+            "focus_source": "blocked_candidate_focus",
+            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 30 --action run_execution_style_split_review",
+        },
+        "representative_candidates": {
+            "accepted": {
+                "symbol": "BTCUSDC",
+                "strategy_family": "sweep_reversal",
+                "edge_state": "watch_edge",
+                "entry_timing_preferred_variant": "reaction_confirmed",
+                "execution_style_preferred_variant": "market",
+            },
+            "blocked": {
+                "symbol": "ETHUSDC",
+                "strategy_family": "trend_continuation",
+                "block_reason": "portfolio_cap",
+                "edge_state": "watch_edge",
+                "entry_timing_preferred_variant": "reaction_confirmed",
+                "execution_style_preferred_variant": "market",
+            },
+        },
     }
     current = {
         "stage": "2_LINEAGE_READY",
         "close_only_active": True,
         "playbook_go_no_go": "GO",
+        "dashboard_approval_strip": {
+            "approve_value": "entry gate blocked",
+            "align_value": "aligned",
+            "act_value": "continue_candidate_review_under_portfolio_caps",
+        },
+        "validation_approval_strip": {
+            "approve_value": "approval usable",
+            "align_value": "aligned",
+            "act_value": "review_runtime_execution_drag_before_expansion",
+        },
+        "checklist_approval_strip": {
+            "approve_value": "approval usable",
+            "align_value": "aligned",
+            "act_value": "clear_blocking_operational_items_before_rollout",
+        },
         "trial_runs_written": 1,
         "selected_trial_run_id": "trial_run_001",
         "execution_degradation": "manual_review",
+        "edge_experiment_review": {
+            "edge_state": "fragile_edge",
+            "entry_timing_preferred_variant": "early_limit",
+            "execution_style_preferred_variant": "passive_limit",
+            "true_edge_ratio": 0.62,
+        },
+        "entry_timing_review_target": {
+            "action": "run_entry_timing_split_review",
+            "preferred_variant": "early_limit",
+            "symbol": "BTCUSDC",
+            "status": "ACTIONABLE_ENTRY",
+            "strategy_family": "sweep_reversal",
+            "focus_source": "accepted_candidate_focus",
+            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review",
+        },
+        "execution_style_review_target": {
+            "action": "run_execution_style_split_review",
+            "preferred_variant": "passive_limit",
+            "symbol": "BTCUSDC",
+            "status": "ACTIONABLE_ENTRY",
+            "strategy_family": "sweep_reversal",
+            "focus_source": "accepted_candidate_focus",
+            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_execution_style_split_review",
+        },
+        "representative_candidates": {
+            "accepted": {
+                "symbol": "BTCUSDC",
+                "strategy_family": "sweep_reversal",
+                "edge_state": "watch_edge",
+                "entry_timing_preferred_variant": "early_limit",
+                "execution_style_preferred_variant": "passive_limit",
+            },
+            "blocked": {
+                "symbol": "ETHUSDC",
+                "strategy_family": "trend_continuation",
+                "block_reason": "portfolio_cap",
+                "edge_state": "fragile_edge",
+                "entry_timing_preferred_variant": "early_limit",
+                "execution_style_preferred_variant": "passive_limit",
+            },
+        },
     }
 
     events = notify_stage_change._collect_events(previous, current)
@@ -134,7 +332,14 @@ def test_collect_events_emits_transition_events():
 
     assert "stage_changed" in event_types
     assert "close_only_changed" in event_types
+    assert "dashboard_surface_changed" in event_types
     assert "playbook_changed" in event_types
+    assert "checklist_surface_changed" in event_types
+    assert "edge_experiment_changed" in event_types
+    assert "accepted_candidate_focus_changed" in event_types
+    assert "blocked_candidate_focus_changed" in event_types
+    assert "entry_timing_review_target_changed" in event_types
+    assert "execution_style_review_target_changed" in event_types
     assert "trial_runs_started" in event_types
     assert "winner_selected" in event_types
     assert "execution_manual_review" in event_types
@@ -159,3 +364,86 @@ def test_collect_events_initial_snapshot_only_on_first_run():
             "body": "Current stage is 0_BLOCKED.",
         }
     ]
+
+
+def test_render_message_uses_approval_surface_lines() -> None:
+    current = {
+        "stage": "2_LINEAGE_READY",
+        "dashboard_approval_strip": {
+            "approve_value": "entry gate blocked",
+            "align_value": "aligned",
+            "act_value": "continue_candidate_review_under_portfolio_caps",
+        },
+        "validation_approval_strip": {
+            "approve_value": "approval usable",
+            "align_value": "aligned",
+            "act_value": "review_runtime_execution_drag_before_expansion",
+        },
+        "checklist_approval_strip": {
+            "approve_value": "approval usable",
+            "align_value": "aligned",
+            "act_value": "clear_blocking_operational_items_before_rollout",
+        },
+        "close_only_active": True,
+        "checklist_status": "FAIL",
+        "eligible_closed_trades": 4,
+        "trial_runs_written": 1,
+        "selected_trial_run_id": "trial_run_001",
+        "execution_degradation": "manual_review",
+        "top_operator_action": "continue_candidate_review_under_portfolio_caps",
+        "alpha_research_next_step": "review_execution_drag_before_reopen",
+        "edge_experiment_review": {
+            "edge_state": "watch_edge",
+            "entry_timing_preferred_variant": "early_limit",
+            "execution_style_preferred_variant": "passive_limit",
+            "true_edge_ratio": 0.82,
+        },
+        "entry_timing_review_target": {
+            "action": "run_entry_timing_split_review",
+            "preferred_variant": "early_limit",
+            "symbol": "BTCUSDC",
+            "status": "ACTIONABLE_ENTRY",
+            "strategy_family": "sweep_reversal",
+            "focus_source": "accepted_candidate_focus",
+            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review",
+        },
+        "execution_style_review_target": {
+            "action": "run_execution_style_split_review",
+            "preferred_variant": "passive_limit",
+            "symbol": "BTCUSDC",
+            "status": "ACTIONABLE_ENTRY",
+            "strategy_family": "sweep_reversal",
+            "focus_source": "accepted_candidate_focus",
+            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_execution_style_split_review",
+        },
+        "representative_candidates": {
+            "accepted": {
+                "symbol": "BTCUSDC",
+                "strategy_family": "sweep_reversal",
+                "edge_state": "watch_edge",
+                "entry_timing_preferred_variant": "early_limit",
+                "execution_style_preferred_variant": "passive_limit",
+            },
+            "blocked": {
+                "symbol": "ETHUSDC",
+                "strategy_family": "trend_continuation",
+                "block_reason": "portfolio_cap",
+                "edge_state": "fragile_edge",
+                "entry_timing_preferred_variant": "reaction_confirmed",
+                "execution_style_preferred_variant": "market",
+            },
+        },
+    }
+
+    message = notify_stage_change._render_message(current, [])
+
+    assert "dashboard_surface: approve=entry gate blocked | align=aligned | act=continue_candidate_review_under_portfolio_caps" in message
+    assert "validation_surface: approve=approval usable | align=aligned | act=review_runtime_execution_drag_before_expansion" in message
+    assert "checklist_surface: approve=approval usable | align=aligned | act=clear_blocking_operational_items_before_rollout" in message
+    assert "edge_experiment: state=watch_edge | entry_timing=early_limit | execution_style=passive_limit | true_edge=0.8200" in message
+    assert "entry_timing_review_target: action=run_entry_timing_split_review | target=BTCUSDC | variant=early_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review" in message
+    assert "execution_style_review_target: action=run_execution_style_split_review | target=BTCUSDC | variant=passive_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_execution_style_split_review" in message
+    assert "accepted_candidate_focus: BTCUSDC | family=sweep_reversal | edge=watch_edge | split=early_limit/passive_limit" in message
+    assert "blocked_candidate_focus: ETHUSDC | family=trend_continuation | edge=fragile_edge | split=reaction_confirmed/market | reason=portfolio_cap" in message
+    assert "playbook_go_no_go" not in message
+    assert "deployment_go_no_go" not in message

@@ -14,10 +14,16 @@ class OperatorActionPriorityService:
         "playbook": 6,
         "execution_degradation": 5,
         "family_execution_degradation": 4,
-        "opportunity_capture": 3,
-        "mode_advisory": 2,
-        "alpha_research": 1,
+        "edge_evolution": 3,
+        "opportunity_capture": 2,
+        "edge_experiment": 1,
+        "mode_advisory": 1,
+        "alpha_research": 0,
         "monitor": 0,
+    }
+    _SPLIT_REVIEW_ACTION_TARGETS = {
+        "run_entry_timing_split_review": "entry_timing_target",
+        "run_execution_style_split_review": "execution_style_target",
     }
 
     @classmethod
@@ -31,6 +37,93 @@ class OperatorActionPriorityService:
     @staticmethod
     def _dict(payload: dict[str, Any] | None) -> dict[str, Any]:
         return dict(payload or {})
+
+    @staticmethod
+    def _int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return int(default)
+
+    def _command_context(
+        self,
+        *,
+        dashboard_payload: dict[str, Any] | None,
+        validation_payload: dict[str, Any] | None,
+        opportunity_capture_payload: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        dashboard = self._dict(dashboard_payload)
+        validation_source = self._dict(self._dict(validation_payload).get("validation_report") or validation_payload)
+        portfolio = self._dict(dashboard.get("portfolio_summary"))
+        score_to_outcome = self._dict(validation_source.get("score_to_outcome_funnel_summary"))
+        opportunity_capture = self._dict(opportunity_capture_payload)
+        return {
+            "symbol": str(dashboard.get("symbol") or validation_source.get("symbol") or ""),
+            "universe": str(
+                portfolio.get("universe")
+                or dashboard.get("universe")
+                or opportunity_capture.get("universe")
+                or "usdc_perp_top30"
+            ),
+            "days": max(
+                self._int(
+                    dashboard.get("report_window_days")
+                    or score_to_outcome.get("report_window_days")
+                    or opportunity_capture.get("report_window_days")
+                    or 7,
+                    7,
+                ),
+                1,
+            ),
+        }
+
+    def _split_review_followup_command(
+        self,
+        *,
+        action: str,
+        symbol: str,
+        universe: str,
+        days: int,
+    ) -> str:
+        if action not in self._SPLIT_REVIEW_ACTION_TARGETS or not symbol:
+            return ""
+        return (
+            f"./.venv/bin/python scripts/run_split_review_followup.py "
+            f"--symbol {symbol.upper()} --universe {universe} --days {max(int(days), 1)} --action {action}"
+        )
+
+    def _decorate_experiment_target(
+        self,
+        target: dict[str, Any] | None,
+        *,
+        action: str,
+        command_context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        item = self._dict(target)
+        if not item:
+            return None
+        item["followup_command"] = self._split_review_followup_command(
+            action=action,
+            symbol=str(item.get("symbol") or command_context.get("symbol") or ""),
+            universe=str(command_context.get("universe") or "usdc_perp_top30"),
+            days=max(self._int(command_context.get("days"), 7), 1),
+        )
+        return item
+
+    def _decorate_action_followup(
+        self,
+        action_payload: dict[str, Any] | None,
+        *,
+        command_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        item = self._dict(action_payload)
+        item["followup_command"] = self._split_review_followup_command(
+            action=str(item.get("action") or ""),
+            symbol=str(item.get("target_symbol") or command_context.get("symbol") or ""),
+            universe=str(command_context.get("universe") or "usdc_perp_top30"),
+            days=max(self._int(command_context.get("days"), 7), 1),
+        )
+        return item
 
     @staticmethod
     def _push_action(
@@ -65,6 +158,8 @@ class OperatorActionPriorityService:
             "execution_degradation",
             "family_execution_degradation",
             "opportunity_capture",
+            "edge_experiment",
+            "edge_evolution",
             "mode_advisory",
             "alpha_research",
         }:
@@ -184,6 +279,306 @@ class OperatorActionPriorityService:
             "advisory_only": True,
         }
 
+    def _candidate_edge_focus(
+        self,
+        row: dict[str, Any] | None,
+        *,
+        status: str,
+        focus_source: str,
+    ) -> dict[str, Any] | None:
+        item = self._dict(row)
+        focus = self._dict(item.get("edge_experiment_focus"))
+        if not item or not focus:
+            return None
+        return {
+            "symbol": str(item.get("symbol") or ""),
+            "status": status,
+            "strategy_family": str(item.get("strategy_family") or "unknown"),
+            "block_reason": str(item.get("block_reason") or ""),
+            "edge_state": str(focus.get("edge_state") or "insufficient_edge_measurement"),
+            "entry_timing_preferred_variant": str(focus.get("entry_timing_preferred_variant") or "none"),
+            "execution_style_preferred_variant": str(focus.get("execution_style_preferred_variant") or "none"),
+            "focus_source": focus_source,
+        }
+
+    def _edge_experiment_candidate_context(self, dashboard_payload: dict[str, Any] | None) -> dict[str, Any]:
+        dashboard = self._dict(dashboard_payload)
+        portfolio = self._dict(dashboard.get("portfolio_summary"))
+        accepted_rows = [self._dict(item) for item in list(portfolio.get("accepted_candidates") or [])]
+        blocked_rows = [self._dict(item) for item in list(portfolio.get("blocked_candidates") or [])]
+
+        accepted_focus = next(
+            (
+                candidate
+                for candidate in (
+                    self._candidate_edge_focus(
+                        row,
+                        status="ACTIONABLE_ENTRY",
+                        focus_source="accepted_candidate_focus",
+                    )
+                    for row in accepted_rows
+                )
+                if candidate
+            ),
+            None,
+        )
+        blocked_focus = next(
+            (
+                candidate
+                for candidate in (
+                    self._candidate_edge_focus(
+                        row,
+                        status="BLOCKED_SETUP",
+                        focus_source="blocked_candidate_focus",
+                    )
+                    for row in blocked_rows
+                )
+                if candidate
+            ),
+            None,
+        )
+        return {
+            "accepted_candidate_focus": accepted_focus,
+            "blocked_candidate_focus": blocked_focus,
+        }
+
+    def _preferred_experiment_target(
+        self,
+        *,
+        preferred_variant: str,
+        variant_key: str,
+        accepted_focus: dict[str, Any] | None,
+        blocked_focus: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        candidates = [self._dict(accepted_focus), self._dict(blocked_focus)]
+        normalized_preferred = str(preferred_variant or "none")
+        if normalized_preferred and normalized_preferred != "none":
+            for candidate in candidates:
+                if str(candidate.get(variant_key) or "none") == normalized_preferred:
+                    return candidate
+        for candidate in candidates:
+            if candidate:
+                return candidate
+        return None
+
+    def _edge_experiment_context(
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        dashboard_payload: dict[str, Any] | None = None,
+        command_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        summary = self._dict(payload)
+        if not summary or not bool(summary.get("available", False)):
+            return None
+        command_context_payload = self._dict(command_context)
+        context = {
+            "available": True,
+            "edge_state": str(summary.get("edge_state") or "insufficient_edge_measurement"),
+            "true_edge_ratio": float(summary.get("true_edge_ratio", 0.0) or 0.0),
+            "edge_decay_rate": float(summary.get("edge_decay_rate", 0.0) or 0.0),
+            "entry_timing_preferred_variant": str(summary.get("entry_timing_preferred_variant") or "none"),
+            "entry_timing_recommendation_reason": str(
+                summary.get("entry_timing_recommendation_reason") or "not_available"
+            ),
+            "entry_timing_comparison_ready": bool(summary.get("entry_timing_comparison_ready", False)),
+            "execution_style_preferred_variant": str(summary.get("execution_style_preferred_variant") or "none"),
+            "execution_style_recommendation_reason": str(
+                summary.get("execution_style_recommendation_reason") or "not_available"
+            ),
+            "execution_style_comparison_ready": bool(summary.get("execution_style_comparison_ready", False)),
+        }
+        candidate_context = self._edge_experiment_candidate_context(dashboard_payload)
+        accepted_focus = self._dict(candidate_context.get("accepted_candidate_focus"))
+        blocked_focus = self._dict(candidate_context.get("blocked_candidate_focus"))
+        context["accepted_candidate_focus"] = accepted_focus or None
+        context["blocked_candidate_focus"] = blocked_focus or None
+        context["entry_timing_target"] = self._decorate_experiment_target(
+            self._preferred_experiment_target(
+                preferred_variant=str(context.get("entry_timing_preferred_variant") or "none"),
+                variant_key="entry_timing_preferred_variant",
+                accepted_focus=accepted_focus,
+                blocked_focus=blocked_focus,
+            ),
+            action="run_entry_timing_split_review",
+            command_context=command_context_payload,
+        )
+        context["execution_style_target"] = self._decorate_experiment_target(
+            self._preferred_experiment_target(
+                preferred_variant=str(context.get("execution_style_preferred_variant") or "none"),
+                variant_key="execution_style_preferred_variant",
+                accepted_focus=accepted_focus,
+                blocked_focus=blocked_focus,
+            ),
+            action="run_execution_style_split_review",
+            command_context=command_context_payload,
+        )
+        return context
+
+    def _edge_experiment_actions(
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        dashboard_payload: dict[str, Any] | None = None,
+        command_context: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        context = self._edge_experiment_context(
+            payload,
+            dashboard_payload=dashboard_payload,
+            command_context=command_context,
+        )
+        if not context:
+            return []
+
+        edge_state = str(context.get("edge_state") or "insufficient_edge_measurement")
+        if edge_state not in {"watch_edge", "fragile_edge"}:
+            return []
+
+        priority_level = "watch"
+        actions: list[dict[str, Any]] = []
+        if bool(context.get("entry_timing_comparison_ready", False)):
+            preferred = str(context.get("entry_timing_preferred_variant") or "none")
+            reason = str(context.get("entry_timing_recommendation_reason") or "not_available")
+            target = self._dict(context.get("entry_timing_target"))
+            target_reason = ""
+            if target.get("symbol"):
+                target_reason = (
+                    f"; target={target.get('symbol')} "
+                    f"{target.get('status') or 'UNKNOWN'} "
+                    f"family={target.get('strategy_family') or 'unknown'}"
+                )
+            actions.append(
+                {
+                    "action": "run_entry_timing_split_review",
+                    "reason": (
+                        f"edge_state={edge_state}; preferred entry timing branch is "
+                        f"{preferred} ({reason}){target_reason}"
+                    ),
+                    "priority_level": priority_level,
+                    "source": "edge_experiment",
+                    "action_family": "edge_review",
+                    "target_symbol": str(target.get("symbol") or ""),
+                    "target_status": str(target.get("status") or ""),
+                    "target_family": str(target.get("strategy_family") or ""),
+                    "target_block_reason": str(target.get("block_reason") or ""),
+                    "target_focus_source": str(target.get("focus_source") or ""),
+                    "advisory_only": True,
+                }
+            )
+        if bool(context.get("execution_style_comparison_ready", False)):
+            preferred = str(context.get("execution_style_preferred_variant") or "none")
+            reason = str(context.get("execution_style_recommendation_reason") or "not_available")
+            target = self._dict(context.get("execution_style_target"))
+            target_reason = ""
+            if target.get("symbol"):
+                target_reason = (
+                    f"; target={target.get('symbol')} "
+                    f"{target.get('status') or 'UNKNOWN'} "
+                    f"family={target.get('strategy_family') or 'unknown'}"
+                )
+            actions.append(
+                {
+                    "action": "run_execution_style_split_review",
+                    "reason": (
+                        f"edge_state={edge_state}; preferred execution style is "
+                        f"{preferred} ({reason}){target_reason}"
+                    ),
+                    "priority_level": priority_level,
+                    "source": "edge_experiment",
+                    "action_family": "edge_review",
+                    "target_symbol": str(target.get("symbol") or ""),
+                    "target_status": str(target.get("status") or ""),
+                    "target_family": str(target.get("strategy_family") or ""),
+                    "target_block_reason": str(target.get("block_reason") or ""),
+                    "target_focus_source": str(target.get("focus_source") or ""),
+                    "advisory_only": True,
+                }
+            )
+        return [
+            self._decorate_action_followup(item, command_context=self._dict(command_context))
+            for item in actions
+        ]
+
+    def _edge_evolution_actions(
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        experiment_context: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        summary = self._dict(payload)
+        if not summary or not bool(summary.get("available", False)):
+            return []
+
+        evolution_state = str(summary.get("evolution_state") or "insufficient_sample")
+        recommended_action = str(summary.get("recommended_action") or "keep_current_baseline")
+        confidence = str(summary.get("confidence") or "low")
+        experiment = self._dict(experiment_context)
+        promotion_candidate = self._dict(summary.get("promotion_candidate"))
+
+        if evolution_state == "reduce_candidate":
+            return [
+                {
+                    "action": "reduce_baseline_allocation_review",
+                    "reason": str(summary.get("summary") or "baseline allocation should be reduced while edge remains weak"),
+                    "priority_level": "watch",
+                    "source": "edge_evolution",
+                    "action_family": "allocation_review",
+                    "advisory_only": True,
+                    "followup_command": "",
+                }
+            ]
+
+        if evolution_state == "edge_kill_review":
+            kill_state = str(self._dict(summary.get("source_summary")).get("kill_condition_state") or "observe_only")
+            return [
+                {
+                    "action": "review_edge_kill_condition",
+                    "reason": str(summary.get("summary") or "edge deterioration justifies kill-condition review"),
+                    "priority_level": "urgent" if kill_state == "kill_switch_review" else "watch",
+                    "source": "edge_evolution",
+                    "action_family": "risk_review",
+                    "advisory_only": True,
+                    "followup_command": "",
+                }
+            ]
+
+        if evolution_state != "promote_candidate":
+            return []
+
+        axis = str(promotion_candidate.get("axis") or "")
+        if axis == "entry_timing":
+            target = self._dict(experiment.get("entry_timing_target"))
+        elif axis == "execution_style":
+            target = self._dict(experiment.get("execution_style_target"))
+        else:
+            target = {}
+
+        target_reason = ""
+        if target.get("symbol"):
+            target_reason = (
+                f"; target={target.get('symbol')} "
+                f"{target.get('status') or 'UNKNOWN'} "
+                f"family={target.get('strategy_family') or 'unknown'}"
+            )
+        action = recommended_action or (
+            f"promote_{axis}_branch_review" if axis in {"entry_timing", "execution_style"} else "promote_preferred_branch_review"
+        )
+        return [
+            {
+                "action": action,
+                "reason": f"{summary.get('summary') or 'preferred branch promotion review is justified'}{target_reason}",
+                "priority_level": "watch" if confidence in {"medium", "high"} else "research",
+                "source": "edge_evolution",
+                "action_family": "promotion_review",
+                "target_symbol": str(target.get("symbol") or ""),
+                "target_status": str(target.get("status") or ""),
+                "target_family": str(target.get("strategy_family") or ""),
+                "target_focus_source": str(target.get("focus_source") or ""),
+                "advisory_only": True,
+                "followup_command": "",
+            }
+        ]
+
     def generate(
         self,
         *,
@@ -202,6 +597,12 @@ class OperatorActionPriorityService:
         research_action = self._dict(funnel.get("alpha_research_recommended_action"))
         softening_review = self._dict(funnel.get("alpha_research_softening_review"))
         promotion_watchlist = self._dict(funnel.get("alpha_research_promotion_watchlist"))
+        edge_experiment = self._dict(
+            funnel.get("edge_experiment_review") or validation_payload.get("edge_experiment_review_summary")
+        )
+        edge_evolution = self._dict(
+            funnel.get("edge_evolution_rule") or validation_payload.get("edge_evolution_rule_summary")
+        )
         opportunity_capture = self._dict(
             funnel.get("opportunity_capture") or validation_payload.get("opportunity_capture_summary")
         )
@@ -233,6 +634,11 @@ class OperatorActionPriorityService:
             {},
         )
 
+        command_context = self._command_context(
+            dashboard_payload=dashboard_payload,
+            validation_payload=validation_payload,
+            opportunity_capture_payload=opportunity_capture,
+        )
         next_actions: list[dict[str, Any]] = []
 
         if playbook_action:
@@ -300,6 +706,23 @@ class OperatorActionPriorityService:
         capture_candidate = self._capture_action_candidate(opportunity_capture)
         if capture_candidate:
             next_actions.append(capture_candidate)
+        next_actions.extend(
+            self._edge_experiment_actions(
+                edge_experiment,
+                dashboard_payload=dashboard_payload,
+                command_context=command_context,
+            )
+        )
+        next_actions.extend(
+            self._edge_evolution_actions(
+                edge_evolution,
+                experiment_context=self._edge_experiment_context(
+                    edge_experiment,
+                    dashboard_payload=dashboard_payload,
+                    command_context=command_context,
+                ),
+            )
+        )
 
         advisory_state = str(mode_top.get("advisory_state") or "")
         if advisory_state == "research_only":
@@ -380,6 +803,11 @@ class OperatorActionPriorityService:
 
         top = self._dict(next_actions[0] if next_actions else {})
         capture_context = self._capture_context(opportunity_capture)
+        experiment_context = self._edge_experiment_context(
+            edge_experiment,
+            dashboard_payload=dashboard_payload,
+            command_context=command_context,
+        )
         if not top:
             return {
                 "available": True,
@@ -387,6 +815,7 @@ class OperatorActionPriorityService:
                 "top_reason": (
                     "no stronger operator action is currently implied by playbook, execution, family, mode, or research signals"
                 ),
+                "top_action_followup_command": "",
                 "priority_level": "monitor",
                 "priority_source": "monitor",
                 "action_family": "monitor",
@@ -394,6 +823,7 @@ class OperatorActionPriorityService:
                 "blocking_signals": [],
                 "next_actions": [],
                 "capture_context": capture_context,
+                "experiment_context": experiment_context,
                 "advisory_only": True,
             }
 
@@ -413,6 +843,43 @@ class OperatorActionPriorityService:
             )
         if research_action.get("recommended_action"):
             supporting_signals.append(f"research:{research_action.get('recommended_action')}")
+        if experiment_context:
+            supporting_signals.append(f"edge:{experiment_context.get('edge_state')}")
+            if bool(experiment_context.get("entry_timing_comparison_ready", False)):
+                supporting_signals.append(
+                    f"entry_timing:{experiment_context.get('entry_timing_preferred_variant')}"
+                )
+                entry_target = self._dict(experiment_context.get("entry_timing_target"))
+                if entry_target.get("symbol"):
+                    supporting_signals.append(
+                        f"entry_target:{entry_target.get('symbol')}:{entry_target.get('status') or 'UNKNOWN'}"
+                    )
+            if bool(experiment_context.get("execution_style_comparison_ready", False)):
+                supporting_signals.append(
+                    f"execution_style:{experiment_context.get('execution_style_preferred_variant')}"
+                )
+                execution_target = self._dict(experiment_context.get("execution_style_target"))
+                if execution_target.get("symbol"):
+                    supporting_signals.append(
+                        f"execution_target:{execution_target.get('symbol')}:{execution_target.get('status') or 'UNKNOWN'}"
+                    )
+            accepted_focus = self._dict(experiment_context.get("accepted_candidate_focus"))
+            if accepted_focus.get("symbol"):
+                supporting_signals.append(
+                    f"accepted_focus:{accepted_focus.get('symbol')}:{accepted_focus.get('edge_state') or 'n/a'}"
+                )
+            blocked_focus = self._dict(experiment_context.get("blocked_candidate_focus"))
+            if blocked_focus.get("symbol"):
+                supporting_signals.append(
+                    f"blocked_focus:{blocked_focus.get('symbol')}:{blocked_focus.get('edge_state') or 'n/a'}"
+                )
+        if edge_evolution:
+            supporting_signals.append(f"edge_evolution:{edge_evolution.get('evolution_state') or 'unknown'}")
+            promotion_candidate = self._dict(edge_evolution.get("promotion_candidate"))
+            if promotion_candidate.get("axis"):
+                supporting_signals.append(
+                    f"promotion_candidate:{promotion_candidate.get('axis')}:{promotion_candidate.get('preferred_variant') or 'none'}"
+                )
         if capture_context:
             dominant_bottleneck = self._dict(capture_context.get("dominant_bottleneck"))
             stage = str(dominant_bottleneck.get("stage") or "")
@@ -449,6 +916,7 @@ class OperatorActionPriorityService:
             "available": True,
             "top_action": str(top.get("action") or "continue_runtime_monitoring"),
             "top_reason": str(top.get("reason") or ""),
+            "top_action_followup_command": str(top.get("followup_command") or ""),
             "priority_level": str(top.get("priority_level") or "monitor"),
             "priority_source": self._normalize_priority_source(str(top.get("source") or "")),
             "action_family": str(top.get("action_family") or "monitor"),
@@ -456,5 +924,6 @@ class OperatorActionPriorityService:
             "blocking_signals": blocking_signals,
             "next_actions": next_actions[1:4],
             "capture_context": capture_context,
+            "experiment_context": experiment_context,
             "advisory_only": True,
         }

@@ -55,7 +55,7 @@ from app.schemas.api import (
     ZoneOut,
 )
 from app.services.candidate_expectations import expectation_contract
-from app.services.deployment_contracts import validation_alert_contract
+from app.services.deployment_contracts import validation_alert_contract, validation_alert_strip_summary
 from app.services.health_check import HealthCheckService
 from app.services.position_sizing import PositionSizingService
 from app.services.strategy_mode import StrategyModeService
@@ -322,6 +322,7 @@ def subscribe_alert(payload: AlertSubscribeIn, engine: StrategyEngine = Depends(
         approval_playbook_code=contract["approval_playbook_code"],
         approval_playbook_action=contract["approval_playbook_action"],
         approval_playbook_message=contract["approval_playbook_message"],
+        approval_strip_summary=validation_alert_strip_summary(row.payload or {}),
     )
 
 

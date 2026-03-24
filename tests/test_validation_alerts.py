@@ -58,6 +58,9 @@ def test_recompute_learning_emits_validation_warn_alert(monkeypatch) -> None:
         assert payload["validation_alert"]["approval_playbook_message"] == payload["validation_report"][
             "deployment_approval_summary"
         ]["playbook_message"]
+        assert payload["validation_alert"]["approval_strip_summary"]["act_value"] == payload["validation_report"][
+            "deployment_approval_summary"
+        ]["playbook_action"]
         assert payload["parameter_changelog"]["reason"] in {"initialized", "changes_detected", "no_changes"}
         assert payload["parameter_changelog"]["path"]
 
@@ -86,6 +89,9 @@ def test_recompute_learning_emits_validation_warn_alert(monkeypatch) -> None:
         assert (alerts[0].payload or {}).get("approval_playbook_message") == payload["validation_report"][
             "deployment_approval_summary"
         ]["playbook_message"]
+        assert ((alerts[0].payload or {}).get("approval_strip_summary") or {}).get("act_value") == payload[
+            "validation_report"
+        ]["deployment_approval_summary"]["playbook_action"]
 
         outbox = list(db.scalars(select(EventOutbox).where(EventOutbox.event_type == "validation.warn")))
         assert any((row.payload or {}).get("symbol") == symbol for row in outbox)
@@ -112,6 +118,11 @@ def test_recompute_learning_emits_validation_warn_alert(monkeypatch) -> None:
         assert any(
             (row.payload or {}).get("approval_playbook_message")
             == payload["validation_report"]["deployment_approval_summary"]["playbook_message"]
+            for row in outbox
+        )
+        assert any(
+            ((row.payload or {}).get("approval_strip_summary") or {}).get("act_value")
+            == payload["validation_report"]["deployment_approval_summary"]["playbook_action"]
             for row in outbox
         )
 
@@ -158,6 +169,9 @@ def test_recompute_learning_validation_alert_respects_cooldown() -> None:
             assert second["validation_alert"]["approval_playbook_message"] == second["validation_report"][
                 "deployment_approval_summary"
             ]["playbook_message"]
+            assert second["validation_alert"]["approval_strip_summary"]["act_value"] == second["validation_report"][
+                "deployment_approval_summary"
+            ]["playbook_action"]
             assert second["parameter_changelog"]["reason"] in {"changes_detected", "no_changes"}
 
             alerts = list(
@@ -233,6 +247,7 @@ def test_recompute_learning_validation_alert_dispatches_external_channel(monkeyp
                 "deployment_approval_summary"
             ]["playbook_message"]
             assert calls
+            assert "approval_strip: approve=" in calls[0]["json_payload"]["content"]
             assert (
                 f"deployment={payload['validation_alert']['deployment_go_no_go']}/"
                 f"{payload['validation_alert']['deployment_code']}"
@@ -271,6 +286,9 @@ def test_recompute_learning_validation_alert_dispatches_external_channel(monkeyp
             assert (alerts[0].payload or {}).get("approval_playbook_message") == payload["validation_report"][
                 "deployment_approval_summary"
             ]["playbook_message"]
+            assert ((alerts[0].payload or {}).get("approval_strip_summary") or {}).get("act_value") == payload[
+                "validation_report"
+            ]["deployment_approval_summary"]["playbook_action"]
     finally:
         settings.validation_alert_channel = old_channel
         settings.alert_discord_webhook_url = old_webhook

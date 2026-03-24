@@ -721,12 +721,12 @@ Binance REST backfill/sync는 기존 최신 candle보다 오래된 overlap histo
 - 현재 `validation_alert.deployment_go_no_go/code/message`가 alert payload에 직접 기록되고, `GET /alerts/metrics`의 `latest_validation_alert`, `POST /operations/checklist`의 `validation_alert_delivery`/`alert_channel_slo` evidence도 같은 필드를 직접 노출한다.
 - 현재 `GET /alerts/metrics`의 `latest_validation_alert.approval_playbook_go_no_go/code/action/message`와 `POST /operations/checklist`의 `alert_channel_slo.evidence.latest_validation_alert`도 같은 playbook mapping을 직접 노출한다.
 - 현재 `POST /operations/checklist`의 `portfolio_headroom.evidence.deployment_go_no_go/code/message`도 `/portfolio/budget` top-level 배포 언어를 직접 노출한다.
-- 현재 validation alert 채널 메시지도 `deployment=<go_no_go>/<code>`를 직접 포함해 `approval=` one-line summary와 함께 배포 언어를 노출한다.
+- 현재 validation alert 채널 메시지는 `approval_strip: approve / align / act`를 먼저 보여주고, 그다음 `approval=` one-line summary와 `contract_trace: deployment=... | playbook_action=...` raw debug를 붙인다.
 - 현재 `POST /operations/checklist`의 `validation_alert_delivery.evidence.approval_playbook_go_no_go/code/action/message`도 `validation_alert.approval_playbook_*`를 top-level로 직접 노출한다.
 - 현재 `GET /portfolio/budget` top-level `playbook_go_no_go/code/action/message`와 portfolio markdown summary도 runtime deployment code 기반 운영 액션 문구를 직접 노출한다.
 - 현재 `GET /indicators/pine-script`와 `scripts/tradingview/trading_engine_v1_mirror.pine`가 TradingView native mirror를 제공하며, 이는 최근 zone 중심의 chart-side approximation일 뿐 실행 source-of-truth를 대체하지 않는다.
-- 현재 validation alert 채널 메시지도 `playbook_action=<approval_playbook_action>`를 직접 포함해 운영 액션 문구를 메시지 단독으로 확인할 수 있다.
-- 현재 `POST /alerts/test` 응답도 `deployment_*`, `approval_playbook_*`를 top-level로 직접 반환해 manual alert drill 경로가 같은 계약을 쓴다.
+- 현재 validation alert 채널 메시지도 `playbook_action=<approval_playbook_action>`를 raw debug에 포함해 운영 액션 문구를 메시지 단독으로 확인할 수 있다.
+- 현재 `POST /alerts/test` 응답도 `deployment_*`, `approval_playbook_*` top-level raw contract와 함께 `approval_strip_summary`를 반환해 manual alert drill 경로가 operator surface와 같은 판단 vocabulary를 공유한다.
 - 현재 `POST /alerts/subscribe` 응답도 `deployment_*`, `approval_playbook_*`를 top-level로 직접 반환해 manual subscribe 경로가 same contract를 공유한다.
 - 현재 `POST /validation/report` top-level도 `deployment_*`, `approval_topline_*`, `playbook_*`를 직접 반환하며, `POST /operations/checklist`는 validation deployment/playbook 해석 시 이 top-level contract를 우선 소비한다.
 - 현재 `app/services/deployment_contracts.py`가 alert/report deployment-playbook contract의 공통 helper이며, 운영 경로는 이 helper 기준의 같은 필드명/같은 fallback 규칙을 따라야 한다.

@@ -512,6 +512,7 @@ class PortfolioBudgetCandidateOut(ORMModel):
     thesis_primary_symbol: str | None = None
     thesis_rejected_reason: str | None = None
     thesis_active_cluster_count: int = 0
+    edge_experiment_focus: dict[str, Any] | None = None
 
 
 class PortfolioBudgetReportOut(ORMModel):
@@ -525,6 +526,8 @@ class PortfolioBudgetReportOut(ORMModel):
     playbook_code: str
     playbook_action: str
     playbook_message: str
+    approval_strip_summary: dict[str, Any] | None = None
+    edge_experiment_review: dict[str, Any] | None = None
     risk_state: RiskGateState
     risk_reason: str
     operating_lock: dict[str, Any] = Field(default_factory=dict)
@@ -616,6 +619,7 @@ class OperationalChecklistOut(ORMModel):
     playbook_code: str
     playbook_action: str
     playbook_message: str
+    approval_strip_summary: dict[str, Any] | None = None
     blocking_failures: int
     warnings: int
     manual_actions: int
@@ -639,6 +643,7 @@ class AlertSubscribeOut(ORMModel):
     approval_playbook_code: str = ""
     approval_playbook_action: str = ""
     approval_playbook_message: str = ""
+    approval_strip_summary: dict[str, Any] | None = None
 
 
 class AlertTestOut(ORMModel):
@@ -652,6 +657,7 @@ class AlertTestOut(ORMModel):
     approval_playbook_code: str = ""
     approval_playbook_action: str = ""
     approval_playbook_message: str = ""
+    approval_strip_summary: dict[str, Any] | None = None
     delivery: dict[str, Any]
     retry_queued: int = 0
 

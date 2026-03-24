@@ -86,6 +86,134 @@ def _manual_review_trigger(previous: dict[str, Any] | None, current: dict[str, A
     return previous_status != "manual_review"
 
 
+def _surface_summary(payload: dict[str, Any] | None, key: str) -> dict[str, str]:
+    summary = dict((payload or {}).get(key) or {})
+    if summary:
+        return {
+            "approve_value": str(summary.get("approve_value") or "n/a"),
+            "align_value": str(summary.get("align_value") or "n/a"),
+            "act_value": str(summary.get("act_value") or "continue_runtime_monitoring"),
+        }
+
+    current = dict(payload or {})
+    return {
+        "approve_value": str(current.get("deployment_go_no_go") or current.get("checklist_status") or "n/a"),
+        "align_value": str(current.get("playbook_go_no_go") or "n/a"),
+        "act_value": str(
+            current.get("top_operator_action")
+            or current.get("alpha_research_next_step")
+            or "continue_runtime_monitoring"
+        ),
+    }
+
+
+def _surface_summary_line(payload: dict[str, Any] | None, key: str, *, label: str) -> str:
+    summary = _surface_summary(payload, key)
+    return (
+        f"{label}: approve={summary.get('approve_value', 'n/a')} | "
+        f"align={summary.get('align_value', 'n/a')} | "
+        f"act={summary.get('act_value', 'continue_runtime_monitoring')}"
+    )
+
+
+def _surface_changed(previous: dict[str, Any] | None, current: dict[str, Any], key: str, *, label: str) -> bool:
+    if previous is None:
+        return False
+    return _surface_summary_line(previous, key, label=label) != _surface_summary_line(current, key, label=label)
+
+
+def _edge_experiment_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("edge_experiment_review") or {})
+    if not source:
+        return {
+            "edge_state": "unavailable",
+            "entry_timing_preferred_variant": "none",
+            "execution_style_preferred_variant": "none",
+            "true_edge_ratio": "n/a",
+        }
+    return {
+        "edge_state": str(source.get("edge_state") or "insufficient_edge_measurement"),
+        "entry_timing_preferred_variant": str(source.get("entry_timing_preferred_variant") or "none"),
+        "execution_style_preferred_variant": str(source.get("execution_style_preferred_variant") or "none"),
+        "true_edge_ratio": f"{float(source.get('true_edge_ratio') or 0.0):.4f}",
+    }
+
+
+def _edge_experiment_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _edge_experiment_summary(payload)
+    return (
+        f"edge_experiment: state={summary.get('edge_state', 'unavailable')} | "
+        f"entry_timing={summary.get('entry_timing_preferred_variant', 'none')} | "
+        f"execution_style={summary.get('execution_style_preferred_variant', 'none')} | "
+        f"true_edge={summary.get('true_edge_ratio', 'n/a')}"
+    )
+
+
+def _candidate_focus_summary_line(payload: dict[str, Any] | None, key: str, *, label: str) -> str:
+    source = dict((((payload or {}).get("representative_candidates") or {}).get(key) or {}))
+    if not source:
+        return f"{label}: none"
+    line = (
+        f"{label}: {source.get('symbol') or 'unknown'} | "
+        f"family={source.get('strategy_family') or 'unknown'} | "
+        f"edge={source.get('edge_state') or 'insufficient_edge_measurement'} | "
+        f"split={(source.get('entry_timing_preferred_variant') or 'none')}/{(source.get('execution_style_preferred_variant') or 'none')}"
+    )
+    if source.get("status"):
+        line = f"{line} | status={source.get('status')}"
+    if source.get("block_reason"):
+        line = f"{line} | reason={source.get('block_reason')}"
+    return line
+
+
+def _experiment_review_target_summary_line(payload: dict[str, Any] | None, key: str, *, label: str) -> str:
+    source = dict((payload or {}).get(key) or {})
+    if not source:
+        return f"{label}: none"
+    line = (
+        f"{label}: action={source.get('action') or 'unknown'} | "
+        f"target={source.get('symbol') or 'unknown'} | "
+        f"variant={source.get('preferred_variant') or 'none'} | "
+        f"status={source.get('status') or 'unknown'} | "
+        f"family={source.get('strategy_family') or 'unknown'}"
+    )
+    if source.get("block_reason"):
+        line = f"{line} | reason={source.get('block_reason')}"
+    if source.get("focus_source"):
+        line = f"{line} | focus={source.get('focus_source')}"
+    if source.get("followup_command"):
+        line = f"{line} | cmd={source.get('followup_command')}"
+    return line
+
+
+def _edge_experiment_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    return _edge_experiment_summary_line(previous) != _edge_experiment_summary_line(current)
+
+
+def _candidate_focus_changed(previous: dict[str, Any] | None, current: dict[str, Any], key: str, *, label: str) -> bool:
+    if previous is None:
+        return False
+    return _candidate_focus_summary_line(previous, key, label=label) != _candidate_focus_summary_line(
+        current, key, label=label
+    )
+
+
+def _experiment_review_target_changed(
+    previous: dict[str, Any] | None,
+    current: dict[str, Any],
+    key: str,
+    *,
+    label: str,
+) -> bool:
+    if previous is None:
+        return False
+    return _experiment_review_target_summary_line(previous, key, label=label) != _experiment_review_target_summary_line(
+        current, key, label=label
+    )
+
+
 def _collect_events(previous: dict[str, Any] | None, current: dict[str, Any]) -> list[dict[str, str]]:
     events: list[dict[str, str]] = []
     if previous is None:
@@ -114,12 +242,97 @@ def _collect_events(previous: dict[str, Any] | None, current: dict[str, Any]) ->
                 "body": f"{previous.get('close_only_active')} -> {current.get('close_only_active')}",
             }
         )
-    if _changed(previous, current, "playbook_go_no_go"):
+    if _surface_changed(previous, current, "dashboard_approval_strip", label="dashboard_surface"):
+        events.append(
+            {
+                "type": "dashboard_surface_changed",
+                "title": "Dashboard approval surface changed",
+                "body": (
+                    f"{_surface_summary_line(previous, 'dashboard_approval_strip', label='dashboard_surface')} -> "
+                    f"{_surface_summary_line(current, 'dashboard_approval_strip', label='dashboard_surface')}"
+                ),
+            }
+        )
+    if _surface_changed(previous, current, "validation_approval_strip", label="validation_surface"):
         events.append(
             {
                 "type": "playbook_changed",
-                "title": "Playbook go/no-go changed",
+                "title": "Validation approval surface changed",
+                "body": (
+                    f"{_surface_summary_line(previous, 'validation_approval_strip', label='validation_surface')} -> "
+                    f"{_surface_summary_line(current, 'validation_approval_strip', label='validation_surface')}"
+                ),
+            }
+        )
+    elif _changed(previous, current, "playbook_go_no_go"):
+        events.append(
+            {
+                "type": "playbook_changed",
+                "title": "Validation approval surface changed",
                 "body": f"{previous.get('playbook_go_no_go')} -> {current.get('playbook_go_no_go')}",
+            }
+        )
+    if _surface_changed(previous, current, "checklist_approval_strip", label="checklist_surface"):
+        events.append(
+            {
+                "type": "checklist_surface_changed",
+                "title": "Checklist approval surface changed",
+                "body": (
+                    f"{_surface_summary_line(previous, 'checklist_approval_strip', label='checklist_surface')} -> "
+                    f"{_surface_summary_line(current, 'checklist_approval_strip', label='checklist_surface')}"
+                ),
+            }
+        )
+    if _edge_experiment_changed(previous, current):
+        events.append(
+            {
+                "type": "edge_experiment_changed",
+                "title": "Edge experiment focus changed",
+                "body": f"{_edge_experiment_summary_line(previous)} -> {_edge_experiment_summary_line(current)}",
+            }
+        )
+    if _candidate_focus_changed(previous, current, "accepted", label="accepted_candidate_focus"):
+        events.append(
+            {
+                "type": "accepted_candidate_focus_changed",
+                "title": "Accepted candidate focus changed",
+                "body": (
+                    f"{_candidate_focus_summary_line(previous, 'accepted', label='accepted_candidate_focus')} -> "
+                    f"{_candidate_focus_summary_line(current, 'accepted', label='accepted_candidate_focus')}"
+                ),
+            }
+        )
+    if _candidate_focus_changed(previous, current, "blocked", label="blocked_candidate_focus"):
+        events.append(
+            {
+                "type": "blocked_candidate_focus_changed",
+                "title": "Blocked candidate focus changed",
+                "body": (
+                    f"{_candidate_focus_summary_line(previous, 'blocked', label='blocked_candidate_focus')} -> "
+                    f"{_candidate_focus_summary_line(current, 'blocked', label='blocked_candidate_focus')}"
+                ),
+            }
+        )
+    if _experiment_review_target_changed(previous, current, "entry_timing_review_target", label="entry_timing_review_target"):
+        events.append(
+            {
+                "type": "entry_timing_review_target_changed",
+                "title": "Entry timing review target changed",
+                "body": (
+                    f"{_experiment_review_target_summary_line(previous, 'entry_timing_review_target', label='entry_timing_review_target')} -> "
+                    f"{_experiment_review_target_summary_line(current, 'entry_timing_review_target', label='entry_timing_review_target')}"
+                ),
+            }
+        )
+    if _experiment_review_target_changed(previous, current, "execution_style_review_target", label="execution_style_review_target"):
+        events.append(
+            {
+                "type": "execution_style_review_target_changed",
+                "title": "Execution style review target changed",
+                "body": (
+                    f"{_experiment_review_target_summary_line(previous, 'execution_style_review_target', label='execution_style_review_target')} -> "
+                    f"{_experiment_review_target_summary_line(current, 'execution_style_review_target', label='execution_style_review_target')}"
+                ),
             }
         )
     if _trial_runs_started(previous, current):
@@ -157,9 +370,15 @@ def _render_message(current: dict[str, Any], events: list[dict[str, str]]) -> st
         [
             "",
             f"stage: {current.get('stage')}",
+            _surface_summary_line(current, "dashboard_approval_strip", label="dashboard_surface"),
+            _surface_summary_line(current, "validation_approval_strip", label="validation_surface"),
+            _surface_summary_line(current, "checklist_approval_strip", label="checklist_surface"),
+            _edge_experiment_summary_line(current),
+            _experiment_review_target_summary_line(current, "entry_timing_review_target", label="entry_timing_review_target"),
+            _experiment_review_target_summary_line(current, "execution_style_review_target", label="execution_style_review_target"),
+            _candidate_focus_summary_line(current, "accepted", label="accepted_candidate_focus"),
+            _candidate_focus_summary_line(current, "blocked", label="blocked_candidate_focus"),
             f"close_only_active: {current.get('close_only_active')}",
-            f"playbook_go_no_go: {current.get('playbook_go_no_go')}",
-            f"deployment_go_no_go: {current.get('deployment_go_no_go')}",
             f"checklist_status: {current.get('checklist_status')}",
             f"eligible_closed_trades: {current.get('eligible_closed_trades')}",
             f"trial_runs_written: {current.get('trial_runs_written')}",

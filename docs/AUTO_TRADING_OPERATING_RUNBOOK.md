@@ -24,17 +24,23 @@ TradingView를 triage에 함께 쓴다면, mirror-only 사용법과 chart-side o
 5. close-only 또는 kill-switch가 켜져 있는가
 
 ## 3A. 장중 운영 체크리스트
-상단 operator surface는 Decision Summary, Top Operator Action, Top Opportunity / Top Blocker, Current Operating State 순서로 먼저 읽고, 그다음 대표 플랜, 현재 진입 가이드, 상세 운영 섹션으로 내려간다.
+상단 operator surface는 5-Second Operator Kernel, Approval Strip, Top Opportunity / Top Blocker, Current Operating State 순서로 먼저 읽고, 그다음 대표 플랜, 현재 진입 가이드, 상세 운영 섹션으로 내려간다. promotion/research stack은 `Deferred Research / Promotion Stack` 안에서 kernel verdict가 약할 때만 후순위로 연다. kernel verdict가 `hold`, `manual_review`, `watch`면 Top Opportunity / Portfolio Candidate surface는 context-only로 읽고 approval/alignment/checklist 해석을 먼저 끝낸다. 같은 조건에서 `Current Operating State`는 expanded operating context만 나중에 연다.
 
-1. `Decision Summary`
-2. `Top Operator Action`
+1. `5-Second Operator Kernel`
+2. `Approval Strip`
 3. `Top Opportunity / Top Blocker`
 4. `Current Operating State`
 5. 그다음 `대표 플랜 / 현재 진입 가이드 / 상세 운영 섹션`
 
 장중에 먼저 확인할 항목:
-- `deployment_go_no_go`
-- `playbook_action`
+- `approval_strip_summary.approve_value`
+- `approval_strip_summary.align_value`
+- `approval_strip_summary.act_value`
+- `validation_report.edge_experiment_review_summary.edge_state`
+- `validation_report.edge_experiment_review_summary.entry_timing_preferred_variant`
+- `validation_report.edge_experiment_review_summary.execution_style_preferred_variant`
+- `validation_report.operator_action_priority_summary.experiment_context.entry_timing_target`
+- `validation_report.operator_action_priority_summary.experiment_context.execution_style_target`
 - `new_entries_allowed`
 - `execution_degradation_advisory.status`
 - `family_execution_degradation_advisory.top_family`
@@ -42,12 +48,15 @@ TradingView를 triage에 함께 쓴다면, mirror-only 사용법과 chart-side o
 - `operator_action_priority.top_action`
 
 장중 운영 규칙:
-- `deployment_go_no_go != "GO"`면 신규 진입 확장을 열지 않는다.
+- `approval_strip_summary.approve_value`가 `approval usable`이 아니면 신규 진입 확장을 열지 않는다.
 - 전역 `execution_degradation_advisory.status == "manual_review"`면 신규 확대보다 실행 품질 점검을 우선한다.
 - `family_execution_degradation_advisory.top_family.status == "manual_review"`면 해당 family는 확대보다 family execution review를 우선한다.
 - `mode_advisory`의 `research_only`와 `promotion_watch`는 운영 해석이다. 실제 mode 변경이나 live permission이 아니다.
 - `alpha_research` next step은 research queue다. 실행 승인처럼 읽지 않는다.
 - `operator_action_priority.top_action`은 operator reading priority다. live submit instruction이 아니다.
+- `operator_action_priority.top_action_followup_command`와 `next_actions[].followup_command`가 비어 있지 않으면, split review는 그 command를 그대로 쓴다.
+- split review target이 있으면 `./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --days 7 --action auto`로 review packet부터 만든다.
+- session brief와 stage monitor의 `entry_timing_review_target` / `execution_style_review_target` 줄에도 같은 followup command가 실린다. handoff에서는 그 command를 source-of-truth로 쓴다.
 
 chart-side triage 예시:
 - 차트가 `CONFIRM`을 보여도 server-side `Top Operator Action`이 `review_execution_drag_before_expansion`이면, 차트는 context only로 두고 서버 review를 먼저 따른다.
@@ -73,6 +82,9 @@ chart-side triage 예시:
 3. outcome funnel
 - `runtime_candidates`
 - `accepted_candidates`
+- candidate row `edge_experiment_focus.edge_state`
+- candidate row `edge_experiment_focus.entry_timing_preferred_variant`
+- candidate row `edge_experiment_focus.execution_style_preferred_variant`
 - `submitted`
 - `filled`
 - `closed`
@@ -257,6 +269,7 @@ launchctl setenv OPERATOR_BRIEF_ALLOW_LIVE_SEND 1
 해석 규칙:
 - `deployment_alignment == "DIVERGED"`면 dashboard와 validation/checklist를 다시 같은 시점으로 읽는다.
 - `playbook_alignment == "DIVERGED"`면 wording drift 여부를 먼저 확인한다.
+- divergence snapshot 안의 `Dashboard / Validation / Checklist` 구간은 per-surface `approve / align / act` 줄로 읽는다.
 - `operator_ui_sections.missing_sections`가 비어 있지 않으면 UI regression으로 본다.
 
 ## 5. 후보 검토 절차
@@ -303,6 +316,7 @@ curl -s "http://127.0.0.1:8000/plans/top?symbol=BTCUSDC&tf=5m&limit=5&refresh=tr
 - `legacy_zone_plan`은 lineage 축적 대상이 아니므로 PAPER lineage drill 성공으로 보지 않는다.
 - `eligible_candidate_found=FAIL`이면 세션 문제이므로 London/New York에 다시 돌린다.
 - `approval_for_paper=FAIL` 또는 `intent_submit_ready=FAIL`이면 rollout/approval block reason부터 해결한다.
+- drill payload의 `approval_strip_summary`를 먼저 읽고, 그다음 `candidate_edge_experiment_focus`와 `approval_state / allowed_execution_mode`로 submit 가능 여부와 split-test focus를 확인한다.
 
 ### 5.4. PAPER lineage watcher
 세션이 올 때까지 사람이 반복 실행하지 않으려면 watcher helper를 쓴다.
@@ -318,6 +332,7 @@ curl -s "http://127.0.0.1:8000/plans/top?symbol=BTCUSDC&tf=5m&limit=5&refresh=tr
 - 내부적으로 `scripts/run_paper_candidate_drill.py --no-write-report`를 주기적으로 반복 호출한다.
 - `trend_continuation` / `sweep_reversal` family candidate가 처음 뜨는 시점까지 감시한다.
 - `--submit-paper`를 주면 eligible candidate가 잡힌 첫 시점에 `live=false` PAPER submit까지 이어진다.
+- 최종 watcher payload는 top-level `edge_experiment_review`와 `candidate_edge_experiment_focus`를 같이 싣기 때문에 nested final_result를 열지 않아도 현재 split-test focus를 바로 읽을 수 있다.
 
 해석:
 - `FOUND_ELIGIBLE_CANDIDATE`: lineage 축적용 family 후보가 잡혔고, 필요 시 PAPER submit까지 진행됐다.
@@ -445,6 +460,7 @@ curl -s -X POST "http://127.0.0.1:8000/execution/control/kill-switch" \
 ```bash
 ./.venv/bin/python scripts/run_post_live_pruning_review.py --symbol BTCUSDC --days 7
 ```
+   생성되는 pruning review는 `Approval Surfaces` 섹션에서 `dashboard / validation / checklist`를 같은 `approve -> align -> act` vocabulary로 다시 요약하고, `Edge Experiment` 섹션에서 현재 split-test focus를 advisory-only로 함께 보여준다.
 
 ## 10. 운영 원칙
 - 차트는 mirror다. 서버 승인보다 우선하지 않는다.

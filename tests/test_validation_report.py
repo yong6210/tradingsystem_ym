@@ -770,6 +770,50 @@ def test_validation_report_generation() -> None:
                 "profitable_rate_from_closed": 0.6667,
                 "baseline_cost_profitable_rate_from_closed": 0.5,
             },
+            "money_funnel": {
+                "available": True,
+                "coverage_note": "expected R uses expected_ev_at_recommended_size_r.",
+                "snapshot_expected_r": {
+                    "runtime_candidates": 1.42,
+                    "accepted_candidates": 0.61,
+                    "blocked_candidates": 0.81,
+                },
+                "historical_expected_r": {
+                    "generated": 2.14,
+                    "submitted": 1.51,
+                    "filled": 1.18,
+                    "closed": 0.96,
+                },
+                "historical_realized_r": {
+                    "raw_closed": 0.84,
+                    "post_cost_closed": 0.72,
+                    "cost_drag": -0.12,
+                },
+                "historical_windows": {
+                    "recent": {
+                        "closed": 3,
+                        "closed_expected_r": 0.54,
+                        "raw_closed_realized_r": 0.5,
+                        "post_cost_closed_realized_r": 0.42,
+                        "true_edge_ratio": 0.7778,
+                    },
+                    "prior": {
+                        "closed": 3,
+                        "closed_expected_r": 0.42,
+                        "raw_closed_realized_r": 0.34,
+                        "post_cost_closed_realized_r": 0.30,
+                        "true_edge_ratio": 0.7143,
+                    },
+                },
+                "historical_gap_r": {
+                    "generated_to_submitted": 0.63,
+                    "submitted_to_filled": 0.33,
+                    "filled_to_closed": 0.22,
+                    "closed_expected_to_raw_realized": -0.12,
+                    "closed_expected_to_post_cost_realized": -0.24,
+                },
+                "summary": "expected_closed_r=0.9600, post_cost_closed_r=0.7200, submitted_to_filled_gap_r=0.3300",
+            },
             "decomposition": {
                 "family": [
                     {
@@ -815,6 +859,112 @@ def test_validation_report_generation() -> None:
                         "profitable_rate_from_closed": 1.0,
                         "baseline_cost_profitable_rate_from_closed": 0.5,
                     }
+                ],
+                "entry_model": [
+                    {
+                        "key": "LIMIT",
+                        "runtime_candidates": 5,
+                        "accepted_candidates": 2,
+                        "blocked_candidates": 3,
+                        "submitted": 4,
+                        "filled": 3,
+                        "closed": 3,
+                        "submitted_expected_r": 0.64,
+                        "filled_expected_r": 0.48,
+                        "closed_expected_r": 0.42,
+                        "baseline_adjusted_r": 0.36,
+                        "fill_rate_from_submitted": 0.75,
+                    },
+                    {
+                        "key": "CONFIRM",
+                        "runtime_candidates": 4,
+                        "accepted_candidates": 2,
+                        "blocked_candidates": 2,
+                        "submitted": 5,
+                        "filled": 4,
+                        "closed": 3,
+                        "submitted_expected_r": 0.87,
+                        "filled_expected_r": 0.52,
+                        "closed_expected_r": 0.54,
+                        "baseline_adjusted_r": 0.36,
+                        "fill_rate_from_submitted": 0.6,
+                    },
+                ],
+                "entry_timing_variant": [
+                    {
+                        "key": "early_limit",
+                        "runtime_candidates": 5,
+                        "accepted_candidates": 2,
+                        "blocked_candidates": 3,
+                        "submitted": 4,
+                        "filled": 3,
+                        "closed": 3,
+                        "submitted_expected_r": 0.64,
+                        "filled_expected_r": 0.48,
+                        "closed_expected_r": 0.42,
+                        "baseline_adjusted_r": 0.36,
+                        "fill_rate_from_submitted": 0.75,
+                    },
+                    {
+                        "key": "reaction_confirmed",
+                        "runtime_candidates": 7,
+                        "accepted_candidates": 3,
+                        "blocked_candidates": 4,
+                        "submitted": 5,
+                        "filled": 4,
+                        "closed": 3,
+                        "submitted_expected_r": 0.87,
+                        "filled_expected_r": 0.52,
+                        "closed_expected_r": 0.54,
+                        "baseline_adjusted_r": 0.36,
+                        "fill_rate_from_submitted": 0.6,
+                    },
+                ],
+                "execution_mode": [
+                    {
+                        "key": "PAPER",
+                        "runtime_candidates": 9,
+                        "accepted_candidates": 4,
+                        "blocked_candidates": 5,
+                        "submitted": 9,
+                        "filled": 7,
+                        "closed": 6,
+                        "submitted_expected_r": 1.51,
+                        "filled_expected_r": 1.18,
+                        "closed_expected_r": 0.96,
+                        "baseline_adjusted_r": 0.72,
+                        "fill_rate_from_submitted": 0.7778,
+                    }
+                ],
+                "execution_style": [
+                    {
+                        "key": "passive_limit",
+                        "runtime_candidates": 5,
+                        "accepted_candidates": 2,
+                        "blocked_candidates": 3,
+                        "submitted": 4,
+                        "filled": 3,
+                        "closed": 3,
+                        "submitted_expected_r": 0.64,
+                        "filled_expected_r": 0.48,
+                        "closed_expected_r": 0.42,
+                        "baseline_adjusted_r": 0.36,
+                        "fill_rate_from_submitted": 0.75,
+                    },
+                    {
+                        "key": "market",
+                        "runtime_candidates": 7,
+                        "accepted_candidates": 3,
+                        "blocked_candidates": 4,
+                        "submitted": 5,
+                        "filled": 4,
+                        "closed": 3,
+                        "submitted_expected_r": 0.87,
+                        "filled_expected_r": 0.52,
+                        "closed_expected_r": 0.54,
+                        "baseline_adjusted_r": 0.36,
+                        "fill_rate_from_submitted": 0.6,
+                    },
                 ],
             },
         },
@@ -932,6 +1082,55 @@ def test_validation_report_generation() -> None:
                 "maturity": "thin_activity",
                 "regime_modifier": {"key": "range", "state": "negative"},
                 "session_modifier": {"key": "dead_session", "state": "negative"},
+            },
+            "experiment_context": {
+                "available": True,
+                "edge_state": "watch_edge",
+                "true_edge_ratio": 0.75,
+                "edge_decay_rate": 0.0635,
+                "entry_timing_preferred_variant": "early_limit",
+                "entry_timing_recommendation_reason": "higher_post_cost_true_edge_ratio",
+                "entry_timing_comparison_ready": True,
+                "execution_style_preferred_variant": "passive_limit",
+                "execution_style_recommendation_reason": "better_fill_capture_ratio",
+                "execution_style_comparison_ready": True,
+                "accepted_candidate_focus": {
+                    "symbol": "BTCUSDC",
+                    "status": "ACTIONABLE_ENTRY",
+                    "strategy_family": "trend_continuation",
+                    "edge_state": "watch_edge",
+                    "entry_timing_preferred_variant": "early_limit",
+                    "execution_style_preferred_variant": "passive_limit",
+                    "focus_source": "accepted_candidate_focus",
+                },
+                "blocked_candidate_focus": {
+                    "symbol": "ETHUSDC",
+                    "status": "BLOCKED_SETUP",
+                    "strategy_family": "trend_continuation",
+                    "block_reason": "mode_shadow_only",
+                    "edge_state": "fragile_edge",
+                    "entry_timing_preferred_variant": "reaction_confirmed",
+                    "execution_style_preferred_variant": "market",
+                    "focus_source": "blocked_candidate_focus",
+                },
+                "entry_timing_target": {
+                    "symbol": "BTCUSDC",
+                    "status": "ACTIONABLE_ENTRY",
+                    "strategy_family": "trend_continuation",
+                    "edge_state": "watch_edge",
+                    "entry_timing_preferred_variant": "early_limit",
+                    "execution_style_preferred_variant": "passive_limit",
+                    "focus_source": "accepted_candidate_focus",
+                },
+                "execution_style_target": {
+                    "symbol": "BTCUSDC",
+                    "status": "ACTIONABLE_ENTRY",
+                    "strategy_family": "trend_continuation",
+                    "edge_state": "watch_edge",
+                    "entry_timing_preferred_variant": "early_limit",
+                    "execution_style_preferred_variant": "passive_limit",
+                    "focus_source": "accepted_candidate_focus",
+                },
             },
             "advisory_only": True,
         },
@@ -1854,6 +2053,8 @@ def test_validation_report_generation() -> None:
     assert "## Mode Advisory" in body
     assert "top_family: bucket=trend_continuation state=research_only" in body
     assert "## Outcome Control Trace" in body
+    assert "## Edge Experiment Review" in body
+    assert "## Approval Strip" in body
     assert "## Multi Strategy AB Expansion" in body
     assert "## B Continuation Activation" in body
     assert "## Forward Stress Regime Validation" in body
@@ -1897,7 +2098,10 @@ def test_validation_report_generation() -> None:
     assert result["score_to_outcome_funnel_summary"]["runtime_candidates"] == 12
     assert result["score_to_outcome_funnel_summary"]["submitted"] == 9
     assert result["score_to_outcome_funnel_summary"]["baseline_cost_profitable"] == 3
+    assert result["score_to_outcome_funnel_summary"]["money_funnel"]["historical_expected_r"]["closed"] == 0.96
     assert result["score_to_outcome_funnel_summary"]["top_family_bucket"]["key"] == "trend_continuation"
+    assert result["score_to_outcome_funnel_summary"]["top_entry_timing_bucket"]["key"] == "early_limit"
+    assert result["score_to_outcome_funnel_summary"]["top_execution_style_bucket"]["key"] == "passive_limit"
     assert result["execution_degradation_advisory_available"] is True
     assert result["execution_degradation_advisory_summary"]["status"] == "manual_review"
     assert result["execution_degradation_advisory_summary"]["recommended_action"] == (
@@ -1920,10 +2124,20 @@ def test_validation_report_generation() -> None:
     assert result["operator_action_priority_summary"]["priority_level"] == "urgent"
     assert result["operator_action_priority_summary"]["priority_source"] == "execution_degradation"
     assert result["operator_action_priority_summary"]["action_family"] == "execution_review"
+    assert result["operator_action_priority_summary"]["top_action_followup_command"] == ""
     assert result["operator_action_priority_summary"]["capture_context"]["dominant_bottleneck"]["reason"] == "quality_blocking"
     assert result["operator_action_priority_summary"]["capture_context"]["family_focus"]["key"] == "trend_continuation"
+    assert result["operator_action_priority_summary"]["experiment_context"]["entry_timing_target"]["symbol"] == "BTCUSDC"
+    assert result["operator_action_priority_summary"]["experiment_context"]["entry_timing_target"]["followup_command"].endswith(
+        "--symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review"
+    )
+    assert result["operator_action_priority_summary"]["experiment_context"]["execution_style_target"]["symbol"] == "BTCUSDC"
+    assert result["operator_action_priority_summary"]["experiment_context"]["execution_style_target"]["followup_command"].endswith(
+        "--symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_execution_style_split_review"
+    )
     assert result["operator_action_priority_summary"]["advisory_only"] is True
     assert len(result["operator_action_priority_summary"]["next_actions"]) == 1
+    assert result["operator_action_priority_summary"]["next_actions"][0]["followup_command"] == ""
     assert result["outcome_control_trace_available"] is True
     assert result["outcome_control_trace_summary"]["approval_penalty_status"] == "manual_review"
     assert result["outcome_control_trace_summary"]["approval_penalty_tier"] == "downgrade_to_manual"
@@ -1933,6 +2147,21 @@ def test_validation_report_generation() -> None:
     assert result["outcome_control_trace_summary"]["portfolio_bias_tier"] == "positive"
     assert result["outcome_control_trace_summary"]["portfolio_bias_score_delta"] == 0.5
     assert "execution_degradation:manual_review" in result["outcome_control_trace_summary"]["top_reason_codes"]
+    assert result["outcome_attribution_available"] is True
+    assert result["outcome_attribution_summary"]["strongest_drag_source"] == "fill_capture_gap"
+    assert result["outcome_attribution_summary"]["strategy_component_r"] == 0.96
+    assert result["outcome_attribution_summary"]["execution_component_r"] == -0.12
+    assert result["outcome_attribution_summary"]["condition_component_r"] == -0.12
+    assert result["outcome_attribution_summary"]["fill_capture_gap_r"] == 0.33
+    assert result["edge_experiment_review_available"] is True
+    assert result["edge_experiment_review_summary"]["edge_state"] == "watch_edge"
+    assert result["edge_experiment_review_summary"]["true_edge_ratio"] == 0.75
+    assert result["edge_experiment_review_summary"]["entry_timing_preferred_variant"] == "early_limit"
+    assert result["edge_experiment_review_summary"]["execution_style_preferred_variant"] == "passive_limit"
+    assert result["edge_evolution_rule_available"] is True
+    assert result["edge_evolution_rule_summary"]["evolution_state"] == "reduce_candidate"
+    assert result["edge_evolution_rule_summary"]["recommended_action"] == "reduce_baseline_allocation_review"
+    assert result["edge_evolution_rule_summary"]["allocation_bias"] == "reduce_baseline"
     assert result["rollout_recommendation_available"] is True
     assert result["rollout_recommendation_summary"]["family"] == "trend_continuation"
     assert result["rollout_recommendation_summary"]["recommendation"] == "research_only"
@@ -2121,6 +2350,10 @@ def test_validation_report_generation() -> None:
         == "hold_live_rollout_and_keep_prototype_path"
     )
     assert result["deployment_approval_summary"]["playbook_message"].startswith("NO-GO:")
+    assert result["approval_strip_summary"]["approve_value"] == "validation no_go"
+    assert result["approval_strip_summary"]["align_value"] == "playbook_drift"
+    assert result["approval_strip_summary"]["act_value"] == "review_runtime_execution_drag_before_expansion"
+    assert result["approval_strip_summary"]["act_priority_level"] == "urgent"
     assert result["deployment_approval_summary"]["threshold_lineage_winner_type"] == "runtime_proxy"
     assert result["deployment_approval_summary"]["replay_derived_worst_scenario"] == "shock_concentration"
     assert result["deployment_approval_summary"]["replay_derived_worst_scenario_status"] == "FAIL"
@@ -2129,6 +2362,7 @@ def test_validation_report_generation() -> None:
         result["deployment_approval_summary"]["approval_warning_code"]
         == "proxy_selected_trial_against_replay_backed_worst_scenario"
     )
+    assert "- approve=validation no_go | align=playbook_drift | act=review_runtime_execution_drag_before_expansion | priority=urgent" in body
     assert result["strategy_v2_stress_replay_lineage_available"] is True
     assert result["strategy_v2_stress_replay_lineage_summary"]["runtime_inputs_ready"] is False
     assert result["strategy_v2_stress_replay_assessment_available"] is True
@@ -2204,6 +2438,10 @@ def test_validation_report_generation() -> None:
     assert "## Operator Action Priority" in body
     assert "top_action: review_runtime_execution_drag_before_expansion" in body
     assert "priority_level: urgent" in body
+    assert "experiment_context.entry_timing_target: symbol=BTCUSDC" in body
+    assert "experiment_context.blocked_candidate_focus: symbol=ETHUSDC" in body
+    assert "## Edge Evolution Rule" in body
+    assert "recommended_action=reduce_baseline_allocation_review" in body
     assert "latency_plus_1_bar" in body
     assert "## Thesis Dedupe Comparison" in body
 

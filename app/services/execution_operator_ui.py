@@ -436,6 +436,58 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       font-weight: 700;
       color: var(--muted);
     }
+    .deferred-stack {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: rgba(12,18,26,0.8);
+      padding: 12px 14px;
+    }
+    .deferred-stack summary {
+      cursor: pointer;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .deferred-stack summary::-webkit-details-marker {
+      display: none;
+    }
+    .deferred-stack .summary-line {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+      margin-top: 6px;
+    }
+    .deferred-stack-body {
+      margin-top: 14px;
+      display: grid;
+      gap: 14px;
+    }
+    .kernel-muted-surface {
+      opacity: 0.66;
+      border-color: rgba(95, 112, 135, 0.5) !important;
+      box-shadow: 0 4px 18px rgba(0,0,0,0.16);
+      filter: saturate(0.82);
+    }
+    .kernel-muted-surface .summary-box,
+    .kernel-muted-surface .hint-card,
+    .kernel-muted-surface .list-card,
+    .kernel-muted-surface .table-wrap {
+      border-color: rgba(95, 112, 135, 0.38);
+    }
+    .kernel-guard-note {
+      border: 1px solid rgba(80, 102, 129, 0.55);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(8,12,17,0.45);
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+      margin-bottom: 12px;
+    }
     @media (max-width: 920px) {
       .app-shell {
         grid-template-columns: 1fr;
@@ -524,7 +576,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         <section class="nav-card">
           <div class="nav-title">화면 읽는 법</div>
           <div class="meta">
-            상단 operator surface는 Decision Summary 안의 Top Operator Action을 먼저 확인하고, 이어서 Top Opportunity / Top Blocker, Current Operating State 순서로 읽은 뒤 대표 플랜과 상세 운영 섹션으로 내려가면 됩니다.
+            상단 operator surface는 5-Second Operator Kernel을 먼저 보고, 이어서 Approval Strip, Top Opportunity / Top Blocker, Current Operating State 순서로 읽은 뒤 대표 플랜과 상세 운영 섹션으로 내려가면 됩니다. kernel verdict가 hold/manual_review/watch면 Top Opportunity / Portfolio Candidate surface는 context-only로 읽습니다.
           </div>
         </section>
         <section class="nav-card">
@@ -540,13 +592,13 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           <div class="section-header">
             <div>
               <h2>홈</h2>
-              <div class="meta">Decision Summary 안의 Top Operator Action을 먼저 확인하고, 이어서 Top Opportunity / Top Blocker, Current Operating State 순서로 읽은 뒤 대표 플랜과 현재 진입 가이드를 봅니다.</div>
+              <div class="meta">5-Second Operator Kernel에서 money funnel, outcome attribution, outcome control, rollout 순서를 먼저 확인하고, 이어서 Approval Strip, Top Opportunity / Top Blocker, Current Operating State 순서로 읽은 뒤 대표 플랜과 현재 진입 가이드를 봅니다. kernel verdict가 hold/manual_review/watch면 Top Opportunity / Portfolio Candidate surface는 context-only입니다.</div>
             </div>
           </div>
+          <div id="operator-kernel" class="stack"></div>
           <div id="decision-summary" class="stack"></div>
-          <div id="approval-divergence-banner" class="stack"></div>
           <section class="grid two">
-            <div class="panel">
+            <div id="top-opportunity-panel" class="panel">
               <h2>Top Opportunity</h2>
               <div id="top-opportunity" class="stack"></div>
             </div>
@@ -556,14 +608,10 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             </div>
           </section>
           <div id="current-operating-state" class="stack"></div>
-          <div id="strategy-ab-posture" class="stack"></div>
-          <div id="promotion-operating-stack" class="stack"></div>
-          <div id="promotion-case-inspector" class="stack"></div>
           <div id="validation-checklist-review-stack" class="stack"></div>
           <div id="validation-case-inspector" class="stack"></div>
           <div id="runtime-quality-inspector" class="stack"></div>
           <div id="signal-funnel-inspector" class="stack"></div>
-          <div id="alpha-research-inspector" class="stack"></div>
           <div id="kill-condition-inspector" class="stack"></div>
           <div id="policy-lock-inspector" class="stack"></div>
           <div id="intent-exposure-inspector" class="stack"></div>
@@ -574,6 +622,16 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           <div id="portfolio-candidate-inspector" class="stack"></div>
           <div id="checklist-evidence-drilldown" class="stack"></div>
           <div id="report-navigation" class="stack"></div>
+          <details id="deferred-home-stack" class="deferred-stack">
+            <summary id="deferred-home-stack-summary">Deferred Research / Promotion Stack</summary>
+            <div class="summary-line" id="deferred-home-stack-note">kernel verdict가 강하면 이 섹션은 기본 접힘 상태로 유지됩니다.</div>
+            <div class="deferred-stack-body">
+              <div id="strategy-ab-posture" class="stack"></div>
+              <div id="promotion-operating-stack" class="stack"></div>
+              <div id="promotion-case-inspector" class="stack"></div>
+              <div id="alpha-research-inspector" class="stack"></div>
+            </div>
+          </details>
           <div id="overview" class="stack"></div>
           <section class="grid cards" id="cards"></section>
           <section class="grid three">
@@ -784,6 +842,105 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       `;
     }
 
+    function surfaceApprovalStrip(surface, surfaceType = 'generic') {
+      if (surfaceType === 'validation') {
+        return surface?.validation_report?.approval_strip_summary || surface?.approval_strip_summary || {};
+      }
+      return surface?.approval_strip_summary || {};
+    }
+
+    function surfaceApproveValue(surface, surfaceType = 'generic') {
+      const summary = surfaceApprovalStrip(surface, surfaceType);
+      return summary?.approve_value
+        || surface?.deployment_go_no_go
+        || surface?.approval_topline_status
+        || '';
+    }
+
+    function surfaceApproveReason(surface, surfaceType = 'generic') {
+      const summary = surfaceApprovalStrip(surface, surfaceType);
+      return summary?.approve_reason
+        || surface?.deployment_message
+        || surface?.approval_topline_summary_line
+        || surface?.approval_topline_message
+        || '';
+    }
+
+    function surfaceAlignValue(surface, surfaceType = 'generic') {
+      const summary = surfaceApprovalStrip(surface, surfaceType);
+      return summary?.align_value
+        || surface?.playbook_go_no_go
+        || surface?.approval_topline_status
+        || '';
+    }
+
+    function surfaceAlignReason(surface, surfaceType = 'generic') {
+      const summary = surfaceApprovalStrip(surface, surfaceType);
+      return summary?.align_reason
+        || surface?.approval_topline_summary_line
+        || surface?.playbook_message
+        || surface?.deployment_message
+        || '';
+    }
+
+    function surfaceActValue(surface, surfaceType = 'generic') {
+      const summary = surfaceApprovalStrip(surface, surfaceType);
+      return summary?.act_value
+        || surface?.playbook_action
+        || '';
+    }
+
+    function surfaceActReason(surface, surfaceType = 'generic') {
+      const summary = surfaceApprovalStrip(surface, surfaceType);
+      return summary?.act_reason
+        || surface?.playbook_message
+        || surface?.deployment_message
+        || surface?.approval_topline_summary_line
+        || '';
+    }
+
+    function describeExperimentTarget(target, preferredVariant, axisLabel) {
+      const row = target || {};
+      if (!row?.symbol) {
+        return {
+          value: `${axisLabel}: no direct target`,
+          reason: `${axisLabel} split target is not attached to a representative candidate row.`,
+          command: '',
+        };
+      }
+      const blockReason = row?.block_reason ? ` | block=${row.block_reason}` : '';
+      const focusSource = row?.focus_source ? ` | focus=${row.focus_source}` : '';
+      return {
+        value: `${axisLabel}:${row.symbol} / ${preferredVariant || 'none'}`,
+        reason: `${row.status || 'n/a'} | family=${row.strategy_family || 'unknown'}${blockReason}${focusSource}`,
+        command: row?.followup_command || '',
+      };
+    }
+
+    function summarizeExperimentRouting(operatorActionPriority) {
+      const experiment = operatorActionPriority?.experiment_context || {};
+      const entryTarget = describeExperimentTarget(
+        experiment?.entry_timing_target,
+        experiment?.entry_timing_preferred_variant,
+        'entry'
+      );
+      const executionTarget = describeExperimentTarget(
+        experiment?.execution_style_target,
+        experiment?.execution_style_preferred_variant,
+        'execution'
+      );
+      return {
+        value: [entryTarget.value, executionTarget.value].filter(Boolean).join(' | '),
+        reason: [
+          experiment?.edge_state ? `edge=${experiment.edge_state}` : '',
+          entryTarget.reason,
+          entryTarget.command ? `entry_cmd=${entryTarget.command}` : '',
+          executionTarget.reason,
+          executionTarget.command ? `execution_cmd=${executionTarget.command}` : '',
+        ].filter(Boolean).join(' | '),
+      };
+    }
+
     function deriveOperatorActionPriority(dashboard, checklist, validation) {
       const funnel = dashboard?.signal_funnel || {};
       const sharedPriority = funnel.operator_action_priority || {};
@@ -792,10 +949,15 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           available: true,
           top_action: sharedPriority.top_action || 'continue_runtime_monitoring',
           top_reason: sharedPriority.top_reason || '',
+          top_action_followup_command: sharedPriority.top_action_followup_command || '',
           priority_level: sharedPriority.priority_level || 'monitor',
+          priority_source: sharedPriority.priority_source || 'monitor',
+          action_family: sharedPriority.action_family || 'monitor',
           supporting_signals: Array.isArray(sharedPriority.supporting_signals) ? sharedPriority.supporting_signals : [],
           blocking_signals: Array.isArray(sharedPriority.blocking_signals) ? sharedPriority.blocking_signals : [],
           next_actions: Array.isArray(sharedPriority.next_actions) ? sharedPriority.next_actions.slice(0, 3) : [],
+          capture_context: sharedPriority.capture_context || {},
+          experiment_context: sharedPriority.experiment_context || {},
           advisory_only: sharedPriority.advisory_only !== false,
         };
       }
@@ -824,19 +986,20 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const modeTop = [modeFamilyTop, modeRegimeTop, modeSessionTop].find((row) => row && row.bucket) || {};
 
       const nextActions = [];
-      function pushAction(action, reason, priorityLevel, source) {
+      function pushAction(action, reason, priorityLevel, source, actionFamily = 'monitor') {
         if (!action) return;
         nextActions.push({
           action,
           reason: reason || '',
           priority_level: priorityLevel,
           source,
+          action_family: actionFamily,
           advisory_only: true,
         });
       }
 
       if (playbookAction) {
-        pushAction(playbookAction, playbookReason, 'urgent', 'playbook');
+        pushAction(playbookAction, playbookReason, 'urgent', 'playbook', 'playbook');
       }
 
       if (degradation?.status === 'manual_review') {
@@ -844,14 +1007,16 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           degradation?.recommended_action || 'review_execution_drag_before_expansion',
           degradation?.summary || 'global execution degradation requires manual review',
           'urgent',
-          'execution_degradation'
+          'execution_degradation',
+          'execution_review'
         );
       } else if (degradation?.status === 'watch') {
         pushAction(
           degradation?.recommended_action || 'review_execution_drag_and_hold_size',
           degradation?.summary || 'global execution quality is drifting',
           'watch',
-          'execution_degradation'
+          'execution_degradation',
+          'execution_review'
         );
       }
 
@@ -863,7 +1028,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         const familyPriority = topFamilyExecution?.status === 'manual_review'
           ? 'watch'
           : (topFamilyExecution?.status === 'watch' ? 'watch' : 'monitor');
-        pushAction(familyAction, familyReason, familyPriority, 'family_execution_degradation');
+        pushAction(familyAction, familyReason, familyPriority, 'family_execution_degradation', 'execution_review');
       }
 
       if (modeTop?.advisory_state === 'research_only') {
@@ -871,21 +1036,24 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           'keep_bucket_in_research_only_review',
           modeTop?.why || `${modeTop.axis || 'bucket'}=${modeTop.bucket || 'unknown'} remains research-only`,
           'research',
-          'mode_advisory'
+          'mode_advisory',
+          'mode_review'
         );
       } else if (modeTop?.advisory_state === 'promotion_watch') {
         pushAction(
           'keep_bucket_under_promotion_watch',
           modeTop?.why || `${modeTop.axis || 'bucket'}=${modeTop.bucket || 'unknown'} stays on promotion watch`,
           'watch',
-          'mode_advisory'
+          'mode_advisory',
+          'mode_review'
         );
       } else if (modeTop?.advisory_state === 'watch') {
         pushAction(
           'watch_bucket_execution_and_outcome',
           modeTop?.why || `${modeTop.axis || 'bucket'}=${modeTop.bucket || 'unknown'} should be watched`,
           'watch',
-          'mode_advisory'
+          'mode_advisory',
+          'mode_review'
         );
       }
 
@@ -894,21 +1062,24 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           researchAction.recommended_action,
           researchAction?.recommended_reason || 'alpha-research next step',
           'research',
-          'alpha_research'
+          'alpha_research',
+          'research'
         );
       } else if (softeningReview?.top_candidate?.bucket) {
         pushAction(
           'softening_review',
           `${softeningReview.top_candidate.axis || 'bucket'}=${softeningReview.top_candidate.bucket}`,
           'research',
-          'alpha_research_softening'
+          'alpha_research_softening',
+          'research'
         );
       } else if (promotionWatchlist?.top_watch?.bucket) {
         pushAction(
           'promotion_watch',
           `${promotionWatchlist.top_watch.focus || 'bucket'}=${promotionWatchlist.top_watch.bucket}`,
           'research',
-          'alpha_research_promotion_watch'
+          'alpha_research_promotion_watch',
+          'research'
         );
       }
 
@@ -925,10 +1096,15 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           available: true,
           top_action: 'continue_runtime_monitoring',
           top_reason: 'no stronger operator action is currently implied by playbook, execution, family, mode, or research signals',
+          top_action_followup_command: '',
           priority_level: 'monitor',
+          priority_source: 'monitor',
+          action_family: 'monitor',
           supporting_signals: [],
           blocking_signals: [],
           next_actions: [],
+          capture_context: {},
+          experiment_context: {},
           advisory_only: true,
         };
       }
@@ -948,33 +1124,83 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         available: true,
         top_action: top.action,
         top_reason: top.reason,
+        top_action_followup_command: top.followup_command || '',
         priority_level: top.priority_level,
+        priority_source: top.source || 'monitor',
+        action_family: top.action_family || 'monitor',
         supporting_signals: supportingSignals,
         blocking_signals: blockingSignals,
         next_actions: nextActions.slice(1, 4),
+        capture_context: {},
+        experiment_context: {},
         advisory_only: true,
       };
     }
 
-    function renderDecisionSummary(dashboard, checklist, validation) {
+    function deriveOperatorKernel(dashboard, checklist, validation) {
+      const funnel = dashboard?.signal_funnel || {};
+      const checklistMap = checklistStatusMap(checklist);
+      const moneyFunnel = funnel?.score_to_outcome_funnel?.money_funnel || validation?.score_to_outcome_funnel_summary?.money_funnel || {};
+      const attribution = funnel?.outcome_attribution || validation?.outcome_attribution_summary || {};
+      const edgeExperiment = funnel?.edge_experiment_review || validation?.edge_experiment_review_summary || {};
+      const outcomeControl = funnel?.outcome_control_trace || validation?.outcome_control_trace_summary || {};
+      const rollout = funnel?.rollout_recommendation || validation?.rollout_recommendation_summary || {};
+      const moneyLeak = Number(moneyFunnel?.historical_gap_r?.submitted_to_filled || 0);
+      const expectedClosedR = Number(moneyFunnel?.historical_expected_r?.closed || 0);
+      const postCostClosedR = Number(moneyFunnel?.historical_realized_r?.post_cost_closed || 0);
+      const attributionDelta = Number(attribution?.closed_post_cost_delta_r || 0);
+      const dragSource = attribution?.strongest_drag_source || 'n/a';
+      const approvalTier = outcomeControl?.approval_penalty_tier || outcomeControl?.approval_penalty_status || 'n/a';
+      const rolloutState = rollout?.recommendation || 'n/a';
+      let kernelVerdict = 'monitor';
+      let kernelReason = rollout?.summary
+        || outcomeControl?.summary
+        || edgeExperiment?.summary
+        || attribution?.summary
+        || moneyFunnel?.summary
+        || 'kernel verdict unavailable';
+      if (validation?.deployment_go_no_go === 'NO_GO' || checklist?.deployment_go_no_go === 'NO_GO') {
+        kernelVerdict = 'hold';
+        kernelReason = validation?.playbook_message
+          || checklist?.playbook_message
+          || validation?.deployment_message
+          || kernelReason;
+      } else if (approvalTier === 'downgrade_to_manual' || rolloutState === 'reduce') {
+        kernelVerdict = 'manual_review';
+      } else if (moneyLeak >= 0.25 || attributionDelta <= -0.15) {
+        kernelVerdict = 'watch';
+      }
+      return {
+        checklistMap,
+        moneyFunnel,
+        attribution,
+        edgeExperiment,
+        outcomeControl,
+        rollout,
+        moneyLeak,
+        expectedClosedR,
+        postCostClosedR,
+        attributionDelta,
+        dragSource,
+        approvalTier,
+        rolloutState,
+        kernelVerdict,
+        kernelReason,
+      };
+    }
+
+    function renderDecisionSummary(dashboard, checklist, validation, candidate) {
       const signalFunnel = dashboard?.signal_funnel || {};
       const degradation = signalFunnel.execution_degradation_advisory || {};
       const modeAdvisory = signalFunnel.mode_advisory || {};
       const familyTop = modeAdvisory.family_top || {};
-      const operatorActionPriority = deriveOperatorActionPriority(dashboard, checklist, validation);
-      const entriesAllowed = dashboard?.new_entries_allowed !== false;
-      const entryState = entriesAllowed ? '가능' : '불가';
-      const primaryReason = dashboard?.blocking_reason_message
-        || checklist?.playbook_message
-        || dashboard?.playbook_message
-        || validation?.deployment_message
-        || '현재 운영 판단 근거가 없습니다.';
-      const operatingHint = dashboard?.playbook_action
-        || checklist?.playbook_action
-        || validation?.playbook_action
-        || 'playbook action unavailable';
+      const strip = deriveApprovalStripState(dashboard, checklist, validation, candidate);
       const decisionBadges = [
-        badge('신규 진입', entryState),
+        badge('Kernel Verdict', strip.kernel.kernelVerdict),
+        badge('1 Approve', strip.approveValue),
+        badge('2 Align', strip.alignValue),
+        badge('3 Act', strip.operatorActionPriority?.priority_level || 'monitor'),
+        badge('신규 진입', strip.entriesAllowed ? '가능' : '불가'),
         badge('서버 승인', dashboard?.deployment_go_no_go || 'n/a'),
         badge('체크리스트', checklist?.deployment_go_no_go || 'n/a'),
         badge('검증', validation?.deployment_go_no_go || 'n/a'),
@@ -984,66 +1210,206 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         <div class="panel">
           <div class="section-header">
             <div>
-              <h2>Decision Summary</h2>
-              <div class="meta">지금 신규 진입 가능 여부와 Decision Summary 안의 server-side Top Operator Action을 먼저 보여줍니다. policy mutation이 아니라 reading priority입니다.</div>
+              <h2>Approval Strip</h2>
+              <div class="meta">5-Second Operator Kernel 바로 아래에서 approve -> align -> act 순서로 신규 진입 허용, surface alignment, server-side Top Operator Action을 한 strip으로 압축합니다. policy mutation이 아니라 reading priority입니다.</div>
             </div>
           </div>
           <div class="desk-strip">${decisionBadges}</div>
-          <div class="strong-line">${esc(entriesAllowed ? '현재 신규 진입은 열려 있습니다.' : '현재 신규 진입은 차단되어 있습니다.')}</div>
-          <div class="meta">${esc(primaryReason)}</div>
+          <div class="strong-line">${esc(strip.entriesAllowed ? '현재 신규 진입은 열려 있지만 approval strip을 먼저 통과해야 합니다.' : '현재 신규 진입은 approval strip에서 차단되어 있습니다.')}</div>
+          <div class="meta">${esc(strip.primaryReason)}</div>
           <div class="summary-grid" style="margin-top:12px;">
-            ${renderSummaryBox('핵심 이유', entriesAllowed ? '진입 가능' : '진입 차단', dashboard?.blocking_reason_code || 'runtime safety / checklist / validation 기준')}
-            ${renderSummaryBox('Top Operator Action', operatorActionPriority?.top_action || 'continue_runtime_monitoring', operatorActionPriority?.top_reason || 'server-side operator action priority unavailable; advisory only')}
-            ${renderSummaryBox('현재 운영 해석', operatingHint, dashboard?.playbook_message || checklist?.playbook_message || '')}
+            ${renderSummaryBox('1. Approve', strip.approveValue, strip.approveReason)}
+            ${renderSummaryBox('2. Align', strip.alignValue, strip.alignReason)}
+            ${renderSummaryBox('3. Act / Top Operator Action', strip.actValue, strip.actReason)}
             ${renderSummaryBox('Execution 상태', degradation?.status || 'n/a', degradation?.summary || 'execution advisory unavailable')}
             ${renderSummaryBox('대표 Mode Advisory', familyTop?.advisory_state || 'n/a', familyTop?.bucket ? `family=${familyTop.bucket}` : (modeAdvisory?.coverage_note || 'mode advisory unavailable'))}
+          </div>
+          <div class="grid two" style="margin-top:12px;">
+            <div class="hint-card">
+              <div class="title">Approval Strip Detail</div>
+              <div class="body">${esc(strip.alignment.message)}</div>
+            </div>
+            <div class="hint-card">
+              <div class="title">Approval Strip Next Move</div>
+              <div class="body">${esc(strip.alignment.nextMove)}</div>
+            </div>
           </div>
         </div>
       `;
     }
 
-    function renderApprovalDivergenceBanner(dashboard, checklist, validation, candidate) {
+    function renderOperatorKernel(dashboard, checklist, validation) {
+      const kernel = deriveOperatorKernel(dashboard, checklist, validation);
+      const {
+        checklistMap,
+        moneyFunnel,
+        attribution,
+        outcomeControl,
+        rollout,
+        moneyLeak,
+        expectedClosedR,
+        postCostClosedR,
+        attributionDelta,
+        dragSource,
+        approvalTier,
+        rolloutState,
+        kernelVerdict,
+        kernelReason,
+      } = kernel;
+      const checklistTrace = [
+        `money=${checklistMap?.money_funnel?.status || 'n/a'}`,
+        `attribution=${checklistMap?.outcome_attribution?.status || 'n/a'}`,
+        `edge=${checklistMap?.edge_experiment_review?.status || 'n/a'}`,
+        `control=${checklistMap?.outcome_control_trace?.status || 'n/a'}`,
+        `rollout=${checklistMap?.rollout_recommendation?.status || 'n/a'}`,
+      ].join(' | ');
+
+      $('operator-kernel').innerHTML = `
+        <div class="panel">
+          <div class="section-header">
+            <div>
+              <h2>5-Second Operator Kernel</h2>
+              <div class="meta">operator가 5초 안에 money funnel -> outcome attribution -> outcome control -> rollout 순서로 현재 돈 누수와 승인 방향을 읽도록 압축한 kernel view입니다.</div>
+            </div>
+          </div>
+          <div class="desk-strip">
+            ${badge('Kernel Verdict', kernelVerdict)}
+            ${badge('1 Money Funnel', fmtR(moneyLeak))}
+            ${badge('2 Attribution', dragSource)}
+            ${badge('3 Outcome Control', approvalTier)}
+            ${badge('4 Rollout', rolloutState)}
+          </div>
+          <div class="summary-grid">
+            ${renderSummaryBox('1. Money Funnel', fmtR(expectedClosedR), `leak=${fmtR(moneyLeak)} | realized=${fmtR(postCostClosedR)} | checklist=${checklistMap?.money_funnel?.status || 'n/a'}`)}
+            ${renderSummaryBox('2. Outcome Attribution', dragSource, `${fmtR(attributionDelta)} | checklist=${checklistMap?.outcome_attribution?.status || 'n/a'} | ${attribution?.summary || 'outcome attribution unavailable'}`)}
+            ${renderSummaryBox('3. Outcome Control', approvalTier, `${outcomeControl?.approval_penalty_status || 'n/a'} | checklist=${checklistMap?.outcome_control_trace?.status || 'n/a'} | ${outcomeControl?.summary || 'outcome control unavailable'}`)}
+            ${renderSummaryBox('4. Rollout', rolloutState, `${rollout?.confidence || 'n/a'} | checklist=${checklistMap?.rollout_recommendation?.status || 'n/a'} | ${rollout?.summary || 'rollout recommendation unavailable'}`)}
+          </div>
+          <div class="grid two" style="margin-top:12px;">
+            <div class="hint-card">
+              <div class="title">Expected vs Realized R</div>
+              <div class="body">${esc(`${fmtR(expectedClosedR)} -> ${fmtR(postCostClosedR)} | leak=${fmtR(moneyLeak)} | delta=${fmtR(attributionDelta)}`)}</div>
+            </div>
+            <div class="hint-card">
+              <div class="title">Checklist Trace</div>
+              <div class="body">${esc(checklistTrace)}</div>
+            </div>
+          </div>
+          <div class="grid two" style="margin-top:12px;">
+            <div class="hint-card">
+              <div class="title">Kernel Reading Order</div>
+              <div class="body">${esc('money funnel -> outcome attribution -> outcome control -> rollout 순서가 현재 operator home의 최우선 reading order입니다.')}</div>
+            </div>
+            <div class="hint-card">
+              <div class="title">Kernel Next Move</div>
+              <div class="body">${esc(kernelReason)}</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderDeferredHomeStackControl(dashboard, checklist, validation) {
+      const kernel = deriveOperatorKernel(dashboard, checklist, validation);
+      const deferred = $('deferred-home-stack');
+      const summary = $('deferred-home-stack-summary');
+      const note = $('deferred-home-stack-note');
+      const shouldOpen = !['hold', 'manual_review', 'watch'].includes(kernel.kernelVerdict);
+      deferred.open = shouldOpen;
+      summary.innerHTML = `
+        <span>Deferred Research / Promotion Stack</span>
+        <span>${badge('Kernel Verdict', kernel.kernelVerdict)} ${badge('Rollout', kernel.rolloutState || 'n/a')} ${badge('Drag', kernel.dragSource || 'n/a')}</span>
+      `;
+      note.textContent = shouldOpen
+        ? 'kernel verdict가 monitor라서 promotion/research stack을 기본 펼침 상태로 둡니다.'
+        : 'kernel verdict가 hold/manual_review/watch라서 promotion/research stack을 기본 접힘 상태로 둡니다.';
+    }
+
+    function deriveSurfaceAlignment(dashboard, checklist, validation, candidate) {
       const deploymentStatuses = [
-        dashboard?.deployment_go_no_go,
-        checklist?.deployment_go_no_go,
-        validation?.deployment_go_no_go,
+        surfaceApproveValue(dashboard, 'dashboard'),
+        surfaceApproveValue(checklist, 'checklist'),
+        surfaceApproveValue(validation, 'validation'),
         candidate?.deployment_go_no_go || candidate?.operator_status,
       ].filter((value) => value);
       const playbookActions = [
-        dashboard?.playbook_action,
-        checklist?.playbook_action,
-        validation?.playbook_action,
+        surfaceActValue(dashboard, 'dashboard'),
+        surfaceActValue(checklist, 'checklist'),
+        surfaceActValue(validation, 'validation'),
       ].filter((value) => value);
       const deploymentAligned = new Set(deploymentStatuses).size <= 1;
       const playbookAligned = new Set(playbookActions).size <= 1;
-      const state = deploymentAligned && playbookAligned ? 'aligned' : 'diverged';
-      const message = state === 'aligned'
-        ? 'dashboard / checklist / validation / candidate surface가 같은 방향을 가리키고 있습니다.'
-        : 'dashboard / checklist / validation / candidate surface가 서로 다른 방향을 가리키고 있습니다.';
+      let alignmentState = 'aligned';
+      let message = 'dashboard / checklist / validation / candidate surface가 같은 방향을 가리키고 있습니다.';
+      if (!deploymentAligned && !playbookAligned) {
+        alignmentState = 'diverged';
+        message = 'dashboard / checklist / validation / candidate surface가 서로 다른 방향을 가리키고 있습니다.';
+      } else if (!deploymentAligned) {
+        alignmentState = 'deployment_drift';
+        message = 'deployment_go_no_go 방향은 갈라졌지만 playbook wording은 아직 크게 벗어나지 않았습니다.';
+      } else if (!playbookAligned) {
+        alignmentState = 'playbook_drift';
+        message = '배포 방향은 비슷하지만 playbook wording drift가 남아 있습니다.';
+      }
       const detail = [
-        `dashboard=${dashboard?.deployment_go_no_go || 'n/a'}`,
-        `checklist=${checklist?.deployment_go_no_go || 'n/a'}`,
-        `validation=${validation?.deployment_go_no_go || 'n/a'}`,
+        `dashboard=${surfaceApproveValue(dashboard, 'dashboard') || 'n/a'}`,
+        `checklist=${surfaceApproveValue(checklist, 'checklist') || 'n/a'}`,
+        `validation=${surfaceApproveValue(validation, 'validation') || 'n/a'}`,
         `candidate=${candidate?.deployment_go_no_go || candidate?.operator_status || 'n/a'}`,
       ].join(' | ');
-      const nextMove = dashboard?.playbook_action
-        || validation?.playbook_action
-        || checklist?.playbook_action
+      const nextMove = surfaceActValue(dashboard, 'dashboard')
+        || surfaceActValue(validation, 'validation')
+        || surfaceActValue(checklist, 'checklist')
         || 'approval divergence next move unavailable';
+      return {
+        deploymentStatuses,
+        playbookActions,
+        deploymentAligned,
+        playbookAligned,
+        alignmentState,
+        message,
+        detail,
+        nextMove,
+      };
+    }
 
-      $('approval-divergence-banner').innerHTML = `
-        <div class="panel">
-          <div class="desk-strip">
-            ${badge('Approval Divergence', state)}
-            ${badge('Dashboard', dashboard?.deployment_go_no_go || 'n/a')}
-            ${badge('Checklist', checklist?.deployment_go_no_go || 'n/a')}
-            ${badge('Validation', validation?.deployment_go_no_go || 'n/a')}
-          </div>
-          <div class="strong-line">${esc(message)}</div>
-          <div class="meta">${esc(detail)}</div>
-          <div class="meta">${esc(`next_move=${nextMove}`)}</div>
-        </div>
-      `;
+    function ensureKernelGuardNote(panel, text) {
+      if (!panel) return;
+      let note = panel.querySelector('[data-kernel-guard-note="true"]');
+      if (!note) {
+        note = document.createElement('div');
+        note.className = 'kernel-guard-note';
+        note.dataset.kernelGuardNote = 'true';
+        const anchor = panel.querySelector('.section-header');
+        if (anchor) {
+          anchor.insertAdjacentElement('afterend', note);
+        } else {
+          const title = panel.querySelector('h2');
+          if (title) {
+            title.insertAdjacentElement('afterend', note);
+          } else {
+            panel.prepend(note);
+          }
+        }
+      }
+      note.textContent = text;
+    }
+
+    function renderCandidatePriorityGuard(dashboard, checklist, validation) {
+      const kernel = deriveOperatorKernel(dashboard, checklist, validation);
+      const muted = ['hold', 'manual_review', 'watch'].includes(kernel.kernelVerdict);
+      const noteText = muted
+        ? `kernel verdict=${kernel.kernelVerdict}; opportunity/candidate surface는 context-only로 읽고 approval/alignment/checklist를 먼저 확인합니다.`
+        : `kernel verdict=${kernel.kernelVerdict}; opportunity/candidate surface를 정상 우선순위로 읽되 money funnel과 approval alignment를 먼저 확인한 뒤 drilldown으로 내려갑니다.`;
+      [
+        $('top-opportunity-panel'),
+        $('portfolio-candidate-drilldown')?.querySelector('.panel'),
+        $('portfolio-candidate-inspector')?.querySelector('.panel'),
+      ].forEach((panel) => {
+        if (!panel) return;
+        panel.classList.toggle('kernel-muted-surface', muted);
+        ensureKernelGuardNote(panel, noteText);
+      });
     }
 
     function renderTopOpportunity(candidate, symbol) {
@@ -1108,7 +1474,76 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       `;
     }
 
-    function renderCurrentOperatingState(dashboard, checklist, validation) {
+    function deriveApprovalStripState(dashboard, checklist, validation, candidate) {
+      const kernel = deriveOperatorKernel(dashboard, checklist, validation);
+      const alignment = deriveSurfaceAlignment(dashboard, checklist, validation, candidate);
+      const operatorActionPriority = deriveOperatorActionPriority(dashboard, checklist, validation);
+      const nextActions = Array.isArray(operatorActionPriority?.next_actions) ? operatorActionPriority.next_actions : [];
+      const nextActionText = nextActions.length
+        ? nextActions.map((item) => `${item.action} [${item.priority_level}]`).join(' | ')
+        : '추가 operator action priority가 없습니다.';
+      const entriesAllowed = dashboard?.new_entries_allowed !== false;
+      const primaryReason = dashboard?.blocking_reason_message
+        || checklist?.playbook_message
+        || dashboard?.playbook_message
+        || validation?.deployment_message
+        || '현재 운영 판단 근거가 없습니다.';
+      let approveValue = 'approval usable';
+      let approveReason = kernel.kernelReason;
+      if (kernel.kernelVerdict === 'hold') {
+        approveValue = 'validation/checklist no_go';
+        approveReason = [
+          `validation=${validation?.deployment_go_no_go || 'n/a'}`,
+          `checklist=${checklist?.deployment_go_no_go || 'n/a'}`,
+          `dashboard=${dashboard?.deployment_go_no_go || 'n/a'}`,
+          kernel.kernelReason,
+        ].filter(Boolean).join(' | ');
+      } else if (kernel.kernelVerdict === 'manual_review') {
+        approveValue = 'manual review first';
+        approveReason = [
+          `control=${kernel.approvalTier || 'n/a'}`,
+          `rollout=${kernel.rolloutState || 'n/a'}`,
+          kernel.kernelReason,
+        ].filter(Boolean).join(' | ');
+      } else if (kernel.kernelVerdict === 'watch') {
+        approveValue = 'watch approval drift';
+        approveReason = [
+          `money_leak=${fmtR(kernel.moneyLeak)}`,
+          `drag=${kernel.dragSource || 'n/a'}`,
+          kernel.kernelReason,
+        ].filter(Boolean).join(' | ');
+      }
+      const alignReason = [
+        alignment.message,
+        alignment.detail,
+        `next_move=${alignment.nextMove}`,
+      ].filter(Boolean).join(' | ');
+      const actReason = [
+        operatorActionPriority?.top_reason || 'server-side operator action priority unavailable; advisory only',
+        nextActionText,
+      ].filter(Boolean).join(' | ');
+      const contextOpen = !['hold', 'manual_review', 'watch'].includes(kernel.kernelVerdict);
+      const contextNote = contextOpen
+        ? 'kernel verdict가 monitor라서 expanded operating context를 기본 펼침 상태로 둡니다.'
+        : 'kernel verdict가 hold/manual_review/watch라서 expanded operating context는 approve/align/act 확인 전까지 기본 접힘 상태로 둡니다.';
+      return {
+        kernel,
+        alignment,
+        operatorActionPriority,
+        entriesAllowed,
+        primaryReason,
+        approveValue,
+        approveReason,
+        alignValue: alignment.alignmentState,
+        alignReason,
+        actValue: operatorActionPriority?.top_action || 'continue_runtime_monitoring',
+        actReason,
+        contextOpen,
+        contextNote,
+      };
+    }
+
+    function renderCurrentOperatingState(dashboard, checklist, validation, candidate) {
       const funnel = dashboard?.signal_funnel || {};
       const portfolio = dashboard?.portfolio_summary || {};
       const degradation = funnel.execution_degradation_advisory || {};
@@ -1117,17 +1552,8 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const researchAction = funnel.alpha_research_recommended_action || {};
       const softeningReview = funnel.alpha_research_softening_review || {};
       const promotionWatchlist = funnel.alpha_research_promotion_watchlist || {};
-      const operatorActionPriority = deriveOperatorActionPriority(dashboard, checklist, validation);
-
-      const playbookHint = dashboard?.playbook_action
-        || checklist?.playbook_action
-        || validation?.playbook_action
-        || 'playbook action unavailable';
-      const playbookReason = dashboard?.playbook_message
-        || checklist?.playbook_message
-        || validation?.playbook_message
-        || validation?.deployment_message
-        || '현재 운영 액션 요약이 없습니다.';
+      const focus = deriveApprovalStripState(dashboard, checklist, validation, candidate);
+      const operatorActionPriority = focus.operatorActionPriority;
 
       const headroomByRegime = portfolio?.headroom_by_regime || {};
       const topHeadroom = Object.entries(headroomByRegime)
@@ -1174,25 +1600,39 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const nextActionReason = nextActions.length
         ? nextActions.map((item) => item.reason).filter(Boolean).join(' | ')
         : '현재 top operator action만 확인하면 됩니다.';
+      const experimentRouting = summarizeExperimentRouting(operatorActionPriority);
 
       $('current-operating-state').innerHTML = `
         <div class="panel">
           <div class="section-header">
             <div>
               <h2>Current Operating State</h2>
-              <div class="meta">Top Operator Action과 Top Opportunity / Top Blocker 다음 순서에서, 포트폴리오, execution, family advisory, mode, research 기준의 server-side 현재 운영 해석과 next actions를 요약합니다.</div>
+              <div class="meta">Approval Strip와 Top Opportunity / Top Blocker 다음 순서에서, portfolio/execution/family/mode/research context를 follow-up으로 읽습니다. strong kernel verdict면 expanded operating context는 접힌 상태로 둡니다.</div>
             </div>
           </div>
-          <div class="summary-grid">
-            ${renderSummaryBox('Playbook / Deployment Hint', playbookHint, playbookReason)}
-            ${renderSummaryBox('Portfolio Headroom', headroomValue, headroomReason)}
-            ${renderSummaryBox('Execution Degradation', degradation?.status || 'n/a', degradation?.summary || degradation?.recommended_action || 'execution advisory unavailable')}
-            ${renderSummaryBox('Family Execution Advisory', familyExecutionValue, familyExecutionReason)}
-            ${renderSummaryBox('Family Advisory Coverage', familyCoverageValue, familyCoverageReason)}
-            ${renderSummaryBox('Mode Advisory', modeValue, modeReason)}
-            ${renderSummaryBox('Alpha-Research Next Step', researchNextStep, researchReason || 'research-only next step')}
-            ${renderSummaryBox('Next Actions', nextActionText, nextActionReason || 'server-side operator reading priority only; not a live submit instruction')}
+          <div class="desk-strip">
+            ${badge('Kernel Verdict', focus.kernel.kernelVerdict)}
+            ${badge('Approval Strip', focus.approveValue)}
+            ${badge('Action Priority', operatorActionPriority?.priority_level || 'monitor')}
+            ${badge('Surface Align', focus.alignValue)}
           </div>
+          <details id="current-operating-context" class="deferred-stack"${focus.contextOpen ? ' open' : ''}>
+            <summary id="current-operating-context-summary">Expanded Operating Context</summary>
+            <div class="summary-line" id="current-operating-context-note">${esc(focus.contextNote)}</div>
+            <div class="deferred-stack-body">
+              <div class="summary-grid">
+                ${renderSummaryBox('Portfolio Headroom', headroomValue, headroomReason)}
+                ${renderSummaryBox('Execution Degradation', degradation?.status || 'n/a', degradation?.summary || degradation?.recommended_action || 'execution advisory unavailable')}
+                ${renderSummaryBox('Family Execution Advisory', familyExecutionValue, familyExecutionReason)}
+                ${renderSummaryBox('Family Advisory Coverage', familyCoverageValue, familyCoverageReason)}
+                ${renderSummaryBox('Mode Advisory', modeValue, modeReason)}
+                ${renderSummaryBox('Alpha-Research Next Step', researchNextStep, researchReason || 'research-only next step')}
+                ${renderSummaryBox('Experiment Routing', experimentRouting.value, experimentRouting.reason)}
+                ${renderSummaryBox('Next Actions', nextActionText, nextActionReason || 'server-side operator reading priority only; not a live submit instruction')}
+                ${renderSummaryBox('Approval Strip Carryover', focus.actValue, `${focus.approveReason} | ${focus.alignReason}`)}
+              </div>
+            </div>
+          </details>
         </div>
       `;
     }
@@ -1447,6 +1887,10 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const checklistMap = checklistStatusMap(checklist);
       const rows = [
         ['outcome_control_trace', 'Outcome Control', validation?.outcome_control_trace_summary || {}, 'approval_penalty_status', 'portfolio_bias_tier'],
+        ['money_funnel', 'Money Funnel', validation?.score_to_outcome_funnel_summary?.money_funnel || {}, 'historical_expected_r.closed', 'historical_gap_r.submitted_to_filled'],
+        ['outcome_attribution', 'Outcome Attribution', validation?.outcome_attribution_summary || {}, 'strongest_drag_source', 'closed_post_cost_delta_r'],
+        ['edge_experiment_review', 'Edge Experiment Review', validation?.edge_experiment_review_summary || {}, 'edge_state', 'entry_timing_preferred_variant'],
+        ['edge_evolution_rule', 'Edge Evolution Rule', validation?.edge_evolution_rule_summary || {}, 'evolution_state', 'recommended_action'],
         ['rollout_recommendation', 'Rollout Recommendation', validation?.rollout_recommendation_summary || {}, 'recommendation', 'confidence'],
         ['multi_strategy_ab_expansion', 'Multi Strategy AB', validation?.multi_strategy_ab_summary || {}, 'mode', 'b_cluster.strategy_cluster_status'],
         ['b_continuation_activation', 'B Continuation Activation', validation?.b_continuation_activation_summary || {}, 'activation_state', 'activation_bias'],
@@ -1484,10 +1928,12 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             </div>
           </div>
           <div class="summary-grid">
-            ${renderSummaryBox('Validation GO/NO_GO', validation?.deployment_go_no_go || 'n/a', validation?.deployment_message || 'validation deployment language unavailable')}
-            ${renderSummaryBox('Checklist GO/NO_GO', checklist?.deployment_go_no_go || 'n/a', checklist?.deployment_message || 'checklist deployment language unavailable')}
-            ${renderSummaryBox('Validation Playbook', validation?.playbook_action || 'n/a', validation?.playbook_message || 'validation playbook unavailable')}
-            ${renderSummaryBox('Checklist Playbook', checklist?.playbook_action || 'n/a', checklist?.playbook_message || 'checklist playbook unavailable')}
+            ${renderSummaryBox('Validation Approve', surfaceApproveValue(validation, 'validation') || 'n/a', surfaceApproveReason(validation, 'validation') || 'validation approval summary unavailable')}
+            ${renderSummaryBox('Validation Align', surfaceAlignValue(validation, 'validation') || 'n/a', surfaceAlignReason(validation, 'validation') || 'validation alignment summary unavailable')}
+            ${renderSummaryBox('Validation Act', surfaceActValue(validation, 'validation') || 'n/a', surfaceActReason(validation, 'validation') || 'validation action summary unavailable')}
+            ${renderSummaryBox('Checklist Approve', surfaceApproveValue(checklist, 'checklist') || 'n/a', surfaceApproveReason(checklist, 'checklist') || 'checklist approval summary unavailable')}
+            ${renderSummaryBox('Checklist Align', surfaceAlignValue(checklist, 'checklist') || 'n/a', surfaceAlignReason(checklist, 'checklist') || 'checklist alignment summary unavailable')}
+            ${renderSummaryBox('Checklist Act', surfaceActValue(checklist, 'checklist') || 'n/a', surfaceActReason(checklist, 'checklist') || 'checklist action summary unavailable')}
           </div>
           ${renderTable(
             rows,
@@ -1506,6 +1952,10 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
 
     function renderValidationCaseInspector(validation) {
       const outcomeControl = validation?.outcome_control_trace_summary || {};
+      const moneyFunnel = validation?.score_to_outcome_funnel_summary?.money_funnel || {};
+      const attribution = validation?.outcome_attribution_summary || {};
+      const edgeExperiment = validation?.edge_experiment_review_summary || {};
+      const edgeEvolution = validation?.edge_evolution_rule_summary || {};
       const rollout = validation?.rollout_recommendation_summary || {};
       const lifecycle = validation?.strategy_lifecycle_summary || {};
       const multiStrategy = validation?.multi_strategy_ab_summary || {};
@@ -1524,7 +1974,16 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         || 'n/a';
       const topCondition = `${bucket?.top_condition_axis || 'n/a'} / ${bucket?.top_condition_bucket?.key || 'n/a'}`;
       const captureBottleneck = capture?.dominant_bottleneck?.reason || 'n/a';
-      const nextMove = validation?.playbook_message
+      const moneyLeak = moneyFunnel?.historical_gap_r?.submitted_to_filled;
+      const expectedClosedR = moneyFunnel?.historical_expected_r?.closed;
+      const realizedClosedR = moneyFunnel?.historical_realized_r?.post_cost_closed;
+      const dragSource = attribution?.strongest_drag_source || 'n/a';
+      const edgeState = edgeExperiment?.edge_state || 'n/a';
+      const nextMove = surfaceActReason(validation, 'validation')
+        || `${surfaceActValue(validation, 'validation') || 'n/a'} | ${surfaceAlignValue(validation, 'validation') || 'n/a'}`
+        || edgeExperiment?.summary
+        || attribution?.summary
+        || moneyFunnel?.summary
         || rollout?.summary
         || capture?.summary
         || allocator?.summary
@@ -1536,18 +1995,28 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           <div class="section-header">
             <div>
               <h2>Validation Case Inspector</h2>
-              <div class="meta">현재 symbol validation case를 outcome control, rollout, lifecycle, A/B posture, condition split, capture, allocator 기준으로 다시 압축해 operator가 한 카드로 읽습니다.</div>
+              <div class="meta">현재 symbol validation case를 money funnel, outcome attribution, outcome control, rollout, lifecycle, A/B posture, condition split, capture, allocator 기준으로 다시 압축해 operator가 한 카드로 읽습니다.</div>
             </div>
           </div>
           <div class="desk-strip">
             ${badge('Family', family)}
-            ${badge('Deployment', validation?.deployment_go_no_go || 'n/a')}
-            ${badge('Playbook', validation?.playbook_action || 'n/a')}
+            ${badge('Approve', surfaceApproveValue(validation, 'validation') || 'n/a')}
+            ${badge('Align', surfaceAlignValue(validation, 'validation') || 'n/a')}
+            ${badge('Act', surfaceActValue(validation, 'validation') || 'n/a')}
+            ${badge('Money Leak', fmtR(moneyLeak))}
+            ${badge('Attribution', dragSource)}
             ${badge('Rollout', rollout?.recommendation || 'n/a')}
             ${badge('Lifecycle', lifecycle?.state || 'n/a')}
             ${badge('Capture', captureBottleneck)}
           </div>
           <div class="summary-grid">
+            ${renderSummaryBox('Validation Approve', surfaceApproveValue(validation, 'validation') || 'n/a', surfaceApproveReason(validation, 'validation') || 'validation approval summary unavailable')}
+            ${renderSummaryBox('Validation Align', surfaceAlignValue(validation, 'validation') || 'n/a', surfaceAlignReason(validation, 'validation') || 'validation alignment summary unavailable')}
+            ${renderSummaryBox('Validation Act', surfaceActValue(validation, 'validation') || 'n/a', surfaceActReason(validation, 'validation') || 'validation action summary unavailable')}
+            ${renderSummaryBox('Money Funnel', fmtR(expectedClosedR), moneyFunnel?.summary || `post_cost_closed=${fmtR(realizedClosedR)}`)}
+            ${renderSummaryBox('Outcome Attribution', dragSource, attribution?.summary || `delta=${fmtR(attribution?.closed_post_cost_delta_r)}`)}
+            ${renderSummaryBox('Edge Experiment', edgeState, edgeExperiment?.summary || `true_edge=${fmtMaybe(edgeExperiment?.true_edge_ratio)}`)}
+            ${renderSummaryBox('Edge Evolution', edgeEvolution?.evolution_state || 'n/a', edgeEvolution?.summary || edgeEvolution?.recommended_action || 'edge evolution rule unavailable')}
             ${renderSummaryBox('Outcome Control', outcomeControl?.approval_penalty_status || 'n/a', outcomeControl?.summary || outcomeControl?.portfolio_bias_tier || 'outcome control unavailable')}
             ${renderSummaryBox('Rollout Recommendation', rollout?.recommendation || 'n/a', rollout?.summary || rollout?.confidence || 'rollout recommendation unavailable')}
             ${renderSummaryBox('Strategy Lifecycle', lifecycle?.state || 'n/a', lifecycle?.transition_bias || lifecycle?.summary || 'strategy lifecycle unavailable')}
@@ -1558,6 +2027,20 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             ${renderSummaryBox('Capital Allocator', allocator?.allocator_state || 'n/a', allocator?.capital_pressure || allocator?.summary || 'capital allocator unavailable')}
           </div>
           <div class="grid two" style="margin-top:12px;">
+            <div class="hint-card">
+              <div class="title">Expected vs Realized R</div>
+              <div class="body">${esc(`${fmtR(expectedClosedR)} -> ${fmtR(realizedClosedR)} | drag=${fmtR(attribution?.closed_post_cost_delta_r)}`)}</div>
+            </div>
+            <div class="hint-card">
+              <div class="title">Money Leak Focus</div>
+              <div class="body">${esc(`${fmtR(moneyLeak)} | ${attribution?.summary || moneyFunnel?.summary || 'money leak summary unavailable'}`)}</div>
+            </div>
+          </div>
+          <div class="grid two" style="margin-top:12px;">
+            <div class="hint-card">
+              <div class="title">Edge Split Focus</div>
+              <div class="body">${esc(`${edgeState} | timing=${edgeExperiment?.entry_timing_preferred_variant || 'n/a'} | execution=${edgeExperiment?.execution_style_preferred_variant || 'n/a'}`)}</div>
+            </div>
             <div class="hint-card">
               <div class="title">Top Condition Split</div>
               <div class="body">${esc(`${topCondition} | ${bucket?.summary || 'condition split summary unavailable'}`)}</div>
@@ -1574,7 +2057,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             </div>
             <div class="hint-card">
               <div class="title">Operator Reading Order</div>
-              <div class="body">${esc('outcome control -> rollout -> lifecycle -> A/B posture -> capture -> allocator 순서로 읽으면 현재 validation case를 빠르게 정리할 수 있습니다.')}</div>
+              <div class="body">${esc('money funnel -> outcome attribution -> outcome control -> rollout -> lifecycle -> A/B posture -> capture -> allocator 순서로 읽으면 현재 validation case를 빠르게 정리할 수 있습니다.')}</div>
             </div>
           </div>
         </div>
@@ -1586,6 +2069,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const overall = alerts?.overall || {};
       const retryQueue = alerts?.retry_queue || {};
       const latestAlert = alerts?.latest_validation_alert || {};
+      const latestAlertStrip = latestAlert?.approval_strip_summary || {};
       const quality = dashboard?.execution_quality_summary || {};
       const reconcile = dashboard?.recent_reconciliation_summary || {};
       const queuedCount = retryQueue?.counts?.queued ?? 'n/a';
@@ -1598,7 +2082,9 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         `forced_exit=${quality?.forced_exit_ratio == null ? 'n/a' : Number(quality.forced_exit_ratio).toFixed(2)}`,
       ].join(' | ');
       const retryFocus = `queued=${queuedCount} / dead_letter=${deadLetterCount} / backlog_age_seconds=${backlogAge}`;
-      const nextMove = latestAlert?.approval_playbook_action
+      const latestAlertApprove = latestAlertStrip?.approve_value || latestAlert?.deployment_go_no_go || 'n/a';
+      const latestAlertAct = latestAlertStrip?.act_value || latestAlert?.approval_playbook_action || 'n/a';
+      const nextMove = latestAlertAct
         || latestAlert?.approval_playbook_message
         || latestAlert?.deployment_message
         || dashboard?.playbook_message
@@ -1614,14 +2100,16 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           </div>
           <div class="desk-strip">
             ${badge('Alert Overall', overall?.status || overall?.state || 'n/a')}
-            ${badge('Latest Alert', latestAlert?.deployment_go_no_go || 'n/a')}
+            ${badge('Latest Alert Approve', latestAlertApprove)}
+            ${badge('Latest Alert Act', latestAlertAct)}
             ${badge('Retry Queue', queuedCount)}
             ${badge('Reconcile', reconcile?.highest_severity || 'n/a')}
             ${badge('Fill Rate', quality?.fill_rate == null ? 'n/a' : Number(quality.fill_rate).toFixed(2))}
           </div>
           <div class="summary-grid">
             ${renderSummaryBox('Alert Overall', overall?.status || overall?.state || 'n/a', overall?.summary || `alerts_total=${fmtMaybe(overall?.alerts_total)}`)}
-            ${renderSummaryBox('Latest Validation Alert', latestAlert?.deployment_go_no_go || 'n/a', latestAlert?.approval_playbook_action || latestAlert?.deployment_message || 'latest validation alert unavailable')}
+            ${renderSummaryBox('Latest Alert Approve', latestAlertApprove, latestAlertStrip?.approve_reason || latestAlert?.deployment_message || 'latest validation alert unavailable')}
+            ${renderSummaryBox('Latest Alert Act', latestAlertAct, latestAlertStrip?.act_reason || latestAlert?.approval_playbook_message || latestAlert?.deployment_message || 'latest validation alert action unavailable')}
             ${renderSummaryBox('Retry Queue', String(queuedCount), retryFocus)}
             ${renderSummaryBox('Execution Quality', quality?.fill_rate == null ? 'n/a' : Number(quality.fill_rate).toFixed(2), qualityFocus)}
             ${renderSummaryBox('Failure Mix', quality?.information_failure_ratio == null ? 'n/a' : Number(quality.information_failure_ratio).toFixed(2), `time=${fmtMaybe(quality?.time_failure_ratio)} | target_exit=${fmtMaybe(quality?.target_exit_ratio)}`)}
@@ -1643,6 +2131,11 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
 
     function renderSignalFunnelInspector(dashboard) {
       const funnel = dashboard?.signal_funnel || {};
+      const scoreToOutcome = funnel?.score_to_outcome_funnel || {};
+      const moneyFunnel = scoreToOutcome?.money_funnel || {};
+      const attribution = funnel?.outcome_attribution || {};
+      const edgeExperiment = funnel?.edge_experiment_review || {};
+      const edgeEvolution = funnel?.edge_evolution_rule || {};
       const hard = funnel?.hard_block_summary || {};
       const soft = funnel?.softening_candidate_summary || {};
       const rollout = funnel?.rollout_block_summary || {};
@@ -1652,13 +2145,18 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const session = Array.isArray(funnel?.session_bottlenecks) ? funnel.session_bottlenecks[0] : null;
       const currentGate = funnel?.current_entry_gate_group || 'unknown';
       const currentGateReason = funnel?.current_entry_gate_reason || '현재 신규 진입 차단 사유가 없습니다.';
+      const submittedToFilledGap = moneyFunnel?.historical_gap_r?.submitted_to_filled;
+      const closedExpectedR = moneyFunnel?.historical_expected_r?.closed;
+      const postCostClosedR = moneyFunnel?.historical_realized_r?.post_cost_closed;
+      const dragSource = attribution?.strongest_drag_source || 'n/a';
+      const edgeState = edgeExperiment?.edge_state || 'n/a';
 
       $('signal-funnel-inspector').innerHTML = `
         <div class="panel">
           <div class="section-header">
             <div>
               <h2>Signal Funnel Inspector</h2>
-              <div class="meta">현재 hard gate, softening 후보, rollout block, family/regime/session bottleneck을 홈 섹션에서 한 번에 읽도록 압축합니다.</div>
+              <div class="meta">현재 hard gate, softening 후보, rollout block, family/regime/session bottleneck에 money funnel과 outcome attribution까지 묶어서 홈 섹션에서 한 번에 읽도록 압축합니다.</div>
             </div>
           </div>
           <div class="desk-strip">
@@ -1666,15 +2164,31 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             ${badge('Hard Block', String(hard?.blocked ?? 0))}
             ${badge('Softening', String(soft?.blocked ?? 0))}
             ${badge('Rollout Block', String(rollout?.blocked ?? 0))}
+            ${badge('Money Leak', fmtR(submittedToFilledGap))}
+            ${badge('Drag Source', dragSource)}
             ${badge('Runtime/Accepted', `${fmtMaybe(funnel?.runtime_candidates ?? 0)} / ${fmtMaybe(funnel?.accepted_candidates ?? 0)}`)}
           </div>
           <div class="summary-grid">
             ${renderSummaryBox('Hard Gate Summary', String(hard?.blocked ?? 0), hard?.top_reason || currentGateReason)}
             ${renderSummaryBox('Softening Candidate Summary', String(soft?.blocked ?? 0), soft?.top_reason || 'quality softening candidate unavailable')}
             ${renderSummaryBox('Rollout Block Summary', String(rollout?.blocked ?? 0), rollout?.top_reason || 'rollout block unavailable')}
+            ${renderSummaryBox('Money Funnel', fmtR(closedExpectedR), moneyFunnel?.summary || `post_cost_closed=${fmtR(postCostClosedR)}`)}
+            ${renderSummaryBox('Outcome Attribution', dragSource, attribution?.summary || `delta=${fmtR(attribution?.closed_post_cost_delta_r)}`)}
+            ${renderSummaryBox('Edge Experiment', edgeState, edgeExperiment?.summary || `true_edge=${fmtMaybe(edgeExperiment?.true_edge_ratio)}`)}
+            ${renderSummaryBox('Edge Evolution', edgeEvolution?.evolution_state || 'n/a', edgeEvolution?.summary || edgeEvolution?.recommended_action || 'edge evolution rule unavailable')}
             ${renderSummaryBox('Top Family Bottleneck', family?.key || 'n/a', family ? `${fmtPercent(family.pass_rate)} | ${fmtR(family.avg_expected_ev_r)}` : 'family bottleneck unavailable')}
             ${renderSummaryBox('Top Regime Bottleneck', regime?.key || 'n/a', regime ? `${fmtPercent(regime.pass_rate)} | ${fmtR(regime.avg_expected_ev_r)}` : 'regime bottleneck unavailable')}
             ${renderSummaryBox('Top Session Bottleneck', session?.key || 'n/a', session ? `${fmtPercent(session.pass_rate)} | ${fmtR(session.avg_expected_ev_r)}` : 'session bottleneck unavailable')}
+          </div>
+          <div class="grid two" style="margin-top:12px;">
+            <div class="hint-card">
+              <div class="title">Expected vs Realized R</div>
+              <div class="body">${esc(`${fmtR(closedExpectedR)} -> ${fmtR(postCostClosedR)} | leak=${fmtR(submittedToFilledGap)}`)}</div>
+            </div>
+            <div class="hint-card">
+              <div class="title">Attribution Focus</div>
+              <div class="body">${esc(`${dragSource} | ${attribution?.summary || 'outcome attribution summary unavailable'}`)}</div>
+            </div>
           </div>
           ${renderTable(
             priorities.map((row) => ({
@@ -1943,9 +2457,9 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const sessionTop = modeAdvisory?.session_top || {};
       const modeTop = [familyTop, regimeTop, sessionTop].find((row) => row && row.bucket) || familyTop;
       const liveMode = multiStrategy?.mode || 'n/a';
-      const nextMove = dashboard?.playbook_action
-        || validation?.playbook_action
-        || checklist?.playbook_action
+      const nextMove = surfaceActValue(dashboard, 'dashboard')
+        || surfaceActValue(validation, 'validation')
+        || surfaceActValue(checklist, 'checklist')
         || rollout?.summary
         || 'mode / deployment next move unavailable';
 
@@ -1961,14 +2475,14 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             ${badge('Execution Mode', dashboard?.execution_mode || 'n/a')}
             ${badge('Live Strategy Mode', liveMode)}
             ${badge('New Entries', dashboard?.new_entries_allowed === false ? 'blocked' : 'allowed')}
-            ${badge('Dashboard', dashboard?.deployment_go_no_go || 'n/a')}
-            ${badge('Checklist', checklist?.deployment_go_no_go || 'n/a')}
-            ${badge('Validation', validation?.deployment_go_no_go || 'n/a')}
+            ${badge('Dashboard', surfaceApproveValue(dashboard, 'dashboard') || 'n/a')}
+            ${badge('Checklist', surfaceApproveValue(checklist, 'checklist') || 'n/a')}
+            ${badge('Validation', surfaceApproveValue(validation, 'validation') || 'n/a')}
           </div>
           <div class="summary-grid">
-            ${renderSummaryBox('Dashboard Deployment', dashboard?.deployment_go_no_go || 'n/a', dashboard?.playbook_action || dashboard?.playbook_message || 'dashboard deployment unavailable')}
-            ${renderSummaryBox('Checklist Deployment', checklist?.deployment_go_no_go || 'n/a', checklist?.playbook_action || checklist?.playbook_message || 'checklist deployment unavailable')}
-            ${renderSummaryBox('Validation Deployment', validation?.deployment_go_no_go || 'n/a', validation?.playbook_action || validation?.deployment_message || 'validation deployment unavailable')}
+            ${renderSummaryBox('Dashboard Deployment', surfaceApproveValue(dashboard, 'dashboard') || 'n/a', `align=${surfaceAlignValue(dashboard, 'dashboard') || 'n/a'} | act=${surfaceActValue(dashboard, 'dashboard') || 'n/a'}`)}
+            ${renderSummaryBox('Checklist Deployment', surfaceApproveValue(checklist, 'checklist') || 'n/a', `align=${surfaceAlignValue(checklist, 'checklist') || 'n/a'} | act=${surfaceActValue(checklist, 'checklist') || 'n/a'}`)}
+            ${renderSummaryBox('Validation Deployment', surfaceApproveValue(validation, 'validation') || 'n/a', `align=${surfaceAlignValue(validation, 'validation') || 'n/a'} | act=${surfaceActValue(validation, 'validation') || 'n/a'}`)}
             ${renderSummaryBox('Rollout Recommendation', rollout?.recommendation || 'n/a', rollout?.summary || rollout?.confidence || 'rollout recommendation unavailable')}
             ${renderSummaryBox('Mode Advisory', modeTop?.advisory_state || 'n/a', modeTop?.bucket ? `${modeTop.axis || 'bucket'}=${modeTop.bucket}` : 'mode advisory unavailable')}
             ${renderSummaryBox('Multi Strategy Mode', liveMode, multiStrategy?.summary || multiStrategy?.b_cluster?.strategy_cluster_status || 'multi strategy mode unavailable')}
@@ -1976,7 +2490,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           <div class="grid two" style="margin-top:12px;">
             <div class="hint-card">
               <div class="title">Entry Gate Reason</div>
-              <div class="body">${esc(dashboard?.blocking_reason_message || dashboard?.playbook_message || '현재 entry gate reason이 없습니다.')}</div>
+              <div class="body">${esc(surfaceApproveReason(dashboard, 'dashboard') || '현재 entry gate reason이 없습니다.')}</div>
             </div>
             <div class="hint-card">
               <div class="title">Top Mode Bucket</div>
@@ -1994,23 +2508,24 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
     function renderApprovalAlignmentInspector(dashboard, checklist, validation, candidate) {
       const operatorPriority = dashboard?.signal_funnel?.operator_action_priority || {};
       const deploymentStatuses = [
-        dashboard?.deployment_go_no_go,
-        checklist?.deployment_go_no_go,
-        validation?.deployment_go_no_go,
+        surfaceApproveValue(dashboard, 'dashboard'),
+        surfaceApproveValue(checklist, 'checklist'),
+        surfaceApproveValue(validation, 'validation'),
       ].filter((value) => value);
       const playbookActions = [
-        dashboard?.playbook_action,
-        checklist?.playbook_action,
-        validation?.playbook_action,
+        surfaceActValue(dashboard, 'dashboard'),
+        surfaceActValue(checklist, 'checklist'),
+        surfaceActValue(validation, 'validation'),
       ].filter((value) => value);
       const deploymentAligned = new Set(deploymentStatuses).size <= 1;
       const playbookAligned = new Set(playbookActions).size <= 1;
       const alignmentState = deploymentAligned && playbookAligned ? 'aligned' : 'diverged';
       const nextMove = operatorPriority?.top_action
-        || dashboard?.playbook_action
-        || validation?.playbook_action
-        || checklist?.playbook_action
+        || surfaceActValue(dashboard, 'dashboard')
+        || surfaceActValue(validation, 'validation')
+        || surfaceActValue(checklist, 'checklist')
         || 'approval alignment next move unavailable';
+      const experimentRouting = summarizeExperimentRouting(operatorPriority);
 
       $('approval-alignment-inspector').innerHTML = `
         <div class="panel">
@@ -2022,27 +2537,28 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           </div>
           <div class="desk-strip">
             ${badge('Alignment', alignmentState)}
-            ${badge('Dashboard', dashboard?.deployment_go_no_go || 'n/a')}
-            ${badge('Checklist', checklist?.deployment_go_no_go || 'n/a')}
-            ${badge('Validation', validation?.deployment_go_no_go || 'n/a')}
+            ${badge('Dashboard', surfaceApproveValue(dashboard, 'dashboard') || 'n/a')}
+            ${badge('Checklist', surfaceApproveValue(checklist, 'checklist') || 'n/a')}
+            ${badge('Validation', surfaceApproveValue(validation, 'validation') || 'n/a')}
             ${badge('Candidate', candidate?.deployment_go_no_go || candidate?.operator_status || 'n/a')}
             ${badge('Operator Priority', operatorPriority?.priority_level || 'n/a')}
           </div>
           <div class="summary-grid">
-            ${renderSummaryBox('Dashboard Surface', dashboard?.deployment_go_no_go || 'n/a', dashboard?.playbook_action || dashboard?.playbook_message || 'dashboard surface unavailable')}
-            ${renderSummaryBox('Checklist Surface', checklist?.deployment_go_no_go || 'n/a', checklist?.playbook_action || checklist?.playbook_message || 'checklist surface unavailable')}
-            ${renderSummaryBox('Validation Surface', validation?.deployment_go_no_go || 'n/a', validation?.playbook_action || validation?.approval_topline_summary_line || 'validation surface unavailable')}
+            ${renderSummaryBox('Dashboard Surface', surfaceApproveValue(dashboard, 'dashboard') || 'n/a', `align=${surfaceAlignValue(dashboard, 'dashboard') || 'n/a'} | act=${surfaceActValue(dashboard, 'dashboard') || 'n/a'}`)}
+            ${renderSummaryBox('Checklist Surface', surfaceApproveValue(checklist, 'checklist') || 'n/a', `align=${surfaceAlignValue(checklist, 'checklist') || 'n/a'} | act=${surfaceActValue(checklist, 'checklist') || 'n/a'}`)}
+            ${renderSummaryBox('Validation Surface', surfaceApproveValue(validation, 'validation') || 'n/a', `align=${surfaceAlignValue(validation, 'validation') || 'n/a'} | act=${surfaceActValue(validation, 'validation') || 'n/a'}`)}
             ${renderSummaryBox('Candidate Surface', candidate?.deployment_go_no_go || candidate?.operator_status || 'n/a', candidate?.block_reason_message || candidate?.deployment_message || 'candidate surface unavailable')}
-            ${renderSummaryBox('Operator Action Priority', operatorPriority?.top_action || 'n/a', operatorPriority?.top_reason || operatorPriority?.priority_source || 'operator action priority unavailable')}
+            ${renderSummaryBox('Operator Action Priority', operatorPriority?.top_action || 'n/a', [operatorPriority?.top_reason || operatorPriority?.priority_source || 'operator action priority unavailable', operatorPriority?.top_action_followup_command ? `cmd=${operatorPriority.top_action_followup_command}` : ''].filter(Boolean).join(' | '))}
+            ${renderSummaryBox('Experiment Routing', experimentRouting.value, experimentRouting.reason)}
             ${renderSummaryBox('Playbook Alignment', playbookAligned ? 'aligned' : 'diverged', playbookActions.length ? playbookActions.join(' | ') : 'playbook action unavailable')}
           </div>
           <div class="grid two" style="margin-top:12px;">
             <div class="hint-card">
               <div class="title">Deployment Message Stack</div>
               <div class="body">${esc([
-                dashboard?.blocking_reason_message || dashboard?.playbook_message,
-                checklist?.deployment_message || checklist?.playbook_message,
-                validation?.deployment_message || validation?.approval_topline_summary_line,
+                surfaceApproveReason(dashboard, 'dashboard'),
+                surfaceApproveReason(checklist, 'checklist'),
+                surfaceApproveReason(validation, 'validation'),
               ].filter(Boolean).join(' | ') || '현재 deployment message stack이 없습니다.')}</div>
             </div>
             <div class="hint-card">
@@ -2114,6 +2630,16 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       return [...accepted, ...blocked];
     }
 
+    function candidateEdgeFocus(row) {
+      const focus = row?.edge_experiment_focus || {};
+      return {
+        state: focus?.edge_state || 'n/a',
+        entry: focus?.entry_timing_preferred_variant || 'n/a',
+        execution: focus?.execution_style_preferred_variant || 'n/a',
+        summary: focus?.summary || `entry=${focus?.entry_timing_preferred_variant || 'n/a'} | execution=${focus?.execution_style_preferred_variant || 'n/a'}`,
+      };
+    }
+
     function renderPortfolioCandidateDrilldown(dashboard) {
       const portfolio = dashboard?.portfolio_summary || {};
       const rows = portfolioCandidateRows(portfolio);
@@ -2122,7 +2648,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           <div class="section-header">
             <div>
               <h2>Portfolio Candidate Drilldown</h2>
-              <div class="meta">accepted / blocked 후보를 raw JSON 없이 읽기 위해, cluster, allocated risk, outcome bias, capital allocator, A/B posture를 같은 표로 보여줍니다.</div>
+              <div class="meta">accepted / blocked 후보를 raw JSON 없이 읽기 위해, cluster, allocated risk, outcome bias, edge focus, capital allocator, A/B posture를 같은 표로 보여줍니다.</div>
             </div>
           </div>
           <div class="summary-grid">
@@ -2140,6 +2666,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
               { label: 'Cluster', render: (row) => row.strategy_cluster || row.multi_strategy_overlay?.cluster || 'n/a' },
               { label: 'Risk', render: (row) => `${fmtR(row.recommended_risk_r)} / ${fmtR(row.allocated_risk_r)}` },
               { label: 'Outcome Bias', render: (row) => row.outcome_bias?.tier || 'n/a' },
+              { label: 'Edge Focus', render: (row) => `${candidateEdgeFocus(row).state} / ${candidateEdgeFocus(row).entry} / ${candidateEdgeFocus(row).execution}` },
               { label: 'Allocator', render: (row) => row.capital_allocator?.tier || row.capital_pressure || 'n/a' },
               { label: 'A/B Posture', render: (row) => row.strategy_cluster_balance?.balance_state || row.b_continuation_activation?.activation_state || 'n/a' },
               { label: 'Block / Size', render: (row) => row.block_reason || row.strategy_sizing?.outcome_risk_adjustment?.reason_code || 'n/a' },
@@ -2172,6 +2699,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         || row?.session_liquidity_reference?.reference
         || row?.session_liquidity_reference?.state
         || 'n/a';
+      const edgeFocus = candidateEdgeFocus(row);
       return `
         <div class="panel">
           <h2>${esc(label)}</h2>
@@ -2184,6 +2712,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           <div class="summary-grid">
             ${renderSummaryBox('Risk', `${fmtR(row.recommended_risk_r)} / ${fmtR(row.allocated_risk_r)}`, `recommended / allocated | ${sizingReason}`)}
             ${renderSummaryBox('Outcome Bias', row.outcome_bias?.tier || 'n/a', row.outcome_bias?.summary || `score=${fmtMaybe(row.outcome_bias?.score_delta)}`)}
+            ${renderSummaryBox('Edge Focus', edgeFocus.state, edgeFocus.summary)}
             ${renderSummaryBox('Capital Allocator', row.capital_allocator?.tier || 'n/a', row.capital_pressure || 'capital pressure unavailable')}
             ${renderSummaryBox('A/B Posture', row.strategy_cluster_balance?.balance_state || row.b_continuation_activation?.activation_state || 'n/a', abSummary)}
             ${renderSummaryBox('Session Guidance', sessionState, `penalty=${fmtMaybe(row.session_penalty)}`)}
@@ -2191,7 +2720,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           </div>
           <div class="hint-card">
             <div class="title">Why This Row Matters</div>
-            <div class="body">${esc(row.block_reason || abSummary)}</div>
+            <div class="body">${esc(`${row.block_reason || abSummary} | edge=${edgeFocus.state} | split=${edgeFocus.entry}/${edgeFocus.execution}`)}</div>
           </div>
         </div>
       `;
@@ -2206,7 +2735,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           <div class="section-header">
             <div>
               <h2>Portfolio Candidate Inspector</h2>
-              <div class="meta">대표 accepted row 1개와 blocked row 1개를 카드로 다시 압축해, risk, allocator, A/B posture, session, reaction evidence를 바로 읽습니다.</div>
+              <div class="meta">대표 accepted row 1개와 blocked row 1개를 카드로 다시 압축해, risk, allocator, A/B posture, edge focus, session, reaction evidence를 바로 읽습니다.</div>
             </div>
           </div>
           <div class="grid two">
@@ -2343,7 +2872,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const risk = (plan?.validity?.recommended_risk_r ?? candidate?.recommended_risk_r);
       const whyNow = candidate?.why_now || plan?.validity?.entry_reason || '현재 대표 플랜 기준';
       $('overview').innerHTML = `
-        <div>${badge('현재 상태', tradeStatus)} ${badge('서버 승인', dashboard?.deployment_go_no_go || 'n/a')} ${badge('체크리스트', checklist?.deployment_go_no_go || 'n/a')} ${badge('검증', validation?.deployment_go_no_go || 'n/a')}</div>
+        <div>${badge('현재 상태', tradeStatus)} ${badge('서버 Approve', surfaceApproveValue(dashboard, 'dashboard') || 'n/a')} ${badge('체크리스트 Approve', surfaceApproveValue(checklist, 'checklist') || 'n/a')} ${badge('검증 Approve', surfaceApproveValue(validation, 'validation') || 'n/a')}</div>
         <div class="strong-line">${esc(reason)}</div>
         <div class="summary-grid">
           ${renderSummaryBox('대표 전략', `${fmtMaybe(family)} / ${fmtMaybe(model)}`, candidate?.strategy_grade ? `등급 ${candidate.strategy_grade}` : '')}
@@ -2386,7 +2915,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         {
           title: '권장 리스크',
           metric: fmtR(plan?.validity?.recommended_risk_r ?? candidate?.recommended_risk_r),
-          meta: dashboard?.playbook_action || dashboard?.playbook_message || 'runtime policy unavailable',
+          meta: surfaceActReason(dashboard, 'dashboard') || surfaceActValue(dashboard, 'dashboard') || 'runtime policy unavailable',
         },
       ];
       $('cards').innerHTML = cards.map((card) => `
@@ -2400,16 +2929,16 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
 
     function renderApproval(checklist, validation) {
       const checklistHtml = `
-        <div>${badge('체크리스트', checklist?.deployment_go_no_go || 'n/a')}</div>
-        <div class="meta">${esc(checklist?.deployment_message || '체크리스트 배포 메시지가 없습니다.')}</div>
-        <div>${badge('체크리스트 액션', checklist?.playbook_go_no_go || 'n/a')}</div>
-        <div class="meta">${esc(checklist?.playbook_action || checklist?.playbook_message || '체크리스트 플레이북 액션이 없습니다.')}</div>
+        <div>${badge('체크리스트 Approve', surfaceApproveValue(checklist, 'checklist') || 'n/a')}</div>
+        <div class="meta">${esc(surfaceApproveReason(checklist, 'checklist') || '체크리스트 배포 메시지가 없습니다.')}</div>
+        <div>${badge('체크리스트 Act', surfaceActValue(checklist, 'checklist') || 'n/a')}</div>
+        <div class="meta">${esc(surfaceActReason(checklist, 'checklist') || '체크리스트 플레이북 액션이 없습니다.')}</div>
       `;
       const validationHtml = `
-        <div>${badge('검증 리포트', validation?.deployment_go_no_go || 'n/a')}</div>
-        <div class="meta">${esc(validation?.deployment_message || '검증 배포 메시지가 없습니다.')}</div>
-        <div>${badge('최상단 승인', validation?.approval_topline_status || 'n/a')}</div>
-        <div class="meta">${esc(validation?.approval_topline_summary_line || validation?.approval_topline_message || '최상단 승인 요약이 없습니다.')}</div>
+        <div>${badge('검증 Approve', surfaceApproveValue(validation, 'validation') || 'n/a')}</div>
+        <div class="meta">${esc(surfaceApproveReason(validation, 'validation') || '검증 배포 메시지가 없습니다.')}</div>
+        <div>${badge('검증 Align', surfaceAlignValue(validation, 'validation') || 'n/a')}</div>
+        <div class="meta">${esc(surfaceAlignReason(validation, 'validation') || '최상단 승인 요약이 없습니다.')}</div>
       `;
       $('approval-summary').innerHTML = checklistHtml + validationHtml;
     }
@@ -2418,12 +2947,13 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const portfolio = dashboard.portfolio_summary || {};
       const alerts = dashboard.alert_summary || {};
       const latestAlert = alerts.latest_validation_alert || {};
+      const latestAlertStrip = latestAlert.approval_strip_summary || {};
       const quality = dashboard.execution_quality_summary || {};
       $('runtime-summary').innerHTML = `
-        <div>${badge('포트폴리오', portfolio.deployment_go_no_go || 'n/a')}</div>
+        <div>${badge('포트폴리오 Approve', portfolio.deployment_go_no_go || 'n/a')}</div>
         <div class="meta">${esc(portfolio.playbook_action || portfolio.deployment_message || '포트폴리오 요약이 없습니다.')}</div>
-        <div>${badge('최근 검증 알림', latestAlert.deployment_go_no_go || 'n/a')}</div>
-        <div class="meta">${esc(latestAlert.approval_playbook_action || latestAlert.deployment_message || '최근 검증 알림이 없습니다.')}</div>
+        <div>${badge('최근 검증 알림 Approve', latestAlertStrip.approve_value || latestAlert.deployment_go_no_go || 'n/a')} ${badge('최근 검증 알림 Act', latestAlertStrip.act_value || latestAlert.approval_playbook_action || 'n/a')}</div>
+        <div class="meta">${esc(latestAlertStrip.primary_reason || latestAlert.approval_playbook_message || latestAlert.deployment_message || '최근 검증 알림이 없습니다.')}</div>
         <div>${badge('체결률', quality.fill_rate == null ? 'n/a' : quality.fill_rate.toFixed(2))}</div>
         <div class="meta">${esc(`목표청산=${quality.target_exit_ratio ?? 'n/a'} 강제청산=${quality.forced_exit_ratio ?? 'n/a'} 정보실패=${quality.information_failure_ratio ?? 'n/a'}`)}</div>
       `;
@@ -3077,11 +3607,12 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         ]);
         const plan = firstPlan(plans);
         const candidate = pickCandidate(scannerRows, symbol);
-        renderDecisionSummary(dashboard, checklist, validation);
-        renderApprovalDivergenceBanner(dashboard, checklist, validation, candidate);
+        renderOperatorKernel(dashboard, checklist, validation);
+        renderDecisionSummary(dashboard, checklist, validation, candidate);
         renderTopOpportunity(candidate, symbol);
         renderTopBlocker(dashboard);
-        renderCurrentOperatingState(dashboard, checklist, validation);
+        renderCurrentOperatingState(dashboard, checklist, validation, candidate);
+        renderDeferredHomeStackControl(dashboard, checklist, validation);
         renderStrategyABPosture(dashboard, candidate);
         renderPromotionOperatingStack(dashboard);
         renderPromotionCaseInspector(dashboard);
@@ -3098,6 +3629,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         renderDataFreshnessSourceInspector(dashboard, checklist, validation);
         renderPortfolioCandidateDrilldown(dashboard);
         renderPortfolioCandidateInspector(dashboard);
+        renderCandidatePriorityGuard(dashboard, checklist, validation);
         renderChecklistEvidenceDrilldown(checklist);
         renderReportNavigation(dashboard, checklist, validation);
         renderOverview(symbol, dashboard, checklist, validation, plan, candidate);

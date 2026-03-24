@@ -217,6 +217,10 @@ def test_alert_metrics_report_aggregates_leaf_channels_and_system_fanout() -> No
                 payload["latest_validation_alert"]["approval_playbook_action"]
                 == "hold_live_rollout_and_keep_prototype_path"
             )
+            assert payload["latest_validation_alert"]["approval_strip_summary"]["approve_value"] == "validation no_go"
+            assert payload["latest_validation_alert"]["approval_strip_summary"]["act_value"] == (
+                "hold_live_rollout_and_keep_prototype_path"
+            )
             assert payload["latest_validation_alert"]["approval_topline_summary_line"].startswith(
                 "winner=runtime_proxy/"
             )

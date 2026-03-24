@@ -6,19 +6,43 @@ from app.services.execution_operator_ui import build_execution_operator_ui
 def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     html = build_execution_operator_ui(symbol="BTCUSDC", universe="usdc_perp_top30", days=7)
 
-    assert "Decision Summary" in html
-    assert "Approval Divergence" in html
+    assert "Approval Strip" in html
     assert "dashboard / checklist / validation / candidate surface가 서로 다른 방향을 가리키고 있습니다." in html or "dashboard / checklist / validation / candidate surface가 같은 방향을 가리키고 있습니다." in html
+    assert "5-Second Operator Kernel" in html
+    assert "operator가 5초 안에 money funnel -> outcome attribution -> outcome control -> rollout 순서로 현재 돈 누수와 승인 방향을 읽도록 압축한 kernel view입니다." in html
+    assert "Kernel Verdict" in html
+    assert "Kernel Reading Order" in html
+    assert "Checklist Trace" in html
+    assert "Kernel Next Move" in html
     assert "Top Opportunity" in html
     assert "Top Blocker" in html
     assert "Current Operating State" in html
-    assert "상단 operator surface는 Decision Summary 안의 Top Operator Action을 먼저 확인하고, 이어서 Top Opportunity / Top Blocker, Current Operating State 순서로 읽은 뒤" in html
+    assert "상단 operator surface는 5-Second Operator Kernel을 먼저 보고, 이어서 Approval Strip, Top Opportunity / Top Blocker, Current Operating State 순서로 읽은 뒤" in html
     assert "대표 플랜과 상세 운영 섹션으로 내려가면 됩니다." in html
-    assert "Decision Summary 안의 Top Operator Action을 먼저 확인하고, 이어서 Top Opportunity / Top Blocker, Current Operating State 순서로 읽은 뒤 대표 플랜과 현재 진입 가이드를 봅니다." in html
+    assert "kernel verdict가 hold/manual_review/watch면 Top Opportunity / Portfolio Candidate surface는 context-only로 읽습니다." in html
+    assert "5-Second Operator Kernel에서 money funnel, outcome attribution, outcome control, rollout 순서를 먼저 확인하고, 이어서 Approval Strip, Top Opportunity / Top Blocker, Current Operating State 순서로 읽은 뒤 대표 플랜과 현재 진입 가이드를 봅니다. kernel verdict가 hold/manual_review/watch면 Top Opportunity / Portfolio Candidate surface는 context-only입니다." in html
+    assert "Deferred Research / Promotion Stack" in html
+    assert "kernel verdict가 hold/manual_review/watch라서 promotion/research stack을 기본 접힘 상태로 둡니다." in html
+    assert "id=\"top-opportunity-panel\"" in html
+    assert "kernel-muted-surface" in html
+    assert "kernel-guard-note" in html
+    assert "opportunity/candidate surface는 context-only로 읽고 approval/alignment/checklist를 먼저 확인합니다." in html
+    assert "opportunity/candidate surface를 정상 우선순위로 읽되 money funnel과 approval alignment를 먼저 확인한 뒤 drilldown으로 내려갑니다." in html
     assert "Family Execution Advisory" in html
     assert "Family Advisory Coverage" in html
     assert "Top Operator Action" in html
     assert "Next Actions" in html
+    assert "5-Second Operator Kernel 바로 아래에서 approve -> align -> act 순서로 신규 진입 허용, surface alignment, server-side Top Operator Action을 한 strip으로 압축합니다. policy mutation이 아니라 reading priority입니다." in html
+    assert "1. Approve" in html
+    assert "2. Align" in html
+    assert "3. Act / Top Operator Action" in html
+    assert "Approval Strip Detail" in html
+    assert "Approval Strip Next Move" in html
+    assert "Approval Strip와 Top Opportunity / Top Blocker 다음 순서에서, portfolio/execution/family/mode/research context를 follow-up으로 읽습니다. strong kernel verdict면 expanded operating context는 접힌 상태로 둡니다." in html
+    assert "Expanded Operating Context" in html
+    assert "Experiment Routing" in html
+    assert "kernel verdict가 monitor라서 expanded operating context를 기본 펼침 상태로 둡니다." in html
+    assert "kernel verdict가 hold/manual_review/watch라서 expanded operating context는 approve/align/act 확인 전까지 기본 접힘 상태로 둡니다." in html
     assert "A/B Strategy Posture" in html
     assert "A remains anchor인지, B continuation이 research-only인지 guarded activation인지, 현재 mix가 여전히 A 집중인지까지 한 번에 읽습니다." in html
     assert "현재 A/B mix" in html
@@ -33,23 +57,40 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "Cleared Guardrails" in html
     assert "Validation / Checklist Review Stack" in html
     assert "validation top-level summary와 checklist item status를 같은 표로 압축해서, raw JSON 없이 operator review stack을 읽습니다." in html
-    assert "Validation GO/NO_GO" in html
-    assert "Checklist GO/NO_GO" in html
+    assert "Validation Approve" in html
+    assert "Validation Align" in html
+    assert "Validation Act" in html
+    assert "Checklist Approve" in html
+    assert "Checklist Align" in html
+    assert "Checklist Act" in html
     assert "Validation Case Inspector" in html
-    assert "현재 symbol validation case를 outcome control, rollout, lifecycle, A/B posture, condition split, capture, allocator 기준으로 다시 압축해 operator가 한 카드로 읽습니다." in html
+    assert "현재 symbol validation case를 money funnel, outcome attribution, outcome control, rollout, lifecycle, A/B posture, condition split, capture, allocator 기준으로 다시 압축해 operator가 한 카드로 읽습니다." in html
+    assert "Approve" in html
+    assert "Align" in html
+    assert "Act" in html
+    assert "Money Funnel" in html
+    assert "Outcome Attribution" in html
+    assert "Edge Experiment" in html
+    assert "Edge Split Focus" in html
+    assert "Expected vs Realized R" in html
+    assert "Money Leak Focus" in html
     assert "Top Condition Split" in html
     assert "Opportunity Capture" in html
     assert "Next Validation Move" in html
     assert "Operator Reading Order" in html
     assert "Runtime Quality Inspector" in html
     assert "최근 validation alert, retry queue, execution quality, reconciliation health를 한 카드로 압축해 runtime 운영 품질을 빠르게 읽습니다." in html
+    assert "Latest Alert Approve" in html
+    assert "Latest Alert Act" in html
     assert "Runtime Next Move" in html
     assert "Quality Drift Focus" in html
     assert "Signal Funnel Inspector" in html
-    assert "현재 hard gate, softening 후보, rollout block, family/regime/session bottleneck을 홈 섹션에서 한 번에 읽도록 압축합니다." in html
+    assert "현재 hard gate, softening 후보, rollout block, family/regime/session bottleneck에 money funnel과 outcome attribution까지 묶어서 홈 섹션에서 한 번에 읽도록 압축합니다." in html
+    assert "Edge Experiment" in html
     assert "Top Family Bottleneck" in html
     assert "Top Regime Bottleneck" in html
     assert "Top Session Bottleneck" in html
+    assert "Attribution Focus" in html
     assert "Current Gate Reason" in html
     assert "Softening Priority Queue" in html
     assert "Alpha Research Inspector" in html
@@ -87,12 +128,13 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "Source Flow" in html
     assert "Freshness Note" in html
     assert "Portfolio Candidate Drilldown" in html
-    assert "accepted / blocked 후보를 raw JSON 없이 읽기 위해, cluster, allocated risk, outcome bias, capital allocator, A/B posture를 같은 표로 보여줍니다." in html
+    assert "accepted / blocked 후보를 raw JSON 없이 읽기 위해, cluster, allocated risk, outcome bias, edge focus, capital allocator, A/B posture를 같은 표로 보여줍니다." in html
     assert "Portfolio Candidate Inspector" in html
-    assert "대표 accepted row 1개와 blocked row 1개를 카드로 다시 압축해, risk, allocator, A/B posture, session, reaction evidence를 바로 읽습니다." in html
+    assert "대표 accepted row 1개와 blocked row 1개를 카드로 다시 압축해, risk, allocator, A/B posture, edge focus, session, reaction evidence를 바로 읽습니다." in html
     assert "Representative Accepted Candidate" in html
     assert "Representative Blocked Candidate" in html
     assert "Why This Row Matters" in html
+    assert "Edge Focus" in html
     assert "Checklist Evidence Drilldown" in html
     assert "WARN / MANUAL / FAIL 체크를 evidence 중심으로 다시 펼쳐서, raw checklist payload 없이 operator review 포인트를 읽습니다." in html
     assert "Report Navigation" in html
@@ -100,8 +142,7 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "Validation Report File" in html
     assert "Checklist Report File" in html
     assert "Execution Quality Report File" in html
-    assert "지금 신규 진입 가능 여부와 Decision Summary 안의 server-side Top Operator Action을 먼저 보여줍니다. policy mutation이 아니라 reading priority입니다." in html
-    assert "Top Operator Action과 Top Opportunity / Top Blocker 다음 순서에서, 포트폴리오, execution, family advisory, mode, research 기준의 server-side 현재 운영 해석과 next actions를 요약합니다." in html
+    assert "Approval Strip Carryover" in html
     assert "권장 Shadow Experiment" in html
     assert "operator가 다음으로 돌릴 shadow experiment 절차와 관찰 기준을 보여줍니다." in html
     assert "shadow_experiment_templates" in html
@@ -150,6 +191,7 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "execution_mode" in html
     assert "new_entries_allowed" in html
     assert "approval_topline_summary_line" in html
+    assert "approval_strip_summary" in html
     assert "operator_action_priority" in html
     assert "Dashboard Generated" in html
     assert "Validation Generated" in html

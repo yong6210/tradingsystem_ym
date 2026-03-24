@@ -83,8 +83,172 @@ def _status(ok: bool) -> str:
     return "PASS" if ok else "FAIL"
 
 
+def _float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def _family_set(raw: str) -> set[str]:
     return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
+def _scanner_candidate_strip_summary(row: dict[str, Any] | None) -> dict[str, str] | None:
+    candidate = dict(row or {})
+    if not candidate:
+        return None
+    deployment_state = str(candidate.get("deployment_go_no_go") or "MANUAL_REVIEW").upper()
+    approve_value = "approval usable"
+    if deployment_state == "NO_GO":
+        approve_value = "runtime no_go"
+    elif deployment_state == "MANUAL_REVIEW":
+        approve_value = "manual review first"
+    act_value = "continue_candidate_review_under_portfolio_caps"
+    if str(candidate.get("block_reason") or ""):
+        act_value = "review_candidate_block_reason"
+    return {
+        "primary_reason": str(candidate.get("deployment_message") or candidate.get("block_reason_message") or ""),
+        "approve_value": approve_value,
+        "approve_reason": str(candidate.get("deployment_message") or ""),
+        "align_value": "candidate_surface",
+        "align_reason": "scanner candidate surface is a runtime context layer",
+        "act_value": act_value,
+        "act_reason": str(candidate.get("block_reason_message") or candidate.get("deployment_message") or ""),
+        "act_priority_level": "watch" if deployment_state == "MANUAL_REVIEW" else "monitor",
+    }
+
+
+def _approval_strip_summary(payload: dict[str, Any] | None) -> dict[str, str] | None:
+    approval = dict(payload or {})
+    if not approval:
+        return None
+    approval_state = str(approval.get("approval_state") or "").upper()
+    deployment_go_no_go = str(approval.get("deployment_go_no_go") or "MANUAL_REVIEW").upper()
+    playbook_go_no_go = str(approval.get("playbook_go_no_go") or deployment_go_no_go).upper()
+    deployment_message = str(approval.get("deployment_message") or "").strip()
+    playbook_message = str(approval.get("playbook_message") or "").strip()
+    approve_value = "approval usable"
+    if approval_state == "BLOCKED" or deployment_go_no_go == "NO_GO":
+        approve_value = "execution blocked"
+    elif approval_state == "APPROVED_MANUAL" or deployment_go_no_go == "MANUAL_REVIEW":
+        approve_value = "manual review first"
+    elif approval_state == "APPROVED_SHADOW":
+        approve_value = "shadow only"
+    align_value = "aligned" if deployment_go_no_go == playbook_go_no_go else "playbook_drift"
+    priority_map = {
+        "BLOCKED": "urgent",
+        "APPROVED_MANUAL": "watch",
+        "APPROVED_SHADOW": "watch",
+        "APPROVED_AUTO": "monitor",
+    }
+    return {
+        "primary_reason": deployment_message or playbook_message,
+        "approve_value": approve_value,
+        "approve_reason": deployment_message or playbook_message,
+        "align_value": align_value,
+        "align_reason": playbook_message or deployment_message,
+        "act_value": str(approval.get("playbook_action") or "review_execution_gate_before_submit"),
+        "act_reason": playbook_message or deployment_message,
+        "act_priority_level": priority_map.get(approval_state, "monitor"),
+    }
+
+
+def _edge_experiment_summary(validation_payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    source = dict(
+        (((validation_payload or {}).get("validation_report") or validation_payload or {}).get("edge_experiment_review_summary") or {})
+    )
+    if not source:
+        return None
+
+    source_summary = dict(source.get("source_summary") or {})
+    return {
+        "available": bool(source.get("available", True)),
+        "advisory_only": bool(source.get("advisory_only", True)),
+        "edge_state": str(source.get("edge_state") or "insufficient_edge_measurement"),
+        "summary": str(source.get("summary") or ""),
+        "true_edge_ratio": round(_float(source.get("true_edge_ratio")), 4),
+        "edge_decay_rate": round(_float(source.get("edge_decay_rate")), 4),
+        "entry_timing_preferred_variant": str(
+            source.get("entry_timing_preferred_variant") or source_summary.get("entry_timing_preferred_variant") or "none"
+        ),
+        "execution_style_preferred_variant": str(
+            source.get("execution_style_preferred_variant")
+            or source_summary.get("execution_style_preferred_variant")
+            or "none"
+        ),
+    }
+
+
+def _edge_experiment_summary_line(summary: dict[str, Any] | None) -> str:
+    if not summary:
+        return "edge_experiment: unavailable"
+    return (
+        f"edge_experiment: state={summary.get('edge_state', 'insufficient_edge_measurement')} | "
+        f"entry_timing={summary.get('entry_timing_preferred_variant', 'none')} | "
+        f"execution_style={summary.get('execution_style_preferred_variant', 'none')} | "
+        f"true_edge={float(summary.get('true_edge_ratio') or 0.0):.4f}"
+    )
+
+
+def _edge_experiment_next_step(summary: dict[str, Any] | None) -> str | None:
+    if not summary:
+        return None
+    edge_state = str(summary.get("edge_state") or "")
+    entry_timing = str(summary.get("entry_timing_preferred_variant") or "none")
+    execution_style = str(summary.get("execution_style_preferred_variant") or "none")
+    if edge_state == "fragile_edge":
+        return (
+            "Advisory only: fragile post-cost edge; keep PAPER lineage running but queue a controlled split review "
+            f"for entry_timing={entry_timing} and execution_style={execution_style}."
+        )
+    if edge_state == "watch_edge":
+        return (
+            "Advisory only: unstable post-cost edge; compare PAPER outcomes against "
+            f"entry_timing={entry_timing} and execution_style={execution_style} before changing the entry design."
+        )
+    if edge_state == "insufficient_edge_measurement":
+        return "Advisory only: keep collecting closed PAPER samples before promoting edge experiment conclusions."
+    return None
+
+
+def _candidate_edge_experiment_focus(
+    candidate: dict[str, Any] | None,
+    edge_experiment_review: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    item = dict(candidate or {})
+    if not item:
+        return None
+    row_focus = dict(item.get("edge_experiment_focus") or {})
+    source = row_focus or dict(edge_experiment_review or {})
+    if not source:
+        return None
+    return {
+        "symbol": str(item.get("symbol") or ""),
+        "strategy_family": str(item.get("strategy_family") or ""),
+        "block_reason": str(item.get("block_reason") or ""),
+        "edge_state": str(source.get("edge_state") or "insufficient_edge_measurement"),
+        "entry_timing_preferred_variant": str(source.get("entry_timing_preferred_variant") or "none"),
+        "execution_style_preferred_variant": str(source.get("execution_style_preferred_variant") or "none"),
+        "true_edge_ratio": round(_float(source.get("true_edge_ratio")), 4),
+        "focus_source": "row_level" if row_focus else "top_level_fallback",
+    }
+
+
+def _candidate_edge_experiment_focus_line(payload: dict[str, Any] | None) -> str:
+    focus = dict(payload or {})
+    if not focus:
+        return "candidate_edge_focus: unavailable"
+    line = (
+        f"candidate_edge_focus: {focus.get('symbol') or 'unknown'} | "
+        f"family={focus.get('strategy_family') or 'unknown'} | "
+        f"edge={focus.get('edge_state') or 'insufficient_edge_measurement'} | "
+        f"split={(focus.get('entry_timing_preferred_variant') or 'none')}/{(focus.get('execution_style_preferred_variant') or 'none')}"
+    )
+    if focus.get("block_reason"):
+        line = f"{line} | reason={focus.get('block_reason')}"
+    line = f"{line} | source={focus.get('focus_source') or 'unknown'}"
+    return line
 
 
 def _is_allowed_runtime_state(row: dict[str, Any], include_manual: bool) -> bool:
@@ -180,6 +344,30 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     for row in payload["checks"]:
         lines.append(f"- [{row['status']}] {row['name']}: {row['message']}")
     lines.append("")
+    lines.append("## Approval Strip")
+    lines.append("")
+    approval_strip = payload.get("approval_strip_summary") or {}
+    if approval_strip:
+        lines.append(
+            f"- approve={approval_strip.get('approve_value')} | "
+            f"align={approval_strip.get('align_value')} | "
+            f"act={approval_strip.get('act_value')} | "
+            f"priority={approval_strip.get('act_priority_level')}"
+        )
+        lines.append(f"- reason: {approval_strip.get('primary_reason') or approval_strip.get('approve_reason')}")
+    else:
+        lines.append("- approval strip unavailable")
+    lines.append("")
+    lines.append("## Edge Experiment")
+    lines.append("")
+    edge_experiment = payload.get("edge_experiment_review") or {}
+    if edge_experiment:
+        lines.append(f"- {_edge_experiment_summary_line(edge_experiment)}")
+        lines.append(f"- summary: {edge_experiment.get('summary', '')}")
+    else:
+        lines.append("- edge experiment unavailable")
+    lines.append(f"- {_candidate_edge_experiment_focus_line(payload.get('candidate_edge_experiment_focus'))}")
+    lines.append("")
     lines.append("## Candidate")
     lines.append("")
     candidate = payload.get("candidate") or {}
@@ -187,7 +375,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
         lines.append(f"- symbol: {candidate.get('symbol', '')}")
         lines.append(f"- plan_id: {candidate.get('plan_id', '')}")
         lines.append(f"- family: {candidate.get('strategy_family', '')}")
-        lines.append(f"- deployment: {candidate.get('deployment_go_no_go', '')}")
+        lines.append(f"- candidate_surface: {candidate.get('deployment_go_no_go', '') or candidate.get('operator_status', '')}")
         lines.append(f"- expected_summary: {candidate.get('expected_summary', '')}")
     else:
         lines.append("- no eligible candidate found")
@@ -258,7 +446,16 @@ def main() -> int:
     approval: dict[str, Any] | None = None
     intent: dict[str, Any] | None = None
     submission: dict[str, Any] | None = None
+    validation_context: dict[str, Any] | None = None
+    edge_experiment_review: dict[str, Any] | None = None
     if candidate is not None:
+        validation_context = _request_json(
+            args.base_url,
+            "POST",
+            "/validation/report",
+            query={"symbol": str(candidate["symbol"])},
+        )
+        edge_experiment_review = _edge_experiment_summary(validation_context)
         preview_body = {
             "plan_id": candidate["plan_id"],
             "paper_lineage_override": bool(args.paper_lineage_override),
@@ -296,6 +493,9 @@ def main() -> int:
                     "paper_scenario": args.paper_scenario,
                 },
             )
+    candidate_edge_experiment_focus = _candidate_edge_experiment_focus(candidate, edge_experiment_review)
+    candidate_surface_summary = _scanner_candidate_strip_summary(candidate)
+    approval_strip_summary = _approval_strip_summary(approval) or candidate_surface_summary
 
     checks: list[dict[str, str]] = []
     if sync_payload is not None:
@@ -314,7 +514,9 @@ def main() -> int:
                 "No eligible trend_continuation/sweep_reversal candidate found in scanner output."
                 if candidate is None
                 else (
-                    f"{candidate.get('symbol')} {candidate.get('strategy_family')} {candidate.get('deployment_go_no_go')}"
+                    f"{candidate.get('symbol')} {candidate.get('strategy_family')} "
+                    f"approve={(candidate_surface_summary or {}).get('approve_value', candidate.get('deployment_go_no_go', ''))} | "
+                    f"act={(candidate_surface_summary or {}).get('act_value', 'continue_candidate_review_under_portfolio_caps')}"
                     + (
                         " via paper lineage override"
                         if bool(args.paper_lineage_override)
@@ -340,6 +542,9 @@ def main() -> int:
                 "name": "approval_for_paper",
                 "status": _status(approval_state in {"APPROVED_AUTO", "APPROVED_MANUAL"} and allowed_execution_mode in {"PAPER", "MICRO_LIVE", "LIVE"}),
                 "message": (
+                    f"approve={(approval_strip_summary or {}).get('approve_value', approval_state)} | "
+                    f"align={(approval_strip_summary or {}).get('align_value', 'aligned')} | "
+                    f"act={(approval_strip_summary or {}).get('act_value', '')} | "
                     f"approval_state={approval_state} allowed_execution_mode={allowed_execution_mode}"
                     + (
                         f" override={approval.get('paper_lineage_override_reason', '')}"
@@ -385,6 +590,9 @@ def main() -> int:
         elif submission is not None:
             next_steps.append("Monitor execution/operator-dashboard and validation/report after the PAPER submission closes.")
             next_steps.append("Repeat this drill until enough closed v2 trades exist to resolve threshold lineage winner.")
+    advisory_next_step = _edge_experiment_next_step(edge_experiment_review)
+    if advisory_next_step:
+        next_steps.append(advisory_next_step)
     if submission is None and args.submit_paper:
         next_steps.append("No PAPER submission occurred in this run.")
 
@@ -404,8 +612,13 @@ def main() -> int:
         "sync": sync_payload,
         "portfolio": portfolio_payload,
         "candidate": candidate,
+        "candidate_surface_summary": candidate_surface_summary,
+        "validation_context": validation_context,
         "preview": preview,
         "approval": approval,
+        "approval_strip_summary": approval_strip_summary,
+        "edge_experiment_review": edge_experiment_review,
+        "candidate_edge_experiment_focus": candidate_edge_experiment_focus,
         "intent": intent,
         "submission": submission,
         "next_steps": next_steps,

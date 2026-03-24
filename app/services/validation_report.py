@@ -5,6 +5,12 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import get_settings
+from app.services.edge_experiment_review import (
+    build_edge_experiment_review,
+    summarize_edge_experiment_review,
+)
+from app.services.edge_evolution_rule import build_edge_evolution_rule, summarize_edge_evolution_rule
+from app.services.outcome_attribution import build_outcome_attribution, summarize_outcome_attribution
 from app.services.outcome_control_trace import (
     build_outcome_control_trace,
     summarize_outcome_control_trace,
@@ -14,6 +20,75 @@ from app.services.outcome_control_trace import (
 class ValidationReportService:
     def __init__(self):
         self.settings = get_settings()
+
+    @staticmethod
+    def _split_review_followup_command(*, action: str, symbol: str, universe: str, days: int) -> str:
+        if action not in {"run_entry_timing_split_review", "run_execution_style_split_review"} or not symbol:
+            return ""
+        return (
+            f"./.venv/bin/python scripts/run_split_review_followup.py "
+            f"--symbol {symbol.upper()} --universe {universe} --days {max(int(days), 1)} --action {action}"
+        )
+
+    @classmethod
+    def _normalize_operator_action_priority_payload(
+        cls,
+        payload: dict[str, Any] | None,
+        *,
+        symbol: str,
+        universe: str,
+        days: int,
+    ) -> dict[str, Any]:
+        priority = dict(payload or {})
+        if not priority:
+            return {}
+
+        experiment_context = dict(priority.get("experiment_context") or {})
+        target_specs = (
+            ("entry_timing_target", "run_entry_timing_split_review"),
+            ("execution_style_target", "run_execution_style_split_review"),
+        )
+        for key, action in target_specs:
+            target = dict(experiment_context.get(key) or {})
+            target_symbol = str(target.get("symbol") or symbol or "")
+            if target and not target.get("followup_command"):
+                target["followup_command"] = cls._split_review_followup_command(
+                    action=action,
+                    symbol=target_symbol,
+                    universe=universe,
+                    days=max(int(days), 1),
+                )
+                experiment_context[key] = target
+        if experiment_context:
+            priority["experiment_context"] = experiment_context
+
+        normalized_actions: list[dict[str, Any]] = []
+        for row in list(priority.get("next_actions") or []):
+            item = dict(row or {})
+            if not item.get("followup_command"):
+                item["followup_command"] = cls._split_review_followup_command(
+                    action=str(item.get("action") or ""),
+                    symbol=str(item.get("target_symbol") or symbol or ""),
+                    universe=universe,
+                    days=max(int(days), 1),
+                )
+            normalized_actions.append(item)
+        priority["next_actions"] = normalized_actions
+
+        if not priority.get("top_action_followup_command"):
+            top_action = str(priority.get("top_action") or "")
+            top_target_key = {
+                "run_entry_timing_split_review": "entry_timing_target",
+                "run_execution_style_split_review": "execution_style_target",
+            }.get(top_action, "")
+            top_target = dict(experiment_context.get(top_target_key) or {})
+            priority["top_action_followup_command"] = cls._split_review_followup_command(
+                action=top_action,
+                symbol=str(top_target.get("symbol") or symbol or ""),
+                universe=universe,
+                days=max(int(days), 1),
+            )
+        return priority
 
     @staticmethod
     def _approval_warning_playbook_mapping(
@@ -107,6 +182,94 @@ class ValidationReportService:
         if passed >= 2:
             return "WARN"
         return "FAIL"
+
+    @staticmethod
+    def _approval_strip_summary(
+        *,
+        deployment_approval_template: dict[str, Any] | None,
+        operator_action_priority_summary: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        template = dict(deployment_approval_template or {})
+        if not template and not operator_action_priority_summary:
+            return None
+
+        playbook_go_no_go = str(template.get("playbook_go_no_go") or "")
+        playbook_action = str(template.get("playbook_action") or "")
+        playbook_message = str(template.get("playbook_message") or "")
+        topline_message = str(template.get("topline_message") or "")
+        template_status = str(template.get("template_status") or "NOT_AVAILABLE")
+        replay_alignment_status = str(template.get("replay_output_lineage_alignment_status") or "NOT_AVAILABLE")
+        approval_warning_locked = bool(template.get("approval_warning_locked", False))
+        priority = dict(operator_action_priority_summary or {})
+
+        approve_value = "approval usable"
+        if playbook_go_no_go == "NO_GO":
+            approve_value = "validation no_go"
+        elif playbook_go_no_go == "MANUAL_REVIEW":
+            approve_value = "manual review first"
+        approve_reason = playbook_message or topline_message or "validation approval strip unavailable"
+
+        if not template:
+            align_value = "not_available"
+            align_reason = "deployment approval template unavailable"
+        elif approval_warning_locked or replay_alignment_status == "WARN" or template_status == "REVIEW":
+            align_value = "playbook_drift"
+            align_reason = " | ".join(
+                part
+                for part in [
+                    template.get("approval_warning_message"),
+                    f"template_status={template_status}",
+                    f"replay_alignment={replay_alignment_status}",
+                    template.get("template_reason"),
+                ]
+                if part
+            )
+        elif template_status == "PASS":
+            align_value = "aligned"
+            align_reason = " | ".join(
+                part
+                for part in [
+                    template.get("topline_summary_line"),
+                    template.get("template_reason"),
+                ]
+                if part
+            ) or "validation approval template is aligned"
+        else:
+            align_value = "not_available"
+            align_reason = " | ".join(
+                part
+                for part in [
+                    f"template_status={template_status}",
+                    template.get("template_reason"),
+                ]
+                if part
+            ) or "validation approval alignment unavailable"
+
+        act_value = str(priority.get("top_action") or playbook_action or "continue_runtime_monitoring")
+        act_reason = str(
+            priority.get("top_reason")
+            or playbook_message
+            or topline_message
+            or "validation operator action unavailable"
+        )
+        next_actions = [dict(item) for item in list(priority.get("next_actions") or [])[:3]]
+        if next_actions:
+            act_reason = f"{act_reason} | " + " | ".join(
+                f"{item.get('action')} [{item.get('priority_level')}]"
+                for item in next_actions
+                if item.get("action")
+            )
+
+        return {
+            "available": True,
+            "approve_value": approve_value,
+            "approve_reason": approve_reason,
+            "align_value": align_value,
+            "align_reason": align_reason,
+            "act_value": act_value,
+            "act_reason": act_reason,
+            "act_priority_level": str(priority.get("priority_level") or "monitor"),
+        }
 
     @staticmethod
     def _deployment_approval_template(
@@ -1027,6 +1190,7 @@ class ValidationReportService:
         score_to_outcome_snapshot = dict(score_to_outcome_payload.get("snapshot_selection") or {})
         score_to_outcome_history = dict(score_to_outcome_payload.get("historical_execution_outcomes") or {})
         score_to_outcome_decomposition = dict(score_to_outcome_payload.get("decomposition") or {})
+        money_funnel_payload = dict(score_to_outcome_payload.get("money_funnel") or {})
         score_to_outcome_lines: list[str] = []
         if score_to_outcome_payload:
             score_to_outcome_lines = [
@@ -1065,6 +1229,41 @@ class ValidationReportService:
                         f"baseline_cost_profitable_rate={float(row.get('baseline_cost_profitable_rate_from_closed', 0.0) or 0.0):.4f}"
                     )
             score_to_outcome_lines.append("")
+        money_funnel_lines: list[str] = []
+        if money_funnel_payload:
+            snapshot_expected = dict(money_funnel_payload.get("snapshot_expected_r") or {})
+            historical_expected = dict(money_funnel_payload.get("historical_expected_r") or {})
+            historical_realized = dict(money_funnel_payload.get("historical_realized_r") or {})
+            historical_gap = dict(money_funnel_payload.get("historical_gap_r") or {})
+            money_funnel_lines = [
+                "## Money Funnel",
+                f"- available: {bool(money_funnel_payload.get('available', False))}",
+                f"- coverage_note: {money_funnel_payload.get('coverage_note', '')}",
+                (
+                    f"- snapshot_expected_r: runtime={float(snapshot_expected.get('runtime_candidates', 0.0) or 0.0):.4f}, "
+                    f"accepted={float(snapshot_expected.get('accepted_candidates', 0.0) or 0.0):.4f}, "
+                    f"blocked={float(snapshot_expected.get('blocked_candidates', 0.0) or 0.0):.4f}"
+                ),
+                (
+                    f"- historical_expected_r: generated={float(historical_expected.get('generated', 0.0) or 0.0):.4f}, "
+                    f"submitted={float(historical_expected.get('submitted', 0.0) or 0.0):.4f}, "
+                    f"filled={float(historical_expected.get('filled', 0.0) or 0.0):.4f}, "
+                    f"closed={float(historical_expected.get('closed', 0.0) or 0.0):.4f}"
+                ),
+                (
+                    f"- historical_realized_r: raw_closed={float(historical_realized.get('raw_closed', 0.0) or 0.0):.4f}, "
+                    f"post_cost_closed={float(historical_realized.get('post_cost_closed', 0.0) or 0.0):.4f}, "
+                    f"cost_drag={float(historical_realized.get('cost_drag', 0.0) or 0.0):.4f}"
+                ),
+                (
+                    f"- historical_gap_r: generated_to_submitted={float(historical_gap.get('generated_to_submitted', 0.0) or 0.0):.4f}, "
+                    f"submitted_to_filled={float(historical_gap.get('submitted_to_filled', 0.0) or 0.0):.4f}, "
+                    f"filled_to_closed={float(historical_gap.get('filled_to_closed', 0.0) or 0.0):.4f}, "
+                    f"closed_expected_to_post_cost_realized={float(historical_gap.get('closed_expected_to_post_cost_realized', 0.0) or 0.0):.4f}"
+                ),
+                f"- summary: {money_funnel_payload.get('summary', '')}",
+                "",
+            ]
 
         execution_degradation_payload = dict(execution_degradation_advisory or {})
         execution_degradation_reasons = list(execution_degradation_payload.get("reasons") or [])
@@ -1121,7 +1320,12 @@ class ValidationReportService:
                 )
             mode_advisory_lines.append("")
 
-        operator_action_priority_payload = dict(operator_action_priority or {})
+        operator_action_priority_payload = self._normalize_operator_action_priority_payload(
+            operator_action_priority,
+            symbol=symbol,
+            universe=str(getattr(self.settings, "universe_name", "usdc_perp_top30") or "usdc_perp_top30"),
+            days=max(int(score_to_outcome_payload.get("report_window_days", 0) or 0), 1) if score_to_outcome_payload else 7,
+        )
         operator_action_priority_lines: list[str] = []
         if operator_action_priority_payload:
             operator_action_priority_lines = [
@@ -1129,6 +1333,7 @@ class ValidationReportService:
                 f"- available: {bool(operator_action_priority_payload.get('available', False))}",
                 f"- top_action: {operator_action_priority_payload.get('top_action', 'continue_runtime_monitoring')}",
                 f"- top_reason: {operator_action_priority_payload.get('top_reason', '')}",
+                f"- top_action_followup_command: {operator_action_priority_payload.get('top_action_followup_command', '')}",
                 f"- priority_level: {operator_action_priority_payload.get('priority_level', 'monitor')}",
                 f"- priority_source: {operator_action_priority_payload.get('priority_source', 'monitor')}",
                 f"- action_family: {operator_action_priority_payload.get('action_family', 'monitor')}",
@@ -1145,10 +1350,55 @@ class ValidationReportService:
                         f"- capture_context.maturity: {capture_context.get('maturity', 'unknown')}",
                     ]
                 )
+            experiment_context = dict(operator_action_priority_payload.get("experiment_context") or {})
+            if experiment_context:
+                operator_action_priority_lines.extend(
+                    [
+                        (
+                            f"- experiment_context: edge_state={experiment_context.get('edge_state')} "
+                            f"true_edge_ratio={float(experiment_context.get('true_edge_ratio', 0.0) or 0.0):.4f} "
+                            f"edge_decay_rate={float(experiment_context.get('edge_decay_rate', 0.0) or 0.0):+.4f}"
+                        ),
+                        (
+                            f"- experiment_context.entry_timing: preferred={experiment_context.get('entry_timing_preferred_variant')} "
+                            f"ready={bool(experiment_context.get('entry_timing_comparison_ready', False))} "
+                            f"reason={experiment_context.get('entry_timing_recommendation_reason')}"
+                        ),
+                        (
+                            f"- experiment_context.execution_style: preferred={experiment_context.get('execution_style_preferred_variant')} "
+                            f"ready={bool(experiment_context.get('execution_style_comparison_ready', False))} "
+                            f"reason={experiment_context.get('execution_style_recommendation_reason')}"
+                        ),
+                    ]
+                )
+                for label, key in (
+                    ("accepted_candidate_focus", "accepted_candidate_focus"),
+                    ("blocked_candidate_focus", "blocked_candidate_focus"),
+                    ("entry_timing_target", "entry_timing_target"),
+                    ("execution_style_target", "execution_style_target"),
+                ):
+                    target = dict(experiment_context.get(key) or {})
+                    if not target:
+                        continue
+                    operator_action_priority_lines.append(
+                        f"- experiment_context.{label}: symbol={target.get('symbol')} status={target.get('status')} "
+                        f"family={target.get('strategy_family')} edge_state={target.get('edge_state')} "
+                        f"entry={target.get('entry_timing_preferred_variant')} "
+                        f"execution={target.get('execution_style_preferred_variant')} "
+                        f"block_reason={target.get('block_reason')} focus={target.get('focus_source')} "
+                        f"cmd={target.get('followup_command')}"
+                    )
             for idx, row in enumerate(list(operator_action_priority_payload.get("next_actions") or [])[:3], start=1):
+                target_suffix = ""
+                if row.get("target_symbol"):
+                    target_suffix = (
+                        f" target={row.get('target_symbol')}:{row.get('target_status')}:{row.get('target_family')} "
+                        f"block={row.get('target_block_reason')} focus={row.get('target_focus_source')}"
+                    )
+                command_suffix = f" cmd={row.get('followup_command')}" if row.get("followup_command") else ""
                 operator_action_priority_lines.append(
                     f"- next_{idx}: action={row.get('action')} priority={row.get('priority_level')} "
-                    f"source={row.get('source')} family={row.get('action_family')} reason={row.get('reason')}"
+                    f"source={row.get('source')} family={row.get('action_family')} reason={row.get('reason')}{target_suffix}{command_suffix}"
                 )
             operator_action_priority_lines.append("")
 
@@ -1997,6 +2247,135 @@ class ValidationReportService:
                 )
             performance_decomposition_lines.append("")
 
+        outcome_attribution = build_outcome_attribution(
+            score_to_outcome_funnel=score_to_outcome_payload,
+            performance_decomposition_summary=performance_decomposition_summary,
+            execution_friction_measurement=execution_friction_measurement_payload,
+        )
+        outcome_attribution_summary = summarize_outcome_attribution(outcome_attribution)
+        outcome_attribution_lines: list[str] = []
+        if outcome_attribution_summary:
+            outcome_attribution_lines = [
+                "## Outcome Attribution",
+                f"- available: {bool(outcome_attribution_summary.get('available', False))}",
+                f"- advisory_only: {bool(outcome_attribution_summary.get('advisory_only', True))}",
+                (
+                    f"- confidence: {outcome_attribution_summary.get('confidence', 'low')} | "
+                    f"closed_trade_count={int(outcome_attribution_summary.get('closed_trade_count', 0) or 0)} | "
+                    f"strongest_drag_source={outcome_attribution_summary.get('strongest_drag_source', 'none')}"
+                ),
+                (
+                    f"- components_r: strategy={float(outcome_attribution_summary.get('strategy_component_r', 0.0) or 0.0):.4f}, "
+                    f"execution={float(outcome_attribution_summary.get('execution_component_r', 0.0) or 0.0):.4f}, "
+                    f"condition={float(outcome_attribution_summary.get('condition_component_r', 0.0) or 0.0):.4f}, "
+                    f"fill_capture_gap={float(outcome_attribution_summary.get('fill_capture_gap_r', 0.0) or 0.0):.4f}"
+                ),
+                (
+                    f"- expected_vs_realized_r: expected_closed={float(outcome_attribution_summary.get('closed_expected_r', 0.0) or 0.0):.4f}, "
+                    f"post_cost_closed={float(outcome_attribution_summary.get('closed_post_cost_realized_r', 0.0) or 0.0):.4f}, "
+                    f"delta={float(outcome_attribution_summary.get('closed_post_cost_delta_r', 0.0) or 0.0):.4f}"
+                ),
+                f"- summary: {outcome_attribution_summary.get('summary', '')}",
+                f"- reason_codes: {list(outcome_attribution_summary.get('reason_codes') or [])}",
+                f"- source_summary: {dict(outcome_attribution_summary.get('source_summary') or {})}",
+                "",
+            ]
+
+        edge_experiment_review = build_edge_experiment_review(score_to_outcome_funnel=score_to_outcome_payload)
+        edge_experiment_summary = summarize_edge_experiment_review(edge_experiment_review)
+        edge_experiment_lines: list[str] = []
+        if edge_experiment_summary:
+            true_edge = dict(edge_experiment_summary.get("true_edge") or {})
+            entry_timing = dict(edge_experiment_summary.get("entry_timing_experiment") or {})
+            execution_style = dict(edge_experiment_summary.get("execution_style_experiment") or {})
+            edge_experiment_lines = [
+                "## Edge Experiment Review",
+                f"- available: {bool(edge_experiment_summary.get('available', False))}",
+                f"- advisory_only: {bool(edge_experiment_summary.get('advisory_only', True))}",
+                (
+                    f"- edge_state: {edge_experiment_summary.get('edge_state', 'insufficient_edge_measurement')} | "
+                    f"closed_trade_count={int(edge_experiment_summary.get('closed_trade_count', 0) or 0)} | "
+                    f"true_edge_ratio={float(edge_experiment_summary.get('true_edge_ratio', 0.0) or 0.0):.4f}"
+                ),
+                (
+                    f"- edge_windows: recent={float(edge_experiment_summary.get('recent_true_edge_ratio', 0.0) or 0.0):.4f}, "
+                    f"prior={float(edge_experiment_summary.get('prior_true_edge_ratio', 0.0) or 0.0):.4f}, "
+                    f"decay={float(edge_experiment_summary.get('edge_decay_rate', 0.0) or 0.0):+.4f}, "
+                    f"stability={float(edge_experiment_summary.get('edge_stability', 0.0) or 0.0):.4f}"
+                ),
+                (
+                    f"- entry_timing_experiment: available={bool(edge_experiment_summary.get('entry_timing_available', False))} | "
+                    f"comparison_ready={bool(edge_experiment_summary.get('entry_timing_comparison_ready', False))} | "
+                    f"preferred={edge_experiment_summary.get('entry_timing_preferred_variant', 'none')} | "
+                    f"reason={edge_experiment_summary.get('entry_timing_recommendation_reason', 'not_available')}"
+                ),
+                (
+                    f"- execution_style_experiment: available={bool(edge_experiment_summary.get('execution_style_available', False))} | "
+                    f"comparison_ready={bool(edge_experiment_summary.get('execution_style_comparison_ready', False))} | "
+                    f"preferred={edge_experiment_summary.get('execution_style_preferred_variant', 'none')} | "
+                    f"reason={edge_experiment_summary.get('execution_style_recommendation_reason', 'not_available')}"
+                ),
+                f"- summary: {edge_experiment_summary.get('summary', '')}",
+                f"- reason_codes: {list(edge_experiment_summary.get('reason_codes') or [])}",
+                f"- source_summary: {dict(edge_experiment_summary.get('source_summary') or {})}",
+            ]
+            for label, payload in (
+                ("entry_timing_lhs", dict(entry_timing.get("lhs") or {})),
+                ("entry_timing_rhs", dict(entry_timing.get("rhs") or {})),
+                ("execution_style_lhs", dict(execution_style.get("lhs") or {})),
+                ("execution_style_rhs", dict(execution_style.get("rhs") or {})),
+            ):
+                if payload:
+                    edge_experiment_lines.append(
+                        f"- {label}: key={payload.get('key')} submitted={int(payload.get('submitted', 0) or 0)} "
+                        f"filled={int(payload.get('filled', 0) or 0)} closed={int(payload.get('closed', 0) or 0)} "
+                        f"capture_ratio_r={float(payload.get('capture_ratio_r', 0.0) or 0.0):.4f} "
+                        f"true_edge_ratio={float(payload.get('true_edge_ratio', 0.0) or 0.0):.4f}"
+                    )
+            if true_edge:
+                edge_experiment_lines.append(
+                    f"- window_closed_counts: recent={int(dict(true_edge.get('recent_window') or {}).get('closed', 0) or 0)}, "
+                    f"prior={int(dict(true_edge.get('prior_window') or {}).get('closed', 0) or 0)}"
+                )
+            edge_experiment_lines.append("")
+
+        edge_evolution_summary = summarize_edge_evolution_rule(
+            build_edge_evolution_rule(
+                edge_experiment_review=edge_experiment_summary,
+                rollout_recommendation=rollout_recommendation_payload,
+                strategy_lifecycle=strategy_lifecycle_payload,
+                kill_condition_automation=kill_condition_automation_payload,
+            )
+        )
+        edge_evolution_lines: list[str] = []
+        if edge_evolution_summary:
+            edge_evolution_lines = [
+                "## Edge Evolution Rule",
+                f"- available: {bool(edge_evolution_summary.get('available', False))}",
+                f"- advisory_only: {bool(edge_evolution_summary.get('advisory_only', True))}",
+                (
+                    f"- evolution_state: {edge_evolution_summary.get('evolution_state', 'insufficient_sample')} | "
+                    f"recommended_action={edge_evolution_summary.get('recommended_action', 'keep_current_baseline')} | "
+                    f"allocation_bias={edge_evolution_summary.get('allocation_bias', 'hold_current_baseline')} | "
+                    f"confidence={edge_evolution_summary.get('confidence', 'low')}"
+                ),
+                (
+                    f"- edge_basis: true_edge_ratio={float(edge_evolution_summary.get('true_edge_ratio', 0.0) or 0.0):.4f} | "
+                    f"edge_decay_rate={float(edge_evolution_summary.get('edge_decay_rate', 0.0) or 0.0):+.4f} | "
+                    f"closed_trade_count={int(edge_evolution_summary.get('closed_trade_count', 0) or 0)} | "
+                    f"kill_review_triggered={bool(edge_evolution_summary.get('kill_review_triggered', False))}"
+                ),
+                (
+                    f"- promotion_candidate: axis={edge_evolution_summary.get('promotion_candidate_axis', 'none')} | "
+                    f"variant={edge_evolution_summary.get('promotion_candidate_variant', 'none')} | "
+                    f"reason={edge_evolution_summary.get('promotion_candidate_reason', 'not_available')}"
+                ),
+                f"- summary: {edge_evolution_summary.get('summary', '')}",
+                f"- reason_codes: {list(edge_evolution_summary.get('reason_codes') or [])}",
+                f"- source_summary: {dict(edge_evolution_summary.get('source_summary') or {})}",
+                "",
+            ]
+
         thesis_payload = dict(strategy_v2_thesis_validation or {})
         thesis_metrics = dict(thesis_payload.get("thesis_metrics") or {})
         thesis_before = dict(thesis_metrics.get("before_dedupe") or {})
@@ -2081,6 +2460,25 @@ class ValidationReportService:
                 ),
                 "",
             ]
+        approval_strip_summary = self._approval_strip_summary(
+            deployment_approval_template=deployment_approval_template,
+            operator_action_priority_summary=operator_action_priority_payload,
+        )
+        approval_strip_lines: list[str] = []
+        if approval_strip_summary:
+            approval_strip_lines = [
+                "## Approval Strip",
+                (
+                    f"- approve={approval_strip_summary.get('approve_value', 'n/a')} | "
+                    f"align={approval_strip_summary.get('align_value', 'n/a')} | "
+                    f"act={approval_strip_summary.get('act_value', 'n/a')} | "
+                    f"priority={approval_strip_summary.get('act_priority_level', 'monitor')}"
+                ),
+                f"- approve_reason: {approval_strip_summary.get('approve_reason', '')}",
+                f"- align_reason: {approval_strip_summary.get('align_reason', '')}",
+                f"- act_reason: {approval_strip_summary.get('act_reason', '')}",
+                "",
+            ]
 
         content = [
             f"# Validation Report: {symbol}",
@@ -2117,6 +2515,7 @@ class ValidationReportService:
             f"- gate_4_metric_ev_positive: {'PASS' if metric.get('ev', -99.0) > 0 else 'FAIL'}",
             "",
             *deployment_approval_lines,
+            *approval_strip_lines,
             *eq_lines,
             *execution_friction_measurement_lines,
             *fi_lines,
@@ -2132,11 +2531,15 @@ class ValidationReportService:
             *scalp_lines,
             *alpha_research_lines,
             *score_to_outcome_lines,
+            *money_funnel_lines,
             *execution_degradation_lines,
             *family_execution_degradation_lines,
             *mode_advisory_lines,
             *operator_action_priority_lines,
             *outcome_control_trace_lines,
+            *outcome_attribution_lines,
+            *edge_experiment_lines,
+            *edge_evolution_lines,
             *rollout_recommendation_lines,
             *strategy_lifecycle_lines,
             *a_strategy_post_cost_edge_validation_lines,
@@ -2178,6 +2581,7 @@ class ValidationReportService:
             "path": str(file_path),
             "generated_at": now.isoformat(),
             "deployment_approval_summary": deployment_approval_template,
+            "approval_strip_summary": approval_strip_summary,
             "execution_quality_summary": {
                 "target_exit_ratio": float((execution_quality or {}).get("target_exit_ratio", 0.0)),
                 "forced_exit_ratio": float((execution_quality or {}).get("forced_exit_ratio", 0.0)),
@@ -2234,6 +2638,12 @@ class ValidationReportService:
             "performance_decomposition_summary": performance_decomposition_summary,
             "score_to_outcome_funnel": score_to_outcome_payload if score_to_outcome_payload else None,
             "score_to_outcome_funnel_summary": {
+                "available": bool(score_to_outcome_payload.get("available", False)),
+                "reason": score_to_outcome_payload.get("reason", "not_available"),
+                "report_window_days": int(score_to_outcome_payload.get("report_window_days", 0) or 0),
+                "snapshot_selection": score_to_outcome_snapshot,
+                "historical_execution_outcomes": score_to_outcome_history,
+                "decomposition": score_to_outcome_decomposition,
                 "runtime_candidates": int(score_to_outcome_snapshot.get("runtime_candidates", 0) or 0),
                 "accepted_candidates": int(score_to_outcome_snapshot.get("accepted_candidates", 0) or 0),
                 "blocked_candidates": int(score_to_outcome_snapshot.get("blocked_candidates", 0) or 0),
@@ -2250,9 +2660,20 @@ class ValidationReportService:
                     score_to_outcome_history.get("baseline_cost_profitable_rate_from_closed", 0.0) or 0.0
                 ),
                 "coverage_note": score_to_outcome_payload.get("coverage_note"),
+                "money_funnel": money_funnel_payload if money_funnel_payload else None,
                 "top_family_bucket": dict((list(score_to_outcome_decomposition.get("family") or [])[:1] or [{}])[0]),
                 "top_regime_bucket": dict((list(score_to_outcome_decomposition.get("regime") or [])[:1] or [{}])[0]),
                 "top_session_bucket": dict((list(score_to_outcome_decomposition.get("session") or [])[:1] or [{}])[0]),
+                "top_entry_model_bucket": dict((list(score_to_outcome_decomposition.get("entry_model") or [])[:1] or [{}])[0]),
+                "top_entry_timing_bucket": dict(
+                    (list(score_to_outcome_decomposition.get("entry_timing_variant") or [])[:1] or [{}])[0]
+                ),
+                "top_execution_mode_bucket": dict(
+                    (list(score_to_outcome_decomposition.get("execution_mode") or [])[:1] or [{}])[0]
+                ),
+                "top_execution_style_bucket": dict(
+                    (list(score_to_outcome_decomposition.get("execution_style") or [])[:1] or [{}])[0]
+                ),
             }
             if score_to_outcome_payload
             else None,
@@ -2295,6 +2716,7 @@ class ValidationReportService:
                 "available": bool(operator_action_priority_payload.get("available", False)),
                 "top_action": operator_action_priority_payload.get("top_action", "continue_runtime_monitoring"),
                 "top_reason": operator_action_priority_payload.get("top_reason", ""),
+                "top_action_followup_command": operator_action_priority_payload.get("top_action_followup_command", ""),
                 "priority_level": operator_action_priority_payload.get("priority_level", "monitor"),
                 "priority_source": operator_action_priority_payload.get("priority_source", "monitor"),
                 "action_family": operator_action_priority_payload.get("action_family", "monitor"),
@@ -2302,6 +2724,7 @@ class ValidationReportService:
                 "blocking_signals": list(operator_action_priority_payload.get("blocking_signals") or []),
                 "next_actions": [dict(item) for item in list(operator_action_priority_payload.get("next_actions") or [])[:3]],
                 "capture_context": dict(operator_action_priority_payload.get("capture_context") or {}),
+                "experiment_context": dict(operator_action_priority_payload.get("experiment_context") or {}),
                 "advisory_only": bool(operator_action_priority_payload.get("advisory_only", True)),
             }
             if operator_action_priority_payload
@@ -2310,6 +2733,18 @@ class ValidationReportService:
             if outcome_control_trace_summary
             else False,
             "outcome_control_trace_summary": outcome_control_trace_summary,
+            "outcome_attribution_available": bool(outcome_attribution_summary.get("available", False))
+            if outcome_attribution_summary
+            else False,
+            "outcome_attribution_summary": outcome_attribution_summary,
+            "edge_experiment_review_available": bool(edge_experiment_summary.get("available", False))
+            if edge_experiment_summary
+            else False,
+            "edge_experiment_review_summary": edge_experiment_summary,
+            "edge_evolution_rule_available": bool(edge_evolution_summary.get("available", False))
+            if edge_evolution_summary
+            else False,
+            "edge_evolution_rule_summary": edge_evolution_summary,
             "rollout_recommendation": rollout_recommendation_payload if rollout_recommendation_payload else None,
             "rollout_recommendation_available": bool(rollout_recommendation_payload.get("available", False))
             if rollout_recommendation_payload

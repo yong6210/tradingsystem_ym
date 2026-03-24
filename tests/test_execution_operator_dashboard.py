@@ -231,6 +231,9 @@ def test_execution_operator_dashboard_aggregates_runtime_state(monkeypatch) -> N
     assert payload["open_positions"][0]["symbol"] == symbol
     assert payload["recent_reconciliation_events"][0]["mismatch_type"] == "MISSING_STOP_ORDER"
     assert "portfolio_summary" in payload
+    assert payload["approval_strip_summary"]["approve_value"] in {"approval usable", "entry gate blocked", "runtime no_go"}
+    assert "align_value" in payload["approval_strip_summary"]
+    assert "act_value" in payload["approval_strip_summary"]
     assert isinstance(payload["portfolio_summary"]["blocked_reason_counts"], dict)
     if payload["portfolio_summary"]["blocked_candidate_count"] > 0:
         assert sum(payload["portfolio_summary"]["blocked_reason_counts"].values()) >= payload["portfolio_summary"]["blocked_candidate_count"]
@@ -295,6 +298,11 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
                         "recommended_risk_r": 0.5,
                         "allocated_risk_r": 0.55,
                         "outcome_bias": {"tier": "positive", "score_delta": 2.5, "applied": True},
+                        "edge_experiment_focus": {
+                            "edge_state": "watch_edge",
+                            "entry_timing_preferred_variant": "early_limit",
+                            "execution_style_preferred_variant": "passive_limit",
+                        },
                         "capital_allocator": {
                             "tier": "boost",
                             "allocation_weight": 1.1,
@@ -346,6 +354,11 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
                         "session_guidance": {"state": "preferred"},
                         "allocated_risk_r": 0.375,
                         "outcome_bias": {"tier": "negative", "score_delta": -2.5, "applied": True},
+                        "edge_experiment_focus": {
+                            "edge_state": "fragile_edge",
+                            "entry_timing_preferred_variant": "reaction_confirmed",
+                            "execution_style_preferred_variant": "market",
+                        },
                         "capital_allocator": {
                             "tier": "reduce",
                             "allocation_weight": 0.75,
@@ -535,6 +548,18 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
             },
             alert_summary={},
             execution_quality_summary=None,
+            performance_decomposition_summary={
+                "available": True,
+                "tuning_focus": [
+                    {
+                        "focus": "session",
+                        "bucket": "dead_session",
+                        "metric": "post_cost_expectancy_r",
+                        "value": -0.08,
+                        "samples": 6,
+                    }
+                ],
+            },
             execution_friction_measurement_summary={
                 "available": True,
                 "advisory_only": True,
@@ -763,10 +788,103 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
                     "profitable_rate_from_closed": 0.5,
                     "baseline_cost_profitable_rate_from_closed": 0.5,
                 },
+                "money_funnel": {
+                    "available": True,
+                    "snapshot_expected_r": {
+                        "runtime_candidates": 0.84,
+                        "accepted_candidates": 0.24,
+                        "blocked_candidates": 0.60,
+                    },
+                    "historical_expected_r": {
+                        "generated": 1.42,
+                        "submitted": 0.96,
+                        "filled": 0.61,
+                        "closed": 0.46,
+                    },
+                    "historical_realized_r": {
+                        "raw_closed": 0.38,
+                        "post_cost_closed": 0.31,
+                        "cost_drag": -0.07,
+                    },
+                    "historical_windows": {
+                        "recent": {
+                            "closed": 1,
+                            "closed_expected_r": 0.22,
+                            "raw_closed_realized_r": 0.18,
+                            "post_cost_closed_realized_r": 0.15,
+                            "true_edge_ratio": 0.6818,
+                        },
+                        "prior": {
+                            "closed": 1,
+                            "closed_expected_r": 0.24,
+                            "raw_closed_realized_r": 0.20,
+                            "post_cost_closed_realized_r": 0.16,
+                            "true_edge_ratio": 0.6667,
+                        },
+                    },
+                    "historical_gap_r": {
+                        "generated_to_submitted": 0.46,
+                        "submitted_to_filled": 0.35,
+                        "filled_to_closed": 0.15,
+                        "closed_expected_to_raw_realized": -0.08,
+                        "closed_expected_to_post_cost_realized": -0.15,
+                    },
+                    "summary": "expected_closed_r=0.4600, post_cost_closed_r=0.3100, submitted_to_filled_gap_r=0.3500",
+                },
                 "decomposition": {
                     "family": [{"key": "sweep_reversal"}],
                     "regime": [{"key": "range"}],
                     "session": [{"key": "dead_session"}],
+                    "entry_model": [{"key": "LIMIT"}],
+                    "entry_timing_variant": [
+                        {
+                            "key": "early_limit",
+                            "submitted": 1,
+                            "filled": 1,
+                            "closed": 1,
+                            "submitted_expected_r": 0.28,
+                            "filled_expected_r": 0.28,
+                            "closed_expected_r": 0.22,
+                            "baseline_adjusted_r": 0.15,
+                            "fill_rate_from_submitted": 1.0,
+                        },
+                        {
+                            "key": "reaction_confirmed",
+                            "submitted": 2,
+                            "filled": 1,
+                            "closed": 1,
+                            "submitted_expected_r": 0.68,
+                            "filled_expected_r": 0.33,
+                            "closed_expected_r": 0.24,
+                            "baseline_adjusted_r": 0.16,
+                            "fill_rate_from_submitted": 0.5,
+                        },
+                    ],
+                    "execution_mode": [{"key": "PAPER"}],
+                    "execution_style": [
+                        {
+                            "key": "passive_limit",
+                            "submitted": 1,
+                            "filled": 1,
+                            "closed": 1,
+                            "submitted_expected_r": 0.28,
+                            "filled_expected_r": 0.28,
+                            "closed_expected_r": 0.22,
+                            "baseline_adjusted_r": 0.15,
+                            "fill_rate_from_submitted": 1.0,
+                        },
+                        {
+                            "key": "market",
+                            "submitted": 2,
+                            "filled": 1,
+                            "closed": 1,
+                            "submitted_expected_r": 0.68,
+                            "filled_expected_r": 0.33,
+                            "closed_expected_r": 0.24,
+                            "baseline_adjusted_r": 0.16,
+                            "fill_rate_from_submitted": 0.5,
+                        },
+                    ],
                 },
             },
             execution_degradation_advisory_summary={
@@ -865,6 +983,45 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
                     "dominant_bottleneck": {"stage": "submit_to_fill", "reason": "execution_fill_shortfall"},
                     "family_focus": {"key": "sweep_reversal"},
                     "maturity": "usable_activity",
+                },
+                "experiment_context": {
+                    "available": True,
+                    "edge_state": "watch_edge",
+                    "true_edge_ratio": 0.67,
+                    "edge_decay_rate": -0.03,
+                    "entry_timing_preferred_variant": "early_limit",
+                    "entry_timing_recommendation_reason": "higher_post_cost_true_edge_ratio",
+                    "entry_timing_comparison_ready": True,
+                    "execution_style_preferred_variant": "passive_limit",
+                    "execution_style_recommendation_reason": "better_fill_capture_ratio",
+                    "execution_style_comparison_ready": True,
+                    "accepted_candidate_focus": {
+                        "symbol": "BTCUSDC",
+                        "status": "ACTIONABLE_ENTRY",
+                        "strategy_family": "trend_continuation",
+                        "edge_state": "watch_edge",
+                        "entry_timing_preferred_variant": "early_limit",
+                        "execution_style_preferred_variant": "passive_limit",
+                        "focus_source": "accepted_candidate_focus",
+                    },
+                    "entry_timing_target": {
+                        "symbol": "BTCUSDC",
+                        "status": "ACTIONABLE_ENTRY",
+                        "strategy_family": "trend_continuation",
+                        "edge_state": "watch_edge",
+                        "entry_timing_preferred_variant": "early_limit",
+                        "execution_style_preferred_variant": "passive_limit",
+                        "focus_source": "accepted_candidate_focus",
+                    },
+                    "execution_style_target": {
+                        "symbol": "BTCUSDC",
+                        "status": "ACTIONABLE_ENTRY",
+                        "strategy_family": "trend_continuation",
+                        "edge_state": "watch_edge",
+                        "entry_timing_preferred_variant": "early_limit",
+                        "execution_style_preferred_variant": "passive_limit",
+                        "focus_source": "accepted_candidate_focus",
+                    },
                 },
                 "advisory_only": True,
             },
@@ -1550,6 +1707,7 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
     assert signal_funnel["score_to_outcome_funnel"]["available"] is True
     assert signal_funnel["score_to_outcome_funnel"]["runtime_candidates"] == 4
     assert signal_funnel["score_to_outcome_funnel"]["submitted"] == 3
+    assert signal_funnel["score_to_outcome_funnel"]["money_funnel"]["historical_expected_r"]["closed"] == 0.46
     assert signal_funnel["score_to_outcome_funnel"]["top_family_bucket"]["key"] == "sweep_reversal"
     assert signal_funnel["execution_degradation_advisory"]["available"] is True
     assert signal_funnel["execution_degradation_advisory"]["status"] == "watch"
@@ -1570,14 +1728,49 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
     assert signal_funnel["operator_action_priority"]["priority_level"] == "urgent"
     assert signal_funnel["operator_action_priority"]["priority_source"] == "execution_degradation"
     assert signal_funnel["operator_action_priority"]["action_family"] == "execution_review"
+    assert signal_funnel["operator_action_priority"]["top_action_followup_command"] == ""
     assert signal_funnel["operator_action_priority"]["capture_context"]["dominant_bottleneck"]["reason"] == "execution_fill_shortfall"
+    assert signal_funnel["operator_action_priority"]["experiment_context"]["entry_timing_target"]["symbol"] == "BTCUSDC"
+    assert signal_funnel["operator_action_priority"]["experiment_context"]["entry_timing_target"]["followup_command"].endswith(
+        "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review"
+    )
+    assert signal_funnel["operator_action_priority"]["experiment_context"]["execution_style_target"]["symbol"] == "BTCUSDC"
+    assert signal_funnel["operator_action_priority"]["experiment_context"]["execution_style_target"]["followup_command"].endswith(
+        "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action run_execution_style_split_review"
+    )
+    assert signal_funnel["operator_action_priority"]["experiment_context"]["accepted_candidate_focus"]["symbol"] == "BTCUSDC"
     assert signal_funnel["operator_action_priority"]["advisory_only"] is True
     assert len(signal_funnel["operator_action_priority"]["next_actions"]) == 1
+    assert signal_funnel["operator_action_priority"]["next_actions"][0]["followup_command"] == ""
+    assert payload["approval_strip_summary"]["approve_value"] == "entry gate blocked"
+    assert payload["approval_strip_summary"]["align_value"] == "aligned"
+    assert payload["approval_strip_summary"]["act_value"] == "review_runtime_execution_drag_before_expansion"
+    assert payload["approval_strip_summary"]["act_priority_level"] == "urgent"
     assert signal_funnel["outcome_control_trace"]["available"] is True
     assert signal_funnel["outcome_control_trace"]["approval_penalty_tier"] == "reason_only"
     assert signal_funnel["outcome_control_trace"]["sizing_penalty_tier"] == "hard_clamp"
     assert signal_funnel["outcome_control_trace"]["portfolio_bias_tier"] == "negative"
     assert signal_funnel["outcome_control_trace"]["portfolio_bias_distribution"]["negative"] == 3
+    assert signal_funnel["outcome_attribution"]["available"] is True
+    assert signal_funnel["outcome_attribution"]["strongest_drag_source"] == "fill_capture_gap"
+    assert signal_funnel["outcome_attribution"]["fill_capture_gap_r"] == 0.35
+    assert signal_funnel["outcome_attribution"]["reason_codes"] == [
+        "closed_trades:2",
+        "strongest_drag:fill_capture_gap",
+        "friction:watch_friction",
+        "execution_axis:slippage_state",
+        "condition_focus:session",
+        "condition_bucket:dead_session",
+    ]
+    assert signal_funnel["outcome_attribution"]["source_summary"]["weakest_execution_axis"] == "slippage_state"
+    assert signal_funnel["outcome_attribution"]["source_summary"]["condition_bucket"] == "dead_session"
+    assert signal_funnel["edge_experiment_review"]["available"] is True
+    assert signal_funnel["edge_experiment_review"]["edge_state"] == "insufficient_edge_measurement"
+    assert signal_funnel["edge_experiment_review"]["entry_timing_preferred_variant"] == "early_limit"
+    assert signal_funnel["edge_experiment_review"]["execution_style_preferred_variant"] == "passive_limit"
+    assert signal_funnel["edge_evolution_rule"]["available"] is True
+    assert signal_funnel["edge_evolution_rule"]["evolution_state"] == "insufficient_sample"
+    assert signal_funnel["edge_evolution_rule"]["recommended_action"] == "keep_research_only_until_sample_matures"
     assert signal_funnel["rollout_recommendation"]["family"] == "sweep_reversal"
     assert signal_funnel["rollout_recommendation"]["recommendation"] == "research_only"
     assert signal_funnel["rollout_recommendation"]["suggested_policy_delta"]["action"] == "keep_research_only"
@@ -1683,6 +1876,11 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
     )
     assert payload["portfolio_summary"]["accepted_candidates"][0]["capital_allocator"]["tier"] == "boost"
     assert payload["portfolio_summary"]["accepted_candidates"][0]["allocated_risk_r"] == 0.55
+    assert payload["portfolio_summary"]["accepted_candidates"][0]["edge_experiment_focus"]["edge_state"] == "watch_edge"
+    assert (
+        payload["portfolio_summary"]["accepted_candidates"][0]["edge_experiment_focus"]["entry_timing_preferred_variant"]
+        == "early_limit"
+    )
     assert (
         payload["portfolio_summary"]["blocked_candidates"][0]["strategy_sizing"]["outcome_risk_adjustment"]["applied"]
         is True

@@ -9,7 +9,7 @@ from typing import Any
 from app.core.config import Settings, get_settings
 from app.db.models import AlertSubscription
 from app.db.repositories import AlertRepository, AlertRetryQueueRepository
-from app.services.deployment_contracts import validation_alert_contract
+from app.services.deployment_contracts import validation_alert_contract, validation_alert_strip_summary
 from app.services.notification_dispatcher import NotificationDispatcher
 
 
@@ -233,6 +233,7 @@ class AlertMetricsService:
             skipped = bool(delivery.get("skipped"))
             failed = not delivered and not skipped
             contract = validation_alert_contract(payload)
+            approval_strip_summary = validation_alert_strip_summary(payload)
             return {
                 "available": True,
                 "alert_id": alert.alert_id,
@@ -241,6 +242,7 @@ class AlertMetricsService:
                 "type": alert.type,
                 "triggered_ts": alert.triggered_ts.isoformat(),
                 "status": str(payload.get("status", "") or "").upper(),
+                "approval_strip_summary": approval_strip_summary,
                 **contract,
                 "delivery_reason": str(delivery.get("reason", "") or ""),
                 "delivery_channel": str(delivery.get("channel", "") or alert.channel),
@@ -257,6 +259,7 @@ class AlertMetricsService:
             "type": None,
             "triggered_ts": None,
             "status": "",
+            "approval_strip_summary": {},
             "deployment_go_no_go": "",
             "deployment_code": "",
             "deployment_message": "",
@@ -325,11 +328,19 @@ class AlertMetricsService:
         )
 
         latest_validation_alert = dict(payload.get("latest_validation_alert") or {})
+        latest_alert_strip = dict(latest_validation_alert.get("approval_strip_summary") or {})
         lines.extend(
             [
                 "",
                 "## Latest Validation Alert",
                 f"- available: {latest_validation_alert.get('available', False)}",
+                (
+                    "- approval_strip: "
+                    f"approve={latest_alert_strip.get('approve_value', '')} | "
+                    f"align={latest_alert_strip.get('align_value', '')} | "
+                    f"act={latest_alert_strip.get('act_value', '')} | "
+                    f"priority={latest_alert_strip.get('act_priority_level', '')}"
+                ),
                 f"- deployment_go_no_go: {latest_validation_alert.get('deployment_go_no_go', '')}",
                 f"- deployment_code: {latest_validation_alert.get('deployment_code', '')}",
                 f"- deployment_message: {latest_validation_alert.get('deployment_message', '')}",

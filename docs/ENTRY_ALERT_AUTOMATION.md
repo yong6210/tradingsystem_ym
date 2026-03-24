@@ -6,6 +6,8 @@
 - `BLOCKED_SETUP`
 - `RESEARCH_ONLY_SETUP`
 
+The alert headline now starts with the same `approval_strip: approve -> align -> act` line exposed by `/portfolio/budget`, the `contract_trace` line repeats the same `approve / align / act` contract before appending raw runtime/playbook fields for debugging, and an `edge_experiment` line carries the current split-test focus (`edge_state`, preferred entry timing, preferred execution style). Candidate rows now also append row-level `edge=` and `split=` hints when the portfolio surface has symbol-specific experiment focus.
+
 Use the wrapper below so runtime defaults, state file path, and the latest run artifact stay in one place.
 The wrapper prefers `/Users/yumin/Documents/trading/.venv/bin/python` and falls back to `python3` if the virtualenv binary is not present.
 

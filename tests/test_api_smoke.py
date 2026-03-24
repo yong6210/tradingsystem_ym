@@ -70,6 +70,8 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert subscribe_payload["approval_playbook_go_no_go"] == "MANUAL_REVIEW"
     assert subscribe_payload["approval_playbook_code"] == "manual_review_subscribe_contract"
     assert subscribe_payload["approval_playbook_action"] == "review_subscribed_alert_contract"
+    assert subscribe_payload["approval_strip_summary"]["approve_value"] == "manual review first"
+    assert subscribe_payload["approval_strip_summary"]["act_value"] == "review_subscribed_alert_contract"
 
     plans = client.get("/plans/top?symbol=BTCUSDC&tf=5m&limit=5")
     assert plans.status_code == 200
@@ -171,6 +173,10 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "open_positions" in execution_dashboard_payload
     assert "recent_reconciliation_summary" in execution_dashboard_payload
     assert "portfolio_summary" in execution_dashboard_payload
+    assert "approval_strip_summary" in execution_dashboard_payload
+    assert "approve_value" in execution_dashboard_payload["approval_strip_summary"]
+    assert "align_value" in execution_dashboard_payload["approval_strip_summary"]
+    assert "act_value" in execution_dashboard_payload["approval_strip_summary"]
     assert "signal_funnel" in execution_dashboard_payload
     assert "family_pass_rates" in execution_dashboard_payload["signal_funnel"]
     assert "regime_pass_rates" in execution_dashboard_payload["signal_funnel"]
@@ -195,8 +201,11 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "operator_action_priority" in execution_dashboard_payload["signal_funnel"]
     assert "priority_source" in execution_dashboard_payload["signal_funnel"]["operator_action_priority"]
     assert "action_family" in execution_dashboard_payload["signal_funnel"]["operator_action_priority"]
+    assert "top_action_followup_command" in execution_dashboard_payload["signal_funnel"]["operator_action_priority"]
     assert "capture_context" in execution_dashboard_payload["signal_funnel"]["operator_action_priority"]
+    assert "experiment_context" in execution_dashboard_payload["signal_funnel"]["operator_action_priority"]
     assert "outcome_control_trace" in execution_dashboard_payload["signal_funnel"]
+    assert "edge_experiment_review" in execution_dashboard_payload["signal_funnel"]
     assert "rollout_recommendation" in execution_dashboard_payload["signal_funnel"]
     assert "strategy_lifecycle" in execution_dashboard_payload["signal_funnel"]
     assert "promotion_governance" in execution_dashboard_payload["signal_funnel"]
@@ -242,17 +251,38 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert execution_operator_ui.status_code == 200
     assert execution_operator_ui.headers["content-type"].startswith("text/html")
     assert "실행 운영 화면" in execution_operator_ui.text
-    assert "Decision Summary" in execution_operator_ui.text
-    assert "Approval Divergence" in execution_operator_ui.text
+    assert "5-Second Operator Kernel" in execution_operator_ui.text
+    assert "operator가 5초 안에 money funnel -> outcome attribution -> outcome control -> rollout 순서로 현재 돈 누수와 승인 방향을 읽도록 압축한 kernel view입니다." in execution_operator_ui.text
+    assert "Kernel Verdict" in execution_operator_ui.text
+    assert "Checklist Trace" in execution_operator_ui.text
+    assert "Approval Strip" in execution_operator_ui.text
     assert "Top Opportunity" in execution_operator_ui.text
     assert "Top Blocker" in execution_operator_ui.text
     assert "Current Operating State" in execution_operator_ui.text
-    assert "상단 operator surface는 Decision Summary 안의 Top Operator Action을 먼저 확인하고, 이어서 Top Opportunity / Top Blocker, Current Operating State 순서로 읽은 뒤" in execution_operator_ui.text
+    assert "상단 operator surface는 5-Second Operator Kernel을 먼저 보고, 이어서 Approval Strip, Top Opportunity / Top Blocker, Current Operating State 순서로 읽은 뒤" in execution_operator_ui.text
     assert "대표 플랜과 상세 운영 섹션으로 내려가면 됩니다." in execution_operator_ui.text
+    assert "kernel verdict가 hold/manual_review/watch면 Top Opportunity / Portfolio Candidate surface는 context-only로 읽습니다." in execution_operator_ui.text
+    assert "Deferred Research / Promotion Stack" in execution_operator_ui.text
+    assert "kernel verdict가 hold/manual_review/watch라서 promotion/research stack을 기본 접힘 상태로 둡니다." in execution_operator_ui.text
+    assert "id=\"top-opportunity-panel\"" in execution_operator_ui.text
+    assert "kernel-muted-surface" in execution_operator_ui.text
+    assert "kernel-guard-note" in execution_operator_ui.text
+    assert "opportunity/candidate surface는 context-only로 읽고 approval/alignment/checklist를 먼저 확인합니다." in execution_operator_ui.text
+    assert "opportunity/candidate surface를 정상 우선순위로 읽되 money funnel과 approval alignment를 먼저 확인한 뒤 drilldown으로 내려갑니다." in execution_operator_ui.text
     assert "Family Execution Advisory" in execution_operator_ui.text
     assert "Family Advisory Coverage" in execution_operator_ui.text
     assert "Top Operator Action" in execution_operator_ui.text
     assert "Next Actions" in execution_operator_ui.text
+    assert "5-Second Operator Kernel 바로 아래에서 approve -> align -> act 순서로 신규 진입 허용, surface alignment, server-side Top Operator Action을 한 strip으로 압축합니다. policy mutation이 아니라 reading priority입니다." in execution_operator_ui.text
+    assert "1. Approve" in execution_operator_ui.text
+    assert "2. Align" in execution_operator_ui.text
+    assert "3. Act / Top Operator Action" in execution_operator_ui.text
+    assert "Approval Strip Detail" in execution_operator_ui.text
+    assert "Approval Strip Next Move" in execution_operator_ui.text
+    assert "Approval Strip와 Top Opportunity / Top Blocker 다음 순서에서, portfolio/execution/family/mode/research context를 follow-up으로 읽습니다. strong kernel verdict면 expanded operating context는 접힌 상태로 둡니다." in execution_operator_ui.text
+    assert "Expanded Operating Context" in execution_operator_ui.text
+    assert "kernel verdict가 monitor라서 expanded operating context를 기본 펼침 상태로 둡니다." in execution_operator_ui.text
+    assert "kernel verdict가 hold/manual_review/watch라서 expanded operating context는 approve/align/act 확인 전까지 기본 접힘 상태로 둡니다." in execution_operator_ui.text
     assert "A/B Strategy Posture" in execution_operator_ui.text
     assert "A remains anchor인지, B continuation이 research-only인지 guarded activation인지, 현재 mix가 여전히 A 집중인지까지 한 번에 읽습니다." in execution_operator_ui.text
     assert "현재 A/B mix" in execution_operator_ui.text
@@ -267,10 +297,16 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "Cleared Guardrails" in execution_operator_ui.text
     assert "Validation / Checklist Review Stack" in execution_operator_ui.text
     assert "validation top-level summary와 checklist item status를 같은 표로 압축해서, raw JSON 없이 operator review stack을 읽습니다." in execution_operator_ui.text
-    assert "Validation GO/NO_GO" in execution_operator_ui.text
-    assert "Checklist GO/NO_GO" in execution_operator_ui.text
+    assert "Validation Approve" in execution_operator_ui.text
+    assert "Validation Align" in execution_operator_ui.text
+    assert "Validation Act" in execution_operator_ui.text
+    assert "Checklist Approve" in execution_operator_ui.text
+    assert "Checklist Align" in execution_operator_ui.text
+    assert "Checklist Act" in execution_operator_ui.text
     assert "Validation Case Inspector" in execution_operator_ui.text
-    assert "현재 symbol validation case를 outcome control, rollout, lifecycle, A/B posture, condition split, capture, allocator 기준으로 다시 압축해 operator가 한 카드로 읽습니다." in execution_operator_ui.text
+    assert "현재 symbol validation case를 money funnel, outcome attribution, outcome control, rollout, lifecycle, A/B posture, condition split, capture, allocator 기준으로 다시 압축해 operator가 한 카드로 읽습니다." in execution_operator_ui.text
+    assert "Edge Experiment" in execution_operator_ui.text
+    assert "Edge Split Focus" in execution_operator_ui.text
     assert "Top Condition Split" in execution_operator_ui.text
     assert "Opportunity Capture" in execution_operator_ui.text
     assert "Next Validation Move" in execution_operator_ui.text
@@ -280,7 +316,8 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "Runtime Next Move" in execution_operator_ui.text
     assert "Quality Drift Focus" in execution_operator_ui.text
     assert "Signal Funnel Inspector" in execution_operator_ui.text
-    assert "현재 hard gate, softening 후보, rollout block, family/regime/session bottleneck을 홈 섹션에서 한 번에 읽도록 압축합니다." in execution_operator_ui.text
+    assert "현재 hard gate, softening 후보, rollout block, family/regime/session bottleneck에 money funnel과 outcome attribution까지 묶어서 홈 섹션에서 한 번에 읽도록 압축합니다." in execution_operator_ui.text
+    assert "Edge Experiment" in execution_operator_ui.text
     assert "Top Family Bottleneck" in execution_operator_ui.text
     assert "Top Regime Bottleneck" in execution_operator_ui.text
     assert "Top Session Bottleneck" in execution_operator_ui.text
@@ -321,12 +358,13 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "Source Flow" in execution_operator_ui.text
     assert "Freshness Note" in execution_operator_ui.text
     assert "Portfolio Candidate Drilldown" in execution_operator_ui.text
-    assert "accepted / blocked 후보를 raw JSON 없이 읽기 위해, cluster, allocated risk, outcome bias, capital allocator, A/B posture를 같은 표로 보여줍니다." in execution_operator_ui.text
+    assert "accepted / blocked 후보를 raw JSON 없이 읽기 위해, cluster, allocated risk, outcome bias, edge focus, capital allocator, A/B posture를 같은 표로 보여줍니다." in execution_operator_ui.text
     assert "Portfolio Candidate Inspector" in execution_operator_ui.text
-    assert "대표 accepted row 1개와 blocked row 1개를 카드로 다시 압축해, risk, allocator, A/B posture, session, reaction evidence를 바로 읽습니다." in execution_operator_ui.text
+    assert "대표 accepted row 1개와 blocked row 1개를 카드로 다시 압축해, risk, allocator, A/B posture, edge focus, session, reaction evidence를 바로 읽습니다." in execution_operator_ui.text
     assert "Representative Accepted Candidate" in execution_operator_ui.text
     assert "Representative Blocked Candidate" in execution_operator_ui.text
     assert "Why This Row Matters" in execution_operator_ui.text
+    assert "Edge Focus" in execution_operator_ui.text
     assert "Checklist Evidence Drilldown" in execution_operator_ui.text
     assert "WARN / MANUAL / FAIL 체크를 evidence 중심으로 다시 펼쳐서, raw checklist payload 없이 operator review 포인트를 읽습니다." in execution_operator_ui.text
     assert "Report Navigation" in execution_operator_ui.text
@@ -334,9 +372,8 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "Validation Report File" in execution_operator_ui.text
     assert "Checklist Report File" in execution_operator_ui.text
     assert "Execution Quality Report File" in execution_operator_ui.text
-    assert "Decision Summary 안의 Top Operator Action을 먼저 확인하고, 이어서 Top Opportunity / Top Blocker, Current Operating State 순서로 읽은 뒤 대표 플랜과 현재 진입 가이드를 봅니다." in execution_operator_ui.text
-    assert "지금 신규 진입 가능 여부와 Decision Summary 안의 server-side Top Operator Action을 먼저 보여줍니다. policy mutation이 아니라 reading priority입니다." in execution_operator_ui.text
-    assert "Top Operator Action과 Top Opportunity / Top Blocker 다음 순서에서, 포트폴리오, execution, family advisory, mode, research 기준의 server-side 현재 운영 해석과 next actions를 요약합니다." in execution_operator_ui.text
+    assert "5-Second Operator Kernel에서 money funnel, outcome attribution, outcome control, rollout 순서를 먼저 확인하고, 이어서 Approval Strip, Top Opportunity / Top Blocker, Current Operating State 순서로 읽은 뒤 대표 플랜과 현재 진입 가이드를 봅니다. kernel verdict가 hold/manual_review/watch면 Top Opportunity / Portfolio Candidate surface는 context-only입니다." in execution_operator_ui.text
+    assert "Approval Strip Carryover" in execution_operator_ui.text
     assert "리포트 기준 최근 일수" in execution_operator_ui.text
     assert "기간 필터 제외" in execution_operator_ui.text
     assert "게이트 유형별 차단" in execution_operator_ui.text
@@ -455,6 +492,11 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "playbook_code" in portfolio_payload
     assert "playbook_action" in portfolio_payload
     assert "playbook_message" in portfolio_payload
+    assert "approval_strip_summary" in portfolio_payload
+    assert "approve_value" in portfolio_payload["approval_strip_summary"]
+    assert "align_value" in portfolio_payload["approval_strip_summary"]
+    assert "act_value" in portfolio_payload["approval_strip_summary"]
+    assert "edge_experiment_review" in portfolio_payload
     assert "current_exposure" in portfolio_payload
     assert "strategy_mode" in portfolio_payload
     assert "operating_lock" in portfolio_payload
@@ -468,6 +510,19 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "multi_strategy_ab_summary" in portfolio_payload
     assert "strategy_cluster_balance_summary" in portfolio_payload
     assert "capital_allocator_summary" in portfolio_payload
+    focus_symbol = (portfolio_payload.get("edge_experiment_review") or {}).get("focus_symbol")
+    if focus_symbol:
+        focus_rows = [
+            row
+            for row in [
+                *portfolio_payload["accepted_candidates"],
+                *portfolio_payload["blocked_candidates"],
+                *portfolio_payload["alpha_research_candidates"],
+            ]
+            if row.get("symbol") == focus_symbol
+        ]
+        if focus_rows:
+            assert "edge_experiment_focus" in focus_rows[0]
     if portfolio_payload["accepted_candidates"]:
         assert "strategy_family" in portfolio_payload["accepted_candidates"][0]
         assert "strategy_cluster" in portfolio_payload["accepted_candidates"][0]
@@ -541,6 +596,8 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert alert_payload["approval_playbook_go_no_go"] == "MANUAL_REVIEW"
     assert alert_payload["approval_playbook_code"] == "manual_review_test_gate"
     assert alert_payload["approval_playbook_action"] == "run_manual_validation_alert_drill"
+    assert alert_payload["approval_strip_summary"]["approve_value"] == "manual review first"
+    assert alert_payload["approval_strip_summary"]["act_value"] == "run_manual_validation_alert_drill"
     assert alert_payload["delivery"]["skipped"] is True
     assert "retry_queued" in alert_payload
 
@@ -554,6 +611,7 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
         assert "approval_playbook_go_no_go" in alert_metrics_payload["latest_validation_alert"]
         assert "approval_playbook_code" in alert_metrics_payload["latest_validation_alert"]
         assert "approval_playbook_action" in alert_metrics_payload["latest_validation_alert"]
+        assert "approval_strip_summary" in alert_metrics_payload["latest_validation_alert"]
     assert "retry_queue" in alert_metrics_payload
 
     alert_retry_status = client.get("/internal/alerts/retry-queue/status")
@@ -622,6 +680,10 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "playbook_action" in rp
     assert "playbook_message" in rp
     assert "deployment_approval_summary" in rp["validation_report"]
+    assert "approval_strip_summary" in rp["validation_report"]
+    assert "approve_value" in rp["validation_report"]["approval_strip_summary"]
+    assert "align_value" in rp["validation_report"]["approval_strip_summary"]
+    assert "act_value" in rp["validation_report"]["approval_strip_summary"]
     assert "topline_status" in rp["validation_report"]["deployment_approval_summary"]
     assert "topline_message" in rp["validation_report"]["deployment_approval_summary"]
     assert "topline_summary_line" in rp["validation_report"]["deployment_approval_summary"]
@@ -694,9 +756,13 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "operator_action_priority_summary" in rp["validation_report"]
     assert "priority_source" in rp["validation_report"]["operator_action_priority_summary"]
     assert "action_family" in rp["validation_report"]["operator_action_priority_summary"]
+    assert "top_action_followup_command" in rp["validation_report"]["operator_action_priority_summary"]
     assert "capture_context" in rp["validation_report"]["operator_action_priority_summary"]
+    assert "experiment_context" in rp["validation_report"]["operator_action_priority_summary"]
     assert "outcome_control_trace_available" in rp["validation_report"]
     assert "outcome_control_trace_summary" in rp["validation_report"]
+    assert "edge_experiment_review_available" in rp["validation_report"]
+    assert "edge_experiment_review_summary" in rp["validation_report"]
     assert "rollout_recommendation_available" in rp["validation_report"]
     assert "rollout_recommendation_summary" in rp["validation_report"]
     assert "strategy_lifecycle_available" in rp["validation_report"]
@@ -912,6 +978,10 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "playbook_code" in ops_payload
     assert "playbook_action" in ops_payload
     assert "playbook_message" in ops_payload
+    assert "approval_strip_summary" in ops_payload
+    assert "approve_value" in ops_payload["approval_strip_summary"]
+    assert "align_value" in ops_payload["approval_strip_summary"]
+    assert "act_value" in ops_payload["approval_strip_summary"]
     assert "checks" in ops_payload
     portfolio_item = next((item for item in ops_payload["checks"] if item["item_id"] == "portfolio_headroom"), None)
     if portfolio_item is not None:

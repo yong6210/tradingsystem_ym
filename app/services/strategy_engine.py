@@ -57,7 +57,9 @@ from app.services.deployment_contracts import (
     alert_contract_defaults,
     approval_summary_passthrough,
     validation_alert_contract,
+    validation_alert_strip_summary,
 )
+from app.services.edge_evolution_rule import build_edge_evolution_rule, summarize_edge_evolution_rule
 from app.services.execution_quality import ExecutionQualityService
 from app.services.execution_friction_measurement import ExecutionFrictionMeasurementService
 from app.services.execution_operator_dashboard import ExecutionOperatorDashboardService
@@ -1443,41 +1445,6 @@ class StrategyEngine:
                 ),
                 promotion_watchlist=dict(alpha_research_pipeline_summary.get("promotion_watchlist") or {}),
             )
-        operator_action_priority_summary = self.operator_action_priority.generate(
-            dashboard={
-                "playbook_action": portfolio_summary.get("playbook_action", ""),
-                "playbook_message": portfolio_summary.get("playbook_message", ""),
-                "new_entries_allowed": bool(safety_state.get("new_entry_allowed", False)),
-                "blocking_reason_code": str(safety_state.get("blocking_reason_code", "")),
-                "signal_funnel": {
-                    "execution_degradation_advisory": execution_degradation_advisory_summary,
-                    "family_execution_degradation_advisory": family_execution_degradation_advisory_summary,
-                    "mode_advisory": mode_advisory_summary,
-                    "alpha_research_recommended_action": (
-                        dict(alpha_research_pipeline_summary.get("recommended_action_summary") or {})
-                        if alpha_research_pipeline_summary
-                        else {}
-                    ),
-                    "alpha_research_softening_review": (
-                        dict(alpha_research_pipeline_summary.get("softening_candidate_review") or {})
-                        if alpha_research_pipeline_summary
-                        else {}
-                    ),
-                    "alpha_research_promotion_watchlist": (
-                        dict(alpha_research_pipeline_summary.get("promotion_watchlist") or {})
-                        if alpha_research_pipeline_summary
-                        else {}
-                    ),
-                    "opportunity_capture": self._opportunity_capture_summary(
-                        score_to_outcome_funnel_summary=score_to_outcome_funnel_summary,
-                        portfolio_budget=portfolio_summary,
-                        execution_quality_summary=execution_quality_summary,
-                    ),
-                },
-            },
-            checklist=None,
-            validation=None,
-        )
         rollout_recommendation_summary = self._rollout_recommendation_summary(
             score_to_outcome_funnel_summary=score_to_outcome_funnel_summary,
             execution_degradation_advisory_summary=execution_degradation_advisory_summary,
@@ -1511,6 +1478,48 @@ class StrategyEngine:
             score_to_outcome_funnel_summary=score_to_outcome_funnel_summary,
             portfolio_budget=portfolio_summary,
             execution_quality_summary=execution_quality_summary,
+        )
+        edge_evolution_rule_summary = summarize_edge_evolution_rule(
+            build_edge_evolution_rule(
+                edge_experiment_review=summarize_edge_experiment_review(
+                    build_edge_experiment_review(score_to_outcome_funnel=score_to_outcome_funnel_summary)
+                ),
+                rollout_recommendation=rollout_recommendation_summary,
+                strategy_lifecycle=strategy_lifecycle_summary,
+                kill_condition_automation=kill_condition_automation_summary,
+            )
+        )
+        operator_action_priority_summary = self.operator_action_priority.generate(
+            dashboard={
+                "playbook_action": portfolio_summary.get("playbook_action", ""),
+                "playbook_message": portfolio_summary.get("playbook_message", ""),
+                "new_entries_allowed": bool(safety_state.get("new_entry_allowed", False)),
+                "blocking_reason_code": str(safety_state.get("blocking_reason_code", "")),
+                "signal_funnel": {
+                    "execution_degradation_advisory": execution_degradation_advisory_summary,
+                    "family_execution_degradation_advisory": family_execution_degradation_advisory_summary,
+                    "mode_advisory": mode_advisory_summary,
+                    "edge_evolution_rule": edge_evolution_rule_summary,
+                    "alpha_research_recommended_action": (
+                        dict(alpha_research_pipeline_summary.get("recommended_action_summary") or {})
+                        if alpha_research_pipeline_summary
+                        else {}
+                    ),
+                    "alpha_research_softening_review": (
+                        dict(alpha_research_pipeline_summary.get("softening_candidate_review") or {})
+                        if alpha_research_pipeline_summary
+                        else {}
+                    ),
+                    "alpha_research_promotion_watchlist": (
+                        dict(alpha_research_pipeline_summary.get("promotion_watchlist") or {})
+                        if alpha_research_pipeline_summary
+                        else {}
+                    ),
+                    "opportunity_capture": opportunity_capture_summary,
+                },
+            },
+            checklist=None,
+            validation=None,
         )
         outcome_bucket_granularity_summary = self._outcome_bucket_granularity_summary(
             score_to_outcome_funnel_summary=score_to_outcome_funnel_summary,
@@ -1673,6 +1682,7 @@ class StrategyEngine:
             promotion_reopen_queue_summary=promotion_reopen_queue_summary,
             promotion_decision_brief_summary=promotion_decision_brief_summary,
             auto_promotion_rollout_execution_summary=auto_promotion_rollout_execution_summary,
+            performance_decomposition_summary=performance_decomposition_summary,
             b_continuation_activation_summary=b_continuation_activation_summary,
             b_continuation_edge_validation_summary=b_continuation_edge_validation_summary,
             strategy_cluster_balance_summary=strategy_cluster_balance_summary,
@@ -3525,6 +3535,7 @@ class StrategyEngine:
             return None
         approval_contract = approval_summary_passthrough(report.get("deployment_approval_summary"))
         alert_contract = alert_contract_defaults(approval_contract)
+        approval_strip_summary = validation_alert_strip_summary({**approval_contract})
 
         alert_type = "validation_warn" if status == "WARN" else "validation_fail"
         event_type = VALIDATION_WARN if status == "WARN" else VALIDATION_FAIL
@@ -3542,6 +3553,7 @@ class StrategyEngine:
                 "type": alert_type,
                 "status": status,
                 "cooldown_seconds": self.settings.validation_alert_cooldown_seconds,
+                "approval_strip_summary": approval_strip_summary,
                 **alert_contract,
             }
 
@@ -3552,6 +3564,7 @@ class StrategyEngine:
             "status": status,
             "report_path": report.get("path"),
             "generated_at": report.get("generated_at"),
+            "approval_strip_summary": approval_strip_summary,
             **alert_contract,
         }
         delivery = self.notification_dispatcher.dispatch(
@@ -3585,6 +3598,7 @@ class StrategyEngine:
                 "status": status,
                 "report_path": report.get("path"),
                 "generated_at": report.get("generated_at"),
+                "approval_strip_summary": approval_strip_summary,
                 **alert_contract,
                 "dedupe_key": f"{event_type}:{symbol}:{version}:{now.strftime('%Y%m%d%H')}",
             },
@@ -3594,6 +3608,7 @@ class StrategyEngine:
             "type": alert_type,
             "status": status,
             "channel": self.settings.validation_alert_channel,
+            "approval_strip_summary": approval_strip_summary,
             **alert_contract,
             "delivery": delivery,
             "retry_queued": len(retry_tasks),
@@ -3617,6 +3632,17 @@ class StrategyEngine:
             "subscription_status": "active",
             "subscription_created_at": datetime.now(timezone.utc).isoformat(),
         }
+        if any(
+            normalized_payload.get(key)
+            for key in (
+                "deployment_go_no_go",
+                "approval_playbook_go_no_go",
+                "playbook_go_no_go",
+                "approval_playbook_action",
+                "playbook_action",
+            )
+        ):
+            normalized_payload["approval_strip_summary"] = validation_alert_strip_summary(normalized_payload)
         alert = AlertSubscription(
             alert_id=self._alert_id(prefix="alert", symbol=symbol),
             plan_id=plan_id,
@@ -3662,9 +3688,11 @@ class StrategyEngine:
 
     def send_test_alert(self, *, channel: str, symbol: str, message: str, payload: dict) -> dict:
         now = datetime.now(timezone.utc)
+        approval_strip_summary = validation_alert_strip_summary(payload)
         base_payload = {
             "symbol": symbol,
             "message": message,
+            "approval_strip_summary": approval_strip_summary,
             **payload,
         }
         alert_contract = validation_alert_contract(base_payload)
@@ -3696,6 +3724,7 @@ class StrategyEngine:
             "alert_id": alert.alert_id,
             "channel": channel,
             "symbol": symbol,
+            "approval_strip_summary": approval_strip_summary,
             **alert_contract,
             "delivery": delivery,
             "retry_queued": len(retry_tasks),

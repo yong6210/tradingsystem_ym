@@ -9,7 +9,7 @@ from typing import Any, ClassVar
 import httpx
 
 from app.core.config import Settings, get_settings
-from app.services.deployment_contracts import validation_alert_contract
+from app.services.deployment_contracts import validation_alert_contract, validation_alert_strip_summary
 
 
 @dataclass(slots=True)
@@ -374,28 +374,57 @@ class NotificationDispatcher:
         generated_at = str(payload.get("generated_at") or "")
         report_path = str(payload.get("report_path") or "")
         contract = validation_alert_contract(payload)
+        approval_strip = validation_alert_strip_summary(payload)
         deployment_go_no_go = contract["deployment_go_no_go"].strip()
         deployment_code = contract["deployment_code"].strip()
+        approval_playbook_go_no_go = str(contract["approval_playbook_go_no_go"] or "").strip()
+        approval_playbook_code = str(contract["approval_playbook_code"] or "").strip()
         approval_playbook_action = str(
             contract["approval_playbook_action"] or payload.get("playbook_action") or ""
         ).strip()
         approval_topline_summary_line = str(
             contract["approval_topline_summary_line"] or payload.get("topline_summary_line") or ""
         ).strip()
+        has_approval_contract = any(
+            (
+                bool(payload.get("approval_strip_summary")),
+                bool(deployment_go_no_go),
+                bool(deployment_code),
+                bool(approval_playbook_go_no_go),
+                bool(approval_playbook_code),
+                bool(approval_playbook_action),
+                bool(approval_topline_summary_line),
+            )
+        )
 
         lines = [f"[{alert_type.upper()}] {symbol}"]
         if custom_message:
             lines.append(custom_message)
         if status:
             lines.append(f"status={status}")
-        if deployment_go_no_go and deployment_code:
-            lines.append(f"deployment={deployment_go_no_go}/{deployment_code}")
-        elif deployment_go_no_go:
-            lines.append(f"deployment={deployment_go_no_go}")
-        if approval_playbook_action:
-            lines.append(f"playbook_action={approval_playbook_action}")
+        if has_approval_contract:
+            lines.append(
+                "approval_strip: "
+                f"approve={approval_strip.get('approve_value', 'n/a')} | "
+                f"align={approval_strip.get('align_value', 'n/a')} | "
+                f"act={approval_strip.get('act_value', 'review_validation_alert_contract')} | "
+                f"priority={approval_strip.get('act_priority_level', 'monitor')}"
+            )
         if approval_topline_summary_line:
             lines.append(f"approval={approval_topline_summary_line}")
+        trace_parts: list[str] = []
+        if deployment_go_no_go and deployment_code:
+            trace_parts.append(f"deployment={deployment_go_no_go}/{deployment_code}")
+        elif deployment_go_no_go:
+            trace_parts.append(f"deployment={deployment_go_no_go}")
+        if approval_playbook_go_no_go and approval_playbook_code:
+            trace_parts.append(f"playbook={approval_playbook_go_no_go}/{approval_playbook_code}")
+        elif approval_playbook_go_no_go:
+            trace_parts.append(f"playbook={approval_playbook_go_no_go}")
+        if approval_playbook_action:
+            trace_parts.append(f"playbook_action={approval_playbook_action}")
+        if trace_parts:
+            lines.append("contract_trace: " + " | ".join(trace_parts))
         if version:
             lines.append(f"version={version}")
         if generated_at:
@@ -403,4 +432,9 @@ class NotificationDispatcher:
         if report_path:
             lines.append(f"report={report_path}")
 
-        return " | ".join(lines)
+        use_multiline = (
+            alert_type.startswith("validation_")
+            or alert_type == "test"
+            or has_approval_contract
+        )
+        return "\n".join(lines) if use_multiline else " | ".join(lines)
