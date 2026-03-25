@@ -74,7 +74,13 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "Edge Evolution" in html
     assert "Review Followup Ledger" in html
     assert "Edge Split Focus" in html
+    assert "Edge Proof Posture" in html
+    assert "loss_driven_rewrite_allowed" in html
+    assert "rollout_expansion_allowed" in html
+    assert "signal_density_control_review_allowed" in html
+    assert "multi_strategy_expansion_review_allowed" in html
     assert "Recent Review Packet" in html
+    assert "Operating Funnel KPIs" in html
     assert "Expected vs Realized R" in html
     assert "Money Leak Focus" in html
     assert "Top Condition Split" in html

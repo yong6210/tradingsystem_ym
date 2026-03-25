@@ -192,6 +192,20 @@ def _review_target_line(label: str, target: dict[str, Any] | None) -> str:
     return line
 
 
+def _edge_experiment_focus_text(funnel: dict[str, Any]) -> str:
+    return (
+        f"edge_state={funnel.get('edge_state')} "
+        f"| proof={funnel.get('edge_proof_state', 'unknown')}/{funnel.get('edge_claim_state', 'unknown')} "
+        f"| closes={int(funnel.get('edge_closed_trade_count', 0) or 0)}/{int(funnel.get('edge_proof_goal_closed_trades', 0) or 0)} "
+        f"| remaining={int(funnel.get('remaining_closed_trades_to_edge_proof_goal', 0) or 0)} "
+        f"| regime={funnel.get('edge_regime_dependency_state', 'not_available')} "
+        f"| entry_timing={funnel.get('entry_timing_focus')} "
+        f"| execution_style={funnel.get('execution_style_focus')} "
+        f"| true_edge={float(funnel.get('edge_true_edge_ratio', 0.0) or 0.0):.4f} "
+        f"| decay={float(funnel.get('edge_decay_rate', 0.0) or 0.0):.4f}"
+    )
+
+
 def _alert_state(brief: dict[str, Any]) -> dict[str, Any]:
     snapshot = brief.get("snapshot") or {}
     approval_strip = snapshot.get("approval_strip") or {}
@@ -243,6 +257,16 @@ def _alert_state(brief: dict[str, Any]) -> dict[str, Any]:
         "approval_strip_priority": str(approval_strip.get("act_priority_level") or ""),
         "research_action": str(funnel.get("research_action") or ""),
         "edge_state": str(funnel.get("edge_state") or ""),
+        "edge_proof_state": str(funnel.get("edge_proof_state") or ""),
+        "edge_claim_state": str(funnel.get("edge_claim_state") or ""),
+        "edge_proof_goal_closed_trades": int(funnel.get("edge_proof_goal_closed_trades", 0) or 0),
+        "remaining_closed_trades_to_edge_proof_goal": int(
+            funnel.get("remaining_closed_trades_to_edge_proof_goal", 0) or 0
+        ),
+        "edge_closed_trade_count": int(funnel.get("edge_closed_trade_count", 0) or 0),
+        "edge_regime_dependency_state": str(funnel.get("edge_regime_dependency_state") or ""),
+        "edge_true_edge_ratio": float(funnel.get("edge_true_edge_ratio", 0.0) or 0.0),
+        "edge_decay_rate": float(funnel.get("edge_decay_rate", 0.0) or 0.0),
         "edge_evolution_state": str(funnel.get("edge_evolution_state") or ""),
         "edge_evolution_action": str(funnel.get("edge_evolution_action") or ""),
         "edge_evolution_bias": str(funnel.get("edge_evolution_bias") or ""),
@@ -311,6 +335,14 @@ def _changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
         "approval_strip_priority",
         "research_action",
         "edge_state",
+        "edge_proof_state",
+        "edge_claim_state",
+        "edge_proof_goal_closed_trades",
+        "remaining_closed_trades_to_edge_proof_goal",
+        "edge_closed_trade_count",
+        "edge_regime_dependency_state",
+        "edge_true_edge_ratio",
+        "edge_decay_rate",
         "edge_evolution_state",
         "edge_evolution_action",
         "edge_evolution_bias",
@@ -390,11 +422,9 @@ def _render_shift_start_message(brief: dict[str, Any]) -> str:
         f"- top_operator_action: {dashboard.get('top_operator_action')}{top_action_suffix}",
         (
             f"- research/funnel: action={funnel.get('research_action')} "
-            f"| edge_state={funnel.get('edge_state')} "
+            f"| {_edge_experiment_focus_text(funnel)} "
             f"| edge_evolution={funnel.get('edge_evolution_state')}:{funnel.get('edge_evolution_action')}:{funnel.get('edge_evolution_bias')} "
             f"| review_ledger={review_followup.get('last_status')}:{review_followup.get('last_action')}:{review_followup.get('recent_entry_count')} "
-            f"| entry_timing={funnel.get('entry_timing_focus')} "
-            f"| execution_style={funnel.get('execution_style_focus')} "
             f"| family_bottleneck={funnel.get('top_family_bottleneck')} "
             f"| session_bottleneck={funnel.get('top_session_bottleneck')}"
         ),
@@ -455,11 +485,9 @@ def _render_shift_end_message(brief: dict[str, Any]) -> str:
         f"- final_top_action: {dashboard.get('top_operator_action')}{top_action_suffix}",
         (
             f"- carryover_focus: research={funnel.get('research_action')} "
-            f"| edge_state={funnel.get('edge_state')} "
+            f"| {_edge_experiment_focus_text(funnel)} "
             f"| edge_evolution={funnel.get('edge_evolution_state')}:{funnel.get('edge_evolution_action')}:{funnel.get('edge_evolution_bias')} "
             f"| review_ledger={review_followup.get('last_status')}:{review_followup.get('last_action')}:{review_followup.get('recent_entry_count')} "
-            f"| entry_timing={funnel.get('entry_timing_focus')} "
-            f"| execution_style={funnel.get('execution_style_focus')} "
             f"| family_bottleneck={funnel.get('top_family_bottleneck')} "
             f"| session_bottleneck={funnel.get('top_session_bottleneck')}"
         ),

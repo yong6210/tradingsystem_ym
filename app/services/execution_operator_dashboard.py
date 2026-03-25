@@ -18,6 +18,7 @@ from app.services.outcome_control_trace import (
     summarize_outcome_control_trace,
 )
 from app.services.outcome_attribution import build_outcome_attribution, summarize_outcome_attribution
+from app.services.outcome_funnel_operating_kpis import build_outcome_funnel_operating_kpis
 from app.services.split_review_followup_ledger import summarize_split_review_followup_ledger
 
 
@@ -506,6 +507,12 @@ class ExecutionOperatorDashboardService:
                 "confidence": None,
                 "sample_note": None,
                 "aligned_candidates": 0,
+                "deferred_by_experiment_sequence": False,
+                "experiment_sequence_state": None,
+                "current_priority_experiment": None,
+                "current_priority_action": None,
+                "exit_optimization_allowed": False,
+                "sequencing_reason": None,
                 "recommended_actions": [],
             }
         return {
@@ -520,6 +527,12 @@ class ExecutionOperatorDashboardService:
             "confidence": summary.get("confidence"),
             "sample_note": summary.get("sample_note"),
             "aligned_candidates": int(summary.get("aligned_candidates", 0) or 0),
+            "deferred_by_experiment_sequence": bool(summary.get("deferred_by_experiment_sequence", False)),
+            "experiment_sequence_state": summary.get("experiment_sequence_state"),
+            "current_priority_experiment": summary.get("current_priority_experiment"),
+            "current_priority_action": summary.get("current_priority_action"),
+            "exit_optimization_allowed": bool(summary.get("exit_optimization_allowed", False)),
+            "sequencing_reason": summary.get("sequencing_reason"),
             "recommended_actions": actions[:3],
         }
 
@@ -544,6 +557,12 @@ class ExecutionOperatorDashboardService:
                 "bucket": None,
                 "confidence": None,
                 "sample_note": None,
+                "deferred_by_experiment_sequence": False,
+                "experiment_sequence_state": None,
+                "current_priority_experiment": None,
+                "current_priority_action": None,
+                "exit_optimization_allowed": False,
+                "sequencing_reason": None,
                 "observe_metrics": [],
                 "success_criteria": [],
                 "stop_conditions": [],
@@ -564,6 +583,12 @@ class ExecutionOperatorDashboardService:
             "bucket": top.get("bucket"),
             "confidence": top.get("confidence"),
             "sample_note": top.get("sample_note"),
+            "deferred_by_experiment_sequence": bool(top.get("deferred_by_experiment_sequence", False)),
+            "experiment_sequence_state": top.get("experiment_sequence_state"),
+            "current_priority_experiment": top.get("current_priority_experiment"),
+            "current_priority_action": top.get("current_priority_action"),
+            "exit_optimization_allowed": bool(top.get("exit_optimization_allowed", False)),
+            "sequencing_reason": top.get("sequencing_reason"),
             "observe_metrics": list(top.get("observe_metrics") or []),
             "success_criteria": list(top.get("success_criteria") or []),
             "stop_conditions": list(top.get("stop_conditions") or []),
@@ -837,6 +862,7 @@ class ExecutionOperatorDashboardService:
         history = dict(payload.get("historical_execution_outcomes") or {})
         decomposition = dict(payload.get("decomposition") or {})
         money_funnel = dict(payload.get("money_funnel") or {})
+        operating_kpis = build_outcome_funnel_operating_kpis(payload)
         return {
             "available": bool(payload.get("available", False)),
             "reason": payload.get("reason", "not_available"),
@@ -858,6 +884,7 @@ class ExecutionOperatorDashboardService:
                 history.get("baseline_cost_profitable_rate_from_closed", 0.0) or 0.0
             ),
             "money_funnel": money_funnel if money_funnel else None,
+            "operating_kpis": operating_kpis,
             "top_family_bucket": dict((list(decomposition.get("family") or [])[:1] or [{}])[0]),
             "top_regime_bucket": dict((list(decomposition.get("regime") or [])[:1] or [{}])[0]),
             "top_session_bucket": dict((list(decomposition.get("session") or [])[:1] or [{}])[0]),

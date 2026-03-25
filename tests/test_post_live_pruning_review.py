@@ -69,6 +69,19 @@ def _dashboard_payload(*, approve_value: str = "approval usable") -> dict:
                 "edge_decay_rate": -0.03,
                 "entry_timing_preferred_variant": "early_limit",
                 "execution_style_preferred_variant": "passive_limit",
+                "edge_proof_goal_closed_trades": 100,
+                "remaining_closed_trades_to_edge_proof_goal": 93,
+                "edge_proof_posture": {
+                    "state": "sample_building",
+                    "claim_state": "do_not_claim_edge_yet",
+                },
+                "daily_edge_kpis": {
+                    "closed_trade_count": 7,
+                    "sample_maturity_state": "review_ready",
+                    "true_edge_ratio": 0.84,
+                    "edge_decay_rate": -0.03,
+                    "regime_dependency_state": "single_regime_observed",
+                },
             },
             "edge_evolution_rule": {
                 "available": True,
@@ -243,7 +256,7 @@ def test_main_reopens_pruning_review_when_live_cycle_and_surfaces_are_usable(mon
     assert payload["review_followup_ledger"]["last_decision_status"] == "ACKED"
     assert payload["representative_candidates"]["accepted"]["symbol"] == "BTCUSDC"
     assert payload["representative_candidates"]["blocked"]["symbol"] == "ETHUSDC"
-    assert any("Advisory only: unstable post-cost edge" in step for step in payload["next_steps"])
+    assert any("edge proof is still sample-building" in step for step in payload["next_steps"])
     assert any("edge evolution still points to baseline reduction" in step for step in payload["next_steps"])
     assert all(check["status"] == "PASS" for check in payload["checks"])
 

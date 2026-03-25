@@ -653,6 +653,12 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
                     "confidence": "medium",
                     "sample_note": "usable evidence, but still limited",
                     "aligned_candidates": 1,
+                    "deferred_by_experiment_sequence": True,
+                    "experiment_sequence_state": "entry_timing_first",
+                    "current_priority_experiment": "entry_timing",
+                    "current_priority_action": "run_entry_timing_split_review",
+                    "exit_optimization_allowed": False,
+                    "sequencing_reason": "Lock entry timing first: compare early_limit versus reaction_confirmed before changing execution style or reviewing exit optimization.",
                 },
                 "recommended_actions": [
                     {
@@ -665,6 +671,12 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
                         "confidence": "medium",
                         "sample_note": "usable evidence, but still limited",
                         "aligned_candidates": 1,
+                        "deferred_by_experiment_sequence": True,
+                        "experiment_sequence_state": "entry_timing_first",
+                        "current_priority_experiment": "entry_timing",
+                        "current_priority_action": "run_entry_timing_split_review",
+                        "exit_optimization_allowed": False,
+                        "sequencing_reason": "Lock entry timing first: compare early_limit versus reaction_confirmed before changing execution style or reviewing exit optimization.",
                     }
                 ],
                 "top_shadow_experiment": {
@@ -680,6 +692,12 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
                     "bucket": "sweep_reversal",
                     "confidence": "medium",
                     "sample_note": "usable evidence, but still limited",
+                    "deferred_by_experiment_sequence": True,
+                    "experiment_sequence_state": "entry_timing_first",
+                    "current_priority_experiment": "entry_timing",
+                    "current_priority_action": "run_entry_timing_split_review",
+                    "exit_optimization_allowed": False,
+                    "sequencing_reason": "Lock entry timing first: compare early_limit versus reaction_confirmed before changing execution style or reviewing exit optimization.",
                     "observe_metrics": ["information_failure_rate", "forced_exit_rate", "post_cost_ev"],
                     "success_criteria": [
                         "information failure looks reducible without weakening hard gates",
@@ -800,6 +818,15 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
                             "not_ready_reason": None,
                         }
                     ],
+                },
+                "experiment_sequence": {
+                    "state": "entry_timing_first",
+                    "entry_timing_locked": False,
+                    "execution_style_locked": False,
+                    "exit_optimization_allowed": False,
+                    "current_priority_experiment": "entry_timing",
+                    "current_priority_action": "run_entry_timing_split_review",
+                    "summary": "Lock entry timing first: compare early_limit versus reaction_confirmed before changing execution style or reviewing exit optimization.",
                 },
             },
             score_to_outcome_funnel_summary={
@@ -1725,12 +1752,17 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
     assert signal_funnel["alpha_research_recommended_action"]["focus"] == "family_information_failure"
     assert signal_funnel["alpha_research_recommended_action"]["bucket"] == "sweep_reversal"
     assert signal_funnel["alpha_research_recommended_action"]["confidence"] == "medium"
+    assert signal_funnel["alpha_research_recommended_action"]["deferred_by_experiment_sequence"] is True
+    assert signal_funnel["alpha_research_recommended_action"]["current_priority_experiment"] == "entry_timing"
+    assert signal_funnel["alpha_research_recommended_action"]["current_priority_action"] == "run_entry_timing_split_review"
     assert len(signal_funnel["alpha_research_recommended_action"]["recommended_actions"]) == 1
     assert signal_funnel["alpha_research_top_shadow_experiment"]["available"] is True
     assert signal_funnel["alpha_research_top_shadow_experiment"]["analysis_symbol"] == "BTCUSDC"
     assert signal_funnel["alpha_research_top_shadow_experiment"]["experiment_id"] == "shadow_exit_review_family"
     assert signal_funnel["alpha_research_top_shadow_experiment"]["target"] == "family=sweep_reversal"
     assert signal_funnel["alpha_research_top_shadow_experiment"]["focus"] == "family_information_failure"
+    assert signal_funnel["alpha_research_top_shadow_experiment"]["deferred_by_experiment_sequence"] is True
+    assert signal_funnel["alpha_research_top_shadow_experiment"]["current_priority_experiment"] == "entry_timing"
     assert "post_cost_ev" in signal_funnel["alpha_research_top_shadow_experiment"]["observe_metrics"]
     assert len(signal_funnel["alpha_research_top_shadow_experiment"]["shadow_experiment_templates"]) == 1
     assert signal_funnel["quality_softening_priorities"][0]["reason"] == "risk_budget_below_min"
@@ -1744,6 +1776,11 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
     assert signal_funnel["score_to_outcome_funnel"]["runtime_candidates"] == 4
     assert signal_funnel["score_to_outcome_funnel"]["submitted"] == 3
     assert signal_funnel["score_to_outcome_funnel"]["money_funnel"]["historical_expected_r"]["closed"] == 0.46
+    assert signal_funnel["score_to_outcome_funnel"]["operating_kpis"]["primary_focus"] == "after_cost_edge_proof"
+    assert signal_funnel["score_to_outcome_funnel"]["operating_kpis"]["stage_conversion_rates"]["runtime_to_accepted"] == 0.25
+    assert signal_funnel["score_to_outcome_funnel"]["operating_kpis"]["stage_conversion_rates"]["submitted_to_filled"] == 0.6667
+    assert signal_funnel["score_to_outcome_funnel"]["operating_kpis"]["stage_conversion_rates"]["filled_to_closed"] == 1.0
+    assert signal_funnel["score_to_outcome_funnel"]["operating_kpis"]["cost_adjusted_survival_rate"] == 0.5
     assert signal_funnel["score_to_outcome_funnel"]["top_family_bucket"]["key"] == "sweep_reversal"
     assert signal_funnel["execution_degradation_advisory"]["available"] is True
     assert signal_funnel["execution_degradation_advisory"]["status"] == "watch"
@@ -1804,6 +1841,20 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
     assert signal_funnel["edge_experiment_review"]["edge_state"] == "insufficient_edge_measurement"
     assert signal_funnel["edge_experiment_review"]["entry_timing_preferred_variant"] == "early_limit"
     assert signal_funnel["edge_experiment_review"]["execution_style_preferred_variant"] == "passive_limit"
+    assert signal_funnel["edge_experiment_review"]["edge_proof_goal_closed_trades"] == 100
+    assert signal_funnel["edge_experiment_review"]["edge_proof_posture"]["state"] == "sample_building"
+    assert signal_funnel["edge_experiment_review"]["operating_discipline"]["discipline_state"] == "research_only_until_edge_proof_goal"
+    assert signal_funnel["edge_experiment_review"]["operating_discipline"]["evaluation_focus"] == "after_cost_edge_only"
+    assert signal_funnel["edge_experiment_review"]["operating_discipline"]["early_loss_rewrite_embargo_active"] is True
+    assert signal_funnel["edge_experiment_review"]["operating_discipline"]["loss_driven_rewrite_allowed"] is False
+    assert signal_funnel["edge_experiment_review"]["operating_discipline"]["rollout_expansion_allowed"] is False
+    assert (
+        signal_funnel["edge_experiment_review"]["operating_discipline"]["improvement_priority"]
+        == "prove_single_edge_before_density_or_strategy_expansion"
+    )
+    assert signal_funnel["edge_experiment_review"]["operating_discipline"]["signal_density_control_review_allowed"] is False
+    assert signal_funnel["edge_experiment_review"]["operating_discipline"]["multi_strategy_expansion_review_allowed"] is False
+    assert signal_funnel["edge_experiment_review"]["daily_edge_kpis"]["regime_dependency_state"] == "insufficient_regime_closes"
     assert signal_funnel["edge_evolution_rule"]["available"] is True
     assert signal_funnel["edge_evolution_rule"]["evolution_state"] == "insufficient_sample"
     assert signal_funnel["edge_evolution_rule"]["recommended_action"] == "keep_research_only_until_sample_matures"

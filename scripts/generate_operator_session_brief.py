@@ -170,6 +170,20 @@ def _experiment_review_target_line(label: str, target: dict[str, Any] | None) ->
     return line
 
 
+def _edge_experiment_snapshot_line(funnel: dict[str, Any]) -> str:
+    return (
+        f"- edge_experiment: state={funnel.get('edge_state', '')} | "
+        f"entry_timing={funnel.get('entry_timing_focus', '')} | "
+        f"execution_style={funnel.get('execution_style_focus', '')} | "
+        f"proof={funnel.get('edge_proof_state', 'unknown')}/{funnel.get('edge_claim_state', 'unknown')} | "
+        f"closes={int(funnel.get('edge_closed_trade_count', 0) or 0)}/{int(funnel.get('edge_proof_goal_closed_trades', 0) or 0)} | "
+        f"remaining={int(funnel.get('remaining_closed_trades_to_edge_proof_goal', 0) or 0)} | "
+        f"regime={funnel.get('edge_regime_dependency_state', 'not_available')} | "
+        f"true_edge={float(funnel.get('edge_true_edge_ratio', 0.0) or 0.0):.4f} | "
+        f"decay={float(funnel.get('edge_decay_rate', 0.0) or 0.0):.4f}"
+    )
+
+
 def _headline(snapshot: dict[str, Any], status: str) -> str:
     dashboard = snapshot.get("dashboard_summary") or {}
     validation = snapshot.get("validation_summary") or {}
@@ -287,11 +301,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append(f"- research_action: {funnel.get('research_action', '')}")
     lines.append(f"- shadow_experiment: {funnel.get('shadow_experiment', '')}")
     lines.append(f"- top_action_followup_command: {funnel.get('top_action_followup_command', '') or 'none'}")
-    lines.append(
-        f"- edge_experiment: state={funnel.get('edge_state', '')} | "
-        f"entry_timing={funnel.get('entry_timing_focus', '')} | "
-        f"execution_style={funnel.get('execution_style_focus', '')}"
-    )
+    lines.append(_edge_experiment_snapshot_line(funnel))
     lines.append(
         f"- edge_evolution: state={funnel.get('edge_evolution_state', '')} | "
         f"action={funnel.get('edge_evolution_action', '')} | "

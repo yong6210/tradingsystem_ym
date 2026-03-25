@@ -15,6 +15,7 @@ from app.services.outcome_control_trace import (
     build_outcome_control_trace,
     summarize_outcome_control_trace,
 )
+from app.services.outcome_funnel_operating_kpis import build_outcome_funnel_operating_kpis
 from app.services.split_review_followup_ledger import summarize_split_review_followup_ledger
 
 
@@ -1099,6 +1100,10 @@ class ValidationReportService:
                 "",
             ]
 
+        edge_experiment_preview_summary = summarize_edge_experiment_review(
+            build_edge_experiment_review(score_to_outcome_funnel=dict(score_to_outcome_funnel or {}))
+        )
+        edge_operating_discipline_preview = dict((edge_experiment_preview_summary or {}).get("operating_discipline") or {})
         alpha_research_payload = dict(alpha_research_pipeline or {})
         alpha_research_summary = dict(alpha_research_payload.get("summary") or {})
         alpha_research_alignment = dict(alpha_research_payload.get("research_focus_alignment") or {})
@@ -1112,6 +1117,7 @@ class ValidationReportService:
         alpha_research_outcome_summary = dict(alpha_research_evidence_summary.get("outcome_alignment_summary") or {})
         alpha_research_softening_review = dict(alpha_research_payload.get("softening_candidate_review") or {})
         alpha_research_promotion_watchlist = dict(alpha_research_payload.get("promotion_watchlist") or {})
+        alpha_research_experiment_sequence = dict(alpha_research_payload.get("experiment_sequence") or {})
         alpha_research_lines: list[str] = []
         if alpha_research_payload:
             alpha_research_lines = [
@@ -1137,11 +1143,22 @@ class ValidationReportService:
                 f"- recommended_bucket: {alpha_research_action_summary.get('bucket')}",
                 f"- confidence: {alpha_research_action_summary.get('confidence')}",
                 f"- sample_note: {alpha_research_action_summary.get('sample_note')}",
+                f"- recommended_action_deferred_by_sequence: {bool(alpha_research_action_summary.get('deferred_by_experiment_sequence', False))}",
+                f"- recommended_action_current_priority: {alpha_research_action_summary.get('current_priority_experiment')}:{alpha_research_action_summary.get('current_priority_action')}",
                 f"- top_shadow_experiment_id: {alpha_research_top_experiment.get('experiment_id')}",
                 f"- top_shadow_experiment_title: {alpha_research_top_experiment.get('title')}",
                 f"- top_shadow_experiment_target: {alpha_research_top_experiment.get('target')}",
                 f"- top_shadow_experiment_confidence: {alpha_research_top_experiment.get('confidence')}",
                 f"- top_shadow_experiment_objective: {alpha_research_top_experiment.get('objective')}",
+                f"- top_shadow_experiment_deferred_by_sequence: {bool(alpha_research_top_experiment.get('deferred_by_experiment_sequence', False))}",
+                (
+                    f"- experiment_sequence: state={alpha_research_experiment_sequence.get('state')} | "
+                    f"entry_timing_locked={bool(alpha_research_experiment_sequence.get('entry_timing_locked', False))} | "
+                    f"execution_style_locked={bool(alpha_research_experiment_sequence.get('execution_style_locked', False))} | "
+                    f"exit_optimization_allowed={bool(alpha_research_experiment_sequence.get('exit_optimization_allowed', False))} | "
+                    f"current_priority={alpha_research_experiment_sequence.get('current_priority_experiment')}:{alpha_research_experiment_sequence.get('current_priority_action')}"
+                ),
+                f"- experiment_sequence_summary: {alpha_research_experiment_sequence.get('summary')}",
                 f"- evidence_available: {bool(alpha_research_evidence_summary.get('available', False))}",
                 f"- evidence_top_reason: {alpha_research_reason_summary.get('top_reason')}",
                 f"- evidence_focus_aligned_candidates: {int(alpha_research_focus_summary.get('aligned_candidate_count', 0) or 0)}",
@@ -1154,6 +1171,9 @@ class ValidationReportService:
                 f"- softening_top_priority: {dict(alpha_research_softening_review.get('top_candidate') or {}).get('review_priority')}",
                 f"- promotion_watchlist_available: {bool(alpha_research_promotion_watchlist.get('available', False))}",
                 f"- promotion_watchlist_count: {int(alpha_research_promotion_watchlist.get('watchlist_count', 0) or 0)}",
+                f"- improvement_priority: {edge_operating_discipline_preview.get('improvement_priority')}",
+                f"- signal_density_control_review_allowed: {bool(edge_operating_discipline_preview.get('signal_density_control_review_allowed', False))}",
+                f"- multi_strategy_expansion_review_allowed: {bool(edge_operating_discipline_preview.get('multi_strategy_expansion_review_allowed', False))}",
                 "",
             ]
             for idx, row in enumerate(alpha_research_actions[:3], start=1):
@@ -1192,6 +1212,7 @@ class ValidationReportService:
         score_to_outcome_history = dict(score_to_outcome_payload.get("historical_execution_outcomes") or {})
         score_to_outcome_decomposition = dict(score_to_outcome_payload.get("decomposition") or {})
         money_funnel_payload = dict(score_to_outcome_payload.get("money_funnel") or {})
+        outcome_operating_kpis = dict(build_outcome_funnel_operating_kpis(score_to_outcome_payload) or {})
         score_to_outcome_lines: list[str] = []
         if score_to_outcome_payload:
             score_to_outcome_lines = [
@@ -1219,6 +1240,15 @@ class ValidationReportService:
                     f"profitable_from_closed={float(score_to_outcome_history.get('profitable_rate_from_closed', 0.0) or 0.0):.4f}, "
                     f"baseline_cost_profitable_from_closed={float(score_to_outcome_history.get('baseline_cost_profitable_rate_from_closed', 0.0) or 0.0):.4f}"
                 ),
+                (
+                    f"- operating_kpis: primary_focus={outcome_operating_kpis.get('primary_focus', 'after_cost_edge_proof')} | "
+                    f"runtime_accept={float(dict(outcome_operating_kpis.get('stage_conversion_rates') or {}).get('runtime_to_accepted', 0.0) or 0.0):.4f} | "
+                    f"submitted_fill={float(dict(outcome_operating_kpis.get('stage_conversion_rates') or {}).get('submitted_to_filled', 0.0) or 0.0):.4f} | "
+                    f"filled_close={float(dict(outcome_operating_kpis.get('stage_conversion_rates') or {}).get('filled_to_closed', 0.0) or 0.0):.4f} | "
+                    f"closed_post_cost_survival={float(outcome_operating_kpis.get('cost_adjusted_survival_rate', 0.0) or 0.0):.4f} | "
+                    f"closed_per_day={float(outcome_operating_kpis.get('closed_trades_per_day', 0.0) or 0.0):.4f}"
+                ),
+                f"- operating_kpi_summary: {outcome_operating_kpis.get('summary', '')}",
             ]
             for axis in ("family", "regime", "session"):
                 row = dict((list(score_to_outcome_decomposition.get(axis) or [])[:1] or [{}])[0])
@@ -2312,6 +2342,7 @@ class ValidationReportService:
             entry_timing = dict(edge_experiment_summary.get("entry_timing_experiment") or {})
             execution_style = dict(edge_experiment_summary.get("execution_style_experiment") or {})
             regime_breakdown = dict(edge_experiment_summary.get("regime_edge_breakdown") or {})
+            experiment_sequence = dict(edge_experiment_summary.get("experiment_sequence") or {})
             edge_experiment_lines = [
                 "## Edge Experiment Review",
                 f"- available: {bool(edge_experiment_summary.get('available', False))}",
@@ -2345,10 +2376,43 @@ class ValidationReportService:
                     f"remaining={int(edge_experiment_summary.get('remaining_closed_trades_to_next_target', 0) or 0)}"
                 ),
                 (
+                    f"- edge_proof: state={dict(edge_experiment_summary.get('edge_proof_posture') or {}).get('state', 'unknown')} | "
+                    f"claim={dict(edge_experiment_summary.get('edge_proof_posture') or {}).get('claim_state', 'unknown')} | "
+                    f"goal_closed_trades={int(edge_experiment_summary.get('edge_proof_goal_closed_trades', 0) or 0)} | "
+                    f"remaining_to_goal={int(edge_experiment_summary.get('remaining_closed_trades_to_edge_proof_goal', 0) or 0)}"
+                ),
+                (
+                    f"- operating_discipline: state={dict(edge_experiment_summary.get('operating_discipline') or {}).get('discipline_state', 'unknown')} | "
+                    f"framework={dict(edge_experiment_summary.get('operating_discipline') or {}).get('framework_quality_state', 'framework_ready')} | "
+                    f"mode={dict(edge_experiment_summary.get('operating_discipline') or {}).get('system_mode', 'operate_and_experiment')} | "
+                    f"primary_goal={dict(edge_experiment_summary.get('operating_discipline') or {}).get('primary_goal', 'find_first_verified_edge')} | "
+                    f"improvement_priority={dict(edge_experiment_summary.get('operating_discipline') or {}).get('improvement_priority', 'prove_single_edge_before_density_or_strategy_expansion')} | "
+                    f"evaluation_focus={dict(edge_experiment_summary.get('operating_discipline') or {}).get('evaluation_focus', 'after_cost_edge_only')} | "
+                    f"min_closed_trades={int(dict(edge_experiment_summary.get('operating_discipline') or {}).get('minimum_closed_trades_for_edge_evaluation', 0) or 0)} | "
+                    f"profit_claim_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('profit_claim_allowed', False))} | "
+                    f"structure_change_review_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('structure_change_review_allowed', False))} | "
+                    f"loss_driven_rewrite_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('loss_driven_rewrite_allowed', False))} | "
+                    f"early_loss_embargo_active={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('early_loss_rewrite_embargo_active', False))} | "
+                    f"rollout_expansion_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('rollout_expansion_allowed', False))} | "
+                    f"signal_density_review_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('signal_density_control_review_allowed', False))} | "
+                    f"multi_strategy_expansion_review_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('multi_strategy_expansion_review_allowed', False))} | "
+                    f"single_experiment_only={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('single_experiment_only', True))}"
+                ),
+                (
+                    f"- experiment_sequence: state={experiment_sequence.get('state', 'unknown')} | "
+                    f"entry_timing_locked={bool(experiment_sequence.get('entry_timing_locked', False))} | "
+                    f"execution_style_locked={bool(experiment_sequence.get('execution_style_locked', False))} | "
+                    f"exit_optimization_allowed={bool(experiment_sequence.get('exit_optimization_allowed', False))} | "
+                    f"current_priority={experiment_sequence.get('current_priority_experiment', 'unknown')}:{experiment_sequence.get('current_priority_action', 'unknown')}"
+                ),
+                f"- experiment_sequence_summary: {experiment_sequence.get('summary', '')}",
+                (
                     f"- regime_breakdown: dependency={edge_experiment_summary.get('regime_dependency_state', 'not_available')} | "
                     f"strongest={edge_experiment_summary.get('strongest_regime', 'none')}:{float(edge_experiment_summary.get('strongest_regime_true_edge_ratio', 0.0) or 0.0):.4f} | "
                     f"weakest={edge_experiment_summary.get('weakest_regime', 'none')}:{float(edge_experiment_summary.get('weakest_regime_true_edge_ratio', 0.0) or 0.0):.4f}"
                 ),
+                f"- daily_edge_kpis: {dict(edge_experiment_summary.get('daily_edge_kpis') or {})}",
+                f"- operating_discipline_summary: {dict(edge_experiment_summary.get('operating_discipline') or {}).get('summary', '')}",
                 f"- summary: {edge_experiment_summary.get('summary', '')}",
                 f"- reason_codes: {list(edge_experiment_summary.get('reason_codes') or [])}",
                 f"- source_summary: {dict(edge_experiment_summary.get('source_summary') or {})}",
@@ -2730,6 +2794,7 @@ class ValidationReportService:
                 ),
                 "coverage_note": score_to_outcome_payload.get("coverage_note"),
                 "money_funnel": money_funnel_payload if money_funnel_payload else None,
+                "operating_kpis": build_outcome_funnel_operating_kpis(score_to_outcome_payload),
                 "top_family_bucket": dict((list(score_to_outcome_decomposition.get("family") or [])[:1] or [{}])[0]),
                 "top_regime_bucket": dict((list(score_to_outcome_decomposition.get("regime") or [])[:1] or [{}])[0]),
                 "top_session_bucket": dict((list(score_to_outcome_decomposition.get("session") or [])[:1] or [{}])[0]),
@@ -2974,6 +3039,15 @@ class ValidationReportService:
                 "recommended_bucket": alpha_research_action_summary.get("bucket"),
                 "confidence": alpha_research_action_summary.get("confidence"),
                 "sample_note": alpha_research_action_summary.get("sample_note"),
+                "recommended_action_deferred_by_sequence": bool(
+                    alpha_research_action_summary.get("deferred_by_experiment_sequence", False)
+                ),
+                "recommended_action_current_priority_experiment": alpha_research_action_summary.get(
+                    "current_priority_experiment"
+                ),
+                "recommended_action_current_priority_action": alpha_research_action_summary.get(
+                    "current_priority_action"
+                ),
                 "top_shadow_experiment_id": alpha_research_top_experiment.get("experiment_id"),
                 "top_shadow_experiment_title": alpha_research_top_experiment.get("title"),
                 "top_shadow_experiment_target": alpha_research_top_experiment.get("target"),
@@ -2982,6 +3056,18 @@ class ValidationReportService:
                 "top_shadow_experiment_observe_metrics": list(alpha_research_top_experiment.get("observe_metrics") or []),
                 "top_shadow_experiment_success_criteria": list(alpha_research_top_experiment.get("success_criteria") or []),
                 "top_shadow_experiment_stop_conditions": list(alpha_research_top_experiment.get("stop_conditions") or []),
+                "top_shadow_experiment_deferred_by_sequence": bool(
+                    alpha_research_top_experiment.get("deferred_by_experiment_sequence", False)
+                ),
+                "experiment_sequence_state": alpha_research_experiment_sequence.get("state"),
+                "experiment_sequence_summary": alpha_research_experiment_sequence.get("summary"),
+                "entry_timing_locked": bool(alpha_research_experiment_sequence.get("entry_timing_locked", False)),
+                "execution_style_locked": bool(alpha_research_experiment_sequence.get("execution_style_locked", False)),
+                "exit_optimization_allowed": bool(
+                    alpha_research_experiment_sequence.get("exit_optimization_allowed", False)
+                ),
+                "current_priority_experiment": alpha_research_experiment_sequence.get("current_priority_experiment"),
+                "current_priority_action": alpha_research_experiment_sequence.get("current_priority_action"),
                 "shadow_experiment_template_count": len(alpha_research_experiment_templates),
                 "evidence_available": bool(alpha_research_evidence_summary.get("available", False)),
                 "evidence_top_reason": alpha_research_reason_summary.get("top_reason"),
@@ -3000,6 +3086,30 @@ class ValidationReportService:
                 "promotion_watchlist_count": int(alpha_research_promotion_watchlist.get("watchlist_count", 0) or 0),
                 "promotion_top_bucket": dict((list(alpha_research_promotion_watchlist.get("watch_items") or [])[:1] or [{}])[0]).get("bucket"),
                 "promotion_top_not_ready_reason": dict((list(alpha_research_promotion_watchlist.get("watch_items") or [])[:1] or [{}])[0]).get("not_ready_reason"),
+                "improvement_priority": dict(edge_experiment_summary.get("operating_discipline") or {}).get(
+                    "improvement_priority"
+                )
+                if edge_experiment_summary
+                else None,
+                "signal_density_control_review_allowed": bool(
+                    dict(edge_experiment_summary.get("operating_discipline") or {}).get(
+                        "signal_density_control_review_allowed", False
+                    )
+                )
+                if edge_experiment_summary
+                else False,
+                "multi_strategy_expansion_review_allowed": bool(
+                    dict(edge_experiment_summary.get("operating_discipline") or {}).get(
+                        "multi_strategy_expansion_review_allowed", False
+                    )
+                )
+                if edge_experiment_summary
+                else False,
+                "deferred_review_backlog": list(
+                    dict(edge_experiment_summary.get("operating_discipline") or {}).get("deferred_review_backlog") or []
+                )
+                if edge_experiment_summary
+                else [],
             }
             if alpha_research_payload
             else None,

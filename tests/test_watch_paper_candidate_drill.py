@@ -72,8 +72,22 @@ def test_main_emits_edge_experiment_review_when_candidate_is_found(monkeypatch, 
                 "edge_state": "watch_edge",
                 "summary": "Prefer controlled split tests before changing entry design.",
                 "true_edge_ratio": 0.79,
+                "edge_decay_rate": -0.02,
                 "entry_timing_preferred_variant": "early_limit",
                 "execution_style_preferred_variant": "passive_limit",
+                "edge_proof_goal_closed_trades": 100,
+                "remaining_closed_trades_to_edge_proof_goal": 95,
+                "edge_proof_posture": {
+                    "state": "sample_building",
+                    "claim_state": "do_not_claim_edge_yet",
+                },
+                "daily_edge_kpis": {
+                    "closed_trade_count": 5,
+                    "sample_maturity_state": "directional_only",
+                    "true_edge_ratio": 0.79,
+                    "edge_decay_rate": -0.02,
+                    "regime_dependency_state": "single_regime_observed",
+                },
             },
         },
     )
@@ -86,4 +100,4 @@ def test_main_emits_edge_experiment_review_when_candidate_is_found(monkeypatch, 
     assert payload["edge_experiment_review"]["entry_timing_preferred_variant"] == "early_limit"
     assert payload["candidate_edge_experiment_focus"]["symbol"] == "BTCUSDC"
     assert payload["candidate_edge_experiment_focus"]["focus_source"] == "row_level"
-    assert any("Advisory only: unstable post-cost edge" in step for step in payload["next_steps"])
+    assert any("edge proof is still sample-building" in step for step in payload["next_steps"])

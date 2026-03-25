@@ -1122,6 +1122,13 @@ class ValidationReportOut(ORMModel):
     strategy_v2_scalp_experiment: dict[str, Any] | None = None
     alpha_research_pipeline: dict[str, Any] | None = None
     parameter_changelog: dict[str, Any] | None = None
+    operator_action_priority_summary: dict[str, Any] | None = None
+    edge_experiment_review_available: bool | None = None
+    edge_experiment_review_summary: dict[str, Any] | None = None
+    edge_evolution_rule_available: bool | None = None
+    edge_evolution_rule_summary: dict[str, Any] | None = None
+    review_followup_ledger_available: bool | None = None
+    review_followup_ledger_summary: dict[str, Any] | None = None
 
 
 class ExecutionQualityOut(ORMModel):

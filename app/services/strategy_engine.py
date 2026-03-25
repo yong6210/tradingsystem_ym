@@ -3454,6 +3454,13 @@ class StrategyEngine:
             "strategy_v2_scalp_experiment": strategy_v2_scalp_experiment,
             "alpha_research_pipeline": alpha_research_pipeline,
             "parameter_changelog": parameter_changelog,
+            "operator_action_priority_summary": report.get("operator_action_priority_summary"),
+            "edge_experiment_review_available": report.get("edge_experiment_review_available"),
+            "edge_experiment_review_summary": report.get("edge_experiment_review_summary"),
+            "edge_evolution_rule_available": report.get("edge_evolution_rule_available"),
+            "edge_evolution_rule_summary": report.get("edge_evolution_rule_summary"),
+            "review_followup_ledger_available": report.get("review_followup_ledger_available"),
+            "review_followup_ledger_summary": report.get("review_followup_ledger_summary"),
         }
 
     def feature_importance(

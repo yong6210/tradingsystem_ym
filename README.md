@@ -93,6 +93,7 @@ The funnel matters because candidate quality is only useful if it survives portf
 `generated expected R -> submitted expected R -> filled expected R -> closed expected R -> raw realized R -> post-cost realized R`
 
 - `score_to_outcome_funnel` now carries `money_funnel` so count conversion and R conversion can be read together.
+- `score_to_outcome_funnel_summary.operating_kpis` now promotes the funnel into an operator KPI layer: `runtime_to_accepted`, `submitted_to_filled`, `filled_to_closed`, `closed_to_post_cost_profitable`, and `closed_trades_per_day`.
 - `expected_ev_at_recommended_size_r` is the first expected-R proxy when available; otherwise the engine falls back to `expected_ev_r x recommended_risk_r`.
 - This layer is explanatory and does not replace approval, sizing, or live execution truth.
 
@@ -173,7 +174,12 @@ The funnel matters because candidate quality is only useful if it survives portf
 - `edge_experiment_review` turns the same post-cost funnel into `true_edge_ratio`, `recent/prior` edge windows, and compare-only next-test guidance.
 - `entry_timing_experiment` compares `early_limit` versus `reaction_confirmed`; `execution_style_experiment` compares `passive_limit` versus `market` when both branches have coverage.
 - It now also emits `sample_maturity_state`, `next_sample_target_closed_trades`, and `regime_dependency_state`, so operators can separate directional evidence from durable edge and see when the weakest regime is still lagging.
+- It also emits `edge_proof_goal_closed_trades=100`, `remaining_closed_trades_to_edge_proof_goal`, `edge_proof_posture`, and `daily_edge_kpis`, so thin samples are not mistaken for proven edge.
+- It also emits `operating_discipline`, which keeps the framework/edge distinction explicit: `framework_quality_state=framework_ready`, `system_mode=operate_and_experiment`, `evaluation_focus=after_cost_edge_only`, `primary_goal=find_first_verified_edge`, `improvement_priority=prove_single_edge_before_density_or_strategy_expansion`, `profit_claim_allowed=false`, `structure_change_review_allowed=false`, `loss_driven_rewrite_allowed=false`, `rollout_expansion_allowed=false`, `signal_density_control_review_allowed=false`, and `multi_strategy_expansion_review_allowed=false` until proof posture is genuinely reviewable and regime stability is confirmed.
+- It also emits `experiment_sequence`, which fixes the research order as `entry_timing (early_limit vs reaction_confirmed) -> execution_style (passive_limit vs market) -> exit optimization`; exit review stays deferred until both split baselines are locked and the exit-review floor is reached.
 - This layer is advisory-only and is meant to answer "what should we test next?" before anyone rewrites the strategy structure.
+
+Framework quality and edge proof are different claims. The framework can be structurally ready while the edge is still unproven; until `edge_proof_posture.state == edge_claim_ready`, treat the system as `operate_and_experiment`, not profit-proven, and judge it on after-cost closed-trade edge rather than architecture completeness.
 
 ## Edge Evolution Rule
 

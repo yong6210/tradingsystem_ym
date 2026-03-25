@@ -208,6 +208,7 @@ def test_alpha_research_pipeline_summarizes_softened_candidates() -> None:
     assert "## Summary" in body
     assert "## Research Focus Alignment" in body
     assert "## Recommended Action" in body
+    assert "## Experiment Sequence" in body
     assert "## Evidence Summary" in body
     assert "## False Negative Suspects" in body
     assert "## Softening Candidate Review" in body
@@ -215,3 +216,136 @@ def test_alpha_research_pipeline_summarizes_softened_candidates() -> None:
     assert "## Recommended Actions" in body
     assert "## Priorities" in body
     assert "## Candidates" in body
+
+
+def test_alpha_research_pipeline_defers_exit_review_until_entry_sequence_is_locked() -> None:
+    service = AlphaResearchPipelineService()
+
+    payload = service.generate(
+        universe="usdc_perp_top30",
+        focus_symbol="BTCUSDC",
+        analysis_symbol="BTCUSDC",
+        portfolio_budget={
+            "alpha_research_candidates": [
+                {
+                    "symbol": "BTCUSDC",
+                    "plan_id": "plan_btc",
+                    "direction": "long",
+                    "entry_model": "LIMIT",
+                    "strategy_family": "trend_continuation",
+                    "regime": "range",
+                    "session_guidance": {"state": "dead_session"},
+                    "alpha_research_candidate": True,
+                    "alpha_research_reason": "risk_budget_below_min",
+                    "alpha_research_softened_risk_r": 0.2,
+                    "alpha_research_gap": 4.5,
+                    "expected_ev_r": 0.18,
+                    "expected_ev_at_recommended_size_r": 0.09,
+                }
+            ]
+        },
+        performance_decomposition_summary={
+            "tuning_focus": [
+                {
+                    "focus": "family_information_failure",
+                    "bucket": "trend_continuation",
+                    "metric": "information_failure_rate",
+                    "value": 0.4,
+                }
+            ]
+        },
+        score_to_outcome_funnel={
+            "available": True,
+            "report_window_days": 30,
+            "money_funnel": {
+                "historical_expected_r": {"closed": 0.46},
+                "historical_realized_r": {"post_cost_closed": 0.31},
+                "historical_windows": {
+                    "recent": {
+                        "closed": 1,
+                        "true_edge_ratio": 0.6818,
+                    },
+                    "prior": {
+                        "closed": 1,
+                        "true_edge_ratio": 0.6667,
+                    },
+                },
+            },
+            "historical_execution_outcomes": {
+                "submitted": 3,
+                "filled": 2,
+                "closed": 2,
+            },
+            "decomposition": {
+                "family": [
+                    {
+                        "key": "trend_continuation",
+                        "runtime_candidates": 4,
+                        "accepted_candidates": 1,
+                        "submitted": 3,
+                        "closed": 2,
+                        "baseline_cost_profitable": 1,
+                        "profitable_rate_from_closed": 0.5,
+                        "baseline_cost_profitable_rate_from_closed": 0.5,
+                    }
+                ],
+                "entry_timing_variant": [
+                    {
+                        "key": "early_limit",
+                        "submitted": 1,
+                        "filled": 1,
+                        "closed": 1,
+                        "submitted_expected_r": 0.28,
+                        "filled_expected_r": 0.28,
+                        "closed_expected_r": 0.22,
+                        "baseline_adjusted_r": 0.15,
+                        "fill_rate_from_submitted": 1.0,
+                    }
+                ],
+                "execution_style": [
+                    {
+                        "key": "passive_limit",
+                        "submitted": 1,
+                        "filled": 1,
+                        "closed": 1,
+                        "submitted_expected_r": 0.28,
+                        "filled_expected_r": 0.28,
+                        "closed_expected_r": 0.22,
+                        "baseline_adjusted_r": 0.15,
+                        "fill_rate_from_submitted": 1.0,
+                    },
+                    {
+                        "key": "market",
+                        "submitted": 2,
+                        "filled": 1,
+                        "closed": 1,
+                        "submitted_expected_r": 0.68,
+                        "filled_expected_r": 0.33,
+                        "closed_expected_r": 0.24,
+                        "baseline_adjusted_r": 0.16,
+                        "fill_rate_from_submitted": 0.5,
+                    },
+                ],
+            },
+        },
+        execution_degradation_advisory={
+            "available": True,
+            "status": "watch",
+            "healthy": False,
+            "summary": "runtime execution drag is rising.",
+            "recommended_action": "review_runtime_execution_drag_before_expansion",
+            "reason_codes": ["fill_rate_watch"],
+        },
+        write_report=False,
+    )
+
+    assert payload["experiment_sequence"]["state"] == "entry_timing_first"
+    assert payload["experiment_sequence"]["current_priority_experiment"] == "entry_timing"
+    assert payload["experiment_sequence"]["current_priority_action"] == "run_entry_timing_split_review"
+    assert payload["experiment_sequence"]["exit_optimization_allowed"] is False
+    assert payload["recommended_action_summary"]["recommended_action"] == "run_shadow_exit_review"
+    assert payload["recommended_action_summary"]["deferred_by_experiment_sequence"] is True
+    assert payload["recommended_action_summary"]["current_priority_experiment"] == "entry_timing"
+    assert payload["top_shadow_experiment"]["deferred_by_experiment_sequence"] is True
+    assert payload["top_shadow_experiment"]["sequencing_reason"]
+    assert payload["next_steps"][0].startswith("lock entry timing first")

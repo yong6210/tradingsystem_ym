@@ -288,6 +288,9 @@ def test_recompute_learning_seeds_trial_writer_and_pbo_dsr_metrics() -> None:
             writer_payload["selection_rule"],
             threshold_payload["selection_rule"],
         }
+        assert payload["edge_experiment_review_summary"] is not None
+        assert payload["edge_evolution_rule_summary"] is not None
+        assert payload["review_followup_ledger_summary"] is not None
         assert metrics_payload["selected_trial"]["writer_source"] in {
             "runtime_validation_proxy_v1",
             "true_threshold_sweep_runner_v1",

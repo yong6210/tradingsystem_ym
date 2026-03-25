@@ -6,10 +6,15 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings, get_settings
+from app.services.edge_experiment_review import build_edge_experiment_review, summarize_edge_experiment_review
 
 _SOFTENING_RESEARCH_REASONS = {
     "risk_budget_below_min",
     "adjusted_score_non_positive",
+}
+_EXIT_SHADOW_REVIEW_ACTIONS = {
+    "run_shadow_exit_review",
+    "run_shadow_exit_timing_review",
 }
 
 
@@ -18,8 +23,82 @@ class AlphaResearchPipelineService:
         self.settings = settings or get_settings()
 
     @staticmethod
+    def _dedupe_strings(values: list[str]) -> list[str]:
+        out: list[str] = []
+        for value in values:
+            if value and value not in out:
+                out.append(value)
+        return out
+
+    @staticmethod
     def _session_state(row: dict[str, Any]) -> str:
         return str(((row.get("session_guidance") or {}).get("state")) or "unknown")
+
+    @staticmethod
+    def _experiment_sequence(score_to_outcome_funnel: dict[str, Any] | None) -> dict[str, Any] | None:
+        edge_review = build_edge_experiment_review(score_to_outcome_funnel=score_to_outcome_funnel)
+        edge_summary = summarize_edge_experiment_review(edge_review)
+        if not edge_summary:
+            return None
+        return dict(edge_summary.get("experiment_sequence") or {})
+
+    @staticmethod
+    def _annotate_with_experiment_sequence(
+        payload: dict[str, Any] | None,
+        *,
+        experiment_sequence: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        source = dict(payload or {})
+        sequence = dict(experiment_sequence or {})
+        if not source:
+            return None
+        if not sequence:
+            return source
+
+        recommended_action = str(source.get("recommended_action") or "")
+        deferred = recommended_action in _EXIT_SHADOW_REVIEW_ACTIONS and not bool(
+            sequence.get("exit_optimization_allowed", False)
+        )
+        source.update(
+            {
+                "experiment_sequence_state": str(sequence.get("state") or "unknown"),
+                "current_priority_experiment": str(sequence.get("current_priority_experiment") or "unknown"),
+                "current_priority_action": str(sequence.get("current_priority_action") or "unknown"),
+                "exit_optimization_allowed": bool(sequence.get("exit_optimization_allowed", False)),
+                "deferred_by_experiment_sequence": deferred,
+                "sequencing_reason": str(sequence.get("summary") or ""),
+            }
+        )
+        return source
+
+    @classmethod
+    def _sequencing_next_steps(cls, experiment_sequence: dict[str, Any] | None) -> list[str]:
+        sequence = dict(experiment_sequence or {})
+        if not sequence:
+            return []
+
+        state = str(sequence.get("state") or "")
+        if state == "entry_timing_first":
+            return [
+                "lock entry timing first by comparing early_limit versus reaction_confirmed before execution-style or exit review",
+                "keep execution style on the current baseline until the entry-timing comparison is decision-ready",
+                "defer exit optimization review until both split baselines are locked and at least 8 closes are available",
+            ]
+        if state == "execution_style_second":
+            return [
+                "entry timing is already locked; compare passive_limit versus market next before exit review",
+                "keep exit optimization deferred until execution style is also locked",
+            ]
+        if state == "sample_building_before_exit_optimization":
+            return [
+                "entry timing and execution style both have directional coverage; accumulate more closed trades before exit review",
+                "do not couple exit optimization to the current split cycle until the exit-review floor is reached",
+            ]
+        if state == "exit_optimization_allowed":
+            return [
+                "entry timing and execution style are locked; exit optimization review can run next without changing hard gates",
+            ]
+        return []
 
     @staticmethod
     def _focus_axis(focus_name: str) -> str:
@@ -1011,6 +1090,7 @@ class AlphaResearchPipelineService:
         evidence_summary = dict(payload.get("alpha_research_evidence_summary") or {})
         softening_review = dict(payload.get("softening_candidate_review") or {})
         promotion_watchlist = dict(payload.get("promotion_watchlist") or {})
+        experiment_sequence = dict(payload.get("experiment_sequence") or {})
         reason_summary = dict(evidence_summary.get("near_miss_reason_summary") or {})
         focus_summary = dict(evidence_summary.get("focus_alignment_summary") or {})
         outcome_summary = dict(evidence_summary.get("outcome_alignment_summary") or {})
@@ -1047,6 +1127,19 @@ class AlphaResearchPipelineService:
             f"- shadow_experiment_type: {recommended_action_summary.get('shadow_experiment_type')}",
             f"- confidence: {recommended_action_summary.get('confidence')}",
             f"- sample_note: {recommended_action_summary.get('sample_note')}",
+            f"- deferred_by_experiment_sequence: {bool(recommended_action_summary.get('deferred_by_experiment_sequence', False))}",
+            f"- current_priority_experiment: {recommended_action_summary.get('current_priority_experiment')}",
+            f"- current_priority_action: {recommended_action_summary.get('current_priority_action')}",
+            f"- sequencing_reason: {recommended_action_summary.get('sequencing_reason')}",
+            "",
+            "## Experiment Sequence",
+            f"- state: {experiment_sequence.get('state')}",
+            f"- entry_timing_locked: {bool(experiment_sequence.get('entry_timing_locked', False))}",
+            f"- execution_style_locked: {bool(experiment_sequence.get('execution_style_locked', False))}",
+            f"- exit_optimization_allowed: {bool(experiment_sequence.get('exit_optimization_allowed', False))}",
+            f"- current_priority_experiment: {experiment_sequence.get('current_priority_experiment')}",
+            f"- current_priority_action: {experiment_sequence.get('current_priority_action')}",
+            f"- summary: {experiment_sequence.get('summary')}",
             "",
             "## Evidence Summary",
             f"- available: {bool(evidence_summary.get('available', False))}",
@@ -1204,18 +1297,35 @@ class AlphaResearchPipelineService:
             analysis_symbol=analysis,
             performance_decomposition_summary=performance_decomposition_summary,
         )
+        experiment_sequence = self._experiment_sequence(score_to_outcome_funnel)
         recommended_actions = self._recommended_actions(research_focus_alignment)
+        recommended_actions = [
+            self._annotate_with_experiment_sequence(row, experiment_sequence=experiment_sequence) or {}
+            for row in recommended_actions
+        ]
         recommended_action_summary = self._recommended_action_summary(
             recommended_actions,
             analysis_symbol=analysis,
+        )
+        recommended_action_summary = self._annotate_with_experiment_sequence(
+            recommended_action_summary,
+            experiment_sequence=experiment_sequence,
         )
         shadow_experiment_templates = self._shadow_experiment_templates(
             recommended_actions,
             analysis_symbol=analysis,
         )
+        shadow_experiment_templates = [
+            self._annotate_with_experiment_sequence(row, experiment_sequence=experiment_sequence) or {}
+            for row in shadow_experiment_templates
+        ]
         top_shadow_experiment = self._top_shadow_experiment(
             shadow_experiment_templates,
             analysis_symbol=analysis,
+        )
+        top_shadow_experiment = self._annotate_with_experiment_sequence(
+            top_shadow_experiment,
+            experiment_sequence=experiment_sequence,
         )
 
         priorities: list[dict[str, Any]] = []
@@ -1324,6 +1434,7 @@ class AlphaResearchPipelineService:
             next_steps = [f"wait for new softening candidates that match {focus} or widen the universe review window"]
         else:
             next_steps = ["wait for new quality-gate near-miss candidates to populate the research backlog"]
+        next_steps = self._dedupe_strings(self._sequencing_next_steps(experiment_sequence) + next_steps)
 
         payload = {
             "schema_version": "alpha_research_pipeline_v1",
@@ -1341,6 +1452,7 @@ class AlphaResearchPipelineService:
             "softening_candidate_review": softening_candidate_review,
             "promotion_watchlist": promotion_watchlist,
             "research_focus_alignment": research_focus_alignment,
+            "experiment_sequence": experiment_sequence,
             "recommended_action_summary": recommended_action_summary,
             "recommended_actions": recommended_actions,
             "top_shadow_experiment": top_shadow_experiment,

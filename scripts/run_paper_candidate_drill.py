@@ -163,6 +163,8 @@ def _edge_experiment_summary(validation_payload: dict[str, Any] | None) -> dict[
         return None
 
     source_summary = dict(source.get("source_summary") or {})
+    edge_proof_posture = dict(source.get("edge_proof_posture") or {})
+    daily_edge_kpis = dict(source.get("daily_edge_kpis") or {})
     return {
         "available": bool(source.get("available", True)),
         "advisory_only": bool(source.get("advisory_only", True)),
@@ -178,23 +180,73 @@ def _edge_experiment_summary(validation_payload: dict[str, Any] | None) -> dict[
             or source_summary.get("execution_style_preferred_variant")
             or "none"
         ),
+        "edge_proof_goal_closed_trades": int(
+            source.get("edge_proof_goal_closed_trades") or edge_proof_posture.get("edge_proof_goal_closed_trades") or 0
+        ),
+        "remaining_closed_trades_to_edge_proof_goal": int(
+            source.get("remaining_closed_trades_to_edge_proof_goal")
+            or edge_proof_posture.get("remaining_closed_trades_to_edge_proof_goal")
+            or 0
+        ),
+        "edge_proof_posture": {
+            "state": str(edge_proof_posture.get("state") or "unknown"),
+            "claim_state": str(edge_proof_posture.get("claim_state") or "unknown"),
+        },
+        "daily_edge_kpis": {
+            "closed_trade_count": int(daily_edge_kpis.get("closed_trade_count", source.get("closed_trade_count", 0)) or 0),
+            "sample_maturity_state": str(
+                daily_edge_kpis.get("sample_maturity_state") or source.get("sample_maturity_state") or "unknown"
+            ),
+            "true_edge_ratio": round(_float(daily_edge_kpis.get("true_edge_ratio", source.get("true_edge_ratio"))), 4),
+            "edge_decay_rate": round(_float(daily_edge_kpis.get("edge_decay_rate", source.get("edge_decay_rate"))), 4),
+            "regime_dependency_state": str(
+                daily_edge_kpis.get("regime_dependency_state") or source.get("regime_dependency_state") or "not_available"
+            ),
+        },
     }
 
 
 def _edge_experiment_summary_line(summary: dict[str, Any] | None) -> str:
     if not summary:
         return "edge_experiment: unavailable"
+    posture = dict(summary.get("edge_proof_posture") or {})
+    kpis = dict(summary.get("daily_edge_kpis") or {})
     return (
         f"edge_experiment: state={summary.get('edge_state', 'insufficient_edge_measurement')} | "
         f"entry_timing={summary.get('entry_timing_preferred_variant', 'none')} | "
         f"execution_style={summary.get('execution_style_preferred_variant', 'none')} | "
-        f"true_edge={float(summary.get('true_edge_ratio') or 0.0):.4f}"
+        f"proof={posture.get('state', 'unknown')}/{posture.get('claim_state', 'unknown')} | "
+        f"closes={int(kpis.get('closed_trade_count', 0) or 0)}/{int(summary.get('edge_proof_goal_closed_trades', 0) or 0)} | "
+        f"remaining={int(summary.get('remaining_closed_trades_to_edge_proof_goal', 0) or 0)} | "
+        f"regime={kpis.get('regime_dependency_state', 'not_available')} | "
+        f"true_edge={float(kpis.get('true_edge_ratio', summary.get('true_edge_ratio')) or 0.0):.4f} | "
+        f"decay={float(kpis.get('edge_decay_rate', summary.get('edge_decay_rate')) or 0.0):.4f}"
     )
 
 
 def _edge_experiment_next_step(summary: dict[str, Any] | None) -> str | None:
     if not summary:
         return None
+    posture = dict(summary.get("edge_proof_posture") or {})
+    kpis = dict(summary.get("daily_edge_kpis") or {})
+    proof_state = str(posture.get("state") or "unknown")
+    proof_goal = max(int(summary.get("edge_proof_goal_closed_trades", 0) or 0), 0)
+    remaining = max(int(summary.get("remaining_closed_trades_to_edge_proof_goal", 0) or 0), 0)
+    if proof_state == "sample_building":
+        return (
+            "Advisory only: PAPER lineage is still in sample-building mode; treat split preferences as directional "
+            f"while {remaining} closed trades remain to the {proof_goal}-close proof goal."
+        )
+    if proof_state == "regime_limited":
+        return (
+            "Advisory only: the edge proof goal is met, but regime dependency is still active; keep PAPER lineage "
+            "running before treating the preferred branch as portable."
+        )
+    if proof_state == "proof_goal_met_but_edge_weak":
+        return (
+            "Advisory only: the proof goal is met, but current true-edge/decay still looks weak; keep PAPER-only "
+            "until the edge stabilizes."
+        )
     edge_state = str(summary.get("edge_state") or "")
     entry_timing = str(summary.get("entry_timing_preferred_variant") or "none")
     execution_style = str(summary.get("execution_style_preferred_variant") or "none")

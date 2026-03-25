@@ -45,6 +45,11 @@ TradingView를 triage에 함께 쓴다면, mirror-only 사용법과 chart-side o
 - `validation_report.edge_experiment_review_summary.regime_dependency_state`
 - `validation_report.edge_experiment_review_summary.strongest_regime`
 - `validation_report.edge_experiment_review_summary.weakest_regime`
+- `validation_report.edge_experiment_review_summary.edge_proof_goal_closed_trades`
+- `validation_report.edge_experiment_review_summary.remaining_closed_trades_to_edge_proof_goal`
+- `validation_report.edge_experiment_review_summary.edge_proof_posture`
+- `validation_report.edge_experiment_review_summary.daily_edge_kpis`
+- `validation_report.score_to_outcome_funnel_summary.operating_kpis`
 - `validation_report.edge_evolution_rule_summary.evolution_state`
 - `validation_report.edge_evolution_rule_summary.recommended_action`
 - `validation_report.edge_evolution_rule_summary.recommendation_strength`
@@ -81,6 +86,25 @@ TradingView를 triage에 함께 쓴다면, mirror-only 사용법과 chart-side o
 - `review_followup_ledger.last_decision_status`는 packet 생성 이후 사람이 붙인 후속 판단이다. `last_status`보다 늦게 들어온 신호일 수 있으니 둘이 다르면 `last_effective_status`를 최종 상태로 읽는다.
 - `edge_evolution_rule.recommendation_strength == confirmed` 또는 `escalated`면 최근 packet 이후 새 closes가 같은 방향으로 누적됐다는 뜻이다. 이때만 `promote / reduce / kill-review` 해석을 강화한다.
 - `edge_experiment_review.sample_maturity_state`가 `pre_directional`, `directional_only`, `review_ready`면 아직 edge proof가 아니다. 이 구간에서는 promote/reduce보다 close sample 축적을 우선한다.
+- `edge_experiment_review.edge_proof_goal_closed_trades=100`을 넘기기 전에는 구조 완성과 별개로 edge claim을 쓰지 않는다. `remaining_closed_trades_to_edge_proof_goal > 0`이면 research posture를 유지한다.
+- `edge_experiment_review.operating_discipline.framework_quality_state == framework_ready`여도 수익 증명과는 별개다. 이 상태는 “구조 평가 종료”가 아니라 “운용/실험 단계 진입”으로 읽는다.
+- `edge_experiment_review.operating_discipline.system_mode == operate_and_experiment`면 이번 사이클의 대상은 시스템 개선보다 운영과 표본 축적이다.
+- `edge_experiment_review.operating_discipline.primary_goal == find_first_verified_edge`면 이번 사이클의 목표는 구조 개선이 아니라 edge 검증이다.
+- `edge_experiment_review.operating_discipline.evaluation_focus == after_cost_edge_only`면 판단 기준은 구조 quality가 아니라 after-cost closed-trade edge다.
+- `edge_experiment_review.operating_discipline.minimum_closed_trades_for_edge_evaluation == 100`이면 100 closes 전 결론을 평가로 쓰지 않는다.
+- `edge_experiment_review.operating_discipline.profit_claim_allowed == false`면 framework가 좋아 보여도 profitability wording을 쓰지 않는다.
+- `edge_experiment_review.operating_discipline.structure_change_review_allowed == false`면 split 실험 중에는 구조 변경을 얼리고 close sample 누적을 우선한다.
+- `edge_experiment_review.operating_discipline.early_loss_rewrite_embargo_active == true`면 초기 손실이나 흔들림만으로 전략 구조를 바꾸지 않는다. 최소한 close sample이 더 쌓일 때까지 같은 실험을 유지한다.
+- `edge_experiment_review.operating_discipline.loss_driven_rewrite_allowed == false`면 손실을 이유로 한 구조 rewrite는 금지 상태로 읽는다.
+- `edge_experiment_review.operating_discipline.rollout_expansion_allowed == false`면 edge가 좋아 보여도 확장하지 않는다. `stable_across_regimes`가 아니면 expansion review를 열지 않는다.
+- `edge_experiment_review.operating_discipline.improvement_priority == prove_single_edge_before_density_or_strategy_expansion`이면 지금 단계의 목표는 density tuning이나 multi-strategy 확장이 아니라 단일 edge proof다.
+- `edge_experiment_review.operating_discipline.signal_density_control_review_allowed == false`면 target trades/day tuning은 아직 보류한다.
+- `edge_experiment_review.operating_discipline.multi_strategy_expansion_review_allowed == false`면 A_ONLY 탈출이나 전략 다변화 review도 아직 보류한다.
+- `score_to_outcome_funnel_summary.operating_kpis`는 이제 설명용이 아니라 daily 운영 KPI다. 최소한 `runtime_to_accepted`, `submitted_to_filled`, `filled_to_closed`, `closed_to_post_cost_profitable`, `closed_trades_per_day`를 같이 본다.
+- `edge_experiment_review.experiment_sequence.state`는 실험 순서를 고정한다. 기본 순서는 `entry_timing -> execution_style -> exit_optimization`이다.
+- `edge_experiment_review.experiment_sequence.current_priority_experiment == entry_timing`이면 `early_limit vs reaction_confirmed`를 먼저 잠그고, 그 전에는 exit review를 해석하지 않는다.
+- `edge_experiment_review.experiment_sequence.current_priority_experiment == execution_style`이면 `passive_limit vs market`를 잠그는 단계다. 이 구간에서도 exit review는 보류다.
+- `edge_experiment_review.experiment_sequence.exit_optimization_allowed == false`면 alpha-research가 `run_shadow_exit_review`나 `run_shadow_exit_timing_review`를 추천해도 sequencing hint로만 읽고 현재 split cycle을 먼저 끝낸다.
 - `edge_experiment_review.regime_dependency_state == regime_dependent`면 strongest regime에서 좋아 보여도 weakest regime를 따로 본다. 이 상태에선 promotion을 범용 edge처럼 읽지 않는다.
 - `edge_evolution_rule.regime_guard_state == promotion_blocked_by_regime_dependency`면 preferred branch가 좋아 보여도 weakest regime evidence가 모일 때까지 research-only로 유지한다.
 - session brief와 stage monitor의 `entry_timing_review_target` / `execution_style_review_target` 줄에도 같은 followup command가 실린다. handoff에서는 그 command를 source-of-truth로 쓴다.
@@ -93,9 +117,10 @@ TradingView를 triage에 함께 쓴다면, mirror-only 사용법과 chart-side o
 4. 새 closed trade를 누적해서 split별 close sample을 늘린다.
 5. `next_sample_target_closed_trades`를 넘겼는지 확인한다.
 6. 그 다음에만 `edge_experiment_review`를 다시 읽는다.
-7. 이어서 `edge_evolution_rule`를 다시 읽는다.
-8. `promote / reduce / kill-review` 해석은 위 순서가 끝난 뒤에만 한다.
-9. packet이 실제로 확인되거나 기각됐으면 `scripts/run_split_review_followup.py --transition-status ...`로 같은 ledger에 후속 status를 남긴다.
+7. `edge_experiment_review.experiment_sequence`가 아직 `entry_timing_first` 또는 `execution_style_second`면 exit optimization review는 deferred로 유지한다.
+8. 이어서 `edge_evolution_rule`를 다시 읽는다.
+9. `promote / reduce / kill-review` 해석은 위 순서가 끝난 뒤에만 한다.
+10. packet이 실제로 확인되거나 기각됐으면 `scripts/run_split_review_followup.py --transition-status ...`로 같은 ledger에 후속 status를 남긴다.
 
 표본 목표:
 - `4 closes`
@@ -108,6 +133,12 @@ TradingView를 triage에 함께 쓴다면, mirror-only 사용법과 chart-side o
   - operator sample floor
 - `50 / 100 / 300 closes`
   - early / emerging / credible edge 구간
+
+해석 금지 규칙:
+- framework completion과 edge proof를 같은 문장으로 묶지 않는다.
+- `profit_claim_allowed == false`면 “좋은 시스템” 평가는 가능해도 “돈 버는 edge” 평가는 하지 않는다.
+- `structure_change_review_allowed == false`면 실험 중 feature 추가나 구조 리팩터보다 sample 축적을 우선한다.
+- `system_mode == operate_and_experiment`면 이 저장소는 더 이상 구조 개선 점수로 평가하지 않고, after-cost edge sample 누적으로 평가한다.
 
 실험 보류 조건:
 - `close_only_active == true`면 split 실험 확대를 열지 않는다.

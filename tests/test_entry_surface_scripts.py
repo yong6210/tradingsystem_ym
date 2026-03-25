@@ -57,10 +57,24 @@ def _budget_payload(*, deployment_go_no_go: str = "GO") -> dict:
             "advisory_only": True,
             "edge_state": "watch_edge",
             "true_edge_ratio": 0.81,
+            "edge_decay_rate": -0.02,
             "entry_timing_preferred_variant": "early_limit",
             "execution_style_preferred_variant": "passive_limit",
             "focus_symbol": "BTCUSDC",
             "focus_status": "ACTIONABLE_ENTRY",
+            "edge_proof_goal_closed_trades": 100,
+            "remaining_closed_trades_to_edge_proof_goal": 95,
+            "edge_proof_posture": {
+                "state": "sample_building",
+                "claim_state": "do_not_claim_edge_yet",
+            },
+            "daily_edge_kpis": {
+                "closed_trade_count": 5,
+                "sample_maturity_state": "directional_only",
+                "true_edge_ratio": 0.81,
+                "edge_decay_rate": -0.02,
+                "regime_dependency_state": "single_regime_observed",
+            },
             "summary": "Prefer split tests before structural entry rewrites.",
         },
         "edge_evolution_rule": {
@@ -223,7 +237,8 @@ def test_render_message_includes_all_sections_and_reasons():
     ) in message
     assert (
         "edge_experiment: state=watch_edge | entry_timing=early_limit | execution_style=passive_limit | "
-        "true_edge=0.8100 | focus=BTCUSDC/ACTIONABLE_ENTRY"
+        "proof=sample_building/do_not_claim_edge_yet | closes=5/100 | remaining=95 | "
+        "regime=single_regime_observed | true_edge=0.8100 | decay=-0.0200 | focus=BTCUSDC/ACTIONABLE_ENTRY"
     ) in message
     assert (
         "edge_evolution: state=reduce_candidate | action=reduce_baseline_allocation_review | "

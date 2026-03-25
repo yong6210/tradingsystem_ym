@@ -750,6 +750,7 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "alpha_research_pipeline" in rp
     assert "score_to_outcome_funnel" in rp["validation_report"]
     assert "score_to_outcome_funnel_summary" in rp["validation_report"]
+    assert "operating_kpis" in rp["validation_report"]["score_to_outcome_funnel_summary"]
     assert "execution_degradation_advisory_available" in rp["validation_report"]
     assert "execution_degradation_advisory_summary" in rp["validation_report"]
     assert "family_execution_degradation_advisory" in rp["validation_report"]
@@ -758,6 +759,7 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "mode_advisory_summary" in rp["validation_report"]
     assert "operator_action_priority" in rp["validation_report"]
     assert "operator_action_priority_summary" in rp["validation_report"]
+    assert rp["operator_action_priority_summary"] == rp["validation_report"]["operator_action_priority_summary"]
     assert "priority_source" in rp["validation_report"]["operator_action_priority_summary"]
     assert "action_family" in rp["validation_report"]["operator_action_priority_summary"]
     assert "top_action_followup_command" in rp["validation_report"]["operator_action_priority_summary"]
@@ -767,10 +769,22 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "outcome_control_trace_summary" in rp["validation_report"]
     assert "edge_experiment_review_available" in rp["validation_report"]
     assert "edge_experiment_review_summary" in rp["validation_report"]
+    assert rp["edge_experiment_review_summary"] == rp["validation_report"]["edge_experiment_review_summary"]
+    assert "edge_proof_goal_closed_trades" in rp["edge_experiment_review_summary"]
+    assert "edge_proof_posture" in rp["edge_experiment_review_summary"]
+    assert "operating_discipline" in rp["edge_experiment_review_summary"]
+    assert rp["edge_experiment_review_summary"]["operating_discipline"]["system_mode"] == "operate_and_experiment"
+    assert rp["edge_experiment_review_summary"]["operating_discipline"]["loss_driven_rewrite_allowed"] is False
+    assert rp["edge_experiment_review_summary"]["operating_discipline"]["rollout_expansion_allowed"] is False
+    assert rp["edge_experiment_review_summary"]["operating_discipline"]["signal_density_control_review_allowed"] is False
+    assert rp["edge_experiment_review_summary"]["operating_discipline"]["multi_strategy_expansion_review_allowed"] is False
+    assert "daily_edge_kpis" in rp["edge_experiment_review_summary"]
     assert "edge_evolution_rule_available" in rp["validation_report"]
     assert "edge_evolution_rule_summary" in rp["validation_report"]
+    assert rp["edge_evolution_rule_summary"] == rp["validation_report"]["edge_evolution_rule_summary"]
     assert "review_followup_ledger_available" in rp["validation_report"]
     assert "review_followup_ledger_summary" in rp["validation_report"]
+    assert rp["review_followup_ledger_summary"] == rp["validation_report"]["review_followup_ledger_summary"]
     assert "rollout_recommendation_available" in rp["validation_report"]
     assert "rollout_recommendation_summary" in rp["validation_report"]
     assert "strategy_lifecycle_available" in rp["validation_report"]

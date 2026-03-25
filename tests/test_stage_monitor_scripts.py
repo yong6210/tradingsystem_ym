@@ -86,6 +86,19 @@ def _validation_report(
             "edge_decay_rate": -0.04,
             "entry_timing_preferred_variant": "early_limit",
             "execution_style_preferred_variant": "passive_limit",
+            "edge_proof_goal_closed_trades": 100,
+            "remaining_closed_trades_to_edge_proof_goal": 92,
+            "edge_proof_posture": {
+                "state": "sample_building",
+                "claim_state": "do_not_claim_edge_yet",
+            },
+            "daily_edge_kpis": {
+                "closed_trade_count": 8,
+                "sample_maturity_state": "review_ready",
+                "true_edge_ratio": 0.88,
+                "edge_decay_rate": -0.04,
+                "regime_dependency_state": "single_regime_observed",
+            },
         },
         "edge_evolution_rule_summary": {
             "evolution_state": "reduce_candidate",
@@ -255,6 +268,19 @@ def test_collect_events_emits_transition_events():
             "entry_timing_preferred_variant": "reaction_confirmed",
             "execution_style_preferred_variant": "market",
             "true_edge_ratio": 0.74,
+            "edge_decay_rate": -0.08,
+            "edge_proof_goal_closed_trades": 100,
+            "remaining_closed_trades_to_edge_proof_goal": 96,
+            "edge_proof_posture": {
+                "state": "sample_building",
+                "claim_state": "do_not_claim_edge_yet",
+            },
+            "daily_edge_kpis": {
+                "closed_trade_count": 4,
+                "true_edge_ratio": 0.74,
+                "edge_decay_rate": -0.08,
+                "regime_dependency_state": "single_regime_observed",
+            },
         },
         "edge_evolution_rule": {
             "evolution_state": "hold_baseline",
@@ -334,6 +360,19 @@ def test_collect_events_emits_transition_events():
             "entry_timing_preferred_variant": "early_limit",
             "execution_style_preferred_variant": "passive_limit",
             "true_edge_ratio": 0.62,
+            "edge_decay_rate": -0.12,
+            "edge_proof_goal_closed_trades": 100,
+            "remaining_closed_trades_to_edge_proof_goal": 91,
+            "edge_proof_posture": {
+                "state": "sample_building",
+                "claim_state": "do_not_claim_edge_yet",
+            },
+            "daily_edge_kpis": {
+                "closed_trade_count": 9,
+                "true_edge_ratio": 0.62,
+                "edge_decay_rate": -0.12,
+                "regime_dependency_state": "regime_dependent",
+            },
         },
         "edge_evolution_rule": {
             "evolution_state": "reduce_candidate",
@@ -457,6 +496,19 @@ def test_render_message_uses_approval_surface_lines() -> None:
             "entry_timing_preferred_variant": "early_limit",
             "execution_style_preferred_variant": "passive_limit",
             "true_edge_ratio": 0.82,
+            "edge_decay_rate": -0.03,
+            "edge_proof_goal_closed_trades": 100,
+            "remaining_closed_trades_to_edge_proof_goal": 94,
+            "edge_proof_posture": {
+                "state": "sample_building",
+                "claim_state": "do_not_claim_edge_yet",
+            },
+            "daily_edge_kpis": {
+                "closed_trade_count": 6,
+                "true_edge_ratio": 0.82,
+                "edge_decay_rate": -0.03,
+                "regime_dependency_state": "single_regime_observed",
+            },
         },
         "edge_evolution_rule": {
             "evolution_state": "reduce_candidate",
@@ -513,7 +565,7 @@ def test_render_message_uses_approval_surface_lines() -> None:
     assert "dashboard_surface: approve=entry gate blocked | align=aligned | act=continue_candidate_review_under_portfolio_caps" in message
     assert "validation_surface: approve=approval usable | align=aligned | act=review_runtime_execution_drag_before_expansion" in message
     assert "checklist_surface: approve=approval usable | align=aligned | act=clear_blocking_operational_items_before_rollout" in message
-    assert "edge_experiment: state=watch_edge | entry_timing=early_limit | execution_style=passive_limit | true_edge=0.8200" in message
+    assert "edge_experiment: state=watch_edge | entry_timing=early_limit | execution_style=passive_limit | proof=sample_building/do_not_claim_edge_yet | closes=6/100 | remaining=94 | regime=single_regime_observed | true_edge=0.8200 | decay=-0.0300" in message
     assert "edge_evolution: state=reduce_candidate | action=reduce_baseline_allocation_review | bias=reduce_baseline | promotion=entry_timing/early_limit" in message
     assert "review_followup_ledger: status=READY | action=reduce_baseline_allocation_review | entries=3 | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review" in message
     assert "entry_timing_review_target: action=run_entry_timing_split_review | target=BTCUSDC | variant=early_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review" in message

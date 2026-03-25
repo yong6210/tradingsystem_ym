@@ -55,6 +55,19 @@ def _dashboard_payload() -> dict:
                 "edge_decay_rate": -0.03,
                 "entry_timing_preferred_variant": "early_limit",
                 "execution_style_preferred_variant": "passive_limit",
+                "edge_proof_goal_closed_trades": 100,
+                "remaining_closed_trades_to_edge_proof_goal": 94,
+                "edge_proof_posture": {
+                    "state": "sample_building",
+                    "claim_state": "do_not_claim_edge_yet",
+                },
+                "daily_edge_kpis": {
+                    "closed_trade_count": 6,
+                    "sample_maturity_state": "review_ready",
+                    "true_edge_ratio": 0.82,
+                    "edge_decay_rate": -0.03,
+                    "regime_dependency_state": "single_regime_observed",
+                },
             },
             "edge_evolution_rule": {
                 "available": True,
@@ -296,7 +309,7 @@ def test_main_emits_approval_surfaces_and_ready_status(monkeypatch, capsys) -> N
     assert payload["representative_candidates"]["accepted"]["edge_state"] == "watch_edge"
     assert payload["representative_candidates"]["blocked"]["symbol"] == "ETHUSDC"
     assert payload["representative_candidates"]["blocked"]["edge_state"] == "fragile_edge"
-    assert any("Advisory only: post-cost edge is unstable" in step for step in payload["next_steps"])
+    assert any("edge proof is still sample-building" in step for step in payload["next_steps"])
     assert any("edge evolution points to baseline reduction" in step for step in payload["next_steps"])
     assert any("scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review" in step for step in payload["next_steps"])
     assert any(

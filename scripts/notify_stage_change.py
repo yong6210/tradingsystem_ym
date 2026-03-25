@@ -54,6 +54,13 @@ def _webhook_url(cli_value: str) -> str:
     return str(get_settings().alert_discord_webhook_url or "").strip()
 
 
+def _float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def _changed(previous: dict[str, Any] | None, current: dict[str, Any], key: str) -> bool:
     if previous is None:
         return False
@@ -129,23 +136,59 @@ def _edge_experiment_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
             "edge_state": "unavailable",
             "entry_timing_preferred_variant": "none",
             "execution_style_preferred_variant": "none",
-            "true_edge_ratio": "n/a",
+            "edge_proof_goal_closed_trades": 0,
+            "remaining_closed_trades_to_edge_proof_goal": 0,
+            "edge_proof_posture": {"state": "unknown", "claim_state": "unknown"},
+            "daily_edge_kpis": {
+                "closed_trade_count": 0,
+                "true_edge_ratio": 0.0,
+                "edge_decay_rate": 0.0,
+                "regime_dependency_state": "not_available",
+            },
         }
+    edge_proof_posture = dict(source.get("edge_proof_posture") or {})
+    daily_edge_kpis = dict(source.get("daily_edge_kpis") or {})
     return {
         "edge_state": str(source.get("edge_state") or "insufficient_edge_measurement"),
         "entry_timing_preferred_variant": str(source.get("entry_timing_preferred_variant") or "none"),
         "execution_style_preferred_variant": str(source.get("execution_style_preferred_variant") or "none"),
-        "true_edge_ratio": f"{float(source.get('true_edge_ratio') or 0.0):.4f}",
+        "edge_proof_goal_closed_trades": int(
+            source.get("edge_proof_goal_closed_trades") or edge_proof_posture.get("edge_proof_goal_closed_trades") or 0
+        ),
+        "remaining_closed_trades_to_edge_proof_goal": int(
+            source.get("remaining_closed_trades_to_edge_proof_goal")
+            or edge_proof_posture.get("remaining_closed_trades_to_edge_proof_goal")
+            or 0
+        ),
+        "edge_proof_posture": {
+            "state": str(edge_proof_posture.get("state") or "unknown"),
+            "claim_state": str(edge_proof_posture.get("claim_state") or "unknown"),
+        },
+        "daily_edge_kpis": {
+            "closed_trade_count": int(daily_edge_kpis.get("closed_trade_count", source.get("closed_trade_count", 0)) or 0),
+            "true_edge_ratio": round(_float(daily_edge_kpis.get("true_edge_ratio", source.get("true_edge_ratio"))), 4),
+            "edge_decay_rate": round(_float(daily_edge_kpis.get("edge_decay_rate", source.get("edge_decay_rate"))), 4),
+            "regime_dependency_state": str(
+                daily_edge_kpis.get("regime_dependency_state") or source.get("regime_dependency_state") or "not_available"
+            ),
+        },
     }
 
 
 def _edge_experiment_summary_line(payload: dict[str, Any] | None) -> str:
     summary = _edge_experiment_summary(payload)
+    posture = dict(summary.get("edge_proof_posture") or {})
+    kpis = dict(summary.get("daily_edge_kpis") or {})
     return (
         f"edge_experiment: state={summary.get('edge_state', 'unavailable')} | "
         f"entry_timing={summary.get('entry_timing_preferred_variant', 'none')} | "
         f"execution_style={summary.get('execution_style_preferred_variant', 'none')} | "
-        f"true_edge={summary.get('true_edge_ratio', 'n/a')}"
+        f"proof={posture.get('state', 'unknown')}/{posture.get('claim_state', 'unknown')} | "
+        f"closes={int(kpis.get('closed_trade_count', 0) or 0)}/{int(summary.get('edge_proof_goal_closed_trades', 0) or 0)} | "
+        f"remaining={int(summary.get('remaining_closed_trades_to_edge_proof_goal', 0) or 0)} | "
+        f"regime={kpis.get('regime_dependency_state', 'not_available')} | "
+        f"true_edge={float(kpis.get('true_edge_ratio', 0.0) or 0.0):.4f} | "
+        f"decay={float(kpis.get('edge_decay_rate', 0.0) or 0.0):.4f}"
     )
 
 

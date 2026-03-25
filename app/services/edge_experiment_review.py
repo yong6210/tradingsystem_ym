@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+_EDGE_PROOF_GOAL_CLOSED_TRADES = 100
+
 
 def _float(value: Any, default: float = 0.0) -> float:
     try:
@@ -170,6 +172,229 @@ def _sample_progress(*, closed_trade_count: int) -> dict[str, Any]:
         "operator_sample_floor_ready": bool(count >= 20),
         "next_sample_target_closed_trades": int(next_target),
         "remaining_closed_trades_to_next_target": max(int(next_target) - count, 0) if next_target else 0,
+        "edge_proof_goal_closed_trades": _EDGE_PROOF_GOAL_CLOSED_TRADES,
+        "edge_proof_goal_ready": bool(count >= _EDGE_PROOF_GOAL_CLOSED_TRADES),
+        "remaining_closed_trades_to_edge_proof_goal": max(_EDGE_PROOF_GOAL_CLOSED_TRADES - count, 0),
+    }
+
+
+def _edge_proof_posture(
+    *,
+    closed_trade_count: int,
+    true_edge_ratio: float,
+    edge_decay_rate: float,
+    sample_progress: dict[str, Any],
+    regime_edge_breakdown: dict[str, Any],
+) -> dict[str, Any]:
+    count = max(_int(closed_trade_count, 0), 0)
+    proof_goal = _int(sample_progress.get("edge_proof_goal_closed_trades", _EDGE_PROOF_GOAL_CLOSED_TRADES))
+    proof_goal_ready = bool(sample_progress.get("edge_proof_goal_ready", False))
+    remaining_to_goal = max(_int(sample_progress.get("remaining_closed_trades_to_edge_proof_goal", 0)), 0)
+    maturity = str(sample_progress.get("sample_maturity_state") or "unknown")
+    regime_dependency_state = str(regime_edge_breakdown.get("dependency_state") or "not_available")
+
+    posture_state = "sample_building"
+    claim_state = "do_not_claim_edge_yet"
+    focus = "accumulate_closed_trades"
+    summary = (
+        f"Closed sample is {count}/{proof_goal}; keep the system in research posture until the edge proof goal is met."
+    )
+
+    if proof_goal_ready and regime_dependency_state == "regime_dependent":
+        posture_state = "regime_limited"
+        claim_state = "regime_specific_only"
+        focus = "close_weakest_regime_gap"
+        summary = "Closed sample cleared the proof goal, but edge is still regime-dependent; do not generalize promotion."
+    elif proof_goal_ready and (true_edge_ratio < 1.0 or edge_decay_rate <= -0.05):
+        posture_state = "proof_goal_met_but_edge_weak"
+        claim_state = "keep_research_only"
+        focus = "monitor_true_edge_and_decay"
+        summary = "Closed sample cleared the proof goal, but current true-edge/decay does not support a durable edge claim."
+    elif proof_goal_ready:
+        posture_state = "edge_claim_ready"
+        claim_state = "eligible_for_edge_claim"
+        focus = "review_promotion_cautiously"
+        summary = "Closed sample cleared the proof goal and current edge metrics are strong enough to review as a durable candidate."
+    elif maturity in {"pre_directional", "directional_only", "review_ready"}:
+        focus = "accumulate_closed_trades_before_split_conclusions"
+        summary = (
+            f"Closed sample is {count}/{proof_goal}; treat split preferences as directional only until more closes accumulate."
+        )
+
+    return {
+        "state": posture_state,
+        "claim_state": claim_state,
+        "focus": focus,
+        "edge_proof_goal_closed_trades": proof_goal,
+        "edge_proof_goal_ready": proof_goal_ready,
+        "remaining_closed_trades_to_edge_proof_goal": remaining_to_goal,
+        "summary": summary,
+    }
+
+
+def _operating_discipline(
+    *,
+    edge_proof_posture: dict[str, Any],
+    sample_progress: dict[str, Any],
+    regime_edge_breakdown: dict[str, Any],
+) -> dict[str, Any]:
+    posture_state = str(edge_proof_posture.get("state") or "sample_building")
+    discipline_state = "research_only_until_edge_proof_goal"
+    structure_change_review_allowed = False
+    profit_claim_allowed = False
+    proof_goal = _int(edge_proof_posture.get("edge_proof_goal_closed_trades", _EDGE_PROOF_GOAL_CLOSED_TRADES))
+    closed_trade_count = _int(sample_progress.get("closed_trade_count", 0))
+    regime_dependency_state = str(regime_edge_breakdown.get("dependency_state") or "not_available")
+    framework_quality_state = "framework_ready"
+    system_mode = "operate_and_experiment"
+    evaluation_focus = "after_cost_edge_only"
+    evaluation_metric = "true_edge_ratio_post_cost_closed"
+    improvement_priority = "prove_single_edge_before_density_or_strategy_expansion"
+    edge_status = "unknown_until_after_cost_proof"
+    early_loss_rewrite_embargo_closed_trades = 50
+    early_loss_rewrite_embargo_active = closed_trade_count < early_loss_rewrite_embargo_closed_trades
+    regime_stability_required_for_expansion = True
+    rollout_expansion_allowed = False
+    loss_driven_rewrite_allowed = False
+    signal_density_control_review_allowed = False
+    multi_strategy_expansion_review_allowed = False
+    summary = (
+        "Framework is ready, but edge is still unproven; operate and experiment with one active split, and judge the "
+        "system on after-cost closed-trade edge instead of structure changes until the proof goal is met. Keep signal-density "
+        "tuning and multi-strategy expansion deferred until one edge is actually proven."
+    )
+
+    if posture_state == "regime_limited":
+        discipline_state = "research_only_until_regime_confirms"
+        edge_status = "unknown_until_regime_confirms"
+        summary = (
+            "Framework is ready, but edge is still regime-limited; keep one experiment active and judge progress on "
+            "after-cost closed-trade edge until weaker regimes confirm. Do not expand rollout, tune signal density, or open "
+            "multi-strategy expansion until regime stability is real."
+        )
+    elif posture_state == "proof_goal_met_but_edge_weak":
+        discipline_state = "research_only_until_edge_stabilizes"
+        edge_status = "unknown_until_edge_stabilizes"
+        summary = (
+            "The proof goal is met, but after-cost edge quality is still weak; do not claim profitability or justify "
+            "structural rewrites, signal-density tuning, or expansion from this sample yet."
+        )
+    elif posture_state == "edge_claim_ready":
+        discipline_state = "reviewable_after_edge_proof"
+        structure_change_review_allowed = True
+        profit_claim_allowed = True
+        edge_status = "reviewable_after_cost_edge"
+        rollout_expansion_allowed = regime_dependency_state == "stable_across_regimes"
+        loss_driven_rewrite_allowed = not early_loss_rewrite_embargo_active
+        signal_density_control_review_allowed = rollout_expansion_allowed
+        multi_strategy_expansion_review_allowed = rollout_expansion_allowed
+        summary = (
+            "After-cost edge evidence is finally strong enough for cautious review; keep single-experiment discipline "
+            "and treat any structural change as reviewable, not guaranteed profit."
+        )
+        if not rollout_expansion_allowed:
+            summary += " Expansion still stays blocked until regime stability is confirmed."
+
+    if posture_state != "edge_claim_ready":
+        loss_driven_rewrite_allowed = False
+        signal_density_control_review_allowed = False
+        multi_strategy_expansion_review_allowed = False
+
+    deferred_review_backlog: list[str] = []
+    if not signal_density_control_review_allowed:
+        deferred_review_backlog.append("signal_density_control")
+    if not multi_strategy_expansion_review_allowed:
+        deferred_review_backlog.append("multi_strategy_expansion")
+
+    return {
+        "discipline_state": discipline_state,
+        "framework_quality_state": framework_quality_state,
+        "system_mode": system_mode,
+        "primary_goal": "find_first_verified_edge",
+        "evaluation_focus": evaluation_focus,
+        "evaluation_metric": evaluation_metric,
+        "improvement_priority": improvement_priority,
+        "minimum_closed_trades_for_edge_evaluation": proof_goal,
+        "edge_status": edge_status,
+        "single_experiment_only": True,
+        "parallel_experiments_allowed": False,
+        "profit_claim_allowed": profit_claim_allowed,
+        "structure_change_review_allowed": structure_change_review_allowed,
+        "early_loss_rewrite_embargo_closed_trades": early_loss_rewrite_embargo_closed_trades,
+        "early_loss_rewrite_embargo_active": early_loss_rewrite_embargo_active,
+        "loss_driven_rewrite_allowed": loss_driven_rewrite_allowed,
+        "regime_stability_required_for_expansion": regime_stability_required_for_expansion,
+        "rollout_expansion_allowed": rollout_expansion_allowed,
+        "signal_density_control_review_allowed": signal_density_control_review_allowed,
+        "multi_strategy_expansion_review_allowed": multi_strategy_expansion_review_allowed,
+        "deferred_review_backlog": deferred_review_backlog,
+        "summary": summary,
+    }
+
+
+def _experiment_sequence(
+    *,
+    entry_timing: dict[str, Any],
+    execution_style: dict[str, Any],
+    sample_progress: dict[str, Any],
+) -> dict[str, Any]:
+    decision_ready = bool(sample_progress.get("decision_ready", False))
+    promotion_ready = bool(sample_progress.get("promotion_ready", False))
+    entry_preferred = str(entry_timing.get("preferred_variant") or "none")
+    execution_preferred = str(execution_style.get("preferred_variant") or "none")
+    entry_timing_locked = bool(entry_timing.get("comparison_ready", False)) and decision_ready and entry_preferred not in {
+        "",
+        "none",
+    }
+    execution_style_locked = bool(execution_style.get("comparison_ready", False)) and decision_ready and execution_preferred not in {
+        "",
+        "none",
+    }
+
+    state = "entry_timing_first"
+    current_priority_experiment = "entry_timing"
+    current_priority_action = "run_entry_timing_split_review"
+    summary = (
+        "Lock entry timing first: compare early_limit versus reaction_confirmed before changing execution style or "
+        "reviewing exit optimization."
+    )
+
+    if entry_timing_locked and not execution_style_locked:
+        state = "execution_style_second"
+        current_priority_experiment = "execution_style"
+        current_priority_action = "run_execution_style_split_review"
+        summary = (
+            "Entry timing is directionally locked; lock execution style next by comparing passive_limit versus market "
+            "before reviewing exit optimization."
+        )
+    elif entry_timing_locked and execution_style_locked and not promotion_ready:
+        state = "sample_building_before_exit_optimization"
+        current_priority_experiment = "sample_building"
+        current_priority_action = "accumulate_closed_trades"
+        summary = (
+            "Entry timing and execution style both have directional coverage, but the closed-trade sample is still "
+            "below the exit-review floor; accumulate more closes before exit optimization."
+        )
+    elif entry_timing_locked and execution_style_locked and promotion_ready:
+        state = "exit_optimization_allowed"
+        current_priority_experiment = "exit_optimization"
+        current_priority_action = "run_shadow_exit_timing_review"
+        summary = (
+            "Entry timing and execution style are both locked with enough closed-trade evidence; exit optimization "
+            "review can start without coupling it to the current split decision."
+        )
+
+    return {
+        "state": state,
+        "entry_timing_variants": ["early_limit", "reaction_confirmed"],
+        "execution_style_variants": ["passive_limit", "market"],
+        "entry_timing_locked": entry_timing_locked,
+        "execution_style_locked": execution_style_locked,
+        "exit_review_floor_closed_trades": 8,
+        "exit_optimization_allowed": bool(entry_timing_locked and execution_style_locked and promotion_ready),
+        "current_priority_experiment": current_priority_experiment,
+        "current_priority_action": current_priority_action,
+        "summary": summary,
     }
 
 
@@ -390,6 +615,23 @@ def summarize_edge_experiment_review(payload: dict[str, Any] | None) -> dict[str
     strongest_regime = dict(regime_edge_breakdown.get("strongest_regime") or {})
     weakest_regime = dict(regime_edge_breakdown.get("weakest_regime") or {})
     dominant_regime = dict(regime_edge_breakdown.get("dominant_regime") or {})
+    edge_proof_posture = _edge_proof_posture(
+        closed_trade_count=_int(true_edge.get("closed_trade_count", 0)),
+        true_edge_ratio=_float(true_edge.get("true_edge_ratio", 0.0)),
+        edge_decay_rate=_float(true_edge.get("edge_decay_rate", 0.0)),
+        sample_progress=sample_progress,
+        regime_edge_breakdown=regime_edge_breakdown,
+    )
+    operating_discipline = _operating_discipline(
+        edge_proof_posture=edge_proof_posture,
+        sample_progress=sample_progress,
+        regime_edge_breakdown=regime_edge_breakdown,
+    )
+    experiment_sequence = _experiment_sequence(
+        entry_timing=entry_timing,
+        execution_style=execution_style,
+        sample_progress=sample_progress,
+    )
     return {
         "available": bool(source.get("available", False)),
         "advisory_only": bool(source.get("advisory_only", True)),
@@ -421,6 +663,11 @@ def summarize_edge_experiment_review(payload: dict[str, Any] | None) -> dict[str
         "remaining_closed_trades_to_next_target": _int(
             sample_progress.get("remaining_closed_trades_to_next_target", 0)
         ),
+        "edge_proof_goal_closed_trades": _int(sample_progress.get("edge_proof_goal_closed_trades", 0)),
+        "edge_proof_goal_ready": bool(sample_progress.get("edge_proof_goal_ready", False)),
+        "remaining_closed_trades_to_edge_proof_goal": _int(
+            sample_progress.get("remaining_closed_trades_to_edge_proof_goal", 0)
+        ),
         "regime_dependency_state": str(regime_edge_breakdown.get("dependency_state") or "not_available"),
         "regime_dependency_gap": round(_float(regime_edge_breakdown.get("dependency_gap", 0.0)), 4),
         "strongest_regime": str(strongest_regime.get("key") or "none"),
@@ -429,6 +676,18 @@ def summarize_edge_experiment_review(payload: dict[str, Any] | None) -> dict[str
         "weakest_regime_true_edge_ratio": round(_float(weakest_regime.get("true_edge_ratio", 0.0)), 4),
         "dominant_regime": str(dominant_regime.get("key") or "none"),
         "dominant_regime_closed_trade_count": _int(dominant_regime.get("closed", 0)),
+        "edge_proof_posture": edge_proof_posture,
+        "operating_discipline": operating_discipline,
+        "experiment_sequence": experiment_sequence,
+        "daily_edge_kpis": {
+            "closed_trade_count": _int(true_edge.get("closed_trade_count", 0)),
+            "sample_maturity_state": str(sample_progress.get("sample_maturity_state") or "unknown"),
+            "true_edge_ratio": round(_float(true_edge.get("true_edge_ratio", 0.0)), 4),
+            "true_edge_ratio_claim_threshold": 1.0,
+            "edge_decay_rate": round(_float(true_edge.get("edge_decay_rate", 0.0)), 4),
+            "edge_decay_watch_floor": -0.05,
+            "regime_dependency_state": str(regime_edge_breakdown.get("dependency_state") or "not_available"),
+        },
         "summary": str(source.get("summary") or ""),
         "reason_codes": list(source.get("reason_codes") or []),
         "source_summary": dict(source.get("source_summary") or {}),

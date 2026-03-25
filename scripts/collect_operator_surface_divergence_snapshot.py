@@ -139,6 +139,20 @@ def _edge_evolution_summary_line(summary: dict[str, Any] | None) -> str:
     )
 
 
+def _edge_experiment_snapshot_line(funnel: dict[str, Any]) -> str:
+    return (
+        f"- edge_experiment: state={funnel.get('edge_state', '')} | "
+        f"entry_timing={funnel.get('entry_timing_focus', '')} | "
+        f"execution_style={funnel.get('execution_style_focus', '')} | "
+        f"proof={funnel.get('edge_proof_state', 'unknown')}/{funnel.get('edge_claim_state', 'unknown')} | "
+        f"closes={int(funnel.get('edge_closed_trade_count', 0) or 0)}/{int(funnel.get('edge_proof_goal_closed_trades', 0) or 0)} | "
+        f"remaining={int(funnel.get('remaining_closed_trades_to_edge_proof_goal', 0) or 0)} | "
+        f"regime={funnel.get('edge_regime_dependency_state', 'not_available')} | "
+        f"true_edge={float(funnel.get('edge_true_edge_ratio', 0.0) or 0.0):.4f} | "
+        f"decay={float(funnel.get('edge_decay_rate', 0.0) or 0.0):.4f}"
+    )
+
+
 def _representative_candidate_snapshot(row: dict[str, Any] | None, *, status: str) -> dict[str, Any] | None:
     item = dict(row or {})
     if not item:
@@ -465,11 +479,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append(f"- research_action: {funnel['research_action']}")
     lines.append(f"- shadow_experiment: {funnel['shadow_experiment']}")
     lines.append(f"- top_action_followup_command: {funnel.get('top_action_followup_command') or 'none'}")
-    lines.append(
-        f"- edge_experiment: state={funnel.get('edge_state', '')} | "
-        f"entry_timing={funnel.get('entry_timing_focus', '')} | "
-        f"execution_style={funnel.get('execution_style_focus', '')}"
-    )
+    lines.append(_edge_experiment_snapshot_line(funnel))
     lines.append(
         f"- edge_evolution: state={funnel.get('edge_evolution_state', '')} | "
         f"action={funnel.get('edge_evolution_action', '')} | "
@@ -771,6 +781,30 @@ def main() -> int:
             "shadow_experiment": (alpha_research_experiment.get("experiment_id") or ""),
             "top_action_followup_command": (operator_action_priority.get("top_action_followup_command") or ""),
             "edge_state": edge_state,
+            "edge_proof_state": (dict(edge_experiment.get("edge_proof_posture") or {}).get("state") or ""),
+            "edge_claim_state": (dict(edge_experiment.get("edge_proof_posture") or {}).get("claim_state") or ""),
+            "edge_proof_goal_closed_trades": int(edge_experiment.get("edge_proof_goal_closed_trades", 0) or 0),
+            "remaining_closed_trades_to_edge_proof_goal": int(
+                edge_experiment.get("remaining_closed_trades_to_edge_proof_goal", 0) or 0
+            ),
+            "edge_closed_trade_count": int(
+                dict(edge_experiment.get("daily_edge_kpis") or {}).get("closed_trade_count", 0) or 0
+            ),
+            "edge_regime_dependency_state": (
+                dict(edge_experiment.get("daily_edge_kpis") or {}).get("regime_dependency_state") or ""
+            ),
+            "edge_true_edge_ratio": float(
+                dict(edge_experiment.get("daily_edge_kpis") or {}).get(
+                    "true_edge_ratio", edge_experiment.get("true_edge_ratio", 0.0)
+                )
+                or 0.0
+            ),
+            "edge_decay_rate": float(
+                dict(edge_experiment.get("daily_edge_kpis") or {}).get(
+                    "edge_decay_rate", edge_experiment.get("edge_decay_rate", 0.0)
+                )
+                or 0.0
+            ),
             "edge_evolution_state": evolution_state,
             "edge_evolution_action": (edge_evolution.get("recommended_action") or ""),
             "edge_evolution_bias": (edge_evolution.get("allocation_bias") or ""),

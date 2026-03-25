@@ -593,6 +593,12 @@ def test_validation_report_generation(monkeypatch) -> None:
                 "confidence": "medium",
                 "sample_note": "usable evidence, but still limited",
                 "aligned_candidates": 2,
+                "deferred_by_experiment_sequence": True,
+                "experiment_sequence_state": "entry_timing_first",
+                "current_priority_experiment": "entry_timing",
+                "current_priority_action": "run_entry_timing_split_review",
+                "exit_optimization_allowed": False,
+                "sequencing_reason": "Lock entry timing first: compare early_limit versus reaction_confirmed before changing execution style or reviewing exit optimization.",
             },
             "recommended_actions": [
                 {
@@ -610,6 +616,12 @@ def test_validation_report_generation(monkeypatch) -> None:
                         "do_not_promote_if_information_failure_persists",
                         "do_not_weaken_safety_or_structural_gates",
                     ],
+                    "deferred_by_experiment_sequence": True,
+                    "experiment_sequence_state": "entry_timing_first",
+                    "current_priority_experiment": "entry_timing",
+                    "current_priority_action": "run_entry_timing_split_review",
+                    "exit_optimization_allowed": False,
+                    "sequencing_reason": "Lock entry timing first: compare early_limit versus reaction_confirmed before changing execution style or reviewing exit optimization.",
                 }
             ],
             "top_shadow_experiment": {
@@ -625,6 +637,12 @@ def test_validation_report_generation(monkeypatch) -> None:
                 "bucket": "trend_continuation",
                 "confidence": "medium",
                 "sample_note": "usable evidence, but still limited",
+                "deferred_by_experiment_sequence": True,
+                "experiment_sequence_state": "entry_timing_first",
+                "current_priority_experiment": "entry_timing",
+                "current_priority_action": "run_entry_timing_split_review",
+                "exit_optimization_allowed": False,
+                "sequencing_reason": "Lock entry timing first: compare early_limit versus reaction_confirmed before changing execution style or reviewing exit optimization.",
                 "observe_metrics": ["information_failure_rate", "forced_exit_rate", "post_cost_ev"],
                 "success_criteria": [
                     "information failure looks reducible without weakening hard gates",
@@ -669,6 +687,15 @@ def test_validation_report_generation(monkeypatch) -> None:
                     "sample_note": "usable evidence, but still limited",
                 }
             ],
+            "experiment_sequence": {
+                "state": "entry_timing_first",
+                "entry_timing_locked": False,
+                "execution_style_locked": False,
+                "exit_optimization_allowed": False,
+                "current_priority_experiment": "entry_timing",
+                "current_priority_action": "run_entry_timing_split_review",
+                "summary": "Lock entry timing first: compare early_limit versus reaction_confirmed before changing execution style or reviewing exit optimization.",
+            },
             "alpha_research_evidence_summary": {
                 "available": True,
                 "analysis_symbol": "BTCUSDC",
@@ -2076,13 +2103,19 @@ def test_validation_report_generation(monkeypatch) -> None:
     assert "BTCUSDC" in path.name
     assert "## Performance Decomposition" in body
     assert "recommended_action: run_shadow_exit_review" in body
+    assert "recommended_action_deferred_by_sequence: True" in body
+    assert "recommended_action_current_priority: entry_timing:run_entry_timing_split_review" in body
     assert "shadow_experiment_type: exit_failure_review" in body
     assert "top_shadow_experiment_id: shadow_exit_review_family" in body
     assert "top_shadow_experiment_title: Family Exit Failure Review" in body
+    assert "top_shadow_experiment_deferred_by_sequence: True" in body
+    assert "experiment_sequence: state=entry_timing_first" in body
     assert "experiment_1: shadow_exit_review_family" in body
     assert "## Score To Outcome Funnel" in body
     assert "snapshot_selection: runtime=12, accepted=5, blocked=7" in body
     assert "historical_execution_outcomes: submitted=9, filled=7, closed=6, profitable=4" in body
+    assert "operating_kpis: primary_focus=after_cost_edge_proof" in body
+    assert "operating_kpi_summary: runtime_accept=" in body
     assert "## Execution Degradation Advisory" in body
     assert "status: manual_review" in body
     assert "recommended_action: review_runtime_execution_drag_before_expansion" in body
@@ -2090,6 +2123,19 @@ def test_validation_report_generation(monkeypatch) -> None:
     assert "top_family: bucket=trend_continuation state=research_only" in body
     assert "## Outcome Control Trace" in body
     assert "## Edge Experiment Review" in body
+    assert "operating_discipline: state=research_only_until_edge_proof_goal" in body
+    assert "framework=framework_ready" in body
+    assert "mode=operate_and_experiment" in body
+    assert "improvement_priority=prove_single_edge_before_density_or_strategy_expansion" in body
+    assert "loss_driven_rewrite_allowed=False" in body
+    assert "early_loss_embargo_active=True" in body
+    assert "rollout_expansion_allowed=False" in body
+    assert "signal_density_review_allowed=False" in body
+    assert "multi_strategy_expansion_review_allowed=False" in body
+    assert "experiment_sequence: state=sample_building_before_exit_optimization" in body
+    assert "primary_goal=find_first_verified_edge" in body
+    assert "evaluation_focus=after_cost_edge_only" in body
+    assert "min_closed_trades=100" in body
     assert "## Approval Strip" in body
     assert "## Multi Strategy AB Expansion" in body
     assert "## B Continuation Activation" in body
@@ -2194,6 +2240,25 @@ def test_validation_report_generation(monkeypatch) -> None:
     assert result["edge_experiment_review_summary"]["true_edge_ratio"] == 0.75
     assert result["edge_experiment_review_summary"]["entry_timing_preferred_variant"] == "early_limit"
     assert result["edge_experiment_review_summary"]["execution_style_preferred_variant"] == "passive_limit"
+    assert result["edge_experiment_review_summary"]["edge_proof_goal_closed_trades"] == 100
+    assert result["edge_experiment_review_summary"]["edge_proof_posture"]["state"] == "sample_building"
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["discipline_state"] == "research_only_until_edge_proof_goal"
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["system_mode"] == "operate_and_experiment"
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["evaluation_focus"] == "after_cost_edge_only"
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["profit_claim_allowed"] is False
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["early_loss_rewrite_embargo_active"] is True
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["loss_driven_rewrite_allowed"] is False
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["rollout_expansion_allowed"] is False
+    assert (
+        result["edge_experiment_review_summary"]["operating_discipline"]["improvement_priority"]
+        == "prove_single_edge_before_density_or_strategy_expansion"
+    )
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["signal_density_control_review_allowed"] is False
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["multi_strategy_expansion_review_allowed"] is False
+    assert result["edge_experiment_review_summary"]["daily_edge_kpis"]["true_edge_ratio"] == 0.75
+    assert result["score_to_outcome_funnel_summary"]["operating_kpis"]["primary_focus"] == "after_cost_edge_proof"
+    assert result["score_to_outcome_funnel_summary"]["operating_kpis"]["stage_conversion_rates"]["runtime_to_accepted"] == 0.4167
+    assert result["score_to_outcome_funnel_summary"]["operating_kpis"]["cost_adjusted_survival_rate"] == 0.5
     assert result["edge_evolution_rule_available"] is True
     assert result["edge_evolution_rule_summary"]["evolution_state"] == "reduce_candidate"
     assert result["edge_evolution_rule_summary"]["recommended_action"] == "reduce_baseline_allocation_review"
@@ -2308,6 +2373,11 @@ def test_validation_report_generation(monkeypatch) -> None:
     assert result["alpha_research_pipeline_summary"]["recommended_bucket"] == "trend_continuation"
     assert result["alpha_research_pipeline_summary"]["confidence"] == "medium"
     assert result["alpha_research_pipeline_summary"]["sample_note"] == "usable evidence, but still limited"
+    assert result["alpha_research_pipeline_summary"]["recommended_action_deferred_by_sequence"] is True
+    assert result["alpha_research_pipeline_summary"]["recommended_action_current_priority_experiment"] == "entry_timing"
+    assert result["alpha_research_pipeline_summary"]["recommended_action_current_priority_action"] == (
+        "run_entry_timing_split_review"
+    )
     assert result["alpha_research_pipeline_summary"]["top_shadow_experiment_id"] == "shadow_exit_review_family"
     assert result["alpha_research_pipeline_summary"]["top_shadow_experiment_title"] == "Family Exit Failure Review"
     assert result["alpha_research_pipeline_summary"]["top_shadow_experiment_target"] == "family=trend_continuation"
@@ -2319,6 +2389,23 @@ def test_validation_report_generation(monkeypatch) -> None:
     assert "post_cost_ev" in result["alpha_research_pipeline_summary"]["top_shadow_experiment_observe_metrics"]
     assert len(result["alpha_research_pipeline_summary"]["top_shadow_experiment_success_criteria"]) == 2
     assert len(result["alpha_research_pipeline_summary"]["top_shadow_experiment_stop_conditions"]) == 2
+    assert result["alpha_research_pipeline_summary"]["top_shadow_experiment_deferred_by_sequence"] is True
+    assert result["alpha_research_pipeline_summary"]["experiment_sequence_state"] == "entry_timing_first"
+    assert result["alpha_research_pipeline_summary"]["entry_timing_locked"] is False
+    assert result["alpha_research_pipeline_summary"]["execution_style_locked"] is False
+    assert result["alpha_research_pipeline_summary"]["exit_optimization_allowed"] is False
+    assert result["alpha_research_pipeline_summary"]["current_priority_experiment"] == "entry_timing"
+    assert result["alpha_research_pipeline_summary"]["current_priority_action"] == "run_entry_timing_split_review"
+    assert (
+        result["alpha_research_pipeline_summary"]["improvement_priority"]
+        == "prove_single_edge_before_density_or_strategy_expansion"
+    )
+    assert result["alpha_research_pipeline_summary"]["signal_density_control_review_allowed"] is False
+    assert result["alpha_research_pipeline_summary"]["multi_strategy_expansion_review_allowed"] is False
+    assert result["alpha_research_pipeline_summary"]["deferred_review_backlog"] == [
+        "signal_density_control",
+        "multi_strategy_expansion",
+    ]
     assert result["alpha_research_pipeline_summary"]["shadow_experiment_template_count"] == 1
     assert result["alpha_research_pipeline_summary"]["top_reason"] == "risk_budget_below_min"
     assert result["alpha_research_pipeline_summary"]["evidence_available"] is True

@@ -143,6 +143,13 @@
 - `execution_friction_measurement`, `forward_stress_regime_validation`, `kill_condition_automation`은 edge verdict를 보완하는 safety layer다.
 - `proposal_only`와 `explicit arm` 철학은 유지한다.
 - split experiment는 한 번에 하나만 active로 둔다. `entry_timing`과 `execution_style`를 동시에 실거래 실험으로 열지 않는다.
+- split 실험 순서는 고정이다. 먼저 `entry_timing (early_limit vs reaction_confirmed)`, 그다음 `execution_style (passive_limit vs market)`, 그 다음에만 exit optimization review를 연다.
+- `edge_experiment_review.experiment_sequence.exit_optimization_allowed == false`면 alpha-research가 exit review를 권해도 sequencing hint로만 읽고 현재 split 실험을 먼저 끝낸다.
+- `edge_experiment_review.operating_discipline.early_loss_rewrite_embargo_active == true`면 초반 손실만으로 구조를 바꾸지 않는다.
+- `edge_experiment_review.operating_discipline.rollout_expansion_allowed == false`면 regime가 안정화되기 전에는 확장을 열지 않는다.
+- `edge_experiment_review.operating_discipline.signal_density_control_review_allowed == false`면 target trades/day tuning은 아직 보류한다.
+- `edge_experiment_review.operating_discipline.multi_strategy_expansion_review_allowed == false`면 multi-strategy 확장도 아직 보류한다.
+- `score_to_outcome_funnel_summary.operating_kpis`는 daily KPI로 읽는다. `runtime_to_accepted`, `submitted_to_filled`, `filled_to_closed`, `closed_to_post_cost_profitable`, `closed_trades_per_day`를 같이 본다.
 - `sample_maturity_state`가 `pre_directional`, `directional_only`, `review_ready`면 결론보다 표본 축적을 우선한다.
 - `regime_dependency_state=regime_dependent`면 strongest regime에서 좋아 보여도 weakest regime evidence가 쌓이기 전까지는 범용 edge로 승격하지 않는다.
 

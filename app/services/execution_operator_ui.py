@@ -1883,13 +1883,55 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       return current == null ? '' : current;
     }
 
+    function edgeExperimentProofParts(edgeExperiment) {
+      const posture = edgeExperiment?.edge_proof_posture || {};
+      const kpis = edgeExperiment?.daily_edge_kpis || {};
+      return {
+        proofState: posture?.state || 'unknown',
+        claimState: posture?.claim_state || 'unknown',
+        closedTradeCount: Number(kpis?.closed_trade_count ?? 0),
+        proofGoal: Number(edgeExperiment?.edge_proof_goal_closed_trades ?? 0),
+        remainingToGoal: Number(edgeExperiment?.remaining_closed_trades_to_edge_proof_goal ?? 0),
+        regimeDependencyState: kpis?.regime_dependency_state || 'not_available',
+        trueEdgeRatio: kpis?.true_edge_ratio ?? edgeExperiment?.true_edge_ratio,
+        edgeDecayRate: kpis?.edge_decay_rate ?? edgeExperiment?.edge_decay_rate,
+        sampleMaturityState: kpis?.sample_maturity_state || edgeExperiment?.sample_maturity_state || 'unknown',
+      };
+    }
+
+    function edgeExperimentSummaryBody(edgeExperiment) {
+      const proof = edgeExperimentProofParts(edgeExperiment);
+      return (
+        edgeExperiment?.operating_discipline?.summary
+        || edgeExperiment?.summary
+        || `proof=${proof.proofState}/${proof.claimState} | closes=${proof.closedTradeCount}/${proof.proofGoal} | remaining=${proof.remainingToGoal} | regime=${proof.regimeDependencyState} | true_edge=${fmtMaybe(proof.trueEdgeRatio)} | decay=${fmtMaybe(proof.edgeDecayRate)}`
+      );
+    }
+
+    function edgeExperimentDisciplineBody(edgeExperiment) {
+      const discipline = edgeExperiment?.operating_discipline || {};
+      if (discipline?.summary) {
+        return `${discipline.summary} | goal=${discipline.primary_goal || 'find_first_verified_edge'} | profit_claim_allowed=${String(Boolean(discipline.profit_claim_allowed))} | structure_change_review_allowed=${String(Boolean(discipline.structure_change_review_allowed))} | loss_driven_rewrite_allowed=${String(Boolean(discipline.loss_driven_rewrite_allowed))} | rollout_expansion_allowed=${String(Boolean(discipline.rollout_expansion_allowed))} | signal_density_control_review_allowed=${String(Boolean(discipline.signal_density_control_review_allowed))} | multi_strategy_expansion_review_allowed=${String(Boolean(discipline.multi_strategy_expansion_review_allowed))}`;
+      }
+      const proof = edgeExperimentProofParts(edgeExperiment);
+      return (
+        edgeExperiment?.summary
+        || `proof=${proof.proofState}/${proof.claimState} | closes=${proof.closedTradeCount}/${proof.proofGoal} | remaining=${proof.remainingToGoal} | regime=${proof.regimeDependencyState} | true_edge=${fmtMaybe(proof.trueEdgeRatio)} | decay=${fmtMaybe(proof.edgeDecayRate)}`
+      );
+    }
+
+    function edgeExperimentFocusBody(edgeExperiment) {
+      const proof = edgeExperimentProofParts(edgeExperiment);
+      return `${edgeExperiment?.edge_state || 'n/a'} | timing=${edgeExperiment?.entry_timing_preferred_variant || 'n/a'} | execution=${edgeExperiment?.execution_style_preferred_variant || 'n/a'} | proof=${proof.proofState}/${proof.claimState} | closes=${proof.closedTradeCount}/${proof.proofGoal} | regime=${proof.regimeDependencyState}`;
+    }
+
     function renderValidationChecklistReviewStack(validation, checklist) {
       const checklistMap = checklistStatusMap(checklist);
       const rows = [
         ['outcome_control_trace', 'Outcome Control', validation?.outcome_control_trace_summary || {}, 'approval_penalty_status', 'portfolio_bias_tier'],
         ['money_funnel', 'Money Funnel', validation?.score_to_outcome_funnel_summary?.money_funnel || {}, 'historical_expected_r.closed', 'historical_gap_r.submitted_to_filled'],
         ['outcome_attribution', 'Outcome Attribution', validation?.outcome_attribution_summary || {}, 'strongest_drag_source', 'closed_post_cost_delta_r'],
-        ['edge_experiment_review', 'Edge Experiment Review', validation?.edge_experiment_review_summary || {}, 'edge_state', 'entry_timing_preferred_variant'],
+        ['edge_experiment_review', 'Edge Experiment Review', validation?.edge_experiment_review_summary || {}, 'edge_state', 'edge_proof_posture.claim_state'],
         ['edge_evolution_rule', 'Edge Evolution Rule', validation?.edge_evolution_rule_summary || {}, 'evolution_state', 'recommended_action'],
         ['review_followup_ledger', 'Review Followup Ledger', validation?.review_followup_ledger_summary || {}, 'last_status', 'last_action'],
         ['rollout_recommendation', 'Rollout Recommendation', validation?.rollout_recommendation_summary || {}, 'recommendation', 'confidence'],
@@ -2017,7 +2059,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             ${renderSummaryBox('Validation Act', surfaceActValue(validation, 'validation') || 'n/a', surfaceActReason(validation, 'validation') || 'validation action summary unavailable')}
             ${renderSummaryBox('Money Funnel', fmtR(expectedClosedR), moneyFunnel?.summary || `post_cost_closed=${fmtR(realizedClosedR)}`)}
             ${renderSummaryBox('Outcome Attribution', dragSource, attribution?.summary || `delta=${fmtR(attribution?.closed_post_cost_delta_r)}`)}
-            ${renderSummaryBox('Edge Experiment', edgeState, edgeExperiment?.summary || `true_edge=${fmtMaybe(edgeExperiment?.true_edge_ratio)}`)}
+            ${renderSummaryBox('Edge Experiment', edgeState, edgeExperimentSummaryBody(edgeExperiment))}
             ${renderSummaryBox('Edge Evolution', edgeEvolution?.evolution_state || 'n/a', edgeEvolution?.summary || edgeEvolution?.recommended_action || 'edge evolution rule unavailable')}
             ${renderSummaryBox('Review Followup Ledger', reviewLedger?.last_status || 'n/a', reviewLedger?.summary || reviewLedger?.last_action || 'review followup ledger unavailable')}
             ${renderSummaryBox('Outcome Control', outcomeControl?.approval_penalty_status || 'n/a', outcomeControl?.summary || outcomeControl?.portfolio_bias_tier || 'outcome control unavailable')}
@@ -2042,7 +2084,11 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           <div class="grid two" style="margin-top:12px;">
             <div class="hint-card">
               <div class="title">Edge Split Focus</div>
-              <div class="body">${esc(`${edgeState} | timing=${edgeExperiment?.entry_timing_preferred_variant || 'n/a'} | execution=${edgeExperiment?.execution_style_preferred_variant || 'n/a'}`)}</div>
+              <div class="body">${esc(edgeExperimentFocusBody(edgeExperiment))}</div>
+            </div>
+            <div class="hint-card">
+              <div class="title">Edge Proof Posture</div>
+              <div class="body">${esc(edgeExperimentDisciplineBody(edgeExperiment))}</div>
             </div>
             <div class="hint-card">
               <div class="title">Recent Review Packet</div>
@@ -2140,6 +2186,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const funnel = dashboard?.signal_funnel || {};
       const scoreToOutcome = funnel?.score_to_outcome_funnel || {};
       const moneyFunnel = scoreToOutcome?.money_funnel || {};
+      const operatingKpis = scoreToOutcome?.operating_kpis || {};
       const attribution = funnel?.outcome_attribution || {};
       const edgeExperiment = funnel?.edge_experiment_review || {};
       const edgeEvolution = funnel?.edge_evolution_rule || {};
@@ -2182,7 +2229,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             ${renderSummaryBox('Rollout Block Summary', String(rollout?.blocked ?? 0), rollout?.top_reason || 'rollout block unavailable')}
             ${renderSummaryBox('Money Funnel', fmtR(closedExpectedR), moneyFunnel?.summary || `post_cost_closed=${fmtR(postCostClosedR)}`)}
             ${renderSummaryBox('Outcome Attribution', dragSource, attribution?.summary || `delta=${fmtR(attribution?.closed_post_cost_delta_r)}`)}
-            ${renderSummaryBox('Edge Experiment', edgeState, edgeExperiment?.summary || `true_edge=${fmtMaybe(edgeExperiment?.true_edge_ratio)}`)}
+            ${renderSummaryBox('Edge Experiment', edgeState, edgeExperimentSummaryBody(edgeExperiment))}
             ${renderSummaryBox('Edge Evolution', edgeEvolution?.evolution_state || 'n/a', edgeEvolution?.summary || edgeEvolution?.recommended_action || 'edge evolution rule unavailable')}
             ${renderSummaryBox('Review Followup Ledger', reviewLedger?.last_status || 'n/a', reviewLedger?.summary || reviewLedger?.last_action || 'review followup ledger unavailable')}
             ${renderSummaryBox('Top Family Bottleneck', family?.key || 'n/a', family ? `${fmtPercent(family.pass_rate)} | ${fmtR(family.avg_expected_ev_r)}` : 'family bottleneck unavailable')}
@@ -2199,8 +2246,16 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
               <div class="body">${esc(`${dragSource} | ${attribution?.summary || 'outcome attribution summary unavailable'}`)}</div>
             </div>
             <div class="hint-card">
+              <div class="title">Edge Proof Posture</div>
+              <div class="body">${esc(edgeExperimentDisciplineBody(edgeExperiment))}</div>
+            </div>
+            <div class="hint-card">
               <div class="title">Review Packet History</div>
               <div class="body">${esc(`${reviewLedger?.last_status || 'n/a'} | action=${reviewLedger?.last_action || 'none'} | entries=${fmtMaybe(reviewLedger?.recent_entry_count)}`)}</div>
+            </div>
+            <div class="hint-card">
+              <div class="title">Operating Funnel KPIs</div>
+              <div class="body">${esc(operatingKpis?.summary || 'outcome funnel operating kpis unavailable')}</div>
             </div>
           </div>
           ${renderTable(

@@ -322,10 +322,16 @@
 - 구현 방식: `edge_evolution_rule`는 최신 `review_followup_ledger` packet과 현재 `edge_experiment_review.closed_trade_count / true_edge_ratio / edge_decay_rate`를 함께 읽어, 이전 review 이후 새 closes가 같은 방향으로 누적됐을 때만 `recommendation_strength`와 `closed_loop_confirmation_state`를 `promote / reduce / kill` 강화에 사용한다.
 - 구현 방식: `operator_action_priority`는 같은 ledger summary를 읽어 `fresh READY packet`, 직전 `NO_TARGET`, 최근 3회 연속 동일 packet을 중복 억제 기준으로 사용한다. ledger는 packet history이며 approval authority가 아니다.
 - 구현 방식: `edge_experiment_review`는 `sample_maturity_state`, `next_sample_target_closed_trades`, `remaining_closed_trades_to_next_target`, `regime_dependency_state`, `strongest_regime`, `weakest_regime`를 함께 노출해 “아직 directional인지 / 어느 regime에서 약한지”를 같은 contract에서 읽게 한다.
+- 구현 방식: `edge_experiment_review.operating_discipline`는 `framework_quality_state=framework_ready`, `system_mode=operate_and_experiment`, `evaluation_focus=after_cost_edge_only`, `primary_goal=find_first_verified_edge`, `profit_claim_allowed`, `structure_change_review_allowed`, `single_experiment_only`를 함께 노출해 framework readiness와 edge proof를 혼동하지 않게 한다.
+- 구현 방식: 같은 `operating_discipline`는 `early_loss_rewrite_embargo_active`, `loss_driven_rewrite_allowed`, `rollout_expansion_allowed`를 함께 노출해 early-loss rewrite와 regime-unstable expansion을 명시적으로 금지한다.
+- 구현 방식: 같은 `operating_discipline`는 `improvement_priority=prove_single_edge_before_density_or_strategy_expansion`, `signal_density_control_review_allowed`, `multi_strategy_expansion_review_allowed`도 함께 노출해 density tuning과 전략 확장을 edge proof 뒤로 미룬다.
+- 구현 방식: `score_to_outcome_funnel_summary.operating_kpis`는 `runtime_to_accepted`, `submitted_to_filled`, `filled_to_closed`, `closed_to_post_cost_profitable`, `closed_trades_per_day`를 daily KPI contract로 노출한다.
+- 구현 방식: `edge_experiment_review.experiment_sequence`는 `entry_timing (early_limit vs reaction_confirmed) -> execution_style (passive_limit vs market) -> exit_optimization` 순서를 노출하고, `exit_optimization_allowed=false` 동안에는 alpha-research exit review를 deferred hint로 읽게 한다.
 - 구현 방식: `edge_evolution_rule`는 regime dependency가 아직 크면 `regime_guard_state=promotion_blocked_by_regime_dependency`로 promotion 해석을 research-only로 되돌린다.
 - 구현 방식: `operator_action_priority`는 `experiment_execution_policy.mode=single_active_experiment`와 `deferred_experiment_actions`를 함께 내려, entry timing과 execution style을 동시에 돌리지 않고 한 번에 하나의 split만 active로 유지한다.
 - 완료 기준: dashboard/validation/checklist/session brief/stage monitor/entry alert가 같은 ledger history vocabulary를 공유하고, evolution rule과 operator priority가 둘 다 같은 history로 closed-loop와 dedupe를 수행한다.
 - 완료 기준: operator가 같은 surface에서 `sample target`, `regime guard`, `single active experiment` 정책을 같이 읽을 수 있다.
+- 완료 기준: operator가 같은 surface에서 “framework is ready”와 “edge is proven”을 분리해서 읽고, `system_mode=operate_and_experiment`, `evaluation_focus=after_cost_edge_only`, `profit_claim_allowed=false` 구간에서는 구조 변경 대신 sample accumulation을 우선한다.
 - 검증: `tests/test_split_review_followup_ledger.py`, `tests/test_edge_evolution_rule.py`, `tests/test_operator_action_priority.py`, `tests/test_edge_experiment_review.py`, `tests/test_split_review_followup.py`로 packet summary, closed-loop 강화, regime guard, single-active-experiment, script 회귀를 확인한다.
 
 - [x] post-live pruning review helper 추가
