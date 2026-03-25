@@ -213,6 +213,10 @@ def test_stage_payload_reports_blocked_state():
     )
     assert payload["representative_candidates"]["accepted"]["symbol"] == "BTCUSDC"
     assert payload["representative_candidates"]["blocked"]["symbol"] == "ETHUSDC"
+    assert payload["lineage_gate_ready"] is False
+    assert payload["candidate_gate_ready"] is True
+    assert payload["edge_sample_gate_ready"] is False
+    assert payload["all_readiness_gates_ready"] is False
 
 
 def test_stage_payload_reports_lineage_ready_when_trial_exists():
@@ -238,6 +242,10 @@ def test_stage_payload_reports_lineage_ready_when_trial_exists():
     assert payload["checklist_approval_strip"]["approve_value"] == "approval usable"
     assert payload["edge_experiment_review"]["execution_style_preferred_variant"] == "passive_limit"
     assert payload["edge_evolution_rule"]["allocation_bias"] == "reduce_baseline"
+    assert payload["lineage_gate_ready"] is True
+    assert payload["candidate_gate_ready"] is True
+    assert payload["edge_sample_gate_ready"] is False
+    assert payload["all_readiness_gates_ready"] is False
 
 
 def test_collect_events_emits_transition_events():
@@ -245,6 +253,10 @@ def test_collect_events_emits_transition_events():
         "stage": "1_SAMPLE_COLLECTION",
         "close_only_active": False,
         "playbook_go_no_go": "MANUAL_REVIEW",
+        "lineage_gate_ready": False,
+        "candidate_gate_ready": False,
+        "edge_sample_gate_ready": False,
+        "all_readiness_gates_ready": False,
         "dashboard_approval_strip": {
             "approve_value": "manual review first",
             "align_value": "aligned",
@@ -337,6 +349,10 @@ def test_collect_events_emits_transition_events():
         "stage": "2_LINEAGE_READY",
         "close_only_active": True,
         "playbook_go_no_go": "GO",
+        "lineage_gate_ready": True,
+        "candidate_gate_ready": True,
+        "edge_sample_gate_ready": False,
+        "all_readiness_gates_ready": False,
         "dashboard_approval_strip": {
             "approve_value": "entry gate blocked",
             "align_value": "aligned",
@@ -441,7 +457,30 @@ def test_collect_events_emits_transition_events():
     assert "execution_style_review_target_changed" in event_types
     assert "trial_runs_started" in event_types
     assert "winner_selected" in event_types
+    assert "lineage_gate_ready" in event_types
+    assert "candidate_gate_ready" in event_types
     assert "execution_manual_review" in event_types
+
+
+def test_collect_events_emits_all_readiness_gate_event():
+    previous = {
+        "lineage_gate_ready": True,
+        "candidate_gate_ready": True,
+        "edge_sample_gate_ready": False,
+        "all_readiness_gates_ready": False,
+    }
+    current = {
+        "lineage_gate_ready": True,
+        "candidate_gate_ready": True,
+        "edge_sample_gate_ready": True,
+        "all_readiness_gates_ready": True,
+    }
+
+    events = notify_stage_change._collect_events(previous, current)
+    event_types = {event["type"] for event in events}
+
+    assert "edge_sample_gate_ready" in event_types
+    assert "all_readiness_gates_ready" in event_types
 
 
 def test_collect_events_initial_snapshot_only_on_first_run():
@@ -468,6 +507,10 @@ def test_collect_events_initial_snapshot_only_on_first_run():
 def test_render_message_uses_approval_surface_lines() -> None:
     current = {
         "stage": "2_LINEAGE_READY",
+        "lineage_gate_ready": True,
+        "candidate_gate_ready": True,
+        "edge_sample_gate_ready": False,
+        "all_readiness_gates_ready": False,
         "dashboard_approval_strip": {
             "approve_value": "entry gate blocked",
             "align_value": "aligned",
@@ -572,5 +615,6 @@ def test_render_message_uses_approval_surface_lines() -> None:
     assert "execution_style_review_target: action=run_execution_style_split_review | target=BTCUSDC | variant=passive_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_execution_style_split_review" in message
     assert "accepted_candidate_focus: BTCUSDC | family=sweep_reversal | edge=watch_edge | split=early_limit/passive_limit" in message
     assert "blocked_candidate_focus: ETHUSDC | family=trend_continuation | edge=fragile_edge | split=reaction_confirmed/market | reason=portfolio_cap" in message
+    assert "readiness_gates: lineage=True | candidate=True | edge_sample=False | all_ready=False" in message
     assert "playbook_go_no_go" not in message
     assert "deployment_go_no_go" not in message

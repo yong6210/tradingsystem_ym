@@ -302,6 +302,9 @@ def _review_followup_summary_line(summary: dict[str, Any] | None) -> str:
     )
 
 
+_LINEAGE_TARGET_FAMILIES = {"sweep_reversal", "trend_continuation"}
+
+
 def _representative_candidates(dashboard: dict[str, Any]) -> dict[str, Any]:
     portfolio = dict((dashboard or {}).get("portfolio_summary") or {})
 
@@ -384,6 +387,68 @@ def _experiment_review_target(
             )
             if symbol
             else ""
+        ),
+    }
+
+
+def _lineage_gate_ready(selected_trial_run_id: Any, trial_runs_written: Any) -> bool:
+    return bool(selected_trial_run_id) or int(trial_runs_written or 0) > 0
+
+
+def _candidate_gate_ready(
+    representative_candidates: dict[str, Any] | None,
+    entry_timing_review_target: dict[str, Any] | None,
+    execution_style_review_target: dict[str, Any] | None,
+) -> bool:
+    accepted = dict((representative_candidates or {}).get("accepted") or {})
+    accepted_family = str(accepted.get("strategy_family") or "").strip().lower()
+    if accepted and accepted_family in _LINEAGE_TARGET_FAMILIES:
+        return True
+
+    for target in (entry_timing_review_target, execution_style_review_target):
+        item = dict(target or {})
+        family = str(item.get("strategy_family") or "").strip().lower()
+        status = str(item.get("status") or "").strip().upper()
+        if item and family in _LINEAGE_TARGET_FAMILIES and status.startswith("ACTIONABLE"):
+            return True
+    return False
+
+
+def _edge_sample_gate_ready(edge_experiment_review: dict[str, Any] | None) -> bool:
+    summary = dict(edge_experiment_review or {})
+    if not summary:
+        return False
+    detail = _edge_experiment_detail_parts(summary)
+    proof_goal = int(detail.get("proof_goal_closed_trades", 0) or 0)
+    closed_count = int(detail.get("closed_trade_count", 0) or 0)
+    return proof_goal > 0 and closed_count >= proof_goal
+
+
+def _readiness_gates(
+    *,
+    selected_trial_run_id: Any,
+    trial_runs_written: Any,
+    representative_candidates: dict[str, Any] | None,
+    entry_timing_review_target: dict[str, Any] | None,
+    execution_style_review_target: dict[str, Any] | None,
+    edge_experiment_review: dict[str, Any] | None,
+) -> dict[str, Any]:
+    lineage_ready = _lineage_gate_ready(selected_trial_run_id, trial_runs_written)
+    candidate_ready = _candidate_gate_ready(
+        representative_candidates,
+        entry_timing_review_target,
+        execution_style_review_target,
+    )
+    edge_sample_ready = _edge_sample_gate_ready(edge_experiment_review)
+    all_ready = lineage_ready and candidate_ready and edge_sample_ready
+    return {
+        "lineage_gate_ready": lineage_ready,
+        "candidate_gate_ready": candidate_ready,
+        "edge_sample_gate_ready": edge_sample_ready,
+        "all_ready": all_ready,
+        "summary": (
+            f"lineage={lineage_ready} | candidate={candidate_ready} | "
+            f"edge_sample={edge_sample_ready} | all_ready={all_ready}"
         ),
     }
 
@@ -577,6 +642,18 @@ def _build_stage_payload(
             or alpha_research_pipeline.get("promotion_top_bucket")
         ),
     }
+    payload["readiness_gates"] = _readiness_gates(
+        selected_trial_run_id=trial_writer_summary.get("selected_trial_run_id"),
+        trial_runs_written=sample_counts.get("trial_runs_written"),
+        representative_candidates=representative_candidates,
+        entry_timing_review_target=entry_timing_review_target,
+        execution_style_review_target=execution_style_review_target,
+        edge_experiment_review=edge_experiment_review,
+    )
+    payload["lineage_gate_ready"] = bool(payload["readiness_gates"]["lineage_gate_ready"])
+    payload["candidate_gate_ready"] = bool(payload["readiness_gates"]["candidate_gate_ready"])
+    payload["edge_sample_gate_ready"] = bool(payload["readiness_gates"]["edge_sample_gate_ready"])
+    payload["all_readiness_gates_ready"] = bool(payload["readiness_gates"]["all_ready"])
     payload.update(_stage_message_fields(stage, validation_report, checklist, dashboard))
     return payload
 
@@ -598,6 +675,7 @@ def _print_human(payload: dict[str, Any]) -> None:
     representative_candidates = payload.get("representative_candidates") or {}
     print(_representative_candidate_summary_line("accepted_candidate_focus", representative_candidates.get("accepted")))
     print(_representative_candidate_summary_line("blocked_candidate_focus", representative_candidates.get("blocked")))
+    print(f"readiness_gates: {(payload.get('readiness_gates') or {}).get('summary', 'unavailable')}")
     print(f"checklist_status: {payload['checklist_status']}")
     print(f"eligible_closed_trades: {payload['eligible_closed_trades']}")
     print(f"trial_runs_written: {payload['trial_runs_written']}")

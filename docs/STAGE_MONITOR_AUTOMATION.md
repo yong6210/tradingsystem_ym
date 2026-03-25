@@ -1,15 +1,23 @@
 # Stage Monitor Automation
 
 `ops_stage_board.py` and `notify_stage_change.py` are designed to run together.
+`stage_monitor_tick.py` is the Python orchestrator that runs both in one process and is the preferred entrypoint for launchd.
 Use the wrapper below so the stage snapshot is always written before the Discord notifier runs.
-The stage snapshot now also carries per-surface `approve / align / act` summaries for `dashboard`, `validation`, and `checklist`, plus `edge_experiment_review`, `edge_evolution_rule`, `review_followup_ledger`, `top_operator_action_followup_command`, representative accepted/blocked candidate split focus, and explicit `entry_timing_review_target` / `execution_style_review_target` lines.
+The stage snapshot now also carries per-surface `approve / align / act` summaries for `dashboard`, `validation`, and `checklist`, plus `edge_experiment_review`, `edge_evolution_rule`, `review_followup_ledger`, `top_operator_action_followup_command`, representative accepted/blocked candidate split focus, explicit `entry_timing_review_target` / `execution_style_review_target` lines, and composite readiness gates for `lineage`, `candidate`, `edge_sample`, and `all_ready`.
 Those target lines now include the ready-to-run `scripts/run_split_review_followup.py` command, and the notifier message prints the same contract directly before the stage counters.
+`notify_stage_change.py` now emits dedicated events when any readiness gate flips from `false -> true`, including a single `all_readiness_gates_ready` event when the full edge-proof stack is finally ready.
 
 ## Wrapper
 
 ```bash
 chmod +x /Users/yumin/Documents/trading/scripts/run_stage_monitor_tick.sh
 bash /Users/yumin/Documents/trading/scripts/run_stage_monitor_tick.sh
+```
+
+Direct Python entrypoint:
+
+```bash
+/Users/yumin/Documents/trading/.venv/bin/python /Users/yumin/Documents/trading/scripts/stage_monitor_tick.py
 ```
 
 Environment variables:
@@ -65,8 +73,8 @@ Current plist contents:
 
     <key>ProgramArguments</key>
     <array>
-      <string>/bin/bash</string>
-      <string>/Users/yumin/Documents/trading/scripts/run_stage_monitor_tick.sh</string>
+      <string>/Users/yumin/Documents/trading/.venv/bin/python</string>
+      <string>/Users/yumin/Documents/trading/scripts/stage_monitor_tick.py</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/yumin/Documents/trading</string>
@@ -98,6 +106,18 @@ Unload:
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.yumin.trading.stage-monitor.plist
 ```
+
+The previous shell-wrapper variant could fail under `~/Documents` with `Operation not permitted`.
+The current plist runs Python directly to avoid that shell-level failure mode.
+If you still see a `Documents` privacy denial, the blocker is the launch context rather than the stage monitor code.
+
+Old shell-wrapper failure example:
+
+```text
+/bin/bash: /Users/yumin/Documents/trading/scripts/run_stage_monitor_tick.sh: Operation not permitted
+```
+
+When that happens, the stage alert code is fine; the blocker is the launch context. Use a runner with access to the workspace, or move the workspace out of `~/Documents` before relying on unattended launchd execution.
 
 ## cron example
 

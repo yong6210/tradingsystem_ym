@@ -93,6 +93,12 @@ def _manual_review_trigger(previous: dict[str, Any] | None, current: dict[str, A
     return previous_status != "manual_review"
 
 
+def _gate_flipped_ready(previous: dict[str, Any] | None, current: dict[str, Any], key: str) -> bool:
+    if previous is None:
+        return False
+    return not bool(previous.get(key, False)) and bool(current.get(key, False))
+
+
 def _surface_summary(payload: dict[str, Any] | None, key: str) -> dict[str, str]:
     summary = dict((payload or {}).get(key) or {})
     if summary:
@@ -245,6 +251,28 @@ def _review_followup_summary_line(payload: dict[str, Any] | None) -> str:
         f"action={summary.get('last_action', 'none')} | "
         f"entries={summary.get('recent_entry_count', 0)} | "
         f"cmd={summary.get('last_followup_command', '') or 'none'}"
+    )
+
+
+def _readiness_gates_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    current = dict(payload or {})
+    source = dict(current.get("readiness_gates") or {})
+    return {
+        "lineage_gate_ready": bool(source.get("lineage_gate_ready", current.get("lineage_gate_ready", False))),
+        "candidate_gate_ready": bool(source.get("candidate_gate_ready", current.get("candidate_gate_ready", False))),
+        "edge_sample_gate_ready": bool(source.get("edge_sample_gate_ready", current.get("edge_sample_gate_ready", False))),
+        "all_ready": bool(source.get("all_ready", current.get("all_readiness_gates_ready", False))),
+        "summary": str(source.get("summary") or ""),
+    }
+
+
+def _readiness_gates_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _readiness_gates_summary(payload)
+    return (
+        f"readiness_gates: lineage={summary.get('lineage_gate_ready', False)} | "
+        f"candidate={summary.get('candidate_gate_ready', False)} | "
+        f"edge_sample={summary.get('edge_sample_gate_ready', False)} | "
+        f"all_ready={summary.get('all_ready', False)}"
     )
 
 
@@ -478,6 +506,38 @@ def _collect_events(previous: dict[str, Any] | None, current: dict[str, Any]) ->
                 "body": f"selected_trial_run_id: {current.get('selected_trial_run_id')}",
             }
         )
+    if _gate_flipped_ready(previous, current, "lineage_gate_ready"):
+        events.append(
+            {
+                "type": "lineage_gate_ready",
+                "title": "Lineage gate is ready",
+                "body": _readiness_gates_summary_line(current),
+            }
+        )
+    if _gate_flipped_ready(previous, current, "candidate_gate_ready"):
+        events.append(
+            {
+                "type": "candidate_gate_ready",
+                "title": "Lineage candidate gate is ready",
+                "body": _readiness_gates_summary_line(current),
+            }
+        )
+    if _gate_flipped_ready(previous, current, "edge_sample_gate_ready"):
+        events.append(
+            {
+                "type": "edge_sample_gate_ready",
+                "title": "Edge sample gate is ready",
+                "body": _readiness_gates_summary_line(current),
+            }
+        )
+    if _gate_flipped_ready(previous, current, "all_readiness_gates_ready"):
+        events.append(
+            {
+                "type": "all_readiness_gates_ready",
+                "title": "All edge-proof readiness gates are ready",
+                "body": _readiness_gates_summary_line(current),
+            }
+        )
     if _manual_review_trigger(previous, current):
         events.append(
             {
@@ -507,6 +567,7 @@ def _render_message(current: dict[str, Any], events: list[dict[str, str]]) -> st
             _experiment_review_target_summary_line(current, "execution_style_review_target", label="execution_style_review_target"),
             _candidate_focus_summary_line(current, "accepted", label="accepted_candidate_focus"),
             _candidate_focus_summary_line(current, "blocked", label="blocked_candidate_focus"),
+            _readiness_gates_summary_line(current),
             f"close_only_active: {current.get('close_only_active')}",
             f"checklist_status: {current.get('checklist_status')}",
             f"eligible_closed_trades: {current.get('eligible_closed_trades')}",

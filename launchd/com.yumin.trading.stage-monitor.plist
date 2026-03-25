@@ -7,8 +7,8 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/bash</string>
-    <string>/Users/yumin/Documents/trading/scripts/run_stage_monitor_tick.sh</string>
+    <string>/Users/yumin/Documents/trading/.venv/bin/python</string>
+    <string>/Users/yumin/Documents/trading/scripts/stage_monitor_tick.py</string>
   </array>
 
   <key>WorkingDirectory</key>
