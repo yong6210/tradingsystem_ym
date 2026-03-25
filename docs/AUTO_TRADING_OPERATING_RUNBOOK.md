@@ -1,6 +1,6 @@
 # Auto Trading 운영 절차 (Living)
 
-최종 갱신: 2026-03-09
+최종 갱신: 2026-03-25
 
 ## 1. 목적
 - 자동매매 운영자가 매 세션마다 같은 순서로 상태를 확인하고, 같은 기준으로 신규 진입/중단/복구를 판단하게 만든다.
@@ -39,13 +39,26 @@ TradingView를 triage에 함께 쓴다면, mirror-only 사용법과 chart-side o
 - `validation_report.edge_experiment_review_summary.edge_state`
 - `validation_report.edge_experiment_review_summary.entry_timing_preferred_variant`
 - `validation_report.edge_experiment_review_summary.execution_style_preferred_variant`
+- `validation_report.edge_experiment_review_summary.sample_maturity_state`
+- `validation_report.edge_experiment_review_summary.next_sample_target_closed_trades`
+- `validation_report.edge_experiment_review_summary.remaining_closed_trades_to_next_target`
+- `validation_report.edge_experiment_review_summary.regime_dependency_state`
+- `validation_report.edge_experiment_review_summary.strongest_regime`
+- `validation_report.edge_experiment_review_summary.weakest_regime`
 - `validation_report.edge_evolution_rule_summary.evolution_state`
 - `validation_report.edge_evolution_rule_summary.recommended_action`
+- `validation_report.edge_evolution_rule_summary.recommendation_strength`
+- `validation_report.edge_evolution_rule_summary.closed_loop_confirmation_state`
+- `validation_report.edge_evolution_rule_summary.regime_guard_state`
 - `validation_report.review_followup_ledger_summary.last_status`
+- `validation_report.review_followup_ledger_summary.last_decision_status`
+- `validation_report.review_followup_ledger_summary.last_effective_status`
 - `validation_report.review_followup_ledger_summary.last_action`
 - `validation_report.review_followup_ledger_summary.last_followup_command`
 - `validation_report.operator_action_priority_summary.experiment_context.entry_timing_target`
 - `validation_report.operator_action_priority_summary.experiment_context.execution_style_target`
+- `validation_report.operator_action_priority_summary.experiment_execution_policy`
+- `validation_report.operator_action_priority_summary.deferred_experiment_actions`
 - `new_entries_allowed`
 - `execution_degradation_advisory.status`
 - `family_execution_degradation_advisory.top_family`
@@ -60,24 +73,58 @@ TradingView를 triage에 함께 쓴다면, mirror-only 사용법과 chart-side o
 - `alpha_research` next step은 research queue다. 실행 승인처럼 읽지 않는다.
 - `operator_action_priority.top_action`은 operator reading priority다. live submit instruction이 아니다.
 - `operator_action_priority.top_action_followup_command`와 `next_actions[].followup_command`가 비어 있지 않으면, split review는 그 command를 그대로 쓴다.
+- `operator_action_priority.dedupe_suppressed_actions`가 비어 있지 않으면, review packet은 추천 자체가 없어진 게 아니라 ledger history 때문에 잠시 억제된 것이다. `fresh READY packet`, 직전 `NO_TARGET`, 최근 3회 연속 동일 packet` 중 어느 경우인지 같이 확인한다.
+- `operator_action_priority.experiment_execution_policy.mode == single_active_experiment`면 split 실험은 항상 하나만 active로 해석한다. 동시에 `entry_timing`과 `execution_style`를 둘 다 열지 않는다.
+- `operator_action_priority.deferred_experiment_actions`가 비어 있지 않으면 실험 후보가 사라진 게 아니라 다음 sample target까지 보류된 것이다.
 - split review target이 있으면 `./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --days 7 --action auto`로 review packet부터 만든다.
 - `review_followup_ledger.last_status`가 `NO_TARGET` 또는 `NO_REVIEW_ACTION_AVAILABLE`면 새 실험보다 target contract와 command carryover부터 고친다.
+- `review_followup_ledger.last_decision_status`는 packet 생성 이후 사람이 붙인 후속 판단이다. `last_status`보다 늦게 들어온 신호일 수 있으니 둘이 다르면 `last_effective_status`를 최종 상태로 읽는다.
+- `edge_evolution_rule.recommendation_strength == confirmed` 또는 `escalated`면 최근 packet 이후 새 closes가 같은 방향으로 누적됐다는 뜻이다. 이때만 `promote / reduce / kill-review` 해석을 강화한다.
+- `edge_experiment_review.sample_maturity_state`가 `pre_directional`, `directional_only`, `review_ready`면 아직 edge proof가 아니다. 이 구간에서는 promote/reduce보다 close sample 축적을 우선한다.
+- `edge_experiment_review.regime_dependency_state == regime_dependent`면 strongest regime에서 좋아 보여도 weakest regime를 따로 본다. 이 상태에선 promotion을 범용 edge처럼 읽지 않는다.
+- `edge_evolution_rule.regime_guard_state == promotion_blocked_by_regime_dependency`면 preferred branch가 좋아 보여도 weakest regime evidence가 모일 때까지 research-only로 유지한다.
 - session brief와 stage monitor의 `entry_timing_review_target` / `execution_style_review_target` 줄에도 같은 followup command가 실린다. handoff에서는 그 command를 source-of-truth로 쓴다.
 - session brief와 stage monitor의 `review_followup_ledger` 줄은 가장 최근 review packet 이력이다. 추천이 아니라 이미 생성된 packet history로 읽는다.
 
 실제 edge 실험 순서:
 1. `operator_action_priority.top_action_followup_command` 또는 `entry_timing_review_target` / `execution_style_review_target` command로 review packet을 만든다.
-2. packet이 가리킨 split을 실제 시장에서 관찰한다. 이 단계는 코드나 backfill로 대체하지 않는다.
-3. 새 closed trade를 누적해서 split별 close sample을 늘린다.
-4. 그 다음에만 `edge_experiment_review`를 다시 읽는다.
-5. 이어서 `edge_evolution_rule`를 다시 읽는다.
-6. `promote / reduce / kill-review` 해석은 위 순서가 끝난 뒤에만 한다.
+2. `experiment_execution_policy.active_action`만 이번 사이클의 실험으로 연다. 다른 split 후보는 `deferred_experiment_actions`에 남겨둔다.
+3. packet이 가리킨 split을 실제 시장에서 관찰한다. 이 단계는 코드나 backfill로 대체하지 않는다.
+4. 새 closed trade를 누적해서 split별 close sample을 늘린다.
+5. `next_sample_target_closed_trades`를 넘겼는지 확인한다.
+6. 그 다음에만 `edge_experiment_review`를 다시 읽는다.
+7. 이어서 `edge_evolution_rule`를 다시 읽는다.
+8. `promote / reduce / kill-review` 해석은 위 순서가 끝난 뒤에만 한다.
+9. packet이 실제로 확인되거나 기각됐으면 `scripts/run_split_review_followup.py --transition-status ...`로 같은 ledger에 후속 status를 남긴다.
+
+표본 목표:
+- `4 closes`
+  - directional read만 가능
+- `6 closes`
+  - review decision은 가능하지만 아직 약함
+- `8 closes`
+  - promote/reduce review를 읽기 시작할 수 있는 최소선
+- `20 closes`
+  - operator sample floor
+- `50 / 100 / 300 closes`
+  - early / emerging / credible edge 구간
 
 실험 보류 조건:
 - `close_only_active == true`면 split 실험 확대를 열지 않는다.
 - `validation_report` 또는 `operations/checklist`가 `NO_GO`면 packet generation은 가능해도 실험 해석은 보류한다.
 - `edge_experiment_review.edge_state == insufficient_edge_measurement` 또는 `edge_evolution_rule.evolution_state == insufficient_sample`이면 edge 해석보다 close sample 축적을 우선한다.
+- `operator_action_priority.experiment_execution_policy.active_action == none`이면 이번 세션은 실험 실행 단계가 아니라 sample 축적 또는 blocker 정리 단계다.
 - accepted candidate가 없고 `review_followup_ledger.last_status`가 `NO_REVIEW_ACTION_AVAILABLE`이면, 현재 세션은 실험 실행 단계가 아니라 blocker 정리 단계로 읽는다.
+
+ledger transition 예시:
+- `ACKED`
+  - packet을 운영자가 확인했고 follow-up을 시작했다.
+- `COMPLETED`
+  - review packet 기준 조사나 비교가 끝났지만 promote/reduce/kill 방향은 아직 확정하지 않았다.
+- `PROMOTE_CONFIRMED`, `REDUCE_CONFIRMED`, `KILL_REVIEW_ESCALATED`
+  - 확인된 outcome을 ledger에 닫아서 이후 `edge_evolution_rule`가 closed-loop 강화에 사용할 수 있게 한다.
+- `REJECTED`
+  - packet 방향이 잘못됐거나 더 이상 유효하지 않아서 닫았다.
 
 chart-side triage 예시:
 - 차트가 `CONFIRM`을 보여도 server-side `Top Operator Action`이 `review_execution_drag_before_expansion`이면, 차트는 context only로 두고 서버 review를 먼저 따른다.

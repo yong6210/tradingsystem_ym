@@ -199,6 +199,44 @@ def _edge_evolution_summary_line(summary: dict[str, Any] | None) -> str:
     )
 
 
+def _review_followup_summary(
+    *,
+    dashboard_payload: dict[str, Any] | None,
+    validation_payload: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    dashboard_source = dict(((((dashboard_payload or {}).get("signal_funnel") or {}).get("review_followup_ledger")) or {}))
+    validation_source = dict(
+        (((validation_payload or {}).get("validation_report") or validation_payload or {}).get("review_followup_ledger_summary") or {})
+    )
+    source = dashboard_source or validation_source
+    if not source:
+        return None
+    return {
+        "available": bool(source.get("available", False)),
+        "last_status": str(source.get("last_status") or "none"),
+        "last_generated_status": str(source.get("last_generated_status") or source.get("last_status") or "none"),
+        "last_decision_status": str(source.get("last_decision_status") or "none"),
+        "last_effective_status": str(source.get("last_effective_status") or source.get("last_status") or "none"),
+        "last_action": str(source.get("last_action") or "none"),
+        "recent_entry_count": int(source.get("recent_entry_count", 0) or 0),
+        "last_followup_command": str(source.get("last_followup_command") or ""),
+        "summary": str(source.get("summary") or ""),
+    }
+
+
+def _review_followup_summary_line(summary: dict[str, Any] | None) -> str:
+    if not summary:
+        return "review_followup_ledger: unavailable"
+    return (
+        f"review_followup_ledger: generated={summary.get('last_status', 'none')} | "
+        f"decision={summary.get('last_decision_status', 'none')} | "
+        f"effective={summary.get('last_effective_status', 'none')} | "
+        f"action={summary.get('last_action', 'none')} | "
+        f"entries={int(summary.get('recent_entry_count', 0) or 0)} | "
+        f"cmd={summary.get('last_followup_command', '') or 'none'}"
+    )
+
+
 def _edge_experiment_next_step(summary: dict[str, Any] | None) -> str | None:
     if not summary:
         return None
@@ -241,6 +279,24 @@ def _edge_evolution_next_step(summary: dict[str, Any] | None) -> str | None:
         return (
             "Advisory only: preferred branch promotion review is now the higher-value follow-up; review "
             f"{axis}={variant} with {action} after pruning notes are captured."
+        )
+    return None
+
+
+def _review_followup_next_step(summary: dict[str, Any] | None) -> str | None:
+    if not summary:
+        return None
+    generated_status = str(summary.get("last_status") or "none")
+    followup_command = str(summary.get("last_followup_command") or "").strip()
+    if generated_status in {"NO_TARGET", "NO_REVIEW_ACTION_AVAILABLE"}:
+        if followup_command:
+            return (
+                "Advisory only: the latest review packet stalled during generation at "
+                f"`{generated_status}`; fix target contract carryover before rerunning `{followup_command}`."
+            )
+        return (
+            "Advisory only: the latest review packet stalled during generation at "
+            f"`{generated_status}`; fix target contract carryover before generating another packet."
         )
     return None
 
@@ -332,6 +388,10 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     if edge_evolution:
         lines.append(f"- {_edge_evolution_summary_line(edge_evolution)}")
         lines.append(f"- summary: {edge_evolution.get('summary', '')}")
+    review_followup = payload.get("review_followup_ledger") or {}
+    if review_followup:
+        lines.append(f"- {_review_followup_summary_line(review_followup)}")
+        lines.append(f"- summary: {review_followup.get('summary', '')}")
     representative_candidates = payload.get("representative_candidates") or {}
     lines.append(f"- {_representative_candidate_line('accepted_candidate_focus', representative_candidates.get('accepted'))}")
     lines.append(f"- {_representative_candidate_line('blocked_candidate_focus', representative_candidates.get('blocked'))}")
@@ -406,6 +466,10 @@ def main() -> int:
         validation_payload=validation,
     )
     edge_evolution_rule = _edge_evolution_summary(
+        dashboard_payload=dashboard,
+        validation_payload=validation,
+    )
+    review_followup_ledger = _review_followup_summary(
         dashboard_payload=dashboard,
         validation_payload=validation,
     )
@@ -486,6 +550,9 @@ def main() -> int:
     edge_evolution_next_step = _edge_evolution_next_step(edge_evolution_rule)
     if edge_evolution_next_step:
         next_steps.append(edge_evolution_next_step)
+    review_followup_next_step = _review_followup_next_step(review_followup_ledger)
+    if review_followup_next_step:
+        next_steps.append(review_followup_next_step)
 
     payload = {
         "generated_at": generated_at.isoformat(),
@@ -532,6 +599,7 @@ def main() -> int:
         ],
         "edge_experiment_review": edge_experiment_review,
         "edge_evolution_rule": edge_evolution_rule,
+        "review_followup_ledger": review_followup_ledger,
         "representative_candidates": representative_candidates,
         "next_steps": next_steps,
     }

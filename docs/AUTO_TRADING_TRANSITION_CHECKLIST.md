@@ -1,6 +1,6 @@
 # Trading Engine v1 자동매매 전환 상세 체크리스트 (Living)
 
-최종 갱신: 2026-03-09
+최종 갱신: 2026-03-25
 현재 기준선: Iteration #133 (quality softening priority + family/regime/session bottleneck visibility)
 
 ## 운영 규칙
@@ -315,6 +315,18 @@
 - 완료 기준: `./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --days 7` 한 번으로 live 전환 전 preflight 상태를 결정할 수 있다.
 - 완료 기준: split review target이 잡힌 경우 `./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --days 7 --action auto`로 바로 review packet을 만들 수 있다.
 - 검증: `py_compile`, `--help`, `--no-write-report`, markdown report write 경로를 실제로 확인한다.
+
+- [x] split review followup ledger contract + closed-loop 강화
+- 목적: split review packet 이력을 운영 surface에서 같은 의미로 읽고, 같은 packet 재생성을 억제하면서, 새 close가 쌓인 뒤에는 이전 review 방향이 실제로 확인됐는지 다시 규칙에 반영한다.
+- 구현 방식: `scripts/run_split_review_followup.py`는 generation packet과 후속 decision transition을 같은 `reports/operations/split_review_followups/review_ledger.jsonl`에 기록하고, 요약 contract는 `last_generated_status`, `last_decision_status`, `last_effective_status`, `last_action`, `last_followup_command`, `recent_entry_count`, `recent_packets`, `latest_action_streak`를 고정한다.
+- 구현 방식: `edge_evolution_rule`는 최신 `review_followup_ledger` packet과 현재 `edge_experiment_review.closed_trade_count / true_edge_ratio / edge_decay_rate`를 함께 읽어, 이전 review 이후 새 closes가 같은 방향으로 누적됐을 때만 `recommendation_strength`와 `closed_loop_confirmation_state`를 `promote / reduce / kill` 강화에 사용한다.
+- 구현 방식: `operator_action_priority`는 같은 ledger summary를 읽어 `fresh READY packet`, 직전 `NO_TARGET`, 최근 3회 연속 동일 packet을 중복 억제 기준으로 사용한다. ledger는 packet history이며 approval authority가 아니다.
+- 구현 방식: `edge_experiment_review`는 `sample_maturity_state`, `next_sample_target_closed_trades`, `remaining_closed_trades_to_next_target`, `regime_dependency_state`, `strongest_regime`, `weakest_regime`를 함께 노출해 “아직 directional인지 / 어느 regime에서 약한지”를 같은 contract에서 읽게 한다.
+- 구현 방식: `edge_evolution_rule`는 regime dependency가 아직 크면 `regime_guard_state=promotion_blocked_by_regime_dependency`로 promotion 해석을 research-only로 되돌린다.
+- 구현 방식: `operator_action_priority`는 `experiment_execution_policy.mode=single_active_experiment`와 `deferred_experiment_actions`를 함께 내려, entry timing과 execution style을 동시에 돌리지 않고 한 번에 하나의 split만 active로 유지한다.
+- 완료 기준: dashboard/validation/checklist/session brief/stage monitor/entry alert가 같은 ledger history vocabulary를 공유하고, evolution rule과 operator priority가 둘 다 같은 history로 closed-loop와 dedupe를 수행한다.
+- 완료 기준: operator가 같은 surface에서 `sample target`, `regime guard`, `single active experiment` 정책을 같이 읽을 수 있다.
+- 검증: `tests/test_split_review_followup_ledger.py`, `tests/test_edge_evolution_rule.py`, `tests/test_operator_action_priority.py`, `tests/test_edge_experiment_review.py`, `tests/test_split_review_followup.py`로 packet summary, closed-loop 강화, regime guard, single-active-experiment, script 회귀를 확인한다.
 
 - [x] post-live pruning review helper 추가
 - 목적: 첫 실제 live 운영 사이클 이후 contract pruning backlog를 다시 열어야 하는지 `filled live activity + reconciliation + validation/checklist` 기준으로 판단한다.

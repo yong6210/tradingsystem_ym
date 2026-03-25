@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -293,6 +294,75 @@ def _portfolio_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _top_family_counts(rows: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
+    counts = Counter(str(row.get("strategy_family") or "unknown") for row in rows if isinstance(row, dict))
+    return [{"family": family, "count": count} for family, count in counts.most_common(limit)]
+
+
+def _match_family_rows(rows: list[dict[str, Any]], families: set[str]) -> list[dict[str, Any]]:
+    return [row for row in rows if str(row.get("strategy_family") or "").lower() in families]
+
+
+def _family_availability_summary(
+    *,
+    scanner_rows: list[dict[str, Any]],
+    portfolio_payload: dict[str, Any] | None,
+    families: set[str],
+) -> dict[str, Any]:
+    portfolio = dict(portfolio_payload or {})
+    accepted_rows = [dict(row) for row in (portfolio.get("accepted_candidates") or []) if isinstance(row, dict)]
+    blocked_rows = [dict(row) for row in (portfolio.get("blocked_candidates") or []) if isinstance(row, dict)]
+    alpha_rows = [dict(row) for row in (portfolio.get("alpha_research_candidates") or []) if isinstance(row, dict)]
+
+    scanner_matches = _match_family_rows(scanner_rows, families)
+    accepted_matches = _match_family_rows(accepted_rows, families)
+    blocked_matches = _match_family_rows(blocked_rows, families)
+    alpha_matches = _match_family_rows(alpha_rows, families)
+    portfolio_match_count = len(accepted_matches) + len(blocked_matches) + len(alpha_matches)
+
+    dominant_scanner = (_top_family_counts(scanner_rows, limit=1) or [{}])[0]
+    dominant_blocked = (_top_family_counts(blocked_rows, limit=1) or [{}])[0]
+
+    if len(scanner_rows) == 0 and portfolio_match_count == 0:
+        availability_state = "scanner_surface_empty"
+        summary = "Scanner returned zero rows for the current universe snapshot."
+    elif len(scanner_matches) == 0 and portfolio_match_count == 0:
+        availability_state = "requested_families_absent"
+        summary = (
+            f"No requested family candidate is present on the current surface; "
+            f"scanner is dominated by `{dominant_scanner.get('family', 'unknown')}` "
+            f"({int(dominant_scanner.get('count', 0) or 0)})."
+        )
+    else:
+        availability_state = "requested_families_present_but_ineligible"
+        summary = (
+            f"Requested families are present but not currently eligible; "
+            f"scanner_matches={len(scanner_matches)} portfolio_matches={portfolio_match_count}."
+        )
+
+    if dominant_blocked:
+        summary = (
+            f"{summary} Top blocked portfolio family is "
+            f"`{dominant_blocked.get('family', 'unknown')}` "
+            f"({int(dominant_blocked.get('count', 0) or 0)})."
+        )
+
+    return {
+        "requested_families": sorted(families),
+        "availability_state": availability_state,
+        "summary": summary,
+        "scanner_surface_count": len(scanner_rows),
+        "scanner_match_count": len(scanner_matches),
+        "portfolio_match_count": portfolio_match_count,
+        "accepted_match_count": len(accepted_matches),
+        "blocked_match_count": len(blocked_matches),
+        "alpha_match_count": len(alpha_matches),
+        "scanner_top_families": _top_family_counts(scanner_rows),
+        "blocked_top_families": _top_family_counts(blocked_rows),
+        "alpha_top_families": _top_family_counts(alpha_rows),
+    }
+
+
 def _choose_override_candidate(
     rows: list[dict[str, Any]],
     *,
@@ -379,6 +449,10 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
         lines.append(f"- expected_summary: {candidate.get('expected_summary', '')}")
     else:
         lines.append("- no eligible candidate found")
+    family_availability = payload.get("family_availability_summary") or {}
+    if family_availability:
+        lines.append(f"- family_availability: {family_availability.get('availability_state', 'unknown')}")
+        lines.append(f"- family_summary: {family_availability.get('summary', '')}")
     lines.append("")
     lines.append("## Next Steps")
     lines.append("")
@@ -441,6 +515,14 @@ def main() -> int:
             families=families,
             include_manual=args.include_manual_review,
         )
+    elif candidate is None:
+        portfolio_raw = _request_json(
+            args.base_url,
+            "GET",
+            "/portfolio/budget",
+            query={"universe": args.universe, "limit": args.candidate_limit, "write_report": "false"},
+        )
+        portfolio_payload = portfolio_raw if isinstance(portfolio_raw, dict) else {}
 
     preview: dict[str, Any] | None = None
     approval: dict[str, Any] | None = None
@@ -496,6 +578,11 @@ def main() -> int:
     candidate_edge_experiment_focus = _candidate_edge_experiment_focus(candidate, edge_experiment_review)
     candidate_surface_summary = _scanner_candidate_strip_summary(candidate)
     approval_strip_summary = _approval_strip_summary(approval) or candidate_surface_summary
+    family_availability_summary = _family_availability_summary(
+        scanner_rows=scanner_rows,
+        portfolio_payload=portfolio_payload,
+        families=families,
+    )
 
     checks: list[dict[str, str]] = []
     if sync_payload is not None:
@@ -582,6 +669,12 @@ def main() -> int:
     if candidate is None:
         next_steps.append("Wait for London/New York session and rerun this helper until an eligible family candidate appears.")
         next_steps.append("Keep focus on trend_continuation or sweep_reversal families; legacy_zone_plan does not advance MICRO_LIVE lineage.")
+        if family_availability_summary.get("availability_state") == "scanner_surface_empty":
+            next_steps.append("Scanner returned zero rows for this universe snapshot; treat this as a surface-empty wait and recheck the next session window.")
+        elif family_availability_summary.get("availability_state") == "requested_families_absent":
+            next_steps.append("Requested PAPER lineage families are absent from both scanner and portfolio surfaces; this is a market-availability wait, not an approval blockage.")
+        else:
+            next_steps.append("Requested PAPER lineage families are present but not eligible; inspect portfolio block reasons before widening scope.")
     else:
         if intent is not None and str(intent.get("submit_decision") or "") != "SUBMIT":
             next_steps.append(f"Candidate found but PAPER intent is not submit-ready: {(intent or {}).get('decision_reason_message', '')}")
@@ -613,6 +706,7 @@ def main() -> int:
         "portfolio": portfolio_payload,
         "candidate": candidate,
         "candidate_surface_summary": candidate_surface_summary,
+        "family_availability_summary": family_availability_summary,
         "validation_context": validation_context,
         "preview": preview,
         "approval": approval,

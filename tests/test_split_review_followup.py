@@ -134,6 +134,11 @@ def test_main_auto_selects_top_split_action(monkeypatch, capsys, tmp_path) -> No
             ledger_path=str(ledger_path),
             no_write_report=True,
             no_write_ledger=False,
+            transition_status="",
+            packet_id="",
+            decision_actor="",
+            decision_notes="",
+            transition_reason="",
         ),
     )
 
@@ -178,6 +183,11 @@ def test_main_honors_explicit_execution_style_action(monkeypatch, capsys, tmp_pa
             ledger_path=str(ledger_path),
             no_write_report=True,
             no_write_ledger=False,
+            transition_status="",
+            packet_id="",
+            decision_actor="",
+            decision_notes="",
+            transition_reason="",
         ),
     )
 
@@ -222,6 +232,11 @@ def test_main_auto_selects_edge_evolution_review_when_it_is_top_action(monkeypat
             ledger_path=str(tmp_path / "review_ledger.jsonl"),
             no_write_report=True,
             no_write_ledger=False,
+            transition_status="",
+            packet_id="",
+            decision_actor="",
+            decision_notes="",
+            transition_reason="",
         ),
     )
 
@@ -245,3 +260,71 @@ def test_main_auto_selects_edge_evolution_review_when_it_is_top_action(monkeypat
     assert payload["edge_evolution_rule"]["evolution_state"] == "reduce_candidate"
     assert payload["review_followup_ledger_summary"]["last_action"] == "reduce_baseline_allocation_review"
     assert any("reducing any baseline allocation" in step for step in payload["review_steps"])
+
+
+def test_main_records_decision_transition_without_refetching_surfaces(monkeypatch, capsys, tmp_path) -> None:
+    ledger_path = tmp_path / "review_ledger.jsonl"
+    generation_args = SimpleNamespace(
+        base_url="http://127.0.0.1:8000",
+        symbol="BTCUSDC",
+        universe="usdc_perp_top30",
+        days=7,
+        action="auto",
+        report_dir="reports/operations/split_review_followups",
+        ledger_path=str(ledger_path),
+        no_write_report=True,
+        no_write_ledger=False,
+        transition_status="",
+        packet_id="",
+        decision_actor="",
+        decision_notes="",
+        transition_reason="",
+    )
+    monkeypatch.setattr(split_review_followup, "parse_args", lambda: generation_args)
+
+    request_count = 0
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        nonlocal request_count
+        request_count += 1
+        if path == "/execution/operator-dashboard":
+            return _dashboard_payload()
+        if path == "/validation/report":
+            return _validation_payload()
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(split_review_followup, "_request_json", _request_json)
+
+    assert split_review_followup.main() == 0
+    generated_payload = json.loads(capsys.readouterr().out)
+    assert request_count == 2
+
+    transition_args = SimpleNamespace(
+        base_url="http://127.0.0.1:8000",
+        symbol="BTCUSDC",
+        universe="usdc_perp_top30",
+        days=7,
+        action="auto",
+        report_dir="reports/operations/split_review_followups",
+        ledger_path=str(ledger_path),
+        no_write_report=True,
+        no_write_ledger=False,
+        transition_status="ACKED",
+        packet_id=generated_payload["packet_id"],
+        decision_actor="post_review_pruning",
+        decision_notes="packet acknowledged and queued",
+        transition_reason="operator_handoff",
+    )
+    monkeypatch.setattr(split_review_followup, "parse_args", lambda: transition_args)
+
+    assert split_review_followup.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert request_count == 2
+    assert payload["mode"] == "record_transition"
+    assert payload["status"] == "ACKED"
+    assert payload["packet_id"] == generated_payload["packet_id"]
+    assert payload["review_followup_ledger_packet"]["latest_decision_status"] == "ACKED"
+    assert payload["review_followup_ledger_summary"]["last_status"] == "READY"
+    assert payload["review_followup_ledger_summary"]["last_decision_status"] == "ACKED"
+    assert payload["review_followup_ledger_summary"]["last_effective_status"] == "ACKED"

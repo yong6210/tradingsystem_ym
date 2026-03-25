@@ -499,6 +499,8 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "align_value" in portfolio_payload["approval_strip_summary"]
     assert "act_value" in portfolio_payload["approval_strip_summary"]
     assert "edge_experiment_review" in portfolio_payload
+    assert "edge_evolution_rule" in portfolio_payload
+    assert "review_followup_ledger" in portfolio_payload
     assert "current_exposure" in portfolio_payload
     assert "strategy_mode" in portfolio_payload
     assert "operating_lock" in portfolio_payload

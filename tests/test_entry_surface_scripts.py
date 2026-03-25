@@ -73,6 +73,20 @@ def _budget_payload(*, deployment_go_no_go: str = "GO") -> dict:
             "promotion_candidate_variant": "early_limit",
             "summary": "Reduce baseline allocation while split evidence stays fragile.",
         },
+        "review_followup_ledger": {
+            "available": True,
+            "last_status": "READY",
+            "last_generated_status": "READY",
+            "last_decision_status": "ACKED",
+            "last_effective_status": "ACKED",
+            "last_action": "reduce_baseline_allocation_review",
+            "recent_entry_count": 3,
+            "last_followup_command": (
+                "./.venv/bin/python scripts/run_split_review_followup.py "
+                "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review"
+            ),
+            "summary": "Latest review packet generated cleanly and is already acknowledged.",
+        },
         "accepted_candidates": [
             {
                 "symbol": "BTCUSDC",
@@ -169,6 +183,8 @@ def test_build_entry_snapshot_maps_rows_to_three_statuses():
     assert snapshot["approval_strip"]["act_value"] == "continue_candidate_review_under_portfolio_caps"
     assert snapshot["edge_experiment_review"]["edge_state"] == "watch_edge"
     assert snapshot["edge_evolution_rule"]["evolution_state"] == "reduce_candidate"
+    assert snapshot["review_followup_ledger"]["last_status"] == "READY"
+    assert snapshot["review_followup_ledger"]["last_decision_status"] == "ACKED"
     assert snapshot["sections"][notify_entry_surface.ACTIONABLE_ENTRY][0]["edge_experiment_focus"]["edge_state"] == "watch_edge"
     assert snapshot["sections"][notify_entry_surface.ACTIONABLE_ENTRY][0]["symbol"] == "BTCUSDC"
     assert snapshot["sections"][notify_entry_surface.BLOCKED_SETUP][0]["symbol"] == "ETHUSDC"
@@ -212,6 +228,12 @@ def test_render_message_includes_all_sections_and_reasons():
     assert (
         "edge_evolution: state=reduce_candidate | action=reduce_baseline_allocation_review | "
         "bias=reduce_baseline | promotion=entry_timing/early_limit"
+    ) in message
+    assert (
+        "review_followup_ledger: generated=READY | decision=ACKED | effective=ACKED | "
+        "action=reduce_baseline_allocation_review | entries=3 | "
+        "cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC "
+        "--universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review"
     ) in message
     assert "edge=watch_edge | split=early_limit/passive_limit" in message
     assert "edge=fragile_edge | split=reaction_confirmed/market" in message

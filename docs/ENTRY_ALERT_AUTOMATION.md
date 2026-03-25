@@ -6,7 +6,36 @@
 - `BLOCKED_SETUP`
 - `RESEARCH_ONLY_SETUP`
 
-The alert headline now starts with the same `approval_strip: approve -> align -> act` line exposed by `/portfolio/budget`, the `contract_trace` line repeats the same `approve / align / act` contract before appending raw runtime/playbook fields for debugging, an `edge_experiment` line carries the current split-test focus (`edge_state`, preferred entry timing, preferred execution style), and an `edge_evolution` line carries the current allocation/promotion posture (`evolution_state`, `recommended_action`, `allocation_bias`, `promotion_candidate_*`). Candidate rows now also append row-level `edge=` and `split=` hints when the portfolio surface has symbol-specific experiment focus.
+The alert headline now starts with the same `approval_strip: approve -> align -> act` line exposed by `/portfolio/budget`, the `contract_trace` line repeats the same `approve / align / act` contract before appending raw runtime/playbook fields for debugging, an `edge_experiment` line carries the current split-test focus (`edge_state`, preferred entry timing, preferred execution style), and an `edge_evolution` line carries the current allocation/promotion posture (`evolution_state`, `recommended_action`, `allocation_bias`, `promotion_candidate_*`).
+
+Read the alert as a compressed surface, not as the full experiment policy. The current runtime still enforces:
+
+- one active split experiment at a time
+- sample-target gating before stronger `promote / reduce / kill-review` interpretation
+- regime dependency guarding before promotion is treated as general edge
+
+It now also carries a `review_followup_ledger` line from the same portfolio surface. Read that line as packet history, not as a fresh recommendation:
+
+- `generated`
+  - the last packet generation status (`READY`, `NO_TARGET`, `NO_REVIEW_ACTION_AVAILABLE`, etc.)
+- `decision`
+  - the latest operator-confirmed follow-up transition if one was appended later
+- `effective`
+  - the most recent status after combining generation + later decision transitions
+- `action`
+  - the last packet's selected review action
+- `entries`
+  - how many recent packet generations exist in the current summary window
+- `cmd`
+  - the runnable `scripts/run_split_review_followup.py` command that produced the packet
+
+Candidate rows still append row-level `edge=` and `split=` hints when the portfolio surface has symbol-specific experiment focus. The alert's own dedupe state file is separate from `review_followup_ledger`; the state file suppresses repeated notifications, while the ledger records split/evolution packet history across surfaces.
+
+Operational reading rules:
+
+- If the alert shows a preferred `entry_timing` and `execution_style` at the same time, do not open both experiments in parallel. Check `operator_action_priority.experiment_execution_policy` on dashboard or validation and execute only the active split.
+- If the preferred branch looks better but the validation surface still says `sample_maturity_state=pre_directional`, `directional_only`, or `review_ready`, keep collecting closes before treating it as a rollout conclusion.
+- If validation shows `regime_dependency_state=regime_dependent` or `edge_evolution_rule.regime_guard_state=promotion_blocked_by_regime_dependency`, treat the alert as regime-specific context only, not as a universal promotion signal.
 
 Use the wrapper below so runtime defaults, state file path, and the latest run artifact stay in one place.
 The wrapper prefers `/Users/yumin/Documents/trading/.venv/bin/python` and falls back to `python3` if the virtualenv binary is not present.

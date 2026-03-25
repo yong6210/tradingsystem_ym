@@ -1340,6 +1340,14 @@ class ValidationReportService:
                 f"- action_family: {operator_action_priority_payload.get('action_family', 'monitor')}",
                 f"- advisory_only: {bool(operator_action_priority_payload.get('advisory_only', True))}",
             ]
+            experiment_policy = dict(operator_action_priority_payload.get("experiment_execution_policy") or {})
+            if experiment_policy:
+                operator_action_priority_lines.append(
+                    f"- experiment_policy: mode={experiment_policy.get('mode', 'single_active_experiment')} "
+                    f"active_action={experiment_policy.get('active_action', 'none')} "
+                    f"sample_maturity={experiment_policy.get('sample_maturity_state', 'unknown')} "
+                    f"next_target_closed_trades={int(experiment_policy.get('next_sample_target_closed_trades', 0) or 0)}"
+                )
             capture_context = dict(operator_action_priority_payload.get("capture_context") or {})
             if capture_context:
                 dominant_bottleneck = dict(capture_context.get("dominant_bottleneck") or {})
@@ -1359,6 +1367,11 @@ class ValidationReportService:
                             f"- experiment_context: edge_state={experiment_context.get('edge_state')} "
                             f"true_edge_ratio={float(experiment_context.get('true_edge_ratio', 0.0) or 0.0):.4f} "
                             f"edge_decay_rate={float(experiment_context.get('edge_decay_rate', 0.0) or 0.0):+.4f}"
+                        ),
+                        (
+                            f"- experiment_context.sample: state={experiment_context.get('sample_maturity_state', 'unknown')} "
+                            f"remaining_to_next_target={int(experiment_context.get('remaining_closed_trades_to_next_target', 0) or 0)} "
+                            f"regime_dependency={experiment_context.get('regime_dependency_state', 'not_available')}"
                         ),
                         (
                             f"- experiment_context.entry_timing: preferred={experiment_context.get('entry_timing_preferred_variant')} "
@@ -1389,6 +1402,11 @@ class ValidationReportService:
                         f"block_reason={target.get('block_reason')} focus={target.get('focus_source')} "
                         f"cmd={target.get('followup_command')}"
                     )
+            for idx, row in enumerate(list(operator_action_priority_payload.get("deferred_experiment_actions") or [])[:2], start=1):
+                operator_action_priority_lines.append(
+                    f"- deferred_experiment_{idx}: action={row.get('action')} "
+                    f"reason={row.get('defer_reason')} target={row.get('target_symbol') or 'none'}"
+                )
             for idx, row in enumerate(list(operator_action_priority_payload.get("next_actions") or [])[:3], start=1):
                 target_suffix = ""
                 if row.get("target_symbol"):
@@ -2284,11 +2302,16 @@ class ValidationReportService:
 
         edge_experiment_review = build_edge_experiment_review(score_to_outcome_funnel=score_to_outcome_payload)
         edge_experiment_summary = summarize_edge_experiment_review(edge_experiment_review)
+        review_followup_ledger_summary = summarize_split_review_followup_ledger(
+            symbol=symbol,
+            universe=str(getattr(self.settings, "universe_name", "usdc_perp_top30") or "usdc_perp_top30"),
+        )
         edge_experiment_lines: list[str] = []
         if edge_experiment_summary:
             true_edge = dict(edge_experiment_summary.get("true_edge") or {})
             entry_timing = dict(edge_experiment_summary.get("entry_timing_experiment") or {})
             execution_style = dict(edge_experiment_summary.get("execution_style_experiment") or {})
+            regime_breakdown = dict(edge_experiment_summary.get("regime_edge_breakdown") or {})
             edge_experiment_lines = [
                 "## Edge Experiment Review",
                 f"- available: {bool(edge_experiment_summary.get('available', False))}",
@@ -2316,6 +2339,16 @@ class ValidationReportService:
                     f"preferred={edge_experiment_summary.get('execution_style_preferred_variant', 'none')} | "
                     f"reason={edge_experiment_summary.get('execution_style_recommendation_reason', 'not_available')}"
                 ),
+                (
+                    f"- sample_progress: state={edge_experiment_summary.get('sample_maturity_state', 'unknown')} | "
+                    f"next_target_closed_trades={int(edge_experiment_summary.get('next_sample_target_closed_trades', 0) or 0)} | "
+                    f"remaining={int(edge_experiment_summary.get('remaining_closed_trades_to_next_target', 0) or 0)}"
+                ),
+                (
+                    f"- regime_breakdown: dependency={edge_experiment_summary.get('regime_dependency_state', 'not_available')} | "
+                    f"strongest={edge_experiment_summary.get('strongest_regime', 'none')}:{float(edge_experiment_summary.get('strongest_regime_true_edge_ratio', 0.0) or 0.0):.4f} | "
+                    f"weakest={edge_experiment_summary.get('weakest_regime', 'none')}:{float(edge_experiment_summary.get('weakest_regime_true_edge_ratio', 0.0) or 0.0):.4f}"
+                ),
                 f"- summary: {edge_experiment_summary.get('summary', '')}",
                 f"- reason_codes: {list(edge_experiment_summary.get('reason_codes') or [])}",
                 f"- source_summary: {dict(edge_experiment_summary.get('source_summary') or {})}",
@@ -2338,6 +2371,12 @@ class ValidationReportService:
                     f"- window_closed_counts: recent={int(dict(true_edge.get('recent_window') or {}).get('closed', 0) or 0)}, "
                     f"prior={int(dict(true_edge.get('prior_window') or {}).get('closed', 0) or 0)}"
                 )
+            for idx, payload in enumerate(list(regime_breakdown.get("rows") or [])[:3], start=1):
+                edge_experiment_lines.append(
+                    f"- regime_{idx}: key={payload.get('key')} closed={int(payload.get('closed', 0) or 0)} "
+                    f"capture_ratio_r={float(payload.get('capture_ratio_r', 0.0) or 0.0):.4f} "
+                    f"true_edge_ratio={float(payload.get('true_edge_ratio', 0.0) or 0.0):.4f}"
+                )
             edge_experiment_lines.append("")
 
         edge_evolution_summary = summarize_edge_evolution_rule(
@@ -2346,11 +2385,8 @@ class ValidationReportService:
                 rollout_recommendation=rollout_recommendation_payload,
                 strategy_lifecycle=strategy_lifecycle_payload,
                 kill_condition_automation=kill_condition_automation_payload,
+                review_followup_ledger=review_followup_ledger_summary,
             )
-        )
-        review_followup_ledger_summary = summarize_split_review_followup_ledger(
-            symbol=symbol,
-            universe=str(getattr(self.settings, "universe_name", "usdc_perp_top30") or "usdc_perp_top30"),
         )
         edge_evolution_lines: list[str] = []
         if edge_evolution_summary:
@@ -2369,6 +2405,11 @@ class ValidationReportService:
                     f"edge_decay_rate={float(edge_evolution_summary.get('edge_decay_rate', 0.0) or 0.0):+.4f} | "
                     f"closed_trade_count={int(edge_evolution_summary.get('closed_trade_count', 0) or 0)} | "
                     f"kill_review_triggered={bool(edge_evolution_summary.get('kill_review_triggered', False))}"
+                ),
+                (
+                    f"- regime_guard: state={edge_evolution_summary.get('regime_guard_state', 'not_applicable')} | "
+                    f"strongest={edge_evolution_summary.get('strongest_regime', 'none')} | "
+                    f"weakest={edge_evolution_summary.get('weakest_regime', 'none')}:{float(edge_evolution_summary.get('weakest_regime_true_edge_ratio', 0.0) or 0.0):.4f}"
                 ),
                 (
                     f"- promotion_candidate: axis={edge_evolution_summary.get('promotion_candidate_axis', 'none')} | "
@@ -2753,6 +2794,12 @@ class ValidationReportService:
                 "next_actions": [dict(item) for item in list(operator_action_priority_payload.get("next_actions") or [])[:3]],
                 "capture_context": dict(operator_action_priority_payload.get("capture_context") or {}),
                 "experiment_context": dict(operator_action_priority_payload.get("experiment_context") or {}),
+                "experiment_execution_policy": dict(
+                    operator_action_priority_payload.get("experiment_execution_policy") or {}
+                ),
+                "deferred_experiment_actions": [
+                    dict(item) for item in list(operator_action_priority_payload.get("deferred_experiment_actions") or [])[:3]
+                ],
                 "advisory_only": bool(operator_action_priority_payload.get("advisory_only", True)),
             }
             if operator_action_priority_payload

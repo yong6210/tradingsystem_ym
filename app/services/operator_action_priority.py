@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 
 class OperatorActionPriorityService:
+    _REVIEW_PACKET_FRESH_HOURS = 12
+    _REVIEW_PACKET_NO_TARGET_COOLDOWN_HOURS = 6
+    _REVIEW_PACKET_REPEAT_LIMIT = 3
     _PRIORITY_RANK = {
         "urgent": 3,
         "watch": 2,
@@ -49,6 +53,27 @@ class OperatorActionPriorityService:
             return int(value)
         except (TypeError, ValueError):
             return int(default)
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        normalized = text.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    @classmethod
+    def _age_hours(cls, value: Any) -> float | None:
+        parsed = cls._parse_datetime(value)
+        if parsed is None:
+            return None
+        return max((datetime.now(UTC) - parsed).total_seconds() / 3600.0, 0.0)
 
     def _command_context(
         self,
@@ -129,6 +154,125 @@ class OperatorActionPriorityService:
             days=max(self._int(command_context.get("days"), 7), 1),
         )
         return item
+
+    def _review_followup_packets(self, payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+        summary = self._dict(payload)
+        recent_packets = [
+            self._dict(item)
+            for item in list(summary.get("recent_packets") or [])
+            if isinstance(item, dict)
+        ]
+        if recent_packets:
+            return recent_packets
+        last_action = str(summary.get("last_action") or "none")
+        if last_action in {"", "none"}:
+            return []
+        return [
+            {
+                "action": last_action,
+                "status": str(summary.get("last_status") or "none"),
+                "generated_at": str(summary.get("last_generated_at") or ""),
+                "recorded_at": str(summary.get("last_recorded_at") or ""),
+                "target_contract": self._dict(summary.get("last_target_contract")),
+                "packet_key": str(summary.get("last_packet_key") or ""),
+            }
+        ]
+
+    def _candidate_packet_key(self, action_payload: dict[str, Any] | None) -> str:
+        item = self._dict(action_payload)
+        return "|".join(
+            [
+                str(item.get("action") or "none"),
+                str(item.get("target_axis") or "none"),
+                str(item.get("target_preferred_variant") or "none"),
+                str(item.get("target_symbol") or "").upper() or "none",
+                str(item.get("target_family") or "none"),
+            ]
+        )
+
+    def _ledger_packet_key(self, packet: dict[str, Any] | None) -> str:
+        item = self._dict(packet)
+        direct = str(item.get("packet_key") or "")
+        if direct:
+            return direct
+        target = self._dict(item.get("target_contract"))
+        return "|".join(
+            [
+                str(item.get("action") or "none"),
+                str(target.get("axis") or "none"),
+                str(target.get("preferred_variant") or "none"),
+                str(target.get("symbol") or "").upper() or "none",
+                str(target.get("strategy_family") or "none"),
+            ]
+        )
+
+    def _review_action_dedupe_reason(
+        self,
+        action_payload: dict[str, Any] | None,
+        *,
+        review_followup_ledger: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        item = self._dict(action_payload)
+        action = str(item.get("action") or "")
+        if action not in self._REVIEW_FOLLOWUP_ACTION_TARGETS:
+            return None
+
+        packets = self._review_followup_packets(review_followup_ledger)
+        if not packets:
+            return None
+
+        packet_key = self._candidate_packet_key(item)
+        last_packet = self._dict(packets[0])
+        last_action = str(last_packet.get("action") or "none")
+        last_status = str(last_packet.get("status") or "UNKNOWN")
+        if last_action == action and last_status in {"NO_TARGET", "NO_REVIEW_ACTION_AVAILABLE"}:
+            age_hours = self._age_hours(last_packet.get("generated_at") or last_packet.get("recorded_at"))
+            if age_hours is None or age_hours <= self._REVIEW_PACKET_NO_TARGET_COOLDOWN_HOURS:
+                target_symbol = str(item.get("target_symbol") or "").upper()
+                last_target = self._dict(last_packet.get("target_contract"))
+                last_target_symbol = str(last_target.get("symbol") or "").upper()
+                if not target_symbol or not last_target_symbol or target_symbol == last_target_symbol:
+                    return {
+                        "reason": "last_packet_had_no_target",
+                        "message": "the most recent packet for this review action already stalled at NO_TARGET",
+                        "matched_packet": last_packet,
+                    }
+
+        for packet in packets:
+            packet_item = self._dict(packet)
+            if str(packet_item.get("status") or "UNKNOWN") != "READY":
+                continue
+            if packet_key != self._ledger_packet_key(packet_item):
+                continue
+            age_hours = self._age_hours(packet_item.get("generated_at") or packet_item.get("recorded_at"))
+            if age_hours is not None and age_hours <= self._REVIEW_PACKET_FRESH_HOURS:
+                return {
+                    "reason": "fresh_packet_already_exists",
+                    "message": "an equivalent READY review packet already exists in the fresh ledger window",
+                    "matched_packet": packet_item,
+                }
+
+        leading_packets = [self._dict(packet) for packet in packets[: self._REVIEW_PACKET_REPEAT_LIMIT]]
+        if len(leading_packets) >= self._REVIEW_PACKET_REPEAT_LIMIT and all(
+            str(packet.get("action") or "none") == action for packet in leading_packets
+        ):
+            matching_repeat_count = sum(
+                1 for packet in leading_packets if self._ledger_packet_key(packet) == packet_key
+            )
+            if matching_repeat_count >= self._REVIEW_PACKET_REPEAT_LIMIT:
+                return {
+                    "reason": "same_packet_repeated_three_times",
+                    "message": "the same review packet has already been generated three times in a row",
+                    "matched_packet": leading_packets[0],
+                }
+            if not str(item.get("target_symbol") or "").strip() and matching_repeat_count <= 1:
+                return {
+                    "reason": "same_action_repeated_three_times",
+                    "message": "the same review action has already been generated three times in a row",
+                    "matched_packet": leading_packets[0],
+                }
+
+        return None
 
     @staticmethod
     def _push_action(
@@ -239,6 +383,57 @@ class OperatorActionPriorityService:
         if action_family == "execution_review" and reason == "execution_fill_shortfall":
             return "watch"
         return "monitor"
+
+    @staticmethod
+    def _is_split_experiment_action(action: str) -> bool:
+        return str(action or "") in {
+            "run_entry_timing_split_review",
+            "run_execution_style_split_review",
+        }
+
+    @classmethod
+    def _enforce_single_experiment_policy(
+        cls,
+        actions: list[dict[str, Any]],
+        *,
+        experiment_context: dict[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+        context = cls._dict(experiment_context)
+        kept: list[dict[str, Any]] = []
+        deferred: list[dict[str, Any]] = []
+        active_experiment: dict[str, Any] = {}
+        reason = "keep one split experiment active until fresh closes advance the next sample target"
+
+        for row in actions:
+            item = cls._dict(row)
+            if not cls._is_split_experiment_action(str(item.get("action") or "")):
+                kept.append(item)
+                continue
+            if not active_experiment:
+                active_experiment = item
+                kept.append(item)
+                continue
+            deferred_item = dict(item)
+            deferred_item["defer_reason"] = "single_active_experiment"
+            deferred_item["defer_message"] = reason
+            deferred.append(deferred_item)
+
+        return kept, deferred, {
+            "mode": "single_active_experiment",
+            "reason": reason,
+            "active_action": str(active_experiment.get("action") or "none"),
+            "active_axis": str(active_experiment.get("target_axis") or "none"),
+            "sample_maturity_state": str(context.get("sample_maturity_state") or "unknown"),
+            "next_sample_target_closed_trades": cls._int(
+                context.get("next_sample_target_closed_trades"),
+                0,
+            ),
+            "remaining_closed_trades_to_next_target": cls._int(
+                context.get("remaining_closed_trades_to_next_target"),
+                0,
+            ),
+            "deferred_actions": [dict(item) for item in deferred[:3]],
+        }
 
     def _capture_context(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
         summary = self._dict(payload)
@@ -440,6 +635,16 @@ class OperatorActionPriorityService:
             "edge_state": str(summary.get("edge_state") or "insufficient_edge_measurement"),
             "true_edge_ratio": float(summary.get("true_edge_ratio", 0.0) or 0.0),
             "edge_decay_rate": float(summary.get("edge_decay_rate", 0.0) or 0.0),
+            "closed_trade_count": self._int(summary.get("closed_trade_count", 0), 0),
+            "sample_maturity_state": str(summary.get("sample_maturity_state") or "unknown"),
+            "next_sample_target_closed_trades": self._int(summary.get("next_sample_target_closed_trades", 0), 0),
+            "remaining_closed_trades_to_next_target": self._int(
+                summary.get("remaining_closed_trades_to_next_target", 0),
+                0,
+            ),
+            "regime_dependency_state": str(summary.get("regime_dependency_state") or "not_available"),
+            "strongest_regime": str(summary.get("strongest_regime") or "none"),
+            "weakest_regime": str(summary.get("weakest_regime") or "none"),
             "entry_timing_preferred_variant": str(summary.get("entry_timing_preferred_variant") or "none"),
             "entry_timing_recommendation_reason": str(
                 summary.get("entry_timing_recommendation_reason") or "not_available"
@@ -520,6 +725,8 @@ class OperatorActionPriorityService:
                     "priority_level": priority_level,
                     "source": "edge_experiment",
                     "action_family": "edge_review",
+                    "target_axis": "entry_timing",
+                    "target_preferred_variant": preferred,
                     "target_symbol": str(target.get("symbol") or ""),
                     "target_status": str(target.get("status") or ""),
                     "target_family": str(target.get("strategy_family") or ""),
@@ -549,6 +756,8 @@ class OperatorActionPriorityService:
                     "priority_level": priority_level,
                     "source": "edge_experiment",
                     "action_family": "edge_review",
+                    "target_axis": "execution_style",
+                    "target_preferred_variant": preferred,
                     "target_symbol": str(target.get("symbol") or ""),
                     "target_status": str(target.get("status") or ""),
                     "target_family": str(target.get("strategy_family") or ""),
@@ -598,6 +807,10 @@ class OperatorActionPriorityService:
                         "priority_level": "watch",
                         "source": "edge_evolution",
                         "action_family": "allocation_review",
+                        "target_axis": str(target.get("axis") or promotion_candidate.get("axis") or "none"),
+                        "target_preferred_variant": str(
+                            target.get("preferred_variant") or promotion_candidate.get("preferred_variant") or "none"
+                        ),
                         "target_symbol": str(target.get("symbol") or ""),
                         "target_status": str(target.get("status") or ""),
                         "target_family": str(target.get("strategy_family") or ""),
@@ -626,6 +839,10 @@ class OperatorActionPriorityService:
                         "priority_level": "urgent" if kill_state == "kill_switch_review" else "watch",
                         "source": "edge_evolution",
                         "action_family": "risk_review",
+                        "target_axis": str(target.get("axis") or promotion_candidate.get("axis") or "none"),
+                        "target_preferred_variant": str(
+                            target.get("preferred_variant") or promotion_candidate.get("preferred_variant") or "none"
+                        ),
                         "target_symbol": str(target.get("symbol") or ""),
                         "target_status": str(target.get("status") or ""),
                         "target_family": str(target.get("strategy_family") or ""),
@@ -667,6 +884,10 @@ class OperatorActionPriorityService:
                     "priority_level": "watch" if confidence in {"medium", "high"} else "research",
                     "source": "edge_evolution",
                     "action_family": "promotion_review",
+                    "target_axis": str(target.get("axis") or axis or "none"),
+                    "target_preferred_variant": str(
+                        target.get("preferred_variant") or promotion_candidate.get("preferred_variant") or "none"
+                    ),
                     "target_symbol": str(target.get("symbol") or ""),
                     "target_status": str(target.get("status") or ""),
                     "target_family": str(target.get("strategy_family") or ""),
@@ -700,6 +921,9 @@ class OperatorActionPriorityService:
         )
         edge_evolution = self._dict(
             funnel.get("edge_evolution_rule") or validation_payload.get("edge_evolution_rule_summary")
+        )
+        review_followup_ledger = self._dict(
+            funnel.get("review_followup_ledger") or validation_payload.get("review_followup_ledger_summary")
         )
         opportunity_capture = self._dict(
             funnel.get("opportunity_capture") or validation_payload.get("opportunity_capture_summary")
@@ -892,6 +1116,28 @@ class OperatorActionPriorityService:
                     action_family="research",
                 )
 
+        dedupe_suppressed_actions: list[dict[str, Any]] = []
+        filtered_next_actions: list[dict[str, Any]] = []
+        for action in next_actions:
+            dedupe_reason = self._review_action_dedupe_reason(
+                action,
+                review_followup_ledger=review_followup_ledger,
+            )
+            if dedupe_reason:
+                suppressed = dict(action)
+                suppressed["dedupe_reason"] = str(dedupe_reason.get("reason") or "unknown")
+                suppressed["dedupe_message"] = str(dedupe_reason.get("message") or "")
+                suppressed["matched_packet"] = self._dict(dedupe_reason.get("matched_packet"))
+                dedupe_suppressed_actions.append(suppressed)
+                continue
+            filtered_next_actions.append(action)
+        next_actions = filtered_next_actions
+        experiment_context = self._edge_experiment_context(
+            edge_experiment,
+            dashboard_payload=dashboard_payload,
+            command_context=command_context,
+        )
+
         next_actions.sort(
             key=lambda item: (
                 -self._priority_rank(str(item.get("priority_level") or "monitor")),
@@ -899,20 +1145,39 @@ class OperatorActionPriorityService:
                 str(item.get("action") or ""),
             )
         )
+        deferred_experiment_actions: list[dict[str, Any]] = []
+        experiment_execution_policy: dict[str, Any] = {
+            "mode": "single_active_experiment",
+            "reason": "keep one split experiment active until fresh closes advance the next sample target",
+            "active_action": "none",
+            "active_axis": "none",
+            "sample_maturity_state": str(self._dict(experiment_context).get("sample_maturity_state") or "unknown"),
+            "next_sample_target_closed_trades": self._int(
+                self._dict(experiment_context).get("next_sample_target_closed_trades"),
+                0,
+            ),
+            "remaining_closed_trades_to_next_target": self._int(
+                self._dict(experiment_context).get("remaining_closed_trades_to_next_target"),
+                0,
+            ),
+            "deferred_actions": [],
+        }
+        if experiment_context:
+            next_actions, deferred_experiment_actions, experiment_execution_policy = self._enforce_single_experiment_policy(
+                next_actions,
+                experiment_context=experiment_context,
+            )
 
         top = self._dict(next_actions[0] if next_actions else {})
         capture_context = self._capture_context(opportunity_capture)
-        experiment_context = self._edge_experiment_context(
-            edge_experiment,
-            dashboard_payload=dashboard_payload,
-            command_context=command_context,
-        )
         if not top:
             return {
                 "available": True,
                 "top_action": "continue_runtime_monitoring",
                 "top_reason": (
-                    "no stronger operator action is currently implied by playbook, execution, family, mode, or research signals"
+                    "all higher-priority review actions are already covered by fresh or recently stalled ledger packets"
+                    if dedupe_suppressed_actions
+                    else "no stronger operator action is currently implied by playbook, execution, family, mode, or research signals"
                 ),
                 "top_action_followup_command": "",
                 "priority_level": "monitor",
@@ -923,6 +1188,9 @@ class OperatorActionPriorityService:
                 "next_actions": [],
                 "capture_context": capture_context,
                 "experiment_context": experiment_context,
+                "experiment_execution_policy": experiment_execution_policy,
+                "deferred_experiment_actions": deferred_experiment_actions,
+                "dedupe_suppressed_actions": dedupe_suppressed_actions,
                 "advisory_only": True,
             }
 
@@ -944,6 +1212,18 @@ class OperatorActionPriorityService:
             supporting_signals.append(f"research:{research_action.get('recommended_action')}")
         if experiment_context:
             supporting_signals.append(f"edge:{experiment_context.get('edge_state')}")
+            supporting_signals.append(
+                f"sample_maturity:{experiment_context.get('sample_maturity_state') or 'unknown'}"
+            )
+            regime_dependency_state = str(experiment_context.get("regime_dependency_state") or "")
+            if regime_dependency_state:
+                supporting_signals.append(f"regime_dependency:{regime_dependency_state}")
+            strongest_regime = str(experiment_context.get("strongest_regime") or "")
+            weakest_regime = str(experiment_context.get("weakest_regime") or "")
+            if strongest_regime and strongest_regime != "none":
+                supporting_signals.append(f"strongest_regime:{strongest_regime}")
+            if weakest_regime and weakest_regime != "none":
+                supporting_signals.append(f"weakest_regime:{weakest_regime}")
             if bool(experiment_context.get("entry_timing_comparison_ready", False)):
                 supporting_signals.append(
                     f"entry_timing:{experiment_context.get('entry_timing_preferred_variant')}"
@@ -979,6 +1259,17 @@ class OperatorActionPriorityService:
                 supporting_signals.append(
                     f"promotion_candidate:{promotion_candidate.get('axis')}:{promotion_candidate.get('preferred_variant') or 'none'}"
                 )
+            recommendation_strength = str(edge_evolution.get("recommendation_strength") or "")
+            if recommendation_strength:
+                supporting_signals.append(f"edge_strength:{recommendation_strength}")
+        if review_followup_ledger:
+            supporting_signals.append(
+                f"review_ledger:{review_followup_ledger.get('last_status') or 'none'}:{review_followup_ledger.get('last_action') or 'none'}"
+            )
+            if int(review_followup_ledger.get("latest_action_streak", 0) or 0) > 0:
+                supporting_signals.append(
+                    f"review_ledger_streak:{int(review_followup_ledger.get('latest_action_streak', 0) or 0)}"
+                )
         if capture_context:
             dominant_bottleneck = self._dict(capture_context.get("dominant_bottleneck"))
             stage = str(dominant_bottleneck.get("stage") or "")
@@ -1010,6 +1301,14 @@ class OperatorActionPriorityService:
             blocking_signals.append(
                 f"research_only:{mode_top.get('axis') or 'bucket'}={mode_top.get('bucket') or 'unknown'}"
             )
+        for row in dedupe_suppressed_actions:
+            blocking_signals.append(
+                f"review_packet_dedupe:{row.get('action') or 'none'}:{row.get('dedupe_reason') or 'unknown'}"
+            )
+        for row in deferred_experiment_actions:
+            blocking_signals.append(
+                f"experiment_deferred:{row.get('action') or 'none'}:{row.get('defer_reason') or 'unknown'}"
+            )
 
         return {
             "available": True,
@@ -1024,5 +1323,8 @@ class OperatorActionPriorityService:
             "next_actions": next_actions[1:4],
             "capture_context": capture_context,
             "experiment_context": experiment_context,
+            "experiment_execution_policy": experiment_execution_policy,
+            "deferred_experiment_actions": deferred_experiment_actions[:3],
+            "dedupe_suppressed_actions": dedupe_suppressed_actions,
             "advisory_only": True,
         }

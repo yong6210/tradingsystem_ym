@@ -66,6 +66,20 @@ def _dashboard_payload() -> dict:
                 "promotion_candidate_variant": "early_limit",
                 "summary": "Reduce baseline allocation while split evidence stays fragile.",
             },
+            "review_followup_ledger": {
+                "available": True,
+                "last_status": "READY",
+                "last_generated_status": "READY",
+                "last_decision_status": "ACKED",
+                "last_effective_status": "ACKED",
+                "last_action": "reduce_baseline_allocation_review",
+                "recent_entry_count": 2,
+                "last_followup_command": (
+                    "./.venv/bin/python scripts/run_split_review_followup.py "
+                    "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review"
+                ),
+                "summary": "Latest review packet generated cleanly and is already acknowledged.",
+            },
         },
         "portfolio_summary": {
             "accepted_candidates": [
@@ -141,6 +155,20 @@ def _validation_payload(*, approve_value: str = "approval usable") -> dict:
                 "promotion_candidate_axis": "entry_timing",
                 "promotion_candidate_variant": "early_limit",
                 "summary": "Reduce baseline allocation while split evidence stays fragile.",
+            },
+            "review_followup_ledger_summary": {
+                "available": True,
+                "last_status": "READY",
+                "last_generated_status": "READY",
+                "last_decision_status": "ACKED",
+                "last_effective_status": "ACKED",
+                "last_action": "reduce_baseline_allocation_review",
+                "recent_entry_count": 2,
+                "last_followup_command": (
+                    "./.venv/bin/python scripts/run_split_review_followup.py "
+                    "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review"
+                ),
+                "summary": "Latest review packet generated cleanly and is already acknowledged.",
             },
         },
     }
@@ -256,6 +284,8 @@ def test_main_emits_approval_surfaces_and_ready_status(monkeypatch, capsys) -> N
     assert payload["edge_experiment_review"]["execution_style_preferred_variant"] == "passive_limit"
     assert payload["edge_evolution_rule"]["evolution_state"] == "reduce_candidate"
     assert payload["edge_evolution_rule"]["recommended_action"] == "reduce_baseline_allocation_review"
+    assert payload["review_followup_ledger"]["last_status"] == "READY"
+    assert payload["review_followup_ledger"]["last_decision_status"] == "ACKED"
     assert payload["experiment_review_targets"]["entry_timing"]["symbol"] == "BTCUSDC"
     assert payload["experiment_review_targets"]["entry_timing"]["action"] == "run_entry_timing_split_review"
     assert payload["experiment_review_targets"]["entry_timing"]["followup_command"].endswith(

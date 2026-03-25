@@ -110,6 +110,8 @@ def test_portfolio_budget_report_summarizes_exposure_and_headroom() -> None:
             assert payload["approval_strip_summary"]["align_value"] == "aligned"
             assert payload["approval_strip_summary"]["act_value"] == payload["playbook_action"]
             assert "edge_experiment_review" in payload
+            assert "edge_evolution_rule" in payload
+            assert "review_followup_ledger" in payload
             assert payload["strategy_mode"] == "A_ONLY"
             assert payload["mode_policy"]["mode"] == "A_ONLY"
             assert payload["mode_stats"]["daily_trade_limit"] == 3
@@ -350,6 +352,8 @@ def test_portfolio_budget_report_reflects_daily_operating_lock() -> None:
             assert payload["approval_strip_summary"]["act_value"] == "hold_new_entries_until_operating_lock_clears"
             assert payload["approval_strip_summary"]["act_priority_level"] == "urgent"
             assert "edge_experiment_review" in payload
+            assert "edge_evolution_rule" in payload
+            assert "review_followup_ledger" in payload
             assert payload["operating_lock"]["active"] is True
             assert payload["operating_lock"]["scope"] == "daily"
             assert payload["operating_lock"]["daily_stats"]["a_grade_loss_streak"] == 2
@@ -802,6 +806,15 @@ def test_portfolio_budget_report_attaches_edge_experiment_focus_to_candidate_row
             assert row["edge_experiment_focus"]["edge_state"] == "watch_edge"
             assert row["edge_experiment_focus"]["entry_timing_preferred_variant"] == "early_limit"
             assert row["edge_experiment_focus"]["execution_style_preferred_variant"] == "passive_limit"
+            assert payload["edge_experiment_review"]["focus_symbol"] == "BTCUSDC"
+            assert payload["edge_evolution_rule"]["available"] is True
+            assert payload["edge_evolution_rule"]["recommended_action"] in {
+                "keep_current_baseline",
+                "reduce_baseline_allocation_review",
+            }
+            assert payload["review_followup_ledger"]["symbol"] == "BTCUSDC"
+            assert "last_status" in payload["review_followup_ledger"]
+            assert "last_action" in payload["review_followup_ledger"]
     finally:
         for key, value in old_values.items():
             setattr(settings, key, value)

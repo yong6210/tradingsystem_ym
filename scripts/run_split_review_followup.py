@@ -10,6 +10,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -18,6 +19,8 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.services.split_review_followup_ledger import (
     record_split_review_followup_ledger_entry,
+    record_split_review_followup_ledger_transition,
+    resolve_split_review_followup_ledger_packet,
     summarize_split_review_followup_ledger,
 )
 
@@ -59,6 +62,15 @@ _REVIEW_ACTIONS: dict[str, dict[str, str]] = {
     },
 }
 
+_DECISION_STATUSES = [
+    "ACKED",
+    "COMPLETED",
+    "REJECTED",
+    "PROMOTE_CONFIRMED",
+    "REDUCE_CONFIRMED",
+    "KILL_REVIEW_ESCALATED",
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -78,6 +90,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ledger-path", default="reports/operations/split_review_followups/review_ledger.jsonl")
     parser.add_argument("--no-write-report", action="store_true")
     parser.add_argument("--no-write-ledger", action="store_true")
+    parser.add_argument(
+        "--transition-status",
+        default="",
+        choices=["", *_DECISION_STATUSES],
+        help="Append a decision/status transition to the latest recorded packet instead of generating a new packet.",
+    )
+    parser.add_argument("--packet-id", default="")
+    parser.add_argument("--decision-actor", default="")
+    parser.add_argument("--decision-notes", default="")
+    parser.add_argument("--transition-reason", default="")
     return parser.parse_args()
 
 
@@ -406,10 +428,12 @@ def _review_steps(
 
 def _write_report(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_summary = _dict(payload.get("review_followup_ledger_summary"))
     lines = [
         "# Split Review Followup",
         "",
         f"- generated_at: {payload['generated_at']}",
+        f"- packet_id: {payload.get('packet_id', '') or 'none'}",
         f"- symbol: {payload['symbol']}",
         f"- universe: {payload['universe']}",
         f"- days: {payload['days']}",
@@ -463,17 +487,18 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
             "## Followup Ledger",
             "",
             (
-                f"- available: {bool(_dict(payload.get('review_followup_ledger_summary')).get('available', False))} "
-                f"| recent_entries={int(_dict(payload.get('review_followup_ledger_summary')).get('recent_entry_count', 0) or 0)} "
-                f"| last_status={_dict(payload.get('review_followup_ledger_summary')).get('last_status', 'none')}"
+                f"- available: {bool(ledger_summary.get('available', False))} "
+                f"| recent_entries={int(ledger_summary.get('recent_entry_count', 0) or 0)} "
+                f"| last_generated_status={ledger_summary.get('last_status', 'none')} "
+                f"| last_decision_status={ledger_summary.get('last_decision_status', 'none')}"
             ),
             (
-                f"- last_action: {_dict(payload.get('review_followup_ledger_summary')).get('last_action', 'none')} "
+                f"- last_action: {ledger_summary.get('last_action', 'none')} "
                 f"| last_followup_command: "
-                f"{_dict(payload.get('review_followup_ledger_summary')).get('last_followup_command', '') or 'none'}"
+                f"{ledger_summary.get('last_followup_command', '') or 'none'}"
             ),
-            f"- ledger_path: {_dict(payload.get('review_followup_ledger_summary')).get('ledger_path', '') or 'none'}",
-            f"- summary: {_dict(payload.get('review_followup_ledger_summary')).get('summary', '')}",
+            f"- ledger_path: {ledger_summary.get('ledger_path', '') or 'none'}",
+            f"- summary: {ledger_summary.get('summary', '')}",
             "",
             "## Review Steps",
             "",
@@ -498,6 +523,49 @@ def main() -> int:
     args = parse_args()
     generated_at = _now()
     ledger_path = ROOT_DIR / args.ledger_path
+    transition_status = str(getattr(args, "transition_status", "") or "")
+    if transition_status:
+        if bool(getattr(args, "no_write_ledger", False)):
+            raise RuntimeError("--transition-status requires ledger writes")
+        transition_entry = record_split_review_followup_ledger_transition(
+            symbol=args.symbol,
+            universe=args.universe,
+            decision_status=transition_status,
+            packet_id=str(getattr(args, "packet_id", "") or "").strip() or None,
+            selected_action=args.action,
+            decision_actor=str(getattr(args, "decision_actor", "") or ""),
+            decision_notes=str(getattr(args, "decision_notes", "") or ""),
+            transition_reason=str(getattr(args, "transition_reason", "") or ""),
+            ledger_path=ledger_path,
+        )
+        resolved_packet = resolve_split_review_followup_ledger_packet(
+            symbol=args.symbol,
+            universe=args.universe,
+            packet_id=str(transition_entry.get("packet_id") or ""),
+            ledger_path=ledger_path,
+        )
+        payload = {
+            "mode": "record_transition",
+            "generated_at": generated_at.isoformat(),
+            "symbol": args.symbol.upper(),
+            "universe": args.universe,
+            "packet_id": str(transition_entry.get("packet_id") or ""),
+            "status": str(transition_entry.get("status") or transition_status),
+            "selected_action": str(transition_entry.get("selected_action") or "none"),
+            "decision_actor": str(transition_entry.get("decision_actor") or ""),
+            "decision_notes": str(transition_entry.get("decision_notes") or ""),
+            "transition_reason": str(transition_entry.get("transition_reason") or ""),
+            "target_contract": _dict(transition_entry.get("target_contract")),
+            "review_followup_ledger_packet": resolved_packet,
+            "review_followup_ledger_summary": summarize_split_review_followup_ledger(
+                symbol=args.symbol,
+                universe=args.universe,
+                ledger_path=ledger_path,
+            ),
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
+        return 0
+
     dashboard = _request_json(
         args.base_url,
         "GET",
@@ -525,6 +593,7 @@ def main() -> int:
 
     payload: dict[str, Any] = {
         "generated_at": generated_at.isoformat(),
+        "packet_id": f"review_followup:{uuid4().hex}",
         "symbol": args.symbol.upper(),
         "universe": args.universe,
         "days": args.days,
@@ -564,7 +633,8 @@ def main() -> int:
         payload["report_path"] = str(report_path.relative_to(ROOT_DIR))
 
     if not args.no_write_ledger:
-        record_split_review_followup_ledger_entry(payload, ledger_path=ledger_path)
+        recorded_entry = record_split_review_followup_ledger_entry(payload, ledger_path=ledger_path)
+        payload["packet_id"] = str(recorded_entry.get("packet_id") or payload.get("packet_id") or "")
     payload["review_followup_ledger_summary"] = summarize_split_review_followup_ledger(
         symbol=args.symbol,
         universe=args.universe,

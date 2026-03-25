@@ -198,6 +198,23 @@ def _edge_evolution_summary(payload: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _review_followup_summary(payload: dict[str, Any]) -> dict[str, Any] | None:
+    summary = dict(payload.get("review_followup_ledger") or {})
+    if not summary:
+        return None
+    return {
+        "available": bool(summary.get("available", False)),
+        "last_status": str(summary.get("last_status") or "none"),
+        "last_generated_status": str(summary.get("last_generated_status") or summary.get("last_status") or "none"),
+        "last_decision_status": str(summary.get("last_decision_status") or "none"),
+        "last_effective_status": str(summary.get("last_effective_status") or summary.get("last_status") or "none"),
+        "last_action": str(summary.get("last_action") or "none"),
+        "recent_entry_count": int(summary.get("recent_entry_count", 0) or 0),
+        "last_followup_command": str(summary.get("last_followup_command") or ""),
+        "summary": str(summary.get("summary") or ""),
+    }
+
+
 def _sort_actionable_key(row: dict[str, Any]) -> tuple[float, float, float, str]:
     return (
         float(row.get("adjusted_rank_score", row.get("final_rank_score", 0.0)) or 0.0),
@@ -264,6 +281,7 @@ def build_entry_snapshot(
         "approval_strip": _approval_strip_summary(payload),
         "edge_experiment_review": _edge_experiment_summary(payload),
         "edge_evolution_rule": _edge_evolution_summary(payload),
+        "review_followup_ledger": _review_followup_summary(payload),
         "counts": {
             ACTIONABLE_ENTRY: len(actionable_rows),
             BLOCKED_SETUP: len(blocked_non_research),
@@ -282,6 +300,7 @@ def build_alert_state(snapshot: dict[str, Any]) -> dict[str, Any]:
     approval_strip = dict(snapshot.get("approval_strip") or {})
     edge_experiment = dict(snapshot.get("edge_experiment_review") or {})
     edge_evolution = dict(snapshot.get("edge_evolution_rule") or {})
+    review_followup = dict(snapshot.get("review_followup_ledger") or {})
     return {
         "scope": str(snapshot.get("scope") or ""),
         "deployment_go_no_go": str(snapshot.get("deployment_go_no_go") or ""),
@@ -298,6 +317,12 @@ def build_alert_state(snapshot: dict[str, Any]) -> dict[str, Any]:
         "edge_evolution_bias": str(edge_evolution.get("allocation_bias") or ""),
         "entry_timing_focus": str(edge_experiment.get("entry_timing_preferred_variant") or ""),
         "execution_style_focus": str(edge_experiment.get("execution_style_preferred_variant") or ""),
+        "review_followup_generated_status": str(review_followup.get("last_status") or ""),
+        "review_followup_decision_status": str(review_followup.get("last_decision_status") or ""),
+        "review_followup_effective_status": str(review_followup.get("last_effective_status") or ""),
+        "review_followup_action": str(review_followup.get("last_action") or ""),
+        "review_followup_entries": int(review_followup.get("recent_entry_count", 0) or 0),
+        "review_followup_command": str(review_followup.get("last_followup_command") or ""),
         "counts": {
             ACTIONABLE_ENTRY: int((snapshot.get("counts") or {}).get(ACTIONABLE_ENTRY, 0) or 0),
             BLOCKED_SETUP: int((snapshot.get("counts") or {}).get(BLOCKED_SETUP, 0) or 0),
@@ -421,6 +446,20 @@ def _format_edge_evolution_trace(snapshot: dict[str, Any]) -> str:
     )
 
 
+def _format_review_followup_trace(snapshot: dict[str, Any]) -> str:
+    review_followup = dict(snapshot.get("review_followup_ledger") or {})
+    if not review_followup:
+        return "review_followup_ledger: unavailable"
+    return (
+        f"review_followup_ledger: generated={review_followup.get('last_status', 'none')} "
+        f"| decision={review_followup.get('last_decision_status', 'none')} "
+        f"| effective={review_followup.get('last_effective_status', 'none')} "
+        f"| action={review_followup.get('last_action', 'none')} "
+        f"| entries={int(review_followup.get('recent_entry_count', 0) or 0)} "
+        f"| cmd={review_followup.get('last_followup_command', '') or 'none'}"
+    )
+
+
 def render_message(snapshot: dict[str, Any]) -> str:
     counts = dict(snapshot.get("counts") or {})
     sections = dict(snapshot.get("sections") or {})
@@ -438,6 +477,7 @@ def render_message(snapshot: dict[str, Any]) -> str:
         _format_contract_trace(snapshot),
         _format_edge_experiment_trace(snapshot),
         _format_edge_evolution_trace(snapshot),
+        _format_review_followup_trace(snapshot),
         (
             f"counts: {ACTIONABLE_ENTRY}={counts.get(ACTIONABLE_ENTRY, 0)}, "
             f"{BLOCKED_SETUP}={counts.get(BLOCKED_SETUP, 0)}, "

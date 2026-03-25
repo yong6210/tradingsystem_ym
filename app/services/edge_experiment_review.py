@@ -139,6 +139,119 @@ def _compare_variants(
     }
 
 
+def _sample_progress(*, closed_trade_count: int) -> dict[str, Any]:
+    count = max(_int(closed_trade_count, 0), 0)
+    milestones = [4, 6, 8, 20, 50, 100, 300]
+    next_target = next((target for target in milestones if count < target), 0)
+
+    if count < 4:
+        maturity = "pre_directional"
+    elif count < 6:
+        maturity = "directional_only"
+    elif count < 8:
+        maturity = "review_ready"
+    elif count < 20:
+        maturity = "pilot_live"
+    elif count < 50:
+        maturity = "early_edge"
+    elif count < 100:
+        maturity = "emerging_edge"
+    elif count < 300:
+        maturity = "credible_edge"
+    else:
+        maturity = "validated_edge"
+
+    return {
+        "closed_trade_count": count,
+        "sample_maturity_state": maturity,
+        "directional_ready": bool(count >= 4),
+        "decision_ready": bool(count >= 6),
+        "promotion_ready": bool(count >= 8),
+        "operator_sample_floor_ready": bool(count >= 20),
+        "next_sample_target_closed_trades": int(next_target),
+        "remaining_closed_trades_to_next_target": max(int(next_target) - count, 0) if next_target else 0,
+    }
+
+
+def _regime_edge_breakdown(payload: dict[str, Any] | None) -> dict[str, Any]:
+    rows = [_bucket_summary(row) for row in list(_bucket_rows(payload, "regime").values())]
+    rows = [row for row in rows if row]
+    if not rows:
+        return {
+            "available": False,
+            "dependency_state": "not_available",
+            "dependency_gap": 0.0,
+            "dominant_regime": {},
+            "strongest_regime": {},
+            "weakest_regime": {},
+            "rows": [],
+        }
+
+    sorted_rows = sorted(
+        rows,
+        key=lambda item: (
+            -_int(item.get("closed", 0)),
+            -_int(item.get("filled", 0)),
+            -_int(item.get("submitted", 0)),
+            str(item.get("key") or ""),
+        ),
+    )
+    dominant_regime = dict(sorted_rows[0] if sorted_rows else {})
+    closed_rows = [row for row in sorted_rows if _int(row.get("closed", 0)) > 0]
+    if not closed_rows:
+        return {
+            "available": True,
+            "dependency_state": "insufficient_regime_closes",
+            "dependency_gap": 0.0,
+            "dominant_regime": dominant_regime,
+            "strongest_regime": {},
+            "weakest_regime": {},
+            "rows": sorted_rows,
+        }
+
+    strongest_regime = dict(
+        max(
+            closed_rows,
+            key=lambda item: (
+                _float(item.get("true_edge_ratio", 0.0)),
+                _int(item.get("closed", 0)),
+                str(item.get("key") or ""),
+            ),
+        )
+    )
+    weakest_regime = dict(
+        min(
+            closed_rows,
+            key=lambda item: (
+                _float(item.get("true_edge_ratio", 0.0)),
+                -_int(item.get("closed", 0)),
+                str(item.get("key") or ""),
+            ),
+        )
+    )
+    dependency_gap = round(
+        _float(strongest_regime.get("true_edge_ratio", 0.0))
+        - _float(weakest_regime.get("true_edge_ratio", 0.0)),
+        4,
+    )
+    if len(closed_rows) >= 2 and dependency_gap >= 0.20:
+        dependency_state = "regime_dependent"
+    elif len(closed_rows) >= 2:
+        dependency_state = "stable_across_regimes"
+    else:
+        dependency_state = "single_regime_observed"
+
+    return {
+        "available": True,
+        "dependency_state": dependency_state,
+        "dependency_gap": dependency_gap,
+        "dominant_regime": dominant_regime,
+        "strongest_regime": strongest_regime,
+        "weakest_regime": weakest_regime,
+        "rows": sorted_rows,
+    }
+
+
 def build_edge_experiment_review(
     *,
     score_to_outcome_funnel: dict[str, Any] | None,
@@ -203,6 +316,18 @@ def build_edge_experiment_review(
         lhs_key="passive_limit",
         rhs_key="market",
     )
+    sample_progress = _sample_progress(closed_trade_count=_int(history.get("closed", 0)))
+    regime_edge_breakdown = _regime_edge_breakdown(funnel_payload)
+
+    if str(regime_edge_breakdown.get("dependency_state") or "") == "regime_dependent":
+        strongest_regime = dict(regime_edge_breakdown.get("strongest_regime") or {})
+        weakest_regime = dict(regime_edge_breakdown.get("weakest_regime") or {})
+        strongest_label = str(strongest_regime.get("key") or "unknown")
+        weakest_label = str(weakest_regime.get("key") or "unknown")
+        summary = (
+            f"{summary} Regime dispersion is still meaningful; strongest={strongest_label}, "
+            f"weakest={weakest_label}, so avoid generalizing the edge across regimes yet."
+        )
 
     reason_codes = _dedupe(
         [
@@ -210,6 +335,8 @@ def build_edge_experiment_review(
             f"true_edge_ratio:{true_edge_ratio:.4f}",
             f"entry_timing:{entry_timing.get('recommendation_reason', 'not_available')}",
             f"execution_style:{execution_style.get('recommendation_reason', 'not_available')}",
+            f"sample_maturity:{sample_progress.get('sample_maturity_state', 'unknown')}",
+            f"regime_dependency:{regime_edge_breakdown.get('dependency_state', 'not_available')}",
         ]
     )
 
@@ -233,12 +360,19 @@ def build_edge_experiment_review(
         },
         "entry_timing_experiment": entry_timing,
         "execution_style_experiment": execution_style,
+        "sample_progress": sample_progress,
+        "regime_edge_breakdown": regime_edge_breakdown,
         "source_summary": {
             "money_funnel_summary": str(money_funnel.get("summary") or ""),
             "recent_window_closed": recent_closed,
             "prior_window_closed": prior_closed,
             "entry_timing_preferred_variant": entry_timing.get("preferred_variant", "none"),
             "execution_style_preferred_variant": execution_style.get("preferred_variant", "none"),
+            "sample_maturity_state": str(sample_progress.get("sample_maturity_state") or "unknown"),
+            "next_sample_target_closed_trades": int(sample_progress.get("next_sample_target_closed_trades", 0) or 0),
+            "regime_dependency_state": str(regime_edge_breakdown.get("dependency_state") or "not_available"),
+            "strongest_regime": str(dict(regime_edge_breakdown.get("strongest_regime") or {}).get("key") or "none"),
+            "weakest_regime": str(dict(regime_edge_breakdown.get("weakest_regime") or {}).get("key") or "none"),
         },
     }
 
@@ -251,6 +385,11 @@ def summarize_edge_experiment_review(payload: dict[str, Any] | None) -> dict[str
     true_edge = dict(source.get("true_edge") or {})
     entry_timing = dict(source.get("entry_timing_experiment") or {})
     execution_style = dict(source.get("execution_style_experiment") or {})
+    sample_progress = dict(source.get("sample_progress") or {})
+    regime_edge_breakdown = dict(source.get("regime_edge_breakdown") or {})
+    strongest_regime = dict(regime_edge_breakdown.get("strongest_regime") or {})
+    weakest_regime = dict(regime_edge_breakdown.get("weakest_regime") or {})
+    dominant_regime = dict(regime_edge_breakdown.get("dominant_regime") or {})
     return {
         "available": bool(source.get("available", False)),
         "advisory_only": bool(source.get("advisory_only", True)),
@@ -273,10 +412,29 @@ def summarize_edge_experiment_review(payload: dict[str, Any] | None) -> dict[str
         "execution_style_recommendation_reason": str(
             execution_style.get("recommendation_reason") or "not_available"
         ),
+        "sample_maturity_state": str(sample_progress.get("sample_maturity_state") or "unknown"),
+        "directional_ready": bool(sample_progress.get("directional_ready", False)),
+        "decision_ready": bool(sample_progress.get("decision_ready", False)),
+        "promotion_ready": bool(sample_progress.get("promotion_ready", False)),
+        "operator_sample_floor_ready": bool(sample_progress.get("operator_sample_floor_ready", False)),
+        "next_sample_target_closed_trades": _int(sample_progress.get("next_sample_target_closed_trades", 0)),
+        "remaining_closed_trades_to_next_target": _int(
+            sample_progress.get("remaining_closed_trades_to_next_target", 0)
+        ),
+        "regime_dependency_state": str(regime_edge_breakdown.get("dependency_state") or "not_available"),
+        "regime_dependency_gap": round(_float(regime_edge_breakdown.get("dependency_gap", 0.0)), 4),
+        "strongest_regime": str(strongest_regime.get("key") or "none"),
+        "strongest_regime_true_edge_ratio": round(_float(strongest_regime.get("true_edge_ratio", 0.0)), 4),
+        "weakest_regime": str(weakest_regime.get("key") or "none"),
+        "weakest_regime_true_edge_ratio": round(_float(weakest_regime.get("true_edge_ratio", 0.0)), 4),
+        "dominant_regime": str(dominant_regime.get("key") or "none"),
+        "dominant_regime_closed_trade_count": _int(dominant_regime.get("closed", 0)),
         "summary": str(source.get("summary") or ""),
         "reason_codes": list(source.get("reason_codes") or []),
         "source_summary": dict(source.get("source_summary") or {}),
         "true_edge": true_edge,
         "entry_timing_experiment": entry_timing,
         "execution_style_experiment": execution_style,
+        "sample_progress": sample_progress,
+        "regime_edge_breakdown": regime_edge_breakdown,
     }

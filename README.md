@@ -172,6 +172,7 @@ The funnel matters because candidate quality is only useful if it survives portf
 
 - `edge_experiment_review` turns the same post-cost funnel into `true_edge_ratio`, `recent/prior` edge windows, and compare-only next-test guidance.
 - `entry_timing_experiment` compares `early_limit` versus `reaction_confirmed`; `execution_style_experiment` compares `passive_limit` versus `market` when both branches have coverage.
+- It now also emits `sample_maturity_state`, `next_sample_target_closed_trades`, and `regime_dependency_state`, so operators can separate directional evidence from durable edge and see when the weakest regime is still lagging.
 - This layer is advisory-only and is meant to answer "what should we test next?" before anyone rewrites the strategy structure.
 
 ## Edge Evolution Rule
@@ -181,12 +182,16 @@ The funnel matters because candidate quality is only useful if it survives portf
 - `edge_evolution_rule` turns split-test evidence into advisory-only `promote / reduce / research_only / kill-review` language without mutating rollout or safety state by itself.
 - It exists to answer "when should we reduce baseline allocation, keep research-only, or escalate a preferred branch into promotion review?" after the raw split evidence is already visible.
 - `promote / reduce / kill-review` wording is only interpretable after real split observation has produced enough closed post-cost trades; if the sample is still thin, this layer should stay in `insufficient_sample` or `research_only` posture.
+- The rule now also emits `recommendation_strength` and `closed_loop_confirmation_state`, so operator surfaces can distinguish a first-pass advisory from a direction that was re-confirmed after a prior review packet and newer closed trades.
+- It also emits `regime_guard_state`, so preferred-branch promotion can be explicitly blocked when the edge still looks regime-dependent.
 
 ## Review Followup Ledger
 
 `run_split_review_followup -> review_followup_ledger -> validation/dashboard/checklist/ui/handoff`
 
-- `review_followup_ledger` records the last split/evolution review packet that was actually generated, so operator surfaces can read recent `last_status + last_action + followup_command` instead of only the current recommendation.
+- `review_followup_ledger` records both split/evolution review packet generation events and later operator decision transitions, so operator surfaces can read recent `last_generated_status + last_decision_status + last_effective_status + last_action + followup_command` instead of only the current recommendation.
+- The ledger summary now separates `last_generated_status`, `last_decision_status`, and `last_effective_status`, plus `recent_packets`, `latest_action_streak`, and `fresh_ready_packet_count`, so surfaces can tell the difference between packet generation, later operator confirmation, and simple packet repetition.
+- `operator_action_priority` now also exposes `experiment_execution_policy` and `deferred_experiment_actions`, so the system keeps only one split experiment active at a time instead of opening entry-timing and execution-style experiments in parallel.
 - This closes the loop between `operator_action_priority`, a runnable `scripts/run_split_review_followup.py` command, and recent packet history without creating a new approval authority.
 
 ## Outcome-Aware Rollout Recommendation
@@ -450,7 +455,7 @@ The funnel matters because candidate quality is only useful if it survives portf
   For repeatable browser inspection and dry-run divergence capture, use [docs/OPERATOR_UI_HOME_INSPECTION_CHECKLIST.md](/Users/yumin/Documents/trading/docs/OPERATOR_UI_HOME_INSPECTION_CHECKLIST.md), [scripts/collect_operator_surface_divergence_snapshot.py](/Users/yumin/Documents/trading/scripts/collect_operator_surface_divergence_snapshot.py), [scripts/generate_operator_session_brief.py](/Users/yumin/Documents/trading/scripts/generate_operator_session_brief.py), [scripts/notify_operator_session_brief.py](/Users/yumin/Documents/trading/scripts/notify_operator_session_brief.py), [scripts/check_operator_session_brief_automation.py](/Users/yumin/Documents/trading/scripts/check_operator_session_brief_automation.py), and [scripts/check_operator_session_brief_delivery_preflight.py](/Users/yumin/Documents/trading/scripts/check_operator_session_brief_delivery_preflight.py). The notifier supports `system` or `discord` delivery plus separate `shift-start` and `shift-end` handoff formats, now carries both the derived `candidate_surface_priority` field and an `Approval Strip` summary alongside the rest of the `5-Second Operator Kernel`, includes top-level `edge_experiment` focus (`edge_state`, preferred entry timing, preferred execution style), and also preserves representative accepted/blocked row `edge_experiment_focus` so split-test follow-up survives handoff at candidate level. Live delivery requires both `OPERATOR_BRIEF_DRY_RUN` unset and `OPERATOR_BRIEF_ALLOW_LIVE_SEND=1`. [docs/OPERATOR_SESSION_BRIEF_AUTOMATION.md](/Users/yumin/Documents/trading/docs/OPERATOR_SESSION_BRIEF_AUTOMATION.md) documents the tick wrapper, cron examples, launchd plists, automation health checks, and delivery preflight for split shift handoff loops.
 - `GET /portfolio/budget`
   Exposure, headroom, blocked reasons, accepted candidates, and `alpha_research_candidates`.
-  It now also exposes top-candidate `edge_experiment_review`, so entry alerts and portfolio review can carry the same split-test focus (`edge_state`, preferred entry timing, preferred execution style) as validation and drill surfaces.
+  It now also exposes top-candidate `edge_experiment_review`, top-level `edge_evolution_rule`, and focus-symbol `review_followup_ledger`, so entry alerts and portfolio review can carry the same split-test focus, current allocation/promotion posture, and latest review packet carryover state as validation and drill surfaces.
   Accepted and blocked candidate rows may include `strategy_family`, `strategy_cluster`, `strategy_cluster_status`, `multi_strategy_overlay`, `b_continuation_activation`, `strategy_cluster_balance`, `strategy_sizing.outcome_risk_adjustment`, `outcome_bias`, `edge_experiment_focus`, and `capital_allocator` with `allocated_risk_r`.
 - `POST /validation/report`
   Deployment approval summary plus the full validation and research stack for one symbol.
@@ -679,7 +684,7 @@ MICRO_LIVE preflight:
 ./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --days 7
 ```
 
-The preflight output now includes `approval_surfaces`, `edge_experiment_review`, `edge_evolution_rule`, and representative accepted/blocked candidate split focus, so dashboard, validation, checklist, the current entry/execution hypothesis, and the current allocation/promotion posture can be read together before final live sign-off.
+The preflight output now includes `approval_surfaces`, `edge_experiment_review`, `edge_evolution_rule`, `review_followup_ledger`, and representative accepted/blocked candidate split focus, so dashboard, validation, checklist, the current entry/execution hypothesis, the current allocation/promotion posture, and the latest packet carryover state can be read together before final live sign-off.
 When split review targets are available, the preflight `next_steps` now also prints a ready-to-run `scripts/run_split_review_followup.py` command for the current symbol.
 
 Split review followup packet:
@@ -691,6 +696,8 @@ Split review followup packet:
 The followup packet turns the latest `operator_action_priority`, `edge_experiment_review`, and `edge_evolution_rule` into a concrete `selected_action + target_contract + review_steps` bundle, then appends the result to `review_followup_ledger`, so split review prep stops being a manual copy/paste exercise even when the top action is `reduce`, `promote`, or `kill-review`.
 The intended live experiment loop is fixed: generate the packet from `operator_action_priority` or `top_action_followup_command`, run the real split observation in market, accumulate new closed trades, rerun `edge_experiment_review`, rerun `edge_evolution_rule`, and only then interpret `promote / reduce / kill-review`.
 If the packet returns `NO_TARGET` or `NO_REVIEW_ACTION_AVAILABLE`, treat that as a blocker signal rather than an experiment result: clear approval blockers, restore target contract carryover, or wait for enough closed-trade evidence before trying to interpret edge evolution.
+If the same packet already exists in fresh `READY` history, if the last packet for that action stalled at `NO_TARGET`, or if the same packet has already been generated three times in a row, `operator_action_priority` now suppresses that duplicate packet and surfaces the suppression through `blocking_signals` / `dedupe_suppressed_actions`.
+After the operator has actually resolved a packet, append the outcome back into the same ledger with `./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --days 7 --action reduce_baseline_allocation_review --transition-status REDUCE_CONFIRMED` or another transition status (`ACKED`, `COMPLETED`, `REJECTED`, `PROMOTE_CONFIRMED`, `KILL_REVIEW_ESCALATED`). That transition history is what lets later `edge_evolution_rule` runs strengthen recommendation language instead of repeating a first-pass advisory forever.
 The operator surface divergence snapshot, session brief, and stage monitor now also carry the same ready-to-run followup command on each `entry_timing_review_target` / `execution_style_review_target` line, preserve `top_action_followup_command` for non-split edge-evolution review actions, and surface `review_followup_ledger.last_status / last_action` so recent packet history survives handoff.
 The server-side `operator_action_priority` payload now also carries `top_action_followup_command` plus per-row `next_actions[].followup_command` for split-review actions, so dashboard, validation, checklist, and UI can point to the same runnable packet command.
 
@@ -716,7 +723,7 @@ Post-live pruning review:
 ./.venv/bin/python scripts/run_post_live_pruning_review.py --symbol BTCUSDC --days 7
 ```
 
-The pruning review output now includes `approval_surfaces`, `edge_experiment_review`, `edge_evolution_rule`, and representative accepted/blocked candidate split focus, so the reopen decision stays separate from the current split-test focus while still using the same operator vocabulary.
+The pruning review output now includes `approval_surfaces`, `edge_experiment_review`, `edge_evolution_rule`, `review_followup_ledger`, and representative accepted/blocked candidate split focus, so the reopen decision stays separate from the current split-test focus while still preserving whether the latest review packet actually resolved a runnable target.
 
 Execution incident drill:
 

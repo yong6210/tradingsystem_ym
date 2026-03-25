@@ -42,6 +42,53 @@ def test_quality_gate_detects_reverse_timestamp_after_normalization() -> None:
         gate.validate(new, prev)
 
 
+def test_candle_repository_upsert_handles_duplicate_key_in_same_transaction() -> None:
+    init_db()
+    symbol = f"DUPX{uuid4().hex[:6].upper()}USDC"
+    base = datetime(2026, 3, 9, 0, 0, tzinfo=timezone.utc)
+
+    with SessionLocal() as db:
+        repo = CandleRepository(db)
+        repo.upsert(
+            Candle(
+                symbol=symbol,
+                timeframe="1m",
+                ts=base,
+                o=100.0,
+                h=101.0,
+                l=99.5,
+                c=100.5,
+                v=1000.0,
+                source="first",
+                is_final=False,
+            )
+        )
+        repo.upsert(
+            Candle(
+                symbol=symbol,
+                timeframe="1m",
+                ts=base,
+                o=100.1,
+                h=101.2,
+                l=99.4,
+                c=100.9,
+                v=1200.0,
+                source="second",
+                is_final=True,
+            )
+        )
+
+        db.commit()
+
+        candles = repo.list_recent(symbol=symbol, timeframe="1m", limit=10)
+
+        assert len(candles) == 1
+        assert candles[0].c == 100.9
+        assert candles[0].v == 1200.0
+        assert candles[0].source == "second"
+        assert candles[0].is_final is True
+
+
 def test_backfill_from_binance_skips_older_overlap_rows() -> None:
     init_db()
     symbol = f"OVLP{uuid4().hex[:6].upper()}USDC"

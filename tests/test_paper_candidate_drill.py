@@ -138,3 +138,122 @@ def test_main_emits_approval_strip_summary(monkeypatch, capsys) -> None:
     assert "approve=approval usable" in approval_check["message"]
     eligible_check = next(check for check in payload["checks"] if check["name"] == "eligible_candidate_found")
     assert "act=continue_candidate_review_under_portfolio_caps" in eligible_check["message"]
+
+
+def test_main_reports_family_availability_when_requested_families_are_absent(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        paper_drill,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol=None,
+            universe="usdc_perp_top30",
+            families="trend_continuation,sweep_reversal",
+            candidate_limit=100,
+            include_manual_review=False,
+            skip_sync=True,
+            limit_symbols=30,
+            symbol_concurrency=4,
+            limit_1m=900,
+            limit_5m=500,
+            limit_15m=500,
+            submit_paper=False,
+            paper_scenario="fill",
+            paper_lineage_override=False,
+            report_dir="reports/operations/paper_candidate_drill",
+            no_write_report=True,
+        ),
+    )
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/scanner/top":
+            return [
+                {
+                    "symbol": "WIFUSDC",
+                    "plan_id": "plan-wif",
+                    "strategy_family": "legacy_zone_plan",
+                    "deployment_go_no_go": "GO",
+                    "recommended_risk_r": 0.2,
+                }
+            ]
+        if path == "/portfolio/budget":
+            return {
+                "accepted_candidates": [],
+                "blocked_candidates": [
+                    {
+                        "symbol": "WIFUSDC",
+                        "plan_id": "plan-wif",
+                        "strategy_family": "legacy_zone_plan",
+                        "block_reason": "thesis_duplicate_blocked",
+                        "recommended_risk_r": 0.0,
+                    }
+                ],
+                "alpha_research_candidates": [],
+            }
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(paper_drill, "_request_json", _request_json)
+
+    assert paper_drill.main() == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["candidate"] is None
+    assert payload["family_availability_summary"]["availability_state"] == "requested_families_absent"
+    assert payload["family_availability_summary"]["scanner_match_count"] == 0
+    assert payload["family_availability_summary"]["portfolio_match_count"] == 0
+    assert payload["family_availability_summary"]["scanner_top_families"][0] == {"family": "legacy_zone_plan", "count": 1}
+    assert any("market-availability wait" in step for step in payload["next_steps"])
+
+
+def test_main_reports_empty_scanner_surface(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        paper_drill,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol=None,
+            universe="usdc_perp_top30",
+            families="trend_continuation,sweep_reversal",
+            candidate_limit=100,
+            include_manual_review=False,
+            skip_sync=True,
+            limit_symbols=30,
+            symbol_concurrency=4,
+            limit_1m=900,
+            limit_5m=500,
+            limit_15m=500,
+            submit_paper=False,
+            paper_scenario="fill",
+            paper_lineage_override=False,
+            report_dir="reports/operations/paper_candidate_drill",
+            no_write_report=True,
+        ),
+    )
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/scanner/top":
+            return []
+        if path == "/portfolio/budget":
+            return {
+                "accepted_candidates": [],
+                "blocked_candidates": [
+                    {
+                        "symbol": "WIFUSDC",
+                        "plan_id": "plan-wif",
+                        "strategy_family": "legacy_zone_plan",
+                        "block_reason": "thesis_duplicate_blocked",
+                        "recommended_risk_r": 0.0,
+                    }
+                ],
+                "alpha_research_candidates": [],
+            }
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(paper_drill, "_request_json", _request_json)
+
+    assert paper_drill.main() == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["family_availability_summary"]["availability_state"] == "scanner_surface_empty"
+    assert payload["family_availability_summary"]["scanner_surface_count"] == 0
+    assert any("Scanner returned zero rows" in step for step in payload["next_steps"])

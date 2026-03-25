@@ -11,10 +11,16 @@ from app.db.models import Plan
 from app.db.repositories import PlanRepository
 from app.services.b_continuation_activation import BContinuationActivationService
 from app.services.edge_experiment_review import build_edge_experiment_review, summarize_edge_experiment_review
+from app.services.edge_evolution_rule import build_edge_evolution_rule, summarize_edge_evolution_rule
 from app.services.scanner import ScannerService, _runtime_deployment_language
+from app.services.split_review_followup_ledger import summarize_split_review_followup_ledger
 from app.services.strategy_mode import StrategyModeService
 from app.services.strategy_cluster_balance import StrategyClusterBalanceService
 from app.services.multi_strategy_ab import MultiStrategyABExpansionService
+
+
+def _dict(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return dict(payload or {})
 
 
 def _plan_regime(plan: Plan) -> str:
@@ -80,7 +86,7 @@ def _portfolio_playbook_mapping(deployment_language: dict[str, str]) -> dict[str
 
 class PortfolioBudgetReportService:
     @staticmethod
-    def _edge_experiment_lookup(
+    def _edge_experiment_summary_lookup(
         *,
         outcome_inputs_by_symbol: dict[str, dict[str, Any]] | None,
     ) -> dict[str, dict[str, Any]]:
@@ -97,7 +103,17 @@ class PortfolioBudgetReportService:
             )
             if not review:
                 continue
-            lookup[symbol_key] = {
+            lookup[symbol_key] = dict(review)
+        return lookup
+
+    @staticmethod
+    def _edge_experiment_lookup(
+        *,
+        edge_experiment_summary_lookup: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        lookup: dict[str, dict[str, Any]] = {}
+        for symbol_key, review in dict(edge_experiment_summary_lookup or {}).items():
+            lookup[str(symbol_key or "").upper()] = {
                 "available": bool(review.get("available", False)),
                 "advisory_only": bool(review.get("advisory_only", True)),
                 "edge_state": str(review.get("edge_state") or "insufficient_edge_measurement"),
@@ -126,12 +142,12 @@ class PortfolioBudgetReportService:
         return annotated_rows
 
     @staticmethod
-    def _edge_experiment_review(
+    def _focused_candidate(
         *,
         accepted_candidates: list[dict[str, Any]],
         blocked_candidates: list[dict[str, Any]],
         alpha_research_candidates: list[dict[str, Any]],
-    ) -> dict[str, Any] | None:
+    ) -> tuple[str, dict[str, Any]] | None:
         candidate_groups = (
             ("ACTIONABLE_ENTRY", accepted_candidates),
             ("BLOCKED_SETUP", blocked_candidates),
@@ -139,16 +155,62 @@ class PortfolioBudgetReportService:
         )
         for focus_status, rows in candidate_groups:
             for row in rows:
-                review = dict(row.get("edge_experiment_focus") or {})
-                if not review:
-                    continue
-                symbol = str(row.get("symbol") or "").upper()
-                enriched = dict(review)
-                enriched["focus_symbol"] = symbol
-                enriched["focus_status"] = focus_status
-                enriched["focus_family"] = str(row.get("strategy_family") or "unknown")
-                return enriched
+                if dict(row.get("edge_experiment_focus") or {}):
+                    return focus_status, dict(row)
         return None
+
+    @staticmethod
+    def _edge_experiment_review(
+        *,
+        accepted_candidates: list[dict[str, Any]],
+        blocked_candidates: list[dict[str, Any]],
+        alpha_research_candidates: list[dict[str, Any]],
+        edge_experiment_summary_lookup: dict[str, dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        focus = PortfolioBudgetReportService._focused_candidate(
+            accepted_candidates=accepted_candidates,
+            blocked_candidates=blocked_candidates,
+            alpha_research_candidates=alpha_research_candidates,
+        )
+        if not focus:
+            return None
+        focus_status, row = focus
+        symbol = str(row.get("symbol") or "").upper()
+        review = dict(edge_experiment_summary_lookup.get(symbol) or row.get("edge_experiment_focus") or {})
+        if not review:
+            return None
+        enriched = dict(review)
+        enriched["focus_symbol"] = symbol
+        enriched["focus_status"] = focus_status
+        enriched["focus_family"] = str(row.get("strategy_family") or "unknown")
+        return enriched
+
+    @staticmethod
+    def _edge_evolution_review(
+        *,
+        edge_experiment_review: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not edge_experiment_review:
+            return None
+        return summarize_edge_evolution_rule(
+            build_edge_evolution_rule(
+                edge_experiment_review=edge_experiment_review,
+            )
+        )
+
+    @staticmethod
+    def _review_followup_ledger(
+        *,
+        edge_experiment_review: dict[str, Any] | None,
+        universe: str,
+    ) -> dict[str, Any] | None:
+        focus_symbol = str(_dict(edge_experiment_review).get("focus_symbol") or "").upper()
+        if not focus_symbol:
+            return None
+        return summarize_split_review_followup_ledger(
+            symbol=focus_symbol,
+            universe=universe,
+        )
 
     @staticmethod
     def _approval_strip_summary(
@@ -660,8 +722,11 @@ class PortfolioBudgetReportService:
             alpha_research_candidates,
             strategy_cluster_balance_summary=strategy_cluster_balance_summary,
         )
-        edge_experiment_lookup = self._edge_experiment_lookup(
+        edge_experiment_summary_lookup = self._edge_experiment_summary_lookup(
             outcome_inputs_by_symbol=outcome_inputs_by_symbol,
+        )
+        edge_experiment_lookup = self._edge_experiment_lookup(
+            edge_experiment_summary_lookup=edge_experiment_summary_lookup,
         )
         accepted_candidates = self._annotate_edge_experiment_rows(
             accepted_candidates,
@@ -691,6 +756,14 @@ class PortfolioBudgetReportService:
             accepted_candidates=accepted_candidates,
             blocked_candidates=blocked_candidates,
             alpha_research_candidates=alpha_research_candidates,
+            edge_experiment_summary_lookup=edge_experiment_summary_lookup,
+        )
+        edge_evolution_rule = self._edge_evolution_review(
+            edge_experiment_review=edge_experiment_review,
+        )
+        review_followup_ledger = self._review_followup_ledger(
+            edge_experiment_review=edge_experiment_review,
+            universe=universe,
         )
 
         payload: dict[str, Any] = {
@@ -706,6 +779,8 @@ class PortfolioBudgetReportService:
             "playbook_message": playbook["playbook_message"],
             "approval_strip_summary": approval_strip_summary,
             "edge_experiment_review": edge_experiment_review,
+            "edge_evolution_rule": edge_evolution_rule,
+            "review_followup_ledger": review_followup_ledger,
             "risk_state": risk_state.value,
             "risk_reason": risk_reason,
             "operating_lock": dict(operating_lock or {}),

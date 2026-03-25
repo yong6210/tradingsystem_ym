@@ -528,6 +528,8 @@ class PortfolioBudgetReportOut(ORMModel):
     playbook_message: str
     approval_strip_summary: dict[str, Any] | None = None
     edge_experiment_review: dict[str, Any] | None = None
+    edge_evolution_rule: dict[str, Any] | None = None
+    review_followup_ledger: dict[str, Any] | None = None
     risk_state: RiskGateState
     risk_reason: str
     operating_lock: dict[str, Any] = Field(default_factory=dict)

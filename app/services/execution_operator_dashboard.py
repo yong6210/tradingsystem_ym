@@ -937,6 +937,10 @@ class ExecutionOperatorDashboardService:
             "next_actions": [dict(item) for item in list(priority.get("next_actions") or [])[:3]],
             "capture_context": dict(priority.get("capture_context") or {}),
             "experiment_context": dict(priority.get("experiment_context") or {}),
+            "experiment_execution_policy": dict(priority.get("experiment_execution_policy") or {}),
+            "deferred_experiment_actions": [
+                dict(item) for item in list(priority.get("deferred_experiment_actions") or [])[:3]
+            ],
             "advisory_only": bool(priority.get("advisory_only", True)),
         }
 
@@ -1148,17 +1152,18 @@ class ExecutionOperatorDashboardService:
         edge_experiment_summary = summarize_edge_experiment_review(
             build_edge_experiment_review(score_to_outcome_funnel=score_to_outcome_funnel_summary)
         )
+        review_followup_ledger_summary = summarize_split_review_followup_ledger(
+            symbol=symbol or "",
+            universe=str(portfolio_summary_payload.get("universe") or "usdc_perp_top30"),
+        )
         edge_evolution_summary = summarize_edge_evolution_rule(
             build_edge_evolution_rule(
                 edge_experiment_review=edge_experiment_summary,
                 rollout_recommendation=rollout_recommendation_summary,
                 strategy_lifecycle=strategy_lifecycle_summary,
                 kill_condition_automation=kill_condition_automation_summary,
+                review_followup_ledger=review_followup_ledger_summary,
             )
-        )
-        review_followup_ledger_summary = summarize_split_review_followup_ledger(
-            symbol=symbol or "",
-            universe=str(portfolio_summary_payload.get("universe") or "usdc_perp_top30"),
         )
         submit_decision_counts: dict[str, int] = {}
         for item in recent_intents:

@@ -142,6 +142,9 @@
 - replay review는 `historical context`를 읽는 것이다. live confidence나 sizing authority가 아니다.
 - `execution_friction_measurement`, `forward_stress_regime_validation`, `kill_condition_automation`은 edge verdict를 보완하는 safety layer다.
 - `proposal_only`와 `explicit arm` 철학은 유지한다.
+- split experiment는 한 번에 하나만 active로 둔다. `entry_timing`과 `execution_style`를 동시에 실거래 실험으로 열지 않는다.
+- `sample_maturity_state`가 `pre_directional`, `directional_only`, `review_ready`면 결론보다 표본 축적을 우선한다.
+- `regime_dependency_state=regime_dependent`면 strongest regime에서 좋아 보여도 weakest regime evidence가 쌓이기 전까지는 범용 edge로 승격하지 않는다.
 
 ## 8. 추천 순서
 1. `operator-ui`
@@ -156,3 +159,5 @@
 - A는 `validated_edge`가 누적되기 전까지도 계속 post-cost 기준으로만 유지 여부를 판단한다.
 - B는 `validated_edge + acceptable friction + acceptable generalization`이 동시에 유지되기 전까지 계속 guarded posture다.
 - sample이 얇으면 해석보다 수집을 우선한다.
+- 운영 sample 목표는 대략 `4 / 6 / 8 / 20 / 50 / 100 / 300 closes` 순서로 읽는다.
+- `8 closes`는 review를 읽기 시작하는 최소선이고, `20 closes` 전까지는 pilot-live 수준으로 간주한다.

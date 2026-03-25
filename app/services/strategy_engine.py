@@ -1484,17 +1484,18 @@ class StrategyEngine:
         edge_experiment_summary = summarize_edge_experiment_review(
             build_edge_experiment_review(score_to_outcome_funnel=score_to_outcome_funnel_summary)
         )
+        review_followup_ledger_summary = summarize_split_review_followup_ledger(
+            symbol=symbol or "",
+            universe=str(portfolio_summary.get("universe") or "usdc_perp_top30"),
+        )
         edge_evolution_rule_summary = summarize_edge_evolution_rule(
             build_edge_evolution_rule(
                 edge_experiment_review=edge_experiment_summary,
                 rollout_recommendation=rollout_recommendation_summary,
                 strategy_lifecycle=strategy_lifecycle_summary,
                 kill_condition_automation=kill_condition_automation_summary,
+                review_followup_ledger=review_followup_ledger_summary,
             )
-        )
-        review_followup_ledger_summary = summarize_split_review_followup_ledger(
-            symbol=symbol or "",
-            universe=str(portfolio_summary.get("universe") or "usdc_perp_top30"),
         )
         operator_action_priority_summary = self.operator_action_priority.generate(
             dashboard={

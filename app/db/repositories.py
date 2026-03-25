@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from sqlalchemy import delete, desc, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.core.enums import EventStatus, PlanState, ZoneState
@@ -28,12 +30,21 @@ from app.db.models import (
     ValidationTrialRun,
     Zone,
     ZoneOutcome,
+    utcnow,
 )
 
 
 class CandleRepository:
     def __init__(self, db: Session):
         self.db = db
+
+    @staticmethod
+    def _identity_stmt(*, symbol: str, timeframe: str, ts: datetime):
+        return select(Candle).where(
+            Candle.symbol == symbol,
+            Candle.timeframe == timeframe,
+            Candle.ts == ts,
+        )
 
     def get_last_candle(self, symbol: str, timeframe: str) -> Candle | None:
         stmt = (
@@ -45,11 +56,48 @@ class CandleRepository:
         return self.db.scalar(stmt)
 
     def upsert(self, candle: Candle) -> Candle:
-        stmt = select(Candle).where(
-            Candle.symbol == candle.symbol,
-            Candle.timeframe == candle.timeframe,
-            Candle.ts == candle.ts,
-        )
+        stmt = self._identity_stmt(symbol=candle.symbol, timeframe=candle.timeframe, ts=candle.ts)
+        values = {
+            "symbol": candle.symbol,
+            "timeframe": candle.timeframe,
+            "ts": candle.ts,
+            "o": candle.o,
+            "h": candle.h,
+            "l": candle.l,
+            "c": candle.c,
+            "v": candle.v,
+            "source": candle.source,
+            "is_final": candle.is_final,
+            "created_at": candle.created_at or utcnow(),
+        }
+        update_values = {
+            "o": values["o"],
+            "h": values["h"],
+            "l": values["l"],
+            "c": values["c"],
+            "v": values["v"],
+            "is_final": values["is_final"],
+            "source": values["source"],
+        }
+        bind = self.db.get_bind()
+        dialect_name = bind.dialect.name if bind is not None else ""
+
+        if dialect_name == "sqlite":
+            upsert_stmt = sqlite_insert(Candle).values(**values).on_conflict_do_update(
+                index_elements=["symbol", "timeframe", "ts"],
+                set_=update_values,
+            )
+            self.db.execute(upsert_stmt)
+            return self.db.scalar(stmt) or candle
+
+        if dialect_name == "postgresql":
+            upsert_stmt = pg_insert(Candle).values(**values).on_conflict_do_update(
+                index_elements=["symbol", "timeframe", "ts"],
+                set_=update_values,
+            )
+            self.db.execute(upsert_stmt)
+            return self.db.scalar(stmt) or candle
+
         existing = self.db.scalar(stmt)
         if existing:
             existing.o = candle.o
