@@ -142,6 +142,15 @@ def test_edge_experiment_review_summarizes_true_edge_and_split_preferences() -> 
     assert summary["operating_discipline"]["discipline_state"] == "research_only_until_edge_proof_goal"
     assert summary["operating_discipline"]["framework_quality_state"] == "framework_ready"
     assert summary["operating_discipline"]["system_mode"] == "operate_and_experiment"
+    assert summary["operating_discipline"]["current_system_identity"] == "edge_proof_engine"
+    assert summary["operating_discipline"]["next_system_stage"] == "post_first_verified_edge"
+    assert summary["operating_discipline"]["resilience_claim"] == "harder_to_fail_from_self_deception"
+    assert summary["operating_discipline"]["fail_safe_claim"] is False
+    assert summary["operating_discipline"]["realized_edge_dependency_domains"] == [
+        "market_edge",
+        "execution_quality",
+        "operating_discipline",
+    ]
     assert summary["operating_discipline"]["primary_goal"] == "find_first_verified_edge"
     assert summary["operating_discipline"]["evaluation_focus"] == "after_cost_edge_only"
     assert summary["operating_discipline"]["minimum_closed_trades_for_edge_evaluation"] == 100
@@ -154,11 +163,20 @@ def test_edge_experiment_review_summarizes_true_edge_and_split_preferences() -> 
     assert summary["operating_discipline"]["regime_stability_required_for_expansion"] is True
     assert summary["operating_discipline"]["rollout_expansion_allowed"] is False
     assert summary["operating_discipline"]["improvement_priority"] == "prove_single_edge_before_density_or_strategy_expansion"
+    assert summary["operating_discipline"]["alpha_generator_review_allowed"] is False
     assert summary["operating_discipline"]["signal_density_control_review_allowed"] is False
+    assert summary["operating_discipline"]["execution_strategy_automation_review_allowed"] is False
     assert summary["operating_discipline"]["multi_strategy_expansion_review_allowed"] is False
     assert summary["operating_discipline"]["deferred_review_backlog"] == [
         "signal_density_control",
         "multi_strategy_expansion",
+    ]
+    assert summary["operating_discipline"]["deferred_system_upgrade_backlog"] == [
+        "alpha_generator_layer",
+        "capital_scale_curve",
+        "signal_density_controller",
+        "execution_strategy_automation",
+        "multi_strategy_activation",
     ]
     assert summary["experiment_sequence"]["state"] == "sample_building_before_exit_optimization"
     assert summary["experiment_sequence"]["entry_timing_locked"] is True
@@ -284,6 +302,16 @@ def test_edge_experiment_review_allows_cautious_expansion_only_after_regime_stab
     assert summary["operating_discipline"]["early_loss_rewrite_embargo_active"] is False
     assert summary["operating_discipline"]["loss_driven_rewrite_allowed"] is True
     assert summary["operating_discipline"]["rollout_expansion_allowed"] is True
+    assert summary["operating_discipline"]["alpha_generator_review_allowed"] is True
+    assert summary["operating_discipline"]["resilience_claim"] == "harder_to_fail_from_self_deception"
+    assert summary["operating_discipline"]["fail_safe_claim"] is False
+    assert summary["operating_discipline"]["realized_edge_dependency_domains"] == [
+        "market_edge",
+        "execution_quality",
+        "operating_discipline",
+    ]
     assert summary["operating_discipline"]["signal_density_control_review_allowed"] is True
+    assert summary["operating_discipline"]["execution_strategy_automation_review_allowed"] is True
     assert summary["operating_discipline"]["multi_strategy_expansion_review_allowed"] is True
     assert summary["operating_discipline"]["deferred_review_backlog"] == []
+    assert summary["operating_discipline"]["deferred_system_upgrade_backlog"] == []

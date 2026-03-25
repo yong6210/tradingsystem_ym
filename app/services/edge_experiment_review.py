@@ -237,6 +237,7 @@ def _operating_discipline(
     edge_proof_posture: dict[str, Any],
     sample_progress: dict[str, Any],
     regime_edge_breakdown: dict[str, Any],
+    experiment_sequence: dict[str, Any],
 ) -> dict[str, Any]:
     posture_state = str(edge_proof_posture.get("state") or "sample_building")
     discipline_state = "research_only_until_edge_proof_goal"
@@ -250,18 +251,34 @@ def _operating_discipline(
     evaluation_focus = "after_cost_edge_only"
     evaluation_metric = "true_edge_ratio_post_cost_closed"
     improvement_priority = "prove_single_edge_before_density_or_strategy_expansion"
+    current_system_identity = "edge_proof_engine"
+    next_system_stage = "post_first_verified_edge"
+    resilience_claim = "harder_to_fail_from_self_deception"
+    fail_safe_claim = False
+    realized_edge_dependency_domains = [
+        "market_edge",
+        "execution_quality",
+        "operating_discipline",
+    ]
+    realized_edge_dependency_summary = (
+        "Realized results still depend on market edge, execution quality, and operating discipline."
+    )
     edge_status = "unknown_until_after_cost_proof"
     early_loss_rewrite_embargo_closed_trades = 50
     early_loss_rewrite_embargo_active = closed_trade_count < early_loss_rewrite_embargo_closed_trades
     regime_stability_required_for_expansion = True
     rollout_expansion_allowed = False
     loss_driven_rewrite_allowed = False
+    alpha_generator_review_allowed = False
+    capital_scale_review_allowed = False
     signal_density_control_review_allowed = False
+    execution_strategy_automation_review_allowed = False
     multi_strategy_expansion_review_allowed = False
     summary = (
         "Framework is ready, but edge is still unproven; operate and experiment with one active split, and judge the "
-        "system on after-cost closed-trade edge instead of structure changes until the proof goal is met. Keep signal-density "
-        "tuning and multi-strategy expansion deferred until one edge is actually proven."
+        "system on after-cost closed-trade edge instead of structure changes until the proof goal is met. Keep alpha-generator "
+        "expansion, capital scaling, signal-density tuning, execution automation, and multi-strategy expansion deferred until "
+        "one edge is actually proven. This setup is meant to make self-deception failure harder, not to make the system fail-safe."
     )
 
     if posture_state == "regime_limited":
@@ -269,15 +286,19 @@ def _operating_discipline(
         edge_status = "unknown_until_regime_confirms"
         summary = (
             "Framework is ready, but edge is still regime-limited; keep one experiment active and judge progress on "
-            "after-cost closed-trade edge until weaker regimes confirm. Do not expand rollout, tune signal density, or open "
-            "multi-strategy expansion until regime stability is real."
+            "after-cost closed-trade edge until weaker regimes confirm. Do not expand rollout, open alpha-generation v2 work, "
+            "start capital scaling, tune signal density, automate execution style, or open multi-strategy expansion until regime stability is real. "
+            "The framework reduces self-deception risk, but realized results still depend on market edge, execution quality, "
+            "and operating discipline."
         )
     elif posture_state == "proof_goal_met_but_edge_weak":
         discipline_state = "research_only_until_edge_stabilizes"
         edge_status = "unknown_until_edge_stabilizes"
         summary = (
             "The proof goal is met, but after-cost edge quality is still weak; do not claim profitability or justify "
-            "structural rewrites, signal-density tuning, or expansion from this sample yet."
+            "structural rewrites, alpha-generator work, capital scaling, signal-density tuning, execution automation, or expansion from this "
+            "sample yet. The framework is still not fail-safe; realized results still depend on market edge, execution quality, "
+            "and operating discipline."
         )
     elif posture_state == "edge_claim_ready":
         discipline_state = "reviewable_after_edge_proof"
@@ -286,18 +307,30 @@ def _operating_discipline(
         edge_status = "reviewable_after_cost_edge"
         rollout_expansion_allowed = regime_dependency_state == "stable_across_regimes"
         loss_driven_rewrite_allowed = not early_loss_rewrite_embargo_active
+        alpha_generator_review_allowed = rollout_expansion_allowed
+        capital_scale_review_allowed = (
+            rollout_expansion_allowed and bool(experiment_sequence.get("execution_style_locked", False))
+        )
         signal_density_control_review_allowed = rollout_expansion_allowed
+        execution_strategy_automation_review_allowed = (
+            rollout_expansion_allowed and bool(experiment_sequence.get("execution_style_locked", False))
+        )
         multi_strategy_expansion_review_allowed = rollout_expansion_allowed
         summary = (
             "After-cost edge evidence is finally strong enough for cautious review; keep single-experiment discipline "
-            "and treat any structural change as reviewable, not guaranteed profit."
+            "and treat any structural change as reviewable, not guaranteed profit. Only after this stage should alpha-generator "
+            "work, capital scaling, execution automation, signal density control, and multi-strategy expansion be reviewed. Even here, realized "
+            "results still depend on market edge, execution quality, and operating discipline."
         )
         if not rollout_expansion_allowed:
             summary += " Expansion still stays blocked until regime stability is confirmed."
 
     if posture_state != "edge_claim_ready":
         loss_driven_rewrite_allowed = False
+        alpha_generator_review_allowed = False
+        capital_scale_review_allowed = False
         signal_density_control_review_allowed = False
+        execution_strategy_automation_review_allowed = False
         multi_strategy_expansion_review_allowed = False
 
     deferred_review_backlog: list[str] = []
@@ -306,10 +339,29 @@ def _operating_discipline(
     if not multi_strategy_expansion_review_allowed:
         deferred_review_backlog.append("multi_strategy_expansion")
 
+    deferred_system_upgrade_backlog: list[str] = []
+    if not alpha_generator_review_allowed:
+        deferred_system_upgrade_backlog.append("alpha_generator_layer")
+    if not capital_scale_review_allowed:
+        deferred_system_upgrade_backlog.append("capital_scale_curve")
+    if not signal_density_control_review_allowed:
+        deferred_system_upgrade_backlog.append("signal_density_controller")
+    if not execution_strategy_automation_review_allowed:
+        deferred_system_upgrade_backlog.append("execution_strategy_automation")
+    if not multi_strategy_expansion_review_allowed:
+        deferred_system_upgrade_backlog.append("multi_strategy_activation")
+
     return {
         "discipline_state": discipline_state,
         "framework_quality_state": framework_quality_state,
         "system_mode": system_mode,
+        "current_system_identity": current_system_identity,
+        "next_system_stage": next_system_stage,
+        "resilience_claim": resilience_claim,
+        "fail_safe_claim": fail_safe_claim,
+        "realized_edge_dependency_domains": realized_edge_dependency_domains,
+        "realized_edge_dependency_summary": realized_edge_dependency_summary,
+        "post_proof_scale_spec_id": "edge_proof_capital_scale_v1",
         "primary_goal": "find_first_verified_edge",
         "evaluation_focus": evaluation_focus,
         "evaluation_metric": evaluation_metric,
@@ -325,9 +377,13 @@ def _operating_discipline(
         "loss_driven_rewrite_allowed": loss_driven_rewrite_allowed,
         "regime_stability_required_for_expansion": regime_stability_required_for_expansion,
         "rollout_expansion_allowed": rollout_expansion_allowed,
+        "alpha_generator_review_allowed": alpha_generator_review_allowed,
+        "capital_scale_review_allowed": capital_scale_review_allowed,
         "signal_density_control_review_allowed": signal_density_control_review_allowed,
+        "execution_strategy_automation_review_allowed": execution_strategy_automation_review_allowed,
         "multi_strategy_expansion_review_allowed": multi_strategy_expansion_review_allowed,
         "deferred_review_backlog": deferred_review_backlog,
+        "deferred_system_upgrade_backlog": deferred_system_upgrade_backlog,
         "summary": summary,
     }
 
@@ -622,15 +678,16 @@ def summarize_edge_experiment_review(payload: dict[str, Any] | None) -> dict[str
         sample_progress=sample_progress,
         regime_edge_breakdown=regime_edge_breakdown,
     )
-    operating_discipline = _operating_discipline(
-        edge_proof_posture=edge_proof_posture,
-        sample_progress=sample_progress,
-        regime_edge_breakdown=regime_edge_breakdown,
-    )
     experiment_sequence = _experiment_sequence(
         entry_timing=entry_timing,
         execution_style=execution_style,
         sample_progress=sample_progress,
+    )
+    operating_discipline = _operating_discipline(
+        edge_proof_posture=edge_proof_posture,
+        sample_progress=sample_progress,
+        regime_edge_breakdown=regime_edge_breakdown,
+        experiment_sequence=experiment_sequence,
     )
     return {
         "available": bool(source.get("available", False)),

@@ -1172,8 +1172,24 @@ class ValidationReportService:
                 f"- promotion_watchlist_available: {bool(alpha_research_promotion_watchlist.get('available', False))}",
                 f"- promotion_watchlist_count: {int(alpha_research_promotion_watchlist.get('watchlist_count', 0) or 0)}",
                 f"- improvement_priority: {edge_operating_discipline_preview.get('improvement_priority')}",
+                f"- current_system_identity: {edge_operating_discipline_preview.get('current_system_identity')}",
+                f"- next_system_stage: {edge_operating_discipline_preview.get('next_system_stage')}",
+                f"- resilience_claim: {edge_operating_discipline_preview.get('resilience_claim')}",
+                f"- fail_safe_claim: {bool(edge_operating_discipline_preview.get('fail_safe_claim', False))}",
+                (
+                    "- realized_edge_dependency_domains: "
+                    f"{list(edge_operating_discipline_preview.get('realized_edge_dependency_domains') or [])}"
+                ),
+                f"- post_proof_scale_spec_id: {edge_operating_discipline_preview.get('post_proof_scale_spec_id')}",
+                f"- alpha_generator_review_allowed: {bool(edge_operating_discipline_preview.get('alpha_generator_review_allowed', False))}",
+                f"- capital_scale_review_allowed: {bool(edge_operating_discipline_preview.get('capital_scale_review_allowed', False))}",
                 f"- signal_density_control_review_allowed: {bool(edge_operating_discipline_preview.get('signal_density_control_review_allowed', False))}",
+                f"- execution_strategy_automation_review_allowed: {bool(edge_operating_discipline_preview.get('execution_strategy_automation_review_allowed', False))}",
                 f"- multi_strategy_expansion_review_allowed: {bool(edge_operating_discipline_preview.get('multi_strategy_expansion_review_allowed', False))}",
+                (
+                    "- deferred_system_upgrade_backlog: "
+                    f"{list(edge_operating_discipline_preview.get('deferred_system_upgrade_backlog') or [])}"
+                ),
                 "",
             ]
             for idx, row in enumerate(alpha_research_actions[:3], start=1):
@@ -2385,6 +2401,12 @@ class ValidationReportService:
                     f"- operating_discipline: state={dict(edge_experiment_summary.get('operating_discipline') or {}).get('discipline_state', 'unknown')} | "
                     f"framework={dict(edge_experiment_summary.get('operating_discipline') or {}).get('framework_quality_state', 'framework_ready')} | "
                     f"mode={dict(edge_experiment_summary.get('operating_discipline') or {}).get('system_mode', 'operate_and_experiment')} | "
+                    f"identity={dict(edge_experiment_summary.get('operating_discipline') or {}).get('current_system_identity', 'edge_proof_engine')} | "
+                    f"next_stage={dict(edge_experiment_summary.get('operating_discipline') or {}).get('next_system_stage', 'post_first_verified_edge')} | "
+                    f"resilience={dict(edge_experiment_summary.get('operating_discipline') or {}).get('resilience_claim', 'harder_to_fail_from_self_deception')} | "
+                    f"fail_safe_claim={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('fail_safe_claim', False))} | "
+                    f"dependencies={'/'.join(list(dict(edge_experiment_summary.get('operating_discipline') or {}).get('realized_edge_dependency_domains') or [])) or 'market_edge/execution_quality/operating_discipline'} | "
+                    f"scale_spec={dict(edge_experiment_summary.get('operating_discipline') or {}).get('post_proof_scale_spec_id', 'edge_proof_capital_scale_v1')} | "
                     f"primary_goal={dict(edge_experiment_summary.get('operating_discipline') or {}).get('primary_goal', 'find_first_verified_edge')} | "
                     f"improvement_priority={dict(edge_experiment_summary.get('operating_discipline') or {}).get('improvement_priority', 'prove_single_edge_before_density_or_strategy_expansion')} | "
                     f"evaluation_focus={dict(edge_experiment_summary.get('operating_discipline') or {}).get('evaluation_focus', 'after_cost_edge_only')} | "
@@ -2394,7 +2416,10 @@ class ValidationReportService:
                     f"loss_driven_rewrite_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('loss_driven_rewrite_allowed', False))} | "
                     f"early_loss_embargo_active={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('early_loss_rewrite_embargo_active', False))} | "
                     f"rollout_expansion_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('rollout_expansion_allowed', False))} | "
+                    f"alpha_generator_review_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('alpha_generator_review_allowed', False))} | "
+                    f"capital_scale_review_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('capital_scale_review_allowed', False))} | "
                     f"signal_density_review_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('signal_density_control_review_allowed', False))} | "
+                    f"execution_strategy_automation_review_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('execution_strategy_automation_review_allowed', False))} | "
                     f"multi_strategy_expansion_review_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('multi_strategy_expansion_review_allowed', False))} | "
                     f"single_experiment_only={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('single_experiment_only', True))}"
                 ),
@@ -3091,9 +3116,63 @@ class ValidationReportService:
                 )
                 if edge_experiment_summary
                 else None,
+                "current_system_identity": dict(edge_experiment_summary.get("operating_discipline") or {}).get(
+                    "current_system_identity"
+                )
+                if edge_experiment_summary
+                else None,
+                "next_system_stage": dict(edge_experiment_summary.get("operating_discipline") or {}).get(
+                    "next_system_stage"
+                )
+                if edge_experiment_summary
+                else None,
+                "resilience_claim": dict(edge_experiment_summary.get("operating_discipline") or {}).get(
+                    "resilience_claim"
+                )
+                if edge_experiment_summary
+                else None,
+                "fail_safe_claim": bool(
+                    dict(edge_experiment_summary.get("operating_discipline") or {}).get("fail_safe_claim", False)
+                )
+                if edge_experiment_summary
+                else False,
+                "realized_edge_dependency_domains": list(
+                    dict(edge_experiment_summary.get("operating_discipline") or {}).get(
+                        "realized_edge_dependency_domains"
+                    )
+                    or []
+                )
+                if edge_experiment_summary
+                else [],
+                "post_proof_scale_spec_id": dict(edge_experiment_summary.get("operating_discipline") or {}).get(
+                    "post_proof_scale_spec_id"
+                )
+                if edge_experiment_summary
+                else None,
+                "alpha_generator_review_allowed": bool(
+                    dict(edge_experiment_summary.get("operating_discipline") or {}).get(
+                        "alpha_generator_review_allowed", False
+                    )
+                )
+                if edge_experiment_summary
+                else False,
+                "capital_scale_review_allowed": bool(
+                    dict(edge_experiment_summary.get("operating_discipline") or {}).get(
+                        "capital_scale_review_allowed", False
+                    )
+                )
+                if edge_experiment_summary
+                else False,
                 "signal_density_control_review_allowed": bool(
                     dict(edge_experiment_summary.get("operating_discipline") or {}).get(
                         "signal_density_control_review_allowed", False
+                    )
+                )
+                if edge_experiment_summary
+                else False,
+                "execution_strategy_automation_review_allowed": bool(
+                    dict(edge_experiment_summary.get("operating_discipline") or {}).get(
+                        "execution_strategy_automation_review_allowed", False
                     )
                 )
                 if edge_experiment_summary
@@ -3107,6 +3186,14 @@ class ValidationReportService:
                 else False,
                 "deferred_review_backlog": list(
                     dict(edge_experiment_summary.get("operating_discipline") or {}).get("deferred_review_backlog") or []
+                )
+                if edge_experiment_summary
+                else [],
+                "deferred_system_upgrade_backlog": list(
+                    dict(edge_experiment_summary.get("operating_discipline") or {}).get(
+                        "deferred_system_upgrade_backlog"
+                    )
+                    or []
                 )
                 if edge_experiment_summary
                 else [],

@@ -98,8 +98,16 @@ TradingView를 triage에 함께 쓴다면, mirror-only 사용법과 chart-side o
 - `edge_experiment_review.operating_discipline.loss_driven_rewrite_allowed == false`면 손실을 이유로 한 구조 rewrite는 금지 상태로 읽는다.
 - `edge_experiment_review.operating_discipline.rollout_expansion_allowed == false`면 edge가 좋아 보여도 확장하지 않는다. `stable_across_regimes`가 아니면 expansion review를 열지 않는다.
 - `edge_experiment_review.operating_discipline.improvement_priority == prove_single_edge_before_density_or_strategy_expansion`이면 지금 단계의 목표는 density tuning이나 multi-strategy 확장이 아니라 단일 edge proof다.
+- `edge_experiment_review.operating_discipline.current_system_identity == edge_proof_engine`이면 지금 시스템은 alpha를 새로 만들기보다 first verified edge를 증명하는 단계로 읽는다.
+- `edge_experiment_review.operating_discipline.next_system_stage == post_first_verified_edge`면 alpha generator / execution automation / density control / multi-strategy는 proof 뒤의 backlog다.
+- `edge_experiment_review.operating_discipline.resilience_claim == harder_to_fail_from_self_deception`이면 이 구조는 착각으로 망하기 어렵게 만든 것이지 fail-safe를 보장하는 것이 아니다.
+- `edge_experiment_review.operating_discipline.fail_safe_claim == false`를 유지한다. 구조가 좋아도 성패는 계속 `market_edge`, `execution_quality`, `operating_discipline`에 달려 있다.
+- `edge_experiment_review.operating_discipline.alpha_generator_review_allowed == false`면 새 alpha-generation layer 설계는 아직 live 우선순위가 아니다.
+- `edge_experiment_review.operating_discipline.capital_scale_review_allowed == false`면 proof 이후 scale curve review도 아직 금지 상태다.
 - `edge_experiment_review.operating_discipline.signal_density_control_review_allowed == false`면 target trades/day tuning은 아직 보류한다.
+- `edge_experiment_review.operating_discipline.execution_strategy_automation_review_allowed == false`면 passive-vs-market을 자동 선택하는 execution layer도 아직 보류한다.
 - `edge_experiment_review.operating_discipline.multi_strategy_expansion_review_allowed == false`면 A_ONLY 탈출이나 전략 다변화 review도 아직 보류한다.
+- `edge_experiment_review.operating_discipline.capital_scale_review_allowed == true`가 되면 [EDGE_PROOF_CAPITAL_SCALE_CONTRACT.md](/Users/yumin/Documents/trading/docs/EDGE_PROOF_CAPITAL_SCALE_CONTRACT.md)를 기준으로 review한다.
 - `score_to_outcome_funnel_summary.operating_kpis`는 이제 설명용이 아니라 daily 운영 KPI다. 최소한 `runtime_to_accepted`, `submitted_to_filled`, `filled_to_closed`, `closed_to_post_cost_profitable`, `closed_trades_per_day`를 같이 본다.
 - `edge_experiment_review.experiment_sequence.state`는 실험 순서를 고정한다. 기본 순서는 `entry_timing -> execution_style -> exit_optimization`이다.
 - `edge_experiment_review.experiment_sequence.current_priority_experiment == entry_timing`이면 `early_limit vs reaction_confirmed`를 먼저 잠그고, 그 전에는 exit review를 해석하지 않는다.

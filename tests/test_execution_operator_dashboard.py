@@ -1852,8 +1852,28 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
         signal_funnel["edge_experiment_review"]["operating_discipline"]["improvement_priority"]
         == "prove_single_edge_before_density_or_strategy_expansion"
     )
+    assert signal_funnel["edge_experiment_review"]["operating_discipline"]["current_system_identity"] == "edge_proof_engine"
+    assert signal_funnel["edge_experiment_review"]["operating_discipline"]["next_system_stage"] == "post_first_verified_edge"
+    assert signal_funnel["edge_experiment_review"]["operating_discipline"]["resilience_claim"] == (
+        "harder_to_fail_from_self_deception"
+    )
+    assert signal_funnel["edge_experiment_review"]["operating_discipline"]["fail_safe_claim"] is False
+    assert signal_funnel["edge_experiment_review"]["operating_discipline"]["realized_edge_dependency_domains"] == [
+        "market_edge",
+        "execution_quality",
+        "operating_discipline",
+    ]
+    assert signal_funnel["edge_experiment_review"]["operating_discipline"]["alpha_generator_review_allowed"] is False
     assert signal_funnel["edge_experiment_review"]["operating_discipline"]["signal_density_control_review_allowed"] is False
+    assert signal_funnel["edge_experiment_review"]["operating_discipline"]["execution_strategy_automation_review_allowed"] is False
     assert signal_funnel["edge_experiment_review"]["operating_discipline"]["multi_strategy_expansion_review_allowed"] is False
+    assert signal_funnel["edge_experiment_review"]["operating_discipline"]["deferred_system_upgrade_backlog"] == [
+        "alpha_generator_layer",
+        "capital_scale_curve",
+        "signal_density_controller",
+        "execution_strategy_automation",
+        "multi_strategy_activation",
+    ]
     assert signal_funnel["edge_experiment_review"]["daily_edge_kpis"]["regime_dependency_state"] == "insufficient_regime_closes"
     assert signal_funnel["edge_evolution_rule"]["available"] is True
     assert signal_funnel["edge_evolution_rule"]["evolution_state"] == "insufficient_sample"

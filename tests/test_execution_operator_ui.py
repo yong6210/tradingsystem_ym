@@ -75,9 +75,14 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "Review Followup Ledger" in html
     assert "Edge Split Focus" in html
     assert "Edge Proof Posture" in html
+    assert "fail_safe_claim" in html
+    assert "post_proof_scale_spec_id" in html
+    assert "capital_scale_review_allowed" in html
     assert "loss_driven_rewrite_allowed" in html
     assert "rollout_expansion_allowed" in html
+    assert "alpha_generator_review_allowed" in html
     assert "signal_density_control_review_allowed" in html
+    assert "execution_strategy_automation_review_allowed" in html
     assert "multi_strategy_expansion_review_allowed" in html
     assert "Recent Review Packet" in html
     assert "Operating Funnel KPIs" in html

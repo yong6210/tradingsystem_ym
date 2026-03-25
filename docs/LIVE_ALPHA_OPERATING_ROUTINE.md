@@ -144,11 +144,19 @@
 - `proposal_only`와 `explicit arm` 철학은 유지한다.
 - split experiment는 한 번에 하나만 active로 둔다. `entry_timing`과 `execution_style`를 동시에 실거래 실험으로 열지 않는다.
 - split 실험 순서는 고정이다. 먼저 `entry_timing (early_limit vs reaction_confirmed)`, 그다음 `execution_style (passive_limit vs market)`, 그 다음에만 exit optimization review를 연다.
+- 현재 A anchor의 first-edge live spec은 [A_STRATEGY_EXPERIMENT_SPEC_V1.md](/Users/yumin/Documents/trading/docs/A_STRATEGY_EXPERIMENT_SPEC_V1.md) 기준으로 읽는다. `sweep_reversal`에서 `early_limit` vs `reaction_confirmed`만 먼저 검증하고, exit 아이디어는 sequencing이 열리기 전까지 shadow-only로 남긴다.
 - `edge_experiment_review.experiment_sequence.exit_optimization_allowed == false`면 alpha-research가 exit review를 권해도 sequencing hint로만 읽고 현재 split 실험을 먼저 끝낸다.
 - `edge_experiment_review.operating_discipline.early_loss_rewrite_embargo_active == true`면 초반 손실만으로 구조를 바꾸지 않는다.
 - `edge_experiment_review.operating_discipline.rollout_expansion_allowed == false`면 regime가 안정화되기 전에는 확장을 열지 않는다.
+- `edge_experiment_review.operating_discipline.current_system_identity == edge_proof_engine`이면 지금은 v2 확장보다 edge proof가 우선이다.
+- `edge_experiment_review.operating_discipline.resilience_claim == harder_to_fail_from_self_deception`이면 지금 구조는 착각 방지형이지 fail-safe가 아니다.
+- `edge_experiment_review.operating_discipline.realized_edge_dependency_domains == [market_edge, execution_quality, operating_discipline]`를 같이 읽는다. 즉 성패는 여전히 시장, 실행, 운영 discipline에 달려 있다.
+- `edge_experiment_review.operating_discipline.alpha_generator_review_allowed == false`면 새 hypothesis/alpha generator 설계는 아직 backlog다.
+- `edge_experiment_review.operating_discipline.capital_scale_review_allowed == false`면 proof 이후 capital scale curve도 아직 backlog다.
 - `edge_experiment_review.operating_discipline.signal_density_control_review_allowed == false`면 target trades/day tuning은 아직 보류한다.
+- `edge_experiment_review.operating_discipline.execution_strategy_automation_review_allowed == false`면 spread/latency 기반 passive-vs-market 자동화도 아직 보류한다.
 - `edge_experiment_review.operating_discipline.multi_strategy_expansion_review_allowed == false`면 multi-strategy 확장도 아직 보류한다.
+- `capital_scale_review_allowed == true`가 되면 [EDGE_PROOF_CAPITAL_SCALE_CONTRACT.md](/Users/yumin/Documents/trading/docs/EDGE_PROOF_CAPITAL_SCALE_CONTRACT.md) 기준으로만 증액 review를 연다.
 - `score_to_outcome_funnel_summary.operating_kpis`는 daily KPI로 읽는다. `runtime_to_accepted`, `submitted_to_filled`, `filled_to_closed`, `closed_to_post_cost_profitable`, `closed_trades_per_day`를 같이 본다.
 - `sample_maturity_state`가 `pre_directional`, `directional_only`, `review_ready`면 결론보다 표본 축적을 우선한다.
 - `regime_dependency_state=regime_dependent`면 strongest regime에서 좋아 보여도 weakest regime evidence가 쌓이기 전까지는 범용 edge로 승격하지 않는다.

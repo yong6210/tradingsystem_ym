@@ -2126,11 +2126,18 @@ def test_validation_report_generation(monkeypatch) -> None:
     assert "operating_discipline: state=research_only_until_edge_proof_goal" in body
     assert "framework=framework_ready" in body
     assert "mode=operate_and_experiment" in body
+    assert "identity=edge_proof_engine" in body
+    assert "next_stage=post_first_verified_edge" in body
+    assert "resilience=harder_to_fail_from_self_deception" in body
+    assert "fail_safe_claim=False" in body
+    assert "dependencies=market_edge/execution_quality/operating_discipline" in body
     assert "improvement_priority=prove_single_edge_before_density_or_strategy_expansion" in body
     assert "loss_driven_rewrite_allowed=False" in body
     assert "early_loss_embargo_active=True" in body
     assert "rollout_expansion_allowed=False" in body
+    assert "alpha_generator_review_allowed=False" in body
     assert "signal_density_review_allowed=False" in body
+    assert "execution_strategy_automation_review_allowed=False" in body
     assert "multi_strategy_expansion_review_allowed=False" in body
     assert "experiment_sequence: state=sample_building_before_exit_optimization" in body
     assert "primary_goal=find_first_verified_edge" in body
@@ -2244,6 +2251,18 @@ def test_validation_report_generation(monkeypatch) -> None:
     assert result["edge_experiment_review_summary"]["edge_proof_posture"]["state"] == "sample_building"
     assert result["edge_experiment_review_summary"]["operating_discipline"]["discipline_state"] == "research_only_until_edge_proof_goal"
     assert result["edge_experiment_review_summary"]["operating_discipline"]["system_mode"] == "operate_and_experiment"
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["current_system_identity"] == "edge_proof_engine"
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["next_system_stage"] == "post_first_verified_edge"
+    assert (
+        result["edge_experiment_review_summary"]["operating_discipline"]["resilience_claim"]
+        == "harder_to_fail_from_self_deception"
+    )
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["fail_safe_claim"] is False
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["realized_edge_dependency_domains"] == [
+        "market_edge",
+        "execution_quality",
+        "operating_discipline",
+    ]
     assert result["edge_experiment_review_summary"]["operating_discipline"]["evaluation_focus"] == "after_cost_edge_only"
     assert result["edge_experiment_review_summary"]["operating_discipline"]["profit_claim_allowed"] is False
     assert result["edge_experiment_review_summary"]["operating_discipline"]["early_loss_rewrite_embargo_active"] is True
@@ -2253,8 +2272,17 @@ def test_validation_report_generation(monkeypatch) -> None:
         result["edge_experiment_review_summary"]["operating_discipline"]["improvement_priority"]
         == "prove_single_edge_before_density_or_strategy_expansion"
     )
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["alpha_generator_review_allowed"] is False
     assert result["edge_experiment_review_summary"]["operating_discipline"]["signal_density_control_review_allowed"] is False
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["execution_strategy_automation_review_allowed"] is False
     assert result["edge_experiment_review_summary"]["operating_discipline"]["multi_strategy_expansion_review_allowed"] is False
+    assert result["edge_experiment_review_summary"]["operating_discipline"]["deferred_system_upgrade_backlog"] == [
+        "alpha_generator_layer",
+        "capital_scale_curve",
+        "signal_density_controller",
+        "execution_strategy_automation",
+        "multi_strategy_activation",
+    ]
     assert result["edge_experiment_review_summary"]["daily_edge_kpis"]["true_edge_ratio"] == 0.75
     assert result["score_to_outcome_funnel_summary"]["operating_kpis"]["primary_focus"] == "after_cost_edge_proof"
     assert result["score_to_outcome_funnel_summary"]["operating_kpis"]["stage_conversion_rates"]["runtime_to_accepted"] == 0.4167
@@ -2400,11 +2428,29 @@ def test_validation_report_generation(monkeypatch) -> None:
         result["alpha_research_pipeline_summary"]["improvement_priority"]
         == "prove_single_edge_before_density_or_strategy_expansion"
     )
+    assert result["alpha_research_pipeline_summary"]["current_system_identity"] == "edge_proof_engine"
+    assert result["alpha_research_pipeline_summary"]["next_system_stage"] == "post_first_verified_edge"
+    assert result["alpha_research_pipeline_summary"]["resilience_claim"] == "harder_to_fail_from_self_deception"
+    assert result["alpha_research_pipeline_summary"]["fail_safe_claim"] is False
+    assert result["alpha_research_pipeline_summary"]["realized_edge_dependency_domains"] == [
+        "market_edge",
+        "execution_quality",
+        "operating_discipline",
+    ]
+    assert result["alpha_research_pipeline_summary"]["alpha_generator_review_allowed"] is False
     assert result["alpha_research_pipeline_summary"]["signal_density_control_review_allowed"] is False
+    assert result["alpha_research_pipeline_summary"]["execution_strategy_automation_review_allowed"] is False
     assert result["alpha_research_pipeline_summary"]["multi_strategy_expansion_review_allowed"] is False
     assert result["alpha_research_pipeline_summary"]["deferred_review_backlog"] == [
         "signal_density_control",
         "multi_strategy_expansion",
+    ]
+    assert result["alpha_research_pipeline_summary"]["deferred_system_upgrade_backlog"] == [
+        "alpha_generator_layer",
+        "capital_scale_curve",
+        "signal_density_controller",
+        "execution_strategy_automation",
+        "multi_strategy_activation",
     ]
     assert result["alpha_research_pipeline_summary"]["shadow_experiment_template_count"] == 1
     assert result["alpha_research_pipeline_summary"]["top_reason"] == "risk_budget_below_min"

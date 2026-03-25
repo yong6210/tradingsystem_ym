@@ -774,10 +774,23 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "edge_proof_posture" in rp["edge_experiment_review_summary"]
     assert "operating_discipline" in rp["edge_experiment_review_summary"]
     assert rp["edge_experiment_review_summary"]["operating_discipline"]["system_mode"] == "operate_and_experiment"
+    assert rp["edge_experiment_review_summary"]["operating_discipline"]["current_system_identity"] == "edge_proof_engine"
+    assert rp["edge_experiment_review_summary"]["operating_discipline"]["next_system_stage"] == "post_first_verified_edge"
+    assert rp["edge_experiment_review_summary"]["operating_discipline"]["resilience_claim"] == "harder_to_fail_from_self_deception"
+    assert rp["edge_experiment_review_summary"]["operating_discipline"]["fail_safe_claim"] is False
+    assert rp["edge_experiment_review_summary"]["operating_discipline"]["post_proof_scale_spec_id"] == "edge_proof_capital_scale_v1"
+    assert rp["edge_experiment_review_summary"]["operating_discipline"]["realized_edge_dependency_domains"] == [
+        "market_edge",
+        "execution_quality",
+        "operating_discipline",
+    ]
     assert rp["edge_experiment_review_summary"]["operating_discipline"]["loss_driven_rewrite_allowed"] is False
     assert rp["edge_experiment_review_summary"]["operating_discipline"]["rollout_expansion_allowed"] is False
+    assert rp["edge_experiment_review_summary"]["operating_discipline"]["alpha_generator_review_allowed"] is False
     assert rp["edge_experiment_review_summary"]["operating_discipline"]["signal_density_control_review_allowed"] is False
+    assert rp["edge_experiment_review_summary"]["operating_discipline"]["execution_strategy_automation_review_allowed"] is False
     assert rp["edge_experiment_review_summary"]["operating_discipline"]["multi_strategy_expansion_review_allowed"] is False
+    assert rp["edge_experiment_review_summary"]["operating_discipline"]["capital_scale_review_allowed"] is False
     assert "daily_edge_kpis" in rp["edge_experiment_review_summary"]
     assert "edge_evolution_rule_available" in rp["validation_report"]
     assert "edge_evolution_rule_summary" in rp["validation_report"]
