@@ -270,3 +270,213 @@ def test_main_reports_empty_scanner_surface(monkeypatch, capsys) -> None:
     assert payload["family_availability_summary"]["availability_state"] == "scanner_surface_empty"
     assert payload["family_availability_summary"]["scanner_surface_count"] == 0
     assert any("Scanner returned zero rows" in step for step in payload["next_steps"])
+
+
+def test_main_emits_symbol_refresh_summary_when_no_candidate(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        paper_drill,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            families="sweep_reversal",
+            candidate_limit=100,
+            include_manual_review=False,
+            skip_sync=True,
+            limit_symbols=30,
+            symbol_concurrency=4,
+            limit_1m=900,
+            limit_5m=500,
+            limit_15m=500,
+            submit_paper=False,
+            paper_scenario="fill",
+            paper_lineage_override=False,
+            report_dir="reports/operations/paper_candidate_drill",
+            no_write_report=True,
+        ),
+    )
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/scanner/top":
+            return []
+        if path == "/portfolio/budget":
+            return {"accepted_candidates": [], "blocked_candidates": [], "alpha_research_candidates": []}
+        if path == "/indicators/summary":
+            return {
+                "symbol": "BTCUSDC",
+                "refresh": {
+                    "symbol": "BTCUSDC",
+                    "updated": True,
+                    "plans": 0,
+                    "active_zone_count": 45,
+                    "active_signal_plan_count": 3,
+                    "regime_label": "transition",
+                    "transition_state": "transition_confirmed",
+                    "plan_generation_diagnostics": {
+                        "generation_state": "no_fresh_candidates",
+                        "hard_gate_block_counts": {"low_confluence": 45},
+                    },
+                },
+            }
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(paper_drill, "_request_json", _request_json)
+
+    assert paper_drill.main() == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["overall_status"] == "NOT_READY"
+    assert payload["symbol_refresh_summary"]["generated_plan_count"] == 0
+    assert payload["symbol_refresh_summary"]["top_block_reason"] == "low_confluence"
+    assert payload["symbol_refresh_summary"]["top_block_count"] == 45
+    assert "generated 0 fresh plan(s) from 45 active zone(s)" in payload["checks"][0]["message"]
+    assert any("top block=low_confluence x45" in step for step in payload["next_steps"])
+
+
+def test_choose_override_candidate_allows_zero_risk_a_grade_thesis_block() -> None:
+    rows = [
+        {
+            "symbol": "BTCUSDC",
+            "plan_id": "plan-legacy",
+            "strategy_family": "legacy_zone_plan",
+            "strategy_grade": "A",
+            "block_reason": "thesis_duplicate_blocked",
+            "recommended_risk_r": 0.0,
+            "expected_ev_r": 0.9,
+            "expected_ev_at_recommended_size_r": 0.0,
+            "final_rank_score": 70.0,
+            "deployment_go_no_go": "GO",
+            "session_guidance": {"state": "preferred_live_window", "dead_session": False},
+        },
+        {
+            "symbol": "BTCUSDC",
+            "plan_id": "plan-sweep",
+            "strategy_family": "sweep_reversal",
+            "strategy_grade": "A",
+            "block_reason": "thesis_active_cap_reached",
+            "recommended_risk_r": 0.0,
+            "expected_ev_r": 0.4,
+            "expected_ev_at_recommended_size_r": 0.0,
+            "final_rank_score": 55.0,
+            "deployment_go_no_go": "GO",
+            "session_guidance": {"state": "preferred_live_window", "dead_session": False},
+        },
+    ]
+
+    chosen = paper_drill._choose_override_candidate(
+        rows,
+        symbol="BTCUSDC",
+        families={"sweep_reversal"},
+        include_manual=False,
+    )
+
+    assert chosen is not None
+    assert chosen["plan_id"] == "plan-sweep"
+
+
+def test_main_selects_zero_risk_override_candidate_for_paper_sampling(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        paper_drill,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            families="sweep_reversal",
+            candidate_limit=100,
+            include_manual_review=False,
+            skip_sync=True,
+            limit_symbols=30,
+            symbol_concurrency=4,
+            limit_1m=900,
+            limit_5m=500,
+            limit_15m=500,
+            submit_paper=False,
+            paper_scenario="fill",
+            paper_lineage_override=True,
+            report_dir="reports/operations/paper_candidate_drill",
+            no_write_report=True,
+        ),
+    )
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/scanner/top":
+            return []
+        if path == "/portfolio/budget":
+            return {
+                "accepted_candidates": [],
+                "blocked_candidates": [
+                    {
+                        "symbol": "BTCUSDC",
+                        "plan_id": "plan-sweep",
+                        "strategy_family": "sweep_reversal",
+                        "strategy_grade": "A",
+                        "block_reason": "thesis_active_cap_reached",
+                        "block_reason_message": "Blocked: active thesis cluster cap is reached.",
+                        "recommended_risk_r": 0.0,
+                        "expected_ev_r": 0.4,
+                        "expected_ev_at_recommended_size_r": 0.0,
+                        "final_rank_score": 55.0,
+                        "deployment_go_no_go": "GO",
+                        "session_guidance": {"state": "preferred_live_window", "dead_session": False},
+                    }
+                ],
+                "alpha_research_candidates": [],
+            }
+        if path == "/validation/report":
+            return _validation()
+        if path == "/execution/plans/preview":
+            return {"entry_type": "market", "entry_semantics": "confirm_on_close"}
+        if path == "/execution/approve-plan":
+            payload = _approval()
+            payload["paper_lineage_override_applied"] = True
+            payload["paper_lineage_override_reason"] = "paper lineage override bypassed thesis active-cap block for eligible A-grade PAPER sampling."
+            return payload
+        if path == "/execution/order-intents":
+            return {
+                "intent_id": "intent-override",
+                "submit_decision": "SUBMIT",
+                "decision_reason_code": "paper_lineage_override_applied",
+            }
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(paper_drill, "_request_json", _request_json)
+
+    assert paper_drill.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["overall_status"] == "READY_FOR_PAPER_SAMPLE"
+    assert payload["candidate"]["plan_id"] == "plan-sweep"
+    eligible_check = next(check for check in payload["checks"] if check["name"] == "eligible_candidate_found")
+    assert "via paper lineage override" in eligible_check["message"]
+
+
+def test_choose_override_candidate_falls_back_to_validity_grade_and_missing_runtime_state() -> None:
+    rows = [
+        {
+            "symbol": "AAVEUSDC",
+            "plan_id": "plan-aave",
+            "strategy_family": "sweep_reversal",
+            "strategy_grade": None,
+            "setup_grade": "A",
+            "validity": {"strategy_grade": "A"},
+            "block_reason": "thesis_duplicate_blocked",
+            "recommended_risk_r": 0.0,
+            "expected_ev_r": 0.31,
+            "expected_ev_at_recommended_size_r": 0.0,
+            "final_rank_score": 48.0,
+            "deployment_go_no_go": None,
+            "session_guidance": {"state": "preferred_live_window", "dead_session": False},
+        }
+    ]
+
+    chosen = paper_drill._choose_override_candidate(
+        rows,
+        symbol=None,
+        families={"sweep_reversal", "trend_continuation"},
+        include_manual=False,
+    )
+
+    assert chosen is not None
+    assert chosen["plan_id"] == "plan-aave"

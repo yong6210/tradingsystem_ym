@@ -206,6 +206,61 @@ def _edge_experiment_summary(validation_payload: dict[str, Any] | None) -> dict[
     }
 
 
+def _top_refresh_block(diag: dict[str, Any] | None) -> tuple[str | None, int]:
+    source = dict(diag or {})
+    for key in (
+        "hard_gate_block_counts",
+        "generic_setup_block_counts",
+        "router_block_counts",
+        "reaction_skip_counts",
+        "mode_block_counts",
+        "setup_disable_counts",
+        "legacy_router_reason_counts",
+    ):
+        counts = dict(source.get(key) or {})
+        if counts:
+            first_key = next(iter(counts))
+            return str(first_key), int(counts.get(first_key, 0) or 0)
+    return None, 0
+
+
+def _symbol_refresh_summary(indicator_payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    refresh = dict((indicator_payload or {}).get("refresh") or {})
+    if not refresh:
+        return None
+    diagnostics = dict(refresh.get("plan_generation_diagnostics") or {})
+    top_block_reason, top_block_count = _top_refresh_block(diagnostics)
+    summary = {
+        "symbol": str(refresh.get("symbol") or (indicator_payload or {}).get("symbol") or "").upper() or None,
+        "updated": bool(refresh.get("updated", False)),
+        "generated_plan_count": int(refresh.get("plans", 0) or 0),
+        "active_signal_plan_count": int(refresh.get("active_signal_plan_count", 0) or 0),
+        "active_zone_count": int(refresh.get("active_zone_count", diagnostics.get("active_zone_count", 0)) or 0),
+        "regime_label": str(refresh.get("regime_label") or diagnostics.get("regime_profile") or "unknown"),
+        "transition_state": str(refresh.get("transition_state") or diagnostics.get("transition_state") or "unknown"),
+        "generation_state": str(diagnostics.get("generation_state") or "unknown"),
+        "top_block_reason": top_block_reason,
+        "top_block_count": int(top_block_count or 0),
+        "plan_generation_diagnostics": diagnostics,
+    }
+    if summary["generated_plan_count"] > 0:
+        summary["message"] = (
+            f"{summary['symbol'] or 'symbol'} refresh generated {summary['generated_plan_count']} fresh plan(s); "
+            f"scanner/portfolio eligibility is the remaining gate."
+        )
+    elif top_block_reason:
+        summary["message"] = (
+            f"{summary['symbol'] or 'symbol'} refresh generated 0 fresh plan(s) from {summary['active_zone_count']} active zone(s); "
+            f"top block={top_block_reason} x{summary['top_block_count']} "
+            f"under {summary['regime_label']}/{summary['transition_state']}."
+        )
+    else:
+        summary["message"] = (
+            f"{summary['symbol'] or 'symbol'} refresh generated 0 fresh plan(s) from {summary['active_zone_count']} active zone(s)."
+        )
+    return summary
+
+
 def _edge_experiment_summary_line(summary: dict[str, Any] | None) -> str:
     if not summary:
         return "edge_experiment: unavailable"
@@ -309,6 +364,25 @@ def _is_allowed_runtime_state(row: dict[str, Any], include_manual: bool) -> bool
     if state == "GO":
         return True
     return include_manual and state == "MANUAL_REVIEW"
+
+
+def _runtime_state_allows_override(row: dict[str, Any], include_manual: bool) -> bool:
+    state = str(row.get("deployment_go_no_go") or "").upper()
+    if not state:
+        return True
+    return _is_allowed_runtime_state(row, include_manual)
+
+
+def _strategy_grade(row: dict[str, Any]) -> str:
+    validity = dict(row.get("validity") or {})
+    strategy_sizing = dict(row.get("strategy_sizing") or {})
+    return str(
+        row.get("strategy_grade")
+        or validity.get("strategy_grade")
+        or strategy_sizing.get("strategy_grade")
+        or row.get("setup_grade")
+        or ""
+    ).upper()
 
 
 def _choose_candidate(rows: list[dict[str, Any]], *, symbol: str | None, families: set[str], include_manual: bool) -> dict[str, Any] | None:
@@ -430,11 +504,9 @@ def _choose_override_candidate(
             continue
         if symbol and str(row.get("symbol") or "").upper() != symbol.upper():
             continue
-        if not _is_allowed_runtime_state(row, include_manual):
+        if not _runtime_state_allows_override(row, include_manual):
             continue
-        if float(row.get("recommended_risk_r") or 0.0) <= 0.0:
-            continue
-        if str(row.get("strategy_grade") or "").upper() != "A":
+        if _strategy_grade(row) != "A":
             continue
         if str(row.get("block_reason") or "") not in eligible_blocks:
             continue
@@ -443,8 +515,9 @@ def _choose_override_candidate(
         return None
     filtered.sort(
         key=lambda row: (
-            float(row.get("expected_ev_at_recommended_size_r") or 0.0),
             float(row.get("expected_ev_r") or 0.0),
+            float(row.get("expected_ev_at_recommended_size_r") or 0.0),
+            float(row.get("final_rank_score") or 0.0),
             float(row.get("recommended_risk_r") or 0.0),
         ),
         reverse=True,
@@ -582,6 +655,7 @@ def main() -> int:
     submission: dict[str, Any] | None = None
     validation_context: dict[str, Any] | None = None
     edge_experiment_review: dict[str, Any] | None = None
+    symbol_refresh_summary: dict[str, Any] | None = None
     if candidate is not None:
         validation_context = _request_json(
             args.base_url,
@@ -627,6 +701,15 @@ def main() -> int:
                     "paper_scenario": args.paper_scenario,
                 },
             )
+    elif args.symbol:
+        indicator_payload = _request_json(
+            args.base_url,
+            "GET",
+            "/indicators/summary",
+            query={"symbol": str(args.symbol), "refresh": "true", "plan_limit": 3, "zone_limit": 5},
+        )
+        if isinstance(indicator_payload, dict):
+            symbol_refresh_summary = _symbol_refresh_summary(indicator_payload)
     candidate_edge_experiment_focus = _candidate_edge_experiment_focus(candidate, edge_experiment_review)
     candidate_surface_summary = _scanner_candidate_strip_summary(candidate)
     approval_strip_summary = _approval_strip_summary(approval) or candidate_surface_summary
@@ -650,7 +733,14 @@ def main() -> int:
             "name": "eligible_candidate_found",
             "status": _status(candidate is not None),
             "message": (
-                "No eligible trend_continuation/sweep_reversal candidate found in scanner output."
+                (
+                    "No eligible trend_continuation/sweep_reversal candidate found in scanner output."
+                    + (
+                        f" {symbol_refresh_summary.get('message', '')}"
+                        if symbol_refresh_summary and str(symbol_refresh_summary.get("message") or "")
+                        else ""
+                    )
+                )
                 if candidate is None
                 else (
                     f"{candidate.get('symbol')} {candidate.get('strategy_family')} "
@@ -727,6 +817,8 @@ def main() -> int:
             next_steps.append("Requested PAPER lineage families are absent from both scanner and portfolio surfaces; this is a market-availability wait, not an approval blockage.")
         else:
             next_steps.append("Requested PAPER lineage families are present but not eligible; inspect portfolio block reasons before widening scope.")
+        if symbol_refresh_summary and str(symbol_refresh_summary.get("message") or ""):
+            next_steps.append(str(symbol_refresh_summary["message"]))
     else:
         if intent is not None and str(intent.get("submit_decision") or "") != "SUBMIT":
             next_steps.append(f"Candidate found but PAPER intent is not submit-ready: {(intent or {}).get('decision_reason_message', '')}")
@@ -759,6 +851,7 @@ def main() -> int:
         "candidate": candidate,
         "candidate_surface_summary": candidate_surface_summary,
         "family_availability_summary": family_availability_summary,
+        "symbol_refresh_summary": symbol_refresh_summary,
         "validation_context": validation_context,
         "preview": preview,
         "approval": approval,

@@ -14,6 +14,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import get_settings
+from app.services.notification_dispatcher import NotificationDispatcher
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,6 +98,16 @@ def _gate_flipped_ready(previous: dict[str, Any] | None, current: dict[str, Any]
     if previous is None:
         return False
     return not bool(previous.get(key, False)) and bool(current.get(key, False))
+
+
+def _edge_sample_stall_trigger(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    current_active = bool(dict(current.get("edge_sample_stall") or {}).get("active", False))
+    if not current_active:
+        return False
+    if previous is None:
+        return True
+    previous_active = bool(dict(previous.get("edge_sample_stall") or {}).get("active", False))
+    return not previous_active
 
 
 def _surface_summary(payload: dict[str, Any] | None, key: str) -> dict[str, str]:
@@ -254,6 +265,28 @@ def _review_followup_summary_line(payload: dict[str, Any] | None) -> str:
     )
 
 
+def _lineage_sample_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("lineage_sample_summary") or {})
+    return {
+        "scope": str(source.get("scope") or "symbol_edge_proof"),
+        "families": list(source.get("families") or []),
+        "proof_goal_closed_trades": int(source.get("proof_goal_closed_trades", 0) or 0),
+        "closed_trade_count": int(source.get("closed_trade_count", 0) or 0),
+        "remaining_closed_trades_to_goal": int(source.get("remaining_closed_trades_to_goal", 0) or 0),
+    }
+
+
+def _lineage_sample_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _lineage_sample_summary(payload)
+    families = ",".join(str(item) for item in summary.get("families", []) if str(item).strip()) or "none"
+    return (
+        f"lineage_sample: scope={summary.get('scope', 'unknown')} | "
+        f"families={families} | "
+        f"closes={summary.get('closed_trade_count', 0)}/{summary.get('proof_goal_closed_trades', 0)} | "
+        f"remaining={summary.get('remaining_closed_trades_to_goal', 0)}"
+    )
+
+
 def _readiness_gates_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
     current = dict(payload or {})
     source = dict(current.get("readiness_gates") or {})
@@ -273,6 +306,30 @@ def _readiness_gates_summary_line(payload: dict[str, Any] | None) -> str:
         f"candidate={summary.get('candidate_gate_ready', False)} | "
         f"edge_sample={summary.get('edge_sample_gate_ready', False)} | "
         f"all_ready={summary.get('all_ready', False)}"
+    )
+
+
+def _edge_sample_stall_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("edge_sample_stall") or {})
+    return {
+        "active": bool(source.get("active", False)),
+        "threshold_hours": int(source.get("threshold_hours", 0) or 0),
+        "hours_since_progress": round(_float(source.get("hours_since_progress", 0.0)), 2),
+        "progress_count": int(source.get("progress_count", 0) or 0),
+        "current_closed_trade_count": int(source.get("current_closed_trade_count", 0) or 0),
+        "last_progress_at": str(source.get("last_progress_at") or ""),
+        "status": str(source.get("status") or "unknown"),
+        "summary": str(source.get("summary") or ""),
+    }
+
+
+def _edge_sample_stall_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _edge_sample_stall_summary(payload)
+    return (
+        f"edge_sample_stall: active={summary.get('active', False)} | "
+        f"hours_since_progress={summary.get('hours_since_progress', 0.0):.2f} | "
+        f"closes={summary.get('current_closed_trade_count', 0)} | "
+        f"threshold_hours={summary.get('threshold_hours', 0)}"
     )
 
 
@@ -538,6 +595,14 @@ def _collect_events(previous: dict[str, Any] | None, current: dict[str, Any]) ->
                 "body": _readiness_gates_summary_line(current),
             }
         )
+    if _edge_sample_stall_trigger(previous, current):
+        events.append(
+            {
+                "type": "edge_sample_stall",
+                "title": "Edge sample accumulation stalled",
+                "body": _edge_sample_stall_summary_line(current),
+            }
+        )
     if _manual_review_trigger(previous, current):
         events.append(
             {
@@ -563,11 +628,13 @@ def _render_message(current: dict[str, Any], events: list[dict[str, str]]) -> st
             _edge_experiment_summary_line(current),
             _edge_evolution_summary_line(current),
             _review_followup_summary_line(current),
+            _lineage_sample_summary_line(current),
             _experiment_review_target_summary_line(current, "entry_timing_review_target", label="entry_timing_review_target"),
             _experiment_review_target_summary_line(current, "execution_style_review_target", label="execution_style_review_target"),
             _candidate_focus_summary_line(current, "accepted", label="accepted_candidate_focus"),
             _candidate_focus_summary_line(current, "blocked", label="blocked_candidate_focus"),
             _readiness_gates_summary_line(current),
+            _edge_sample_stall_summary_line(current),
             f"close_only_active: {current.get('close_only_active')}",
             f"checklist_status: {current.get('checklist_status')}",
             f"eligible_closed_trades: {current.get('eligible_closed_trades')}",
@@ -597,6 +664,43 @@ def _post_discord(webhook_url: str, message: str) -> dict[str, Any]:
         raise RuntimeError(f"discord webhook failed with HTTP {exc.code}: {body}") from exc
     except URLError as exc:
         raise RuntimeError(f"discord webhook failed: {exc.reason}") from exc
+
+
+def _notification_symbol(current: dict[str, Any]) -> str:
+    for key in ("entry_timing_review_target", "execution_style_review_target"):
+        target = dict(current.get(key) or {})
+        symbol = str(target.get("symbol") or "").strip().upper()
+        if symbol:
+            return symbol
+    representative = dict(current.get("representative_candidates") or {})
+    for key in ("accepted", "blocked"):
+        candidate = dict(representative.get(key) or {})
+        symbol = str(candidate.get("symbol") or "").strip().upper()
+        if symbol:
+            return symbol
+    return "OPERATIONS"
+
+
+def _discord_safe_message(message: str, *, max_chars: int = 1800) -> str:
+    content = str(message or "")
+    if len(content) <= max_chars:
+        return content
+    suffix = "\n...[truncated]"
+    budget = max(0, max_chars - len(suffix))
+    return content[:budget].rstrip() + suffix
+
+
+def _dispatch_stage_notification(current: dict[str, Any], *, message: str, webhook_url: str) -> dict[str, Any]:
+    settings = get_settings()
+    if webhook_url.strip():
+        settings.alert_discord_webhook_url = webhook_url.strip()
+    dispatcher = NotificationDispatcher(settings)
+    return dispatcher.dispatch(
+        channel="discord",
+        alert_type="stage_monitor_alert",
+        symbol=_notification_symbol(current),
+        payload={"message": _discord_safe_message(message)},
+    )
 
 
 def main() -> int:
@@ -630,15 +734,14 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
-    webhook_url = _webhook_url(args.webhook_url)
-    if not webhook_url:
-        result["warning"] = "discord webhook url is not configured"
-        _write_json(state_file, current)
+    delivery = _dispatch_stage_notification(current, message=message, webhook_url=args.webhook_url)
+    result["delivery"] = delivery
+    result["notified"] = bool(delivery.get("delivered"))
+    if not result["notified"]:
+        result["warning"] = f"discord delivery not completed: {delivery.get('reason')}"
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
-    delivery = _post_discord(webhook_url, message)
-    result["notified"] = True
     result["delivery"] = delivery
     _write_json(state_file, current)
     print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -27,9 +27,12 @@ def parse_args() -> argparse.Namespace:
         description="Run one PAPER lineage watch tick and normalize no-candidate outcomes to a healthy exit."
     )
     parser.add_argument("--base-url", default=os.environ.get("PAPER_LINEAGE_WATCH_BASE_URL", "http://127.0.0.1:8000"))
-    parser.add_argument("--families", default=os.environ.get("PAPER_LINEAGE_WATCH_FAMILIES", "sweep_reversal"))
+    parser.add_argument(
+        "--families",
+        default=os.environ.get("PAPER_LINEAGE_WATCH_FAMILIES", "sweep_reversal,trend_continuation"),
+    )
     parser.add_argument("--universe", default=os.environ.get("PAPER_LINEAGE_WATCH_UNIVERSE", "usdc_perp_top30"))
-    parser.add_argument("--symbol", default=os.environ.get("PAPER_LINEAGE_WATCH_SYMBOL", "BTCUSDC"))
+    parser.add_argument("--symbol", default=os.environ.get("PAPER_LINEAGE_WATCH_SYMBOL"))
     parser.add_argument(
         "--candidate-limit",
         type=int,

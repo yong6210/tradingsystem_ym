@@ -454,7 +454,7 @@ curl -s "http://127.0.0.1:8000/plans/top?symbol=BTCUSDC&tf=5m&limit=5&refresh=tr
 - `/Users/yumin/Documents/trading/scripts/paper_lineage_watch_tick.py`
 - `/Users/yumin/Documents/trading/docs/PAPER_LINEAGE_WATCH_AUTOMATION.md`
 
-이 tick은 `NO_ELIGIBLE_CANDIDATE`를 정상 idle 상태로 처리하고, launchd에서 15분 간격으로 계속 lineage 표본 축적만 담당한다.
+이 tick은 `NO_ELIGIBLE_CANDIDATE`를 정상 idle 상태로 처리하고, launchd에서 15분 간격으로 universe-wide `sweep_reversal` lineage 표본 축적만 담당한다.
 
 ## 6. 실행 절차
 ### 6.1. 실행용 preview

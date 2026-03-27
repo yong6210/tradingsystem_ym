@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -183,6 +184,7 @@ def test_stage_payload_reports_blocked_state():
         _dashboard(),
     )
 
+    assert payload["generated_at"]
     assert payload["stage"] == "0_BLOCKED"
     assert payload["close_only_active"] is True
     assert payload["playbook_go_no_go"] == "NO_GO"
@@ -202,6 +204,9 @@ def test_stage_payload_reports_blocked_state():
     assert payload["edge_evolution_rule"]["recommended_action"] == "reduce_baseline_allocation_review"
     assert payload["review_followup_ledger"]["last_status"] == "READY"
     assert payload["review_followup_ledger"]["last_action"] == "reduce_baseline_allocation_review"
+    assert payload["lineage_sample_summary"]["scope"] == "symbol_edge_proof"
+    assert payload["lineage_sample_summary"]["closed_trade_count"] == 8
+    assert payload["lineage_sample_summary"]["remaining_closed_trades_to_goal"] == 92
     assert payload["entry_timing_review_target"]["symbol"] == "BTCUSDC"
     assert payload["entry_timing_review_target"]["action"] == "run_entry_timing_split_review"
     assert payload["entry_timing_review_target"]["followup_command"].endswith(
@@ -246,6 +251,39 @@ def test_stage_payload_reports_lineage_ready_when_trial_exists():
     assert payload["candidate_gate_ready"] is True
     assert payload["edge_sample_gate_ready"] is False
     assert payload["all_readiness_gates_ready"] is False
+
+
+def test_stage_payload_can_use_family_global_lineage_sample(monkeypatch):
+    monkeypatch.setattr(
+        ops_stage_board,
+        "_lineage_sample_summary",
+        lambda **kwargs: {
+            "scope": "family_global",
+            "families": ["sweep_reversal"],
+            "proof_goal_closed_trades": 100,
+            "closed_trade_count": 104,
+            "remaining_closed_trades_to_goal": 0,
+            "goal_ready": True,
+            "latest_closed_trade_at": "2026-03-27T00:00:00+00:00",
+            "sample_days": 180,
+            "summary": "scope=family_global | families=sweep_reversal | closes=104/100 | remaining=0 | lookback_days=180",
+        },
+    )
+
+    payload = ops_stage_board._build_stage_payload(
+        _validation_report(playbook_go_no_go="GO", eligible_closed_trades=8, trial_runs_written=2, selected_trial_run_id="trial_run_001", execution_degradation="watch"),
+        _checklist(overall_status="PASS"),
+        _dashboard(new_entries_allowed=True, close_only_active=False),
+        lineage_sample_scope="family_global",
+        lineage_families="sweep_reversal",
+        lineage_proof_goal_closed_trades=100,
+        lineage_sample_days=180,
+    )
+
+    assert payload["lineage_sample_summary"]["scope"] == "family_global"
+    assert payload["lineage_sample_summary"]["closed_trade_count"] == 104
+    assert payload["edge_sample_gate_ready"] is True
+    assert payload["all_readiness_gates_ready"] is True
 
 
 def test_collect_events_emits_transition_events():
@@ -403,6 +441,13 @@ def test_collect_events_emits_transition_events():
             "recent_entry_count": 3,
             "last_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review",
         },
+        "lineage_sample_summary": {
+            "scope": "family_global",
+            "families": ["sweep_reversal"],
+            "proof_goal_closed_trades": 100,
+            "closed_trade_count": 12,
+            "remaining_closed_trades_to_goal": 88,
+        },
         "entry_timing_review_target": {
             "action": "run_entry_timing_split_review",
             "preferred_variant": "early_limit",
@@ -481,6 +526,30 @@ def test_collect_events_emits_all_readiness_gate_event():
 
     assert "edge_sample_gate_ready" in event_types
     assert "all_readiness_gates_ready" in event_types
+
+
+def test_collect_events_emits_edge_sample_stall_event():
+    previous = {
+        "edge_sample_stall": {
+            "active": False,
+            "threshold_hours": 24,
+            "hours_since_progress": 6.0,
+            "current_closed_trade_count": 2,
+        }
+    }
+    current = {
+        "edge_sample_stall": {
+            "active": True,
+            "threshold_hours": 24,
+            "hours_since_progress": 49.0,
+            "current_closed_trade_count": 2,
+        }
+    }
+
+    events = notify_stage_change._collect_events(previous, current)
+    event_types = {event["type"] for event in events}
+
+    assert "edge_sample_stall" in event_types
 
 
 def test_collect_events_initial_snapshot_only_on_first_run():
@@ -566,6 +635,13 @@ def test_render_message_uses_approval_surface_lines() -> None:
             "recent_entry_count": 3,
             "last_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review",
         },
+        "lineage_sample_summary": {
+            "scope": "family_global",
+            "families": ["sweep_reversal"],
+            "proof_goal_closed_trades": 100,
+            "closed_trade_count": 12,
+            "remaining_closed_trades_to_goal": 88,
+        },
         "entry_timing_review_target": {
             "action": "run_entry_timing_split_review",
             "preferred_variant": "early_limit",
@@ -601,6 +677,12 @@ def test_render_message_uses_approval_surface_lines() -> None:
                 "execution_style_preferred_variant": "market",
             },
         },
+        "edge_sample_stall": {
+            "active": True,
+            "threshold_hours": 24,
+            "hours_since_progress": 49.0,
+            "current_closed_trade_count": 2,
+        },
     }
 
     message = notify_stage_change._render_message(current, [])
@@ -611,10 +693,79 @@ def test_render_message_uses_approval_surface_lines() -> None:
     assert "edge_experiment: state=watch_edge | entry_timing=early_limit | execution_style=passive_limit | proof=sample_building/do_not_claim_edge_yet | closes=6/100 | remaining=94 | regime=single_regime_observed | true_edge=0.8200 | decay=-0.0300" in message
     assert "edge_evolution: state=reduce_candidate | action=reduce_baseline_allocation_review | bias=reduce_baseline | promotion=entry_timing/early_limit" in message
     assert "review_followup_ledger: status=READY | action=reduce_baseline_allocation_review | entries=3 | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review" in message
+    assert "lineage_sample: scope=family_global | families=sweep_reversal | closes=12/100 | remaining=88" in message
     assert "entry_timing_review_target: action=run_entry_timing_split_review | target=BTCUSDC | variant=early_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review" in message
     assert "execution_style_review_target: action=run_execution_style_split_review | target=BTCUSDC | variant=passive_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_execution_style_split_review" in message
     assert "accepted_candidate_focus: BTCUSDC | family=sweep_reversal | edge=watch_edge | split=early_limit/passive_limit" in message
     assert "blocked_candidate_focus: ETHUSDC | family=trend_continuation | edge=fragile_edge | split=reaction_confirmed/market | reason=portfolio_cap" in message
     assert "readiness_gates: lineage=True | candidate=True | edge_sample=False | all_ready=False" in message
+    assert "edge_sample_stall: active=True | hours_since_progress=49.00 | closes=2 | threshold_hours=24" in message
     assert "playbook_go_no_go" not in message
     assert "deployment_go_no_go" not in message
+
+
+def test_main_returns_warning_without_writing_state_when_delivery_fails(monkeypatch, tmp_path, capsys) -> None:
+    stage_file = tmp_path / "current_stage.json"
+    state_file = tmp_path / "last_alert_state.json"
+    stage_file.write_text(json.dumps({"stage": "0_BLOCKED"}, ensure_ascii=False), encoding="utf-8")
+
+    args = notify_stage_change.argparse.Namespace(
+        stage_file=str(stage_file),
+        state_file=str(state_file),
+        webhook_url="",
+        dry_run=False,
+    )
+
+    monkeypatch.setattr(notify_stage_change, "parse_args", lambda: args)
+    monkeypatch.setattr(
+        notify_stage_change,
+        "_dispatch_stage_notification",
+        lambda current, *, message, webhook_url: {
+            "channel": "discord",
+            "delivered": False,
+            "skipped": False,
+            "reason": "http_403",
+            "status_code": 403,
+        },
+    )
+
+    exit_code = notify_stage_change.main()
+
+    captured = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert captured["notified"] is False
+    assert captured["delivery"]["reason"] == "http_403"
+    assert captured["warning"] == "discord delivery not completed: http_403"
+    assert state_file.exists() is False
+
+
+def test_dispatch_stage_notification_truncates_message_for_discord(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    class _FakeDispatcher:
+        def __init__(self, settings):  # noqa: ANN001
+            self.settings = settings
+
+        def dispatch(self, *, channel, alert_type, symbol, payload):  # noqa: ANN001
+            calls.append(
+                {
+                    "channel": channel,
+                    "alert_type": alert_type,
+                    "symbol": symbol,
+                    "payload": payload,
+                }
+            )
+            return {"delivered": True, "reason": "delivered"}
+
+    monkeypatch.setattr(notify_stage_change, "NotificationDispatcher", _FakeDispatcher)
+
+    result = notify_stage_change._dispatch_stage_notification(
+        {"entry_timing_review_target": {"symbol": "BTCUSDC"}},
+        message="x" * 2500,
+        webhook_url="",
+    )
+
+    assert result["delivered"] is True
+    assert calls[0]["symbol"] == "BTCUSDC"
+    assert len(calls[0]["payload"]["message"]) <= 1800
+    assert calls[0]["payload"]["message"].endswith("...[truncated]")

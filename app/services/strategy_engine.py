@@ -2919,6 +2919,40 @@ class StrategyEngine:
             if can_open
             else []
         )
+        if can_open:
+            if ranked_plans:
+                plan_generation_diagnostics = {
+                    "schema_version": "plan_generation_diagnostics_v1",
+                    "symbol": symbol,
+                    "generation_state": "generated",
+                    "regime_profile": self.plan_generator.resolve_regime_label(context),
+                    "transition_state": context.transition_state,
+                    "transition_lock_reason": context.transition_lock_reason,
+                    "active_zone_count": len(active_zones),
+                    "generated_plan_count": len(ranked_plans),
+                }
+            else:
+                plan_generation_diagnostics = self.plan_generator.generation_diagnostics(
+                    symbol=symbol,
+                    zones=active_zones,
+                    context=context,
+                    candles_5m=candles5,
+                    importance_calibration=feature_calibration,
+                )
+                plan_generation_diagnostics["generation_state"] = "no_fresh_candidates"
+                plan_generation_diagnostics["generated_plan_count"] = 0
+        else:
+            plan_generation_diagnostics = {
+                "schema_version": "plan_generation_diagnostics_v1",
+                "symbol": symbol,
+                "generation_state": "skipped_by_gate",
+                "gate_reason": gate_reason,
+                "regime_profile": self.plan_generator.resolve_regime_label(context),
+                "transition_state": context.transition_state,
+                "transition_lock_reason": context.transition_lock_reason,
+                "active_zone_count": len(active_zones),
+                "generated_plan_count": 0,
+            }
         self.plan_repo.upsert_many([x.plan for x in ranked_plans])
         self.plan_repo.invalidate_expired()
         active_signal_plans = self.plan_repo.list_active_for_symbol(
@@ -2945,7 +2979,10 @@ class StrategyEngine:
             "symbol": symbol,
             "updated": True,
             "zones": len(zones),
+            "active_zone_count": len(active_zones),
             "plans": len(ranked_plans),
+            "active_signal_plan_count": len(active_signal_plans),
+            "plan_generation_diagnostics": plan_generation_diagnostics,
             "risk_state": gate_state.value,
             "gate_reason": gate_reason,
             "operating_lock": operating_lock.to_dict(),

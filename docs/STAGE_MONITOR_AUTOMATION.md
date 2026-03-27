@@ -5,6 +5,7 @@
 Use the wrapper below so the stage snapshot is always written before the Discord notifier runs.
 The stage snapshot now also carries per-surface `approve / align / act` summaries for `dashboard`, `validation`, and `checklist`, plus `edge_experiment_review`, `edge_evolution_rule`, `review_followup_ledger`, `top_operator_action_followup_command`, representative accepted/blocked candidate split focus, explicit `entry_timing_review_target` / `execution_style_review_target` lines, and composite readiness gates for `lineage`, `candidate`, `edge_sample`, and `all_ready`.
 Those target lines now include the ready-to-run `scripts/run_split_review_followup.py` command, and the notifier message prints the same contract directly before the stage counters.
+The launchd configuration now tracks lineage sample progress with `family_global` scope for `sweep_reversal` and `trend_continuation`, so `edge_sample_gate_ready` and `edge_sample_stall` are no longer pinned to `BTCUSDC` closes alone.
 `notify_stage_change.py` now emits dedicated events when any readiness gate flips from `false -> true`, including a single `all_readiness_gates_ready` event when the full edge-proof stack is finally ready.
 
 ## Wrapper
@@ -75,6 +76,14 @@ Current plist contents:
     <array>
       <string>/Users/yumin/Documents/trading/.venv/bin/python</string>
       <string>/Users/yumin/Documents/trading/scripts/stage_monitor_tick.py</string>
+      <string>--lineage-sample-scope</string>
+      <string>family_global</string>
+      <string>--lineage-families</string>
+      <string>sweep_reversal,trend_continuation</string>
+      <string>--lineage-proof-goal-closed-trades</string>
+      <string>100</string>
+      <string>--lineage-sample-days</string>
+      <string>180</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/yumin/Documents/trading</string>

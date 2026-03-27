@@ -511,6 +511,128 @@ def test_paper_lineage_override_does_not_bypass_open_intent_duplicate(monkeypatc
     assert intent_payload["dedupe_result"]["source"] == "open_intent"
 
 
+def test_paper_lineage_override_bypasses_allowlist_and_validation_for_paper_sampling(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trading_execution_mode", ExecutionMode.PAPER)
+    monkeypatch.setattr(settings, "auto_trading_allowed_symbols", "BTCUSDC")
+    monkeypatch.setattr(settings, "auto_trading_allowed_families", "trend_continuation")
+    monkeypatch.setattr(
+        "app.services.strategy_engine.StrategyEngine.metrics",
+        lambda self, symbol, version: {  # noqa: ARG005
+            "symbol": symbol,
+            "version": version,
+            "grade": "F",
+            "recommendation": "do-not-deploy",
+            "risk_state": "OPEN",
+            "risk_reason": "normal",
+            "operating_lock": {
+                "active": False,
+                "enforced": False,
+                "reason": "",
+                "scope": "none",
+                "current_session": {"name": "london", "active": True},
+            },
+        },
+    )
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr(
+        "app.services.strategy_engine.StrategyEngine._approval_outcome_inputs",
+        lambda self, *, symbol, candidate_rows: {  # noqa: ARG005
+            "execution_degradation_advisory_summary": {
+                "status": "manual_review",
+                "reason_codes": ["slippage_p95_exceeds_live_tolerance"],
+            },
+            "score_to_outcome_funnel_summary": {
+                "historical_execution_outcomes": {"baseline_cost_profitable_rate_from_closed": 0.0},
+                "decomposition": {"family": [], "regime": [], "session": []},
+            },
+            "mode_advisory_summary": {"family": [], "regime": [], "session": []},
+        },
+    )
+
+    symbol = f"PLALW{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 14}USDC"
+    existing_plan_id = f"{symbol}_existing"
+    fresh_plan_id = f"{symbol}_fresh"
+    shared_thesis = {
+        "direction": "long",
+        "regime": "range",
+        "strategy_family": "sweep_reversal",
+        "liquidity_narrative": "session_low_sweep",
+        "event_classification": "rejection_confirmed",
+        "time_bucket": "2026-03-09T05:00Z_30m",
+        "correlation_cluster": "others",
+    }
+    _seed_plan(
+        symbol=symbol,
+        family="sweep_reversal",
+        plan_id=existing_plan_id,
+        state="ENTERED",
+        thesis_fingerprint=shared_thesis,
+    )
+    _seed_plan(
+        symbol=symbol,
+        family="sweep_reversal",
+        plan_id=fresh_plan_id,
+        state="ARMED",
+        thesis_fingerprint=shared_thesis,
+    )
+
+    def _exposures(self):
+        with SessionLocal() as db:
+            row = db.get(Plan, existing_plan_id)
+            return [row] if row is not None else []
+
+    def _candidate_rows(self, *, symbol: str):
+        return None, [
+            {
+                "plan_id": fresh_plan_id,
+                "symbol": symbol,
+                "direction": "long",
+                "strategy_family": "sweep_reversal",
+                "strategy_grade": "A",
+                "deployment_go_no_go": "GO",
+                "deployment_code": "go_runtime_gate_open",
+                "deployment_message": "GO: runtime gate is open for candidate review.",
+                "block_reason": "thesis_duplicate_blocked",
+                "block_reason_message": "Blocked: an active candidate with the same thesis already exists.",
+                "thesis_rejected_reason": "duplicate_active_thesis",
+                "recommended_risk_r": 0.5,
+                "session_guidance": {"state": "london", "session_name": "london"},
+                "operating_lock": {"active": False, "current_session": {"name": "london", "active": True}},
+                "final_rank_score": 80.0,
+            }
+        ], {"active": False, "current_session": {"name": "london", "active": True}}
+
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", _exposures)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._execution_candidate_rows", _candidate_rows)
+
+    approval = client.post(
+        "/execution/approve-plan",
+        json={"plan_id": fresh_plan_id, "paper_lineage_override": True},
+    )
+    assert approval.status_code == 200
+    approval_payload = approval.json()
+    assert approval_payload["approval_state"] == "APPROVED_AUTO"
+    assert approval_payload["playbook_go_no_go"] == "GO"
+    reason_codes = {row["code"] for row in approval_payload["approval_reasons"]}
+    assert "paper_lineage_override_bypassed_symbol_allowlist" in reason_codes
+    assert "paper_lineage_override_bypassed_family_allowlist" in reason_codes
+    assert "paper_lineage_override_bypassed_validation_do_not_deploy" in reason_codes
+    assert "paper_lineage_override_retained_paper_auto_submit" in reason_codes
+
+    intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": fresh_plan_id, "execution_mode": "PAPER", "paper_lineage_override": True},
+    )
+    assert intent.status_code == 200
+    intent_payload = intent.json()
+    assert intent_payload["submit_decision"] == "SUBMIT"
+    assert intent_payload["paper_lineage_override_applied"] is True
+
+
 def test_live_submit_requires_global_live_enable_even_when_intent_is_ready(monkeypatch) -> None:
     init_db()
     _apply_auto_trading_defaults(monkeypatch)

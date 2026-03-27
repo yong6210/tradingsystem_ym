@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -723,6 +724,214 @@ class PlanGenerator:
             return "trendline_led_block"
         return None
 
+    @staticmethod
+    def _sorted_counts(counter: Counter[str]) -> dict[str, int]:
+        return {str(key): int(value) for key, value in sorted(counter.items(), key=lambda item: (-item[1], str(item[0])))}
+
+    def generation_diagnostics(
+        self,
+        *,
+        symbol: str,
+        zones: list[Zone],
+        context: ContextSnapshot,
+        candles_5m: list[Candle] | None = None,
+        importance_calibration: dict[str, dict] | None = None,
+    ) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        profile = self._regime_profile(context)
+        mode_policy = self.strategy_mode.policy()
+        hard_gate_counts: Counter[str] = Counter()
+        setup_disable_counts: Counter[str] = Counter()
+        reaction_skip_counts: Counter[str] = Counter()
+        router_block_counts: Counter[str] = Counter()
+        legacy_router_reason_counts: Counter[str] = Counter()
+        generic_setup_block_counts: Counter[str] = Counter()
+        mode_block_counts: Counter[str] = Counter()
+        block_examples: list[dict[str, Any]] = []
+        post_hard_gate_zone_count = 0
+        pre_generation_candidate_count = 0
+
+        for zone in zones:
+            stats = dict(zone.stats or {})
+            disabled_reason = self._is_setup_disabled(stats)
+            if disabled_reason:
+                setup_disable_counts[disabled_reason] += 1
+                if len(block_examples) < 8:
+                    block_examples.append(
+                        {
+                            "zone_id": zone.zone_id,
+                            "stage": "setup_disable",
+                            "reason": disabled_reason,
+                            "zone_type": zone.type,
+                            "dir_bias": zone.dir_bias,
+                        }
+                    )
+                continue
+
+            near_lp = self._find_near_lp(zone, zones, context.atr15)
+            confluence_score, confluence_components, *_ = self._confluence_score(
+                zone,
+                context,
+                near_lp,
+                stats,
+                profile,
+                now,
+                importance_calibration=importance_calibration,
+            )
+            gate_reason = self._hard_gate(zone, context, confluence_score, profile)
+            if gate_reason is not None:
+                hard_gate_counts[gate_reason] += 1
+                if len(block_examples) < 8:
+                    block_examples.append(
+                        {
+                            "zone_id": zone.zone_id,
+                            "stage": "hard_gate",
+                            "reason": gate_reason,
+                            "zone_type": zone.type,
+                            "dir_bias": zone.dir_bias,
+                            "confluence_score": round(float(confluence_score), 2),
+                        }
+                    )
+                continue
+            post_hard_gate_zone_count += 1
+
+            reaction = self.reaction_classifier.classify_zone(zone=zone, context=context, candles_5m=candles_5m)
+            classification = str(reaction.classification)
+            if reaction.available and classification == "mixed":
+                reaction_skip_counts["mixed"] += 1
+                if len(block_examples) < 8:
+                    block_examples.append(
+                        {
+                            "zone_id": zone.zone_id,
+                            "stage": "reaction_skip",
+                            "reason": "mixed",
+                            "zone_type": zone.type,
+                            "dir_bias": zone.dir_bias,
+                        }
+                    )
+                continue
+            if reaction.available and classification in {"acceptance_confirmed", "acceptance_tentative"}:
+                reaction_skip_counts[classification] += 1
+                if len(block_examples) < 8:
+                    block_examples.append(
+                        {
+                            "zone_id": zone.zone_id,
+                            "stage": "reaction_skip",
+                            "reason": classification,
+                            "zone_type": zone.type,
+                            "dir_bias": zone.dir_bias,
+                        }
+                    )
+                continue
+
+            strategy_family = StrategyFamilyDecision(
+                available=False,
+                family="legacy_zone_plan",
+                grade="F",
+                score=0.0,
+                reason="strategy_family_not_applicable",
+                entry_model=None,
+            )
+            routed_family = self.strategy_family_router.route(
+                zone=zone,
+                context=context,
+                reaction=reaction,
+                near_lp=near_lp,
+                zone_strength=self._zone_strength(zone, context),
+                confluence_score=confluence_score,
+                regime_name=profile.name,
+                candles_5m=candles_5m,
+            )
+            if routed_family.family != "none":
+                strategy_family = routed_family
+                if not strategy_family.available:
+                    router_block_counts[str(strategy_family.reason or strategy_family.family)] += 1
+                    if len(block_examples) < 8:
+                        block_examples.append(
+                            {
+                                "zone_id": zone.zone_id,
+                                "stage": "router_block",
+                                "reason": str(strategy_family.reason or strategy_family.family),
+                                "zone_type": zone.type,
+                                "dir_bias": zone.dir_bias,
+                            }
+                        )
+                    continue
+            elif str(routed_family.reason or "").strip():
+                legacy_router_reason = str(routed_family.reason)
+                legacy_router_reason_counts[legacy_router_reason] += 1
+                strategy_family = StrategyFamilyDecision(
+                    available=False,
+                    family="legacy_zone_plan",
+                    grade="F",
+                    score=0.0,
+                    reason=legacy_router_reason,
+                    entry_model=None,
+                )
+
+            generic_block_reason = self._generic_setup_block_reason(
+                zone=zone,
+                near_lp=near_lp,
+                reaction=reaction,
+                strategy_family=strategy_family,
+                confluence_components=confluence_components,
+                candles_5m=candles_5m,
+            )
+            if generic_block_reason:
+                generic_setup_block_counts[generic_block_reason] += 1
+                if len(block_examples) < 8:
+                    block_examples.append(
+                        {
+                            "zone_id": zone.zone_id,
+                            "stage": "generic_setup_block",
+                            "reason": generic_block_reason,
+                            "zone_type": zone.type,
+                            "dir_bias": zone.dir_bias,
+                        }
+                    )
+                continue
+
+            mode_allowed, mode_reason = self.strategy_mode.allow_candidate(
+                strategy_family=strategy_family.family,
+                strategy_grade=strategy_family.grade if strategy_family.available else None,
+                mode=mode_policy.mode,
+            )
+            if not mode_allowed:
+                mode_block_counts[str(mode_reason or "mode_rejected")] += 1
+                if len(block_examples) < 8:
+                    block_examples.append(
+                        {
+                            "zone_id": zone.zone_id,
+                            "stage": "mode_block",
+                            "reason": str(mode_reason or "mode_rejected"),
+                            "zone_type": zone.type,
+                            "dir_bias": zone.dir_bias,
+                        }
+                    )
+                continue
+
+            pre_generation_candidate_count += 1
+
+        return {
+            "schema_version": "plan_generation_diagnostics_v1",
+            "symbol": symbol,
+            "generation_state": "diagnosed",
+            "regime_profile": profile.name,
+            "transition_state": context.transition_state,
+            "transition_lock_reason": context.transition_lock_reason,
+            "active_zone_count": len(zones),
+            "post_hard_gate_zone_count": int(post_hard_gate_zone_count),
+            "pre_generation_candidate_count": int(pre_generation_candidate_count),
+            "setup_disable_counts": self._sorted_counts(setup_disable_counts),
+            "hard_gate_block_counts": self._sorted_counts(hard_gate_counts),
+            "reaction_skip_counts": self._sorted_counts(reaction_skip_counts),
+            "router_block_counts": self._sorted_counts(router_block_counts),
+            "legacy_router_reason_counts": self._sorted_counts(legacy_router_reason_counts),
+            "generic_setup_block_counts": self._sorted_counts(generic_setup_block_counts),
+            "mode_block_counts": self._sorted_counts(mode_block_counts),
+            "block_examples": block_examples,
+        }
+
     def _hard_gate(self, zone: Zone, context: ContextSnapshot, confluence_score: float, profile: RegimeProfile) -> str | None:
         counter_trend = (zone.dir_bias == "support" and context.v < 0) or (zone.dir_bias == "resistance" and context.v > 0)
 
@@ -975,6 +1184,15 @@ class PlanGenerator:
                 strategy_family = routed_family
                 if not strategy_family.available:
                     continue
+            elif str(routed_family.reason or "").strip():
+                strategy_family = StrategyFamilyDecision(
+                    available=False,
+                    family="legacy_zone_plan",
+                    grade="F",
+                    score=0.0,
+                    reason=str(routed_family.reason),
+                    entry_model=None,
+                )
             generic_block_reason = self._generic_setup_block_reason(
                 zone=zone,
                 near_lp=near_lp,

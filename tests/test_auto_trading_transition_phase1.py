@@ -291,9 +291,11 @@ def test_auto_trading_settings_defaults_and_preview_approval_api_paths() -> None
     assert settings.auto_trading_allowed_families == ""
 
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    active = _plan(plan_id=f"preview_live_{int(now.timestamp())}")
+    test_symbol = f"REPOTEST{int(now.timestamp())}USDC"
+    active = _plan(plan_id=f"preview_live_{int(now.timestamp())}", symbol=test_symbol)
     expired = _plan(
         plan_id=f"preview_expired_{int(now.timestamp())}",
+        symbol=test_symbol,
         valid_until=now - timedelta(minutes=5),
     )
     active_plan_id = active.plan_id
@@ -418,3 +420,67 @@ def test_approval_service_keeps_auto_and_adds_reason_only_watch_penalty() -> Non
     assert payload["outcome_approval_penalty"]["status"] == "watch"
     assert payload["outcome_approval_penalty"]["penalty_tier"] == "reason_only"
     assert any(reason["code"] == "execution_degradation:watch" for reason in payload["approval_reasons"])
+
+
+def test_approval_service_paper_lineage_override_bypasses_paper_sampling_gates_only() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="PAPER",
+        auto_trading_allowed_symbols="BTCUSDC",
+        auto_trading_allowed_families="trend_continuation",
+        auto_trading_require_validation_go=True,
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_OpenRolloutProvider())
+    plan = _plan(
+        plan_id="paper_lineage_sampling_override_case",
+        symbol="WIFUSDC",
+        validity={
+            "strategy_family": "sweep_reversal",
+            "strategy_grade": "A",
+            "regime": "range",
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "recommended_risk_r": 0.4,
+        },
+    )
+    candidate = {
+        "accepted": False,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "block_reason": "thesis_duplicate_blocked",
+        "block_reason_message": "Blocked: an active candidate with the same thesis already exists.",
+        "thesis_rejected_reason": "duplicate_active_thesis",
+        "session_guidance": {"session_name": "london"},
+        "operating_lock": {"active": False, "current_session": {"name": "london", "active": True}},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "F", "recommendation": "do-not-deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+        paper_lineage_override=True,
+        outcome_inputs={
+            "execution_degradation_advisory_summary": {
+                "status": "manual_review",
+                "reason_codes": ["slippage_p95_exceeds_live_tolerance"],
+            },
+            "score_to_outcome_funnel_summary": {
+                "historical_execution_outcomes": {"baseline_cost_profitable_rate_from_closed": 0.0},
+                "decomposition": {"family": [], "regime": [], "session": []},
+            },
+            "mode_advisory_summary": {"family": [], "regime": [], "session": []},
+        },
+    )
+
+    assert payload["paper_lineage_override_applied"] is True
+    assert payload["approval_state"] == ApprovalState.APPROVED_AUTO.value
+    assert payload["playbook_go_no_go"] == "GO"
+    assert payload["allowed_execution_mode"] == "PAPER"
+    reason_codes = {reason["code"] for reason in payload["approval_reasons"]}
+    assert "paper_lineage_override_bypassed_symbol_allowlist" in reason_codes
+    assert "paper_lineage_override_bypassed_family_allowlist" in reason_codes
+    assert "paper_lineage_override_bypassed_validation_do_not_deploy" in reason_codes
+    assert "paper_lineage_override_retained_paper_auto_submit" in reason_codes
+    assert "execution_degradation:manual_review" in reason_codes

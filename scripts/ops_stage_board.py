@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -22,6 +23,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--universe", default="usdc_perp_top30")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--days", type=int, default=30)
+    parser.add_argument(
+        "--lineage-sample-scope",
+        choices=["symbol_edge_proof", "family_global"],
+        default="symbol_edge_proof",
+        help="Sample scope for readiness/stall tracking.",
+    )
+    parser.add_argument(
+        "--lineage-families",
+        default="sweep_reversal",
+        help="Comma-separated lineage families to count when using family_global scope.",
+    )
+    parser.add_argument(
+        "--lineage-proof-goal-closed-trades",
+        type=int,
+        default=100,
+        help="Closed-trade goal for lineage sample readiness.",
+    )
+    parser.add_argument(
+        "--lineage-sample-days",
+        type=int,
+        default=180,
+        help="Lookback window for lineage family sample counting.",
+    )
     parser.add_argument("--alert-test-lookback-hours", type=int, default=24)
     parser.add_argument("--json", action="store_true", help="Print full JSON only.")
     parser.add_argument(
@@ -150,6 +174,98 @@ def _float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _family_set(raw: str | None) -> list[str]:
+    values = {item.strip().lower() for item in str(raw or "").split(",") if item.strip()}
+    return sorted(values)
+
+
+def _lineage_sample_summary(
+    *,
+    scope: str,
+    symbol: str,
+    edge_experiment_review: dict[str, Any] | None,
+    families: list[str],
+    proof_goal_closed_trades: int,
+    sample_days: int,
+) -> dict[str, Any]:
+    normalized_scope = str(scope or "symbol_edge_proof").strip().lower() or "symbol_edge_proof"
+    goal = max(int(proof_goal_closed_trades or 0), 0)
+    if normalized_scope != "family_global":
+        detail = _edge_experiment_detail_parts(edge_experiment_review or {})
+        closed_count = int(detail.get("closed_trade_count", 0) or 0)
+        summary = {
+            "scope": "symbol_edge_proof",
+            "symbol_filter": str(symbol or "").upper() or None,
+            "families": list(families),
+            "proof_goal_closed_trades": goal,
+            "closed_trade_count": closed_count,
+            "remaining_closed_trades_to_goal": max(goal - closed_count, 0),
+            "goal_ready": goal > 0 and closed_count >= goal,
+            "latest_closed_trade_at": None,
+        }
+        summary["summary"] = (
+            f"scope=symbol_edge_proof | symbol={summary['symbol_filter'] or 'n/a'} | "
+            f"closes={summary['closed_trade_count']}/{goal} | "
+            f"remaining={summary['remaining_closed_trades_to_goal']}"
+        )
+        return summary
+
+    from app.core.config import get_settings
+    from app.core.enums import PlanState
+    from app.db.models import Plan
+    from app.db.session import SessionLocal
+    from app.services.strategy_v2_validation import StrategyV2ValidationService
+
+    settings = get_settings()
+    validation = StrategyV2ValidationService(settings)
+    db = SessionLocal()
+    closed_count = 0
+    latest_closed_trade_at: str | None = None
+    try:
+        rows = (
+            db.query(Plan)
+            .filter(Plan.state == PlanState.CLOSED.value, Plan.strategy_version == settings.strategy_version)
+            .all()
+        )
+        cutoff = datetime.now(timezone.utc)
+        if sample_days > 0:
+            from datetime import timedelta
+
+            cutoff = cutoff - timedelta(days=max(1, int(sample_days)))
+        for row in rows:
+            validity = dict(getattr(row, "validity", {}) or {})
+            family = str(validity.get("strategy_family") or "").strip().lower()
+            if family not in families:
+                continue
+            closed_ts = validation._parse_ts(validity.get("final_exit_ts") or validity.get("last_exit_ts"))
+            if closed_ts is None or (sample_days > 0 and closed_ts < cutoff):
+                continue
+            closed_count += 1
+            if latest_closed_trade_at is None or closed_ts.isoformat() > latest_closed_trade_at:
+                latest_closed_trade_at = closed_ts.isoformat()
+    finally:
+        db.close()
+
+    summary = {
+        "scope": "family_global",
+        "symbol_filter": None,
+        "families": list(families),
+        "proof_goal_closed_trades": goal,
+        "closed_trade_count": closed_count,
+        "remaining_closed_trades_to_goal": max(goal - closed_count, 0),
+        "goal_ready": goal > 0 and closed_count >= goal,
+        "latest_closed_trade_at": latest_closed_trade_at,
+        "sample_days": int(max(1, sample_days)),
+    }
+    summary["summary"] = (
+        f"scope=family_global | families={','.join(summary['families']) or 'none'} | "
+        f"closes={summary['closed_trade_count']}/{goal} | "
+        f"remaining={summary['remaining_closed_trades_to_goal']} | "
+        f"lookback_days={summary['sample_days']}"
+    )
+    return summary
 
 
 def _edge_experiment_summary(
@@ -302,6 +418,19 @@ def _review_followup_summary_line(summary: dict[str, Any] | None) -> str:
     )
 
 
+def _lineage_sample_summary_line(summary: dict[str, Any] | None) -> str:
+    item = dict(summary or {})
+    if not item:
+        return "lineage_sample: unavailable"
+    families = ",".join(str(name) for name in (item.get("families") or []) if str(name).strip()) or "none"
+    return (
+        f"lineage_sample: scope={item.get('scope', 'unknown')} | "
+        f"families={families} | "
+        f"closes={int(item.get('closed_trade_count', 0) or 0)}/{int(item.get('proof_goal_closed_trades', 0) or 0)} | "
+        f"remaining={int(item.get('remaining_closed_trades_to_goal', 0) or 0)}"
+    )
+
+
 _LINEAGE_TARGET_FAMILIES = {"sweep_reversal", "trend_continuation"}
 
 
@@ -414,7 +543,15 @@ def _candidate_gate_ready(
     return False
 
 
-def _edge_sample_gate_ready(edge_experiment_review: dict[str, Any] | None) -> bool:
+def _edge_sample_gate_ready(
+    edge_experiment_review: dict[str, Any] | None,
+    lineage_sample_summary: dict[str, Any] | None = None,
+) -> bool:
+    lineage_summary = dict(lineage_sample_summary or {})
+    if lineage_summary:
+        proof_goal = int(lineage_summary.get("proof_goal_closed_trades", 0) or 0)
+        closed_count = int(lineage_summary.get("closed_trade_count", 0) or 0)
+        return proof_goal > 0 and closed_count >= proof_goal
     summary = dict(edge_experiment_review or {})
     if not summary:
         return False
@@ -432,6 +569,7 @@ def _readiness_gates(
     entry_timing_review_target: dict[str, Any] | None,
     execution_style_review_target: dict[str, Any] | None,
     edge_experiment_review: dict[str, Any] | None,
+    lineage_sample_summary: dict[str, Any] | None,
 ) -> dict[str, Any]:
     lineage_ready = _lineage_gate_ready(selected_trial_run_id, trial_runs_written)
     candidate_ready = _candidate_gate_ready(
@@ -439,7 +577,7 @@ def _readiness_gates(
         entry_timing_review_target,
         execution_style_review_target,
     )
-    edge_sample_ready = _edge_sample_gate_ready(edge_experiment_review)
+    edge_sample_ready = _edge_sample_gate_ready(edge_experiment_review, lineage_sample_summary)
     all_ready = lineage_ready and candidate_ready and edge_sample_ready
     return {
         "lineage_gate_ready": lineage_ready,
@@ -583,6 +721,10 @@ def _build_stage_payload(
     symbol: str = "BTCUSDC",
     universe: str = "usdc_perp_top30",
     days: int = 30,
+    lineage_sample_scope: str = "symbol_edge_proof",
+    lineage_families: str = "sweep_reversal",
+    lineage_proof_goal_closed_trades: int = 100,
+    lineage_sample_days: int = 180,
 ) -> dict[str, Any]:
     deployment = validation_report.get("deployment_approval_summary") or {}
     trial_writer_summary = validation_report.get("strategy_v2_pbo_dsr_trial_writer_summary") or {}
@@ -596,6 +738,14 @@ def _build_stage_payload(
     edge_experiment_review = _edge_experiment_summary(validation_report, dashboard)
     edge_evolution_rule = _edge_evolution_summary(validation_report, dashboard)
     review_followup_ledger = _review_followup_summary(validation_report, dashboard)
+    lineage_sample_summary = _lineage_sample_summary(
+        scope=lineage_sample_scope,
+        symbol=symbol,
+        edge_experiment_review=edge_experiment_review,
+        families=_family_set(lineage_families),
+        proof_goal_closed_trades=lineage_proof_goal_closed_trades,
+        sample_days=lineage_sample_days,
+    )
     representative_candidates = _representative_candidates(dashboard)
     entry_timing_review_target = _experiment_review_target(
         operator_action_priority,
@@ -616,6 +766,7 @@ def _build_stage_payload(
 
     stage = _stage_from_payload(validation_report, checklist, dashboard)
     payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "stage": stage,
         "close_only_active": _active_close_only(dashboard),
         "playbook_go_no_go": deployment.get("playbook_go_no_go"),
@@ -633,6 +784,7 @@ def _build_stage_payload(
         "edge_experiment_review": edge_experiment_review,
         "edge_evolution_rule": edge_evolution_rule,
         "review_followup_ledger": review_followup_ledger,
+        "lineage_sample_summary": lineage_sample_summary,
         "entry_timing_review_target": entry_timing_review_target,
         "execution_style_review_target": execution_style_review_target,
         "representative_candidates": representative_candidates,
@@ -649,6 +801,7 @@ def _build_stage_payload(
         entry_timing_review_target=entry_timing_review_target,
         execution_style_review_target=execution_style_review_target,
         edge_experiment_review=edge_experiment_review,
+        lineage_sample_summary=lineage_sample_summary,
     )
     payload["lineage_gate_ready"] = bool(payload["readiness_gates"]["lineage_gate_ready"])
     payload["candidate_gate_ready"] = bool(payload["readiness_gates"]["candidate_gate_ready"])
@@ -670,6 +823,7 @@ def _print_human(payload: dict[str, Any]) -> None:
     print(_edge_experiment_summary_line(payload.get("edge_experiment_review")))
     print(_edge_evolution_summary_line(payload.get("edge_evolution_rule")))
     print(_review_followup_summary_line(payload.get("review_followup_ledger")))
+    print(_lineage_sample_summary_line(payload.get("lineage_sample_summary")))
     print(_experiment_review_target_line("entry_timing_review_target", payload.get("entry_timing_review_target")))
     print(_experiment_review_target_line("execution_style_review_target", payload.get("execution_style_review_target")))
     representative_candidates = payload.get("representative_candidates") or {}
@@ -728,6 +882,10 @@ def main() -> int:
         symbol=args.symbol,
         universe=args.universe,
         days=args.days,
+        lineage_sample_scope=args.lineage_sample_scope,
+        lineage_families=args.lineage_families,
+        lineage_proof_goal_closed_trades=args.lineage_proof_goal_closed_trades,
+        lineage_sample_days=args.lineage_sample_days,
     )
     if not args.no_write_stage:
         _write_stage_file(Path(args.stage_file).resolve(), payload)

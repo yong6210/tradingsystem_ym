@@ -454,6 +454,8 @@ class ExecutionPlanningService:
                 override_reason = "paper lineage override bypassed thesis active-cap block for eligible A-grade PAPER sampling."
             else:
                 override_reason = "paper lineage override bypassed thesis duplicate block for eligible A-grade PAPER sampling."
+        paper_lineage_sampling_mode = override_applied and requested_mode == ExecutionMode.PAPER
+        lineage_override_extra_reasons: list[dict[str, Any]] = []
 
         effective_block_reason = "" if override_applied else block_reason
         effective_block_reason_message = "" if override_applied else block_reason_message
@@ -465,6 +467,7 @@ class ExecutionPlanningService:
             applied_penalty = dict(outcome_approval_penalty or {})
             if (
                 state == ApprovalState.APPROVED_AUTO
+                and not paper_lineage_sampling_mode
                 and applied_penalty
                 and bool(applied_penalty.get("available"))
                 and str(applied_penalty.get("penalty_tier") or "") == "downgrade_to_manual"
@@ -564,16 +567,32 @@ class ExecutionPlanningService:
                 effective_message,
             )
         if symbol and self.allowed_symbols() and symbol not in self.allowed_symbols():
-            return result(
-                ApprovalState.BLOCKED,
-                "symbol_not_live_enabled",
-                f"{symbol} is not in the current auto-trading allowlist.",
+            if not paper_lineage_sampling_mode:
+                return result(
+                    ApprovalState.BLOCKED,
+                    "symbol_not_live_enabled",
+                    f"{symbol} is not in the current auto-trading allowlist.",
+                )
+            lineage_override_extra_reasons.append(
+                {
+                    "code": "paper_lineage_override_bypassed_symbol_allowlist",
+                    "message": f"PAPER lineage sampling bypassed the auto-trading symbol allowlist for {symbol}.",
+                    "blocking": False,
+                }
             )
         if family and self.allowed_families() and family not in self.allowed_families():
-            return result(
-                ApprovalState.BLOCKED,
-                "family_not_live_enabled",
-                f"{family} is not in the current auto-trading family allowlist.",
+            if not paper_lineage_sampling_mode:
+                return result(
+                    ApprovalState.BLOCKED,
+                    "family_not_live_enabled",
+                    f"{family} is not in the current auto-trading family allowlist.",
+                )
+            lineage_override_extra_reasons.append(
+                {
+                    "code": "paper_lineage_override_bypassed_family_allowlist",
+                    "message": f"PAPER lineage sampling bypassed the auto-trading family allowlist for {family}.",
+                    "blocking": False,
+                }
             )
         if executable_plan.get("strategy_mode") == "RESEARCH":
             return result(
@@ -600,10 +619,18 @@ class ExecutionPlanningService:
                 f"Current session {session_name} is outside the allowed rollout sessions for {family}.",
             )
         if self.settings.auto_trading_require_validation_go and metrics_recommendation == "do-not-deploy":
-            return result(
-                ApprovalState.BLOCKED,
-                "validation_do_not_deploy",
-                "Validation recommendation is do-not-deploy.",
+            if not paper_lineage_sampling_mode:
+                return result(
+                    ApprovalState.BLOCKED,
+                    "validation_do_not_deploy",
+                    "Validation recommendation is do-not-deploy.",
+                )
+            lineage_override_extra_reasons.append(
+                {
+                    "code": "paper_lineage_override_bypassed_validation_do_not_deploy",
+                    "message": "PAPER lineage sampling bypassed the validation do-not-deploy gate while edge proof remains in sample-building mode.",
+                    "blocking": False,
+                }
             )
         if requested_mode in {ExecutionMode.LIVE, ExecutionMode.MICRO_LIVE} and not rollout_policy.live_enabled:
             return result(
@@ -706,11 +733,25 @@ class ExecutionPlanningService:
                     "blocking": False,
                 }
             )
+        extra_reasons.extend(lineage_override_extra_reasons)
         if requested_mode_exceeds_cap and not strict_requested_mode:
             extra_reasons.append(
                 {
                     "code": "rollout_mode_capped",
                     "message": f"Requested/global mode was capped to {allowed_execution_mode.value} by family rollout policy.",
+                    "blocking": False,
+                }
+            )
+        if (
+            paper_lineage_sampling_mode
+            and outcome_approval_penalty
+            and bool(outcome_approval_penalty.get("available"))
+            and str(outcome_approval_penalty.get("penalty_tier") or "") == "downgrade_to_manual"
+        ):
+            extra_reasons.append(
+                {
+                    "code": "paper_lineage_override_retained_paper_auto_submit",
+                    "message": "PAPER lineage sampling kept auto-submit eligibility despite live-entry outcome penalties.",
                     "blocking": False,
                 }
             )

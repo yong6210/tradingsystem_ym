@@ -9,6 +9,14 @@
   <array>
     <string>/Users/yumin/Documents/trading/.venv/bin/python</string>
     <string>/Users/yumin/Documents/trading/scripts/stage_monitor_tick.py</string>
+    <string>--lineage-sample-scope</string>
+    <string>family_global</string>
+    <string>--lineage-families</string>
+    <string>sweep_reversal,trend_continuation</string>
+    <string>--lineage-proof-goal-closed-trades</string>
+    <string>100</string>
+    <string>--lineage-sample-days</string>
+    <string>180</string>
   </array>
 
   <key>WorkingDirectory</key>

@@ -641,6 +641,117 @@ def test_trend_continuation_strategy_family_fields_are_written(monkeypatch) -> N
     assert validity["strategy_scorecard_trendline_bonus"] == 0.0
 
 
+def test_legacy_plan_preserves_router_reason_when_family_is_none(monkeypatch) -> None:
+    generator = PlanGenerator()
+    zones = [
+        _base_zone(zone_id="z_legacy_reason", zone_type="OB", dir_bias="support", low=98.9, high=99.1, mid=99.0),
+        _base_zone(zone_id="z_target", zone_type="LP", dir_bias="resistance", low=101.7, high=102.1, mid=101.9, stats={}),
+    ]
+    context = ContextSnapshot(
+        symbol="BTCUSDC",
+        regime_15m=0.48,
+        jump_rate_5m=0.06,
+        friction_5m=0.10,
+        atr5=0.45,
+        atr15=0.9,
+        sdir=0.2,
+        sevt=-0.05,
+        f=0.1,
+        v=0.15,
+        a=0.04,
+        vz=0.2,
+        az=0.1,
+        last_price=99.02,
+        regime_label="range",
+    )
+    monkeypatch.setattr(
+        generator.reaction_classifier,
+        "classify_zone",
+        lambda **kwargs: AcceptanceRejectionResult(
+            available=False,
+            classification="not_applicable",
+            rejection_score=0.0,
+            acceptance_score=0.0,
+            rejection_hard_count=0,
+            acceptance_hard_count=0,
+            mixed_reasons=[],
+            input={},
+        ),
+    )
+    monkeypatch.setattr(
+        generator.strategy_family_router,
+        "route",
+        lambda **kwargs: StrategyFamilyDecision(
+            available=False,
+            family="none",
+            grade="F",
+            score=0.0,
+            reason="trend_continuation_not_applicable",
+            entry_model=None,
+        ),
+    )
+    monkeypatch.setattr(
+        generator,
+        "_meta_filter",
+        lambda **kwargs: (True, 60.0, 40.0, "pass"),
+    )
+    monkeypatch.setattr(
+        generator,
+        "_generic_setup_block_reason",
+        lambda **kwargs: None,
+    )
+
+    ranked = generator.generate(symbol="BTCUSDC", zones=zones, context=context, candles_5m=_trend_candles())
+    assert ranked
+    validity = dict(ranked[0].plan.validity or {})
+    assert validity["strategy_family"] == "legacy_zone_plan"
+    assert validity["strategy_family_reason"] == "trend_continuation_not_applicable"
+
+
+def test_generation_diagnostics_reports_low_confluence_hard_gate(monkeypatch) -> None:
+    generator = PlanGenerator()
+    zones = [
+        _base_zone(zone_id="z_diag_1", zone_type="LP", dir_bias="support", low=98.9, high=99.1, mid=99.0),
+        _base_zone(zone_id="z_diag_2", zone_type="OB", dir_bias="resistance", low=100.9, high=101.1, mid=101.0),
+    ]
+    context = ContextSnapshot(
+        symbol="BTCUSDC",
+        regime_15m=0.72,
+        jump_rate_5m=0.04,
+        friction_5m=0.10,
+        atr5=0.45,
+        atr15=0.9,
+        sdir=0.1,
+        sevt=0.0,
+        f=0.1,
+        v=0.12,
+        a=0.03,
+        vz=0.2,
+        az=0.1,
+        last_price=100.0,
+        regime_label="transition",
+        transition_score=64.0,
+        transition_state="transition_confirmed",
+        transition_lock_reason="transition_hard_override_state_disagreement",
+    )
+    monkeypatch.setattr(
+        generator,
+        "_confluence_score",
+        lambda *args, **kwargs: (55.0, {}, {}, {}, 1.0),
+    )
+
+    payload = generator.generation_diagnostics(symbol="BTCUSDC", zones=zones, context=context, candles_5m=_trend_candles())
+
+    assert payload["generation_state"] == "diagnosed"
+    assert payload["regime_profile"] == "transition"
+    assert payload["active_zone_count"] == 2
+    assert payload["post_hard_gate_zone_count"] == 0
+    assert payload["pre_generation_candidate_count"] == 0
+    assert payload["hard_gate_block_counts"] == {"low_confluence": 2}
+    assert payload["block_examples"][0]["stage"] == "hard_gate"
+    assert payload["block_examples"][0]["reason"] == "low_confluence"
+
+
 def test_range_rotation_research_only_candidate_is_blocked(monkeypatch) -> None:
     generator = PlanGenerator()
     zones = [

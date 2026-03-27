@@ -4,8 +4,8 @@
 It wraps `watch_paper_candidate_drill.py` in a single-tick process so `NO_ELIGIBLE_CANDIDATE` is treated as a healthy idle outcome instead of a failing automation run.
 
 Current defaults:
-- family scope: `sweep_reversal`
-- symbol pin: `BTCUSDC`
+- family scope: `sweep_reversal`, `trend_continuation`
+- symbol pin: none
 - universe: `usdc_perp_top30`
 - cadence: every 15 minutes
 - behavior: if an eligible candidate appears, submit it via `PAPER`
@@ -64,7 +64,7 @@ launchctl bootout gui/$(id -u)/com.yumin.trading.paper-lineage-watch
   - watcher found no eligible candidate.
 
 This automation does not replace stage readiness alerts.
-It exists to keep accumulating lineage closes so the stage monitor can eventually flip:
+It exists to keep accumulating universe-wide lineage closes so the stage monitor can eventually flip:
 - `lineage_gate_ready`
 - `candidate_gate_ready`
 - `edge_sample_gate_ready`
