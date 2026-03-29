@@ -46,6 +46,22 @@ class ScoreToOutcomeFunnelService:
         return str(((row.get("session_guidance") or {}).get("state")) or "unknown")
 
     @staticmethod
+    def _submission_session_state(submission: OrderSubmission | None) -> str:
+        if submission is None:
+            return ""
+        attachments = dict(getattr(submission, "attachments", {}) or {})
+        raw = dict(getattr(submission, "raw", {}) or {})
+        for payload in (
+            dict(attachments.get("session_guidance") or {}),
+            dict(raw.get("session_guidance") or {}),
+            dict((raw.get("intent_snapshot") or {}).get("session_guidance") or {}),
+        ):
+            state = str(payload.get("state") or payload.get("session_name") or "").strip()
+            if state:
+                return state
+        return ""
+
+    @staticmethod
     def _plan_family(plan: Plan | None) -> str:
         validity = dict(getattr(plan, "validity", {}) or {})
         return str(validity.get("strategy_family") or "unknown")
@@ -114,9 +130,12 @@ class ScoreToOutcomeFunnelService:
             return self.validation._session_bucket(closed_record.closed_ts)
 
         if submission is not None:
-            state = str(((submission.session_guidance or {}).get("state")) or "").strip()
+            state = self._submission_session_state(submission)
             if state:
                 return state
+            submitted_at = getattr(submission, "submitted_at", None) or getattr(submission, "created_at", None)
+            if submitted_at is not None:
+                return self.validation._session_bucket(submitted_at)
 
         valid_from = getattr(plan, "valid_from", None)
         if valid_from is not None:

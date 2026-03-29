@@ -6,11 +6,12 @@ from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
 from app.core.enums import ExecutionMode, OrderLifecycleState, RiskGateState
-from app.db.models import BinanceOrderLedger, BinancePositionSnapshot, OrderIntent, OrderSubmission, Plan
+from app.db.models import BinanceOrderLedger, BinancePositionSnapshot, Candle, ExecutionFill, OrderIntent, OrderSubmission, Plan
 from app.db.repositories import (
     FamilyRolloutPolicyRepository,
     OrderIntentRepository,
     OrderSubmissionRepository,
+    PlanRepository,
     SafetyLockRepository,
 )
 from app.db.session import SessionLocal, init_db
@@ -240,6 +241,142 @@ def test_order_intent_and_paper_submit_flow_updates_position_state(monkeypatch) 
         refreshed = db.get(Plan, plan_id)
         assert refreshed is not None
         assert refreshed.state == "ENTERED"
+
+
+def test_paper_exit_tick_closes_filled_paper_positions_on_targets(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+
+    symbol = f"PEXIT{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 2}USDC"
+    plan_id = f"{symbol}_plan"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, state="ENTERED")
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with SessionLocal() as db:
+        db.add(
+            OrderSubmission(
+                submission_id=f"sub_{symbol}",
+                intent_id=f"intent_{symbol}",
+                plan_id=plan_id,
+                symbol=symbol,
+                client_order_id=f"client_{symbol}",
+                exchange_order_id=f"paper_{symbol}",
+                state=OrderLifecycleState.FILLED.value,
+                submit_status="FILLED",
+                message="paper filled",
+                adapter="paper",
+                execution_mode="PAPER",
+                attachments={},
+                side="BUY",
+                order_type="LIMIT",
+                reduce_only=False,
+                requested_live=False,
+                raw={},
+                submitted_at=now,
+                acknowledged_at=now,
+            )
+        )
+        db.add(
+            Candle(
+                symbol=symbol,
+                timeframe="1m",
+                ts=now,
+                o=100.0,
+                h=103.5,
+                l=99.5,
+                c=103.1,
+                v=1000.0,
+                source="test",
+                is_final=True,
+            )
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        payload = engine.process_paper_exit_tick(
+            families=["sweep_reversal"],
+            days=2,
+            limit=20,
+            sync_candles=False,
+            limit_1m=1,
+            limit_5m=1,
+        )
+        assert payload["paper_candidate_plans"] >= 1
+        assert payload["partial_exit_events"] == 2
+        assert payload["closed_events"] == 1
+
+    with SessionLocal() as db:
+        refreshed = db.get(Plan, plan_id)
+        assert refreshed is not None
+        assert refreshed.state == "CLOSED"
+        validity = dict(refreshed.validity or {})
+        assert validity["final_exit_reason"] == "target_tp3"
+        fills = (
+            db.query(ExecutionFill)
+            .filter(ExecutionFill.plan_id == plan_id)
+            .order_by(ExecutionFill.fill_ts.asc())
+            .all()
+        )
+        assert [fill.stage for fill in fills] == ["PARTIAL_EXIT", "PARTIAL_EXIT", "CLOSED"]
+
+
+def test_plan_upsert_preserves_entered_plan_history_by_rolling_plan_id() -> None:
+    init_db()
+    symbol = f"PCOLL{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 3}USDC"
+    plan_id = f"{symbol}_plan"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, state="ENTERED")
+
+    with SessionLocal() as db:
+        repo = PlanRepository(db)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        repo.upsert_many(
+            [
+                Plan(
+                    plan_id=plan_id,
+                    zone_id=f"{symbol}_z1",
+                    symbol=symbol,
+                    timeframe="5m",
+                    direction="long",
+                    entry_model="CONFIRM",
+                    entry_price=101.0,
+                    entry_condition="refresh",
+                    sl=99.0,
+                    tp1=102.0,
+                    tp2=103.0,
+                    tp3=104.0,
+                    split={"tp1": 0.5, "tp2": 0.3, "runner": 0.2},
+                    rr_min=1.0,
+                    rr_base=1.5,
+                    rr_opt=2.0,
+                    ev=0.2,
+                    cost_est=0.05,
+                    confidence=0.7,
+                    validity={
+                        "strategy_family": "legacy_zone_plan",
+                        "strategy_family_reason": "trend_continuation_not_applicable",
+                    },
+                    state="PLANNED",
+                    valid_from=now,
+                    valid_until=now + timedelta(hours=2),
+                    strategy_version="v1",
+                )
+            ]
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        original = db.get(Plan, plan_id)
+        assert original is not None
+        assert original.state == "ENTERED"
+        rows = db.query(Plan).filter(Plan.symbol == symbol).order_by(Plan.valid_from.asc()).all()
+        assert len(rows) == 2
+        rolled = next(row for row in rows if row.plan_id != plan_id)
+        assert rolled.state == "PLANNED"
+        assert rolled.plan_id.startswith(plan_id[: min(len(plan_id), 40)])
+        validity = dict(rolled.validity or {})
+        assert validity["supersedes_plan_id"] == plan_id
+        assert validity["collision_preserved_existing_state"] == "ENTERED"
 
 
 def test_execution_candidate_rows_apply_outcome_sizing_clamp(monkeypatch) -> None:
@@ -631,6 +768,16 @@ def test_paper_lineage_override_bypasses_allowlist_and_validation_for_paper_samp
     intent_payload = intent.json()
     assert intent_payload["submit_decision"] == "SUBMIT"
     assert intent_payload["paper_lineage_override_applied"] is True
+
+    submit = client.post(
+        "/execution/submit",
+        json={"intent_id": intent_payload["intent_id"], "live": False, "paper_scenario": "fill"},
+    )
+    assert submit.status_code == 200
+    submit_payload = submit.json()
+    assert submit_payload["adapter"] == "paper"
+    assert submit_payload["state"] == "FILLED"
+    assert submit_payload["submit_status"] == "FILLED"
 
 
 def test_live_submit_requires_global_live_enable_even_when_intent_is_ready(monkeypatch) -> None:

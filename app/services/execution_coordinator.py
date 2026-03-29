@@ -158,7 +158,7 @@ class ExecutionCoordinator:
         plan_repo: PlanRepository,
         intent_repo: OrderIntentRepository,
         submission_repo: OrderSubmissionRepository,
-        approval_loader: Callable[[str, ExecutionMode], dict],
+        approval_loader: Callable[[str, ExecutionMode, bool], dict],
         fill_ingest: Callable[..., dict],
         live_submitter: Callable[..., dict],
         settings: Settings | None = None,
@@ -213,8 +213,12 @@ class ExecutionCoordinator:
             side="BUY" if str(plan.direction).lower() == "long" else "SELL",
             order_type="LIMIT" if str(plan.entry_model).upper() == "LIMIT" else "MARKET",
             requested_live=False,
-            attachments={},
-            raw={"rejected": True, "submit_status": submit_status},
+            attachments={"session_guidance": dict(intent.session_guidance or {})},
+            raw={
+                "rejected": True,
+                "submit_status": submit_status,
+                "intent_snapshot": {"session_guidance": dict(intent.session_guidance or {})},
+            },
         )
         self.submission_repo.add(row)
         return row
@@ -239,7 +243,12 @@ class ExecutionCoordinator:
 
         requested_mode = ExecutionPlanningService.coerce_execution_mode(intent.execution_mode)
         client_order_id = self._client_order_id(intent.intent_id)
-        approval_bundle = self.approval_loader(plan.plan_id, requested_mode)
+        paper_lineage_override = bool(dict(intent.approval_snapshot or {}).get("paper_lineage_override_applied"))
+        approval_bundle = self.approval_loader(
+            plan.plan_id,
+            requested_mode,
+            paper_lineage_override=paper_lineage_override,
+        )
         approval = dict(approval_bundle["approval"])
         approval_state = ApprovalState(str(approval.get("approval_state") or ApprovalState.BLOCKED.value))
 
@@ -318,8 +327,12 @@ class ExecutionCoordinator:
                 order_type=adapter_result.order_type,
                 reduce_only=adapter_result.reduce_only,
                 requested_live=False,
-                attachments=adapter_result.attachments,
-                raw={**adapter_result.raw, "fill_results": fill_results},
+                attachments={**adapter_result.attachments, "session_guidance": dict(intent.session_guidance or {})},
+                raw={
+                    **adapter_result.raw,
+                    "fill_results": fill_results,
+                    "intent_snapshot": {"session_guidance": dict(intent.session_guidance or {})},
+                },
                 submitted_at=datetime.now(timezone.utc),
                 acknowledged_at=adapter_result.acknowledged_at,
                 cancelled_at=adapter_result.cancelled_at,

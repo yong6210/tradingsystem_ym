@@ -528,6 +528,32 @@ def test_collect_events_emits_all_readiness_gate_event():
     assert "all_readiness_gates_ready" in event_types
 
 
+def test_collect_events_emits_lineage_sample_progress_event():
+    previous = {
+        "lineage_sample_summary": {
+            "scope": "family_global",
+            "families": ["sweep_reversal", "trend_continuation"],
+            "proof_goal_closed_trades": 100,
+            "closed_trade_count": 2,
+            "remaining_closed_trades_to_goal": 98,
+        }
+    }
+    current = {
+        "lineage_sample_summary": {
+            "scope": "family_global",
+            "families": ["sweep_reversal", "trend_continuation"],
+            "proof_goal_closed_trades": 100,
+            "closed_trade_count": 3,
+            "remaining_closed_trades_to_goal": 97,
+        }
+    }
+
+    events = notify_stage_change._collect_events(previous, current)
+    event_types = {event["type"] for event in events}
+
+    assert "lineage_sample_progressed" in event_types
+
+
 def test_collect_events_emits_edge_sample_stall_event():
     previous = {
         "edge_sample_stall": {

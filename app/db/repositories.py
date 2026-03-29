@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
+from uuid import uuid4
 
 from sqlalchemy import delete, desc, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -194,16 +195,45 @@ class ZoneRepository:
 
 
 class PlanRepository:
+    _REPLACEABLE_STATES = {
+        PlanState.PLANNED.value,
+        PlanState.ARMED.value,
+    }
+
     def __init__(self, db: Session):
         self.db = db
 
     def get(self, plan_id: str) -> Plan | None:
         return self.db.get(Plan, plan_id)
 
+    def _roll_plan_id_for_collision(self, plan: Plan, *, previous_plan_id: str, existing_state: str) -> Plan:
+        suffix = f"_r{uuid4().hex[:6]}"
+        base = str(previous_plan_id or plan.plan_id or "plan")
+        max_base_len = max(1, 50 - len(suffix))
+        next_plan_id = f"{base[:max_base_len]}{suffix}"
+        while self.db.get(Plan, next_plan_id) is not None:
+            suffix = f"_r{uuid4().hex[:6]}"
+            next_plan_id = f"{base[:max_base_len]}{suffix}"
+        validity = dict(plan.validity or {})
+        validity["supersedes_plan_id"] = previous_plan_id
+        validity["collision_preserved_existing_state"] = str(existing_state or "")
+        plan.plan_id = next_plan_id
+        plan.validity = validity
+        return plan
+
     def upsert_many(self, plans: Iterable[Plan]) -> None:
         for plan in plans:
             existing = self.db.get(Plan, plan.plan_id)
             if existing:
+                if str(existing.state or "") not in self._REPLACEABLE_STATES:
+                    self.db.add(
+                        self._roll_plan_id_for_collision(
+                            plan,
+                            previous_plan_id=str(existing.plan_id),
+                            existing_state=str(existing.state or ""),
+                        )
+                    )
+                    continue
                 for attr in (
                     "entry_price",
                     "entry_condition",

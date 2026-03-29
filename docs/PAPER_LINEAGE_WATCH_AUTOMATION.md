@@ -2,6 +2,7 @@
 
 `paper_lineage_watch_tick.py` is the unattended runner for lineage sample collection.
 It wraps `watch_paper_candidate_drill.py` in a single-tick process so `NO_ELIGIBLE_CANDIDATE` is treated as a healthy idle outcome instead of a failing automation run.
+The same tick now also runs `run_paper_exit_monitor.py`, so previously entered `PAPER` positions can emit `PARTIAL_EXIT` / `CLOSED` fills when TP, SL, or expiry conditions are reached.
 
 Current defaults:
 - family scope: `sweep_reversal`, `trend_continuation`
@@ -9,6 +10,7 @@ Current defaults:
 - universe: `usdc_perp_top30`
 - cadence: every 15 minutes
 - behavior: if an eligible candidate appears, submit it via `PAPER`
+- close handling: after each watch tick, evaluate open `PAPER` lineage positions for TP/SL/expiry exits
 
 ## Manual run
 
@@ -62,6 +64,10 @@ launchctl bootout gui/$(id -u)/com.yumin.trading.paper-lineage-watch
   - watcher found an eligible candidate.
 - `watch_process_return_code=1`
   - watcher found no eligible candidate.
+- `paper_exit_monitor.closed_events > 0`
+  - at least one open `PAPER` position closed during the same tick.
+- `paper_exit_monitor.partial_exit_events > 0`
+  - at least one open `PAPER` position advanced to a partial exit during the same tick.
 
 This automation does not replace stage readiness alerts.
 It exists to keep accumulating universe-wide lineage closes so the stage monitor can eventually flip:

@@ -110,6 +110,14 @@ def _edge_sample_stall_trigger(previous: dict[str, Any] | None, current: dict[st
     return not previous_active
 
 
+def _lineage_sample_progressed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    before = int(_lineage_sample_summary(previous).get("closed_trade_count", 0) or 0)
+    after = int(_lineage_sample_summary(current).get("closed_trade_count", 0) or 0)
+    return after > before
+
+
 def _surface_summary(payload: dict[str, Any] | None, key: str) -> dict[str, str]:
     summary = dict((payload or {}).get(key) or {})
     if summary:
@@ -585,6 +593,14 @@ def _collect_events(previous: dict[str, Any] | None, current: dict[str, Any]) ->
                 "type": "edge_sample_gate_ready",
                 "title": "Edge sample gate is ready",
                 "body": _readiness_gates_summary_line(current),
+            }
+        )
+    if _lineage_sample_progressed(previous, current):
+        events.append(
+            {
+                "type": "lineage_sample_progressed",
+                "title": "Lineage sample count increased",
+                "body": f"{_lineage_sample_summary_line(previous)} -> {_lineage_sample_summary_line(current)}",
             }
         )
     if _gate_flipped_ready(previous, current, "all_readiness_gates_ready"):

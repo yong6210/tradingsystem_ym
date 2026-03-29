@@ -1250,6 +1250,276 @@ class StrategyEngine:
         self.db.refresh(row)
         return self._submission_to_dict(row, fill_results=fill_results, idempotent_reuse=idempotent_reuse)
 
+    @staticmethod
+    def _paper_exit_price_tolerance(value: float) -> float:
+        return max(abs(float(value)) * 0.0005, 1e-6)
+
+    def _latest_paper_submission_for_plan(self, plan_id: str):
+        rows = self.submission_repo.list_for_plan(plan_id, limit=20)
+        for row in rows:
+            if str(row.adapter or "").lower() == "paper":
+                return row
+        return None
+
+    def _latest_paper_exit_candle(
+        self,
+        *,
+        symbol: str,
+        sync_candles: bool,
+        limit_1m: int,
+        limit_5m: int,
+    ):
+        if sync_candles:
+            try:
+                self.market_data.backfill_symbol_timeframes(
+                    symbol=symbol,
+                    limit_1m=max(1, int(limit_1m)),
+                    limit_5m=max(1, int(limit_5m)),
+                    limit_15m=0,
+                )
+            except Exception:
+                self.db.rollback()
+        for timeframe in ("1m", "5m"):
+            candles = self.market_data.recent_candles(symbol, timeframe, limit=1)
+            if candles:
+                return candles[-1], timeframe
+        return None, None
+
+    @staticmethod
+    def _paper_exit_split_weights(plan) -> dict[str, float]:
+        split = dict(plan.split or {})
+        weights = {
+            "tp1": max(float(split.get("tp1", 0.0) or 0.0), 0.0),
+            "tp2": max(float(split.get("tp2", 0.0) or 0.0), 0.0),
+            "runner": max(float(split.get("runner", 0.0) or 0.0), 0.0),
+        }
+        total = sum(weights.values())
+        if total <= 1e-9:
+            return {"tp1": 0.5, "tp2": 0.5, "runner": 0.0}
+        if abs(total - 1.0) <= 1e-6:
+            return weights
+        return {key: float(value / total) for key, value in weights.items()}
+
+    def _paper_exit_threshold_hits(self, *, plan, candle) -> dict[str, bool]:
+        high = float(candle.h)
+        low = float(candle.l)
+        direction = str(plan.direction or "").lower()
+        tolerance = self._paper_exit_price_tolerance
+        if direction == "short":
+            return {
+                "stop": high >= float(plan.sl) - tolerance(plan.sl),
+                "tp1": low <= float(plan.tp1) + tolerance(plan.tp1),
+                "tp2": low <= float(plan.tp2) + tolerance(plan.tp2),
+                "tp3": low <= float(plan.tp3) + tolerance(plan.tp3),
+            }
+        return {
+            "stop": low <= float(plan.sl) + tolerance(plan.sl),
+            "tp1": high >= float(plan.tp1) - tolerance(plan.tp1),
+            "tp2": high >= float(plan.tp2) - tolerance(plan.tp2),
+            "tp3": high >= float(plan.tp3) - tolerance(plan.tp3),
+        }
+
+    def process_paper_exit_tick(
+        self,
+        *,
+        families: list[str] | None = None,
+        days: int = 7,
+        limit: int = 200,
+        sync_candles: bool = True,
+        limit_1m: int = 3,
+        limit_5m: int = 3,
+    ) -> dict[str, Any]:
+        normalized_families = {str(item).strip().lower() for item in (families or []) if str(item).strip()}
+        plans = self.plan_repo.list_recent_global(
+            timeframe="5m",
+            days=max(1, int(days)),
+            states=[PlanState.ENTERED.value, PlanState.PARTIAL_EXIT.value],
+            limit=max(1, int(limit)),
+        )
+        summary: dict[str, Any] = {
+            "schema_version": "paper_exit_monitor_v1",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "families": sorted(normalized_families),
+            "processed_plans": 0,
+            "paper_candidate_plans": 0,
+            "entry_states_seen": 0,
+            "partial_exit_events": 0,
+            "closed_events": 0,
+            "skipped": 0,
+            "actions": [],
+        }
+        for plan in plans:
+            summary["processed_plans"] += 1
+            validity = dict(plan.validity or {})
+            family = str(validity.get("strategy_family") or "legacy_zone_plan").lower()
+            if normalized_families and family not in normalized_families:
+                summary["skipped"] += 1
+                continue
+            submission = self._latest_paper_submission_for_plan(plan.plan_id)
+            if submission is None or str(submission.adapter or "").lower() != "paper":
+                summary["skipped"] += 1
+                continue
+
+            summary["paper_candidate_plans"] += 1
+            candle, candle_timeframe = self._latest_paper_exit_candle(
+                symbol=plan.symbol,
+                sync_candles=sync_candles,
+                limit_1m=limit_1m,
+                limit_5m=limit_5m,
+            )
+            if candle is None:
+                summary["actions"].append(
+                    {
+                        "plan_id": plan.plan_id,
+                        "symbol": plan.symbol,
+                        "family": family,
+                        "status": "no_candle",
+                    }
+                )
+                continue
+
+            previous_fills = sorted(
+                self.fill_repo.list_for_plans(plan_ids=[plan.plan_id], symbol=plan.symbol),
+                key=lambda item: item.fill_ts,
+            )
+            exited_target_reasons = {
+                str((fill.payload or {}).get("exit_reason") or "")
+                for fill in previous_fills
+                if str(fill.stage) in {ExecutionFillStage.PARTIAL_EXIT.value, ExecutionFillStage.CLOSED.value}
+            }
+            exited_qty = sum(
+                max(float(fill.qty or 0.0), 0.0)
+                for fill in previous_fills
+                if str(fill.stage) == ExecutionFillStage.PARTIAL_EXIT.value
+            )
+            remaining_qty = max(0.0, 1.0 - exited_qty)
+            hits = self._paper_exit_threshold_hits(plan=plan, candle=candle)
+            fill_ts = candle.ts
+            candle_close = float(candle.c)
+            candle_ts_text = fill_ts.isoformat() if hasattr(fill_ts, "isoformat") else str(fill_ts)
+            summary["entry_states_seen"] += 1
+            actions_for_plan: list[dict[str, Any]] = []
+
+            def _record_fill(*, leg: str, stage: ExecutionFillStage, price: float, qty: float, exit_reason: str) -> None:
+                nonlocal remaining_qty, actions_for_plan
+                response = self.ingest_execution_fill(
+                    fill_id=f"paper_exit_{plan.plan_id}_{leg}",
+                    plan_id=plan.plan_id,
+                    symbol=plan.symbol,
+                    stage=stage,
+                    fill_ts=fill_ts,
+                    price=price,
+                    qty=max(float(qty), 0.0),
+                    fee=0.0,
+                    payload={
+                        "source": "paper_exit_monitor",
+                        "client_order_id": submission.client_order_id,
+                        "execution_adapter": "paper",
+                        "exit_reason": exit_reason,
+                        "remaining_qty": 0.0 if stage == ExecutionFillStage.CLOSED else max(remaining_qty - qty, 0.0),
+                        "notes": {
+                            "monitor": "paper_exit_monitor_v1",
+                            "candle_timeframe": candle_timeframe,
+                            "candle_ts": candle_ts_text,
+                        },
+                    },
+                )
+                remaining_qty = max(0.0, remaining_qty - qty)
+                actions_for_plan.append(
+                    {
+                        "plan_id": plan.plan_id,
+                        "symbol": plan.symbol,
+                        "family": family,
+                        "leg": leg,
+                        "stage": stage.value,
+                        "exit_reason": exit_reason,
+                        "price": float(price),
+                        "qty": round(float(qty), 4),
+                        "accepted": bool(response.get("accepted")),
+                        "duplicate": bool(response.get("duplicate")),
+                        "to_state": response.get("to_state"),
+                    }
+                )
+                if stage == ExecutionFillStage.CLOSED:
+                    summary["closed_events"] += 1
+                elif stage == ExecutionFillStage.PARTIAL_EXIT:
+                    summary["partial_exit_events"] += 1
+
+            if remaining_qty > 1e-10 and hits["stop"]:
+                _record_fill(
+                    leg="stop",
+                    stage=ExecutionFillStage.CLOSED,
+                    price=float(plan.sl),
+                    qty=remaining_qty,
+                    exit_reason="stop_loss",
+                )
+            else:
+                split = self._paper_exit_split_weights(plan)
+                if (
+                    remaining_qty > 1e-10
+                    and "target_tp1" not in exited_target_reasons
+                    and hits["tp1"]
+                    and split["tp1"] > 1e-10
+                ):
+                    tp1_qty = min(remaining_qty, split["tp1"])
+                    stage = ExecutionFillStage.CLOSED if remaining_qty - tp1_qty <= 1e-10 else ExecutionFillStage.PARTIAL_EXIT
+                    _record_fill(
+                        leg="tp1",
+                        stage=stage,
+                        price=float(plan.tp1),
+                        qty=tp1_qty,
+                        exit_reason="target_tp1",
+                    )
+                    exited_target_reasons.add("target_tp1")
+
+                if (
+                    remaining_qty > 1e-10
+                    and "target_tp2" not in exited_target_reasons
+                    and hits["tp2"]
+                    and split["tp2"] > 1e-10
+                ):
+                    tp2_qty = min(remaining_qty, split["tp2"])
+                    stage = ExecutionFillStage.CLOSED if remaining_qty - tp2_qty <= 1e-10 else ExecutionFillStage.PARTIAL_EXIT
+                    _record_fill(
+                        leg="tp2",
+                        stage=stage,
+                        price=float(plan.tp2),
+                        qty=tp2_qty,
+                        exit_reason="target_tp2",
+                    )
+                    exited_target_reasons.add("target_tp2")
+
+                if remaining_qty > 1e-10 and hits["tp3"]:
+                    _record_fill(
+                        leg="tp3",
+                        stage=ExecutionFillStage.CLOSED,
+                        price=float(plan.tp3),
+                        qty=remaining_qty,
+                        exit_reason="target_tp3",
+                    )
+                elif remaining_qty > 1e-10 and candle.ts >= plan.valid_until:
+                    _record_fill(
+                        leg="expiry",
+                        stage=ExecutionFillStage.CLOSED,
+                        price=candle_close,
+                        qty=remaining_qty,
+                        exit_reason="session_end_flatten",
+                    )
+
+            if not actions_for_plan:
+                actions_for_plan.append(
+                    {
+                        "plan_id": plan.plan_id,
+                        "symbol": plan.symbol,
+                        "family": family,
+                        "status": "holding",
+                        "candle_timeframe": candle_timeframe,
+                        "candle_ts": candle_ts_text,
+                    }
+                )
+            summary["actions"].extend(actions_for_plan)
+        return summary
+
     def reconcile_execution(self, *, symbol: str, auto_resolve: bool = False, apply_lock: bool = False) -> dict[str, Any]:
         result = self.execution_reconciliation.reconcile(
             symbol=symbol,

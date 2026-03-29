@@ -55,7 +55,13 @@ def test_main_treats_no_candidate_as_healthy_tick(monkeypatch, capsys, tmp_path)
     def _fake_parse_args():
         return args
 
-    def _fake_run(*_args, **_kwargs):
+    def _fake_run(cmd, *_args, **_kwargs):
+        if "run_paper_exit_monitor.py" in " ".join(str(item) for item in cmd):
+            return _CompletedProcess(
+                0,
+                stdout='{"processed_plans":1,"paper_candidate_plans":1,"partial_exit_events":0,"closed_events":1,"actions":[]}',
+                stderr="",
+            )
         return _CompletedProcess(
             1,
             stdout='{"overall_status":"NO_ELIGIBLE_CANDIDATE","summary_line":"no candidate","attempts_run":1}',
@@ -71,4 +77,5 @@ def test_main_treats_no_candidate_as_healthy_tick(monkeypatch, capsys, tmp_path)
     assert exit_code == 0
     assert '"tick_status": "no_eligible_candidate"' in captured.out
     assert '"treated_as_healthy_tick": true' in captured.out
+    assert '"closed_events": 1' in captured.out
     assert (tmp_path / "latest_launchd_run.json").exists()

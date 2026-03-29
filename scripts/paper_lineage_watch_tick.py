@@ -12,6 +12,7 @@ from typing import Any
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 WATCH_SCRIPT = ROOT_DIR / "scripts" / "watch_paper_candidate_drill.py"
+EXIT_SCRIPT = ROOT_DIR / "scripts" / "run_paper_exit_monitor.py"
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "reports" / "operations" / "paper_candidate_watch"
 
 
@@ -145,6 +146,15 @@ def _build_cmd(args: argparse.Namespace) -> list[str]:
     return cmd
 
 
+def _build_exit_cmd(args: argparse.Namespace) -> list[str]:
+    return [
+        sys.executable,
+        str(EXIT_SCRIPT),
+        "--families",
+        args.families,
+    ]
+
+
 def main() -> int:
     args = parse_args()
     completed = subprocess.run(
@@ -179,6 +189,25 @@ def main() -> int:
     payload["treated_as_healthy_tick"] = True
     payload["watch_process_return_code"] = completed.returncode
     payload["watch_process_stderr"] = completed.stderr.strip()
+
+    exit_completed = subprocess.run(
+        _build_exit_cmd(args),
+        cwd=ROOT_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if exit_completed.returncode != 0 or not exit_completed.stdout.strip():
+        raise RuntimeError(
+            f"paper exit monitor failed with code={exit_completed.returncode} stderr={exit_completed.stderr.strip()}"
+        )
+    try:
+        payload["paper_exit_monitor"] = json.loads(exit_completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"paper exit monitor returned invalid JSON stdout={exit_completed.stdout[:1000]} stderr={exit_completed.stderr.strip()}"
+        ) from exc
+    payload["paper_exit_monitor_stderr"] = exit_completed.stderr.strip()
 
     latest_run_file = Path(args.latest_run_file).resolve()
     _write_json(latest_run_file, payload)
