@@ -79,7 +79,12 @@ class MarketDataService:
                 "source": "binance",
                 "is_final": row.is_final,
             }
-            self.ingest_candle(payload)
+            try:
+                self.ingest_candle(payload)
+            except DataQualityError as exc:
+                if str(exc) == "reverse timestamp detected":
+                    continue
+                raise
             ingested += 1
             last_ts = self.quality_gate._as_utc(row.open_time)
         return ingested

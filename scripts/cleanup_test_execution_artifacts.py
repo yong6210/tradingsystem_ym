@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from collections import OrderedDict
+from pathlib import Path
 from typing import Iterable
 
 from sqlalchemy import delete, select
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from app.db.models import (
     AlertRetryTask,
@@ -29,9 +35,14 @@ from app.db.session import SessionLocal, init_db
 
 
 TEST_SYMBOL_PATTERNS = (
+    r"^DBG[A-Z0-9]+USDC$",
     r"^LOCKSYM[0-9]+USDC$",
     r"^LOCKGLB[0-9]+USDC$",
     r"^PAPER[0-9]+USDC$",
+    r"^PEXIT[0-9]+USDC$",
+    r"^PEXWAIT[0-9]+USDC$",
+    r"^PREENTRY[0-9]+USDC$",
+    r"^PRESUB[0-9]+USDC$",
     r"^RECON[0-9]+USDC$",
     r"^DEDUPE[0-9]+USDC$",
     r"^EXECPRE[0-9]+USDC$",
@@ -42,6 +53,8 @@ TEST_SYMBOL_PATTERNS = (
     r"^RO[0-9]+USDC$",
     r"^BUS[0-9]+USDC$",
     r"^PBOENGINE[0-9]+USDC$",
+    r"^PLALW[0-9]+USDC$",
+    r"^PLCF[0-9]+USDC$",
 )
 
 

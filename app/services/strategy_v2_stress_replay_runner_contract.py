@@ -67,6 +67,7 @@ class StrategyV2StressReplayRunnerContractService:
         for index, scenario in enumerate(self._SCENARIO_ORDER, start=1):
             status = dict(scenario_statuses.get(scenario) or {})
             if scenario == "shock_concentration":
+                prototype_ready = runtime_inputs_ready and shock_trades > 0 and self._float(coverage.get("candle_path_coverage")) >= min_path
                 ready = runtime_inputs_ready and shock_trades >= minimum and self._float(coverage.get("candle_path_coverage")) >= min_path
                 scenario_trades = shock_trades
                 required_inputs = [
@@ -78,6 +79,7 @@ class StrategyV2StressReplayRunnerContractService:
                     "ready" if ready else "shock_sample_or_candle_path_below_contract"
                 )
             elif scenario == "latency_plus_1_bar":
+                prototype_ready = runtime_inputs_ready and latency_trades > 0 and self._float(coverage.get("latency_candle_coverage")) >= min_latency
                 ready = runtime_inputs_ready and latency_trades >= minimum and self._float(coverage.get("latency_candle_coverage")) >= min_latency
                 scenario_trades = latency_trades
                 required_inputs = [
@@ -87,6 +89,7 @@ class StrategyV2StressReplayRunnerContractService:
                 ]
                 gating_reason = "ready" if ready else "latency_reference_coverage_below_contract"
             else:
+                prototype_ready = runtime_inputs_ready and full_fill_trades > 0 and self._float(fill_path.get("full_fill_path_coverage")) >= min_exec
                 ready = runtime_inputs_ready and full_fill_trades >= minimum and self._float(fill_path.get("full_fill_path_coverage")) >= min_exec
                 scenario_trades = full_fill_trades
                 required_inputs = [
@@ -105,6 +108,7 @@ class StrategyV2StressReplayRunnerContractService:
             rows[scenario] = {
                 "priority_rank": index,
                 "ready": ready,
+                "prototype_ready": prototype_ready,
                 "gating_reason": gating_reason,
                 "scenario_status": str(status.get("status", "UNKNOWN")),
                 "scenario_reason": str(status.get("reason", "not_available")),
@@ -138,6 +142,9 @@ class StrategyV2StressReplayRunnerContractService:
         true_runner_ready = bool(true_runner_readiness.get("true_runner_ready", False))
 
         ready_scenarios = [name for name, row in scenario_contract.items() if bool(row.get("ready", False))]
+        prototype_ready_scenarios = [
+            name for name, row in scenario_contract.items() if bool(row.get("prototype_ready", False))
+        ]
         blocked_scenarios = [name for name, row in scenario_contract.items() if not bool(row.get("ready", False))]
         total_jobs = sum(self._int(row.get("suggested_job_count")) for row in scenario_contract.values() if bool(row.get("ready", False)))
 
@@ -157,10 +164,20 @@ class StrategyV2StressReplayRunnerContractService:
             next_steps.append("close runtime lineage gaps before creating replay batches")
         elif not full_replay_ready:
             blocked_by.append("full_replay_not_ready")
-            implementation_status = "runner_contract_defined_waiting_for_upgrade_signal"
-            reason = "stress_replay_upgrade_not_ready"
-            runtime_job_ready = False
-            next_steps.append("keep approximation live and revisit replay once stress evidence accumulates")
+            runtime_job_ready = bool(prototype_ready_scenarios)
+            if runtime_job_ready:
+                implementation_status = "runner_contract_defined_ready_for_prototype"
+                reason = "stress_replay_prototype_ready"
+                next_steps.extend(
+                    [
+                        "materialize prototype replay outputs for currently covered scenarios",
+                        "keep approximation live while replay-backed downside evidence accumulates",
+                    ]
+                )
+            else:
+                implementation_status = "runner_contract_defined_waiting_for_upgrade_signal"
+                reason = "stress_replay_upgrade_not_ready"
+                next_steps.append("keep approximation live and revisit replay once stress evidence accumulates")
         else:
             if true_runner_ready:
                 implementation_status = "runner_contract_defined_ready_for_true_market_runner"
@@ -197,6 +214,7 @@ class StrategyV2StressReplayRunnerContractService:
             "replacement_recommended": replacement_recommended,
             "priority": priority,
             "ready_scenarios": ready_scenarios,
+            "prototype_ready_scenarios": prototype_ready_scenarios,
             "blocked_scenarios": blocked_scenarios,
             "suggested_total_jobs": total_jobs,
         }

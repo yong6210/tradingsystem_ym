@@ -155,6 +155,22 @@ def _build_exit_cmd(args: argparse.Namespace) -> list[str]:
     ]
 
 
+def _active_sample_duplicate_hold(payload: dict[str, Any]) -> bool:
+    source = dict(payload or {})
+    final_result = dict(source.get("final_result") or {})
+    candidate = dict(source.get("candidate") or final_result.get("candidate") or {})
+    intent = dict(source.get("intent") or final_result.get("intent") or {})
+    if not candidate or not intent:
+        return False
+    submit_decision = str(intent.get("submit_decision") or "").strip().upper()
+    reason_code = str(intent.get("decision_reason_code") or "").strip().lower()
+    reason_message = str(intent.get("decision_reason_message") or "").strip().lower()
+    if submit_decision == "SUBMIT":
+        return False
+    duplicate_reason = "duplicate" in reason_code or "duplicate thesis detected against active plan" in reason_message
+    return duplicate_reason and bool(candidate.get("symbol"))
+
+
 def main() -> int:
     args = parse_args()
     completed = subprocess.run(
@@ -181,11 +197,13 @@ def main() -> int:
             f"paper lineage watch failed with code={completed.returncode} stderr={completed.stderr.strip()}"
         )
 
+    duplicate_hold = _active_sample_duplicate_hold(payload)
     payload["tick_status"] = (
-        "found_eligible_candidate"
-        if completed.returncode == 0
-        else "no_eligible_candidate"
+        "active_sample_already_in_progress"
+        if duplicate_hold
+        else ("found_eligible_candidate" if completed.returncode == 0 else "no_eligible_candidate")
     )
+    payload["active_sample_duplicate_hold"] = duplicate_hold
     payload["treated_as_healthy_tick"] = True
     payload["watch_process_return_code"] = completed.returncode
     payload["watch_process_stderr"] = completed.stderr.strip()

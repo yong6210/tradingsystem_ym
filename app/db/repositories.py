@@ -199,6 +199,13 @@ class PlanRepository:
         PlanState.PLANNED.value,
         PlanState.ARMED.value,
     }
+    _ROUTED_SUBMISSION_STATES = {
+        "CREATED",
+        "SUBMITTED",
+        "ACKNOWLEDGED",
+        "PARTIALLY_FILLED",
+        "FILLED",
+    }
 
     def __init__(self, db: Session):
         self.db = db
@@ -206,7 +213,14 @@ class PlanRepository:
     def get(self, plan_id: str) -> Plan | None:
         return self.db.get(Plan, plan_id)
 
-    def _roll_plan_id_for_collision(self, plan: Plan, *, previous_plan_id: str, existing_state: str) -> Plan:
+    def _roll_plan_id_for_collision(
+        self,
+        plan: Plan,
+        *,
+        previous_plan_id: str,
+        existing_state: str,
+        collision_artifact: str | None = None,
+    ) -> Plan:
         suffix = f"_r{uuid4().hex[:6]}"
         base = str(previous_plan_id or plan.plan_id or "plan")
         max_base_len = max(1, 50 - len(suffix))
@@ -217,20 +231,44 @@ class PlanRepository:
         validity = dict(plan.validity or {})
         validity["supersedes_plan_id"] = previous_plan_id
         validity["collision_preserved_existing_state"] = str(existing_state or "")
+        if collision_artifact:
+            validity["collision_preserved_existing_artifact"] = str(collision_artifact)
         plan.plan_id = next_plan_id
         plan.validity = validity
         return plan
+
+    def _existing_plan_has_lifecycle_artifacts(self, plan_id: str) -> str | None:
+        fill_stmt = select(ExecutionFill.fill_id).where(ExecutionFill.plan_id == plan_id).limit(1)
+        if self.db.scalar(fill_stmt) is not None:
+            return "execution_fill"
+
+        submission_stmt = (
+            select(OrderSubmission.submission_id)
+            .where(
+                OrderSubmission.plan_id == plan_id,
+                OrderSubmission.adapter != "none",
+                OrderSubmission.state.in_(self._ROUTED_SUBMISSION_STATES),
+            )
+            .limit(1)
+        )
+        if self.db.scalar(submission_stmt) is not None:
+            return "routed_submission"
+        return None
 
     def upsert_many(self, plans: Iterable[Plan]) -> None:
         for plan in plans:
             existing = self.db.get(Plan, plan.plan_id)
             if existing:
-                if str(existing.state or "") not in self._REPLACEABLE_STATES:
+                collision_artifact = None
+                if str(existing.state or "") in self._REPLACEABLE_STATES:
+                    collision_artifact = self._existing_plan_has_lifecycle_artifacts(str(existing.plan_id or ""))
+                if str(existing.state or "") not in self._REPLACEABLE_STATES or collision_artifact:
                     self.db.add(
                         self._roll_plan_id_for_collision(
                             plan,
                             previous_plan_id=str(existing.plan_id),
                             existing_state=str(existing.state or ""),
+                            collision_artifact=collision_artifact,
                         )
                     )
                     continue

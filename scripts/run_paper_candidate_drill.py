@@ -385,7 +385,7 @@ def _strategy_grade(row: dict[str, Any]) -> str:
     ).upper()
 
 
-def _choose_candidate(rows: list[dict[str, Any]], *, symbol: str | None, families: set[str], include_manual: bool) -> dict[str, Any] | None:
+def _rank_candidates(rows: list[dict[str, Any]], *, symbol: str | None, families: set[str], include_manual: bool) -> list[dict[str, Any]]:
     filtered: list[dict[str, Any]] = []
     for row in rows:
         family = str(row.get("strategy_family") or "").lower()
@@ -408,7 +408,14 @@ def _choose_candidate(rows: list[dict[str, Any]], *, symbol: str | None, familie
         ),
         reverse=True,
     )
-    return filtered[0]
+    return filtered
+
+
+def _choose_candidate(rows: list[dict[str, Any]], *, symbol: str | None, families: set[str], include_manual: bool) -> dict[str, Any] | None:
+    ranked = _rank_candidates(rows, symbol=symbol, families=families, include_manual=include_manual)
+    if not ranked:
+        return None
+    return ranked[0]
 
 
 def _portfolio_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -489,13 +496,13 @@ def _family_availability_summary(
     }
 
 
-def _choose_override_candidate(
+def _rank_override_candidates(
     rows: list[dict[str, Any]],
     *,
     symbol: str | None,
     families: set[str],
     include_manual: bool,
-) -> dict[str, Any] | None:
+) -> list[dict[str, Any]]:
     eligible_blocks = {"thesis_duplicate_blocked", "thesis_active_cap_reached"}
     filtered: list[dict[str, Any]] = []
     for row in rows:
@@ -522,7 +529,37 @@ def _choose_override_candidate(
         ),
         reverse=True,
     )
-    return filtered[0]
+    return filtered
+
+
+def _choose_override_candidate(
+    rows: list[dict[str, Any]],
+    *,
+    symbol: str | None,
+    families: set[str],
+    include_manual: bool,
+) -> dict[str, Any] | None:
+    ranked = _rank_override_candidates(rows, symbol=symbol, families=families, include_manual=include_manual)
+    if not ranked:
+        return None
+    return ranked[0]
+
+
+def _skip_existing_sample_submit_block(intent: dict[str, Any] | None) -> bool:
+    payload = dict(intent or {})
+    submit_decision = str(payload.get("submit_decision") or "").strip().upper()
+    reason_code = str(payload.get("decision_reason_code") or "").strip().lower()
+    reason_message = str(payload.get("decision_reason_message") or "").strip().lower()
+    if submit_decision == "SUBMIT":
+        return False
+    return (
+        "duplicate_active_thesis" in reason_code
+        or "plan_reentry_blocked" in reason_code
+        or "skip_already_submitted" in submit_decision.lower()
+        or "plan already has routed submission" in reason_message
+        or "skip_existing_active_plan" in reason_code
+        or "duplicate thesis detected against active plan" in reason_message
+    )
 
 
 def _write_report(path: Path, payload: dict[str, Any]) -> None:
@@ -619,12 +656,13 @@ def main() -> int:
         query={"universe": args.universe, "limit": args.candidate_limit},
     )
     scanner_rows = scanner if isinstance(scanner, list) else []
-    candidate = _choose_candidate(
+    candidate_pool = _rank_candidates(
         scanner_rows,
         symbol=args.symbol,
         families=families,
         include_manual=args.include_manual_review,
     )
+    candidate = candidate_pool[0] if candidate_pool else None
     portfolio_payload: dict[str, Any] | None = None
     if candidate is None and args.paper_lineage_override:
         portfolio_raw = _request_json(
@@ -634,12 +672,13 @@ def main() -> int:
             query={"universe": args.universe, "limit": args.candidate_limit, "write_report": "false"},
         )
         portfolio_payload = portfolio_raw if isinstance(portfolio_raw, dict) else {}
-        candidate = _choose_override_candidate(
+        candidate_pool = _rank_override_candidates(
             _portfolio_candidates(portfolio_payload),
             symbol=args.symbol,
             families=families,
             include_manual=args.include_manual_review,
         )
+        candidate = candidate_pool[0] if candidate_pool else None
     elif candidate is None:
         portfolio_raw = _request_json(
             args.base_url,
@@ -656,51 +695,64 @@ def main() -> int:
     validation_context: dict[str, Any] | None = None
     edge_experiment_review: dict[str, Any] | None = None
     symbol_refresh_summary: dict[str, Any] | None = None
+    skipped_active_duplicate_candidates: list[dict[str, str]] = []
     if candidate is not None:
-        validation_context = _request_json(
-            args.base_url,
-            "POST",
-            "/validation/report",
-            query={"symbol": str(candidate["symbol"])},
-        )
-        edge_experiment_review = _edge_experiment_summary(validation_context)
-        preview_body = {
-            "plan_id": candidate["plan_id"],
-            "paper_lineage_override": bool(args.paper_lineage_override),
-        }
-        preview = _request_json(
-            args.base_url,
-            "POST",
-            "/execution/plans/preview",
-            body=preview_body,
-        )
-        approval = _request_json(
-            args.base_url,
-            "POST",
-            "/execution/approve-plan",
-            body=preview_body,
-        )
-        intent = _request_json(
-            args.base_url,
-            "POST",
-            "/execution/order-intents",
-            body={
-                "plan_id": candidate["plan_id"],
-                "execution_mode": "PAPER",
-                "paper_lineage_override": bool(args.paper_lineage_override),
-            },
-        )
-        if args.submit_paper and str(intent.get("submit_decision") or "") == "SUBMIT":
-            submission = _request_json(
+        for candidate_option in candidate_pool:
+            validation_context = _request_json(
                 args.base_url,
                 "POST",
-                "/execution/submit",
+                "/validation/report",
+                query={"symbol": str(candidate_option["symbol"])},
+            )
+            edge_experiment_review = _edge_experiment_summary(validation_context)
+            preview_body = {
+                "plan_id": candidate_option["plan_id"],
+                "paper_lineage_override": bool(args.paper_lineage_override),
+            }
+            preview = _request_json(
+                args.base_url,
+                "POST",
+                "/execution/plans/preview",
+                body=preview_body,
+            )
+            approval = _request_json(
+                args.base_url,
+                "POST",
+                "/execution/approve-plan",
+                body=preview_body,
+            )
+            intent = _request_json(
+                args.base_url,
+                "POST",
+                "/execution/order-intents",
                 body={
-                    "intent_id": intent["intent_id"],
-                    "live": False,
-                    "paper_scenario": args.paper_scenario,
+                    "plan_id": candidate_option["plan_id"],
+                    "execution_mode": "PAPER",
+                    "paper_lineage_override": bool(args.paper_lineage_override),
                 },
             )
+            candidate = candidate_option
+            if args.submit_paper and _skip_existing_sample_submit_block(intent):
+                skipped_active_duplicate_candidates.append(
+                    {
+                        "symbol": str(candidate_option.get("symbol") or ""),
+                        "plan_id": str(candidate_option.get("plan_id") or ""),
+                        "reason_code": str(intent.get("decision_reason_code") or ""),
+                    }
+                )
+                continue
+            if args.submit_paper and str(intent.get("submit_decision") or "") == "SUBMIT":
+                submission = _request_json(
+                    args.base_url,
+                    "POST",
+                    "/execution/submit",
+                    body={
+                        "intent_id": intent["intent_id"],
+                        "live": False,
+                        "paper_scenario": args.paper_scenario,
+                    },
+                )
+            break
     elif args.symbol:
         indicator_payload = _request_json(
             args.base_url,
@@ -827,6 +879,12 @@ def main() -> int:
         elif submission is not None:
             next_steps.append("Monitor execution/operator-dashboard and validation/report after the PAPER submission closes.")
             next_steps.append("Repeat this drill until enough closed v2 trades exist to resolve threshold lineage winner.")
+        if skipped_active_duplicate_candidates:
+            skipped_symbols = ", ".join(
+                f"{item.get('symbol') or 'unknown'}[{item.get('reason_code') or 'duplicate'}]"
+                for item in skipped_active_duplicate_candidates
+            )
+            next_steps.append(f"Skipped active-sample duplicates while searching for a new PAPER lineage candidate: {skipped_symbols}.")
     advisory_next_step = _edge_experiment_next_step(edge_experiment_review)
     if advisory_next_step:
         next_steps.append(advisory_next_step)

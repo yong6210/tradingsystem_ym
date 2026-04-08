@@ -333,7 +333,8 @@ class StrategyV2StressReplayPrototypeWorkerService:
             row = dict((payload.get("scenario_runs") or {}).get(scenario) or {})
             summary = dict(row.get("summary") or {})
             lines.append(
-                f"- {scenario}: ready={bool(row.get('ready', False))}, executed={bool(row.get('executed', False))}, "
+                f"- {scenario}: ready={bool(row.get('ready', False))}, prototype_ready={bool(row.get('prototype_ready', False))}, "
+                f"executed={bool(row.get('executed', False))}, "
                 f"batches_read={int(row.get('batches_read', 0) or 0)}, trades={int(summary.get('trades', 0) or 0)}, "
                 f"ev={float(summary.get('ev', 0.0)):.4f}, max_dd={float(summary.get('max_drawdown', 0.0)):.4f}"
             )
@@ -387,8 +388,13 @@ class StrategyV2StressReplayPrototypeWorkerService:
             for scenario in self._SCENARIO_ORDER:
                 batch_row = dict(scenario_batches.get(scenario) or {})
                 contract_row = dict(scenario_contract.get(scenario) or {})
-                ready = bool(batch_row.get("ready", False)) and bool(contract_row.get("ready", False))
-                if ready:
+                batch_ready = bool(batch_row.get("ready", False))
+                batch_prototype_ready = bool(batch_row.get("prototype_ready", False))
+                contract_ready = bool(contract_row.get("ready", False))
+                contract_prototype_ready = bool(contract_row.get("prototype_ready", False))
+                ready = batch_ready and contract_ready
+                prototype_ready = (batch_ready or batch_prototype_ready) and (contract_ready or contract_prototype_ready)
+                if prototype_ready:
                     ready_scenarios += 1
                 artifact_paths = [str(item.get("artifact_path", "")) for item in list(batch_row.get("batches") or []) if item.get("artifact_path")]
                 rows, missing_paths = self._read_batch_rows(
@@ -397,11 +403,16 @@ class StrategyV2StressReplayPrototypeWorkerService:
                     version=version,
                     scenario=scenario,
                 )
-                if not ready or not rows:
+                if not prototype_ready or not rows:
                     scenario_runs[scenario] = {
                         "ready": ready,
+                        "prototype_ready": prototype_ready,
                         "executed": False,
-                        "reason": "no_ready_input_batches" if ready else str(batch_row.get("gating_reason", "not_ready")),
+                        "reason": (
+                            "no_ready_input_batches"
+                            if prototype_ready
+                            else str(batch_row.get("gating_reason", "not_ready"))
+                        ),
                         "batches_read": len(artifact_paths) - len(missing_paths),
                         "missing_input_artifacts": missing_paths,
                         "input_artifact_paths": artifact_paths,
@@ -410,7 +421,7 @@ class StrategyV2StressReplayPrototypeWorkerService:
                         "output_artifact_path": None,
                         "report_path": None,
                     }
-                    if ready and artifact_paths and missing_paths:
+                    if prototype_ready and artifact_paths and missing_paths:
                         blocked_by.append(f"{scenario}:missing_input_batch_artifacts")
                     continue
 
@@ -446,7 +457,8 @@ class StrategyV2StressReplayPrototypeWorkerService:
                 executed_scenarios += 1
                 executed = True
                 scenario_runs[scenario] = {
-                    "ready": True,
+                    "ready": ready,
+                    "prototype_ready": prototype_ready,
                     "executed": True,
                     "reason": "prototype_replay_completed",
                     "batches_read": len(artifact_paths) - len(missing_paths),

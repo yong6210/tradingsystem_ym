@@ -177,7 +177,14 @@ def _dashboard(*, new_entries_allowed: bool = False, close_only_active: bool = T
     }
 
 
-def test_stage_payload_reports_blocked_state():
+def test_stage_payload_reports_blocked_state(monkeypatch):
+    monkeypatch.setattr(ops_stage_board, "_open_lineage_samples", lambda families, limit=3: {
+        "open_sample_count": 0,
+        "sample_limit": limit,
+        "samples": [],
+        "symbols": [],
+        "summary": "open lineage samples: 0",
+    })
     payload = ops_stage_board._build_stage_payload(
         _validation_report(),
         _checklist(),
@@ -207,6 +214,10 @@ def test_stage_payload_reports_blocked_state():
     assert payload["lineage_sample_summary"]["scope"] == "symbol_edge_proof"
     assert payload["lineage_sample_summary"]["closed_trade_count"] == 8
     assert payload["lineage_sample_summary"]["remaining_closed_trades_to_goal"] == 92
+    assert payload["lineage_closed_fill_health"]["status"] == "closed_fills_present"
+    assert payload["lineage_closed_fill_health"]["healthy"] is True
+    assert payload["lineage_closed_fill_health"]["closed_trade_count"] == 8
+    assert payload["open_lineage_sample_summary"]["open_sample_count"] == 0
     assert payload["entry_timing_review_target"]["symbol"] == "BTCUSDC"
     assert payload["entry_timing_review_target"]["action"] == "run_entry_timing_split_review"
     assert payload["entry_timing_review_target"]["followup_command"].endswith(
@@ -253,6 +264,53 @@ def test_stage_payload_reports_lineage_ready_when_trial_exists():
     assert payload["all_readiness_gates_ready"] is False
 
 
+def test_stage_payload_uses_active_lineage_sample_for_candidate_gate(monkeypatch):
+    monkeypatch.setattr(
+        ops_stage_board,
+        "_open_lineage_samples",
+        lambda families, limit=3: {
+            "open_sample_count": 1,
+            "sample_limit": limit,
+            "samples": [
+                {
+                    "symbol": "ARBUSDC",
+                    "strategy_family": "sweep_reversal",
+                    "status": "OPEN_PAPER_SAMPLE",
+                    "plan_id": "plan_zone_c15debc65a13_confirm",
+                    "hours_open": 7.25,
+                    "last_fill_stage": "ENTRY",
+                }
+            ],
+            "symbols": ["ARBUSDC"],
+            "summary": "open lineage samples=1 | top=ARBUSDC:ENTRY",
+        },
+    )
+
+    dashboard = _dashboard(new_entries_allowed=True, close_only_active=False)
+    dashboard["portfolio_summary"] = {
+        **dict(dashboard.get("portfolio_summary") or {}),
+        "accepted_candidates": [],
+        "blocked_candidates": [],
+    }
+
+    payload = ops_stage_board._build_stage_payload(
+        _validation_report(playbook_go_no_go="GO", eligible_closed_trades=1, trial_runs_written=0, selected_trial_run_id=None),
+        _checklist(overall_status="PASS"),
+        dashboard,
+        lineage_sample_scope="family_global",
+        lineage_families="sweep_reversal,trend_continuation",
+        lineage_proof_goal_closed_trades=100,
+        lineage_sample_days=180,
+    )
+
+    assert payload["active_lineage_sample_focus"]["symbol"] == "ARBUSDC"
+    assert payload["open_lineage_sample_summary"]["open_sample_count"] == 1
+    assert payload["candidate_gate_ready"] is True
+    assert payload["active_lineage_sample_health"]["active"] is True
+    assert payload["active_lineage_sample_health"]["status"] == "stalled"
+    assert payload["active_lineage_sample_health"]["last_fill_stage"] == "ENTRY"
+
+
 def test_stage_payload_can_use_family_global_lineage_sample(monkeypatch):
     monkeypatch.setattr(
         ops_stage_board,
@@ -282,8 +340,33 @@ def test_stage_payload_can_use_family_global_lineage_sample(monkeypatch):
 
     assert payload["lineage_sample_summary"]["scope"] == "family_global"
     assert payload["lineage_sample_summary"]["closed_trade_count"] == 104
+    assert payload["lineage_closed_fill_health"]["status"] == "closed_fills_present"
     assert payload["edge_sample_gate_ready"] is True
     assert payload["all_readiness_gates_ready"] is True
+
+
+def test_lineage_sample_summary_uses_closed_fill_metrics_for_family_global(monkeypatch):
+    expected_ts = "2026-04-08T07:29:00+00:00"
+    monkeypatch.setattr(
+        ops_stage_board,
+        "_family_closed_fill_metrics",
+        lambda **kwargs: (130, ops_stage_board.datetime.fromisoformat(expected_ts)),
+    )
+
+    payload = ops_stage_board._lineage_sample_summary(
+        scope="family_global",
+        symbol="BTCUSDC",
+        edge_experiment_review={},
+        families=["sweep_reversal", "trend_continuation"],
+        proof_goal_closed_trades=100,
+        sample_days=180,
+    )
+
+    assert payload["scope"] == "family_global"
+    assert payload["closed_trade_count"] == 130
+    assert payload["remaining_closed_trades_to_goal"] == 0
+    assert payload["goal_ready"] is True
+    assert payload["latest_closed_trade_at"] == expected_ts
 
 
 def test_collect_events_emits_transition_events():
@@ -448,6 +531,21 @@ def test_collect_events_emits_transition_events():
             "closed_trade_count": 12,
             "remaining_closed_trades_to_goal": 88,
         },
+        "lineage_closed_fill_health": {
+            "status": "closed_fills_present",
+            "healthy": True,
+            "closed_trade_count": 12,
+            "latest_closed_trade_at": "2026-03-27T08:00:00+00:00",
+            "summary": "lineage CLOSED fills observed: 12 | latest=2026-03-27T08:00:00+00:00",
+        },
+        "open_lineage_sample_summary": {
+            "open_sample_count": 2,
+            "sample_limit": 3,
+            "samples": [
+                {"symbol": "FILUSDC", "last_fill_stage": "ENTRY"},
+                {"symbol": "ARBUSDC", "last_fill_stage": "PARTIAL_EXIT"},
+            ],
+        },
         "entry_timing_review_target": {
             "action": "run_entry_timing_split_review",
             "preferred_variant": "early_limit",
@@ -554,6 +652,82 @@ def test_collect_events_emits_lineage_sample_progress_event():
     assert "lineage_sample_progressed" in event_types
 
 
+def test_collect_events_emits_open_lineage_sample_count_change_event():
+    previous = {
+        "open_lineage_sample_summary": {
+            "open_sample_count": 1,
+            "sample_limit": 3,
+            "samples": [
+                {
+                    "symbol": "ARBUSDC",
+                    "last_fill_stage": "PARTIAL_EXIT",
+                }
+            ],
+        }
+    }
+    current = {
+        "open_lineage_sample_summary": {
+            "open_sample_count": 2,
+            "sample_limit": 3,
+            "samples": [
+                {
+                    "symbol": "FILUSDC",
+                    "last_fill_stage": "ENTRY",
+                },
+                {
+                    "symbol": "ARBUSDC",
+                    "last_fill_stage": "PARTIAL_EXIT",
+                },
+            ],
+        }
+    }
+
+    events = notify_stage_change._collect_events(previous, current)
+    event_types = {event["type"] for event in events}
+
+    assert "open_lineage_sample_count_changed" in event_types
+
+
+def test_collect_events_emits_first_lineage_closed_fill_event():
+    previous = {
+        "lineage_sample_summary": {
+            "scope": "family_global",
+            "families": ["sweep_reversal", "trend_continuation"],
+            "proof_goal_closed_trades": 100,
+            "closed_trade_count": 0,
+            "remaining_closed_trades_to_goal": 100,
+        },
+        "lineage_closed_fill_health": {
+            "status": "no_closed_fills_present",
+            "healthy": False,
+            "closed_trade_count": 0,
+            "summary": "no lineage CLOSED fills observed yet",
+        },
+    }
+    current = {
+        "lineage_sample_summary": {
+            "scope": "family_global",
+            "families": ["sweep_reversal", "trend_continuation"],
+            "proof_goal_closed_trades": 100,
+            "closed_trade_count": 1,
+            "remaining_closed_trades_to_goal": 99,
+        },
+        "lineage_closed_fill_health": {
+            "status": "closed_fills_present",
+            "healthy": True,
+            "closed_trade_count": 1,
+            "latest_closed_trade_at": "2026-04-08T09:00:00+00:00",
+            "summary": "lineage CLOSED fills observed: 1 | latest=2026-04-08T09:00:00+00:00",
+        },
+    }
+
+    events = notify_stage_change._collect_events(previous, current)
+    event_types = {event["type"] for event in events}
+
+    assert "lineage_sample_progressed" in event_types
+    assert "first_lineage_closed_fill_observed" in event_types
+
+
 def test_collect_events_emits_edge_sample_stall_event():
     previous = {
         "edge_sample_stall": {
@@ -576,6 +750,62 @@ def test_collect_events_emits_edge_sample_stall_event():
     event_types = {event["type"] for event in events}
 
     assert "edge_sample_stall" in event_types
+
+
+def test_collect_events_emits_active_lineage_sample_stall_event():
+    previous = {
+        "active_lineage_sample_health": {
+            "active": False,
+            "threshold_hours": 6,
+            "hours_open": 1.0,
+            "status": "tracking",
+            "symbol": "ARBUSDC",
+            "last_fill_stage": "ENTRY",
+        }
+    }
+    current = {
+        "active_lineage_sample_health": {
+            "active": True,
+            "threshold_hours": 6,
+            "hours_open": 7.25,
+            "status": "stalled",
+            "symbol": "ARBUSDC",
+            "last_fill_stage": "ENTRY",
+        }
+    }
+
+    events = notify_stage_change._collect_events(previous, current)
+    event_types = {event["type"] for event in events}
+
+    assert "active_lineage_sample_stall" in event_types
+
+
+def test_collect_events_emits_active_lineage_sample_progress_event():
+    previous = {
+        "active_lineage_sample_focus": {
+            "symbol": "ARBUSDC",
+            "strategy_family": "sweep_reversal",
+            "status": "OPEN_PAPER_SAMPLE",
+            "plan_id": "plan_zone_c15debc65a13_confirm",
+            "hours_open": 0.20,
+            "last_fill_stage": "ENTRY",
+        }
+    }
+    current = {
+        "active_lineage_sample_focus": {
+            "symbol": "ARBUSDC",
+            "strategy_family": "sweep_reversal",
+            "status": "OPEN_PAPER_SAMPLE",
+            "plan_id": "plan_zone_c15debc65a13_confirm",
+            "hours_open": 0.40,
+            "last_fill_stage": "PARTIAL_EXIT",
+        }
+    }
+
+    events = notify_stage_change._collect_events(previous, current)
+    event_types = {event["type"] for event in events}
+
+    assert "active_lineage_sample_progressed" in event_types
 
 
 def test_collect_events_initial_snapshot_only_on_first_run():
@@ -668,6 +898,22 @@ def test_render_message_uses_approval_surface_lines() -> None:
             "closed_trade_count": 12,
             "remaining_closed_trades_to_goal": 88,
         },
+        "lineage_closed_fill_health": {
+            "status": "closed_fills_present",
+            "healthy": True,
+            "closed_trade_count": 12,
+            "latest_closed_trade_at": "2026-03-27T08:00:00+00:00",
+            "summary": "lineage CLOSED fills observed: 12 | latest=2026-03-27T08:00:00+00:00",
+        },
+        "open_lineage_sample_summary": {
+            "open_sample_count": 2,
+            "sample_limit": 3,
+            "samples": [
+                {"symbol": "FILUSDC", "last_fill_stage": "ENTRY"},
+                {"symbol": "ARBUSDC", "last_fill_stage": "PARTIAL_EXIT"},
+            ],
+            "symbols": ["FILUSDC", "ARBUSDC"],
+        },
         "entry_timing_review_target": {
             "action": "run_entry_timing_split_review",
             "preferred_variant": "early_limit",
@@ -720,12 +966,16 @@ def test_render_message_uses_approval_surface_lines() -> None:
     assert "edge_evolution: state=reduce_candidate | action=reduce_baseline_allocation_review | bias=reduce_baseline | promotion=entry_timing/early_limit" in message
     assert "review_followup_ledger: status=READY | action=reduce_baseline_allocation_review | entries=3 | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review" in message
     assert "lineage_sample: scope=family_global | families=sweep_reversal | closes=12/100 | remaining=88" in message
+    assert "lineage_closed_fill_health: status=closed_fills_present | healthy=True | closes=12 | latest=2026-03-27T08:00:00+00:00" in message
+    assert "open_lineage_samples: count=2 | limit=3 | top=FILUSDC:ENTRY, ARBUSDC:PARTIAL_EXIT" in message
+    assert "active_lineage_sample_focus: none" in message
     assert "entry_timing_review_target: action=run_entry_timing_split_review | target=BTCUSDC | variant=early_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review" in message
     assert "execution_style_review_target: action=run_execution_style_split_review | target=BTCUSDC | variant=passive_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_execution_style_split_review" in message
     assert "accepted_candidate_focus: BTCUSDC | family=sweep_reversal | edge=watch_edge | split=early_limit/passive_limit" in message
     assert "blocked_candidate_focus: ETHUSDC | family=trend_continuation | edge=fragile_edge | split=reaction_confirmed/market | reason=portfolio_cap" in message
     assert "readiness_gates: lineage=True | candidate=True | edge_sample=False | all_ready=False" in message
     assert "edge_sample_stall: active=True | hours_since_progress=49.00 | closes=2 | threshold_hours=24" in message
+    assert "active_lineage_sample_health: active=False | hours_open=0.00 | threshold_hours=0 | status=none" in message
     assert "playbook_go_no_go" not in message
     assert "deployment_go_no_go" not in message
 

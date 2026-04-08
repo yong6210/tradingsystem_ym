@@ -110,12 +110,54 @@ def _edge_sample_stall_trigger(previous: dict[str, Any] | None, current: dict[st
     return not previous_active
 
 
+def _active_lineage_sample_stall_trigger(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    current_active = bool(dict(current.get("active_lineage_sample_health") or {}).get("active", False))
+    if not current_active:
+        return False
+    if previous is None:
+        return True
+    previous_active = bool(dict(previous.get("active_lineage_sample_health") or {}).get("active", False))
+    return not previous_active
+
+
+def _active_lineage_sample_progressed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    before = dict(previous.get("active_lineage_sample_focus") or {})
+    after = dict(current.get("active_lineage_sample_focus") or {})
+    before_plan = str(before.get("plan_id") or "")
+    after_plan = str(after.get("plan_id") or "")
+    if not after_plan:
+        return False
+    if before_plan != after_plan:
+        return True
+    before_stage = str(before.get("last_fill_stage") or "")
+    after_stage = str(after.get("last_fill_stage") or "")
+    return bool(after_stage) and before_stage != after_stage
+
+
+def _open_lineage_sample_count_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    before = int(_open_lineage_sample_summary(previous).get("open_sample_count", 0) or 0)
+    after = int(_open_lineage_sample_summary(current).get("open_sample_count", 0) or 0)
+    return before != after
+
+
 def _lineage_sample_progressed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
     if previous is None:
         return False
     before = int(_lineage_sample_summary(previous).get("closed_trade_count", 0) or 0)
     after = int(_lineage_sample_summary(current).get("closed_trade_count", 0) or 0)
     return after > before
+
+
+def _first_lineage_closed_fill_observed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    before = int(_lineage_sample_summary(previous).get("closed_trade_count", 0) or 0)
+    after = int(_lineage_sample_summary(current).get("closed_trade_count", 0) or 0)
+    return before <= 0 and after > 0
 
 
 def _surface_summary(payload: dict[str, Any] | None, key: str) -> dict[str, str]:
@@ -295,6 +337,58 @@ def _lineage_sample_summary_line(payload: dict[str, Any] | None) -> str:
     )
 
 
+def _lineage_closed_fill_health_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("lineage_closed_fill_health") or {})
+    return {
+        "status": str(source.get("status") or "unknown"),
+        "healthy": bool(source.get("healthy", False)),
+        "closed_trade_count": int(source.get("closed_trade_count", 0) or 0),
+        "latest_closed_trade_at": str(source.get("latest_closed_trade_at") or ""),
+        "summary": str(source.get("summary") or ""),
+    }
+
+
+def _lineage_closed_fill_health_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _lineage_closed_fill_health_summary(payload)
+    line = (
+        f"lineage_closed_fill_health: status={summary.get('status', 'unknown')} | "
+        f"healthy={summary.get('healthy', False)} | "
+        f"closes={summary.get('closed_trade_count', 0)}"
+    )
+    latest = str(summary.get("latest_closed_trade_at") or "")
+    if latest:
+        line = f"{line} | latest={latest}"
+    return line
+
+
+def _open_lineage_sample_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("open_lineage_sample_summary") or {})
+    samples = list(source.get("samples") or [])
+    return {
+        "open_sample_count": int(source.get("open_sample_count", 0) or 0),
+        "sample_limit": int(source.get("sample_limit", 0) or 0),
+        "samples": samples,
+        "symbols": list(source.get("symbols") or []),
+        "summary": str(source.get("summary") or ""),
+    }
+
+
+def _open_lineage_sample_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _open_lineage_sample_summary(payload)
+    preview = ", ".join(
+        f"{str(item.get('symbol') or 'unknown')}:{str(item.get('last_fill_stage') or 'none')}"
+        for item in summary.get("samples", [])
+        if isinstance(item, dict)
+    )
+    line = (
+        f"open_lineage_samples: count={summary.get('open_sample_count', 0)} | "
+        f"limit={summary.get('sample_limit', 0)}"
+    )
+    if preview:
+        line = f"{line} | top={preview}"
+    return line
+
+
 def _readiness_gates_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
     current = dict(payload or {})
     source = dict(current.get("readiness_gates") or {})
@@ -315,6 +409,67 @@ def _readiness_gates_summary_line(payload: dict[str, Any] | None) -> str:
         f"edge_sample={summary.get('edge_sample_gate_ready', False)} | "
         f"all_ready={summary.get('all_ready', False)}"
     )
+
+
+def _active_lineage_sample_health_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("active_lineage_sample_health") or {})
+    return {
+        "active": bool(source.get("active", False)),
+        "status": str(source.get("status") or "none"),
+        "threshold_hours": int(source.get("threshold_hours", 0) or 0),
+        "hours_open": round(_float(source.get("hours_open", 0.0)), 2),
+        "symbol": str(source.get("symbol") or ""),
+        "strategy_family": str(source.get("strategy_family") or ""),
+        "plan_id": str(source.get("plan_id") or ""),
+        "last_fill_stage": str(source.get("last_fill_stage") or "none"),
+        "last_fill_at": str(source.get("last_fill_at") or ""),
+        "summary": str(source.get("summary") or ""),
+    }
+
+
+def _active_lineage_sample_health_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _active_lineage_sample_health_summary(payload)
+    line = (
+        f"active_lineage_sample_health: active={summary.get('active', False)} | "
+        f"hours_open={summary.get('hours_open', 0.0):.2f} | "
+        f"threshold_hours={summary.get('threshold_hours', 0)} | "
+        f"status={summary.get('status', 'none')}"
+    )
+    if summary.get("symbol"):
+        line = f"{line} | symbol={summary.get('symbol')}"
+    if summary.get("last_fill_stage"):
+        line = f"{line} | last_fill={summary.get('last_fill_stage')}"
+    return line
+
+
+def _active_lineage_sample_focus_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("active_lineage_sample_focus") or {})
+    return {
+        "symbol": str(source.get("symbol") or ""),
+        "status": str(source.get("status") or "none"),
+        "strategy_family": str(source.get("strategy_family") or ""),
+        "plan_id": str(source.get("plan_id") or ""),
+        "submission_id": str(source.get("submission_id") or ""),
+        "hours_open": round(_float(source.get("hours_open", 0.0)), 2),
+        "last_fill_stage": str(source.get("last_fill_stage") or "none"),
+        "last_fill_at": str(source.get("last_fill_at") or ""),
+    }
+
+
+def _active_lineage_sample_focus_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _active_lineage_sample_focus_summary(payload)
+    if not summary.get("plan_id"):
+        return "active_lineage_sample_focus: none"
+    line = (
+        f"active_lineage_sample_focus: {summary.get('symbol') or 'unknown'} | "
+        f"family={summary.get('strategy_family') or 'unknown'} | "
+        f"status={summary.get('status') or 'unknown'} | "
+        f"plan_id={summary.get('plan_id') or 'unknown'} | "
+        f"hours_open={summary.get('hours_open', 0.0):.2f}"
+    )
+    if summary.get("last_fill_stage"):
+        line = f"{line} | last_fill={summary.get('last_fill_stage')}"
+    return line
 
 
 def _edge_sample_stall_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -603,6 +758,33 @@ def _collect_events(previous: dict[str, Any] | None, current: dict[str, Any]) ->
                 "body": f"{_lineage_sample_summary_line(previous)} -> {_lineage_sample_summary_line(current)}",
             }
         )
+    if _open_lineage_sample_count_changed(previous, current):
+        events.append(
+            {
+                "type": "open_lineage_sample_count_changed",
+                "title": "Open lineage sample count changed",
+                "body": f"{_open_lineage_sample_summary_line(previous)} -> {_open_lineage_sample_summary_line(current)}",
+            }
+        )
+    if _active_lineage_sample_progressed(previous, current):
+        events.append(
+            {
+                "type": "active_lineage_sample_progressed",
+                "title": "Active lineage sample progressed",
+                "body": (
+                    f"{_active_lineage_sample_focus_summary_line(previous)} -> "
+                    f"{_active_lineage_sample_focus_summary_line(current)}"
+                ),
+            }
+        )
+    if _first_lineage_closed_fill_observed(previous, current):
+        events.append(
+            {
+                "type": "first_lineage_closed_fill_observed",
+                "title": "First lineage CLOSED fill observed",
+                "body": _lineage_closed_fill_health_summary_line(current),
+            }
+        )
     if _gate_flipped_ready(previous, current, "all_readiness_gates_ready"):
         events.append(
             {
@@ -617,6 +799,14 @@ def _collect_events(previous: dict[str, Any] | None, current: dict[str, Any]) ->
                 "type": "edge_sample_stall",
                 "title": "Edge sample accumulation stalled",
                 "body": _edge_sample_stall_summary_line(current),
+            }
+        )
+    if _active_lineage_sample_stall_trigger(previous, current):
+        events.append(
+            {
+                "type": "active_lineage_sample_stall",
+                "title": "Open lineage sample stalled",
+                "body": _active_lineage_sample_health_summary_line(current),
             }
         )
     if _manual_review_trigger(previous, current):
@@ -645,12 +835,16 @@ def _render_message(current: dict[str, Any], events: list[dict[str, str]]) -> st
             _edge_evolution_summary_line(current),
             _review_followup_summary_line(current),
             _lineage_sample_summary_line(current),
+            _lineage_closed_fill_health_summary_line(current),
+            _open_lineage_sample_summary_line(current),
+            _active_lineage_sample_focus_summary_line(current),
             _experiment_review_target_summary_line(current, "entry_timing_review_target", label="entry_timing_review_target"),
             _experiment_review_target_summary_line(current, "execution_style_review_target", label="execution_style_review_target"),
             _candidate_focus_summary_line(current, "accepted", label="accepted_candidate_focus"),
             _candidate_focus_summary_line(current, "blocked", label="blocked_candidate_focus"),
             _readiness_gates_summary_line(current),
             _edge_sample_stall_summary_line(current),
+            _active_lineage_sample_health_summary_line(current),
             f"close_only_active: {current.get('close_only_active')}",
             f"checklist_status: {current.get('checklist_status')}",
             f"eligible_closed_trades: {current.get('eligible_closed_trades')}",

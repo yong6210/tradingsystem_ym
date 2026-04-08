@@ -123,3 +123,55 @@ def test_stress_replay_lineage_writer_materializes_scenario_batches(tmp_path: Pa
     assert body["schema_version"] == "strategy_v2_stress_replay_lineage_batch_v1"
     assert body["scenario"] == "shock_concentration"
     assert body["trade_rows"][0]["plan_id"] == "plan_a"
+
+
+def test_stress_replay_lineage_writer_materializes_prototype_ready_batches(tmp_path: Path) -> None:
+    service = StrategyV2StressReplayLineageWriterService()
+    service.settings.validation_report_dir = str(tmp_path)
+    payload = service.generate(
+        symbol="BTCUSDC",
+        version="v2",
+        stress_replay_lineage={
+            "available": True,
+            "sample_counts": {"eligible_closed_trades": 1},
+            "lineage_contract": {},
+            "blocked_by": [],
+            "next_steps": [],
+        },
+        stress_replay_runner_contract={
+            "available": True,
+            "runtime_job_ready": True,
+            "scenario_contract": {
+                "shock_concentration": {"ready": False, "prototype_ready": True, "gating_reason": "shock_sample_or_candle_path_below_contract"},
+                "latency_plus_1_bar": {"ready": False, "prototype_ready": True, "gating_reason": "latency_reference_coverage_below_contract"},
+                "partial_fills_only": {"ready": False, "prototype_ready": False, "gating_reason": "execution_fill_path_below_contract"},
+            },
+            "runner_contract": {"batching": {"target_trades_per_job": 2}},
+            "blocked_by": ["full_replay_not_ready"],
+            "next_steps": ["materialize prototype replay outputs for currently covered scenarios"],
+        },
+        trade_rows=[
+            {
+                "plan_id": "plan_proto",
+                "closed_ts": "2026-03-08T10:00:00+00:00",
+                "entry_anchor_ts": "2026-03-08T09:40:00+00:00",
+                "exit_anchor_ts": "2026-03-08T10:00:00+00:00",
+                "entry_anchor_source": "execution_entry_fill",
+                "exit_anchor_source": "execution_closed_fill",
+                "final_exit_realized_r": 1.2,
+                "final_exit_reason": "target_tp1",
+                "path_coverage_ratio": 1.0,
+                "regime": "shock",
+                "latency_bar_exists": True,
+                "full_fill_path": False,
+            },
+        ],
+        write_report=False,
+    )
+
+    assert payload["artifacts_written"] is True
+    assert payload["implementation_status"] == "lineage_writer_seeded_prototype_batches"
+    assert payload["reason"] == "stress_replay_lineage_prototype_batches_written"
+    assert payload["scenario_batches"]["shock_concentration"]["prototype_ready"] is True
+    assert payload["scenario_batches"]["shock_concentration"]["ready"] is False
+    assert len(payload["scenario_batches"]["shock_concentration"]["batches"]) == 1

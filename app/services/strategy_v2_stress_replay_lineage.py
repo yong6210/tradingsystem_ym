@@ -27,6 +27,7 @@ class _LineageTrade:
     entry_bar_exists: bool
     latency_bar_exists: bool
     exit_bar_exists: bool
+    entry_bar_boundary_fallback_used: bool
     path_coverage_ratio: float
     full_fill_path: bool
     complete_candle_path: bool
@@ -87,6 +88,11 @@ class StrategyV2StressReplayLineageService:
         if self.plan_repo is None:
             return []
         return self.plan_repo.list_recent(symbol=symbol, days=180)
+
+    @staticmethod
+    def _market_symbol(plan: Any) -> str:
+        validity = dict(getattr(plan, "validity", {}) or {})
+        return str(validity.get("lineage_source_symbol") or getattr(plan, "symbol", "") or "")
 
     def _closed_trades(self, *, symbol: str, version: str) -> list[tuple[Any, ClosedTradeRecord]]:
         plans = self._plans(symbol=symbol, version=version)
@@ -170,18 +176,31 @@ class StrategyV2StressReplayLineageService:
         entry_bar = self._bar_start_5m(entry_anchor_ts)
         latency_bar = entry_bar + timedelta(minutes=5 * self._LATENCY_BARS)
         exit_bar = self._bar_start_5m(exit_anchor_ts)
-        candle_start = min(entry_bar, exit_bar)
-        candle_end = max(entry_bar, exit_bar)
-        timestamps = self._candle_timestamps(symbol=str(plan.symbol), start_ts=candle_start, end_ts=candle_end)
+        candle_start = min(entry_bar, latency_bar, exit_bar)
+        candle_end = max(entry_bar, latency_bar, exit_bar)
+        timestamps = self._candle_timestamps(symbol=self._market_symbol(plan), start_ts=candle_start, end_ts=candle_end)
         expected_bars = self._expected_bar_count(candle_start, candle_end)
         actual_bars = len(timestamps)
         path_coverage_ratio = 0.0 if expected_bars <= 0 else round(min(1.0, float(actual_bars) / float(expected_bars)), 4)
+        entry_bar_exists = entry_bar in timestamps
+        latency_bar_exists = latency_bar in timestamps
+        exit_bar_exists = exit_bar in timestamps
+        first_available_bar = min(timestamps) if timestamps else None
+        min_path_coverage = float(self.settings.stress_replay_lineage_min_candle_path_coverage)
+        entry_bar_boundary_fallback_used = (
+            not entry_bar_exists
+            and entry_fill is not None
+            and first_available_bar == latency_bar
+            and latency_bar_exists
+            and exit_bar_exists
+            and path_coverage_ratio >= min_path_coverage
+        )
         complete_candle_path = (
             expected_bars > 0
-            and path_coverage_ratio >= float(self.settings.stress_replay_lineage_min_candle_path_coverage)
-            and entry_bar in timestamps
-            and latency_bar in timestamps
-            and exit_bar in timestamps
+            and path_coverage_ratio >= min_path_coverage
+            and latency_bar_exists
+            and exit_bar_exists
+            and (entry_bar_exists or entry_bar_boundary_fallback_used)
         )
         return _LineageTrade(
             plan=plan,
@@ -196,9 +215,10 @@ class StrategyV2StressReplayLineageService:
             has_partial_exit_fill=partial_exit_fill is not None,
             entry_anchor_source=entry_anchor_source,
             exit_anchor_source=exit_anchor_source,
-            entry_bar_exists=entry_bar in timestamps,
-            latency_bar_exists=latency_bar in timestamps,
-            exit_bar_exists=exit_bar in timestamps,
+            entry_bar_exists=entry_bar_exists,
+            latency_bar_exists=latency_bar_exists,
+            exit_bar_exists=exit_bar_exists,
+            entry_bar_boundary_fallback_used=entry_bar_boundary_fallback_used,
             path_coverage_ratio=path_coverage_ratio,
             full_fill_path=entry_fill is not None and close_fill is not None,
             complete_candle_path=complete_candle_path,
@@ -219,7 +239,7 @@ class StrategyV2StressReplayLineageService:
                 {
                     "plan_id": str(getattr(trade.plan, "plan_id", "") or ""),
                     "zone_id": str(getattr(trade.plan, "zone_id", "") or ""),
-                    "symbol": str(getattr(trade.plan, "symbol", "") or ""),
+                    "symbol": self._market_symbol(trade.plan),
                     "direction": str(getattr(trade.plan, "direction", "") or ""),
                     "strategy_family": str(validity.get("strategy_family") or trade.record.strategy_family or ""),
                     "strategy_grade": str(validity.get("strategy_grade") or trade.record.strategy_grade or ""),
@@ -238,6 +258,7 @@ class StrategyV2StressReplayLineageService:
                     "entry_bar_exists": trade.entry_bar_exists,
                     "latency_bar_exists": trade.latency_bar_exists,
                     "exit_bar_exists": trade.exit_bar_exists,
+                    "entry_bar_boundary_fallback_used": trade.entry_bar_boundary_fallback_used,
                     "path_coverage_ratio": float(trade.path_coverage_ratio),
                     "full_fill_path": trade.full_fill_path,
                     "complete_candle_path": trade.complete_candle_path,

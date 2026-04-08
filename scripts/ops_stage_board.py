@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,8 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 DEFAULT_STAGE_FILE = ROOT_DIR / "reports/operations/stage_monitor/current_stage.json"
 
 
@@ -212,41 +215,8 @@ def _lineage_sample_summary(
         )
         return summary
 
-    from app.core.config import get_settings
-    from app.core.enums import PlanState
-    from app.db.models import Plan
-    from app.db.session import SessionLocal
-    from app.services.strategy_v2_validation import StrategyV2ValidationService
-
-    settings = get_settings()
-    validation = StrategyV2ValidationService(settings)
-    db = SessionLocal()
-    closed_count = 0
-    latest_closed_trade_at: str | None = None
-    try:
-        rows = (
-            db.query(Plan)
-            .filter(Plan.state == PlanState.CLOSED.value, Plan.strategy_version == settings.strategy_version)
-            .all()
-        )
-        cutoff = datetime.now(timezone.utc)
-        if sample_days > 0:
-            from datetime import timedelta
-
-            cutoff = cutoff - timedelta(days=max(1, int(sample_days)))
-        for row in rows:
-            validity = dict(getattr(row, "validity", {}) or {})
-            family = str(validity.get("strategy_family") or "").strip().lower()
-            if family not in families:
-                continue
-            closed_ts = validation._parse_ts(validity.get("final_exit_ts") or validity.get("last_exit_ts"))
-            if closed_ts is None or (sample_days > 0 and closed_ts < cutoff):
-                continue
-            closed_count += 1
-            if latest_closed_trade_at is None or closed_ts.isoformat() > latest_closed_trade_at:
-                latest_closed_trade_at = closed_ts.isoformat()
-    finally:
-        db.close()
+    closed_count, latest_closed_trade_dt = _family_closed_fill_metrics(families=families, sample_days=sample_days)
+    latest_closed_trade_at = latest_closed_trade_dt.isoformat() if latest_closed_trade_dt is not None else None
 
     summary = {
         "scope": "family_global",
@@ -266,6 +236,54 @@ def _lineage_sample_summary(
         f"lookback_days={summary['sample_days']}"
     )
     return summary
+
+
+def _family_closed_fill_metrics(*, families: list[str], sample_days: int) -> tuple[int, datetime | None]:
+    from datetime import timedelta
+
+    from app.core.config import get_settings
+    from app.core.enums import ExecutionFillStage
+    from app.db.models import ExecutionFill
+    from app.db.session import SessionLocal
+
+    normalized_families = {str(item).strip().lower() for item in families if str(item).strip()}
+    if not normalized_families:
+        return 0, None
+
+    settings = get_settings()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(sample_days)))
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(ExecutionFill.plan_id, ExecutionFill.fill_ts, ExecutionFill.payload)
+            .filter(
+                ExecutionFill.stage == ExecutionFillStage.CLOSED.value,
+                ExecutionFill.strategy_version == settings.strategy_version,
+                ExecutionFill.fill_ts >= cutoff,
+            )
+            .all()
+        )
+        latest_by_plan: dict[str, datetime] = {}
+        latest_closed_trade_at: datetime | None = None
+        for plan_id, fill_ts, payload in rows:
+            family = str((payload or {}).get("strategy_family") or "").strip().lower()
+            if family not in normalized_families:
+                continue
+            candidate = fill_ts if isinstance(fill_ts, datetime) else None
+            if candidate is None:
+                continue
+            if candidate.tzinfo is None:
+                candidate = candidate.replace(tzinfo=timezone.utc)
+            else:
+                candidate = candidate.astimezone(timezone.utc)
+            current = latest_by_plan.get(str(plan_id))
+            if current is None or candidate > current:
+                latest_by_plan[str(plan_id)] = candidate
+            if latest_closed_trade_at is None or candidate > latest_closed_trade_at:
+                latest_closed_trade_at = candidate
+        return len(latest_by_plan), latest_closed_trade_at
+    finally:
+        db.close()
 
 
 def _edge_experiment_summary(
@@ -431,7 +449,43 @@ def _lineage_sample_summary_line(summary: dict[str, Any] | None) -> str:
     )
 
 
+def _lineage_closed_fill_health(lineage_sample_summary: dict[str, Any] | None) -> dict[str, Any]:
+    summary = dict(lineage_sample_summary or {})
+    closed_trade_count = int(summary.get("closed_trade_count", 0) or 0)
+    latest_closed_trade_at = str(summary.get("latest_closed_trade_at") or "")
+    if closed_trade_count <= 0:
+        return {
+            "status": "no_closed_fills_present",
+            "healthy": False,
+            "closed_trade_count": 0,
+            "latest_closed_trade_at": latest_closed_trade_at,
+            "summary": "no lineage CLOSED fills observed yet",
+        }
+    return {
+        "status": "closed_fills_present",
+        "healthy": True,
+        "closed_trade_count": closed_trade_count,
+        "latest_closed_trade_at": latest_closed_trade_at,
+        "summary": (
+            f"lineage CLOSED fills observed: {closed_trade_count}"
+            + (f" | latest={latest_closed_trade_at}" if latest_closed_trade_at else "")
+        ),
+    }
+
+
+def _lineage_closed_fill_health_line(summary: dict[str, Any] | None) -> str:
+    item = dict(summary or {})
+    if not item:
+        return "lineage_closed_fill_health: unavailable"
+    return (
+        f"lineage_closed_fill_health: status={item.get('status', 'unknown')} | "
+        f"healthy={bool(item.get('healthy', False))} | "
+        f"closes={int(item.get('closed_trade_count', 0) or 0)}"
+    )
+
+
 _LINEAGE_TARGET_FAMILIES = {"sweep_reversal", "trend_continuation"}
+_ACTIVE_LINEAGE_SAMPLE_STALL_HOURS = 6
 
 
 def _representative_candidates(dashboard: dict[str, Any]) -> dict[str, Any]:
@@ -457,6 +511,177 @@ def _representative_candidates(dashboard: dict[str, Any]) -> dict[str, Any]:
     return {
         "accepted": _candidate(accepted_rows[0] if accepted_rows else None, status="ACTIONABLE_ENTRY"),
         "blocked": _candidate(blocked_rows[0] if blocked_rows else None, status="BLOCKED_SETUP"),
+    }
+
+
+def _open_lineage_samples(families: list[str], *, limit: int = 3) -> dict[str, Any]:
+    from app.core.enums import OrderLifecycleState
+    from app.db.models import ExecutionFill, OrderIntent, OrderSubmission
+    from app.db.session import SessionLocal
+
+    normalized_families = {str(item).strip().lower() for item in families if str(item).strip()}
+    if not normalized_families:
+        return {
+            "open_sample_count": 0,
+            "sample_limit": int(max(1, limit)),
+            "samples": [],
+            "symbols": [],
+            "summary": "open lineage samples: 0",
+        }
+
+    db = SessionLocal()
+    try:
+        closed_plan_ids = {
+            str(plan_id)
+            for (plan_id,) in db.query(ExecutionFill.plan_id)
+            .filter(ExecutionFill.stage == "CLOSED")
+            .distinct()
+            .all()
+        }
+        rows = (
+            db.query(OrderSubmission, OrderIntent)
+            .join(OrderIntent, OrderIntent.intent_id == OrderSubmission.intent_id)
+            .filter(
+                OrderSubmission.adapter == "paper",
+                OrderSubmission.execution_mode == "PAPER",
+                OrderSubmission.state.in_(
+                    [
+                        OrderLifecycleState.ACKNOWLEDGED.value,
+                        OrderLifecycleState.PARTIALLY_FILLED.value,
+                        OrderLifecycleState.FILLED.value,
+                    ]
+                ),
+            )
+            .order_by(OrderSubmission.submitted_at.desc(), OrderSubmission.created_at.desc())
+            .limit(50)
+            .all()
+        )
+        samples: list[dict[str, Any]] = []
+        seen_plan_ids: set[str] = set()
+        for submission, intent in rows:
+            family = str(getattr(intent, "strategy_family", "") or "").strip().lower()
+            if family not in normalized_families:
+                continue
+            plan_id = str(getattr(submission, "plan_id", "") or "")
+            if not plan_id or plan_id in closed_plan_ids or plan_id in seen_plan_ids:
+                continue
+            seen_plan_ids.add(plan_id)
+            latest_fill = (
+                db.query(ExecutionFill)
+                .filter(ExecutionFill.plan_id == plan_id)
+                .order_by(ExecutionFill.fill_ts.desc())
+                .first()
+            )
+            if latest_fill is None:
+                continue
+            submitted_at = getattr(submission, "submitted_at", None) or getattr(submission, "created_at", None)
+            if isinstance(submitted_at, datetime) and submitted_at.tzinfo is None:
+                submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+            elif isinstance(submitted_at, datetime):
+                submitted_at = submitted_at.astimezone(timezone.utc)
+            last_fill_at = getattr(latest_fill, "fill_ts", None)
+            if isinstance(last_fill_at, datetime) and last_fill_at.tzinfo is None:
+                last_fill_at = last_fill_at.replace(tzinfo=timezone.utc)
+            elif isinstance(last_fill_at, datetime):
+                last_fill_at = last_fill_at.astimezone(timezone.utc)
+            hours_open = 0.0
+            if isinstance(submitted_at, datetime):
+                hours_open = max((datetime.now(timezone.utc) - submitted_at).total_seconds() / 3600.0, 0.0)
+            samples.append(
+                {
+                    "symbol": str(getattr(submission, "symbol", "") or ""),
+                    "status": "OPEN_PAPER_SAMPLE",
+                    "strategy_family": family,
+                    "plan_id": plan_id,
+                    "submission_id": str(getattr(submission, "submission_id", "") or ""),
+                    "submitted_at": submitted_at.isoformat() if isinstance(submitted_at, datetime) else "",
+                    "hours_open": round(hours_open, 2),
+                    "last_fill_stage": str(getattr(latest_fill, "stage", "") or "none"),
+                    "last_fill_at": last_fill_at.isoformat() if isinstance(last_fill_at, datetime) else "",
+                }
+            )
+    finally:
+        db.close()
+
+    limited = samples[: max(1, int(limit))]
+    symbols = [str(item.get("symbol") or "") for item in limited if str(item.get("symbol") or "").strip()]
+    preview = ", ".join(
+        f"{item.get('symbol') or 'unknown'}:{item.get('last_fill_stage') or 'none'}" for item in limited
+    )
+    return {
+        "open_sample_count": len(samples),
+        "sample_limit": int(max(1, limit)),
+        "samples": limited,
+        "symbols": symbols,
+        "summary": (
+            f"open lineage samples={len(samples)}"
+            + (f" | top={preview}" if preview else "")
+        ),
+    }
+
+
+def _active_lineage_sample_focus(families: list[str]) -> dict[str, Any] | None:
+    summary = _open_lineage_samples(families, limit=1)
+    samples = list(summary.get("samples") or [])
+    if not samples:
+        return None
+    return dict(samples[0])
+
+
+def _open_lineage_sample_summary_line(summary: dict[str, Any] | None) -> str:
+    item = dict(summary or {})
+    if not item:
+        return "open_lineage_samples: unavailable"
+    samples = list(item.get("samples") or [])
+    preview = ", ".join(
+        f"{sample.get('symbol') or 'unknown'}:{sample.get('last_fill_stage') or 'none'}"
+        for sample in samples
+    )
+    line = (
+        f"open_lineage_samples: count={int(item.get('open_sample_count', 0) or 0)} | "
+        f"limit={int(item.get('sample_limit', 0) or 0)}"
+    )
+    if preview:
+        line = f"{line} | top={preview}"
+    return line
+
+
+def _active_lineage_sample_health(
+    sample: dict[str, Any] | None,
+    *,
+    threshold_hours: int = _ACTIVE_LINEAGE_SAMPLE_STALL_HOURS,
+) -> dict[str, Any]:
+    item = dict(sample or {})
+    if not item:
+        return {
+            "active": False,
+            "status": "none",
+            "threshold_hours": int(max(1, threshold_hours)),
+            "hours_open": 0.0,
+            "symbol": "",
+            "strategy_family": "",
+            "plan_id": "",
+            "last_fill_stage": "none",
+            "last_fill_at": "",
+            "summary": "no active lineage paper sample",
+        }
+    hours_open = round(float(item.get("hours_open", 0.0) or 0.0), 2)
+    active = hours_open >= float(max(1, threshold_hours))
+    return {
+        "active": active,
+        "status": "stalled" if active else "tracking",
+        "threshold_hours": int(max(1, threshold_hours)),
+        "hours_open": hours_open,
+        "symbol": str(item.get("symbol") or ""),
+        "strategy_family": str(item.get("strategy_family") or ""),
+        "plan_id": str(item.get("plan_id") or ""),
+        "last_fill_stage": str(item.get("last_fill_stage") or "none"),
+        "last_fill_at": str(item.get("last_fill_at") or ""),
+        "summary": (
+            f"open lineage sample {str(item.get('symbol') or 'unknown')} "
+            f"has remained open for {hours_open:.1f}h "
+            f"(threshold={max(1, threshold_hours)}h)"
+        ),
     }
 
 
@@ -528,10 +753,16 @@ def _candidate_gate_ready(
     representative_candidates: dict[str, Any] | None,
     entry_timing_review_target: dict[str, Any] | None,
     execution_style_review_target: dict[str, Any] | None,
+    active_lineage_sample_focus: dict[str, Any] | None,
 ) -> bool:
     accepted = dict((representative_candidates or {}).get("accepted") or {})
     accepted_family = str(accepted.get("strategy_family") or "").strip().lower()
     if accepted and accepted_family in _LINEAGE_TARGET_FAMILIES:
+        return True
+
+    active_sample = dict(active_lineage_sample_focus or {})
+    active_sample_family = str(active_sample.get("strategy_family") or "").strip().lower()
+    if active_sample and active_sample_family in _LINEAGE_TARGET_FAMILIES:
         return True
 
     for target in (entry_timing_review_target, execution_style_review_target):
@@ -568,6 +799,7 @@ def _readiness_gates(
     representative_candidates: dict[str, Any] | None,
     entry_timing_review_target: dict[str, Any] | None,
     execution_style_review_target: dict[str, Any] | None,
+    active_lineage_sample_focus: dict[str, Any] | None,
     edge_experiment_review: dict[str, Any] | None,
     lineage_sample_summary: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -576,6 +808,7 @@ def _readiness_gates(
         representative_candidates,
         entry_timing_review_target,
         execution_style_review_target,
+        active_lineage_sample_focus,
     )
     edge_sample_ready = _edge_sample_gate_ready(edge_experiment_review, lineage_sample_summary)
     all_ready = lineage_ready and candidate_ready and edge_sample_ready
@@ -609,6 +842,33 @@ def _experiment_review_target_line(label: str, target: dict[str, Any] | None) ->
     if item.get("followup_command"):
         line = f"{line} | cmd={item.get('followup_command')}"
     return line
+
+
+def _active_lineage_sample_focus_line(sample: dict[str, Any] | None) -> str:
+    item = dict(sample or {})
+    if not item:
+        return "active_lineage_sample_focus: none"
+    line = (
+        f"active_lineage_sample_focus: {item.get('symbol') or 'unknown'} | "
+        f"family={item.get('strategy_family') or 'unknown'} | "
+        f"status={item.get('status') or 'unknown'} | "
+        f"plan_id={item.get('plan_id') or 'unknown'}"
+    )
+    if item.get("hours_open") is not None:
+        line = f"{line} | hours_open={float(item.get('hours_open') or 0.0):.2f}"
+    if item.get("last_fill_stage"):
+        line = f"{line} | last_fill={item.get('last_fill_stage')}"
+    return line
+
+
+def _active_lineage_sample_health_line(item: dict[str, Any] | None) -> str:
+    sample = dict(item or {})
+    return (
+        f"active_lineage_sample_health: active={bool(sample.get('active', False))} | "
+        f"hours_open={float(sample.get('hours_open', 0.0) or 0.0):.2f} | "
+        f"threshold_hours={int(sample.get('threshold_hours', 0) or 0)} | "
+        f"status={sample.get('status') or 'none'}"
+    )
 
 
 def _stage_from_payload(
@@ -747,6 +1007,10 @@ def _build_stage_payload(
         sample_days=lineage_sample_days,
     )
     representative_candidates = _representative_candidates(dashboard)
+    open_lineage_sample_summary = _open_lineage_samples(_family_set(lineage_families))
+    active_lineage_samples = list(open_lineage_sample_summary.get("samples") or [])
+    active_lineage_sample_focus = dict(active_lineage_samples[0]) if active_lineage_samples else None
+    active_lineage_sample_health = _active_lineage_sample_health(active_lineage_sample_focus)
     entry_timing_review_target = _experiment_review_target(
         operator_action_priority,
         target_key="entry_timing_target",
@@ -785,9 +1049,13 @@ def _build_stage_payload(
         "edge_evolution_rule": edge_evolution_rule,
         "review_followup_ledger": review_followup_ledger,
         "lineage_sample_summary": lineage_sample_summary,
+        "lineage_closed_fill_health": _lineage_closed_fill_health(lineage_sample_summary),
         "entry_timing_review_target": entry_timing_review_target,
         "execution_style_review_target": execution_style_review_target,
         "representative_candidates": representative_candidates,
+        "open_lineage_sample_summary": open_lineage_sample_summary,
+        "active_lineage_sample_focus": active_lineage_sample_focus,
+        "active_lineage_sample_health": active_lineage_sample_health,
         "alpha_research_next_step": (
             alpha_research_pipeline.get("recommended_action")
             or alpha_research_pipeline.get("softening_top_bucket")
@@ -800,6 +1068,7 @@ def _build_stage_payload(
         representative_candidates=representative_candidates,
         entry_timing_review_target=entry_timing_review_target,
         execution_style_review_target=execution_style_review_target,
+        active_lineage_sample_focus=active_lineage_sample_focus,
         edge_experiment_review=edge_experiment_review,
         lineage_sample_summary=lineage_sample_summary,
     )
@@ -824,11 +1093,15 @@ def _print_human(payload: dict[str, Any]) -> None:
     print(_edge_evolution_summary_line(payload.get("edge_evolution_rule")))
     print(_review_followup_summary_line(payload.get("review_followup_ledger")))
     print(_lineage_sample_summary_line(payload.get("lineage_sample_summary")))
+    print(_lineage_closed_fill_health_line(payload.get("lineage_closed_fill_health")))
     print(_experiment_review_target_line("entry_timing_review_target", payload.get("entry_timing_review_target")))
     print(_experiment_review_target_line("execution_style_review_target", payload.get("execution_style_review_target")))
     representative_candidates = payload.get("representative_candidates") or {}
     print(_representative_candidate_summary_line("accepted_candidate_focus", representative_candidates.get("accepted")))
     print(_representative_candidate_summary_line("blocked_candidate_focus", representative_candidates.get("blocked")))
+    print(_open_lineage_sample_summary_line(payload.get("open_lineage_sample_summary")))
+    print(_active_lineage_sample_focus_line(payload.get("active_lineage_sample_focus")))
+    print(_active_lineage_sample_health_line(payload.get("active_lineage_sample_health")))
     print(f"readiness_gates: {(payload.get('readiness_gates') or {}).get('summary', 'unavailable')}")
     print(f"checklist_status: {payload['checklist_status']}")
     print(f"eligible_closed_trades: {payload['eligible_closed_trades']}")

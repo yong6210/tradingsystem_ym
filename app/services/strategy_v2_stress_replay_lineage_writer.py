@@ -113,13 +113,18 @@ class StrategyV2StressReplayLineageWriterService:
         for scenario in self._SCENARIO_ORDER:
             contract_row = dict(scenario_contract.get(scenario) or {})
             scenario_rows = self._scenario_trade_rows(scenario=scenario, trade_rows=trade_rows)
+            ready = bool(contract_row.get("ready", False))
+            prototype_ready = bool(contract_row.get("prototype_ready", False))
+            executable = ready or prototype_ready
             summary: dict[str, Any] = {
-                "ready": bool(contract_row.get("ready", False)),
+                "ready": ready,
+                "prototype_ready": prototype_ready,
+                "executable": executable,
                 "gating_reason": contract_row.get("gating_reason", "not_available"),
                 "candidate_trades": len(scenario_rows),
                 "batches": [],
             }
-            if not summary["ready"]:
+            if not executable:
                 sample_counts[scenario] = summary
                 continue
 
@@ -183,7 +188,8 @@ class StrategyV2StressReplayLineageWriterService:
         for scenario in self._SCENARIO_ORDER:
             row = dict((payload.get("scenario_batches") or {}).get(scenario) or {})
             lines.append(
-                f"- {scenario}: ready={bool(row.get('ready', False))}, candidate_trades={int(row.get('candidate_trades', 0) or 0)}, "
+                f"- {scenario}: ready={bool(row.get('ready', False))}, prototype_ready={bool(row.get('prototype_ready', False))}, "
+                f"candidate_trades={int(row.get('candidate_trades', 0) or 0)}, "
                 f"batches={len(row.get('batches', []))}, gating_reason={row.get('gating_reason', 'not_available')}"
             )
         lines.extend(["", "## Blockers"])
@@ -238,8 +244,24 @@ class StrategyV2StressReplayLineageWriterService:
                 trade_rows=rows,
                 now=now,
             )
-            implementation_status = "lineage_writer_seeded_scenario_batches" if total_batches_written > 0 else "lineage_writer_no_ready_batches"
-            reason = "stress_replay_lineage_batches_written" if total_batches_written > 0 else "stress_replay_no_ready_scenarios"
+            prototype_batches_written = any(
+                row.get("prototype_ready", False) and row.get("batches")
+                for row in scenario_batches.values()
+            )
+            if total_batches_written > 0:
+                implementation_status = (
+                    "lineage_writer_seeded_prototype_batches"
+                    if prototype_batches_written
+                    else "lineage_writer_seeded_scenario_batches"
+                )
+                reason = (
+                    "stress_replay_lineage_prototype_batches_written"
+                    if prototype_batches_written
+                    else "stress_replay_lineage_batches_written"
+                )
+            else:
+                implementation_status = "lineage_writer_no_ready_batches"
+                reason = "stress_replay_no_ready_scenarios"
         elif not available:
             implementation_status = "lineage_writer_waiting_for_dependencies"
             reason = "stress_replay_lineage_or_runner_contract_unavailable"

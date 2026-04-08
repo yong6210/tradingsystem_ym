@@ -140,3 +140,67 @@ def test_stress_replay_runner_contract_reports_ready_scenarios_and_batching() ->
     body = path.read_text(encoding="utf-8")
     assert "# Strategy v2 Stress Replay Runner Contract: BTCUSDC" in body
     assert "## Runner Contract" in body
+
+
+def test_stress_replay_runner_contract_allows_prototype_path_before_full_replay_ready() -> None:
+    service = StrategyV2StressReplayRunnerContractService()
+    payload = service.generate(
+        symbol="BTCUSDC",
+        version="v2",
+        stress_validation={
+            "schema_version": "strategy_v2_stress_validation_v2",
+            "deployment_recommendation": {
+                "scenario_statuses": {
+                    "latency_plus_1_bar": {"status": "WARN", "reason": "thin_sample", "catastrophic_loss_detected": False},
+                    "partial_fills_only": {"status": "WARN", "reason": "thin_sample", "catastrophic_loss_detected": False},
+                    "shock_concentration": {"status": "WARN", "reason": "thin_sample", "catastrophic_loss_detected": False},
+                },
+                "priority": "low",
+            },
+            "sample_counts": {"shock_regime_trades": 1},
+        },
+        stress_replay_lineage={
+            "schema_version": "strategy_v2_stress_replay_lineage_v1",
+            "available": True,
+            "runtime_inputs_ready": True,
+            "sample_counts": {
+                "eligible_closed_trades": 4,
+                "latency_bar_trades": 1,
+                "full_fill_path_trades": 1,
+            },
+            "coverage": {
+                "execution_fill_coverage": 0.75,
+                "latency_candle_coverage": 1.0,
+                "candle_path_coverage": 1.0,
+            },
+            "fill_path": {"full_fill_path_coverage": 0.75},
+            "blocked_by": [],
+            "next_steps": [],
+        },
+        stress_replay_assessment={
+            "schema_version": "strategy_v2_stress_replay_assessment_v1",
+            "available": True,
+            "full_replay_ready": False,
+            "replacement_recommended": False,
+            "true_runner_readiness": {
+                "true_runner_ready": False,
+                "stage": "prototype_only",
+                "blocked_by": [],
+                "next_steps": [],
+            },
+            "deployment_recommendation": {"priority": "low"},
+        },
+        write_report=False,
+    )
+
+    assert payload["runtime_job_ready"] is True
+    assert payload["implementation_status"] == "runner_contract_defined_ready_for_prototype"
+    assert payload["reason"] == "stress_replay_prototype_ready"
+    assert payload["readiness"]["ready_scenarios"] == []
+    assert payload["readiness"]["prototype_ready_scenarios"] == [
+        "shock_concentration",
+        "latency_plus_1_bar",
+        "partial_fills_only",
+    ]
+    assert payload["scenario_contract"]["latency_plus_1_bar"]["prototype_ready"] is True
+    assert payload["scenario_contract"]["latency_plus_1_bar"]["ready"] is False

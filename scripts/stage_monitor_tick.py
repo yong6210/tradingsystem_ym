@@ -137,39 +137,8 @@ def _latest_symbol_closed_trade_ts(symbol: str) -> datetime | None:
 
 
 def _latest_family_closed_trade_ts(*, families: list[str], sample_days: int) -> datetime | None:
-    from datetime import timedelta
-
-    from app.core.config import get_settings
-    from app.core.enums import PlanState
-    from app.db.models import Plan
-    from app.db.session import SessionLocal
-    from app.services.strategy_v2_validation import StrategyV2ValidationService
-
-    settings = get_settings()
-    validation = StrategyV2ValidationService(settings)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, sample_days))
-    db = SessionLocal()
-    try:
-        rows = (
-            db.query(Plan)
-            .filter(Plan.state == PlanState.CLOSED.value, Plan.strategy_version == settings.strategy_version)
-            .all()
-        )
-        latest: datetime | None = None
-        normalized_families = {str(item).strip().lower() for item in families if str(item).strip()}
-        for row in rows:
-            validity = dict(getattr(row, "validity", {}) or {})
-            family = str(validity.get("strategy_family") or "").strip().lower()
-            if family not in normalized_families:
-                continue
-            candidate = validation._parse_ts(validity.get("final_exit_ts") or validity.get("last_exit_ts"))
-            if candidate is None or candidate < cutoff:
-                continue
-            if latest is None or candidate > latest:
-                latest = candidate
-        return latest
-    finally:
-        db.close()
+    _, latest = ops_stage_board._family_closed_fill_metrics(families=families, sample_days=sample_days)
+    return latest
 
 
 def _apply_edge_sample_stall(

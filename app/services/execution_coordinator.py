@@ -178,6 +178,20 @@ class ExecutionCoordinator:
         return f"intent-{intent_id[-16:]}"
 
     @staticmethod
+    def _submission_blocks_plan_reentry(row: OrderSubmission | None) -> bool:
+        if row is None:
+            return False
+        if str(row.adapter or "").lower() == "none":
+            return False
+        return str(row.state or "") in {
+            OrderLifecycleState.CREATED.value,
+            OrderLifecycleState.SUBMITTED.value,
+            OrderLifecycleState.ACKNOWLEDGED.value,
+            OrderLifecycleState.PARTIALLY_FILLED.value,
+            OrderLifecycleState.FILLED.value,
+        }
+
+    @staticmethod
     def _terminal_state(status: str) -> OrderLifecycleState:
         mapping = {
             "PARTIALLY_FILLED": OrderLifecycleState.PARTIALLY_FILLED,
@@ -240,6 +254,22 @@ class ExecutionCoordinator:
         plan = self.plan_repo.get(intent.plan_id)
         if plan is None:
             raise ValueError("plan_not_found")
+        for existing_submission in self.submission_repo.list_for_plan(plan.plan_id, limit=20):
+            if existing_submission.intent_id == intent.intent_id:
+                continue
+            if not self._submission_blocks_plan_reentry(existing_submission):
+                continue
+            row = self._rejection_submission(
+                intent=intent,
+                plan=plan,
+                message=(
+                    f"Plan already has routed submission {existing_submission.submission_id} "
+                    f"in state {existing_submission.state}."
+                ),
+                submit_status="PLAN_REENTRY_BLOCKED",
+                client_order_id=self._client_order_id(intent.intent_id),
+            )
+            return row, [], False
 
         requested_mode = ExecutionPlanningService.coerce_execution_mode(intent.execution_mode)
         client_order_id = self._client_order_id(intent.intent_id)

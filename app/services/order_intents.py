@@ -50,8 +50,29 @@ class OrderIntentService:
             "SUBMITTED",
             "ACKNOWLEDGED",
             "PARTIALLY_FILLED",
+        }
+
+    @staticmethod
+    def _submission_blocks_plan_reentry(submission: OrderSubmission | None) -> bool:
+        if submission is None:
+            return False
+        if str(submission.adapter or "").lower() == "none":
+            return False
+        return str(submission.state or "") in {
+            "CREATED",
+            "SUBMITTED",
+            "ACKNOWLEDGED",
+            "PARTIALLY_FILLED",
             "FILLED",
         }
+
+    def _latest_routed_submission_for_plan(self, plan_id: str) -> OrderSubmission | None:
+        if self.submission_repo is None:
+            return None
+        for submission in self.submission_repo.list_for_plan(plan_id, limit=20):
+            if self._submission_blocks_plan_reentry(submission):
+                return submission
+        return None
 
     def _dedupe_via_open_intents(self, *, plan: Plan, fingerprint: dict) -> dict | None:
         validity = dict(plan.validity or {})
@@ -175,10 +196,17 @@ class OrderIntentService:
         approval_state: ApprovalState,
         stale: bool,
         duplicate: bool,
+        already_submitted: bool,
         paper_lineage_override: bool = False,
         dedupe_source: str = "",
         approval_reason_code: str = "",
     ) -> tuple[SubmitDecision, str, str]:
+        if already_submitted:
+            return (
+                SubmitDecision.SKIP_ALREADY_SUBMITTED,
+                "plan_reentry_blocked",
+                "This plan already has a routed submission, so a new entry intent is blocked.",
+            )
         if stale:
             return (
                 SubmitDecision.SKIP_STALE_PLAN,
@@ -259,6 +287,8 @@ class OrderIntentService:
         executable_plan = dict(approval_bundle["executable_plan"])
         approval_state = ApprovalState(str(approval.get("approval_state") or ApprovalState.BLOCKED.value))
         stale = self._is_stale(plan)
+        existing_submission = self._latest_routed_submission_for_plan(plan.plan_id)
+        already_submitted = existing_submission is not None
         dedupe_result = self._dedupe_result(plan)
         duplicate = dedupe_result.get("status") == "duplicate_active_thesis"
         dedupe_source = str(dedupe_result.get("source") or "")
@@ -273,12 +303,18 @@ class OrderIntentService:
             approval_state=approval_state,
             stale=stale,
             duplicate=duplicate,
+            already_submitted=already_submitted,
             paper_lineage_override=override_active_plan_duplicate,
             dedupe_source=dedupe_source,
             approval_reason_code=str(approval.get("playbook_code") or ""),
         )
 
-        if stale:
+        if already_submitted and existing_submission is not None:
+            reason_message = (
+                f"Plan already has routed submission {existing_submission.submission_id} "
+                f"in state {existing_submission.state}."
+            )
+        elif stale:
             reason_message = "Plan is no longer valid for a new entry."
         elif duplicate and override_active_plan_duplicate:
             reason_code = str(approval.get("paper_lineage_override_reason") or "paper_lineage_override_applied")

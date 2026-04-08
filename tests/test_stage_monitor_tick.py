@@ -163,3 +163,19 @@ def test_apply_edge_sample_stall_marks_stalled_after_threshold() -> None:
     assert payload["edge_sample_stall"]["current_closed_trade_count"] == 2
     assert payload["edge_sample_stall"]["hours_since_progress"] == 49.0
     assert payload["edge_sample_stall"]["scope"] == "family_global"
+
+
+def test_latest_family_closed_trade_ts_uses_closed_fill_metrics(monkeypatch) -> None:
+    expected = datetime(2026, 4, 8, 7, 29, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        stage_monitor_tick.ops_stage_board,
+        "_family_closed_fill_metrics",
+        lambda **kwargs: (130, expected),
+    )
+
+    latest = stage_monitor_tick._latest_family_closed_trade_ts(
+        families=["sweep_reversal", "trend_continuation"],
+        sample_days=180,
+    )
+
+    assert latest == expected

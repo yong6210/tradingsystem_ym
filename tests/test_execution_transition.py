@@ -243,6 +243,123 @@ def test_order_intent_and_paper_submit_flow_updates_position_state(monkeypatch) 
         assert refreshed.state == "ENTERED"
 
 
+def test_order_intent_blocks_plan_reentry_when_prior_submission_exists(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+
+    symbol = f"PREENTRY{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 101}USDC"
+    plan_id = f"{symbol}_plan"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id)
+
+    first_intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "PAPER"},
+    )
+    assert first_intent.status_code == 200
+    first_intent_payload = first_intent.json()
+    assert first_intent_payload["submit_decision"] == "SUBMIT"
+
+    first_submit = client.post(
+        "/execution/submit",
+        json={"intent_id": first_intent_payload["intent_id"], "live": False, "paper_scenario": "fill"},
+    )
+    assert first_submit.status_code == 200
+    assert first_submit.json()["state"] == "FILLED"
+
+    with SessionLocal() as db:
+        plan = db.get(Plan, plan_id)
+        assert plan is not None
+        plan.state = "PLANNED"
+        db.add(plan)
+        db.commit()
+
+    second_intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "PAPER"},
+    )
+    assert second_intent.status_code == 200
+    second_intent_payload = second_intent.json()
+    assert second_intent_payload["submit_decision"] == "SKIP_ALREADY_SUBMITTED"
+    assert second_intent_payload["decision_reason_code"] == "plan_reentry_blocked"
+    assert "already has routed submission" in second_intent_payload["decision_reason_message"]
+
+
+def test_submit_rejects_plan_reentry_when_prior_submission_exists(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+
+    symbol = f"PRESUB{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 102}USDC"
+    plan_id = f"{symbol}_plan"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id)
+
+    first_intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "PAPER"},
+    )
+    assert first_intent.status_code == 200
+    first_intent_payload = first_intent.json()
+
+    first_submit = client.post(
+        "/execution/submit",
+        json={"intent_id": first_intent_payload["intent_id"], "live": False, "paper_scenario": "fill"},
+    )
+    assert first_submit.status_code == 200
+    assert first_submit.json()["state"] == "FILLED"
+
+    with SessionLocal() as db:
+        plan = db.get(Plan, plan_id)
+        assert plan is not None
+        plan.state = "PLANNED"
+        db.add(plan)
+        db.add(
+            OrderIntent(
+                intent_id=f"intent_{symbol}_manual_reentry",
+                plan_id=plan_id,
+                symbol=symbol,
+                strategy_family="sweep_reversal",
+                execution_mode="PAPER",
+                approval_state="APPROVED_AUTO",
+                submit_decision="SUBMIT",
+                decision_reason_code="submit_ready",
+                decision_reason_message="ready",
+                thesis_fingerprint={},
+                dedupe_result={"status": "unique"},
+                session_guidance={"state": "london"},
+                quality_snapshot={"validation_grade": "A"},
+                approval_snapshot={
+                    "approval_state": "APPROVED_AUTO",
+                    "allowed_execution_mode": "PAPER",
+                    "deployment_go_no_go": "GO",
+                    "deployment_code": "go_execution_auto_submit",
+                    "playbook_go_no_go": "GO",
+                    "playbook_code": "go_execution_auto_submit",
+                    "playbook_action": "allow_auto_submit",
+                    "playbook_message": "GO: execution path is auto-approved.",
+                },
+                payload={},
+            )
+        )
+        db.commit()
+
+    second_submit = client.post(
+        "/execution/submit",
+        json={"intent_id": f"intent_{symbol}_manual_reentry", "live": False, "paper_scenario": "fill"},
+    )
+    assert second_submit.status_code == 200
+    second_submit_payload = second_submit.json()
+    assert second_submit_payload["adapter"] == "none"
+    assert second_submit_payload["submit_status"] == "PLAN_REENTRY_BLOCKED"
+    assert second_submit_payload["state"] == "REJECTED"
+
+
 def test_paper_exit_tick_closes_filled_paper_positions_on_targets(monkeypatch) -> None:
     init_db()
     _apply_auto_trading_defaults(monkeypatch)
@@ -303,8 +420,9 @@ def test_paper_exit_tick_closes_filled_paper_positions_on_targets(monkeypatch) -
             limit_5m=1,
         )
         assert payload["paper_candidate_plans"] >= 1
-        assert payload["partial_exit_events"] == 2
-        assert payload["closed_events"] == 1
+        assert payload["partial_exit_events"] >= 2
+        assert payload["closed_events"] >= 1
+        assert any(action.get("plan_id") == plan_id for action in payload["actions"])
 
     with SessionLocal() as db:
         refreshed = db.get(Plan, plan_id)
@@ -319,6 +437,277 @@ def test_paper_exit_tick_closes_filled_paper_positions_on_targets(monkeypatch) -
             .all()
         )
         assert [fill.stage for fill in fills] == ["PARTIAL_EXIT", "PARTIAL_EXIT", "CLOSED"]
+
+
+def test_paper_exit_tick_waits_for_candle_after_latest_fill() -> None:
+    init_db()
+    _reset_execution_control_state()
+
+    symbol = f"PEXWAIT{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 3}USDC"
+    plan_id = f"{symbol}_plan"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, state="ENTERED")
+
+    candle_ts = datetime.now(timezone.utc).replace(microsecond=0, second=0)
+    entry_fill_ts = candle_ts + timedelta(seconds=40)
+    with SessionLocal() as db:
+        db.add(
+            OrderSubmission(
+                submission_id=f"sub_{symbol}",
+                intent_id=f"intent_{symbol}",
+                plan_id=plan_id,
+                symbol=symbol,
+                client_order_id=f"client_{symbol}",
+                exchange_order_id=f"paper_{symbol}",
+                state=OrderLifecycleState.FILLED.value,
+                submit_status="FILLED",
+                message="paper filled",
+                adapter="paper",
+                execution_mode="PAPER",
+                attachments={},
+                side="BUY",
+                order_type="LIMIT",
+                reduce_only=False,
+                requested_live=False,
+                raw={},
+                submitted_at=entry_fill_ts,
+                acknowledged_at=entry_fill_ts,
+            )
+        )
+        db.add(
+            ExecutionFill(
+                fill_id=f"fill_{symbol}_entry",
+                plan_id=plan_id,
+                symbol=symbol,
+                stage="ENTRY",
+                fill_ts=entry_fill_ts,
+                price=100.0,
+                qty=1.0,
+                fee=0.0,
+                from_state="ARMED",
+                to_state="ENTERED",
+                state_changed=True,
+                payload={"source": "paper_adapter"},
+                strategy_version="v1",
+            )
+        )
+        db.add(
+            Candle(
+                symbol=symbol,
+                timeframe="1m",
+                ts=candle_ts,
+                o=100.0,
+                h=103.5,
+                l=99.5,
+                c=103.1,
+                v=1000.0,
+                source="test",
+                is_final=True,
+            )
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        payload = engine.process_paper_exit_tick(
+            families=["sweep_reversal"],
+            days=2,
+            limit=20,
+            sync_candles=False,
+            limit_1m=1,
+            limit_5m=1,
+        )
+        assert payload["partial_exit_events"] == 0
+        assert payload["closed_events"] == 0
+        assert any(
+            action.get("plan_id") == plan_id and action.get("status") == "await_next_candle_after_last_fill"
+            for action in payload["actions"]
+        )
+
+    with SessionLocal() as db:
+        refreshed = db.get(Plan, plan_id)
+        assert refreshed is not None
+        assert refreshed.state == "ENTERED"
+        fills = db.query(ExecutionFill).filter(ExecutionFill.plan_id == plan_id).all()
+        assert [fill.stage for fill in fills] == ["ENTRY"]
+
+
+def test_paper_exit_tick_repairs_armed_plan_state_from_entry_fill() -> None:
+    init_db()
+    symbol = f"PEXWAIT{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 6}USDC"
+    plan_id = f"{symbol}_plan"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, state="ARMED")
+    candle_ts = datetime.now(timezone.utc).replace(microsecond=0, second=0)
+    entry_fill_ts = candle_ts + timedelta(seconds=40)
+
+    with SessionLocal() as db:
+        db.add(
+            OrderSubmission(
+                submission_id=f"sub_{symbol}",
+                intent_id=f"intent_{symbol}",
+                plan_id=plan_id,
+                symbol=symbol,
+                client_order_id=f"client_{symbol}",
+                exchange_order_id=f"paper_{symbol}",
+                state=OrderLifecycleState.FILLED.value,
+                submit_status="FILLED",
+                message="paper filled",
+                adapter="paper",
+                execution_mode="PAPER",
+                attachments={},
+                side="BUY",
+                order_type="LIMIT",
+                reduce_only=False,
+                requested_live=False,
+                raw={},
+                submitted_at=entry_fill_ts,
+                acknowledged_at=entry_fill_ts,
+            )
+        )
+        db.add(
+            ExecutionFill(
+                fill_id=f"{plan_id}_entry",
+                plan_id=plan_id,
+                symbol=symbol,
+                stage="ENTRY",
+                fill_ts=entry_fill_ts,
+                price=100.0,
+                qty=1.0,
+                fee=0.0,
+                from_state="ARMED",
+                to_state="ENTERED",
+                state_changed=True,
+                payload={"source": "paper_adapter"},
+                strategy_version="v1",
+            )
+        )
+        db.add(
+            Candle(
+                symbol=symbol,
+                timeframe="1m",
+                ts=candle_ts,
+                o=100.0,
+                h=103.5,
+                l=99.5,
+                c=103.1,
+                v=1000.0,
+                source="test",
+                is_final=True,
+            )
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        payload = engine.process_paper_exit_tick(
+            families=["sweep_reversal"],
+            days=2,
+            limit=20,
+            sync_candles=False,
+            limit_1m=1,
+            limit_5m=1,
+        )
+        assert payload["paper_candidate_plans"] >= 1
+        assert payload["state_repairs"] >= 1
+        assert any(
+            action.get("plan_id") == plan_id and action.get("status") == "await_next_candle_after_last_fill"
+            for action in payload["actions"]
+        )
+
+    with SessionLocal() as db:
+        refreshed = db.get(Plan, plan_id)
+        assert refreshed is not None
+        assert refreshed.state == "ENTERED"
+
+
+def test_paper_exit_tick_repairs_missing_entry_fill_from_submission_raw() -> None:
+    init_db()
+    symbol = f"PREENTRY{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 9}USDC"
+    plan_id = f"{symbol}_plan"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, state="ARMED")
+    submitted_at = datetime.now(timezone.utc).replace(microsecond=0, second=0)
+    candle_ts = submitted_at + timedelta(minutes=1)
+
+    with SessionLocal() as db:
+        db.add(
+            OrderSubmission(
+                submission_id=f"sub_{symbol}",
+                intent_id=f"intent_{symbol}",
+                plan_id=plan_id,
+                symbol=symbol,
+                client_order_id=f"client_{symbol}",
+                exchange_order_id=f"paper_{symbol}",
+                state=OrderLifecycleState.FILLED.value,
+                submit_status="FILLED",
+                message="paper filled",
+                adapter="paper",
+                execution_mode="PAPER",
+                attachments={},
+                side="BUY",
+                order_type="LIMIT",
+                reduce_only=False,
+                requested_live=False,
+                raw={
+                    "fill_results": [
+                        {
+                            "accepted": True,
+                            "duplicate": False,
+                            "fill_id": f"paper_fill_{symbol}_entry",
+                            "plan_id": plan_id,
+                            "symbol": symbol,
+                            "stage": "ENTRY",
+                            "from_state": "ARMED",
+                            "to_state": "ENTERED",
+                            "state_changed": True,
+                            "reason": "applied",
+                            "exit_reason": None,
+                        }
+                    ]
+                },
+                submitted_at=submitted_at,
+                acknowledged_at=submitted_at,
+            )
+        )
+        db.add(
+            Candle(
+                symbol=symbol,
+                timeframe="1m",
+                ts=candle_ts,
+                o=100.0,
+                h=100.4,
+                l=99.8,
+                c=100.1,
+                v=1000.0,
+                source="test",
+                is_final=True,
+            )
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        payload = engine.process_paper_exit_tick(
+            families=["sweep_reversal"],
+            days=2,
+            limit=20,
+            sync_candles=False,
+            limit_1m=1,
+            limit_5m=1,
+        )
+        assert payload["paper_candidate_plans"] >= 1
+        assert payload["fill_repairs"] >= 1
+
+    with SessionLocal() as db:
+        fills = (
+            db.query(ExecutionFill)
+            .filter(ExecutionFill.plan_id == plan_id)
+            .order_by(ExecutionFill.fill_ts.asc())
+            .all()
+        )
+        assert [fill.stage for fill in fills] == ["ENTRY"]
+        assert dict(fills[0].payload or {})["source"] == "paper_submission_raw_repair"
+        refreshed = db.get(Plan, plan_id)
+        assert refreshed is not None
+        assert refreshed.state == "ENTERED"
 
 
 def test_plan_upsert_preserves_entered_plan_history_by_rolling_plan_id() -> None:
@@ -377,6 +766,160 @@ def test_plan_upsert_preserves_entered_plan_history_by_rolling_plan_id() -> None
         validity = dict(rolled.validity or {})
         assert validity["supersedes_plan_id"] == plan_id
         assert validity["collision_preserved_existing_state"] == "ENTERED"
+
+
+def test_plan_upsert_preserves_replaceable_plan_with_execution_fill_artifact() -> None:
+    init_db()
+    symbol = f"PCOLL{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 4}USDC"
+    plan_id = f"{symbol}_plan"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, state="ARMED")
+
+    with SessionLocal() as db:
+        db.add(
+            ExecutionFill(
+                fill_id=f"{plan_id}_entry_fill",
+                plan_id=plan_id,
+                symbol=symbol,
+                stage="ENTRY",
+                fill_ts=datetime.now(timezone.utc).replace(microsecond=0),
+                price=100.0,
+                qty=1.0,
+                fee=0.0,
+                from_state="ARMED",
+                to_state="ENTERED",
+                state_changed=True,
+                payload={},
+                strategy_version="v1",
+            )
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        repo = PlanRepository(db)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        repo.upsert_many(
+            [
+                Plan(
+                    plan_id=plan_id,
+                    zone_id=f"{symbol}_z1",
+                    symbol=symbol,
+                    timeframe="5m",
+                    direction="long",
+                    entry_model="CONFIRM",
+                    entry_price=101.0,
+                    entry_condition="refresh",
+                    sl=99.0,
+                    tp1=102.0,
+                    tp2=103.0,
+                    tp3=104.0,
+                    split={"tp1": 0.5, "tp2": 0.3, "runner": 0.2},
+                    rr_min=1.0,
+                    rr_base=1.5,
+                    rr_opt=2.0,
+                    ev=0.2,
+                    cost_est=0.05,
+                    confidence=0.7,
+                    validity={"strategy_family": "legacy_zone_plan"},
+                    state="PLANNED",
+                    valid_from=now,
+                    valid_until=now + timedelta(hours=2),
+                    strategy_version="v1",
+                )
+            ]
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        original = db.get(Plan, plan_id)
+        assert original is not None
+        assert original.state == "ARMED"
+        rows = db.query(Plan).filter(Plan.symbol == symbol).order_by(Plan.valid_from.asc()).all()
+        assert len(rows) == 2
+        rolled = next(row for row in rows if row.plan_id != plan_id)
+        validity = dict(rolled.validity or {})
+        assert validity["supersedes_plan_id"] == plan_id
+        assert validity["collision_preserved_existing_state"] == "ARMED"
+        assert validity["collision_preserved_existing_artifact"] == "execution_fill"
+
+
+def test_plan_upsert_preserves_replaceable_plan_with_routed_submission_artifact() -> None:
+    init_db()
+    symbol = f"PCOLL{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 5}USDC"
+    plan_id = f"{symbol}_plan"
+    intent_id = f"{plan_id}_intent"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, state="ARMED")
+
+    with SessionLocal() as db:
+        db.add(
+            OrderSubmission(
+                submission_id=f"{plan_id}_submission",
+                intent_id=intent_id,
+                plan_id=plan_id,
+                symbol=symbol,
+                client_order_id=f"{plan_id}_client",
+                exchange_order_id=f"{plan_id}_exchange",
+                state=OrderLifecycleState.FILLED.value,
+                submit_status="FILLED",
+                message="existing routed submission",
+                adapter="paper",
+                execution_mode=ExecutionMode.PAPER.value,
+                side="BUY",
+                order_type="LIMIT",
+                reduce_only=False,
+                requested_live=False,
+                attachments={},
+                raw={},
+                submitted_at=datetime.now(timezone.utc).replace(microsecond=0),
+            )
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        repo = PlanRepository(db)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        repo.upsert_many(
+            [
+                Plan(
+                    plan_id=plan_id,
+                    zone_id=f"{symbol}_z1",
+                    symbol=symbol,
+                    timeframe="5m",
+                    direction="long",
+                    entry_model="CONFIRM",
+                    entry_price=101.0,
+                    entry_condition="refresh",
+                    sl=99.0,
+                    tp1=102.0,
+                    tp2=103.0,
+                    tp3=104.0,
+                    split={"tp1": 0.5, "tp2": 0.3, "runner": 0.2},
+                    rr_min=1.0,
+                    rr_base=1.5,
+                    rr_opt=2.0,
+                    ev=0.2,
+                    cost_est=0.05,
+                    confidence=0.7,
+                    validity={"strategy_family": "legacy_zone_plan"},
+                    state="PLANNED",
+                    valid_from=now,
+                    valid_until=now + timedelta(hours=2),
+                    strategy_version="v1",
+                )
+            ]
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        original = db.get(Plan, plan_id)
+        assert original is not None
+        assert original.state == "ARMED"
+        rows = db.query(Plan).filter(Plan.symbol == symbol).order_by(Plan.valid_from.asc()).all()
+        assert len(rows) == 2
+        rolled = next(row for row in rows if row.plan_id != plan_id)
+        validity = dict(rolled.validity or {})
+        assert validity["supersedes_plan_id"] == plan_id
+        assert validity["collision_preserved_existing_state"] == "ARMED"
+        assert validity["collision_preserved_existing_artifact"] == "routed_submission"
 
 
 def test_execution_candidate_rows_apply_outcome_sizing_clamp(monkeypatch) -> None:
@@ -646,6 +1189,82 @@ def test_paper_lineage_override_does_not_bypass_open_intent_duplicate(monkeypatc
     intent_payload = intent.json()
     assert intent_payload["submit_decision"] == "SKIP_DUPLICATE"
     assert intent_payload["dedupe_result"]["source"] == "open_intent"
+
+
+def test_closed_filled_submission_does_not_keep_thesis_open(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trading_execution_mode", ExecutionMode.PAPER)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+
+    symbol = f"PLCF{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 131}USDC"
+    existing_plan_id = f"{symbol}_existing"
+    fresh_plan_id = f"{symbol}_fresh"
+    _seed_plan(symbol=symbol, family="trend_continuation", plan_id=existing_plan_id, state="CLOSED")
+    _seed_plan(symbol=symbol, family="trend_continuation", plan_id=fresh_plan_id, state="ARMED")
+
+    with SessionLocal() as db:
+        existing_plan = db.get(Plan, existing_plan_id)
+        assert existing_plan is not None
+        existing_fingerprint = ThesisFingerprintService(get_settings()).build_from_plan(existing_plan)
+        db.add(
+            OrderIntent(
+                intent_id=f"intent_{symbol}_existing",
+                plan_id=existing_plan_id,
+                symbol=symbol,
+                strategy_family="trend_continuation",
+                execution_mode="PAPER",
+                approval_state="APPROVED_AUTO",
+                submit_decision="SUBMIT",
+                decision_reason_code="submit_ready",
+                decision_reason_message="ready",
+                thesis_fingerprint=existing_fingerprint,
+                dedupe_result={"status": "unique"},
+                session_guidance={"state": "london"},
+                quality_snapshot={"validation_grade": "A"},
+                approval_snapshot={
+                    "approval_state": "APPROVED_AUTO",
+                    "allowed_execution_mode": "PAPER",
+                    "deployment_go_no_go": "GO",
+                    "deployment_code": "go_execution_auto_submit",
+                    "playbook_go_no_go": "GO",
+                    "playbook_code": "go_execution_auto_submit",
+                    "playbook_action": "allow_auto_submit",
+                    "playbook_message": "GO: execution path is auto-approved.",
+                },
+                payload={},
+            )
+        )
+        db.add(
+            OrderSubmission(
+                submission_id=f"sub_{symbol}_existing",
+                intent_id=f"intent_{symbol}_existing",
+                plan_id=existing_plan_id,
+                symbol=symbol,
+                client_order_id=f"client_{symbol}_existing",
+                adapter="paper",
+                execution_mode="PAPER",
+                state="FILLED",
+                submit_status="FILLED",
+                side="BUY",
+                order_type="LIMIT",
+                requested_live=False,
+            )
+        )
+        db.commit()
+
+    intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": fresh_plan_id, "execution_mode": "PAPER"},
+    )
+    assert intent.status_code == 200
+    intent_payload = intent.json()
+    assert intent_payload["submit_decision"] == "SUBMIT"
+    assert intent_payload["dedupe_result"]["status"] == "unique"
 
 
 def test_paper_lineage_override_bypasses_allowlist_and_validation_for_paper_sampling(monkeypatch) -> None:

@@ -12,6 +12,10 @@ from app.db.models import Candle
 from app.services.market_data import DataQualityError, DataQualityGate, MarketDataService
 
 
+def _recent_base() -> datetime:
+    return datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(days=1)
+
+
 def _candle(*, ts: datetime, close: float = 100.0) -> Candle:
     return Candle(
         symbol="QTESTUSDC",
@@ -45,7 +49,7 @@ def test_quality_gate_detects_reverse_timestamp_after_normalization() -> None:
 def test_candle_repository_upsert_handles_duplicate_key_in_same_transaction() -> None:
     init_db()
     symbol = f"DUPX{uuid4().hex[:6].upper()}USDC"
-    base = datetime(2026, 3, 9, 0, 0, tzinfo=timezone.utc)
+    base = _recent_base()
 
     with SessionLocal() as db:
         repo = CandleRepository(db)
@@ -92,7 +96,7 @@ def test_candle_repository_upsert_handles_duplicate_key_in_same_transaction() ->
 def test_backfill_from_binance_skips_older_overlap_rows() -> None:
     init_db()
     symbol = f"OVLP{uuid4().hex[:6].upper()}USDC"
-    base = datetime(2026, 3, 9, 0, 0, tzinfo=timezone.utc)
+    base = _recent_base()
 
     with SessionLocal() as db:
         repo = CandleRepository(db)
@@ -135,7 +139,7 @@ def test_backfill_from_binance_skips_older_overlap_rows() -> None:
 def test_backfill_from_binance_returns_zero_when_all_rows_are_older_than_latest() -> None:
     init_db()
     symbol = f"OVLA{uuid4().hex[:6].upper()}USDC"
-    base = datetime(2026, 3, 9, 0, 0, tzinfo=timezone.utc)
+    base = _recent_base()
 
     with SessionLocal() as db:
         repo = CandleRepository(db)
@@ -169,3 +173,59 @@ def test_backfill_from_binance_returns_zero_when_all_rows_are_older_than_latest(
         assert ingested == 0
         assert len(candles) == 1
         assert DataQualityGate._as_utc(candles[0].ts) == base + timedelta(minutes=45)
+
+
+def test_backfill_from_binance_skips_reverse_timestamp_row_without_failing_symbol() -> None:
+    init_db()
+    symbol = f"OVLR{uuid4().hex[:6].upper()}USDC"
+    base = _recent_base()
+
+    with SessionLocal() as db:
+        repo = CandleRepository(db)
+        repo.upsert(
+            Candle(
+                symbol=symbol,
+                timeframe="5m",
+                ts=base + timedelta(minutes=10),
+                o=100.0,
+                h=101.0,
+                l=99.0,
+                c=100.5,
+                v=1000.0,
+                source="seed",
+                is_final=True,
+            )
+        )
+        repo.upsert(
+            Candle(
+                symbol=symbol,
+                timeframe="5m",
+                ts=base + timedelta(minutes=25),
+                o=101.0,
+                h=102.0,
+                l=100.5,
+                c=101.5,
+                v=900.0,
+                source="future",
+                is_final=True,
+            )
+        )
+        db.commit()
+
+        service = MarketDataService(repo)
+        service.binance.fetch_klines = lambda **kwargs: [  # type: ignore[assignment]
+            BinanceKline(symbol=symbol, interval="5m", open_time=base + timedelta(minutes=20), close_time=base + timedelta(minutes=25), o=100.8, h=101.4, l=100.6, c=101.1, v=1000.0, is_final=True),
+            BinanceKline(symbol=symbol, interval="5m", open_time=base + timedelta(minutes=30), close_time=base + timedelta(minutes=35), o=101.2, h=102.0, l=101.0, c=101.8, v=1100.0, is_final=True),
+        ]
+
+        ingested = service.backfill_from_binance(symbol=symbol, timeframe="5m", limit=2)
+        db.commit()
+
+        candles = repo.list_recent(symbol=symbol, timeframe="5m", limit=10)
+
+        assert ingested == 1
+        assert [DataQualityGate._as_utc(row.ts) for row in candles] == [
+            base + timedelta(minutes=10),
+            base + timedelta(minutes=25),
+            base + timedelta(minutes=30),
+        ]

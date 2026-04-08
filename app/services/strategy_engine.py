@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -135,6 +136,9 @@ from app.services.zone_engine import ZoneEngine
 
 
 class StrategyEngine:
+    _GLOBAL_LINEAGE_VALIDATION_SYMBOL = "LINEAGE_GLOBAL"
+    _GLOBAL_LINEAGE_VALIDATION_FAMILIES = ("sweep_reversal", "trend_continuation")
+
     def __init__(self, db: Session):
         self.db = db
         self.settings = get_settings()
@@ -1300,6 +1304,24 @@ class StrategyEngine:
             return weights
         return {key: float(value / total) for key, value in weights.items()}
 
+    @staticmethod
+    def _paper_exit_effective_state(plan, previous_fills: list[Any]) -> str:
+        latest_fill = max(
+            previous_fills,
+            key=lambda item: item.fill_ts if item.fill_ts.tzinfo else item.fill_ts.replace(tzinfo=timezone.utc),
+            default=None,
+        )
+        if latest_fill is None:
+            return str(plan.state or "")
+        stage = str(latest_fill.stage or "")
+        if stage == ExecutionFillStage.ENTRY.value:
+            return PlanState.ENTERED.value
+        if stage == ExecutionFillStage.PARTIAL_EXIT.value:
+            return PlanState.PARTIAL_EXIT.value
+        if stage == ExecutionFillStage.CLOSED.value:
+            return PlanState.CLOSED.value
+        return str(plan.state or "")
+
     def _paper_exit_threshold_hits(self, *, plan, candle) -> dict[str, bool]:
         high = float(candle.h)
         low = float(candle.l)
@@ -1319,6 +1341,165 @@ class StrategyEngine:
             "tp3": high >= float(plan.tp3) - tolerance(plan.tp3),
         }
 
+    @staticmethod
+    def _parse_iso_utc(value: Any) -> datetime | None:
+        if value in {None, ""}:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _repair_missing_paper_plan_from_submission(
+        self,
+        *,
+        submission: Any,
+        intent: Any | None,
+    ) -> Any | None:
+        if str(getattr(submission, "adapter", "") or "").lower() != "paper":
+            return None
+        plan_id = str(getattr(submission, "plan_id", "") or getattr(intent, "plan_id", "") or "")
+        if not plan_id:
+            return None
+        existing = self.plan_repo.get(plan_id)
+        if existing is not None:
+            return existing
+
+        payload = dict(getattr(intent, "payload", {}) or {})
+        executable_plan = dict(payload.get("executable_plan") or {})
+        if not executable_plan:
+            return None
+
+        raw = dict(getattr(submission, "raw", {}) or {})
+        fill_results = list(raw.get("fill_results") or [])
+        tp_targets = list(executable_plan.get("tp_targets") or [])
+        tp_by_label = {
+            str(item.get("label") or "").upper(): dict(item or {})
+            for item in tp_targets
+            if isinstance(item, dict)
+        }
+
+        entry_price = executable_plan.get("entry_limit_price")
+        if entry_price in {None, ""}:
+            entry_price = executable_plan.get("entry_trigger_price")
+        if entry_price in {None, ""} and fill_results:
+            entry_price = fill_results[0].get("price")
+        stop_price = executable_plan.get("stop_price")
+        if entry_price in {None, ""} or stop_price in {None, ""}:
+            return None
+
+        entry_price = float(entry_price)
+        stop_price = float(stop_price)
+        risk_distance = max(abs(entry_price - stop_price), 1e-9)
+        direction = str(executable_plan.get("direction") or "long").lower()
+
+        def _target_price(label: str, default_rr: float) -> float:
+            target = dict(tp_by_label.get(label) or {})
+            price = target.get("price")
+            if price not in {None, ""}:
+                return float(price)
+            sign = 1.0 if direction == "long" else -1.0
+            return float(entry_price + sign * risk_distance * default_rr)
+
+        def _target_fraction(label: str, default_fraction: float) -> float:
+            target = dict(tp_by_label.get(label) or {})
+            fraction = target.get("size_fraction")
+            try:
+                return float(fraction if fraction not in {None, ""} else default_fraction)
+            except (TypeError, ValueError):
+                return float(default_fraction)
+
+        tp1 = _target_price("TP1", 1.0)
+        tp2 = _target_price("TP2", 2.0)
+        tp3 = _target_price("TP3", 3.0)
+        split = {
+            "tp1": _target_fraction("TP1", 0.4),
+            "tp2": _target_fraction("TP2", 0.4),
+            "runner": _target_fraction("TP3", 0.2),
+        }
+
+        def _rr(target_price: float) -> float:
+            return round(abs(float(target_price) - entry_price) / risk_distance, 4)
+
+        valid_from = self._parse_iso_utc(executable_plan.get("valid_from")) or getattr(submission, "submitted_at", None)
+        valid_until = self._parse_iso_utc(executable_plan.get("valid_until")) or getattr(submission, "submitted_at", None)
+        if valid_from is None:
+            valid_from = datetime.now(timezone.utc)
+        if valid_until is None:
+            valid_until = valid_from
+
+        setup_score = float(executable_plan.get("setup_score", 0.0) or 0.0)
+        expected_summary = dict(executable_plan.get("expected_summary") or {})
+        context_snapshot = dict(executable_plan.get("context_snapshot") or {})
+        strategy_family = str(
+            executable_plan.get("strategy_family")
+            or getattr(intent, "strategy_family", "")
+            or "legacy_zone_plan"
+        )
+        latest_fill_stage = str((fill_results[-1] or {}).get("stage") or "").upper() if fill_results else ""
+        if latest_fill_stage == ExecutionFillStage.CLOSED.value:
+            plan_state = PlanState.CLOSED.value
+        elif latest_fill_stage == ExecutionFillStage.PARTIAL_EXIT.value:
+            plan_state = PlanState.PARTIAL_EXIT.value
+        elif latest_fill_stage == ExecutionFillStage.ENTRY.value:
+            plan_state = PlanState.ENTERED.value
+        elif str(getattr(submission, "state", "") or "") in {
+            OrderLifecycleState.FILLED.value,
+            OrderLifecycleState.PARTIALLY_FILLED.value,
+        }:
+            plan_state = PlanState.ENTERED.value
+        else:
+            plan_state = PlanState.ARMED.value
+
+        self.plan_repo.upsert_many(
+            [
+                Plan(
+                    plan_id=plan_id,
+                    zone_id=f"recovered:{plan_id}"[:50],
+                    symbol=str(executable_plan.get("symbol") or getattr(submission, "symbol", "") or ""),
+                    timeframe=str(executable_plan.get("tf") or "5m"),
+                    direction=direction,
+                    entry_model=str(executable_plan.get("entry_model") or "CONFIRM"),
+                    entry_price=entry_price,
+                    entry_condition=str(executable_plan.get("entry_semantics") or ""),
+                    sl=stop_price,
+                    tp1=tp1,
+                    tp2=tp2,
+                    tp3=tp3,
+                    split=split,
+                    rr_min=_rr(tp1),
+                    rr_base=_rr(tp2),
+                    rr_opt=_rr(tp3),
+                    ev=float(expected_summary.get("expected_ev_r", 0.0) or 0.0),
+                    cost_est=0.0,
+                    confidence=min(max(setup_score / 100.0, 0.0), 1.0),
+                    validity={
+                        "strategy_family": strategy_family,
+                        "strategy_grade": str(executable_plan.get("setup_grade") or ""),
+                        "regime": str(context_snapshot.get("regime") or "unknown"),
+                        "strategy_mode": str(executable_plan.get("strategy_mode") or ""),
+                        "entry_type": str(executable_plan.get("entry_type") or ""),
+                        "expected_summary": expected_summary,
+                        "thesis_primary_symbol": str(executable_plan.get("thesis_primary_symbol") or ""),
+                        "thesis_cluster_id": str(executable_plan.get("thesis_cluster_id") or ""),
+                        "context_snapshot": context_snapshot,
+                        "recovered_from_submission_id": str(getattr(submission, "submission_id", "") or ""),
+                        "recovered_from_intent_id": str(getattr(intent, "intent_id", "") or ""),
+                        "recovered_from_order_payload": True,
+                    },
+                    state=plan_state,
+                    valid_from=valid_from,
+                    valid_until=valid_until,
+                    strategy_version=str(executable_plan.get("strategy_version") or self.settings.strategy_version),
+                )
+            ]
+        )
+        self.db.flush()
+        return self.plan_repo.get(plan_id)
+
     def process_paper_exit_tick(
         self,
         *,
@@ -1328,14 +1509,35 @@ class StrategyEngine:
         sync_candles: bool = True,
         limit_1m: int = 3,
         limit_5m: int = 3,
-    ) -> dict[str, Any]:
+        ) -> dict[str, Any]:
         normalized_families = {str(item).strip().lower() for item in (families or []) if str(item).strip()}
-        plans = self.plan_repo.list_recent_global(
-            timeframe="5m",
-            days=max(1, int(days)),
-            states=[PlanState.ENTERED.value, PlanState.PARTIAL_EXIT.value],
-            limit=max(1, int(limit)),
-        )
+        submission_rows = self.submission_repo.list_recent(days=max(1, int(days)), limit=max(50, int(limit) * 5))
+        candidate_rows: list[tuple[Any, Any, str]] = []
+        seen_plan_ids: set[str] = set()
+        for submission in submission_rows:
+            if str(submission.adapter or "").lower() != "paper":
+                continue
+            plan_id = str(submission.plan_id or "")
+            if not plan_id or plan_id in seen_plan_ids:
+                continue
+            intent = self.intent_repo.get(str(submission.intent_id or ""))
+            plan = self.plan_repo.get(plan_id)
+            if plan is None:
+                repaired_plan = self._repair_missing_paper_plan_from_submission(submission=submission, intent=intent)
+                if repaired_plan is not None:
+                    plan = repaired_plan
+                    summary["plan_repairs"] += 1
+            if plan is None or str(plan.timeframe or "") != "5m":
+                continue
+            family = str(
+                (getattr(intent, "strategy_family", "") or (plan.validity or {}).get("strategy_family") or "legacy_zone_plan")
+            ).lower()
+            if normalized_families and family not in normalized_families:
+                continue
+            candidate_rows.append((plan, submission, family))
+            seen_plan_ids.add(plan_id)
+            if len(candidate_rows) >= max(1, int(limit)):
+                break
         summary: dict[str, Any] = {
             "schema_version": "paper_exit_monitor_v1",
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1346,17 +1548,28 @@ class StrategyEngine:
             "partial_exit_events": 0,
             "closed_events": 0,
             "skipped": 0,
+            "plan_repairs": 0,
+            "fill_repairs": 0,
+            "state_repairs": 0,
             "actions": [],
         }
-        for plan in plans:
+        for plan, submission, family in candidate_rows:
             summary["processed_plans"] += 1
-            validity = dict(plan.validity or {})
-            family = str(validity.get("strategy_family") or "legacy_zone_plan").lower()
-            if normalized_families and family not in normalized_families:
-                summary["skipped"] += 1
-                continue
-            submission = self._latest_paper_submission_for_plan(plan.plan_id)
-            if submission is None or str(submission.adapter or "").lower() != "paper":
+
+            repaired_fill = self._repair_missing_paper_entry_fill_from_submission(plan=plan, submission=submission)
+            if repaired_fill is not None and bool(repaired_fill.get("accepted")):
+                summary["fill_repairs"] += 1
+
+            previous_fills = sorted(
+                self.fill_repo.list_for_plans(plan_ids=[plan.plan_id], symbol=plan.symbol),
+                key=lambda item: item.fill_ts,
+            )
+            effective_state = self._paper_exit_effective_state(plan, previous_fills)
+            if effective_state in {PlanState.ENTERED.value, PlanState.PARTIAL_EXIT.value} and str(plan.state or "") != effective_state:
+                plan.state = effective_state
+                self.plan_repo.db.add(plan)
+                summary["state_repairs"] += 1
+            if effective_state not in {PlanState.ENTERED.value, PlanState.PARTIAL_EXIT.value}:
                 summary["skipped"] += 1
                 continue
 
@@ -1378,9 +1591,12 @@ class StrategyEngine:
                 )
                 continue
 
-            previous_fills = sorted(
-                self.fill_repo.list_for_plans(plan_ids=[plan.plan_id], symbol=plan.symbol),
-                key=lambda item: item.fill_ts,
+            latest_fill_ts = max(
+                (
+                    fill.fill_ts if fill.fill_ts.tzinfo else fill.fill_ts.replace(tzinfo=timezone.utc)
+                    for fill in previous_fills
+                ),
+                default=None,
             )
             exited_target_reasons = {
                 str((fill.payload or {}).get("exit_reason") or "")
@@ -1399,6 +1615,23 @@ class StrategyEngine:
             candle_ts_text = fill_ts.isoformat() if hasattr(fill_ts, "isoformat") else str(fill_ts)
             summary["entry_states_seen"] += 1
             actions_for_plan: list[dict[str, Any]] = []
+            if latest_fill_ts is not None:
+                normalized_candle_ts = fill_ts if fill_ts.tzinfo else fill_ts.replace(tzinfo=timezone.utc)
+                normalized_candle_ts = normalized_candle_ts.astimezone(timezone.utc)
+                if normalized_candle_ts <= latest_fill_ts.astimezone(timezone.utc):
+                    actions_for_plan.append(
+                        {
+                            "plan_id": plan.plan_id,
+                            "symbol": plan.symbol,
+                            "family": family,
+                            "status": "await_next_candle_after_last_fill",
+                            "candle_timeframe": candle_timeframe,
+                            "candle_ts": candle_ts_text,
+                            "last_fill_ts": latest_fill_ts.isoformat(),
+                        }
+                    )
+                    summary["actions"].extend(actions_for_plan)
+                    continue
 
             def _record_fill(*, leg: str, stage: ExecutionFillStage, price: float, qty: float, exit_reason: str) -> None:
                 nonlocal remaining_qty, actions_for_plan
@@ -1518,7 +1751,62 @@ class StrategyEngine:
                     }
                 )
             summary["actions"].extend(actions_for_plan)
+        if summary["plan_repairs"] > 0 or summary["state_repairs"] > 0:
+            self.db.commit()
         return summary
+
+    def _repair_missing_paper_entry_fill_from_submission(
+        self,
+        *,
+        plan: Any,
+        submission: Any,
+    ) -> dict[str, Any] | None:
+        if str(getattr(submission, "adapter", "") or "").lower() != "paper":
+            return None
+        existing_fills = self.fill_repo.list_for_plans(plan_ids=[str(getattr(plan, "plan_id", "") or "")], symbol=plan.symbol)
+        if existing_fills:
+            return None
+        raw = dict(getattr(submission, "raw", {}) or {})
+        fill_results = list(raw.get("fill_results") or [])
+        entry_result = None
+        for item in fill_results:
+            row = dict(item or {})
+            if not bool(row.get("accepted")):
+                continue
+            if str(row.get("stage") or "") == ExecutionFillStage.ENTRY.value:
+                entry_result = row
+                break
+        if not entry_result:
+            return None
+
+        fill_ts = (
+            getattr(submission, "acknowledged_at", None)
+            or getattr(submission, "submitted_at", None)
+            or getattr(submission, "created_at", None)
+            or datetime.now(timezone.utc)
+        )
+        if fill_ts.tzinfo is None:
+            fill_ts = fill_ts.replace(tzinfo=timezone.utc)
+        else:
+            fill_ts = fill_ts.astimezone(timezone.utc)
+
+        payload = {
+            "source": "paper_submission_raw_repair",
+            "client_order_id": str(getattr(submission, "client_order_id", "") or ""),
+            "exchange_order_id": str(getattr(submission, "exchange_order_id", "") or ""),
+            "repaired_from_submission_id": str(getattr(submission, "submission_id", "") or ""),
+        }
+        return self.ingest_execution_fill(
+            fill_id=str(entry_result.get("fill_id") or f"paper_repair_{plan.plan_id}_entry"),
+            plan_id=str(getattr(plan, "plan_id", "") or ""),
+            symbol=str(getattr(plan, "symbol", "") or ""),
+            stage=ExecutionFillStage.ENTRY,
+            fill_ts=fill_ts,
+            price=float(getattr(plan, "entry_price", 0.0) or 0.0),
+            qty=1.0,
+            fee=0.0,
+            payload=payload,
+        )
 
     def reconcile_execution(self, *, symbol: str, auto_resolve: bool = False, apply_lock: bool = False) -> dict[str, Any]:
         result = self.execution_reconciliation.reconcile(
@@ -3054,6 +3342,342 @@ class StrategyEngine:
         )
         return regime_label, calibration
 
+    @classmethod
+    def _global_lineage_validation_symbol(cls) -> str:
+        return cls._GLOBAL_LINEAGE_VALIDATION_SYMBOL
+
+    def _global_lineage_validation_plans(self, *, version: str) -> list[Any]:
+        plans = self.plan_repo.list_recent_global(
+            timeframe="5m",
+            days=180,
+            limit=20000,
+        )
+        family_set = set(self._GLOBAL_LINEAGE_VALIDATION_FAMILIES)
+        fills = self.fill_repo.list_for_plans(
+            plan_ids=[str(getattr(plan, "plan_id", "") or "") for plan in plans if getattr(plan, "plan_id", None)]
+        )
+        close_fill_by_plan_id: dict[str, Any] = {}
+        for fill in fills:
+            if str(getattr(fill, "stage", "")) != ExecutionFillStage.CLOSED.value:
+                continue
+            plan_id = str(getattr(fill, "plan_id", "") or "")
+            if not plan_id:
+                continue
+            close_fill_by_plan_id[plan_id] = fill
+        synthetic_plans: list[Any] = []
+        for plan in plans:
+            validity = dict(getattr(plan, "validity", {}) or {})
+            family = str(validity.get("strategy_family") or "").strip()
+            plan_id = str(getattr(plan, "plan_id", "") or "")
+            close_fill = close_fill_by_plan_id.get(plan_id)
+            if family not in family_set or str(getattr(plan, "strategy_version", "")) != version or close_fill is None:
+                continue
+            validity.setdefault("lineage_source_symbol", str(getattr(plan, "symbol", "") or ""))
+            fill_ts = getattr(close_fill, "fill_ts", None)
+            if fill_ts is not None and not validity.get("final_exit_ts"):
+                validity["final_exit_ts"] = fill_ts.isoformat()
+            synthetic_plans.append(
+                SimpleNamespace(
+                    plan_id=plan_id,
+                    zone_id=str(getattr(plan, "zone_id", "") or ""),
+                    symbol=self._global_lineage_validation_symbol(),
+                    timeframe=str(getattr(plan, "timeframe", "5m") or "5m"),
+                    direction=str(getattr(plan, "direction", "") or ""),
+                    entry_model=str(getattr(plan, "entry_model", "") or ""),
+                    state=PlanState.CLOSED.value,
+                    valid_from=getattr(plan, "valid_from", None),
+                    valid_until=getattr(plan, "valid_until", None),
+                    strategy_version=str(getattr(plan, "strategy_version", "") or ""),
+                    validity=validity,
+                )
+            )
+        return synthetic_plans
+
+    def _global_lineage_pbo_dsr_metrics(
+        self,
+        *,
+        version: str,
+        write_report: bool,
+        persist_snapshot: bool,
+    ) -> dict[str, Any]:
+        symbol = self._global_lineage_validation_symbol()
+        plans = self._global_lineage_validation_plans(version=version)
+        self.strategy_v2_pbo_dsr_trial_writer.generate(
+            symbol=symbol,
+            version=version,
+            plans=plans,
+            write_report=False,
+            persist=True,
+        )
+        self.strategy_v2_pbo_dsr_threshold_runner.generate(
+            symbol=symbol,
+            version=version,
+            plans=plans,
+            write_report=False,
+            persist=True,
+        )
+        payload = self.strategy_v2_pbo_dsr_metrics.generate(
+            symbol=symbol,
+            version=version,
+            write_report=write_report,
+            persist_snapshot=persist_snapshot,
+        )
+        payload = dict(payload or {})
+        payload["validation_scope"] = {
+            "scope": "family_global",
+            "families": list(self._GLOBAL_LINEAGE_VALIDATION_FAMILIES),
+            "symbol_namespace": symbol,
+        }
+        return payload
+
+    def _merge_global_lineage_pbo_fallback(
+        self,
+        *,
+        primary: dict[str, Any],
+        fallback: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        primary_payload = dict(primary or {})
+        fallback_payload = dict(fallback or {})
+        if not fallback_payload:
+            return primary_payload
+
+        primary_selected = dict(primary_payload.get("selected_trial") or {})
+        primary_lineage = dict(primary_payload.get("lineage_audit") or {})
+        fallback_selected = dict(fallback_payload.get("selected_trial") or {})
+        fallback_lineage = dict(fallback_payload.get("lineage_audit") or {})
+        fallback_trial_run_id = str(fallback_selected.get("trial_run_id") or "")
+        primary_trial_run_id = str(primary_selected.get("trial_run_id") or "")
+        primary_lineage_reason = str(primary_lineage.get("reason", ""))
+        primary_reason = str(primary_payload.get("reason", ""))
+        apply_fallback = (
+            not primary_trial_run_id
+            and bool(fallback_trial_run_id)
+            and (
+                primary_lineage_reason
+                in {
+                    "selected_trial_missing",
+                    "selected_trial_lineage_unresolved",
+                    "selection_rule_counts_missing",
+                    "",
+                }
+                or primary_reason in {"pbo_dsr_trial_runs_missing", ""}
+                or not bool(primary_payload.get("available", False))
+            )
+        )
+
+        merged = dict(primary_payload)
+        merged["global_lineage_fallback"] = {
+            "available": bool(fallback_payload.get("available", False)),
+            "metrics_complete": bool(fallback_payload.get("metrics_complete", False)),
+            "reason": fallback_payload.get("reason", "not_available"),
+            "validation_scope": dict(fallback_payload.get("validation_scope") or {}),
+            "selected_trial": fallback_selected,
+            "lineage_audit": fallback_lineage,
+            "selection_universe_summary": dict(fallback_payload.get("selection_universe_summary") or {}),
+        }
+        merged["selected_trial_fallback_applied"] = apply_fallback
+        if not apply_fallback:
+            return merged
+
+        merged["symbol_scope_selected_trial"] = primary_selected
+        merged["symbol_scope_lineage_audit"] = primary_lineage
+        merged["selected_trial"] = fallback_selected
+        merged["lineage_audit"] = fallback_lineage
+        merged["selection_universe_summary"] = dict(fallback_payload.get("selection_universe_summary") or {})
+        deployment_recommendation = dict(merged.get("deployment_recommendation") or {})
+        deployment_recommendation["selected_trial_scope"] = "family_global_fallback"
+        deployment_recommendation["selected_trial_scope_reason"] = "symbol_scope_selected_trial_missing"
+        merged["deployment_recommendation"] = deployment_recommendation
+        return merged
+
+    def _refresh_stress_replay_outputs_after_worker(
+        self,
+        *,
+        symbol: str,
+        version: str,
+        stress_validation: dict[str, Any],
+        stress_replay_lineage: dict[str, Any],
+        pbo_dsr_metrics: dict[str, Any],
+        write_report: bool,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+        stress_replay_output_artifacts = self.strategy_v2_stress_replay_output_artifacts.generate(
+            symbol=symbol,
+            version=version,
+            stress_validation=stress_validation,
+            write_report=write_report,
+        )
+        stress_validation = self.strategy_v2_stress_validation.attach_replay_output_artifacts(
+            payload=stress_validation,
+            stress_replay_output_artifacts=stress_replay_output_artifacts,
+            write_report=write_report,
+        )
+        stress_replay_assessment = self.strategy_v2_stress_replay_assessment.generate(
+            symbol=symbol,
+            version=version,
+            stress_validation=stress_validation,
+            stress_replay_lineage=stress_replay_lineage,
+            stress_replay_output_artifacts=stress_replay_output_artifacts,
+            pbo_dsr_metrics=pbo_dsr_metrics,
+            write_report=write_report,
+        )
+        stress_replay_runner_contract = self.strategy_v2_stress_replay_runner_contract.generate(
+            symbol=symbol,
+            version=version,
+            stress_validation=stress_validation,
+            stress_replay_lineage=stress_replay_lineage,
+            stress_replay_assessment=stress_replay_assessment,
+            write_report=write_report,
+        )
+        return (
+            stress_validation,
+            stress_replay_output_artifacts,
+            stress_replay_assessment,
+            stress_replay_runner_contract,
+        )
+
+    def _global_lineage_stress_replay_stack(
+        self,
+        *,
+        version: str,
+        write_report: bool,
+        run_prototype_worker: bool,
+        pbo_dsr_metrics: dict[str, Any],
+    ) -> dict[str, Any]:
+        symbol = self._global_lineage_validation_symbol()
+        plans = self._global_lineage_validation_plans(version=version)
+        lineage_service = StrategyV2StressReplayLineageService(
+            self.settings,
+            plan_repo=SimpleNamespace(list_recent=lambda symbol, days=180: plans),
+            fill_repo=self.fill_repo,
+            candle_repo=self.candle_repo,
+        )
+        stress_validation = self.strategy_v2_stress_validation.generate(
+            symbol=symbol,
+            version=version,
+            plans=plans,
+            write_report=write_report,
+        )
+        stress_replay_lineage = lineage_service.generate(
+            symbol=symbol,
+            version=version,
+            write_report=write_report,
+        )
+        stress_replay_output_artifacts = self.strategy_v2_stress_replay_output_artifacts.generate(
+            symbol=symbol,
+            version=version,
+            stress_validation=stress_validation,
+            write_report=write_report,
+        )
+        stress_validation = self.strategy_v2_stress_validation.attach_replay_output_artifacts(
+            payload=stress_validation,
+            stress_replay_output_artifacts=stress_replay_output_artifacts,
+            write_report=write_report,
+        )
+        stress_replay_assessment = self.strategy_v2_stress_replay_assessment.generate(
+            symbol=symbol,
+            version=version,
+            stress_validation=stress_validation,
+            stress_replay_lineage=stress_replay_lineage,
+            stress_replay_output_artifacts=stress_replay_output_artifacts,
+            pbo_dsr_metrics=pbo_dsr_metrics,
+            write_report=write_report,
+        )
+        stress_replay_runner_contract = self.strategy_v2_stress_replay_runner_contract.generate(
+            symbol=symbol,
+            version=version,
+            stress_validation=stress_validation,
+            stress_replay_lineage=stress_replay_lineage,
+            stress_replay_assessment=stress_replay_assessment,
+            write_report=write_report,
+        )
+        stress_replay_lineage_writer = self.strategy_v2_stress_replay_lineage_writer.generate(
+            symbol=symbol,
+            version=version,
+            stress_replay_lineage=stress_replay_lineage,
+            stress_replay_runner_contract=stress_replay_runner_contract,
+            write_report=write_report,
+            trade_rows=lineage_service.trade_rows(symbol=symbol, version=version),
+        )
+        stress_replay_prototype_worker: dict[str, object] | None = None
+        if run_prototype_worker:
+            stress_replay_prototype_worker = self.strategy_v2_stress_replay_prototype_worker.generate(
+                symbol=symbol,
+                version=version,
+                stress_validation=stress_validation,
+                stress_replay_lineage_writer=stress_replay_lineage_writer,
+                stress_replay_runner_contract=stress_replay_runner_contract,
+                write_report=write_report,
+            )
+            if bool((stress_replay_prototype_worker or {}).get("executed", False)):
+                (
+                    stress_validation,
+                    stress_replay_output_artifacts,
+                    stress_replay_assessment,
+                    stress_replay_runner_contract,
+                ) = self._refresh_stress_replay_outputs_after_worker(
+                    symbol=symbol,
+                    version=version,
+                    stress_validation=stress_validation,
+                    stress_replay_lineage=stress_replay_lineage,
+                    pbo_dsr_metrics=pbo_dsr_metrics,
+                    write_report=write_report,
+                )
+        return {
+            "stress_validation": stress_validation,
+            "stress_replay_lineage": stress_replay_lineage,
+            "stress_replay_assessment": stress_replay_assessment,
+            "stress_replay_runner_contract": stress_replay_runner_contract,
+            "stress_replay_lineage_writer": stress_replay_lineage_writer,
+            "stress_replay_prototype_worker": stress_replay_prototype_worker or {},
+            "stress_replay_output_artifacts": stress_replay_output_artifacts,
+            "pbo_dsr_metrics": pbo_dsr_metrics,
+        }
+
+    def _merge_global_lineage_stress_replay_fallback(
+        self,
+        *,
+        primary_stack: dict[str, Any],
+        fallback_stack: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        merged = dict(primary_stack or {})
+        fallback = dict(fallback_stack or {})
+        if not fallback:
+            return merged
+
+        primary_assessment = dict(merged.get("stress_replay_assessment") or {})
+        fallback_assessment = dict(fallback.get("stress_replay_assessment") or {})
+        primary_recommendation = dict(primary_assessment.get("deployment_recommendation") or {})
+        fallback_recommendation = dict(fallback_assessment.get("deployment_recommendation") or {})
+        primary_cross = dict(primary_recommendation.get("approval_cross_display") or {})
+        fallback_cross = dict(fallback_recommendation.get("approval_cross_display") or {})
+        fallback_source = str(fallback_cross.get("replay_derived_worst_scenario_source", ""))
+        apply_fallback = (
+            str(primary_cross.get("approval_warning_code", "")) == "replay_backed_worst_scenario_missing"
+            and fallback_source == "replay_output"
+        )
+
+        fallback_summary = {
+            "available": bool(fallback_assessment.get("available", False)),
+            "reason": fallback_assessment.get("reason", "not_available"),
+            "deployment_recommendation": fallback_recommendation,
+            "stress_replay_lineage": dict(fallback.get("stress_replay_lineage") or {}),
+            "stress_replay_output_artifacts": dict(fallback.get("stress_replay_output_artifacts") or {}),
+        }
+        primary_assessment["global_lineage_fallback"] = fallback_summary
+        primary_assessment["global_lineage_fallback_applied"] = apply_fallback
+        if not apply_fallback:
+            merged["stress_replay_assessment"] = primary_assessment
+            return merged
+
+        primary_assessment["symbol_scope_deployment_recommendation"] = primary_recommendation
+        primary_assessment["deployment_recommendation"] = fallback_recommendation
+        merged["stress_replay_assessment"] = primary_assessment
+        if not bool(dict(merged.get("stress_replay_output_artifacts") or {}).get("available", False)) and bool(
+            dict(fallback.get("stress_replay_output_artifacts") or {}).get("available", False)
+        ):
+            merged["stress_replay_output_artifacts"] = dict(fallback.get("stress_replay_output_artifacts") or {})
+        return merged
+
     def _build_stress_replay_runtime_stack(
         self,
         *,
@@ -3087,6 +3711,15 @@ class StrategyEngine:
                 write_report=False,
                 persist_snapshot=False,
             )
+        global_lineage_pbo_dsr_metrics = self._global_lineage_pbo_dsr_metrics(
+            version=version,
+            write_report=False,
+            persist_snapshot=False,
+        )
+        runtime_pbo_dsr_metrics = self._merge_global_lineage_pbo_fallback(
+            primary=runtime_pbo_dsr_metrics or {},
+            fallback=global_lineage_pbo_dsr_metrics,
+        )
         stress_validation = self.strategy_v2_stress_validation.generate(
             symbol=symbol,
             version=version,
@@ -3143,7 +3776,21 @@ class StrategyEngine:
                 stress_replay_runner_contract=stress_replay_runner_contract,
                 write_report=write_report,
             )
-        return {
+            if bool((stress_replay_prototype_worker or {}).get("executed", False)):
+                (
+                    stress_validation,
+                    stress_replay_output_artifacts,
+                    stress_replay_assessment,
+                    stress_replay_runner_contract,
+                ) = self._refresh_stress_replay_outputs_after_worker(
+                    symbol=symbol,
+                    version=version,
+                    stress_validation=stress_validation,
+                    stress_replay_lineage=stress_replay_lineage,
+                    pbo_dsr_metrics=runtime_pbo_dsr_metrics or {},
+                    write_report=write_report,
+                )
+        stack = {
             "stress_validation": stress_validation,
             "stress_replay_lineage": stress_replay_lineage,
             "stress_replay_assessment": stress_replay_assessment,
@@ -3153,6 +3800,16 @@ class StrategyEngine:
             "stress_replay_output_artifacts": stress_replay_output_artifacts,
             "pbo_dsr_metrics": runtime_pbo_dsr_metrics or {},
         }
+        global_lineage_replay_stack = self._global_lineage_stress_replay_stack(
+            version=version,
+            write_report=write_report,
+            run_prototype_worker=run_prototype_worker,
+            pbo_dsr_metrics=global_lineage_pbo_dsr_metrics,
+        )
+        return self._merge_global_lineage_stress_replay_fallback(
+            primary_stack=stack,
+            fallback_stack=global_lineage_replay_stack,
+        )
 
     def refresh_symbol(self, symbol: str) -> dict:
         candles5 = self.market_data.recent_candles(symbol, "5m", limit=300)
@@ -3355,6 +4012,14 @@ class StrategyEngine:
             version=self.settings.strategy_version,
             write_report=True,
             persist_snapshot=True,
+        )
+        strategy_v2_pbo_dsr_metrics = self._merge_global_lineage_pbo_fallback(
+            primary=strategy_v2_pbo_dsr_metrics,
+            fallback=self._global_lineage_pbo_dsr_metrics(
+                version=self.settings.strategy_version,
+                write_report=True,
+                persist_snapshot=True,
+            ),
         )
         strategy_v2_pbo_dsr_artifact_store = self.strategy_v2_pbo_dsr_artifact_store.generate(
             symbol=symbol,
@@ -4845,6 +5510,14 @@ class StrategyEngine:
             version=active_version,
             write_report=write_report,
             persist_snapshot=True,
+        )
+        payload = self._merge_global_lineage_pbo_fallback(
+            primary=payload,
+            fallback=self._global_lineage_pbo_dsr_metrics(
+                version=active_version,
+                write_report=write_report,
+                persist_snapshot=True,
+            ),
         )
         self.db.commit()
         return payload

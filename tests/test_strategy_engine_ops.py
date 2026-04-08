@@ -235,3 +235,176 @@ def test_stress_replay_assessment_uses_replay_attached_stress_validation() -> No
         assert (
             payload["stress_validation"]["deployment_recommendation"]["worst_scenario_source"] == "replay_output"
         )
+
+
+def test_stress_replay_runtime_stack_can_apply_global_lineage_pbo_fallback() -> None:
+    class _StressValidationStub:
+        def generate(self, **kwargs) -> dict:
+            return {"deployment_recommendation": {"scenario_statuses": {}}, "sample_counts": {}, "scenario_metrics": {}}
+
+        def attach_replay_output_artifacts(self, *, payload: dict, stress_replay_output_artifacts: dict, write_report: bool = True) -> dict:
+            out = dict(payload)
+            out["replay_output_artifacts"] = dict(stress_replay_output_artifacts)
+            return out
+
+    class _LineageStub:
+        def generate(self, **kwargs) -> dict:
+            return {"available": True}
+
+    class _OutputArtifactsStub:
+        def generate(self, **kwargs) -> dict:
+            return {"available": False}
+
+    class _AssessmentStub:
+        def __init__(self) -> None:
+            self.seen_pbo_metrics = None
+
+        def generate(self, **kwargs) -> dict:
+            self.seen_pbo_metrics = dict(kwargs.get("pbo_dsr_metrics") or {})
+            return {"available": True, "deployment_recommendation": {"decision": "keep_approximation"}}
+
+    class _RunnerContractStub:
+        def generate(self, **kwargs) -> dict:
+            return {"available": True}
+
+    class _LineageWriterStub:
+        def generate(self, **kwargs) -> dict:
+            return {"available": True}
+
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        assessment_stub = _AssessmentStub()
+        engine.plan_repo.list_recent = lambda symbol, days=180: []  # type: ignore[assignment]
+        engine.strategy_v2_stress_validation = _StressValidationStub()  # type: ignore[assignment]
+        engine.strategy_v2_stress_replay_lineage = _LineageStub()  # type: ignore[assignment]
+        engine.strategy_v2_stress_replay_output_artifacts = _OutputArtifactsStub()  # type: ignore[assignment]
+        engine.strategy_v2_stress_replay_assessment = assessment_stub  # type: ignore[assignment]
+        engine.strategy_v2_stress_replay_runner_contract = _RunnerContractStub()  # type: ignore[assignment]
+        engine.strategy_v2_stress_replay_lineage_writer = _LineageWriterStub()  # type: ignore[assignment]
+        engine._global_lineage_pbo_dsr_metrics = (  # type: ignore[assignment]
+            lambda **kwargs: {
+                "available": True,
+                "metrics_complete": True,
+                "reason": "pbo_dsr_metrics_computed",
+                "selected_trial": {
+                    "trial_run_id": "global_trial",
+                    "writer_source": "true_threshold_sweep_runner_v1",
+                    "selection_rule": "true_threshold_sweep_top_in_sample_ev",
+                },
+                "lineage_audit": {
+                    "audit_status": "PASS",
+                    "reason": "selected_trial_from_true_threshold_only_lineage",
+                    "selected_trial_writer_source": "true_threshold_sweep_runner_v1",
+                    "selected_trial_selection_rule": "true_threshold_sweep_top_in_sample_ev",
+                    "selected_trial_from_runtime_proxy": False,
+                    "selected_trial_from_true_threshold": True,
+                },
+                "selection_universe_summary": {"recording_status": "family_global"},
+                "validation_scope": {"scope": "family_global", "families": ["sweep_reversal", "trend_continuation"]},
+            }
+        )
+
+        payload = engine._build_stress_replay_runtime_stack(
+            symbol="BTCUSDC",
+            version="v2",
+            pbo_dsr_metrics={
+                "available": False,
+                "metrics_complete": False,
+                "selected_trial": {},
+                "lineage_audit": {"audit_status": "WARN", "reason": "selected_trial_missing"},
+            },
+            write_report=False,
+            run_prototype_worker=False,
+        )
+
+        assert payload["pbo_dsr_metrics"]["selected_trial_fallback_applied"] is True
+        assert payload["pbo_dsr_metrics"]["global_lineage_fallback"]["validation_scope"]["scope"] == "family_global"
+        assert payload["pbo_dsr_metrics"]["selected_trial"]["trial_run_id"] == "global_trial"
+
+
+def test_merge_global_lineage_pbo_fallback_applies_when_primary_trial_runs_missing() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        merged = engine._merge_global_lineage_pbo_fallback(
+            primary={
+                "available": False,
+                "metrics_complete": False,
+                "reason": "pbo_dsr_trial_runs_missing",
+                "selected_trial": {},
+                "lineage_audit": {
+                    "audit_status": "WARN",
+                    "reason": "selection_rule_counts_missing",
+                },
+                "deployment_recommendation": {
+                    "decision": "not_ready",
+                },
+            },
+            fallback={
+                "available": True,
+                "metrics_complete": True,
+                "reason": "pbo_dsr_metrics_computed",
+                "selected_trial": {
+                    "trial_run_id": "global_trial",
+                    "writer_source": "true_threshold_sweep_runner_v1",
+                    "selection_rule": "true_threshold_sweep_top_in_sample_ev",
+                },
+                "lineage_audit": {
+                    "audit_status": "PASS",
+                    "reason": "selected_trial_from_true_threshold_with_dual_lineage",
+                },
+                "validation_scope": {"scope": "family_global"},
+            },
+        )
+
+        assert merged["selected_trial_fallback_applied"] is True
+        assert merged["selected_trial"]["trial_run_id"] == "global_trial"
+        assert merged["deployment_recommendation"]["selected_trial_scope"] == "family_global_fallback"
+
+
+def test_merge_global_lineage_stress_replay_fallback_applies_when_replay_output_exists() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        merged = engine._merge_global_lineage_stress_replay_fallback(
+            primary_stack={
+                "stress_replay_assessment": {
+                    "deployment_recommendation": {
+                        "approval_cross_display": {
+                            "approval_warning_code": "replay_backed_worst_scenario_missing",
+                            "replay_derived_worst_scenario_source": "approximation",
+                        }
+                    }
+                },
+                "stress_replay_output_artifacts": {
+                    "available": False,
+                },
+            },
+            fallback_stack={
+                "stress_replay_assessment": {
+                    "available": True,
+                    "reason": "replay_worker_output_artifacts_loaded",
+                    "deployment_recommendation": {
+                        "decision": "keep_approximation",
+                        "approval_cross_display": {
+                            "approval_warning_code": "none",
+                            "replay_derived_worst_scenario_source": "replay_output",
+                        },
+                    },
+                },
+                "stress_replay_output_artifacts": {
+                    "available": True,
+                    "reason": "replay_worker_output_artifacts_loaded",
+                },
+            },
+        )
+
+        assert merged["stress_replay_assessment"]["global_lineage_fallback_applied"] is True
+        assert (
+            merged["stress_replay_assessment"]["deployment_recommendation"]["approval_cross_display"][
+                "replay_derived_worst_scenario_source"
+            ]
+            == "replay_output"
+        )
+        assert merged["stress_replay_output_artifacts"]["available"] is True

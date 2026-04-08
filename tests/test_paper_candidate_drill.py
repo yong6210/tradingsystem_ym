@@ -452,6 +452,168 @@ def test_main_selects_zero_risk_override_candidate_for_paper_sampling(monkeypatc
     assert "via paper lineage override" in eligible_check["message"]
 
 
+def test_main_skips_duplicate_active_candidate_and_uses_next_submit_ready_candidate(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        paper_drill,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol=None,
+            universe="usdc_perp_top30",
+            families="sweep_reversal,trend_continuation",
+            candidate_limit=100,
+            include_manual_review=False,
+            skip_sync=True,
+            limit_symbols=30,
+            symbol_concurrency=4,
+            limit_1m=900,
+            limit_5m=500,
+            limit_15m=500,
+            submit_paper=True,
+            paper_scenario="fill",
+            paper_lineage_override=True,
+            report_dir="reports/operations/paper_candidate_drill",
+            no_write_report=True,
+        ),
+    )
+
+    candidate_a = {
+        **_candidate(),
+        "symbol": "ARBUSDC",
+        "plan_id": "plan-arb-1",
+        "expected_ev_at_recommended_size_r": 0.30,
+        "expected_ev_r": 0.60,
+    }
+    candidate_b = {
+        **_candidate(),
+        "symbol": "FILUSDC",
+        "plan_id": "plan-fil-2",
+        "expected_ev_at_recommended_size_r": 0.20,
+        "expected_ev_r": 0.40,
+    }
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/scanner/top":
+            return [candidate_a, candidate_b]
+        if path == "/validation/report":
+            return _validation()
+        if path == "/execution/plans/preview":
+            return {"entry_type": "limit", "entry_semantics": "limit_on_touch"}
+        if path == "/execution/approve-plan":
+            return _approval()
+        if path == "/execution/order-intents":
+            plan_id = kwargs["body"]["plan_id"]
+            if plan_id == "plan-arb-1":
+                return {
+                    "intent_id": "intent-arb",
+                    "submit_decision": "SKIP_EXISTING_ACTIVE_PLAN",
+                    "decision_reason_code": "duplicate_active_thesis",
+                    "decision_reason_message": "Duplicate thesis detected against active plan plan_zone_c15debc65a13_confirm.",
+                }
+            if plan_id == "plan-fil-2":
+                return {
+                    "intent_id": "intent-fil",
+                    "submit_decision": "SUBMIT",
+                    "decision_reason_code": "submit_ready",
+                }
+            raise AssertionError(f"unexpected plan_id: {plan_id}")
+        if path == "/execution/submit":
+            return {"submit_status": "FILLED", "state": "FILLED"}
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(paper_drill, "_request_json", _request_json)
+
+    assert paper_drill.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["overall_status"] == "READY_FOR_PAPER_SAMPLE"
+    assert payload["candidate"]["symbol"] == "FILUSDC"
+    assert payload["candidate"]["plan_id"] == "plan-fil-2"
+    assert payload["submission"]["submit_status"] == "FILLED"
+    assert any("Skipped active-sample duplicates" in step for step in payload["next_steps"])
+
+
+def test_main_skips_already_submitted_candidate_and_uses_next_submit_ready_candidate(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        paper_drill,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol=None,
+            universe="usdc_perp_top30",
+            families="sweep_reversal,trend_continuation",
+            candidate_limit=100,
+            include_manual_review=False,
+            skip_sync=True,
+            limit_symbols=30,
+            symbol_concurrency=4,
+            limit_1m=900,
+            limit_5m=500,
+            limit_15m=500,
+            submit_paper=True,
+            paper_scenario="fill",
+            paper_lineage_override=True,
+            report_dir="reports/operations/paper_candidate_drill",
+            no_write_report=True,
+        ),
+    )
+
+    candidate_a = {
+        **_candidate(),
+        "symbol": "DOGEUSDC",
+        "plan_id": "plan-doge-1",
+        "expected_ev_at_recommended_size_r": 0.30,
+        "expected_ev_r": 0.60,
+    }
+    candidate_b = {
+        **_candidate(),
+        "symbol": "FILUSDC",
+        "plan_id": "plan-fil-2",
+        "expected_ev_at_recommended_size_r": 0.20,
+        "expected_ev_r": 0.40,
+    }
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/scanner/top":
+            return [candidate_a, candidate_b]
+        if path == "/validation/report":
+            return _validation()
+        if path == "/execution/plans/preview":
+            return {"entry_type": "limit", "entry_semantics": "limit_on_touch"}
+        if path == "/execution/approve-plan":
+            return _approval()
+        if path == "/execution/order-intents":
+            plan_id = kwargs["body"]["plan_id"]
+            if plan_id == "plan-doge-1":
+                return {
+                    "intent_id": "intent-doge",
+                    "submit_decision": "SKIP_ALREADY_SUBMITTED",
+                    "decision_reason_code": "plan_reentry_blocked",
+                    "decision_reason_message": "Plan already has routed submission sub_existing in state FILLED.",
+                }
+            if plan_id == "plan-fil-2":
+                return {
+                    "intent_id": "intent-fil",
+                    "submit_decision": "SUBMIT",
+                    "decision_reason_code": "submit_ready",
+                }
+            raise AssertionError(f"unexpected plan_id: {plan_id}")
+        if path == "/execution/submit":
+            return {"submit_status": "FILLED", "state": "FILLED"}
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(paper_drill, "_request_json", _request_json)
+
+    assert paper_drill.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["overall_status"] == "READY_FOR_PAPER_SAMPLE"
+    assert payload["candidate"]["symbol"] == "FILUSDC"
+    assert payload["candidate"]["plan_id"] == "plan-fil-2"
+    assert payload["submission"]["submit_status"] == "FILLED"
+    assert any("DOGEUSDC[plan_reentry_blocked]" in step for step in payload["next_steps"])
+
+
 def test_choose_override_candidate_falls_back_to_validity_grade_and_missing_runtime_state() -> None:
     rows = [
         {

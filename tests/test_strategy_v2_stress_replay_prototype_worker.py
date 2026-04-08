@@ -237,3 +237,87 @@ def test_stress_replay_prototype_worker_reads_batches_and_writes_outputs(tmp_pat
     assert latency_body["input_lineage_summary"]["input_batch_count"] == 1
     assert latency_body["input_lineage_summary"]["input_trade_rows"] == 2
     assert latency_body["input_lineage_summary"]["entry_anchor_sources"]["execution_entry_fill"] == 2
+
+
+def test_stress_replay_prototype_worker_executes_prototype_ready_batches(tmp_path: Path) -> None:
+    service = StrategyV2StressReplayPrototypeWorkerService()
+    service.settings.validation_report_dir = str(tmp_path)
+
+    latency_batch = tmp_path / "latency_batch.json"
+    _write_batch(
+        latency_batch,
+        symbol="BTCUSDC",
+        version="v2",
+        scenario="latency_plus_1_bar",
+        rows=[
+            {
+                "plan_id": "plan_latency_proto",
+                "closed_ts": "2026-03-08T10:00:00+00:00",
+                "strategy_family": "trend_continuation",
+                "strategy_grade": "A",
+                "final_exit_realized_r": 1.0,
+                "final_exit_reason": "target_tp1",
+                "final_exit_held_bars": 4,
+                "has_entry_fill": True,
+                "has_close_fill": True,
+                "has_partial_exit_fill": False,
+                "latency_bar_exists": True,
+                "full_fill_path": False,
+                "complete_candle_path": True,
+                "path_coverage_ratio": 1.0,
+                "entry_anchor_source": "execution_entry_fill",
+                "exit_anchor_source": "execution_closed_fill",
+            }
+        ],
+    )
+
+    payload = service.generate(
+        symbol="BTCUSDC",
+        version="v2",
+        stress_validation={
+            "scenario_metrics": {
+                "latency_plus_1_bar": {"trades": 1, "ev": 0.10, "p5_ev": -0.20, "p50_ev": 0.10, "max_drawdown": 0.40, "ulcer_index": 0.10},
+            }
+        },
+        stress_replay_lineage_writer={
+            "available": True,
+            "runtime_job_ready": True,
+            "schema_version": "strategy_v2_stress_replay_lineage_writer_v1",
+            "scenario_batches": {
+                "latency_plus_1_bar": {
+                    "ready": False,
+                    "prototype_ready": True,
+                    "gating_reason": "latency_reference_coverage_below_contract",
+                    "batches": [{"artifact_path": str(latency_batch)}],
+                },
+            },
+            "blocked_by": ["full_replay_not_ready"],
+            "next_steps": ["materialize prototype replay outputs for currently covered scenarios"],
+        },
+        stress_replay_runner_contract={
+            "available": True,
+            "runtime_job_ready": True,
+            "schema_version": "strategy_v2_stress_replay_runner_contract_v1",
+            "scenario_contract": {
+                "latency_plus_1_bar": {
+                    "ready": False,
+                    "prototype_ready": True,
+                    "gating_reason": "latency_reference_coverage_below_contract",
+                },
+            },
+            "worker_input_contract": {"required_sources": ["lineage_batch_artifact"]},
+            "worker_output_contract": {"summary_fields": ["ev", "max_drawdown"]},
+            "blocked_by": ["full_replay_not_ready"],
+            "next_steps": ["keep approximation live while replay-backed downside evidence accumulates"],
+        },
+        write_report=False,
+    )
+
+    assert payload["available"] is True
+    assert payload["runtime_job_ready"] is True
+    assert payload["executed"] is True
+    assert payload["sample_counts"]["executed_scenarios"] == 1
+    assert payload["sample_counts"]["ready_scenarios"] == 1
+    assert payload["scenario_runs"]["latency_plus_1_bar"]["prototype_ready"] is True
+    assert payload["scenario_runs"]["latency_plus_1_bar"]["ready"] is False
+    assert payload["scenario_runs"]["latency_plus_1_bar"]["executed"] is True
