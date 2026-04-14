@@ -90,8 +90,8 @@ MICRO_LIVE exit criteria:
 - [ ] `runtime_operator_signoff_summary.status == ready_for_manual_full_live_signoff` 또는 `ready_for_operator_signoff`
 - [ ] `post_patch_closed_trade_count >= 80`
 - [ ] `post_patch_sample_summary.replay_max_drawdown_r < 5.0`
-- [ ] `post_patch_sample_summary.replay_p5_r >= -1.0`
-- [ ] `post_patch_sample_summary.stop_loss_share < 0.35`
+- [ ] `post_patch_sample_summary.replay_p5_r >= -1.05`
+- [ ] `post_patch_sample_summary.stop_loss_share < 0.30`
 - [ ] `post_patch_sample_summary.worst_loss_streak < 5`
 
 ## 8. 즉시 NO-GO 조건

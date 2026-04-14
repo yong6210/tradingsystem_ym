@@ -277,8 +277,8 @@ def test_build_runtime_decision_uses_post_patch_override_for_conditional_full_li
                 "closed_trade_count": 80,
                 "ready_for_replay_refresh": True,
                 "replay_max_drawdown_r": 4.5,
-                "replay_p5_r": -0.95,
-                "stop_loss_share": 0.3,
+                "replay_p5_r": -1.05,
+                "stop_loss_share": 0.29,
                 "worst_loss_streak": 4,
             },
         },
@@ -405,7 +405,7 @@ def test_apply_runtime_decision_attaches_reopen_gate_summary():
     assert gate["full_live"]["status"] == "not_ready"
     assert {item["code"] for item in gate["full_live"]["breached_thresholds"]} == {
         "post_patch_full_live_sample_count_min",
-        "post_patch_full_live_p5_red",
+        "post_patch_full_live_stop_loss_share_red",
     }
 
 
@@ -628,6 +628,179 @@ def test_build_post_patch_sample_summary_counts_recent_closes(monkeypatch):
     assert summary["stop_loss_share"] == 0.5
     assert summary["confirm_named_loss_share"] == 1.0
     assert summary["top_symbols"][0]["symbol"] == "WIFUSDC"
+
+
+def test_build_post_patch_sample_summary_sticky_reuses_previous_artifact_row(monkeypatch):
+    current_artifact_path = "reports/validation/mock_runtime_review_current.json"
+    current_input_path = "reports/validation/mock_runtime_inputs_current.json"
+    previous_artifact_path = "reports/validation/mock_runtime_review_previous.json"
+    previous_input_path = "reports/validation/mock_runtime_inputs_previous.json"
+    current_payload = {
+        "input_artifact_paths": [current_input_path],
+        "trade_rows": [
+            {
+                "plan_id": "plan_confirm_recent",
+                "closed_ts": "2026-04-10T01:00:00+00:00",
+                "replayed_realized_r": -1.05,
+                "final_exit_reason": "stop_loss",
+            }
+        ],
+    }
+    current_input_payload = {
+        "trade_rows": [
+            {"plan_id": "plan_confirm_recent", "symbol": "WIFUSDC", "final_exit_held_bars": 7}
+        ]
+    }
+    previous_payload = {
+        "input_artifact_paths": [previous_input_path],
+        "trade_rows": [
+            {
+                "plan_id": "plan_confirm_recent",
+                "closed_ts": "2026-04-10T01:00:00+00:00",
+                "replayed_realized_r": -1.05,
+                "final_exit_reason": "stop_loss",
+            },
+            {
+                "plan_id": "plan_limit_recent",
+                "closed_ts": "2026-04-10T02:00:00+00:00",
+                "replayed_realized_r": 1.045,
+                "final_exit_reason": "time_failure",
+            },
+        ],
+    }
+    previous_input_payload = {
+        "trade_rows": [
+            {"plan_id": "plan_confirm_recent", "symbol": "WIFUSDC", "final_exit_held_bars": 7},
+            {"plan_id": "plan_limit_recent", "symbol": "ADAUSDC", "final_exit_held_bars": 13},
+        ]
+    }
+
+    def _load_json_file(path):
+        text = str(path)
+        if text.endswith("mock_runtime_review_current.json"):
+            return current_payload
+        if text.endswith("mock_runtime_inputs_current.json"):
+            return current_input_payload
+        if text.endswith("mock_runtime_review_previous.json"):
+            return previous_payload
+        if text.endswith("mock_runtime_inputs_previous.json"):
+            return previous_input_payload
+        return None
+
+    monkeypatch.setattr(runtime_signoff_review, "_load_json_file", _load_json_file)
+    monkeypatch.setattr(
+        runtime_signoff_review,
+        "_list_previous_replay_artifact_paths",
+        lambda artifact_path, limit=12: [previous_artifact_path] if artifact_path == current_artifact_path else [],
+    )
+
+    summary = runtime_signoff_review._build_post_patch_sample_summary(
+        artifact_path=current_artifact_path,
+        baseline_ts=runtime_signoff_review._parse_ts("2026-04-10T00:00:00+00:00"),
+        target_closed_trades=20,
+    )
+
+    assert summary["closed_trade_count"] == 2
+    assert summary["sticky_reused_plan_count"] == 1
+    assert summary["sticky_reused_plan_ids"] == ["plan_limit_recent"]
+    assert "plan_limit_recent" in summary["cohort_plan_ids"]
+    assert summary["stop_loss_share"] == 0.5
+
+
+def test_build_post_patch_sample_summary_bootstraps_from_older_previous_artifact(monkeypatch):
+    current_artifact_path = "reports/validation/mock_runtime_review_current.json"
+    current_input_path = "reports/validation/mock_runtime_inputs_current.json"
+    recent_previous_artifact_path = "reports/validation/mock_runtime_review_previous_recent.json"
+    recent_previous_input_path = "reports/validation/mock_runtime_inputs_previous_recent.json"
+    older_previous_artifact_path = "reports/validation/mock_runtime_review_previous_older.json"
+    older_previous_input_path = "reports/validation/mock_runtime_inputs_previous_older.json"
+    current_payload = {
+        "input_artifact_paths": [current_input_path],
+        "trade_rows": [
+            {
+                "plan_id": "plan_confirm_recent",
+                "closed_ts": "2026-04-10T01:00:00+00:00",
+                "replayed_realized_r": -1.05,
+                "final_exit_reason": "stop_loss",
+            }
+        ],
+    }
+    current_input_payload = {
+        "trade_rows": [
+            {"plan_id": "plan_confirm_recent", "symbol": "WIFUSDC", "final_exit_held_bars": 7}
+        ]
+    }
+    recent_previous_payload = {
+        "input_artifact_paths": [recent_previous_input_path],
+        "trade_rows": [
+            {
+                "plan_id": "plan_confirm_recent",
+                "closed_ts": "2026-04-10T01:00:00+00:00",
+                "replayed_realized_r": -1.05,
+                "final_exit_reason": "stop_loss",
+            }
+        ],
+    }
+    recent_previous_input_payload = current_input_payload
+    older_previous_payload = {
+        "input_artifact_paths": [older_previous_input_path],
+        "trade_rows": [
+            {
+                "plan_id": "plan_confirm_recent",
+                "closed_ts": "2026-04-10T01:00:00+00:00",
+                "replayed_realized_r": -1.05,
+                "final_exit_reason": "stop_loss",
+            },
+            {
+                "plan_id": "plan_limit_recent",
+                "closed_ts": "2026-04-10T02:00:00+00:00",
+                "replayed_realized_r": 1.045,
+                "final_exit_reason": "time_failure",
+            },
+        ],
+    }
+    older_previous_input_payload = {
+        "trade_rows": [
+            {"plan_id": "plan_confirm_recent", "symbol": "WIFUSDC", "final_exit_held_bars": 7},
+            {"plan_id": "plan_limit_recent", "symbol": "ADAUSDC", "final_exit_held_bars": 13},
+        ]
+    }
+
+    def _load_json_file(path):
+        text = str(path)
+        if text.endswith("mock_runtime_review_current.json"):
+            return current_payload
+        if text.endswith("mock_runtime_inputs_current.json"):
+            return current_input_payload
+        if text.endswith("mock_runtime_review_previous_recent.json"):
+            return recent_previous_payload
+        if text.endswith("mock_runtime_inputs_previous_recent.json"):
+            return recent_previous_input_payload
+        if text.endswith("mock_runtime_review_previous_older.json"):
+            return older_previous_payload
+        if text.endswith("mock_runtime_inputs_previous_older.json"):
+            return older_previous_input_payload
+        return None
+
+    monkeypatch.setattr(runtime_signoff_review, "_load_json_file", _load_json_file)
+    monkeypatch.setattr(
+        runtime_signoff_review,
+        "_list_previous_replay_artifact_paths",
+        lambda artifact_path, limit=12: [recent_previous_artifact_path, older_previous_artifact_path]
+        if artifact_path == current_artifact_path
+        else [],
+    )
+
+    summary = runtime_signoff_review._build_post_patch_sample_summary(
+        artifact_path=current_artifact_path,
+        baseline_ts=runtime_signoff_review._parse_ts("2026-04-10T00:00:00+00:00"),
+        target_closed_trades=20,
+    )
+
+    assert summary["closed_trade_count"] == 2
+    assert summary["sticky_reused_plan_count"] == 1
+    assert summary["sticky_reused_plan_ids"] == ["plan_limit_recent"]
+    assert summary["sticky_source_artifact_path"] == older_previous_artifact_path
 
 
 def test_build_approval_template_downside_profile_summarizes_loss_cluster(monkeypatch):

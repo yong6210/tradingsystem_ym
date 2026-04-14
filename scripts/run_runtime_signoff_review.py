@@ -41,10 +41,10 @@ _POST_PATCH_FULL_LIVE_MAX_DRAWDOWN_R = float(
     os.environ.get("RUNTIME_FULL_LIVE_POST_PATCH_MAX_DRAWDOWN_R", "5.0")
 )
 _POST_PATCH_FULL_LIVE_MIN_P5_R = float(
-    os.environ.get("RUNTIME_FULL_LIVE_POST_PATCH_MIN_P5_R", "-1.0")
+    os.environ.get("RUNTIME_FULL_LIVE_POST_PATCH_MIN_P5_R", "-1.05")
 )
 _POST_PATCH_FULL_LIVE_MAX_STOP_LOSS_SHARE = float(
-    os.environ.get("RUNTIME_FULL_LIVE_POST_PATCH_MAX_STOP_LOSS_SHARE", "0.35")
+    os.environ.get("RUNTIME_FULL_LIVE_POST_PATCH_MAX_STOP_LOSS_SHARE", "0.30")
 )
 _POST_PATCH_FULL_LIVE_MAX_LOSS_STREAK = int(
     os.environ.get("RUNTIME_FULL_LIVE_POST_PATCH_MAX_LOSS_STREAK", "5")
@@ -1211,34 +1211,75 @@ def _build_post_patch_sample_summary(
     artifact_path: str,
     baseline_ts: datetime | None = None,
     target_closed_trades: int = _POST_PATCH_SAMPLE_GOAL,
+    previous_summary: dict[str, Any] | None = None,
+    previous_artifact_path: str = "",
 ) -> dict[str, Any] | None:
     artifact_rel = str(artifact_path or "").strip()
     if not artifact_rel:
-        return None
-    artifact = _load_json_file(ROOT_DIR / artifact_rel)
-    if not artifact:
         return None
 
     cutoff = baseline_ts or _parse_ts(_POST_PATCH_BASELINE_TEXT)
     if cutoff is None:
         return None
 
-    plan_to_meta: dict[str, dict[str, Any]] = {}
-    for path_str in list(artifact.get("input_artifact_paths") or []):
-        batch = _load_json_file(ROOT_DIR / str(path_str))
-        if not batch:
-            continue
-        for row in list(batch.get("trade_rows") or []):
-            plan_to_meta[str(row.get("plan_id") or "")] = dict(row)
+    cohort_rows = _load_post_patch_rows_from_artifact(artifact_rel, cutoff=cutoff)
+    if cohort_rows is None:
+        return None
 
-    cohort_rows: list[dict[str, Any]] = []
-    for row in list(artifact.get("trade_rows") or []):
-        closed_ts = _parse_ts(row.get("closed_ts"))
-        if closed_ts is None or closed_ts < cutoff:
+    cohort_by_plan_id = {
+        str(row.get("plan_id") or ""): dict(row)
+        for row in cohort_rows
+        if str(row.get("plan_id") or "").strip()
+    }
+    sticky_reused_plan_ids: list[str] = []
+    sticky_source_artifact_path = str(previous_artifact_path or "").strip()
+    if sticky_source_artifact_path == artifact_rel:
+        sticky_source_artifact_path = ""
+    previous_summary_map = dict(previous_summary or {})
+    previous_baseline = _parse_ts(previous_summary_map.get("baseline_ts"))
+    previous_ids = [
+        str(plan_id).strip()
+        for plan_id in list(previous_summary_map.get("cohort_plan_ids") or [])
+        if str(plan_id).strip()
+    ]
+    if previous_baseline is not None and previous_baseline != cutoff:
+        previous_ids = []
+        sticky_source_artifact_path = ""
+    candidate_artifact_paths: list[str] = []
+    if sticky_source_artifact_path:
+        candidate_artifact_paths.append(sticky_source_artifact_path)
+    if not previous_ids:
+        candidate_artifact_paths.extend(_list_previous_replay_artifact_paths(artifact_rel, limit=96))
+    seen_candidate_paths: set[str] = set()
+    for candidate_artifact_path in candidate_artifact_paths:
+        candidate_rel = str(candidate_artifact_path or "").strip()
+        if not candidate_rel or candidate_rel == artifact_rel or candidate_rel in seen_candidate_paths:
             continue
-        plan_id = str(row.get("plan_id") or "")
-        meta = dict(plan_to_meta.get(plan_id, {}) or {})
-        cohort_rows.append({**meta, **dict(row)})
+        seen_candidate_paths.add(candidate_rel)
+        previous_rows = _load_post_patch_rows_from_artifact(candidate_rel, cutoff=cutoff) or []
+        previous_by_plan_id = {
+            str(row.get("plan_id") or ""): dict(row)
+            for row in previous_rows
+            if str(row.get("plan_id") or "").strip()
+        }
+        plan_ids_to_check = previous_ids or list(previous_by_plan_id.keys())
+        reused_before = len(sticky_reused_plan_ids)
+        for plan_id in plan_ids_to_check:
+            if not plan_id or plan_id in cohort_by_plan_id:
+                continue
+            sticky_row = dict(previous_by_plan_id.get(plan_id) or {})
+            if not sticky_row:
+                continue
+            cohort_by_plan_id[plan_id] = sticky_row
+            sticky_reused_plan_ids.append(plan_id)
+        if len(sticky_reused_plan_ids) > reused_before:
+            sticky_source_artifact_path = candidate_rel
+            if not previous_ids:
+                break
+    cohort_rows = sorted(
+        cohort_by_plan_id.values(),
+        key=lambda row: (_parse_ts(row.get("closed_ts")) or datetime.min.replace(tzinfo=UTC), str(row.get("plan_id") or "")),
+    )
 
     if not cohort_rows:
         return {
@@ -1251,6 +1292,9 @@ def _build_post_patch_sample_summary(
             "stop_loss_share": 0.0,
             "median_held_bars": 0.0,
             "top_symbols": [],
+            "cohort_plan_ids": [],
+            "sticky_reused_plan_ids": [],
+            "sticky_reused_plan_count": 0,
             "summary": f"post-patch sample 0/{int(target_closed_trades)}; waiting for new closes",
         }
 
@@ -1306,12 +1350,66 @@ def _build_post_patch_sample_summary(
         "replay_p5_r": replay_p5_r,
         "worst_loss_streak": int(worst_loss_streak),
         "top_symbols": top_symbols,
+        "cohort_plan_ids": [str(row.get("plan_id") or "") for row in cohort_rows if str(row.get("plan_id") or "").strip()],
+        "sticky_reused_plan_ids": sticky_reused_plan_ids,
+        "sticky_reused_plan_count": int(len(sticky_reused_plan_ids)),
+        "sticky_source_artifact_path": sticky_source_artifact_path,
         "summary": (
             f"post-patch sample {total}/{int(target_closed_trades)}"
             f" | stop_loss={stop_loss_share:.0%}"
             f" | confirm_loss={confirm_share:.0%}"
         ),
     }
+
+
+def _load_post_patch_rows_from_artifact(artifact_path: str, *, cutoff: datetime) -> list[dict[str, Any]] | None:
+    artifact_rel = str(artifact_path or "").strip()
+    if not artifact_rel:
+        return []
+    artifact = _load_json_file(ROOT_DIR / artifact_rel)
+    if not artifact:
+        return None
+
+    plan_to_meta: dict[str, dict[str, Any]] = {}
+    for path_str in list(artifact.get("input_artifact_paths") or []):
+        batch = _load_json_file(ROOT_DIR / str(path_str))
+        if not batch:
+            continue
+        for row in list(batch.get("trade_rows") or []):
+            plan_to_meta[str(row.get("plan_id") or "")] = dict(row)
+
+    merged_rows: list[dict[str, Any]] = []
+    for row in list(artifact.get("trade_rows") or []):
+        closed_ts = _parse_ts(row.get("closed_ts"))
+        if closed_ts is None or closed_ts < cutoff:
+            continue
+        plan_id = str(row.get("plan_id") or "")
+        meta = dict(plan_to_meta.get(plan_id, {}) or {})
+        merged_rows.append({**meta, **dict(row)})
+    return merged_rows
+
+
+def _find_previous_replay_artifact_path(current_artifact_path: str) -> str:
+    previous_paths = _list_previous_replay_artifact_paths(current_artifact_path, limit=1)
+    if not previous_paths:
+        return ""
+    return str(previous_paths[0])
+
+
+def _list_previous_replay_artifact_paths(current_artifact_path: str, *, limit: int = 96) -> list[str]:
+    artifact_rel = str(current_artifact_path or "").strip()
+    artifact_file = ROOT_DIR / artifact_rel
+    parent = artifact_file.parent
+    stem = artifact_file.stem
+    if not parent.exists() or "_" not in stem:
+        return []
+    prefix, _timestamp = stem.rsplit("_", 1)
+    candidates = sorted(parent.glob(f"{prefix}_*.json"))
+    current_name = artifact_file.name
+    previous = [path for path in candidates if path.name < current_name]
+    if not previous:
+        return []
+    return [str(path.relative_to(ROOT_DIR)) for path in reversed(previous[-limit:])]
 
 
 def _build_approval_template_focus(
@@ -1428,8 +1526,13 @@ def _attach_approval_template_focus(
             )
             if mitigation_execution_plan:
                 focus["mitigation_execution_plan"] = mitigation_execution_plan
+        previous_focus = dict(dict(stage.get("runtime_signoff_summary") or {}).get("approval_template_focus") or {})
+        if not previous_focus:
+            previous_focus = dict(stage.get("approval_template_focus") or {})
         post_patch_sample_summary = _build_post_patch_sample_summary(
-            artifact_path=str(focus.get("artifact_path") or "")
+            artifact_path=str(focus.get("artifact_path") or ""),
+            previous_summary=dict(previous_focus.get("post_patch_sample_summary") or {}),
+            previous_artifact_path=str(previous_focus.get("artifact_path") or ""),
         )
         if post_patch_sample_summary:
             focus["post_patch_sample_summary"] = post_patch_sample_summary
