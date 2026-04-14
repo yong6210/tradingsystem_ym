@@ -5,6 +5,12 @@
   <key>Label</key>
   <string>com.yumin.trading.entry-surface</string>
 
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ENTRY_SURFACE_BASE_URL</key>
+    <string>http://127.0.0.1:8000</string>
+  </dict>
+
   <key>ProgramArguments</key>
   <array>
     <string>/Users/yumin/Documents/trading/.venv/bin/python</string>
@@ -21,6 +27,8 @@
     <string>discord</string>
     <string>--state-file</string>
     <string>/Users/yumin/Documents/trading/reports/operations/entry_surface/last_alert_state.json</string>
+    <string>--output-file</string>
+    <string>/Users/yumin/Documents/trading/reports/operations/entry_surface/latest_entry_alert_run.json</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -33,7 +41,7 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/yumin/Documents/trading/reports/operations/entry_surface/latest_entry_alert_run.json</string>
+  <string>/Users/yumin/Documents/trading/reports/operations/entry_surface/launchd.out.log</string>
 
   <key>StandardErrorPath</key>
   <string>/Users/yumin/Documents/trading/reports/operations/entry_surface/launchd.err.log</string>

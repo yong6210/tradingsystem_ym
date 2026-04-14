@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.core.config import Settings, get_settings
@@ -68,6 +68,7 @@ _QUALITY_REASONS = {
 
 _HARD_GATE_GROUPS = {"safety", "structural"}
 _SOFTENING_GATE_GROUPS = {"quality"}
+_RECONCILIATION_ACTIVE_WINDOW_HOURS = 24
 
 
 class ExecutionOperatorDashboardService:
@@ -748,6 +749,14 @@ class ExecutionOperatorDashboardService:
         }
 
     @staticmethod
+    def _as_utc_datetime(value: Any) -> datetime | None:
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    @staticmethod
     def _reconciliation_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
         if not events:
             return {
@@ -756,18 +765,81 @@ class ExecutionOperatorDashboardService:
                 "degraded": False,
                 "critical_count": 0,
                 "lock_required_count": 0,
+                "active_event_count": 0,
+                "stale_event_count": 0,
+                "latest_event_at": None,
+                "latest_event_age_hours": None,
+                "stale_highest_severity": "INFO",
+                "active_window_hours": _RECONCILIATION_ACTIVE_WINDOW_HOURS,
             }
-        highest = max(events, key=lambda item: _SEVERITY_ORDER.get(str(item.get("severity") or "INFO"), 0))
+
+        now = datetime.now(timezone.utc)
+        active_cutoff = now - timedelta(hours=_RECONCILIATION_ACTIVE_WINDOW_HOURS)
+        latest_event_at: datetime | None = None
+        active_events: list[dict[str, Any]] = []
+        stale_events: list[dict[str, Any]] = []
+
+        for item in events:
+            created_at = ExecutionOperatorDashboardService._as_utc_datetime(item.get("created_at"))
+            if created_at is not None and (latest_event_at is None or created_at > latest_event_at):
+                latest_event_at = created_at
+            if created_at is None or created_at >= active_cutoff:
+                active_events.append(item)
+            else:
+                stale_events.append(item)
+
+        if not active_events:
+            stale_highest = max(
+                stale_events,
+                key=lambda item: _SEVERITY_ORDER.get(str(item.get("severity") or "INFO"), 0),
+                default={},
+            )
+            return {
+                "healthy": True,
+                "highest_severity": "INFO",
+                "degraded": False,
+                "critical_count": 0,
+                "lock_required_count": 0,
+                "active_event_count": 0,
+                "stale_event_count": len(stale_events),
+                "latest_event_at": latest_event_at,
+                "latest_event_age_hours": round(
+                    max((now - latest_event_at).total_seconds(), 0.0) / 3600.0,
+                    2,
+                )
+                if latest_event_at is not None
+                else None,
+                "stale_highest_severity": str(stale_highest.get("severity") or "INFO"),
+                "active_window_hours": _RECONCILIATION_ACTIVE_WINDOW_HOURS,
+            }
+
+        highest = max(active_events, key=lambda item: _SEVERITY_ORDER.get(str(item.get("severity") or "INFO"), 0))
         highest_severity = str(highest.get("severity") or "INFO")
-        critical_count = sum(1 for item in events if str(item.get("severity") or "") == "CRITICAL")
-        lock_required_count = sum(1 for item in events if bool(item.get("lock_required")))
+        critical_count = sum(1 for item in active_events if str(item.get("severity") or "") == "CRITICAL")
+        lock_required_count = sum(1 for item in active_events if bool(item.get("lock_required")))
         degraded = _SEVERITY_ORDER.get(highest_severity, 0) >= _SEVERITY_ORDER["WARNING"]
+        stale_highest = max(
+            stale_events,
+            key=lambda item: _SEVERITY_ORDER.get(str(item.get("severity") or "INFO"), 0),
+            default={},
+        )
         return {
             "healthy": not degraded,
             "highest_severity": highest_severity,
             "degraded": degraded,
             "critical_count": critical_count,
             "lock_required_count": lock_required_count,
+            "active_event_count": len(active_events),
+            "stale_event_count": len(stale_events),
+            "latest_event_at": latest_event_at,
+            "latest_event_age_hours": round(
+                max((now - latest_event_at).total_seconds(), 0.0) / 3600.0,
+                2,
+            )
+            if latest_event_at is not None
+            else None,
+            "stale_highest_severity": str(stale_highest.get("severity") or "INFO"),
+            "active_window_hours": _RECONCILIATION_ACTIVE_WINDOW_HOURS,
         }
 
     @staticmethod

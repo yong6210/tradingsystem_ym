@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import URLError
 
 
 ROOT_DIR = Path("/Users/yumin/Documents/trading")
@@ -223,6 +224,38 @@ def _alerts_payload() -> dict:
     }
 
 
+def test_request_json_retries_after_timeout(monkeypatch) -> None:
+    calls = {"count": 0}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return None
+
+        def read(self):
+            return b'{"ok": true}'
+
+    def _urlopen(_request, timeout):  # noqa: ANN001
+        assert timeout == run_micro_live_preflight._REQUEST_TIMEOUT_SECONDS
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise TimeoutError("timed out")
+        return _Response()
+
+    monkeypatch.setattr(run_micro_live_preflight, "urlopen", _urlopen)
+
+    payload = run_micro_live_preflight._request_json(
+        "http://127.0.0.1:8000",
+        "GET",
+        "/health/live",
+    )
+
+    assert payload["ok"] is True
+    assert calls["count"] == 2
+
+
 def _scanner_payload() -> list[dict]:
     return [
         {
@@ -233,6 +266,10 @@ def _scanner_payload() -> list[dict]:
             "expected_summary": "win≈54.0%, EV≈+0.30R",
         }
     ]
+
+
+def _empty_scanner_payload() -> list[dict]:
+    return []
 
 
 def test_surface_strip_summary_prefers_nested_validation_strip() -> None:
@@ -316,3 +353,95 @@ def test_main_emits_approval_surfaces_and_ready_status(monkeypatch, capsys) -> N
         check["name"] == "validation_language" and "approve=approval usable" in check["message"]
         for check in payload["checks"]
     )
+
+
+def test_main_keeps_preflight_ready_when_no_candidate_is_live(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        run_micro_live_preflight,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            days=7,
+            candidate_limit=10,
+            report_dir="reports/operations/micro_live_preflight",
+            no_write_report=True,
+        ),
+    )
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/health/ready":
+            return _ready_payload()
+        if path == "/execution/operator-dashboard":
+            return _dashboard_payload()
+        if path == "/execution/safety-state":
+            return _safety_payload()
+        if path == "/execution/reconcile":
+            return _reconcile_payload()
+        if path == "/validation/report":
+            return _validation_payload()
+        if path == "/operations/checklist":
+            return _checklist_payload()
+        if path == "/alerts/metrics":
+            return _alerts_payload()
+        if path == "/scanner/top":
+            return _empty_scanner_payload()
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(run_micro_live_preflight, "_request_json", _request_json)
+
+    assert run_micro_live_preflight.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["overall_status"] == "READY_FOR_MICRO_LIVE"
+    candidate_check = next(item for item in payload["checks"] if item["name"] == "candidate_available")
+    assert candidate_check["status"] == "PASS"
+    assert "No accepted scanner candidate is live right now" in candidate_check["message"]
+
+
+def test_main_uses_read_only_queries_for_reconcile_validation_and_checklist(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        run_micro_live_preflight,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            days=7,
+            candidate_limit=10,
+            report_dir="reports/operations/micro_live_preflight",
+            no_write_report=True,
+        ),
+    )
+
+    calls: dict[str, dict] = {}
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        calls[path] = kwargs
+        if path == "/health/ready":
+            return _ready_payload()
+        if path == "/execution/operator-dashboard":
+            return _dashboard_payload()
+        if path == "/execution/safety-state":
+            return _safety_payload()
+        if path == "/execution/reconcile":
+            return _reconcile_payload()
+        if path == "/validation/report":
+            return _validation_payload()
+        if path == "/operations/checklist":
+            return _checklist_payload()
+        if path == "/alerts/metrics":
+            return _alerts_payload()
+        if path == "/scanner/top":
+            return _empty_scanner_payload()
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(run_micro_live_preflight, "_request_json", _request_json)
+
+    assert run_micro_live_preflight.main() == 0
+    _ = json.loads(capsys.readouterr().out)
+
+    assert calls["/execution/reconcile"]["query"] == {"apply_lock": "false", "auto_resolve": "false"}
+    assert calls["/validation/report"]["query"] == {"symbol": "BTCUSDC", "refresh": "false"}
+    assert calls["/operations/checklist"]["query"] == {"symbol": "BTCUSDC", "write_report": "false"}

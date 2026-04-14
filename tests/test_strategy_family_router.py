@@ -164,6 +164,52 @@ def test_router_marks_a_grade_sweep_reversal_and_prefers_limit_for_clean_case() 
     assert decision.scorecard["bucket_caps"]["trendline_bonus"] == 2.0
 
 
+def test_router_routes_range_a_grade_non_clean_reversal_to_range_rotation_research_only() -> None:
+    router = StrategyFamilyRouter()
+
+    decision = router.route(
+        zone=_zone(zone_type="LP", width_atr=0.52),
+        context=_context(regime_label="range", friction=0.12, jump_rate=0.06, v=0.25),
+        reaction=_reaction(rejection_score=84.0, acceptance_score=16.0, outside_close_count=0, session_quality=0.95),
+        near_lp=True,
+        zone_strength=88.0,
+        confluence_score=80.0,
+        regime_name="range",
+        candles_5m=_trend_candles(),
+    )
+
+    assert decision.available is False
+    assert decision.family == "range_rotation"
+    assert decision.entry_model is None
+    assert decision.reason == "range_rotation_research_only"
+
+
+def test_router_blocks_range_confirm_only_reversal_candidates() -> None:
+    router = StrategyFamilyRouter()
+
+    decision = router.route(
+        zone=_zone(zone_type="LP", width_atr=0.40),
+        context=_context(regime_label="range", friction=0.10, jump_rate=0.05, v=0.2),
+        reaction=_reaction(
+            classification="rejection_tentative",
+            rejection_score=79.0,
+            acceptance_score=19.0,
+            outside_close_count=0,
+            session_quality=0.95,
+        ),
+        near_lp=True,
+        zone_strength=84.0,
+        confluence_score=78.0,
+        regime_name="range",
+        candles_5m=_trend_candles(),
+    )
+
+    assert decision.available is False
+    assert decision.family == "range_rotation"
+    assert decision.reason == "range_rotation_research_only"
+    assert decision.entry_model is None
+
+
 def test_router_blocks_sweep_reversal_in_trend_when_location_is_not_extreme() -> None:
     router = StrategyFamilyRouter()
 

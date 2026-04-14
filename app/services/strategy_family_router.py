@@ -331,6 +331,28 @@ class StrategyFamilyRouter:
         if confirm_only:
             entry_model = EntryModel.CONFIRM
 
+        # Runtime signoff plus the post-patch cohort still showed the
+        # residual left-tail coming from range-regime late entries.
+        # Keep clean A-grade limit entries, but stop generating fresh
+        # range reversal candidates that require a confirm-style chase.
+        if regime_name == "range" and entry_model in {EntryModel.CONFIRM, EntryModel.SWEEP_CONFIRM}:
+            return StrategyFamilyDecision(
+                available=False,
+                family="sweep_reversal",
+                grade=grade,
+                score=family_score,
+                reason=(
+                    "range_confirm_entry_tightened_out"
+                    if entry_model == EntryModel.CONFIRM
+                    else "range_sweep_confirm_entry_tightened_out"
+                ),
+                entry_model=None,
+                components=components,
+                clean_case=clean_case,
+                confirm_only=confirm_only,
+                scorecard=scorecard,
+            )
+
         reason = "sweep_reversal_confirm_only" if confirm_only else "sweep_reversal_limit" if clean_case else "sweep_reversal_sweep_confirm"
         return StrategyFamilyDecision(
             available=True,

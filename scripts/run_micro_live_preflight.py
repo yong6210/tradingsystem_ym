@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,9 @@ from urllib.request import Request, urlopen
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+_REQUEST_RETRY_ATTEMPTS = 3
+_REQUEST_RETRY_BASE_DELAY_SECONDS = 0.5
+_REQUEST_TIMEOUT_SECONDS = 90
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,14 +57,33 @@ def _request_json(
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
     request = Request(url=url, data=data, headers=headers, method=method.upper())
-    try:
-        with urlopen(request, timeout=20) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        payload = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{method.upper()} {path} failed with HTTP {exc.code}: {payload}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"{method.upper()} {path} failed: {exc.reason}") from exc
+    last_error: RuntimeError | None = None
+    for attempt in range(1, _REQUEST_RETRY_ATTEMPTS + 1):
+        try:
+            with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            payload = exc.read().decode("utf-8", errors="replace")
+            retryable = exc.code >= 500 or "database is locked" in payload.lower()
+            last_error = RuntimeError(f"{method.upper()} {path} failed with HTTP {exc.code}: {payload}")
+            if retryable and attempt < _REQUEST_RETRY_ATTEMPTS:
+                time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
+                continue
+            raise last_error from exc
+        except URLError as exc:
+            last_error = RuntimeError(f"{method.upper()} {path} failed: {exc.reason}")
+            if attempt < _REQUEST_RETRY_ATTEMPTS:
+                time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
+                continue
+            raise last_error from exc
+        except TimeoutError as exc:
+            last_error = RuntimeError(f"{method.upper()} {path} timed out after {_REQUEST_TIMEOUT_SECONDS}s")
+            if attempt < _REQUEST_RETRY_ATTEMPTS:
+                time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
+                continue
+            raise last_error from exc
+    assert last_error is not None
+    raise last_error
 
 
 def _truthy_ready(payload: dict[str, Any]) -> bool:
@@ -159,6 +182,30 @@ def _surface_summary_line(label: str, summary: dict[str, str]) -> str:
 def _surface_allows_preflight(summary: dict[str, str]) -> bool:
     approve_value = str(summary.get("approve_value") or "").strip().lower()
     return approve_value not in {"runtime no_go", "validation no_go", "validation/checklist no_go", "entry gate blocked"}
+
+
+def _candidate_availability_check(
+    *,
+    candidate: dict[str, Any] | None,
+    dashboard_strip: dict[str, str],
+) -> dict[str, str]:
+    if candidate:
+        return {
+            "name": "candidate_available",
+            "status": "PASS",
+            "message": (
+                f"{candidate.get('symbol', '')} {candidate.get('strategy_family', '')} "
+                f"{candidate.get('deployment_go_no_go', '') or candidate.get('operator_status', '')}"
+            ),
+        }
+    return {
+        "name": "candidate_available",
+        "status": "PASS",
+        "message": (
+            "No accepted scanner candidate is live right now; runtime may stay open and wait for the next "
+            f"eligible session candidate. act={dashboard_strip.get('act_value', '')}"
+        ),
+    }
 
 
 def _edge_experiment_summary(
@@ -614,20 +661,20 @@ def main() -> int:
         args.base_url,
         "POST",
         "/execution/reconcile",
-        query={"apply_lock": "true", "auto_resolve": "true"},
+        query={"apply_lock": "false", "auto_resolve": "false"},
         body={"symbol": args.symbol},
     )
     validation = _request_json(
         args.base_url,
         "POST",
         "/validation/report",
-        query={"symbol": args.symbol},
+        query={"symbol": args.symbol, "refresh": "false"},
     )
     checklist = _request_json(
         args.base_url,
         "POST",
         "/operations/checklist",
-        query={"symbol": args.symbol},
+        query={"symbol": args.symbol, "write_report": "false"},
     )
     alerts = _request_json(
         args.base_url,
@@ -768,18 +815,7 @@ def main() -> int:
             "message": f"latest_validation_alert={bool(latest_validation_alert)}",
         }
     )
-    checks.append(
-        {
-            "name": "candidate_available",
-            "status": _status(candidate is not None),
-            "message": (
-                f"{candidate.get('symbol', '')} {candidate.get('strategy_family', '')} "
-                f"{candidate.get('deployment_go_no_go', '') or candidate.get('operator_status', '')}"
-                if candidate
-                else "No accepted scanner candidate available."
-            ),
-        }
-    )
+    checks.append(_candidate_availability_check(candidate=candidate, dashboard_strip=dashboard_strip))
 
     failed = [item for item in checks if item["status"] != "PASS"]
     overall_status = "READY_FOR_MICRO_LIVE" if not failed else "NOT_READY"

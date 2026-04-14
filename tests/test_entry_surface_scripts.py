@@ -205,6 +205,16 @@ def test_build_entry_snapshot_maps_rows_to_three_statuses():
     assert snapshot["sections"][notify_entry_surface.RESEARCH_ONLY_SETUP][0]["symbol"] == "SOLUSDC"
 
 
+def test_emit_result_writes_output_file(tmp_path, capsys):
+    payload = {"status": "ok", "count": 1}
+    output_path = tmp_path / "entry_surface_result.json"
+
+    notify_entry_surface._emit_result(output_path, payload)
+
+    assert json.loads(output_path.read_text(encoding="utf-8")) == payload
+    assert json.loads(capsys.readouterr().out) == payload
+
+
 def test_build_entry_snapshot_demotes_accepted_rows_when_topline_is_not_go():
     snapshot = notify_entry_surface.build_entry_snapshot(
         _budget_payload(deployment_go_no_go="MANUAL_REVIEW"),

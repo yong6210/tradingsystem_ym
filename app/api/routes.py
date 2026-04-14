@@ -603,12 +603,15 @@ def validation_report(
     refresh: bool = True,
     engine: StrategyEngine = Depends(get_engine),
 ) -> ValidationReportOut:
-    if not refresh:
-        raise HTTPException(
-            status_code=400,
-            detail="refresh=false is not supported yet; call with refresh=true",
-        )
-    payload = engine.recompute_learning(symbol)
+    if refresh:
+        payload = engine.recompute_learning(symbol, persist_runtime_validation_artifacts=False)
+    else:
+        payload = engine._load_cached_validation_payload(symbol)
+        if payload is None:
+            raise HTTPException(
+                status_code=404,
+                detail="cached validation payload is not available yet; call with refresh=true first",
+            )
     return ValidationReportOut(**payload)
 
 

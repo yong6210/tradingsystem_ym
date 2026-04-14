@@ -1316,6 +1316,91 @@ def test_operational_checklist_marks_missing_alert_test_as_manual() -> None:
     assert payload["playbook_action"] == "clear_blocking_operational_items_before_rollout"
 
 
+def test_operational_checklist_downgrades_missing_alert_test_when_recent_validation_alert_delivered() -> None:
+    settings = Settings(alert_discord_webhook_url="https://discord.example/webhook")
+    service = OperationalChecklistService(alert_repo=_AlertRepoStub([]), settings=settings)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    payload = service.generate(
+        symbol="BTCUSDC",
+        universe="usdc_perp_top30",
+        strategy_version="v1",
+        ready=ReadySnapshot(status="ready", checks={"db": True}, details={"db": "ok"}),
+        validation_payload={
+            "validation_report": {
+                "status": "WARN",
+                "approval_strip_summary": {
+                    "approve_value": "manual review first",
+                    "approve_reason": "alignment warning remains",
+                    "align_value": "playbook_drift",
+                    "align_reason": "template warning",
+                    "act_value": "continue_candidate_review_under_portfolio_caps",
+                    "act_reason": "continue under caps",
+                    "act_priority_level": "urgent",
+                },
+                "operator_action_priority_summary": {
+                    "available": False,
+                },
+            },
+            "deployment_go_no_go": "MANUAL_REVIEW",
+            "deployment_code": "manual_review_alignment_warning",
+            "deployment_message": "MANUAL REVIEW: alignment warning remains.",
+            "playbook_go_no_go": "MANUAL_REVIEW",
+            "playbook_code": "manual_review_alignment_warning",
+            "playbook_action": "hold_rollout_and_review_alignment_details",
+            "playbook_message": "MANUAL REVIEW: alignment warning remains.",
+            "validation_alert": {
+                "emitted": True,
+                "delivery": {
+                    "channel": "discord",
+                    "delivered": True,
+                    "skipped": False,
+                    "reason": "ok",
+                },
+            },
+            "strategy_v2_pbo_dsr_design": {"design_ready": True, "available": False},
+        },
+        alert_metrics={
+            "overall": {"slo": {"status": "PASS"}, "error_budget": {"status": "PASS"}},
+            "channel_metrics": {},
+            "circuit_state": {},
+            "retry_queue": {"counts": {"queued": 0, "dead_letter": 0}, "backlog_age_seconds": 0},
+            "latest_validation_alert": {
+                "available": True,
+                "alert_id": "val_warn_test",
+                "channel": "discord",
+                "delivery_channel": "discord",
+                "triggered_ts": now.isoformat(),
+                "status": "WARN",
+                "delivered": True,
+                "skipped": False,
+                "failed": False,
+            },
+        },
+        outbox_status={"counts": {"pending": 0, "failed": 0}, "backlog_age_seconds": 0, "retry_policy": {}},
+        strategy_metrics={"risk_state": "OPEN", "risk_reason": "normal", "operating_lock": {"active": False}},
+        portfolio_budget={
+            "deployment_go_no_go": "GO",
+            "deployment_code": "go_runtime_gate_open",
+            "deployment_message": "GO: runtime gate is open for candidate review.",
+            "current_exposure": {"active_thesis_clusters": 0},
+            "blocked_reason_counts": {},
+            "strategy_mode": "A_ONLY",
+        },
+        execution_quality={"plans_matured": 0, "fill_events_total": 0},
+        alert_test_lookback_hours=24,
+        write_report=False,
+    )
+
+    alert_test_item = next(item for item in payload["checks"] if item["item_id"] == "alert_test_recent")
+    assert alert_test_item["status"] == "WARN"
+    assert alert_test_item["blocking"] is False
+    assert alert_test_item["evidence"]["recent_live_delivery"]["discord"]["source"] == "recent_validation_alert_delivery"
+    assert payload["manual_actions"] == 0
+    assert payload["deployment_go_no_go"] == "MANUAL_REVIEW"
+    assert payload["approval_strip_summary"]["approve_value"] == "manual review first"
+
+
 def test_operational_checklist_marks_dead_session_as_warn_non_blocking() -> None:
     now = datetime.now(timezone.utc).replace(microsecond=0)
     settings = Settings(alert_discord_webhook_url="https://discord.example/webhook")

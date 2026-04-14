@@ -56,6 +56,15 @@ class CandleRepository:
         )
         return self.db.scalar(stmt)
 
+    def get_first_candle(self, symbol: str, timeframe: str) -> Candle | None:
+        stmt = (
+            select(Candle)
+            .where(Candle.symbol == symbol, Candle.timeframe == timeframe)
+            .order_by(Candle.ts.asc())
+            .limit(1)
+        )
+        return self.db.scalar(stmt)
+
     def upsert(self, candle: Candle) -> Candle:
         stmt = self._identity_stmt(symbol=candle.symbol, timeframe=candle.timeframe, ts=candle.ts)
         values = {

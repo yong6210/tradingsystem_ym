@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.core.config import get_settings
 from app.db.models import Candle
@@ -89,17 +89,118 @@ class MarketDataService:
             last_ts = self.quality_gate._as_utc(row.open_time)
         return ingested
 
+    def backfill_history_before_latest(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        limit: int = 1500,
+        batches: int = 1,
+    ) -> int:
+        earliest_candle = self.candle_repo.get_first_candle(symbol, timeframe)
+        if earliest_candle is None:
+            return 0
+
+        earliest_ts = self.quality_gate._as_utc(earliest_candle.ts)
+        ingested = 0
+        remaining_batches = max(1, int(batches))
+        while earliest_ts is not None and remaining_batches > 0:
+            end_time_ms = int((earliest_ts - timedelta(milliseconds=1)).timestamp() * 1000)
+            klines = sorted(
+                self.binance.fetch_klines(
+                    symbol=symbol,
+                    interval=timeframe,
+                    limit=limit,
+                    end_time_ms=end_time_ms,
+                ),
+                key=lambda row: row.open_time,
+            )
+            older_rows = [
+                row
+                for row in klines
+                if self.quality_gate._as_utc(row.open_time) < earliest_ts
+            ]
+            if not older_rows:
+                break
+            prev_candle: Candle | None = None
+            for row in older_rows:
+                candle = Candle(
+                    symbol=row.symbol,
+                    timeframe=timeframe,
+                    ts=row.open_time,
+                    o=row.o,
+                    h=row.h,
+                    l=row.l,
+                    c=row.c,
+                    v=row.v,
+                    source="binance",
+                    is_final=row.is_final,
+                )
+                try:
+                    self.quality_gate.validate(candle, prev_candle)
+                except DataQualityError as exc:
+                    if str(exc) == "reverse timestamp detected":
+                        continue
+                    raise
+                self.candle_repo.upsert(candle)
+                ingested += 1
+                prev_candle = candle
+            earliest_ts = min(self.quality_gate._as_utc(row.open_time) for row in older_rows)
+            remaining_batches -= 1
+        return ingested
+
     def backfill_symbol_timeframes(
         self,
         symbol: str,
         limit_1m: int = 0,
         limit_5m: int = 500,
         limit_15m: int = 500,
+        history_batches_1m: int = 0,
+        history_batches_5m: int = 0,
+        history_batches_15m: int = 0,
     ) -> dict[str, int]:
         count_1m = self.backfill_from_binance(symbol=symbol, timeframe="1m", limit=limit_1m) if int(limit_1m) > 0 else 0
         count_5m = self.backfill_from_binance(symbol=symbol, timeframe="5m", limit=limit_5m)
         count_15m = self.backfill_from_binance(symbol=symbol, timeframe="15m", limit=limit_15m)
-        return {"1m": count_1m, "5m": count_5m, "15m": count_15m, "total": count_1m + count_5m + count_15m}
+        history_1m = (
+            self.backfill_history_before_latest(
+                symbol=symbol,
+                timeframe="1m",
+                limit=limit_1m,
+                batches=history_batches_1m,
+            )
+            if int(limit_1m) > 0 and int(history_batches_1m) > 0
+            else 0
+        )
+        history_5m = (
+            self.backfill_history_before_latest(
+                symbol=symbol,
+                timeframe="5m",
+                limit=limit_5m,
+                batches=history_batches_5m,
+            )
+            if int(history_batches_5m) > 0
+            else 0
+        )
+        history_15m = (
+            self.backfill_history_before_latest(
+                symbol=symbol,
+                timeframe="15m",
+                limit=limit_15m,
+                batches=history_batches_15m,
+            )
+            if int(history_batches_15m) > 0
+            else 0
+        )
+        return {
+            "1m": count_1m,
+            "5m": count_5m,
+            "15m": count_15m,
+            "history_1m": history_1m,
+            "history_5m": history_5m,
+            "history_15m": history_15m,
+            "total": count_1m + count_5m + count_15m + history_1m + history_5m + history_15m,
+        }
 
     def refresh_universe(self, limit: int = 30) -> list[str]:
         return self.binance.fetch_top_usdc_perp_symbols(limit=limit)

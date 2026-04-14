@@ -372,6 +372,62 @@ def test_strategy_v2_pbo_dsr_metrics_passes_lineage_audit_when_true_threshold_se
         assert payload["selection_universe_summary"]["dsr_selection_universe_basis"] == "full_parameter_sweep_universe"
         assert payload["lineage_audit"]["selected_trial_from_runtime_proxy"] is False
         assert payload["lineage_audit"]["selected_trial_from_true_threshold"] is True
+
+
+def test_strategy_v2_pbo_dsr_metrics_prefers_true_threshold_when_dual_selected_flags_exist() -> None:
+    init_db()
+    symbol = f"PBODUALSELECT{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 4}USDC"
+
+    with SessionLocal() as db:
+        repo = ValidationArtifactRepository(db)
+        proxy_trial_run_id = _seed_trial(
+            repo,
+            symbol=symbol,
+            trial_suffix="trial_proxy_selected",
+            selection_rule="runtime_validation_proxy_top_in_sample_ev",
+            selected_flag=True,
+            selection_rank=1,
+            out_of_sample_metric=0.30,
+            sharpe_like_score=1.7,
+            writer_source="runtime_validation_proxy_v1",
+        )
+        threshold_trial_run_id = _seed_trial(
+            repo,
+            symbol=symbol,
+            trial_suffix="trial_threshold_selected",
+            selection_rule="true_threshold_sweep_top_in_sample_ev",
+            selected_flag=True,
+            selection_rank=1,
+            out_of_sample_metric=0.30,
+            sharpe_like_score=1.7,
+            writer_source="true_threshold_sweep_runner_v1",
+        )
+        other_trial_run_id = _seed_trial(
+            repo,
+            symbol=symbol,
+            trial_suffix="trial_threshold_other",
+            selection_rule="true_threshold_sweep_top_in_sample_ev",
+            selected_flag=False,
+            selection_rank=2,
+            out_of_sample_metric=0.22,
+            sharpe_like_score=1.1,
+            writer_source="true_threshold_sweep_runner_v1",
+        )
+        _seed_fold_scores(
+            repo,
+            symbol=symbol,
+            selected_trial_run_id=threshold_trial_run_id,
+            second_trial_run_id=proxy_trial_run_id,
+            third_trial_run_id=other_trial_run_id,
+        )
+
+        service = StrategyV2PboDsrMetricsService(repo=repo)
+        payload = service.generate(symbol=symbol, version="v1", write_report=False, persist_snapshot=False)
+
+        assert payload["selected_trial"]["trial_run_id"] == threshold_trial_run_id
+        assert payload["selected_trial"]["writer_source"] == "true_threshold_sweep_runner_v1"
+        assert payload["lineage_audit"]["audit_status"] == "PASS"
+        assert payload["lineage_audit"]["reason"] == "selected_trial_from_true_threshold_with_dual_lineage"
         assert payload["dsr"]["selection_universe_basis"] == "full_parameter_sweep_universe"
         assert payload["dsr"]["selection_universe_size"] == 2
         assert payload["dsr"]["legacy_combined_selection_universe_size"] == 3

@@ -294,6 +294,11 @@ class ValidationReportService:
             or pbo_selected_trial.get("writer_source")
             or pbo_lineage_audit.get("selected_trial_writer_source", "unknown")
         )
+        threshold_lineage_winner_run_id = str(
+            approval_cross_display.get("threshold_lineage_winner_run_id")
+            or pbo_selected_trial.get("trial_run_id")
+            or ""
+        )
         threshold_lineage_winner_selection_rule = str(
             approval_cross_display.get("threshold_lineage_winner_selection_rule")
             or pbo_selected_trial.get("selection_rule")
@@ -394,6 +399,7 @@ class ValidationReportService:
             "playbook_message": playbook_mapping["playbook_message"],
             "template_status": template_status,
             "template_reason": template_reason,
+            "threshold_lineage_winner_run_id": threshold_lineage_winner_run_id or None,
             "threshold_lineage_winner_source": threshold_lineage_winner_source,
             "threshold_lineage_winner_selection_rule": threshold_lineage_winner_selection_rule,
             "threshold_lineage_winner_type": threshold_lineage_winner_type,

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime, timezone
+import json
+from pathlib import Path
+import time
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -21,8 +25,8 @@ from app.core.events import (
     VALIDATION_WARN,
     ZONE_CREATED,
 )
-from app.core.enums import ExecutionFillStage, ExecutionMode, OrderLifecycleState, PlanState, RiskGateState
-from app.db.models import AlertSubscription, Zone, ZoneOutcome
+from app.core.enums import ExecutionFillStage, ExecutionMode, ExitReason, OrderLifecycleState, PlanState, RiskGateState
+from app.db.models import AlertSubscription, Plan, Zone, ZoneOutcome
 from app.db.session import SessionLocal
 from app.db.repositories import (
     AlertRepository,
@@ -133,6 +137,10 @@ from app.services.strategy_v2_validation import StrategyV2ValidationService
 from app.services.validation_report import ValidationReportService
 from app.services.health_check import HealthCheckService
 from app.services.zone_engine import ZoneEngine
+
+_READ_ONLY_RECOMPUTE_CACHE_TTL_SECONDS = 120.0
+_READ_ONLY_RECOMPUTE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_VALIDATION_PAYLOAD_CACHE_MAX_AGE_SECONDS = 900.0
 
 
 class StrategyEngine:
@@ -350,6 +358,53 @@ class StrategyEngine:
         )
         self.events = EventBus(db)
 
+    def _validation_payload_cache_path(self, symbol: str) -> Path:
+        return Path(self.settings.validation_report_dir) / "runtime_payload_cache" / f"{str(symbol).upper()}.json"
+
+    def _load_cached_validation_payload(self, symbol: str) -> dict[str, Any] | None:
+        cache_key = str(symbol).upper()
+        cached_entry = _READ_ONLY_RECOMPUTE_CACHE.get(cache_key)
+        if cached_entry is not None:
+            expires_at, cached_payload = cached_entry
+            if expires_at > time.monotonic():
+                return copy.deepcopy(cached_payload)
+            _READ_ONLY_RECOMPUTE_CACHE.pop(cache_key, None)
+
+        path = self._validation_payload_cache_path(symbol)
+        if not path.exists():
+            return None
+        try:
+            age_seconds = max(time.time() - path.stat().st_mtime, 0.0)
+        except OSError:
+            return None
+        if age_seconds > _VALIDATION_PAYLOAD_CACHE_MAX_AGE_SECONDS:
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or not payload:
+            return None
+        _READ_ONLY_RECOMPUTE_CACHE[cache_key] = (
+            time.monotonic() + _READ_ONLY_RECOMPUTE_CACHE_TTL_SECONDS,
+            copy.deepcopy(payload),
+        )
+        return payload
+
+    def _store_cached_validation_payload(self, symbol: str, payload: dict[str, Any]) -> None:
+        cache_key = str(symbol).upper()
+        cached_payload = copy.deepcopy(dict(payload))
+        _READ_ONLY_RECOMPUTE_CACHE[cache_key] = (
+            time.monotonic() + _READ_ONLY_RECOMPUTE_CACHE_TTL_SECONDS,
+            cached_payload,
+        )
+        path = self._validation_payload_cache_path(symbol)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(cached_payload, ensure_ascii=False, default=str), encoding="utf-8")
+        except OSError:
+            return
+
     def _consecutive_losses(self, outcomes: list[ZoneOutcome]) -> int:
         losses = 0
         for o in outcomes:
@@ -365,7 +420,21 @@ class StrategyEngine:
             states=[PlanState.CLOSED.value],
             limit=2000,
         )
-        return self.operating_lock.evaluate(plans=plans, now=now)
+        submissions = self.submission_repo.list_recent(days=3, limit=10000)
+        counted_execution_modes = {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value}
+        counted_plan_ids: set[str] = set()
+        seen_plan_ids: set[str] = set()
+        for row in submissions:
+            plan_id = str(getattr(row, "plan_id", "") or "")
+            if not plan_id or plan_id in seen_plan_ids:
+                continue
+            seen_plan_ids.add(plan_id)
+            execution_mode = str(getattr(row, "execution_mode", "") or "")
+            requested_live = bool(getattr(row, "requested_live", False))
+            if requested_live or execution_mode in counted_execution_modes:
+                counted_plan_ids.add(plan_id)
+        filtered_plans = [plan for plan in plans if str(plan.plan_id) in counted_plan_ids]
+        return self.operating_lock.evaluate(plans=filtered_plans, now=now)
 
     def _evaluate_gate(self, *, symbol: str, jump_rate: float) -> tuple[RiskGateState, bool, str, OperatingLockSnapshot]:
         outcomes = self.outcome_repo.list_recent(symbol=symbol, days=30)
@@ -597,6 +666,7 @@ class StrategyEngine:
             {
                 "severity": getattr(row, "severity", "INFO"),
                 "lock_required": bool(getattr(row, "lock_required", False)),
+                "created_at": getattr(row, "created_at", None),
             }
             for row in self.reconciliation_event_repo.list_recent(symbol=symbol, limit=limit, days=days)
         ]
@@ -1342,6 +1412,29 @@ class StrategyEngine:
         }
 
     @staticmethod
+    def _paper_exit_bar_seconds(timeframe: str) -> int:
+        if str(timeframe or "") == "15m":
+            return 15 * 60
+        return 5 * 60
+
+    def _paper_exit_held_bars(self, *, plan, fill_ts: datetime, previous_fills: list[Any]) -> int:
+        entry_ts = plan.valid_from if getattr(plan, "valid_from", None) else fill_ts
+        for fill in previous_fills:
+            if str(getattr(fill, "stage", "") or "") == ExecutionFillStage.ENTRY.value:
+                fill_entry_ts = fill.fill_ts if fill.fill_ts.tzinfo else fill.fill_ts.replace(tzinfo=timezone.utc)
+                entry_ts = fill_entry_ts.astimezone(timezone.utc)
+                break
+        normalized_fill_ts = fill_ts if fill_ts.tzinfo else fill_ts.replace(tzinfo=timezone.utc)
+        normalized_fill_ts = normalized_fill_ts.astimezone(timezone.utc)
+        normalized_entry_ts = entry_ts if entry_ts.tzinfo else entry_ts.replace(tzinfo=timezone.utc)
+        normalized_entry_ts = normalized_entry_ts.astimezone(timezone.utc)
+        delta_seconds = max(0.0, (normalized_fill_ts - normalized_entry_ts).total_seconds())
+        bar_seconds = max(1, self._paper_exit_bar_seconds(str(getattr(plan, "timeframe", "") or "5m")))
+        if delta_seconds <= 0.0:
+            return 0
+        return int((delta_seconds + bar_seconds - 1) // bar_seconds)
+
+    @staticmethod
     def _parse_iso_utc(value: Any) -> datetime | None:
         if value in {None, ""}:
             return None
@@ -1514,6 +1607,7 @@ class StrategyEngine:
         submission_rows = self.submission_repo.list_recent(days=max(1, int(days)), limit=max(50, int(limit) * 5))
         candidate_rows: list[tuple[Any, Any, str]] = []
         seen_plan_ids: set[str] = set()
+        plan_repairs = 0
         for submission in submission_rows:
             if str(submission.adapter or "").lower() != "paper":
                 continue
@@ -1526,7 +1620,7 @@ class StrategyEngine:
                 repaired_plan = self._repair_missing_paper_plan_from_submission(submission=submission, intent=intent)
                 if repaired_plan is not None:
                     plan = repaired_plan
-                    summary["plan_repairs"] += 1
+                    plan_repairs += 1
             if plan is None or str(plan.timeframe or "") != "5m":
                 continue
             family = str(
@@ -1548,7 +1642,7 @@ class StrategyEngine:
             "partial_exit_events": 0,
             "closed_events": 0,
             "skipped": 0,
-            "plan_repairs": 0,
+            "plan_repairs": plan_repairs,
             "fill_repairs": 0,
             "state_repairs": 0,
             "actions": [],
@@ -1613,6 +1707,8 @@ class StrategyEngine:
             fill_ts = candle.ts
             candle_close = float(candle.c)
             candle_ts_text = fill_ts.isoformat() if hasattr(fill_ts, "isoformat") else str(fill_ts)
+            held_bars = self._paper_exit_held_bars(plan=plan, fill_ts=fill_ts, previous_fills=previous_fills)
+            max_allowed_bars = int((plan.validity or {}).get("strategy_family_time_stop_max_bars", 0) or 0)
             summary["entry_states_seen"] += 1
             actions_for_plan: list[dict[str, Any]] = []
             if latest_fill_ts is not None:
@@ -1730,6 +1826,14 @@ class StrategyEngine:
                         qty=remaining_qty,
                         exit_reason="target_tp3",
                     )
+                elif remaining_qty > 1e-10 and max_allowed_bars > 0 and held_bars > max_allowed_bars:
+                    _record_fill(
+                        leg="time_stop",
+                        stage=ExecutionFillStage.CLOSED,
+                        price=candle_close,
+                        qty=remaining_qty,
+                        exit_reason=ExitReason.TIME_FAILURE.value,
+                    )
                 elif remaining_qty > 1e-10 and candle.ts >= plan.valid_until:
                     _record_fill(
                         leg="expiry",
@@ -1751,7 +1855,13 @@ class StrategyEngine:
                     }
                 )
             summary["actions"].extend(actions_for_plan)
-        if summary["plan_repairs"] > 0 or summary["state_repairs"] > 0:
+        if (
+            summary["plan_repairs"] > 0
+            or summary["fill_repairs"] > 0
+            or summary["state_repairs"] > 0
+            or summary["partial_exit_events"] > 0
+            or summary["closed_events"] > 0
+        ):
             self.db.commit()
         return summary
 
@@ -3399,6 +3509,7 @@ class StrategyEngine:
         version: str,
         write_report: bool,
         persist_snapshot: bool,
+        persist_runtime_validation_artifacts: bool = True,
     ) -> dict[str, Any]:
         symbol = self._global_lineage_validation_symbol()
         plans = self._global_lineage_validation_plans(version=version)
@@ -3407,20 +3518,20 @@ class StrategyEngine:
             version=version,
             plans=plans,
             write_report=False,
-            persist=True,
+            persist=persist_runtime_validation_artifacts,
         )
         self.strategy_v2_pbo_dsr_threshold_runner.generate(
             symbol=symbol,
             version=version,
             plans=plans,
             write_report=False,
-            persist=True,
+            persist=persist_runtime_validation_artifacts,
         )
         payload = self.strategy_v2_pbo_dsr_metrics.generate(
             symbol=symbol,
             version=version,
             write_report=write_report,
-            persist_snapshot=persist_snapshot,
+            persist_snapshot=bool(persist_snapshot and persist_runtime_validation_artifacts),
         )
         payload = dict(payload or {})
         payload["validation_scope"] = {
@@ -3449,19 +3560,49 @@ class StrategyEngine:
         primary_trial_run_id = str(primary_selected.get("trial_run_id") or "")
         primary_lineage_reason = str(primary_lineage.get("reason", ""))
         primary_reason = str(primary_payload.get("reason", ""))
+        primary_writer_source = str(primary_selected.get("writer_source") or primary_lineage.get("selected_trial_writer_source") or "")
+        primary_selection_rule = str(
+            primary_selected.get("selection_rule") or primary_lineage.get("selected_trial_selection_rule") or ""
+        )
+        fallback_writer_source = str(
+            fallback_selected.get("writer_source") or fallback_lineage.get("selected_trial_writer_source") or ""
+        )
+        fallback_selection_rule = str(
+            fallback_selected.get("selection_rule") or fallback_lineage.get("selected_trial_selection_rule") or ""
+        )
+        primary_from_runtime_proxy = (
+            bool(primary_lineage.get("selected_trial_from_runtime_proxy", False))
+            or primary_writer_source == "runtime_validation_proxy_v1"
+            or primary_selection_rule.startswith("runtime_validation_proxy")
+        )
+        fallback_from_true_threshold = (
+            bool(fallback_lineage.get("selected_trial_from_true_threshold", False))
+            or fallback_writer_source == "true_threshold_sweep_runner_v1"
+            or fallback_selection_rule.startswith("true_threshold_sweep")
+        )
         apply_fallback = (
-            not primary_trial_run_id
-            and bool(fallback_trial_run_id)
+            bool(fallback_trial_run_id)
             and (
-                primary_lineage_reason
-                in {
-                    "selected_trial_missing",
-                    "selected_trial_lineage_unresolved",
-                    "selection_rule_counts_missing",
-                    "",
-                }
-                or primary_reason in {"pbo_dsr_trial_runs_missing", ""}
-                or not bool(primary_payload.get("available", False))
+                (
+                    not primary_trial_run_id
+                    and (
+                        primary_lineage_reason
+                        in {
+                            "selected_trial_missing",
+                            "selected_trial_lineage_unresolved",
+                            "selection_rule_counts_missing",
+                            "",
+                        }
+                        or primary_reason in {"pbo_dsr_trial_runs_missing", ""}
+                        or not bool(primary_payload.get("available", False))
+                    )
+                )
+                or (
+                    bool(primary_trial_run_id)
+                    and primary_from_runtime_proxy
+                    and fallback_from_true_threshold
+                    and str(fallback_lineage.get("audit_status", "")) == "PASS"
+                )
             )
         )
 
@@ -3486,7 +3627,11 @@ class StrategyEngine:
         merged["selection_universe_summary"] = dict(fallback_payload.get("selection_universe_summary") or {})
         deployment_recommendation = dict(merged.get("deployment_recommendation") or {})
         deployment_recommendation["selected_trial_scope"] = "family_global_fallback"
-        deployment_recommendation["selected_trial_scope_reason"] = "symbol_scope_selected_trial_missing"
+        deployment_recommendation["selected_trial_scope_reason"] = (
+            "symbol_scope_runtime_proxy_replaced_by_global_true_threshold"
+            if primary_trial_run_id and primary_from_runtime_proxy and fallback_from_true_threshold
+            else "symbol_scope_selected_trial_missing"
+        )
         merged["deployment_recommendation"] = deployment_recommendation
         return merged
 
@@ -3687,6 +3832,7 @@ class StrategyEngine:
         pbo_dsr_metrics: dict | None = None,
         write_report: bool = False,
         run_prototype_worker: bool = False,
+        persist_runtime_validation_artifacts: bool = True,
     ) -> dict[str, dict]:
         recent_plans = plans if plans is not None else self.plan_repo.list_recent(symbol=symbol, days=180)
         runtime_pbo_dsr_metrics = pbo_dsr_metrics
@@ -3696,14 +3842,14 @@ class StrategyEngine:
                 version=version,
                 plans=recent_plans,
                 write_report=False,
-                persist=True,
+                persist=persist_runtime_validation_artifacts,
             )
             self.strategy_v2_pbo_dsr_threshold_runner.generate(
                 symbol=symbol,
                 version=version,
                 plans=recent_plans,
                 write_report=False,
-                persist=True,
+                persist=persist_runtime_validation_artifacts,
             )
             runtime_pbo_dsr_metrics = self.strategy_v2_pbo_dsr_metrics.generate(
                 symbol=symbol,
@@ -3715,6 +3861,7 @@ class StrategyEngine:
             version=version,
             write_report=False,
             persist_snapshot=False,
+            persist_runtime_validation_artifacts=persist_runtime_validation_artifacts,
         )
         runtime_pbo_dsr_metrics = self._merge_global_lineage_pbo_fallback(
             primary=runtime_pbo_dsr_metrics or {},
@@ -3924,7 +4071,12 @@ class StrategyEngine:
             "signal_alerts": signal_alerts,
         }
 
-    def recompute_learning(self, symbol: str) -> dict:
+    def recompute_learning(self, symbol: str, *, persist_runtime_validation_artifacts: bool = True) -> dict:
+        if not persist_runtime_validation_artifacts:
+            cached_payload = self._load_cached_validation_payload(symbol)
+            if cached_payload is not None:
+                return cached_payload
+
         outcomes = self.outcome_repo.list_recent(symbol=symbol, days=180)
         by_zone: dict[str, list[ZoneOutcome]] = defaultdict(list)
         for item in outcomes:
@@ -3954,7 +4106,8 @@ class StrategyEngine:
             "p3r": snap.p3r,
         }
         self.metrics_repo.upsert(symbol=symbol, version=self.settings.strategy_version, metric=metric)
-        self.events.publish(OUTCOME_UPDATED, {"symbol": symbol, "updated_zones": updated})
+        if updated > 0:
+            self.events.publish(OUTCOME_UPDATED, {"symbol": symbol, "updated_zones": updated})
         self.db.commit()
 
         wf = self.backtest.walk_forward(
@@ -3998,27 +4151,28 @@ class StrategyEngine:
             version=self.settings.strategy_version,
             plans=recent_plans,
             write_report=True,
-            persist=True,
+            persist=persist_runtime_validation_artifacts,
         )
         strategy_v2_pbo_dsr_threshold_runner = self.strategy_v2_pbo_dsr_threshold_runner.generate(
             symbol=symbol,
             version=self.settings.strategy_version,
             plans=recent_plans,
             write_report=True,
-            persist=True,
+            persist=persist_runtime_validation_artifacts,
         )
         strategy_v2_pbo_dsr_metrics = self.strategy_v2_pbo_dsr_metrics.generate(
             symbol=symbol,
             version=self.settings.strategy_version,
             write_report=True,
-            persist_snapshot=True,
+            persist_snapshot=persist_runtime_validation_artifacts,
         )
         strategy_v2_pbo_dsr_metrics = self._merge_global_lineage_pbo_fallback(
             primary=strategy_v2_pbo_dsr_metrics,
             fallback=self._global_lineage_pbo_dsr_metrics(
                 version=self.settings.strategy_version,
                 write_report=True,
-                persist_snapshot=True,
+                persist_snapshot=persist_runtime_validation_artifacts,
+                persist_runtime_validation_artifacts=persist_runtime_validation_artifacts,
             ),
         )
         strategy_v2_pbo_dsr_artifact_store = self.strategy_v2_pbo_dsr_artifact_store.generate(
@@ -4039,6 +4193,7 @@ class StrategyEngine:
             pbo_dsr_metrics=strategy_v2_pbo_dsr_metrics,
             write_report=True,
             run_prototype_worker=True,
+            persist_runtime_validation_artifacts=persist_runtime_validation_artifacts,
         )
         strategy_v2_stress_validation = stress_replay_stack["stress_validation"]
         strategy_v2_stress_replay_lineage = stress_replay_stack["stress_replay_lineage"]
@@ -4397,7 +4552,7 @@ class StrategyEngine:
             trigger="validation_report",
         )
         self.db.commit()
-        return {
+        payload = {
             "symbol": symbol,
             "updated_zones": updated,
             "metrics": metric,
@@ -4434,6 +4589,9 @@ class StrategyEngine:
             "review_followup_ledger_available": report.get("review_followup_ledger_available"),
             "review_followup_ledger_summary": report.get("review_followup_ledger_summary"),
         }
+        if not persist_runtime_validation_artifacts:
+            self._store_cached_validation_payload(symbol, payload)
+        return payload
 
     def feature_importance(
         self,
@@ -5359,7 +5517,11 @@ class StrategyEngine:
         write_report: bool = True,
     ) -> dict:
         ready = HealthCheckService().evaluate()
-        validation_payload = self.recompute_learning(symbol)
+        validation_payload = None
+        if not write_report:
+            validation_payload = self._load_cached_validation_payload(symbol)
+        if validation_payload is None:
+            validation_payload = self.recompute_learning(symbol, persist_runtime_validation_artifacts=False)
         alert_metrics = self.alert_metrics_report(days=days, write_report=False)
         outbox_status = self.outbox_status()
         strategy_metrics = self.metrics(symbol=symbol, version=self.settings.strategy_version)
@@ -5517,6 +5679,7 @@ class StrategyEngine:
                 version=active_version,
                 write_report=write_report,
                 persist_snapshot=True,
+                persist_runtime_validation_artifacts=True,
             ),
         )
         self.db.commit()
@@ -5573,6 +5736,7 @@ class StrategyEngine:
             version=active_version,
             write_report=False,
             run_prototype_worker=False,
+            persist_runtime_validation_artifacts=False,
         )
         return self.strategy_v2_stress_replay_assessment.generate(
             symbol=symbol,
@@ -5611,6 +5775,7 @@ class StrategyEngine:
             version=active_version,
             write_report=False,
             run_prototype_worker=False,
+            persist_runtime_validation_artifacts=False,
         )
         return self.strategy_v2_stress_replay_runner_contract.generate(
             symbol=symbol,
@@ -5634,6 +5799,7 @@ class StrategyEngine:
             version=active_version,
             write_report=False,
             run_prototype_worker=False,
+            persist_runtime_validation_artifacts=False,
         )
         return self.strategy_v2_stress_replay_lineage_writer.generate(
             symbol=symbol,
@@ -5677,6 +5843,7 @@ class StrategyEngine:
             version=active_version,
             write_report=False,
             run_prototype_worker=False,
+            persist_runtime_validation_artifacts=False,
         )
         return self.strategy_v2_stress_replay_prototype_worker.generate(
             symbol=symbol,

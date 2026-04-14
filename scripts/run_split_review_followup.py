@@ -303,10 +303,59 @@ def _candidate_focus_fallback(experiment_context: dict[str, Any]) -> dict[str, A
     )
 
 
+def _self_target_split_fallback(
+    *,
+    action: str,
+    priority: dict[str, Any],
+    edge_experiment: dict[str, Any],
+    edge_evolution: dict[str, Any],
+    requested_symbol: str,
+) -> dict[str, Any] | None:
+    spec = _REVIEW_ACTIONS.get(action)
+    if not spec:
+        return None
+    axis = str(spec.get("axis") or "").strip()
+    if axis not in {"entry_timing", "execution_style"}:
+        return None
+    symbol = str(requested_symbol or "").strip().upper()
+    if not symbol:
+        return None
+
+    context = _dict(priority.get("experiment_context"))
+    preferred_variant = str(context.get(spec["preferred_key"]) or "").strip()
+    if not preferred_variant or preferred_variant == "none":
+        if axis == "entry_timing":
+            preferred_variant = str(edge_experiment.get("entry_timing_preferred_variant") or "").strip()
+        else:
+            preferred_variant = str(edge_experiment.get("execution_style_preferred_variant") or "").strip()
+    if (
+        (not preferred_variant or preferred_variant == "none")
+        and str(edge_evolution.get("promotion_candidate_axis") or "").strip() == axis
+    ):
+        preferred_variant = str(edge_evolution.get("promotion_candidate_variant") or "").strip()
+    if not preferred_variant or preferred_variant == "none":
+        return None
+
+    focus = _candidate_focus_fallback(context)
+    return {
+        "action": action,
+        "axis": axis,
+        "preferred_variant": preferred_variant,
+        "symbol": symbol,
+        "status": "SYMBOL_SELF_TARGET",
+        "strategy_family": str(focus.get("strategy_family") or priority.get("action_family") or ""),
+        "block_reason": str(focus.get("block_reason") or ""),
+        "focus_source": "self_target_fallback",
+    }
+
+
 def _target_from_priority(
     priority: dict[str, Any],
     edge_evolution: dict[str, Any],
     action: str,
+    *,
+    symbol: str,
+    edge_experiment: dict[str, Any],
 ) -> dict[str, Any] | None:
     spec = _REVIEW_ACTIONS.get(action)
     if not spec:
@@ -348,6 +397,15 @@ def _target_from_priority(
                 "focus_source": str(matching_row.get("target_focus_source") or ""),
             }
     if not target:
+        fallback = _self_target_split_fallback(
+            action=action,
+            priority=priority,
+            edge_experiment=edge_experiment,
+            edge_evolution=edge_evolution,
+            requested_symbol=symbol,
+        )
+        if fallback:
+            return fallback
         return None
     return {
         "action": action,
@@ -591,12 +649,22 @@ def main() -> int:
         query={"symbol": args.symbol},
     )
     priority = _operator_action_priority(dashboard_payload=dashboard, validation_payload=validation)
+    edge_experiment = _edge_experiment_review(
+        dashboard_payload=dashboard,
+        validation_payload=validation,
+    )
     edge_evolution = _edge_evolution_rule(
         dashboard_payload=dashboard,
         validation_payload=validation,
     )
     selected_action, selection_reason = _select_action(priority, edge_evolution, args.action)
-    target_contract = _target_from_priority(priority, edge_evolution, selected_action)
+    target_contract = _target_from_priority(
+        priority,
+        edge_evolution,
+        selected_action,
+        symbol=args.symbol,
+        edge_experiment=edge_experiment,
+    )
     status = "READY"
     if not selected_action:
         status = "NO_REVIEW_ACTION_AVAILABLE"
@@ -618,10 +686,7 @@ def main() -> int:
             "priority_level": str(priority.get("priority_level") or "monitor"),
             "priority_source": str(priority.get("priority_source") or "monitor"),
         },
-        "edge_experiment_review": _edge_experiment_review(
-            dashboard_payload=dashboard,
-            validation_payload=validation,
-        ),
+        "edge_experiment_review": edge_experiment,
         "edge_evolution_rule": edge_evolution,
         "approval_strips": _approval_strip(
             dashboard_payload=dashboard,
@@ -631,10 +696,7 @@ def main() -> int:
         "review_steps": _review_steps(
             selected_action,
             target_contract,
-            edge_experiment=_edge_experiment_review(
-                dashboard_payload=dashboard,
-                validation_payload=validation,
-            ),
+            edge_experiment=edge_experiment,
             edge_evolution=edge_evolution,
         ),
     }

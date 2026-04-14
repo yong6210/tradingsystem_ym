@@ -99,6 +99,50 @@ def test_dispatcher_discord_delivery_success(monkeypatch) -> None:
         settings.alert_discord_webhook_url = old_url
 
 
+def test_dispatcher_discord_truncates_long_message(monkeypatch) -> None:
+    NotificationDispatcher.reset_circuit_state()
+    settings = get_settings()
+    old_url = settings.alert_discord_webhook_url
+
+    calls: list[dict] = []
+
+    class _Response:
+        status_code = 204
+
+    class _Client:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001
+            return False
+
+        def post(self, url, json=None, headers=None):  # noqa: ANN001
+            calls.append({"url": url, "json": json, "headers": headers})
+            return _Response()
+
+    try:
+        settings.alert_discord_webhook_url = "https://discord.example/webhook"
+        monkeypatch.setattr("app.services.notification_dispatcher.httpx.Client", _Client)
+
+        dispatcher = NotificationDispatcher(settings)
+        result = dispatcher.dispatch(
+            channel="discord",
+            alert_type="validation_warn",
+            symbol="BTCUSDC",
+            payload={"message": "x" * 2500},
+        )
+
+        assert result["delivered"] is True
+        assert len(calls) == 1
+        assert len(calls[0]["json"]["content"]) <= NotificationDispatcher._DISCORD_MAX_MESSAGE_CHARS
+        assert calls[0]["json"]["content"].endswith("...[truncated]")
+    finally:
+        settings.alert_discord_webhook_url = old_url
+
+
 def test_dispatcher_system_fanout_delivers_to_configured_routes(monkeypatch) -> None:
     NotificationDispatcher.reset_circuit_state()
     settings = get_settings()

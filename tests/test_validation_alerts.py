@@ -127,6 +127,30 @@ def test_recompute_learning_emits_validation_warn_alert(monkeypatch) -> None:
         )
 
 
+def test_recompute_learning_skips_outcome_updated_event_when_no_zone_updates(monkeypatch) -> None:
+    init_db()
+    settings = get_settings()
+    monkeypatch.setattr(settings, "alert_telegram_bot_token", "")
+    monkeypatch.setattr(settings, "alert_telegram_chat_id", "")
+    monkeypatch.setattr(settings, "alert_discord_webhook_url", "")
+    monkeypatch.setattr(settings, "alert_push_webhook_url", "")
+    symbol = f"VALN{int(datetime.now(timezone.utc).timestamp())}USDC"
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        published: list[tuple[str, dict]] = []
+
+        def _publish(event_type: str, payload: dict) -> None:
+            published.append((event_type, payload))
+
+        monkeypatch.setattr(engine.events, "publish", _publish)
+
+        payload = engine.recompute_learning(symbol=symbol)
+
+        assert payload["updated_zones"] == 0
+        assert all(event_type != "outcome.updated" for event_type, _ in published)
+
+
 def test_recompute_learning_validation_alert_respects_cooldown() -> None:
     init_db()
     settings = get_settings()

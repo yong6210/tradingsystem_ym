@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,6 +93,40 @@ def test_approval_strip_summary_maps_execution_approval() -> None:
     assert summary["approve_value"] == "approval usable"
     assert summary["align_value"] == "aligned"
     assert summary["act_value"] == "allow_auto_submit"
+
+
+def test_request_json_retries_retryable_http_error(monkeypatch) -> None:
+    attempts = {"count": 0}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return b'{"status":"ok"}'
+
+    def _fake_urlopen(request, timeout):  # noqa: ARG001
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise paper_drill.HTTPError(
+                request.full_url,
+                500,
+                "Internal Server Error",
+                hdrs=None,
+                fp=io.BytesIO(b"database is locked"),
+            )
+        return _Response()
+
+    monkeypatch.setattr(paper_drill, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(paper_drill.time, "sleep", lambda *_args, **_kwargs: None)
+
+    payload = paper_drill._request_json("http://127.0.0.1:8000", "GET", "/health/live")
+
+    assert payload == {"status": "ok"}
+    assert attempts["count"] == 3
 
 
 def test_main_emits_approval_strip_summary(monkeypatch, capsys) -> None:

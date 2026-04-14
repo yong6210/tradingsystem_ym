@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,13 @@ from urllib.request import Request, urlopen
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+from scripts import run_runtime_signoff_review
+
 DEFAULT_STAGE_FILE = ROOT_DIR / "reports/operations/stage_monitor/current_stage.json"
+_REQUEST_RETRY_ATTEMPTS = 5
+_REQUEST_RETRY_BASE_DELAY_SECONDS = 1.0
+_RUNTIME_MONITOR_REUSE_SECONDS = 900
+_REQUEST_TIMEOUT_SECONDS = 90
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,12 +36,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lineage-sample-scope",
         choices=["symbol_edge_proof", "family_global"],
-        default="symbol_edge_proof",
+        default="family_global",
         help="Sample scope for readiness/stall tracking.",
     )
     parser.add_argument(
         "--lineage-families",
-        default="sweep_reversal",
+        default="sweep_reversal,trend_continuation",
         help="Comma-separated lineage families to count when using family_global scope.",
     )
     parser.add_argument(
@@ -75,19 +82,70 @@ def _request_json(
     if query:
         url += f"?{urlencode(query, doseq=True)}"
     request = Request(url=url, headers={"Accept": "application/json"}, method=method.upper())
-    try:
-        with urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        payload = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{method.upper()} {path} failed with HTTP {exc.code}: {payload}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"{method.upper()} {path} failed: {exc.reason}") from exc
+    last_error: RuntimeError | None = None
+    retry_with_refresh = (
+        path == "/validation/report"
+        and str((query or {}).get("refresh", "")).lower() in {"false", "0"}
+    )
+    for attempt in range(1, _REQUEST_RETRY_ATTEMPTS + 1):
+        try:
+            with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            payload = exc.read().decode("utf-8", errors="replace")
+            if retry_with_refresh and exc.code == 404 and "cached validation payload is not available yet" in payload.lower():
+                refreshed_query = dict(query or {})
+                refreshed_query["refresh"] = True
+                return _request_json(base_url, method, path, query=refreshed_query)
+            retryable = exc.code >= 500 or "database is locked" in payload.lower()
+            last_error = RuntimeError(f"{method.upper()} {path} failed with HTTP {exc.code}: {payload}")
+            if retryable and attempt < _REQUEST_RETRY_ATTEMPTS:
+                time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
+                continue
+            raise last_error from exc
+        except URLError as exc:
+            last_error = RuntimeError(f"{method.upper()} {path} failed: {exc.reason}")
+            if attempt < _REQUEST_RETRY_ATTEMPTS:
+                time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
+                continue
+            raise last_error from exc
+        except TimeoutError as exc:
+            last_error = RuntimeError(f"{method.upper()} {path} timed out after {_REQUEST_TIMEOUT_SECONDS}s")
+            if attempt < _REQUEST_RETRY_ATTEMPTS:
+                time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
+                continue
+            raise last_error from exc
+    assert last_error is not None
+    raise last_error
 
 
 def _write_stage_file(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        normalized = text.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _read_stage_file(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return dict(payload) if isinstance(payload, dict) else None
 
 
 def _active_close_only(dashboard: dict[str, Any]) -> bool:
@@ -745,6 +803,65 @@ def _experiment_review_target(
     }
 
 
+def _resolved_selected_trial(validation_report: dict[str, Any] | None) -> dict[str, Any]:
+    report = dict(validation_report or {})
+    deployment = dict(report.get("deployment_approval_summary") or {})
+    trial_writer_summary = dict(report.get("strategy_v2_pbo_dsr_trial_writer_summary") or {})
+    threshold_runner_summary = dict(report.get("strategy_v2_pbo_dsr_threshold_runner_summary") or {})
+
+    writer_selected_trial_run_id = trial_writer_summary.get("selected_trial_run_id")
+    if writer_selected_trial_run_id:
+        return {
+            "selected_trial_run_id": writer_selected_trial_run_id,
+            "resolution_source": "trial_writer_summary",
+            "raw_trial_writer_selected_trial_run_id": writer_selected_trial_run_id,
+            "threshold_lineage_winner_run_id": deployment.get("threshold_lineage_winner_run_id"),
+            "threshold_lineage_winner_source": deployment.get("threshold_lineage_winner_source"),
+            "threshold_lineage_winner_type": deployment.get("threshold_lineage_winner_type"),
+            "threshold_lineage_audit_status": deployment.get("threshold_lineage_audit_status"),
+        }
+
+    threshold_runner_selected_trial_run_id = threshold_runner_summary.get("selected_trial_run_id")
+    if threshold_runner_selected_trial_run_id:
+        return {
+            "selected_trial_run_id": threshold_runner_selected_trial_run_id,
+            "resolution_source": "threshold_runner_summary",
+            "raw_trial_writer_selected_trial_run_id": writer_selected_trial_run_id,
+            "threshold_lineage_winner_run_id": deployment.get("threshold_lineage_winner_run_id"),
+            "threshold_lineage_winner_source": deployment.get("threshold_lineage_winner_source"),
+            "threshold_lineage_winner_type": deployment.get("threshold_lineage_winner_type"),
+            "threshold_lineage_audit_status": deployment.get("threshold_lineage_audit_status"),
+        }
+
+    threshold_lineage_winner_run_id = deployment.get("threshold_lineage_winner_run_id")
+    threshold_lineage_winner_type = str(deployment.get("threshold_lineage_winner_type") or "").strip().lower()
+    threshold_lineage_audit_status = str(deployment.get("threshold_lineage_audit_status") or "").strip().upper()
+    if (
+        threshold_lineage_winner_run_id
+        and threshold_lineage_winner_type in {"true_threshold", "runtime_proxy"}
+        and threshold_lineage_audit_status == "PASS"
+    ):
+        return {
+            "selected_trial_run_id": threshold_lineage_winner_run_id,
+            "resolution_source": "deployment_threshold_lineage_winner",
+            "raw_trial_writer_selected_trial_run_id": writer_selected_trial_run_id,
+            "threshold_lineage_winner_run_id": threshold_lineage_winner_run_id,
+            "threshold_lineage_winner_source": deployment.get("threshold_lineage_winner_source"),
+            "threshold_lineage_winner_type": deployment.get("threshold_lineage_winner_type"),
+            "threshold_lineage_audit_status": deployment.get("threshold_lineage_audit_status"),
+        }
+
+    return {
+        "selected_trial_run_id": None,
+        "resolution_source": "unresolved",
+        "raw_trial_writer_selected_trial_run_id": writer_selected_trial_run_id,
+        "threshold_lineage_winner_run_id": deployment.get("threshold_lineage_winner_run_id"),
+        "threshold_lineage_winner_source": deployment.get("threshold_lineage_winner_source"),
+        "threshold_lineage_winner_type": deployment.get("threshold_lineage_winner_type"),
+        "threshold_lineage_audit_status": deployment.get("threshold_lineage_audit_status"),
+    }
+
+
 def _lineage_gate_ready(selected_trial_run_id: Any, trial_runs_written: Any) -> bool:
     return bool(selected_trial_run_id) or int(trial_runs_written or 0) > 0
 
@@ -871,6 +988,611 @@ def _active_lineage_sample_health_line(item: dict[str, Any] | None) -> str:
     )
 
 
+def _risk_gate_summary(checklist: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(checklist or {})
+    checks = list(payload.get("checks") or [])
+    for item in checks:
+        row = dict(item or {})
+        if str(row.get("item_id") or "") != "risk_gate_open":
+            continue
+        evidence = dict(row.get("evidence") or {})
+        operating_lock = dict(evidence.get("operating_lock") or {})
+        daily_stats = dict(operating_lock.get("daily_stats") or {})
+        last_trade = dict(daily_stats.get("last_trade") or {})
+        return {
+            "status": str(row.get("status") or "NOT_AVAILABLE"),
+            "blocking": bool(row.get("blocking", False)),
+            "summary": str(row.get("summary") or ""),
+            "risk_state": str(evidence.get("risk_state") or "UNKNOWN"),
+            "risk_reason": str(evidence.get("risk_reason") or "unknown"),
+            "unlock_at": operating_lock.get("unlock_at"),
+            "scope": str(operating_lock.get("scope") or ""),
+            "strategy_mode": str(operating_lock.get("strategy_mode") or ""),
+            "daily_realized_r": float(daily_stats.get("realized_r", 0.0) or 0.0),
+            "daily_trades": int(daily_stats.get("trades", 0) or 0),
+            "daily_loss_streak": int(daily_stats.get("loss_streak", 0) or 0),
+            "daily_loss_limit_r": float(daily_stats.get("loss_limit_r", 0.0) or 0.0),
+            "last_trade_symbol": str(last_trade.get("symbol") or ""),
+            "last_trade_closed_ts": last_trade.get("closed_ts"),
+            "last_trade_realized_r": float(last_trade.get("realized_r", 0.0) or 0.0),
+            "last_trade_exit_reason": str(last_trade.get("exit_reason") or ""),
+        }
+    return {
+        "status": "NOT_AVAILABLE",
+        "blocking": False,
+        "summary": "risk gate evidence unavailable",
+    }
+
+
+def _risk_gate_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    return (
+        f"risk_gate: status={summary.get('status') or 'NOT_AVAILABLE'} | "
+        f"state={summary.get('risk_state') or 'UNKNOWN'} | "
+        f"reason={summary.get('risk_reason') or 'unknown'} | "
+        f"unlock_at={summary.get('unlock_at') or 'n/a'} | "
+        f"daily_r={float(summary.get('daily_realized_r', 0.0) or 0.0):.4f}/"
+        f"{float(summary.get('daily_loss_limit_r', 0.0) or 0.0):.4f} | "
+        f"loss_streak={int(summary.get('daily_loss_streak', 0) or 0)}"
+    )
+
+
+def _risk_gate_unlock_summary(item: dict[str, Any] | None) -> dict[str, Any]:
+    summary = dict(item or {})
+    unlock_at = summary.get("unlock_at")
+    risk_state = str(summary.get("risk_state") or "").upper()
+    status = str(summary.get("status") or "").upper()
+    if unlock_at and risk_state == "CLOSED" and status == "FAIL":
+        return {
+            "active": True,
+            "status": "scheduled_unlock",
+            "unlock_at": unlock_at,
+            "summary": f"operating lock is expected to auto-clear at {unlock_at}",
+        }
+    return {
+        "active": False,
+        "status": "not_locked",
+        "unlock_at": unlock_at,
+        "summary": "no scheduled operating-lock unlock is pending",
+    }
+
+
+def _risk_gate_unlock_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    line = (
+        f"risk_gate_unlock: active={bool(summary.get('active', False))} | "
+        f"status={summary.get('status') or 'not_available'} | "
+        f"unlock_at={summary.get('unlock_at') or 'n/a'}"
+    )
+    if summary.get("expected_stage_after_unlock"):
+        line = f"{line} | expected_stage={summary.get('expected_stage_after_unlock')}"
+    if summary.get("expected_checklist_status_after_unlock"):
+        line = f"{line} | expected_checklist={summary.get('expected_checklist_status_after_unlock')}"
+    return line
+
+
+def _post_unlock_review_summary(
+    *,
+    risk_gate_summary: dict[str, Any] | None,
+    risk_gate_unlock_summary: dict[str, Any] | None,
+    validation_report: dict[str, Any] | None,
+    checklist: dict[str, Any] | None,
+    stage: str,
+    lineage_gate_ready: bool,
+    edge_sample_gate_ready: bool,
+    symbol: str,
+    universe: str,
+    days: int,
+) -> dict[str, Any]:
+    risk_summary = dict(risk_gate_summary or {})
+    unlock_summary = dict(risk_gate_unlock_summary or {})
+    deployment = dict((validation_report or {}).get("deployment_approval_summary") or {})
+    validation_surface = _surface_strip_summary(validation_report, surface_type="validation")
+    checklist_status = str((checklist or {}).get("overall_status") or "UNKNOWN").upper()
+    risk_status = str(risk_summary.get("status") or "NOT_AVAILABLE").upper()
+    risk_state = str(risk_summary.get("risk_state") or "UNKNOWN").upper()
+    stage_value = str(stage or "CHECK_MANUALLY")
+    post_unlock_stage = str(unlock_summary.get("expected_stage_after_unlock") or "")
+    post_unlock_checklist = str(unlock_summary.get("expected_checklist_status_after_unlock") or "")
+    review_window_open = (
+        risk_status == "PASS"
+        and risk_state == "OPEN"
+        and lineage_gate_ready
+        and edge_sample_gate_ready
+    )
+    active = bool(unlock_summary.get("active", False)) or review_window_open
+    if review_window_open:
+        next_review_step = "review_validation_and_checklist_before_runtime_reopen"
+    elif risk_state != "OPEN" or risk_status != "PASS":
+        next_review_step = "wait_for_operating_lock_to_clear"
+    else:
+        next_review_step = "wait_for_lineage_sample_and_runtime_gate_alignment"
+    bundle_review_command = (
+        f"./.venv/bin/python scripts/run_post_unlock_review.py "
+        f"--symbol {symbol} --universe {universe} --days {days}"
+    )
+    primary_review_command = (
+        f"./.venv/bin/python scripts/run_micro_live_preflight.py "
+        f"--symbol {symbol} --universe {universe} --days {days}"
+    )
+    secondary_review_command = (
+        f"./.venv/bin/python scripts/run_post_live_pruning_review.py "
+        f"--symbol {symbol} --universe {universe} --days {days}"
+    )
+    signoff_review_command = (
+        f"./.venv/bin/python scripts/run_runtime_signoff_review.py "
+        f"--symbol {symbol} --universe {universe} --days {days}"
+    )
+    summary = (
+        f"post_unlock_review: active={active} | review_window_open={review_window_open} | "
+        f"current_stage={stage_value} | checklist={checklist_status} | "
+        f"validation={deployment.get('playbook_go_no_go') or validation_surface.get('approve_value') or 'n/a'}"
+    )
+    if post_unlock_stage:
+        summary = f"{summary} | expected_stage={post_unlock_stage}"
+    if post_unlock_checklist:
+        summary = f"{summary} | expected_checklist={post_unlock_checklist}"
+    return {
+        "active": active,
+        "review_window_open": review_window_open,
+        "risk_gate_status": risk_status,
+        "risk_gate_state": risk_state,
+        "current_stage": stage_value,
+        "current_checklist_status": checklist_status,
+        "current_validation_playbook_go_no_go": str(deployment.get("playbook_go_no_go") or ""),
+        "current_validation_approve_value": str(validation_surface.get("approve_value") or ""),
+        "expected_stage_after_unlock": post_unlock_stage or None,
+        "expected_checklist_status_after_unlock": post_unlock_checklist or None,
+        "next_review_step": next_review_step,
+        "bundle_review_command": bundle_review_command,
+        "primary_review_command": primary_review_command,
+        "secondary_review_command": secondary_review_command,
+        "signoff_review_command": signoff_review_command,
+        "summary": summary,
+    }
+
+
+def _post_unlock_review_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    return (
+        f"post_unlock_review: active={bool(summary.get('active', False))} | "
+        f"review_window_open={bool(summary.get('review_window_open', False))} | "
+        f"current_stage={summary.get('current_stage') or 'unknown'} | "
+        f"checklist={summary.get('current_checklist_status') or 'UNKNOWN'} | "
+        f"validation={summary.get('current_validation_playbook_go_no_go') or summary.get('current_validation_approve_value') or 'n/a'} | "
+        f"next={summary.get('next_review_step') or 'wait_for_operating_lock_to_clear'}"
+    )
+
+
+def _post_unlock_review_commands_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    return (
+        f"post_unlock_review_commands: bundle={summary.get('bundle_review_command') or 'n/a'} | "
+        f"primary={summary.get('primary_review_command') or 'n/a'} | "
+        f"secondary={summary.get('secondary_review_command') or 'n/a'} | "
+        f"signoff={summary.get('signoff_review_command') or 'n/a'}"
+    )
+
+
+def _default_post_unlock_bundle_result(review_summary: dict[str, Any] | None) -> dict[str, Any]:
+    summary = dict(review_summary or {})
+    review_window_open = bool(summary.get("review_window_open", False))
+    status = "review_window_open_pending_bundle" if review_window_open else "waiting_for_review_window"
+    summary_text = (
+        "post-unlock bundle review is waiting for execution after the review window opens"
+        if review_window_open
+        else "post-unlock bundle review is waiting for the review window to open"
+    )
+    return {
+        "active": bool(summary.get("active", False)),
+        "executed": False,
+        "status": status,
+        "summary": summary_text,
+        "bundle_review_command": str(summary.get("bundle_review_command") or ""),
+    }
+
+
+def _post_unlock_bundle_result_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    return (
+        f"post_unlock_bundle: active={bool(summary.get('active', False))} | "
+        f"executed={bool(summary.get('executed', False))} | "
+        f"status={summary.get('status') or 'not_available'}"
+    )
+
+
+def _runtime_reopen_status(
+    *,
+    risk_gate_summary: dict[str, Any] | None,
+    review_summary: dict[str, Any] | None,
+    bundle_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    risk_summary = dict(risk_gate_summary or {})
+    review = dict(review_summary or {})
+    bundle = dict(bundle_result or {})
+    risk_closed = str(risk_summary.get("risk_state") or "").upper() == "CLOSED"
+    review_window_open = bool(review.get("review_window_open", False))
+    bundle_status = str(bundle.get("status") or "").upper()
+
+    if risk_closed:
+        status = "waiting_for_operating_lock"
+        ready = False
+    elif not review_window_open:
+        status = "waiting_for_review_window"
+        ready = False
+    elif bundle_status == "READY_TO_REOPEN_RUNTIME":
+        status = "ready_to_reopen_runtime"
+        ready = True
+    elif bundle_status and bundle_status != "WAITING_FOR_REVIEW_WINDOW":
+        status = "manual_review_required"
+        ready = False
+    else:
+        status = "review_window_open_pending_bundle"
+        ready = False
+    return {
+        "status": status,
+        "ready": ready,
+        "summary": f"runtime_reopen_status={status}",
+    }
+
+
+def _runtime_reopen_status_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    return (
+        f"runtime_reopen_status: status={summary.get('status') or 'not_available'} | "
+        f"ready={bool(summary.get('ready', False))}"
+    )
+
+
+def _runtime_signoff_summary(
+    *,
+    validation_report: dict[str, Any] | None,
+    checklist: dict[str, Any] | None,
+    runtime_reopen_status: dict[str, Any] | None,
+) -> dict[str, Any]:
+    runtime = dict(runtime_reopen_status or {})
+    validation = dict(validation_report or {})
+    checklist_payload = dict(checklist or {})
+
+    deployment = dict(validation.get("deployment_approval_summary") or {})
+    friction = dict(validation.get("execution_friction_measurement_summary") or {})
+    kill_condition = dict(validation.get("kill_condition_automation_summary") or {})
+    edge_review = dict(validation.get("edge_experiment_review_summary") or {})
+    edge_kpis = dict(edge_review.get("daily_edge_kpis") or {})
+    checklist_checks = list(checklist_payload.get("checks") or [])
+    approval_template_focus = dict(validation.get("approval_template_focus") or {})
+
+    required_reviews: list[dict[str, str]] = []
+    advisory_reviews: list[dict[str, str]] = []
+
+    def _append_unique(
+        target: list[dict[str, str]],
+        code: str,
+        summary: str,
+        *,
+        current_value: str = "",
+        clear_when: str = "",
+    ) -> None:
+        if any(item.get("code") == code for item in target):
+            return
+        target.append(
+            {
+                "code": code,
+                "summary": summary,
+                "current_value": current_value,
+                "clear_when": clear_when,
+            }
+        )
+
+    if str(deployment.get("playbook_go_no_go") or "") == "MANUAL_REVIEW":
+        worst_scenario = str(deployment.get("replay_derived_worst_scenario") or "not_available")
+        worst_scenario_status = str(deployment.get("replay_derived_worst_scenario_status") or "NOT_AVAILABLE")
+        worst_scenario_reason = str(deployment.get("replay_derived_worst_scenario_reason") or "not_available")
+        _append_unique(
+            required_reviews,
+            "approval_template_review",
+            (
+                "approval template warning remains because the replay-derived "
+                f"worst scenario {worst_scenario} is still {worst_scenario_status}"
+            ),
+            current_value=(
+                f"topline_code={deployment.get('topline_code') or deployment.get('template_reason') or 'unknown'}"
+                f", playbook_go_no_go={deployment.get('playbook_go_no_go') or 'unknown'}"
+                f", worst={worst_scenario}/{worst_scenario_status}"
+                f", reason={worst_scenario_reason}"
+            ),
+            clear_when="validation topline REVIEW clears and playbook_go_no_go is no longer MANUAL_REVIEW",
+        )
+        required_reviews[-1]["worst_scenario"] = worst_scenario
+        required_reviews[-1]["worst_scenario_status"] = worst_scenario_status
+        required_reviews[-1]["worst_scenario_reason"] = worst_scenario_reason
+
+    reconciliation_state = str(friction.get("reconciliation_state") or "")
+    if reconciliation_state.startswith("degraded"):
+        _append_unique(
+            required_reviews,
+            "execution_reconciliation_review",
+            "execution reconciliation remains degraded and should be reviewed before reopening",
+            current_value=f"reconciliation_state={reconciliation_state or 'unknown'}",
+            clear_when="execution reconciliation state is no longer degraded",
+        )
+
+    kill_condition_state = str(kill_condition.get("kill_condition_state") or "")
+    if kill_condition_state == "kill_switch_review":
+        _append_unique(
+            required_reviews,
+            "kill_switch_review",
+            "kill-switch review is still advisory-active and should be acknowledged before reopening",
+            current_value=f"kill_condition_state={kill_condition_state or 'unknown'}",
+            clear_when="kill_condition_state is no longer kill_switch_review",
+        )
+
+    portfolio_warn = next(
+        (
+            check
+            for check in checklist_checks
+            if str(check.get("item_id") or "") == "portfolio_headroom" and str(check.get("status") or "") == "WARN"
+        ),
+        None,
+    )
+    if portfolio_warn is not None:
+        _append_unique(
+            advisory_reviews,
+            "portfolio_headroom_review",
+            str(portfolio_warn.get("summary") or "portfolio headroom remains constrained"),
+            current_value=str(portfolio_warn.get("summary") or "portfolio headroom remains constrained"),
+            clear_when="portfolio headroom warning clears or the next candidate fits within current caps",
+        )
+
+    closed_trade_count = int(edge_review.get("closed_trade_count") or edge_kpis.get("closed_trade_count") or 0)
+    goal_closed_trades = int(edge_review.get("edge_proof_goal_closed_trades") or 0)
+    if goal_closed_trades > 0 and closed_trade_count < goal_closed_trades:
+        _append_unique(
+            advisory_reviews,
+            "symbol_edge_thin",
+            f"BTCUSDC symbol proof is still thin at {closed_trade_count}/{goal_closed_trades}",
+            current_value=f"btc_symbol_sample={closed_trade_count}/{goal_closed_trades}",
+            clear_when="BTCUSDC symbol proof reaches its target or is explicitly treated as advisory-only",
+        )
+
+    runtime_ready = run_runtime_signoff_review._runtime_signoff_eligible_status(runtime.get("status"))
+    if not runtime_ready:
+        status = "not_ready"
+    elif required_reviews:
+        status = "manual_signoff_required"
+    else:
+        status = "ready_for_operator_signoff"
+
+    operator_recommendation, operator_recommendation_reason = run_runtime_signoff_review._fallback_operator_recommendation(
+        runtime_ready=runtime_ready,
+        required_reviews=required_reviews,
+    )
+    runtime_decision: dict[str, Any] = {}
+    runtime_reopen_gate_summary: dict[str, Any] = {}
+    if approval_template_focus:
+        runtime_decision = run_runtime_signoff_review._build_runtime_decision(
+            runtime_ready=runtime_ready,
+            required_reviews=required_reviews,
+            approval_template_focus=approval_template_focus,
+        )
+        if runtime_decision.get("effective_action"):
+            operator_recommendation = str(runtime_decision.get("effective_action") or operator_recommendation)
+            if operator_recommendation == "conditional_micro_live_signoff":
+                operator_recommendation_reason = (
+                    "legacy replay remains red, but the post-patch mitigation cohort cleared the red thresholds; "
+                    "limit any reopen to MICRO_LIVE while operator sign-off remains manual"
+                )
+            elif operator_recommendation == "conditional_full_live_signoff":
+                operator_recommendation_reason = (
+                    "legacy replay remains red, but the post-patch mitigation cohort cleared the conditional FULL LIVE "
+                    "thresholds; any reopen still requires explicit operator sign-off"
+                )
+            elif operator_recommendation == "hold_runtime_reopen":
+                operator_recommendation_reason = "replay downside exceeds operating tolerance; keep runtime closed"
+            elif operator_recommendation == "manual_signoff_required":
+                operator_recommendation_reason = "runtime is reopen-ready but required operator review items remain"
+            elif operator_recommendation == "proceed_to_operator_signoff":
+                operator_recommendation_reason = "runtime is reopen-ready and no required operator review items remain"
+        runtime_reopen_gate_summary = run_runtime_signoff_review._build_runtime_reopen_gate_summary(
+            approval_template_focus,
+            runtime_decision,
+        )
+
+    review_labels = ", ".join(item["code"] for item in required_reviews) or "none"
+    summary = (
+        f"runtime sign-off status={status} | required={review_labels}"
+        if runtime_ready
+        else f"runtime sign-off is pending until reopen status becomes ready | required={review_labels}"
+    )
+    return {
+        "status": status,
+        "required_reviews": required_reviews,
+        "advisory_reviews": advisory_reviews,
+        "required_count": len(required_reviews),
+        "advisory_count": len(advisory_reviews),
+        "required_clearance_line": " | ".join(
+            f"{item['code']}=>{item.get('clear_when') or 'clear when warning is removed'}"
+            for item in required_reviews
+        ),
+        "operator_recommendation": operator_recommendation,
+        "operator_recommendation_reason": operator_recommendation_reason,
+        "summary": summary,
+        "approval_template_focus": approval_template_focus,
+        "runtime_decision": runtime_decision,
+        "runtime_reopen_gate_summary": runtime_reopen_gate_summary,
+    }
+
+
+def _runtime_signoff_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    required = list(summary.get("required_reviews") or [])
+    decision = dict(summary.get("runtime_decision") or {})
+    labels = ",".join(str(item.get("code") or "") for item in required) or "none"
+    clearance_line = str(summary.get("required_clearance_line") or "")
+    focus = ""
+    for review in required:
+        if str(review.get("code") or "") == "approval_template_review":
+            worst = str(review.get("worst_scenario") or "").strip()
+            status = str(review.get("worst_scenario_status") or "").strip()
+            if worst and status:
+                focus = f"{worst}/{status}"
+            break
+    return (
+        f"runtime_signoff: status={summary.get('status') or 'not_available'} | "
+        f"required={labels} | advisory_count={int(summary.get('advisory_count') or 0)}"
+        + (f" | band={decision.get('band')}" if decision.get("band") else "")
+        + (f" | focus={focus}" if focus else "")
+        + (f" | recommend={summary.get('operator_recommendation')}" if summary.get("operator_recommendation") else "")
+        + (f" | clear_when={clearance_line}" if clearance_line else "")
+    )
+
+
+def _runtime_reopen_gate_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    micro = dict(summary.get("micro_live") or {})
+    full = dict(summary.get("full_live") or {})
+    return (
+        "runtime_reopen_gate: "
+        f"micro={micro.get('status') or 'not_available'}"
+        f"({int(micro.get('closed_trade_count') or 0)}/{int(micro.get('min_closed_trades') or 0)})"
+        f" | full={full.get('status') or 'not_available'}"
+        f"({int(full.get('closed_trade_count') or 0)}/{int(full.get('min_closed_trades') or 0)})"
+        + (f" | scope={summary.get('active_scope')}" if summary.get("active_scope") else "")
+        + (f" | action={summary.get('effective_action')}" if summary.get("effective_action") else "")
+    )
+
+
+def _runtime_preflight_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    failed_checks = list(summary.get("failed_checks") or [])
+    first_failed = dict(failed_checks[0]) if failed_checks else {}
+    return (
+        f"runtime_preflight: status={summary.get('status') or 'not_available'}"
+        + (f" | action={summary.get('effective_action')}" if summary.get("effective_action") else "")
+        + (f" | summary={summary.get('summary')}" if summary.get("summary") else "")
+        + (
+            f" | first_failed={first_failed.get('name')}/{first_failed.get('message')}"
+            if first_failed
+            else ""
+        )
+    )
+
+
+def _runtime_operator_signoff_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    review_codes = ",".join(str(code) for code in list(summary.get("required_review_codes") or []) if str(code).strip()) or "none"
+    return (
+        f"runtime_operator_signoff: status={summary.get('status') or 'not_available'}"
+        + (f" | action={summary.get('effective_action')}" if summary.get("effective_action") else "")
+        + (f" | scope={summary.get('allowed_scope')}" if summary.get("allowed_scope") else "")
+        + (f" | preflight={summary.get('preflight_status')}" if summary.get("preflight_status") else "")
+        + (f" | required={review_codes}" if review_codes else "")
+        + (f" | next={summary.get('next_step')}" if summary.get("next_step") else "")
+    )
+
+
+def _runtime_mitigation_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    return (
+        f"runtime_mitigation: primary={summary.get('primary_focus_label') or summary.get('primary_action_code') or 'none'}"
+        f"/{summary.get('primary_action_status') or 'none'}"
+        + (
+            f" | next={summary.get('secondary_focus_label') or 'none'}/{summary.get('secondary_status') or 'none'}"
+            if summary
+            else ""
+        )
+        + (
+            f" | cmd={summary.get('primary_action_command')}"
+            if summary.get("primary_action_command")
+            else ""
+        )
+    )
+
+
+def _runtime_mitigation_wait_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    allowed_sessions = ",".join(str(item) for item in list(summary.get("allowed_sessions") or []) if str(item).strip())
+    return (
+        f"runtime_mitigation_wait: focus={summary.get('focus_label') or 'none'}"
+        f" | status={summary.get('status') or 'not_available'}"
+        f" | session={summary.get('current_session') or 'unknown'}"
+        f" | allowed={allowed_sessions or 'none'}"
+        + (
+            f" | next={summary.get('next_trigger')}"
+            if summary.get("next_trigger")
+            else ""
+        )
+        + (
+            f" | constraint={summary.get('wait_constraint')}"
+            if summary.get("wait_constraint")
+            else ""
+        )
+        + (
+            f" | candidate={summary.get('candidate_symbol')}/{summary.get('candidate_family')}/{summary.get('candidate_status')}"
+            if summary.get("candidate_symbol")
+            else ""
+        )
+        + (
+            f" | watcher={summary.get('watch_tick_status')}"
+            if summary.get("watch_tick_status")
+            else ""
+        )
+    )
+
+
+def _post_patch_sample_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    if not summary:
+        return "post_patch_sample: unavailable"
+    top_symbols = "/".join(str(entry.get("symbol") or "UNKNOWN") for entry in list(summary.get("top_symbols") or [])[:3])
+    return (
+        f"post_patch_sample: {int(summary.get('closed_trade_count', 0) or 0)}/"
+        f"{int(summary.get('target_closed_trades', 0) or 0)}"
+        f" | remaining={int(summary.get('remaining_to_target', 0) or 0)}"
+        f" | stop_loss={float(summary.get('stop_loss_share', 0.0) or 0.0):.0%}"
+        f" | confirm_loss={float(summary.get('confirm_named_loss_share', 0.0) or 0.0):.0%}"
+        + (f" | top={top_symbols}" if top_symbols else "")
+    )
+
+
+def _enrich_risk_gate_unlock_summary(
+    unlock_summary: dict[str, Any] | None,
+    *,
+    checklist: dict[str, Any] | None,
+    selected_trial_run_id: Any,
+    trial_runs_written: Any,
+    candidate_gate_ready: bool,
+    edge_sample_gate_ready: bool,
+) -> dict[str, Any]:
+    summary = dict(unlock_summary or {})
+    if not bool(summary.get("active", False)):
+        return summary
+
+    checklist_payload = dict(checklist or {})
+    blocking_failures = int(checklist_payload.get("blocking_failures", 0) or 0)
+    warnings = int(checklist_payload.get("warnings", 0) or 0)
+    manual_actions = int(checklist_payload.get("manual_actions", 0) or 0)
+    if blocking_failures == 1:
+        if manual_actions > 0:
+            expected_checklist_status = "FAIL"
+        elif warnings > 0:
+            expected_checklist_status = "WARN"
+        else:
+            expected_checklist_status = "PASS"
+        summary["expected_checklist_status_after_unlock"] = expected_checklist_status
+
+        if bool(selected_trial_run_id) or int(trial_runs_written or 0) > 0:
+            summary["expected_stage_after_unlock"] = "2_LINEAGE_READY"
+        elif candidate_gate_ready or edge_sample_gate_ready:
+            summary["expected_stage_after_unlock"] = "1_SAMPLE_COLLECTION"
+
+    summary["summary"] = (
+        f"operating lock is expected to auto-clear at {summary.get('unlock_at')}; "
+        f"expected_stage_after_unlock={summary.get('expected_stage_after_unlock', 'unknown')}"
+    )
+    return summary
+
+
 def _stage_from_payload(
     validation_report: dict[str, Any],
     checklist: dict[str, Any],
@@ -878,11 +1600,8 @@ def _stage_from_payload(
 ) -> str:
     deployment = validation_report.get("deployment_approval_summary") or {}
     playbook_go_no_go = str(deployment.get("playbook_go_no_go") or "").upper()
-    selected_trial_run_id = (
-        (
-            validation_report.get("strategy_v2_pbo_dsr_trial_writer_summary") or {}
-        ).get("selected_trial_run_id")
-    )
+    resolved_selected_trial = _resolved_selected_trial(validation_report)
+    selected_trial_run_id = resolved_selected_trial.get("selected_trial_run_id")
     sample_counts = (
         (validation_report.get("strategy_v2_pbo_dsr_trial_writer_summary") or {}).get("sample_counts") or {}
     )
@@ -897,10 +1616,10 @@ def _stage_from_payload(
         or str(checklist.get("overall_status") or "").upper() == "FAIL"
     ):
         return "0_BLOCKED"
-    if trial_runs_written == 0 and eligible_closed_trades > 0:
-        return "1_SAMPLE_COLLECTION"
     if selected_trial_run_id is not None or trial_runs_written > 0:
         return "2_LINEAGE_READY"
+    if trial_runs_written == 0 and eligible_closed_trades > 0:
+        return "1_SAMPLE_COLLECTION"
     if playbook_go_no_go in {"MANUAL_REVIEW", "GO"}:
         return "3_APPROVAL_REVIEW"
     return "CHECK_MANUALLY"
@@ -919,24 +1638,49 @@ def _stage_message_fields(
         ((validation_report.get("execution_degradation_advisory_summary") or {}).get("status") or "")
     ).lower()
     trial_writer_summary = validation_report.get("strategy_v2_pbo_dsr_trial_writer_summary") or {}
+    resolved_selected_trial = _resolved_selected_trial(validation_report)
+    dashboard_strip = dict(dashboard.get("approval_strip_summary") or {})
     sample_counts = trial_writer_summary.get("sample_counts") or {}
     eligible_closed_trades = int(sample_counts.get("eligible_closed_trades") or 0)
     trial_runs_written = int(sample_counts.get("trial_runs_written") or 0)
-    selected_trial_run_id = trial_writer_summary.get("selected_trial_run_id")
+    selected_trial_run_id = resolved_selected_trial.get("selected_trial_run_id")
+    checklist_status = str(checklist.get("overall_status") or "").upper()
 
     blockers: list[str] = []
+    if dashboard.get("new_entries_allowed") is False:
+        blockers.append("runtime_no_go")
     if close_only_active:
         blockers.append("close_only_active")
+    if checklist_status == "FAIL":
+        blockers.append("checklist_fail")
     if playbook_go_no_go == "NO_GO":
         blockers.append("NO_GO")
     if execution_status == "manual_review":
         blockers.append("manual_review")
 
+    if selected_trial_run_id:
+        sample_progress_hint = (
+            "selected lineage winner is resolved; remaining blockers are runtime/checklist approval gates"
+        )
+    elif trial_runs_written > 0:
+        sample_progress_hint = (
+            f"trial runs are present ({trial_runs_written}) but selected lineage winner is still unresolved"
+        )
+    elif eligible_closed_trades > 0:
+        sample_progress_hint = (
+            f"eligible_closed_trades={eligible_closed_trades}, trial_runs_written={trial_runs_written}"
+        )
+    else:
+        sample_progress_hint = "lineage sample collection has not produced eligible closed trades yet"
+
     if stage == "0_BLOCKED":
         return {
             "stage_reason": " + ".join(blockers) if blockers else "operator entry expansion is blocked",
-            "next_step_hint": "resolve approval blocker and execution review before reopening entries",
-            "sample_progress_hint": "lineage sample collection is not sufficient for a selected trial yet",
+            "next_step_hint": (
+                str(dashboard_strip.get("act_value") or "")
+                or "resolve approval blocker and execution review before reopening entries"
+            ),
+            "sample_progress_hint": sample_progress_hint,
         }
     if stage == "1_SAMPLE_COLLECTION":
         return {
@@ -952,25 +1696,59 @@ def _stage_message_fields(
                 else "trial runs have started and lineage selection can progress"
             ),
             "next_step_hint": "review validation and checklist surfaces for approval progression",
-            "sample_progress_hint": (
-                f"eligible_closed_trades={eligible_closed_trades}, trial_runs_written={trial_runs_written}"
-            ),
+            "sample_progress_hint": sample_progress_hint,
         }
     if stage == "3_APPROVAL_REVIEW":
         return {
             "stage_reason": "lineage is ready enough for approval review but rollout still needs operator confirmation",
             "next_step_hint": "review validation and checklist before changing any runtime state",
-            "sample_progress_hint": (
-                f"eligible_closed_trades={eligible_closed_trades}, trial_runs_written={trial_runs_written}"
-            ),
+            "sample_progress_hint": sample_progress_hint,
         }
     return {
         "stage_reason": "stage needs manual interpretation from validation, checklist, and dashboard surfaces",
         "next_step_hint": "review server-side operator surfaces directly",
-        "sample_progress_hint": (
-            f"eligible_closed_trades={eligible_closed_trades}, trial_runs_written={trial_runs_written}"
-        ),
+        "sample_progress_hint": sample_progress_hint,
     }
+
+
+def _apply_runtime_stage_override(payload: dict[str, Any]) -> dict[str, Any]:
+    current = dict(payload or {})
+    signoff = dict(current.get("runtime_signoff_summary") or {})
+    decision = dict(signoff.get("runtime_decision") or current.get("runtime_decision") or {})
+    gate = dict(current.get("runtime_reopen_gate_summary") or signoff.get("runtime_reopen_gate_summary") or {})
+    action = str(decision.get("effective_action") or "")
+    if action not in {
+        "conditional_micro_live_signoff",
+        "conditional_full_live_signoff",
+        "manual_signoff_required",
+        "proceed_to_operator_signoff",
+    }:
+        return current
+
+    current["stage"] = "3_APPROVAL_REVIEW"
+    if action == "conditional_micro_live_signoff":
+        current["stage_reason"] = "post-patch cohort cleared the conditional MICRO_LIVE thresholds"
+        current["next_step_hint"] = "review manual sign-off and, if accepted, reopen MICRO_LIVE only"
+    elif action == "conditional_full_live_signoff":
+        current["stage_reason"] = "post-patch cohort cleared the conditional FULL LIVE thresholds"
+        current["next_step_hint"] = "review manual sign-off and decide whether to reopen MICRO_LIVE or LIVE"
+    elif action == "proceed_to_operator_signoff":
+        current["stage_reason"] = "runtime is reopen-ready and final operator sign-off can proceed"
+        current["next_step_hint"] = "record final operator sign-off before reopening runtime"
+    else:
+        current["stage_reason"] = "runtime is reopen-ready but required operator review items remain"
+        current["next_step_hint"] = "review the remaining required warning before reopening runtime"
+
+    full_gate = dict(gate.get("full_live") or {})
+    micro_gate = dict(gate.get("micro_live") or {})
+    if micro_gate or full_gate:
+        current["sample_progress_hint"] = (
+            f"MICRO_LIVE={micro_gate.get('status') or 'n/a'} "
+            f"({int(micro_gate.get('closed_trade_count') or 0)}/{int(micro_gate.get('min_closed_trades') or 0)}), "
+            f"FULL_LIVE={full_gate.get('status') or 'n/a'} "
+            f"({int(full_gate.get('closed_trade_count') or 0)}/{int(full_gate.get('min_closed_trades') or 0)})"
+        )
+    return current
 
 
 def _build_stage_payload(
@@ -989,6 +1767,7 @@ def _build_stage_payload(
     deployment = validation_report.get("deployment_approval_summary") or {}
     trial_writer_summary = validation_report.get("strategy_v2_pbo_dsr_trial_writer_summary") or {}
     sample_counts = trial_writer_summary.get("sample_counts") or {}
+    resolved_selected_trial = _resolved_selected_trial(validation_report)
     execution_advisory = validation_report.get("execution_degradation_advisory_summary") or {}
     operator_action_priority = validation_report.get("operator_action_priority_summary") or {}
     alpha_research_pipeline = validation_report.get("alpha_research_pipeline_summary") or {}
@@ -998,6 +1777,8 @@ def _build_stage_payload(
     edge_experiment_review = _edge_experiment_summary(validation_report, dashboard)
     edge_evolution_rule = _edge_evolution_summary(validation_report, dashboard)
     review_followup_ledger = _review_followup_summary(validation_report, dashboard)
+    risk_gate_summary = _risk_gate_summary(checklist)
+    risk_gate_unlock_summary = _risk_gate_unlock_summary(risk_gate_summary)
     lineage_sample_summary = _lineage_sample_summary(
         scope=lineage_sample_scope,
         symbol=symbol,
@@ -1038,7 +1819,13 @@ def _build_stage_payload(
         "checklist_status": checklist.get("overall_status"),
         "eligible_closed_trades": sample_counts.get("eligible_closed_trades"),
         "trial_runs_written": sample_counts.get("trial_runs_written"),
-        "selected_trial_run_id": trial_writer_summary.get("selected_trial_run_id"),
+        "selected_trial_run_id": resolved_selected_trial.get("selected_trial_run_id"),
+        "selected_trial_resolution_source": resolved_selected_trial.get("resolution_source"),
+        "raw_trial_writer_selected_trial_run_id": resolved_selected_trial.get("raw_trial_writer_selected_trial_run_id"),
+        "threshold_lineage_winner_run_id": resolved_selected_trial.get("threshold_lineage_winner_run_id"),
+        "threshold_lineage_winner_source": resolved_selected_trial.get("threshold_lineage_winner_source"),
+        "threshold_lineage_winner_type": resolved_selected_trial.get("threshold_lineage_winner_type"),
+        "threshold_lineage_audit_status": resolved_selected_trial.get("threshold_lineage_audit_status"),
         "execution_degradation": execution_advisory.get("status"),
         "top_operator_action": operator_action_priority.get("top_action"),
         "top_operator_action_followup_command": operator_action_priority.get("top_action_followup_command") or "",
@@ -1048,6 +1835,8 @@ def _build_stage_payload(
         "edge_experiment_review": edge_experiment_review,
         "edge_evolution_rule": edge_evolution_rule,
         "review_followup_ledger": review_followup_ledger,
+        "risk_gate_summary": risk_gate_summary,
+        "risk_gate_unlock_summary": risk_gate_unlock_summary,
         "lineage_sample_summary": lineage_sample_summary,
         "lineage_closed_fill_health": _lineage_closed_fill_health(lineage_sample_summary),
         "entry_timing_review_target": entry_timing_review_target,
@@ -1063,7 +1852,7 @@ def _build_stage_payload(
         ),
     }
     payload["readiness_gates"] = _readiness_gates(
-        selected_trial_run_id=trial_writer_summary.get("selected_trial_run_id"),
+        selected_trial_run_id=resolved_selected_trial.get("selected_trial_run_id"),
         trial_runs_written=sample_counts.get("trial_runs_written"),
         representative_candidates=representative_candidates,
         entry_timing_review_target=entry_timing_review_target,
@@ -1076,8 +1865,93 @@ def _build_stage_payload(
     payload["candidate_gate_ready"] = bool(payload["readiness_gates"]["candidate_gate_ready"])
     payload["edge_sample_gate_ready"] = bool(payload["readiness_gates"]["edge_sample_gate_ready"])
     payload["all_readiness_gates_ready"] = bool(payload["readiness_gates"]["all_ready"])
+    payload["risk_gate_unlock_summary"] = _enrich_risk_gate_unlock_summary(
+        payload.get("risk_gate_unlock_summary"),
+        checklist=checklist,
+        selected_trial_run_id=payload.get("selected_trial_run_id"),
+        trial_runs_written=payload.get("trial_runs_written"),
+        candidate_gate_ready=payload["candidate_gate_ready"],
+        edge_sample_gate_ready=payload["edge_sample_gate_ready"],
+    )
+    payload["post_unlock_review_summary"] = _post_unlock_review_summary(
+        risk_gate_summary=payload.get("risk_gate_summary"),
+        risk_gate_unlock_summary=payload.get("risk_gate_unlock_summary"),
+        validation_report=validation_report,
+        checklist=checklist,
+        stage=stage,
+        lineage_gate_ready=payload["lineage_gate_ready"],
+        edge_sample_gate_ready=payload["edge_sample_gate_ready"],
+        symbol=symbol,
+        universe=universe,
+        days=days,
+    )
+    payload["post_unlock_bundle_result"] = _default_post_unlock_bundle_result(payload.get("post_unlock_review_summary"))
+    payload["runtime_reopen_status"] = _runtime_reopen_status(
+        risk_gate_summary=payload.get("risk_gate_summary"),
+        review_summary=payload.get("post_unlock_review_summary"),
+        bundle_result=payload.get("post_unlock_bundle_result"),
+    )
+    payload["runtime_signoff_summary"] = _runtime_signoff_summary(
+        validation_report=validation_report,
+        checklist=checklist,
+        runtime_reopen_status=payload.get("runtime_reopen_status"),
+    )
+    payload["runtime_reopen_gate_summary"] = dict(
+        (payload.get("runtime_signoff_summary") or {}).get("runtime_reopen_gate_summary") or {}
+    )
     payload.update(_stage_message_fields(stage, validation_report, checklist, dashboard))
+    payload = _apply_runtime_stage_override(payload)
     return payload
+
+
+def _reuse_recent_runtime_monitor_fields(
+    payload: dict[str, Any],
+    previous_stage: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    current = dict(payload or {})
+    previous = dict(previous_stage or {})
+    if not previous:
+        return current
+
+    previous_generated_at = _parse_ts(previous.get("generated_at"))
+    reference_now = now or datetime.now(timezone.utc)
+    if previous_generated_at is None:
+        return current
+    if (reference_now - previous_generated_at).total_seconds() > float(_RUNTIME_MONITOR_REUSE_SECONDS):
+        return current
+
+    same_selected_trial = str(previous.get("selected_trial_run_id") or "") == str(current.get("selected_trial_run_id") or "")
+    same_risk_state = str((previous.get("risk_gate_summary") or {}).get("risk_state") or "") == str(
+        (current.get("risk_gate_summary") or {}).get("risk_state") or ""
+    )
+    same_checklist_status = str(previous.get("checklist_status") or "") == str(current.get("checklist_status") or "")
+    same_playbook = str(previous.get("playbook_go_no_go") or "") == str(current.get("playbook_go_no_go") or "")
+    same_lineage_count = int(((previous.get("lineage_sample_summary") or {}).get("closed_trade_count") or 0)) == int(
+        ((current.get("lineage_sample_summary") or {}).get("closed_trade_count") or 0)
+    )
+
+    if not all((same_selected_trial, same_risk_state, same_checklist_status, same_playbook, same_lineage_count)):
+        return current
+
+    for key in (
+        "post_unlock_bundle_result",
+        "runtime_reopen_status",
+        "runtime_signoff_summary",
+        "runtime_reopen_gate_summary",
+        "runtime_preflight_summary",
+        "runtime_operator_signoff_summary",
+        "runtime_mitigation_summary",
+        "runtime_mitigation_packet_result",
+        "runtime_mitigation_wait_summary",
+    ):
+        value = previous.get(key)
+        if value is not None:
+            current[key] = value
+    current["runtime_monitor_snapshot_reused"] = True
+    current["runtime_monitor_snapshot_reused_from"] = previous_generated_at.isoformat()
+    return current
 
 
 def _print_human(payload: dict[str, Any]) -> None:
@@ -1092,6 +1966,19 @@ def _print_human(payload: dict[str, Any]) -> None:
     print(_edge_experiment_summary_line(payload.get("edge_experiment_review")))
     print(_edge_evolution_summary_line(payload.get("edge_evolution_rule")))
     print(_review_followup_summary_line(payload.get("review_followup_ledger")))
+    print(_risk_gate_summary_line(payload.get("risk_gate_summary")))
+    print(_risk_gate_unlock_summary_line(payload.get("risk_gate_unlock_summary")))
+    print(_post_unlock_review_summary_line(payload.get("post_unlock_review_summary")))
+    print(_post_unlock_review_commands_line(payload.get("post_unlock_review_summary")))
+    print(_post_unlock_bundle_result_line(payload.get("post_unlock_bundle_result")))
+    print(_runtime_reopen_status_line(payload.get("runtime_reopen_status")))
+    print(_runtime_signoff_summary_line(payload.get("runtime_signoff_summary")))
+    print(_runtime_reopen_gate_summary_line(payload.get("runtime_reopen_gate_summary")))
+    print(_runtime_preflight_summary_line(payload.get("runtime_preflight_summary")))
+    print(_runtime_operator_signoff_summary_line(payload.get("runtime_operator_signoff_summary")))
+    print(_post_patch_sample_summary_line(payload.get("post_patch_sample_summary")))
+    print(_runtime_mitigation_summary_line(payload.get("runtime_mitigation_summary")))
+    print(_runtime_mitigation_wait_summary_line(payload.get("runtime_mitigation_wait_summary")))
     print(_lineage_sample_summary_line(payload.get("lineage_sample_summary")))
     print(_lineage_closed_fill_health_line(payload.get("lineage_closed_fill_health")))
     print(_experiment_review_target_line("entry_timing_review_target", payload.get("entry_timing_review_target")))
@@ -1107,6 +1994,9 @@ def _print_human(payload: dict[str, Any]) -> None:
     print(f"eligible_closed_trades: {payload['eligible_closed_trades']}")
     print(f"trial_runs_written: {payload['trial_runs_written']}")
     print(f"selected_trial_run_id: {payload['selected_trial_run_id']}")
+    print(f"selected_trial_resolution_source: {payload.get('selected_trial_resolution_source') or 'unresolved'}")
+    if payload.get("threshold_lineage_winner_run_id"):
+        print(f"threshold_lineage_winner_run_id: {payload.get('threshold_lineage_winner_run_id')}")
     print(f"execution_degradation: {payload['execution_degradation']}")
     print(f"top_operator_action: {payload['top_operator_action']}")
     print(f"top_operator_action_followup_command: {payload.get('top_operator_action_followup_command') or 'none'}")
@@ -1115,11 +2005,13 @@ def _print_human(payload: dict[str, Any]) -> None:
 
 def main() -> int:
     args = parse_args()
+    stage_file_path = Path(args.stage_file).resolve()
+    previous_stage = _read_stage_file(stage_file_path)
     validation = _request_json(
         args.base_url,
         "POST",
         "/validation/report",
-        query={"symbol": args.symbol},
+        query={"symbol": args.symbol, "refresh": False},
     )
     checklist = _request_json(
         args.base_url,
@@ -1131,6 +2023,7 @@ def main() -> int:
             "limit": max(1, args.limit),
             "days": max(1, args.days),
             "alert_test_lookback_hours": max(1, args.alert_test_lookback_hours),
+            "write_report": False,
         },
     )
     dashboard = _request_json(
@@ -1160,8 +2053,15 @@ def main() -> int:
         lineage_proof_goal_closed_trades=args.lineage_proof_goal_closed_trades,
         lineage_sample_days=args.lineage_sample_days,
     )
+    payload = _reuse_recent_runtime_monitor_fields(payload, previous_stage)
+    payload["runtime_operator_signoff_summary"] = run_runtime_signoff_review._build_runtime_operator_signoff_summary(
+        runtime_decision=dict(payload.get("runtime_decision") or {}),
+        runtime_preflight_summary=dict(payload.get("runtime_preflight_summary") or {}),
+        runtime_signoff_summary=dict(payload.get("runtime_signoff_summary") or {}),
+    )
+    payload = _apply_runtime_stage_override(payload)
     if not args.no_write_stage:
-        _write_stage_file(Path(args.stage_file).resolve(), payload)
+        _write_stage_file(stage_file_path, payload)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     else:

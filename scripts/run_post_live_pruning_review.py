@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,10 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.db.models import OrderSubmission
 from app.db.session import SessionLocal, init_db
+
+_REQUEST_RETRY_ATTEMPTS = 3
+_REQUEST_RETRY_BASE_DELAY_SECONDS = 0.5
+_REQUEST_TIMEOUT_SECONDS = 90
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,14 +71,33 @@ def _request_json(
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
     request = Request(url=url, data=data, headers=headers, method=method.upper())
-    try:
-        with urlopen(request, timeout=20) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        payload = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{method.upper()} {path} failed with HTTP {exc.code}: {payload}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"{method.upper()} {path} failed: {exc.reason}") from exc
+    last_error: RuntimeError | None = None
+    for attempt in range(1, _REQUEST_RETRY_ATTEMPTS + 1):
+        try:
+            with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            payload = exc.read().decode("utf-8", errors="replace")
+            retryable = exc.code >= 500 or "database is locked" in payload.lower()
+            last_error = RuntimeError(f"{method.upper()} {path} failed with HTTP {exc.code}: {payload}")
+            if retryable and attempt < _REQUEST_RETRY_ATTEMPTS:
+                time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
+                continue
+            raise last_error from exc
+        except URLError as exc:
+            last_error = RuntimeError(f"{method.upper()} {path} failed: {exc.reason}")
+            if attempt < _REQUEST_RETRY_ATTEMPTS:
+                time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
+                continue
+            raise last_error from exc
+        except TimeoutError as exc:
+            last_error = RuntimeError(f"{method.upper()} {path} timed out after {_REQUEST_TIMEOUT_SECONDS}s")
+            if attempt < _REQUEST_RETRY_ATTEMPTS:
+                time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
+                continue
+            raise last_error from exc
+    assert last_error is not None
+    raise last_error
 
 
 def _surface_strip_summary(payload: dict[str, Any] | None, *, surface_type: str = "generic") -> dict[str, str]:

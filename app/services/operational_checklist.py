@@ -474,9 +474,58 @@ class OperationalChecklistService:
             "validation_alert": alert_dict,
         }
 
-    def _alert_test_item(self, *, lookback_hours: int) -> dict[str, Any]:
+    @staticmethod
+    def _parse_iso_timestamp(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _recent_live_alert_delivery(self, *, alert_metrics: dict[str, Any], lookback_hours: int) -> dict[str, dict[str, Any]]:
+        latest_validation_alert = dict(alert_metrics.get("latest_validation_alert") or {})
+        if not latest_validation_alert:
+            return {}
+        triggered_ts = self._parse_iso_timestamp(latest_validation_alert.get("triggered_ts"))
+        if triggered_ts is None:
+            return {}
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, int(lookback_hours)))
+        if triggered_ts < cutoff:
+            return {}
+        delivered = bool(latest_validation_alert.get("delivered"))
+        skipped = bool(latest_validation_alert.get("skipped"))
+        failed = bool(latest_validation_alert.get("failed"))
+        if not delivered or skipped or failed:
+            return {}
+        channel = str(
+            latest_validation_alert.get("delivery_channel")
+            or latest_validation_alert.get("channel")
+            or ""
+        ).lower()
+        if channel not in {"telegram", "discord", "push"}:
+            return {}
+        return {
+            channel: {
+                "channel": channel,
+                "triggered_at": triggered_ts.isoformat(),
+                "source": "recent_validation_alert_delivery",
+                "alert_id": str(latest_validation_alert.get("alert_id") or ""),
+                "status": str(latest_validation_alert.get("status") or ""),
+            }
+        }
+
+    def _alert_test_item(self, *, lookback_hours: int, alert_metrics: dict[str, Any]) -> dict[str, Any]:
         configured_channels = self._configured_leaf_channels()
         recent = self._recent_channel_tests(lookback_hours=lookback_hours)
+        recent_live_delivery = self._recent_live_alert_delivery(
+            alert_metrics=alert_metrics,
+            lookback_hours=lookback_hours,
+        )
         if not configured_channels:
             return self._item(
                 item_id="alert_test_recent",
@@ -486,15 +535,26 @@ class OperationalChecklistService:
                 summary="no leaf alert channel configured for live operations",
                 blocking=True,
                 source={"endpoint": "/alerts/test", "fields": ["delivery", "retry_queued"]},
-                evidence={"configured_channels": [], "recent_tests": recent, "lookback_hours": lookback_hours},
+                evidence={
+                    "configured_channels": [],
+                    "recent_tests": recent,
+                    "recent_live_delivery": recent_live_delivery,
+                    "lookback_hours": lookback_hours,
+                },
             )
 
-        missing = [channel for channel in configured_channels if channel not in recent]
+        missing: list[str] = []
         failed: list[str] = []
         warned: list[str] = []
+        covered_by_live_delivery: list[str] = []
         for channel in configured_channels:
             row = dict(recent.get(channel) or {})
             if not row:
+                live_row = dict(recent_live_delivery.get(channel) or {})
+                if live_row:
+                    covered_by_live_delivery.append(channel)
+                    continue
+                missing.append(channel)
                 continue
             if bool(row.get("delivered")):
                 continue
@@ -515,10 +575,13 @@ class OperationalChecklistService:
             status = "MANUAL"
             blocking = True
             summary = f"run /alerts/test for {missing}"
-        elif warned:
+        elif warned or covered_by_live_delivery:
             status = "WARN"
             blocking = False
-            summary = f"recent alert test needs review on {warned}"
+            review_reasons = list(warned)
+            if covered_by_live_delivery:
+                review_reasons.append(f"recent_live_delivery={covered_by_live_delivery}")
+            summary = f"recent alert test needs review on {review_reasons}"
         else:
             status = "PASS"
             blocking = False
@@ -531,7 +594,11 @@ class OperationalChecklistService:
             summary=summary,
             blocking=blocking,
             source={"endpoint": "/alerts/test", "fields": ["delivery", "retry_queued"], "lookback_hours": lookback_hours},
-            evidence={"configured_channels": configured_channels, "recent_tests": recent},
+            evidence={
+                "configured_channels": configured_channels,
+                "recent_tests": recent,
+                "recent_live_delivery": recent_live_delivery,
+            },
         )
 
     def _retry_queue_item(self, *, alert_metrics: dict[str, Any]) -> dict[str, Any]:
@@ -2604,7 +2671,10 @@ class OperationalChecklistService:
             self._validation_item(validation_payload=validation_payload),
             self._validation_alert_item(validation_payload=validation_payload),
             self._alert_slo_item(alert_metrics=alert_metrics),
-            self._alert_test_item(lookback_hours=alert_test_lookback_hours),
+            self._alert_test_item(
+                lookback_hours=alert_test_lookback_hours,
+                alert_metrics=alert_metrics,
+            ),
             self._retry_queue_item(alert_metrics=alert_metrics),
             self._outbox_item(outbox_status=outbox_status),
             self._risk_gate_item(strategy_metrics=strategy_metrics),

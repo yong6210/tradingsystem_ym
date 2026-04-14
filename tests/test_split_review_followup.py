@@ -262,6 +262,54 @@ def test_main_auto_selects_edge_evolution_review_when_it_is_top_action(monkeypat
     assert any("reducing any baseline allocation" in step for step in payload["review_steps"])
 
 
+def test_main_explicit_split_action_falls_back_to_symbol_self_target(monkeypatch, capsys, tmp_path) -> None:
+    ledger_path = tmp_path / "review_ledger.jsonl"
+    dashboard_payload = _dashboard_payload()
+    dashboard_payload["signal_funnel"]["operator_action_priority"]["experiment_context"] = {
+        "entry_timing_preferred_variant": "early_limit",
+        "execution_style_preferred_variant": "passive_limit",
+    }
+    monkeypatch.setattr(
+        split_review_followup,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol="WIFUSDC",
+            universe="usdc_perp_top30",
+            days=7,
+            action="run_entry_timing_split_review",
+            report_dir="reports/operations/split_review_followups",
+            ledger_path=str(ledger_path),
+            no_write_report=True,
+            no_write_ledger=False,
+            transition_status="",
+            packet_id="",
+            decision_actor="",
+            decision_notes="",
+            transition_reason="",
+        ),
+    )
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/execution/operator-dashboard":
+            return dashboard_payload
+        if path == "/validation/report":
+            return _validation_payload()
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(split_review_followup, "_request_json", _request_json)
+
+    assert split_review_followup.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["status"] == "READY"
+    assert payload["target_contract"]["symbol"] == "WIFUSDC"
+    assert payload["target_contract"]["axis"] == "entry_timing"
+    assert payload["target_contract"]["preferred_variant"] == "early_limit"
+    assert payload["target_contract"]["status"] == "SYMBOL_SELF_TARGET"
+    assert payload["target_contract"]["focus_source"] == "self_target_fallback"
+
+
 def test_main_records_decision_transition_without_refetching_surfaces(monkeypatch, capsys, tmp_path) -> None:
     ledger_path = tmp_path / "review_ledger.jsonl"
     generation_args = SimpleNamespace(

@@ -5,7 +5,10 @@ import argparse
 import json
 from collections import Counter
 from datetime import UTC, datetime
+from http.client import RemoteDisconnected
 from pathlib import Path
+import socket
+import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -13,6 +16,9 @@ from urllib.request import Request, urlopen
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+_REQUEST_RETRY_ATTEMPTS = 5
+_REQUEST_RETRY_BASE_DELAY_SECONDS = 1.0
+_REQUEST_TIMEOUT_SECONDS = 90
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,15 +75,30 @@ def _request_json(
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    request = Request(url=url, data=data, headers=headers, method=method.upper())
-    try:
-        with urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        payload = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{method.upper()} {path} failed with HTTP {exc.code}: {payload}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"{method.upper()} {path} failed: {exc.reason}") from exc
+    last_error: RuntimeError | None = None
+    for attempt in range(1, _REQUEST_RETRY_ATTEMPTS + 1):
+        request = Request(url=url, data=data, headers=headers, method=method.upper())
+        try:
+            with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            payload = exc.read().decode("utf-8", errors="replace")
+            retryable = exc.code >= 500 or "database is locked" in payload.lower() or "sqlite busy" in payload.lower()
+            last_error = RuntimeError(f"{method.upper()} {path} failed with HTTP {exc.code}: {payload}")
+            if retryable and attempt < _REQUEST_RETRY_ATTEMPTS:
+                time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
+                continue
+            raise last_error from exc
+        except (URLError, TimeoutError, socket.timeout, RemoteDisconnected) as exc:
+            reason = exc.reason if isinstance(exc, URLError) else str(exc)
+            last_error = RuntimeError(f"{method.upper()} {path} failed: {reason}")
+            if attempt < _REQUEST_RETRY_ATTEMPTS:
+                time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
+                continue
+            raise last_error from exc
+
+    assert last_error is not None
+    raise last_error
 
 
 def _status(ok: bool) -> str:

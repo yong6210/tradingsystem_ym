@@ -213,6 +213,38 @@ def test_surface_strip_summary_prefers_nested_validation_strip() -> None:
     assert summary["act_value"] == "continue_candidate_review_under_portfolio_caps"
 
 
+def test_request_json_retries_after_timeout(monkeypatch) -> None:
+    calls = {"count": 0}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return None
+
+        def read(self):
+            return b'{"ok": true}'
+
+    def _urlopen(_request, timeout):  # noqa: ANN001
+        assert timeout == run_post_live_pruning_review._REQUEST_TIMEOUT_SECONDS
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise TimeoutError("timed out")
+        return _Response()
+
+    monkeypatch.setattr(run_post_live_pruning_review, "urlopen", _urlopen)
+
+    payload = run_post_live_pruning_review._request_json(
+        "http://127.0.0.1:8000",
+        "GET",
+        "/health/live",
+    )
+
+    assert payload["ok"] is True
+    assert calls["count"] == 2
+
+
 def test_main_reopens_pruning_review_when_live_cycle_and_surfaces_are_usable(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         run_post_live_pruning_review,

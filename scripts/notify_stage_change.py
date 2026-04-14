@@ -136,6 +136,378 @@ def _active_lineage_sample_progressed(previous: dict[str, Any] | None, current: 
     return bool(after_stage) and before_stage != after_stage
 
 
+def _risk_gate_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return dict((payload or {}).get("risk_gate_summary") or {})
+
+
+def _risk_gate_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _risk_gate_summary(payload)
+    return (
+        f"risk_gate: status={summary.get('status') or 'NOT_AVAILABLE'} | "
+        f"state={summary.get('risk_state') or 'UNKNOWN'} | "
+        f"reason={summary.get('risk_reason') or 'unknown'} | "
+        f"unlock_at={summary.get('unlock_at') or 'n/a'} | "
+        f"daily_r={float(summary.get('daily_realized_r', 0.0) or 0.0):.4f}/"
+        f"{float(summary.get('daily_loss_limit_r', 0.0) or 0.0):.4f} | "
+        f"loss_streak={int(summary.get('daily_loss_streak', 0) or 0)}"
+    )
+
+
+def _risk_gate_unlock_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return dict((payload or {}).get("risk_gate_unlock_summary") or {})
+
+
+def _risk_gate_unlock_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _risk_gate_unlock_summary(payload)
+    return (
+        f"risk_gate_unlock: active={bool(summary.get('active', False))} | "
+        f"status={summary.get('status') or 'not_available'} | "
+        f"unlock_at={summary.get('unlock_at') or 'n/a'}"
+    )
+
+
+def _post_unlock_review_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("post_unlock_review_summary") or {})
+    return {
+        "active": bool(source.get("active", False)),
+        "review_window_open": bool(source.get("review_window_open", False)),
+        "current_stage": str(source.get("current_stage") or "unknown"),
+        "current_checklist_status": str(source.get("current_checklist_status") or "UNKNOWN"),
+        "current_validation_playbook_go_no_go": str(source.get("current_validation_playbook_go_no_go") or ""),
+        "current_validation_approve_value": str(source.get("current_validation_approve_value") or ""),
+        "expected_stage_after_unlock": str(source.get("expected_stage_after_unlock") or ""),
+        "expected_checklist_status_after_unlock": str(source.get("expected_checklist_status_after_unlock") or ""),
+        "next_review_step": str(source.get("next_review_step") or "wait_for_operating_lock_to_clear"),
+        "bundle_review_command": str(source.get("bundle_review_command") or ""),
+        "primary_review_command": str(source.get("primary_review_command") or ""),
+        "secondary_review_command": str(source.get("secondary_review_command") or ""),
+        "summary": str(source.get("summary") or ""),
+    }
+
+
+def _post_unlock_review_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _post_unlock_review_summary(payload)
+    validation_value = (
+        summary.get("current_validation_playbook_go_no_go")
+        or summary.get("current_validation_approve_value")
+        or "n/a"
+    )
+    return (
+        f"post_unlock_review: active={summary.get('active', False)} | "
+        f"review_window_open={summary.get('review_window_open', False)} | "
+        f"current_stage={summary.get('current_stage', 'unknown')} | "
+        f"checklist={summary.get('current_checklist_status', 'UNKNOWN')} | "
+        f"validation={validation_value} | "
+        f"next={summary.get('next_review_step', 'wait_for_operating_lock_to_clear')}"
+    )
+
+
+def _post_unlock_review_commands_line(payload: dict[str, Any] | None) -> str:
+    summary = _post_unlock_review_summary(payload)
+    return (
+        f"post_unlock_review_commands: bundle={summary.get('bundle_review_command') or 'n/a'} | "
+        f"primary={summary.get('primary_review_command') or 'n/a'} | "
+        f"secondary={summary.get('secondary_review_command') or 'n/a'}"
+    )
+
+
+def _post_unlock_bundle_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("post_unlock_bundle_result") or {})
+    return {
+        "active": bool(source.get("active", False)),
+        "executed": bool(source.get("executed", False)),
+        "status": str(source.get("status") or "NOT_AVAILABLE"),
+        "summary": str(source.get("summary") or ""),
+        "bundle_review_command": str(source.get("bundle_review_command") or ""),
+        "micro_live_preflight_status": str(source.get("micro_live_preflight_status") or ""),
+        "post_live_pruning_review_decision": str(source.get("post_live_pruning_review_decision") or ""),
+    }
+
+
+def _post_unlock_bundle_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _post_unlock_bundle_summary(payload)
+    return (
+        f"post_unlock_bundle: active={summary.get('active', False)} | "
+        f"executed={summary.get('executed', False)} | "
+        f"status={summary.get('status', 'NOT_AVAILABLE')} | "
+        f"preflight={summary.get('micro_live_preflight_status') or 'n/a'} | "
+        f"pruning={summary.get('post_live_pruning_review_decision') or 'n/a'}"
+    )
+
+
+def _runtime_reopen_status_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("runtime_reopen_status") or {})
+    return {
+        "status": str(source.get("status") or "not_available"),
+        "ready": bool(source.get("ready", False)),
+        "summary": str(source.get("summary") or ""),
+    }
+
+
+def _runtime_reopen_status_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _runtime_reopen_status_summary(payload)
+    return (
+        f"runtime_reopen_status: status={summary.get('status', 'not_available')} | "
+        f"ready={summary.get('ready', False)}"
+    )
+
+
+def _runtime_operator_signoff_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("runtime_operator_signoff_summary") or {})
+    return {
+        "status": str(source.get("status") or "not_available"),
+        "effective_action": str(source.get("effective_action") or ""),
+        "allowed_scope": str(source.get("allowed_scope") or ""),
+        "preflight_status": str(source.get("preflight_status") or ""),
+        "first_required_review_code": str(source.get("first_required_review_code") or ""),
+        "next_step": str(source.get("next_step") or ""),
+    }
+
+
+def _runtime_operator_signoff_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _runtime_operator_signoff_summary(payload)
+    return (
+        f"runtime_operator_signoff: status={summary.get('status', 'not_available')}"
+        + (f" | action={summary.get('effective_action')}" if summary.get("effective_action") else "")
+        + (f" | scope={summary.get('allowed_scope')}" if summary.get("allowed_scope") else "")
+        + (f" | preflight={summary.get('preflight_status')}" if summary.get("preflight_status") else "")
+        + (
+            f" | first_required={summary.get('first_required_review_code')}"
+            if summary.get("first_required_review_code")
+            else ""
+        )
+        + (f" | next={summary.get('next_step')}" if summary.get("next_step") else "")
+    )
+
+
+def _runtime_signoff_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("runtime_signoff_summary") or {})
+    return {
+        "status": str(source.get("status") or "not_available"),
+        "required_reviews": list(source.get("required_reviews") or []),
+        "advisory_reviews": list(source.get("advisory_reviews") or []),
+        "required_count": int(source.get("required_count") or 0),
+        "advisory_count": int(source.get("advisory_count") or 0),
+        "required_clearance_line": str(source.get("required_clearance_line") or ""),
+        "operator_recommendation": str(source.get("operator_recommendation") or ""),
+        "operator_recommendation_reason": str(source.get("operator_recommendation_reason") or ""),
+        "runtime_decision": dict(source.get("runtime_decision") or {}),
+        "approval_template_focus": dict(source.get("approval_template_focus") or {}),
+        "approval_template_focus_error": str(source.get("approval_template_focus_error") or ""),
+        "summary": str(source.get("summary") or ""),
+    }
+
+
+def _runtime_mitigation_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("runtime_mitigation_summary") or {})
+    return {
+        "available": bool(source.get("available", False)),
+        "primary_action_code": str(source.get("primary_action_code") or ""),
+        "primary_action_status": str(source.get("primary_action_status") or ""),
+        "primary_action_command": str(source.get("primary_action_command") or ""),
+        "primary_action_constraint": str(source.get("primary_action_constraint") or ""),
+        "primary_focus_code": str(source.get("primary_focus_code") or ""),
+        "primary_focus_label": str(source.get("primary_focus_label") or ""),
+        "secondary_focus_code": str(source.get("secondary_focus_code") or ""),
+        "secondary_focus_label": str(source.get("secondary_focus_label") or ""),
+        "secondary_status": str(source.get("secondary_status") or ""),
+        "actionable_now_count": int(source.get("actionable_now_count", 0) or 0),
+        "candidate_pending_count": int(source.get("candidate_pending_count", 0) or 0),
+        "deferred_count": int(source.get("deferred_count", 0) or 0),
+        "research_only_count": int(source.get("research_only_count", 0) or 0),
+        "summary": str(source.get("summary") or ""),
+    }
+
+
+def _runtime_mitigation_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _runtime_mitigation_summary(payload)
+    return (
+        f"runtime_mitigation: primary={summary.get('primary_action_code') or 'none'}/"
+        f"{summary.get('primary_action_status') or 'none'} | "
+        f"focus={summary.get('primary_focus_label') or summary.get('primary_action_code') or 'none'} | "
+        f"next={summary.get('secondary_focus_label') or 'none'}/{summary.get('secondary_status') or 'none'} | "
+        f"actionable={summary.get('actionable_now_count', 0)} | "
+        f"pending={summary.get('candidate_pending_count', 0)} | "
+        f"deferred={summary.get('deferred_count', 0)}"
+    )
+
+
+def _runtime_mitigation_packet_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("runtime_mitigation_packet_result") or {})
+    return {
+        "available": bool(source.get("available", False)),
+        "status": str(source.get("status") or "inactive"),
+        "executed": bool(source.get("executed", False)),
+        "packet_id": str(source.get("packet_id") or ""),
+        "command": str(source.get("command") or ""),
+        "target_symbol": str(source.get("target_symbol") or ""),
+        "target_variant": str(source.get("target_variant") or ""),
+        "focus_label": str(source.get("focus_label") or ""),
+        "wait_constraint": str(source.get("wait_constraint") or ""),
+        "primary_action_status": str(source.get("primary_action_status") or ""),
+        "summary": str(source.get("summary") or ""),
+    }
+
+
+def _runtime_mitigation_wait_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("runtime_mitigation_wait_summary") or {})
+    return {
+        "available": bool(source.get("available", False)),
+        "status": str(source.get("status") or "inactive"),
+        "focus_label": str(source.get("focus_label") or ""),
+        "wait_constraint": str(source.get("wait_constraint") or ""),
+        "next_trigger": str(source.get("next_trigger") or ""),
+        "current_session": str(source.get("current_session") or ""),
+        "session_active": bool(source.get("session_active", False)),
+        "allowed_sessions": [str(item) for item in list(source.get("allowed_sessions") or []) if str(item).strip()],
+        "candidate_symbol": str(source.get("candidate_symbol") or ""),
+        "candidate_family": str(source.get("candidate_family") or ""),
+        "candidate_status": str(source.get("candidate_status") or ""),
+        "candidate_reason": str(source.get("candidate_reason") or ""),
+        "watch_tick_status": str(source.get("watch_tick_status") or ""),
+        "watch_generated_at": str(source.get("watch_generated_at") or ""),
+        "summary": str(source.get("summary") or ""),
+    }
+
+
+def _runtime_mitigation_packet_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _runtime_mitigation_packet_summary(payload)
+    return (
+        f"runtime_mitigation_packet: status={summary.get('status') or 'inactive'} | "
+        f"focus={summary.get('focus_label') or 'none'} | "
+        f"action={summary.get('primary_action_status') or 'none'} | "
+        f"executed={summary.get('executed', False)} | "
+        f"target={summary.get('target_symbol') or 'none'} | "
+        f"variant={summary.get('target_variant') or 'none'}"
+        + (
+            f" | constraint={summary.get('wait_constraint')}"
+            if summary.get("wait_constraint")
+            else ""
+        )
+    )
+
+
+def _runtime_mitigation_wait_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _runtime_mitigation_wait_summary(payload)
+    allowed_sessions = ",".join(str(item) for item in list(summary.get("allowed_sessions") or []) if str(item).strip())
+    return (
+        f"runtime_mitigation_wait: status={summary.get('status') or 'inactive'} | "
+        f"focus={summary.get('focus_label') or 'none'} | "
+        f"session={summary.get('current_session') or 'unknown'} | "
+        f"allowed={allowed_sessions or 'none'} | "
+        f"candidate={summary.get('candidate_symbol') or 'none'}/{summary.get('candidate_family') or 'none'} | "
+        f"next={summary.get('next_trigger') or 'none'}"
+        + (
+            f" | reason={summary.get('candidate_reason')}"
+            if summary.get("candidate_reason")
+            else ""
+        )
+    )
+
+
+def _risk_gate_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    return _risk_gate_summary_line(previous) != _risk_gate_summary_line(current)
+
+
+def _risk_gate_cleared(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    before = _risk_gate_summary(previous)
+    after = _risk_gate_summary(current)
+    before_status = str(before.get("status") or "").upper()
+    after_status = str(after.get("status") or "").upper()
+    before_state = str(before.get("risk_state") or "").upper()
+    after_state = str(after.get("risk_state") or "").upper()
+    return before_status == "FAIL" and after_status == "PASS" and before_state == "CLOSED" and after_state == "OPEN"
+
+
+def _post_unlock_review_ready(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    before = _post_unlock_review_summary(previous)
+    after = _post_unlock_review_summary(current)
+    return not bool(before.get("review_window_open", False)) and bool(after.get("review_window_open", False))
+
+
+def _post_unlock_bundle_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    return _post_unlock_bundle_summary_line(previous) != _post_unlock_bundle_summary_line(current)
+
+
+def _runtime_reopen_ready(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    before = _post_unlock_bundle_summary(previous)
+    after = _post_unlock_bundle_summary(current)
+    return str(before.get("status") or "") != "READY_TO_REOPEN_RUNTIME" and str(after.get("status") or "") == "READY_TO_REOPEN_RUNTIME"
+
+
+def _runtime_reopen_status_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    return _runtime_reopen_status_summary_line(previous) != _runtime_reopen_status_summary_line(current)
+
+
+def _runtime_operator_signoff_ready(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    before = _runtime_operator_signoff_summary(previous)
+    after = _runtime_operator_signoff_summary(current)
+    ready_statuses = {
+        "ready_for_manual_micro_live_signoff",
+        "ready_for_manual_full_live_signoff",
+        "ready_for_operator_signoff",
+    }
+    return str(before.get("status") or "") not in ready_statuses and str(after.get("status") or "") in ready_statuses
+
+
+def _runtime_operator_signoff_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    return _runtime_operator_signoff_summary_line(previous) != _runtime_operator_signoff_summary_line(current)
+
+
+def _runtime_mitigation_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    return _runtime_mitigation_summary_line(previous) != _runtime_mitigation_summary_line(current)
+
+
+def _runtime_mitigation_actionable(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    before = _runtime_mitigation_summary(previous)
+    after = _runtime_mitigation_summary(current)
+    return str(before.get("primary_action_status") or "") != "actionable_now" and str(
+        after.get("primary_action_status") or ""
+    ) == "actionable_now"
+
+
+def _runtime_mitigation_packet_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    return _runtime_mitigation_packet_summary_line(previous) != _runtime_mitigation_packet_summary_line(current)
+
+
+def _runtime_mitigation_wait_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    return _runtime_mitigation_wait_summary_line(previous) != _runtime_mitigation_wait_summary_line(current)
+
+
+def _runtime_mitigation_packet_ready(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    before = _runtime_mitigation_packet_summary(previous)
+    after = _runtime_mitigation_packet_summary(current)
+    before_status = str(before.get("status") or "")
+    after_status = str(after.get("status") or "")
+    return before_status not in {"READY", "fresh_packet_ready_exists"} and after_status in {"READY", "fresh_packet_ready_exists"}
+
+
 def _open_lineage_sample_count_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
     if previous is None:
         return False
@@ -642,6 +1014,110 @@ def _collect_events(previous: dict[str, Any] | None, current: dict[str, Any]) ->
                 ),
             }
         )
+    if _risk_gate_changed(previous, current):
+        events.append(
+            {
+                "type": "risk_gate_changed",
+                "title": "Risk gate changed",
+                "body": f"{_risk_gate_summary_line(previous)} -> {_risk_gate_summary_line(current)}",
+            }
+        )
+    if _risk_gate_cleared(previous, current):
+        events.append(
+            {
+                "type": "risk_gate_cleared",
+                "title": "Risk gate reopened",
+                "body": _risk_gate_summary_line(current),
+            }
+        )
+    if _post_unlock_review_ready(previous, current):
+        events.append(
+            {
+                "type": "post_unlock_review_ready",
+                "title": "Post-unlock review window is open",
+                "body": _post_unlock_review_summary_line(current),
+            }
+        )
+    if _post_unlock_bundle_changed(previous, current):
+        events.append(
+            {
+                "type": "post_unlock_bundle_changed",
+                "title": "Post-unlock review bundle changed",
+                "body": _post_unlock_bundle_summary_line(current),
+            }
+        )
+    if _runtime_reopen_ready(previous, current):
+        events.append(
+            {
+                "type": "runtime_reopen_ready",
+                "title": "Runtime reopen review is ready",
+                "body": _post_unlock_bundle_summary_line(current),
+            }
+        )
+    if _runtime_reopen_status_changed(previous, current):
+        events.append(
+            {
+                "type": "runtime_reopen_status_changed",
+                "title": "Runtime reopen status changed",
+                "body": _runtime_reopen_status_summary_line(current),
+            }
+        )
+    if _runtime_operator_signoff_ready(previous, current):
+        events.append(
+            {
+                "type": "runtime_operator_signoff_ready",
+                "title": "Runtime operator sign-off is ready",
+                "body": _runtime_operator_signoff_summary_line(current),
+            }
+        )
+    if _runtime_operator_signoff_changed(previous, current):
+        events.append(
+            {
+                "type": "runtime_operator_signoff_changed",
+                "title": "Runtime operator sign-off changed",
+                "body": _runtime_operator_signoff_summary_line(current),
+            }
+        )
+    if _runtime_mitigation_changed(previous, current):
+        events.append(
+            {
+                "type": "runtime_mitigation_changed",
+                "title": "Runtime mitigation status changed",
+                "body": _runtime_mitigation_summary_line(current),
+            }
+        )
+    if _runtime_mitigation_actionable(previous, current):
+        events.append(
+            {
+                "type": "runtime_mitigation_actionable",
+                "title": "Runtime mitigation became actionable",
+                "body": _runtime_mitigation_summary_line(current),
+            }
+        )
+    if _runtime_mitigation_packet_changed(previous, current):
+        events.append(
+            {
+                "type": "runtime_mitigation_packet_changed",
+                "title": "Runtime mitigation packet changed",
+                "body": _runtime_mitigation_packet_summary_line(current),
+            }
+        )
+    if _runtime_mitigation_wait_changed(previous, current):
+        events.append(
+            {
+                "type": "runtime_mitigation_wait_changed",
+                "title": "Runtime mitigation wait changed",
+                "body": _runtime_mitigation_wait_summary_line(current),
+            }
+        )
+    if _runtime_mitigation_packet_ready(previous, current):
+        events.append(
+            {
+                "type": "runtime_mitigation_packet_ready",
+                "title": "Runtime mitigation packet ready",
+                "body": _runtime_mitigation_packet_summary_line(current),
+            }
+        )
     if _edge_experiment_changed(previous, current):
         events.append(
             {
@@ -821,41 +1297,661 @@ def _collect_events(previous: dict[str, Any] | None, current: dict[str, Any]) ->
 
 
 def _render_message(current: dict[str, Any], events: list[dict[str, str]]) -> str:
-    lines = ["Trading engine stage monitor"]
-    for event in events:
-        lines.append(f"- {event['title']}: {event['body']}")
+    lines = ["트레이딩 상태 알림"]
+    if events:
+        lines.append("변화:")
+        for event in events:
+            lines.append(_event_line_ko(event, current))
+
+    risk = _risk_gate_summary(current)
+    runtime = _runtime_reopen_status_summary(current)
+    signoff = _runtime_signoff_summary(current)
+    post_unlock = _post_unlock_review_summary(current)
+    lineage = dict(current.get("lineage_sample_summary") or {})
+    edge = dict(current.get("edge_experiment_review") or {})
+    posture = dict(edge.get("edge_proof_posture") or {})
+    edge_kpis = dict(edge.get("daily_edge_kpis") or {})
+    active_sample = dict(current.get("active_lineage_sample_focus") or {})
+    active_symbol = str(active_sample.get("symbol") or "없음")
+    if active_sample.get("symbol"):
+        active_sample_line = (
+            f"{active_symbol} / {active_sample.get('last_fill_stage') or 'n/a'} / "
+            f"{float(active_sample.get('hours_open') or 0.0):.2f}h"
+        )
+    else:
+        active_sample_line = active_symbol
+    readiness = (
+        f"lineage={bool(current.get('lineage_gate_ready', False))}, "
+        f"candidate={bool(current.get('candidate_gate_ready', False))}, "
+        f"sample={bool(current.get('edge_sample_gate_ready', False))}"
+    )
+    required_reviews = list(signoff.get("required_reviews") or [])
+    signoff_line = (
+        ", ".join(_ko_signoff_code(item.get("code")) for item in required_reviews[:3])
+        if required_reviews
+        else "없음"
+    )
+    clearance_line = _ko_required_clearance_line(signoff)
+    detail_line = _ko_required_review_detail(signoff)
+    focus_detail_line = _ko_approval_template_focus_detail(signoff)
+    downside_detail_line = _ko_approval_template_downside_detail(signoff)
+    failure_mode_line = _ko_approval_template_failure_mode_detail(signoff)
+    confirm_cluster_line = _ko_confirm_loss_cluster_detail(signoff)
+    entry_timing_profile_line = _ko_entry_timing_loss_profile_detail(signoff)
+    entry_timing_priority_line = _ko_entry_timing_priority_detail(signoff)
+    mitigation_execution_plan_line = _ko_mitigation_execution_plan_detail(signoff)
+    mitigation_detail_line = _ko_approval_template_mitigation_detail(signoff)
+    mitigation_status_line = _ko_approval_template_mitigation_status_detail(signoff)
+    post_patch_line = _ko_post_patch_sample_detail(signoff)
+    mitigation_runtime_line = _ko_runtime_mitigation_action_line(current)
+    mitigation_packet_line = _ko_runtime_mitigation_packet_line(current)
+    mitigation_wait_line = _ko_runtime_mitigation_wait_line(current)
+    recommendation_line = _ko_operator_recommendation(signoff.get("operator_recommendation"))
+    decision_line = _ko_runtime_decision(signoff)
+    gate_line = _ko_runtime_reopen_gate_line(signoff)
+    preflight_line = _ko_runtime_preflight_line(current)
+    operator_signoff_line = _ko_runtime_operator_signoff_line(current)
+
     lines.extend(
         [
-            "",
-            f"stage: {current.get('stage')}",
-            _surface_summary_line(current, "dashboard_approval_strip", label="dashboard_surface"),
-            _surface_summary_line(current, "validation_approval_strip", label="validation_surface"),
-            _surface_summary_line(current, "checklist_approval_strip", label="checklist_surface"),
-            _edge_experiment_summary_line(current),
-            _edge_evolution_summary_line(current),
-            _review_followup_summary_line(current),
-            _lineage_sample_summary_line(current),
-            _lineage_closed_fill_health_summary_line(current),
-            _open_lineage_sample_summary_line(current),
-            _active_lineage_sample_focus_summary_line(current),
-            _experiment_review_target_summary_line(current, "entry_timing_review_target", label="entry_timing_review_target"),
-            _experiment_review_target_summary_line(current, "execution_style_review_target", label="execution_style_review_target"),
-            _candidate_focus_summary_line(current, "accepted", label="accepted_candidate_focus"),
-            _candidate_focus_summary_line(current, "blocked", label="blocked_candidate_focus"),
-            _readiness_gates_summary_line(current),
-            _edge_sample_stall_summary_line(current),
-            _active_lineage_sample_health_summary_line(current),
-            f"close_only_active: {current.get('close_only_active')}",
-            f"checklist_status: {current.get('checklist_status')}",
-            f"eligible_closed_trades: {current.get('eligible_closed_trades')}",
-            f"trial_runs_written: {current.get('trial_runs_written')}",
-            f"selected_trial_run_id: {current.get('selected_trial_run_id')}",
-            f"execution_degradation: {current.get('execution_degradation')}",
-            f"top_operator_action: {current.get('top_operator_action')}",
-            f"alpha_research_next_step: {current.get('alpha_research_next_step')}",
+            f"현재 단계: {current.get('stage')} / 사유={current.get('stage_reason') or 'n/a'}",
+            (
+                "승인 상태: "
+                f"대시보드={_ko_approval_value(dict(current.get('dashboard_approval_strip') or {}).get('approve_value'))}, "
+                f"검증={_ko_approval_value(dict(current.get('validation_approval_strip') or {}).get('approve_value'))}, "
+                f"체크리스트={_ko_approval_value(dict(current.get('checklist_approval_strip') or {}).get('approve_value'))}"
+            ),
+            (
+                "리스크 잠금: "
+                f"{'닫힘' if str(risk.get('risk_state') or '').upper() == 'CLOSED' else '열림'}"
+                f" / 사유={risk.get('risk_reason') or 'normal'}"
+                f" / 해제={risk.get('unlock_at') or 'n/a'}"
+            ),
+            f"재개 상태: {_ko_runtime_reopen_status(runtime.get('status'))}",
+            *([decision_line] if decision_line else []),
+            *([gate_line] if gate_line else []),
+            *([preflight_line] if preflight_line else []),
+            *([operator_signoff_line] if operator_signoff_line else []),
+            f"권장 판단: {recommendation_line}",
+            f"수동 서명: {signoff_line}",
+            *([detail_line] if detail_line else []),
+            *([focus_detail_line] if focus_detail_line else []),
+            *([downside_detail_line] if downside_detail_line else []),
+            *([failure_mode_line] if failure_mode_line else []),
+            *([confirm_cluster_line] if confirm_cluster_line else []),
+            *([entry_timing_profile_line] if entry_timing_profile_line else []),
+            *([entry_timing_priority_line] if entry_timing_priority_line else []),
+            *([mitigation_execution_plan_line] if mitigation_execution_plan_line else []),
+            *([mitigation_detail_line] if mitigation_detail_line else []),
+            *([mitigation_status_line] if mitigation_status_line else []),
+            *([post_patch_line] if post_patch_line else []),
+            *([mitigation_runtime_line] if mitigation_runtime_line else []),
+            *([mitigation_packet_line] if mitigation_packet_line else []),
+            *([mitigation_wait_line] if mitigation_wait_line else []),
+            f"해소 기준: {clearance_line}",
+            (
+                "글로벌 표본: "
+                f"{int(lineage.get('closed_trade_count') or 0)}/"
+                f"{int(lineage.get('proof_goal_closed_trades') or 0)}"
+            ),
+            (
+                "BTCUSDC 표본: "
+                f"{int(edge.get('closed_trade_count') or edge_kpis.get('closed_trade_count') or 0)}/"
+                f"{int(edge.get('edge_proof_goal_closed_trades') or 0)}"
+                f" / 상태={posture.get('state') or 'n/a'}"
+            ),
+            f"준비 게이트: {readiness}",
+            f"열린 샘플: {active_sample_line}",
+            f"다음 액션: {current.get('top_operator_action') or post_unlock.get('next_review_step') or 'n/a'}",
         ]
     )
     return "\n".join(lines)
+
+
+def _ko_approval_value(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("_", " ")
+    mapping = {
+        "runtime no go": "런타임 차단",
+        "manual review first": "수동 검토",
+        "validation/checklist no go": "체크리스트 차단",
+        "approval usable": "사용 가능",
+        "entry gate blocked": "진입 차단",
+    }
+    return mapping.get(raw, str(value or "n/a"))
+
+
+def _ko_runtime_reopen_status(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    mapping = {
+        "waiting_for_operating_lock": "운영 잠금 해제 대기",
+        "waiting_for_review_window": "검토 창 대기",
+        "manual_review_required": "수동 검토 필요",
+        "ready_to_reopen_runtime": "재개 가능",
+    }
+    return mapping.get(raw, str(value or "n/a"))
+
+
+def _ko_operator_recommendation(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    mapping = {
+        "wait_until_runtime_ready": "재개 준비 완료까지 대기",
+        "hold_runtime_reopen": "재개 보류 권장",
+        "manual_signoff_required": "수동 서명 후 판단",
+        "proceed_to_operator_signoff": "최종 서명 진행 가능",
+    }
+    return mapping.get(raw, str(value or "n/a"))
+
+
+def _ko_runtime_decision(signoff: dict[str, Any] | None) -> str:
+    decision = dict(dict(signoff or {}).get("runtime_decision") or {})
+    if not decision:
+        return ""
+    band = str(decision.get("band") or "")
+    action = str(decision.get("effective_action") or "")
+    scope = str(decision.get("allowed_reopen_scope") or "")
+    band_map = {
+        "GREY_WAIT": "대기",
+        "RED_HOLD": "보류(RED)",
+        "AMBER_CONDITIONAL": "조건부(AMBER)",
+        "GREEN_PROCEED": "진행 가능(GREEN)",
+    }
+    action_map = {
+        "wait_until_runtime_ready": "재개 대기",
+        "hold_runtime_reopen": "재개 보류",
+        "conditional_micro_live_signoff": "조건부 마이크로라이브만 검토",
+        "conditional_full_live_signoff": "조건부 풀라이브 검토",
+        "manual_signoff_required": "수동 서명 필요",
+        "proceed_to_operator_signoff": "최종 서명 진행",
+    }
+    scope_map = {
+        "none": "재개 금지",
+        "MICRO_LIVE_ONLY": "MICRO_LIVE만",
+        "MICRO_LIVE_OR_LIVE": "MICRO_LIVE 또는 LIVE",
+    }
+    return (
+        "최종 판정: "
+        f"{band_map.get(band, band or 'n/a')} / "
+        f"{action_map.get(action, action or 'n/a')} / "
+        f"범위={scope_map.get(scope, scope or 'n/a')}"
+    )
+
+
+def _ko_runtime_reopen_gate_line(signoff: dict[str, Any] | None) -> str:
+    gate = dict(dict(signoff or {}).get("runtime_reopen_gate_summary") or {})
+    if not gate:
+        return ""
+    micro = dict(gate.get("micro_live") or {})
+    full = dict(gate.get("full_live") or {})
+    return (
+        "재개 게이트: "
+        f"MICRO={micro.get('status') or 'n/a'} "
+        f"({int(micro.get('closed_trade_count') or 0)}/{int(micro.get('min_closed_trades') or 0)})"
+        f", FULL={full.get('status') or 'n/a'} "
+        f"({int(full.get('closed_trade_count') or 0)}/{int(full.get('min_closed_trades') or 0)})"
+    )
+
+
+def _ko_runtime_preflight_line(current: dict[str, Any] | None) -> str:
+    summary = dict(dict(current or {}).get("runtime_preflight_summary") or {})
+    if not summary or str(summary.get("status") or "").strip().lower() == "not_applicable":
+        return ""
+    failed_checks = list(summary.get("failed_checks") or [])
+    first_failed = dict(failed_checks[0]) if failed_checks else {}
+    line = f"마이크로라이브 사전점검: {summary.get('status') or 'n/a'}"
+    if summary.get("summary"):
+        line += f" / {summary.get('summary')}"
+    if first_failed:
+        line += f" / 첫 실패={first_failed.get('name') or 'unknown'}"
+    return line
+
+
+def _ko_runtime_operator_signoff_line(current: dict[str, Any] | None) -> str:
+    summary = dict(dict(current or {}).get("runtime_operator_signoff_summary") or {})
+    status = str(summary.get("status") or "").strip().lower()
+    if not summary or status in {"", "not_applicable"}:
+        return ""
+
+    status_map = {
+        "waiting_for_preflight": "사전점검 대기",
+        "ready_for_manual_micro_live_signoff": "MICRO_LIVE만 수동 서명 가능",
+        "ready_for_manual_full_live_signoff": "FULL_LIVE 수동 서명 가능",
+        "ready_for_operator_signoff": "최종 운영 서명 가능",
+    }
+    next_step_map = {
+        "review_required_warning_and_record_micro_live_signoff": "경고 검토 후 MICRO_LIVE 서명",
+        "review_required_warning_and_record_full_live_signoff": "경고 검토 후 FULL_LIVE 서명",
+        "record_operator_signoff": "운영 서명 기록",
+        "clear_preflight_failures_before_manual_signoff": "사전점검 실패 해소",
+    }
+    line = f"운영 서명 단계: {status_map.get(status, status)}"
+    if summary.get("allowed_scope"):
+        scope_map = {
+            "MICRO_LIVE_ONLY": "MICRO_LIVE만",
+            "MICRO_LIVE_OR_LIVE": "MICRO_LIVE 또는 FULL_LIVE",
+            "none": "재개 금지",
+        }
+        line += f" / 범위={scope_map.get(str(summary.get('allowed_scope') or ''), str(summary.get('allowed_scope') or 'n/a'))}"
+    if summary.get("first_required_review_code"):
+        line += f" / 우선 검토={_ko_signoff_code(summary.get('first_required_review_code'))}"
+    if summary.get("next_step"):
+        line += f" / 다음={next_step_map.get(str(summary.get('next_step') or ''), str(summary.get('next_step') or 'n/a'))}"
+    return line
+
+
+def _ko_signoff_code(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    mapping = {
+        "approval_template_review": "승인 템플릿 경고",
+        "execution_reconciliation_review": "실행 정합성 점검",
+        "kill_switch_review": "킬스위치 검토",
+        "portfolio_headroom_review": "포트폴리오 여유 검토",
+        "symbol_edge_thin": "BTCUSDC 표본 얇음",
+    }
+    return mapping.get(raw, str(value or "n/a"))
+
+
+def _ko_required_clearance_line(signoff: dict[str, Any] | None) -> str:
+    required_reviews = list(dict(signoff or {}).get("required_reviews") or [])
+    if not required_reviews:
+        return "없음"
+    phrases: list[str] = []
+    for item in required_reviews[:3]:
+        code = str(item.get("code") or "")
+        if code == "approval_template_review":
+            phrases.append("승인 템플릿 REVIEW 해제")
+        elif code == "execution_reconciliation_review":
+            phrases.append("실행 정합성 degraded 해제")
+        elif code == "kill_switch_review":
+            phrases.append("kill_switch_review 해제")
+        else:
+            phrases.append(_ko_signoff_code(code))
+    return ", ".join(phrases)
+
+
+def _ko_required_review_detail(signoff: dict[str, Any] | None) -> str:
+    required_reviews = list(dict(signoff or {}).get("required_reviews") or [])
+    for item in required_reviews[:3]:
+        code = str(item.get("code") or "")
+        if code != "approval_template_review":
+            continue
+        worst = str(item.get("worst_scenario") or "n/a")
+        status = str(item.get("worst_scenario_status") or "NOT_AVAILABLE")
+        reason = str(item.get("worst_scenario_reason") or "not_available")
+        return f"핵심 경고: 최악 시나리오 {worst} = {status} ({reason})"
+    return ""
+
+
+def _ko_approval_template_focus_detail(signoff: dict[str, Any] | None) -> str:
+    focus = dict(dict(signoff or {}).get("approval_template_focus") or {})
+    if not focus:
+        return ""
+    focus_symbol = str(focus.get("focus_symbol") or "n/a")
+    max_drawdown = _float(focus.get("replay_max_drawdown_r"))
+    p5 = _float(focus.get("replay_p5_r"))
+    delta_max_drawdown = _float(focus.get("approximation_gap_max_drawdown_r"))
+    return (
+        "정량 경고: "
+        f"{focus_symbol} / maxDD={max_drawdown:.4f}R / "
+        f"p5={p5:.2f}R / ΔDD={delta_max_drawdown:+.2f}R"
+    )
+
+
+def _ko_approval_template_downside_detail(signoff: dict[str, Any] | None) -> str:
+    focus = dict(dict(signoff or {}).get("approval_template_focus") or {})
+    downside = dict(focus.get("downside_profile") or {})
+    if not downside:
+        return ""
+    stop_loss_count = int(downside.get("stop_loss_count", 0) or 0)
+    trade_count = int(downside.get("trade_count", 0) or 0)
+    worst_loss_streak = int(downside.get("worst_loss_streak", 0) or 0)
+    dominant_regime = str(downside.get("dominant_regime") or "unknown")
+    top_loss_waves = list(downside.get("top_loss_waves") or [])
+    top_loss_symbols = list(downside.get("top_loss_symbols") or [])
+    confirm_share = float(downside.get("confirm_named_loss_share", 0.0) or 0.0)
+    median_held_bars = float(downside.get("median_loss_held_bars", 0.0) or 0.0)
+    top_loss = dict(top_loss_symbols[0] or {}) if top_loss_symbols else {}
+    top_loss_text = ""
+    if top_loss:
+        top_loss_text = (
+            f", 상위 손실 {str(top_loss.get('symbol') or 'UNKNOWN')} "
+            f"{float(top_loss.get('negative_r', 0.0) or 0.0):.2f}R"
+        )
+    wave_text = ""
+    if top_loss_waves:
+        wave = dict(top_loss_waves[0] or {})
+        wave_text = f", 손실 파동 {int(wave.get('loss_trade_count', 0) or 0)}건"
+    return (
+        "구조 경고: "
+        f"{dominant_regime} regime, stop_loss {stop_loss_count}/{trade_count}, "
+        f"confirm 손실 {confirm_share:.0%}, "
+        f"손실 중앙 보유 {median_held_bars:.0f} bars, "
+        f"최대 연속 손실 {worst_loss_streak}회"
+        f"{wave_text}{top_loss_text}"
+    )
+
+
+def _ko_approval_template_failure_mode_detail(signoff: dict[str, Any] | None) -> str:
+    focus = dict(dict(signoff or {}).get("approval_template_focus") or {})
+    downside = dict(focus.get("downside_profile") or {})
+    mode = str(downside.get("primary_failure_mode") or "")
+    if not mode:
+        return ""
+    mapping = {
+        "range_confirm_entry_loss_wave": "주원인: range 구간 confirm-entry + 장기 보유 손절 + 동시 손실 파동",
+        "range_late_entry_loss_wave": "주원인: range 구간 늦은 진입 + 오래 끄는 손절 + 동시 손실 파동",
+        "range_long_hold_stopouts": "주원인: range 구간 오래 끄는 손절 누적",
+        "clustered_stop_loss_wave": "주원인: 같은 파동에서 stop-loss가 동시 다발로 발생",
+        "stop_loss_heavy_distribution": "주원인: 최악 시나리오에서 stop-loss 비중이 과도함",
+        "general_replay_drawdown": "주원인: worst-case replay 손실 분포가 아직 과도함",
+    }
+    return mapping.get(mode, f"주원인: {mode}")
+
+
+def _ko_confirm_loss_cluster_detail(signoff: dict[str, Any] | None) -> str:
+    focus = dict(dict(signoff or {}).get("approval_template_focus") or {})
+    cluster = dict(focus.get("confirm_loss_cluster_summary") or {})
+    if not cluster:
+        return ""
+    top_symbols = list(cluster.get("top_symbols") or [])
+    top_symbol_labels = "/".join(
+        str(item.get("symbol") or "UNKNOWN")
+        for item in top_symbols[:3]
+    )
+    top_text = f", 상위 심볼 {top_symbol_labels}" if top_symbol_labels else ""
+    top_waves = list(cluster.get("top_waves") or [])
+    wave = dict(top_waves[0] or {}) if top_waves else {}
+    wave_text = ""
+    if wave:
+        wave_text = f", confirm 파동 {int(wave.get('loss_trade_count', 0) or 0)}건"
+    held_bar_bands = dict(cluster.get("held_bar_bands") or {})
+    long_hold_text = ""
+    if held_bar_bands:
+        long_hold_text = f", >1000 bars {int(held_bar_bands.get('over_1000', 0) or 0)}건"
+    return (
+        "confirm 손실군: "
+        f"{int(cluster.get('loss_trade_count', 0) or 0)}건, "
+        f"중앙 보유 {float(cluster.get('median_held_bars', 0.0) or 0.0):.0f} bars, "
+        f"p75 보유 {int(cluster.get('p75_held_bars', 0) or 0)} bars"
+        f"{long_hold_text}{wave_text}{top_text}"
+    )
+
+
+def _ko_entry_timing_loss_profile_detail(signoff: dict[str, Any] | None) -> str:
+    focus = dict(dict(signoff or {}).get("approval_template_focus") or {})
+    profile = dict(focus.get("entry_timing_loss_profile") or {})
+    if not profile:
+        return ""
+    confirm = dict(profile.get("confirm") or {})
+    non_confirm = dict(profile.get("non_confirm") or {})
+    return (
+        "entry timing 비교: "
+        f"confirm {int(confirm.get('loss_trade_count', 0) or 0)}건/"
+        f"{float(confirm.get('negative_r', 0.0) or 0.0):.2f}R, "
+        f"non-confirm {int(non_confirm.get('loss_trade_count', 0) or 0)}건/"
+        f"{float(non_confirm.get('negative_r', 0.0) or 0.0):.2f}R, "
+        f"confirm 비중 {float(profile.get('confirm_loss_share', 0.0) or 0.0):.0%}, "
+        f"보유 격차 {float(profile.get('held_bar_gap_confirm_minus_non_confirm', 0.0) or 0.0):+.0f} bars"
+    )
+
+
+def _ko_entry_timing_priority_detail(signoff: dict[str, Any] | None) -> str:
+    focus = dict(dict(signoff or {}).get("approval_template_focus") or {})
+    priority = dict(focus.get("entry_timing_priority_summary") or {})
+    if not priority:
+        return ""
+    code_map = {
+        "confirm_entry_tighten": "confirm 진입 타이밍 축소",
+        "non_confirm_fail_fast": "non-confirm fail-fast",
+        "confirm_fail_fast": "confirm fail-fast",
+        "loss_wave_cluster": "loss wave cluster",
+    }
+    primary_code = str(priority.get("primary_focus_code") or "")
+    secondary_code = str(priority.get("secondary_focus_code") or "")
+    return (
+        "진입 우선순위: "
+        f"1) {code_map.get(primary_code, primary_code or '추가 검토')}, "
+        f"2) {code_map.get(secondary_code, secondary_code or '추가 검토')}"
+    )
+
+
+def _ko_mitigation_execution_plan_detail(signoff: dict[str, Any] | None) -> str:
+    focus = dict(dict(signoff or {}).get("approval_template_focus") or {})
+    plan = dict(focus.get("mitigation_execution_plan") or {})
+    if not plan:
+        return ""
+    status_map = {
+        "actionable_now": "즉시 가능",
+        "candidate_review_pending": "후보 대기",
+        "deferred_by_experiment_sequence": "순서상 보류",
+        "manual_operator_review": "수동 검토",
+    }
+    primary_label = str(plan.get("primary_focus_label") or "추가 검토")
+    primary_status = status_map.get(str(plan.get("primary_status") or ""), str(plan.get("primary_status") or "미정"))
+    secondary_label = str(plan.get("secondary_focus_label") or "")
+    secondary_status = status_map.get(str(plan.get("secondary_status") or ""), str(plan.get("secondary_status") or "미정"))
+    text = f"실행 순서: 1) {primary_label} ({primary_status})"
+    if secondary_label:
+        text += f", 2) {secondary_label} ({secondary_status})"
+    return text
+
+
+def _ko_post_patch_sample_detail(signoff: dict[str, Any] | None) -> str:
+    focus = dict(dict(signoff or {}).get("approval_template_focus") or {})
+    post_patch = dict(focus.get("post_patch_sample_summary") or {})
+    if not post_patch:
+        return ""
+    top_symbols = "/".join(str(item.get("symbol") or "UNKNOWN") for item in list(post_patch.get("top_symbols") or [])[:3])
+    return (
+        "패치 후 표본: "
+        f"{int(post_patch.get('closed_trade_count', 0) or 0)}/"
+        f"{int(post_patch.get('target_closed_trades', 0) or 0)}"
+        f", stop_loss {float(post_patch.get('stop_loss_share', 0.0) or 0.0):.0%}"
+        f", confirm 손실 {float(post_patch.get('confirm_named_loss_share', 0.0) or 0.0):.0%}"
+        f", 중앙 보유 {float(post_patch.get('median_held_bars', 0.0) or 0.0):.0f} bars"
+        + (f", 상위 심볼 {top_symbols}" if top_symbols else "")
+    )
+
+
+def _ko_approval_template_mitigation_detail(signoff: dict[str, Any] | None) -> str:
+    focus = dict(dict(signoff or {}).get("approval_template_focus") or {})
+    downside = dict(focus.get("downside_profile") or {})
+    items = list(downside.get("mitigation_focus") or [])
+    if not items:
+        return ""
+    labels: list[str] = []
+    mapping = {
+        "range_entry_timing_review": "range 진입 타이밍 재검토",
+        "shadow_fail_fast_review": "fail-fast shadow review",
+        "loss_wave_cluster_review": "loss wave cluster 검토",
+    }
+    for item in items[:3]:
+        code = str(item.get("code") or "")
+        labels.append(mapping.get(code, code or "추가 검토"))
+    return "권장 대응: " + ", ".join(labels)
+
+
+def _ko_approval_template_mitigation_status_detail(signoff: dict[str, Any] | None) -> str:
+    focus = dict(dict(signoff or {}).get("approval_template_focus") or {})
+    review_summary = dict(focus.get("mitigation_review_summary") or {})
+    items = list(review_summary.get("items") or [])
+    if not items:
+        return ""
+    code_mapping = {
+        "range_entry_timing_review": "entry timing split",
+        "shadow_fail_fast_review": "fail-fast shadow",
+        "loss_wave_cluster_review": "loss wave 검토",
+    }
+    status_mapping = {
+        "actionable_now": "즉시 가능",
+        "candidate_review_pending": "후보 대기",
+        "deferred_by_experiment_sequence": "순서상 보류",
+        "research_only": "연구 전용",
+        "manual_operator_review": "수동 검토",
+    }
+    labels: list[str] = []
+    for item in items[:3]:
+        code = str(item.get("code") or "")
+        status = str(item.get("status") or "")
+        labels.append(
+            f"{code_mapping.get(code, code or '추가 검토')}="
+            f"{status_mapping.get(status, status or '미정')}"
+        )
+    return "대응 상태: " + ", ".join(labels)
+
+
+def _ko_runtime_mitigation_action_line(current: dict[str, Any] | None) -> str:
+    summary = _runtime_mitigation_summary(current)
+    if not bool(summary.get("available", False)):
+        return ""
+    status = str(summary.get("primary_action_status") or "")
+    code = str(summary.get("primary_action_code") or "")
+    command = str(summary.get("primary_action_command") or "")
+    constraint = str(summary.get("primary_action_constraint") or "")
+    label_map = {
+        "range_entry_timing_review": "entry timing split",
+        "shadow_fail_fast_review": "fail-fast shadow",
+        "loss_wave_cluster_review": "loss wave 검토",
+    }
+    status_map = {
+        "actionable_now": "지금 실행 가능",
+        "candidate_review_pending": "후보 뜰 때 실행",
+        "deferred_by_experiment_sequence": "현재 순서상 보류",
+        "manual_operator_review": "수동 검토",
+        "research_only": "연구 전용",
+    }
+    base = f"실행 포커스: {label_map.get(code, code or '추가 검토')} / {status_map.get(status, status or '미정')}"
+    if status == "actionable_now" and command:
+        return f"{base} / 명령={command}"
+    if constraint:
+        return f"{base} / 제약={constraint}"
+    return base
+
+
+def _ko_runtime_mitigation_packet_line(current: dict[str, Any] | None) -> str:
+    summary = _runtime_mitigation_packet_summary(current)
+    if not bool(summary.get("available", False)):
+        return ""
+    status = str(summary.get("status") or "")
+    if status == "inactive":
+        return ""
+    if status == "waiting_for_actionable_mitigation":
+        return (
+            f"실행 패킷: {summary.get('focus_label') or '추가 검토'} 대기"
+            f" / 상태={summary.get('primary_action_status') or 'none'}"
+            f" / 제약={summary.get('wait_constraint') or 'none'}"
+        )
+    base = (
+        f"실행 패킷: {status}"
+        f" / 포커스={summary.get('focus_label') or 'none'}"
+        f" / 대상={summary.get('target_symbol') or 'none'}"
+        f" / variant={summary.get('target_variant') or 'none'}"
+    )
+    if summary.get("packet_id"):
+        base = f"{base} / packet={summary.get('packet_id')}"
+    return base
+
+
+def _ko_runtime_mitigation_wait_line(current: dict[str, Any] | None) -> str:
+    summary = _runtime_mitigation_wait_summary(current)
+    if not bool(summary.get("available", False)):
+        return ""
+    status = str(summary.get("status") or "")
+    session_name = str(summary.get("current_session") or "unknown")
+    allowed_sessions = ",".join(str(item) for item in list(summary.get("allowed_sessions") or []) if str(item).strip())
+    candidate_symbol = str(summary.get("candidate_symbol") or "")
+    candidate_family = str(summary.get("candidate_family") or "")
+    candidate_text = ""
+    if candidate_symbol or candidate_family:
+        candidate_text = f" / 최근 후보={candidate_symbol or 'none'}:{candidate_family or 'none'}"
+    reason_text = ""
+    if summary.get("candidate_reason"):
+        reason_text = f" / 사유={summary.get('candidate_reason')}"
+    watch_text = ""
+    if summary.get("watch_tick_status"):
+        watch_text = f" / watcher={summary.get('watch_tick_status')}"
+    return (
+        f"대기 사유: {summary.get('focus_label') or '추가 검토'} / "
+        f"{status or 'inactive'} / 세션={session_name} / 허용={allowed_sessions or 'none'} / 다음 트리거={summary.get('next_trigger') or 'none'}"
+        f"{candidate_text}{reason_text}{watch_text}"
+    )
+
+
+def _event_line_ko(event: dict[str, str], current: dict[str, Any]) -> str:
+    event_type = str(event.get("type") or "")
+    titles = {
+        "initial_snapshot": "초기 상태 수집",
+        "stage_changed": "단계 변경",
+        "trial_runs_started": "trial 생성 시작",
+        "winner_selected": "lineage winner 선택",
+        "lineage_gate_ready": "lineage gate 준비 완료",
+        "candidate_gate_ready": "candidate gate 준비 완료",
+        "edge_sample_gate_ready": "표본 gate 준비 완료",
+        "all_readiness_gates_ready": "전체 readiness 준비 완료",
+        "edge_sample_stall": "표본 누적 정체",
+        "active_lineage_sample_stall": "열린 샘플 정체",
+        "execution_manual_review": "실행 수동 검토 필요",
+        "risk_gate_changed": "리스크 잠금 상태 변경",
+        "risk_gate_cleared": "리스크 잠금 해제",
+        "post_unlock_review_ready": "잠금 해제 후 검토 창 열림",
+        "post_unlock_bundle_changed": "잠금 해제 후 자동 검토 결과 갱신",
+        "runtime_reopen_ready": "런타임 재개 가능",
+        "runtime_reopen_status_changed": "런타임 재개 상태 변경",
+        "runtime_operator_signoff_ready": "운영 서명 가능",
+        "runtime_operator_signoff_changed": "운영 서명 단계 변경",
+        "runtime_mitigation_changed": "대응 상태 변경",
+        "runtime_mitigation_actionable": "대응 실행 가능",
+        "runtime_mitigation_packet_changed": "대응 패킷 상태 변경",
+        "runtime_mitigation_packet_ready": "대응 패킷 준비 완료",
+        "runtime_mitigation_wait_changed": "대응 대기 사유 변경",
+        "lineage_sample_progressed": "글로벌 표본 증가",
+        "first_lineage_closed_fill_observed": "첫 lineage closed 관측",
+        "open_lineage_sample_count_changed": "열린 샘플 수 변경",
+        "active_lineage_sample_progressed": "열린 샘플 진행",
+        "blocked_candidate_focus_changed": "차단 후보 변경",
+    }
+    label = titles.get(event_type, str(event.get("title") or event_type or "상태 변경"))
+    if event_type == "lineage_sample_progressed":
+        lineage = dict(current.get("lineage_sample_summary") or {})
+        return f"- {label}: {int(lineage.get('closed_trade_count') or 0)}/{int(lineage.get('proof_goal_closed_trades') or 0)}"
+    if event_type in {"risk_gate_changed", "risk_gate_cleared"}:
+        risk = _risk_gate_summary(current)
+        return f"- {label}: {risk.get('risk_reason') or 'normal'} / 해제={risk.get('unlock_at') or 'n/a'}"
+    if event_type in {"runtime_reopen_ready", "runtime_reopen_status_changed"}:
+        runtime = _runtime_reopen_status_summary(current)
+        return f"- {label}: {_ko_runtime_reopen_status(runtime.get('status'))}"
+    if event_type in {"runtime_operator_signoff_ready", "runtime_operator_signoff_changed"}:
+        return f"- {label}: {_ko_runtime_operator_signoff_line(current)}"
+    if event_type in {"runtime_mitigation_changed", "runtime_mitigation_actionable"}:
+        mitigation = _runtime_mitigation_summary(current)
+        line = (
+            f"- {label}: {mitigation.get('primary_action_code') or 'none'} / "
+            f"{mitigation.get('primary_action_status') or 'none'}"
+        )
+        if event_type == "runtime_mitigation_actionable" and mitigation.get("primary_action_command"):
+            line = f"{line} / cmd={mitigation.get('primary_action_command')}"
+        return line
+    if event_type in {"runtime_mitigation_packet_changed", "runtime_mitigation_packet_ready"}:
+        packet = _runtime_mitigation_packet_summary(current)
+        line = (
+            f"- {label}: {packet.get('status') or 'inactive'} / "
+            f"{packet.get('target_symbol') or 'none'}"
+        )
+        if packet.get("packet_id"):
+            line = f"{line} / packet={packet.get('packet_id')}"
+        return line
+    if event_type == "runtime_mitigation_wait_changed":
+        wait = _runtime_mitigation_wait_summary(current)
+        return (
+            f"- {label}: {wait.get('status') or 'inactive'} / "
+            f"{wait.get('candidate_symbol') or 'none'} / "
+            f"{wait.get('next_trigger') or 'none'}"
+        )
+    if event_type in {"active_lineage_sample_progressed", "open_lineage_sample_count_changed"}:
+        active_sample = dict(current.get("active_lineage_sample_focus") or {})
+        symbol = str(active_sample.get("symbol") or "없음")
+        stage = str(active_sample.get("last_fill_stage") or "n/a")
+        return f"- {label}: {symbol} / {stage}"
+    return f"- {label}"
 
 
 def _post_discord(webhook_url: str, message: str) -> dict[str, Any]:

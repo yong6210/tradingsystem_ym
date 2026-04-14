@@ -2675,3 +2675,4 @@ def test_deployment_approval_template_playbook_mapping_pass_case() -> None:
     assert payload["playbook_code"] == "go_approval_template_aligned"
     assert payload["playbook_action"] == "proceed_with_configured_rollout"
     assert payload["playbook_message"].startswith("GO:")
+    assert payload["threshold_lineage_winner_run_id"] == "trial_threshold_01"

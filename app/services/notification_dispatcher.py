@@ -45,6 +45,7 @@ class NotificationDispatcher:
     """Dispatches operational alerts to external channels."""
 
     SUPPORTED_CHANNELS = {"telegram", "discord", "push", "system"}
+    _DISCORD_MAX_MESSAGE_CHARS = 1800
     _circuit_states: ClassVar[dict[str, _CircuitState]] = {}
     _circuit_lock: ClassVar[Lock] = Lock()
 
@@ -201,13 +202,22 @@ class NotificationDispatcher:
                 latency_ms=0.0,
             ).to_dict()
 
-        payload = {"content": message}
+        payload = {"content": self._discord_safe_message(message)}
         return self._post_json(
             channel="discord",
             url=webhook_url,
             json_payload=payload,
             target="discord:webhook",
         )
+
+    @classmethod
+    def _discord_safe_message(cls, message: str) -> str:
+        content = str(message or "")
+        if len(content) <= cls._DISCORD_MAX_MESSAGE_CHARS:
+            return content
+        suffix = "\n...[truncated]"
+        budget = max(0, cls._DISCORD_MAX_MESSAGE_CHARS - len(suffix))
+        return content[:budget].rstrip() + suffix
 
     def _send_push(self, *, alert_type: str, symbol: str, message: str, payload: dict[str, Any]) -> dict[str, Any]:
         webhook_url = self.settings.alert_push_webhook_url.strip()

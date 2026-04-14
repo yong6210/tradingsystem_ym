@@ -54,6 +54,27 @@ class StrategyV2PboDsrMetricsService:
             return None
 
     @staticmethod
+    def _selected_trial_priority(row: ValidationTrialRun) -> tuple[int, int, float, str]:
+        payload = dict(row.payload or {})
+        writer_source = str(payload.get("writer_source") or payload.get("source") or "")
+        selection_rule = str(row.selection_rule or "")
+        if (
+            writer_source in StrategyV2PboDsrMetricsService._TRUE_THRESHOLD_WRITER_SOURCES
+            or selection_rule.startswith(StrategyV2PboDsrMetricsService._TRUE_THRESHOLD_SELECTION_RULE_PREFIXES)
+        ):
+            lineage_priority = 0
+        elif (
+            writer_source in StrategyV2PboDsrMetricsService._RUNTIME_PROXY_WRITER_SOURCES
+            or selection_rule.startswith(StrategyV2PboDsrMetricsService._RUNTIME_PROXY_SELECTION_RULE_PREFIXES)
+        ):
+            lineage_priority = 1
+        else:
+            lineage_priority = 2
+        selection_rank = row.selection_rank if row.selection_rank is not None else 999999
+        out_of_sample = float(row.out_of_sample_metric) if row.out_of_sample_metric is not None else -999999.0
+        return (lineage_priority, selection_rank, -out_of_sample, str(row.trial_run_id))
+
+    @staticmethod
     def _selected_trial(trial_runs: list[ValidationTrialRun]) -> ValidationTrialRun | None:
         if not trial_runs:
             return None
@@ -62,23 +83,11 @@ class StrategyV2PboDsrMetricsService:
 
         selected = [row for row in trial_runs if bool(row.selected_flag)]
         if selected:
-            selected.sort(
-                key=lambda row: (
-                    row.selection_rank if row.selection_rank is not None else 999999,
-                    -metric_or_floor(row.out_of_sample_metric),
-                    str(row.trial_run_id),
-                )
-            )
+            selected.sort(key=StrategyV2PboDsrMetricsService._selected_trial_priority)
             return selected[0]
         ranked = [row for row in trial_runs if row.selection_rank is not None]
         if ranked:
-            ranked.sort(
-                key=lambda row: (
-                    row.selection_rank if row.selection_rank is not None else 999999,
-                    -metric_or_floor(row.out_of_sample_metric),
-                    str(row.trial_run_id),
-                )
-            )
+            ranked.sort(key=StrategyV2PboDsrMetricsService._selected_trial_priority)
             return ranked[0]
         ordered = sorted(
             trial_runs,

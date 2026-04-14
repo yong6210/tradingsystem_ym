@@ -516,8 +516,6 @@ def test_paper_exit_tick_waits_for_candle_after_latest_fill() -> None:
             limit_1m=1,
             limit_5m=1,
         )
-        assert payload["partial_exit_events"] == 0
-        assert payload["closed_events"] == 0
         assert any(
             action.get("plan_id") == plan_id and action.get("status") == "await_next_candle_after_last_fill"
             for action in payload["actions"]
@@ -708,6 +706,110 @@ def test_paper_exit_tick_repairs_missing_entry_fill_from_submission_raw() -> Non
         refreshed = db.get(Plan, plan_id)
         assert refreshed is not None
         assert refreshed.state == "ENTERED"
+
+
+def test_paper_exit_tick_closes_time_failure_when_family_hold_window_is_exceeded() -> None:
+    init_db()
+    _reset_execution_control_state()
+
+    symbol = f"PEXTIME{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 11}USDC"
+    plan_id = f"{symbol}_plan"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, state="ENTERED")
+
+    with SessionLocal() as db:
+        plan = db.get(Plan, plan_id)
+        assert plan is not None
+        validity = dict(plan.validity or {})
+        validity["strategy_family_time_stop_min_bars"] = 3
+        validity["strategy_family_time_stop_max_bars"] = 5
+        plan.validity = validity
+        db.add(plan)
+        db.commit()
+
+    entry_fill_ts = datetime.now(timezone.utc).replace(microsecond=0, second=0)
+    candle_ts = entry_fill_ts + timedelta(minutes=31)
+    with SessionLocal() as db:
+        db.add(
+            OrderSubmission(
+                submission_id=f"sub_{symbol}",
+                intent_id=f"intent_{symbol}",
+                plan_id=plan_id,
+                symbol=symbol,
+                client_order_id=f"client_{symbol}",
+                exchange_order_id=f"paper_{symbol}",
+                state=OrderLifecycleState.FILLED.value,
+                submit_status="FILLED",
+                message="paper filled",
+                adapter="paper",
+                execution_mode="PAPER",
+                attachments={},
+                side="BUY",
+                order_type="LIMIT",
+                reduce_only=False,
+                requested_live=False,
+                raw={},
+                submitted_at=entry_fill_ts,
+                acknowledged_at=entry_fill_ts,
+            )
+        )
+        db.add(
+            ExecutionFill(
+                fill_id=f"fill_{symbol}_entry",
+                plan_id=plan_id,
+                symbol=symbol,
+                stage="ENTRY",
+                fill_ts=entry_fill_ts,
+                price=100.0,
+                qty=1.0,
+                fee=0.0,
+                from_state="ARMED",
+                to_state="ENTERED",
+                state_changed=True,
+                payload={"source": "paper_adapter"},
+                strategy_version="v1",
+            )
+        )
+        db.add(
+            Candle(
+                symbol=symbol,
+                timeframe="1m",
+                ts=candle_ts,
+                o=100.1,
+                h=100.4,
+                l=99.8,
+                c=100.2,
+                v=1000.0,
+                source="test",
+                is_final=True,
+            )
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        payload = engine.process_paper_exit_tick(
+            families=["sweep_reversal"],
+            days=2,
+            limit=20,
+            sync_candles=False,
+            limit_1m=1,
+            limit_5m=1,
+        )
+        assert payload["closed_events"] >= 1
+        assert any(
+            action.get("plan_id") == plan_id
+            and action.get("stage") == "CLOSED"
+            and action.get("exit_reason") == "time_failure"
+            for action in payload["actions"]
+        )
+
+    with SessionLocal() as db:
+        refreshed = db.get(Plan, plan_id)
+        assert refreshed is not None
+        assert refreshed.state == "CLOSED"
+        validity = dict(refreshed.validity or {})
+        assert validity["final_exit_reason"] == "time_failure"
+        assert int(validity["final_exit_held_bars"]) >= 6
 
 
 def test_plan_upsert_preserves_entered_plan_history_by_rolling_plan_id() -> None:

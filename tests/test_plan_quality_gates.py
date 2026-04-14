@@ -323,7 +323,7 @@ def test_mixed_classifier_blocks_candidate(monkeypatch) -> None:
     assert ranked == []
 
 
-def test_rejection_tentative_forces_confirm_only(monkeypatch) -> None:
+def test_rejection_tentative_range_reversal_is_tightened_out(monkeypatch) -> None:
     generator = PlanGenerator()
     old_mode = generator.settings.strategy_mode
     generator.settings.strategy_mode = "A_PLUS_B"
@@ -379,18 +379,7 @@ def test_rejection_tentative_forces_confirm_only(monkeypatch) -> None:
 
     try:
         ranked = generator.generate(symbol="BTCUSDC", zones=zones, context=context)
-        assert ranked
-        assert ranked[0].plan.entry_model == "CONFIRM"
-        validity = ranked[0].plan.validity
-        assert validity["reaction_classification"] == "rejection_tentative"
-        assert validity["reaction_classifier_available"] is True
-        assert validity["reaction_evidence"] == {
-            "structure_shift_hint": "rejection_bias",
-            "reclaim_speed_bucket": "moderate",
-            "close_outside_bucket": "single",
-            "retest_status": "held",
-            "efficiency_state": "inefficiency_created",
-        }
+        assert ranked == []
     finally:
         generator.settings.strategy_mode = old_mode
 

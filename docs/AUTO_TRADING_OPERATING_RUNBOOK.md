@@ -267,6 +267,12 @@ family 리뷰:
 
 ## 4. 세션 시작 전 점검
 ### 4.1. 프로세스/헬스
+기본 API 런타임은 LaunchAgent `com.yumin.trading.api`가 유지한다. 상태 확인:
+
+```bash
+launchctl print gui/$(id -u)/com.yumin.trading.api | sed -n '1,80p'
+```
+
 ```bash
 curl -s "http://127.0.0.1:8000/health/live" | jq
 curl -s "http://127.0.0.1:8000/health/ready" | jq
@@ -502,6 +508,10 @@ curl -s -X POST "http://127.0.0.1:8000/execution/submit" \
 규칙:
 - `MICRO_LIVE` 전까지는 기본 `live=false`
 - `live=true`는 `BINANCE_TRADE_LIVE_ENABLED=true`와 approval/rollout/safety 조건이 모두 맞을 때만 사용
+- `MICRO_LIVE` 진입 전 확인 기준은 `runtime_decision_band == AMBER_CONDITIONAL`, `runtime_effective_action == conditional_micro_live_signoff`, `runtime_allowed_reopen_scope == MICRO_LIVE_ONLY`다.
+- `MICRO_LIVE` 직전 surface는 `runtime_preflight_summary.status == READY_FOR_MICRO_LIVE`와 `runtime_operator_signoff_summary.status == ready_for_manual_micro_live_signoff`를 같이 보여줘야 한다. 이 단계 의미는 “기술 gate는 통과했고, 운영자가 MICRO_LIVE만 수동 서명할 수 있다”이다.
+- `MICRO_LIVE`는 `post_patch_closed_trade_count >= 50`, `post_patch_sample_summary.replay_max_drawdown_r < 5.0`, `post_patch_sample_summary.replay_p5_r >= -1.05`, `post_patch_sample_summary.stop_loss_share < 0.35`, `post_patch_sample_summary.worst_loss_streak < 5`를 동시에 만족할 때만 검토한다.
+- `FULL LIVE` 확대는 별도 gate다. `runtime_effective_action == conditional_full_live_signoff` 또는 `proceed_to_operator_signoff`, `runtime_allowed_reopen_scope == MICRO_LIVE_OR_LIVE`, `runtime_operator_signoff_summary.status == ready_for_manual_full_live_signoff` 또는 `ready_for_operator_signoff`를 확인하고, `post_patch_closed_trade_count >= 80`, `post_patch_sample_summary.replay_p5_r >= -1.0`까지 충족될 때만 검토한다.
 
 ## 7. 제출 후 모니터링
 ### 7.1. operator dashboard
@@ -580,3 +590,6 @@ curl -s -X POST "http://127.0.0.1:8000/execution/control/kill-switch" \
 - 신규 진입은 `approval -> intent -> submit` 순서를 건너뛰지 않는다.
 - mismatch, stale stream, missing stop 같은 runtime 이상은 “나중에 보기”가 아니라 즉시 lock/close-only 판단 대상이다.
 - live 문제를 paper에서 재현 가능하게 유지하는 것이 운영 안정성의 핵심이다.
+- `legacy` 전체 replay는 경고 근거로 유지하되, `MICRO_LIVE` / `FULL LIVE` 재개 승인은 `post-patch rolling cohort` 기준으로 분리해서 본다.
+- `MICRO_LIVE`는 `post-patch 50+`의 현실적 문턱으로 먼저 연다. `FULL LIVE`는 `post-patch 80+`와 더 엄격한 `p5 >= -1.0` 기준을 별도로 충족해야 한다.
+- `MICRO_LIVE_ONLY`와 `MICRO_LIVE_OR_LIVE`는 같은 단계가 아니다. 전자는 검증용 제한 재개고, 후자는 추가 운영 확대를 검토할 수 있다는 뜻이다.

@@ -1,9 +1,49 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
+from app.core.enums import PlanState
+from app.db.models import Plan
 from app.db.session import SessionLocal, init_db
+from app.services import strategy_engine as strategy_engine_module
+from app.services.operating_lock import OperatingLockSnapshot
 from app.services.strategy_engine import StrategyEngine
+
+
+def _closed_plan(*, plan_id: str, closed_ts: datetime, realized_r: float) -> Plan:
+    return Plan(
+        plan_id=plan_id,
+        zone_id=f"{plan_id}_zone",
+        symbol="BTCUSDC",
+        timeframe="5m",
+        direction="long",
+        entry_model="CONFIRM",
+        entry_price=100.0,
+        entry_condition="touch_then_confirm",
+        sl=98.5,
+        tp1=101.0,
+        tp2=102.0,
+        tp3=103.0,
+        split={"tp1": 0.4, "tp2": 0.4, "runner": 0.2},
+        rr_min=1.4,
+        rr_base=2.0,
+        rr_opt=3.0,
+        ev=0.22,
+        cost_est=0.05,
+        confidence=0.75,
+        validity={
+            "strategy_grade": "A",
+            "final_exit_ts": closed_ts.isoformat(),
+            "final_exit_realized_r": realized_r,
+            "final_exit_reason": "stop_loss" if realized_r < 0 else "target_tp2",
+        },
+        state=PlanState.CLOSED.value,
+        valid_from=closed_ts - timedelta(hours=1),
+        valid_until=closed_ts + timedelta(hours=2),
+        strategy_version="v2",
+    )
 
 
 def test_sync_universe_from_binance_with_mocked_market_data() -> None:
@@ -114,6 +154,175 @@ def test_send_test_alert_surfaces_playbook_mapping_in_response() -> None:
         assert result["approval_playbook_code"] == "manual_review_test_gate"
         assert result["approval_playbook_action"] == "run_manual_validation_alert_drill"
         assert result["approval_playbook_message"].startswith("MANUAL_REVIEW:")
+
+
+def test_operating_lock_snapshot_ignores_paper_only_closed_plans() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        now = datetime(2026, 4, 8, 12, 30, tzinfo=timezone.utc)
+        paper_plan = _closed_plan(plan_id="paper_plan", closed_ts=now - timedelta(minutes=20), realized_r=-1.2)
+        live_plan = _closed_plan(plan_id="live_plan", closed_ts=now - timedelta(minutes=10), realized_r=-1.1)
+
+        engine.plan_repo.list_recent_global = lambda **kwargs: [paper_plan, live_plan]  # type: ignore[assignment]
+        engine.submission_repo.list_recent = lambda **kwargs: [  # type: ignore[assignment]
+            SimpleNamespace(plan_id="live_plan", requested_live=True, execution_mode="MICRO_LIVE"),
+            SimpleNamespace(plan_id="paper_plan", requested_live=False, execution_mode="PAPER"),
+        ]
+
+        captured: dict[str, list[str]] = {}
+
+        def _fake_evaluate(*, plans, now=None):
+            captured["plan_ids"] = [plan.plan_id for plan in plans]
+            return OperatingLockSnapshot(
+                state="OPEN",  # type: ignore[arg-type]
+                active=False,
+                enforced=True,
+                reason="normal",
+                scope="none",
+                strategy_mode="A_ONLY",
+                unlock_at=None,
+                current_session={},
+                daily_stats={},
+                session_stats={},
+            )
+
+        engine.operating_lock.evaluate = _fake_evaluate  # type: ignore[assignment]
+
+        engine._operating_lock_snapshot(now=now)
+
+        assert captured["plan_ids"] == ["live_plan"]
+
+
+def test_operational_checklist_uses_read_only_validation_runtime() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        captured: dict[str, object] = {}
+
+        def _fake_recompute_learning(symbol: str, *, persist_runtime_validation_artifacts: bool = True) -> dict:
+            captured["symbol"] = symbol
+            captured["persist_runtime_validation_artifacts"] = persist_runtime_validation_artifacts
+            return {"execution_quality": {"status": "ok"}}
+
+        engine.recompute_learning = _fake_recompute_learning  # type: ignore[assignment]
+        engine.alert_metrics_report = lambda **kwargs: {}  # type: ignore[assignment]
+        engine.outbox_status = lambda: {}  # type: ignore[assignment]
+        engine.metrics = lambda **kwargs: {}  # type: ignore[assignment]
+        engine.portfolio_budget_report = lambda **kwargs: {}  # type: ignore[assignment]
+        engine.operational_checklist_service.generate = lambda **kwargs: kwargs  # type: ignore[assignment]
+
+        payload = engine.operational_checklist(
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            limit=20,
+            days=30,
+            write_report=False,
+        )
+
+        assert captured["symbol"] == "BTCUSDC"
+        assert captured["persist_runtime_validation_artifacts"] is False
+        assert payload["validation_payload"]["execution_quality"]["status"] == "ok"
+
+
+def test_recompute_learning_read_only_runtime_keeps_global_lineage_persistence_disabled() -> None:
+    class _StopAfterGlobalFallback(RuntimeError):
+        pass
+
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        captured: dict[str, object] = {}
+
+        engine.outcome_repo.list_recent = lambda symbol, days=180: []  # type: ignore[assignment]
+        engine.zone_repo.list_all = lambda symbol, timeframe="15m": []  # type: ignore[assignment]
+        engine.metrics_repo.upsert = lambda **kwargs: None  # type: ignore[assignment]
+        engine.backtest.walk_forward = lambda *args, **kwargs: {}  # type: ignore[assignment]
+        engine.backtest.monte_carlo = lambda *args, **kwargs: {}  # type: ignore[assignment]
+        engine.current_context = lambda symbol: SimpleNamespace()  # type: ignore[assignment]
+        engine.feature_importance = lambda **kwargs: {}  # type: ignore[assignment]
+        engine.feature_calibration = lambda **kwargs: {}  # type: ignore[assignment]
+        engine.plan_repo.list_recent = lambda symbol, days=180: []  # type: ignore[assignment]
+        engine.plan_repo.list_recent_global = lambda **kwargs: []  # type: ignore[assignment]
+        engine.market_data.recent_candles = lambda *args, **kwargs: []  # type: ignore[assignment]
+        engine.strategy_v2_validation.generate = lambda **kwargs: {}  # type: ignore[assignment]
+        engine.strategy_v2_lock_validation.generate = lambda **kwargs: {}  # type: ignore[assignment]
+        engine.strategy_v2_pbo_dsr_trial_writer.generate = lambda **kwargs: {"available": False}  # type: ignore[assignment]
+        engine.strategy_v2_pbo_dsr_threshold_runner.generate = lambda **kwargs: {"available": False}  # type: ignore[assignment]
+        engine.strategy_v2_pbo_dsr_metrics.generate = (  # type: ignore[assignment]
+            lambda **kwargs: {"available": False, "metrics_complete": False, "selected_trial": {}, "lineage_audit": {}}
+        )
+
+        def _global_lineage_capture(**kwargs):
+            captured["persist_snapshot"] = kwargs.get("persist_snapshot")
+            captured["persist_runtime_validation_artifacts"] = kwargs.get("persist_runtime_validation_artifacts")
+            raise _StopAfterGlobalFallback
+
+        engine._global_lineage_pbo_dsr_metrics = _global_lineage_capture  # type: ignore[assignment]
+
+        try:
+            engine.recompute_learning("BTCUSDC", persist_runtime_validation_artifacts=False)
+        except _StopAfterGlobalFallback:
+            pass
+        else:
+            raise AssertionError("expected test stub to stop recompute_learning after global lineage fallback capture")
+
+        assert captured["persist_snapshot"] is False
+        assert captured["persist_runtime_validation_artifacts"] is False
+
+
+def test_recompute_learning_read_only_runtime_uses_recent_cache() -> None:
+    init_db()
+    symbol = "BTCUSDC"
+    strategy_engine_module._READ_ONLY_RECOMPUTE_CACHE.clear()
+    strategy_engine_module._READ_ONLY_RECOMPUTE_CACHE[symbol] = (
+        time.monotonic() + 60.0,
+        {"symbol": symbol, "updated_zones": 41, "validation_report": {"cached": True}},
+    )
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        engine.outcome_repo.list_recent = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cache miss"))  # type: ignore[assignment]
+
+        first = engine.recompute_learning(symbol, persist_runtime_validation_artifacts=False)
+        first["updated_zones"] = 0
+        second = engine.recompute_learning(symbol, persist_runtime_validation_artifacts=False)
+
+        assert first["validation_report"]["cached"] is True
+        assert second["updated_zones"] == 41
+
+    strategy_engine_module._READ_ONLY_RECOMPUTE_CACHE.clear()
+
+
+def test_operational_checklist_reuses_cached_validation_payload_when_available() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        captured: dict[str, object] = {}
+
+        engine._load_cached_validation_payload = lambda symbol: {  # type: ignore[assignment]
+            "validation_report": {"cached": True},
+            "execution_quality": {"cached": "eq"},
+        }
+        engine.recompute_learning = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected recompute"))  # type: ignore[assignment]
+        engine.alert_metrics_report = lambda **kwargs: {"alerts": 1}  # type: ignore[assignment]
+        engine.outbox_status = lambda: {"pending": 0}  # type: ignore[assignment]
+        engine.metrics = lambda **kwargs: {"sample_size": 10}  # type: ignore[assignment]
+        engine.portfolio_budget_report = lambda **kwargs: {"playbook_action": "hold"}  # type: ignore[assignment]
+        engine.execution_quality_report = lambda **kwargs: {"report": "fresh"}  # type: ignore[assignment]
+        engine.operational_checklist_service.generate = lambda **kwargs: captured.update(kwargs) or {"overall_status": "WARN"}  # type: ignore[assignment]
+
+        payload = engine.operational_checklist(
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            limit=20,
+            days=30,
+            alert_test_lookback_hours=24,
+            write_report=False,
+        )
+
+        assert payload["overall_status"] == "WARN"
+        assert captured["validation_payload"] == {"validation_report": {"cached": True}, "execution_quality": {"cached": "eq"}}
 
 
 def test_stress_replay_assessment_uses_replay_attached_stress_validation() -> None:
@@ -323,6 +532,93 @@ def test_stress_replay_runtime_stack_can_apply_global_lineage_pbo_fallback() -> 
         assert payload["pbo_dsr_metrics"]["selected_trial"]["trial_run_id"] == "global_trial"
 
 
+def test_stress_replay_runtime_stack_can_run_read_only_without_persisting_validation_artifacts() -> None:
+    class _StressValidationStub:
+        def generate(self, **kwargs) -> dict:
+            return {"deployment_recommendation": {"scenario_statuses": {}}, "sample_counts": {}, "scenario_metrics": {}}
+
+        def attach_replay_output_artifacts(
+            self,
+            *,
+            payload: dict,
+            stress_replay_output_artifacts: dict,
+            write_report: bool = True,
+        ) -> dict:
+            out = dict(payload)
+            out["replay_output_artifacts"] = dict(stress_replay_output_artifacts)
+            return out
+
+    class _LineageStub:
+        def generate(self, **kwargs) -> dict:
+            return {"available": True}
+
+    class _OutputArtifactsStub:
+        def generate(self, **kwargs) -> dict:
+            return {"available": True}
+
+    class _AssessmentStub:
+        def generate(self, **kwargs) -> dict:
+            return {"available": True, "deployment_recommendation": {"decision": "keep_approximation"}}
+
+    class _RunnerContractStub:
+        def generate(self, **kwargs) -> dict:
+            return {"available": True}
+
+    class _LineageWriterStub:
+        def generate(self, **kwargs) -> dict:
+            return {"available": True}
+
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        persist_flags: dict[str, object] = {}
+        engine.plan_repo.list_recent = lambda symbol, days=180: []  # type: ignore[assignment]
+        engine.strategy_v2_stress_validation = _StressValidationStub()  # type: ignore[assignment]
+        engine.strategy_v2_stress_replay_lineage = _LineageStub()  # type: ignore[assignment]
+        engine.strategy_v2_stress_replay_output_artifacts = _OutputArtifactsStub()  # type: ignore[assignment]
+        engine.strategy_v2_stress_replay_assessment = _AssessmentStub()  # type: ignore[assignment]
+        engine.strategy_v2_stress_replay_runner_contract = _RunnerContractStub()  # type: ignore[assignment]
+        engine.strategy_v2_stress_replay_lineage_writer = _LineageWriterStub()  # type: ignore[assignment]
+
+        def _trial_writer_generate(**kwargs):
+            persist_flags["trial_writer_persist"] = kwargs.get("persist")
+            return {"available": False}
+
+        def _threshold_runner_generate(**kwargs):
+            persist_flags["threshold_runner_persist"] = kwargs.get("persist")
+            return {"available": False}
+
+        def _pbo_metrics_generate(**kwargs):
+            persist_flags["metrics_persist_snapshot"] = kwargs.get("persist_snapshot")
+            return {"available": False, "metrics_complete": False, "selected_trial": {}, "lineage_audit": {}}
+
+        engine.strategy_v2_pbo_dsr_trial_writer.generate = _trial_writer_generate  # type: ignore[assignment]
+        engine.strategy_v2_pbo_dsr_threshold_runner.generate = _threshold_runner_generate  # type: ignore[assignment]
+        engine.strategy_v2_pbo_dsr_metrics.generate = _pbo_metrics_generate  # type: ignore[assignment]
+        engine._global_lineage_pbo_dsr_metrics = (  # type: ignore[assignment]
+            lambda **kwargs: persist_flags.setdefault("global_persist_runtime_validation_artifacts", kwargs.get("persist_runtime_validation_artifacts")) or {
+                "available": False,
+                "metrics_complete": False,
+                "selected_trial": {},
+                "lineage_audit": {},
+            }
+        )
+
+        engine._build_stress_replay_runtime_stack(
+            symbol="BTCUSDC",
+            version="v2",
+            pbo_dsr_metrics=None,
+            write_report=False,
+            run_prototype_worker=False,
+            persist_runtime_validation_artifacts=False,
+        )
+
+        assert persist_flags["trial_writer_persist"] is False
+        assert persist_flags["threshold_runner_persist"] is False
+        assert persist_flags["metrics_persist_snapshot"] is False
+        assert persist_flags["global_persist_runtime_validation_artifacts"] is False
+
+
 def test_merge_global_lineage_pbo_fallback_applies_when_primary_trial_runs_missing() -> None:
     init_db()
     with SessionLocal() as db:
@@ -361,6 +657,59 @@ def test_merge_global_lineage_pbo_fallback_applies_when_primary_trial_runs_missi
         assert merged["selected_trial_fallback_applied"] is True
         assert merged["selected_trial"]["trial_run_id"] == "global_trial"
         assert merged["deployment_recommendation"]["selected_trial_scope"] == "family_global_fallback"
+
+
+def test_merge_global_lineage_pbo_fallback_applies_when_primary_is_runtime_proxy_and_global_is_true_threshold() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        merged = engine._merge_global_lineage_pbo_fallback(
+            primary={
+                "available": True,
+                "metrics_complete": True,
+                "reason": "pbo_dsr_metrics_computed",
+                "selected_trial": {
+                    "trial_run_id": "symbol_proxy_trial",
+                    "writer_source": "runtime_validation_proxy_v1",
+                    "selection_rule": "runtime_validation_proxy_top_in_sample_ev",
+                },
+                "lineage_audit": {
+                    "audit_status": "WARN",
+                    "reason": "selected_trial_from_runtime_proxy_while_true_threshold_lineage_exists",
+                    "selected_trial_from_runtime_proxy": True,
+                    "selected_trial_from_true_threshold": False,
+                    "selected_trial_writer_source": "runtime_validation_proxy_v1",
+                    "selected_trial_selection_rule": "runtime_validation_proxy_top_in_sample_ev",
+                },
+                "deployment_recommendation": {
+                    "decision": "warn_lineage_audit",
+                },
+            },
+            fallback={
+                "available": True,
+                "metrics_complete": True,
+                "reason": "pbo_dsr_metrics_computed",
+                "selected_trial": {
+                    "trial_run_id": "global_true_threshold_trial",
+                    "writer_source": "true_threshold_sweep_runner_v1",
+                    "selection_rule": "true_threshold_sweep_top_in_sample_ev",
+                },
+                "lineage_audit": {
+                    "audit_status": "PASS",
+                    "reason": "selected_trial_from_true_threshold_with_dual_lineage",
+                    "selected_trial_from_runtime_proxy": False,
+                    "selected_trial_from_true_threshold": True,
+                },
+                "validation_scope": {"scope": "family_global"},
+            },
+        )
+
+        assert merged["selected_trial_fallback_applied"] is True
+        assert merged["selected_trial"]["trial_run_id"] == "global_true_threshold_trial"
+        assert (
+            merged["deployment_recommendation"]["selected_trial_scope_reason"]
+            == "symbol_scope_runtime_proxy_replaced_by_global_true_threshold"
+        )
 
 
 def test_merge_global_lineage_stress_replay_fallback_applies_when_replay_output_exists() -> None:

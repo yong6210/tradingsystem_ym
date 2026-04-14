@@ -101,3 +101,54 @@ def test_main_emits_edge_experiment_review_when_candidate_is_found(monkeypatch, 
     assert payload["candidate_edge_experiment_focus"]["symbol"] == "BTCUSDC"
     assert payload["candidate_edge_experiment_focus"]["focus_source"] == "row_level"
     assert any("edge proof is still sample-building" in step for step in payload["next_steps"])
+
+
+def test_main_retries_transient_run_once_failures(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        watch_paper_candidate_drill,
+        "parse_args",
+        lambda: SimpleNamespace(
+            interval_seconds=1,
+            max_attempts=1,
+            families="trend_continuation,sweep_reversal",
+            universe="usdc_perp_top30",
+            candidate_limit=100,
+            symbol=None,
+            limit_symbols=30,
+            symbol_concurrency=4,
+            limit_1m=900,
+            limit_5m=500,
+            limit_15m=500,
+            include_manual_review=False,
+            submit_paper=False,
+            paper_lineage_override=False,
+            paper_scenario="fill",
+            report_dir="reports/operations/paper_candidate_watch",
+            no_write_report=True,
+        ),
+    )
+    calls = {"count": 0}
+
+    def _run_once(_args):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("watch drill attempt returned no stdout (code=1) stderr=TimeoutError: timed out")
+        return {
+            "generated_at": "2026-03-24T00:00:00+00:00",
+            "overall_status": "READY_FOR_PAPER_SAMPLE",
+            "summary_line": "Eligible PAPER candidate is ready.",
+            "checks": [{"name": "eligible_candidate_found", "status": "PASS"}],
+            "candidate": {"symbol": "BTCUSDC"},
+            "candidate_edge_experiment_focus": None,
+            "submission": None,
+            "edge_experiment_review": None,
+        }
+
+    monkeypatch.setattr(watch_paper_candidate_drill, "_run_once", _run_once)
+    monkeypatch.setattr(watch_paper_candidate_drill.time, "sleep", lambda *_args, **_kwargs: None)
+
+    assert watch_paper_candidate_drill.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["overall_status"] == "FOUND_ELIGIBLE_CANDIDATE"
+    assert calls["count"] == 2

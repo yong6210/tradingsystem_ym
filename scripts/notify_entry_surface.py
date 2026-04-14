@@ -5,7 +5,10 @@ import argparse
 import json
 import sys
 from datetime import UTC, datetime
+from http.client import RemoteDisconnected
 from pathlib import Path
+import socket
+import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -23,6 +26,9 @@ from app.services.notification_dispatcher import NotificationDispatcher
 ACTIONABLE_ENTRY = "ACTIONABLE_ENTRY"
 BLOCKED_SETUP = "BLOCKED_SETUP"
 RESEARCH_ONLY_SETUP = "RESEARCH_ONLY_SETUP"
+_REQUEST_RETRY_ATTEMPTS = 5
+_REQUEST_RETRY_BASE_DELAY_SECONDS = 1.0
+_REQUEST_TIMEOUT_SECONDS = 90
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +48,7 @@ def parse_args() -> argparse.Namespace:
         "--state-file",
         default=str(ROOT_DIR / "reports/operations/entry_surface/last_alert_state.json"),
     )
+    parser.add_argument("--output-file", default="")
     parser.add_argument("--webhook-url", default="")
     parser.add_argument("--force-send", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -65,6 +72,12 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _emit_result(path: Path | None, payload: dict[str, Any]) -> None:
+    if path is not None:
+        _write_json(path, payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def _request_json(
     base_url: str,
     method: str,
@@ -75,15 +88,31 @@ def _request_json(
     url = f"{base_url.rstrip('/')}{path}"
     if query:
         url += f"?{urlencode(query, doseq=True)}"
-    request = Request(url=url, headers={"Accept": "application/json"}, method=method.upper())
-    try:
-        with urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{method.upper()} {path} failed with HTTP {exc.code}: {body}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"{method.upper()} {path} failed: {exc.reason}") from exc
+    last_error: RuntimeError | None = None
+    for attempt in range(1, _REQUEST_RETRY_ATTEMPTS + 1):
+        request = Request(url=url, headers={"Accept": "application/json"}, method=method.upper())
+        try:
+            with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+                break
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            retryable = exc.code >= 500 or "database is locked" in body.lower() or "sqlite busy" in body.lower()
+            last_error = RuntimeError(f"{method.upper()} {path} failed with HTTP {exc.code}: {body}")
+            if retryable and attempt < _REQUEST_RETRY_ATTEMPTS:
+                time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
+                continue
+            raise last_error from exc
+        except (URLError, TimeoutError, socket.timeout, RemoteDisconnected) as exc:
+            reason = exc.reason if isinstance(exc, URLError) else str(exc)
+            last_error = RuntimeError(f"{method.upper()} {path} failed: {reason}")
+            if attempt < _REQUEST_RETRY_ATTEMPTS:
+                time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
+                continue
+            raise last_error from exc
+    else:
+        assert last_error is not None
+        raise last_error
 
     if not isinstance(payload, dict):
         raise RuntimeError(f"{method.upper()} {path} returned a non-object payload")
@@ -543,6 +572,8 @@ def _has_alertable_rows(snapshot: dict[str, Any]) -> bool:
 def main() -> int:
     args = parse_args()
     state_file = Path(args.state_file).resolve()
+    output_file_raw = str(getattr(args, "output_file", "") or "").strip()
+    output_file = Path(output_file_raw).resolve() if output_file_raw else None
     payload = _request_json(
         args.base_url,
         "GET",
@@ -596,13 +627,13 @@ def main() -> int:
                 },
             )
             result["state_written"] = True
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        _emit_result(output_file, result)
         return 0
 
     if previous_state == alert_state and not args.force_send:
         result["reason"] = "unchanged_surface_state"
         result["dedupe_suppressed"] = True
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        _emit_result(output_file, result)
         return 0
 
     message = render_message(snapshot)
@@ -610,7 +641,7 @@ def main() -> int:
 
     if args.dry_run:
         result["reason"] = "dry_run"
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        _emit_result(output_file, result)
         return 0
 
     settings = get_settings()
@@ -640,7 +671,7 @@ def main() -> int:
             },
         )
         result["state_written"] = True
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    _emit_result(output_file, result)
     return 0
 
 

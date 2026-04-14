@@ -276,6 +276,34 @@ def test_execution_operator_dashboard_aggregates_runtime_state(monkeypatch) -> N
     assert "alert_summary" in payload
 
 
+def test_reconciliation_summary_ages_out_stale_events() -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    summary = ExecutionOperatorDashboardService._reconciliation_summary(
+        [
+            {
+                "severity": "CRITICAL",
+                "lock_required": True,
+                "created_at": now - timedelta(hours=30),
+            },
+            {
+                "severity": "WARNING",
+                "lock_required": False,
+                "created_at": now - timedelta(hours=32),
+            },
+        ]
+    )
+
+    assert summary["healthy"] is True
+    assert summary["highest_severity"] == "INFO"
+    assert summary["degraded"] is False
+    assert summary["critical_count"] == 0
+    assert summary["lock_required_count"] == 0
+    assert summary["active_event_count"] == 0
+    assert summary["stale_event_count"] == 2
+    assert summary["stale_highest_severity"] == "CRITICAL"
+    assert summary["active_window_hours"] == 24
+
+
 def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkeypatch) -> None:
     init_db()
     _apply_defaults(monkeypatch)

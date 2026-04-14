@@ -13,6 +13,8 @@ from typing import Any
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DRILL_SCRIPT = ROOT_DIR / "scripts" / "run_paper_candidate_drill.py"
+_TRANSIENT_FAILURE_RETRY_ATTEMPTS = 3
+_TRANSIENT_FAILURE_RETRY_BASE_DELAY_SECONDS = 1.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -248,6 +250,23 @@ def _run_once(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
+def _is_retryable_run_error(message: str) -> bool:
+    lowered = str(message or "").lower()
+    return any(
+        token in lowered
+        for token in (
+            "database is locked",
+            "sqlite busy",
+            "timed out",
+            "timeout",
+            "http 500",
+            "internal server error",
+            "remote end closed connection",
+            "returned no stdout",
+        )
+    )
+
+
 def _write_report(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     attempts = payload.get("attempts", [])
@@ -285,7 +304,16 @@ def main() -> int:
     final_payload: dict[str, Any] | None = None
 
     for index in range(1, args.max_attempts + 1):
-        payload = _run_once(args)
+        payload: dict[str, Any] | None = None
+        for retry_attempt in range(1, _TRANSIENT_FAILURE_RETRY_ATTEMPTS + 1):
+            try:
+                payload = _run_once(args)
+                break
+            except RuntimeError as exc:
+                if retry_attempt >= _TRANSIENT_FAILURE_RETRY_ATTEMPTS or not _is_retryable_run_error(str(exc)):
+                    raise
+                time.sleep(_TRANSIENT_FAILURE_RETRY_BASE_DELAY_SECONDS * retry_attempt)
+        assert payload is not None
         attempts.append(
             {
                 "attempt": index,

@@ -60,6 +60,16 @@ PAPER exit criteria:
 - [ ] `POST /validation/report` 결과가 최소 `MANUAL_REVIEW` 이상이고, 운영자가 승인함
 - [ ] `POST /operations/checklist` 결과가 신규 진입 가능 상태를 가리킴
 - [ ] `GET /execution/operator-dashboard`에서 `recent_reconciliation_summary.healthy == true`
+- [ ] `runtime_decision_band == AMBER_CONDITIONAL`
+- [ ] `runtime_effective_action == conditional_micro_live_signoff`
+- [ ] `runtime_allowed_reopen_scope == MICRO_LIVE_ONLY`
+- [ ] `runtime_preflight_summary.status == READY_FOR_MICRO_LIVE`
+- [ ] `runtime_operator_signoff_summary.status == ready_for_manual_micro_live_signoff`
+- [ ] `post_patch_closed_trade_count >= 50`
+- [ ] `post_patch_sample_summary.replay_max_drawdown_r < 5.0`
+- [ ] `post_patch_sample_summary.replay_p5_r >= -1.05`
+- [ ] `post_patch_sample_summary.stop_loss_share < 0.35`
+- [ ] `post_patch_sample_summary.worst_loss_streak < 5`
 
 MICRO_LIVE exit criteria:
 - [ ] fee/slippage 포함 후 기대치 유지
@@ -73,6 +83,16 @@ MICRO_LIVE exit criteria:
 - [ ] user-stream stale / missing stop / fill gap 사고가 해결됨
 - [ ] threshold lineage / replay-backed approval 기준이 운영상 충분히 해석 가능
 - [ ] operator runbook이 실제 운영 과정과 어긋나지 않음
+- [ ] `runtime_decision_band == AMBER_CONDITIONAL` 또는 `GREEN_PROCEED`
+- [ ] `runtime_effective_action == conditional_full_live_signoff` 또는 `proceed_to_operator_signoff`
+- [ ] `runtime_allowed_reopen_scope == MICRO_LIVE_OR_LIVE`
+- [ ] `runtime_preflight_summary.status == READY_FOR_MICRO_LIVE`
+- [ ] `runtime_operator_signoff_summary.status == ready_for_manual_full_live_signoff` 또는 `ready_for_operator_signoff`
+- [ ] `post_patch_closed_trade_count >= 80`
+- [ ] `post_patch_sample_summary.replay_max_drawdown_r < 5.0`
+- [ ] `post_patch_sample_summary.replay_p5_r >= -1.0`
+- [ ] `post_patch_sample_summary.stop_loss_share < 0.35`
+- [ ] `post_patch_sample_summary.worst_loss_streak < 5`
 
 ## 8. 즉시 NO-GO 조건
 - [ ] `validation/report`가 `NO_GO`
@@ -102,4 +122,6 @@ curl -s "http://127.0.0.1:8000/alerts/metrics?days=7&write_report=false" | jq
 ## 10. 운영 원칙
 - live 전환은 기능 완성 여부가 아니라 `reconciliation / safety / operator visibility`가 충분한지로 판단한다.
 - `MICRO_LIVE`는 검증 단계다. 수익 극대화 모드가 아니다.
+- `legacy` 전체 replay는 경고 근거로 유지하되, `MICRO_LIVE` / `LIVE` 재개 승인은 `post-patch rolling cohort` 기준으로 분리해서 본다.
+- `MICRO_LIVE`는 `post-patch 50+`의 현실적 조건으로 먼저 열고, `LIVE`는 `post-patch 80+`와 더 엄격한 `p5` 기준으로 별도 판단한다.
 - unresolved mismatch가 있으면 “조금 더 지켜본다”가 아니라 즉시 `close-only` 또는 `kill-switch`를 고려한다.
