@@ -164,6 +164,7 @@ class ExecutionCoordinator:
         fill_ingest: Callable[..., dict],
         live_submitter: Callable[..., dict],
         live_symbol_rules_loader: Callable[[str], dict[str, Any] | None] | None = None,
+        live_liquidity_loader: Callable[..., dict[str, Any] | None] | None = None,
         settings: Settings | None = None,
         paper_adapter: PaperExecutionAdapter | None = None,
     ):
@@ -174,6 +175,7 @@ class ExecutionCoordinator:
         self.fill_ingest = fill_ingest
         self.live_submitter = live_submitter
         self.live_symbol_rules_loader = live_symbol_rules_loader
+        self.live_liquidity_loader = live_liquidity_loader
         self.settings = settings or get_settings()
         self.paper_adapter = paper_adapter or PaperExecutionAdapter()
         self._live_symbol_rules_cache: dict[str, dict[str, Any]] = {}
@@ -325,6 +327,337 @@ class ExecutionCoordinator:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+    def _partial_submit_enabled(self) -> bool:
+        return bool(getattr(self.settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", False))
+
+    def _min_tranche_notional(self) -> float:
+        return max(0.0, float(getattr(self.settings, "auto_trading_live_liquidity_gate_min_tranche_notional_usdt", 0.0) or 0.0))
+
+    @staticmethod
+    def _live_tranche_from_submission(row: OrderSubmission | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        attachments = dict(getattr(row, "attachments", {}) or {})
+        raw = dict(getattr(row, "raw", {}) or {})
+        tranche = dict(attachments.get("live_tranche") or raw.get("live_tranche") or {})
+        return tranche
+
+    def _intent_tranche_continuation(self, intent: OrderIntent) -> dict[str, Any]:
+        dedupe = dict(intent.dedupe_result or {})
+        if str(dedupe.get("status") or "") != "tranche_continuation_available":
+            return {}
+        return dict(dedupe.get("tranche_continuation") or {})
+
+    def _apply_tranche_remaining_cap(
+        self,
+        *,
+        intent: OrderIntent,
+        max_position_notional: float,
+        sizing_details: dict[str, Any],
+    ) -> float:
+        continuation = self._intent_tranche_continuation(intent)
+        if not continuation or not self._partial_submit_enabled():
+            return max_position_notional
+        remaining_notional = self._maybe_float(continuation.get("remaining_notional"))
+        if remaining_notional is None or remaining_notional <= 0.0:
+            return max_position_notional
+
+        capped_notional = min(float(max_position_notional), float(remaining_notional))
+        sizing_details["liquidity_tranche_continuation"] = {
+            "enabled": True,
+            "parent_intent_id": str(continuation.get("parent_intent_id") or ""),
+            "parent_submission_id": str(continuation.get("parent_submission_id") or ""),
+            "parent_plan_id": str(continuation.get("parent_plan_id") or ""),
+            "target_notional": round(float(continuation.get("target_notional") or max_position_notional), 4),
+            "remaining_notional_before": round(float(remaining_notional), 4),
+            "next_tranche_index": int(continuation.get("next_tranche_index") or 1),
+            "max_tranches": int(continuation.get("max_tranches") or 0),
+            "capped_max_position_notional": round(capped_notional, 4),
+        }
+        return capped_notional
+
+    def _partial_tranche_order(
+        self,
+        *,
+        intent: OrderIntent,
+        plan: Plan,
+        live_quantity: float,
+        live_sizing: dict[str, Any],
+        liquidity_gate: dict[str, Any],
+        reference_price: float,
+    ) -> tuple[float | None, dict[str, Any], str | None]:
+        if not self._partial_submit_enabled():
+            return None, {}, "partial_submit_disabled"
+        target_notional = max(float(live_sizing.get("max_position_notional") or 0.0), 0.0)
+        if target_notional <= 0.0:
+            target_notional = max(float(live_quantity or 0.0), 0.0) * max(float(reference_price or 0.0), 0.0)
+        if target_notional <= 0.0 or reference_price <= 0.0:
+            return None, {}, "partial_submit_invalid_target_notional"
+
+        allowed_notional = self._maybe_float(liquidity_gate.get("allowed_notional"))
+        if allowed_notional is None:
+            allowed_notional = self._maybe_float(dict(liquidity_gate.get("derived") or {}).get("allowed_notional"))
+        if allowed_notional is None or allowed_notional <= 0.0:
+            return None, {}, "partial_submit_allowed_notional_unavailable"
+
+        submitted_target_notional = min(float(allowed_notional), target_notional)
+        min_tranche_notional = self._min_tranche_notional()
+        if submitted_target_notional < min_tranche_notional:
+            return None, {}, "partial_submit_allowed_notional_below_minimum"
+
+        step = max(float(live_sizing.get("quantity_step") or getattr(self.settings, "binance_live_quantity_step", 0.001) or 0.001), 1e-9)
+        min_quantity = max(float(live_sizing.get("min_quantity") or getattr(self.settings, "binance_live_min_quantity", step) or step), step)
+        partial_quantity = self._round_down_to_step(submitted_target_notional / reference_price, step=step)
+        if partial_quantity + 1e-12 < min_quantity:
+            return None, {}, "partial_submit_quantity_below_minimum"
+
+        submitted_notional = partial_quantity * reference_price
+        if submitted_notional < min_tranche_notional:
+            return None, {}, "partial_submit_rounded_notional_below_minimum"
+
+        continuation = self._intent_tranche_continuation(intent)
+        remaining_before = self._maybe_float(continuation.get("remaining_notional")) if continuation else None
+        if remaining_before is None or remaining_before <= 0.0:
+            remaining_before = target_notional
+        total_target_notional = self._maybe_float(continuation.get("target_notional")) if continuation else None
+        if total_target_notional is None or total_target_notional <= 0.0:
+            total_target_notional = target_notional
+
+        tranche_index = int((continuation or {}).get("next_tranche_index") or 1)
+        max_tranches = max(1, int(getattr(self.settings, "auto_trading_live_liquidity_gate_max_tranches", 1) or 1))
+        remaining_after = max(0.0, float(remaining_before) - submitted_notional)
+        additive_allowed = remaining_after >= min_tranche_notional and tranche_index < max_tranches
+        cluster_id = str((intent.dedupe_result or {}).get("cluster_id") or "")
+        live_tranche = {
+            "enabled": True,
+            "reason": "liquidity_split_partial_submit",
+            "parent_intent_id": str((continuation or {}).get("parent_intent_id") or intent.intent_id),
+            "parent_submission_id": str((continuation or {}).get("parent_submission_id") or ""),
+            "parent_plan_id": str((continuation or {}).get("parent_plan_id") or plan.plan_id),
+            "thesis_cluster_id": cluster_id,
+            "tranche_index": tranche_index,
+            "max_tranches": max_tranches,
+            "target_notional": round(float(total_target_notional), 4),
+            "remaining_notional_before": round(float(remaining_before), 4),
+            "submitted_notional": round(submitted_notional, 4),
+            "remaining_notional": round(remaining_after, 4),
+            "min_tranche_notional": round(min_tranche_notional, 4),
+            "additive_allowed": bool(additive_allowed),
+            "next_tranche_index": tranche_index + 1 if additive_allowed else tranche_index,
+            "reason_codes": list(liquidity_gate.get("reason_codes") or []),
+        }
+        adjusted_sizing = {
+            **dict(live_sizing or {}),
+            "liquidity_gate_decision": "SPLIT_PARTIAL_SUBMIT",
+            "original_normalized_quantity": round(float(live_quantity or 0.0), 8),
+            "original_max_position_notional": round(float(target_notional), 4),
+            "normalized_quantity": round(float(partial_quantity), 8),
+            "max_position_notional": round(submitted_notional, 4),
+            "live_tranche": live_tranche,
+        }
+        return partial_quantity, adjusted_sizing, None
+
+    def _live_liquidity_gate(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: float,
+        price: float | None,
+        reference_price: float,
+    ) -> dict[str, Any]:
+        if not bool(getattr(self.settings, "auto_trading_live_liquidity_gate_enabled", False)):
+            return {"enabled": False, "decision": "PASS", "reason_codes": []}
+
+        thresholds = {
+            "min_depth_usdt": max(
+                0.0,
+                float(getattr(self.settings, "auto_trading_live_liquidity_gate_min_depth_usdt", 0.0) or 0.0),
+            ),
+            "max_depth_participation": max(
+                0.0,
+                float(getattr(self.settings, "auto_trading_live_liquidity_gate_max_depth_participation", 0.0) or 0.0),
+            ),
+            "max_1m_volume_participation": max(
+                0.0,
+                float(getattr(self.settings, "auto_trading_live_liquidity_gate_max_1m_volume_participation", 0.0) or 0.0),
+            ),
+            "max_5m_volume_participation": max(
+                0.0,
+                float(getattr(self.settings, "auto_trading_live_liquidity_gate_max_5m_volume_participation", 0.0) or 0.0),
+            ),
+            "max_spread_bps": max(
+                0.0,
+                float(getattr(self.settings, "auto_trading_live_liquidity_gate_max_spread_bps", 0.0) or 0.0),
+            ),
+            "max_market_slippage_bps": max(
+                0.0,
+                float(getattr(self.settings, "auto_trading_live_liquidity_gate_max_market_slippage_bps", 0.0) or 0.0),
+            ),
+        }
+        fail_closed = bool(getattr(self.settings, "auto_trading_live_liquidity_gate_fail_closed", True))
+        order_notional = max(float(quantity or 0.0), 0.0) * max(float(price or reference_price or 0.0), 0.0)
+
+        if self.live_liquidity_loader is None:
+            decision = "BLOCK" if fail_closed else "PASS"
+            return {
+                "enabled": True,
+                "decision": decision,
+                "reason_codes": ["liquidity_loader_missing"],
+                "message": "Live liquidity gate has no market-data loader.",
+                "thresholds": thresholds,
+                "order_notional": round(order_notional, 4),
+            }
+
+        try:
+            snapshot = self.live_liquidity_loader(
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                quantity=quantity,
+                price=price,
+                reference_price=reference_price,
+            )
+        except Exception as exc:  # pragma: no cover - defensive live-submit guard
+            decision = "BLOCK" if fail_closed else "PASS"
+            return {
+                "enabled": True,
+                "decision": decision,
+                "reason_codes": ["liquidity_snapshot_error"],
+                "message": f"Live liquidity snapshot failed: {exc}",
+                "thresholds": thresholds,
+                "order_notional": round(order_notional, 4),
+            }
+
+        snapshot_payload = dict(snapshot or {})
+        if not snapshot_payload:
+            decision = "BLOCK" if fail_closed else "PASS"
+            return {
+                "enabled": True,
+                "decision": decision,
+                "reason_codes": ["liquidity_snapshot_unavailable"],
+                "message": "Live liquidity snapshot was unavailable.",
+                "thresholds": thresholds,
+                "order_notional": round(order_notional, 4),
+            }
+
+        order_notional = self._maybe_float(snapshot_payload.get("order_notional")) or order_notional
+        depth_notional = self._maybe_float(snapshot_payload.get("opposite_depth_notional"))
+        spread_bps = self._maybe_float(snapshot_payload.get("spread_bps"))
+        market_slippage_bps = self._maybe_float(snapshot_payload.get("market_slippage_bps"))
+        volume_1m = self._maybe_float(snapshot_payload.get("recent_1m_quote_volume"))
+        volume_5m = self._maybe_float(snapshot_payload.get("recent_5m_quote_volume"))
+
+        block_codes: list[str] = []
+        split_codes: list[str] = []
+        derived: dict[str, Any] = {"order_notional": round(order_notional, 4)}
+        notional_caps: list[dict[str, Any]] = []
+
+        if depth_notional is None or depth_notional <= 0.0:
+            if fail_closed:
+                block_codes.append("orderbook_depth_unavailable")
+        else:
+            depth_participation = order_notional / depth_notional if depth_notional > 0.0 else 0.0
+            derived["depth_participation"] = round(depth_participation, 6)
+            if thresholds["min_depth_usdt"] > 0.0 and depth_notional < thresholds["min_depth_usdt"]:
+                block_codes.append("visible_depth_below_floor")
+            if (
+                thresholds["max_depth_participation"] > 0.0
+                and depth_participation > thresholds["max_depth_participation"]
+            ):
+                split_codes.append("depth_participation_too_high")
+                notional_caps.append(
+                    {
+                        "source": "depth_participation",
+                        "allowed_notional": depth_notional * thresholds["max_depth_participation"],
+                    }
+                )
+
+        if spread_bps is None:
+            if fail_closed:
+                block_codes.append("spread_unavailable")
+        elif thresholds["max_spread_bps"] > 0.0 and spread_bps > thresholds["max_spread_bps"]:
+            block_codes.append("spread_too_wide")
+
+        if (
+            market_slippage_bps is not None
+            and thresholds["max_market_slippage_bps"] > 0.0
+            and market_slippage_bps > thresholds["max_market_slippage_bps"]
+        ):
+            split_codes.append("market_slippage_too_high")
+
+        if volume_1m is not None and volume_1m > 0.0:
+            participation_1m = order_notional / volume_1m
+            derived["one_minute_volume_participation"] = round(participation_1m, 6)
+            if (
+                thresholds["max_1m_volume_participation"] > 0.0
+                and participation_1m > thresholds["max_1m_volume_participation"]
+            ):
+                split_codes.append("one_minute_participation_too_high")
+                notional_caps.append(
+                    {
+                        "source": "one_minute_volume_participation",
+                        "allowed_notional": volume_1m * thresholds["max_1m_volume_participation"],
+                    }
+                )
+        elif fail_closed:
+            block_codes.append("one_minute_volume_unavailable")
+
+        if volume_5m is not None and volume_5m > 0.0:
+            participation_5m = order_notional / volume_5m
+            derived["five_minute_volume_participation"] = round(participation_5m, 6)
+            if (
+                thresholds["max_5m_volume_participation"] > 0.0
+                and participation_5m > thresholds["max_5m_volume_participation"]
+            ):
+                split_codes.append("five_minute_participation_too_high")
+                notional_caps.append(
+                    {
+                        "source": "five_minute_volume_participation",
+                        "allowed_notional": volume_5m * thresholds["max_5m_volume_participation"],
+                    }
+                )
+        elif fail_closed:
+            block_codes.append("five_minute_volume_unavailable")
+
+        valid_caps = [
+            {
+                "source": str(item.get("source") or ""),
+                "allowed_notional": round(float(item.get("allowed_notional") or 0.0), 4),
+            }
+            for item in notional_caps
+            if float(item.get("allowed_notional") or 0.0) > 0.0
+        ]
+        allowed_notional = min((float(item["allowed_notional"]) for item in valid_caps), default=0.0)
+        if valid_caps:
+            derived["notional_caps"] = valid_caps
+            derived["allowed_notional"] = round(min(order_notional, allowed_notional), 4)
+
+        if block_codes:
+            decision = "BLOCK"
+            reason_codes = block_codes + split_codes
+            message = "Live order blocked by liquidity gate."
+        elif split_codes:
+            decision = "SPLIT_REQUIRED"
+            reason_codes = split_codes
+            message = "Live order exceeds liquidity participation limits; split or reduce size."
+        else:
+            decision = "PASS"
+            reason_codes = []
+            message = "Live liquidity gate passed."
+
+        return {
+            "enabled": True,
+            "decision": decision,
+            "reason_codes": reason_codes,
+            "message": message,
+            "thresholds": thresholds,
+            "derived": derived,
+            "allowed_notional": derived.get("allowed_notional"),
+            "snapshot": snapshot_payload,
+        }
 
     def _live_submit_fill_payload(
         self,
@@ -487,6 +820,15 @@ class ExecutionCoordinator:
 
         if max_position_notional <= 0.0:
             return None, sizing_details, "Live submit requires a positive max_position_notional."
+
+        max_position_notional = self._apply_tranche_remaining_cap(
+            intent=intent,
+            max_position_notional=max_position_notional,
+            sizing_details=sizing_details,
+        )
+        sizing_details["max_position_notional"] = round(max_position_notional, 4)
+        if max_position_notional <= 0.0:
+            return None, sizing_details, "Live submit has no remaining tranche notional to route."
 
         raw_quantity = max_position_notional / reference_price
         normalized_quantity = self._round_down_to_step(raw_quantity, step=step)
@@ -743,6 +1085,78 @@ class ExecutionCoordinator:
             }
             return row, [], False
 
+        liquidity_reference_price = float(
+            normalized_live_price
+            or live_sizing.get("reference_price")
+            or getattr(plan, "entry_price", 0.0)
+            or 0.0
+        )
+        liquidity_gate = self._live_liquidity_gate(
+            symbol=plan.symbol,
+            side=live_side,
+            order_type=live_order_type,
+            quantity=live_quantity,
+            price=normalized_live_price if live_order_type == "LIMIT" else None,
+            reference_price=liquidity_reference_price,
+        )
+        if bool(liquidity_gate.get("enabled")):
+            live_sizing = {
+                **dict(live_sizing or {}),
+                "liquidity_gate_decision": str(liquidity_gate.get("decision") or ""),
+            }
+        if str(liquidity_gate.get("decision") or "PASS").upper() != "PASS":
+            decision = str(liquidity_gate.get("decision") or "BLOCK").upper()
+            live_tranche: dict[str, Any] = {}
+            if decision == "SPLIT_REQUIRED":
+                partial_quantity, adjusted_sizing, partial_error = self._partial_tranche_order(
+                    intent=intent,
+                    plan=plan,
+                    live_quantity=live_quantity,
+                    live_sizing=live_sizing,
+                    liquidity_gate=liquidity_gate,
+                    reference_price=liquidity_reference_price,
+                )
+                if partial_error is None and partial_quantity is not None:
+                    live_quantity = partial_quantity
+                    live_sizing = adjusted_sizing
+                    live_tranche = dict(adjusted_sizing.get("live_tranche") or {})
+                    liquidity_gate = {
+                        **dict(liquidity_gate or {}),
+                        "decision": "SPLIT_PARTIAL_SUBMIT",
+                        "message": "Live order size was reduced by liquidity gate and routed as a tranche.",
+                    }
+                    decision = "PASS"
+                else:
+                    liquidity_gate = {
+                        **dict(liquidity_gate or {}),
+                        "partial_submit_error": partial_error,
+                    }
+            if decision == "PASS":
+                pass
+            else:
+                row = self._rejection_submission(
+                    intent=intent,
+                    plan=plan,
+                    message=str(liquidity_gate.get("message") or "Live liquidity gate blocked the order."),
+                    submit_status="LIVE_LIQUIDITY_SPLIT_REQUIRED" if decision == "SPLIT_REQUIRED" else "LIVE_LIQUIDITY_BLOCKED",
+                    client_order_id=client_order_id,
+                    requested_live=live,
+                )
+                row.attachments = {
+                    **dict(row.attachments or {}),
+                    "live_order_sizing": live_sizing,
+                    "live_liquidity_gate": liquidity_gate,
+                    "session_guidance": dict(intent.session_guidance or {}),
+                }
+                row.raw = {
+                    **dict(row.raw or {}),
+                    "live_order_sizing": live_sizing,
+                    "live_liquidity_gate": liquidity_gate,
+                }
+                return row, [], False
+        else:
+            live_tranche = {}
+
         live_result = self.live_submitter(
             symbol=plan.symbol,
             side=live_side,
@@ -783,11 +1197,15 @@ class ExecutionCoordinator:
             attachments={
                 "status": "pending_attach",
                 "live_order_sizing": live_sizing,
+                **({"live_tranche": live_tranche} if live_tranche else {}),
+                **({"live_liquidity_gate": liquidity_gate} if bool(liquidity_gate.get("enabled")) else {}),
                 "session_guidance": dict(intent.session_guidance or {}),
             },
             raw={
                 **dict(live_result),
                 "live_order_sizing": live_sizing,
+                **({"live_tranche": live_tranche} if live_tranche else {}),
+                **({"live_liquidity_gate": liquidity_gate} if bool(liquidity_gate.get("enabled")) else {}),
                 "intent_snapshot": {"session_guidance": dict(intent.session_guidance or {})},
             },
             submitted_at=datetime.now(timezone.utc),

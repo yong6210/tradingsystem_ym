@@ -416,6 +416,7 @@ class StrategyEngine:
             fill_ingest=self.ingest_execution_fill,
             live_submitter=self.submit_binance_order,
             live_symbol_rules_loader=self.load_binance_symbol_trading_rules,
+            live_liquidity_loader=self.load_binance_live_liquidity_snapshot,
             settings=self.settings,
         )
         self.execution_reconciliation = ExecutionReconciliationService(
@@ -1000,6 +1001,113 @@ class StrategyEngine:
                 filtered_rows.append(row)
         return filtered_rows
 
+    @staticmethod
+    def _submission_live_tranche_payload(submission: Any | None) -> dict[str, Any]:
+        if submission is None:
+            return {}
+        attachments = dict(getattr(submission, "attachments", {}) or {})
+        raw = dict(getattr(submission, "raw", {}) or {})
+        return dict(attachments.get("live_tranche") or raw.get("live_tranche") or {})
+
+    def _plan_allows_live_tranche_continuation(self, plan: Plan) -> bool:
+        if not bool(getattr(self.settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", False)):
+            return False
+        latest_intent = self.intent_repo.latest_for_plan(str(plan.plan_id))
+        if latest_intent is None:
+            return False
+        latest_submission = self.submission_repo.latest_for_intent(str(latest_intent.intent_id))
+        if latest_submission is None:
+            return False
+        if str(latest_submission.adapter or "").lower() != "binance" or not bool(latest_submission.requested_live):
+            return False
+        if str(latest_submission.state or "") != OrderLifecycleState.FILLED.value:
+            return False
+        tranche = self._submission_live_tranche_payload(latest_submission)
+        if not bool(tranche.get("additive_allowed")):
+            return False
+        remaining_notional = self._maybe_float(tranche.get("remaining_notional")) or 0.0
+        min_tranche_notional = max(
+            0.0,
+            float(getattr(self.settings, "auto_trading_live_liquidity_gate_min_tranche_notional_usdt", 0.0) or 0.0),
+        )
+        tranche_index = int(tranche.get("tranche_index") or 1)
+        max_tranches = max(
+            1,
+            int(tranche.get("max_tranches") or getattr(self.settings, "auto_trading_live_liquidity_gate_max_tranches", 1) or 1),
+        )
+        return remaining_notional >= min_tranche_notional and tranche_index < max_tranches
+
+    def _is_same_live_tranche_thesis(self, *, plan: Plan, executable_plan: dict[str, Any], exposure: Plan) -> bool:
+        requested_fingerprint = dict(executable_plan.get("thesis_fingerprint") or {})
+        if not requested_fingerprint:
+            requested_fingerprint = self.thesis.build_from_plan(plan)
+        return self.thesis.same_thesis(requested_fingerprint, self.thesis.build_from_plan(exposure))
+
+    def _has_live_tranche_continuation(
+        self,
+        *,
+        plan: Plan,
+        executable_plan: dict[str, Any],
+        exposure_rows: list[Plan],
+    ) -> bool:
+        for row in exposure_rows:
+            if str(getattr(row, "plan_id", "") or "") == str(plan.plan_id or ""):
+                continue
+            if not self._is_same_live_tranche_thesis(plan=plan, executable_plan=executable_plan, exposure=row):
+                continue
+            if self._plan_allows_live_tranche_continuation(row):
+                return True
+        return False
+
+    def _candidate_row_with_live_tranche_override(
+        self,
+        *,
+        plan: Plan,
+        executable_plan: dict[str, Any],
+        candidate_row: dict[str, Any] | None,
+        exposure_rows: list[Plan],
+    ) -> dict[str, Any] | None:
+        if not candidate_row:
+            return candidate_row
+        block_reason = str(candidate_row.get("block_reason") or "")
+        thesis_rejected_reason = str(candidate_row.get("thesis_rejected_reason") or "")
+        if block_reason != "thesis_duplicate_blocked" and thesis_rejected_reason != "duplicate_active_thesis":
+            return candidate_row
+        if not self._has_live_tranche_continuation(
+            plan=plan,
+            executable_plan=executable_plan,
+            exposure_rows=exposure_rows,
+        ):
+            return candidate_row
+
+        adjusted = dict(candidate_row)
+        adjusted["accepted"] = True
+        adjusted["block_reason"] = None
+        adjusted["block_reason_message"] = None
+        adjusted["thesis_rejected_reason"] = None
+        adjusted["live_tranche_continuation_override"] = True
+        adjusted["live_tranche_continuation_override_reason"] = (
+            "Same-thesis duplicate gate bypassed because the prior live tranche is filled "
+            "and explicitly allows a remaining tranche."
+        )
+        return adjusted
+
+    @staticmethod
+    def _replace_candidate_row(
+        *,
+        candidate_rows: list[dict[str, Any]],
+        candidate_row: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        if not candidate_row:
+            return candidate_rows
+        plan_id = str(candidate_row.get("plan_id") or "")
+        if not plan_id:
+            return candidate_rows
+        return [
+            dict(candidate_row) if str(row.get("plan_id") or "") == plan_id else row
+            for row in candidate_rows
+        ]
+
     def _live_cluster_guard(
         self,
         *,
@@ -1035,6 +1143,8 @@ class StrategyEngine:
             for row in exposure_rows:
                 if str(getattr(row, "plan_id", "") or "") == str(plan.plan_id or ""):
                     continue
+                if self._is_same_live_tranche_thesis(plan=plan, executable_plan=executable_plan, exposure=row) and self._plan_allows_live_tranche_continuation(row):
+                    continue
                 validity = dict(getattr(row, "validity", {}) or {})
                 row_family = str(validity.get("strategy_family") or "legacy_zone_plan").lower()
                 if row_family != family:
@@ -1054,6 +1164,8 @@ class StrategyEngine:
         if max_same_family_direction_exposures > 0 and requested_direction:
             for row in exposure_rows:
                 if str(getattr(row, "plan_id", "") or "") == str(plan.plan_id or ""):
+                    continue
+                if self._is_same_live_tranche_thesis(plan=plan, executable_plan=executable_plan, exposure=row) and self._plan_allows_live_tranche_continuation(row):
                     continue
                 validity = dict(getattr(row, "validity", {}) or {})
                 row_family = str(validity.get("strategy_family") or "legacy_zone_plan").lower()
@@ -2946,13 +3058,31 @@ class StrategyEngine:
         operating_lock = dict((candidate_row or {}).get("operating_lock") or {})
         session_name = ExecutionPlanningService._session_name(candidate_row or {}, operating_lock)
         exposure_rows = self._current_exposure_rows()
-        outcome_inputs = self._approval_outcome_inputs(symbol=plan.symbol, candidate_rows=candidate_rows)
         executable_plan = self.execution_planning.build_executable_plan(
             plan=plan,
             context=context,
             candidate_row=candidate_row,
             execution_mode=requested_mode,
         )
+        adjusted_candidate_row = self._candidate_row_with_live_tranche_override(
+            plan=plan,
+            executable_plan=executable_plan,
+            candidate_row=candidate_row,
+            exposure_rows=exposure_rows,
+        )
+        if adjusted_candidate_row is not candidate_row:
+            candidate_row = adjusted_candidate_row
+            candidate_rows = self._replace_candidate_row(
+                candidate_rows=candidate_rows,
+                candidate_row=candidate_row,
+            )
+            executable_plan = self.execution_planning.build_executable_plan(
+                plan=plan,
+                context=context,
+                candidate_row=candidate_row,
+                execution_mode=requested_mode,
+            )
+        outcome_inputs = self._approval_outcome_inputs(symbol=plan.symbol, candidate_rows=candidate_rows)
         live_cluster_guard = self._live_cluster_guard(
             plan=plan,
             executable_plan=executable_plan,
@@ -5446,7 +5576,100 @@ class StrategyEngine:
             "quantity_precision": rules.quantity_precision,
             "source": "binance_exchange_info",
         }
-        
+
+    def load_binance_live_liquidity_snapshot(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: float,
+        price: float | None = None,
+        reference_price: float = 0.0,
+    ) -> dict[str, Any]:
+        normalized_symbol = str(symbol or "").upper()
+        normalized_side = str(side or "").upper()
+        depth_limit = int(getattr(self.settings, "auto_trading_live_liquidity_gate_orderbook_limit", 100) or 100)
+        order_book = self.market_data.binance.fetch_order_book(symbol=normalized_symbol, limit=depth_limit)
+
+        def _levels(raw_rows: Any) -> list[tuple[float, float]]:
+            levels: list[tuple[float, float]] = []
+            for row in list(raw_rows or []):
+                if not isinstance(row, (list, tuple)) or len(row) < 2:
+                    continue
+                level_price = float(row[0])
+                level_qty = float(row[1])
+                if level_price > 0.0 and level_qty > 0.0:
+                    levels.append((level_price, level_qty))
+            return levels
+
+        bids = _levels(order_book.get("bids"))
+        asks = _levels(order_book.get("asks"))
+        best_bid = bids[0][0] if bids else 0.0
+        best_ask = asks[0][0] if asks else 0.0
+        mid_price = (best_bid + best_ask) / 2.0 if best_bid > 0.0 and best_ask > 0.0 else 0.0
+        effective_reference = float(price or reference_price or mid_price or 0.0)
+        spread_bps = ((best_ask - best_bid) / mid_price * 10_000.0) if mid_price > 0.0 else None
+        normalized_order_type = str(order_type or "").upper()
+        is_marketable_now = normalized_order_type != "LIMIT"
+        if normalized_order_type == "LIMIT" and price is not None:
+            if normalized_side == "BUY":
+                is_marketable_now = best_ask > 0.0 and float(price) >= best_ask
+            else:
+                is_marketable_now = best_bid > 0.0 and float(price) <= best_bid
+
+        opposite_levels = asks if normalized_side == "BUY" else bids
+        opposite_depth_notional = sum(level_price * level_qty for level_price, level_qty in opposite_levels)
+
+        remaining_qty = max(float(quantity or 0.0), 0.0)
+        simulated_cost = 0.0
+        simulated_qty = 0.0
+        for level_price, level_qty in opposite_levels:
+            if remaining_qty <= 0.0:
+                break
+            take_qty = min(remaining_qty, level_qty)
+            simulated_cost += take_qty * level_price
+            simulated_qty += take_qty
+            remaining_qty -= take_qty
+
+        market_fill_avg_price = simulated_cost / simulated_qty if simulated_qty > 0.0 else None
+        market_slippage_bps = None
+        if is_marketable_now and market_fill_avg_price is not None and effective_reference > 0.0:
+            if normalized_side == "BUY":
+                market_slippage_bps = max(0.0, (market_fill_avg_price - effective_reference) / effective_reference * 10_000.0)
+            else:
+                market_slippage_bps = max(0.0, (effective_reference - market_fill_avg_price) / effective_reference * 10_000.0)
+
+        klines_1m = self.market_data.binance.fetch_klines(symbol=normalized_symbol, interval="1m", limit=5)
+        quote_volumes = [float(row.c) * float(row.v) for row in klines_1m if float(row.c) > 0.0 and float(row.v) >= 0.0]
+        recent_1m_quote_volume = quote_volumes[-1] if quote_volumes else None
+        recent_5m_quote_volume = sum(quote_volumes) if quote_volumes else None
+        order_notional = max(float(quantity or 0.0), 0.0) * max(effective_reference, 0.0)
+
+        return {
+            "source": "binance_public_depth_klines",
+            "symbol": normalized_symbol,
+            "side": normalized_side,
+            "order_type": normalized_order_type,
+            "marketable_now": bool(is_marketable_now),
+            "orderbook_limit": depth_limit,
+            "best_bid": round(best_bid, 8),
+            "best_ask": round(best_ask, 8),
+            "mid_price": round(mid_price, 8),
+            "reference_price": round(effective_reference, 8),
+            "order_notional": round(order_notional, 4),
+            "spread_bps": round(float(spread_bps), 4) if spread_bps is not None else None,
+            "opposite_depth_notional": round(opposite_depth_notional, 4),
+            "market_fill_avg_price": round(float(market_fill_avg_price), 8) if market_fill_avg_price is not None else None,
+            "market_slippage_bps": round(float(market_slippage_bps), 4) if market_slippage_bps is not None else None,
+            "simulated_fill_coverage": round(simulated_qty / max(float(quantity or 0.0), 1e-12), 6),
+            "recent_1m_quote_volume": round(float(recent_1m_quote_volume), 4)
+            if recent_1m_quote_volume is not None
+            else None,
+            "recent_5m_quote_volume": round(float(recent_5m_quote_volume), 4)
+            if recent_5m_quote_volume is not None
+            else None,
+        }
 
     def query_binance_order(
         self,

@@ -1176,6 +1176,7 @@ open "http://127.0.0.1:8000/execution/operator-ui?symbol=BTCUSDC&universe=usdc_p
 - `/health/ready` checks `db`, `binance_rest`, `event_backend`, live worker heartbeats/PIDs, WS no-message timeout, and 1m/5m market-data freshness.
 - Runtime scripts disable Pydantic plugin loading and bytecode writes by default for stable startup and cleaner git state.
 - `POST /internal/binance/order` is a test order by default. Live submit or cancel opens only when `BINANCE_TRADE_LIVE_ENABLED=true` and the request payload sets `live=true`.
+- `AUTO_TRADING_LIVE_LIQUIDITY_GATE_ENABLED=true` adds a final pre-submit live gate using Binance public order-book depth plus recent 1m turnover. It blocks or marks split-required when visible depth, spread, simulated slippage, or volume participation is outside configured limits.
 - `POST /internal/binance/user-stream/process` requires the optional `websockets` dependency.
 - Binance sync and backfill skip overlap history so older overlapping candles do not trigger reverse-timestamp failures.
 - `/indicators/*`, Pine mirror output, and TradingView chart alerts are context surfaces. They do not replace execution approval or live runtime truth.

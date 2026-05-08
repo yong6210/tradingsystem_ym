@@ -84,6 +84,7 @@ def _apply_auto_trading_defaults(monkeypatch) -> None:
     monkeypatch.setattr(settings, "auto_trading_micro_live_max_daily_new_entries", 10)
     monkeypatch.setattr(settings, "auto_trading_reconciliation_user_stream_stale_seconds", 180)
     monkeypatch.setattr(settings, "binance_trade_live_enabled", False)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", False)
     monkeypatch.setattr(settings, "portfolio_overlay_enabled", False)
     monkeypatch.setattr(settings, "transition_edge_variant_enabled", True)
     monkeypatch.setattr(settings, "transition_edge_variant_shadow_only", True)
@@ -2538,6 +2539,326 @@ def test_micro_live_submit_path_uses_binance_adapter_when_gates_pass(monkeypatch
     assert captured["quantity"] == 0.125
     assert submit_payload["attachments"]["live_order_sizing"]["max_position_notional"] == 12.5
     assert submit_payload["attachments"]["live_order_sizing"]["normalized_quantity"] == 0.125
+
+
+def test_micro_live_submit_runs_liquidity_gate_when_enabled(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "NOTIONAL_PER_R")
+    monkeypatch.setattr(settings, "auto_trading_notional_per_r", 25.0)
+    suffix = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000))[-6:]
+    symbol = f"LG{suffix}USDC"
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", symbol)
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
+    monkeypatch.setattr(
+        "app.services.strategy_engine.StrategyEngine.load_binance_live_liquidity_snapshot",
+        lambda self, **kwargs: {
+            "source": "test_liquidity",
+            "symbol": kwargs["symbol"],
+            "order_notional": 12.5,
+            "spread_bps": 1.0,
+            "opposite_depth_notional": 100_000.0,
+            "market_slippage_bps": 0.5,
+            "recent_1m_quote_volume": 50_000.0,
+            "recent_5m_quote_volume": 250_000.0,
+        },
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_submit(self, **kwargs):
+        captured.update(kwargs)
+        return {
+            "symbol": kwargs["symbol"],
+            "plan_id": kwargs["plan_id"],
+            "order_id": 987658,
+            "client_order_id": kwargs["client_order_id"],
+            "status": "NEW",
+            "side": kwargs["side"],
+            "order_type": kwargs["order_type"],
+            "reduce_only": kwargs["reduce_only"],
+        }
+
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.submit_binance_order", _fake_submit)
+
+    plan_id = f"{symbol}_liq_pass_{suffix}"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, entry_model="LIMIT")
+
+    intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "MICRO_LIVE"},
+    )
+    assert intent.status_code == 200
+    intent_payload = intent.json()
+    assert intent_payload["submit_decision"] == "SUBMIT"
+
+    submit = client.post(
+        "/execution/submit",
+        json={"intent_id": intent_payload["intent_id"], "live": True},
+    )
+    assert submit.status_code == 200
+    submit_payload = submit.json()
+    assert submit_payload["adapter"] == "binance"
+    assert submit_payload["state"] == "ACKNOWLEDGED"
+    assert captured["quantity"] == 0.125
+    assert submit_payload["attachments"]["live_liquidity_gate"]["decision"] == "PASS"
+    assert submit_payload["attachments"]["live_order_sizing"]["liquidity_gate_decision"] == "PASS"
+
+
+def test_micro_live_submit_blocks_thin_liquidity_before_binance_submit(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "NOTIONAL_PER_R")
+    monkeypatch.setattr(settings, "auto_trading_notional_per_r", 25.0)
+    suffix = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000))[-6:]
+    symbol = f"LB{suffix}USDC"
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", symbol)
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
+    monkeypatch.setattr(
+        "app.services.strategy_engine.StrategyEngine.load_binance_live_liquidity_snapshot",
+        lambda self, **kwargs: {
+            "source": "test_liquidity",
+            "symbol": kwargs["symbol"],
+            "order_notional": 12.5,
+            "spread_bps": 1.0,
+            "opposite_depth_notional": 1_000.0,
+            "market_slippage_bps": 0.5,
+            "recent_1m_quote_volume": 50_000.0,
+            "recent_5m_quote_volume": 250_000.0,
+        },
+    )
+
+    def _unexpected_submit(self, **kwargs):
+        raise AssertionError("live submitter should not be called when liquidity gate blocks")
+
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.submit_binance_order", _unexpected_submit)
+
+    plan_id = f"{symbol}_liq_block_{suffix}"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, entry_model="LIMIT")
+
+    intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "MICRO_LIVE"},
+    )
+    assert intent.status_code == 200
+    intent_payload = intent.json()
+    assert intent_payload["submit_decision"] == "SUBMIT"
+
+    submit = client.post(
+        "/execution/submit",
+        json={"intent_id": intent_payload["intent_id"], "live": True},
+    )
+    assert submit.status_code == 200
+    submit_payload = submit.json()
+    assert submit_payload["state"] == "REJECTED"
+    assert submit_payload["submit_status"] == "LIVE_LIQUIDITY_BLOCKED"
+    gate = submit_payload["attachments"]["live_liquidity_gate"]
+    assert gate["decision"] == "BLOCK"
+    assert "visible_depth_below_floor" in gate["reason_codes"]
+
+
+def test_micro_live_submit_routes_partial_tranche_when_liquidity_size_is_too_large(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_min_depth_usdt", 0.0)
+    monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "NOTIONAL_PER_R")
+    monkeypatch.setattr(settings, "auto_trading_notional_per_r", 2500.0)
+    suffix = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000))[-6:]
+    symbol = f"LP{suffix}USDC"
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", symbol)
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr(
+        "app.services.strategy_engine.StrategyEngine.load_binance_live_liquidity_snapshot",
+        lambda self, **kwargs: {
+            "source": "test_liquidity",
+            "symbol": kwargs["symbol"],
+            "spread_bps": 1.0,
+            "opposite_depth_notional": 1_000.0,
+            "market_slippage_bps": 0.5,
+            "recent_1m_quote_volume": 1_000_000.0,
+            "recent_5m_quote_volume": 5_000_000.0,
+        },
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_submit(self, **kwargs):
+        captured.update(kwargs)
+        return {
+            "symbol": kwargs["symbol"],
+            "plan_id": kwargs["plan_id"],
+            "order_id": 987659,
+            "client_order_id": kwargs["client_order_id"],
+            "status": "NEW",
+            "side": kwargs["side"],
+            "order_type": kwargs["order_type"],
+            "reduce_only": kwargs["reduce_only"],
+        }
+
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.submit_binance_order", _fake_submit)
+
+    plan_id = f"{symbol}_liq_partial_{suffix}"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, entry_model="LIMIT")
+
+    intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "MICRO_LIVE"},
+    )
+    assert intent.status_code == 200
+    intent_payload = intent.json()
+    assert intent_payload["submit_decision"] == "SUBMIT"
+
+    submit = client.post(
+        "/execution/submit",
+        json={"intent_id": intent_payload["intent_id"], "live": True},
+    )
+    assert submit.status_code == 200
+    submit_payload = submit.json()
+    assert submit_payload["adapter"] == "binance"
+    assert submit_payload["state"] == "ACKNOWLEDGED"
+    assert captured["quantity"] == 1.0
+    sizing = submit_payload["attachments"]["live_order_sizing"]
+    assert sizing["liquidity_gate_decision"] == "SPLIT_PARTIAL_SUBMIT"
+    assert sizing["original_max_position_notional"] == 1250.0
+    assert sizing["max_position_notional"] == 100.0
+    tranche = submit_payload["attachments"]["live_tranche"]
+    assert tranche["tranche_index"] == 1
+    assert tranche["submitted_notional"] == 100.0
+    assert tranche["remaining_notional"] == 1150.0
+    assert tranche["additive_allowed"] is True
+
+
+def test_micro_live_submit_allows_next_signal_to_fill_remaining_tranche(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_min_depth_usdt", 0.0)
+    monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "NOTIONAL_PER_R")
+    monkeypatch.setattr(settings, "auto_trading_notional_per_r", 2500.0)
+    suffix = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000))[-6:]
+    symbol = f"LT{suffix}USDC"
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", symbol)
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
+    monkeypatch.setattr(
+        "app.services.strategy_engine.StrategyEngine.load_binance_live_liquidity_snapshot",
+        lambda self, **kwargs: {
+            "source": "test_liquidity",
+            "symbol": kwargs["symbol"],
+            "spread_bps": 1.0,
+            "opposite_depth_notional": 1_000.0 if kwargs["quantity"] > 12.0 else 100_000.0,
+            "market_slippage_bps": 0.5,
+            "recent_1m_quote_volume": 1_000_000.0,
+            "recent_5m_quote_volume": 5_000_000.0,
+        },
+    )
+
+    shared_thesis = {
+        "direction": "long",
+        "regime": "trend",
+        "strategy_family": "sweep_reversal",
+        "liquidity_narrative": "session_low_sweep",
+        "event_classification": "rejection_confirmed",
+        "time_bucket": "2026-05-08T16:00Z",
+        "correlation_cluster": "test_cluster",
+    }
+    first_plan_id = f"{symbol}_first_{suffix}"
+    second_plan_id = f"{symbol}_second_{suffix}"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=first_plan_id, entry_model="LIMIT", thesis_fingerprint=shared_thesis)
+
+    def _exposures(self):
+        with SessionLocal() as db:
+            rows = []
+            for plan_id in (first_plan_id, second_plan_id):
+                row = db.get(Plan, plan_id)
+                if row is not None:
+                    rows.append(row)
+            return rows
+
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", _exposures)
+
+    submitted_quantities: list[float] = []
+
+    def _fake_submit(self, **kwargs):
+        submitted_quantities.append(float(kwargs["quantity"]))
+        return {
+            "symbol": kwargs["symbol"],
+            "plan_id": kwargs["plan_id"],
+            "order_id": 987660 + len(submitted_quantities),
+            "client_order_id": kwargs["client_order_id"],
+            "status": "FILLED" if len(submitted_quantities) == 1 else "NEW",
+            "side": kwargs["side"],
+            "order_type": kwargs["order_type"],
+            "reduce_only": kwargs["reduce_only"],
+        }
+
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.submit_binance_order", _fake_submit)
+
+    first_intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": first_plan_id, "execution_mode": "MICRO_LIVE"},
+    )
+    assert first_intent.status_code == 200
+    first_intent_payload = first_intent.json()
+    assert first_intent_payload["submit_decision"] == "SUBMIT"
+
+    first_submit = client.post(
+        "/execution/submit",
+        json={"intent_id": first_intent_payload["intent_id"], "live": True},
+    )
+    assert first_submit.status_code == 200
+    assert first_submit.json()["attachments"]["live_tranche"]["remaining_notional"] == 1150.0
+
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=second_plan_id, entry_model="LIMIT", thesis_fingerprint=shared_thesis)
+
+    second_intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": second_plan_id, "execution_mode": "MICRO_LIVE"},
+    )
+    assert second_intent.status_code == 200
+    second_intent_payload = second_intent.json()
+    assert second_intent_payload["submit_decision"] == "SUBMIT"
+    assert second_intent_payload["dedupe_result"]["status"] == "tranche_continuation_available"
+
+    second_submit = client.post(
+        "/execution/submit",
+        json={"intent_id": second_intent_payload["intent_id"], "live": True},
+    )
+    assert second_submit.status_code == 200
+    assert submitted_quantities == [1.0, 11.5]
+    second_sizing = second_submit.json()["attachments"]["live_order_sizing"]
+    assert second_sizing["liquidity_tranche_continuation"]["remaining_notional_before"] == 1150.0
+    assert second_sizing["max_position_notional"] == 1150.0
 
 
 def test_micro_live_submit_blocks_when_notional_implies_sub_minimum_quantity(monkeypatch) -> None:

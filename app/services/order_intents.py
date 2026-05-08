@@ -98,6 +98,49 @@ class OrderIntentService:
             "FILLED",
         }
 
+    def _partial_submit_enabled(self) -> bool:
+        return bool(getattr(self.settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", False))
+
+    def _min_tranche_notional(self) -> float:
+        return max(0.0, float(getattr(self.settings, "auto_trading_live_liquidity_gate_min_tranche_notional_usdt", 0.0) or 0.0))
+
+    @staticmethod
+    def _submission_live_tranche(submission: OrderSubmission | None) -> dict:
+        if submission is None:
+            return {}
+        attachments = dict(getattr(submission, "attachments", {}) or {})
+        raw = dict(getattr(submission, "raw", {}) or {})
+        return dict(attachments.get("live_tranche") or raw.get("live_tranche") or {})
+
+    def _tranche_continuation(self, submission: OrderSubmission | None) -> dict | None:
+        if not self._partial_submit_enabled() or submission is None:
+            return None
+        if str(submission.adapter or "").lower() != "binance" or not bool(submission.requested_live):
+            return None
+        if str(submission.state or "") != "FILLED":
+            return None
+        tranche = self._submission_live_tranche(submission)
+        if not tranche or not bool(tranche.get("additive_allowed")):
+            return None
+        remaining_notional = float(tranche.get("remaining_notional") or 0.0)
+        if remaining_notional < self._min_tranche_notional():
+            return None
+        tranche_index = int(tranche.get("tranche_index") or 1)
+        max_tranches = max(1, int(tranche.get("max_tranches") or getattr(self.settings, "auto_trading_live_liquidity_gate_max_tranches", 1) or 1))
+        if tranche_index >= max_tranches:
+            return None
+        return {
+            "parent_intent_id": str(tranche.get("parent_intent_id") or submission.intent_id),
+            "parent_submission_id": str(tranche.get("parent_submission_id") or submission.submission_id),
+            "parent_plan_id": str(tranche.get("parent_plan_id") or submission.plan_id),
+            "thesis_cluster_id": str(tranche.get("thesis_cluster_id") or ""),
+            "target_notional": float(tranche.get("target_notional") or 0.0),
+            "remaining_notional": remaining_notional,
+            "next_tranche_index": tranche_index + 1,
+            "max_tranches": max_tranches,
+            "source_submission_id": submission.submission_id,
+        }
+
     def _latest_routed_submission_for_plan(self, plan_id: str) -> tuple[OrderSubmission | None, dict]:
         if self.submission_repo is None:
             return None, {
@@ -143,18 +186,6 @@ class OrderIntentService:
             else:
                 plan_still_open = False
 
-            latest_submission = self.submission_repo.latest_for_intent(intent.intent_id) if self.submission_repo else None
-            if not plan_still_open and not self._submission_keeps_thesis_open(latest_submission):
-                if self._is_stale_paper_submission(latest_submission):
-                    ignored_stale_intents.append(
-                        {
-                            "intent_id": str(intent.intent_id or ""),
-                            "plan_id": str(intent.plan_id or ""),
-                            "symbol": str(intent.symbol or ""),
-                        }
-                    )
-                continue
-
             other_fingerprint = dict(intent.thesis_fingerprint or {})
             if not other_fingerprint:
                 continue
@@ -171,6 +202,34 @@ class OrderIntentService:
             if not same_execution_group:
                 continue
             if not self.thesis.same_thesis(fingerprint, other_fingerprint):
+                continue
+
+            latest_submission = self.submission_repo.latest_for_intent(intent.intent_id) if self.submission_repo else None
+            continuation = self._tranche_continuation(latest_submission)
+            if continuation is not None:
+                return {
+                    "status": "tranche_continuation_available",
+                    "matched_plan_id": intent.plan_id,
+                    "matched_intent_id": intent.intent_id,
+                    "matched_submission_id": latest_submission.submission_id if latest_submission else None,
+                    "matched_symbol": intent.symbol,
+                    "cluster_id": self.thesis.thesis_cluster_id(fingerprint),
+                    "source": "open_intent_tranche",
+                    "tranche_continuation": continuation,
+                }, {
+                    "ignored_stale_paper_intent_count": len(ignored_stale_intents),
+                    "ignored_stale_paper_intents": ignored_stale_intents[:3],
+                }
+
+            if not plan_still_open and not self._submission_keeps_thesis_open(latest_submission):
+                if self._is_stale_paper_submission(latest_submission):
+                    ignored_stale_intents.append(
+                        {
+                            "intent_id": str(intent.intent_id or ""),
+                            "plan_id": str(intent.plan_id or ""),
+                            "symbol": str(intent.symbol or ""),
+                        }
+                    )
                 continue
 
             return {
@@ -207,6 +266,24 @@ class OrderIntentService:
             }:
                 continue
             if self.thesis.same_thesis(fingerprint, self.thesis.build_from_plan(exposure)):
+                matched_intent = self.intent_repo.latest_for_plan(exposure.plan_id)
+                matched_submission = (
+                    self.submission_repo.latest_for_intent(matched_intent.intent_id)
+                    if self.submission_repo is not None and matched_intent is not None
+                    else None
+                )
+                continuation = self._tranche_continuation(matched_submission)
+                if continuation is not None:
+                    return {
+                        "status": "tranche_continuation_available",
+                        "matched_plan_id": exposure.plan_id,
+                        "matched_intent_id": matched_intent.intent_id if matched_intent else None,
+                        "matched_submission_id": matched_submission.submission_id if matched_submission else None,
+                        "matched_symbol": exposure.symbol,
+                        "cluster_id": self.thesis.thesis_cluster_id(fingerprint),
+                        "source": "active_plan_tranche",
+                        "tranche_continuation": continuation,
+                    }
                 return {
                     "status": "duplicate_active_thesis",
                     "matched_plan_id": exposure.plan_id,

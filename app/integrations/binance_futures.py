@@ -601,6 +601,19 @@ class BinanceFuturesClient:
 
         return [self._parse_kline_row(symbol.upper(), interval, row) for row in payload]
 
+    def fetch_order_book(self, symbol: str, limit: int = 100) -> dict[str, Any]:
+        allowed_limits = [5, 10, 20, 50, 100, 500, 1000]
+        requested_limit = max(1, int(limit or 100))
+        normalized_limit = next((item for item in allowed_limits if item >= requested_limit), allowed_limits[-1])
+        with httpx.Client(base_url=self.rest_base_url, timeout=self.timeout_seconds) as client:
+            response = client.get(
+                "/fapi/v1/depth",
+                params={"symbol": symbol.upper(), "limit": normalized_limit},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        return dict(payload)
+
     def fetch_funding_rates(
         self,
         *,

@@ -136,6 +136,7 @@ def _patch_live_contract(engine: StrategyEngine, *, allowed_symbols: list[str]) 
     engine.settings.auto_trading_notional_per_r = 25.0
     engine.settings.binance_live_min_quantity = 0.001
     engine.settings.binance_live_quantity_step = 0.001
+    engine.settings.auto_trading_live_liquidity_gate_enabled = False
     engine.settings.session_impulse_retest_shadow_only = False
     engine.settings.session_impulse_retest_partial_activation_ratio = 1.0
     engine.execution_coordinator.live_symbol_rules_loader = lambda symbol: {
