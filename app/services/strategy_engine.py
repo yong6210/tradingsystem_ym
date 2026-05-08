@@ -441,14 +441,14 @@ class StrategyEngine:
         return self.validation_payload_cache.key(symbol)
 
     def _sqlite_database_artifact_paths(self) -> list[Path]:
-        return self.validation_payload_cache._sqlite_database_artifact_paths()
+        return self.validation_payload_cache.sqlite_database_artifact_paths()
 
     def _validation_payload_cache_stale_for_database(self, cache_mtime: float) -> bool:
-        return self.validation_payload_cache._stale_for_database(cache_mtime)
+        return self.validation_payload_cache.stale_for_database(cache_mtime)
 
     @staticmethod
     def _valid_cached_validation_payload(symbol: str, payload: Any) -> bool:
-        return ValidationPayloadCacheService._valid_payload(symbol, payload)
+        return ValidationPayloadCacheService.valid_payload(symbol, payload)
 
     def _load_cached_validation_payload(self, symbol: str) -> dict[str, Any] | None:
         return self.validation_payload_cache.load(symbol)

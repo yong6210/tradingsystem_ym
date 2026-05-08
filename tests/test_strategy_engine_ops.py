@@ -283,8 +283,8 @@ def test_recompute_learning_read_only_runtime_uses_recent_cache() -> None:
 
     with SessionLocal() as db:
         engine = StrategyEngine(db)
-        strategy_engine_module._READ_ONLY_RECOMPUTE_CACHE[engine._validation_payload_cache_key(symbol)] = (
-            time.monotonic() + 60.0,
+        engine._store_cached_validation_payload(
+            symbol,
             {"symbol": symbol, "updated_zones": 41, "validation_report": {"cached": True}},
         )
         engine.outcome_repo.list_recent = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cache miss"))  # type: ignore[assignment]
