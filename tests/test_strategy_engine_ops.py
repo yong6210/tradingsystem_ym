@@ -199,6 +199,7 @@ def test_operating_lock_snapshot_ignores_paper_only_closed_plans() -> None:
 
 def test_operational_checklist_uses_read_only_validation_runtime() -> None:
     init_db()
+    strategy_engine_module._READ_ONLY_RECOMPUTE_CACHE.clear()
     with SessionLocal() as db:
         engine = StrategyEngine(db)
         captured: dict[str, object] = {}
@@ -233,6 +234,7 @@ def test_recompute_learning_read_only_runtime_keeps_global_lineage_persistence_d
         pass
 
     init_db()
+    strategy_engine_module._READ_ONLY_RECOMPUTE_CACHE.clear()
     with SessionLocal() as db:
         engine = StrategyEngine(db)
         captured: dict[str, object] = {}
@@ -278,13 +280,13 @@ def test_recompute_learning_read_only_runtime_uses_recent_cache() -> None:
     init_db()
     symbol = "BTCUSDC"
     strategy_engine_module._READ_ONLY_RECOMPUTE_CACHE.clear()
-    strategy_engine_module._READ_ONLY_RECOMPUTE_CACHE[symbol] = (
-        time.monotonic() + 60.0,
-        {"symbol": symbol, "updated_zones": 41, "validation_report": {"cached": True}},
-    )
 
     with SessionLocal() as db:
         engine = StrategyEngine(db)
+        strategy_engine_module._READ_ONLY_RECOMPUTE_CACHE[engine._validation_payload_cache_key(symbol)] = (
+            time.monotonic() + 60.0,
+            {"symbol": symbol, "updated_zones": 41, "validation_report": {"cached": True}},
+        )
         engine.outcome_repo.list_recent = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cache miss"))  # type: ignore[assignment]
 
         first = engine.recompute_learning(symbol, persist_runtime_validation_artifacts=False)

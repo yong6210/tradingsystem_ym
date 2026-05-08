@@ -78,7 +78,7 @@ def test_promotion_lifecycle_history_persists_append_only_rows_without_duplicate
         )
         db.commit()
 
-        rows = repo.list_recent(family="trend_continuation", days=30, limit=10)
+        rows = repo.list_recent(family="trend_continuation", days=30, limit=10, now=now)
 
     assert first["available"] is True
     assert first["history_state"] == "history_attention_required"

@@ -1080,6 +1080,12 @@ class ExecutionPlanningService:
                 }
             )
         if requested_mode in {ExecutionMode.LIVE, ExecutionMode.MICRO_LIVE} and not rollout_policy.live_enabled:
+            if requested_mode_exceeds_cap:
+                return result(
+                    ApprovalState.BLOCKED,
+                    "rollout_mode_cap_exceeded",
+                    f"Requested execution mode {requested_mode.value} exceeds the family rollout cap {rollout_policy.max_execution_mode.value}.",
+                )
             return result(
                 ApprovalState.BLOCKED,
                 "family_live_rollout_disabled",

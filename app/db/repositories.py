@@ -1196,8 +1196,10 @@ class PromotionLifecycleHistoryRepository:
         family: str | None = None,
         days: int = 30,
         limit: int = 100,
+        now: datetime | None = None,
     ) -> list[PromotionLifecycleHistory]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))
+        reference_now = now.astimezone(timezone.utc) if now is not None else datetime.now(timezone.utc)
+        cutoff = reference_now - timedelta(days=max(1, int(days)))
         stmt = select(PromotionLifecycleHistory).where(PromotionLifecycleHistory.event_ts >= cutoff)
         if family:
             stmt = stmt.where(PromotionLifecycleHistory.family == family)

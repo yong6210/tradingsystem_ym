@@ -1043,7 +1043,8 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "operator_action_priority" in item_ids
 
     report_no_refresh = client.post("/validation/report?symbol=BTCUSDC&refresh=false")
-    assert report_no_refresh.status_code == 400
+    assert report_no_refresh.status_code == 200
+    assert report_no_refresh.json()["symbol"] == "BTCUSDC"
 
     fi = client.get("/validation/feature-importance?symbol=BTCUSDC")
     assert fi.status_code == 200
