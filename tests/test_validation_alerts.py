@@ -271,18 +271,13 @@ def test_recompute_learning_validation_alert_dispatches_external_channel(monkeyp
                 "deployment_approval_summary"
             ]["playbook_message"]
             assert calls
-            assert "approval_strip: approve=" in calls[0]["json_payload"]["content"]
-            assert (
-                f"deployment={payload['validation_alert']['deployment_go_no_go']}/"
-                f"{payload['validation_alert']['deployment_code']}"
-            ) in calls[0]["json_payload"]["content"]
-            assert (
-                f"playbook_action={payload['validation_alert']['approval_playbook_action']}"
-            ) in calls[0]["json_payload"]["content"]
-            assert "approval=" in calls[0]["json_payload"]["content"]
-            assert payload["validation_report"]["deployment_approval_summary"]["topline_summary_line"] in calls[0][
-                "json_payload"
-            ]["content"]
+            content = calls[0]["json_payload"]["content"]
+            assert content.startswith(f"[주의] {symbol} 검증 주의")
+            assert "해야 할 일:" in content
+            assert "이유:" in content
+            assert "리포트:" in content
+            assert "contract_trace" not in content
+            assert "approval=" not in content
 
             alerts = list(
                 db.scalars(

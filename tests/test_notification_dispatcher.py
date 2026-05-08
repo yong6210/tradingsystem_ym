@@ -99,7 +99,14 @@ def test_dispatcher_discord_delivery_success(monkeypatch) -> None:
         settings.alert_discord_webhook_url = old_url
 
 
-def test_dispatcher_discord_truncates_long_message(monkeypatch) -> None:
+def test_dispatcher_discord_safe_message_truncates_long_message() -> None:
+    message = NotificationDispatcher._discord_safe_message("x" * 2500)
+
+    assert len(message) <= NotificationDispatcher._DISCORD_MAX_MESSAGE_CHARS
+    assert message.endswith("...[truncated]")
+
+
+def test_dispatcher_discord_uses_short_korean_validation_message(monkeypatch) -> None:
     NotificationDispatcher.reset_circuit_state()
     settings = get_settings()
     old_url = settings.alert_discord_webhook_url
@@ -132,13 +139,43 @@ def test_dispatcher_discord_truncates_long_message(monkeypatch) -> None:
             channel="discord",
             alert_type="validation_warn",
             symbol="BTCUSDC",
-            payload={"message": "x" * 2500},
+            payload={
+                "status": "WARN",
+                "deployment_code": "manual_review_required",
+                "approval_playbook_action": "review_before_live_rollout",
+                "report_path": "reports/validation/BTCUSDC.json",
+            },
         )
 
+        content = calls[0]["json"]["content"]
         assert result["delivered"] is True
-        assert len(calls) == 1
-        assert len(calls[0]["json"]["content"]) <= NotificationDispatcher._DISCORD_MAX_MESSAGE_CHARS
-        assert calls[0]["json"]["content"].endswith("...[truncated]")
+        assert content.startswith("[주의] BTCUSDC 검증 주의")
+        assert "해야 할 일: review before live rollout" in content
+        assert "이유: manual review required" in content
+        assert "리포트: reports/validation/BTCUSDC.json" in content
+        assert "contract_trace" not in content
+    finally:
+        settings.alert_discord_webhook_url = old_url
+
+
+def test_dispatcher_discord_suppresses_low_importance_signal(monkeypatch) -> None:
+    NotificationDispatcher.reset_circuit_state()
+    settings = get_settings()
+    old_url = settings.alert_discord_webhook_url
+
+    try:
+        settings.alert_discord_webhook_url = "https://discord.example/webhook"
+        dispatcher = NotificationDispatcher(settings)
+        result = dispatcher.dispatch(
+            channel="discord",
+            alert_type="near",
+            symbol="BTCUSDC",
+            payload={"status": "INFO"},
+        )
+
+        assert result["delivered"] is False
+        assert result["skipped"] is True
+        assert result["reason"] == "discord_low_importance_signal_suppressed"
     finally:
         settings.alert_discord_webhook_url = old_url
 

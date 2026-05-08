@@ -99,11 +99,23 @@ class NotificationDispatcher:
         if normalized == "system":
             return self._dispatch_system(alert_type=alert_type, symbol=symbol, payload=payload)
 
+        if normalized == "discord":
+            skip_reason = self._discord_skip_reason(alert_type=alert_type, payload=payload)
+            if skip_reason:
+                return DispatchResult(
+                    channel="discord",
+                    delivered=False,
+                    skipped=True,
+                    reason=skip_reason,
+                    target="discord:webhook",
+                    latency_ms=0.0,
+                ).to_dict()
+            message = self._format_discord_message(alert_type=alert_type, symbol=symbol, payload=payload)
+            return self._send_discord(message=message)
+
         message = self._format_message(alert_type=alert_type, symbol=symbol, payload=payload)
         if normalized == "telegram":
             return self._send_telegram(message=message)
-        if normalized == "discord":
-            return self._send_discord(message=message)
         return self._send_push(alert_type=alert_type, symbol=symbol, message=message, payload=payload)
 
     def _configured_system_routes(self) -> list[str]:
@@ -448,3 +460,174 @@ class NotificationDispatcher:
             or has_approval_contract
         )
         return "\n".join(lines) if use_multiline else " | ".join(lines)
+
+    @classmethod
+    def _discord_skip_reason(cls, *, alert_type: str, payload: dict[str, Any]) -> str:
+        normalized_type = str(alert_type or "").strip().lower()
+        if bool(payload.get("force_send")) or bool(payload.get("force_alert")):
+            return ""
+        if normalized_type in {"test"}:
+            return ""
+        if normalized_type in {"near", "touch"}:
+            return "discord_low_importance_signal_suppressed"
+
+        status = str(payload.get("status") or "").strip().upper()
+        if status in {"FAIL", "WARN", "MISS", "BLOCKED", "NO_GO", "ERROR"}:
+            return ""
+
+        important_types = {
+            "validation_fail",
+            "validation_warn",
+            "session_impulse_retest_miss",
+            "entry",
+            "confirm",
+            "tp",
+            "closed",
+            "stop",
+            "exit",
+            "fill",
+            "entry_surface_alert",
+            "stage_monitor_alert",
+        }
+        if normalized_type in important_types:
+            return ""
+
+        if normalized_type.startswith("operator_session_brief"):
+            message = str(payload.get("message") or "").lower()
+            urgent_terms = (
+                "urgent",
+                "manual_review",
+                "no_go",
+                "fail",
+                "blocked",
+                "warning",
+                "주의",
+                "긴급",
+                "차단",
+            )
+            return "" if any(term in message for term in urgent_terms) else "discord_low_importance_brief_suppressed"
+
+        if status in {"OK", "PASS", "READY", "MONITOR", "INFO", "NORMAL"}:
+            return "discord_low_importance_status_suppressed"
+        return "discord_low_importance_alert_suppressed"
+
+    @classmethod
+    def _format_discord_message(cls, *, alert_type: str, symbol: str, payload: dict[str, Any]) -> str:
+        normalized_type = str(alert_type or "").strip().lower()
+        if normalized_type in {"entry", "confirm", "tp", "closed", "stop", "exit", "fill"}:
+            return cls._format_discord_trade_signal(alert_type=normalized_type, symbol=symbol, payload=payload)
+        if normalized_type == "session_impulse_retest_miss":
+            return cls._format_discord_session_miss(symbol=symbol, payload=payload)
+        if normalized_type.startswith("validation_"):
+            return cls._format_discord_validation(alert_type=normalized_type, symbol=symbol, payload=payload)
+        if normalized_type in {"entry_surface_alert", "stage_monitor_alert"} or normalized_type.startswith(
+            "operator_session_brief"
+        ):
+            return cls._format_discord_operational(alert_type=normalized_type, symbol=symbol, payload=payload)
+        if normalized_type == "test":
+            return cls._format_discord_test(symbol=symbol, payload=payload)
+        return cls._format_discord_operational(alert_type=normalized_type, symbol=symbol, payload=payload)
+
+    @staticmethod
+    def _clean_label(value: Any, *, fallback: str = "-") -> str:
+        text = str(value or "").strip()
+        if not text:
+            return fallback
+        return text.replace("_", " ")
+
+    @staticmethod
+    def _short_text(value: Any, *, max_chars: int = 120) -> str:
+        text = " ".join(str(value or "").strip().split())
+        if len(text) <= max_chars:
+            return text
+        return text[: max(0, max_chars - 3)].rstrip() + "..."
+
+    @classmethod
+    def _format_discord_trade_signal(cls, *, alert_type: str, symbol: str, payload: dict[str, Any]) -> str:
+        title_by_type = {
+            "confirm": "진입 확인 신호",
+            "entry": "진입 발생",
+            "tp": "목표가 도달",
+            "closed": "거래 종료",
+            "stop": "손절/무효화",
+            "exit": "청산 신호",
+            "fill": "체결 발생",
+        }
+        title = title_by_type.get(alert_type, "거래 신호")
+        direction = str(payload.get("direction") or "").upper()
+        plan_id = str(payload.get("plan_id") or "").strip()
+        price = payload.get("event_price") or payload.get("price") or payload.get("entry_price")
+        expected = payload.get("expected_summary")
+
+        lines = [f"[중요] {symbol} {title}"]
+        if direction or price:
+            parts = []
+            if direction:
+                parts.append(f"방향: {direction}")
+            if price is not None:
+                parts.append(f"가격: {price}")
+            lines.append(" | ".join(parts))
+        if expected:
+            lines.append(f"기대값: {cls._short_text(expected, max_chars=100)}")
+        if plan_id:
+            lines.append(f"플랜: {plan_id}")
+        return "\n".join(lines)
+
+    @classmethod
+    def _format_discord_validation(cls, *, alert_type: str, symbol: str, payload: dict[str, Any]) -> str:
+        contract = validation_alert_contract(payload)
+        approval_strip = validation_alert_strip_summary(payload)
+        status = str(payload.get("status") or ("FAIL" if alert_type.endswith("fail") else "WARN")).upper()
+        action = (
+            contract.get("approval_playbook_action")
+            or payload.get("playbook_action")
+            or approval_strip.get("act_value")
+            or "검증 리포트 확인"
+        )
+        reason = contract.get("deployment_code") or contract.get("approval_playbook_code") or payload.get("reason")
+        report_path = payload.get("report_path")
+
+        title = "검증 실패" if status == "FAIL" else "검증 주의"
+        lines = [f"[주의] {symbol} {title}"]
+        lines.append(f"상태: {status}")
+        lines.append(f"해야 할 일: {cls._clean_label(action)}")
+        if reason:
+            lines.append(f"이유: {cls._clean_label(reason)}")
+        if report_path:
+            lines.append(f"리포트: {report_path}")
+        return "\n".join(lines)
+
+    @classmethod
+    def _format_discord_session_miss(cls, *, symbol: str, payload: dict[str, Any]) -> str:
+        miss_count = int(payload.get("miss_count") or 0)
+        lookback_hours = int(payload.get("lookback_hours") or 0)
+        symbols = ", ".join(list(payload.get("symbols_with_misses") or [])[:8])
+        report_path = payload.get("report_path")
+
+        lines = [f"[주의] {symbol} 신호 누락 가능성"]
+        lines.append(f"누락: {miss_count}건 | 기간: {lookback_hours}h")
+        if symbols:
+            lines.append(f"심볼: {symbols}")
+        if report_path:
+            lines.append(f"리포트: {report_path}")
+        return "\n".join(lines)
+
+    @classmethod
+    def _format_discord_operational(cls, *, alert_type: str, symbol: str, payload: dict[str, Any]) -> str:
+        message = str(payload.get("message") or "").strip()
+        summary_lines = [line.strip("- ").strip() for line in message.splitlines() if line.strip()]
+        headline = cls._short_text(summary_lines[0] if summary_lines else alert_type, max_chars=140)
+        report_path = payload.get("report_path")
+
+        lines = [f"[운영] {symbol} 확인 필요"]
+        lines.append(f"요약: {headline}")
+        if len(summary_lines) > 1:
+            lines.append(f"추가: {cls._short_text(summary_lines[1], max_chars=120)}")
+        if report_path:
+            lines.append(f"리포트: {report_path}")
+        return "\n".join(lines)
+
+    @classmethod
+    def _format_discord_test(cls, *, symbol: str, payload: dict[str, Any]) -> str:
+        message = cls._short_text(payload.get("message") or "테스트 알림", max_chars=120)
+        return f"[테스트] {symbol}\n{message}"
