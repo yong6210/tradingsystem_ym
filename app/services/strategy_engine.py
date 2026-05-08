@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
-import hashlib
 import json
 from pathlib import Path
-import time
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import unquote
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -157,14 +153,16 @@ from app.services.strategy_v2_stress_validation import StrategyV2StressValidatio
 from app.services.strategy_v2_thesis_validation import StrategyV2ThesisValidationService
 from app.services.strategy_v2_validation import StrategyV2ValidationService
 from app.services.thesis_fingerprint import ThesisFingerprintService
+from app.services.validation_payload_cache import (
+    READ_ONLY_RECOMPUTE_CACHE,
+    ValidationPayloadCacheService,
+)
 from app.services.validation_report import ValidationReportService
 from app.services.health_check import HealthCheckService
 from app.services.zone_engine import ZoneEngine
 
-_READ_ONLY_RECOMPUTE_CACHE_TTL_SECONDS = 120.0
 _AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY = "session_impulse_retest"
-_READ_ONLY_RECOMPUTE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-_VALIDATION_PAYLOAD_CACHE_MAX_AGE_SECONDS = 900.0
+_READ_ONLY_RECOMPUTE_CACHE = READ_ONLY_RECOMPUTE_CACHE
 _ACTIVE_CONTRACT_REPLAY_BASELINE_FILE = "strategy_proof_contract_live_subset.json"
 
 _SAFETY_REASON_PREFIXES = (
@@ -431,102 +429,32 @@ class StrategyEngine:
             settings=self.settings,
         )
         self.events = EventBus(db)
+        self.validation_payload_cache = ValidationPayloadCacheService(self.settings)
 
     def _validation_payload_cache_path(self, symbol: str) -> Path:
-        scope = self._validation_payload_cache_scope()
-        return Path(self.settings.validation_report_dir) / "runtime_payload_cache" / scope / f"{str(symbol).upper()}.json"
+        return self.validation_payload_cache.path(symbol)
 
     def _validation_payload_cache_scope(self) -> str:
-        raw = "|".join(
-            [
-                str(getattr(self.settings, "database_url", "")),
-                str(getattr(self.settings, "strategy_version", "")),
-            ]
-        )
-        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+        return self.validation_payload_cache.scope()
 
     def _validation_payload_cache_key(self, symbol: str) -> str:
-        report_dir = str(Path(self.settings.validation_report_dir).expanduser().resolve())
-        return "|".join([report_dir, self._validation_payload_cache_scope(), str(symbol).upper()])
+        return self.validation_payload_cache.key(symbol)
 
     def _sqlite_database_artifact_paths(self) -> list[Path]:
-        database_url = str(getattr(self.settings, "database_url", ""))
-        if not database_url.startswith("sqlite:///"):
-            return []
-        raw_path = unquote(database_url.removeprefix("sqlite:///").split("?", 1)[0])
-        if not raw_path or raw_path == ":memory:":
-            return []
-        db_path = Path(raw_path).expanduser()
-        return [db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")]
+        return self.validation_payload_cache._sqlite_database_artifact_paths()
 
     def _validation_payload_cache_stale_for_database(self, cache_mtime: float) -> bool:
-        for artifact_path in self._sqlite_database_artifact_paths():
-            try:
-                if artifact_path.exists() and artifact_path.stat().st_mtime > cache_mtime:
-                    return True
-            except OSError:
-                continue
-        return False
+        return self.validation_payload_cache._stale_for_database(cache_mtime)
 
     @staticmethod
     def _valid_cached_validation_payload(symbol: str, payload: Any) -> bool:
-        if not isinstance(payload, dict) or not payload:
-            return False
-        if str(payload.get("symbol") or "").upper() != str(symbol).upper():
-            return False
-        return isinstance(payload.get("validation_report"), dict)
+        return ValidationPayloadCacheService._valid_payload(symbol, payload)
 
     def _load_cached_validation_payload(self, symbol: str) -> dict[str, Any] | None:
-        cache_key = self._validation_payload_cache_key(symbol)
-        cached_entry = _READ_ONLY_RECOMPUTE_CACHE.get(cache_key)
-        if cached_entry is not None:
-            expires_at, cached_payload = cached_entry
-            if expires_at > time.monotonic():
-                if self._valid_cached_validation_payload(symbol, cached_payload):
-                    return copy.deepcopy(cached_payload)
-                _READ_ONLY_RECOMPUTE_CACHE.pop(cache_key, None)
-                return None
-            _READ_ONLY_RECOMPUTE_CACHE.pop(cache_key, None)
-
-        path = self._validation_payload_cache_path(symbol)
-        if not path.exists():
-            return None
-        try:
-            cache_mtime = path.stat().st_mtime
-            age_seconds = max(time.time() - cache_mtime, 0.0)
-        except OSError:
-            return None
-        if age_seconds > _VALIDATION_PAYLOAD_CACHE_MAX_AGE_SECONDS:
-            return None
-        if self._validation_payload_cache_stale_for_database(cache_mtime):
-            return None
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        if not self._valid_cached_validation_payload(symbol, payload):
-            return None
-        _READ_ONLY_RECOMPUTE_CACHE[cache_key] = (
-            time.monotonic() + _READ_ONLY_RECOMPUTE_CACHE_TTL_SECONDS,
-            copy.deepcopy(payload),
-        )
-        return payload
+        return self.validation_payload_cache.load(symbol)
 
     def _store_cached_validation_payload(self, symbol: str, payload: dict[str, Any]) -> None:
-        cache_key = self._validation_payload_cache_key(symbol)
-        cached_payload = copy.deepcopy(dict(payload))
-        if not self._valid_cached_validation_payload(symbol, cached_payload):
-            return
-        _READ_ONLY_RECOMPUTE_CACHE[cache_key] = (
-            time.monotonic() + _READ_ONLY_RECOMPUTE_CACHE_TTL_SECONDS,
-            cached_payload,
-        )
-        path = self._validation_payload_cache_path(symbol)
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(cached_payload, ensure_ascii=False, default=str), encoding="utf-8")
-        except OSError:
-            return
+        self.validation_payload_cache.store(symbol, payload)
 
     @staticmethod
     def _session_impulse_retest_plan_id_for_entry(*, symbol: str, direction: str, entry_ts: datetime) -> str:
