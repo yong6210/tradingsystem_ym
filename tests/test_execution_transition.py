@@ -16,6 +16,7 @@ from app.db.repositories import (
 )
 from app.db.session import SessionLocal, init_db
 from app.main import app
+from app.services.lane_tracker import get_execution_lane_tracker, reset_execution_lane_tracker
 from app.services.strategy_engine import StrategyEngine
 from app.services.family_rollout import RolloutPolicyService
 from app.services.operating_lock import OperatingLockSnapshot
@@ -26,6 +27,7 @@ client = TestClient(app)
 
 
 def _reset_execution_control_state() -> None:
+    reset_execution_lane_tracker()
     with SessionLocal() as db:
         safety = SafetyLockService(repo=SafetyLockRepository(db), settings=get_settings())
         for reason_code in [
@@ -38,17 +40,17 @@ def _reset_execution_control_state() -> None:
         rollout = RolloutPolicyService(repo=FamilyRolloutPolicyRepository(db))
         rollout.upsert(
             family="trend_continuation",
-            live_enabled=True,
-            max_execution_mode="MICRO_LIVE",
-            max_risk_r=1.0,
+            live_enabled=False,
+            max_execution_mode="PAPER",
+            max_risk_r=0.5,
             allowed_sessions=["london", "new_york"],
             min_quality_score=75.0,
             updated_by="test_reset",
         )
         rollout.upsert(
             family="sweep_reversal",
-            live_enabled=False,
-            max_execution_mode="PAPER",
+            live_enabled=True,
+            max_execution_mode="MICRO_LIVE",
             max_risk_r=0.5,
             allowed_sessions=["london", "new_york"],
             min_quality_score=70.0,
@@ -83,6 +85,18 @@ def _apply_auto_trading_defaults(monkeypatch) -> None:
     monkeypatch.setattr(settings, "auto_trading_reconciliation_user_stream_stale_seconds", 180)
     monkeypatch.setattr(settings, "binance_trade_live_enabled", False)
     monkeypatch.setattr(settings, "portfolio_overlay_enabled", False)
+    monkeypatch.setattr(settings, "transition_edge_variant_enabled", True)
+    monkeypatch.setattr(settings, "transition_edge_variant_shadow_only", True)
+    monkeypatch.setattr(settings, "transition_edge_variant_partial_activation_ratio", 0.3)
+    monkeypatch.setattr(
+        "app.services.strategy_engine.StrategyEngine.load_binance_symbol_trading_rules",
+        lambda self, symbol: {
+            "symbol": str(symbol).upper(),
+            "quantity_step": 0.001,
+            "min_quantity": 0.001,
+            "source": "test_default",
+        },
+    )
 
 
 def _seed_plan(
@@ -93,6 +107,7 @@ def _seed_plan(
     state: str = "ARMED",
     strategy_grade: str = "A",
     thesis_fingerprint: dict | None = None,
+    entry_model: str = "CONFIRM",
 ) -> None:
     with SessionLocal() as db:
         now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -103,9 +118,9 @@ def _seed_plan(
                 symbol=symbol,
                 timeframe="5m",
                 direction="long",
-                entry_model="CONFIRM",
+                entry_model=entry_model,
                 entry_price=100.0,
-                entry_condition="touch_then_confirm",
+                entry_condition="limit_on_touch" if entry_model == "LIMIT" else "touch_then_confirm",
                 sl=98.5,
                 tp1=101.0,
                 tp2=102.0,
@@ -183,16 +198,17 @@ def test_execution_preview_and_approval_respect_family_rollout(monkeypatch) -> N
     monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
     monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
     monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
 
     symbol = f"EXECPRE{int(datetime.now(timezone.utc).timestamp() * 1_000_000)}USDC"
     plan_id = f"{symbol}_plan"
-    _seed_plan(symbol=symbol, family="trend_continuation", plan_id=plan_id)
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, entry_model="LIMIT")
 
     preview = client.post("/execution/plans/preview", json={"plan_id": plan_id})
     assert preview.status_code == 200
     preview_payload = preview.json()
     assert preview_payload["plan_id"] == plan_id
-    assert preview_payload["strategy_family"] == "trend_continuation"
+    assert preview_payload["strategy_family"] == "sweep_reversal"
 
     approval = client.post("/execution/approve-plan", json={"plan_id": plan_id})
     assert approval.status_code == 200
@@ -200,6 +216,167 @@ def test_execution_preview_and_approval_respect_family_rollout(monkeypatch) -> N
     assert approval_payload["approval_state"] == "APPROVED_AUTO"
     assert approval_payload["allowed_execution_mode"] == "MICRO_LIVE"
     assert approval_payload["rollout_policy"]["max_execution_mode"] == "MICRO_LIVE"
+
+
+def test_execution_approval_blocks_same_window_family_cluster_for_micro_live(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+
+    now_token = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
+    symbol = f"CLUSTER{now_token}USDC"
+    other_symbol = f"CLUSTER{now_token + 1}USDC"
+    plan_id = f"{symbol}_plan"
+    other_plan_id = f"{other_symbol}_plan"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, entry_model="LIMIT")
+    _seed_plan(
+        symbol=other_symbol,
+        family="sweep_reversal",
+        plan_id=other_plan_id,
+        state="ENTERED",
+        entry_model="LIMIT",
+    )
+
+    with SessionLocal() as db:
+        other_plan = PlanRepository(db).get(other_plan_id)
+        assert other_plan is not None
+        monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [other_plan])
+
+        approval = client.post("/execution/approve-plan", json={"plan_id": plan_id})
+        assert approval.status_code == 200
+        approval_payload = approval.json()
+
+    assert approval_payload["approval_state"] == "BLOCKED"
+    assert approval_payload["approval_reasons"][0]["code"] == "live_family_cluster_window_cap_reached"
+
+
+def test_micro_live_symbol_priority_blocks_eth_when_recent_btc_submit_ready_exists(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    now_token = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
+    btc_symbol = f"BTCPRIO{now_token}USDC"
+    eth_symbol = f"ETHPRIO{now_token}USDC"
+    btc_plan_id = f"{btc_symbol}_plan"
+    eth_plan_id = f"{eth_symbol}_plan"
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", f"{btc_symbol},{eth_symbol}")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_symbol_priority", f"{btc_symbol},{eth_symbol}")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_priority_submit_ready_lookback_minutes", 180)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
+
+    _seed_plan(symbol=btc_symbol, family="sweep_reversal", plan_id=btc_plan_id, entry_model="LIMIT")
+    _seed_plan(symbol=eth_symbol, family="sweep_reversal", plan_id=eth_plan_id, entry_model="LIMIT")
+
+    with SessionLocal() as db:
+        db.add(
+            OrderIntent(
+                intent_id=f"intent_{btc_symbol}_submit_ready",
+                plan_id=btc_plan_id,
+                symbol=btc_symbol,
+                strategy_family="sweep_reversal",
+                execution_mode="MICRO_LIVE",
+                approval_state="APPROVED_AUTO",
+                submit_decision="SUBMIT",
+                decision_reason_code="submit_ready",
+                decision_reason_message="ready",
+                thesis_fingerprint={},
+                dedupe_result={"status": "unique"},
+                session_guidance={"state": "london"},
+                quality_snapshot={"validation_grade": "A"},
+                approval_snapshot={
+                    "approval_state": "APPROVED_AUTO",
+                    "allowed_execution_mode": "MICRO_LIVE",
+                    "deployment_go_no_go": "GO",
+                    "deployment_code": "go_execution_auto_submit",
+                    "playbook_go_no_go": "GO",
+                    "playbook_code": "go_execution_auto_submit",
+                    "playbook_action": "allow_auto_submit",
+                    "playbook_message": "GO: execution path is auto-approved.",
+                },
+                payload={"entry_model": "LIMIT"},
+                created_at=datetime.now(timezone.utc) - timedelta(minutes=15),
+            )
+        )
+        db.commit()
+
+    intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": eth_plan_id, "execution_mode": "MICRO_LIVE"},
+    )
+    assert intent.status_code == 200
+    intent_payload = intent.json()
+    assert intent_payload["approval_state"] == "BLOCKED"
+    assert intent_payload["submit_decision"] == "SKIP_BLOCKED"
+    assert intent_payload["decision_reason_code"] == "micro_live_higher_priority_symbol_available"
+    assert btc_symbol in intent_payload["decision_reason_message"]
+
+
+def test_micro_live_symbol_priority_keeps_btc_as_top_priority(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    now_token = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
+    btc_symbol = f"BTCPRIO{now_token + 1}USDC"
+    eth_symbol = f"ETHPRIO{now_token + 1}USDC"
+    btc_plan_id = f"{btc_symbol}_plan"
+    eth_plan_id = f"{eth_symbol}_plan"
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", f"{btc_symbol},{eth_symbol}")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_symbol_priority", f"{btc_symbol},{eth_symbol}")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_priority_submit_ready_lookback_minutes", 180)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
+
+    _seed_plan(symbol=btc_symbol, family="sweep_reversal", plan_id=btc_plan_id, entry_model="LIMIT")
+    _seed_plan(symbol=eth_symbol, family="sweep_reversal", plan_id=eth_plan_id, entry_model="LIMIT")
+
+    with SessionLocal() as db:
+        db.add(
+            OrderIntent(
+                intent_id=f"intent_{eth_symbol}_submit_ready",
+                plan_id=eth_plan_id,
+                symbol=eth_symbol,
+                strategy_family="sweep_reversal",
+                execution_mode="MICRO_LIVE",
+                approval_state="APPROVED_AUTO",
+                submit_decision="SUBMIT",
+                decision_reason_code="submit_ready",
+                decision_reason_message="ready",
+                thesis_fingerprint={},
+                dedupe_result={"status": "unique"},
+                session_guidance={"state": "london"},
+                quality_snapshot={"validation_grade": "A"},
+                approval_snapshot={
+                    "approval_state": "APPROVED_AUTO",
+                    "allowed_execution_mode": "MICRO_LIVE",
+                    "deployment_go_no_go": "GO",
+                    "deployment_code": "go_execution_auto_submit",
+                    "playbook_go_no_go": "GO",
+                    "playbook_code": "go_execution_auto_submit",
+                    "playbook_action": "allow_auto_submit",
+                    "playbook_message": "GO: execution path is auto-approved.",
+                },
+                payload={"entry_model": "LIMIT"},
+                created_at=datetime.now(timezone.utc) - timedelta(minutes=15),
+            )
+        )
+        db.commit()
+
+    approval = client.post("/execution/approve-plan", json={"plan_id": btc_plan_id})
+    assert approval.status_code == 200
+    approval_payload = approval.json()
+    assert approval_payload["approval_state"] == "APPROVED_AUTO"
+    assert approval_payload["allowed_execution_mode"] == "MICRO_LIVE"
 
 
 def test_order_intent_and_paper_submit_flow_updates_position_state(monkeypatch) -> None:
@@ -358,6 +535,59 @@ def test_submit_rejects_plan_reentry_when_prior_submission_exists(monkeypatch) -
     assert second_submit_payload["adapter"] == "none"
     assert second_submit_payload["submit_status"] == "PLAN_REENTRY_BLOCKED"
     assert second_submit_payload["state"] == "REJECTED"
+
+
+def test_order_intent_allows_reentry_when_prior_paper_submission_is_stale(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trading_paper_submission_stale_hours", 1)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+
+    symbol = f"STALESUB{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 102}USDC"
+    plan_id = f"{symbol}_plan"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id)
+
+    first_intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "PAPER"},
+    )
+    assert first_intent.status_code == 200
+    first_intent_payload = first_intent.json()
+
+    first_submit = client.post(
+        "/execution/submit",
+        json={"intent_id": first_intent_payload["intent_id"], "live": False, "paper_scenario": "fill"},
+    )
+    assert first_submit.status_code == 200
+
+    stale_ts = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=10)
+    with SessionLocal() as db:
+        plan = db.get(Plan, plan_id)
+        assert plan is not None
+        plan.state = "PLANNED"
+        db.add(plan)
+        submission = db.query(OrderSubmission).filter(OrderSubmission.plan_id == plan_id).one()
+        submission.submitted_at = stale_ts
+        submission.acknowledged_at = stale_ts
+        submission.updated_at = stale_ts
+        db.add(submission)
+        db.commit()
+
+    second_intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "PAPER"},
+    )
+    assert second_intent.status_code == 200
+    second_intent_payload = second_intent.json()
+    assert second_intent_payload["submit_decision"] == "SUBMIT"
+    assert second_intent_payload["decision_reason_code"] == "submit_ready"
+    self_heal = dict(second_intent_payload.get("self_heal_summary") or {})
+    assert self_heal["stale_paper_reentry_block_ignored"] is True
+    assert self_heal["stale_paper_reentry_block_ignored_count"] >= 1
 
 
 def test_paper_exit_tick_closes_filled_paper_positions_on_targets(monkeypatch) -> None:
@@ -812,6 +1042,301 @@ def test_paper_exit_tick_closes_time_failure_when_family_hold_window_is_exceeded
         assert int(validity["final_exit_held_bars"]) >= 6
 
 
+def test_paper_exit_tick_closes_structure_failure_when_fast_guard_stop_hits() -> None:
+    init_db()
+    _reset_execution_control_state()
+
+    symbol = f"PEXFAST{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 12}USDC"
+    plan_id = f"{symbol}_plan"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, state="ENTERED", entry_model="LIMIT")
+
+    with SessionLocal() as db:
+        plan = db.get(Plan, plan_id)
+        assert plan is not None
+        validity = dict(plan.validity or {})
+        validity["strategy_fast_failure_enabled"] = True
+        validity["strategy_fast_failure_policy"] = "btc_sweep_reversal_limit_initial_guard_stop"
+        validity["strategy_fast_failure_max_bars"] = 1
+        validity["strategy_fast_failure_stop_r"] = 0.6
+        validity["strategy_fast_failure_requires_sl_touch"] = True
+        plan.validity = validity
+        db.add(plan)
+        db.commit()
+
+    entry_fill_ts = datetime.now(timezone.utc).replace(microsecond=0, second=0)
+    candle_ts = entry_fill_ts + timedelta(minutes=4)
+    with SessionLocal() as db:
+        db.add(
+            OrderSubmission(
+                submission_id=f"sub_{symbol}",
+                intent_id=f"intent_{symbol}",
+                plan_id=plan_id,
+                symbol=symbol,
+                client_order_id=f"client_{symbol}",
+                exchange_order_id=f"paper_{symbol}",
+                state=OrderLifecycleState.FILLED.value,
+                submit_status="FILLED",
+                message="paper filled",
+                adapter="paper",
+                execution_mode="PAPER",
+                attachments={},
+                side="BUY",
+                order_type="LIMIT",
+                reduce_only=False,
+                requested_live=False,
+                raw={},
+                submitted_at=entry_fill_ts,
+                acknowledged_at=entry_fill_ts,
+            )
+        )
+        db.add(
+            ExecutionFill(
+                fill_id=f"fill_{symbol}_entry",
+                plan_id=plan_id,
+                symbol=symbol,
+                stage="ENTRY",
+                fill_ts=entry_fill_ts,
+                price=100.0,
+                qty=1.0,
+                fee=0.0,
+                from_state="ARMED",
+                to_state="ENTERED",
+                state_changed=True,
+                payload={"source": "paper_adapter"},
+                strategy_version="v1",
+            )
+        )
+        db.add(
+            Candle(
+                symbol=symbol,
+                timeframe="1m",
+                ts=candle_ts,
+                o=100.0,
+                h=100.1,
+                l=98.4,
+                c=98.8,
+                v=1000.0,
+                source="test",
+                is_final=True,
+            )
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        payload = engine.process_paper_exit_tick(
+            families=["sweep_reversal"],
+            days=2,
+            limit=20,
+            sync_candles=False,
+            limit_1m=1,
+            limit_5m=1,
+        )
+        assert payload["closed_events"] >= 1
+        assert any(
+            action.get("plan_id") == plan_id
+            and action.get("stage") == "CLOSED"
+            and action.get("exit_reason") == "structure_failure"
+            for action in payload["actions"]
+        )
+
+    with SessionLocal() as db:
+        refreshed = db.get(Plan, plan_id)
+        assert refreshed is not None
+        assert refreshed.state == "CLOSED"
+        validity = dict(refreshed.validity or {})
+        assert validity["final_exit_reason"] == "structure_failure"
+        assert validity["final_exit_price"] == 99.1
+        assert validity["final_exit_trigger_detail"]["saved_r_vs_full_stop"] == 0.4
+        assert validity["final_exit_trigger_detail"]["requires_sl_touch"] is True
+
+
+def test_paper_exit_tick_skips_fast_failure_without_original_stop_touch() -> None:
+    init_db()
+    _reset_execution_control_state()
+
+    symbol = f"PEXFASTSKIP{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 12}USDC"
+    plan_id = f"{symbol}_plan"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, state="ENTERED", entry_model="LIMIT")
+
+    with SessionLocal() as db:
+        plan = db.get(Plan, plan_id)
+        assert plan is not None
+        validity = dict(plan.validity or {})
+        validity["strategy_fast_failure_enabled"] = True
+        validity["strategy_fast_failure_policy"] = "btc_sweep_reversal_limit_initial_guard_stop"
+        validity["strategy_fast_failure_max_bars"] = 1
+        validity["strategy_fast_failure_stop_r"] = 0.6
+        validity["strategy_fast_failure_requires_sl_touch"] = True
+        plan.validity = validity
+        db.add(plan)
+        db.commit()
+
+    entry_fill_ts = datetime.now(timezone.utc).replace(microsecond=0, second=0)
+    first_candle_ts = entry_fill_ts + timedelta(minutes=4)
+    second_candle_ts = entry_fill_ts + timedelta(minutes=5)
+    with SessionLocal() as db:
+        db.add(
+            OrderSubmission(
+                submission_id=f"sub_{symbol}",
+                intent_id=f"intent_{symbol}",
+                plan_id=plan_id,
+                symbol=symbol,
+                client_order_id=f"client_{symbol}",
+                exchange_order_id=f"paper_{symbol}",
+                state=OrderLifecycleState.FILLED.value,
+                submit_status="FILLED",
+                message="paper filled",
+                adapter="paper",
+                execution_mode="PAPER",
+                attachments={},
+                side="BUY",
+                order_type="LIMIT",
+                reduce_only=False,
+                requested_live=False,
+                raw={},
+                submitted_at=entry_fill_ts,
+                acknowledged_at=entry_fill_ts,
+            )
+        )
+        db.add(
+            ExecutionFill(
+                fill_id=f"fill_{symbol}_entry",
+                plan_id=plan_id,
+                symbol=symbol,
+                stage="ENTRY",
+                fill_ts=entry_fill_ts,
+                price=100.0,
+                qty=1.0,
+                fee=0.0,
+                from_state="ARMED",
+                to_state="ENTERED",
+                state_changed=True,
+                payload={"source": "paper_adapter"},
+                strategy_version="v1",
+            )
+        )
+        db.add(
+            Candle(
+                symbol=symbol,
+                timeframe="1m",
+                ts=first_candle_ts,
+                o=100.0,
+                h=100.4,
+                l=99.35,
+                c=100.2,
+                v=1000.0,
+                source="test",
+                is_final=True,
+            )
+        )
+        db.add(
+            Candle(
+                symbol=symbol,
+                timeframe="1m",
+                ts=second_candle_ts,
+                o=100.2,
+                h=100.8,
+                l=100.1,
+                c=100.7,
+                v=1000.0,
+                source="test",
+                is_final=True,
+            )
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        payload = engine.process_paper_exit_tick(
+            families=["sweep_reversal"],
+            days=2,
+            limit=20,
+            sync_candles=False,
+            limit_1m=2,
+            limit_5m=1,
+        )
+        assert not any(
+            action.get("plan_id") == plan_id
+            and action.get("stage") == "CLOSED"
+            and action.get("exit_reason") == "structure_failure"
+            for action in payload["actions"]
+        )
+
+    with SessionLocal() as db:
+        refreshed = db.get(Plan, plan_id)
+        assert refreshed is not None
+        assert refreshed.state == "ENTERED"
+
+
+def test_paper_exit_tick_repairs_closed_plan_final_exit_metadata_from_closed_fill_payload() -> None:
+    init_db()
+    symbol = f"PEXCLOSE{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 13}USDC"
+    plan_id = f"{symbol}_plan"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, state="CLOSED")
+    closed_ts = datetime.now(timezone.utc).replace(microsecond=0, second=0)
+
+    with SessionLocal() as db:
+        plan = db.get(Plan, plan_id)
+        assert plan is not None
+        validity = dict(plan.validity or {})
+        validity.pop("final_exit_ts", None)
+        validity.pop("final_exit_realized_r", None)
+        validity.pop("final_exit_reason", None)
+        validity.pop("final_exit_held_bars", None)
+        plan.validity = validity
+        plan.valid_from = closed_ts - timedelta(days=45)
+        plan.valid_until = closed_ts - timedelta(days=44)
+        db.add(plan)
+        db.add(
+            ExecutionFill(
+                fill_id=f"{plan_id}_closed",
+                plan_id=plan_id,
+                symbol=symbol,
+                stage="CLOSED",
+                fill_ts=closed_ts,
+                price=102.25,
+                qty=1.0,
+                fee=0.0,
+                from_state="PARTIAL_EXIT",
+                to_state="CLOSED",
+                state_changed=True,
+                payload={
+                    "source": "paper_adapter",
+                    "exit_ts": closed_ts.isoformat(),
+                    "realized_r": 1.25,
+                    "exit_reason": "target_tp2",
+                    "held_bars": 9,
+                    "exit_price": 102.25,
+                },
+                strategy_version="v1",
+            )
+        )
+        db.commit()
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        payload = engine.process_paper_exit_tick(
+            families=["sweep_reversal"],
+            days=30,
+            limit=20,
+            sync_candles=False,
+            limit_1m=1,
+            limit_5m=1,
+        )
+        assert payload["closed_validity_repairs"] >= 1
+
+    with SessionLocal() as db:
+        refreshed = db.get(Plan, plan_id)
+        assert refreshed is not None
+        validity = dict(refreshed.validity or {})
+        assert validity["final_exit_ts"] == closed_ts.isoformat()
+        assert validity["final_exit_realized_r"] == 1.25
+        assert validity["final_exit_reason"] == "target_tp2"
+        assert validity["final_exit_held_bars"] == 9
+        assert validity["final_exit_price"] == 102.25
+
+
 def test_plan_upsert_preserves_entered_plan_history_by_rolling_plan_id() -> None:
     init_db()
     symbol = f"PCOLL{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 3}USDC"
@@ -1141,6 +1666,89 @@ def test_order_intent_uses_execution_layer_open_intent_for_duplicate_thesis(monk
     assert intent_payload["decision_reason_code"] == "duplicate_active_thesis"
     assert intent_payload["dedupe_result"]["source"] == "open_intent"
     assert intent_payload["dedupe_result"]["matched_intent_id"] == f"intent_{symbol}_existing"
+
+
+def test_order_intent_ignores_stale_paper_open_intent_duplicate(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trading_paper_submission_stale_hours", 1)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+
+    symbol = f"STALEDUPE{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 11}USDC"
+    existing_plan_id = f"{symbol}_existing"
+    fresh_plan_id = f"{symbol}_fresh"
+    _seed_plan(symbol=symbol, family="trend_continuation", plan_id=existing_plan_id, state="CLOSED")
+    _seed_plan(symbol=symbol, family="trend_continuation", plan_id=fresh_plan_id, state="ARMED")
+
+    with SessionLocal() as db:
+        existing_plan = db.get(Plan, existing_plan_id)
+        assert existing_plan is not None
+        existing_fingerprint = ThesisFingerprintService(get_settings()).build_from_plan(existing_plan)
+        db.add(
+            OrderIntent(
+                intent_id=f"intent_{symbol}_existing",
+                plan_id=existing_plan_id,
+                symbol=symbol,
+                strategy_family="trend_continuation",
+                execution_mode="PAPER",
+                approval_state="APPROVED_AUTO",
+                submit_decision="SUBMIT",
+                decision_reason_code="submit_ready",
+                decision_reason_message="ready",
+                thesis_fingerprint=existing_fingerprint,
+                dedupe_result={"status": "unique"},
+                session_guidance={"state": "london"},
+                quality_snapshot={"validation_grade": "A"},
+                approval_snapshot={
+                    "approval_state": "APPROVED_AUTO",
+                    "allowed_execution_mode": "PAPER",
+                    "deployment_go_no_go": "GO",
+                    "deployment_code": "go_execution_auto_submit",
+                    "playbook_go_no_go": "GO",
+                    "playbook_code": "go_execution_auto_submit",
+                    "playbook_action": "allow_auto_submit",
+                    "playbook_message": "GO: execution path is auto-approved.",
+                },
+                payload={},
+                created_at=datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=10),
+            )
+        )
+        db.add(
+            OrderSubmission(
+                submission_id=f"sub_{symbol}_existing",
+                intent_id=f"intent_{symbol}_existing",
+                plan_id=existing_plan_id,
+                symbol=symbol,
+                client_order_id=f"client_{symbol}_existing",
+                adapter="paper",
+                execution_mode="PAPER",
+                state="ACKNOWLEDGED",
+                submit_status="ACKNOWLEDGED",
+                side="BUY",
+                order_type="LIMIT",
+                requested_live=False,
+                submitted_at=datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=10),
+                acknowledged_at=datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=10),
+                created_at=datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=10),
+                updated_at=datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=10),
+            )
+        )
+        db.commit()
+
+    intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": fresh_plan_id, "execution_mode": "PAPER"},
+    )
+    assert intent.status_code == 200
+    intent_payload = intent.json()
+    assert intent_payload["submit_decision"] == "SUBMIT"
+    assert intent_payload["dedupe_result"]["status"] == "unique"
+    self_heal = dict(intent_payload.get("self_heal_summary") or {})
+    assert self_heal["stale_paper_duplicate_intents_ignored_count"] >= 1
 
 
 def test_paper_lineage_override_allows_active_plan_duplicate_for_eligible_family(monkeypatch) -> None:
@@ -1508,10 +2116,11 @@ def test_live_submit_requires_global_live_enable_even_when_intent_is_ready(monke
     monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
     monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
     monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
 
     symbol = f"LIVE{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 2}USDC"
     plan_id = f"{symbol}_plan"
-    _seed_plan(symbol=symbol, family="trend_continuation", plan_id=plan_id)
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, entry_model="LIMIT")
 
     intent = client.post(
         "/execution/order-intents",
@@ -1727,6 +2336,11 @@ def test_control_plane_close_only_and_safety_state_routes(monkeypatch) -> None:
     state_payload = state.json()
     assert state_payload["close_only_active"] is True
     assert state_payload["blocking_reason_code"] == "close_only_active"
+    assert state_payload["transition_edge_variant"]["enabled"] is True
+    assert state_payload["transition_edge_variant"]["shadow_only"] is True
+    assert state_payload["transition_edge_variant"]["killed"] is False
+    assert state_payload["transition_edge_variant"]["live_lane"]["counts"]["base"]["intent"] == 0
+    assert state_payload["transition_edge_variant"]["live_lane"]["counts"]["variant"]["intent"] == 0
 
     disable = client.post(
         "/execution/control/close-only",
@@ -1870,16 +2484,24 @@ def test_micro_live_submit_path_uses_binance_adapter_when_gates_pass(monkeypatch
     _apply_auto_trading_defaults(monkeypatch)
     settings = get_settings()
     monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "NOTIONAL_PER_R")
+    monkeypatch.setattr(settings, "auto_trading_notional_per_r", 25.0)
+    monkeypatch.setattr(settings, "binance_live_min_quantity", 0.001)
+    monkeypatch.setattr(settings, "binance_live_quantity_step", 0.001)
     suffix = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000))[-6:]
     symbol = f"LH{suffix}USDC"
     monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", symbol)
-    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "trend_continuation")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
     monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
     monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
     monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
     monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
+
+    captured: dict[str, object] = {}
 
     def _fake_submit(self, **kwargs):
+        captured.update(kwargs)
         return {
             "symbol": kwargs["symbol"],
             "plan_id": kwargs["plan_id"],
@@ -1894,7 +2516,7 @@ def test_micro_live_submit_path_uses_binance_adapter_when_gates_pass(monkeypatch
     monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.submit_binance_order", _fake_submit)
 
     plan_id = f"{symbol}_ml_{suffix}"
-    _seed_plan(symbol=symbol, family="trend_continuation", plan_id=plan_id)
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, entry_model="LIMIT")
 
     intent = client.post(
         "/execution/order-intents",
@@ -1913,6 +2535,339 @@ def test_micro_live_submit_path_uses_binance_adapter_when_gates_pass(monkeypatch
     assert submit_payload["adapter"] == "binance"
     assert submit_payload["requested_live"] is True
     assert submit_payload["state"] == "ACKNOWLEDGED"
+    assert captured["quantity"] == 0.125
+    assert submit_payload["attachments"]["live_order_sizing"]["max_position_notional"] == 12.5
+    assert submit_payload["attachments"]["live_order_sizing"]["normalized_quantity"] == 0.125
+
+
+def test_micro_live_submit_blocks_when_notional_implies_sub_minimum_quantity(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "NOTIONAL_PER_R")
+    monkeypatch.setattr(settings, "auto_trading_notional_per_r", 0.1)
+    monkeypatch.setattr(settings, "binance_live_min_quantity", 0.001)
+    monkeypatch.setattr(settings, "binance_live_quantity_step", 0.001)
+    suffix = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000))[-6:]
+    symbol = f"LS{suffix}USDC"
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", symbol)
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
+
+    def _unexpected_submit(self, **kwargs):
+        raise AssertionError("live submitter should not be called when quantity is below minimum")
+
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.submit_binance_order", _unexpected_submit)
+
+    plan_id = f"{symbol}_ml_{suffix}"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, entry_model="LIMIT")
+
+    intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "MICRO_LIVE"},
+    )
+    assert intent.status_code == 200
+    intent_payload = intent.json()
+    assert intent_payload["submit_decision"] == "SUBMIT"
+
+    submit = client.post(
+        "/execution/submit",
+        json={"intent_id": intent_payload["intent_id"], "live": True},
+    )
+    assert submit.status_code == 200
+    submit_payload = submit.json()
+    assert submit_payload["state"] == "REJECTED"
+    assert submit_payload["submit_status"] == "LIVE_SIZING_INVALID"
+    assert "below the configured minimum" in submit_payload["message"]
+    assert submit_payload["attachments"]["live_order_sizing"]["normalized_quantity"] == 0.0
+
+
+def test_micro_live_submit_uses_risk_pct_sizing_and_caps_by_leverage(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "RISK_PCT")
+    monkeypatch.setattr(settings, "auto_trading_live_account_equity_usdt", 200.0)
+    monkeypatch.setattr(settings, "auto_trading_live_risk_per_trade_pct", 0.005)
+    monkeypatch.setattr(settings, "auto_trading_live_usable_margin_fraction", 0.85)
+    monkeypatch.setattr(settings, "auto_trading_live_leverage_cap", 6.0)
+    monkeypatch.setattr(settings, "binance_live_min_quantity", 0.001)
+    monkeypatch.setattr(settings, "binance_live_quantity_step", 0.001)
+    suffix = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000))[-6:]
+    symbol = f"LR{suffix}USDC"
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", symbol)
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
+
+    captured: dict[str, object] = {}
+
+    def _fake_submit(self, **kwargs):
+        captured.update(kwargs)
+        return {
+            "symbol": kwargs["symbol"],
+            "plan_id": kwargs["plan_id"],
+            "order_id": 987655,
+            "client_order_id": kwargs["client_order_id"],
+            "status": "NEW",
+            "side": kwargs["side"],
+            "order_type": kwargs["order_type"],
+            "reduce_only": kwargs["reduce_only"],
+        }
+
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.submit_binance_order", _fake_submit)
+
+    plan_id = f"{symbol}_risk_{suffix}"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, entry_model="LIMIT")
+
+    with SessionLocal() as db:
+        plan = db.get(Plan, plan_id)
+        assert plan is not None
+        plan.sl = 99.9
+        db.add(plan)
+        db.commit()
+
+    intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "MICRO_LIVE"},
+    )
+    assert intent.status_code == 200
+    intent_payload = intent.json()
+    assert intent_payload["submit_decision"] == "SUBMIT"
+
+    submit = client.post(
+        "/execution/submit",
+        json={"intent_id": intent_payload["intent_id"], "live": True},
+    )
+    assert submit.status_code == 200
+    submit_payload = submit.json()
+    assert submit_payload["adapter"] == "binance"
+    assert submit_payload["requested_live"] is True
+    assert submit_payload["state"] == "ACKNOWLEDGED"
+    assert captured["quantity"] == 10.0
+    sizing = submit_payload["attachments"]["live_order_sizing"]
+    assert sizing["sizing_mode"] == "RISK_PCT"
+    assert sizing["target_notional"] == 1000.0
+    assert sizing["max_position_notional"] == 1000.0
+    assert sizing["required_leverage"] == 5.8824
+    assert sizing["leverage_cap"] == 6.0
+    assert sizing["leverage_capped"] is False
+    assert sizing["actual_risk_usdt"] == 1.0
+
+
+def test_micro_live_submit_uses_symbol_specific_quantity_filters(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "NOTIONAL_PER_R")
+    monkeypatch.setattr(settings, "auto_trading_notional_per_r", 25.0)
+    monkeypatch.setattr(settings, "binance_live_min_quantity", 0.001)
+    monkeypatch.setattr(settings, "binance_live_quantity_step", 0.001)
+    suffix = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000))[-6:]
+    symbol = f"XQ{suffix}USDC"
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", symbol)
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
+    monkeypatch.setattr(
+        "app.services.strategy_engine.StrategyEngine.load_binance_symbol_trading_rules",
+        lambda self, requested_symbol: {
+            "symbol": requested_symbol,
+            "quantity_step": 0.1,
+            "min_quantity": 0.1,
+            "source": "binance_exchange_info",
+        },
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_submit(self, **kwargs):
+        captured.update(kwargs)
+        return {
+            "symbol": kwargs["symbol"],
+            "plan_id": kwargs["plan_id"],
+            "order_id": 987656,
+            "client_order_id": kwargs["client_order_id"],
+            "status": "NEW",
+            "side": kwargs["side"],
+            "order_type": kwargs["order_type"],
+            "reduce_only": kwargs["reduce_only"],
+        }
+
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.submit_binance_order", _fake_submit)
+
+    plan_id = f"{symbol}_filters_{suffix}"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, entry_model="LIMIT")
+
+    intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "MICRO_LIVE"},
+    )
+    assert intent.status_code == 200
+    intent_payload = intent.json()
+    assert intent_payload["submit_decision"] == "SUBMIT"
+
+    submit = client.post(
+        "/execution/submit",
+        json={"intent_id": intent_payload["intent_id"], "live": True},
+    )
+    assert submit.status_code == 200
+    submit_payload = submit.json()
+    assert submit_payload["state"] == "ACKNOWLEDGED"
+    assert captured["quantity"] == 0.1
+    sizing = submit_payload["attachments"]["live_order_sizing"]
+    assert sizing["symbol_rules_source"] == "binance_exchange_info"
+    assert sizing["quantity_step"] == 0.1
+    assert sizing["min_quantity"] == 0.1
+    assert sizing["normalized_quantity"] == 0.1
+
+
+def test_micro_live_submit_rejects_when_symbol_specific_min_quantity_not_met(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "NOTIONAL_PER_R")
+    monkeypatch.setattr(settings, "auto_trading_notional_per_r", 25.0)
+    monkeypatch.setattr(settings, "binance_live_min_quantity", 0.001)
+    monkeypatch.setattr(settings, "binance_live_quantity_step", 0.001)
+    suffix = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000))[-6:]
+    symbol = f"AQ{suffix}USDC"
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", symbol)
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
+    monkeypatch.setattr(
+        "app.services.strategy_engine.StrategyEngine.load_binance_symbol_trading_rules",
+        lambda self, requested_symbol: {
+            "symbol": requested_symbol,
+            "quantity_step": 1.0,
+            "min_quantity": 1.0,
+            "source": "binance_exchange_info",
+        },
+    )
+
+    def _unexpected_submit(self, **kwargs):
+        raise AssertionError("live submitter should not be called when symbol min quantity is not met")
+
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.submit_binance_order", _unexpected_submit)
+
+    plan_id = f"{symbol}_filters_{suffix}"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, entry_model="LIMIT")
+
+    intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "MICRO_LIVE"},
+    )
+    assert intent.status_code == 200
+    intent_payload = intent.json()
+    assert intent_payload["submit_decision"] == "SUBMIT"
+
+    submit = client.post(
+        "/execution/submit",
+        json={"intent_id": intent_payload["intent_id"], "live": True},
+    )
+    assert submit.status_code == 200
+    submit_payload = submit.json()
+    assert submit_payload["state"] == "REJECTED"
+    assert submit_payload["submit_status"] == "LIVE_SIZING_INVALID"
+    assert "below the configured minimum" in submit_payload["message"]
+    sizing = submit_payload["attachments"]["live_order_sizing"]
+    assert sizing["symbol_rules_source"] == "binance_exchange_info"
+    assert sizing["quantity_step"] == 1.0
+    assert sizing["min_quantity"] == 1.0
+    assert sizing["normalized_quantity"] == 0.0
+
+
+def test_micro_live_submit_normalizes_limit_price_by_symbol_tick_size(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "NOTIONAL_PER_R")
+    monkeypatch.setattr(settings, "auto_trading_notional_per_r", 25.0)
+    suffix = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000))[-6:]
+    symbol = f"PQ{suffix}USDC"
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", symbol)
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
+    monkeypatch.setattr(
+        "app.services.strategy_engine.StrategyEngine.load_binance_symbol_trading_rules",
+        lambda self, requested_symbol: {
+            "symbol": requested_symbol,
+            "quantity_step": 0.001,
+            "min_quantity": 0.001,
+            "tick_size": 0.1,
+            "source": "binance_exchange_info",
+        },
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_submit(self, **kwargs):
+        captured.update(kwargs)
+        return {
+            "symbol": kwargs["symbol"],
+            "plan_id": kwargs["plan_id"],
+            "order_id": 987657,
+            "client_order_id": kwargs["client_order_id"],
+            "status": "NEW",
+            "side": kwargs["side"],
+            "order_type": kwargs["order_type"],
+            "reduce_only": kwargs["reduce_only"],
+        }
+
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.submit_binance_order", _fake_submit)
+
+    plan_id = f"{symbol}_price_{suffix}"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, entry_model="LIMIT")
+    with SessionLocal() as db:
+        plan = db.get(Plan, plan_id)
+        assert plan is not None
+        plan.entry_price = 100.03
+        db.add(plan)
+        db.commit()
+
+    intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "MICRO_LIVE"},
+    )
+    assert intent.status_code == 200
+    intent_payload = intent.json()
+    assert intent_payload["submit_decision"] == "SUBMIT"
+
+    submit = client.post(
+        "/execution/submit",
+        json={"intent_id": intent_payload["intent_id"], "live": True},
+    )
+    assert submit.status_code == 200
+    submit_payload = submit.json()
+    assert submit_payload["state"] == "ACKNOWLEDGED"
+    assert captured["price"] == 100.0
+    live_price = submit_payload["attachments"]["live_order_sizing"]["live_limit_price"]
+    assert live_price["requested_limit_price"] == 100.03
+    assert live_price["tick_size"] == 0.1
+    assert live_price["normalized_limit_price"] == 100.0
 
 
 def test_rollout_policy_db_override_blocks_micro_live_intent(monkeypatch) -> None:
@@ -2061,3 +3016,48 @@ def test_reconcile_user_stream_stale_applies_global_lock(monkeypatch) -> None:
             reason_code="reconciliation_user_stream_stale",
         )
         db.commit()
+
+
+def test_transition_edge_variant_lock_does_not_block_baseline_entries_globally() -> None:
+    init_db()
+    with SessionLocal() as db:
+        service = SafetyLockService(repo=SafetyLockRepository(db), settings=get_settings())
+        service.set_transition_edge_variant_disabled(
+            active=True,
+            family="sweep_reversal",
+            reason_message="variant disabled for transition validation",
+        )
+        state = service.safety_state(
+            symbol="BTCUSDC",
+            family="sweep_reversal",
+            session_name="london",
+        )
+        assert state["new_entry_allowed"] is True
+        assert state["transition_edge_variant_disabled_active"] is True
+        reason_codes = {item["reason_code"] for item in state["transition_edge_variant_matching_locks"]}
+        assert SafetyLockService.TRANSITION_EDGE_VARIANT_DISABLED_REASON in reason_codes
+
+
+def test_execution_lane_tracker_separates_base_and_variant() -> None:
+    tracker = reset_execution_lane_tracker(window=5)
+
+    tracker.record_intent(is_variant=False)
+    tracker.record_submitted(is_variant=False)
+    tracker.record_filled(is_variant=False)
+    tracker.record_closed(is_variant=False, realized_r=0.5)
+
+    tracker.record_intent(is_variant=True)
+    tracker.record_submitted(is_variant=True)
+    tracker.record_filled(is_variant=True)
+    tracker.record_closed(is_variant=True, realized_r=1.0)
+
+    snapshot = tracker.snapshot()
+    assert snapshot["counts"]["base"]["intent"] == 1
+    assert snapshot["counts"]["variant"]["intent"] == 1
+    assert snapshot["counts"]["base"]["closed"] == 1
+    assert snapshot["counts"]["variant"]["closed"] == 1
+    assert snapshot["ev"]["base"] == 0.5
+    assert snapshot["ev"]["variant"] == 1.0
+    assert snapshot["downstream"]["base"]["filled_rate"] == 1.0
+    assert snapshot["downstream"]["variant"]["closed_rate"] == 1.0
+    assert get_execution_lane_tracker(window=5).snapshot()["window"] == 5

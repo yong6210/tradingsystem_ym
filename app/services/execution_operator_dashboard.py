@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings, get_settings
@@ -56,7 +58,14 @@ _ROLLOUT_REASONS = {
     "mode_total_risk_cap_reached",
     "live_disabled_family",
     "execution_mode_cap_exceeded",
+    "live_limit_only_entry_required",
+    "live_entry_model_not_allowed",
+    "micro_live_strategy_hour_not_allowed",
+    "micro_live_strategy_time_bucket_not_allowed",
+    "micro_live_plan_id_blocklisted",
     "micro_live_session_not_allowed",
+    "live_family_cluster_window_cap_reached",
+    "live_family_loss_cooldown_active",
 }
 
 _QUALITY_REASONS = {
@@ -69,6 +78,7 @@ _QUALITY_REASONS = {
 _HARD_GATE_GROUPS = {"safety", "structural"}
 _SOFTENING_GATE_GROUPS = {"quality"}
 _RECONCILIATION_ACTIVE_WINDOW_HOURS = 24
+_ACTIVE_CONTRACT_REPLAY_BASELINE_FILE = "strategy_proof_contract_live_subset.json"
 
 
 class ExecutionOperatorDashboardService:
@@ -197,6 +207,44 @@ class ExecutionOperatorDashboardService:
             )
         rows.sort(key=lambda item: (-item["blocked"], item["key"]))
         return counts, rows
+
+    @staticmethod
+    def _row_matches_contract_filters(row: dict[str, Any], filters: dict[str, Any] | None) -> bool:
+        payload = dict(row or {})
+        filter_payload = dict(filters or {})
+        symbol = str(filter_payload.get("symbol") or "").strip().upper()
+        execution_mode = str(filter_payload.get("execution_mode") or "").strip().upper()
+        strategy_families = {
+            str(item or "").strip().lower()
+            for item in list(filter_payload.get("strategy_families") or [])
+            if str(item or "").strip()
+        }
+        entry_models = {
+            str(item or "").strip().upper()
+            for item in list(filter_payload.get("entry_models") or [])
+            if str(item or "").strip()
+        }
+        directions = {
+            str(item or "").strip().upper()
+            for item in list(filter_payload.get("directions") or [])
+            if str(item or "").strip()
+        }
+        row_symbol = str(payload.get("symbol") or "").strip().upper()
+        row_execution_mode = str(payload.get("execution_mode") or "").strip().upper()
+        family = str(payload.get("strategy_family") or dict(payload.get("validity") or {}).get("strategy_family") or "").lower()
+        entry_model = str(payload.get("entry_model") or dict(payload.get("validity") or {}).get("entry_model") or "").upper()
+        direction = str(payload.get("direction") or dict(payload.get("validity") or {}).get("direction") or "").upper()
+        if symbol and row_symbol and row_symbol != symbol:
+            return False
+        if execution_mode and row_execution_mode and row_execution_mode != execution_mode:
+            return False
+        if strategy_families and family not in strategy_families:
+            return False
+        if entry_models and entry_model not in entry_models:
+            return False
+        if directions and direction not in directions:
+            return False
+        return True
 
     def _gate_group_reason_summary(
         self,
@@ -675,11 +723,15 @@ class ExecutionOperatorDashboardService:
     def _intent_row(row: Any) -> dict[str, Any]:
         approval_snapshot = dict(row.approval_snapshot or {})
         payload = dict(row.payload or {})
+        executable_plan = dict(payload.get("executable_plan") or {})
         return {
             "intent_id": row.intent_id,
             "plan_id": row.plan_id,
             "symbol": row.symbol,
             "strategy_family": row.strategy_family,
+            "direction": str(executable_plan.get("direction") or payload.get("direction") or ""),
+            "entry_type": str(executable_plan.get("entry_type") or ""),
+            "entry_model": str(executable_plan.get("entry_model") or ""),
             "execution_mode": row.execution_mode,
             "approval_state": row.approval_state,
             "submit_decision": row.submit_decision,
@@ -846,6 +898,12 @@ class ExecutionOperatorDashboardService:
     def _portfolio_candidate_row(row: dict[str, Any]) -> dict[str, Any]:
         item = dict(row or {})
         strategy_sizing = dict(item.get("strategy_sizing") or {})
+        runtime_signal_shadow_tilt = dict(
+            item.get("runtime_signal_shadow_tilt")
+            or strategy_sizing.get("runtime_signal_shadow_tilt")
+            or dict(item.get("validity") or {}).get("runtime_signal_shadow_tilt")
+            or {}
+        )
         return {
             "symbol": item.get("symbol", ""),
             "plan_id": item.get("plan_id", ""),
@@ -864,8 +922,10 @@ class ExecutionOperatorDashboardService:
             "edge_experiment_focus": dict(item.get("edge_experiment_focus") or {}),
             "capital_allocator": dict(item.get("capital_allocator") or {}),
             "capital_pressure": str(item.get("capital_pressure", "neutral") or "neutral"),
+            "runtime_signal_shadow_tilt": runtime_signal_shadow_tilt,
             "strategy_sizing": {
                 "outcome_risk_adjustment": dict(strategy_sizing.get("outcome_risk_adjustment") or {}),
+                "runtime_signal_shadow_tilt": runtime_signal_shadow_tilt,
             },
         }
 
@@ -913,16 +973,62 @@ class ExecutionOperatorDashboardService:
     def _execution_quality_summary(payload: dict[str, Any] | None) -> dict[str, Any] | None:
         if not payload:
             return None
+        final_exit_reasons = dict(payload.get("final_exit_reasons") or {})
+        terminal_exit_split = {
+            "planned_stop_loss": int(final_exit_reasons.get("stop_loss", 0) or 0),
+            "time_failure": int(final_exit_reasons.get("time_failure", 0) or 0),
+            "information_failure": int(final_exit_reasons.get("information_failure", 0) or 0),
+            "manual_flatten": int(final_exit_reasons.get("manual_flatten", 0) or 0),
+            "risk_lock_flatten": int(final_exit_reasons.get("risk_lock_flatten", 0) or 0),
+            "session_end_flatten": int(final_exit_reasons.get("session_end_flatten", 0) or 0),
+            "structure_failure": int(final_exit_reasons.get("structure_failure", 0) or 0),
+            "target_tp1": int(final_exit_reasons.get("target_tp1", 0) or 0),
+            "target_tp2": int(final_exit_reasons.get("target_tp2", 0) or 0),
+            "target_tp3": int(final_exit_reasons.get("target_tp3", 0) or 0),
+        }
+        operational_forced_exit_split = {
+            "time_failure": terminal_exit_split["time_failure"],
+            "information_failure": terminal_exit_split["information_failure"],
+            "manual_flatten": terminal_exit_split["manual_flatten"],
+            "risk_lock_flatten": terminal_exit_split["risk_lock_flatten"],
+            "session_end_flatten": terminal_exit_split["session_end_flatten"],
+        }
         return {
             "symbol": payload.get("symbol", ""),
+            "filters": dict(payload.get("filters") or {}) or None,
             "fill_rate": payload.get("fill_rate", 0.0),
+            "plan_fill_rate": payload.get("fill_rate", 0.0),
+            "plan_fill_rate_denominator": "matured_plans",
+            "terminal_exit_ratio": payload.get("forced_exit_ratio", 0.0),
+            "terminal_exit_ratio_denominator": "closed_plans",
+            "plans_total": int(payload.get("plans_total", 0) or 0),
+            "matured_plans": int(payload.get("plans_matured", 0) or 0),
+            "filled_matured_plans": int(payload.get("fills_matched", 0) or 0),
+            "unfilled_matured_plans": max(
+                int(payload.get("plans_matured", 0) or 0) - int(payload.get("fills_matched", 0) or 0),
+                0,
+            ),
             "fill_events_total": payload.get("fill_events_total", 0),
             "slippage_bps": dict(payload.get("slippage_bps") or {}),
             "fees": dict(payload.get("fees") or {}),
+            "unfilled_reasons": dict(payload.get("unfilled_reasons") or {}),
+            "unfilled_reason_details": dict(payload.get("unfilled_reason_details") or {}),
+            "entry_reach_diagnostics": dict(payload.get("entry_reach_diagnostics") or {}),
             "target_exit_ratio": payload.get("target_exit_ratio", 0.0),
             "forced_exit_ratio": payload.get("forced_exit_ratio", 0.0),
+            "forced_exit_ratio_total": payload.get("forced_exit_ratio", 0.0),
             "information_failure_ratio": payload.get("information_failure_ratio", 0.0),
             "time_failure_ratio": payload.get("time_failure_ratio", 0.0),
+            "final_exit_reasons": dict(payload.get("final_exit_reasons") or {}),
+            "terminal_exit_split": terminal_exit_split,
+            "operational_forced_exit_split": operational_forced_exit_split,
+            "operational_forced_exit_count": int(sum(operational_forced_exit_split.values())),
+            "operational_forced_exit_ratio": (
+                float(sum(operational_forced_exit_split.values())) / float(sum(final_exit_reasons.values()))
+                if sum(final_exit_reasons.values()) > 0
+                else 0.0
+            ),
+            "operational_forced_exit_ratio_denominator": "closed_plans",
             "report_path": payload.get("report_path"),
         }
 
@@ -939,6 +1045,7 @@ class ExecutionOperatorDashboardService:
             "available": bool(payload.get("available", False)),
             "reason": payload.get("reason", "not_available"),
             "report_window_days": int(payload.get("report_window_days", 0) or 0),
+            "filters": dict(payload.get("filters") or {}) or None,
             "coverage_note": payload.get("coverage_note"),
             "runtime_candidates": int(snapshot.get("runtime_candidates", 0) or 0),
             "accepted_candidates": int(snapshot.get("accepted_candidates", 0) or 0),
@@ -950,6 +1057,8 @@ class ExecutionOperatorDashboardService:
             "profitable": int(history.get("profitable", 0) or 0),
             "baseline_cost_profitable": int(history.get("baseline_cost_profitable", 0) or 0),
             "fill_rate_from_submitted": float(history.get("fill_rate_from_submitted", 0.0) or 0.0),
+            "submitted_to_fill_rate": float(history.get("fill_rate_from_submitted", 0.0) or 0.0),
+            "submitted_to_fill_rate_denominator": "submitted_plans",
             "close_rate_from_filled": float(history.get("close_rate_from_filled", 0.0) or 0.0),
             "profitable_rate_from_closed": float(history.get("profitable_rate_from_closed", 0.0) or 0.0),
             "baseline_cost_profitable_rate_from_closed": float(
@@ -964,6 +1073,166 @@ class ExecutionOperatorDashboardService:
             "top_entry_timing_bucket": dict((list(decomposition.get("entry_timing_variant") or [])[:1] or [{}])[0]),
             "top_execution_mode_bucket": dict((list(decomposition.get("execution_mode") or [])[:1] or [{}])[0]),
             "top_execution_style_bucket": dict((list(decomposition.get("execution_style") or [])[:1] or [{}])[0]),
+        }
+
+    @classmethod
+    def _active_contract_summary(cls, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not payload:
+            return None
+        return {
+            "filters": dict(payload.get("filters") or {}) or None,
+            "raw_counts": dict(payload.get("raw_counts") or {}) or None,
+            "recent_intent_summary": dict(payload.get("recent_intent_summary") or {}) or None,
+            "flow_cadence": dict(payload.get("flow_cadence") or {}) or None,
+            "replay_flow_baseline": dict(payload.get("replay_flow_baseline") or {}) or None,
+            "promotion_shadow_counter": dict(payload.get("promotion_shadow_counter") or {}) or None,
+            "shadow_relaxation_priority": dict(payload.get("shadow_relaxation_priority") or {}) or None,
+            "transition_edge_variant_shadow": dict(payload.get("transition_edge_variant_shadow") or {}) or None,
+            "selection_shortfall_breakdown": dict(payload.get("selection_shortfall_breakdown") or {}) or None,
+            "execution_quality_summary": cls._execution_quality_summary(
+                dict(payload.get("execution_quality_summary") or {}) or None
+            ),
+            "score_to_outcome_funnel": cls._score_to_outcome_funnel_summary(
+                dict(payload.get("score_to_outcome_funnel_summary") or {}) or None
+            ),
+            "opportunity_capture": dict(payload.get("opportunity_capture_summary") or {}) or None,
+        }
+
+    @staticmethod
+    def _active_contract_flow_cadence(
+        *,
+        recent_intents: list[dict[str, Any]],
+        days: int,
+        score_to_outcome_funnel_summary: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        last_created_at = None
+        for row in recent_intents:
+            created_at = ExecutionOperatorDashboardService._as_utc_datetime(row.get("created_at"))
+            if created_at is None:
+                continue
+            if last_created_at is None or created_at > last_created_at:
+                last_created_at = created_at
+        now = datetime.now(timezone.utc)
+        hours_since_last_active_contract_intent = (
+            round(max((now - last_created_at).total_seconds(), 0.0) / 3600.0, 2)
+            if last_created_at is not None
+            else None
+        )
+        funnel = dict(score_to_outcome_funnel_summary or {})
+        history = dict(funnel.get("historical_execution_outcomes") or {})
+        snapshot = dict(funnel.get("snapshot_selection") or {})
+        runtime_candidates = int(snapshot.get("runtime_candidates", 0) or 0)
+        submitted = int(history.get("submitted", 0) or 0)
+        closed = int(history.get("closed", 0) or 0)
+        cadence_window_days = max(int(days or 1), 1)
+        execution_sample_window_days = max(int(funnel.get("report_window_days", 0) or cadence_window_days), 1)
+        current_window_active_contract_intents_per_week = round((len(recent_intents) / cadence_window_days) * 7.0, 4)
+        execution_sample_submitted_per_week = round((submitted / execution_sample_window_days) * 7.0, 4)
+        execution_sample_closed_per_week = round((closed / execution_sample_window_days) * 7.0, 4)
+        if runtime_candidates > 0:
+            flow_state = "active_now"
+        elif last_created_at is None:
+            flow_state = "no_recent_active_contract_flow"
+        else:
+            flow_state = "currently_sparse"
+        return {
+            "cadence_window_days": cadence_window_days,
+            "cadence_window_basis": "recent_active_contract_intents",
+            "execution_sample_window_days": execution_sample_window_days,
+            "execution_sample_window_basis": "contract_faithful_execution_sample",
+            "hours_since_last_active_contract_intent": hours_since_last_active_contract_intent,
+            "runtime_candidates_current_snapshot": runtime_candidates,
+            "current_window_active_contract_intent_count": len(recent_intents),
+            "current_window_active_contract_intents_per_week": current_window_active_contract_intents_per_week,
+            "execution_sample_submitted_count": submitted,
+            "execution_sample_closed_count": closed,
+            "execution_sample_submitted_per_week": execution_sample_submitted_per_week,
+            "execution_sample_closed_per_week": execution_sample_closed_per_week,
+            "flow_state": flow_state,
+        }
+
+    def _active_contract_replay_flow_baseline(self, *, filters: dict[str, Any], cadence_window: dict[str, Any]) -> dict[str, Any] | None:
+        cache_path = Path(self.settings.validation_report_dir) / "historical_walk_forward_cache" / _ACTIVE_CONTRACT_REPLAY_BASELINE_FILE
+        if not cache_path.exists():
+            return None
+        try:
+            payload = json.loads(cache_path.read_text())
+        except Exception:
+            return None
+
+        simulation_start_ts = str(payload.get("simulation_start_ts") or "")
+        simulation_end_ts = str(payload.get("simulation_end_ts") or "")
+        try:
+            simulation_start = datetime.fromisoformat(simulation_start_ts.replace("Z", "+00:00"))
+            simulation_end = datetime.fromisoformat(simulation_end_ts.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if simulation_start.tzinfo is None:
+            simulation_start = simulation_start.replace(tzinfo=timezone.utc)
+        if simulation_end.tzinfo is None:
+            simulation_end = simulation_end.replace(tzinfo=timezone.utc)
+        replay_window_days = max((simulation_end - simulation_start).total_seconds() / 86400.0, 1.0)
+        replay_window_weeks = replay_window_days / 7.0
+
+        filter_symbol = str(filters.get("symbol") or "").strip().upper()
+        strategy_families = {
+            str(item or "").strip().lower()
+            for item in list(filters.get("strategy_families") or [])
+            if str(item or "").strip()
+        }
+        entry_models = {
+            str(item or "").strip().upper()
+            for item in list(filters.get("entry_models") or [])
+            if str(item or "").strip()
+        }
+        directions = {
+            str(item or "").strip().upper()
+            for item in list(filters.get("directions") or [])
+            if str(item or "").strip()
+        }
+
+        replay_rows = [
+            dict(row)
+            for row in list(payload.get("trade_rows") or [])
+            if (
+                (not filter_symbol or str(row.get("symbol") or "").strip().upper() == filter_symbol)
+                and (
+                    not strategy_families
+                    or str(row.get("strategy_family") or "").strip().lower() in strategy_families
+                )
+                and (
+                    not entry_models
+                    or str(row.get("entry_model") or "").strip().upper() in entry_models
+                )
+                and (
+                    not directions
+                    or str(row.get("direction") or "").strip().upper() in directions
+                )
+            )
+        ]
+        expected_active_contract_candidates_per_week = (
+            round(len(replay_rows) / replay_window_weeks, 4)
+            if replay_window_weeks > 0
+            else 0.0
+        )
+        expected_closed_per_week_from_replay = round(len(replay_rows) / replay_window_weeks, 4) if replay_window_weeks > 0 else 0.0
+        observed_current_window_intents_per_week = float(
+            cadence_window.get("current_window_active_contract_intents_per_week") or 0.0
+        )
+        live_vs_replay_flow_ratio = (
+            round(observed_current_window_intents_per_week / expected_active_contract_candidates_per_week, 4)
+            if expected_active_contract_candidates_per_week > 0
+            else None
+        )
+        return {
+            "available": True,
+            "source_path": str(cache_path),
+            "replay_window_days": round(replay_window_days, 4),
+            "expected_active_contract_candidates_per_week_from_replay": expected_active_contract_candidates_per_week,
+            "expected_closed_per_week_from_replay": expected_closed_per_week_from_replay,
+            "observed_current_window_active_contract_intents_per_week_live": observed_current_window_intents_per_week,
+            "live_vs_replay_flow_ratio": live_vs_replay_flow_ratio,
+            "comparison_only": True,
         }
 
     @staticmethod
@@ -1169,6 +1438,7 @@ class ExecutionOperatorDashboardService:
         portfolio_summary: dict[str, Any],
         alert_summary: dict[str, Any],
         execution_quality_summary: dict[str, Any] | None,
+        active_contract_summary: dict[str, Any] | None = None,
         alpha_research_pipeline_summary: dict[str, Any] | None = None,
         score_to_outcome_funnel_summary: dict[str, Any] | None = None,
         execution_degradation_advisory_summary: dict[str, Any] | None = None,
@@ -1203,6 +1473,33 @@ class ExecutionOperatorDashboardService:
             self._intent_row(row)
             for row in self.intent_repo.list_recent(symbol=symbol, limit=intent_limit, days=days)
         ]
+        active_contract_payload = dict(active_contract_summary or {})
+        active_contract_filters = dict(active_contract_payload.get("filters") or {})
+        if active_contract_filters:
+            active_contract_recent_intents = [
+                row
+                for row in recent_intents
+                if self._row_matches_contract_filters(row, active_contract_filters)
+            ]
+            active_contract_payload["recent_intent_summary"] = {
+                "broad_recent_intent_count": len(recent_intents),
+                "active_contract_recent_intent_count": len(active_contract_recent_intents),
+                "non_active_contract_recent_intent_count": max(
+                    len(recent_intents) - len(active_contract_recent_intents),
+                    0,
+                ),
+            }
+            active_contract_payload["flow_cadence"] = self._active_contract_flow_cadence(
+                recent_intents=active_contract_recent_intents,
+                days=days,
+                score_to_outcome_funnel_summary=dict(
+                    active_contract_payload.get("score_to_outcome_funnel_summary") or {}
+                ),
+            )
+            active_contract_payload["replay_flow_baseline"] = self._active_contract_replay_flow_baseline(
+                filters=active_contract_filters,
+                cadence_window=dict(active_contract_payload.get("flow_cadence") or {}),
+            )
         open_orders = [
             self._submission_row(row)
             for row in self.submission_repo.list_open(symbol=symbol)
@@ -1384,6 +1681,7 @@ class ExecutionOperatorDashboardService:
             "positive_evidence_expansion": dict(positive_evidence_expansion_summary or {}) or None,
             "outcome_bucket_granularity": dict(outcome_bucket_granularity_summary or {}) or None,
             "opportunity_capture": dict(opportunity_capture_summary or {}) or None,
+            "active_contract": self._active_contract_summary(active_contract_payload),
             "capital_allocator": dict(portfolio_summary.get("capital_allocator_summary") or {}) or None,
         }
         approval_strip_summary = self._approval_strip_summary(
@@ -1416,6 +1714,9 @@ class ExecutionOperatorDashboardService:
             "active_locks": list(safety_state.get("active_locks") or []),
             "matching_locks": list(safety_state.get("matching_locks") or []),
             "rollout_policies": list(safety_state.get("rollout_policies") or []),
+            "transition_edge_variant": dict(safety_state.get("transition_edge_variant") or {}) or None,
+            "session_impulse_retest_universe_policy": dict(safety_state.get("session_impulse_retest_universe_policy") or {}) or None,
+            "session_impulse_retest_rollout_readiness": dict(safety_state.get("session_impulse_retest_rollout_readiness") or {}) or None,
             "recent_intent_count": len(recent_intents),
             "recent_intents": recent_intents,
             "open_order_count": len(open_orders),
@@ -1426,6 +1727,7 @@ class ExecutionOperatorDashboardService:
             "recent_reconciliation_summary": self._reconciliation_summary(reconciliation_events),
             "recent_reconciliation_events": reconciliation_events,
             "portfolio_summary": portfolio_summary_payload,
+            "active_contract": self._active_contract_summary(active_contract_payload),
             "signal_funnel": signal_funnel,
             "alert_summary": self._alert_summary(alert_summary),
             "execution_quality_summary": self._execution_quality_summary(execution_quality_summary),

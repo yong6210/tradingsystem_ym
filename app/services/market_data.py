@@ -23,7 +23,7 @@ class DataQualityGate:
             return ts.replace(tzinfo=timezone.utc)
         return ts.astimezone(timezone.utc)
 
-    def validate(self, new: Candle, prev: Candle | None) -> None:
+    def validate(self, new: Candle, prev: Candle | None, *, allow_stale: bool = False) -> None:
         if new.h < max(new.o, new.c) or new.l > min(new.o, new.c):
             raise DataQualityError("invalid ohlc bounds")
         if new.v < 0:
@@ -36,7 +36,7 @@ class DataQualityGate:
             return
 
         now = datetime.now(timezone.utc)
-        if (now - new_ts).total_seconds() > 3600 * 24 * 30:
+        if not allow_stale and (now - new_ts).total_seconds() > 3600 * 24 * 30:
             raise DataQualityError("stale candle older than 30 days")
 
 
@@ -137,7 +137,7 @@ class MarketDataService:
                     is_final=row.is_final,
                 )
                 try:
-                    self.quality_gate.validate(candle, prev_candle)
+                    self.quality_gate.validate(candle, prev_candle, allow_stale=True)
                 except DataQualityError as exc:
                     if str(exc) == "reverse timestamp detected":
                         continue

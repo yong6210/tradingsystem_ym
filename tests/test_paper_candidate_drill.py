@@ -95,6 +95,135 @@ def test_approval_strip_summary_maps_execution_approval() -> None:
     assert summary["act_value"] == "allow_auto_submit"
 
 
+def test_choose_candidate_prefers_less_concentrated_symbol_when_diversity_pressure_exists() -> None:
+    crowded = {
+        **_candidate(),
+        "symbol": "ARBUSDC",
+        "plan_id": "plan-arb",
+        "expected_ev_at_recommended_size_r": 0.30,
+        "expected_ev_r": 0.60,
+    }
+    balanced = {
+        **_candidate(),
+        "symbol": "SOLUSDC",
+        "plan_id": "plan-sol",
+        "expected_ev_at_recommended_size_r": 0.20,
+        "expected_ev_r": 0.40,
+    }
+
+    chosen = paper_drill._choose_candidate(
+        [crowded, balanced],
+        symbol=None,
+        families={"sweep_reversal"},
+        include_manual=False,
+        diversity_snapshot={
+            "available": True,
+            "closed_trade_count": 67,
+            "symbol_closed_counts": {"ARBUSDC": 11, "SOLUSDC": 1},
+            "overrepresented_symbols": ["ARBUSDC"],
+            "active_open_symbols": [],
+        },
+    )
+
+    assert chosen is not None
+    assert chosen["symbol"] == "SOLUSDC"
+    assert chosen["symbol_diversity_overrepresented"] is False
+
+
+def test_choose_candidate_prefers_limit_variant_over_confirm_when_ev_is_close() -> None:
+    confirm_like = {
+        **_candidate(),
+        "symbol": "ARBUSDC",
+        "plan_id": "plan_zone_deadbeef_confirm",
+        "expected_ev_at_recommended_size_r": 0.23,
+        "expected_ev_r": 0.42,
+    }
+    limit_like = {
+        **_candidate(),
+        "symbol": "SOLUSDC",
+        "plan_id": "plan_zone_deadbeef_limit",
+        "expected_ev_at_recommended_size_r": 0.22,
+        "expected_ev_r": 0.41,
+    }
+
+    chosen = paper_drill._choose_candidate(
+        [confirm_like, limit_like],
+        symbol=None,
+        families={"sweep_reversal"},
+        include_manual=False,
+    )
+
+    assert chosen is not None
+    assert chosen["symbol"] == "SOLUSDC"
+    assert chosen["entry_variant_preference"] == "limit"
+
+
+def test_choose_candidate_blocks_family_cluster_guarded_rows() -> None:
+    chosen = paper_drill._choose_candidate(
+        [_candidate()],
+        symbol=None,
+        families={"sweep_reversal"},
+        include_manual=False,
+        family_guard_snapshot={
+            "available": True,
+            "families": {
+                "sweep_reversal": {
+                    "cluster_guard_active": True,
+                    "loss_cooldown_active": False,
+                    "recent_window_entry_count": 1,
+                    "recent_loss_count": 0,
+                }
+            },
+        },
+    )
+
+    assert chosen is None
+
+
+def test_current_db_path_honors_database_url(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "isolated.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+
+    resolved = paper_drill._current_db_path()
+
+    assert resolved == db_path
+
+
+def test_trend_proof_candidate_summary_reports_visible_limit_candidate() -> None:
+    scanner_rows = [
+        {
+            **_candidate(),
+            "symbol": "BTCUSDC",
+            "strategy_family": "trend_continuation",
+            "plan_id": "btc_trend_limit_plan",
+            "entry_model": "LIMIT",
+            "expected_ev_at_recommended_size_r": 0.31,
+            "expected_ev_r": 0.58,
+            "recommended_risk_r": 0.5,
+        }
+    ]
+
+    summary = paper_drill._trend_proof_candidate_summary(
+        scanner_rows=scanner_rows,
+        portfolio_payload=None,
+        include_manual=False,
+        diversity_snapshot=None,
+        family_guard_snapshot={"available": True, "families": {}, "active_families": []},
+        trend_proof_snapshot={
+            "available": True,
+            "active": True,
+            "eligible_symbols": ["BTCUSDC", "ETHUSDC"],
+            "summary": "trend proof active",
+        },
+    )
+
+    assert summary["availability_state"] == "trend_limit_candidate_ready"
+    assert summary["scanner_candidate_count"] == 1
+    assert summary["scanner_limit_candidate_count"] == 1
+    assert summary["runtime_eligible_candidate_count"] == 1
+    assert summary["top_runtime_candidate_symbol"] == "BTCUSDC"
+
+
 def test_request_json_retries_retryable_http_error(monkeypatch) -> None:
     attempts = {"count": 0}
 
@@ -130,6 +259,11 @@ def test_request_json_retries_retryable_http_error(monkeypatch) -> None:
 
 
 def test_main_emits_approval_strip_summary(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        paper_drill,
+        "_load_family_cluster_guard_snapshot",
+        lambda **kwargs: {"available": True, "families": {}, "active_families": [], "summary": "disabled in test"},
+    )
     monkeypatch.setattr(
         paper_drill,
         "parse_args",
@@ -176,6 +310,7 @@ def test_main_emits_approval_strip_summary(monkeypatch, capsys) -> None:
     assert payload["candidate_surface_summary"]["approve_value"] == "approval usable"
     assert payload["approval_strip_summary"]["approve_value"] == "approval usable"
     assert payload["approval_strip_summary"]["act_value"] == "allow_auto_submit"
+    assert "family_cluster_guard_summary" in payload
     assert payload["edge_experiment_review"]["edge_state"] == "watch_edge"
     assert payload["edge_experiment_review"]["entry_timing_preferred_variant"] == "early_limit"
     assert payload["candidate_edge_experiment_focus"]["symbol"] == "BTCUSDC"
@@ -410,7 +545,96 @@ def test_choose_override_candidate_allows_zero_risk_a_grade_thesis_block() -> No
     assert chosen["plan_id"] == "plan-sweep"
 
 
+def test_choose_override_candidate_prefers_less_concentrated_symbol() -> None:
+    rows = [
+        {
+            "symbol": "ARBUSDC",
+            "plan_id": "plan-arb",
+            "strategy_family": "sweep_reversal",
+            "strategy_grade": "A",
+            "block_reason": "thesis_duplicate_blocked",
+            "recommended_risk_r": 0.0,
+            "expected_ev_r": 0.9,
+            "expected_ev_at_recommended_size_r": 0.0,
+            "final_rank_score": 70.0,
+            "deployment_go_no_go": "GO",
+            "session_guidance": {"state": "preferred_live_window", "dead_session": False},
+        },
+        {
+            "symbol": "SOLUSDC",
+            "plan_id": "plan-sol",
+            "strategy_family": "sweep_reversal",
+            "strategy_grade": "A",
+            "block_reason": "thesis_duplicate_blocked",
+            "recommended_risk_r": 0.0,
+            "expected_ev_r": 0.4,
+            "expected_ev_at_recommended_size_r": 0.0,
+            "final_rank_score": 55.0,
+            "deployment_go_no_go": "GO",
+            "session_guidance": {"state": "preferred_live_window", "dead_session": False},
+        },
+    ]
+
+    chosen = paper_drill._choose_override_candidate(
+        rows,
+        symbol=None,
+        families={"sweep_reversal"},
+        include_manual=False,
+        diversity_snapshot={
+            "available": True,
+            "closed_trade_count": 67,
+            "symbol_closed_counts": {"ARBUSDC": 11, "SOLUSDC": 1},
+            "overrepresented_symbols": ["ARBUSDC"],
+            "active_open_symbols": [],
+        },
+    )
+
+    assert chosen is not None
+    assert chosen["plan_id"] == "plan-sol"
+
+
+def test_choose_candidate_prioritizes_btc_eth_trend_limit_while_trend_proof_is_unmet() -> None:
+    trend_candidate = {
+        **_candidate(),
+        "symbol": "BTCUSDC",
+        "plan_id": "plan-btc-trend-limit",
+        "strategy_family": "trend_continuation",
+        "entry_model": "LIMIT",
+        "expected_ev_at_recommended_size_r": 0.18,
+        "expected_ev_r": 0.25,
+    }
+    alt_candidate = {
+        **_candidate(),
+        "symbol": "ARBUSDC",
+        "plan_id": "plan-arb-sweep-limit",
+        "strategy_family": "sweep_reversal",
+        "entry_model": "LIMIT",
+        "expected_ev_at_recommended_size_r": 0.30,
+        "expected_ev_r": 0.60,
+    }
+
+    chosen = paper_drill._choose_candidate(
+        [alt_candidate, trend_candidate],
+        symbol=None,
+        families={"sweep_reversal", "trend_continuation"},
+        include_manual=False,
+        trend_proof_snapshot={
+            "available": True,
+            "active": True,
+            "eligible_symbols": ["BTCUSDC", "ETHUSDC"],
+        },
+    )
+
+    assert chosen is not None
+    assert chosen["plan_id"] == "plan-btc-trend-limit"
+
+
 def test_main_selects_zero_risk_override_candidate_for_paper_sampling(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        paper_drill,
+        "_load_family_cluster_guard_snapshot",
+        lambda **kwargs: {"available": True, "families": {}, "active_families": [], "summary": "disabled in test"},
+    )
     monkeypatch.setattr(
         paper_drill,
         "parse_args",
@@ -488,6 +712,11 @@ def test_main_selects_zero_risk_override_candidate_for_paper_sampling(monkeypatc
 
 
 def test_main_skips_duplicate_active_candidate_and_uses_next_submit_ready_candidate(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        paper_drill,
+        "_load_family_cluster_guard_snapshot",
+        lambda **kwargs: {"available": True, "families": {}, "active_families": [], "summary": "disabled in test"},
+    )
     monkeypatch.setattr(
         paper_drill,
         "parse_args",
@@ -569,6 +798,11 @@ def test_main_skips_duplicate_active_candidate_and_uses_next_submit_ready_candid
 
 
 def test_main_skips_already_submitted_candidate_and_uses_next_submit_ready_candidate(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        paper_drill,
+        "_load_family_cluster_guard_snapshot",
+        lambda **kwargs: {"available": True, "families": {}, "active_families": [], "summary": "disabled in test"},
+    )
     monkeypatch.setattr(
         paper_drill,
         "parse_args",

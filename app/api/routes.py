@@ -165,6 +165,8 @@ def get_top_plans(
         if "strategy_sizing" not in validity:
             strategy_sizing = sizing_service.evaluate_from_row(
                 {
+                    "symbol": p.symbol,
+                    "direction": p.direction,
                     "strategy_family": validity.get("strategy_family", "legacy_zone_plan"),
                     "strategy_grade": validity.get("strategy_grade"),
                     "regime": validity.get("regime", "range"),

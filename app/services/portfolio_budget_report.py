@@ -6,9 +6,9 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings, get_settings
-from app.core.enums import PlanState, RiskGateState
+from app.core.enums import ExecutionMode, OrderLifecycleState, PlanState, RiskGateState
 from app.db.models import Plan
-from app.db.repositories import PlanRepository
+from app.db.repositories import OrderSubmissionRepository, PlanRepository
 from app.services.b_continuation_activation import BContinuationActivationService
 from app.services.edge_experiment_review import build_edge_experiment_review, summarize_edge_experiment_review
 from app.services.edge_evolution_rule import build_edge_evolution_rule, summarize_edge_evolution_rule
@@ -85,6 +85,41 @@ def _portfolio_playbook_mapping(deployment_language: dict[str, str]) -> dict[str
 
 
 class PortfolioBudgetReportService:
+    @staticmethod
+    def _submission_counts_as_live_contract(row: Any) -> bool:
+        if str(getattr(row, "adapter", "") or "").lower() == "none":
+            return False
+        if str(getattr(row, "state", "") or "").upper() == OrderLifecycleState.REJECTED.value:
+            return False
+        execution_mode = str(getattr(row, "execution_mode", "") or "").upper()
+        requested_live = bool(getattr(row, "requested_live", False))
+        return requested_live or execution_mode in {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value}
+
+    def _recent_live_submission_plan_ids(self) -> set[str]:
+        live_plan_ids: set[str] = set()
+        for row in self.submission_repo.list_recent(days=7, limit=5000):
+            plan_id = str(getattr(row, "plan_id", "") or "")
+            if not plan_id:
+                continue
+            if self._submission_counts_as_live_contract(row):
+                live_plan_ids.add(plan_id)
+        return live_plan_ids
+
+    def _filter_exposure_plans_for_mode(self, exposure_plans: list[Plan]) -> list[Plan]:
+        mode_value = str(getattr(self.settings.auto_trading_execution_mode, "value", self.settings.auto_trading_execution_mode) or "").upper()
+        if mode_value not in {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value}:
+            return exposure_plans
+
+        allowed_live_modes = {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value}
+        recent_live_submission_plan_ids = self._recent_live_submission_plan_ids()
+        filtered: list[Plan] = []
+        for plan in exposure_plans:
+            validity = dict(plan.validity or {})
+            execution_mode = str(validity.get("execution_mode") or "").upper()
+            if execution_mode in allowed_live_modes or str(getattr(plan, "plan_id", "") or "") in recent_live_submission_plan_ids:
+                filtered.append(plan)
+        return filtered
+
     @staticmethod
     def _edge_experiment_summary_lookup(
         *,
@@ -280,6 +315,7 @@ class PortfolioBudgetReportService:
         self,
         *,
         plan_repo: PlanRepository,
+        submission_repo: OrderSubmissionRepository,
         scanner: ScannerService,
         multi_strategy_ab: MultiStrategyABExpansionService | None = None,
         b_continuation_activation: BContinuationActivationService | None = None,
@@ -287,6 +323,7 @@ class PortfolioBudgetReportService:
         settings: Settings | None = None,
     ):
         self.plan_repo = plan_repo
+        self.submission_repo = submission_repo
         self.scanner = scanner
         self.overlay = scanner.overlay
         self.multi_strategy_ab = multi_strategy_ab or MultiStrategyABExpansionService()
@@ -625,6 +662,7 @@ class PortfolioBudgetReportService:
             include_planned=self.settings.portfolio_overlay_include_planned_exposure,
             limit=300,
         )
+        exposure_plans = self._filter_exposure_plans_for_mode(exposure_plans)
         current_positions, exposure_summary, existing_exposures = self._current_positions(exposure_plans)
         headroom_by_regime = self._headroom_by_regime(exposure_summary=exposure_summary)
         current_total_risk_r = round(sum(float(row.get("recommended_risk_r", 0.0) or 0.0) for row in current_positions), 4)

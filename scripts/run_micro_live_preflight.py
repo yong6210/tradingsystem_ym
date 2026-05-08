@@ -11,6 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from app.core import operator_surface_contracts as osc
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 _REQUEST_RETRY_ATTEMPTS = 3
@@ -818,7 +819,7 @@ def main() -> int:
     checks.append(_candidate_availability_check(candidate=candidate, dashboard_strip=dashboard_strip))
 
     failed = [item for item in checks if item["status"] != "PASS"]
-    overall_status = "READY_FOR_MICRO_LIVE" if not failed else "NOT_READY"
+    overall_status = osc.MICRO_LIVE_PREFLIGHT_STATUS_READY if not failed else osc.MICRO_LIVE_PREFLIGHT_STATUS_NOT_READY
     next_steps = [item["message"] for item in failed] if failed else ["Proceed to the live go-live checklist and final operator sign-off."]
     advisory_next_step = _edge_experiment_next_step(edge_experiment_review)
     if advisory_next_step:

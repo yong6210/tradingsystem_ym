@@ -427,6 +427,9 @@ curl -s "http://127.0.0.1:8000/plans/top?symbol=BTCUSDC&tf=5m&limit=5&refresh=tr
 
 규칙:
 - `legacy_zone_plan`은 lineage 축적 대상이 아니므로 PAPER lineage drill 성공으로 보지 않는다.
+- drill payload의 `family_cluster_guard_summary`는 same-window family cluster와 recent family loss cooldown을 같이 보여준다.
+- `active_families`가 비어 있지 않으면, 그 family는 지금 PAPER 표본도 추가하지 않는다. 이 상태에서 억지로 sample을 더 쌓으면 signoff truth를 악화시킬 가능성이 높다.
+- 기본 guard는 `60분 same-family open >= 1` 또는 `최근 90분 같은 family 손실 >= 2`일 때 동작한다.
 - `eligible_candidate_found=FAIL`이면 세션 문제이므로 London/New York에 다시 돌린다.
 - `approval_for_paper=FAIL` 또는 `intent_submit_ready=FAIL`이면 rollout/approval block reason부터 해결한다.
 - drill payload의 `approval_strip_summary`를 먼저 읽고, 그다음 `candidate_edge_experiment_focus`와 `approval_state / allowed_execution_mode`로 submit 가능 여부와 split-test focus를 확인한다.
@@ -510,8 +513,20 @@ curl -s -X POST "http://127.0.0.1:8000/execution/submit" \
 - `live=true`는 `BINANCE_TRADE_LIVE_ENABLED=true`와 approval/rollout/safety 조건이 모두 맞을 때만 사용
 - `MICRO_LIVE` 진입 전 확인 기준은 `runtime_decision_band == AMBER_CONDITIONAL`, `runtime_effective_action == conditional_micro_live_signoff`, `runtime_allowed_reopen_scope == MICRO_LIVE_ONLY`다.
 - `MICRO_LIVE` 직전 surface는 `runtime_preflight_summary.status == READY_FOR_MICRO_LIVE`와 `runtime_operator_signoff_summary.status == ready_for_manual_micro_live_signoff`를 같이 보여줘야 한다. 이 단계 의미는 “기술 gate는 통과했고, 운영자가 MICRO_LIVE만 수동 서명할 수 있다”이다.
-- `MICRO_LIVE`는 `post_patch_closed_trade_count >= 50`, `post_patch_sample_summary.replay_max_drawdown_r < 5.0`, `post_patch_sample_summary.replay_p5_r >= -1.05`, `post_patch_sample_summary.stop_loss_share < 0.35`, `post_patch_sample_summary.worst_loss_streak < 5`를 동시에 만족할 때만 검토한다.
-- `FULL LIVE` 확대는 별도 gate다. `runtime_effective_action == conditional_full_live_signoff` 또는 `proceed_to_operator_signoff`, `runtime_allowed_reopen_scope == MICRO_LIVE_OR_LIVE`, `runtime_operator_signoff_summary.status == ready_for_manual_full_live_signoff` 또는 `ready_for_operator_signoff`를 확인하고, `post_patch_closed_trade_count >= 80`, `post_patch_sample_summary.replay_p5_r >= -1.05`, `post_patch_sample_summary.stop_loss_share < 0.30`까지 충족될 때만 검토한다.
+- 현재 기본 `MICRO_LIVE` 계약은 `BTCUSDC` only, priority `BTCUSDC`, direction `LONG|SHORT`, family `sweep_reversal`, variant `LIMIT`이다. 세션은 런타임 가드와 매크로 blackout을 통과한 경우에만 허용한다. 즉 현재 `MICRO_LIVE` 제출 대상은 `BTCUSDC + sweep_reversal + limit_only` subset이다.
+- `trend_continuation + LIMIT`는 별도 `trend proof lane`으로만 추적한다. 이 lane은 상승장/추세장 proof를 따로 쌓는 용도고, proof가 쌓이기 전까지는 live submit 계약에 포함하지 않는다.
+- `historical execution contract proof`는 현재 `BTCUSDC + sweep_reversal + LIMIT` 계약의 장기 closed-plan context를 advisory-only로 보여준다. 빠르게 참고할 수 있지만 live gate source로 직접 쓰지 않는다.
+- `historical walk-forward execution proof`는 같은 계약을 과거 5m/15m 캔들에 대해 candle-by-candle로 순차 재생한 advisory lane이다. `simulation_start_ts`, `simulation_end_ts`, `latest_source_ts`를 같이 보고 시뮬레이션 구간이 실제로 어디까지 반영됐는지 확인한다.
+- `historical walk-forward strategy proof`는 현재 `BTCUSDC` 중심 raw candle strategy-level replay lane이다. 이 lane은 과거에 저장된 plan row가 아니라 과거 캔들에서 신호를 직접 재생성해서 large-sample 전략 적합성을 보는 용도다. live execution gate와는 별도 advisory evidence로만 해석한다.
+- `MICRO_LIVE`는 `live_eligible_post_patch_closed_trade_count >= 15`, `live_eligible_post_patch_sample_summary.replay_max_drawdown_r < 4.5`, `live_eligible_post_patch_sample_summary.replay_p5_r >= -1.05`, `live_eligible_post_patch_sample_summary.stop_loss_share < 0.45`, `live_eligible_post_patch_sample_summary.worst_loss_streak < 5`를 동시에 만족할 때만 검토한다.
+- `actual execution subset`이 `5 distinct plans`를 넘기기 전까지는 gate proof가 bootstrap 단계다. 이 구간에선 `runtime_live_contract_scope.proof_source`가 가리키는 `live_eligible_post_patch_sample_summary`를 gate truth로 쓴다.
+- live submit approval은 최근 알트 reversal cluster를 같이 본다. `live_family_cluster_window_cap_reached`가 뜨면 같은 family 신규 진입을 동시 다발로 받지 말고, `live_family_loss_cooldown_active`가 뜨면 최근 family 손실 파동이 가라앉을 때까지 신규 live entry를 멈춘다.
+- 현재 canary pacing rule은 `1 daily new entry`가 아니라 `1 concurrent position`이다. 즉 포지션이 열려 있으면 추가 진입을 막고, 포지션이 닫히면 다음 신호를 approval / safety / reconciliation 기준으로 다시 평가한다.
+- `AUTO_TRADING_MICRO_LIVE_MAX_DAILY_NEW_ENTRIES=0`은 일일 신규 진입 상한을 끈 상태를 의미한다. 이때도 무제한 추격 진입이 아니라 `current_exposure_count`, safety locks, reconciliation, family cluster guard, event blackout, symbol priority guard가 다음 진입을 다시 심사한다.
+- 현재 canary는 major U.S. macro blackout (`FOMC`, `CPI`, `NFP`) 동안 신규 `MICRO_LIVE` 진입을 막는다. 운영자는 blackout 자체를 news 해석기로 읽지 말고, replay blind spot을 줄이는 execution-risk 가드로 이해해야 한다.
+- `MICRO_LIVE_ONLY`가 열렸을 때 운영 순서는 고정한다. `run_micro_live_preflight.py` 재확인 -> `run_runtime_signoff_review.py` 재확인 -> `APPROVED_*` + `LIMIT` plan으로 `POST /execution/order-intents` (`execution_mode=MICRO_LIVE`) -> `POST /execution/submit` (`live=true`) 순서만 허용한다.
+- 이 단계에서 live 제출 후보는 `runtime_operator_signoff_summary.contract_scope == limit_only` 계약을 따라야 한다. `CONFIRM`/`SWEEP_CONFIRM`은 여전히 PAPER/RESEARCH 전용으로 남긴다.
+- `FULL LIVE` 확대는 별도 gate다. `runtime_effective_action == conditional_full_live_signoff` 또는 `proceed_to_operator_signoff`, `runtime_allowed_reopen_scope == MICRO_LIVE_OR_LIVE`, `runtime_operator_signoff_summary.status == ready_for_manual_full_live_signoff` 또는 `ready_for_operator_signoff`를 확인하고, `live_eligible_post_patch_closed_trade_count >= 30`, `live_eligible_post_patch_sample_summary.replay_p5_r >= -1.05`, `live_eligible_post_patch_sample_summary.stop_loss_share < 0.40`, `live_eligible_post_patch_sample_summary.worst_loss_streak < 5`, `live_execution_post_patch_closed_trade_count >= 5`까지 충족될 때만 검토한다.
 
 ## 7. 제출 후 모니터링
 ### 7.1. operator dashboard
@@ -525,6 +540,9 @@ curl -s "http://127.0.0.1:8000/execution/operator-dashboard?symbol=BTCUSDC&days=
 - `open_positions`
 - `recent_reconciliation_events`
 - `execution_quality_summary`
+- `runtime_self_heal_summary`
+- `trend_proof_post_patch_sample_summary`
+- `trend_proof_candidate_summary`
 
 ### 7.2. 실행 품질
 ```bash
@@ -590,6 +608,16 @@ curl -s -X POST "http://127.0.0.1:8000/execution/control/kill-switch" \
 - 신규 진입은 `approval -> intent -> submit` 순서를 건너뛰지 않는다.
 - mismatch, stale stream, missing stop 같은 runtime 이상은 “나중에 보기”가 아니라 즉시 lock/close-only 판단 대상이다.
 - live 문제를 paper에서 재현 가능하게 유지하는 것이 운영 안정성의 핵심이다.
-- `legacy` 전체 replay는 경고 근거로 유지하되, `MICRO_LIVE` / `FULL LIVE` 재개 승인은 `post-patch rolling cohort` 기준으로 분리해서 본다.
-- `MICRO_LIVE`는 `post-patch 50+`의 현실적 문턱으로 먼저 연다. `FULL LIVE`는 `post-patch 80+`와 하드 stop 구조를 반영한 `p5 >= -1.05`, 더 엄격한 `stop_loss_share < 0.30` 기준을 별도로 충족해야 한다.
+- 테스트는 항상 temp DB에서 돌아야 한다. `pytest`와 drill/watch 스크립트는 `DATABASE_URL`을 존중해야 하고, 실 [trading.db](/Users/yumin/Documents/trading/trading.db)를 테스트로 오염시키면 안 된다.
+- `legacy` 전체 replay와 full `post-patch` close-fill cohort는 advisory truth로 유지한다. 실제 live go/no-go는 `live_eligible_post_patch_sample_summary`를 별도로 계산해서 본다.
+- 현재 live 계약은 `BTCUSDC + sweep_reversal + LIMIT`다. `ETHUSDC`는 advisory/proof 비교용으로만 남기고, `CONFIRM` / `SWEEP_CONFIRM`은 paper 또는 research로만 남긴다.
+- raw BTC strategy proof 기준 운영 우선순위는 `BTCUSDC sweep_reversal LIMIT`다. `trend_continuation`은 proof lane으로만 남기고 `CONFIRM`은 운영 계약에서 제외한다.
+- `trend_continuation + LIMIT`는 운영 계약이 아니라 `trend proof lane`이다. lane count가 작을 때는 장 적합성 진단용으로만 본다.
+- `historical_execution_contract_proof_summary`는 `actual execution subset`이 얇을 때 보는 advisory context다. 이 값이 좋아도 `actual execution subset`과 `runtime_reopen_gate_summary`가 약하면 reopen을 밀어붙이지 않는다.
+- `historical_walk_forward_execution_contract_proof_summary`는 candle-by-candle advisory walk-forward context다. 이 값이 좋아도 live gate source는 아니다. `actual execution subset`, `live_eligible subset`, `runtime_reopen_gate_summary`와 분리해서 해석한다.
+- `historical_walk_forward_strategy_proof_summary`는 `BTCUSDC/ETHUSDC` raw candle strategy-level large-sample lane이다. 전략 edge를 빠르게 보는 데는 유용하지만, order queue / fill quality / live execution mismatch를 대체하지는 않는다.
+- `historical_walk_forward_trend_proof_summary`는 `trend_continuation + LIMIT`의 advisory walk-forward lane이다. 0이면 “trend lane 증거 없음”으로 해석한다.
+- `MICRO_LIVE`는 `limit_only post-patch 15+`, `maxDD < 4.5R`, `p5 >= -1.05`, `stop_loss_share < 45%`, `worst_loss_streak < 5`일 때만 검토한다.
+- `FULL LIVE`는 `limit_only post-patch 30+`, `maxDD < 4.5R`, `p5 >= -1.05`, `stop_loss_share < 40%`, `worst_loss_streak < 5`일 때만 검토한다.
+- `runtime_self_heal_summary`는 관측성 필드다. repeated stale cleanup / stale duplicate unblock이 반복되면 기능적으로는 통과여도 운영 품질 이슈로 취급한다.
 - `MICRO_LIVE_ONLY`와 `MICRO_LIVE_OR_LIVE`는 같은 단계가 아니다. 전자는 검증용 제한 재개고, 후자는 추가 운영 확대를 검토할 수 있다는 뜻이다.

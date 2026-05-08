@@ -648,6 +648,99 @@ def test_portfolio_overlay_blocks_new_thesis_when_active_cap_is_hit() -> None:
             setattr(settings, key, value)
 
 
+def test_portfolio_overlay_applies_transition_variant_risk_multiplier() -> None:
+    settings = get_settings()
+    updates = _with_overlay_settings()
+    updates["portfolio_overlay_max_cluster_exposure"] = 99
+    updates["transition_edge_variant_risk_multiplier"] = 0.35
+    old_values = {k: getattr(settings, k) for k in updates}
+
+    try:
+        for key, value in updates.items():
+            setattr(settings, key, value)
+
+        service = PortfolioRiskOverlayService(candle_repo=_CandleRepoStub({}), settings=settings)
+        assessed = service.assess_rows(
+            [
+                {
+                    "symbol": "BTCUSDC",
+                    "direction": "long",
+                    "strategy_family": "sweep_reversal",
+                    "entry_model": "LIMIT",
+                    "final_rank_score": 100.0,
+                    "validity": {
+                        "strategy_family": "sweep_reversal",
+                        "recommended_risk_r": 1.0,
+                        "transition_edge_variant_applied": True,
+                        "transition_edge_variant": {"variant": "exp_6_fvg_relaxed_plus_transition_override", "shadow_only": False},
+                        "thesis_cluster_id": "cluster_variant_btc",
+                    },
+                }
+            ],
+            existing_exposures=[],
+        )
+
+        assert assessed[0]["accepted"] is True
+        assert assessed[0]["transition_edge_variant_risk_multiplier"] == 0.35
+        assert assessed[0]["transition_edge_variant_base_risk_r"] > assessed[0]["recommended_risk_r"]
+        assert assessed[0]["recommended_risk_r"] == round(assessed[0]["transition_edge_variant_base_risk_r"] * 0.35, 4)
+    finally:
+        for key, value in old_values.items():
+            setattr(settings, key, value)
+
+
+def test_portfolio_overlay_blocks_transition_variant_duplicate_overlay_key() -> None:
+    settings = get_settings()
+    updates = _with_overlay_settings()
+    updates["portfolio_overlay_max_cluster_exposure"] = 99
+    old_values = {k: getattr(settings, k) for k in updates}
+
+    try:
+        for key, value in updates.items():
+            setattr(settings, key, value)
+
+        service = PortfolioRiskOverlayService(candle_repo=_CandleRepoStub({}), settings=settings)
+        existing_exposures = [
+            {
+                "symbol": "BTCUSDC",
+                "direction": "long",
+                "strategy_family": "sweep_reversal",
+                "entry_model": "LIMIT",
+                "validity": {
+                    "strategy_family": "sweep_reversal",
+                    "transition_edge_variant_applied": True,
+                    "transition_edge_variant": {"variant": "exp_6_fvg_relaxed_plus_transition_override", "shadow_only": False},
+                    "thesis_cluster_id": "cluster_variant_shared",
+                },
+            }
+        ]
+        assessed = service.assess_rows(
+            [
+                {
+                    "symbol": "BTCUSDC",
+                    "direction": "long",
+                    "strategy_family": "sweep_reversal",
+                    "entry_model": "LIMIT",
+                    "final_rank_score": 100.0,
+                    "validity": {
+                        "strategy_family": "sweep_reversal",
+                        "recommended_risk_r": 1.0,
+                        "transition_edge_variant_applied": True,
+                        "transition_edge_variant": {"variant": "exp_6_fvg_relaxed_plus_transition_override", "shadow_only": False},
+                        "thesis_cluster_id": "cluster_variant_shared",
+                    },
+                }
+            ],
+            existing_exposures=existing_exposures,
+        )
+
+        assert assessed[0]["accepted"] is False
+        assert assessed[0]["block_reason"] == "transition_edge_variant_thesis_duplicate_blocked"
+    finally:
+        for key, value in old_values.items():
+            setattr(settings, key, value)
+
+
 def test_portfolio_overlay_respects_mode_daily_trade_limit() -> None:
     settings = get_settings()
     updates = _with_overlay_settings()

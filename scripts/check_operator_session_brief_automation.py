@@ -88,7 +88,7 @@ def parse_launchctl_print(label: str, raw: str) -> AgentStatus:
         issues.append(f"last exit code is not zero: {last_exit_code_raw or 'missing'}")
     if runs is None or runs < 1:
         issues.append("launchd runs count is missing or zero")
-    if not working_directory.endswith("/Users/yumin/Documents/trading"):
+    if Path(working_directory).expanduser() != ROOT_DIR:
         issues.append(f"unexpected working directory: {working_directory or 'missing'}")
     if not stdout_path:
         issues.append("stdout path missing")

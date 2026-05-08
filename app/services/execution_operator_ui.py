@@ -842,6 +842,32 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       `;
     }
 
+    function extractRuntimeSignalShadowTilt(row) {
+      if (!row) return null;
+      return row?.validity?.runtime_signal_shadow_tilt
+        || row?.runtime_signal_shadow_tilt
+        || row?.strategy_sizing?.runtime_signal_shadow_tilt
+        || null;
+    }
+
+    function formatShadowTiltValue(tilt) {
+      if (!tilt) return 'n/a';
+      const multiplier = tilt?.shadow_size_multiplier == null ? 'n/a' : `${Number(tilt.shadow_size_multiplier).toFixed(2)}x`;
+      const shadowRisk = fmtR(tilt?.shadow_recommended_risk_r);
+      const baseRisk = fmtR(tilt?.base_recommended_risk_r);
+      return `${multiplier} | ${baseRisk} -> ${shadowRisk}`;
+    }
+
+    function formatShadowTiltMeta(tilt) {
+      if (!tilt) return 'runtime_signal_shadow_tilt unavailable';
+      const parts = [
+        tilt?.classification || tilt?.reason_code || 'shadow tilt',
+        tilt?.apply_live === false ? 'apply_live=false' : 'apply_live=true',
+        tilt?.reason || '',
+      ].filter(Boolean);
+      return parts.join(' | ');
+    }
+
     function surfaceApprovalStrip(surface, surfaceType = 'generic') {
       if (surfaceType === 'validation') {
         return surface?.validation_report?.approval_strip_summary || surface?.approval_strip_summary || {};
@@ -1417,6 +1443,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         $('top-opportunity').innerHTML = `<div class="empty">${esc(symbol)} 기준으로 바로 볼 accepted 후보가 없습니다.</div>`;
         return;
       }
+      const shadowTilt = extractRuntimeSignalShadowTilt(candidate);
       const candidateCluster = candidate?.strategy_cluster || candidate?.multi_strategy_overlay?.cluster || 'n/a';
       const candidateClusterStatus = candidate?.strategy_cluster_status
         || candidate?.multi_strategy_overlay?.strategy_cluster_status
@@ -1433,8 +1460,10 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         <div class="kv"><div class="k">방향 / 모델</div><div class="v">${esc(`${fmtMaybe(candidate.direction)} / ${fmtMaybe(candidate.entry_model)}`)}</div></div>
         <div class="kv"><div class="k">추정 승률 / EV</div><div class="v">${esc(`${fmtPercent(candidate.expected_win_prob)} / ${fmtR(candidate.expected_ev_r)}`)}</div></div>
         <div class="kv"><div class="k">권장 리스크</div><div class="v">${esc(fmtR(candidate.recommended_risk_r))}</div></div>
+        ${shadowTilt ? `<div class="kv"><div class="k">Shadow Tilt</div><div class="v">${esc(formatShadowTiltValue(shadowTilt))}</div></div>` : ''}
         <div class="kv"><div class="k">A/B posture</div><div class="v">${esc(`${candidateClusterStatus} / ${candidateABSummary}`)}</div></div>
         <div class="kv"><div class="k">왜 지금</div><div class="v">${esc(fmtMaybe(candidate.why_now || candidate.expected_summary))}</div></div>
+        ${shadowTilt ? `<div class="meta">${esc(formatShadowTiltMeta(shadowTilt))}</div>` : ''}
         <div class="meta">${esc(source)}</div>
       `;
     }
@@ -1904,7 +1933,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       return (
         edgeExperiment?.operating_discipline?.summary
         || edgeExperiment?.summary
-        || `proof=${proof.proofState}/${proof.claimState} | closes=${proof.closedTradeCount}/${proof.proofGoal} | remaining=${proof.remainingToGoal} | regime=${proof.regimeDependencyState} | true_edge=${fmtMaybe(proof.trueEdgeRatio)} | decay=${fmtMaybe(proof.edgeDecayRate)}`
+        || `validation=${proof.proofState}/${proof.claimState} | closed=${proof.closedTradeCount}/${proof.proofGoal} | remaining_to_goal=${proof.remainingToGoal} | regime=${proof.regimeDependencyState} | true_edge=${fmtMaybe(proof.trueEdgeRatio)} | decay=${fmtMaybe(proof.edgeDecayRate)}`
       );
     }
 
@@ -1916,13 +1945,13 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const proof = edgeExperimentProofParts(edgeExperiment);
       return (
         edgeExperiment?.summary
-        || `proof=${proof.proofState}/${proof.claimState} | closes=${proof.closedTradeCount}/${proof.proofGoal} | remaining=${proof.remainingToGoal} | regime=${proof.regimeDependencyState} | true_edge=${fmtMaybe(proof.trueEdgeRatio)} | decay=${fmtMaybe(proof.edgeDecayRate)}`
+        || `validation=${proof.proofState}/${proof.claimState} | closed=${proof.closedTradeCount}/${proof.proofGoal} | remaining_to_goal=${proof.remainingToGoal} | regime=${proof.regimeDependencyState} | true_edge=${fmtMaybe(proof.trueEdgeRatio)} | decay=${fmtMaybe(proof.edgeDecayRate)}`
       );
     }
 
     function edgeExperimentFocusBody(edgeExperiment) {
       const proof = edgeExperimentProofParts(edgeExperiment);
-      return `${edgeExperiment?.edge_state || 'n/a'} | timing=${edgeExperiment?.entry_timing_preferred_variant || 'n/a'} | execution=${edgeExperiment?.execution_style_preferred_variant || 'n/a'} | proof=${proof.proofState}/${proof.claimState} | closes=${proof.closedTradeCount}/${proof.proofGoal} | regime=${proof.regimeDependencyState}`;
+      return `${edgeExperiment?.edge_state || 'n/a'} | timing=${edgeExperiment?.entry_timing_preferred_variant || 'n/a'} | execution=${edgeExperiment?.execution_style_preferred_variant || 'n/a'} | validation=${proof.proofState}/${proof.claimState} | closed=${proof.closedTradeCount}/${proof.proofGoal} | regime=${proof.regimeDependencyState}`;
     }
 
     function renderValidationChecklistReviewStack(validation, checklist) {
@@ -2759,6 +2788,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         || row?.multi_strategy_overlay?.summary
         || row?.expected_summary
         || 'A/B posture summary unavailable';
+      const shadowTilt = extractRuntimeSignalShadowTilt(row);
       const sizingReason = row?.strategy_sizing?.outcome_risk_adjustment?.reason_code || 'n/a';
       const sessionState = row?.session_guidance?.state || row?.session_guidance?.guidance_state || 'n/a';
       const reactionClass = row?.reaction_evidence?.reaction_classification || row?.reaction_evidence?.state || 'n/a';
@@ -2779,6 +2809,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           </div>
           <div class="summary-grid">
             ${renderSummaryBox('Risk', `${fmtR(row.recommended_risk_r)} / ${fmtR(row.allocated_risk_r)}`, `recommended / allocated | ${sizingReason}`)}
+            ${renderSummaryBox('Shadow Tilt', formatShadowTiltValue(shadowTilt), formatShadowTiltMeta(shadowTilt))}
             ${renderSummaryBox('Outcome Bias', row.outcome_bias?.tier || 'n/a', row.outcome_bias?.summary || `score=${fmtMaybe(row.outcome_bias?.score_delta)}`)}
             ${renderSummaryBox('Edge Focus', edgeFocus.state, edgeFocus.summary)}
             ${renderSummaryBox('Capital Allocator', row.capital_allocator?.tier || 'n/a', row.capital_pressure || 'capital pressure unavailable')}
@@ -2938,6 +2969,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const win = plan?.expected_win_prob ?? candidate?.expected_win_prob;
       const ev = plan?.expected_ev_r ?? candidate?.expected_ev_r;
       const risk = (plan?.validity?.recommended_risk_r ?? candidate?.recommended_risk_r);
+      const shadowTilt = extractRuntimeSignalShadowTilt(plan || candidate);
       const whyNow = candidate?.why_now || plan?.validity?.entry_reason || '현재 대표 플랜 기준';
       $('overview').innerHTML = `
         <div>${badge('현재 상태', tradeStatus)} ${badge('서버 Approve', surfaceApproveValue(dashboard, 'dashboard') || 'n/a')} ${badge('체크리스트 Approve', surfaceApproveValue(checklist, 'checklist') || 'n/a')} ${badge('검증 Approve', surfaceApproveValue(validation, 'validation') || 'n/a')}</div>
@@ -2947,6 +2979,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           ${renderSummaryBox('진입 / 손절 / 1차목표', `${fmtPrice(entry)} / ${fmtPrice(stop)} / ${fmtPrice(tp1)}`, 'entry / stop / tp1')}
           ${renderSummaryBox('추정 승률 / 기대값', `${fmtPercent(win)} / ${fmtR(ev)}`, plan?.expected_summary || candidate?.expected_summary || '')}
           ${renderSummaryBox('권장 리스크', fmtR(risk), '현재 엔진이 권장하는 size')}
+          ${renderSummaryBox('Shadow Tilt', formatShadowTiltValue(shadowTilt), formatShadowTiltMeta(shadowTilt))}
           ${renderSummaryBox('왜 지금 보나', fmtMaybe(whyNow), candidate?.entry_condition || '')}
           ${renderSummaryBox('소스', '서버 런타임 기준', 'chart mirror가 아니라 server truth wins on scanner / portfolio / validation surfaces')}
         </div>
@@ -2983,7 +3016,10 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         {
           title: '권장 리스크',
           metric: fmtR(plan?.validity?.recommended_risk_r ?? candidate?.recommended_risk_r),
-          meta: surfaceActReason(dashboard, 'dashboard') || surfaceActValue(dashboard, 'dashboard') || 'runtime policy unavailable',
+          meta: [
+            surfaceActReason(dashboard, 'dashboard') || surfaceActValue(dashboard, 'dashboard') || 'runtime policy unavailable',
+            formatShadowTiltMeta(extractRuntimeSignalShadowTilt(plan || candidate)),
+          ].filter(Boolean).join(' | '),
         },
       ];
       $('cards').innerHTML = cards.map((card) => `
@@ -3423,6 +3459,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         return;
       }
       const recommendedRisk = plan.validity?.recommended_risk_r;
+      const shadowTilt = extractRuntimeSignalShadowTilt(plan);
       $('top-plan').innerHTML = `
         <div class="desk-strip">${badge('Plan', plan.plan_id)} ${badge('방향', plan.direction)} ${badge('모델', plan.entry_model)}</div>
         <div class="price-line">
@@ -3446,7 +3483,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           <div class="hero-stat">
             <div class="label">권장 리스크</div>
             <div class="value">${esc(fmtR(recommendedRisk))}</div>
-            <div class="subvalue">엔진 size 권장치</div>
+            <div class="subvalue">엔진 size 권장치${shadowTilt ? ` | shadow ${esc(formatShadowTiltValue(shadowTilt))}` : ''}</div>
           </div>
           <div class="hero-stat">
             <div class="label">손익비</div>
@@ -3472,6 +3509,12 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           <div class="title">대표 플랜 요약</div>
           <div class="body">${esc(plan.expected_summary || '요약 없음')}</div>
         </div>
+        ${shadowTilt ? `
+        <div class="hint-card">
+          <div class="title">Shadow Tilt</div>
+          <div class="body">${esc(formatShadowTiltValue(shadowTilt))}</div>
+          <div class="meta">${esc(formatShadowTiltMeta(shadowTilt))}</div>
+        </div>` : ''}
       `;
     }
 
@@ -3480,6 +3523,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         $('top-candidate').innerHTML = `<div class="empty">${esc(symbol)} 기준으로 실행 가능한 스캐너 후보가 없습니다.</div>`;
         return;
       }
+      const shadowTilt = extractRuntimeSignalShadowTilt(candidate);
       const candidateCluster = candidate?.strategy_cluster || candidate?.multi_strategy_overlay?.cluster || 'n/a';
       const candidateClusterStatus = candidate?.strategy_cluster_status
         || candidate?.multi_strategy_overlay?.strategy_cluster_status
@@ -3496,7 +3540,9 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         <div class="kv"><div class="k">허용 / 차단 이유</div><div class="v">${esc(fmtMaybe(candidate.block_reason_message || candidate.deployment_message))}</div></div>
         <div class="kv"><div class="k">추정 승률 / EV</div><div class="v">${esc(`${fmtPercent(candidate.expected_win_prob)} / ${fmtR(candidate.expected_ev_r)}`)}</div></div>
         <div class="kv"><div class="k">권장 리스크</div><div class="v">${esc(fmtR(candidate.recommended_risk_r))}</div></div>
+        ${shadowTilt ? `<div class="kv"><div class="k">Shadow Tilt</div><div class="v">${esc(formatShadowTiltValue(shadowTilt))}</div></div>` : ''}
         <div class="kv"><div class="k">A/B posture</div><div class="v">${esc(`${candidateClusterStatus} / ${candidateABSummary}`)}</div></div>
+        ${shadowTilt ? `<div class="meta">${esc(formatShadowTiltMeta(shadowTilt))}</div>` : ''}
         <div class="meta">${esc(candidateSource)}</div>
       `;
     }

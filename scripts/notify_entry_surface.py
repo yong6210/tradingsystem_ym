@@ -482,19 +482,19 @@ def _format_contract_trace(snapshot: dict[str, Any]) -> str:
 def _format_edge_experiment_trace(snapshot: dict[str, Any]) -> str:
     edge_experiment = dict(snapshot.get("edge_experiment_review") or {})
     if not edge_experiment:
-        return "edge_experiment: unavailable"
+        return "live_validation: unavailable"
     focus = str(edge_experiment.get("focus_symbol") or "")
     focus_status = str(edge_experiment.get("focus_status") or "")
     focus_suffix = f" | focus={focus}/{focus_status}" if focus and focus_status else ""
     posture = dict(edge_experiment.get("edge_proof_posture") or {})
     kpis = dict(edge_experiment.get("daily_edge_kpis") or {})
     return (
-        f"edge_experiment: state={edge_experiment.get('edge_state')} "
+        f"live_validation: state={edge_experiment.get('edge_state')} "
         f"| entry_timing={edge_experiment.get('entry_timing_preferred_variant')} "
         f"| execution_style={edge_experiment.get('execution_style_preferred_variant')} "
-        f"| proof={posture.get('state', 'unknown')}/{posture.get('claim_state', 'unknown')} "
-        f"| closes={int(kpis.get('closed_trade_count', 0) or 0)}/{int(edge_experiment.get('edge_proof_goal_closed_trades', 0) or 0)} "
-        f"| remaining={int(edge_experiment.get('remaining_closed_trades_to_edge_proof_goal', 0) or 0)} "
+        f"| validation={posture.get('state', 'unknown')}/{posture.get('claim_state', 'unknown')} "
+        f"| closed={int(kpis.get('closed_trade_count', 0) or 0)}/{int(edge_experiment.get('edge_proof_goal_closed_trades', 0) or 0)} "
+        f"| remaining_to_goal={int(edge_experiment.get('remaining_closed_trades_to_edge_proof_goal', 0) or 0)} "
         f"| regime={kpis.get('regime_dependency_state', 'not_available')} "
         f"| true_edge={float(kpis.get('true_edge_ratio', edge_experiment.get('true_edge_ratio', 0.0)) or 0.0):.4f} "
         f"| decay={float(kpis.get('edge_decay_rate', edge_experiment.get('edge_decay_rate', 0.0)) or 0.0):.4f}"

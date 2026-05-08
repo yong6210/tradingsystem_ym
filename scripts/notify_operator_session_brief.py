@@ -194,10 +194,10 @@ def _review_target_line(label: str, target: dict[str, Any] | None) -> str:
 
 def _edge_experiment_focus_text(funnel: dict[str, Any]) -> str:
     return (
-        f"edge_state={funnel.get('edge_state')} "
-        f"| proof={funnel.get('edge_proof_state', 'unknown')}/{funnel.get('edge_claim_state', 'unknown')} "
-        f"| closes={int(funnel.get('edge_closed_trade_count', 0) or 0)}/{int(funnel.get('edge_proof_goal_closed_trades', 0) or 0)} "
-        f"| remaining={int(funnel.get('remaining_closed_trades_to_edge_proof_goal', 0) or 0)} "
+        f"validation_state={funnel.get('edge_state')} "
+        f"| live_validation={funnel.get('edge_proof_state', 'unknown')}/{funnel.get('edge_claim_state', 'unknown')} "
+        f"| closed={int(funnel.get('edge_closed_trade_count', 0) or 0)}/{int(funnel.get('edge_proof_goal_closed_trades', 0) or 0)} "
+        f"| remaining_to_goal={int(funnel.get('remaining_closed_trades_to_edge_proof_goal', 0) or 0)} "
         f"| regime={funnel.get('edge_regime_dependency_state', 'not_available')} "
         f"| entry_timing={funnel.get('entry_timing_focus')} "
         f"| execution_style={funnel.get('execution_style_focus')} "
@@ -376,11 +376,6 @@ def _changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
     )
     return any(previous.get(key) != current.get(key) for key in keys)
 
-
-def _render_message(brief: dict[str, Any]) -> str:
-    return _render_shift_start_message(brief)
-
-
 def _render_shift_start_message(brief: dict[str, Any]) -> str:
     snapshot = brief.get("snapshot") or {}
     approval_strip = snapshot.get("approval_strip") or {}
@@ -421,7 +416,7 @@ def _render_shift_start_message(brief: dict[str, Any]) -> str:
         _surface_summary_line("checklist_surface", checklist_strip),
         f"- top_operator_action: {dashboard.get('top_operator_action')}{top_action_suffix}",
         (
-            f"- research/funnel: action={funnel.get('research_action')} "
+            f"- validation/funnel: action={funnel.get('research_action')} "
             f"| {_edge_experiment_focus_text(funnel)} "
             f"| edge_evolution={funnel.get('edge_evolution_state')}:{funnel.get('edge_evolution_action')}:{funnel.get('edge_evolution_bias')} "
             f"| review_ledger={review_followup.get('last_status')}:{review_followup.get('last_action')}:{review_followup.get('recent_entry_count')} "
@@ -484,7 +479,7 @@ def _render_shift_end_message(brief: dict[str, Any]) -> str:
         _surface_summary_line("closing_checklist_surface", checklist_strip),
         f"- final_top_action: {dashboard.get('top_operator_action')}{top_action_suffix}",
         (
-            f"- carryover_focus: research={funnel.get('research_action')} "
+            f"- carryover_focus: validation={funnel.get('research_action')} "
             f"| {_edge_experiment_focus_text(funnel)} "
             f"| edge_evolution={funnel.get('edge_evolution_state')}:{funnel.get('edge_evolution_action')}:{funnel.get('edge_evolution_bias')} "
             f"| review_ledger={review_followup.get('last_status')}:{review_followup.get('last_action')}:{review_followup.get('recent_entry_count')} "

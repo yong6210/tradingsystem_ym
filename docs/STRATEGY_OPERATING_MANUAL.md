@@ -673,8 +673,10 @@ Binance REST backfill/sync는 기존 최신 candle보다 오래된 overlap histo
 7. 캘리브레이션은 결과 기반 후행 보정이므로, `matched_samples`가 얕은 구간에서는 수동 가중치 변경보다 표본 축적을 우선한다.
 
 ## 11. 헬스체크 기준
-- `/health/ready`는 `db`, `binance_rest`, `event_backend`를 동시에 점검한다.
+- `/health/ready`는 `db`, `binance_rest`, `event_backend`, DB 경로 디스크 여유 공간, worker heartbeat/PID, WS no-message timeout, 1m/5m market-data freshness를 동시에 점검한다.
 - 하나라도 실패하면 상태는 `degraded`이며 신규 라이브 진입을 보류한다.
+- `worker_ws` heartbeat의 `processed_messages`, `reconnects`, `ingest_errors`, `skipped_reverse_timestamp`를 같이 본다.
+- 런타임 스크립트는 시작 지연과 pycache 오염을 줄이기 위해 `PYDANTIC_DISABLE_PLUGINS=1`, `PYTHONDONTWRITEBYTECODE=1`을 기본값으로 둔다.
 
 ## 12. vNext 기획 기준
 - 기준 문서: `docs/UPGRADE_ROADMAP_VNEXT.md`

@@ -141,11 +141,13 @@ def test_strategy_v2_scalp_experiment_prefers_experiment_branch() -> None:
     assert payload["baseline"]["top_plan"]["plan_id"] == "baseline_plan"
     assert payload["experiment"]["top_plan"]["plan_id"] == "experiment_plan"
     assert payload["comparison"]["delta_top_expected_ev_at_size_r"] > 0.0
+    assert "micro_main_shadow" in payload
     path = Path(payload["report_path"])
     assert path.exists()
     body = path.read_text(encoding="utf-8")
     assert "## Baseline (15m zone / 5m execution)" in body
     assert "## Experiment (5m zone / 1m execution)" in body
+    assert "## Session Impulse Retest (shadow)" in body
     assert "preferred_branch: experiment" in body
 
 

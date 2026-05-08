@@ -14,6 +14,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import get_settings
+from app.core import operator_surface_contracts as osc
 from app.services.notification_dispatcher import NotificationDispatcher
 
 
@@ -261,11 +262,59 @@ def _runtime_operator_signoff_summary(payload: dict[str, Any] | None) -> dict[st
         "preflight_status": str(source.get("preflight_status") or ""),
         "first_required_review_code": str(source.get("first_required_review_code") or ""),
         "next_step": str(source.get("next_step") or ""),
+        "intent_execution_mode": str(source.get("intent_execution_mode") or ""),
+        "contract_scope": str(source.get("contract_scope") or ""),
+        "review_command": str(source.get("review_command") or ""),
     }
+
+
+def _runtime_live_cluster_guard_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((payload or {}).get("runtime_live_cluster_guard_summary") or {})
+    return {
+        "status": str(source.get("status") or "not_available"),
+        "active": bool(source.get("active", False)),
+        "current_reason_code": str(source.get("current_reason_code") or ""),
+        "current_reason_message": str(source.get("current_reason_message") or ""),
+        "cluster_window_blocked_candidates": int(source.get("cluster_window_blocked_candidates", 0) or 0),
+        "loss_cooldown_blocked_candidates": int(source.get("loss_cooldown_blocked_candidates", 0) or 0),
+        "families": [str(item) for item in list(source.get("families") or []) if str(item).strip()],
+        "symbols": [str(item) for item in list(source.get("symbols") or []) if str(item).strip()],
+    }
+
+
+def _runtime_live_cluster_guard_summary_line(payload: dict[str, Any] | None) -> str:
+    summary = _runtime_live_cluster_guard_summary(payload)
+    return (
+        f"runtime_live_cluster_guard: status={summary.get('status', 'not_available')}"
+        f" | cluster={int(summary.get('cluster_window_blocked_candidates') or 0)}"
+        f" | cooldown={int(summary.get('loss_cooldown_blocked_candidates') or 0)}"
+        + (
+            f" | families={','.join(summary.get('families') or [])}"
+            if summary.get("families")
+            else ""
+        )
+        + (
+            f" | symbols={','.join(summary.get('symbols') or [])}"
+            if summary.get("symbols")
+            else ""
+        )
+        + (
+            f" | reason={summary.get('current_reason_code')}"
+            if summary.get("current_reason_code")
+            else ""
+        )
+    )
 
 
 def _runtime_operator_signoff_summary_line(payload: dict[str, Any] | None) -> str:
     summary = _runtime_operator_signoff_summary(payload)
+    submit_mode = str(summary.get("intent_execution_mode") or "")
+    contract_scope = str(summary.get("contract_scope") or "")
+    submit_path = ""
+    if submit_mode:
+        submit_path = f"{submit_mode}/live:true"
+        if contract_scope:
+            submit_path = f"{submit_path}/{contract_scope}"
     return (
         f"runtime_operator_signoff: status={summary.get('status', 'not_available')}"
         + (f" | action={summary.get('effective_action')}" if summary.get("effective_action") else "")
@@ -277,22 +326,48 @@ def _runtime_operator_signoff_summary_line(payload: dict[str, Any] | None) -> st
             else ""
         )
         + (f" | next={summary.get('next_step')}" if summary.get("next_step") else "")
+        + (f" | submit={submit_path}" if submit_path else "")
+        + (f" | review_cmd={summary.get('review_command')}" if summary.get("review_command") else "")
     )
 
 
 def _runtime_signoff_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
-    source = dict((payload or {}).get("runtime_signoff_summary") or {})
+    current = dict(payload or {})
+    source = dict(current.get("runtime_signoff_summary") or {})
+    required_reviews = list(
+        current.get("required_reviews")
+        if isinstance(current.get("required_reviews"), list)
+        else source.get("required_reviews")
+        or []
+    )
+    advisory_reviews = list(
+        current.get("advisory_reviews")
+        if isinstance(current.get("advisory_reviews"), list)
+        else source.get("advisory_reviews")
+        or []
+    )
+    runtime_decision = dict(current.get("runtime_decision") or source.get("runtime_decision") or {})
+    runtime_reopen_gate_summary = dict(
+        current.get("runtime_reopen_gate_summary") or source.get("runtime_reopen_gate_summary") or {}
+    )
+    approval_template_focus = dict(current.get("approval_template_focus") or source.get("approval_template_focus") or {})
+    operator_recommendation = str(
+        current.get("runtime_operator_recommendation")
+        or source.get("operator_recommendation")
+        or ""
+    )
     return {
         "status": str(source.get("status") or "not_available"),
-        "required_reviews": list(source.get("required_reviews") or []),
-        "advisory_reviews": list(source.get("advisory_reviews") or []),
-        "required_count": int(source.get("required_count") or 0),
-        "advisory_count": int(source.get("advisory_count") or 0),
+        "required_reviews": required_reviews,
+        "advisory_reviews": advisory_reviews,
+        "required_count": len(required_reviews),
+        "advisory_count": len(advisory_reviews),
         "required_clearance_line": str(source.get("required_clearance_line") or ""),
-        "operator_recommendation": str(source.get("operator_recommendation") or ""),
+        "operator_recommendation": operator_recommendation,
         "operator_recommendation_reason": str(source.get("operator_recommendation_reason") or ""),
-        "runtime_decision": dict(source.get("runtime_decision") or {}),
-        "approval_template_focus": dict(source.get("approval_template_focus") or {}),
+        "runtime_decision": runtime_decision,
+        "runtime_reopen_gate_summary": runtime_reopen_gate_summary,
+        "approval_template_focus": approval_template_focus,
         "approval_template_focus_error": str(source.get("approval_template_focus_error") or ""),
         "summary": str(source.get("summary") or ""),
     }
@@ -366,6 +441,10 @@ def _runtime_mitigation_wait_summary(payload: dict[str, Any] | None) -> dict[str
         "candidate_reason": str(source.get("candidate_reason") or ""),
         "watch_tick_status": str(source.get("watch_tick_status") or ""),
         "watch_generated_at": str(source.get("watch_generated_at") or ""),
+        "watch_guard_active": bool(source.get("watch_guard_active", False)),
+        "watch_guard_family": str(source.get("watch_guard_family") or ""),
+        "watch_guard_families": [str(item) for item in list(source.get("watch_guard_families") or []) if str(item).strip()],
+        "watch_guard_reason_code": str(source.get("watch_guard_reason_code") or ""),
         "summary": str(source.get("summary") or ""),
     }
 
@@ -389,14 +468,22 @@ def _runtime_mitigation_packet_summary_line(payload: dict[str, Any] | None) -> s
 
 def _runtime_mitigation_wait_summary_line(payload: dict[str, Any] | None) -> str:
     summary = _runtime_mitigation_wait_summary(payload)
+    status = str(summary.get("status") or "").strip().lower()
     allowed_sessions = ",".join(str(item) for item in list(summary.get("allowed_sessions") or []) if str(item).strip())
+    guard_text = ""
+    if bool(summary.get("watch_guard_active", False)):
+        families = ",".join(str(item) for item in list(summary.get("watch_guard_families") or []) if str(item).strip())
+        guard_family = str(summary.get("watch_guard_family") or "")
+        guard_scope = families or guard_family or "none"
+        guard_text = f" | guard={summary.get('watch_guard_reason_code') or 'active'}:{guard_scope}"
     return (
-        f"runtime_mitigation_wait: status={summary.get('status') or 'inactive'} | "
+        f"runtime_mitigation_wait: status={osc.EN_RUNTIME_MITIGATION_WAIT_STATUS_LABELS.get(status, status or 'inactive')} | "
         f"focus={summary.get('focus_label') or 'none'} | "
         f"session={summary.get('current_session') or 'unknown'} | "
         f"allowed={allowed_sessions or 'none'} | "
         f"candidate={summary.get('candidate_symbol') or 'none'}/{summary.get('candidate_family') or 'none'} | "
         f"next={summary.get('next_trigger') or 'none'}"
+        f"{guard_text}"
         + (
             f" | reason={summary.get('candidate_reason')}"
             if summary.get("candidate_reason")
@@ -457,9 +544,9 @@ def _runtime_operator_signoff_ready(previous: dict[str, Any] | None, current: di
     before = _runtime_operator_signoff_summary(previous)
     after = _runtime_operator_signoff_summary(current)
     ready_statuses = {
-        "ready_for_manual_micro_live_signoff",
-        "ready_for_manual_full_live_signoff",
-        "ready_for_operator_signoff",
+        osc.RUNTIME_OPERATOR_SIGNOFF_STATUS_READY_FOR_MANUAL_MICRO_LIVE_SIGNOFF,
+        osc.RUNTIME_OPERATOR_SIGNOFF_STATUS_READY_FOR_MANUAL_FULL_LIVE_SIGNOFF,
+        osc.RUNTIME_OPERATOR_SIGNOFF_STATUS_READY_FOR_OPERATOR_SIGNOFF,
     }
     return str(before.get("status") or "") not in ready_statuses and str(after.get("status") or "") in ready_statuses
 
@@ -468,6 +555,12 @@ def _runtime_operator_signoff_changed(previous: dict[str, Any] | None, current: 
     if previous is None:
         return False
     return _runtime_operator_signoff_summary_line(previous) != _runtime_operator_signoff_summary_line(current)
+
+
+def _runtime_live_cluster_guard_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if previous is None:
+        return False
+    return _runtime_live_cluster_guard_summary_line(previous) != _runtime_live_cluster_guard_summary_line(current)
 
 
 def _runtime_mitigation_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
@@ -481,9 +574,9 @@ def _runtime_mitigation_actionable(previous: dict[str, Any] | None, current: dic
         return False
     before = _runtime_mitigation_summary(previous)
     after = _runtime_mitigation_summary(current)
-    return str(before.get("primary_action_status") or "") != "actionable_now" and str(
+    return str(before.get("primary_action_status") or "") != osc.MITIGATION_ACTION_STATUS_ACTIONABLE_NOW and str(
         after.get("primary_action_status") or ""
-    ) == "actionable_now"
+    ) == osc.MITIGATION_ACTION_STATUS_ACTIONABLE_NOW
 
 
 def _runtime_mitigation_packet_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
@@ -505,7 +598,13 @@ def _runtime_mitigation_packet_ready(previous: dict[str, Any] | None, current: d
     after = _runtime_mitigation_packet_summary(current)
     before_status = str(before.get("status") or "")
     after_status = str(after.get("status") or "")
-    return before_status not in {"READY", "fresh_packet_ready_exists"} and after_status in {"READY", "fresh_packet_ready_exists"}
+    return before_status not in {
+        osc.MITIGATION_PACKET_STATUS_READY,
+        osc.MITIGATION_PACKET_STATUS_FRESH_READY_EXISTS,
+    } and after_status in {
+        osc.MITIGATION_PACKET_STATUS_READY,
+        osc.MITIGATION_PACKET_STATUS_FRESH_READY_EXISTS,
+    }
 
 
 def _open_lineage_sample_count_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
@@ -619,12 +718,12 @@ def _edge_experiment_summary_line(payload: dict[str, Any] | None) -> str:
     posture = dict(summary.get("edge_proof_posture") or {})
     kpis = dict(summary.get("daily_edge_kpis") or {})
     return (
-        f"edge_experiment: state={summary.get('edge_state', 'unavailable')} | "
+        f"live_validation: state={summary.get('edge_state', 'unavailable')} | "
         f"entry_timing={summary.get('entry_timing_preferred_variant', 'none')} | "
         f"execution_style={summary.get('execution_style_preferred_variant', 'none')} | "
-        f"proof={posture.get('state', 'unknown')}/{posture.get('claim_state', 'unknown')} | "
-        f"closes={int(kpis.get('closed_trade_count', 0) or 0)}/{int(summary.get('edge_proof_goal_closed_trades', 0) or 0)} | "
-        f"remaining={int(summary.get('remaining_closed_trades_to_edge_proof_goal', 0) or 0)} | "
+        f"validation={posture.get('state', 'unknown')}/{posture.get('claim_state', 'unknown')} | "
+        f"closed={int(kpis.get('closed_trade_count', 0) or 0)}/{int(summary.get('edge_proof_goal_closed_trades', 0) or 0)} | "
+        f"remaining_to_goal={int(summary.get('remaining_closed_trades_to_edge_proof_goal', 0) or 0)} | "
         f"regime={kpis.get('regime_dependency_state', 'not_available')} | "
         f"true_edge={float(kpis.get('true_edge_ratio', 0.0) or 0.0):.4f} | "
         f"decay={float(kpis.get('edge_decay_rate', 0.0) or 0.0):.4f}"
@@ -1078,6 +1177,14 @@ def _collect_events(previous: dict[str, Any] | None, current: dict[str, Any]) ->
                 "body": _runtime_operator_signoff_summary_line(current),
             }
         )
+    if _runtime_live_cluster_guard_changed(previous, current):
+        events.append(
+            {
+                "type": "runtime_live_cluster_guard_changed",
+                "title": "Runtime live cluster guard changed",
+                "body": _runtime_live_cluster_guard_summary_line(current),
+            }
+        )
     if _runtime_mitigation_changed(previous, current):
         events.append(
             {
@@ -1350,7 +1457,14 @@ def _render_message(current: dict[str, Any], events: list[dict[str, str]]) -> st
     decision_line = _ko_runtime_decision(signoff)
     gate_line = _ko_runtime_reopen_gate_line(signoff)
     preflight_line = _ko_runtime_preflight_line(current)
+    contract_partition_line = _ko_runtime_contract_partition_line(current)
+    live_subset_performance_line = _ko_runtime_live_subset_performance_line(current)
+    live_cluster_guard_line = _ko_runtime_live_cluster_guard_line(current)
     operator_signoff_line = _ko_runtime_operator_signoff_line(current)
+    operator_action_line = _ko_runtime_operator_action_line(current)
+    actionable_live_candidate_line = _ko_runtime_actionable_live_candidate_line(current)
+    self_heal_line = _ko_runtime_self_heal_line(current)
+    trend_proof_watch_line = _ko_trend_proof_watch_line(current)
 
     lines.extend(
         [
@@ -1371,7 +1485,14 @@ def _render_message(current: dict[str, Any], events: list[dict[str, str]]) -> st
             *([decision_line] if decision_line else []),
             *([gate_line] if gate_line else []),
             *([preflight_line] if preflight_line else []),
+            *([contract_partition_line] if contract_partition_line else []),
+            *([live_subset_performance_line] if live_subset_performance_line else []),
+            *([live_cluster_guard_line] if live_cluster_guard_line else []),
             *([operator_signoff_line] if operator_signoff_line else []),
+            *([operator_action_line] if operator_action_line else []),
+            *([actionable_live_candidate_line] if actionable_live_candidate_line else []),
+            *([self_heal_line] if self_heal_line else []),
+            *([trend_proof_watch_line] if trend_proof_watch_line else []),
             f"권장 판단: {recommendation_line}",
             f"수동 서명: {signoff_line}",
             *([detail_line] if detail_line else []),
@@ -1390,12 +1511,12 @@ def _render_message(current: dict[str, Any], events: list[dict[str, str]]) -> st
             *([mitigation_wait_line] if mitigation_wait_line else []),
             f"해소 기준: {clearance_line}",
             (
-                "글로벌 표본: "
+                "글로벌 참고표본: "
                 f"{int(lineage.get('closed_trade_count') or 0)}/"
                 f"{int(lineage.get('proof_goal_closed_trades') or 0)}"
             ),
             (
-                "BTCUSDC 표본: "
+                "BTCUSDC 운영검증: "
                 f"{int(edge.get('closed_trade_count') or edge_kpis.get('closed_trade_count') or 0)}/"
                 f"{int(edge.get('edge_proof_goal_closed_trades') or 0)}"
                 f" / 상태={posture.get('state') or 'n/a'}"
@@ -1422,24 +1543,12 @@ def _ko_approval_value(value: Any) -> str:
 
 def _ko_runtime_reopen_status(value: Any) -> str:
     raw = str(value or "").strip().lower()
-    mapping = {
-        "waiting_for_operating_lock": "운영 잠금 해제 대기",
-        "waiting_for_review_window": "검토 창 대기",
-        "manual_review_required": "수동 검토 필요",
-        "ready_to_reopen_runtime": "재개 가능",
-    }
-    return mapping.get(raw, str(value or "n/a"))
+    return osc.KO_RUNTIME_REOPEN_STATUS_LABELS.get(raw, str(value or "n/a"))
 
 
 def _ko_operator_recommendation(value: Any) -> str:
     raw = str(value or "").strip().lower()
-    mapping = {
-        "wait_until_runtime_ready": "재개 준비 완료까지 대기",
-        "hold_runtime_reopen": "재개 보류 권장",
-        "manual_signoff_required": "수동 서명 후 판단",
-        "proceed_to_operator_signoff": "최종 서명 진행 가능",
-    }
-    return mapping.get(raw, str(value or "n/a"))
+    return osc.KO_RUNTIME_OPERATOR_RECOMMENDATION_LABELS.get(raw, str(value or "n/a"))
 
 
 def _ko_runtime_decision(signoff: dict[str, Any] | None) -> str:
@@ -1449,30 +1558,11 @@ def _ko_runtime_decision(signoff: dict[str, Any] | None) -> str:
     band = str(decision.get("band") or "")
     action = str(decision.get("effective_action") or "")
     scope = str(decision.get("allowed_reopen_scope") or "")
-    band_map = {
-        "GREY_WAIT": "대기",
-        "RED_HOLD": "보류(RED)",
-        "AMBER_CONDITIONAL": "조건부(AMBER)",
-        "GREEN_PROCEED": "진행 가능(GREEN)",
-    }
-    action_map = {
-        "wait_until_runtime_ready": "재개 대기",
-        "hold_runtime_reopen": "재개 보류",
-        "conditional_micro_live_signoff": "조건부 마이크로라이브만 검토",
-        "conditional_full_live_signoff": "조건부 풀라이브 검토",
-        "manual_signoff_required": "수동 서명 필요",
-        "proceed_to_operator_signoff": "최종 서명 진행",
-    }
-    scope_map = {
-        "none": "재개 금지",
-        "MICRO_LIVE_ONLY": "MICRO_LIVE만",
-        "MICRO_LIVE_OR_LIVE": "MICRO_LIVE 또는 LIVE",
-    }
     return (
         "최종 판정: "
-        f"{band_map.get(band, band or 'n/a')} / "
-        f"{action_map.get(action, action or 'n/a')} / "
-        f"범위={scope_map.get(scope, scope or 'n/a')}"
+        f"{osc.KO_RUNTIME_DECISION_BAND_LABELS.get(band, band or 'n/a')} / "
+        f"{osc.KO_RUNTIME_DECISION_ACTION_LABELS.get(action, action or 'n/a')} / "
+        f"범위={osc.KO_RUNTIME_DECISION_SCOPE_LABELS.get(scope, scope or 'n/a')}"
     )
 
 
@@ -1482,13 +1572,17 @@ def _ko_runtime_reopen_gate_line(signoff: dict[str, Any] | None) -> str:
         return ""
     micro = dict(gate.get("micro_live") or {})
     full = dict(gate.get("full_live") or {})
-    return (
+    line = (
         "재개 게이트: "
-        f"MICRO={micro.get('status') or 'n/a'} "
+        f"MICRO={osc.KO_RUNTIME_REOPEN_GATE_STATUS_LABELS.get(str(micro.get('status') or '').strip().lower(), micro.get('status') or 'n/a')} "
         f"({int(micro.get('closed_trade_count') or 0)}/{int(micro.get('min_closed_trades') or 0)})"
-        f", FULL={full.get('status') or 'n/a'} "
+        f", FULL={osc.KO_RUNTIME_REOPEN_GATE_STATUS_LABELS.get(str(full.get('status') or '').strip().lower(), full.get('status') or 'n/a')} "
         f"({int(full.get('closed_trade_count') or 0)}/{int(full.get('min_closed_trades') or 0)})"
     )
+    contract_scope = str(micro.get("contract_scope") or full.get("contract_scope") or "")
+    if contract_scope:
+        line += f", contract={contract_scope}"
+    return line
 
 
 def _ko_runtime_preflight_line(current: dict[str, Any] | None) -> str:
@@ -1497,12 +1591,111 @@ def _ko_runtime_preflight_line(current: dict[str, Any] | None) -> str:
         return ""
     failed_checks = list(summary.get("failed_checks") or [])
     first_failed = dict(failed_checks[0]) if failed_checks else {}
-    line = f"마이크로라이브 사전점검: {summary.get('status') or 'n/a'}"
+    raw_status = str(summary.get("status") or "").strip()
+    line = (
+        "마이크로라이브 사전점검: "
+        f"{osc.KO_MICRO_LIVE_PREFLIGHT_STATUS_LABELS.get(raw_status.upper(), summary.get('status') or 'n/a')}"
+    )
     if summary.get("summary"):
         line += f" / {summary.get('summary')}"
     if first_failed:
         line += f" / 첫 실패={first_failed.get('name') or 'unknown'}"
     return line
+
+
+def _ko_runtime_contract_partition_line(current: dict[str, Any] | None) -> str:
+    summary = dict(dict(current or {}).get("runtime_contract_partition_summary") or {})
+    if not summary:
+        return ""
+    live_families = ",".join(list(summary.get("live_allowed_families") or [])) or "none"
+    live_entry_models = ",".join(list(summary.get("live_allowed_entry_models") or [])) or "none"
+    research_entry_models = ",".join(list(summary.get("research_only_entry_models") or [])) or "none"
+    priority_symbols = ">".join(list(summary.get("live_symbol_priority") or [])) or "none"
+    direction_contract = dict(summary.get("live_direction_contract") or {})
+    direction_bits = [f"{symbol}:{'|'.join(list(direction_contract.get(symbol) or []))}" for symbol in sorted(direction_contract)]
+    return (
+        "운영 계약 분리: "
+        f"symbols={','.join(list(summary.get('live_allowed_symbols') or [])) or 'all'} "
+        f"| priority={priority_symbols} "
+        f"| directions={';'.join(direction_bits) or 'all'} "
+        f"| proof={summary.get('active_gate_proof_source') or 'n/a'} "
+        f"| execution_subset={int(summary.get('live_execution_closed_trade_count', 0) or 0)} "
+        f"| historical_execution={int(summary.get('historical_execution_contract_closed_trade_count', 0) or 0)} "
+        f"| historical_walk_forward_execution={int(summary.get('historical_walk_forward_execution_contract_closed_trade_count', 0) or 0)} "
+        f"| historical_walk_forward_strategy={int(summary.get('historical_walk_forward_strategy_closed_trade_count', 0) or 0)} "
+        f"| trend_proof={int(summary.get('trend_proof_closed_trade_count', 0) or 0)} "
+        f"| historical_walk_forward_trend={int(summary.get('historical_walk_forward_trend_closed_trade_count', 0) or 0)} "
+        f"| "
+        f"live={live_families}/{live_entry_models} "
+        f"| research-only={research_entry_models} "
+        f"| full_truth={int(summary.get('full_truth_closed_trade_count', 0) or 0)} "
+        f"| live_subset={int(summary.get('live_eligible_closed_trade_count', 0) or 0)}"
+    )
+
+
+def _ko_runtime_live_subset_performance_line(current: dict[str, Any] | None) -> str:
+    summary = dict(dict(current or {}).get("runtime_live_subset_performance_summary") or {})
+    if not summary:
+        return ""
+    execution = dict(summary.get("execution_subset") or {})
+    historical = dict(summary.get("historical_execution_subset") or {})
+    historical_walk_forward = dict(summary.get("historical_walk_forward_execution_subset") or {})
+    strategy_walk_forward = dict(summary.get("historical_walk_forward_strategy_subset") or {})
+    trend = dict(summary.get("trend_proof_subset") or {})
+    walk_forward_trend = dict(summary.get("historical_walk_forward_trend_subset") or {})
+    live = dict(summary.get("live_subset") or {})
+    full = dict(summary.get("full_truth") or {})
+    execution_pf = execution.get("profit_factor")
+    historical_pf = historical.get("profit_factor")
+    historical_walk_forward_pf = historical_walk_forward.get("profit_factor")
+    strategy_walk_forward_pf = strategy_walk_forward.get("profit_factor")
+    trend_pf = trend.get("profit_factor")
+    walk_forward_trend_pf = walk_forward_trend.get("profit_factor")
+    live_pf = live.get("profit_factor")
+    full_pf = full.get("profit_factor")
+    return (
+        "실사용 subset 성적: "
+        f"exec {int(execution.get('closed_trade_count', 0) or 0)}개 plan "
+        f"/ exec 승률 {float(execution.get('win_rate', 0.0) or 0.0):.0%} "
+        f"/ exec EV {float(execution.get('ev_r', 0.0) or 0.0):+.2f}R "
+        f"/ exec PF {(f'{float(execution_pf):.2f}' if execution_pf is not None else 'n/a')} "
+        f"/ exec stop_loss {float(execution.get('stop_loss_share', 0.0) or 0.0):.0%} "
+        f"/ historical {int(historical.get('closed_trade_count', 0) or 0)}개 plan "
+        f"/ historical 승률 {float(historical.get('win_rate', 0.0) or 0.0):.0%} "
+        f"/ historical EV {float(historical.get('ev_r', 0.0) or 0.0):+.2f}R "
+        f"/ historical PF {(f'{float(historical_pf):.2f}' if historical_pf is not None else 'n/a')} "
+        f"/ historical stop_loss {float(historical.get('stop_loss_share', 0.0) or 0.0):.0%} "
+        f"/ historical-wf {int(historical_walk_forward.get('closed_trade_count', 0) or 0)}개 plan "
+        f"/ historical-wf 승률 {float(historical_walk_forward.get('win_rate', 0.0) or 0.0):.0%} "
+        f"/ historical-wf EV {float(historical_walk_forward.get('ev_r', 0.0) or 0.0):+.2f}R "
+        f"/ historical-wf PF {(f'{float(historical_walk_forward_pf):.2f}' if historical_walk_forward_pf is not None else 'n/a')} "
+        f"/ historical-wf stop_loss {float(historical_walk_forward.get('stop_loss_share', 0.0) or 0.0):.0%} "
+        f"/ strategy-wf {int(strategy_walk_forward.get('closed_trade_count', 0) or 0)}개 plan "
+        f"/ strategy-wf 승률 {float(strategy_walk_forward.get('win_rate', 0.0) or 0.0):.0%} "
+        f"/ strategy-wf EV {float(strategy_walk_forward.get('ev_r', 0.0) or 0.0):+.2f}R "
+        f"/ strategy-wf PF {(f'{float(strategy_walk_forward_pf):.2f}' if strategy_walk_forward_pf is not None else 'n/a')} "
+        f"/ strategy-wf stop_loss {float(strategy_walk_forward.get('stop_loss_share', 0.0) or 0.0):.0%} "
+        f"/ trend {int(trend.get('closed_trade_count', 0) or 0)}개 plan "
+        f"/ trend 승률 {float(trend.get('win_rate', 0.0) or 0.0):.0%} "
+        f"/ trend EV {float(trend.get('ev_r', 0.0) or 0.0):+.2f}R "
+        f"/ trend PF {(f'{float(trend_pf):.2f}' if trend_pf is not None else 'n/a')} "
+        f"/ trend stop_loss {float(trend.get('stop_loss_share', 0.0) or 0.0):.0%} "
+        f"/ trend-wf {int(walk_forward_trend.get('closed_trade_count', 0) or 0)}개 plan "
+        f"/ trend-wf 승률 {float(walk_forward_trend.get('win_rate', 0.0) or 0.0):.0%} "
+        f"/ trend-wf EV {float(walk_forward_trend.get('ev_r', 0.0) or 0.0):+.2f}R "
+        f"/ trend-wf PF {(f'{float(walk_forward_trend_pf):.2f}' if walk_forward_trend_pf is not None else 'n/a')} "
+        f"/ trend-wf stop_loss {float(walk_forward_trend.get('stop_loss_share', 0.0) or 0.0):.0%} "
+        f"/ proxy {int(live.get('closed_trade_count', 0) or 0)}개 plan "
+        f"/ 승률 {float(live.get('win_rate', 0.0) or 0.0):.0%} "
+        f"/ EV {float(live.get('ev_r', 0.0) or 0.0):+.2f}R "
+        f"/ PF {(f'{float(live_pf):.2f}' if live_pf is not None else 'n/a')} "
+        f"/ stop_loss {float(live.get('stop_loss_share', 0.0) or 0.0):.0%} "
+        f"/ full {int(full.get('closed_trade_count', 0) or 0)}개 plan "
+        f"/ full 승률 {float(full.get('win_rate', 0.0) or 0.0):.0%} "
+        f"/ full EV {float(full.get('ev_r', 0.0) or 0.0):+.2f}R "
+        f"/ full PF {(f'{float(full_pf):.2f}' if full_pf is not None else 'n/a')} "
+        f"/ full stop_loss {float(full.get('stop_loss_share', 0.0) or 0.0):.0%}"
+    )
 
 
 def _ko_runtime_operator_signoff_line(current: dict[str, Any] | None) -> str:
@@ -1511,30 +1704,149 @@ def _ko_runtime_operator_signoff_line(current: dict[str, Any] | None) -> str:
     if not summary or status in {"", "not_applicable"}:
         return ""
 
-    status_map = {
-        "waiting_for_preflight": "사전점검 대기",
-        "ready_for_manual_micro_live_signoff": "MICRO_LIVE만 수동 서명 가능",
-        "ready_for_manual_full_live_signoff": "FULL_LIVE 수동 서명 가능",
-        "ready_for_operator_signoff": "최종 운영 서명 가능",
-    }
-    next_step_map = {
-        "review_required_warning_and_record_micro_live_signoff": "경고 검토 후 MICRO_LIVE 서명",
-        "review_required_warning_and_record_full_live_signoff": "경고 검토 후 FULL_LIVE 서명",
-        "record_operator_signoff": "운영 서명 기록",
-        "clear_preflight_failures_before_manual_signoff": "사전점검 실패 해소",
-    }
-    line = f"운영 서명 단계: {status_map.get(status, status)}"
+    line = f"운영 서명 단계: {osc.KO_RUNTIME_OPERATOR_SIGNOFF_STATUS_LABELS.get(status, status)}"
     if summary.get("allowed_scope"):
-        scope_map = {
-            "MICRO_LIVE_ONLY": "MICRO_LIVE만",
-            "MICRO_LIVE_OR_LIVE": "MICRO_LIVE 또는 FULL_LIVE",
-            "none": "재개 금지",
-        }
-        line += f" / 범위={scope_map.get(str(summary.get('allowed_scope') or ''), str(summary.get('allowed_scope') or 'n/a'))}"
+        line += (
+            " / 범위="
+            f"{osc.KO_RUNTIME_DECISION_SCOPE_LABELS.get(str(summary.get('allowed_scope') or ''), str(summary.get('allowed_scope') or 'n/a'))}"
+        )
     if summary.get("first_required_review_code"):
         line += f" / 우선 검토={_ko_signoff_code(summary.get('first_required_review_code'))}"
     if summary.get("next_step"):
-        line += f" / 다음={next_step_map.get(str(summary.get('next_step') or ''), str(summary.get('next_step') or 'n/a'))}"
+        raw_next_step = str(summary.get("next_step") or "")
+        line += f" / 다음={osc.KO_RUNTIME_OPERATOR_SIGNOFF_NEXT_STEP_LABELS.get(raw_next_step, raw_next_step or 'n/a')}"
+    submit_mode = str(summary.get("intent_execution_mode") or "")
+    contract_scope = str(summary.get("contract_scope") or "")
+    if submit_mode:
+        submit_text = f"{submit_mode} intent -> live submit"
+        if contract_scope:
+            submit_text += f" ({contract_scope})"
+        line += f" / 실행={submit_text}"
+    return line
+
+
+def _ko_runtime_operator_action_line(current: dict[str, Any] | None) -> str:
+    summary = dict(dict(current or {}).get("runtime_operator_signoff_summary") or {})
+    status = str(summary.get("status") or "").strip().lower()
+    if not summary or status in {"", "not_applicable"}:
+        return ""
+    review_command = str(summary.get("review_command") or "")
+    signoff_review_command = str(summary.get("signoff_review_command") or "")
+    candidate_requirements = str(summary.get("candidate_requirements_summary") or "")
+    intent_mode = str(summary.get("intent_execution_mode") or "")
+    contract_scope = str(summary.get("contract_scope") or "")
+    parts: list[str] = []
+    if review_command:
+        parts.append("1) preflight 재확인")
+    if signoff_review_command:
+        parts.append("2) signoff review 재확인")
+    if intent_mode:
+        submit_text = f"3) APPROVED_* plan을 {intent_mode} intent로 생성"
+        if contract_scope:
+            submit_text += f" ({contract_scope})"
+        parts.append(submit_text)
+        parts.append("4) live=true submit")
+    line = "운영 실행: " + (" -> ".join(parts) if parts else "수동 서명 대기")
+    if candidate_requirements:
+        line += f" / 조건={candidate_requirements}"
+    return line
+
+
+def _ko_runtime_actionable_live_candidate_line(current: dict[str, Any] | None) -> str:
+    summary = dict(dict(current or {}).get("runtime_actionable_live_candidate_summary") or {})
+    status = str(summary.get("status") or "").strip().lower()
+    if not summary or status in {"", "not_applicable"}:
+        return ""
+    line = f"실행 후보: {osc.KO_ACTIONABLE_LIVE_CANDIDATE_STATUS_LABELS.get(status, status)}"
+    if summary.get("candidate_symbol"):
+        line += f" / 후보={summary.get('candidate_symbol')}"
+        if summary.get("candidate_family"):
+            line += f":{summary.get('candidate_family')}"
+        if summary.get("candidate_direction"):
+            line += f"/{summary.get('candidate_direction')}"
+    recent_symbol = str(summary.get("recent_intent_symbol") or "")
+    recent_family = str(summary.get("recent_intent_family") or "")
+    recent_mode = str(summary.get("recent_intent_allowed_execution_mode") or summary.get("recent_intent_execution_mode") or "")
+    recent_direction = str(summary.get("recent_intent_direction") or "")
+    recent_hint = "/".join(item for item in [recent_symbol, recent_family, recent_mode, recent_direction] if item)
+    if recent_hint:
+        line += f" / 최근 surface={recent_hint}"
+    recent_submit_ready_bits = [
+        str(summary.get("recent_submit_ready_symbol") or ""),
+        str(summary.get("recent_submit_ready_family") or ""),
+        str(summary.get("recent_submit_ready_direction") or ""),
+    ]
+    recent_submit_ready_hint = "/".join(item for item in recent_submit_ready_bits if item)
+    if recent_submit_ready_hint:
+        line += f" / 최근 submit_ready={recent_submit_ready_hint}"
+        if summary.get("recent_submit_ready_created_at"):
+            line += f"@{summary.get('recent_submit_ready_created_at')}"
+    if summary.get("recent_contract_match_count") is not None:
+        line += f" / 최근 계약일치={summary.get('recent_contract_match_count')}"
+    if summary.get("next_trigger"):
+        raw_next_trigger = str(summary.get("next_trigger") or "")
+        line += f" / 다음={osc.KO_ACTIONABLE_LIVE_CANDIDATE_NEXT_TRIGGER_LABELS.get(raw_next_trigger, raw_next_trigger)}"
+    if summary.get("summary"):
+        line += f" / {summary.get('summary')}"
+    return line
+
+
+def _ko_runtime_self_heal_line(current: dict[str, Any] | None) -> str:
+    summary = dict(dict(current or {}).get("runtime_self_heal_summary") or {})
+    if not summary:
+        return ""
+    return (
+        "자동 복구 상태: "
+        f"{'활성' if bool(summary.get('active', False)) else '비활성'}"
+        f" / stale_cleanup={int(summary.get('stale_cleanup_events', 0) or 0)}"
+        f" / reentry_ignore={bool(summary.get('latest_reentry_block_ignored', False))}"
+        f" / duplicate_ignore={int(summary.get('latest_duplicate_intents_ignored', 0) or 0)}"
+        f" / submit_ready_self_heal={bool(summary.get('latest_submit_ready_self_heal_applied', False))}"
+    )
+
+
+def _ko_trend_proof_watch_line(current: dict[str, Any] | None) -> str:
+    watch = dict(dict(current or {}).get("paper_lineage_watch_summary") or {})
+    summary = dict(watch.get("trend_proof_candidate_summary") or {})
+    if not summary:
+        return ""
+    return (
+        "트렌드 proof 후보: "
+        f"{summary.get('availability_state') or 'unknown'}"
+        f" / scanner={int(summary.get('scanner_candidate_count', 0) or 0)}"
+        f" / limit={int(summary.get('scanner_limit_candidate_count', 0) or 0)}"
+        f" / runtime={int(summary.get('runtime_eligible_candidate_count', 0) or 0)}"
+    )
+
+
+def _ko_runtime_live_cluster_guard_line(current: dict[str, Any] | None) -> str:
+    summary = _runtime_live_cluster_guard_summary(current)
+    status = str(summary.get("status") or "").strip().lower()
+    if not summary or status in {"", "not_available", "clear"}:
+        return ""
+
+    status_map = {
+        "cluster_window_cap_active": "같은 family 동시 진입 제한 active",
+        "family_loss_cooldown_active": "같은 family 최근 손실 cooldown active",
+        "multiple_live_guards_active": "live cluster guard 복합 active",
+        "cluster_window_cap_present": "같은 family 동시 진입 제한 관찰",
+        "family_loss_cooldown_present": "같은 family 최근 손실 cooldown 관찰",
+    }
+    line = (
+        "라이브 클러스터 가드: "
+        f"{status_map.get(status, status)}"
+        f" / cluster={int(summary.get('cluster_window_blocked_candidates') or 0)}"
+        f" / cooldown={int(summary.get('loss_cooldown_blocked_candidates') or 0)}"
+    )
+    families = ",".join(summary.get("families") or [])
+    symbols = ",".join(summary.get("symbols") or [])
+    if families:
+        line += f" / family={families}"
+    if symbols:
+        line += f" / symbol={symbols}"
+    if summary.get("current_reason_code"):
+        raw_reason = str(summary.get("current_reason_code") or "")
+        line += f" / reason={osc.KO_LIVE_CLUSTER_GUARD_REASON_LABELS.get(raw_reason, raw_reason)}"
     return line
 
 
@@ -1719,16 +2031,16 @@ def _ko_mitigation_execution_plan_detail(signoff: dict[str, Any] | None) -> str:
     plan = dict(focus.get("mitigation_execution_plan") or {})
     if not plan:
         return ""
-    status_map = {
-        "actionable_now": "즉시 가능",
-        "candidate_review_pending": "후보 대기",
-        "deferred_by_experiment_sequence": "순서상 보류",
-        "manual_operator_review": "수동 검토",
-    }
     primary_label = str(plan.get("primary_focus_label") or "추가 검토")
-    primary_status = status_map.get(str(plan.get("primary_status") or ""), str(plan.get("primary_status") or "미정"))
+    primary_status = osc.KO_RUNTIME_MITIGATION_REVIEW_STATUS_LABELS.get(
+        str(plan.get("primary_status") or ""),
+        str(plan.get("primary_status") or "미정"),
+    )
     secondary_label = str(plan.get("secondary_focus_label") or "")
-    secondary_status = status_map.get(str(plan.get("secondary_status") or ""), str(plan.get("secondary_status") or "미정"))
+    secondary_status = osc.KO_RUNTIME_MITIGATION_REVIEW_STATUS_LABELS.get(
+        str(plan.get("secondary_status") or ""),
+        str(plan.get("secondary_status") or "미정"),
+    )
     text = f"실행 순서: 1) {primary_label} ({primary_status})"
     if secondary_label:
         text += f", 2) {secondary_label} ({secondary_status})"
@@ -1781,22 +2093,61 @@ def _ko_approval_template_mitigation_status_detail(signoff: dict[str, Any] | Non
         "shadow_fail_fast_review": "fail-fast shadow",
         "loss_wave_cluster_review": "loss wave 검토",
     }
-    status_mapping = {
-        "actionable_now": "즉시 가능",
-        "candidate_review_pending": "후보 대기",
-        "deferred_by_experiment_sequence": "순서상 보류",
-        "research_only": "연구 전용",
-        "manual_operator_review": "수동 검토",
-    }
     labels: list[str] = []
     for item in items[:3]:
         code = str(item.get("code") or "")
         status = str(item.get("status") or "")
         labels.append(
             f"{code_mapping.get(code, code or '추가 검토')}="
-            f"{status_mapping.get(status, status or '미정')}"
+            f"{osc.KO_RUNTIME_MITIGATION_REVIEW_STATUS_LABELS.get(status, status or '미정')}"
         )
     return "대응 상태: " + ", ".join(labels)
+
+
+def _ko_runtime_mitigation_focus_label(value: Any) -> str:
+    raw = str(value or "").strip()
+    mapping = {
+        "range_entry_timing_review": "entry timing split",
+        "shadow_fail_fast_review": "fail-fast shadow",
+        "loss_wave_cluster_review": "loss wave 검토",
+    }
+    return mapping.get(raw, raw or "추가 검토")
+
+
+def _ko_runtime_mitigation_action_status(value: Any) -> str:
+    raw = str(value or "").strip()
+    return osc.KO_RUNTIME_MITIGATION_ACTION_STATUS_LABELS.get(raw, raw or "미정")
+
+
+def _ko_runtime_mitigation_packet_status(value: Any) -> str:
+    raw = str(value or "").strip()
+    return (
+        osc.KO_RUNTIME_MITIGATION_PACKET_STATUS_LABELS.get(raw)
+        or osc.KO_RUNTIME_MITIGATION_PACKET_STATUS_LABELS.get(raw.upper())
+        or osc.KO_RUNTIME_MITIGATION_PACKET_STATUS_LABELS.get(raw.lower())
+        or raw
+        or "미정"
+    )
+
+
+def _ko_runtime_mitigation_wait_constraint(value: Any) -> str:
+    raw = str(value or "").strip()
+    return osc.KO_RUNTIME_MITIGATION_WAIT_CONSTRAINT_LABELS.get(raw, raw or "none")
+
+
+def _ko_runtime_mitigation_next_trigger(value: Any) -> str:
+    raw = str(value or "").strip()
+    return osc.KO_RUNTIME_MITIGATION_NEXT_TRIGGER_LABELS.get(raw, raw or "none")
+
+
+def _ko_runtime_mitigation_guard_reason(value: Any) -> str:
+    raw = str(value or "").strip()
+    return osc.KO_RUNTIME_MITIGATION_GUARD_REASON_LABELS.get(raw, raw or "active")
+
+
+def _ko_runtime_mitigation_wait_status(value: Any) -> str:
+    raw = str(value or "").strip()
+    return osc.KO_RUNTIME_MITIGATION_WAIT_STATUS_LABELS.get(raw, raw or "비활성")
 
 
 def _ko_runtime_mitigation_action_line(current: dict[str, Any] | None) -> str:
@@ -1807,23 +2158,11 @@ def _ko_runtime_mitigation_action_line(current: dict[str, Any] | None) -> str:
     code = str(summary.get("primary_action_code") or "")
     command = str(summary.get("primary_action_command") or "")
     constraint = str(summary.get("primary_action_constraint") or "")
-    label_map = {
-        "range_entry_timing_review": "entry timing split",
-        "shadow_fail_fast_review": "fail-fast shadow",
-        "loss_wave_cluster_review": "loss wave 검토",
-    }
-    status_map = {
-        "actionable_now": "지금 실행 가능",
-        "candidate_review_pending": "후보 뜰 때 실행",
-        "deferred_by_experiment_sequence": "현재 순서상 보류",
-        "manual_operator_review": "수동 검토",
-        "research_only": "연구 전용",
-    }
-    base = f"실행 포커스: {label_map.get(code, code or '추가 검토')} / {status_map.get(status, status or '미정')}"
-    if status == "actionable_now" and command:
+    base = f"실행 포커스: {_ko_runtime_mitigation_focus_label(code)} / {_ko_runtime_mitigation_action_status(status)}"
+    if status == osc.MITIGATION_ACTION_STATUS_ACTIONABLE_NOW and command:
         return f"{base} / 명령={command}"
     if constraint:
-        return f"{base} / 제약={constraint}"
+        return f"{base} / 제약={_ko_runtime_mitigation_wait_constraint(constraint)}"
     return base
 
 
@@ -1834,14 +2173,14 @@ def _ko_runtime_mitigation_packet_line(current: dict[str, Any] | None) -> str:
     status = str(summary.get("status") or "")
     if status == "inactive":
         return ""
-    if status == "waiting_for_actionable_mitigation":
+    if status == osc.MITIGATION_PACKET_STATUS_WAITING:
         return (
             f"실행 패킷: {summary.get('focus_label') or '추가 검토'} 대기"
-            f" / 상태={summary.get('primary_action_status') or 'none'}"
-            f" / 제약={summary.get('wait_constraint') or 'none'}"
+            f" / 상태={_ko_runtime_mitigation_action_status(summary.get('primary_action_status'))}"
+            f" / 제약={_ko_runtime_mitigation_wait_constraint(summary.get('wait_constraint'))}"
         )
     base = (
-        f"실행 패킷: {status}"
+        f"실행 패킷: {_ko_runtime_mitigation_packet_status(status)}"
         f" / 포커스={summary.get('focus_label') or 'none'}"
         f" / 대상={summary.get('target_symbol') or 'none'}"
         f" / variant={summary.get('target_variant') or 'none'}"
@@ -1866,13 +2205,18 @@ def _ko_runtime_mitigation_wait_line(current: dict[str, Any] | None) -> str:
     reason_text = ""
     if summary.get("candidate_reason"):
         reason_text = f" / 사유={summary.get('candidate_reason')}"
+    guard_text = ""
+    if bool(summary.get("watch_guard_active", False)):
+        families = ",".join(str(item) for item in list(summary.get("watch_guard_families") or []) if str(item).strip())
+        guard_scope = families or str(summary.get("watch_guard_family") or "none")
+        guard_text = f" / guard={_ko_runtime_mitigation_guard_reason(summary.get('watch_guard_reason_code'))}:{guard_scope}"
     watch_text = ""
     if summary.get("watch_tick_status"):
         watch_text = f" / watcher={summary.get('watch_tick_status')}"
     return (
         f"대기 사유: {summary.get('focus_label') or '추가 검토'} / "
-        f"{status or 'inactive'} / 세션={session_name} / 허용={allowed_sessions or 'none'} / 다음 트리거={summary.get('next_trigger') or 'none'}"
-        f"{candidate_text}{reason_text}{watch_text}"
+        f"{_ko_runtime_mitigation_wait_status(status)} / 세션={session_name} / 허용={allowed_sessions or 'none'} / 다음 트리거={_ko_runtime_mitigation_next_trigger(summary.get('next_trigger'))}"
+        f"{candidate_text}{guard_text}{reason_text}{watch_text}"
     )
 
 
@@ -1881,6 +2225,16 @@ def _event_line_ko(event: dict[str, str], current: dict[str, Any]) -> str:
     titles = {
         "initial_snapshot": "초기 상태 수집",
         "stage_changed": "단계 변경",
+        "close_only_changed": "close-only 상태 변경",
+        "dashboard_surface_changed": "대시보드 표면 변경",
+        "playbook_changed": "플레이북 변경",
+        "checklist_surface_changed": "체크리스트 표면 변경",
+        "edge_experiment_changed": "edge experiment 변경",
+        "edge_evolution_changed": "edge evolution 변경",
+        "review_followup_changed": "후속 검토 변경",
+        "accepted_candidate_focus_changed": "대표 승인 후보 변경",
+        "entry_timing_review_target_changed": "진입 타이밍 검토 대상 변경",
+        "execution_style_review_target_changed": "실행 스타일 검토 대상 변경",
         "trial_runs_started": "trial 생성 시작",
         "winner_selected": "lineage winner 선택",
         "lineage_gate_ready": "lineage gate 준비 완료",
@@ -1898,6 +2252,7 @@ def _event_line_ko(event: dict[str, str], current: dict[str, Any]) -> str:
         "runtime_reopen_status_changed": "런타임 재개 상태 변경",
         "runtime_operator_signoff_ready": "운영 서명 가능",
         "runtime_operator_signoff_changed": "운영 서명 단계 변경",
+        "runtime_live_cluster_guard_changed": "라이브 클러스터 가드 변경",
         "runtime_mitigation_changed": "대응 상태 변경",
         "runtime_mitigation_actionable": "대응 실행 가능",
         "runtime_mitigation_packet_changed": "대응 패킷 상태 변경",
@@ -1921,11 +2276,14 @@ def _event_line_ko(event: dict[str, str], current: dict[str, Any]) -> str:
         return f"- {label}: {_ko_runtime_reopen_status(runtime.get('status'))}"
     if event_type in {"runtime_operator_signoff_ready", "runtime_operator_signoff_changed"}:
         return f"- {label}: {_ko_runtime_operator_signoff_line(current)}"
+    if event_type == "runtime_live_cluster_guard_changed":
+        line = _ko_runtime_live_cluster_guard_line(current)
+        return f"- {label}: {line or '라이브 클러스터 가드 해제'}"
     if event_type in {"runtime_mitigation_changed", "runtime_mitigation_actionable"}:
         mitigation = _runtime_mitigation_summary(current)
         line = (
-            f"- {label}: {mitigation.get('primary_action_code') or 'none'} / "
-            f"{mitigation.get('primary_action_status') or 'none'}"
+            f"- {label}: {_ko_runtime_mitigation_focus_label(mitigation.get('primary_action_code'))} / "
+            f"{_ko_runtime_mitigation_action_status(mitigation.get('primary_action_status'))}"
         )
         if event_type == "runtime_mitigation_actionable" and mitigation.get("primary_action_command"):
             line = f"{line} / cmd={mitigation.get('primary_action_command')}"
@@ -1933,7 +2291,7 @@ def _event_line_ko(event: dict[str, str], current: dict[str, Any]) -> str:
     if event_type in {"runtime_mitigation_packet_changed", "runtime_mitigation_packet_ready"}:
         packet = _runtime_mitigation_packet_summary(current)
         line = (
-            f"- {label}: {packet.get('status') or 'inactive'} / "
+            f"- {label}: {_ko_runtime_mitigation_packet_status(packet.get('status'))} / "
             f"{packet.get('target_symbol') or 'none'}"
         )
         if packet.get("packet_id"):
@@ -1942,9 +2300,9 @@ def _event_line_ko(event: dict[str, str], current: dict[str, Any]) -> str:
     if event_type == "runtime_mitigation_wait_changed":
         wait = _runtime_mitigation_wait_summary(current)
         return (
-            f"- {label}: {wait.get('status') or 'inactive'} / "
+            f"- {label}: {_ko_runtime_mitigation_wait_status(wait.get('status'))} / "
             f"{wait.get('candidate_symbol') or 'none'} / "
-            f"{wait.get('next_trigger') or 'none'}"
+            f"{_ko_runtime_mitigation_next_trigger(wait.get('next_trigger'))}"
         )
     if event_type in {"active_lineage_sample_progressed", "open_lineage_sample_count_changed"}:
         active_sample = dict(current.get("active_lineage_sample_focus") or {})

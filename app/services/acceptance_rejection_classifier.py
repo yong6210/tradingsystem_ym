@@ -62,17 +62,22 @@ class AcceptanceRejectionClassifierService:
     def _bar(candle: Candle) -> ReactionBar:
         return ReactionBar(o=float(candle.o), h=float(candle.h), l=float(candle.l), c=float(candle.c))
 
-    def build_input(
+    def build_input_with_reason(
         self,
         *,
         zone: Zone,
         context: ContextSnapshot,
         candles_5m: list[Candle] | None,
-    ) -> AcceptanceRejectionInput | None:
+        sweep_level_override: float | None = None,
+        swept_level_type_override: str | None = None,
+        min_event_bars: int = 2,
+    ) -> tuple[AcceptanceRejectionInput | None, str]:
         if not candles_5m or len(candles_5m) < 3:
-            return None
+            return None, "insufficient_candles"
 
-        level = float(zone.low) if zone.dir_bias == "support" else float(zone.high)
+        level = float(sweep_level_override) if sweep_level_override is not None else (
+            float(zone.low) if zone.dir_bias == "support" else float(zone.high)
+        )
         sweep_side = "below" if zone.dir_bias == "support" else "above"
         window = candles_5m[-5:]
         sweep_indices = [
@@ -81,12 +86,12 @@ class AcceptanceRejectionClassifierService:
             if (candle.l < level if sweep_side == "below" else candle.h > level)
         ]
         if not sweep_indices:
-            return None
+            return None, "no_recent_level_sweep"
 
         sweep_index = sweep_indices[-1]
         event_candles = window[sweep_index : sweep_index + 3]
-        if len(event_candles) < 2:
-            return None
+        if len(event_candles) < max(int(min_event_bars or 0), 1):
+            return None, "insufficient_post_sweep_bars"
 
         bars = [self._bar(candle) for candle in event_candles]
         outside_close_count = 0
@@ -147,7 +152,7 @@ class AcceptanceRejectionClassifierService:
         return AcceptanceRejectionInput(
             swept_level=level,
             sweep_side=sweep_side,
-            swept_level_type=zone.type,
+            swept_level_type=str(swept_level_type_override or zone.type),
             bars=bars,
             atr5=float(context.atr5),
             reclaim_bars=reclaim_bars,
@@ -161,7 +166,23 @@ class AcceptanceRejectionClassifierService:
             opposite_reclaim_failure=bool(reclaim_bars is None or reclaim_bars > self.settings.reaction_classifier_max_reclaim_bars),
             session_quality=float(session_quality),
             avg_wick_to_body_ratio=float(avg_wick_to_body_ratio),
+        ), "ok"
+
+    def build_input(
+        self,
+        *,
+        zone: Zone,
+        context: ContextSnapshot,
+        candles_5m: list[Candle] | None,
+        min_event_bars: int = 2,
+    ) -> AcceptanceRejectionInput | None:
+        payload, _ = self.build_input_with_reason(
+            zone=zone,
+            context=context,
+            candles_5m=candles_5m,
+            min_event_bars=min_event_bars,
         )
+        return payload
 
     def classify(self, data: AcceptanceRejectionInput | None) -> AcceptanceRejectionResult:
         if data is None:

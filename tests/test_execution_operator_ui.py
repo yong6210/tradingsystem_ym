@@ -150,6 +150,9 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "대표 accepted row 1개와 blocked row 1개를 카드로 다시 압축해, risk, allocator, A/B posture, edge focus, session, reaction evidence를 바로 읽습니다." in html
     assert "Representative Accepted Candidate" in html
     assert "Representative Blocked Candidate" in html
+    assert "Shadow Tilt" in html
+    assert "runtime_signal_shadow_tilt unavailable" in html
+    assert "apply_live=false" in html
     assert "Why This Row Matters" in html
     assert "Edge Focus" in html
     assert "Checklist Evidence Drilldown" in html

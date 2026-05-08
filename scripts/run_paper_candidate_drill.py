@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sqlite3
 from collections import Counter
 from datetime import UTC, datetime
 from http.client import RemoteDisconnected
@@ -19,6 +21,74 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 _REQUEST_RETRY_ATTEMPTS = 5
 _REQUEST_RETRY_BASE_DELAY_SECONDS = 1.0
 _REQUEST_TIMEOUT_SECONDS = 90
+_DEFAULT_STAGE_FILE = ROOT_DIR / "reports/operations/stage_monitor/current_stage.json"
+_DEFAULT_DB_PATH = ROOT_DIR / "trading.db"
+_SYMBOL_DIVERSITY_MIN_COHORT_TRADES = 20
+_SYMBOL_DIVERSITY_SOFT_CAP_COUNT = 6
+_SYMBOL_DIVERSITY_SOFT_CAP_SHARE = 0.10
+_PAPER_FAMILY_CLUSTER_WINDOW_MINUTES = 60
+_PAPER_MAX_SAME_FAMILY_ENTRIES_PER_WINDOW = 1
+_PAPER_RECENT_LOSS_COOLDOWN_MINUTES = 90
+_PAPER_RECENT_LOSS_TRIGGER_COUNT = 2
+_ENTRY_VARIANT_PREFERENCE = {
+    "limit": 0,
+    "sweep_confirm": 1,
+    "confirm": 2,
+    "unknown": 3,
+}
+
+
+def _database_url() -> str:
+    return str(os.environ.get("DATABASE_URL") or "").strip()
+
+
+def _current_db_path() -> Path:
+    database_url = _database_url()
+    for prefix in ("sqlite+pysqlite:///", "sqlite:///"):
+        if database_url.startswith(prefix):
+            raw_path = database_url[len(prefix) :].split("?", 1)[0].strip()
+            if not raw_path or raw_path in {":memory:", "file::memory:"}:
+                return _DEFAULT_DB_PATH
+            candidate = Path(raw_path)
+            if not candidate.is_absolute():
+                candidate = (ROOT_DIR / candidate).resolve()
+            return candidate
+    return _DEFAULT_DB_PATH
+
+
+def _load_trend_proof_priority_snapshot(*, families: set[str]) -> dict[str, Any]:
+    if "trend_continuation" not in families:
+        return {
+            "available": False,
+            "active": False,
+            "summary": "trend_continuation is not requested for this PAPER drill pass",
+        }
+    stage_payload = _load_json(_DEFAULT_STAGE_FILE)
+    summary = dict((stage_payload or {}).get("trend_proof_post_patch_sample_summary") or {})
+    target_closed_trades = int(summary.get("target_closed_trades", 5) or 5)
+    closed_trade_count = int(summary.get("closed_trade_count", 0) or 0)
+    remaining_to_target = max(int(summary.get("remaining_to_target", target_closed_trades - closed_trade_count) or 0), 0)
+    eligible_symbols = [
+        str(item or "").strip().upper()
+        for item in (summary.get("eligible_symbols") or ["BTCUSDC", "ETHUSDC"])
+        if str(item or "").strip()
+    ]
+    payload = {
+        "available": True,
+        "active": remaining_to_target > 0,
+        "target_closed_trades": target_closed_trades,
+        "closed_trade_count": closed_trade_count,
+        "remaining_to_target": remaining_to_target,
+        "eligible_symbols": eligible_symbols,
+        "eligible_families": ["trend_continuation"],
+        "eligible_entry_models": ["LIMIT"],
+    }
+    payload["summary"] = (
+        f"trend_proof={closed_trade_count}/{target_closed_trades}"
+        f" | remaining={remaining_to_target}"
+        f" | symbols={','.join(eligible_symbols) or 'none'}"
+    )
+    return payload
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,6 +113,21 @@ def parse_args() -> argparse.Namespace:
         "--paper-lineage-override",
         action="store_true",
         help="Allow PAPER-only lineage override for eligible family candidates blocked by active-plan thesis duplication.",
+    )
+    parser.add_argument(
+        "--symbol-diversity-min-cohort-trades",
+        type=int,
+        default=_SYMBOL_DIVERSITY_MIN_COHORT_TRADES,
+    )
+    parser.add_argument(
+        "--symbol-diversity-soft-cap-count",
+        type=int,
+        default=_SYMBOL_DIVERSITY_SOFT_CAP_COUNT,
+    )
+    parser.add_argument(
+        "--symbol-diversity-soft-cap-share",
+        type=float,
+        default=_SYMBOL_DIVERSITY_SOFT_CAP_SHARE,
     )
     parser.add_argument("--report-dir", default="reports/operations/paper_candidate_drill")
     parser.add_argument("--no-write-report", action="store_true")
@@ -114,6 +199,328 @@ def _float(value: Any, default: float = 0.0) -> float:
 
 def _family_set(raw: str) -> set[str]:
     return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
+def _parse_iso_ts(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _load_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return dict(payload) if isinstance(payload, dict) else None
+
+
+def _stage_post_patch_baseline(stage_payload: dict[str, Any] | None) -> datetime | None:
+    stage = dict(stage_payload or {})
+    candidates = [
+        dict(stage.get("post_patch_sample_summary") or {}),
+        dict(dict(stage.get("approval_template_focus") or {}).get("post_patch_sample_summary") or {}),
+        dict(
+            dict(dict(stage.get("runtime_signoff_summary") or {}).get("approval_template_focus") or {}).get(
+                "post_patch_sample_summary"
+            )
+            or {}
+        ),
+    ]
+    for item in candidates:
+        baseline = _parse_iso_ts(item.get("baseline_ts"))
+        if baseline is not None:
+            return baseline
+    return None
+
+
+def _load_symbol_diversity_snapshot(
+    *,
+    families: set[str],
+    min_cohort_trades: int,
+    soft_cap_count: int,
+    soft_cap_share: float,
+) -> dict[str, Any]:
+    stage_payload = _load_json(_DEFAULT_STAGE_FILE)
+    baseline_ts = _stage_post_patch_baseline(stage_payload)
+    counts: Counter[str] = Counter()
+    active_open_symbols: set[str] = set()
+    db_path = _current_db_path()
+
+    if not db_path.exists():
+        return {
+            "available": False,
+            "baseline_ts": baseline_ts.isoformat() if baseline_ts else "",
+            "closed_trade_count": 0,
+            "symbol_closed_counts": {},
+            "overrepresented_symbols": [],
+            "active_open_symbols": [],
+            "database_path": str(db_path),
+            "summary": "local sqlite database is unavailable; symbol diversity weighting is disabled",
+        }
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute("select symbol, state, validity from plans where state in ('CLOSED','ENTERED','PARTIAL_EXIT')").fetchall()
+    finally:
+        conn.close()
+
+    for symbol_raw, state_raw, validity_raw in rows:
+        symbol = str(symbol_raw or "").strip().upper()
+        state = str(state_raw or "").strip().upper()
+        if not symbol or not isinstance(validity_raw, str):
+            continue
+        try:
+            validity = json.loads(validity_raw) if validity_raw else {}
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(validity, dict):
+            continue
+        family = str(validity.get("strategy_family") or "").strip().lower()
+        if family not in families:
+            continue
+        if state in {"ENTERED", "PARTIAL_EXIT"}:
+            active_open_symbols.add(symbol)
+        if state != "CLOSED":
+            continue
+        closed_ts = _parse_iso_ts(validity.get("final_exit_ts") or validity.get("last_exit_ts"))
+        if baseline_ts is not None and (closed_ts is None or closed_ts < baseline_ts):
+            continue
+        counts[symbol] += 1
+
+    closed_trade_count = int(sum(counts.values()))
+    overrepresented_symbols: list[str] = []
+    if closed_trade_count >= max(0, int(min_cohort_trades or 0)):
+        for symbol, count in counts.items():
+            share = float(count) / float(closed_trade_count) if closed_trade_count > 0 else 0.0
+            if count >= max(0, int(soft_cap_count or 0)) and share >= max(0.0, float(soft_cap_share or 0.0)):
+                overrepresented_symbols.append(symbol)
+
+    overrepresented_symbols.sort()
+    return {
+        "available": True,
+        "database_path": str(db_path),
+        "baseline_ts": baseline_ts.isoformat() if baseline_ts else "",
+        "closed_trade_count": closed_trade_count,
+        "symbol_closed_counts": dict(counts),
+        "overrepresented_symbols": overrepresented_symbols,
+        "active_open_symbols": sorted(active_open_symbols),
+        "summary": (
+            f"closed={closed_trade_count}"
+            f" | overrepresented={','.join(overrepresented_symbols) or 'none'}"
+            f" | active_open={','.join(sorted(active_open_symbols)) or 'none'}"
+        ),
+    }
+
+
+def _load_family_cluster_guard_snapshot(
+    *,
+    families: set[str],
+    cluster_window_minutes: int = _PAPER_FAMILY_CLUSTER_WINDOW_MINUTES,
+    max_same_family_entries: int = _PAPER_MAX_SAME_FAMILY_ENTRIES_PER_WINDOW,
+    recent_loss_cooldown_minutes: int = _PAPER_RECENT_LOSS_COOLDOWN_MINUTES,
+    recent_loss_trigger_count: int = _PAPER_RECENT_LOSS_TRIGGER_COUNT,
+) -> dict[str, Any]:
+    now = _now()
+    entry_cutoff = now.timestamp() - max(0, int(cluster_window_minutes)) * 60
+    loss_cutoff = now.timestamp() - max(0, int(recent_loss_cooldown_minutes)) * 60
+    family_window_entries: dict[str, list[dict[str, Any]]] = {family: [] for family in families}
+    family_recent_losses: dict[str, list[dict[str, Any]]] = {family: [] for family in families}
+    db_path = _current_db_path()
+
+    if not db_path.exists():
+        return {
+            "available": False,
+            "database_path": str(db_path),
+            "summary": "local sqlite database is unavailable; family cluster guard is disabled",
+            "families": {},
+        }
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(
+            "select plan_id, symbol, state, valid_from, valid_until, validity from plans where state in ('CLOSED','ENTERED','PARTIAL_EXIT')"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    for plan_id_raw, symbol_raw, state_raw, valid_from_raw, valid_until_raw, validity_raw in rows:
+        symbol = str(symbol_raw or "").strip().upper()
+        state = str(state_raw or "").strip().upper()
+        if not symbol or not isinstance(validity_raw, str):
+            continue
+        try:
+            validity = json.loads(validity_raw) if validity_raw else {}
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(validity, dict):
+            continue
+        family = str(validity.get("strategy_family") or "").strip().lower()
+        if family not in families:
+            continue
+        if state in {"ENTERED", "PARTIAL_EXIT"}:
+            opened_ts = _parse_iso_ts(validity.get("entry_ts")) or _parse_iso_ts(valid_from_raw)
+            if opened_ts is not None and opened_ts.timestamp() >= entry_cutoff:
+                family_window_entries[family].append(
+                    {
+                        "plan_id": str(plan_id_raw or ""),
+                        "symbol": symbol,
+                        "state": state,
+                        "opened_ts": opened_ts.isoformat(),
+                    }
+                )
+        if state != "CLOSED":
+            continue
+        closed_ts = _parse_iso_ts(validity.get("final_exit_ts") or validity.get("last_exit_ts"))
+        if closed_ts is None or closed_ts.timestamp() < loss_cutoff:
+            continue
+        realized_r = _float(validity.get("final_exit_realized_r"), default=0.0)
+        if realized_r >= 0.0:
+            continue
+        family_recent_losses[family].append(
+            {
+                "plan_id": str(plan_id_raw or ""),
+                "symbol": symbol,
+                "closed_ts": closed_ts.isoformat(),
+                "realized_r": round(realized_r, 4),
+                "exit_reason": str(validity.get("final_exit_reason") or ""),
+            }
+        )
+
+    family_payload: dict[str, Any] = {}
+    active_families: list[str] = []
+    for family in sorted(families):
+        window_entries = sorted(
+            family_window_entries.get(family) or [],
+            key=lambda item: str(item.get("opened_ts") or ""),
+            reverse=True,
+        )
+        recent_losses = sorted(
+            family_recent_losses.get(family) or [],
+            key=lambda item: str(item.get("closed_ts") or ""),
+            reverse=True,
+        )
+        cluster_active = len(window_entries) >= max(0, int(max_same_family_entries))
+        cooldown_active = len(recent_losses) >= max(0, int(recent_loss_trigger_count))
+        if cluster_active or cooldown_active:
+            active_families.append(family)
+        family_payload[family] = {
+            "cluster_window_minutes": int(cluster_window_minutes),
+            "max_same_family_entries": int(max_same_family_entries),
+            "recent_window_entry_count": len(window_entries),
+            "recent_window_entries": window_entries,
+            "recent_loss_cooldown_minutes": int(recent_loss_cooldown_minutes),
+            "recent_loss_trigger_count": int(recent_loss_trigger_count),
+            "recent_loss_count": len(recent_losses),
+            "recent_losses": recent_losses,
+            "cluster_guard_active": bool(cluster_active),
+            "loss_cooldown_active": bool(cooldown_active),
+            "active": bool(cluster_active or cooldown_active),
+        }
+
+    return {
+        "available": True,
+        "database_path": str(db_path),
+        "families": family_payload,
+        "active_families": active_families,
+        "summary": (
+            " | ".join(
+                f"{family}:entries={family_payload[family]['recent_window_entry_count']},losses={family_payload[family]['recent_loss_count']},active={family_payload[family]['active']}"
+                for family in sorted(families)
+            )
+            if family_payload
+            else "no family cluster guard snapshot"
+        ),
+    }
+
+
+def _decorate_symbol_diversity(
+    row: dict[str, Any],
+    *,
+    diversity_snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+    item = dict(row or {})
+    snapshot = dict(diversity_snapshot or {})
+    symbol = str(item.get("symbol") or "").strip().upper()
+    counts = dict(snapshot.get("symbol_closed_counts") or {})
+    closed_trade_count = int(snapshot.get("closed_trade_count", 0) or 0)
+    symbol_closed_count = int(counts.get(symbol, 0) or 0)
+    symbol_closed_share = float(symbol_closed_count) / float(closed_trade_count) if closed_trade_count > 0 else 0.0
+    overrepresented = symbol in {str(value).upper() for value in list(snapshot.get("overrepresented_symbols") or [])}
+    active_open = symbol in {str(value).upper() for value in list(snapshot.get("active_open_symbols") or [])}
+    item["symbol_diversity_recent_closed_count"] = symbol_closed_count
+    item["symbol_diversity_recent_closed_share"] = round(symbol_closed_share, 4)
+    item["symbol_diversity_overrepresented"] = bool(overrepresented)
+    item["symbol_diversity_active_open_symbol"] = bool(active_open)
+    return item
+
+
+def _decorate_family_cluster_guard(
+    row: dict[str, Any],
+    *,
+    guard_snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+    item = dict(row or {})
+    snapshot = dict(guard_snapshot or {})
+    family = str(item.get("strategy_family") or "").strip().lower()
+    family_state = dict((snapshot.get("families") or {}).get(family) or {})
+    item["family_cluster_guard_active"] = bool(family_state.get("cluster_guard_active", False))
+    item["family_loss_cooldown_active"] = bool(family_state.get("loss_cooldown_active", False))
+    item["family_cluster_window_entry_count"] = int(family_state.get("recent_window_entry_count", 0) or 0)
+    item["family_recent_loss_count"] = int(family_state.get("recent_loss_count", 0) or 0)
+    item["family_cluster_guard_summary"] = family_state
+    return item
+
+
+def _decorate_trend_proof_priority(
+    row: dict[str, Any],
+    *,
+    trend_proof_snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+    item = dict(row or {})
+    snapshot = dict(trend_proof_snapshot or {})
+    symbol = str(item.get("symbol") or "").strip().upper()
+    family = str(item.get("strategy_family") or "").strip().lower()
+    entry_variant = _candidate_entry_variant(item)
+    eligible_symbols = {
+        str(value or "").strip().upper()
+        for value in (snapshot.get("eligible_symbols") or [])
+        if str(value or "").strip()
+    }
+    active = bool(snapshot.get("active", False))
+    item["trend_proof_priority_active"] = bool(
+        active
+        and family == "trend_continuation"
+        and entry_variant == "limit"
+        and symbol in eligible_symbols
+    )
+    item["trend_proof_priority_summary"] = snapshot
+    return item
+
+
+def _candidate_entry_variant(row: dict[str, Any] | None) -> str:
+    item = dict(row or {})
+    entry_model = str(item.get("entry_model") or "").strip().upper()
+    if entry_model == "LIMIT":
+        return "limit"
+    if entry_model == "SWEEP_CONFIRM":
+        return "sweep_confirm"
+    if entry_model == "CONFIRM":
+        return "confirm"
+    plan_id = str(item.get("plan_id") or "")
+    if "_sweep_confirm" in plan_id:
+        return "sweep_confirm"
+    if "_confirm" in plan_id:
+        return "confirm"
+    if "_limit" in plan_id:
+        return "limit"
+    return "unknown"
 
 
 def _scanner_candidate_strip_summary(row: dict[str, Any] | None) -> dict[str, str] | None:
@@ -406,7 +813,16 @@ def _strategy_grade(row: dict[str, Any]) -> str:
     ).upper()
 
 
-def _rank_candidates(rows: list[dict[str, Any]], *, symbol: str | None, families: set[str], include_manual: bool) -> list[dict[str, Any]]:
+def _rank_candidates(
+    rows: list[dict[str, Any]],
+    *,
+    symbol: str | None,
+    families: set[str],
+    include_manual: bool,
+    diversity_snapshot: dict[str, Any] | None = None,
+    family_guard_snapshot: dict[str, Any] | None = None,
+    trend_proof_snapshot: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     filtered: list[dict[str, Any]] = []
     for row in rows:
         family = str(row.get("strategy_family") or "").lower()
@@ -418,25 +834,151 @@ def _rank_candidates(rows: list[dict[str, Any]], *, symbol: str | None, families
             continue
         if float(row.get("recommended_risk_r") or 0.0) <= 0.0:
             continue
-        filtered.append(row)
+        item = _decorate_symbol_diversity(row, diversity_snapshot=diversity_snapshot)
+        item = _decorate_family_cluster_guard(item, guard_snapshot=family_guard_snapshot)
+        item = _decorate_trend_proof_priority(item, trend_proof_snapshot=trend_proof_snapshot)
+        item["entry_variant_preference"] = _candidate_entry_variant(item)
+        if bool(item.get("family_cluster_guard_active")) or bool(item.get("family_loss_cooldown_active")):
+            continue
+        filtered.append(item)
     if not filtered:
         return None
     filtered.sort(
         key=lambda row: (
-            float(row.get("expected_ev_at_recommended_size_r") or 0.0),
-            float(row.get("expected_ev_r") or 0.0),
-            float(row.get("recommended_risk_r") or 0.0),
-        ),
-        reverse=True,
+            not bool(row.get("trend_proof_priority_active")),
+            bool(row.get("symbol_diversity_active_open_symbol")),
+            bool(row.get("symbol_diversity_overrepresented")),
+            int(_ENTRY_VARIANT_PREFERENCE.get(str(row.get("entry_variant_preference") or "unknown"), 3)),
+            -float(row.get("expected_ev_at_recommended_size_r") or 0.0),
+            -float(row.get("expected_ev_r") or 0.0),
+            int(row.get("symbol_diversity_recent_closed_count") or 0),
+            -float(row.get("recommended_risk_r") or 0.0),
+        )
     )
     return filtered
 
 
-def _choose_candidate(rows: list[dict[str, Any]], *, symbol: str | None, families: set[str], include_manual: bool) -> dict[str, Any] | None:
-    ranked = _rank_candidates(rows, symbol=symbol, families=families, include_manual=include_manual)
+def _choose_candidate(
+    rows: list[dict[str, Any]],
+    *,
+    symbol: str | None,
+    families: set[str],
+    include_manual: bool,
+    diversity_snapshot: dict[str, Any] | None = None,
+    family_guard_snapshot: dict[str, Any] | None = None,
+    trend_proof_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    ranked = _rank_candidates(
+        rows,
+        symbol=symbol,
+        families=families,
+        include_manual=include_manual,
+        diversity_snapshot=diversity_snapshot,
+        family_guard_snapshot=family_guard_snapshot,
+        trend_proof_snapshot=trend_proof_snapshot,
+    )
     if not ranked:
         return None
     return ranked[0]
+
+
+def _trend_proof_candidate_summary(
+    *,
+    scanner_rows: list[dict[str, Any]],
+    portfolio_payload: dict[str, Any] | None,
+    include_manual: bool,
+    diversity_snapshot: dict[str, Any] | None,
+    family_guard_snapshot: dict[str, Any] | None,
+    trend_proof_snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+    snapshot = dict(trend_proof_snapshot or {})
+    if not bool(snapshot.get("available", False)):
+        return {
+            "available": False,
+            "active": False,
+            "availability_state": "not_requested",
+            "summary": str(snapshot.get("summary") or "trend proof is not active for this drill pass"),
+        }
+
+    eligible_symbols = {
+        str(item or "").strip().upper()
+        for item in list(snapshot.get("eligible_symbols") or [])
+        if str(item or "").strip()
+    }
+    scanner_matches = [
+        dict(row)
+        for row in scanner_rows
+        if str(row.get("symbol") or "").strip().upper() in eligible_symbols
+        and str(row.get("strategy_family") or "").strip().lower() == "trend_continuation"
+    ]
+    scanner_limit_matches = [row for row in scanner_matches if _candidate_entry_variant(row) == "limit"]
+    ranked = _rank_candidates(
+        scanner_rows,
+        symbol=None,
+        families={"trend_continuation"},
+        include_manual=include_manual,
+        diversity_snapshot=diversity_snapshot,
+        family_guard_snapshot=family_guard_snapshot,
+        trend_proof_snapshot=trend_proof_snapshot,
+    ) or []
+
+    portfolio = dict(portfolio_payload or {})
+    portfolio_rows: list[dict[str, Any]] = []
+    for key in ("accepted_candidates", "blocked_candidates", "alpha_research_candidates"):
+        value = portfolio.get(key)
+        if isinstance(value, list):
+            portfolio_rows.extend(dict(item) for item in value if isinstance(item, dict))
+    portfolio_matches = [
+        row
+        for row in portfolio_rows
+        if str(row.get("symbol") or "").strip().upper() in eligible_symbols
+        and str(row.get("strategy_family") or "").strip().lower() == "trend_continuation"
+    ]
+    blocked_reason_counts = Counter(
+        str(row.get("block_reason") or "unknown")
+        for row in portfolio_matches
+        if str(row.get("block_reason") or "").strip()
+    )
+
+    if not scanner_matches and not portfolio_matches:
+        state = "no_trend_surface_candidate_visible"
+        summary = "BTC/ETH trend_continuation candidates are not visible on the current scanner or portfolio surface."
+    elif scanner_matches and not scanner_limit_matches:
+        state = "trend_surface_visible_but_not_limit"
+        summary = "BTC/ETH trend_continuation candidates are visible, but none are LIMIT variants yet."
+    elif scanner_limit_matches and not ranked:
+        state = "trend_limit_visible_but_not_runtime_eligible"
+        summary = "BTC/ETH trend_continuation LIMIT candidates are visible, but none currently pass runtime eligibility."
+    else:
+        state = "trend_limit_candidate_ready"
+        top = dict(ranked[0] or {}) if ranked else {}
+        summary = (
+            f"BTC/ETH trend_continuation LIMIT candidate is visible: "
+            f"{top.get('symbol') or 'unknown'} / {top.get('plan_id') or 'unknown'}."
+        )
+
+    if blocked_reason_counts:
+        summary = (
+            f"{summary} Blocked reasons: "
+            + ", ".join(f"{reason}={count}" for reason, count in blocked_reason_counts.most_common(3))
+            + "."
+        )
+
+    top_ranked = dict(ranked[0] or {}) if ranked else {}
+    return {
+        "available": True,
+        "active": bool(snapshot.get("active", False)),
+        "availability_state": state,
+        "eligible_symbols": sorted(eligible_symbols),
+        "scanner_candidate_count": len(scanner_matches),
+        "scanner_limit_candidate_count": len(scanner_limit_matches),
+        "portfolio_candidate_count": len(portfolio_matches),
+        "runtime_eligible_candidate_count": len(ranked),
+        "blocked_reason_counts": dict(blocked_reason_counts),
+        "top_runtime_candidate_symbol": str(top_ranked.get("symbol") or ""),
+        "top_runtime_candidate_plan_id": str(top_ranked.get("plan_id") or ""),
+        "summary": summary,
+    }
 
 
 def _portfolio_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -523,6 +1065,8 @@ def _rank_override_candidates(
     symbol: str | None,
     families: set[str],
     include_manual: bool,
+    diversity_snapshot: dict[str, Any] | None = None,
+    family_guard_snapshot: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     eligible_blocks = {"thesis_duplicate_blocked", "thesis_active_cap_reached"}
     filtered: list[dict[str, Any]] = []
@@ -538,17 +1082,25 @@ def _rank_override_candidates(
             continue
         if str(row.get("block_reason") or "") not in eligible_blocks:
             continue
-        filtered.append(row)
+        item = _decorate_symbol_diversity(row, diversity_snapshot=diversity_snapshot)
+        item = _decorate_family_cluster_guard(item, guard_snapshot=family_guard_snapshot)
+        item["entry_variant_preference"] = _candidate_entry_variant(item)
+        if bool(item.get("family_cluster_guard_active")) or bool(item.get("family_loss_cooldown_active")):
+            continue
+        filtered.append(item)
     if not filtered:
         return None
     filtered.sort(
         key=lambda row: (
-            float(row.get("expected_ev_r") or 0.0),
-            float(row.get("expected_ev_at_recommended_size_r") or 0.0),
-            float(row.get("final_rank_score") or 0.0),
-            float(row.get("recommended_risk_r") or 0.0),
-        ),
-        reverse=True,
+            bool(row.get("symbol_diversity_active_open_symbol")),
+            bool(row.get("symbol_diversity_overrepresented")),
+            int(_ENTRY_VARIANT_PREFERENCE.get(str(row.get("entry_variant_preference") or "unknown"), 3)),
+            -float(row.get("expected_ev_r") or 0.0),
+            -float(row.get("expected_ev_at_recommended_size_r") or 0.0),
+            -float(row.get("final_rank_score") or 0.0),
+            int(row.get("symbol_diversity_recent_closed_count") or 0),
+            -float(row.get("recommended_risk_r") or 0.0),
+        )
     )
     return filtered
 
@@ -559,8 +1111,17 @@ def _choose_override_candidate(
     symbol: str | None,
     families: set[str],
     include_manual: bool,
+    diversity_snapshot: dict[str, Any] | None = None,
+    family_guard_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    ranked = _rank_override_candidates(rows, symbol=symbol, families=families, include_manual=include_manual)
+    ranked = _rank_override_candidates(
+        rows,
+        symbol=symbol,
+        families=families,
+        include_manual=include_manual,
+        diversity_snapshot=diversity_snapshot,
+        family_guard_snapshot=family_guard_snapshot,
+    )
     if not ranked:
         return None
     return ranked[0]
@@ -611,6 +1172,26 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     else:
         lines.append("- approval strip unavailable")
     lines.append("")
+    lines.append("## Symbol Diversity")
+    lines.append("")
+    diversity = payload.get("symbol_diversity_summary") or {}
+    if diversity:
+        lines.append(
+            f"- closed={int(diversity.get('closed_trade_count', 0) or 0)} | "
+            f"overrepresented={','.join(diversity.get('overrepresented_symbols') or []) or 'none'} | "
+            f"active_open={','.join(diversity.get('active_open_symbols') or []) or 'none'}"
+        )
+    else:
+        lines.append("- symbol diversity summary unavailable")
+    lines.append("")
+    lines.append("## Family Cluster Guard")
+    lines.append("")
+    family_guard = payload.get("family_cluster_guard_summary") or {}
+    if family_guard:
+        lines.append(f"- {family_guard.get('summary') or 'family cluster guard summary unavailable'}")
+    else:
+        lines.append("- family cluster guard summary unavailable")
+    lines.append("")
     lines.append("## Edge Experiment")
     lines.append("")
     edge_experiment = payload.get("edge_experiment_review") or {}
@@ -636,6 +1217,10 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     if family_availability:
         lines.append(f"- family_availability: {family_availability.get('availability_state', 'unknown')}")
         lines.append(f"- family_summary: {family_availability.get('summary', '')}")
+    trend_proof = payload.get("trend_proof_candidate_summary") or {}
+    if trend_proof:
+        lines.append(f"- trend_proof_availability: {trend_proof.get('availability_state', 'unknown')}")
+        lines.append(f"- trend_proof_summary: {trend_proof.get('summary', '')}")
     lines.append("")
     lines.append("## Next Steps")
     lines.append("")
@@ -654,6 +1239,14 @@ def main() -> int:
     args = parse_args()
     generated_at = _now()
     families = _family_set(args.families)
+    diversity_snapshot = _load_symbol_diversity_snapshot(
+        families=families,
+        min_cohort_trades=int(getattr(args, "symbol_diversity_min_cohort_trades", _SYMBOL_DIVERSITY_MIN_COHORT_TRADES) or 0),
+        soft_cap_count=int(getattr(args, "symbol_diversity_soft_cap_count", _SYMBOL_DIVERSITY_SOFT_CAP_COUNT) or 0),
+        soft_cap_share=float(getattr(args, "symbol_diversity_soft_cap_share", _SYMBOL_DIVERSITY_SOFT_CAP_SHARE) or 0.0),
+    )
+    family_guard_snapshot = _load_family_cluster_guard_snapshot(families=families)
+    trend_proof_snapshot = _load_trend_proof_priority_snapshot(families=families)
 
     sync_payload: dict[str, Any] | None = None
     if not args.skip_sync:
@@ -682,6 +1275,9 @@ def main() -> int:
         symbol=args.symbol,
         families=families,
         include_manual=args.include_manual_review,
+        diversity_snapshot=None if args.symbol else diversity_snapshot,
+        family_guard_snapshot=family_guard_snapshot,
+        trend_proof_snapshot=trend_proof_snapshot,
     )
     candidate = candidate_pool[0] if candidate_pool else None
     portfolio_payload: dict[str, Any] | None = None
@@ -698,6 +1294,8 @@ def main() -> int:
             symbol=args.symbol,
             families=families,
             include_manual=args.include_manual_review,
+            diversity_snapshot=None if args.symbol else diversity_snapshot,
+            family_guard_snapshot=family_guard_snapshot,
         )
         candidate = candidate_pool[0] if candidate_pool else None
     elif candidate is None:
@@ -708,6 +1306,14 @@ def main() -> int:
             query={"universe": args.universe, "limit": args.candidate_limit, "write_report": "false"},
         )
         portfolio_payload = portfolio_raw if isinstance(portfolio_raw, dict) else {}
+    trend_proof_candidate_summary = _trend_proof_candidate_summary(
+        scanner_rows=scanner_rows,
+        portfolio_payload=portfolio_payload,
+        include_manual=args.include_manual_review,
+        diversity_snapshot=None if args.symbol else diversity_snapshot,
+        family_guard_snapshot=family_guard_snapshot,
+        trend_proof_snapshot=trend_proof_snapshot,
+    )
 
     preview: dict[str, Any] | None = None
     approval: dict[str, Any] | None = None
@@ -884,15 +1490,31 @@ def main() -> int:
     if candidate is None:
         next_steps.append("Wait for London/New York session and rerun this helper until an eligible family candidate appears.")
         next_steps.append("Keep focus on trend_continuation or sweep_reversal families; legacy_zone_plan does not advance MICRO_LIVE lineage.")
+        active_families = list((family_guard_snapshot.get("active_families") or [])) if isinstance(family_guard_snapshot, dict) else []
+        if active_families:
+            next_steps.append(
+                f"PAPER lineage family guard is active for {', '.join(active_families)}; wait for same-window cluster/loss cooldown to clear before adding more samples."
+            )
         if family_availability_summary.get("availability_state") == "scanner_surface_empty":
             next_steps.append("Scanner returned zero rows for this universe snapshot; treat this as a surface-empty wait and recheck the next session window.")
         elif family_availability_summary.get("availability_state") == "requested_families_absent":
             next_steps.append("Requested PAPER lineage families are absent from both scanner and portfolio surfaces; this is a market-availability wait, not an approval blockage.")
         else:
             next_steps.append("Requested PAPER lineage families are present but not eligible; inspect portfolio block reasons before widening scope.")
+        if bool(trend_proof_candidate_summary.get("available", False)) and str(
+            trend_proof_candidate_summary.get("availability_state") or ""
+        ) != "trend_limit_candidate_ready":
+            next_steps.append(str(trend_proof_candidate_summary.get("summary") or "Trend proof candidate is still not ready."))
         if symbol_refresh_summary and str(symbol_refresh_summary.get("message") or ""):
             next_steps.append(str(symbol_refresh_summary["message"]))
     else:
+        if bool(diversity_snapshot.get("available", False)) and (
+            bool(candidate.get("symbol_diversity_active_open_symbol"))
+            or bool(candidate.get("symbol_diversity_overrepresented"))
+        ):
+            next_steps.append(
+                "Selected candidate still carries symbol concentration pressure because no cleaner family alternative was eligible in this pass."
+            )
         if intent is not None and str(intent.get("submit_decision") or "") != "SUBMIT":
             next_steps.append(f"Candidate found but PAPER intent is not submit-ready: {(intent or {}).get('decision_reason_message', '')}")
         elif not args.submit_paper:
@@ -917,6 +1539,10 @@ def main() -> int:
         "symbol": (args.symbol or "").upper() or None,
         "universe": args.universe,
         "families": sorted(families),
+        "symbol_diversity_summary": diversity_snapshot,
+        "family_cluster_guard_summary": family_guard_snapshot,
+        "trend_proof_priority_summary": trend_proof_snapshot,
+        "trend_proof_candidate_summary": trend_proof_candidate_summary,
         "paper_lineage_override": bool(args.paper_lineage_override),
         "overall_status": overall_status,
         "summary_line": (

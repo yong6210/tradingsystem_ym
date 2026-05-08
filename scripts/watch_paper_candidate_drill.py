@@ -285,6 +285,12 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
         lines.append(
             f"- attempt {attempt['attempt']}: {attempt['overall_status']} / {attempt['summary_line']}"
         )
+    lines.extend(["", "## Family Cluster Guard", ""])
+    family_guard = payload.get("family_cluster_guard_summary") or {}
+    if family_guard:
+        lines.append(f"- {family_guard.get('summary') or 'family cluster guard summary unavailable'}")
+    else:
+        lines.append("- family cluster guard summary unavailable")
     lines.extend(["", "## Edge Experiment", ""])
     edge_experiment = payload.get("edge_experiment_review") or {}
     if edge_experiment:
@@ -293,6 +299,18 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     else:
         lines.append("- edge experiment unavailable")
     lines.append(f"- {_candidate_edge_experiment_focus_line(payload.get('candidate_edge_experiment_focus'))}")
+    lines.extend(["", "## Trend Proof", ""])
+    trend_proof = payload.get("trend_proof_candidate_summary") or {}
+    if trend_proof:
+        lines.append(
+            f"- state={trend_proof.get('availability_state', 'unknown')} | "
+            f"scanner={int(trend_proof.get('scanner_candidate_count', 0) or 0)} | "
+            f"limit={int(trend_proof.get('scanner_limit_candidate_count', 0) or 0)} | "
+            f"runtime={int(trend_proof.get('runtime_eligible_candidate_count', 0) or 0)}"
+        )
+        lines.append(f"- summary: {trend_proof.get('summary', '')}")
+    else:
+        lines.append("- trend proof unavailable")
     lines.extend(["", "## Raw Payload", "", "```json", json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default), "```"])
     path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -340,6 +358,8 @@ def main() -> int:
     overall_status = "FOUND_ELIGIBLE_CANDIDATE" if found else "NO_ELIGIBLE_CANDIDATE"
     edge_experiment_review = _edge_experiment_summary(final_payload)
     candidate_edge_experiment_focus = _candidate_edge_experiment_focus(final_payload)
+    family_cluster_guard_summary = dict((final_payload or {}).get("family_cluster_guard_summary") or {})
+    trend_proof_candidate_summary = dict((final_payload or {}).get("trend_proof_candidate_summary") or {})
     summary_line = (
         f"Eligible PAPER lineage candidate found on attempt {attempts[-1]['attempt']}."
         if found
@@ -361,6 +381,10 @@ def main() -> int:
     advisory_next_step = _edge_experiment_next_step(edge_experiment_review)
     if advisory_next_step:
         next_steps.append(advisory_next_step)
+    if not found and list(family_cluster_guard_summary.get("active_families") or []):
+        next_steps.append(
+            "PAPER lineage family guard is active; wait until the recent-loss cooldown or same-window cluster cap clears."
+        )
 
     result = {
         "generated_at": generated_at,
@@ -373,6 +397,8 @@ def main() -> int:
         "max_attempts": args.max_attempts,
         "attempts": attempts,
         "final_result": final_payload,
+        "family_cluster_guard_summary": family_cluster_guard_summary,
+        "trend_proof_candidate_summary": trend_proof_candidate_summary,
         "edge_experiment_review": edge_experiment_review,
         "candidate_edge_experiment_focus": candidate_edge_experiment_focus,
         "next_steps": next_steps,

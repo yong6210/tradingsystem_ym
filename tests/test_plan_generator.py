@@ -77,6 +77,95 @@ def test_plan_generator_builds_positive_ev_plan() -> None:
     assert "expected_summary" in validity
 
 
+def test_plan_generator_attaches_runtime_signal_telemetry() -> None:
+    now = datetime.now(timezone.utc)
+    zones = [
+        Zone(
+            zone_id="z_support_runtime_telemetry",
+            symbol="BTCUSDC",
+            timeframe="15m",
+            type="OB",
+            low=98.0,
+            high=100.0,
+            mid=99.0,
+            width_atr=0.4,
+            dir_bias="support",
+            created_ts=now,
+            touch_count=1,
+            base_strength=80.0,
+            quality=78.0,
+            state="active",
+            stats={"p1r": 0.7, "p2r": 0.5, "p3r": 0.3},
+            strategy_version="v1",
+        ),
+        Zone(
+            zone_id="z_resist_runtime_telemetry",
+            symbol="BTCUSDC",
+            timeframe="15m",
+            type="LP",
+            low=101.5,
+            high=102.5,
+            mid=102.0,
+            width_atr=0.3,
+            dir_bias="resistance",
+            created_ts=now,
+            touch_count=0,
+            base_strength=65.0,
+            quality=64.0,
+            state="active",
+            stats={},
+            strategy_version="v1",
+        ),
+    ]
+    context = ContextSnapshot(
+        symbol="BTCUSDC",
+        regime_15m=0.45,
+        jump_rate_5m=0.08,
+        friction_5m=0.2,
+        atr5=0.5,
+        atr15=1.0,
+        sdir=0.1,
+        sevt=-0.1,
+        f=0.1,
+        v=0.2,
+        a=0.05,
+        vz=0.1,
+        az=0.05,
+        last_price=99.2,
+        signal_telemetry={
+            "telemetry_source": "context_snapshot",
+            "telemetry_version": "v1",
+            "prior_window_bars": 24,
+            "close_position": 0.74,
+            "body_fraction": 0.38,
+            "range_atr": 0.92,
+            "body_atr": 0.35,
+            "prior_range_atr": 2.1,
+            "ema_spread_atr": 0.44,
+            "close_vs_ema_fast_atr": 0.28,
+            "long_sweep_distance_atr": 0.17,
+            "short_sweep_distance_atr": 0.03,
+            "long_reclaim_distance_atr": 0.41,
+            "short_reclaim_distance_atr": 0.06,
+        },
+    )
+
+    generator = PlanGenerator()
+    ranked = generator.generate(symbol="BTCUSDC", zones=zones, context=context)
+
+    assert ranked
+    runtime_signal_telemetry = dict((ranked[0].plan.validity or {}).get("runtime_signal_telemetry") or {})
+    assert runtime_signal_telemetry["signal_family"] == "legacy_zone_plan"
+    assert runtime_signal_telemetry["direction"] == "long"
+    assert runtime_signal_telemetry["close_position"] == 0.74
+    assert runtime_signal_telemetry["directional_close_position"] == 0.74
+    assert runtime_signal_telemetry["sweep_distance_atr"] == 0.17
+    assert runtime_signal_telemetry["reclaim_distance_atr"] == 0.41
+    assert runtime_signal_telemetry["directional_close_vs_ema_fast_atr"] == 0.28
+    assert "entry_offset_r" in runtime_signal_telemetry
+    assert runtime_signal_telemetry["edge_proximity_atr"] >= 0.0
+
+
 def test_plan_generator_differentiates_expected_win_prob_for_weaker_context() -> None:
     now = datetime.now(timezone.utc)
     zones = [

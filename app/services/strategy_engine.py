@@ -5,7 +5,7 @@ import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import time
@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -20,13 +21,14 @@ from app.core.events import (
     ENTRY_TRIGGERED,
     OUTCOME_UPDATED,
     PLAN_GENERATED,
+    SESSION_IMPULSE_RETEST_MISS,
     TRADE_CLOSED,
     VALIDATION_FAIL,
     VALIDATION_WARN,
     ZONE_CREATED,
 )
-from app.core.enums import ExecutionFillStage, ExecutionMode, ExitReason, OrderLifecycleState, PlanState, RiskGateState
-from app.db.models import AlertSubscription, Plan, Zone, ZoneOutcome
+from app.core.enums import ExecutionFillStage, ExecutionMode, ExitReason, OrderLifecycleState, PlanState, RiskGateState, SubmitDecision
+from app.db.models import AlertSubscription, ExecutionFill, Plan, Zone, ZoneOutcome
 from app.db.session import SessionLocal
 from app.db.repositories import (
     AlertRepository,
@@ -34,6 +36,7 @@ from app.db.repositories import (
     CandleRepository,
     MetricsRepository,
     OutcomeRepository,
+    SessionImpulseRetestRuntimeAuditRepository,
     ValidationArtifactRepository,
     ZoneRepository,
 )
@@ -66,12 +69,14 @@ from app.services.deployment_contracts import (
 )
 from app.services.edge_experiment_review import build_edge_experiment_review, summarize_edge_experiment_review
 from app.services.edge_evolution_rule import build_edge_evolution_rule, summarize_edge_evolution_rule
+from app.services.fast_failure_guard import fast_failure_hit, fast_failure_trigger_detail, resolve_fast_failure_policy
 from app.services.execution_quality import ExecutionQualityService
 from app.services.execution_friction_measurement import ExecutionFrictionMeasurementService
 from app.services.execution_operator_dashboard import ExecutionOperatorDashboardService
 from app.services.family_execution_degradation_advisory import FamilyExecutionDegradationAdvisoryService
 from app.services.forward_stress_regime_validation import ForwardStressRegimeValidationService
 from app.services.kill_condition_automation import KillConditionAutomationService
+from app.services.lane_tracker import get_execution_lane_tracker
 from app.services.mode_advisory import ModeAdvisoryService
 from app.services.multi_strategy_ab import MultiStrategyABExpansionService
 from app.services.outcome_bucket_granularity import OutcomeBucketGranularityService
@@ -86,8 +91,22 @@ from app.services.event_bus import EventBus
 from app.services.feature_calibration import FeatureCalibrationService
 from app.services.feature_importance import FeatureImportanceService
 from app.services.learning import LearningService
-from app.services.market_data import MarketDataService
+from app.services.market_data import DataQualityError, MarketDataService
 from app.services.metrics import summarize_outcomes
+from app.services.micro_main_strategy_research import (
+    SessionImpulseRetestResearch,
+    build_session_impulse_retest_shadow_summary,
+    session_impulse_retest_profile_for_symbol,
+)
+from app.services.micro_main_live_readiness import (
+    evaluate_micro_main_live_readiness,
+    micro_main_live_readiness_to_dict,
+)
+from app.services.micro_main_universe_policy import (
+    build_micro_main_rollout_contract_snapshot,
+    build_micro_main_universe_policy_snapshot,
+    micro_main_universe_entry,
+)
 from app.services.notification_dispatcher import NotificationDispatcher
 from app.services.operational_checklist import OperationalChecklistService
 from app.services.operating_lock import OperatingLockSnapshot, OperatingLockService
@@ -98,6 +117,7 @@ from app.services.parameter_changelog import ParameterChangelogService
 from app.services.plan_generator import PlanGenerator, RankedPlan
 from app.services.positive_evidence_expansion import PositiveEvidenceExpansionService
 from app.services.portfolio_budget_report import PortfolioBudgetReportService
+from app.services.position_sizing import PositionSizingInput
 from app.services.position_state_machine import FillApplyInput, PositionStateMachineService
 from app.services.promotion_clearance_tracker import PromotionClearanceTrackerService
 from app.services.promotion_decision_brief import PromotionDecisionBriefService
@@ -134,13 +154,61 @@ from app.services.strategy_v2_stress_replay_runner_contract import StrategyV2Str
 from app.services.strategy_v2_stress_validation import StrategyV2StressValidationService
 from app.services.strategy_v2_thesis_validation import StrategyV2ThesisValidationService
 from app.services.strategy_v2_validation import StrategyV2ValidationService
+from app.services.thesis_fingerprint import ThesisFingerprintService
 from app.services.validation_report import ValidationReportService
 from app.services.health_check import HealthCheckService
 from app.services.zone_engine import ZoneEngine
 
 _READ_ONLY_RECOMPUTE_CACHE_TTL_SECONDS = 120.0
+_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY = "session_impulse_retest"
 _READ_ONLY_RECOMPUTE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _VALIDATION_PAYLOAD_CACHE_MAX_AGE_SECONDS = 900.0
+_ACTIVE_CONTRACT_REPLAY_BASELINE_FILE = "strategy_proof_contract_live_subset.json"
+
+_SAFETY_REASON_PREFIXES = (
+    "reconciliation_",
+    "kill_switch",
+    "close_only",
+    "operating_lock",
+    "shock",
+    "transition",
+    "risk_lock",
+    "session_lock",
+    "validation_fail",
+    "user_stream_stale",
+)
+
+_STRUCTURAL_REASONS = {
+    "total_cap_reached",
+    "directional_cap_reached",
+    "cluster_cap_reached",
+    "thesis_duplicate_blocked",
+    "thesis_active_cap_reached",
+    "thesis_cluster_cap_zero_risk",
+}
+
+_ROLLOUT_REASONS = {
+    "mode_shadow_only",
+    "mode_daily_trade_limit_reached",
+    "mode_total_risk_cap_reached",
+    "live_disabled_family",
+    "execution_mode_cap_exceeded",
+    "micro_live_session_not_allowed",
+    "live_limit_only_entry_required",
+    "live_entry_model_not_allowed",
+    "micro_live_strategy_hour_not_allowed",
+    "micro_live_strategy_time_bucket_not_allowed",
+    "micro_live_plan_id_blocklisted",
+    "live_family_cluster_window_cap_reached",
+    "live_family_loss_cooldown_active",
+}
+
+_QUALITY_REASONS = {
+    "risk_budget_below_min",
+    "adjusted_score_non_positive",
+    "invalid_candidate",
+    "sizing_zero_risk",
+}
 
 
 class StrategyEngine:
@@ -166,12 +234,14 @@ class StrategyEngine:
         self.validation_artifact_repo = ValidationArtifactRepository(db)
         self.alert_repo = AlertRepository(db)
         self.alert_retry_repo = AlertRetryQueueRepository(db)
+        self.session_impulse_retest_runtime_audit_repo = SessionImpulseRetestRuntimeAuditRepository(db)
         self.metrics_repo = MetricsRepository(db)
 
         self.market_data = MarketDataService(self.candle_repo)
         self.zone_engine = ZoneEngine()
         self.context_engine = ContextEngine()
         self.plan_generator = PlanGenerator()
+        self.thesis = ThesisFingerprintService(self.settings)
         self.feature_importance_service = FeatureImportanceService(self.plan_generator)
         self.feature_calibration_service = FeatureCalibrationService(
             self.plan_generator,
@@ -323,6 +393,7 @@ class StrategyEngine:
         self.scanner = ScannerService(self.plan_repo, self.candle_repo)
         self.portfolio_budget_report_service = PortfolioBudgetReportService(
             plan_repo=self.plan_repo,
+            submission_repo=self.submission_repo,
             scanner=self.scanner,
             multi_strategy_ab=self.multi_strategy_ab,
             b_continuation_activation=self.b_continuation_activation,
@@ -333,7 +404,7 @@ class StrategyEngine:
             plan_repo=self.plan_repo,
             intent_repo=self.intent_repo,
             submission_repo=self.submission_repo,
-            approval_loader=self._execution_approval_bundle,
+            approval_loader=self._execution_approval_bundle_for_routing,
             exposure_loader=self._current_exposure_rows,
             settings=self.settings,
         )
@@ -341,9 +412,10 @@ class StrategyEngine:
             plan_repo=self.plan_repo,
             intent_repo=self.intent_repo,
             submission_repo=self.submission_repo,
-            approval_loader=self._execution_approval_bundle,
+            approval_loader=self._execution_approval_bundle_for_routing,
             fill_ingest=self.ingest_execution_fill,
             live_submitter=self.submit_binance_order,
+            live_symbol_rules_loader=self.load_binance_symbol_trading_rules,
             settings=self.settings,
         )
         self.execution_reconciliation = ExecutionReconciliationService(
@@ -405,6 +477,423 @@ class StrategyEngine:
         except OSError:
             return
 
+    @staticmethod
+    def _session_impulse_retest_plan_id_for_entry(*, symbol: str, direction: str, entry_ts: datetime) -> str:
+        normalized_symbol = str(symbol or "").upper()
+        direction_code = "L" if str(direction or "").lower() == "long" else "S"
+        stamp = entry_ts.astimezone(timezone.utc).strftime("%Y%m%dT%H%M")
+        return f"sir_{normalized_symbol}_{direction_code}_{stamp}"[:50]
+
+    def _session_impulse_retest_miss_detector_symbols(self, symbols: list[str] | None = None) -> list[str]:
+        requested = {
+            str(item or "").upper()
+            for item in list(symbols or [])
+            if str(item or "").strip()
+        }
+        family_allowed = self._session_impulse_retest_allowed_symbols()
+        requested_mode = self._auto_route_requested_mode()
+        if requested_mode in {ExecutionMode.MICRO_LIVE, ExecutionMode.LIVE}:
+            universe = self._session_impulse_retest_live_routable_symbols(requested_mode)
+        else:
+            live_allowed = set(self._csv_items(self.settings.auto_trading_allowed_symbols, case="upper"))
+            micro_live_allowed = set(
+                self._csv_items(getattr(self.settings, "auto_trading_micro_live_allowed_symbols", ""), case="upper")
+            )
+            configured = live_allowed | micro_live_allowed
+            universe = family_allowed & configured
+        if requested:
+            universe &= requested
+        return sorted(universe)
+
+    def _session_impulse_retest_recent_replay_trades(
+        self,
+        *,
+        symbol: str,
+        cutoff: datetime,
+        end_ts: datetime,
+    ) -> list[Any]:
+        first_1m = self.candle_repo.get_first_candle(symbol, "1m")
+        last_1m = self.candle_repo.get_last_candle(symbol, "1m")
+        last_5m = self.candle_repo.get_last_candle(symbol, "5m")
+        if first_1m is None or last_1m is None or last_5m is None:
+            return []
+
+        first_ts = self._to_utc(first_1m.ts)
+        bounded_end_ts = min(self._to_utc(last_1m.ts), end_ts)
+        if bounded_end_ts <= cutoff:
+            return []
+
+        preload_start = max(first_ts, cutoff - timedelta(hours=12))
+        candles_1m = self.candle_repo.list_range(
+            symbol=symbol,
+            timeframe="1m",
+            start_ts=preload_start,
+            end_ts=bounded_end_ts,
+        )
+        candles_5m = self.candle_repo.list_range(
+            symbol=symbol,
+            timeframe="5m",
+            start_ts=preload_start - timedelta(days=2),
+            end_ts=bounded_end_ts,
+        )
+        if len(candles_1m) < 600 or len(candles_5m) < 200:
+            return []
+
+        runtime = SessionImpulseRetestResearch(
+            symbol=symbol,
+            candles_1m=candles_1m,
+            candles_5m=candles_5m,
+            profile_name=session_impulse_retest_profile_for_symbol(symbol),
+        )
+        return [
+            trade
+            for trade in runtime.backtest()
+            if cutoff <= self._to_utc(trade.entry_ts) <= bounded_end_ts
+        ]
+
+    def _session_impulse_retest_runtime_plan_observation(
+        self,
+        *,
+        symbol: str,
+        entry_ts: datetime,
+        direction: str,
+        lookahead_minutes: int = 12,
+    ) -> dict[str, Any]:
+        normalized_symbol = str(symbol or "").upper()
+        expected_plan_id = self._session_impulse_retest_plan_id_for_entry(
+            symbol=normalized_symbol,
+            direction=direction,
+            entry_ts=entry_ts,
+        )
+        first_1m = self.candle_repo.get_first_candle(normalized_symbol, "1m")
+        last_1m = self.candle_repo.get_last_candle(normalized_symbol, "1m")
+        if first_1m is None or last_1m is None:
+            return {"seen": False, "plan_id": expected_plan_id, "reason": "missing_candles"}
+
+        first_ts = self._to_utc(first_1m.ts)
+        last_ts = self._to_utc(last_1m.ts)
+        observation_end = min(last_ts, entry_ts + timedelta(minutes=max(int(lookahead_minutes), 1)))
+        preload_start = max(first_ts, entry_ts - timedelta(hours=12))
+        candles_1m_all = self.candle_repo.list_range(
+            symbol=normalized_symbol,
+            timeframe="1m",
+            start_ts=preload_start,
+            end_ts=observation_end,
+        )
+        candles_5m_all = self.candle_repo.list_range(
+            symbol=normalized_symbol,
+            timeframe="5m",
+            start_ts=preload_start - timedelta(days=2),
+            end_ts=observation_end,
+        )
+        if len(candles_1m_all) < 600 or len(candles_5m_all) < 200:
+            return {"seen": False, "plan_id": expected_plan_id, "reason": "insufficient_candles"}
+
+        exposure_rows = self.plan_repo.list_exposure_candidates(
+            timeframe="5m",
+            include_planned=self.settings.portfolio_overlay_include_planned_exposure,
+            limit=300,
+        )
+        active_thesis_clusters = self._session_impulse_retest_active_thesis_clusters(exposure_rows)
+
+        minute = 0
+        while entry_ts + timedelta(minutes=minute) <= observation_end:
+            cutoff_ts = entry_ts + timedelta(minutes=minute)
+            candles_1m = [row for row in candles_1m_all if self._to_utc(row.ts) <= cutoff_ts]
+            candles_5m = [row for row in candles_5m_all if self._to_utc(row.ts) <= cutoff_ts]
+            plan = self._session_impulse_retest_runtime_plan(
+                symbol=normalized_symbol,
+                candles_1m=candles_1m,
+                candles_5m=candles_5m,
+                active_thesis_clusters=active_thesis_clusters,
+            )
+            if plan is not None and str(getattr(plan, "plan_id", "") or "") == expected_plan_id:
+                return {
+                    "seen": True,
+                    "plan_id": expected_plan_id,
+                    "observed_at": cutoff_ts.isoformat(),
+                    "valid_from": self._to_utc(getattr(plan, "valid_from", cutoff_ts)).isoformat(),
+                    "valid_until": self._to_utc(getattr(plan, "valid_until", cutoff_ts)).isoformat(),
+                }
+            minute += 1
+
+        return {"seen": False, "plan_id": expected_plan_id, "reason": "runtime_plan_not_observed"}
+
+    def _write_session_impulse_retest_miss_detector_report(
+        self,
+        *,
+        payload: dict[str, Any],
+        now: datetime,
+    ) -> str | None:
+        out_dir = Path(self.settings.session_impulse_retest_miss_detector_report_dir)
+        if not out_dir.is_absolute():
+            out_dir = Path.cwd() / out_dir
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ts = now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            out_path = out_dir / f"session_impulse_retest_miss_detector_{ts}.json"
+            out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+            return str(out_path)
+        except OSError:
+            return None
+
+    def detect_session_impulse_retest_recent_misses(
+        self,
+        *,
+        lookback_hours: int | None = None,
+        symbols: list[str] | None = None,
+        write_report: bool = False,
+    ) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        if not bool(self.settings.session_impulse_retest_miss_detector_enabled):
+            return {
+                "enabled": False,
+                "family": "session_impulse_retest",
+                "observation_mode": "replay_runtime_simulation",
+                "generated_at": now.isoformat(),
+                "lookback_hours": 0,
+                "symbols": [],
+                "expected_trade_count": 0,
+                "runtime_observed_count": 0,
+                "miss_count": 0,
+                "misses": [],
+                "report_path": None,
+            }
+        requested_mode = self._auto_route_requested_mode()
+        if requested_mode is None:
+            return {
+                "enabled": False,
+                "family": "session_impulse_retest",
+                "observation_mode": "replay_runtime_simulation",
+                "generated_at": now.isoformat(),
+                "lookback_hours": 0,
+                "symbols": [],
+                "expected_trade_count": 0,
+                "runtime_observed_count": 0,
+                "miss_count": 0,
+                "misses": [],
+                "report_path": None,
+                "disabled_reason": "auto_trading_disabled_or_shadow_mode",
+            }
+        live_auto_route_allowed, disabled_reason = self._session_impulse_retest_live_auto_route_allowed()
+        if not live_auto_route_allowed:
+            return {
+                "enabled": False,
+                "family": "session_impulse_retest",
+                "observation_mode": "replay_runtime_simulation",
+                "generated_at": now.isoformat(),
+                "lookback_hours": 0,
+                "symbols": [],
+                "expected_trade_count": 0,
+                "runtime_observed_count": 0,
+                "miss_count": 0,
+                "misses": [],
+                "report_path": None,
+                "disabled_reason": disabled_reason,
+            }
+
+        hours = max(1, int(lookback_hours or self.settings.session_impulse_retest_miss_detector_lookback_hours or 24))
+        cutoff = now - timedelta(hours=hours)
+        target_symbols = self._session_impulse_retest_miss_detector_symbols(symbols=symbols)
+        misses: list[dict[str, Any]] = []
+        by_symbol: dict[str, dict[str, Any]] = {}
+        expected_trade_count = 0
+        runtime_observed_count = 0
+
+        for symbol in target_symbols:
+            replay_trades = self._session_impulse_retest_recent_replay_trades(
+                symbol=symbol,
+                cutoff=cutoff,
+                end_ts=now,
+            )
+            symbol_summary = {
+                "expected_trades": len(replay_trades),
+                "runtime_observed_trades": 0,
+                "misses": 0,
+            }
+            expected_trade_count += len(replay_trades)
+            for trade in replay_trades:
+                entry_ts = self._to_utc(getattr(trade, "entry_ts"))
+                direction = str(getattr(trade, "direction", "") or "").lower()
+                observation = self._session_impulse_retest_runtime_plan_observation(
+                    symbol=symbol,
+                    entry_ts=entry_ts,
+                    direction=direction,
+                )
+                if not bool(observation.get("seen")):
+                    continue
+                runtime_observed_count += 1
+                symbol_summary["runtime_observed_trades"] += 1
+                plan_id = str(observation.get("plan_id") or "")
+                intents = self.intent_repo.list_for_plan(plan_id, limit=20)
+                submissions = self.submission_repo.list_for_plan(plan_id, limit=20)
+                if intents:
+                    continue
+                misses.append(
+                    {
+                        "symbol": symbol,
+                        "plan_id": plan_id,
+                        "direction": direction,
+                        "entry_ts": entry_ts.isoformat(),
+                        "runtime_observed_at": str(observation.get("observed_at") or ""),
+                        "valid_from": str(observation.get("valid_from") or ""),
+                        "valid_until": str(observation.get("valid_until") or ""),
+                        "intent_count": len(intents),
+                        "submission_count": len(submissions),
+                        "miss_reason": "missing_intent",
+                        "trade_r_value": round(float(getattr(trade, "r_value", 0.0) or 0.0), 4),
+                        "trade_exit_reason": str(getattr(trade, "exit_reason", "") or ""),
+                    }
+                )
+                symbol_summary["misses"] += 1
+            by_symbol[symbol] = symbol_summary
+
+        payload: dict[str, Any] = {
+            "enabled": True,
+            "family": "session_impulse_retest",
+            "observation_mode": "replay_runtime_simulation",
+            "observation_note": (
+                "runtime_observed_count is derived by replaying current runtime plan generation against historical candles; "
+                "it is not a persisted runtime event log."
+            ),
+            "generated_at": now.isoformat(),
+            "lookback_hours": hours,
+            "window_start": cutoff.isoformat(),
+            "window_end": now.isoformat(),
+            "symbols": target_symbols,
+            "expected_trade_count": expected_trade_count,
+            "runtime_observed_count": runtime_observed_count,
+            "miss_count": len(misses),
+            "misses": misses,
+            "by_symbol": by_symbol,
+            "report_path": None,
+        }
+        if write_report:
+            payload["report_path"] = self._write_session_impulse_retest_miss_detector_report(payload=payload, now=now)
+        return payload
+
+    def _maybe_emit_session_impulse_retest_miss_alert(self, *, report: dict[str, Any]) -> dict | None:
+        if not bool(self.settings.session_impulse_retest_miss_alert_enabled):
+            return None
+
+        miss_count = int(report.get("miss_count") or 0)
+        if miss_count <= 0:
+            return None
+
+        alert_type = "session_impulse_retest_miss"
+        alert_symbol = "SESSION_IMPULSE_RETEST"
+        channel = self.settings.validation_alert_channel
+        cooldown_seconds = max(0, int(self.settings.session_impulse_retest_miss_alert_cooldown_seconds))
+        recent = self.alert_repo.find_recent(
+            symbol=alert_symbol,
+            channel=channel,
+            alert_type=alert_type,
+            within_seconds=cooldown_seconds,
+        )
+        symbols_with_misses = sorted(
+            {
+                str(item.get("symbol") or "").upper()
+                for item in list(report.get("misses") or [])
+                if str(item.get("symbol") or "").strip()
+            }
+        )
+        if recent:
+            return {
+                "emitted": False,
+                "reason": "cooldown_active",
+                "type": alert_type,
+                "channel": channel,
+                "cooldown_seconds": cooldown_seconds,
+                "miss_count": miss_count,
+                "symbols_with_misses": symbols_with_misses,
+                "report_path": report.get("report_path"),
+            }
+
+        now = datetime.now(timezone.utc)
+        if not str(report.get("report_path") or "").strip():
+            report["report_path"] = self._write_session_impulse_retest_miss_detector_report(payload=report, now=now)
+
+        preview_items: list[str] = []
+        for miss in list(report.get("misses") or [])[:4]:
+            symbol = str(miss.get("symbol") or "").upper()
+            direction = str(miss.get("direction") or "").upper()
+            entry_ts = str(miss.get("entry_ts") or "")
+            entry_suffix = entry_ts[-9:-3] if len(entry_ts) >= 9 else entry_ts
+            preview_items.append(f"{symbol}:{direction}:{entry_suffix}")
+        preview = ", ".join(item for item in preview_items if item.strip())
+        symbol_clause = ",".join(symbols_with_misses[:8]) if symbols_with_misses else "n/a"
+        message = f"miss={miss_count} lookback={int(report.get('lookback_hours') or 0)}h symbols={symbol_clause}"
+        if preview:
+            message += f" preview={preview}"
+
+        base_payload = {
+            "family": "session_impulse_retest",
+            "status": "MISS",
+            "generated_at": report.get("generated_at"),
+            "report_path": report.get("report_path"),
+            "lookback_hours": int(report.get("lookback_hours") or 0),
+            "window_start": report.get("window_start"),
+            "window_end": report.get("window_end"),
+            "expected_trade_count": int(report.get("expected_trade_count") or 0),
+            "runtime_observed_count": int(report.get("runtime_observed_count") or 0),
+            "miss_count": miss_count,
+            "symbols_with_misses": symbols_with_misses,
+            "miss_preview": list(report.get("misses") or [])[:5],
+            "message": message,
+        }
+        delivery = self.notification_dispatcher.dispatch(
+            channel=channel,
+            alert_type=alert_type,
+            symbol=alert_symbol,
+            payload=base_payload,
+        )
+        alert = AlertSubscription(
+            alert_id=self._alert_id(prefix="sir_miss", symbol=alert_symbol),
+            plan_id=None,
+            symbol=alert_symbol,
+            channel=channel,
+            type=alert_type,
+            payload={**base_payload, "delivery": delivery},
+            triggered_ts=now,
+        )
+        self.alert_repo.add(alert)
+        self.db.flush()
+        retry_tasks = self.alert_retry_queue.capture_delivery_failure(
+            source_alert_id=alert.alert_id,
+            symbol=alert_symbol,
+            alert_type=alert_type,
+            payload=base_payload,
+            delivery=delivery,
+        )
+        self.events.publish(
+            SESSION_IMPULSE_RETEST_MISS,
+            {
+                "family": "session_impulse_retest",
+                "generated_at": report.get("generated_at"),
+                "report_path": report.get("report_path"),
+                "lookback_hours": int(report.get("lookback_hours") or 0),
+                "expected_trade_count": int(report.get("expected_trade_count") or 0),
+                "runtime_observed_count": int(report.get("runtime_observed_count") or 0),
+                "miss_count": miss_count,
+                "symbols_with_misses": symbols_with_misses,
+                "delivery": delivery,
+                "dedupe_key": (
+                    f"{SESSION_IMPULSE_RETEST_MISS}:"
+                    f"{now.strftime('%Y%m%d%H')}:{miss_count}:{','.join(symbols_with_misses)}"
+                ),
+            },
+        )
+        return {
+            "emitted": True,
+            "type": alert_type,
+            "channel": channel,
+            "miss_count": miss_count,
+            "symbols_with_misses": symbols_with_misses,
+            "report_path": report.get("report_path"),
+            "delivery": delivery,
+            "retry_queued": len(retry_tasks),
+        }
+
     def _consecutive_losses(self, outcomes: list[ZoneOutcome]) -> int:
         losses = 0
         for o in outcomes:
@@ -429,12 +918,20 @@ class StrategyEngine:
             if not plan_id or plan_id in seen_plan_ids:
                 continue
             seen_plan_ids.add(plan_id)
-            execution_mode = str(getattr(row, "execution_mode", "") or "")
-            requested_live = bool(getattr(row, "requested_live", False))
-            if requested_live or execution_mode in counted_execution_modes:
+            if self._submission_counts_as_live_contract(row):
                 counted_plan_ids.add(plan_id)
         filtered_plans = [plan for plan in plans if str(plan.plan_id) in counted_plan_ids]
         return self.operating_lock.evaluate(plans=filtered_plans, now=now)
+
+    @staticmethod
+    def _submission_counts_as_live_contract(row: Any) -> bool:
+        if str(getattr(row, "adapter", "") or "").lower() == "none":
+            return False
+        if str(getattr(row, "state", "") or "").upper() == OrderLifecycleState.REJECTED.value:
+            return False
+        execution_mode = str(getattr(row, "execution_mode", "") or "").upper()
+        requested_live = bool(getattr(row, "requested_live", False))
+        return requested_live or execution_mode in {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value}
 
     def _evaluate_gate(self, *, symbol: str, jump_rate: float) -> tuple[RiskGateState, bool, str, OperatingLockSnapshot]:
         outcomes = self.outcome_repo.list_recent(symbol=symbol, days=30)
@@ -454,24 +951,349 @@ class StrategyEngine:
 
     def _today_trade_count(self) -> int:
         start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        return self.plan_repo.count_since(
+        mode_value = str(getattr(self.settings.auto_trading_execution_mode, "value", self.settings.auto_trading_execution_mode) or "").upper()
+        tracked_states = [
+            PlanState.ARMED.value,
+            PlanState.TRIGGERED.value,
+            PlanState.ENTERED.value,
+            PlanState.PARTIAL_EXIT.value,
+            PlanState.CLOSED.value,
+        ]
+        if mode_value not in {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value}:
+            return self.plan_repo.count_since(
+                timeframe="5m",
+                start_ts=start_of_day,
+                states=tracked_states,
+            )
+
+        recent_live_submission_plan_ids: set[str] = set()
+        for row in self.submission_repo.list_recent(days=2, limit=5000):
+            plan_id = str(getattr(row, "plan_id", "") or "")
+            if not plan_id:
+                continue
+            submitted_at = self._to_utc(getattr(row, "submitted_at", None))
+            if submitted_at < start_of_day:
+                continue
+            if self._submission_counts_as_live_contract(row):
+                recent_live_submission_plan_ids.add(plan_id)
+
+        count = 0
+        recent_plans = self.plan_repo.list_recent_global(
             timeframe="5m",
-            start_ts=start_of_day,
-            states=[
-                PlanState.ARMED.value,
-                PlanState.TRIGGERED.value,
-                PlanState.ENTERED.value,
-                PlanState.PARTIAL_EXIT.value,
-                PlanState.CLOSED.value,
-            ],
+            days=2,
+            states=tracked_states,
+            limit=5000,
         )
+        for row in recent_plans:
+            valid_from = self._to_utc(getattr(row, "valid_from", None))
+            if valid_from < start_of_day:
+                continue
+            validity = dict(getattr(row, "validity", {}) or {})
+            row_mode = str(validity.get("execution_mode") or "").upper()
+            if row_mode in {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value} or str(getattr(row, "plan_id", "") or "") in recent_live_submission_plan_ids:
+                count += 1
+        return count
 
     def _current_exposure_rows(self) -> list:
-        return self.plan_repo.list_exposure_candidates(
+        rows = self.plan_repo.list_exposure_candidates(
             timeframe="5m",
             include_planned=self.settings.portfolio_overlay_include_planned_exposure,
             limit=300,
         )
+        mode_value = str(getattr(self.settings.auto_trading_execution_mode, "value", self.settings.auto_trading_execution_mode) or "").upper()
+        if mode_value not in {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value}:
+            return rows
+
+        allowed_live_modes = {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value}
+        recent_live_submission_plan_ids: set[str] = set()
+        for submission in self.submission_repo.list_recent(days=7, limit=5000):
+            plan_id = str(getattr(submission, "plan_id", "") or "")
+            if not plan_id:
+                continue
+            if self._submission_counts_as_live_contract(submission):
+                recent_live_submission_plan_ids.add(plan_id)
+
+        filtered_rows = []
+        for row in rows:
+            validity = dict(getattr(row, "validity", {}) or {})
+            row_mode = str(validity.get("execution_mode") or "").upper()
+            if row_mode in allowed_live_modes or str(getattr(row, "plan_id", "") or "") in recent_live_submission_plan_ids:
+                filtered_rows.append(row)
+        return filtered_rows
+
+    def _live_cluster_guard(
+        self,
+        *,
+        plan: Plan,
+        executable_plan: dict[str, Any],
+        requested_mode: ExecutionMode,
+        exposure_rows: list[Plan],
+    ) -> dict[str, Any] | None:
+        if requested_mode not in {ExecutionMode.MICRO_LIVE, ExecutionMode.LIVE}:
+            return None
+
+        family = str(executable_plan.get("strategy_family") or (plan.validity or {}).get("strategy_family") or "legacy_zone_plan").lower()
+        requested_direction = str(
+            executable_plan.get("direction")
+            or (plan.validity or {}).get("direction")
+            or getattr(plan, "direction", "")
+            or ""
+        ).lower()
+        cluster_window_minutes = max(0, int(self.settings.auto_trading_live_family_cluster_window_minutes or 0))
+        max_same_family_entries = max(0, int(self.settings.auto_trading_live_max_same_family_entries_per_window or 0))
+        max_same_family_direction_exposures = max(
+            0,
+            int(self.settings.auto_trading_live_max_same_family_direction_exposures or 0),
+        )
+        loss_cooldown_minutes = max(0, int(self.settings.auto_trading_live_recent_loss_cooldown_minutes or 0))
+        loss_trigger_count = max(0, int(self.settings.auto_trading_live_recent_loss_trigger_count or 0))
+        now = datetime.now(timezone.utc)
+
+        recent_window_entries: list[dict[str, Any]] = []
+        recent_direction_exposures: list[dict[str, Any]] = []
+        cluster_cutoff = now - timedelta(minutes=cluster_window_minutes) if cluster_window_minutes > 0 else now
+        if cluster_window_minutes > 0 and max_same_family_entries > 0:
+            for row in exposure_rows:
+                if str(getattr(row, "plan_id", "") or "") == str(plan.plan_id or ""):
+                    continue
+                validity = dict(getattr(row, "validity", {}) or {})
+                row_family = str(validity.get("strategy_family") or "legacy_zone_plan").lower()
+                if row_family != family:
+                    continue
+                opened_ts = self._to_utc(validity.get("entry_ts") or getattr(row, "valid_from", None))
+                if opened_ts < cluster_cutoff:
+                    continue
+                recent_window_entries.append(
+                    {
+                        "plan_id": str(getattr(row, "plan_id", "") or ""),
+                        "symbol": str(getattr(row, "symbol", "") or "").upper(),
+                        "state": str(getattr(row, "state", "") or ""),
+                        "opened_ts": opened_ts.isoformat(),
+                    }
+                )
+
+        if max_same_family_direction_exposures > 0 and requested_direction:
+            for row in exposure_rows:
+                if str(getattr(row, "plan_id", "") or "") == str(plan.plan_id or ""):
+                    continue
+                validity = dict(getattr(row, "validity", {}) or {})
+                row_family = str(validity.get("strategy_family") or "legacy_zone_plan").lower()
+                if row_family != family:
+                    continue
+                row_direction = str(
+                    getattr(row, "direction", None)
+                    or validity.get("direction")
+                    or ""
+                ).lower()
+                if row_direction != requested_direction:
+                    continue
+                opened_ts = self._to_utc(validity.get("entry_ts") or getattr(row, "valid_from", None))
+                recent_direction_exposures.append(
+                    {
+                        "plan_id": str(getattr(row, "plan_id", "") or ""),
+                        "symbol": str(getattr(row, "symbol", "") or "").upper(),
+                        "state": str(getattr(row, "state", "") or ""),
+                        "direction": row_direction,
+                        "opened_ts": opened_ts.isoformat(),
+                    }
+                )
+
+        recent_family_losses: list[dict[str, Any]] = []
+        loss_cutoff = now - timedelta(minutes=loss_cooldown_minutes) if loss_cooldown_minutes > 0 else now
+        if loss_cooldown_minutes > 0 and loss_trigger_count > 0:
+            lookback_days = max(2, int((loss_cooldown_minutes // (24 * 60)) + 2))
+            recent_closed_rows = self.plan_repo.list_recent_global(
+                timeframe="5m",
+                days=lookback_days,
+                states=[PlanState.CLOSED.value],
+                limit=2000,
+            )
+            for row in recent_closed_rows:
+                if str(getattr(row, "plan_id", "") or "") == str(plan.plan_id or ""):
+                    continue
+                validity = dict(getattr(row, "validity", {}) or {})
+                row_family = str(validity.get("strategy_family") or "legacy_zone_plan").lower()
+                if row_family != family:
+                    continue
+                closed_ts_raw = validity.get("final_exit_ts") or validity.get("last_exit_ts")
+                if not closed_ts_raw:
+                    continue
+                closed_ts = self._to_utc(closed_ts_raw)
+                if closed_ts < loss_cutoff:
+                    continue
+                realized_r = self._maybe_float(validity.get("final_exit_realized_r"))
+                if realized_r is None or realized_r >= 0.0:
+                    continue
+                recent_family_losses.append(
+                    {
+                        "plan_id": str(getattr(row, "plan_id", "") or ""),
+                        "symbol": str(getattr(row, "symbol", "") or "").upper(),
+                        "closed_ts": closed_ts.isoformat(),
+                        "realized_r": round(float(realized_r), 4),
+                        "exit_reason": str(validity.get("final_exit_reason") or ""),
+                    }
+                )
+
+        recent_family_losses.sort(key=lambda item: str(item.get("closed_ts") or ""), reverse=True)
+        return {
+            "family": family,
+            "cluster_window_minutes": cluster_window_minutes,
+            "max_same_family_entries_per_window": max_same_family_entries,
+            "recent_family_window_entry_count": len(recent_window_entries),
+            "recent_family_window_symbols": [
+                str(item.get("symbol") or "").upper()
+                for item in recent_window_entries
+                if str(item.get("symbol") or "").strip()
+            ],
+            "recent_family_window_entries": recent_window_entries,
+            "direction": requested_direction,
+            "max_same_family_direction_exposures": max_same_family_direction_exposures,
+            "recent_family_direction_exposure_count": len(recent_direction_exposures),
+            "recent_family_direction_exposure_symbols": [
+                str(item.get("symbol") or "").upper()
+                for item in recent_direction_exposures
+                if str(item.get("symbol") or "").strip()
+            ],
+            "recent_family_direction_exposures": recent_direction_exposures,
+            "loss_cooldown_minutes": loss_cooldown_minutes,
+            "loss_cooldown_trigger_count": loss_trigger_count,
+            "recent_family_loss_count": len(recent_family_losses),
+            "recent_family_loss_symbols": [
+                str(item.get("symbol") or "").upper()
+                for item in recent_family_losses
+                if str(item.get("symbol") or "").strip()
+            ],
+            "recent_family_losses": recent_family_losses,
+        }
+
+    def _micro_live_symbol_priority_guard(
+        self,
+        *,
+        plan: Plan,
+        executable_plan: dict[str, Any],
+        requested_mode: ExecutionMode,
+    ) -> dict[str, Any] | None:
+        if requested_mode != ExecutionMode.MICRO_LIVE:
+            return None
+
+        symbol = str(getattr(plan, "symbol", "") or "").upper()
+        if not symbol:
+            return None
+
+        entry_type = str(executable_plan.get("entry_type") or "").strip().lower()
+        if entry_type and entry_type != "limit":
+            return None
+
+        family = str(
+            executable_plan.get("strategy_family")
+            or (plan.validity or {}).get("strategy_family")
+            or "legacy_zone_plan"
+        ).lower()
+        if not family:
+            return None
+
+        allowed_symbols = [
+            item.strip().upper()
+            for item in str(self.settings.auto_trading_micro_live_allowed_symbols or "").split(",")
+            if item.strip()
+        ]
+        priority_symbols = [
+            item.strip().upper()
+            for item in str(self.settings.auto_trading_micro_live_symbol_priority or "").split(",")
+            if item.strip()
+        ]
+        if not priority_symbols:
+            priority_symbols = allowed_symbols
+        if allowed_symbols:
+            allowed_set = set(allowed_symbols)
+            priority_symbols = [item for item in priority_symbols if item in allowed_set]
+        if symbol not in priority_symbols:
+            return None
+
+        symbol_index = priority_symbols.index(symbol)
+        if symbol_index <= 0:
+            return {
+                "active": True,
+                "blocked": False,
+                "symbol": symbol,
+                "preferred_symbols": priority_symbols,
+                "summary": f"{symbol} is currently the top-priority MICRO_LIVE symbol.",
+            }
+
+        higher_priority_symbols = set(priority_symbols[:symbol_index])
+        lookback_minutes = max(1, int(self.settings.auto_trading_micro_live_priority_submit_ready_lookback_minutes or 180))
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
+        lookback_days = max(1, int((lookback_minutes // (24 * 60)) + 2))
+        recent_intents = self.intent_repo.list_recent(limit=500, days=lookback_days)
+
+        latest_by_plan: dict[str, Any] = {}
+        for row in recent_intents:
+            created_at = self._to_utc(getattr(row, "created_at", None))
+            if created_at < cutoff:
+                continue
+            row_symbol = str(getattr(row, "symbol", "") or "").upper()
+            if row_symbol not in higher_priority_symbols:
+                continue
+            row_family = str(getattr(row, "strategy_family", "") or "").lower()
+            if row_family != family:
+                continue
+            plan_id = str(getattr(row, "plan_id", "") or "")
+            if not plan_id or plan_id in latest_by_plan:
+                continue
+            latest_by_plan[plan_id] = row
+
+        preferred_candidates: list[dict[str, Any]] = []
+        for row in latest_by_plan.values():
+            approval_state = str(getattr(row, "approval_state", "") or "")
+            if not approval_state.startswith("APPROVED"):
+                continue
+            if str(getattr(row, "decision_reason_code", "") or "") != "submit_ready":
+                continue
+            payload = dict(getattr(row, "payload", {}) or {})
+            row_entry_model = str(payload.get("entry_model") or payload.get("entry_type") or "").strip().upper()
+            if row_entry_model != "LIMIT":
+                continue
+            preferred_candidates.append(
+                {
+                    "symbol": str(getattr(row, "symbol", "") or "").upper(),
+                    "plan_id": str(getattr(row, "plan_id", "") or ""),
+                    "created_at": self._to_utc(getattr(row, "created_at", None)).isoformat(),
+                }
+            )
+
+        preferred_candidates.sort(
+            key=lambda item: (
+                priority_symbols.index(str(item.get("symbol") or "").upper()),
+                -datetime.fromisoformat(str(item.get("created_at") or "1970-01-01T00:00:00+00:00")).timestamp(),
+            )
+        )
+        if not preferred_candidates:
+            return {
+                "active": True,
+                "blocked": False,
+                "symbol": symbol,
+                "preferred_symbols": priority_symbols,
+                "lookback_minutes": lookback_minutes,
+                "summary": f"{symbol} has no higher-priority MICRO_LIVE submit-ready symbol inside the last {lookback_minutes}m.",
+            }
+
+        preferred = preferred_candidates[0]
+        preferred_symbol = str(preferred.get("symbol") or "")
+        preferred_created_at = str(preferred.get("created_at") or "")
+        return {
+            "active": True,
+            "blocked": True,
+            "symbol": symbol,
+            "preferred_symbols": priority_symbols,
+            "preferred_symbol": preferred_symbol,
+            "preferred_plan_id": str(preferred.get("plan_id") or ""),
+            "preferred_created_at": preferred_created_at,
+            "lookback_minutes": lookback_minutes,
+            "summary": (
+                f"{symbol} is fallback-only while higher-priority {preferred_symbol} has a submit-ready LIMIT candidate "
+                f"inside the last {lookback_minutes}m."
+            ),
+        }
 
     def _gate_context_for_symbol(
         self,
@@ -529,6 +1351,965 @@ class StrategyEngine:
             "blocked_candidates": [],
             "blocked_reason_counts": {},
             "blocked_gate_group_counts": {},
+        }
+
+    @staticmethod
+    def _csv_items(raw: str | None, *, case: str = "asis") -> list[str]:
+        items: list[str] = []
+        for value in str(raw or "").split(","):
+            item = str(value or "").strip()
+            if not item:
+                continue
+            if case == "upper":
+                items.append(item.upper())
+            elif case == "lower":
+                items.append(item.lower())
+            else:
+                items.append(item)
+        return items
+
+    def _micro_live_direction_contract(self) -> dict[str, list[str]]:
+        mapping: dict[str, list[str]] = {}
+        raw = str(getattr(self.settings, "auto_trading_micro_live_direction_contract", "") or "")
+        for item in raw.split(","):
+            token = str(item or "").strip()
+            if not token or ":" not in token:
+                continue
+            symbol, raw_directions = token.split(":", 1)
+            normalized_symbol = str(symbol or "").strip().upper()
+            if not normalized_symbol:
+                continue
+            directions: list[str] = []
+            for direction in str(raw_directions or "").replace("/", "|").split("|"):
+                normalized_direction = str(direction or "").strip().upper()
+                if normalized_direction and normalized_direction not in directions:
+                    directions.append(normalized_direction)
+            if directions:
+                mapping[normalized_symbol] = directions
+        return mapping
+
+    @staticmethod
+    def _gate_group_for_reason(reason: str | None) -> str:
+        normalized = str(reason or "").strip().lower()
+        if not normalized:
+            return "unknown"
+        if normalized.startswith(_SAFETY_REASON_PREFIXES):
+            return "safety"
+        if normalized in _STRUCTURAL_REASONS:
+            return "structural"
+        if normalized in _ROLLOUT_REASONS:
+            return "rollout"
+        if normalized in _QUALITY_REASONS:
+            return "quality"
+        return "unknown"
+
+    @classmethod
+    def _gate_group_counts_from_reasons(cls, reason_counts: dict[str, int] | None) -> dict[str, int]:
+        counts = {"quality": 0, "rollout": 0, "structural": 0, "safety": 0, "unknown": 0}
+        for reason, value in dict(reason_counts or {}).items():
+            counts[cls._gate_group_for_reason(reason)] += int(value or 0)
+        return counts
+
+    def _active_contract_filters(self, *, symbol: str | None) -> dict[str, Any] | None:
+        active_symbol = str(symbol or "").upper()
+        if not active_symbol:
+            return None
+        if str(self.settings.auto_trading_execution_mode or "").upper() != ExecutionMode.MICRO_LIVE.value:
+            return None
+
+        allowed_symbols = self._csv_items(self.settings.auto_trading_micro_live_allowed_symbols, case="upper")
+        if allowed_symbols and active_symbol not in set(allowed_symbols):
+            return None
+
+        strategy_families = self._csv_items(
+            getattr(self.settings, "auto_trading_micro_live_allowed_families", ""),
+            case="lower",
+        )
+        entry_models = self._csv_items(
+            getattr(self.settings, "auto_trading_micro_live_allowed_entry_models", ""),
+            case="upper",
+        )
+        directions = list(self._micro_live_direction_contract().get(active_symbol) or [])
+        if not strategy_families and not entry_models:
+            return None
+
+        return {
+            "symbol": active_symbol,
+            "execution_mode": ExecutionMode.MICRO_LIVE.value,
+            "strategy_families": strategy_families,
+            "entry_models": entry_models,
+            "directions": directions,
+        }
+
+    def _active_contract_summary(
+        self,
+        *,
+        symbol: str,
+        days: int,
+        portfolio_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        filters = self._active_contract_filters(symbol=symbol)
+        if not filters:
+            return None
+
+        filtered_portfolio_summary = self._filtered_portfolio_summary(
+            portfolio_summary=portfolio_summary,
+            filters=filters,
+        )
+        strategy_families = list(filters.get("strategy_families") or [])
+        entry_models = list(filters.get("entry_models") or [])
+        directions = list(filters.get("directions") or [])
+        execution_quality_summary = self.execution_quality_report(
+            symbol=symbol,
+            days=days,
+            write_report=False,
+            strategy_families=strategy_families,
+            entry_models=entry_models,
+            directions=directions,
+        )
+        score_to_outcome_funnel_summary = self.score_to_outcome_funnel.generate(
+            symbol=symbol,
+            version=self.settings.strategy_version,
+            days=days,
+            portfolio_budget=filtered_portfolio_summary,
+            strategy_families=strategy_families,
+            entry_models=entry_models,
+            directions=directions,
+        )
+        opportunity_capture_summary = self._opportunity_capture_summary(
+            score_to_outcome_funnel_summary=score_to_outcome_funnel_summary,
+            portfolio_budget=filtered_portfolio_summary,
+            execution_quality_summary=execution_quality_summary,
+        )
+        promotion_shadow_counter = self._active_contract_promotion_shadow_counter(
+            symbol=symbol,
+            days=days,
+            filters=filters,
+        )
+        eq_summary = dict(execution_quality_summary or {})
+        history = dict(dict(score_to_outcome_funnel_summary or {}).get("historical_execution_outcomes") or {})
+        return {
+            "filters": filters,
+            "execution_quality_summary": execution_quality_summary,
+            "score_to_outcome_funnel_summary": score_to_outcome_funnel_summary,
+            "opportunity_capture_summary": opportunity_capture_summary,
+            "promotion_shadow_counter": promotion_shadow_counter,
+            "shadow_relaxation_priority": self._active_contract_shadow_relaxation_priority(promotion_shadow_counter),
+            "transition_edge_variant_shadow": self._active_contract_transition_edge_variant_shadow(
+                symbol=symbol,
+                filters=filters,
+            ),
+            "selection_shortfall_breakdown": self._contract_selection_shortfall_breakdown(
+                filtered_portfolio_summary=filtered_portfolio_summary
+            ),
+            "raw_counts": {
+                "plans_total": int(eq_summary.get("plans_total", 0) or 0),
+                "matured_plans": int(eq_summary.get("plans_matured", 0) or 0),
+                "filled_matured_plans": int(eq_summary.get("fills_matched", 0) or 0),
+                "unfilled_matured_plans": max(
+                    int(eq_summary.get("plans_matured", 0) or 0) - int(eq_summary.get("fills_matched", 0) or 0),
+                    0,
+                ),
+                "submitted_plans": int(history.get("submitted", 0) or 0),
+                "filled_submitted_plans": int(history.get("filled", 0) or 0),
+                "closed_filled_plans": int(history.get("closed", 0) or 0),
+            },
+        }
+
+    def _active_contract_transition_edge_variant_shadow(
+        self,
+        *,
+        symbol: str,
+        filters: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        filter_symbol = str(filters.get("symbol") or "").strip().upper()
+        strategy_families = {
+            str(item or "").strip().lower()
+            for item in list(filters.get("strategy_families") or [])
+            if str(item or "").strip()
+        }
+        entry_models = {
+            str(item or "").strip().upper()
+            for item in list(filters.get("entry_models") or [])
+            if str(item or "").strip()
+        }
+        directions = {
+            str(item or "").strip().upper()
+            for item in list(filters.get("directions") or [])
+            if str(item or "").strip()
+        }
+        if filter_symbol and str(symbol or "").strip().upper() != filter_symbol:
+            return None
+        if strategy_families and "sweep_reversal" not in strategy_families:
+            return None
+        if entry_models and "LIMIT" not in entry_models:
+            return None
+        if directions and directions != {"LONG", "SHORT"}:
+            return {
+                "available": False,
+                "enabled": bool(self.settings.transition_edge_variant_enabled),
+                "shadow_only": bool(self.settings.transition_edge_variant_shadow_only),
+                "variant": "exp_6_fvg_relaxed_plus_transition_override",
+                "status": "direction_contract_not_supported",
+                "required_contract_directions": sorted(directions),
+                "current_snapshot_only": True,
+                "activation_note": "Direction-scoped active contract is narrower than the current symbol-wide transition shadow diagnostics.",
+            }
+
+        candles5 = self.market_data.recent_candles(symbol, "5m", limit=300)
+        candles15 = self.market_data.recent_candles(symbol, "15m", limit=300)
+        if len(candles5) < 60 or len(candles15) < 60:
+            return {
+                "available": False,
+                "enabled": bool(self.settings.transition_edge_variant_enabled),
+                "shadow_only": bool(self.settings.transition_edge_variant_shadow_only),
+                "variant": "exp_6_fvg_relaxed_plus_transition_override",
+                "status": "insufficient_candles",
+                "required_candles": 60,
+                "candles_5m": len(candles5),
+                "candles_15m": len(candles15),
+            }
+
+        context = self.context_engine.build_snapshot(symbol=symbol, candles_5m=candles5, candles_15m=candles15)
+        existing = self.zone_repo.list_all(symbol=symbol, timeframe="15m")
+        zones = self.zone_engine.refresh(symbol=symbol, candles_15m=candles15, existing=existing)
+        active_zones = [zone for zone in zones if zone.state != "expired"]
+        gate_state, can_open, gate_reason, _ = self._evaluate_gate(
+            symbol=symbol,
+            jump_rate=context.jump_rate_5m,
+        )
+        if not can_open:
+            return {
+                "available": False,
+                "enabled": bool(self.settings.transition_edge_variant_enabled),
+                "shadow_only": bool(self.settings.transition_edge_variant_shadow_only),
+                "variant": "exp_6_fvg_relaxed_plus_transition_override",
+                "status": "skipped_by_gate",
+                "risk_state": str(getattr(gate_state, "value", gate_state) or ""),
+                "gate_reason": str(gate_reason or ""),
+                "active_zone_count": len(active_zones),
+                "regime_profile": self.plan_generator.resolve_regime_label(context),
+                "transition_state": context.transition_state,
+                "transition_lock_reason": context.transition_lock_reason,
+            }
+
+        _, feature_calibration = self._runtime_feature_calibration(symbol=symbol, context=context)
+        diagnostics = self.plan_generator.generation_diagnostics(
+            symbol=symbol,
+            zones=active_zones,
+            context=context,
+            candles_5m=candles5,
+            importance_calibration=feature_calibration,
+        )
+        shadow_summary = dict(diagnostics.get("transition_edge_variant_shadow_summary") or {})
+        low_confluence_block_count = int(
+            dict(diagnostics.get("hard_gate_block_counts") or {}).get("low_confluence", 0) or 0
+        )
+        return {
+            "available": bool(shadow_summary) or bool(self.settings.transition_edge_variant_enabled),
+            "enabled": bool(self.settings.transition_edge_variant_enabled),
+            "shadow_only": bool(self.settings.transition_edge_variant_shadow_only),
+            "variant": "exp_6_fvg_relaxed_plus_transition_override",
+            "status": "shadow_only_compare" if bool(self.settings.transition_edge_variant_shadow_only) else "live_enabled",
+            "regime_profile": diagnostics.get("regime_profile"),
+            "transition_state": diagnostics.get("transition_state"),
+            "transition_lock_reason": diagnostics.get("transition_lock_reason"),
+            "generation_state": diagnostics.get("generation_state"),
+            "active_zone_count": int(diagnostics.get("active_zone_count", 0) or 0),
+            "post_hard_gate_zone_count": int(diagnostics.get("post_hard_gate_zone_count", 0) or 0),
+            "pre_generation_candidate_count": int(diagnostics.get("pre_generation_candidate_count", 0) or 0),
+            "shadow_evaluated_count": int(shadow_summary.get("evaluated", 0) or 0),
+            "shadow_pass_count": int(shadow_summary.get("pass", 0) or 0),
+            "shadow_pass_rate": float(shadow_summary.get("pass_rate", 0.0) or 0.0),
+            "shadow_rescue_reason_mix": dict(shadow_summary.get("reason_mix") or {}),
+            "shadow_candidate_delta": int(shadow_summary.get("shadow_candidate_delta", 0) or 0),
+            "candidate_baseline": int(shadow_summary.get("candidate_baseline", 0) or 0),
+            "candidate_shadow": int(shadow_summary.get("candidate_shadow", 0) or 0),
+            "low_confluence_block_baseline": low_confluence_block_count,
+            "low_confluence_block_shadow": int(shadow_summary.get("low_confluence_block_shadow", 0) or 0),
+            "low_confluence_block_delta": int(shadow_summary.get("low_confluence_block_delta", 0) or 0),
+            "expected_ev_r_proxy": float(shadow_summary.get("expected_ev_r_proxy", 0.0) or 0.0),
+            "current_snapshot_only": True,
+            "activation_note": "Structure/proxy validation only while shadow_only remains enabled.",
+        }
+
+    def _session_impulse_retest_shadow_summary(self, *, symbol: str) -> dict[str, Any]:
+        candles_1m = self.market_data.recent_candles(symbol, "1m", limit=900)
+        candles_5m = self.market_data.recent_candles(symbol, "5m", limit=300)
+        allowed_symbols = [
+            item.strip().upper()
+            for item in str(self.settings.session_impulse_retest_allowed_symbols or "").split(",")
+            if item.strip()
+        ]
+        return build_session_impulse_retest_shadow_summary(
+            symbol=symbol,
+            candles_1m=candles_1m,
+            candles_5m=candles_5m,
+            enabled=bool(self.settings.session_impulse_retest_enabled),
+            shadow_only=bool(self.settings.session_impulse_retest_shadow_only),
+            allowed_symbols=allowed_symbols,
+        )
+
+    def _session_impulse_retest_rollout_readiness(self, *, symbol: str, shadow_summary: dict[str, Any] | None = None) -> dict[str, Any]:
+        universe_policy = build_micro_main_universe_policy_snapshot()
+        readiness = evaluate_micro_main_live_readiness(
+            symbol=symbol,
+            shadow_summary=shadow_summary,
+            universe_policy=universe_policy,
+            enabled=bool(self.settings.session_impulse_retest_enabled),
+            shadow_only=bool(self.settings.session_impulse_retest_shadow_only),
+            partial_ratio=float(self.settings.session_impulse_retest_partial_activation_ratio),
+            core_live_slots=int(self.settings.session_impulse_retest_core_live_slots),
+            secondary_live_enabled=bool(self.settings.session_impulse_retest_secondary_live_enabled),
+        )
+        return micro_main_live_readiness_to_dict(readiness)
+
+    def _session_impulse_retest_allowed_symbols(self) -> set[str]:
+        return {
+            item.strip().upper()
+            for item in str(self.settings.session_impulse_retest_allowed_symbols or "").split(",")
+            if item.strip()
+        }
+
+    def _session_impulse_retest_symbol_tracked(self, symbol: str | None) -> bool:
+        normalized_symbol = str(symbol or "").upper().strip()
+        if not normalized_symbol:
+            return False
+        allowed_symbols = self._session_impulse_retest_allowed_symbols()
+        if not allowed_symbols:
+            return False
+        return normalized_symbol in allowed_symbols
+
+    def _session_impulse_retest_live_routable_symbols(self, requested_mode: ExecutionMode | None) -> set[str]:
+        tracked = self._session_impulse_retest_allowed_symbols()
+        if requested_mode == ExecutionMode.MICRO_LIVE:
+            configured = set(self._csv_items(self.settings.auto_trading_micro_live_allowed_symbols, case="upper"))
+        elif requested_mode == ExecutionMode.LIVE:
+            configured = set(self._csv_items(self.settings.auto_trading_allowed_symbols, case="upper"))
+        else:
+            configured = set()
+        if not configured:
+            return set()
+        return tracked & configured
+
+    def _session_impulse_retest_symbol_live_routable(
+        self,
+        *,
+        symbol: str | None,
+        requested_mode: ExecutionMode | None,
+    ) -> bool:
+        normalized_symbol = str(symbol or "").upper().strip()
+        if not self._session_impulse_retest_symbol_tracked(normalized_symbol):
+            return False
+        return normalized_symbol in self._session_impulse_retest_live_routable_symbols(requested_mode)
+
+    def _session_impulse_retest_live_routable_families(self, requested_mode: ExecutionMode | None) -> set[str]:
+        if requested_mode == ExecutionMode.MICRO_LIVE:
+            return set(
+                self._csv_items(getattr(self.settings, "auto_trading_micro_live_allowed_families", ""), case="lower")
+            )
+        if requested_mode == ExecutionMode.LIVE:
+            return set(self._csv_items(self.settings.auto_trading_allowed_families, case="lower"))
+        live_allowed = set(self._csv_items(self.settings.auto_trading_allowed_families, case="lower"))
+        micro_live_allowed = set(
+            self._csv_items(getattr(self.settings, "auto_trading_micro_live_allowed_families", ""), case="lower")
+        )
+        return live_allowed | micro_live_allowed
+
+    def _session_impulse_retest_live_auto_route_allowed(self) -> tuple[bool, str]:
+        if not bool(self.settings.session_impulse_retest_enabled):
+            return False, "family_disabled"
+        if bool(self.settings.session_impulse_retest_shadow_only):
+            return False, "family_shadow_only"
+        return True, "ok"
+
+    def runtime_sync_symbols(self, *, limit_symbols: int = 30) -> list[str]:
+        explicit_symbols: list[str] = []
+        for raw in (
+            self.settings.auto_trading_allowed_symbols,
+            getattr(self.settings, "auto_trading_micro_live_allowed_symbols", ""),
+            self.settings.session_impulse_retest_allowed_symbols,
+        ):
+            for item in self._csv_items(raw, case="upper"):
+                if item and item not in explicit_symbols:
+                    explicit_symbols.append(item)
+
+        top_symbols = list(self.market_data.refresh_universe(limit=limit_symbols))
+        merged: list[str] = []
+        for symbol in explicit_symbols + top_symbols:
+            normalized = str(symbol or "").upper().strip()
+            if normalized and normalized not in merged:
+                merged.append(normalized)
+        return merged
+
+    def _session_impulse_retest_live_exposure_rows(self, exposure_rows: list[Plan]) -> list[Plan]:
+        requested_mode = self._auto_route_requested_mode()
+        if requested_mode not in {ExecutionMode.MICRO_LIVE, ExecutionMode.LIVE}:
+            return []
+        live_symbols = set(self._session_impulse_retest_miss_detector_symbols())
+        live_families = self._session_impulse_retest_live_routable_families(requested_mode)
+        if not live_symbols or not live_families:
+            return []
+
+        filtered: list[Plan] = []
+        for row in list(exposure_rows or []):
+            symbol = str(getattr(row, "symbol", "") or "").upper()
+            if live_symbols and symbol not in live_symbols:
+                continue
+            validity = dict(getattr(row, "validity", {}) or {})
+            strategy_family = str(validity.get("strategy_family") or "").strip().lower()
+            if live_families and strategy_family not in live_families:
+                continue
+            strategy_sizing = dict(validity.get("strategy_sizing") or {})
+            recommended_risk_r = float(
+                validity.get("recommended_risk_r")
+                or strategy_sizing.get("final_risk_r")
+                or 0.0
+            )
+            if recommended_risk_r <= 0.0:
+                continue
+            filtered.append(row)
+        return filtered
+
+    def _session_impulse_retest_active_thesis_clusters(self, exposure_rows: list[Plan]) -> int:
+        filtered_rows = self._session_impulse_retest_live_exposure_rows(exposure_rows)
+        return len(self.scanner.overlay.thesis_cluster_summary(filtered_rows))
+
+    def _session_impulse_retest_runtime_plan(
+        self,
+        *,
+        symbol: str,
+        candles_1m: list[Any],
+        candles_5m: list[Any],
+        active_thesis_clusters: int,
+    ) -> Plan | None:
+        normalized_symbol = str(symbol or "").upper()
+        if not bool(self.settings.session_impulse_retest_enabled):
+            return None
+        allowed_symbols = self._session_impulse_retest_allowed_symbols()
+        if allowed_symbols and normalized_symbol not in allowed_symbols:
+            return None
+        if len(candles_1m) < 600 or len(candles_5m) < 200:
+            return None
+
+        runtime = SessionImpulseRetestResearch(
+            symbol=normalized_symbol,
+            candles_1m=candles_1m,
+            candles_5m=candles_5m,
+            profile_name=session_impulse_retest_profile_for_symbol(normalized_symbol),
+        )
+        signal = runtime.latest_signal(freshness_minutes=20)
+        if signal is None:
+            return None
+
+        last_ts = runtime._normalize_ts(candles_1m[-1].ts)
+        valid_from = signal.entry_ts
+        valid_until = signal.entry_ts + timedelta(minutes=12)
+        if valid_until <= last_ts:
+            return None
+
+        policy_entry = dict(micro_main_universe_entry(normalized_symbol) or {})
+        tier = str(policy_entry.get("tier") or "secondary")
+        strategy_grade = "A" if tier == "core" else "B"
+        allowed_by_mode, _ = self.plan_generator.strategy_mode.allow_candidate(
+            strategy_family="session_impulse_retest",
+            strategy_grade=strategy_grade,
+        )
+        if not allowed_by_mode:
+            return None
+
+        benchmark_ev_r = float(policy_entry.get("benchmark_ev_r", 0.30) or 0.30)
+        benchmark_win_rate = float(policy_entry.get("benchmark_win_rate", 0.55) or 0.55)
+        universe_risk_multiplier = float(policy_entry.get("risk_multiplier", 0.50) or 0.50)
+        setup_score = min(95.0, max(72.0, 72.0 + benchmark_ev_r * 18.0 + benchmark_win_rate * 8.0))
+
+        strategy_sizing = self.plan_generator.sizing.evaluate(
+            PositionSizingInput(
+                strategy_family="session_impulse_retest",
+                strategy_grade=strategy_grade,
+                regime="trend",
+                reaction_classification="acceptance_confirmed",
+                confirm_only=True,
+                entry_model="CONFIRM",
+                active_thesis_clusters=active_thesis_clusters,
+                transition_state="none",
+                symbol=normalized_symbol,
+                direction=signal.direction,
+            )
+        )
+        strategy_sizing = dict(strategy_sizing)
+        base_final_risk_r = float(strategy_sizing.get("final_risk_r", 0.0) or 0.0)
+        strategy_sizing["pre_universe_final_risk_r"] = round(base_final_risk_r, 4)
+        strategy_sizing["universe_risk_multiplier"] = round(universe_risk_multiplier, 4)
+        strategy_sizing["benchmark_ev_r"] = round(benchmark_ev_r, 4)
+        strategy_sizing["benchmark_win_rate"] = round(benchmark_win_rate, 4)
+        strategy_sizing["final_risk_r"] = round(base_final_risk_r * universe_risk_multiplier, 4)
+        strategy_sizing = self.plan_generator.strategy_mode.apply_to_sizing(
+            strategy_sizing,
+            mode=self.plan_generator.strategy_mode.current_mode(),
+        )
+        post_mode_final_risk_r = float(strategy_sizing.get("final_risk_r", 0.0) or 0.0)
+        signal_weekday_utc = signal.entry_ts.astimezone(timezone.utc).weekday()
+        saturday_risk_multiplier = 1.0
+        if signal_weekday_utc == 5:
+            saturday_risk_multiplier = max(
+                0.0,
+                float(self.settings.session_impulse_retest_saturday_risk_multiplier or 1.0),
+            )
+        strategy_sizing["post_mode_final_risk_r"] = round(post_mode_final_risk_r, 4)
+        strategy_sizing["session_impulse_retest_weekday_utc"] = int(signal_weekday_utc)
+        strategy_sizing["session_impulse_retest_saturday_risk_multiplier"] = round(saturday_risk_multiplier, 4)
+        strategy_sizing["final_risk_r"] = round(post_mode_final_risk_r * saturday_risk_multiplier, 4)
+        if signal_weekday_utc == 5 and saturday_risk_multiplier < 0.9999:
+            strategy_sizing["operational_risk_adjustment_reason"] = "session_impulse_retest_saturday_risk_haircut"
+        final_risk_r = float(strategy_sizing.get("final_risk_r", 0.0) or 0.0)
+        if final_risk_r <= 0.0:
+            return None
+
+        risk_abs = max(abs(signal.entry_price - signal.stop_price), 1e-9)
+        direction_sign = 1.0 if signal.direction == "long" else -1.0
+        tp1 = float(signal.entry_price + direction_sign * risk_abs)
+        tp2 = float(signal.target_price)
+        tp3 = float(signal.target_price)
+        split = {"tp1": 0.35, "tp2": 0.65, "runner": 0.0}
+        cost_est = round(abs(signal.entry_price) * 0.0006 / risk_abs, 4)
+        expected_ev_at_size_r = round(benchmark_ev_r * final_risk_r, 4)
+
+        thesis_fingerprint = self.thesis.build(
+            symbol=normalized_symbol,
+            direction=signal.direction,
+            regime="trend",
+            strategy_family="session_impulse_retest",
+            reaction_classification="acceptance_confirmed",
+            zone_type="micro",
+            near_lp=False,
+            at=signal.entry_ts,
+        )
+        thesis_cluster_id = self.thesis.thesis_cluster_id(thesis_fingerprint)
+
+        validity = {
+            "regime": "trend",
+            "entry_reason": "session_impulse_retest_confirm",
+            "strategy_family": "session_impulse_retest",
+            "strategy_grade": strategy_grade,
+            "strategy_family_score": round(setup_score, 2),
+            "strategy_family_reason": "session_impulse_retest_runtime_signal",
+            "strategy_family_confirm_only": True,
+            "strategy_mode": self.plan_generator.strategy_mode.current_mode().value,
+            "strategy_sizing": strategy_sizing,
+            "recommended_risk_r": final_risk_r,
+            "expected_win_prob": round(benchmark_win_rate, 4),
+            "expected_ev_r": round(benchmark_ev_r, 4),
+            "expected_tp1_prob": round(min(0.95, benchmark_win_rate + 0.12), 4),
+            "expected_tp2_prob": round(max(0.05, benchmark_win_rate - 0.10), 4),
+            "expected_tp3_prob": round(max(0.0, benchmark_win_rate - 0.18), 4),
+            "expected_ev_at_recommended_size_r": expected_ev_at_size_r,
+            "expected_summary": (
+                f"session_impulse_retest benchmark | win≈{benchmark_win_rate * 100.0:.1f}% "
+                f"EV≈{benchmark_ev_r:+.2f}R | tier={tier}"
+            ),
+            "session_impulse_retest_operational_risk_multiplier": round(saturday_risk_multiplier, 4),
+            "reaction_classification": "acceptance_confirmed",
+            "transition_state": "none",
+            "session_impulse_retest_signal": {
+                "profile_name": runtime.profile_name,
+                "signal_ts": signal.signal_ts.isoformat(),
+                "setup_ts": signal.setup_ts.isoformat(),
+                "entry_ts": signal.entry_ts.isoformat(),
+                "direction": signal.direction,
+                "entry_price": round(float(signal.entry_price), 8),
+                "stop_price": round(float(signal.stop_price), 8),
+                "target_price": round(float(signal.target_price), 8),
+                "max_hold_minutes": int(signal.max_hold_minutes),
+                "regime_hint": signal.regime_hint,
+            },
+            "strategy_family_time_stop_max_bars": max(int(signal.max_hold_minutes // 5), 1),
+            "thesis_fingerprint": thesis_fingerprint,
+            "thesis_cluster_id": thesis_cluster_id,
+            "thesis_primary_symbol": normalized_symbol,
+        }
+
+        stamp = signal.entry_ts.astimezone(timezone.utc).strftime("%Y%m%dT%H%M")
+        direction_code = "L" if signal.direction == "long" else "S"
+        plan_id = f"sir_{normalized_symbol}_{direction_code}_{stamp}"[:50]
+        zone_id = f"micro:sir:{normalized_symbol}:{stamp}"[:50]
+        return Plan(
+            plan_id=plan_id,
+            zone_id=zone_id,
+            symbol=normalized_symbol,
+            timeframe="5m",
+            direction=signal.direction,
+            entry_model="CONFIRM",
+            entry_price=float(signal.entry_price),
+            entry_condition="session_impulse_retest_confirm",
+            sl=float(signal.stop_price),
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            split=split,
+            rr_min=1.0,
+            rr_base=2.0,
+            rr_opt=2.0,
+            ev=round(benchmark_ev_r, 4),
+            cost_est=cost_est,
+            confidence=round(min(max(setup_score / 100.0, 0.0), 1.0), 4),
+            validity=validity,
+            state=PlanState.ARMED.value,
+            valid_from=valid_from,
+            valid_until=valid_until,
+            strategy_version=str(self.settings.strategy_version),
+        )
+
+    def _active_contract_promotion_shadow_counter(
+        self,
+        *,
+        symbol: str,
+        days: int,
+        filters: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        cadence_window_days = max(int(days or 1), 1)
+        recent_plans = list(self.plan_repo.list_recent(symbol=symbol, timeframe="5m", days=cadence_window_days))
+        entry_models = {
+            str(item or "").strip().upper()
+            for item in list(filters.get("entry_models") or [])
+            if str(item or "").strip()
+        }
+        if not recent_plans:
+            return {
+                "available": True,
+                "comparison_window_days": cadence_window_days,
+                "comparison_note": "Window-level shadow comparison only; not a one-to-one replay/runtime candidate match.",
+                "runtime_recent_symbol_plans_same_window": 0,
+                "runtime_recent_entry_model_plans_same_window": 0,
+                "runtime_promoted_contract_plans_same_window": 0,
+                "runtime_rejected_same_entry_model_plans_same_window": 0,
+                "runtime_rejected_reason_counts": {},
+                "runtime_rejected_reaction_counts": {},
+                "runtime_rejected_family_counts": {},
+                "runtime_promoted_state_counts": {},
+                "runtime_rejected_state_counts": {},
+                "replay_contract_hits_same_window": 0,
+                "promotion_gap_count": 0,
+                "runtime_vs_replay_promotion_ratio": None,
+                "dominant_rejected_reason": None,
+                "shadow_mismatch_state": "no_recent_symbol_plans",
+            }
+
+        runtime_recent_symbol_plans_same_window = len(recent_plans)
+        runtime_recent_entry_model_plans_same_window = 0
+        runtime_promoted_contract_plans_same_window = 0
+        runtime_rejected_same_entry_model_plans_same_window = 0
+        runtime_rejected_reason_counts: dict[str, int] = {}
+        runtime_rejected_reaction_counts: dict[str, int] = {}
+        runtime_rejected_family_counts: dict[str, int] = {}
+        runtime_promoted_state_counts: dict[str, int] = {}
+        runtime_rejected_state_counts: dict[str, int] = {}
+
+        for row in recent_plans:
+            payload = {
+                "symbol": getattr(row, "symbol", symbol),
+                "direction": getattr(row, "direction", ""),
+                "entry_model": getattr(row, "entry_model", ""),
+                "validity": dict(getattr(row, "validity", {}) or {}),
+            }
+            entry_model = self._row_entry_model(payload)
+            if entry_models and entry_model not in entry_models:
+                continue
+
+            runtime_recent_entry_model_plans_same_window += 1
+            if self._row_matches_contract_filters(payload, filters):
+                runtime_promoted_contract_plans_same_window += 1
+                state = str(getattr(row, "state", "") or "unknown")
+                runtime_promoted_state_counts[state] = runtime_promoted_state_counts.get(state, 0) + 1
+                continue
+
+            runtime_rejected_same_entry_model_plans_same_window += 1
+            validity = dict(getattr(row, "validity", {}) or {})
+            reason = str(validity.get("strategy_family_reason") or "unknown")
+            reaction = str(validity.get("reaction_classification") or "unknown")
+            family = str(validity.get("strategy_family") or "unknown")
+            state = str(getattr(row, "state", "") or "unknown")
+            runtime_rejected_reason_counts[reason] = runtime_rejected_reason_counts.get(reason, 0) + 1
+            runtime_rejected_reaction_counts[reaction] = runtime_rejected_reaction_counts.get(reaction, 0) + 1
+            runtime_rejected_family_counts[family] = runtime_rejected_family_counts.get(family, 0) + 1
+            runtime_rejected_state_counts[state] = runtime_rejected_state_counts.get(state, 0) + 1
+
+        replay_contract_hits_same_window = self._active_contract_replay_hits_same_window(
+            filters=filters,
+            days=cadence_window_days,
+        )
+        promotion_gap_count = max(replay_contract_hits_same_window - runtime_promoted_contract_plans_same_window, 0)
+        runtime_vs_replay_promotion_ratio = (
+            round(runtime_promoted_contract_plans_same_window / replay_contract_hits_same_window, 4)
+            if replay_contract_hits_same_window > 0
+            else None
+        )
+        dominant_rejected_reason = None
+        if runtime_rejected_reason_counts:
+            dominant_rejected_reason = max(
+                runtime_rejected_reason_counts.items(),
+                key=lambda item: (item[1], item[0]),
+            )[0]
+        if runtime_recent_entry_model_plans_same_window == 0:
+            shadow_mismatch_state = "no_recent_entry_model_plans"
+        elif runtime_promoted_contract_plans_same_window == 0 and runtime_rejected_same_entry_model_plans_same_window > 0:
+            shadow_mismatch_state = "runtime_entry_model_seen_but_not_promoted"
+        elif replay_contract_hits_same_window > runtime_promoted_contract_plans_same_window:
+            shadow_mismatch_state = "runtime_below_replay_baseline"
+        else:
+            shadow_mismatch_state = "runtime_aligned_or_insufficient_replay_gap"
+
+        return {
+            "available": True,
+            "comparison_window_days": cadence_window_days,
+            "comparison_note": "Window-level shadow comparison only; not a one-to-one replay/runtime candidate match.",
+            "runtime_recent_symbol_plans_same_window": runtime_recent_symbol_plans_same_window,
+            "runtime_recent_entry_model_plans_same_window": runtime_recent_entry_model_plans_same_window,
+            "runtime_promoted_contract_plans_same_window": runtime_promoted_contract_plans_same_window,
+            "runtime_rejected_same_entry_model_plans_same_window": runtime_rejected_same_entry_model_plans_same_window,
+            "runtime_rejected_reason_counts": runtime_rejected_reason_counts,
+            "runtime_rejected_reaction_counts": runtime_rejected_reaction_counts,
+            "runtime_rejected_family_counts": runtime_rejected_family_counts,
+            "runtime_promoted_state_counts": runtime_promoted_state_counts,
+            "runtime_rejected_state_counts": runtime_rejected_state_counts,
+            "replay_contract_hits_same_window": replay_contract_hits_same_window,
+            "promotion_gap_count": promotion_gap_count,
+            "runtime_vs_replay_promotion_ratio": runtime_vs_replay_promotion_ratio,
+            "dominant_rejected_reason": dominant_rejected_reason,
+            "shadow_mismatch_state": shadow_mismatch_state,
+        }
+
+    @staticmethod
+    def _active_contract_shadow_relaxation_priority(
+        promotion_shadow_counter: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        payload = dict(promotion_shadow_counter or {})
+        if not payload:
+            return None
+
+        comparison_window_days = int(payload.get("comparison_window_days", 0) or 0)
+        mismatch_state = str(payload.get("shadow_mismatch_state") or "")
+        promoted = int(payload.get("runtime_promoted_contract_plans_same_window", 0) or 0)
+        replay_hits = int(payload.get("replay_contract_hits_same_window", 0) or 0)
+        rejected = int(payload.get("runtime_rejected_same_entry_model_plans_same_window", 0) or 0)
+        reaction_counts = dict(payload.get("runtime_rejected_reaction_counts") or {})
+        not_applicable = int(reaction_counts.get("not_applicable", 0) or 0)
+        ratio = payload.get("runtime_vs_replay_promotion_ratio")
+        try:
+            ratio_value = float(ratio) if ratio is not None else None
+        except (TypeError, ValueError):
+            ratio_value = None
+
+        base = {
+            "available": True,
+            "apply_live": False,
+            "comparison_window_days": comparison_window_days,
+            "runtime_promoted_contract_plans_same_window": promoted,
+            "runtime_rejected_same_entry_model_plans_same_window": rejected,
+            "runtime_rejected_not_applicable_count": not_applicable,
+            "replay_contract_hits_same_window": replay_hits,
+            "runtime_vs_replay_promotion_ratio": ratio_value,
+            "runner_up_shadow_lanes": [],
+        }
+
+        if mismatch_state in {"no_recent_symbol_plans", "no_recent_entry_model_plans"}:
+            return {
+                **base,
+                "status": "insufficient_signal",
+                "recommended_shadow_lane": None,
+                "rationale_code": mismatch_state,
+                "operator_headline": "No current shadow relaxation priority because the active entry-model lane has no recent runtime sample.",
+            }
+
+        if (
+            mismatch_state in {"runtime_entry_model_seen_but_not_promoted", "runtime_below_replay_baseline"}
+            and rejected > 0
+            and not_applicable > 0
+        ):
+            return {
+                **base,
+                "status": "priority_candidate",
+                "recommended_shadow_lane": "proof_reclaim_plus_one_bar",
+                "runner_up_shadow_lanes": ["proof_reclaim_only", "one_bar_only"],
+                "rationale_code": "reaction_not_applicable_promotion_gap",
+                "operator_headline": (
+                    "Proof reclaim plus one-bar is the current shadow priority because recent runtime LIMIT plans are being rejected as "
+                    "`reaction not applicable` while replay still shows contract-faithful hits, and the combined rescue lane has outperformed the strict baseline in future-blind variant sweeps. Keep this compare-only; do not apply live."
+                ),
+            }
+
+        return {
+            **base,
+            "status": "monitor_only",
+            "recommended_shadow_lane": None,
+            "rationale_code": "no_clear_relaxation_priority",
+            "operator_headline": "No single relaxation lane has enough evidence to outrank strict runtime behavior yet.",
+        }
+
+    def _active_contract_replay_hits_same_window(
+        self,
+        *,
+        filters: dict[str, Any],
+        days: int,
+    ) -> int:
+        cache_path = (
+            Path(self.settings.validation_report_dir)
+            / "historical_walk_forward_cache"
+            / _ACTIVE_CONTRACT_REPLAY_BASELINE_FILE
+        )
+        if not cache_path.exists():
+            return 0
+        try:
+            payload = json.loads(cache_path.read_text())
+        except Exception:
+            return 0
+
+        rows = list(payload.get("trade_rows") or [])
+        if not rows:
+            return 0
+        try:
+            latest_generated_ts = max(
+                datetime.fromisoformat(str(row.get("generated_ts") or "").replace("Z", "+00:00"))
+                for row in rows
+                if str(row.get("generated_ts") or "").strip()
+            )
+        except ValueError:
+            return 0
+
+        if latest_generated_ts.tzinfo is None:
+            latest_generated_ts = latest_generated_ts.replace(tzinfo=timezone.utc)
+        start = latest_generated_ts - timedelta(days=max(int(days or 1), 1))
+
+        filter_symbol = str(filters.get("symbol") or "").strip().upper()
+        strategy_families = {
+            str(item or "").strip().lower()
+            for item in list(filters.get("strategy_families") or [])
+            if str(item or "").strip()
+        }
+        entry_models = {
+            str(item or "").strip().upper()
+            for item in list(filters.get("entry_models") or [])
+            if str(item or "").strip()
+        }
+        directions = {
+            str(item or "").strip().upper()
+            for item in list(filters.get("directions") or [])
+            if str(item or "").strip()
+        }
+
+        hits = 0
+        for row in rows:
+            generated_ts_raw = str(row.get("generated_ts") or "").strip()
+            if not generated_ts_raw:
+                continue
+            try:
+                generated_ts = datetime.fromisoformat(generated_ts_raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if generated_ts.tzinfo is None:
+                generated_ts = generated_ts.replace(tzinfo=timezone.utc)
+            if generated_ts < start:
+                continue
+            symbol_value = str(row.get("symbol") or "").strip().upper()
+            family_value = str(row.get("strategy_family") or "").strip().lower()
+            entry_model_value = str(row.get("entry_model") or "").strip().upper()
+            direction_value = str(row.get("direction") or "").strip().upper()
+            if filter_symbol and symbol_value != filter_symbol:
+                continue
+            if strategy_families and family_value not in strategy_families:
+                continue
+            if entry_models and entry_model_value not in entry_models:
+                continue
+            if directions and direction_value not in directions:
+                continue
+            hits += 1
+        return hits
+
+    @staticmethod
+    def _row_strategy_family(row: dict[str, Any]) -> str:
+        payload = dict(row or {})
+        validity = dict(payload.get("validity") or {})
+        return str(payload.get("strategy_family") or validity.get("strategy_family") or "").lower()
+
+    @staticmethod
+    def _row_entry_model(row: dict[str, Any]) -> str:
+        payload = dict(row or {})
+        validity = dict(payload.get("validity") or {})
+        return str(payload.get("entry_model") or validity.get("entry_model") or "").upper()
+
+    @staticmethod
+    def _row_direction(row: dict[str, Any]) -> str:
+        payload = dict(row or {})
+        validity = dict(payload.get("validity") or {})
+        return str(payload.get("direction") or validity.get("direction") or "").upper()
+
+    @classmethod
+    def _row_matches_contract_filters(cls, row: dict[str, Any], filters: dict[str, Any]) -> bool:
+        symbol_filter = str(filters.get("symbol") or "").upper()
+        strategy_families = {str(item or "").strip().lower() for item in list(filters.get("strategy_families") or [])}
+        entry_models = {str(item or "").strip().upper() for item in list(filters.get("entry_models") or [])}
+        directions = {str(item or "").strip().upper() for item in list(filters.get("directions") or [])}
+        row_symbol = str(dict(row or {}).get("symbol") or "").upper()
+        if symbol_filter and row_symbol and row_symbol != symbol_filter:
+            return False
+        if strategy_families and cls._row_strategy_family(row) not in strategy_families:
+            return False
+        if entry_models and cls._row_entry_model(row) not in entry_models:
+            return False
+        if directions and cls._row_direction(row) not in directions:
+            return False
+        return True
+
+    @classmethod
+    def _filtered_portfolio_summary(
+        cls,
+        *,
+        portfolio_summary: dict[str, Any] | None,
+        filters: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = dict(portfolio_summary or {})
+        accepted_candidates = [
+            dict(row)
+            for row in list(payload.get("accepted_candidates") or [])
+            if cls._row_matches_contract_filters(dict(row), filters)
+        ]
+        blocked_candidates = [
+            dict(row)
+            for row in list(payload.get("blocked_candidates") or [])
+            if cls._row_matches_contract_filters(dict(row), filters)
+        ]
+        blocked_reason_counts: dict[str, int] = {}
+        for row in blocked_candidates:
+            reason = str(
+                row.get("block_reason")
+                or row.get("blocking_reason_code")
+                or row.get("reason_code")
+                or ""
+            ).strip()
+            if not reason:
+                continue
+            blocked_reason_counts[reason] = blocked_reason_counts.get(reason, 0) + 1
+        blocked_gate_group_counts = cls._gate_group_counts_from_reasons(blocked_reason_counts)
+
+        payload["accepted_candidates"] = accepted_candidates
+        payload["blocked_candidates"] = blocked_candidates
+        payload["blocked_reason_counts"] = blocked_reason_counts
+        payload["blocked_gate_group_counts"] = blocked_gate_group_counts
+        return payload
+
+    @staticmethod
+    def _contract_selection_shortfall_breakdown(
+        *,
+        filtered_portfolio_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        accepted_candidates = [dict(row) for row in list(filtered_portfolio_summary.get("accepted_candidates") or [])]
+        blocked_candidates = [dict(row) for row in list(filtered_portfolio_summary.get("blocked_candidates") or [])]
+        return {
+            "runtime_candidates": len(accepted_candidates) + len(blocked_candidates),
+            "accepted_candidates": len(accepted_candidates),
+            "blocked_candidates": len(blocked_candidates),
+            "blocked_reason_counts": dict(filtered_portfolio_summary.get("blocked_reason_counts") or {}),
+            "blocked_gate_group_counts": dict(filtered_portfolio_summary.get("blocked_gate_group_counts") or {}),
         }
 
     def _outcome_inputs_for_symbol(
@@ -1193,12 +2974,28 @@ class StrategyEngine:
             candidate_row=candidate_row,
             execution_mode=requested_mode,
         )
+        live_cluster_guard = self._live_cluster_guard(
+            plan=plan,
+            executable_plan=executable_plan,
+            requested_mode=requested_mode,
+            exposure_rows=exposure_rows,
+        )
+        micro_live_symbol_priority_guard = self._micro_live_symbol_priority_guard(
+            plan=plan,
+            executable_plan=executable_plan,
+            requested_mode=requested_mode,
+        )
         metrics = self.metrics(symbol=plan.symbol, version=self.settings.strategy_version)
         safety_state = self.safety_locks.safety_state(
             symbol=plan.symbol,
             family=family,
             session_name=session_name,
         )
+        if family == "session_impulse_retest":
+            safety_state = dict(safety_state or {})
+            safety_state["session_impulse_retest_rollout_readiness"] = self._session_impulse_retest_rollout_readiness(
+                symbol=plan.symbol,
+            )
         approval = self.execution_planning.approve(
             plan=plan,
             executable_plan=executable_plan,
@@ -1209,6 +3006,8 @@ class StrategyEngine:
             safety_state=safety_state,
             current_exposure_count=len(exposure_rows),
             daily_new_entry_count=self._today_trade_count(),
+            live_cluster_guard=live_cluster_guard,
+            micro_live_symbol_priority_guard=micro_live_symbol_priority_guard,
             paper_lineage_override=paper_lineage_override,
             outcome_inputs=outcome_inputs,
         )
@@ -1219,8 +3018,23 @@ class StrategyEngine:
             "metrics": metrics,
             "safety_state": safety_state,
             "outcome_inputs": outcome_inputs,
+            "micro_live_symbol_priority_guard": micro_live_symbol_priority_guard,
             "approval": approval,
         }
+
+    def _execution_approval_bundle_for_routing(
+        self,
+        plan_id: str,
+        requested_execution_mode: ExecutionMode | str | None,
+        *,
+        paper_lineage_override: bool = False,
+    ) -> dict[str, Any]:
+        return self._execution_approval_bundle(
+            plan_id,
+            requested_execution_mode,
+            strict_requested_mode=False,
+            paper_lineage_override=paper_lineage_override,
+        )
 
     def execution_plan_preview(self, *, plan_id: str, paper_lineage_override: bool = False) -> dict[str, Any]:
         bundle = self._execution_approval_bundle(
@@ -1231,18 +3045,11 @@ class StrategyEngine:
         )
         return bundle["executable_plan"]
 
-    def approve_execution_plan(self, *, plan_id: str, paper_lineage_override: bool = False) -> dict[str, Any]:
-        bundle = self._execution_approval_bundle(
-            plan_id,
-            None,
-            strict_requested_mode=False,
-            paper_lineage_override=paper_lineage_override,
-        )
-        return bundle["approval"]
-
     @staticmethod
     def _order_intent_to_dict(row) -> dict[str, Any]:
         approval = dict(row.approval_snapshot or {})
+        payload = dict(row.payload or {})
+        self_heal_summary = dict(payload.get("self_heal_summary") or dict(payload.get("intent_snapshot") or {}).get("self_heal_summary") or {})
         return {
             "intent_id": row.intent_id,
             "plan_id": row.plan_id,
@@ -1263,6 +3070,7 @@ class StrategyEngine:
             "paper_lineage_override_applied": bool(approval.get("paper_lineage_override_applied")),
             "paper_lineage_override_reason": approval.get("paper_lineage_override_reason", ""),
             "paper_lineage_override_source": approval.get("paper_lineage_override_source", ""),
+            "self_heal_summary": self_heal_summary,
             "source_of_truth_hint": "execution_approval_snapshot",
             "thesis_fingerprint": dict(row.thesis_fingerprint or {}),
             "dedupe_result": dict(row.dedupe_result or {}),
@@ -1324,6 +3132,455 @@ class StrategyEngine:
         self.db.refresh(row)
         return self._submission_to_dict(row, fill_results=fill_results, idempotent_reuse=idempotent_reuse)
 
+    def _auto_route_requested_mode(self) -> ExecutionMode | None:
+        if not bool(self.settings.auto_trading_enabled):
+            return None
+        requested_mode = ExecutionPlanningService.coerce_execution_mode(
+            getattr(self.settings, "auto_trading_execution_mode", None),
+            default=self.execution_planning.active_execution_mode(),
+        )
+        if requested_mode == ExecutionMode.SHADOW:
+            return None
+        return requested_mode
+
+    def _auto_route_recent_intent_cooldown(self, *, plan_id: str, now: datetime) -> dict[str, Any] | None:
+        latest_intent = self.intent_repo.latest_for_plan(plan_id)
+        if latest_intent is None:
+            return None
+        cooldown_seconds = max(0, int(self.settings.auto_trading_intent_recheck_cooldown_seconds or 0))
+        if cooldown_seconds <= 0:
+            return None
+        created_at = self._to_utc(getattr(latest_intent, "created_at", None))
+        if created_at < now - timedelta(seconds=cooldown_seconds):
+            return None
+        return {
+            "intent_id": str(getattr(latest_intent, "intent_id", "") or ""),
+            "created_at": created_at.isoformat(),
+            "submit_decision": str(getattr(latest_intent, "submit_decision", "") or ""),
+            "approval_state": str(getattr(latest_intent, "approval_state", "") or ""),
+            "decision_reason_code": str(getattr(latest_intent, "decision_reason_code", "") or ""),
+            "cooldown_seconds": cooldown_seconds,
+        }
+
+    def _session_impulse_retest_runtime_audit_json_safe(self, value: Any) -> Any:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, datetime):
+            return self._to_utc(value).isoformat()
+        if isinstance(value, dict):
+            return {
+                str(key): self._session_impulse_retest_runtime_audit_json_safe(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [self._session_impulse_retest_runtime_audit_json_safe(item) for item in value]
+        return str(value)
+
+    def _record_session_impulse_retest_runtime_audit(
+        self,
+        *,
+        symbol: str,
+        phase: str,
+        status: str,
+        plan_id: str | None = None,
+        decision_code: str | None = None,
+        observed_ts: datetime | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        from app.db.models import SessionImpulseRetestRuntimeAudit
+
+        normalized_symbol = str(symbol or "").upper().strip()
+        if not self._session_impulse_retest_symbol_tracked(normalized_symbol):
+            return
+
+        normalized_observed_ts = self._to_utc(observed_ts or datetime.now(timezone.utc))
+        row = SessionImpulseRetestRuntimeAudit(
+            audit_id=self._alert_id(prefix="sir_audit", symbol=normalized_symbol),
+            symbol=normalized_symbol,
+            phase=str(phase or "").lower(),
+            status=str(status or "").lower(),
+            plan_id=str(plan_id or "").strip() or None,
+            decision_code=str(decision_code or "").strip() or None,
+            payload=self._session_impulse_retest_runtime_audit_json_safe(dict(payload or {})),
+            observed_ts=normalized_observed_ts,
+        )
+        self.session_impulse_retest_runtime_audit_repo.add(row)
+
+    def _finalize_session_impulse_retest_auto_route_audit(
+        self,
+        *,
+        symbol: str,
+        response: dict[str, Any],
+        observed_ts: datetime,
+    ) -> dict[str, Any]:
+        first_result = next(iter(response.get("results") or []), {}) if isinstance(response, dict) else {}
+        plan_id = str(first_result.get("plan_id") or response.get("plan_id") or "").strip() or None
+        decision_code = None
+        intent_payload = first_result.get("intent") or {}
+        if isinstance(intent_payload, dict):
+            decision_code = str(intent_payload.get("decision_reason_code") or "").strip() or None
+        self._record_session_impulse_retest_runtime_audit(
+            symbol=symbol,
+            phase="auto_route",
+            status=str(response.get("reason") or first_result.get("status") or "unknown"),
+            plan_id=plan_id,
+            decision_code=decision_code,
+            observed_ts=observed_ts,
+            payload=response,
+        )
+        self.db.commit()
+        return response
+
+    def session_impulse_retest_runtime_audits_recent(
+        self,
+        *,
+        hours: int = 24,
+        symbol: str | None = None,
+        phase: str | None = None,
+        status: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        rows = self.session_impulse_retest_runtime_audit_repo.list_recent(
+            hours=hours,
+            symbol=symbol,
+            phase=phase,
+            status=status,
+            limit=limit,
+        )
+        return [
+            {
+                "audit_id": str(getattr(row, "audit_id", "") or ""),
+                "symbol": str(getattr(row, "symbol", "") or ""),
+                "phase": str(getattr(row, "phase", "") or ""),
+                "status": str(getattr(row, "status", "") or ""),
+                "plan_id": str(getattr(row, "plan_id", "") or ""),
+                "decision_code": str(getattr(row, "decision_code", "") or ""),
+                "observed_ts": self._to_utc(getattr(row, "observed_ts", None)).isoformat(),
+                "payload": self._session_impulse_retest_runtime_audit_json_safe(
+                    dict(getattr(row, "payload", {}) or {})
+                ),
+            }
+            for row in rows
+        ]
+
+    def _auto_route_session_impulse_retest_plan(
+        self,
+        *,
+        symbol: str,
+        plan: Plan,
+        requested_mode: ExecutionMode,
+        now: datetime,
+    ) -> dict[str, Any]:
+        result_item: dict[str, Any] = {
+            "plan_id": str(plan.plan_id),
+            "strategy_family": _AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY,
+            "status": "intent_attempted",
+        }
+        recent_intent = self._auto_route_recent_intent_cooldown(plan_id=str(plan.plan_id), now=now)
+        if recent_intent is not None:
+            return self._finalize_session_impulse_retest_auto_route_audit(
+                symbol=symbol,
+                observed_ts=now,
+                response={
+                    "symbol": symbol,
+                    "enabled": True,
+                    "requested_mode": requested_mode.value,
+                    "reason": "recent_intent_cooldown_active",
+                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                "plans_considered": 1,
+                "intents_created": 0,
+                "submit_calls": 0,
+                "results": [
+                    {
+                        **result_item,
+                        "status": "skipped_recent_intent",
+                        "recent_intent": recent_intent,
+                    }
+                ],
+                },
+            )
+
+        try:
+            intent = self.create_order_intent(
+                plan_id=str(plan.plan_id),
+                execution_mode=requested_mode,
+            )
+        except Exception as exc:
+            return self._finalize_session_impulse_retest_auto_route_audit(
+                symbol=symbol,
+                observed_ts=now,
+                response={
+                    "symbol": symbol,
+                    "enabled": True,
+                    "requested_mode": requested_mode.value,
+                    "reason": "intent_creation_failed",
+                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                "plans_considered": 1,
+                "intents_created": 0,
+                "submit_calls": 0,
+                "results": [
+                    {
+                        **result_item,
+                        "status": "intent_error",
+                        "error": str(exc),
+                    }
+                ],
+                },
+            )
+
+        result_item["intent"] = {
+            "intent_id": str(intent.get("intent_id") or ""),
+            "approval_state": str(intent.get("approval_state") or ""),
+            "submit_decision": str(intent.get("submit_decision") or ""),
+            "decision_reason_code": str(intent.get("decision_reason_code") or ""),
+            "decision_reason_message": str(intent.get("decision_reason_message") or ""),
+        }
+        intents_created = 1
+        submit_calls = 0
+
+        if str(intent.get("submit_decision") or "") == SubmitDecision.SUBMIT.value:
+            live_requested = requested_mode in {ExecutionMode.MICRO_LIVE, ExecutionMode.LIVE}
+            try:
+                submission = self.submit_order_intent(
+                    intent_id=str(intent.get("intent_id") or ""),
+                    live=live_requested,
+                )
+                result_item["status"] = "submitted"
+                result_item["submission"] = {
+                    "submission_id": str(submission.get("submission_id") or ""),
+                    "submit_status": str(submission.get("submit_status") or ""),
+                    "state": str(submission.get("state") or ""),
+                    "adapter": str(submission.get("adapter") or ""),
+                    "requested_live": bool(submission.get("requested_live")),
+                }
+                submit_calls = 1
+            except Exception as exc:
+                result_item["status"] = "submit_error"
+                result_item["error"] = str(exc)
+        else:
+            result_item["status"] = "intent_blocked"
+
+        return self._finalize_session_impulse_retest_auto_route_audit(
+            symbol=symbol,
+            observed_ts=now,
+            response={
+                "symbol": symbol,
+                "enabled": True,
+                "requested_mode": requested_mode.value,
+                "reason": result_item["status"],
+                "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+            "plans_considered": 1,
+                "intents_created": intents_created,
+                "submit_calls": submit_calls,
+                "results": [result_item],
+            },
+        )
+
+    def auto_route_session_impulse_retest_plans(self, *, symbol: str, plan_ids: list[str]) -> dict[str, Any]:
+        normalized_symbol = str(symbol or "").upper()
+        if not self._session_impulse_retest_symbol_tracked(normalized_symbol):
+            return {
+                "symbol": normalized_symbol,
+                "enabled": False,
+                "reason": "symbol_not_enabled_for_session_impulse_retest",
+                "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                "plans_considered": 0,
+                "intents_created": 0,
+                "submit_calls": 0,
+                "results": [],
+            }
+        live_auto_route_allowed, live_auto_route_reason = self._session_impulse_retest_live_auto_route_allowed()
+        if not live_auto_route_allowed:
+            return self._finalize_session_impulse_retest_auto_route_audit(
+                symbol=normalized_symbol,
+                observed_ts=datetime.now(timezone.utc),
+                response={
+                    "symbol": normalized_symbol,
+                    "enabled": False,
+                    "reason": live_auto_route_reason,
+                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                    "plans_considered": 0,
+                    "intents_created": 0,
+                    "submit_calls": 0,
+                    "results": [],
+                },
+            )
+        requested_mode = self._auto_route_requested_mode()
+        if requested_mode is None:
+            return self._finalize_session_impulse_retest_auto_route_audit(
+                symbol=normalized_symbol,
+                observed_ts=datetime.now(timezone.utc),
+                response={
+                    "symbol": normalized_symbol,
+                    "enabled": False,
+                    "reason": "auto_trading_disabled_or_shadow_mode",
+                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                    "plans_considered": 0,
+                    "intents_created": 0,
+                    "submit_calls": 0,
+                    "results": [],
+                },
+            )
+        if not self._session_impulse_retest_symbol_live_routable(
+            symbol=normalized_symbol,
+            requested_mode=requested_mode,
+        ):
+            return self._finalize_session_impulse_retest_auto_route_audit(
+                symbol=normalized_symbol,
+                observed_ts=datetime.now(timezone.utc),
+                response={
+                    "symbol": normalized_symbol,
+                    "enabled": False,
+                    "requested_mode": requested_mode.value,
+                    "reason": "symbol_not_live_enabled_for_auto_route",
+                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                    "plans_considered": 0,
+                    "intents_created": 0,
+                    "submit_calls": 0,
+                    "results": [],
+                },
+            )
+        now = datetime.now(timezone.utc)
+        normalized_plan_ids = [str(plan_id or "").strip() for plan_id in plan_ids if str(plan_id or "").strip()]
+        matching_plans: list[Plan] = []
+        for plan_id in normalized_plan_ids:
+            plan = self.plan_repo.get(plan_id)
+            if plan is None:
+                continue
+            if str(plan.symbol or "").upper() != normalized_symbol:
+                continue
+            if str(plan.state or "") not in {PlanState.PLANNED.value, PlanState.ARMED.value}:
+                continue
+            if self._to_utc(getattr(plan, "valid_until", now)) <= now:
+                continue
+            if str((getattr(plan, "validity", {}) or {}).get("strategy_family") or "").lower() != _AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY:
+                continue
+            matching_plans.append(plan)
+        if not matching_plans:
+            return self._finalize_session_impulse_retest_auto_route_audit(
+                symbol=normalized_symbol,
+                observed_ts=now,
+                response={
+                    "symbol": normalized_symbol,
+                    "enabled": True,
+                    "requested_mode": requested_mode.value,
+                    "reason": "no_matching_session_impulse_retest_plan_ids",
+                "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                "plans_considered": 0,
+                    "intents_created": 0,
+                    "submit_calls": 0,
+                    "results": [],
+                },
+            )
+        return self._auto_route_session_impulse_retest_plan(
+            symbol=normalized_symbol,
+            plan=matching_plans[0],
+            requested_mode=requested_mode,
+            now=now,
+        )
+
+    def auto_route_symbol(self, *, symbol: str) -> dict[str, Any]:
+        normalized_symbol = str(symbol or "").upper()
+        if not self._session_impulse_retest_symbol_tracked(normalized_symbol):
+            return {
+                "symbol": normalized_symbol,
+                "enabled": False,
+                "reason": "symbol_not_enabled_for_session_impulse_retest",
+                "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                "plans_considered": 0,
+                "intents_created": 0,
+                "submit_calls": 0,
+                "results": [],
+            }
+        live_auto_route_allowed, live_auto_route_reason = self._session_impulse_retest_live_auto_route_allowed()
+        if not live_auto_route_allowed:
+            return self._finalize_session_impulse_retest_auto_route_audit(
+                symbol=normalized_symbol,
+                observed_ts=datetime.now(timezone.utc),
+                response={
+                    "symbol": normalized_symbol,
+                    "enabled": False,
+                    "reason": live_auto_route_reason,
+                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                    "plans_considered": 0,
+                    "intents_created": 0,
+                    "submit_calls": 0,
+                    "results": [],
+                },
+            )
+        requested_mode = self._auto_route_requested_mode()
+        if requested_mode is None:
+            return self._finalize_session_impulse_retest_auto_route_audit(
+                symbol=normalized_symbol,
+                observed_ts=datetime.now(timezone.utc),
+                response={
+                    "symbol": normalized_symbol,
+                    "enabled": False,
+                    "reason": "auto_trading_disabled_or_shadow_mode",
+                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                    "plans_considered": 0,
+                    "intents_created": 0,
+                    "submit_calls": 0,
+                    "results": [],
+                },
+            )
+        if not self._session_impulse_retest_symbol_live_routable(
+            symbol=normalized_symbol,
+            requested_mode=requested_mode,
+        ):
+            return self._finalize_session_impulse_retest_auto_route_audit(
+                symbol=normalized_symbol,
+                observed_ts=datetime.now(timezone.utc),
+                response={
+                    "symbol": normalized_symbol,
+                    "enabled": False,
+                    "requested_mode": requested_mode.value,
+                    "reason": "symbol_not_live_enabled_for_auto_route",
+                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                    "plans_considered": 0,
+                    "intents_created": 0,
+                    "submit_calls": 0,
+                    "results": [],
+                },
+            )
+
+        active_plans = self.plan_repo.list_active_for_symbol(
+            symbol=normalized_symbol,
+            timeframe="5m",
+            states=[PlanState.PLANNED.value, PlanState.ARMED.value],
+            limit=max(20, int(self.settings.max_candidate_plans_per_symbol) * 4),
+        )
+        session_plans = [
+            plan
+            for plan in active_plans
+            if str((plan.validity or {}).get("strategy_family") or "").lower()
+            == _AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY
+        ]
+        if not session_plans:
+            return self._finalize_session_impulse_retest_auto_route_audit(
+                symbol=normalized_symbol,
+                observed_ts=datetime.now(timezone.utc),
+                response={
+                    "symbol": normalized_symbol,
+                    "enabled": True,
+                    "requested_mode": requested_mode.value,
+                    "reason": "no_session_impulse_retest_plan",
+                "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                "plans_considered": 0,
+                    "intents_created": 0,
+                    "submit_calls": 0,
+                    "results": [],
+                },
+            )
+
+        now = datetime.now(timezone.utc)
+        return self._auto_route_session_impulse_retest_plan(
+            symbol=normalized_symbol,
+            plan=session_plans[0],
+            requested_mode=requested_mode,
+            now=now,
+        )
+
     @staticmethod
     def _paper_exit_price_tolerance(value: float) -> float:
         return max(abs(float(value)) * 0.0005, 1e-6)
@@ -1334,6 +3591,29 @@ class StrategyEngine:
             if str(row.adapter or "").lower() == "paper":
                 return row
         return None
+
+    @staticmethod
+    def _paper_submission_reference_ts(submission: Any) -> datetime | None:
+        for attr in ("acknowledged_at", "submitted_at", "updated_at", "created_at"):
+            value = getattr(submission, attr, None)
+            if isinstance(value, datetime):
+                if value.tzinfo is None:
+                    return value.replace(tzinfo=timezone.utc)
+                return value.astimezone(timezone.utc)
+        return None
+
+    def _paper_sample_stale_cleanup_ready(self, *, plan: Any, submission: Any) -> bool:
+        if str(getattr(submission, "adapter", "") or "").lower() != "paper":
+            return False
+        threshold_hours = float(getattr(self.settings, "auto_trading_paper_stale_sample_cleanup_hours", 0) or 0)
+        if threshold_hours <= 0:
+            return False
+        reference_ts = self._paper_submission_reference_ts(submission)
+        if reference_ts is None:
+            return False
+        if reference_ts > datetime.now(timezone.utc) - timedelta(hours=threshold_hours):
+            return False
+        return self.candle_repo.get_last_candle(plan.symbol, "1m") is None and self.candle_repo.get_last_candle(plan.symbol, "5m") is None
 
     def _latest_paper_exit_candle(
         self,
@@ -1593,6 +3873,129 @@ class StrategyEngine:
         self.db.flush()
         return self.plan_repo.get(plan_id)
 
+    def _repair_closed_plan_exit_metadata_from_fill_payload(
+        self,
+        *,
+        families: set[str] | None = None,
+        days: int = 180,
+        limit: int = 5000,
+    ) -> int:
+        target_families = {
+            str(item).strip().lower()
+            for item in (families or self._GLOBAL_LINEAGE_VALIDATION_FAMILIES)
+            if str(item).strip()
+        }
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))
+        closed_fills = list(
+            self.db.scalars(
+                select(ExecutionFill)
+                .where(
+                    ExecutionFill.stage == ExecutionFillStage.CLOSED.value,
+                    ExecutionFill.fill_ts >= cutoff,
+                )
+                .order_by(ExecutionFill.fill_ts.asc(), ExecutionFill.created_at.asc())
+                .limit(max(100, int(limit)))
+            )
+        )
+        latest_closed_fill_by_plan_id: dict[str, Any] = {}
+        for fill in closed_fills:
+            plan_id = str(getattr(fill, "plan_id", "") or "")
+            if not plan_id:
+                continue
+            latest_closed_fill_by_plan_id[plan_id] = fill
+
+        if not latest_closed_fill_by_plan_id:
+            return 0
+
+        plans = list(
+            self.db.scalars(
+                select(Plan).where(Plan.plan_id.in_(list(latest_closed_fill_by_plan_id.keys())))
+            )
+        )
+        candidate_plans: list[Any] = []
+        for plan in plans:
+            validity = dict(getattr(plan, "validity", {}) or {})
+            family = str(validity.get("strategy_family") or "").strip().lower()
+            if target_families and family not in target_families:
+                continue
+            if all(
+                validity.get(key) not in {None, ""}
+                for key in (
+                    "final_exit_ts",
+                    "final_exit_realized_r",
+                    "final_exit_reason",
+                    "final_exit_held_bars",
+                )
+            ):
+                continue
+            candidate_plans.append(plan)
+
+        if not candidate_plans:
+            return 0
+
+        repaired = 0
+        for plan in candidate_plans:
+            close_fill = latest_closed_fill_by_plan_id.get(str(getattr(plan, "plan_id", "") or ""))
+            if close_fill is None:
+                continue
+            validity = dict(getattr(plan, "validity", {}) or {})
+            payload = dict(getattr(close_fill, "payload", {}) or {})
+            changed = False
+
+            fill_ts = getattr(close_fill, "fill_ts", None)
+            fill_ts_text = self._to_utc(fill_ts).isoformat() if fill_ts is not None else ""
+            exit_ts = str(payload.get("exit_ts") or fill_ts_text or "").strip()
+            exit_reason = str(payload.get("exit_reason") or "").strip()
+            exit_price = self._maybe_float(payload.get("exit_price"))
+            if exit_price is None:
+                exit_price = self._maybe_float(getattr(close_fill, "price", None))
+            realized_r = self._maybe_float(payload.get("realized_r"))
+            held_bars = self._maybe_int(payload.get("held_bars"))
+            classification_before = payload.get("classification_before_exit")
+            classification_after = payload.get("classification_after_exit")
+            trigger_detail = dict(payload.get("trigger_detail") or {})
+
+            if validity.get("final_exit_ts") in {None, ""} and exit_ts:
+                validity["final_exit_ts"] = exit_ts
+                changed = True
+            if validity.get("final_exit_realized_r") in {None, ""} and realized_r is not None:
+                validity["final_exit_realized_r"] = float(realized_r)
+                changed = True
+            if validity.get("final_exit_reason") in {None, ""} and exit_reason:
+                validity["final_exit_reason"] = exit_reason
+                changed = True
+            if validity.get("final_exit_held_bars") in {None, ""} and held_bars is not None:
+                validity["final_exit_held_bars"] = int(held_bars)
+                changed = True
+            if validity.get("final_exit_price") in {None, ""} and exit_price is not None:
+                validity["final_exit_price"] = float(exit_price)
+                changed = True
+            if validity.get("final_exit_classification_before") in {None, ""} and classification_before not in {None, ""}:
+                validity["final_exit_classification_before"] = classification_before
+                changed = True
+            if validity.get("final_exit_classification_after") in {None, ""} and classification_after not in {None, ""}:
+                validity["final_exit_classification_after"] = classification_after
+                changed = True
+            if not dict(validity.get("final_exit_trigger_detail") or {}) and trigger_detail:
+                validity["final_exit_trigger_detail"] = trigger_detail
+                changed = True
+            if validity.get("last_exit_ts") in {None, ""} and exit_ts:
+                validity["last_exit_ts"] = exit_ts
+                changed = True
+            if validity.get("last_exit_reason") in {None, ""} and exit_reason:
+                validity["last_exit_reason"] = exit_reason
+                changed = True
+            if validity.get("last_exit_price") in {None, ""} and exit_price is not None:
+                validity["last_exit_price"] = float(exit_price)
+                changed = True
+
+            if not changed:
+                continue
+            plan.validity = validity
+            self.plan_repo.db.add(plan)
+            repaired += 1
+        return repaired
+
     def process_paper_exit_tick(
         self,
         *,
@@ -1645,8 +4048,14 @@ class StrategyEngine:
             "plan_repairs": plan_repairs,
             "fill_repairs": 0,
             "state_repairs": 0,
+            "stale_cleanup_events": 0,
             "actions": [],
         }
+        summary["closed_validity_repairs"] = self._repair_closed_plan_exit_metadata_from_fill_payload(
+            families=normalized_families or set(self._GLOBAL_LINEAGE_VALIDATION_FAMILIES),
+            days=max(30, int(days)),
+            limit=max(500, int(limit) * 10),
+        )
         for plan, submission, family in candidate_rows:
             summary["processed_plans"] += 1
 
@@ -1668,6 +4077,12 @@ class StrategyEngine:
                 continue
 
             summary["paper_candidate_plans"] += 1
+            exited_qty = sum(
+                max(float(fill.qty or 0.0), 0.0)
+                for fill in previous_fills
+                if str(fill.stage) == ExecutionFillStage.PARTIAL_EXIT.value
+            )
+            remaining_qty = max(0.0, 1.0 - exited_qty)
             candle, candle_timeframe = self._latest_paper_exit_candle(
                 symbol=plan.symbol,
                 sync_candles=sync_candles,
@@ -1675,6 +4090,57 @@ class StrategyEngine:
                 limit_5m=limit_5m,
             )
             if candle is None:
+                if self._paper_sample_stale_cleanup_ready(plan=plan, submission=submission):
+                    fill_ts = datetime.now(timezone.utc).replace(microsecond=0)
+                    latest_fill_ts = max(
+                        (
+                            fill.fill_ts if fill.fill_ts.tzinfo else fill.fill_ts.replace(tzinfo=timezone.utc)
+                            for fill in previous_fills
+                        ),
+                        default=None,
+                    )
+                    if latest_fill_ts is not None and fill_ts <= latest_fill_ts.astimezone(timezone.utc):
+                        fill_ts = latest_fill_ts.astimezone(timezone.utc) + timedelta(seconds=1)
+                    cleanup_qty = remaining_qty if remaining_qty > 1e-10 else 1.0
+                    response = self.ingest_execution_fill(
+                        fill_id=f"paper_exit_{plan.plan_id}_stale_cleanup",
+                        plan_id=plan.plan_id,
+                        symbol=plan.symbol,
+                        stage=ExecutionFillStage.CLOSED,
+                        fill_ts=fill_ts,
+                        price=float(plan.entry_price or 0.0),
+                        qty=max(float(cleanup_qty), 0.0),
+                        fee=0.0,
+                        payload={
+                            "source": "paper_exit_monitor_stale_cleanup",
+                            "client_order_id": submission.client_order_id,
+                            "execution_adapter": "paper",
+                            "exit_reason": "paper_sample_stale_cleanup",
+                            "remaining_qty": 0.0,
+                            "notes": {
+                                "monitor": "paper_exit_monitor_v1",
+                                "cleanup_reason": "stale_no_market_candles",
+                            },
+                        },
+                    )
+                    summary["closed_events"] += 1
+                    summary["stale_cleanup_events"] += 1
+                    summary["actions"].append(
+                        {
+                            "plan_id": plan.plan_id,
+                            "symbol": plan.symbol,
+                            "family": family,
+                            "status": "stale_cleanup_closed",
+                            "stage": ExecutionFillStage.CLOSED.value,
+                            "exit_reason": "paper_sample_stale_cleanup",
+                            "price": float(plan.entry_price or 0.0),
+                            "qty": round(float(cleanup_qty), 4),
+                            "accepted": bool(response.get("accepted")),
+                            "duplicate": bool(response.get("duplicate")),
+                            "to_state": response.get("to_state"),
+                        }
+                    )
+                    continue
                 summary["actions"].append(
                     {
                         "plan_id": plan.plan_id,
@@ -1697,12 +4163,6 @@ class StrategyEngine:
                 for fill in previous_fills
                 if str(fill.stage) in {ExecutionFillStage.PARTIAL_EXIT.value, ExecutionFillStage.CLOSED.value}
             }
-            exited_qty = sum(
-                max(float(fill.qty or 0.0), 0.0)
-                for fill in previous_fills
-                if str(fill.stage) == ExecutionFillStage.PARTIAL_EXIT.value
-            )
-            remaining_qty = max(0.0, 1.0 - exited_qty)
             hits = self._paper_exit_threshold_hits(plan=plan, candle=candle)
             fill_ts = candle.ts
             candle_close = float(candle.c)
@@ -1729,7 +4189,15 @@ class StrategyEngine:
                     summary["actions"].extend(actions_for_plan)
                     continue
 
-            def _record_fill(*, leg: str, stage: ExecutionFillStage, price: float, qty: float, exit_reason: str) -> None:
+            def _record_fill(
+                *,
+                leg: str,
+                stage: ExecutionFillStage,
+                price: float,
+                qty: float,
+                exit_reason: str,
+                trigger_detail: dict[str, Any] | None = None,
+            ) -> None:
                 nonlocal remaining_qty, actions_for_plan
                 response = self.ingest_execution_fill(
                     fill_id=f"paper_exit_{plan.plan_id}_{leg}",
@@ -1746,6 +4214,7 @@ class StrategyEngine:
                         "execution_adapter": "paper",
                         "exit_reason": exit_reason,
                         "remaining_qty": 0.0 if stage == ExecutionFillStage.CLOSED else max(remaining_qty - qty, 0.0),
+                        "trigger_detail": dict(trigger_detail or {}),
                         "notes": {
                             "monitor": "paper_exit_monitor_v1",
                             "candle_timeframe": candle_timeframe,
@@ -1774,7 +4243,31 @@ class StrategyEngine:
                 elif stage == ExecutionFillStage.PARTIAL_EXIT:
                     summary["partial_exit_events"] += 1
 
-            if remaining_qty > 1e-10 and hits["stop"]:
+            fast_failure_policy = resolve_fast_failure_policy(plan=plan, held_bars=held_bars)
+            if (
+                remaining_qty > 1e-10
+                and fast_failure_policy is not None
+                and (not fast_failure_policy.requires_sl_touch or hits["stop"])
+                and fast_failure_hit(
+                    plan=plan,
+                    policy=fast_failure_policy,
+                    high=float(candle.h),
+                    low=float(candle.l),
+                )
+            ):
+                _record_fill(
+                    leg="fast_failure",
+                    stage=ExecutionFillStage.CLOSED,
+                    price=float(fast_failure_policy.stop_price),
+                    qty=remaining_qty,
+                    exit_reason=ExitReason.STRUCTURE_FAILURE.value,
+                    trigger_detail=fast_failure_trigger_detail(
+                        plan=plan,
+                        policy=fast_failure_policy,
+                        held_bars=held_bars,
+                    ),
+                )
+            elif remaining_qty > 1e-10 and hits["stop"]:
                 _record_fill(
                     leg="stop",
                     stage=ExecutionFillStage.CLOSED,
@@ -1859,8 +4352,10 @@ class StrategyEngine:
             summary["plan_repairs"] > 0
             or summary["fill_repairs"] > 0
             or summary["state_repairs"] > 0
+            or int(summary.get("stale_cleanup_events", 0) or 0) > 0
             or summary["partial_exit_events"] > 0
             or summary["closed_events"] > 0
+            or int(summary.get("closed_validity_repairs", 0) or 0) > 0
         ):
             self.db.commit()
         return summary
@@ -1960,6 +4455,30 @@ class StrategyEngine:
             session_name=session_name,
         )
         payload["rollout_policies"] = [item.to_dict() for item in self.rollout_policy_service.list_all()]
+        tracker = get_execution_lane_tracker(window=int(self.settings.transition_edge_variant_lane_tracker_window))
+        variant_locks = list(payload.get("transition_edge_variant_matching_locks") or [])
+        payload["transition_edge_variant"] = {
+            "enabled": bool(self.settings.transition_edge_variant_enabled),
+            "shadow_only": bool(self.settings.transition_edge_variant_shadow_only),
+            "killed": bool(payload.get("transition_edge_variant_disabled_active", False)),
+            "reason": str((variant_locks[0] or {}).get("reason_code") or "") if variant_locks else None,
+            "reason_message": str((variant_locks[0] or {}).get("reason_message") or "") if variant_locks else None,
+            "partial_ratio": round(float(self.settings.transition_edge_variant_partial_activation_ratio), 4),
+            "live_lane": tracker.snapshot(),
+        }
+        payload["session_impulse_retest_universe_policy"] = build_micro_main_rollout_contract_snapshot(
+            enabled=bool(self.settings.session_impulse_retest_enabled),
+            shadow_only=bool(self.settings.session_impulse_retest_shadow_only),
+            partial_activation_ratio=float(self.settings.session_impulse_retest_partial_activation_ratio),
+            core_live_slots=int(self.settings.session_impulse_retest_core_live_slots),
+            secondary_live_enabled=bool(self.settings.session_impulse_retest_secondary_live_enabled),
+        )
+        if symbol:
+            shadow_summary = self._session_impulse_retest_shadow_summary(symbol=symbol)
+            payload["session_impulse_retest_rollout_readiness"] = self._session_impulse_retest_rollout_readiness(
+                symbol=symbol,
+                shadow_summary=shadow_summary,
+            )
         return payload
 
     def safety_state(
@@ -1994,6 +4513,13 @@ class StrategyEngine:
                 symbol=symbol,
                 days=days,
                 write_report=False,
+            )
+        active_contract_summary = None
+        if symbol:
+            active_contract_summary = self._active_contract_summary(
+                symbol=symbol,
+                days=days,
+                portfolio_summary=portfolio_summary,
             )
         recent_reconciliation_summary = self._recent_reconciliation_summary(
             symbol=symbol,
@@ -2336,7 +4862,7 @@ class StrategyEngine:
             family_execution_degradation_advisory_summary=family_execution_degradation_advisory_summary,
             multi_strategy_ab_summary=multi_strategy_ab_summary,
         )
-        return self.execution_operator_dashboard_service.generate(
+        payload = self.execution_operator_dashboard_service.generate(
             symbol=symbol,
             days=days,
             intent_limit=intent_limit,
@@ -2345,6 +4871,7 @@ class StrategyEngine:
             portfolio_summary=portfolio_summary,
             alert_summary=alert_summary,
             execution_quality_summary=execution_quality_summary,
+            active_contract_summary=active_contract_summary,
             alpha_research_pipeline_summary=alpha_research_pipeline_summary,
             score_to_outcome_funnel_summary=score_to_outcome_funnel_summary,
             execution_degradation_advisory_summary=execution_degradation_advisory_summary,
@@ -2375,6 +4902,21 @@ class StrategyEngine:
             forward_stress_regime_validation_summary=forward_stress_regime_validation_summary,
             kill_condition_automation_summary=kill_condition_automation_summary,
         )
+        if symbol:
+            shadow_summary = self._session_impulse_retest_shadow_summary(symbol=symbol)
+            payload["session_impulse_retest_shadow"] = shadow_summary
+            payload["session_impulse_retest_rollout_readiness"] = self._session_impulse_retest_rollout_readiness(
+                symbol=symbol,
+                shadow_summary=shadow_summary,
+            )
+        payload["session_impulse_retest_universe_policy"] = build_micro_main_rollout_contract_snapshot(
+            enabled=bool(self.settings.session_impulse_retest_enabled),
+            shadow_only=bool(self.settings.session_impulse_retest_shadow_only),
+            partial_activation_ratio=float(self.settings.session_impulse_retest_partial_activation_ratio),
+            core_live_slots=int(self.settings.session_impulse_retest_core_live_slots),
+            secondary_live_enabled=bool(self.settings.session_impulse_retest_secondary_live_enabled),
+        )
+        return payload
 
     def set_kill_switch(
         self,
@@ -2788,6 +5330,33 @@ class StrategyEngine:
         }
         return mapping.get(str(status or "").upper(), OrderLifecycleState.ACKNOWLEDGED)
 
+    def _matching_submit_response_fill(
+        self,
+        *,
+        plan: Any | None,
+        order_id: int | None,
+        stage: ExecutionFillStage | None,
+        qty: float,
+        price: float,
+    ) -> Any | None:
+        if plan is None or order_id is None or stage != ExecutionFillStage.ENTRY:
+            return None
+        for fill in self.fill_repo.list_for_plans(plan_ids=[plan.plan_id], symbol=plan.symbol):
+            if str(getattr(fill, "stage", "")) != stage.value:
+                continue
+            payload = dict(getattr(fill, "payload", {}) or {})
+            if str(payload.get("source") or "") != "binance_submit_response":
+                continue
+            if str(payload.get("exchange_order_id") or "") != str(order_id):
+                continue
+            if qty > 0.0 and abs(float(getattr(fill, "qty", 0.0) or 0.0) - qty) > 1e-9:
+                continue
+            fill_price = float(getattr(fill, "price", 0.0) or 0.0)
+            if price > 0.0 and abs(fill_price - price) > self._paper_exit_price_tolerance(price):
+                continue
+            return fill
+        return None
+
     def _sync_submission_from_binance_event(self, *, normalized: dict[str, Any]) -> dict[str, Any] | None:
         client_order_id = str(normalized.get("client_order_id") or "")
         if not client_order_id:
@@ -2886,6 +5455,18 @@ class StrategyEngine:
         self._persist_binance_order_payload(payload=normalized, event_type="submit")
         self.db.commit()
         return normalized
+
+    def load_binance_symbol_trading_rules(self, symbol: str) -> dict[str, Any]:
+        rules = self.market_data.binance.fetch_symbol_trading_rules(symbol)
+        return {
+            "symbol": rules.symbol,
+            "quantity_step": float(rules.quantity_step),
+            "min_quantity": float(rules.min_quantity),
+            "tick_size": float(rules.tick_size) if rules.tick_size is not None else None,
+            "price_precision": rules.price_precision,
+            "quantity_precision": rules.quantity_precision,
+            "source": "binance_exchange_info",
+        }
         
 
     def query_binance_order(
@@ -3063,7 +5644,30 @@ class StrategyEngine:
         fill_ingest = None
         plan = self.plan_repo.get(plan_id) if plan_id else None
         stage = self._infer_fill_stage_from_binance_event(event=normalized, plan=plan, current_positions=position_rows)
-        if plan is not None and stage is not None:
+        duplicate_submit_fill = self._matching_submit_response_fill(
+            plan=plan,
+            order_id=self._maybe_int(normalized.get("order_id")),
+            stage=stage,
+            qty=float(normalized.get("last_fill_qty") or 0.0),
+            price=float(normalized.get("last_fill_price") or normalized.get("avg_price") or 0.0),
+        )
+        if duplicate_submit_fill is not None:
+            payload = dict(getattr(duplicate_submit_fill, "payload", {}) or {})
+            self.db.commit()
+            fill_ingest = {
+                "accepted": True,
+                "duplicate": True,
+                "fill_id": getattr(duplicate_submit_fill, "fill_id", ""),
+                "plan_id": getattr(duplicate_submit_fill, "plan_id", ""),
+                "symbol": getattr(duplicate_submit_fill, "symbol", ""),
+                "stage": getattr(duplicate_submit_fill, "stage", None),
+                "from_state": getattr(duplicate_submit_fill, "from_state", None),
+                "to_state": getattr(duplicate_submit_fill, "to_state", None),
+                "state_changed": False,
+                "reason": "submit_response_fill_already_recorded",
+                "exit_reason": payload.get("exit_reason"),
+            }
+        elif plan is not None and stage is not None:
             fill_payload = {
                 "source": "binance_user_stream",
                 "client_order_id": normalized.get("client_order_id"),
@@ -3155,6 +5759,8 @@ class StrategyEngine:
 
     def _signal_message(self, *, alert_type: str, payload: dict[str, Any]) -> str:
         plan_id = str(payload.get("plan_id") or "")
+        symbol = str(payload.get("symbol") or "")
+        strategy_family = str(payload.get("strategy_family") or "").strip().lower()
         direction = str(payload.get("direction") or "").lower()
         entry_model = str(payload.get("entry_model") or "")
         event_price = payload.get("event_price", payload.get("fill_price"))
@@ -3163,6 +5769,58 @@ class StrategyEngine:
         distance_atr = payload.get("distance_atr")
         exit_reason = str(payload.get("exit_reason") or "")
         expected_summary = str(payload.get("expected_summary") or "").strip()
+        sl = payload.get("sl")
+        tp1 = payload.get("tp1")
+        tp2 = payload.get("tp2")
+        valid_until = payload.get("valid_until")
+        time_stop_bars = payload.get("time_stop_bars")
+
+        if strategy_family == "session_impulse_retest":
+            valid_until_text = str(valid_until or "").replace("+00:00", "Z")
+            dir_text = direction.upper() if direction else "-"
+            levels_text = (
+                f"e={self._fmt_number(entry_price)} sl={self._fmt_number(sl)} "
+                f"tp1={self._fmt_number(tp1)} tp2={self._fmt_number(tp2)}"
+            ).strip()
+            expiry_text = f"exp={valid_until_text or 'signal_expiry'}"
+            if alert_type == "confirm":
+                message = f"{dir_text} {levels_text} {expiry_text}".strip()
+                if expected_summary:
+                    message = f"{message} | {expected_summary}"
+                return message
+            if alert_type == "touch":
+                message = f"{dir_text} watch {levels_text} {expiry_text}".strip()
+                if expected_summary:
+                    message = f"{message} | {expected_summary}"
+                return message
+            if alert_type == "entry":
+                time_stop_text = (
+                    f"ts≈{int(time_stop_bars) * 5}m"
+                    if isinstance(time_stop_bars, (int, float)) and float(time_stop_bars) > 0
+                    else "ts=plan"
+                )
+                return (
+                    f"{dir_text} fill={self._fmt_number(payload.get('fill_price'))} "
+                    f"qty={self._fmt_number(payload.get('qty'))} {levels_text} {time_stop_text}"
+                ).strip()
+            if alert_type == "sl":
+                return (
+                    f"{dir_text} stop fill={self._fmt_number(payload.get('fill_price'))} "
+                    f"r={self._fmt_number(payload.get('realized_r'), decimals=2)} "
+                    f"reason={exit_reason or 'stop_loss'}"
+                ).strip()
+            if alert_type == "tp":
+                return (
+                    f"{dir_text} target fill={self._fmt_number(payload.get('fill_price'))} "
+                    f"r={self._fmt_number(payload.get('realized_r'), decimals=2)} "
+                    f"reason={exit_reason or 'target'}"
+                ).strip()
+            if alert_type == "closed":
+                return (
+                    f"{dir_text} closed fill={self._fmt_number(payload.get('fill_price'))} "
+                    f"r={self._fmt_number(payload.get('realized_r'), decimals=2)} "
+                    f"reason={exit_reason or 'closed'}"
+                ).strip()
 
         if alert_type == "near":
             message = (
@@ -3334,12 +5992,15 @@ class StrategyEngine:
                 "tp1": float(plan.tp1),
                 "tp2": float(plan.tp2),
                 "tp3": float(plan.tp3),
+                "valid_from": getattr(plan, "valid_from", None).isoformat() if getattr(plan, "valid_from", None) else None,
+                "valid_until": getattr(plan, "valid_until", None).isoformat() if getattr(plan, "valid_until", None) else None,
                 "distance_abs": round(distance_abs, 6),
                 "distance_bps": round(distance_bps, 4),
                 "distance_atr": round(distance_atr, 4),
                 "expected_summary": str((plan.validity or {}).get("expected_summary") or ""),
                 "strategy_family": str((plan.validity or {}).get("strategy_family") or "legacy_zone_plan"),
                 "strategy_grade": (plan.validity or {}).get("strategy_grade"),
+                "time_stop_bars": int((plan.validity or {}).get("strategy_family_time_stop_max_bars", 0) or 0),
             }
             if touched:
                 touch_result = self._emit_subscription_alerts(
@@ -3402,6 +6063,14 @@ class StrategyEngine:
             "fill_price": float(price),
             "qty": float(qty),
             "fee": float(fee),
+            "entry_price": float(plan.entry_price),
+            "sl": float(plan.sl),
+            "tp1": float(plan.tp1),
+            "tp2": float(plan.tp2),
+            "tp3": float(plan.tp3),
+            "valid_from": getattr(plan, "valid_from", None).isoformat() if getattr(plan, "valid_from", None) else None,
+            "valid_until": getattr(plan, "valid_until", None).isoformat() if getattr(plan, "valid_until", None) else None,
+            "time_stop_bars": int(validity.get("strategy_family_time_stop_max_bars", 0) or 0),
             "exit_reason": payload.get("exit_reason"),
             "realized_r": payload.get("realized_r"),
             "expected_summary": str(validity.get("expected_summary") or ""),
@@ -3457,23 +6126,30 @@ class StrategyEngine:
         return cls._GLOBAL_LINEAGE_VALIDATION_SYMBOL
 
     def _global_lineage_validation_plans(self, *, version: str) -> list[Any]:
-        plans = self.plan_repo.list_recent_global(
-            timeframe="5m",
-            days=180,
-            limit=20000,
+        cutoff = datetime.now(timezone.utc) - timedelta(days=180)
+        closed_fills = list(
+            self.db.scalars(
+                select(ExecutionFill)
+                .where(
+                    ExecutionFill.stage == ExecutionFillStage.CLOSED.value,
+                    ExecutionFill.fill_ts >= cutoff,
+                )
+                .order_by(ExecutionFill.fill_ts.asc(), ExecutionFill.created_at.asc())
+                .limit(20000)
+            )
         )
         family_set = set(self._GLOBAL_LINEAGE_VALIDATION_FAMILIES)
-        fills = self.fill_repo.list_for_plans(
-            plan_ids=[str(getattr(plan, "plan_id", "") or "") for plan in plans if getattr(plan, "plan_id", None)]
-        )
         close_fill_by_plan_id: dict[str, Any] = {}
-        for fill in fills:
-            if str(getattr(fill, "stage", "")) != ExecutionFillStage.CLOSED.value:
-                continue
+        for fill in closed_fills:
             plan_id = str(getattr(fill, "plan_id", "") or "")
             if not plan_id:
                 continue
             close_fill_by_plan_id[plan_id] = fill
+        plans = list(
+            self.db.scalars(
+                select(Plan).where(Plan.plan_id.in_(list(close_fill_by_plan_id.keys())))
+            )
+        )
         synthetic_plans: list[Any] = []
         for plan in plans:
             validity = dict(getattr(plan, "validity", {}) or {})
@@ -3483,9 +6159,20 @@ class StrategyEngine:
             if family not in family_set or str(getattr(plan, "strategy_version", "")) != version or close_fill is None:
                 continue
             validity.setdefault("lineage_source_symbol", str(getattr(plan, "symbol", "") or ""))
+            payload = dict(getattr(close_fill, "payload", {}) or {})
             fill_ts = getattr(close_fill, "fill_ts", None)
-            if fill_ts is not None and not validity.get("final_exit_ts"):
-                validity["final_exit_ts"] = fill_ts.isoformat()
+            if not validity.get("final_exit_ts"):
+                validity["final_exit_ts"] = str(payload.get("exit_ts") or (fill_ts.isoformat() if fill_ts is not None else ""))
+            if validity.get("final_exit_realized_r") in {None, ""}:
+                realized_r = self._maybe_float(payload.get("realized_r"))
+                if realized_r is not None:
+                    validity["final_exit_realized_r"] = float(realized_r)
+            if validity.get("final_exit_reason") in {None, ""} and payload.get("exit_reason") not in {None, ""}:
+                validity["final_exit_reason"] = str(payload.get("exit_reason") or "")
+            if validity.get("final_exit_held_bars") in {None, ""}:
+                held_bars = self._maybe_int(payload.get("held_bars"))
+                if held_bars is not None:
+                    validity["final_exit_held_bars"] = int(held_bars)
             synthetic_plans.append(
                 SimpleNamespace(
                     plan_id=plan_id,
@@ -3959,10 +6646,28 @@ class StrategyEngine:
         )
 
     def refresh_symbol(self, symbol: str) -> dict:
+        candles1 = self.market_data.recent_candles(symbol, "1m", limit=900)
         candles5 = self.market_data.recent_candles(symbol, "5m", limit=300)
         candles15 = self.market_data.recent_candles(symbol, "15m", limit=300)
         if len(candles5) < 60 or len(candles15) < 60:
-            return {"symbol": symbol, "updated": False, "reason": "insufficient_candles"}
+            response = {
+                "symbol": symbol,
+                "updated": False,
+                "reason": "insufficient_candles",
+                "available_1m": len(candles1),
+                "available_5m": len(candles5),
+                "available_15m": len(candles15),
+            }
+            self._record_session_impulse_retest_runtime_audit(
+                symbol=symbol,
+                phase="refresh",
+                status="insufficient_candles",
+                decision_code="insufficient_candles",
+                observed_ts=datetime.now(timezone.utc),
+                payload=response,
+            )
+            self.db.commit()
+            return response
 
         context = self.context_engine.build_snapshot(symbol=symbol, candles_5m=candles5, candles_15m=candles15)
         existing = self.zone_repo.list_all(symbol=symbol, timeframe="15m")
@@ -3981,6 +6686,9 @@ class StrategyEngine:
             limit=300,
         )
         active_thesis_clusters = len(self.scanner.overlay.thesis_cluster_summary(exposure_rows))
+        session_impulse_retest_active_thesis_clusters = self._session_impulse_retest_active_thesis_clusters(
+            exposure_rows
+        )
         ranked_plans = (
             self.plan_generator.generate(
                 symbol=symbol,
@@ -3993,6 +6701,16 @@ class StrategyEngine:
             if can_open
             else []
         )
+        micro_runtime_plans: list[Plan] = []
+        if can_open:
+            micro_plan = self._session_impulse_retest_runtime_plan(
+                symbol=symbol,
+                candles_1m=candles1,
+                candles_5m=candles5,
+                active_thesis_clusters=session_impulse_retest_active_thesis_clusters,
+            )
+            if micro_plan is not None:
+                micro_runtime_plans.append(micro_plan)
         if can_open:
             if ranked_plans:
                 plan_generation_diagnostics = {
@@ -4003,7 +6721,7 @@ class StrategyEngine:
                     "transition_state": context.transition_state,
                     "transition_lock_reason": context.transition_lock_reason,
                     "active_zone_count": len(active_zones),
-                    "generated_plan_count": len(ranked_plans),
+                    "generated_plan_count": len(ranked_plans) + len(micro_runtime_plans),
                 }
             else:
                 plan_generation_diagnostics = self.plan_generator.generation_diagnostics(
@@ -4013,8 +6731,10 @@ class StrategyEngine:
                     candles_5m=candles5,
                     importance_calibration=feature_calibration,
                 )
-                plan_generation_diagnostics["generation_state"] = "no_fresh_candidates"
-                plan_generation_diagnostics["generated_plan_count"] = 0
+                plan_generation_diagnostics["generation_state"] = (
+                    "micro_main_generated" if micro_runtime_plans else "no_fresh_candidates"
+                )
+                plan_generation_diagnostics["generated_plan_count"] = len(micro_runtime_plans)
         else:
             plan_generation_diagnostics = {
                 "schema_version": "plan_generation_diagnostics_v1",
@@ -4027,7 +6747,7 @@ class StrategyEngine:
                 "active_zone_count": len(active_zones),
                 "generated_plan_count": 0,
             }
-        self.plan_repo.upsert_many([x.plan for x in ranked_plans])
+        self.plan_repo.upsert_many([x.plan for x in ranked_plans] + micro_runtime_plans)
         self.plan_repo.invalidate_expired()
         active_signal_plans = self.plan_repo.list_active_for_symbol(
             symbol=symbol,
@@ -4047,14 +6767,15 @@ class StrategyEngine:
 
         self.events.publish(ZONE_CREATED, {"symbol": symbol, "count": len(zones)})
         self.events.publish(PLAN_GENERATED, {"symbol": symbol, "count": len(ranked_plans)})
-        self.db.commit()
 
-        return {
+        response = {
             "symbol": symbol,
             "updated": True,
             "zones": len(zones),
             "active_zone_count": len(active_zones),
             "plans": len(ranked_plans),
+            "session_impulse_retest_generated_count": len(micro_runtime_plans),
+            "session_impulse_retest_plan_ids": [str(plan.plan_id) for plan in micro_runtime_plans],
             "active_signal_plan_count": len(active_signal_plans),
             "plan_generation_diagnostics": plan_generation_diagnostics,
             "risk_state": gate_state.value,
@@ -4065,11 +6786,42 @@ class StrategyEngine:
             "transition_state": context.transition_state,
             "transition_lock_reason": context.transition_lock_reason,
             "active_thesis_clusters": active_thesis_clusters,
+            "session_impulse_retest_active_thesis_clusters": session_impulse_retest_active_thesis_clusters,
             "strategy_mode": getattr(self.settings.strategy_mode, "value", str(self.settings.strategy_mode)),
             "feature_calibration_available": bool(feature_calibration and feature_calibration.get("available")),
             "feature_calibration_samples": int((feature_calibration or {}).get("matched_samples", 0)),
             "signal_alerts": signal_alerts,
         }
+        family_enabled = bool(self.settings.session_impulse_retest_enabled)
+        refresh_status = (
+            "family_disabled"
+            if not family_enabled
+            else (
+                "signal_generated"
+                if int(response.get("session_impulse_retest_generated_count", 0) or 0) > 0
+                else (
+                    "skipped_by_gate"
+                    if not can_open
+                    else "no_fresh_candidates"
+                )
+            )
+        )
+        decision_code = str(response.get("gate_reason") or "").strip()
+        if refresh_status == "family_disabled":
+            decision_code = "family_disabled"
+        refresh_plan_ids = list(response.get("session_impulse_retest_plan_ids") or [])
+        self._record_session_impulse_retest_runtime_audit(
+            symbol=symbol,
+            phase="refresh",
+            status=refresh_status,
+            plan_id=refresh_plan_ids[0] if refresh_plan_ids else None,
+            decision_code=decision_code,
+            observed_ts=self._to_utc(candles5[-1].ts),
+            payload=response,
+        )
+        self.db.commit()
+
+        return response
 
     def recompute_learning(self, symbol: str, *, persist_runtime_validation_artifacts: bool = True) -> dict:
         if not persist_runtime_validation_artifacts:
@@ -4931,6 +7683,9 @@ class StrategyEngine:
         response = asdict(result)
         response["exit_reason"] = fill_payload.get("exit_reason") or result.exit_reason
         plan = self.plan_repo.get(result.plan_id) if result.plan_id else None
+        if result.duplicate:
+            self.db.commit()
+            return response
 
         if result.state_changed and result.to_state == PlanState.TRIGGERED.value:
             self.events.publish(
@@ -5267,10 +8022,17 @@ class StrategyEngine:
         )
         self.db.commit()
         refresh = self.refresh_symbol(symbol)
+        plan_ids = list(refresh.get("session_impulse_retest_plan_ids") or [])
+        auto_route = (
+            self.auto_route_session_impulse_retest_plans(symbol=symbol, plan_ids=plan_ids)
+            if plan_ids
+            else self.auto_route_symbol(symbol=symbol)
+        )
         return {
             "symbol": symbol,
             "backfill": summary,
             "refresh": refresh,
+            "auto_route": auto_route,
         }
 
     def sync_universe_from_binance(
@@ -5282,7 +8044,7 @@ class StrategyEngine:
         limit_15m: int = 500,
         symbol_concurrency: int = 1,
     ) -> dict:
-        symbols = self.market_data.refresh_universe(limit=limit_symbols)
+        symbols = self.runtime_sync_symbols(limit_symbols=limit_symbols)
         results: list[dict] = []
         success = 0
         failed = 0
@@ -5340,6 +8102,9 @@ class StrategyEngine:
                         )
 
         results.sort(key=lambda item: symbol_order.get(item.get("symbol", ""), len(symbol_order)))
+        miss_detector = self.detect_session_impulse_retest_recent_misses(write_report=False)
+        miss_alert = self._maybe_emit_session_impulse_retest_miss_alert(report=miss_detector)
+        self.db.commit()
 
         return {
             "universe": self.settings.universe_name,
@@ -5351,6 +8116,8 @@ class StrategyEngine:
             "success": success,
             "failed": failed,
             "results": results,
+            "session_impulse_retest_miss_detector": miss_detector,
+            "session_impulse_retest_miss_alert": miss_alert,
         }
 
     def _sync_universe_symbol_local(self, *, symbol: str, limit_1m: int, limit_5m: int, limit_15m: int) -> dict:
@@ -5362,11 +8129,18 @@ class StrategyEngine:
         )
         self.db.commit()
         refresh = self.refresh_symbol(symbol)
+        plan_ids = list(refresh.get("session_impulse_retest_plan_ids") or [])
+        auto_route = (
+            self.auto_route_session_impulse_retest_plans(symbol=symbol, plan_ids=plan_ids)
+            if plan_ids
+            else self.auto_route_symbol(symbol=symbol)
+        )
         return {
             "symbol": symbol,
             "status": "ok",
             "backfill": backfill,
             "refresh": refresh,
+            "auto_route": auto_route,
         }
 
     @staticmethod
@@ -5388,12 +8162,13 @@ class StrategyEngine:
         self,
         *,
         symbols: list[str],
-        intervals: list[str] | tuple[str, ...] = ("5m", "15m"),
+        intervals: list[str] | tuple[str, ...] = ("1m", "5m", "15m"),
         refresh_on_final: bool = True,
         max_messages: int | None = None,
+        progress_callback: Any | None = None,
     ) -> dict:
         symbols = sorted({s.upper() for s in symbols if s})
-        selected_intervals = [iv for iv in intervals if iv in {"5m", "15m"}]
+        selected_intervals = [iv for iv in intervals if iv in {"1m", "5m", "15m"}]
         if not symbols or not selected_intervals:
             return {
                 "running": False,
@@ -5409,14 +8184,27 @@ class StrategyEngine:
             "processed_messages": 0,
             "committed_candles": 0,
             "ingest_errors": 0,
+            "skipped_reverse_timestamp": 0,
             "refresh_calls": 0,
             "refresh_errors": 0,
+            "auto_route_calls": 0,
+            "auto_route_submit_calls": 0,
+            "auto_route_intents_created": 0,
+            "auto_route_errors": 0,
             "reconnects": 0,
             "per_interval": {iv: 0 for iv in selected_intervals},
             "per_symbol": {symbol: 0 for symbol in symbols},
         }
         stop = False
-        refresh_guard: dict[str, datetime] = {}
+        refresh_guard: dict[tuple[str, str], datetime] = {}
+
+        def _emit_progress() -> None:
+            if progress_callback is None:
+                return
+            try:
+                progress_callback(dict(stats))
+            except Exception:
+                pass
 
         async def _stream_one_interval(interval: str) -> None:
             nonlocal stop
@@ -5444,29 +8232,68 @@ class StrategyEngine:
                             self.market_data.ingest_candle(payload)
                             self.db.commit()
                             stats["committed_candles"] += 1
-                        except Exception:
+                        except DataQualityError as exc:
+                            self.db.rollback()
+                            if str(exc) == "reverse timestamp detected":
+                                stats["skipped_reverse_timestamp"] += 1
+                            else:
+                                stats["ingest_errors"] += 1
+                                stats["last_ingest_error"] = f"{exc.__class__.__name__}:{exc}"
+                            _emit_progress()
+                            continue
+                        except Exception as exc:
                             self.db.rollback()
                             stats["ingest_errors"] += 1
+                            stats["last_ingest_error"] = f"{exc.__class__.__name__}:{exc}"
+                            _emit_progress()
                             continue
 
                         stats["processed_messages"] += 1
                         stats["per_interval"][interval] = int(stats["per_interval"][interval]) + 1
                         stats["per_symbol"][kline.symbol] = int(stats["per_symbol"].get(kline.symbol, 0)) + 1
+                        stats["last_stream_error"] = ""
 
                         if refresh_on_final and kline.is_final:
                             now = datetime.now(timezone.utc)
-                            last = refresh_guard.get(kline.symbol)
+                            refresh_key = (kline.symbol, interval)
+                            last = refresh_guard.get(refresh_key)
                             if last is None or (
                                 now - last
                             ).total_seconds() >= self.settings.ws_refresh_cooldown_seconds:
+                                refresh_payload: dict[str, Any] | None = None
+                                refresh_ok = False
                                 try:
-                                    self.refresh_symbol(kline.symbol)
+                                    refresh_payload = self.refresh_symbol(kline.symbol)
                                     stats["refresh_calls"] += 1
-                                except Exception:
+                                    stats["last_refresh_error"] = ""
+                                    refresh_ok = True
+                                except Exception as exc:
                                     self.db.rollback()
                                     stats["refresh_errors"] += 1
-                                finally:
-                                    refresh_guard[kline.symbol] = now
+                                    stats["last_refresh_error"] = f"{exc.__class__.__name__}:{exc}"
+
+                                if refresh_ok:
+                                    try:
+                                        plan_ids = list((refresh_payload or {}).get("session_impulse_retest_plan_ids") or [])
+                                        route_payload = (
+                                            self.auto_route_session_impulse_retest_plans(
+                                                symbol=kline.symbol,
+                                                plan_ids=plan_ids,
+                                            )
+                                            if plan_ids
+                                            else self.auto_route_symbol(symbol=kline.symbol)
+                                        )
+                                        stats["auto_route_calls"] += 1
+                                        stats["auto_route_submit_calls"] += int(route_payload.get("submit_calls", 0) or 0)
+                                        stats["auto_route_intents_created"] += int(route_payload.get("intents_created", 0) or 0)
+                                        stats["last_auto_route_error"] = ""
+                                    except Exception as exc:
+                                        self.db.rollback()
+                                        stats["auto_route_errors"] += 1
+                                        stats["last_auto_route_error"] = f"{exc.__class__.__name__}:{exc}"
+                                refresh_guard[refresh_key] = now
+
+                        _emit_progress()
 
                         if max_messages and stats["processed_messages"] >= max_messages:
                             stop = True
@@ -5476,13 +8303,16 @@ class StrategyEngine:
                         break
 
                     stats["reconnects"] += 1
+                    _emit_progress()
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2.0, self.settings.ws_reconnect_max_seconds)
                 except asyncio.CancelledError:
                     break
-                except Exception:
+                except Exception as exc:
                     self.db.rollback()
                     stats["reconnects"] += 1
+                    stats["last_stream_error"] = f"{exc.__class__.__name__}:{exc}"
+                    _emit_progress()
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2.0, self.settings.ws_reconnect_max_seconds)
 
@@ -5610,8 +8440,24 @@ class StrategyEngine:
             "recommendation": score.recommendation,
         }
 
-    def execution_quality_report(self, *, symbol: str, days: int, write_report: bool = True) -> dict:
-        return self.execution_quality.generate(symbol=symbol, days=days, write_report=write_report)
+    def execution_quality_report(
+        self,
+        *,
+        symbol: str,
+        days: int,
+        write_report: bool = True,
+        strategy_families: list[str] | None = None,
+        entry_models: list[str] | None = None,
+        directions: list[str] | None = None,
+    ) -> dict:
+        return self.execution_quality.generate(
+            symbol=symbol,
+            days=days,
+            write_report=write_report,
+            strategy_families=strategy_families,
+            entry_models=entry_models,
+            directions=directions,
+        )
 
     def pbo_dsr_artifact_store_report(
         self,

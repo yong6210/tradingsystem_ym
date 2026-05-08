@@ -178,6 +178,7 @@ class OrderIntentResponse(ORMModel):
     paper_lineage_override_applied: bool = False
     paper_lineage_override_reason: str = ""
     paper_lineage_override_source: str = ""
+    self_heal_summary: dict[str, Any] = Field(default_factory=dict)
     thesis_fingerprint: dict[str, Any] | None = None
     dedupe_result: dict[str, Any] = Field(default_factory=dict)
     session_guidance: dict[str, Any] = Field(default_factory=dict)
@@ -270,6 +271,9 @@ class SafetyStateResponse(ORMModel):
     kill_switch_active: bool = False
     close_only_active: bool = False
     config_close_only_active: bool = False
+    transition_edge_variant: dict[str, Any] = Field(default_factory=dict)
+    session_impulse_retest_universe_policy: dict[str, Any] = Field(default_factory=dict)
+    session_impulse_retest_rollout_readiness: dict[str, Any] = Field(default_factory=dict)
     matching_locks: list[SafetyLockSnapshot] = Field(default_factory=list)
     active_locks: list[SafetyLockSnapshot] = Field(default_factory=list)
     rollout_policies: list[RolloutPolicySnapshot] = Field(default_factory=list)
@@ -329,6 +333,8 @@ class OperatorIntentSummary(ORMModel):
     plan_id: str
     symbol: str
     strategy_family: str
+    entry_type: str = ""
+    entry_model: str = ""
     execution_mode: ExecutionMode
     approval_state: ApprovalState
     submit_decision: SubmitDecision
@@ -422,7 +428,12 @@ class ExecutionOperatorDashboardResponse(ORMModel):
     recent_reconciliation_count: int = 0
     recent_reconciliation_summary: dict[str, Any] = Field(default_factory=dict)
     recent_reconciliation_events: list[OperatorReconciliationSummary] = Field(default_factory=list)
+    transition_edge_variant: dict[str, Any] | None = None
+    session_impulse_retest_shadow: dict[str, Any] | None = None
+    session_impulse_retest_universe_policy: dict[str, Any] | None = None
+    session_impulse_retest_rollout_readiness: dict[str, Any] | None = None
     portfolio_summary: dict[str, Any] = Field(default_factory=dict)
+    active_contract: dict[str, Any] | None = None
     signal_funnel: dict[str, Any] = Field(default_factory=dict)
     alert_summary: dict[str, Any] = Field(default_factory=dict)
     execution_quality_summary: dict[str, Any] | None = None

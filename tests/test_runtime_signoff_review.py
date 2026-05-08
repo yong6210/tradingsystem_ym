@@ -4,6 +4,7 @@ import http.client
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT_DIR = Path("/Users/yumin/Documents/trading")
@@ -194,6 +195,94 @@ def test_build_payload_treats_pending_bundle_window_as_signoff_eligible():
     assert payload["status"] == "MANUAL_SIGNOFF_REQUIRED"
 
 
+def test_build_historical_walk_forward_contract_proof_summary_uses_simulation_window(monkeypatch):
+    class _FakeSession:
+        def close(self) -> None:
+            return None
+
+    class _FakeService:
+        def __init__(self, *, candle_repo, settings):  # noqa: ANN001
+            self.candle_repo = candle_repo
+            self.settings = settings
+
+        def generate(self, **kwargs):  # noqa: ANN003
+            assert kwargs["eligible_symbols"] == ("BTCUSDC", "ETHUSDC")
+            return {
+                "schema_version": "historical_walk_forward_contract_proof_v3",
+                "simulation_start_ts": "2026-04-01T00:00:00+00:00",
+                "simulation_end_ts": "2026-04-10T00:00:00+00:00",
+                "latest_source_ts": "2026-04-10T00:00:00+00:00",
+                "latest_source_ts_by_symbol": {
+                    "BTCUSDC": "2026-04-10T00:00:00+00:00",
+                    "ETHUSDC": "2026-04-09T23:55:00+00:00",
+                },
+                "symbol_summaries": [
+                    {
+                        "symbol": "BTCUSDC",
+                        "eligible_bar_count": 100,
+                        "selected_contract_candidate_count": 2,
+                        "closed_trade_count": 2,
+                    }
+                ],
+                "trade_rows": [
+                    {
+                        "plan_id": "wf_btc_1",
+                        "symbol": "BTCUSDC",
+                        "entry_model": "LIMIT",
+                        "strategy_family": "sweep_reversal",
+                        "generated_ts": "2026-04-01T00:20:00+00:00",
+                        "entry_ts": "2026-04-01T00:25:00+00:00",
+                        "closed_ts": "2026-04-01T00:30:00+00:00",
+                        "final_exit_reason": "target_tp3",
+                        "final_exit_realized_r": 1.9,
+                        "replayed_realized_r": 1.9,
+                        "final_exit_held_bars": 1,
+                    },
+                    {
+                        "plan_id": "wf_eth_1",
+                        "symbol": "ETHUSDC",
+                        "entry_model": "LIMIT",
+                        "strategy_family": "sweep_reversal",
+                        "generated_ts": "2026-04-02T00:20:00+00:00",
+                        "entry_ts": "2026-04-02T00:25:00+00:00",
+                        "closed_ts": "2026-04-02T00:35:00+00:00",
+                        "final_exit_reason": "stop_loss",
+                        "final_exit_realized_r": -1.0,
+                        "replayed_realized_r": -1.0,
+                        "final_exit_held_bars": 2,
+                    },
+                ],
+            }
+
+    import app.db.repositories as repo_module
+    import app.db.session as session_module
+    import app.services.historical_walk_forward_proof as walk_forward_module
+
+    monkeypatch.setattr(session_module, "SessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(repo_module, "CandleRepository", lambda db: {"db": db})
+    monkeypatch.setattr(walk_forward_module, "HistoricalWalkForwardProofService", _FakeService)
+
+    summary = runtime_signoff_review._build_historical_walk_forward_contract_proof_summary(
+        eligible_symbols=("BTCUSDC", "ETHUSDC"),
+        eligible_families=("sweep_reversal",),
+        eligible_entry_models=("LIMIT",),
+        target_closed_trades=20,
+        contract_scope="historical_walk_forward_limit_only",
+        cache_key="execution_contract",
+        summary_label="historical walk-forward execution proof",
+    )
+
+    assert summary is not None
+    assert summary["closed_trade_count"] == 2
+    assert summary["baseline_ts"] == "2026-04-01T00:00:00+00:00"
+    assert summary["simulation_start_ts"] == "2026-04-01T00:00:00+00:00"
+    assert summary["simulation_end_ts"] == "2026-04-10T00:00:00+00:00"
+    assert summary["latest_source_ts"] == "2026-04-10T00:00:00+00:00"
+    assert summary["schema_version"] == "historical_walk_forward_contract_proof_v3"
+    assert summary["evidence_basis"] == "historical_walk_forward_candles"
+    assert summary["symbol_summaries"][0]["closed_trade_count"] == 2
+
+
 def test_build_runtime_decision_marks_red_hold_for_large_replay_drawdown():
     decision = runtime_signoff_review._build_runtime_decision(
         runtime_ready=True,
@@ -241,11 +330,11 @@ def test_build_runtime_decision_uses_post_patch_override_for_conditional_micro_l
                 "worst_loss_streak": 9,
             },
             "post_patch_sample_summary": {
-                "closed_trade_count": 50,
+                "closed_trade_count": 20,
                 "ready_for_replay_refresh": True,
                 "replay_max_drawdown_r": 3.25,
-                "replay_p5_r": -1.05,
-                "stop_loss_share": 0.3,
+                "replay_p5_r": -1.0,
+                "stop_loss_share": 0.41,
                 "worst_loss_streak": 4,
             },
         },
@@ -255,6 +344,49 @@ def test_build_runtime_decision_uses_post_patch_override_for_conditional_micro_l
     assert decision["effective_action"] == "conditional_micro_live_signoff"
     assert decision["allowed_reopen_scope"] == "MICRO_LIVE_ONLY"
     assert decision["post_patch_override_active"] is True
+
+
+def test_build_runtime_decision_prefers_live_eligible_subset_over_full_post_patch_truth():
+    decision = runtime_signoff_review._build_runtime_decision(
+        runtime_ready=True,
+        required_reviews=[
+            {
+                "code": "approval_template_review",
+                "worst_scenario_status": "FAIL",
+            }
+        ],
+        approval_template_focus={
+            "replay_max_drawdown_r": 10.1003,
+            "replay_p5_r": -1.05,
+            "downside_profile": {
+                "stop_loss_share": 0.5341,
+                "worst_loss_streak": 9,
+            },
+            "post_patch_sample_summary": {
+                "closed_trade_count": 123,
+                "ready_for_replay_refresh": True,
+                "replay_max_drawdown_r": 6.8758,
+                "replay_p5_r": -1.05,
+                "stop_loss_share": 0.418,
+                "worst_loss_streak": 7,
+            },
+            "live_eligible_post_patch_sample_summary": {
+                "closed_trade_count": 17,
+                "ready_for_replay_refresh": True,
+                "replay_max_drawdown_r": 4.0,
+                "replay_p5_r": -1.0,
+                "stop_loss_share": 0.4118,
+                "worst_loss_streak": 4,
+                "contract_scope": "limit_only",
+                "eligible_entry_models": ["LIMIT"],
+            },
+        },
+    )
+
+    assert decision["band"] == "AMBER_CONDITIONAL"
+    assert decision["effective_action"] == "conditional_micro_live_signoff"
+    assert decision["allowed_reopen_scope"] == "MICRO_LIVE_ONLY"
+    assert decision["post_patch_summary_key"] == "live_eligible_post_patch_sample_summary"
 
 
 def test_build_runtime_decision_uses_post_patch_override_for_conditional_full_live():
@@ -276,8 +408,8 @@ def test_build_runtime_decision_uses_post_patch_override_for_conditional_full_li
             "post_patch_sample_summary": {
                 "closed_trade_count": 80,
                 "ready_for_replay_refresh": True,
-                "replay_max_drawdown_r": 4.5,
-                "replay_p5_r": -1.05,
+                "replay_max_drawdown_r": 4.4,
+                "replay_p5_r": -1.0,
                 "stop_loss_share": 0.29,
                 "worst_loss_streak": 4,
             },
@@ -303,7 +435,7 @@ def test_apply_runtime_decision_syncs_operator_recommendation_from_decision():
                     "closed_trade_count": 50,
                     "ready_for_replay_refresh": True,
                     "replay_max_drawdown_r": 3.25,
-                    "replay_p5_r": -1.05,
+                    "replay_p5_r": -1.0,
                     "stop_loss_share": 0.3,
                     "worst_loss_streak": 4,
                 },
@@ -332,10 +464,10 @@ def test_build_runtime_decision_keeps_red_when_post_patch_sample_count_is_below_
                 "worst_loss_streak": 9,
             },
             "post_patch_sample_summary": {
-                "closed_trade_count": 41,
+                "closed_trade_count": 14,
                 "ready_for_replay_refresh": True,
                 "replay_max_drawdown_r": 4.3114,
-                "replay_p5_r": -1.05,
+                "replay_p5_r": -1.0,
                 "stop_loss_share": 0.3171,
                 "worst_loss_streak": 4,
             },
@@ -343,7 +475,9 @@ def test_build_runtime_decision_keeps_red_when_post_patch_sample_count_is_below_
     )
 
     assert decision["band"] == "RED_HOLD"
-    assert {item["code"] for item in decision["post_patch_breached_thresholds"]} == {"post_patch_sample_count_min"}
+    assert {item["code"] for item in decision["post_patch_breached_thresholds"]} == {
+        "live_eligible_post_patch_sample_count_min"
+    }
 
 
 def test_build_runtime_decision_keeps_micro_live_only_when_full_live_thresholds_still_fail():
@@ -363,11 +497,11 @@ def test_build_runtime_decision_keeps_micro_live_only_when_full_live_thresholds_
                 "worst_loss_streak": 9,
             },
             "post_patch_sample_summary": {
-                "closed_trade_count": 80,
+                "closed_trade_count": 20,
                 "ready_for_replay_refresh": True,
                 "replay_max_drawdown_r": 4.3114,
-                "replay_p5_r": -1.05,
-                "stop_loss_share": 0.3,
+                "replay_p5_r": -1.0,
+                "stop_loss_share": 0.41,
                 "worst_loss_streak": 4,
             },
         },
@@ -388,11 +522,11 @@ def test_apply_runtime_decision_attaches_reopen_gate_summary():
                 "replay_p5_r": -1.05,
                 "downside_profile": {"stop_loss_share": 0.5341, "worst_loss_streak": 9},
                 "post_patch_sample_summary": {
-                    "closed_trade_count": 50,
+                    "closed_trade_count": 20,
                     "ready_for_replay_refresh": True,
                     "replay_max_drawdown_r": 4.3114,
-                    "replay_p5_r": -1.05,
-                    "stop_loss_share": 0.3,
+                    "replay_p5_r": -1.0,
+                    "stop_loss_share": 0.41,
                     "worst_loss_streak": 4,
                 },
             },
@@ -404,12 +538,64 @@ def test_apply_runtime_decision_attaches_reopen_gate_summary():
     assert gate["micro_live"]["status"] == "ready"
     assert gate["full_live"]["status"] == "not_ready"
     assert {item["code"] for item in gate["full_live"]["breached_thresholds"]} == {
-        "post_patch_full_live_sample_count_min",
-        "post_patch_full_live_stop_loss_share_red",
+        "live_eligible_full_live_sample_count_min",
+        "live_eligible_full_live_stop_loss_share_red",
     }
 
 
-def test_build_runtime_operator_signoff_summary_marks_manual_micro_live_ready():
+def test_apply_runtime_decision_uses_live_eligible_gate_summary_when_present():
+    payload = runtime_signoff_review._apply_runtime_decision(
+        {
+            "runtime_reopen_status": {"status": "ready_to_reopen_runtime", "ready": True},
+            "required_reviews": [{"code": "approval_template_review", "worst_scenario_status": "FAIL"}],
+            "approval_template_focus": {
+                "replay_max_drawdown_r": 10.1003,
+                "replay_p5_r": -1.05,
+                "downside_profile": {"stop_loss_share": 0.5341, "worst_loss_streak": 9},
+                "post_patch_sample_summary": {
+                    "closed_trade_count": 123,
+                    "ready_for_replay_refresh": True,
+                    "replay_max_drawdown_r": 6.8758,
+                    "replay_p5_r": -1.05,
+                    "stop_loss_share": 0.418,
+                    "worst_loss_streak": 7,
+                },
+                "live_eligible_post_patch_sample_summary": {
+                    "closed_trade_count": 17,
+                    "ready_for_replay_refresh": True,
+                    "replay_max_drawdown_r": 4.0,
+                    "replay_p5_r": -1.0,
+                    "stop_loss_share": 0.4118,
+                    "worst_loss_streak": 4,
+                    "contract_scope": "limit_only",
+                    "eligible_entry_models": ["LIMIT"],
+                },
+            },
+        }
+    )
+
+    gate = payload["runtime_reopen_gate_summary"]
+    assert gate["micro_live"]["status"] == "ready"
+    assert gate["micro_live"]["source_summary_key"] == "live_eligible_post_patch_sample_summary"
+    assert gate["micro_live"]["contract_scope"] == "limit_only"
+    assert gate["full_live"]["status"] == "not_ready"
+    assert {item["code"] for item in gate["full_live"]["breached_thresholds"]} == {
+        "live_eligible_full_live_sample_count_min",
+        "live_eligible_full_live_stop_loss_share_red",
+    }
+
+
+def test_build_runtime_operator_signoff_summary_marks_manual_micro_live_ready(monkeypatch):
+    monkeypatch.setattr(
+        runtime_signoff_review,
+        "get_settings",
+        lambda: SimpleNamespace(
+            auto_trading_micro_live_allowed_symbols="BTCUSDC",
+            auto_trading_micro_live_allowed_families="sweep_reversal",
+            auto_trading_micro_live_allowed_sessions="london,new_york,overlap",
+            auto_trading_micro_live_direction_contract="BTCUSDC:LONG|SHORT",
+        ),
+    )
     summary = runtime_signoff_review._build_runtime_operator_signoff_summary(
         runtime_decision={
             "effective_action": "conditional_micro_live_signoff",
@@ -417,6 +603,7 @@ def test_build_runtime_operator_signoff_summary_marks_manual_micro_live_ready():
         },
         runtime_preflight_summary={
             "status": "READY_FOR_MICRO_LIVE",
+            "command": "./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --no-write-report",
         },
         runtime_signoff_summary={
             "required_reviews": [
@@ -424,6 +611,13 @@ def test_build_runtime_operator_signoff_summary_marks_manual_micro_live_ready():
                 {"code": "execution_reconciliation_review"},
             ]
         },
+        runtime_reopen_gate_summary={
+            "micro_live": {"contract_scope": "limit_only"},
+        },
+        base_url="http://127.0.0.1:8000",
+        symbol="BTCUSDC",
+        universe="usdc_perp_top30",
+        days=30,
     )
 
     assert summary["active"] is True
@@ -431,6 +625,16 @@ def test_build_runtime_operator_signoff_summary_marks_manual_micro_live_ready():
     assert summary["allowed_scope"] == "MICRO_LIVE_ONLY"
     assert summary["first_required_review_code"] == "approval_template_review"
     assert summary["next_step"] == "review_required_warning_and_record_micro_live_signoff"
+    assert summary["intent_execution_mode"] == "MICRO_LIVE"
+    assert summary["contract_scope"] == "limit_only"
+    assert summary["allowed_symbols"] == ["BTCUSDC"]
+    assert summary["allowed_families"] == ["sweep_reversal"]
+    assert summary["allowed_direction_contract"] == {"BTCUSDC": ["LONG", "SHORT"]}
+    assert summary["allowed_sessions"] == ["london", "new_york", "overlap"]
+    assert summary["review_command"].startswith("./.venv/bin/python scripts/run_micro_live_preflight.py")
+    assert summary["signoff_review_command"].endswith("--symbol BTCUSDC --universe usdc_perp_top30 --days 30")
+    assert "\"execution_mode\":\"MICRO_LIVE\"" in summary["intent_command_template"]
+    assert "\"live\":true" in summary["submit_command_template"]
 
 
 def test_approval_template_focus_symbol_uses_global_lineage_namespace():
@@ -573,6 +777,53 @@ def test_attach_approval_template_focus_retries_on_transient_500(monkeypatch):
     assert enriched["approval_template_focus"]["worst_scenario_status"] == "FAIL"
 
 
+def test_attach_approval_template_focus_reuses_previous_focus_on_timeout():
+    payload = {
+        "primary_required_review": {
+            "code": "approval_template_review",
+            "worst_scenario": "latency_plus_1_bar",
+        }
+    }
+    previous_focus = {
+        "focus_symbol": "LINEAGE_GLOBAL",
+        "artifact_path": "reports/validation/stress_replay_worker_outputs/LINEAGE_GLOBAL/v2/latency_plus_1_bar_cached.json",
+        "live_eligible_post_patch_sample_summary": {
+            "closed_trade_count": 18,
+            "target_closed_trades": 15,
+            "remaining_to_target": 0,
+            "ready_for_replay_refresh": True,
+            "contract_scope": "limit_only",
+        },
+    }
+    stage = {
+        "selected_trial_run_id": "LINEAGE_GLOBAL_v2_true_threshold_sweep_runner_v1_acceptance_rejection_8309223c59",
+        "lineage_sample_summary": {
+            "scope": "family_global",
+        },
+        "runtime_signoff_summary": {
+            "approval_template_focus": previous_focus,
+        },
+    }
+
+    def _request_json(base_url: str, path: str, *, query: dict[str, object]):
+        raise RuntimeError("request failed for timeout")
+
+    enriched = runtime_signoff_review._attach_approval_template_focus(
+        payload,
+        stage=stage,
+        symbol="BTCUSDC",
+        base_url="http://127.0.0.1:8000",
+        request_json_fn=_request_json,
+    )
+
+    assert "approval_template_focus_error" in enriched
+    assert enriched["approval_template_focus"]["focus_symbol"] == "LINEAGE_GLOBAL"
+    assert (
+        enriched["approval_template_focus"]["live_eligible_post_patch_sample_summary"]["closed_trade_count"]
+        == 18
+    )
+
+
 def test_build_post_patch_sample_summary_counts_recent_closes(monkeypatch):
     artifact_path = "reports/validation/mock_runtime_review.json"
     input_path = "reports/validation/mock_runtime_inputs.json"
@@ -616,8 +867,10 @@ def test_build_post_patch_sample_summary_counts_recent_closes(monkeypatch):
         return None
 
     monkeypatch.setattr(runtime_signoff_review, "_load_json_file", _load_json_file)
+    monkeypatch.setattr(runtime_signoff_review, "_load_post_patch_rows_from_lineage", lambda **_: None)
 
     summary = runtime_signoff_review._build_post_patch_sample_summary(
+        focus_symbol="LINEAGE_GLOBAL",
         artifact_path=artifact_path,
         baseline_ts=runtime_signoff_review._parse_ts("2026-04-10T00:00:00+00:00"),
         target_closed_trades=20,
@@ -628,6 +881,120 @@ def test_build_post_patch_sample_summary_counts_recent_closes(monkeypatch):
     assert summary["stop_loss_share"] == 0.5
     assert summary["confirm_named_loss_share"] == 1.0
     assert summary["top_symbols"][0]["symbol"] == "WIFUSDC"
+
+
+def test_build_post_patch_sample_summary_filters_symbols_from_settings_allowlist(monkeypatch):
+    artifact_path = "reports/validation/mock_runtime_review_symbols.json"
+    input_path = "reports/validation/mock_runtime_inputs_symbols.json"
+    artifact_payload = {
+        "input_artifact_paths": [input_path],
+        "trade_rows": [
+            {
+                "plan_id": "plan_btc_limit",
+                "closed_ts": "2026-04-10T01:00:00+00:00",
+                "replayed_realized_r": 1.1,
+                "final_exit_reason": "tp3",
+            },
+            {
+                "plan_id": "plan_tia_limit",
+                "closed_ts": "2026-04-10T02:00:00+00:00",
+                "replayed_realized_r": 0.7,
+                "final_exit_reason": "tp2",
+            },
+        ],
+    }
+    input_payload = {
+        "trade_rows": [
+            {"plan_id": "plan_btc_limit", "symbol": "BTCUSDC", "final_exit_held_bars": 11},
+            {"plan_id": "plan_tia_limit", "symbol": "TIAUSDC", "final_exit_held_bars": 7},
+        ]
+    }
+
+    def _load_json_file(path):
+        text = str(path)
+        if text.endswith("mock_runtime_review_symbols.json"):
+            return artifact_payload
+        if text.endswith("mock_runtime_inputs_symbols.json"):
+            return input_payload
+        return None
+
+    monkeypatch.delenv("RUNTIME_LIVE_EXECUTION_ALLOWED_SYMBOLS", raising=False)
+    monkeypatch.setattr(
+        runtime_signoff_review,
+        "get_settings",
+        lambda: SimpleNamespace(auto_trading_micro_live_allowed_symbols="BTCUSDC,ETHUSDC"),
+    )
+    monkeypatch.setattr(runtime_signoff_review, "_load_json_file", _load_json_file)
+    monkeypatch.setattr(runtime_signoff_review, "_load_post_patch_rows_from_lineage", lambda **_: None)
+
+    summary = runtime_signoff_review._build_post_patch_sample_summary(
+        focus_symbol="LINEAGE_GLOBAL",
+        artifact_path=artifact_path,
+        baseline_ts=runtime_signoff_review._parse_ts("2026-04-10T00:00:00+00:00"),
+        target_closed_trades=5,
+        eligible_symbols=runtime_signoff_review._live_execution_allowed_symbols(),
+        summary_label="live-execution post-patch sample",
+    )
+
+    assert summary["closed_trade_count"] == 1
+    assert summary["eligible_symbols"] == ["BTCUSDC", "ETHUSDC"]
+    assert summary["top_symbols"][0]["symbol"] == "BTCUSDC"
+
+
+def test_build_post_patch_sample_summary_filters_families_from_contract_lane(monkeypatch):
+    artifact_path = "reports/validation/mock_runtime_review_families.json"
+    input_path = "reports/validation/mock_runtime_inputs_families.json"
+    artifact_payload = {
+        "input_artifact_paths": [input_path],
+        "trade_rows": [
+            {
+                "plan_id": "plan_trend_limit",
+                "closed_ts": "2026-04-10T01:00:00+00:00",
+                "replayed_realized_r": 1.4,
+                "final_exit_reason": "tp3",
+            },
+            {
+                "plan_id": "plan_sweep_limit",
+                "closed_ts": "2026-04-10T02:00:00+00:00",
+                "replayed_realized_r": 0.8,
+                "final_exit_reason": "tp2",
+            },
+        ],
+    }
+    input_payload = {
+        "trade_rows": [
+            {"plan_id": "plan_trend_limit", "symbol": "BTCUSDC", "strategy_family": "trend_continuation", "final_exit_held_bars": 9},
+            {"plan_id": "plan_sweep_limit", "symbol": "ETHUSDC", "strategy_family": "sweep_reversal", "final_exit_held_bars": 7},
+        ]
+    }
+
+    def _load_json_file(path):
+        text = str(path)
+        if text.endswith("mock_runtime_review_families.json"):
+            return artifact_payload
+        if text.endswith("mock_runtime_inputs_families.json"):
+            return input_payload
+        return None
+
+    monkeypatch.setattr(runtime_signoff_review, "_load_json_file", _load_json_file)
+    monkeypatch.setattr(runtime_signoff_review, "_load_post_patch_rows_from_lineage", lambda **_: None)
+
+    summary = runtime_signoff_review._build_post_patch_sample_summary(
+        focus_symbol="LINEAGE_GLOBAL",
+        artifact_path=artifact_path,
+        baseline_ts=runtime_signoff_review._parse_ts("2026-04-10T00:00:00+00:00"),
+        target_closed_trades=5,
+        eligible_symbols=("BTCUSDC", "ETHUSDC"),
+        eligible_entry_models=("LIMIT",),
+        eligible_families=("trend_continuation",),
+        contract_scope="trend_limit_only",
+        summary_label="trend-proof post-patch sample",
+    )
+
+    assert summary["closed_trade_count"] == 1
+    assert summary["eligible_families"] == ["trend_continuation"]
+    assert summary["cohort_plan_ids"] == ["plan_trend_limit"]
+    assert summary["top_symbols"][0]["symbol"] == "BTCUSDC"
 
 
 def test_build_post_patch_sample_summary_sticky_reuses_previous_artifact_row(monkeypatch):
@@ -688,6 +1055,7 @@ def test_build_post_patch_sample_summary_sticky_reuses_previous_artifact_row(mon
         return None
 
     monkeypatch.setattr(runtime_signoff_review, "_load_json_file", _load_json_file)
+    monkeypatch.setattr(runtime_signoff_review, "_load_post_patch_rows_from_lineage", lambda **_: None)
     monkeypatch.setattr(
         runtime_signoff_review,
         "_list_previous_replay_artifact_paths",
@@ -695,6 +1063,7 @@ def test_build_post_patch_sample_summary_sticky_reuses_previous_artifact_row(mon
     )
 
     summary = runtime_signoff_review._build_post_patch_sample_summary(
+        focus_symbol="LINEAGE_GLOBAL",
         artifact_path=current_artifact_path,
         baseline_ts=runtime_signoff_review._parse_ts("2026-04-10T00:00:00+00:00"),
         target_closed_trades=20,
@@ -783,6 +1152,7 @@ def test_build_post_patch_sample_summary_bootstraps_from_older_previous_artifact
         return None
 
     monkeypatch.setattr(runtime_signoff_review, "_load_json_file", _load_json_file)
+    monkeypatch.setattr(runtime_signoff_review, "_load_post_patch_rows_from_lineage", lambda **_: None)
     monkeypatch.setattr(
         runtime_signoff_review,
         "_list_previous_replay_artifact_paths",
@@ -792,6 +1162,7 @@ def test_build_post_patch_sample_summary_bootstraps_from_older_previous_artifact
     )
 
     summary = runtime_signoff_review._build_post_patch_sample_summary(
+        focus_symbol="LINEAGE_GLOBAL",
         artifact_path=current_artifact_path,
         baseline_ts=runtime_signoff_review._parse_ts("2026-04-10T00:00:00+00:00"),
         target_closed_trades=20,
@@ -801,6 +1172,197 @@ def test_build_post_patch_sample_summary_bootstraps_from_older_previous_artifact
     assert summary["sticky_reused_plan_count"] == 1
     assert summary["sticky_reused_plan_ids"] == ["plan_limit_recent"]
     assert summary["sticky_source_artifact_path"] == older_previous_artifact_path
+
+
+def test_build_post_patch_sample_summary_prefers_full_lineage_rows_for_cohort_metrics(monkeypatch):
+    artifact_path = "reports/validation/mock_runtime_review.json"
+    input_path = "reports/validation/mock_runtime_inputs.json"
+    artifact_payload = {
+        "input_artifact_paths": [input_path],
+        "trade_rows": [
+            {
+                "plan_id": "plan_recent_one",
+                "closed_ts": "2026-04-10T01:00:00+00:00",
+                "replayed_realized_r": -1.05,
+                "final_exit_reason": "stop_loss",
+            },
+            {
+                "plan_id": "plan_recent_two",
+                "closed_ts": "2026-04-10T02:00:00+00:00",
+                "replayed_realized_r": 1.2,
+                "final_exit_reason": "tp3",
+            },
+        ],
+    }
+    input_payload = {
+        "trade_rows": [
+            {"plan_id": "plan_recent_one", "symbol": "WIFUSDC", "final_exit_held_bars": 7},
+            {"plan_id": "plan_recent_two", "symbol": "SOLUSDC", "final_exit_held_bars": 9},
+        ]
+    }
+
+    def _load_json_file(path):
+        text = str(path)
+        if text.endswith("mock_runtime_review.json"):
+            return artifact_payload
+        if text.endswith("mock_runtime_inputs.json"):
+            return input_payload
+        return None
+
+    monkeypatch.setattr(runtime_signoff_review, "_load_json_file", _load_json_file)
+    monkeypatch.setattr(
+        runtime_signoff_review,
+        "_load_post_patch_rows_from_lineage",
+        lambda *, focus_symbol, cutoff, version="v2": [
+            {
+                "plan_id": "plan_recent_one",
+                "symbol": "WIFUSDC",
+                "closed_ts": "2026-04-10T01:00:00+00:00",
+                "replayed_realized_r": -1.05,
+                "final_exit_reason": "stop_loss",
+                "final_exit_held_bars": 7,
+            },
+            {
+                "plan_id": "plan_recent_two",
+                "symbol": "SOLUSDC",
+                "closed_ts": "2026-04-10T02:00:00+00:00",
+                "replayed_realized_r": 1.2,
+                "final_exit_reason": "tp3",
+                "final_exit_held_bars": 9,
+            },
+            {
+                "plan_id": "plan_recent_three",
+                "symbol": "ARBUSDC",
+                "closed_ts": "2026-04-10T03:00:00+00:00",
+                "replayed_realized_r": 0.8,
+                "final_exit_reason": "time_failure",
+                "final_exit_held_bars": 5,
+            },
+        ],
+    )
+
+    summary = runtime_signoff_review._build_post_patch_sample_summary(
+        focus_symbol="LINEAGE_GLOBAL",
+        artifact_path=artifact_path,
+        baseline_ts=runtime_signoff_review._parse_ts("2026-04-10T00:00:00+00:00"),
+        target_closed_trades=20,
+    )
+
+    assert summary["closed_trade_count"] == 3
+    assert summary["replay_trade_row_count"] == 2
+    assert summary["remaining_to_target"] == 17
+    assert summary["stop_loss_share"] == 0.3333
+    assert summary["replay_p5_r"] == -1.05
+
+
+def test_build_historical_contract_proof_summary_filters_live_contract_lane(monkeypatch):
+    monkeypatch.setattr(
+        runtime_signoff_review,
+        "_load_post_patch_rows_from_lineage",
+        lambda *, focus_symbol, cutoff, version="v2": [
+            {
+                "plan_id": "plan_btc_limit",
+                "symbol": "BTCUSDC",
+                "strategy_family": "sweep_reversal",
+                "entry_model": "LIMIT",
+                "closed_ts": "2026-04-10T01:00:00+00:00",
+                "replayed_realized_r": 1.2,
+                "final_exit_reason": "tp3",
+                "final_exit_held_bars": 9,
+            },
+            {
+                "plan_id": "plan_eth_limit",
+                "symbol": "ETHUSDC",
+                "strategy_family": "sweep_reversal",
+                "entry_model": "LIMIT",
+                "closed_ts": "2026-04-11T01:00:00+00:00",
+                "replayed_realized_r": -1.0,
+                "final_exit_reason": "stop_loss",
+                "final_exit_held_bars": 4,
+            },
+            {
+                "plan_id": "plan_arb_limit",
+                "symbol": "ARBUSDC",
+                "strategy_family": "sweep_reversal",
+                "entry_model": "LIMIT",
+                "closed_ts": "2026-04-12T01:00:00+00:00",
+                "replayed_realized_r": 1.0,
+                "final_exit_reason": "tp2",
+                "final_exit_held_bars": 7,
+            },
+            {
+                "plan_id": "plan_btc_trend",
+                "symbol": "BTCUSDC",
+                "strategy_family": "trend_continuation",
+                "entry_model": "LIMIT",
+                "closed_ts": "2026-04-13T01:00:00+00:00",
+                "replayed_realized_r": 0.8,
+                "final_exit_reason": "tp2",
+                "final_exit_held_bars": 8,
+            },
+        ],
+    )
+
+    summary = runtime_signoff_review._build_historical_contract_proof_summary(
+        focus_symbol="LINEAGE_GLOBAL",
+        as_of=runtime_signoff_review._parse_ts("2026-04-19T00:00:00+00:00"),
+        lookback_days=180,
+        target_closed_trades=20,
+        eligible_entry_models=("LIMIT",),
+        eligible_symbols=("BTCUSDC", "ETHUSDC"),
+        eligible_families=("sweep_reversal",),
+    )
+
+    assert summary["closed_trade_count"] == 2
+    assert summary["advisory_only"] is True
+    assert summary["evidence_basis"] == "historical_closed_lineage_only"
+    assert summary["lookback_days"] == 180
+    assert summary["stop_loss_share"] == 0.5
+    assert summary["top_symbols"][0]["symbol"] == "BTCUSDC"
+
+
+def test_refresh_focus_from_local_artifact_keeps_richer_current_artifact_when_latest_is_thinner(monkeypatch):
+    current_artifact = "reports/validation/current_runtime_review.json"
+    latest_artifact = "reports/validation/latest_runtime_review.json"
+
+    monkeypatch.setattr(
+        runtime_signoff_review,
+        "_find_latest_replay_artifact_path",
+        lambda artifact_path: latest_artifact if artifact_path == current_artifact else artifact_path,
+    )
+    monkeypatch.setattr(
+        runtime_signoff_review,
+        "_replay_artifact_trade_row_count",
+        lambda artifact_path: 171 if artifact_path == current_artifact else 6,
+    )
+    monkeypatch.setattr(
+        runtime_signoff_review,
+        "_build_approval_template_downside_profile",
+        lambda *, artifact_path: {"artifact_path": artifact_path, "stop_loss_share": 0.4},
+    )
+    monkeypatch.setattr(runtime_signoff_review, "_build_confirm_loss_cluster_summary", lambda *, artifact_path: {})
+    monkeypatch.setattr(runtime_signoff_review, "_build_entry_timing_loss_profile", lambda *, artifact_path: {})
+    monkeypatch.setattr(
+        runtime_signoff_review,
+        "_build_post_patch_sample_summary",
+        lambda **kwargs: {
+            "closed_trade_count": 127 if kwargs["artifact_path"] == current_artifact else 6,
+            "replay_trade_row_count": 127 if kwargs["artifact_path"] == current_artifact else 6,
+            "ready_for_replay_refresh": kwargs["artifact_path"] == current_artifact,
+            "contract_scope": kwargs.get("contract_scope", ""),
+        },
+    )
+
+    refreshed = runtime_signoff_review._refresh_focus_from_local_artifact(
+        {"artifact_path": current_artifact, "focus_symbol": "LINEAGE_GLOBAL"},
+        symbol="BTCUSDC",
+        universe="usdc_perp_top30",
+        days=30,
+    )
+
+    assert refreshed["artifact_path"] == current_artifact
+    assert refreshed["replay_trade_rows"] == 127
+    assert refreshed["post_patch_sample_summary"]["closed_trade_count"] == 127
 
 
 def test_build_approval_template_downside_profile_summarizes_loss_cluster(monkeypatch):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from statistics import fmean, pstdev
@@ -20,6 +21,7 @@ class _Exposure:
     symbol: str
     direction: str
     thesis_fingerprint: dict[str, str] | None = None
+    transition_edge_variant_overlay_key: str | None = None
     priority: tuple[float, float, float, float] = (999999.0, 0.0, 999999.0, 0.0)
 
 
@@ -143,6 +145,12 @@ class PortfolioRiskOverlayService:
                         symbol=symbol,
                         direction=direction,
                         thesis_fingerprint=self.thesis.build_from_plan(item),
+                        transition_edge_variant_overlay_key=self._transition_edge_variant_overlay_key(
+                            symbol=symbol,
+                            direction=direction,
+                            validity=dict(item.validity or {}),
+                            fingerprint=self.thesis.build_from_plan(item),
+                        ),
                         priority=self._priority_signature(item),
                     )
                 )
@@ -158,6 +166,12 @@ class PortfolioRiskOverlayService:
                         symbol=symbol,
                         direction=direction,
                         thesis_fingerprint=self.thesis.build_from_candidate(item),
+                        transition_edge_variant_overlay_key=self._transition_edge_variant_overlay_key(
+                            symbol=symbol,
+                            direction=direction,
+                            validity=dict(item.get("validity") or item),
+                            fingerprint=self.thesis.build_from_candidate(item),
+                        ),
                         priority=self._priority_signature(item),
                     )
                 )
@@ -245,6 +259,64 @@ class PortfolioRiskOverlayService:
         row["thesis_primary_symbol"] = cluster.primary_symbol if cluster else row.get("symbol")
         row["thesis_rejected_reason"] = rejected_reason
         row["thesis_active_cluster_count"] = int(row.get("thesis_active_cluster_count", 0) or 0)
+
+    @staticmethod
+    def _reference_identity(reference: dict[str, Any] | None) -> str | None:
+        payload = dict(reference or {})
+        for key in ("reference_id", "primary_label", "reference_type", "primary_type"):
+            value = str(payload.get(key) or "").strip().lower()
+            if value:
+                return value
+        return None
+
+    @staticmethod
+    def _transition_edge_variant_enabled_for_row(validity: dict[str, Any] | None) -> bool:
+        payload = dict(validity or {})
+        if bool(payload.get("transition_edge_variant_applied")):
+            return True
+        variant = dict(payload.get("transition_edge_variant") or {})
+        return bool(variant) and not bool(variant.get("shadow_only"))
+
+    def _transition_edge_variant_overlay_key(
+        self,
+        *,
+        symbol: str,
+        direction: str,
+        validity: dict[str, Any] | None,
+        fingerprint: dict[str, str] | None,
+    ) -> str | None:
+        payload = dict(validity or {})
+        if not self._transition_edge_variant_enabled_for_row(payload):
+            return None
+        thesis_cluster_id = str(payload.get("thesis_cluster_id") or "").strip()
+        if thesis_cluster_id:
+            return f"cluster:{thesis_cluster_id}"
+        location_key = self._reference_identity(payload.get("location_reference"))
+        session_key = self._reference_identity(payload.get("session_liquidity_reference"))
+        if location_key or session_key:
+            return f"{str(symbol or '').upper()}:{str(direction or '').lower()}:{location_key or '-'}:{session_key or '-'}"
+        if fingerprint:
+            return f"cluster:{self.thesis.thesis_cluster_id(fingerprint)}"
+        return None
+
+    def _apply_transition_edge_variant_risk_adjustment(self, row: dict[str, Any]) -> None:
+        validity = dict(row.get("validity") or {})
+        if not self._transition_edge_variant_enabled_for_row(validity):
+            row["transition_edge_variant_risk_multiplier"] = None
+            return
+        multiplier = clamp(float(self.settings.transition_edge_variant_risk_multiplier), 0.0, 1.0)
+        base_risk_r = float(row.get("recommended_risk_r", 0.0) or 0.0)
+        adjusted_risk_r = round(base_risk_r * multiplier, 4)
+        row["transition_edge_variant_risk_multiplier"] = round(multiplier, 4)
+        row["transition_edge_variant_base_risk_r"] = round(base_risk_r, 4)
+        row["recommended_risk_r"] = adjusted_risk_r
+        strategy_sizing = dict(row.get("strategy_sizing") or {})
+        strategy_sizing["transition_edge_variant_risk_multiplier"] = round(multiplier, 4)
+        strategy_sizing["transition_edge_variant_base_risk_r"] = round(base_risk_r, 4)
+        strategy_sizing["final_risk_r"] = adjusted_risk_r
+        row["strategy_sizing"] = strategy_sizing
+        validity["recommended_risk_r"] = adjusted_risk_r
+        row["validity"] = validity
 
     @staticmethod
     def _risk_from_exposure(item: tuple[str, str] | dict[str, Any] | Plan) -> float:
@@ -866,6 +938,7 @@ class PortfolioRiskOverlayService:
         apply_outcome_bias: bool = False,
     ) -> list[dict[str, Any]]:
         exposures = self._normalize_exposures(existing_exposures)
+        active_transition_overlay_keys = {item.transition_edge_variant_overlay_key for item in exposures if item.transition_edge_variant_overlay_key}
         thesis_clusters = self._build_thesis_clusters(exposures)
         mode_policy = self.mode.policy()
         session_guidance = self.session_guidance.snapshot(
@@ -998,6 +1071,7 @@ class PortfolioRiskOverlayService:
             candidates = sorted(rows, key=lambda item: float(item.get("final_rank_score", 0.0)), reverse=True)
         assessed: list[dict[str, Any]] = []
         accepted: list[dict[str, Any]] = []
+        accepted_transition_overlay_keys: set[str] = set()
 
         for item in candidates:
             row = dict(item)
@@ -1041,6 +1115,14 @@ class PortfolioRiskOverlayService:
             row["strategy_sizing"] = self.mode.apply_to_sizing(row["strategy_sizing"], mode=mode_policy.mode)
             row["recommended_risk_r"] = float(row["strategy_sizing"].get("final_risk_r", 0.0) or 0.0)
             self._apply_outcome_sizing_adjustment(row=row, outcome_inputs_by_symbol=outcome_inputs_by_symbol)
+            self._apply_transition_edge_variant_risk_adjustment(row)
+            transition_overlay_key = self._transition_edge_variant_overlay_key(
+                symbol=symbol,
+                direction=direction,
+                validity=dict(row.get("validity") or {}),
+                fingerprint=thesis_fingerprint,
+            )
+            row["transition_edge_variant_overlay_key"] = transition_overlay_key
             capital_allocator = self._build_capital_allocator(
                 row=row,
                 outcome_inputs_by_symbol=outcome_inputs_by_symbol,
@@ -1128,6 +1210,14 @@ class PortfolioRiskOverlayService:
             else:
                 row["final_rank_score"] = pre_outcome_final_rank_score
 
+            if transition_overlay_key and (
+                transition_overlay_key in active_transition_overlay_keys or transition_overlay_key in accepted_transition_overlay_keys
+            ):
+                row["block_reason"] = "transition_edge_variant_thesis_duplicate_blocked"
+                row["block_reason_message"] = block_reason_message(row["block_reason"])
+                row["thesis_rejected_reason"] = "transition_edge_variant_duplicate_active_thesis"
+                assessed.append(row)
+                continue
             if self.settings.thesis_dedupe_enabled and thesis_fingerprint and matched_thesis is not None:
                 row["block_reason"] = "thesis_duplicate_blocked"
                 row["block_reason_message"] = block_reason_message(row["block_reason"])
@@ -1211,6 +1301,8 @@ class PortfolioRiskOverlayService:
             row["thesis_rejected_reason"] = None
             current_total_risk_r = float(current_total_risk_r) + float(row.get("recommended_risk_r", 0.0) or 0.0)
             accepted.append(row)
+            if transition_overlay_key:
+                accepted_transition_overlay_keys.add(transition_overlay_key)
             if self.settings.thesis_dedupe_enabled and thesis_fingerprint:
                 matched_or_new = self._matching_cluster(thesis_clusters, thesis_fingerprint)
                 if matched_or_new is None:

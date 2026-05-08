@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -108,6 +109,18 @@ class _OpenRolloutProvider:
         )
 
 
+class _MicroLiveRolloutProvider:
+    def get(self, strategy_family: str | None) -> RolloutPolicy:
+        return RolloutPolicy(
+            strategy_family=str(strategy_family or "legacy_zone_plan").lower(),
+            live_enabled=True,
+            max_execution_mode=ExecutionMode.MICRO_LIVE,
+            max_risk_r=2.0,
+            allowed_sessions=("london", "new_york", "unknown"),
+            min_quality_score=0.0,
+        )
+
+
 def test_why_now_mapping_and_fallback() -> None:
     assert why_now_message("sweep_reversal_limit") == "extreme location + rejection + clean limit"
     assert why_now_message("custom_reason_code") == "custom reason code"
@@ -115,7 +128,23 @@ def test_why_now_mapping_and_fallback() -> None:
 
 def test_scanner_top_assessed_candidate_supports_accepted_blocked_and_none(monkeypatch) -> None:
     settings = Settings(_env_file=None)
-    accepted_repo = _PlanRepoStub([_plan(plan_id="accepted_case")])
+    accepted_repo = _PlanRepoStub(
+        [
+            _plan(
+                plan_id="accepted_case",
+                validity={
+                    "strategy_family": "trend_continuation",
+                    "strategy_family_reason": "trend_continuation_limit",
+                    "recommended_risk_r": 0.8,
+                    "runtime_signal_shadow_tilt": {
+                        "classification": "strong_short_sweep",
+                        "shadow_size_multiplier": 1.4762,
+                        "apply_live": False,
+                    },
+                },
+            )
+        ]
+    )
     scanner = ScannerService(accepted_repo, _CandleRepoStub())
     monkeypatch.setattr(scanner_module, "get_settings", lambda: settings)
     scanner.overlay.settings = settings
@@ -126,6 +155,7 @@ def test_scanner_top_assessed_candidate_supports_accepted_blocked_and_none(monke
     assert accepted is not None
     assert accepted["operator_status"] == "accepted"
     assert accepted["why_now"] == "trend regime + pullback held + clean continuation"
+    assert accepted["runtime_signal_shadow_tilt"]["classification"] == "strong_short_sweep"
 
     monkeypatch.setattr(settings, "strategy_mode", StrategyMode.RESEARCH)
     blocked = scanner.top_assessed_candidate(symbol="BTCUSDC")
@@ -173,8 +203,21 @@ def test_execution_plan_builder_maps_entry_models(entry_model: str, expected_ent
     ("settings", "plan", "candidate", "metrics", "expected_state", "expected_code"),
     [
         (
-            Settings(_env_file=None, auto_trading_enabled=True, auto_trading_execution_mode="MICRO_LIVE"),
-            _plan(plan_id="manual_review_case"),
+            Settings(
+                _env_file=None,
+                auto_trading_enabled=True,
+                auto_trading_execution_mode="MICRO_LIVE",
+                auto_trading_micro_live_allowed_families="",
+            ),
+            _plan(
+                plan_id="manual_review_case",
+                validity={
+                    "strategy_family": "sweep_reversal",
+                    "strategy_mode": StrategyMode.A_ONLY.value,
+                    "strategy_grade": "A",
+                    "recommended_risk_r": 0.5,
+                },
+            ),
                 {
                     "accepted": True,
                     "deployment_go_no_go": "MANUAL_REVIEW",
@@ -188,7 +231,12 @@ def test_execution_plan_builder_maps_entry_models(entry_model: str, expected_ent
             "manual_review_required",
         ),
         (
-            Settings(_env_file=None, auto_trading_enabled=True, auto_trading_execution_mode="MICRO_LIVE"),
+            Settings(
+                _env_file=None,
+                auto_trading_enabled=True,
+                auto_trading_execution_mode="MICRO_LIVE",
+                auto_trading_micro_live_allowed_families="",
+            ),
             _plan(plan_id="research_shadow_case", validity={"strategy_mode": "RESEARCH", "strategy_family": "range_rotation"}),
                 {
                     "accepted": True,
@@ -207,6 +255,7 @@ def test_execution_plan_builder_maps_entry_models(entry_model: str, expected_ent
                 auto_trading_enabled=True,
                 auto_trading_execution_mode="MICRO_LIVE",
                 auto_trading_allowed_symbols="ETHUSDC",
+                auto_trading_micro_live_allowed_families="",
             ),
             _plan(plan_id="allowlist_case"),
                 {
@@ -221,7 +270,12 @@ def test_execution_plan_builder_maps_entry_models(entry_model: str, expected_ent
             "symbol_not_live_enabled",
         ),
         (
-            Settings(_env_file=None, auto_trading_enabled=True, auto_trading_execution_mode="MICRO_LIVE"),
+            Settings(
+                _env_file=None,
+                auto_trading_enabled=True,
+                auto_trading_execution_mode="MICRO_LIVE",
+                auto_trading_micro_live_allowed_families="",
+            ),
             _plan(
                 plan_id="stale_case",
                 state="CLOSED",
@@ -239,7 +293,12 @@ def test_execution_plan_builder_maps_entry_models(entry_model: str, expected_ent
             "stale_plan_state",
         ),
         (
-            Settings(_env_file=None, auto_trading_enabled=True, auto_trading_execution_mode="MICRO_LIVE"),
+            Settings(
+                _env_file=None,
+                auto_trading_enabled=True,
+                auto_trading_execution_mode="MICRO_LIVE",
+                auto_trading_micro_live_allowed_families="",
+            ),
             _plan(plan_id="no_go_case"),
                 {
                     "accepted": True,
@@ -484,3 +543,837 @@ def test_approval_service_paper_lineage_override_bypasses_paper_sampling_gates_o
     assert "paper_lineage_override_bypassed_validation_do_not_deploy" in reason_codes
     assert "paper_lineage_override_retained_paper_auto_submit" in reason_codes
     assert "execution_degradation:manual_review" in reason_codes
+
+
+def test_approval_service_blocks_micro_live_on_same_window_family_cluster() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(plan_id="micro_live_cluster_guard_case")
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+        live_cluster_guard={
+            "cluster_window_minutes": 60,
+            "max_same_family_entries_per_window": 1,
+            "recent_family_window_entry_count": 1,
+            "recent_family_window_symbols": ["ETHUSDC"],
+            "loss_cooldown_minutes": 90,
+            "loss_cooldown_trigger_count": 2,
+            "recent_family_loss_count": 0,
+            "recent_family_loss_symbols": [],
+        },
+    )
+
+    assert payload["approval_state"] == ApprovalState.BLOCKED.value
+    assert payload["approval_reasons"][0]["code"] == "live_family_cluster_window_cap_reached"
+
+
+def test_approval_service_blocks_micro_live_when_entry_is_not_limit() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(plan_id="micro_live_limit_only_case", entry_model="CONFIRM")
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+    )
+
+    assert payload["approval_state"] == ApprovalState.BLOCKED.value
+    assert payload["approval_reasons"][0]["code"] == "live_limit_only_entry_required"
+
+
+def test_approval_service_allows_micro_live_when_entry_model_is_in_allowlist() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(plan_id="micro_live_confirm_allowed_case", entry_model="CONFIRM")
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+    )
+
+    assert payload["approval_state"] == ApprovalState.APPROVED_AUTO.value
+
+
+def test_approval_service_blocks_micro_live_on_recent_family_loss_cooldown() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(plan_id="micro_live_loss_cooldown_case")
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+        live_cluster_guard={
+            "cluster_window_minutes": 60,
+            "max_same_family_entries_per_window": 1,
+            "recent_family_window_entry_count": 0,
+            "recent_family_window_symbols": [],
+            "loss_cooldown_minutes": 90,
+            "loss_cooldown_trigger_count": 2,
+            "recent_family_loss_count": 2,
+            "recent_family_loss_symbols": ["ETHUSDC", "ARBUSDC"],
+        },
+    )
+
+    assert payload["approval_state"] == ApprovalState.BLOCKED.value
+    assert payload["approval_reasons"][0]["code"] == "live_family_loss_cooldown_active"
+
+
+def test_approval_service_blocks_micro_live_on_same_direction_family_exposure_cap() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_allowed_symbols="SOLUSDC",
+        auto_trading_micro_live_allowed_symbols="SOLUSDC",
+        auto_trading_micro_live_allowed_families="",
+        auto_trading_live_max_same_family_direction_exposures=1,
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(plan_id="micro_live_direction_cap_case", symbol="SOLUSDC")
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+        live_cluster_guard={
+            "cluster_window_minutes": 60,
+            "max_same_family_entries_per_window": 1,
+            "recent_family_window_entry_count": 0,
+            "recent_family_window_symbols": [],
+            "direction": "long",
+            "max_same_family_direction_exposures": 1,
+            "recent_family_direction_exposure_count": 1,
+            "recent_family_direction_exposure_symbols": ["ETHUSDC"],
+            "loss_cooldown_minutes": 90,
+            "loss_cooldown_trigger_count": 2,
+            "recent_family_loss_count": 0,
+            "recent_family_loss_symbols": [],
+        },
+    )
+
+    assert payload["approval_state"] == ApprovalState.BLOCKED.value
+    assert payload["approval_reasons"][0]["code"] == "live_family_direction_exposure_cap_reached"
+
+
+def test_approval_service_holds_out_transition_variant_by_stable_partial_gate() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+        transition_edge_variant_partial_activation_ratio=0.0,
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(
+        plan_id="variant_partial_holdout_case",
+        validity={
+            "strategy_family": "sweep_reversal",
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "strategy_grade": "A",
+            "recommended_risk_r": 0.5,
+            "transition_edge_variant_applied": True,
+            "transition_edge_variant": {"variant": "exp_6_fvg_relaxed_plus_transition_override", "shadow_only": False},
+            "thesis_cluster_id": "cluster_variant_holdout",
+        },
+    )
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+        "transition_edge_variant_applied": True,
+        "transition_edge_variant": {"variant": "exp_6_fvg_relaxed_plus_transition_override", "shadow_only": False},
+        "thesis_cluster_id": "cluster_variant_holdout",
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+    )
+
+    assert payload["approval_state"] == ApprovalState.APPROVED_SHADOW.value
+    assert payload["approval_reasons"][0]["code"] == "transition_edge_variant_partial_holdout"
+    assert payload["transition_edge_variant_applied"] is True
+    assert payload["transition_edge_variant_sampling_selected"] is False
+
+
+def test_approval_service_allows_transition_variant_when_partial_gate_selects_sample() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+        transition_edge_variant_partial_activation_ratio=1.0,
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(
+        plan_id="variant_partial_allow_case",
+        validity={
+            "strategy_family": "sweep_reversal",
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "strategy_grade": "A",
+            "recommended_risk_r": 0.5,
+            "transition_edge_variant_applied": True,
+            "transition_edge_variant": {"variant": "exp_6_fvg_relaxed_plus_transition_override", "shadow_only": False},
+            "thesis_cluster_id": "cluster_variant_allow",
+        },
+    )
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+        "transition_edge_variant_applied": True,
+        "transition_edge_variant": {"variant": "exp_6_fvg_relaxed_plus_transition_override", "shadow_only": False},
+        "thesis_cluster_id": "cluster_variant_allow",
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+    )
+
+    assert payload["approval_state"] == ApprovalState.APPROVED_AUTO.value
+    assert payload["transition_edge_variant_applied"] is True
+    assert payload["transition_edge_variant_sampling_selected"] is True
+
+
+def test_approval_service_ignores_live_cluster_guard_for_paper_mode() -> None:
+    settings = Settings(_env_file=None, auto_trading_enabled=True, auto_trading_execution_mode="PAPER")
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_OpenRolloutProvider())
+    plan = _plan(plan_id="paper_mode_cluster_guard_ignored_case")
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+        live_cluster_guard={
+            "cluster_window_minutes": 60,
+            "max_same_family_entries_per_window": 1,
+            "recent_family_window_entry_count": 5,
+            "recent_family_window_symbols": ["ETHUSDC"],
+            "loss_cooldown_minutes": 90,
+            "loss_cooldown_trigger_count": 2,
+            "recent_family_loss_count": 3,
+            "recent_family_loss_symbols": ["ETHUSDC", "ARBUSDC"],
+        },
+    )
+
+    assert payload["approval_state"] == ApprovalState.APPROVED_AUTO.value
+
+
+def test_approval_service_blocks_micro_live_on_session_direction_hour_contract() -> None:
+    current_hour_utc = datetime.now(timezone.utc).hour
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_session_direction_blocked_hours_utc=f"BTCUSDC:new_york:LONG:{current_hour_utc}",
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(plan_id="micro_live_session_direction_hour_block_case")
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "new_york"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+    )
+
+    assert payload["approval_state"] == ApprovalState.BLOCKED.value
+    assert payload["approval_reasons"][0]["code"] == "micro_live_session_direction_hour_not_allowed"
+
+
+def test_approval_service_allows_micro_live_outside_session_direction_hour_contract() -> None:
+    current_hour_utc = datetime.now(timezone.utc).hour
+    blocked_hour_utc = (current_hour_utc + 1) % 24
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_session_direction_blocked_hours_utc=f"BTCUSDC:new_york:LONG:{blocked_hour_utc}",
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(plan_id="micro_live_session_direction_hour_allow_case")
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "new_york"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+    )
+
+    assert payload["approval_state"] == ApprovalState.APPROVED_AUTO.value
+
+
+def test_approval_service_ignores_micro_live_daily_entry_cap_when_disabled() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_max_daily_new_entries=0,
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(plan_id="micro_live_daily_entry_cap_disabled_case")
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+        daily_new_entry_count=99,
+    )
+
+    assert payload["approval_state"] == ApprovalState.APPROVED_AUTO.value
+
+
+def test_approval_service_blocks_micro_live_on_strategy_hour_contract() -> None:
+    current_hour_utc = datetime.now(timezone.utc).hour
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,SWEEP_CONFIRM",
+        auto_trading_micro_live_symbol_family_entry_direction_blocked_hours_utc=(
+            f"BTCUSDC:sweep_reversal:SWEEP_CONFIRM:LONG:{current_hour_utc}"
+        ),
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(
+        plan_id="micro_live_strategy_hour_block_case",
+        entry_model="SWEEP_CONFIRM",
+        validity={
+            "strategy_family": "sweep_reversal",
+            "strategy_grade": "A",
+            "strategy_family_reason": "sweep_reversal_confirm",
+            "regime": "range",
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "recommended_risk_r": 1.0,
+        },
+    )
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+    )
+
+    assert payload["approval_state"] == ApprovalState.BLOCKED.value
+    assert payload["approval_reasons"][0]["code"] == "micro_live_strategy_hour_not_allowed"
+
+
+def test_approval_service_allows_micro_live_outside_strategy_hour_contract() -> None:
+    current_hour_utc = datetime.now(timezone.utc).hour
+    blocked_hour_utc = (current_hour_utc + 1) % 24
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,SWEEP_CONFIRM",
+        auto_trading_micro_live_symbol_family_entry_direction_blocked_hours_utc=(
+            f"BTCUSDC:sweep_reversal:SWEEP_CONFIRM:LONG:{blocked_hour_utc}"
+        ),
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(
+        plan_id="micro_live_strategy_hour_allow_case",
+        entry_model="SWEEP_CONFIRM",
+        validity={
+            "strategy_family": "sweep_reversal",
+            "strategy_grade": "A",
+            "strategy_family_reason": "sweep_reversal_confirm",
+            "regime": "range",
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "recommended_risk_r": 1.0,
+        },
+    )
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+    )
+
+    assert payload["approval_state"] == ApprovalState.APPROVED_AUTO.value
+
+
+def test_approval_service_blocks_micro_live_on_strategy_time_contract(tmp_path: Path) -> None:
+    current_utc = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    contract_path = tmp_path / "strategy_time_contract.json"
+    contract_path.write_text(
+        json.dumps(
+            {
+                "blocked_buckets": [
+                    {
+                        "symbol": "BTCUSDC",
+                        "strategy_family": "sweep_reversal",
+                        "entry_model": "SWEEP_CONFIRM",
+                        "direction": "LONG",
+                        "weekday_utc": current_utc.weekday(),
+                        "hour_utc": current_utc.hour,
+                        "minute_utc": current_utc.minute,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,SWEEP_CONFIRM",
+        auto_trading_micro_live_strategy_time_contract_path=str(contract_path),
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(
+        plan_id="micro_live_strategy_time_block_case",
+        entry_model="SWEEP_CONFIRM",
+        validity={
+            "strategy_family": "sweep_reversal",
+            "strategy_grade": "A",
+            "strategy_family_reason": "sweep_reversal_confirm",
+            "regime": "range",
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "recommended_risk_r": 1.0,
+        },
+    )
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+    )
+
+    assert payload["approval_state"] == ApprovalState.BLOCKED.value
+    assert payload["approval_reasons"][0]["code"] == "micro_live_strategy_time_bucket_not_allowed"
+
+
+def test_approval_service_allows_micro_live_outside_strategy_time_contract(tmp_path: Path) -> None:
+    current_utc = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    next_minute = (current_utc + timedelta(minutes=1)).replace(second=0, microsecond=0)
+    contract_path = tmp_path / "strategy_time_contract.json"
+    contract_path.write_text(
+        json.dumps(
+            {
+                "blocked_buckets": [
+                    {
+                        "symbol": "BTCUSDC",
+                        "strategy_family": "sweep_reversal",
+                        "entry_model": "SWEEP_CONFIRM",
+                        "direction": "LONG",
+                        "weekday_utc": next_minute.weekday(),
+                        "hour_utc": next_minute.hour,
+                        "minute_utc": next_minute.minute,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,SWEEP_CONFIRM",
+        auto_trading_micro_live_strategy_time_contract_path=str(contract_path),
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(
+        plan_id="micro_live_strategy_time_allow_case",
+        entry_model="SWEEP_CONFIRM",
+        validity={
+            "strategy_family": "sweep_reversal",
+            "strategy_grade": "A",
+            "strategy_family_reason": "sweep_reversal_confirm",
+            "regime": "range",
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "recommended_risk_r": 1.0,
+        },
+    )
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+    )
+
+    assert payload["approval_state"] == ApprovalState.APPROVED_AUTO.value
+
+
+def test_approval_service_blocks_micro_live_on_strategy_time_contract_with_calendar_date(tmp_path: Path) -> None:
+    current_utc = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    contract_path = tmp_path / "strategy_time_contract_calendar.json"
+    contract_path.write_text(
+        json.dumps(
+            {
+                "blocked_buckets": [
+                    {
+                        "symbol": "BTCUSDC",
+                        "strategy_family": "sweep_reversal",
+                        "entry_model": "SWEEP_CONFIRM",
+                        "direction": "LONG",
+                        "year_utc": current_utc.year,
+                        "month_utc": current_utc.month,
+                        "day_utc": current_utc.day,
+                        "hour_utc": current_utc.hour,
+                        "minute_utc": current_utc.minute,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,SWEEP_CONFIRM",
+        auto_trading_micro_live_strategy_time_contract_path=str(contract_path),
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(
+        plan_id="micro_live_strategy_time_calendar_block_case",
+        entry_model="SWEEP_CONFIRM",
+        validity={
+            "strategy_family": "sweep_reversal",
+            "strategy_grade": "A",
+            "strategy_family_reason": "sweep_reversal_confirm",
+            "regime": "range",
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "recommended_risk_r": 1.0,
+        },
+    )
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+    )
+
+    assert payload["approval_state"] == ApprovalState.BLOCKED.value
+    assert payload["approval_reasons"][0]["code"] == "micro_live_strategy_time_bucket_not_allowed"
+
+
+def test_approval_service_blocks_micro_live_on_plan_blocklist(tmp_path: Path) -> None:
+    blocklist_path = tmp_path / "plan_blocklist.json"
+    blocklist_path.write_text(
+        json.dumps({"blocked_plan_ids": ["micro_live_plan_block_case"]}),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_plan_blocklist_path=str(blocklist_path),
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(plan_id="micro_live_plan_block_case")
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+    )
+
+    assert payload["approval_state"] == ApprovalState.BLOCKED.value
+    assert payload["approval_reasons"][0]["code"] == "micro_live_plan_id_blocklisted"
+
+
+def test_approval_service_blocks_micro_live_on_event_blackout_window(tmp_path: Path) -> None:
+    current_utc = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    blackout_path = tmp_path / "event_blackouts.json"
+    blackout_path.write_text(
+        json.dumps(
+            {
+                "windows": [
+                    {
+                        "label": "FOMC_window",
+                        "start_utc": (current_utc - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+                        "end_utc": (current_utc + timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+                        "symbols": ["BTCUSDC"],
+                        "strategy_families": ["sweep_reversal"],
+                        "entry_models": ["LIMIT"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_event_blackout_path=str(blackout_path),
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(
+        plan_id="micro_live_event_blackout_case",
+        validity={
+            "strategy_family": "sweep_reversal",
+            "strategy_grade": "A",
+            "strategy_family_reason": "sweep_reversal_limit",
+            "strategy_scorecard_buckets": {"location": 22.0},
+            "strategy_scorecard_raw_components": {"htf_trend_clarity": 18.0},
+            "regime": "range",
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "recommended_risk_r": 1.0,
+        },
+    )
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+    )
+
+    assert payload["approval_state"] == ApprovalState.BLOCKED.value
+    assert payload["approval_reasons"][0]["code"] == "micro_live_event_blackout_active"
+
+
+def test_approval_service_allows_micro_live_outside_event_blackout_scope(tmp_path: Path) -> None:
+    current_utc = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    blackout_path = tmp_path / "event_blackouts_scope.json"
+    blackout_path.write_text(
+        json.dumps(
+            {
+                "windows": [
+                    {
+                        "label": "FOMC_window",
+                        "start_utc": (current_utc - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+                        "end_utc": (current_utc + timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+                        "symbols": ["BTCUSDC"],
+                        "strategy_families": ["sweep_reversal"],
+                        "entry_models": ["SWEEP_CONFIRM"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,SWEEP_CONFIRM",
+        auto_trading_micro_live_event_blackout_path=str(blackout_path),
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(
+        plan_id="micro_live_event_blackout_allow_case",
+        entry_model="LIMIT",
+        validity={
+            "strategy_family": "sweep_reversal",
+            "strategy_grade": "A",
+            "strategy_family_reason": "sweep_reversal_limit",
+            "strategy_scorecard_buckets": {"location": 22.0},
+            "strategy_scorecard_raw_components": {"htf_trend_clarity": 18.0},
+            "regime": "range",
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "recommended_risk_r": 1.0,
+        },
+    )
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+    )
+
+    assert payload["approval_state"] == ApprovalState.APPROVED_AUTO.value

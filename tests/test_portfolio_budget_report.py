@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import delete
 
 from app.core.config import get_settings
-from app.db.models import Plan
+from app.db.models import OrderSubmission, Plan
 from app.db.session import SessionLocal, init_db
 from app.services.strategy_engine import StrategyEngine
 
@@ -14,6 +14,7 @@ def test_portfolio_budget_report_summarizes_exposure_and_headroom() -> None:
     init_db()
     settings = get_settings()
     updates = {
+        "auto_trading_execution_mode": "MICRO_LIVE",
         "portfolio_overlay_enabled": True,
         "portfolio_overlay_include_planned_exposure": False,
         "portfolio_overlay_max_total_exposure": 1,
@@ -31,6 +32,7 @@ def test_portfolio_budget_report_summarizes_exposure_and_headroom() -> None:
 
         with SessionLocal() as db:
             db.execute(delete(Plan))
+            db.execute(delete(OrderSubmission))
             db.commit()
             base_kwargs = dict(
                 timeframe="5m",
@@ -59,7 +61,7 @@ def test_portfolio_budget_report_summarizes_exposure_and_headroom() -> None:
                         entry_model="LIMIT",
                         entry_price=100.0,
                         entry_condition="limit_on_touch",
-                        validity={"regime": "range", "meta_reason": "meta_pass"},
+                        validity={"regime": "range", "meta_reason": "meta_pass", "execution_mode": "MICRO_LIVE"},
                         state="ARMED",
                         **base_kwargs,
                     ),
@@ -161,6 +163,225 @@ def test_portfolio_budget_report_summarizes_exposure_and_headroom() -> None:
             setattr(settings, key, value)
 
 
+def test_portfolio_budget_report_ignores_unknown_and_paper_exposure_in_micro_live() -> None:
+    init_db()
+    settings = get_settings()
+    updates = {
+        "auto_trading_execution_mode": "MICRO_LIVE",
+        "portfolio_overlay_enabled": True,
+        "portfolio_overlay_include_planned_exposure": False,
+    }
+    old_values = {key: getattr(settings, key) for key in updates}
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    suffix = str(int(now.timestamp() * 1_000_000))
+
+    try:
+        for key, value in updates.items():
+            setattr(settings, key, value)
+
+        with SessionLocal() as db:
+            db.execute(delete(Plan))
+            db.execute(delete(OrderSubmission))
+            db.commit()
+            base_kwargs = dict(
+                timeframe="5m",
+                sl=98.0,
+                tp1=101.0,
+                tp2=102.0,
+                tp3=103.0,
+                split={"tp1": 0.6, "tp2": 0.25, "runner": 0.15},
+                rr_min=1.4,
+                rr_base=2.0,
+                rr_opt=3.0,
+                ev=0.25,
+                cost_est=0.04,
+                confidence=0.72,
+                valid_from=now - timedelta(minutes=30),
+                valid_until=now + timedelta(hours=3),
+                strategy_version="v1",
+            )
+            db.add_all(
+                [
+                    Plan(
+                        plan_id=f"budget_unknown_{suffix}",
+                        zone_id=f"budget_zone_unknown_{suffix}",
+                        symbol="BTCUSDC",
+                        direction="long",
+                        entry_model="LIMIT",
+                        entry_price=100.0,
+                        entry_condition="limit_on_touch",
+                        validity={"regime": "range", "strategy_family": "sweep_reversal"},
+                        state="ARMED",
+                        **base_kwargs,
+                    ),
+                    Plan(
+                        plan_id=f"budget_paper_{suffix}",
+                        zone_id=f"budget_zone_paper_{suffix}",
+                        symbol="BTCUSDC",
+                        direction="long",
+                        entry_model="LIMIT",
+                        entry_price=100.0,
+                        entry_condition="limit_on_touch",
+                        validity={"regime": "range", "strategy_family": "sweep_reversal", "execution_mode": "PAPER"},
+                        state="ARMED",
+                        **base_kwargs,
+                    ),
+                    Plan(
+                        plan_id=f"budget_live_{suffix}",
+                        zone_id=f"budget_zone_live_{suffix}",
+                        symbol="BTCUSDC",
+                        direction="long",
+                        entry_model="LIMIT",
+                        entry_price=100.0,
+                        entry_condition="limit_on_touch",
+                        validity={"regime": "range", "strategy_family": "sweep_reversal", "execution_mode": "MICRO_LIVE"},
+                        state="ARMED",
+                        **base_kwargs,
+                    ),
+                ]
+            )
+            db.commit()
+
+            engine = StrategyEngine(db)
+            payload = engine.portfolio_budget_report(
+                universe="usdc_perp_top30",
+                limit=5,
+                write_report=False,
+            )
+
+            assert payload["current_exposure"]["total"] == 1
+            assert payload["current_positions"][0]["plan_id"] == f"budget_live_{suffix}"
+    finally:
+        for key, value in old_values.items():
+            setattr(settings, key, value)
+
+
+def test_portfolio_budget_report_counts_live_exposure_from_recent_submission_when_plan_mode_missing() -> None:
+    init_db()
+    settings = get_settings()
+    updates = {
+        "auto_trading_execution_mode": "MICRO_LIVE",
+        "portfolio_overlay_enabled": True,
+        "portfolio_overlay_include_planned_exposure": False,
+    }
+    old_values = {key: getattr(settings, key) for key in updates}
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    suffix = str(int(now.timestamp() * 1_000_000) + 99)
+
+    try:
+        for key, value in updates.items():
+            setattr(settings, key, value)
+
+        with SessionLocal() as db:
+            db.execute(delete(Plan))
+            db.execute(delete(OrderSubmission))
+            db.commit()
+            base_kwargs = dict(
+                timeframe="5m",
+                sl=98.0,
+                tp1=101.0,
+                tp2=102.0,
+                tp3=103.0,
+                split={"tp1": 0.6, "tp2": 0.25, "runner": 0.15},
+                rr_min=1.4,
+                rr_base=2.0,
+                rr_opt=3.0,
+                ev=0.25,
+                cost_est=0.04,
+                confidence=0.72,
+                valid_from=now - timedelta(minutes=30),
+                valid_until=now + timedelta(hours=3),
+                strategy_version="v1",
+            )
+            live_plan_id = f"budget_live_submission_{suffix}"
+            rejected_plan_id = f"budget_rejected_submission_{suffix}"
+            db.add_all(
+                [
+                    Plan(
+                        plan_id=live_plan_id,
+                        zone_id=f"budget_zone_live_submission_{suffix}",
+                        symbol="BTCUSDC",
+                        direction="long",
+                        entry_model="LIMIT",
+                        entry_price=100.0,
+                        entry_condition="limit_on_touch",
+                        validity={"regime": "range", "strategy_family": "sweep_reversal"},
+                        state="ARMED",
+                        **base_kwargs,
+                    ),
+                    Plan(
+                        plan_id=rejected_plan_id,
+                        zone_id=f"budget_zone_rejected_submission_{suffix}",
+                        symbol="ETHUSDC",
+                        direction="long",
+                        entry_model="LIMIT",
+                        entry_price=200.0,
+                        entry_condition="limit_on_touch",
+                        validity={"regime": "range", "strategy_family": "sweep_reversal"},
+                        state="ARMED",
+                        **base_kwargs,
+                    ),
+                ]
+            )
+            db.add_all(
+                [
+                    OrderSubmission(
+                        submission_id=f"sub_live_submission_{suffix}",
+                        intent_id=f"intent_live_submission_{suffix}",
+                        plan_id=live_plan_id,
+                        symbol="BTCUSDC",
+                        client_order_id=f"client_live_submission_{suffix}",
+                        state="FILLED",
+                        submit_status="FILLED",
+                        message="linked live submission",
+                        adapter="binance",
+                        execution_mode="MICRO_LIVE",
+                        attachments={},
+                        side="BUY",
+                        order_type="LIMIT",
+                        reduce_only=False,
+                        requested_live=True,
+                        raw={},
+                        submitted_at=now - timedelta(minutes=10),
+                    ),
+                    OrderSubmission(
+                        submission_id=f"sub_rejected_submission_{suffix}",
+                        intent_id=f"intent_rejected_submission_{suffix}",
+                        plan_id=rejected_plan_id,
+                        symbol="ETHUSDC",
+                        client_order_id=f"client_rejected_submission_{suffix}",
+                        state="REJECTED",
+                        submit_status="LIVE_DISABLED",
+                        message="rejected live submission",
+                        adapter="binance",
+                        execution_mode="MICRO_LIVE",
+                        attachments={},
+                        side="BUY",
+                        order_type="LIMIT",
+                        reduce_only=False,
+                        requested_live=True,
+                        raw={},
+                        submitted_at=now - timedelta(minutes=5),
+                    ),
+                ]
+            )
+            db.commit()
+
+            engine = StrategyEngine(db)
+            payload = engine.portfolio_budget_report(
+                universe="usdc_perp_top30",
+                limit=5,
+                write_report=False,
+            )
+
+            assert payload["current_exposure"]["total"] == 1
+            assert payload["current_positions"][0]["plan_id"] == live_plan_id
+            assert all(row["plan_id"] != rejected_plan_id for row in payload["current_positions"])
+    finally:
+        for key, value in old_values.items():
+            setattr(settings, key, value)
+
+
 def test_portfolio_budget_report_collects_alpha_research_candidates() -> None:
     init_db()
     settings = get_settings()
@@ -245,6 +466,7 @@ def test_portfolio_budget_report_reflects_daily_operating_lock() -> None:
     init_db()
     settings = get_settings()
     updates = {
+        "auto_trading_execution_mode": "MICRO_LIVE",
         "portfolio_overlay_enabled": True,
         "portfolio_overlay_include_planned_exposure": False,
         "portfolio_overlay_min_risk_budget_score": 0.0,
@@ -261,6 +483,7 @@ def test_portfolio_budget_report_reflects_daily_operating_lock() -> None:
 
         with SessionLocal() as db:
             db.execute(delete(Plan))
+            db.execute(delete(OrderSubmission))
             db.commit()
             base_kwargs = dict(
                 timeframe="5m",
@@ -295,6 +518,7 @@ def test_portfolio_budget_report_reflects_daily_operating_lock() -> None:
                             "final_exit_realized_r": -0.6,
                             "final_exit_reason": "stop_loss",
                             "regime": "trend",
+                            "execution_mode": "MICRO_LIVE",
                         },
                         state="CLOSED",
                         **base_kwargs,
@@ -312,6 +536,7 @@ def test_portfolio_budget_report_reflects_daily_operating_lock() -> None:
                             "final_exit_realized_r": -0.7,
                             "final_exit_reason": "information_failure",
                             "regime": "trend",
+                            "execution_mode": "MICRO_LIVE",
                         },
                         state="CLOSED",
                         **base_kwargs,
@@ -326,6 +551,48 @@ def test_portfolio_budget_report_reflects_daily_operating_lock() -> None:
                         validity={"regime": "range", "meta_reason": "meta_pass"},
                         state="PLANNED",
                         **base_kwargs,
+                    ),
+                ]
+            )
+            db.add_all(
+                [
+                    OrderSubmission(
+                        submission_id=f"sub_lock_1_{suffix}",
+                        intent_id=f"intent_lock_1_{suffix}",
+                        plan_id=f"budget_lock_closed_1_{suffix}",
+                        symbol="BTCUSDC",
+                        client_order_id=f"client_lock_1_{suffix}",
+                        state="FILLED",
+                        submit_status="FILLED",
+                        message="linked live submission",
+                        adapter="binance",
+                        execution_mode="MICRO_LIVE",
+                        attachments={},
+                        side="BUY",
+                        order_type="LIMIT",
+                        reduce_only=False,
+                        requested_live=True,
+                        raw={},
+                        submitted_at=now - timedelta(minutes=90),
+                    ),
+                    OrderSubmission(
+                        submission_id=f"sub_lock_2_{suffix}",
+                        intent_id=f"intent_lock_2_{suffix}",
+                        plan_id=f"budget_lock_closed_2_{suffix}",
+                        symbol="ETHUSDC",
+                        client_order_id=f"client_lock_2_{suffix}",
+                        state="FILLED",
+                        submit_status="FILLED",
+                        message="linked live submission",
+                        adapter="binance",
+                        execution_mode="MICRO_LIVE",
+                        attachments={},
+                        side="BUY",
+                        order_type="LIMIT",
+                        reduce_only=False,
+                        requested_live=True,
+                        raw={},
+                        submitted_at=now - timedelta(minutes=30),
                     ),
                 ]
             )

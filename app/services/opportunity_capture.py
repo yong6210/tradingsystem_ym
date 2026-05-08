@@ -32,6 +32,13 @@ _ROLLOUT_REASONS = {
     "live_disabled_family",
     "execution_mode_cap_exceeded",
     "micro_live_session_not_allowed",
+    "live_limit_only_entry_required",
+    "live_entry_model_not_allowed",
+    "micro_live_strategy_hour_not_allowed",
+    "micro_live_strategy_time_bucket_not_allowed",
+    "micro_live_plan_id_blocklisted",
+    "live_family_cluster_window_cap_reached",
+    "live_family_loss_cooldown_active",
 }
 
 _QUALITY_REASONS = {
@@ -216,6 +223,8 @@ class OpportunityCaptureService:
 
     @staticmethod
     def _dominant_gate_reason(blocked_mix: dict[str, int]) -> str:
+        if sum(int(value or 0) for value in dict(blocked_mix or {}).values()) <= 0:
+            return "selection_shortfall"
         if blocked_mix.get("quality", 0) >= max(
             blocked_mix.get("rollout", 0),
             blocked_mix.get("structural", 0),

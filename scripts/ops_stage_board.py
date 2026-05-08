@@ -16,6 +16,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 from scripts import run_runtime_signoff_review
+from app.core import operator_surface_contracts as osc
 
 DEFAULT_STAGE_FILE = ROOT_DIR / "reports/operations/stage_monitor/current_stage.json"
 _REQUEST_RETRY_ATTEMPTS = 5
@@ -69,6 +70,35 @@ def parse_args() -> argparse.Namespace:
         help="Do not persist the latest stage snapshot.",
     )
     return parser.parse_args()
+
+
+def _entry_model_type_allowed(*, entry_model: str, entry_type: str, allowed_entry_models: set[str]) -> bool:
+    if not allowed_entry_models:
+        return True
+    normalized_model = str(entry_model or "").strip().upper()
+    normalized_type = str(entry_type or "").strip().upper()
+    if not normalized_model and not normalized_type:
+        return True
+    if normalized_model:
+        return normalized_model in allowed_entry_models
+    if normalized_type == "LIMIT":
+        return "LIMIT" in allowed_entry_models
+    if normalized_type == "STOP_MARKET":
+        return bool(allowed_entry_models.intersection({"CONFIRM", "SWEEP_CONFIRM"}))
+    return normalized_type in allowed_entry_models
+
+
+def _entry_model_block_contract(*, entry_model: str, entry_type: str, allowed_entry_models: list[str]) -> tuple[str, str, str]:
+    allowed_set = {item.strip().upper() for item in allowed_entry_models if item.strip()}
+    reason_code = "live_limit_only_entry_required" if allowed_set == {"LIMIT"} else "live_entry_model_not_allowed"
+    token = str(entry_model or entry_type or "UNKNOWN").strip().upper() or "UNKNOWN"
+    if reason_code == "live_limit_only_entry_required":
+        return reason_code, f"entry type {token} is outside the limit-only contract", "limit_only_candidate_appears"
+    return (
+        reason_code,
+        f"entry model/type {token} is outside the current MICRO_LIVE entry-model contract ({','.join(sorted(allowed_set))})",
+        "allowed_entry_model_candidate_appears",
+    )
 
 
 def _request_json(
@@ -559,6 +589,9 @@ def _representative_candidates(dashboard: dict[str, Any]) -> dict[str, Any]:
             "status": status,
             "strategy_family": str(item.get("strategy_family") or ""),
             "block_reason": str(item.get("block_reason") or ""),
+            "entry_type": str(item.get("entry_type") or ""),
+            "entry_model": str(item.get("entry_model") or ""),
+            "strategy_mode": str(item.get("strategy_mode") or ""),
             "edge_state": str(focus.get("edge_state") or "insufficient_edge_measurement"),
             "entry_timing_preferred_variant": str(focus.get("entry_timing_preferred_variant") or "none"),
             "execution_style_preferred_variant": str(focus.get("execution_style_preferred_variant") or "none"),
@@ -569,6 +602,151 @@ def _representative_candidates(dashboard: dict[str, Any]) -> dict[str, Any]:
     return {
         "accepted": _candidate(accepted_rows[0] if accepted_rows else None, status="ACTIONABLE_ENTRY"),
         "blocked": _candidate(blocked_rows[0] if blocked_rows else None, status="BLOCKED_SETUP"),
+    }
+
+
+def _recent_execution_intent_focus(dashboard: dict[str, Any]) -> dict[str, Any] | None:
+    recent_intents = list((dashboard or {}).get("recent_intents") or [])
+    if not recent_intents:
+        return None
+    item = dict(recent_intents[0] or {})
+    if not item:
+        return None
+    return {
+        "symbol": str(item.get("symbol") or ""),
+        "strategy_family": str(item.get("strategy_family") or ""),
+        "direction": str(item.get("direction") or ""),
+        "entry_type": str(item.get("entry_type") or ""),
+        "execution_mode": str(item.get("execution_mode") or ""),
+        "allowed_execution_mode": str(item.get("allowed_execution_mode") or ""),
+        "approval_state": str(item.get("approval_state") or ""),
+        "decision_reason_code": str(item.get("decision_reason_code") or ""),
+        "playbook_action": str(item.get("playbook_action") or ""),
+        "created_at": str(item.get("created_at") or ""),
+    }
+
+
+def _recent_contract_matching_intent_summary(dashboard: dict[str, Any]) -> dict[str, Any]:
+    from app.core.config import get_settings
+    from app.db.models import OrderIntent
+    from app.db.session import SessionLocal
+    from datetime import timedelta
+
+    settings = get_settings()
+    allowed_symbols = [item.strip() for item in str(settings.auto_trading_micro_live_allowed_symbols or "").split(",") if item.strip()]
+    allowed_families = [item.strip() for item in str(settings.auto_trading_micro_live_allowed_families or "").split(",") if item.strip()]
+    configured_entry_models = [
+        item.strip().upper()
+        for item in str(getattr(settings, "auto_trading_micro_live_allowed_entry_models", "") or "").split(",")
+        if item.strip()
+    ]
+    direction_contract: dict[str, set[str]] = {}
+    for item in str(getattr(settings, "auto_trading_micro_live_direction_contract", "") or "").split(","):
+        token = item.strip()
+        if not token or ":" not in token:
+            continue
+        symbol, raw_directions = token.split(":", 1)
+        directions = {direction.strip().upper() for direction in raw_directions.replace("/", "|").split("|") if direction.strip()}
+        if symbol.strip() and directions:
+            direction_contract[symbol.strip().upper()] = directions
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    db = SessionLocal()
+    try:
+        query = db.query(OrderIntent).filter(OrderIntent.created_at >= cutoff)
+        if allowed_symbols:
+            query = query.filter(OrderIntent.symbol.in_(allowed_symbols))
+        if allowed_families:
+            query = query.filter(OrderIntent.strategy_family.in_(allowed_families))
+        intents = query.order_by(OrderIntent.created_at.desc()).limit(500).all()
+    finally:
+        db.close()
+
+    matching: list[dict[str, Any]] = []
+    allowed_entry_model_set = set(configured_entry_models)
+    for intent in intents:
+        payload = getattr(intent, "payload", {}) or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                payload = {}
+        executable_plan = dict(payload.get("executable_plan") or {})
+        intent_snapshot = dict(payload.get("intent_snapshot") or {})
+        self_heal_summary = dict(intent_snapshot.get("self_heal_summary") or payload.get("self_heal_summary") or {})
+        entry_type = str(executable_plan.get("entry_type") or "").strip()
+        entry_model = str(executable_plan.get("entry_model") or "").strip()
+        direction = str(executable_plan.get("direction") or payload.get("direction") or "").strip().upper()
+        if not _entry_model_type_allowed(
+            entry_model=entry_model,
+            entry_type=entry_type,
+            allowed_entry_models=allowed_entry_model_set,
+        ):
+            continue
+        symbol = str(getattr(intent, "symbol", "") or "")
+        if symbol and direction_contract.get(symbol.upper()) and direction and direction not in direction_contract.get(symbol.upper(), set()):
+            continue
+        matching.append(
+            {
+                "symbol": symbol,
+                "strategy_family": str(getattr(intent, "strategy_family", "") or ""),
+                "direction": direction,
+                "execution_mode": str(getattr(intent, "execution_mode", "") or ""),
+                "approval_state": str(getattr(intent, "approval_state", "") or ""),
+                "decision_reason_code": str(getattr(intent, "decision_reason_code", "") or ""),
+                "allowed_execution_mode": str(payload.get("allowed_execution_mode") or getattr(intent, "execution_mode", "") or ""),
+                "entry_type": entry_type,
+                "entry_model": entry_model,
+                "created_at": str(getattr(intent, "created_at", "") or ""),
+                "plan_id": str(getattr(intent, "plan_id", "") or ""),
+                "self_heal_summary": self_heal_summary,
+            }
+        )
+    latest = dict(matching[0] or {}) if matching else {}
+    latest_submit_ready = next(
+        (
+            item
+            for item in matching
+            if str(item.get("approval_state") or "").startswith("APPROVED")
+            and str(item.get("decision_reason_code") or "") == "submit_ready"
+        ),
+        {},
+    )
+    status = "recent_contract_match_visible" if latest else "no_recent_contract_match_visible"
+    summary = (
+        f"recent MICRO_LIVE contract matches={len(matching)}"
+        if matching
+        else "no recent operator intents matched the current MICRO_LIVE contract"
+    )
+    return {
+        "status": status,
+        "matching_intent_count": len(matching),
+        "allowed_symbols": allowed_symbols,
+        "allowed_families": allowed_families,
+        "latest_symbol": str(latest.get("symbol") or ""),
+        "latest_family": str(latest.get("strategy_family") or ""),
+        "latest_direction": str(latest.get("direction") or ""),
+        "latest_execution_mode": str(latest.get("execution_mode") or ""),
+        "latest_allowed_execution_mode": str(latest.get("allowed_execution_mode") or ""),
+        "latest_approval_state": str(latest.get("approval_state") or ""),
+        "latest_reason_code": str(latest.get("decision_reason_code") or ""),
+        "latest_entry_type": str(latest.get("entry_type") or ""),
+        "latest_entry_model": str(latest.get("entry_model") or ""),
+        "latest_plan_id": str(latest.get("plan_id") or ""),
+        "latest_created_at": str(latest.get("created_at") or ""),
+        "latest_self_heal_summary": dict(latest.get("self_heal_summary") or {}),
+        "latest_submit_ready_symbol": str(latest_submit_ready.get("symbol") or ""),
+        "latest_submit_ready_family": str(latest_submit_ready.get("strategy_family") or ""),
+        "latest_submit_ready_direction": str(latest_submit_ready.get("direction") or ""),
+        "latest_submit_ready_execution_mode": str(latest_submit_ready.get("execution_mode") or ""),
+        "latest_submit_ready_allowed_execution_mode": str(latest_submit_ready.get("allowed_execution_mode") or ""),
+        "latest_submit_ready_approval_state": str(latest_submit_ready.get("approval_state") or ""),
+        "latest_submit_ready_reason_code": str(latest_submit_ready.get("decision_reason_code") or ""),
+        "latest_submit_ready_entry_type": str(latest_submit_ready.get("entry_type") or ""),
+        "latest_submit_ready_entry_model": str(latest_submit_ready.get("entry_model") or ""),
+        "latest_submit_ready_plan_id": str(latest_submit_ready.get("plan_id") or ""),
+        "latest_submit_ready_created_at": str(latest_submit_ready.get("created_at") or ""),
+        "latest_submit_ready_self_heal_summary": dict(latest_submit_ready.get("self_heal_summary") or {}),
+        "summary": summary,
     }
 
 
@@ -1177,7 +1355,11 @@ def _post_unlock_review_commands_line(item: dict[str, Any] | None) -> str:
 def _default_post_unlock_bundle_result(review_summary: dict[str, Any] | None) -> dict[str, Any]:
     summary = dict(review_summary or {})
     review_window_open = bool(summary.get("review_window_open", False))
-    status = "review_window_open_pending_bundle" if review_window_open else "waiting_for_review_window"
+    status = (
+        osc.RUNTIME_REOPEN_STATUS_REVIEW_WINDOW_OPEN_PENDING_BUNDLE
+        if review_window_open
+        else osc.RUNTIME_REOPEN_STATUS_WAITING_FOR_REVIEW_WINDOW
+    )
     summary_text = (
         "post-unlock bundle review is waiting for execution after the review window opens"
         if review_window_open
@@ -1215,19 +1397,19 @@ def _runtime_reopen_status(
     bundle_status = str(bundle.get("status") or "").upper()
 
     if risk_closed:
-        status = "waiting_for_operating_lock"
+        status = osc.RUNTIME_REOPEN_STATUS_WAITING_FOR_OPERATING_LOCK
         ready = False
     elif not review_window_open:
-        status = "waiting_for_review_window"
+        status = osc.RUNTIME_REOPEN_STATUS_WAITING_FOR_REVIEW_WINDOW
         ready = False
     elif bundle_status == "READY_TO_REOPEN_RUNTIME":
-        status = "ready_to_reopen_runtime"
+        status = osc.RUNTIME_REOPEN_STATUS_READY_TO_REOPEN_RUNTIME
         ready = True
     elif bundle_status and bundle_status != "WAITING_FOR_REVIEW_WINDOW":
-        status = "manual_review_required"
+        status = osc.RUNTIME_REOPEN_STATUS_MANUAL_REVIEW_REQUIRED
         ready = False
     else:
-        status = "review_window_open_pending_bundle"
+        status = osc.RUNTIME_REOPEN_STATUS_REVIEW_WINDOW_OPEN_PENDING_BUNDLE
         ready = False
     return {
         "status": status,
@@ -1357,11 +1539,11 @@ def _runtime_signoff_summary(
 
     runtime_ready = run_runtime_signoff_review._runtime_signoff_eligible_status(runtime.get("status"))
     if not runtime_ready:
-        status = "not_ready"
+        status = osc.RUNTIME_OPERATOR_SIGNOFF_STATUS_NOT_READY
     elif required_reviews:
-        status = "manual_signoff_required"
+        status = osc.RUNTIME_OPERATOR_SIGNOFF_STATUS_MANUAL_SIGNOFF_REQUIRED
     else:
-        status = "ready_for_operator_signoff"
+        status = osc.RUNTIME_OPERATOR_SIGNOFF_STATUS_READY_FOR_OPERATOR_SIGNOFF
 
     operator_recommendation, operator_recommendation_reason = run_runtime_signoff_review._fallback_operator_recommendation(
         runtime_ready=runtime_ready,
@@ -1377,21 +1559,21 @@ def _runtime_signoff_summary(
         )
         if runtime_decision.get("effective_action"):
             operator_recommendation = str(runtime_decision.get("effective_action") or operator_recommendation)
-            if operator_recommendation == "conditional_micro_live_signoff":
+            if operator_recommendation == osc.RUNTIME_REOPEN_ACTION_CONDITIONAL_MICRO_LIVE_SIGNOFF:
                 operator_recommendation_reason = (
                     "legacy replay remains red, but the post-patch mitigation cohort cleared the red thresholds; "
                     "limit any reopen to MICRO_LIVE while operator sign-off remains manual"
                 )
-            elif operator_recommendation == "conditional_full_live_signoff":
+            elif operator_recommendation == osc.RUNTIME_REOPEN_ACTION_CONDITIONAL_FULL_LIVE_SIGNOFF:
                 operator_recommendation_reason = (
                     "legacy replay remains red, but the post-patch mitigation cohort cleared the conditional FULL LIVE "
                     "thresholds; any reopen still requires explicit operator sign-off"
                 )
-            elif operator_recommendation == "hold_runtime_reopen":
+            elif operator_recommendation == osc.RUNTIME_REOPEN_ACTION_HOLD_RUNTIME_REOPEN:
                 operator_recommendation_reason = "replay downside exceeds operating tolerance; keep runtime closed"
-            elif operator_recommendation == "manual_signoff_required":
+            elif operator_recommendation == osc.RUNTIME_REOPEN_ACTION_MANUAL_SIGNOFF_REQUIRED:
                 operator_recommendation_reason = "runtime is reopen-ready but required operator review items remain"
-            elif operator_recommendation == "proceed_to_operator_signoff":
+            elif operator_recommendation == osc.RUNTIME_REOPEN_ACTION_PROCEED_TO_OPERATOR_SIGNOFF:
                 operator_recommendation_reason = "runtime is reopen-ready and no required operator review items remain"
         runtime_reopen_gate_summary = run_runtime_signoff_review._build_runtime_reopen_gate_summary(
             approval_template_focus,
@@ -1451,14 +1633,108 @@ def _runtime_reopen_gate_summary_line(item: dict[str, Any] | None) -> str:
     summary = dict(item or {})
     micro = dict(summary.get("micro_live") or {})
     full = dict(summary.get("full_live") or {})
+    contract_scope = str(micro.get("contract_scope") or full.get("contract_scope") or "")
     return (
         "runtime_reopen_gate: "
         f"micro={micro.get('status') or 'not_available'}"
         f"({int(micro.get('closed_trade_count') or 0)}/{int(micro.get('min_closed_trades') or 0)})"
         f" | full={full.get('status') or 'not_available'}"
         f"({int(full.get('closed_trade_count') or 0)}/{int(full.get('min_closed_trades') or 0)})"
+        + (f" | contract={contract_scope}" if contract_scope else "")
         + (f" | scope={summary.get('active_scope')}" if summary.get("active_scope") else "")
         + (f" | action={summary.get('effective_action')}" if summary.get("effective_action") else "")
+    )
+
+
+def _runtime_live_cluster_guard_summary(dashboard: dict[str, Any] | None) -> dict[str, Any]:
+    source = dict((dashboard or {}).get("signal_funnel") or {})
+    portfolio = dict((dashboard or {}).get("portfolio_summary") or {})
+    blocked_rows = [dict(item) for item in list(portfolio.get("blocked_candidates") or []) if isinstance(item, dict)]
+    blocked_reason_counts = dict(source.get("blocked_reason_counts") or {})
+    current_reason_code = str((dashboard or {}).get("blocking_reason_code") or "").strip()
+    current_reason_message = str((dashboard or {}).get("blocking_reason_message") or "").strip()
+
+    cluster_reason = osc.LIVE_CLUSTER_GUARD_REASON_WINDOW_CAP
+    cooldown_reason = osc.LIVE_CLUSTER_GUARD_REASON_LOSS_COOLDOWN
+
+    cluster_rows = [
+        row
+        for row in blocked_rows
+        if str(row.get("block_reason_code") or row.get("block_reason") or "").strip() == cluster_reason
+    ]
+    cooldown_rows = [
+        row
+        for row in blocked_rows
+        if str(row.get("block_reason_code") or row.get("block_reason") or "").strip() == cooldown_reason
+    ]
+
+    cluster_count = max(len(cluster_rows), int(blocked_reason_counts.get(cluster_reason, 0) or 0))
+    cooldown_count = max(len(cooldown_rows), int(blocked_reason_counts.get(cooldown_reason, 0) or 0))
+
+    if current_reason_code == cluster_reason:
+        status = "cluster_window_cap_active"
+    elif current_reason_code == cooldown_reason:
+        status = "family_loss_cooldown_active"
+    elif cluster_count > 0 and cooldown_count > 0:
+        status = "multiple_live_guards_active"
+    elif cluster_count > 0:
+        status = "cluster_window_cap_present"
+    elif cooldown_count > 0:
+        status = "family_loss_cooldown_present"
+    else:
+        status = "clear"
+
+    relevant_rows = cluster_rows + cooldown_rows
+    families: list[str] = []
+    symbols: list[str] = []
+    for row in relevant_rows:
+        family = str(row.get("strategy_family") or "").strip().lower()
+        if family and family not in families:
+            families.append(family)
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+
+    if status == "clear":
+        summary = "no live cluster or loss cooldown rollout guard is currently active"
+    else:
+        summary = (
+            f"cluster_blocked={cluster_count} | cooldown_blocked={cooldown_count}"
+            + (f" | families={','.join(families[:3])}" if families else "")
+            + (f" | symbols={','.join(symbols[:5])}" if symbols else "")
+        )
+
+    return {
+        "available": True,
+        "status": status,
+        "active": status != "clear",
+        "current_reason_code": current_reason_code,
+        "current_reason_message": current_reason_message,
+        "cluster_window_blocked_candidates": cluster_count,
+        "loss_cooldown_blocked_candidates": cooldown_count,
+        "families": families[:3],
+        "symbols": symbols[:5],
+        "summary": summary,
+    }
+
+
+def _runtime_live_cluster_guard_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    if not summary:
+        return "runtime_live_cluster_guard: unavailable"
+    families = ",".join(str(value) for value in list(summary.get("families") or []) if str(value).strip())
+    symbols = ",".join(str(value) for value in list(summary.get("symbols") or []) if str(value).strip())
+    return (
+        f"runtime_live_cluster_guard: status={summary.get('status') or 'not_available'}"
+        f" | cluster={int(summary.get('cluster_window_blocked_candidates') or 0)}"
+        f" | cooldown={int(summary.get('loss_cooldown_blocked_candidates') or 0)}"
+        + (f" | families={families}" if families else "")
+        + (f" | symbols={symbols}" if symbols else "")
+        + (
+            f" | reason={summary.get('current_reason_code')}"
+            if summary.get("current_reason_code")
+            else ""
+        )
     )
 
 
@@ -1481,6 +1757,13 @@ def _runtime_preflight_summary_line(item: dict[str, Any] | None) -> str:
 def _runtime_operator_signoff_summary_line(item: dict[str, Any] | None) -> str:
     summary = dict(item or {})
     review_codes = ",".join(str(code) for code in list(summary.get("required_review_codes") or []) if str(code).strip()) or "none"
+    submit_mode = str(summary.get("intent_execution_mode") or "")
+    contract_scope = str(summary.get("contract_scope") or "")
+    submit_path = ""
+    if submit_mode:
+        submit_path = f"{submit_mode}/live:true"
+        if contract_scope:
+            submit_path = f"{submit_path}/{contract_scope}"
     return (
         f"runtime_operator_signoff: status={summary.get('status') or 'not_available'}"
         + (f" | action={summary.get('effective_action')}" if summary.get("effective_action") else "")
@@ -1488,7 +1771,447 @@ def _runtime_operator_signoff_summary_line(item: dict[str, Any] | None) -> str:
         + (f" | preflight={summary.get('preflight_status')}" if summary.get("preflight_status") else "")
         + (f" | required={review_codes}" if review_codes else "")
         + (f" | next={summary.get('next_step')}" if summary.get("next_step") else "")
+        + (f" | submit={submit_path}" if submit_path else "")
+        + (f" | review_cmd={summary.get('review_command')}" if summary.get("review_command") else "")
     )
+
+
+def _runtime_operator_action_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    status = str(summary.get("status") or "").strip().lower()
+    if status in {"", "not_applicable"}:
+        return "runtime_operator_action: not_applicable"
+    parts = []
+    review_command = str(summary.get("review_command") or "")
+    signoff_review_command = str(summary.get("signoff_review_command") or "")
+    submit_path_summary = str(summary.get("submit_path_summary") or "")
+    candidate_requirements = str(summary.get("candidate_requirements_summary") or "")
+    if review_command:
+        parts.append(f"preflight={review_command}")
+    if signoff_review_command:
+        parts.append(f"signoff={signoff_review_command}")
+    if submit_path_summary:
+        parts.append(f"submit={submit_path_summary}")
+    if candidate_requirements:
+        parts.append(f"candidate={candidate_requirements}")
+    return "runtime_operator_action: " + (" | ".join(parts) if parts else "not_available")
+
+
+def _runtime_actionable_live_candidate_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    if not summary:
+        return "runtime_actionable_live_candidate: not_available"
+    recent_symbol = str(summary.get("recent_intent_symbol") or "")
+    recent_family = str(summary.get("recent_intent_family") or "")
+    recent_mode = str(summary.get("recent_intent_allowed_execution_mode") or summary.get("recent_intent_execution_mode") or "")
+    recent_direction = str(summary.get("recent_intent_direction") or "")
+    recent_hint = "/".join(item for item in [recent_symbol, recent_family, recent_mode, recent_direction] if item)
+    return (
+        f"runtime_actionable_live_candidate: status={summary.get('status') or 'not_available'}"
+        + (f" | candidate={summary.get('candidate_symbol')}/{summary.get('candidate_family')}" if summary.get("candidate_symbol") else "")
+        + (f" | candidate_status={summary.get('candidate_status')}" if summary.get("candidate_status") else "")
+        + (
+            f" | entry={summary.get('candidate_entry_type')}"
+            + (f"/{summary.get('candidate_direction')}" if summary.get("candidate_direction") else "")
+            if summary.get("candidate_entry_type")
+            else ""
+        )
+        + (f" | recent={recent_hint}" if recent_hint else "")
+        + (
+            f" | last_submit_ready="
+            + "/".join(
+                item
+                for item in [
+                    str(summary.get("recent_submit_ready_symbol") or ""),
+                    str(summary.get("recent_submit_ready_family") or ""),
+                    str(summary.get("recent_submit_ready_direction") or ""),
+                ]
+                if item
+            )
+            + (
+                f"@{summary.get('recent_submit_ready_created_at')}"
+                if summary.get("recent_submit_ready_created_at")
+                else ""
+            )
+            if summary.get("recent_submit_ready_symbol")
+            else ""
+        )
+        + (
+            f" | recent_contract_matches={summary.get('recent_contract_match_count')}"
+            if summary.get("recent_contract_match_count") is not None
+            else ""
+        )
+        + (f" | reason={summary.get('reason_code')}" if summary.get("reason_code") else "")
+        + (f" | next={summary.get('next_trigger')}" if summary.get("next_trigger") else "")
+        + (f" | summary={summary.get('summary')}" if summary.get("summary") else "")
+    )
+
+
+def _runtime_self_heal_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    if not summary:
+        return "runtime_self_heal: not_available"
+    return (
+        f"runtime_self_heal: active={bool(summary.get('active', False))}"
+        f" | stale_cleanup={int(summary.get('stale_cleanup_events', 0) or 0)}"
+        f" | latest_reentry_ignored={bool(summary.get('latest_reentry_block_ignored', False))}"
+        f" | latest_duplicate_ignored={int(summary.get('latest_duplicate_intents_ignored', 0) or 0)}"
+        f" | last_submit_ready_self_heal={bool(summary.get('latest_submit_ready_self_heal_applied', False))}"
+        + (f" | summary={summary.get('summary')}" if summary.get("summary") else "")
+    )
+
+
+def _trend_proof_watch_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    if not summary:
+        return "trend_proof_watch: not_available"
+    return (
+        f"trend_proof_watch: state={summary.get('availability_state') or 'unknown'}"
+        f" | scanner={int(summary.get('scanner_candidate_count', 0) or 0)}"
+        f" | limit={int(summary.get('scanner_limit_candidate_count', 0) or 0)}"
+        f" | runtime={int(summary.get('runtime_eligible_candidate_count', 0) or 0)}"
+        + (
+            f" | top={summary.get('top_runtime_candidate_symbol')}/{summary.get('top_runtime_candidate_plan_id')}"
+            if summary.get("top_runtime_candidate_symbol")
+            else ""
+        )
+        + (f" | summary={summary.get('summary')}" if summary.get("summary") else "")
+    )
+
+
+def _apply_runtime_actionable_live_candidate_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    current = dict(payload or {})
+    signoff = dict(current.get("runtime_operator_signoff_summary") or {})
+    status = str(signoff.get("status") or "").strip().lower()
+    scope = str(signoff.get("allowed_scope") or "").strip()
+    if status in {"", "not_applicable"} or scope != osc.RUNTIME_DECISION_SCOPE_MICRO_LIVE_ONLY:
+        current["runtime_actionable_live_candidate_summary"] = {
+            "active": False,
+            "status": "not_applicable",
+            "summary": "actionable live candidate review is only relevant during MICRO_LIVE_ONLY sign-off",
+        }
+        return current
+
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    allowed_symbols = [item.strip() for item in str(settings.auto_trading_micro_live_allowed_symbols or "").split(",") if item.strip()]
+    allowed_families = [item.strip() for item in str(settings.auto_trading_micro_live_allowed_families or "").split(",") if item.strip()]
+    allowed_sessions = [item.strip() for item in str(settings.auto_trading_micro_live_allowed_sessions or "").split(",") if item.strip()]
+    configured_entry_models = [
+        item.strip().upper()
+        for item in str(getattr(settings, "auto_trading_micro_live_allowed_entry_models", "") or "").split(",")
+        if item.strip()
+    ]
+    live_entry_models = list(configured_entry_models)
+    direction_contract: dict[str, set[str]] = {}
+    for item in str(getattr(settings, "auto_trading_micro_live_direction_contract", "") or "").split(","):
+        token = item.strip()
+        if not token or ":" not in token:
+            continue
+        symbol, raw_directions = token.split(":", 1)
+        directions = {direction.strip().upper() for direction in raw_directions.replace("/", "|").split("|") if direction.strip()}
+        if symbol.strip() and directions:
+            direction_contract[symbol.strip().upper()] = directions
+    candidates = dict(current.get("representative_candidates") or {})
+    accepted = dict(candidates.get("accepted") or {})
+    blocked = dict(candidates.get("blocked") or {})
+    recent_intent_focus = dict(current.get("recent_execution_intent_focus") or {})
+    recent_contract_match = dict(current.get("recent_contract_matching_intent_summary") or {})
+    contract_history = dict(current.get("runtime_live_contract_history_summary") or {})
+    watch_summary = dict(current.get("paper_lineage_watch_summary") or {})
+    candidate = accepted or blocked
+    candidate_symbol = str(candidate.get("symbol") or "")
+    candidate_family = str(candidate.get("strategy_family") or "")
+    candidate_entry_model = str(candidate.get("entry_model") or "").strip().upper()
+    candidate_entry_type = str(candidate.get("entry_type") or candidate_entry_model or "").strip().upper()
+    candidate_direction = str(candidate.get("direction") or "").strip().upper()
+    recent_contract_match_count = int(recent_contract_match.get("matching_intent_count", 0) or 0)
+    recent_submit_ready_symbol = str(recent_contract_match.get("latest_submit_ready_symbol") or "")
+    recent_submit_ready_family = str(recent_contract_match.get("latest_submit_ready_family") or "")
+    recent_submit_ready_direction = str(recent_contract_match.get("latest_submit_ready_direction") or "").strip().upper()
+    recent_submit_ready_created_at = str(recent_contract_match.get("latest_submit_ready_created_at") or "")
+    prefer_recent_submit_ready = bool(recent_contract_match_count > 0 and (recent_submit_ready_symbol or recent_submit_ready_family))
+    recent_intent_symbol = str((
+        (
+            recent_submit_ready_symbol
+            if prefer_recent_submit_ready
+            else recent_contract_match.get("latest_symbol")
+        )
+        if recent_contract_match_count > 0
+        else recent_intent_focus.get("symbol") or ""
+    ) or "")
+    recent_intent_family = str((
+        (
+            recent_submit_ready_family
+            if prefer_recent_submit_ready
+            else recent_contract_match.get("latest_family")
+        )
+        if recent_contract_match_count > 0
+        else recent_intent_focus.get("strategy_family") or ""
+    ) or "")
+    recent_intent_entry_model = str((
+        (
+            recent_contract_match.get("latest_submit_ready_entry_model")
+            if prefer_recent_submit_ready
+            else recent_contract_match.get("latest_entry_model")
+        )
+        if recent_contract_match_count > 0
+        else recent_intent_focus.get("entry_model") or ""
+    ) or "").strip().upper()
+    recent_intent_entry_type = str((
+        (
+            recent_contract_match.get("latest_submit_ready_entry_type")
+            if prefer_recent_submit_ready
+            else recent_contract_match.get("latest_entry_type")
+        )
+        if recent_contract_match_count > 0
+        else recent_intent_focus.get("entry_type") or recent_intent_entry_model or ""
+    ) or "").strip().upper()
+    recent_intent_direction = str((
+        (
+            recent_contract_match.get("latest_submit_ready_direction")
+            if prefer_recent_submit_ready
+            else recent_contract_match.get("latest_direction")
+        )
+        if recent_contract_match_count > 0
+        else recent_intent_focus.get("direction") or ""
+    ) or "").strip().upper()
+    recent_intent_execution_mode = str((
+        (
+            recent_contract_match.get("latest_submit_ready_execution_mode")
+            if prefer_recent_submit_ready
+            else recent_contract_match.get("latest_execution_mode")
+        )
+        if recent_contract_match_count > 0
+        else recent_intent_focus.get("execution_mode") or ""
+    ) or "")
+    recent_intent_allowed_mode = str((
+        (
+            recent_contract_match.get("latest_submit_ready_allowed_execution_mode")
+            if prefer_recent_submit_ready
+            else recent_contract_match.get("latest_allowed_execution_mode")
+        )
+        if recent_contract_match_count > 0
+        else recent_intent_focus.get("allowed_execution_mode") or recent_intent_execution_mode or ""
+    ) or "")
+    recent_intent_approval_state = str((
+        (
+            recent_contract_match.get("latest_submit_ready_approval_state")
+            if prefer_recent_submit_ready
+            else recent_contract_match.get("latest_approval_state")
+        )
+        if recent_contract_match_count > 0
+        else recent_intent_focus.get("approval_state") or ""
+    ) or "")
+    recent_intent_reason_code = str((
+        (
+            recent_contract_match.get("latest_submit_ready_reason_code")
+            if prefer_recent_submit_ready
+            else recent_contract_match.get("latest_reason_code")
+        )
+        if recent_contract_match_count > 0
+        else recent_intent_focus.get("decision_reason_code") or ""
+    ) or "")
+    historical_contract_match_count = int(contract_history.get("matching_intent_count_total", 0) or 0)
+    historical_contract_match_count_30d = int(contract_history.get("matching_intent_count_30d", 0) or 0)
+    historical_contract_match_line = str(contract_history.get("symbol_counts_summary") or "")
+    watch_visibility = dict(watch_summary.get("allowed_symbol_family_visibility") or {})
+    watch_visibility_line = str(watch_summary.get("allowed_symbol_family_visibility_line") or "")
+    watch_regime_visibility = dict(watch_summary.get("allowed_symbol_regime_visibility") or {})
+    watch_regime_visibility_line = str(watch_summary.get("allowed_symbol_regime_visibility_line") or "")
+    reason_code = ""
+    summary = ""
+    next_trigger = ""
+    candidate_status = str(candidate.get("status") or "")
+    required_contract = str(signoff.get("contract_scope") or "")
+    candidate_requirements = str(signoff.get("candidate_requirements_summary") or "")
+
+    if accepted:
+        if allowed_symbols and candidate_symbol and candidate_symbol not in allowed_symbols:
+            state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_CANDIDATE_OUTSIDE_SYMBOL
+            reason_code = "micro_live_symbol_not_allowed"
+            summary = f"{candidate_symbol} is accepted but outside the MICRO_LIVE symbol allowlist"
+            next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_ALLOWED_SYMBOL
+        elif allowed_families and candidate_family and candidate_family not in allowed_families:
+            state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_CANDIDATE_OUTSIDE_FAMILY
+            reason_code = "micro_live_family_not_allowed"
+            summary = f"{candidate_family} is accepted but outside the MICRO_LIVE family allowlist"
+            next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_ALLOWED_FAMILY
+        elif not _entry_model_type_allowed(
+            entry_model=candidate_entry_model,
+            entry_type=candidate_entry_type,
+            allowed_entry_models=set(live_entry_models),
+        ):
+            state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_CANDIDATE_ENTRY_MODEL_OUTSIDE_CONTRACT
+            reason_code, detail, next_trigger = _entry_model_block_contract(
+                entry_model=candidate_entry_model,
+                entry_type=candidate_entry_type,
+                allowed_entry_models=live_entry_models,
+            )
+            summary = f"{candidate_symbol} is accepted but {detail}"
+        elif candidate_symbol and candidate_direction and direction_contract.get(candidate_symbol.upper()) and candidate_direction not in direction_contract.get(candidate_symbol.upper(), set()):
+            state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_CANDIDATE_DIRECTION_OUTSIDE_CONTRACT
+            reason_code = "micro_live_direction_not_allowed"
+            summary = f"{candidate_symbol} is accepted but direction {candidate_direction} is outside the current MICRO_LIVE direction contract"
+            next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_ALLOWED_DIRECTION
+        else:
+            state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_ACTIONABLE_VISIBLE
+            summary = f"{candidate_symbol} is accepted and matches the current MICRO_LIVE contract"
+            next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_OPERATOR_REVIEW
+    else:
+        state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_NONE_VISIBLE
+        if recent_intent_symbol or recent_intent_family:
+            recent_label = "/".join(
+                item for item in [recent_intent_symbol, recent_intent_family, recent_intent_allowed_mode] if item
+            )
+            if allowed_symbols and recent_intent_symbol and recent_intent_symbol not in allowed_symbols:
+                state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_RECENT_INTENT_OUTSIDE_SYMBOL
+                reason_code = "micro_live_symbol_not_allowed"
+                summary = f"latest surfaced intent {recent_label} is outside the MICRO_LIVE symbol allowlist"
+                next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_ALLOWED_SYMBOL
+            elif allowed_families and recent_intent_family and recent_intent_family not in allowed_families:
+                state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_RECENT_INTENT_OUTSIDE_FAMILY
+                reason_code = "micro_live_family_not_allowed"
+                summary = f"latest surfaced intent {recent_label} is outside the MICRO_LIVE family allowlist"
+                next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_ALLOWED_FAMILY
+            elif not _entry_model_type_allowed(
+                entry_model=recent_intent_entry_model,
+                entry_type=recent_intent_entry_type,
+                allowed_entry_models=set(live_entry_models),
+            ):
+                state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_RECENT_INTENT_ENTRY_MODEL_OUTSIDE_CONTRACT
+                reason_code, detail, next_trigger = _entry_model_block_contract(
+                    entry_model=recent_intent_entry_model,
+                    entry_type=recent_intent_entry_type,
+                    allowed_entry_models=live_entry_models,
+                )
+                summary = f"latest surfaced intent {recent_label} uses {detail}"
+            elif recent_intent_symbol and recent_intent_direction and direction_contract.get(recent_intent_symbol.upper()) and recent_intent_direction not in direction_contract.get(recent_intent_symbol.upper(), set()):
+                state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_RECENT_INTENT_DIRECTION_OUTSIDE_CONTRACT
+                reason_code = "micro_live_direction_not_allowed"
+                summary = f"latest surfaced intent {recent_label} uses direction {recent_intent_direction} outside the MICRO_LIVE direction contract"
+                next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_ALLOWED_DIRECTION
+            elif recent_intent_allowed_mode and recent_intent_allowed_mode != "MICRO_LIVE":
+                if (
+                    recent_intent_allowed_mode == "PAPER"
+                    and str(recent_intent_approval_state or "").startswith("APPROVED")
+                    and str(recent_intent_reason_code or "") == "submit_ready"
+                ):
+                    state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_RECENT_PAPER_PROMOTION_REQUIRED
+                    reason_code = "paper_intent_requires_micro_live_promotion"
+                    summary = (
+                        f"latest surfaced intent {recent_label} is approved but was created by the PAPER drill; "
+                        "operator must create a MICRO_LIVE intent if the underlying plan still matches the limit-only contract"
+                    )
+                    if recent_submit_ready_symbol:
+                        submit_ready_label = "/".join(
+                            item for item in [recent_submit_ready_symbol, recent_submit_ready_family, recent_submit_ready_direction] if item
+                        )
+                        summary = (
+                            f"{summary}; last submit_ready limit candidate was {submit_ready_label}"
+                            + (f" at {recent_submit_ready_created_at}" if recent_submit_ready_created_at else "")
+                        )
+                    next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_OPERATOR_CREATE_INTENT
+                elif recent_intent_allowed_mode == "PAPER" and str(recent_intent_approval_state or "").startswith("APPROVED"):
+                    lowered_reason = str(recent_intent_reason_code or "").lower()
+                    state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_RECENT_CONTRACT_MATCH_NOT_SUBMIT_READY
+                    reason_code = recent_intent_reason_code or "micro_live_submit_not_ready"
+                    next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_SUBMIT_READY_LIMIT
+                    if "duplicate" in lowered_reason:
+                        state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_RECENT_CONTRACT_MATCH_DUPLICATE
+                        next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_DUPLICATE_CLEARS
+                    elif "reentry" in lowered_reason:
+                        state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_RECENT_CONTRACT_MATCH_REENTRY
+                        next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_REENTRY_CLEARS
+                    summary = (
+                        f"latest surfaced intent {recent_label} matches the limit-only contract but is still PAPER-only "
+                        f"because decision reason is {recent_intent_reason_code or 'not_submit_ready'}"
+                    )
+                    if recent_submit_ready_symbol:
+                        submit_ready_label = "/".join(
+                            item for item in [recent_submit_ready_symbol, recent_submit_ready_family, recent_submit_ready_direction] if item
+                        )
+                        summary = (
+                            f"{summary}; last submit_ready limit candidate was {submit_ready_label}"
+                            + (f" at {recent_submit_ready_created_at}" if recent_submit_ready_created_at else "")
+                        )
+                else:
+                    state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_RECENT_INTENT_NOT_MICRO_LIVE_READY
+                    reason_code = recent_intent_reason_code or "micro_live_execution_mode_not_allowed"
+                    summary = f"latest surfaced intent {recent_label} is capped at {recent_intent_allowed_mode} instead of MICRO_LIVE"
+                    next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_MICRO_LIVE_ALLOWED
+            elif recent_intent_approval_state and not recent_intent_approval_state.startswith("APPROVED"):
+                state = osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_RECENT_INTENT_NOT_APPROVED
+                reason_code = recent_intent_reason_code or "micro_live_intent_not_approved"
+                summary = f"latest surfaced intent {recent_label} is not approved for MICRO_LIVE yet"
+                next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_APPROVED
+        if not summary and blocked:
+            summary = f"no accepted candidate is visible; nearest surfaced candidate {candidate_symbol}/{candidate_family} remains blocked"
+        elif not summary:
+            summary = "no accepted candidate is currently visible on the operator surface"
+        if blocked and state != osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_NONE_VISIBLE:
+            summary = f"{summary}; nearest surfaced candidate {candidate_symbol}/{candidate_family} remains blocked"
+        if state == osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_NONE_VISIBLE:
+            recent_bits = [item for item in [recent_intent_symbol, recent_intent_family, recent_intent_allowed_mode] if item]
+            if recent_bits:
+                summary = f"{summary}; latest surfaced intent is {'/'.join(recent_bits)}"
+            next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_CONTRACT_MATCH
+        if recent_contract_match_count <= 0:
+            summary = f"{summary}; no recent operator intents matched the MICRO_LIVE contract"
+            if historical_contract_match_line:
+                summary = f"{summary}; historical contract intent counts {historical_contract_match_line}"
+            visible_allowed_families = {
+                family
+                for families in watch_visibility.values()
+                for family in list(families or [])
+                if family in set(allowed_families)
+            }
+            if watch_visibility_line:
+                summary = f"{summary}; current watch visibility {watch_visibility_line}"
+            if watch_regime_visibility_line:
+                summary = f"{summary}; current watch regime {watch_regime_visibility_line}"
+            if not visible_allowed_families:
+                next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_TREND_CONTINUATION_WATCH
+
+    current["runtime_actionable_live_candidate_summary"] = {
+        "active": True,
+        "status": state,
+        "summary": summary,
+        "next_trigger": next_trigger,
+        "reason_code": reason_code,
+        "candidate_symbol": candidate_symbol,
+        "candidate_family": candidate_family,
+        "candidate_status": candidate_status,
+        "candidate_entry_type": candidate_entry_type,
+        "candidate_direction": candidate_direction,
+        "recent_intent_symbol": recent_intent_symbol,
+        "recent_intent_family": recent_intent_family,
+        "recent_intent_entry_type": recent_intent_entry_type,
+        "recent_intent_direction": recent_intent_direction,
+        "recent_intent_execution_mode": recent_intent_execution_mode,
+        "recent_intent_allowed_execution_mode": recent_intent_allowed_mode,
+        "recent_intent_approval_state": recent_intent_approval_state,
+        "recent_intent_reason_code": recent_intent_reason_code,
+        "recent_submit_ready_symbol": recent_submit_ready_symbol,
+        "recent_submit_ready_family": recent_submit_ready_family,
+        "recent_submit_ready_direction": recent_submit_ready_direction,
+        "recent_submit_ready_created_at": recent_submit_ready_created_at,
+        "recent_contract_match_count": recent_contract_match_count,
+        "historical_contract_match_count": historical_contract_match_count,
+        "historical_contract_match_count_30d": historical_contract_match_count_30d,
+        "historical_contract_match_summary": historical_contract_match_line,
+        "watch_allowed_symbol_family_visibility": watch_visibility,
+        "watch_allowed_symbol_family_visibility_line": watch_visibility_line,
+        "watch_allowed_symbol_regime_visibility": watch_regime_visibility,
+        "watch_allowed_symbol_regime_visibility_line": watch_regime_visibility_line,
+        "allowed_symbols": allowed_symbols,
+        "allowed_families": allowed_families,
+        "allowed_sessions": allowed_sessions,
+        "required_contract_scope": required_contract,
+        "candidate_requirements_summary": candidate_requirements,
+    }
+    return current
 
 
 def _runtime_mitigation_summary_line(item: dict[str, Any] | None) -> str:
@@ -1512,6 +2235,11 @@ def _runtime_mitigation_summary_line(item: dict[str, Any] | None) -> str:
 def _runtime_mitigation_wait_summary_line(item: dict[str, Any] | None) -> str:
     summary = dict(item or {})
     allowed_sessions = ",".join(str(item) for item in list(summary.get("allowed_sessions") or []) if str(item).strip())
+    guard_text = ""
+    if bool(summary.get("watch_guard_active", False)):
+        families = ",".join(str(item) for item in list(summary.get("watch_guard_families") or []) if str(item).strip())
+        guard_scope = families or str(summary.get("watch_guard_family") or "none")
+        guard_text = f" | guard={summary.get('watch_guard_reason_code') or 'active'}:{guard_scope}"
     return (
         f"runtime_mitigation_wait: focus={summary.get('focus_label') or 'none'}"
         f" | status={summary.get('status') or 'not_available'}"
@@ -1537,6 +2265,7 @@ def _runtime_mitigation_wait_summary_line(item: dict[str, Any] | None) -> str:
             if summary.get("watch_tick_status")
             else ""
         )
+        + guard_text
     )
 
 
@@ -1552,6 +2281,231 @@ def _post_patch_sample_summary_line(item: dict[str, Any] | None) -> str:
         f" | stop_loss={float(summary.get('stop_loss_share', 0.0) or 0.0):.0%}"
         f" | confirm_loss={float(summary.get('confirm_named_loss_share', 0.0) or 0.0):.0%}"
         + (f" | top={top_symbols}" if top_symbols else "")
+    )
+
+
+def _build_runtime_contract_partition_summary(
+    post_patch: dict[str, Any] | None,
+    live_eligible_post_patch: dict[str, Any] | None,
+    live_execution_post_patch: dict[str, Any] | None,
+    historical_execution_contract: dict[str, Any] | None = None,
+    historical_walk_forward_execution_contract: dict[str, Any] | None = None,
+    historical_walk_forward_strategy: dict[str, Any] | None = None,
+    trend_proof_post_patch: dict[str, Any] | None = None,
+    historical_walk_forward_trend: dict[str, Any] | None = None,
+    active_proof_source: str = "",
+) -> dict[str, Any]:
+    from app.core.config import get_settings
+
+    full = dict(post_patch or {})
+    live = dict(live_eligible_post_patch or {})
+    execution = dict(live_execution_post_patch or {})
+    historical = dict(historical_execution_contract or {})
+    historical_walk_forward = dict(historical_walk_forward_execution_contract or {})
+    strategy_walk_forward = dict(historical_walk_forward_strategy or {})
+    trend = dict(trend_proof_post_patch or {})
+    walk_forward_trend = dict(historical_walk_forward_trend or {})
+    settings = get_settings()
+    allowed_symbols = [item.strip() for item in str(settings.auto_trading_micro_live_allowed_symbols or "").split(",") if item.strip()]
+    allowed_families = [item.strip() for item in str(settings.auto_trading_micro_live_allowed_families or "").split(",") if item.strip()]
+    configured_entry_models = [
+        item.strip().upper()
+        for item in str(getattr(settings, "auto_trading_micro_live_allowed_entry_models", "") or "").split(",")
+        if item.strip()
+    ]
+    direction_contract: dict[str, list[str]] = {}
+    for item in str(getattr(settings, "auto_trading_micro_live_direction_contract", "") or "").split(","):
+        token = item.strip()
+        if not token or ":" not in token:
+            continue
+        symbol, raw_directions = token.split(":", 1)
+        directions = [direction.strip().upper() for direction in raw_directions.replace("/", "|").split("|") if direction.strip()]
+        if symbol.strip() and directions:
+            direction_contract[symbol.strip().upper()] = list(dict.fromkeys(directions))
+    direction_contract_items = [f"{symbol}:{'|'.join(direction_contract[symbol])}" for symbol in sorted(direction_contract)]
+    priority_symbols = [item.strip() for item in str(settings.auto_trading_micro_live_symbol_priority or "").split(",") if item.strip()]
+    if not priority_symbols:
+        priority_symbols = list(allowed_symbols)
+    if allowed_symbols:
+        allowed_set = set(allowed_symbols)
+        priority_symbols = [item for item in priority_symbols if item in allowed_set]
+    live_entry_models = [str(item or "").strip().upper() for item in list(live.get("eligible_entry_models") or []) if str(item or "").strip()]
+    if not live_entry_models:
+        live_entry_models = list(configured_entry_models)
+    research_only_entry_models = [item for item in ["SWEEP_CONFIRM", "CONFIRM"] if item not in set(live_entry_models)]
+    preferred_live_symbol = priority_symbols[0] if priority_symbols else ""
+    fallback_live_symbols = priority_symbols[1:] if len(priority_symbols) > 1 else []
+    return {
+        "active": bool(full or live or execution or historical or historical_walk_forward or strategy_walk_forward or trend or walk_forward_trend),
+        "live_contract_scope": str(live.get("contract_scope") or ""),
+        "live_allowed_symbols": allowed_symbols,
+        "live_allowed_families": allowed_families,
+        "live_direction_contract": direction_contract,
+        "live_allowed_entry_models": live_entry_models,
+        "live_symbol_priority": priority_symbols,
+        "preferred_live_symbol": preferred_live_symbol,
+        "fallback_live_symbols": fallback_live_symbols,
+        "research_only_entry_models": research_only_entry_models,
+        "full_truth_closed_trade_count": int(full.get("closed_trade_count", 0) or 0),
+        "live_eligible_closed_trade_count": int(live.get("closed_trade_count", 0) or 0),
+        "live_execution_closed_trade_count": int(execution.get("closed_trade_count", 0) or 0),
+        "historical_execution_contract_closed_trade_count": int(historical.get("closed_trade_count", 0) or 0),
+        "historical_walk_forward_execution_contract_closed_trade_count": int(
+            historical_walk_forward.get("closed_trade_count", 0) or 0
+        ),
+        "historical_walk_forward_strategy_closed_trade_count": int(
+            strategy_walk_forward.get("closed_trade_count", 0) or 0
+        ),
+        "trend_proof_closed_trade_count": int(trend.get("closed_trade_count", 0) or 0),
+        "historical_walk_forward_trend_closed_trade_count": int(
+            walk_forward_trend.get("closed_trade_count", 0) or 0
+        ),
+        "active_gate_proof_source": active_proof_source or "live_eligible_post_patch_sample_summary",
+        "summary": (
+            f"live uses symbols={','.join(allowed_symbols) or 'all'} families={','.join(allowed_families) or 'none'} priority={'>'.join(priority_symbols) or 'none'} directions={';'.join(direction_contract_items) or 'all'} entry_models={','.join(live_entry_models) or 'none'}; "
+            f"research_only_entry_models={','.join(research_only_entry_models) or 'none'}; "
+            f"historical_execution={int(historical.get('closed_trade_count', 0) or 0)}; "
+            f"historical_walk_forward_execution={int(historical_walk_forward.get('closed_trade_count', 0) or 0)}; "
+            f"historical_walk_forward_strategy={int(strategy_walk_forward.get('closed_trade_count', 0) or 0)}; "
+            f"trend_proof={int(trend.get('closed_trade_count', 0) or 0)}; "
+            f"historical_walk_forward_trend={int(walk_forward_trend.get('closed_trade_count', 0) or 0)}; "
+            f"gate_proof={active_proof_source or 'live_eligible_post_patch_sample_summary'}"
+        ),
+    }
+
+
+def _build_runtime_live_subset_performance_summary(
+    post_patch: dict[str, Any] | None,
+    live_eligible_post_patch: dict[str, Any] | None,
+    live_execution_post_patch: dict[str, Any] | None,
+    historical_execution_contract: dict[str, Any] | None = None,
+    historical_walk_forward_execution_contract: dict[str, Any] | None = None,
+    historical_walk_forward_strategy: dict[str, Any] | None = None,
+    trend_proof_post_patch: dict[str, Any] | None = None,
+    historical_walk_forward_trend: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    full = dict(post_patch or {})
+    live = dict(live_eligible_post_patch or {})
+    execution = dict(live_execution_post_patch or {})
+    historical = dict(historical_execution_contract or {})
+    historical_walk_forward = dict(historical_walk_forward_execution_contract or {})
+    strategy_walk_forward = dict(historical_walk_forward_strategy or {})
+    trend = dict(trend_proof_post_patch or {})
+    walk_forward_trend = dict(historical_walk_forward_trend or {})
+
+    def _pack(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "closed_trade_count": int(item.get("closed_trade_count", 0) or 0),
+            "count_basis": str(item.get("count_basis") or "distinct_plan_ids"),
+            "win_rate": float(item.get("win_rate", 0.0) or 0.0),
+            "ev_r": float(item.get("ev_r", 0.0) or 0.0),
+            "profit_factor": item.get("profit_factor"),
+            "stop_loss_share": float(item.get("stop_loss_share", 0.0) or 0.0),
+            "replay_max_drawdown_r": float(item.get("replay_max_drawdown_r", 0.0) or 0.0),
+            "worst_loss_streak": int(item.get("worst_loss_streak", 0) or 0),
+        }
+
+    return {
+        "active": bool(full or live or execution or historical or historical_walk_forward or strategy_walk_forward or trend or walk_forward_trend),
+        "execution_subset": _pack(execution),
+        "historical_execution_subset": _pack(historical),
+        "historical_walk_forward_execution_subset": _pack(historical_walk_forward),
+        "historical_walk_forward_strategy_subset": _pack(strategy_walk_forward),
+        "trend_proof_subset": _pack(trend),
+        "historical_walk_forward_trend_subset": _pack(walk_forward_trend),
+        "live_subset": _pack(live),
+        "full_truth": _pack(full),
+    }
+
+
+def _runtime_contract_partition_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    if not summary:
+        return "runtime_contract_partition: unavailable"
+    direction_contract = dict(summary.get("live_direction_contract") or {})
+    direction_bits = [f"{symbol}:{'|'.join(list(direction_contract.get(symbol) or []))}" for symbol in sorted(direction_contract)]
+    return (
+        "runtime_contract_partition: "
+        f"symbols={','.join(list(summary.get('live_allowed_symbols') or [])) or 'all'}"
+        f" | directions={';'.join(direction_bits) or 'all'}"
+        f" | proof_source={summary.get('active_gate_proof_source') or 'n/a'}"
+        f" | execution_subset={int(summary.get('live_execution_closed_trade_count', 0) or 0)}"
+        f" | historical_execution={int(summary.get('historical_execution_contract_closed_trade_count', 0) or 0)}"
+        f" | historical_walk_forward_execution={int(summary.get('historical_walk_forward_execution_contract_closed_trade_count', 0) or 0)}"
+        f" | historical_walk_forward_strategy={int(summary.get('historical_walk_forward_strategy_closed_trade_count', 0) or 0)}"
+        f" | trend_proof={int(summary.get('trend_proof_closed_trade_count', 0) or 0)}"
+        f" | historical_walk_forward_trend={int(summary.get('historical_walk_forward_trend_closed_trade_count', 0) or 0)}"
+        f" | "
+        f"live_families={','.join(list(summary.get('live_allowed_families') or [])) or 'none'}"
+        f" | live_entry_models={','.join(list(summary.get('live_allowed_entry_models') or [])) or 'none'}"
+        f" | research_only_entry_models={','.join(list(summary.get('research_only_entry_models') or [])) or 'none'}"
+        f" | full_truth={int(summary.get('full_truth_closed_trade_count', 0) or 0)}"
+        f" | live_subset={int(summary.get('live_eligible_closed_trade_count', 0) or 0)}"
+    )
+
+
+def _runtime_live_subset_performance_summary_line(item: dict[str, Any] | None) -> str:
+    summary = dict(item or {})
+    if not summary:
+        return "runtime_live_subset_performance: unavailable"
+    execution = dict(summary.get("execution_subset") or {})
+    historical = dict(summary.get("historical_execution_subset") or {})
+    historical_walk_forward = dict(summary.get("historical_walk_forward_execution_subset") or {})
+    strategy_walk_forward = dict(summary.get("historical_walk_forward_strategy_subset") or {})
+    trend = dict(summary.get("trend_proof_subset") or {})
+    walk_forward_trend = dict(summary.get("historical_walk_forward_trend_subset") or {})
+    live = dict(summary.get("live_subset") or {})
+    full = dict(summary.get("full_truth") or {})
+    execution_pf = execution.get("profit_factor")
+    historical_pf = historical.get("profit_factor")
+    historical_walk_forward_pf = historical_walk_forward.get("profit_factor")
+    strategy_walk_forward_pf = strategy_walk_forward.get("profit_factor")
+    trend_pf = trend.get("profit_factor")
+    walk_forward_trend_pf = walk_forward_trend.get("profit_factor")
+    live_pf = live.get("profit_factor")
+    full_pf = full.get("profit_factor")
+    return (
+        "runtime_live_subset_performance: "
+        f"exec={int(execution.get('closed_trade_count', 0) or 0)}plans"
+        f" | exec_win_rate={float(execution.get('win_rate', 0.0) or 0.0):.0%}"
+        f" | exec_ev={float(execution.get('ev_r', 0.0) or 0.0):+.2f}R"
+        f" | exec_pf={(f'{float(execution_pf):.2f}' if execution_pf is not None else 'n/a')}"
+        f" | exec_stop_loss={float(execution.get('stop_loss_share', 0.0) or 0.0):.0%}"
+        f" | hist={int(historical.get('closed_trade_count', 0) or 0)}plans"
+        f" | hist_win_rate={float(historical.get('win_rate', 0.0) or 0.0):.0%}"
+        f" | hist_ev={float(historical.get('ev_r', 0.0) or 0.0):+.2f}R"
+        f" | hist_pf={(f'{float(historical_pf):.2f}' if historical_pf is not None else 'n/a')}"
+        f" | hist_stop_loss={float(historical.get('stop_loss_share', 0.0) or 0.0):.0%}"
+        f" | hist_wf={int(historical_walk_forward.get('closed_trade_count', 0) or 0)}plans"
+        f" | hist_wf_win_rate={float(historical_walk_forward.get('win_rate', 0.0) or 0.0):.0%}"
+        f" | hist_wf_ev={float(historical_walk_forward.get('ev_r', 0.0) or 0.0):+.2f}R"
+        f" | hist_wf_pf={(f'{float(historical_walk_forward_pf):.2f}' if historical_walk_forward_pf is not None else 'n/a')}"
+        f" | hist_wf_stop_loss={float(historical_walk_forward.get('stop_loss_share', 0.0) or 0.0):.0%}"
+        f" | strat_wf={int(strategy_walk_forward.get('closed_trade_count', 0) or 0)}plans"
+        f" | strat_wf_win_rate={float(strategy_walk_forward.get('win_rate', 0.0) or 0.0):.0%}"
+        f" | strat_wf_ev={float(strategy_walk_forward.get('ev_r', 0.0) or 0.0):+.2f}R"
+        f" | strat_wf_pf={(f'{float(strategy_walk_forward_pf):.2f}' if strategy_walk_forward_pf is not None else 'n/a')}"
+        f" | strat_wf_stop_loss={float(strategy_walk_forward.get('stop_loss_share', 0.0) or 0.0):.0%}"
+        f" | trend={int(trend.get('closed_trade_count', 0) or 0)}plans"
+        f" | trend_win_rate={float(trend.get('win_rate', 0.0) or 0.0):.0%}"
+        f" | trend_ev={float(trend.get('ev_r', 0.0) or 0.0):+.2f}R"
+        f" | trend_pf={(f'{float(trend_pf):.2f}' if trend_pf is not None else 'n/a')}"
+        f" | trend_stop_loss={float(trend.get('stop_loss_share', 0.0) or 0.0):.0%}"
+        f" | trend_wf={int(walk_forward_trend.get('closed_trade_count', 0) or 0)}plans"
+        f" | trend_wf_win_rate={float(walk_forward_trend.get('win_rate', 0.0) or 0.0):.0%}"
+        f" | trend_wf_ev={float(walk_forward_trend.get('ev_r', 0.0) or 0.0):+.2f}R"
+        f" | trend_wf_pf={(f'{float(walk_forward_trend_pf):.2f}' if walk_forward_trend_pf is not None else 'n/a')}"
+        f" | trend_wf_stop_loss={float(walk_forward_trend.get('stop_loss_share', 0.0) or 0.0):.0%}"
+        f" | proxy={int(live.get('closed_trade_count', 0) or 0)}plans"
+        f" | win_rate={float(live.get('win_rate', 0.0) or 0.0):.0%}"
+        f" | ev={float(live.get('ev_r', 0.0) or 0.0):+.2f}R"
+        f" | pf={(f'{float(live_pf):.2f}' if live_pf is not None else 'n/a')}"
+        f" | stop_loss={float(live.get('stop_loss_share', 0.0) or 0.0):.0%}"
+        f" | full={int(full.get('closed_trade_count', 0) or 0)}plans"
+        f" | full_win_rate={float(full.get('win_rate', 0.0) or 0.0):.0%}"
+        f" | full_ev={float(full.get('ev_r', 0.0) or 0.0):+.2f}R"
+        f" | full_pf={(f'{float(full_pf):.2f}' if full_pf is not None else 'n/a')}"
+        f" | full_stop_loss={float(full.get('stop_loss_share', 0.0) or 0.0):.0%}"
     )
 
 
@@ -1718,21 +2672,21 @@ def _apply_runtime_stage_override(payload: dict[str, Any]) -> dict[str, Any]:
     gate = dict(current.get("runtime_reopen_gate_summary") or signoff.get("runtime_reopen_gate_summary") or {})
     action = str(decision.get("effective_action") or "")
     if action not in {
-        "conditional_micro_live_signoff",
-        "conditional_full_live_signoff",
-        "manual_signoff_required",
-        "proceed_to_operator_signoff",
+        osc.RUNTIME_REOPEN_ACTION_CONDITIONAL_MICRO_LIVE_SIGNOFF,
+        osc.RUNTIME_REOPEN_ACTION_CONDITIONAL_FULL_LIVE_SIGNOFF,
+        osc.RUNTIME_REOPEN_ACTION_MANUAL_SIGNOFF_REQUIRED,
+        osc.RUNTIME_REOPEN_ACTION_PROCEED_TO_OPERATOR_SIGNOFF,
     }:
         return current
 
     current["stage"] = "3_APPROVAL_REVIEW"
-    if action == "conditional_micro_live_signoff":
+    if action == osc.RUNTIME_REOPEN_ACTION_CONDITIONAL_MICRO_LIVE_SIGNOFF:
         current["stage_reason"] = "post-patch cohort cleared the conditional MICRO_LIVE thresholds"
         current["next_step_hint"] = "review manual sign-off and, if accepted, reopen MICRO_LIVE only"
-    elif action == "conditional_full_live_signoff":
+    elif action == osc.RUNTIME_REOPEN_ACTION_CONDITIONAL_FULL_LIVE_SIGNOFF:
         current["stage_reason"] = "post-patch cohort cleared the conditional FULL LIVE thresholds"
         current["next_step_hint"] = "review manual sign-off and decide whether to reopen MICRO_LIVE or LIVE"
-    elif action == "proceed_to_operator_signoff":
+    elif action == osc.RUNTIME_REOPEN_ACTION_PROCEED_TO_OPERATOR_SIGNOFF:
         current["stage_reason"] = "runtime is reopen-ready and final operator sign-off can proceed"
         current["next_step_hint"] = "record final operator sign-off before reopening runtime"
     else:
@@ -1788,6 +2742,8 @@ def _build_stage_payload(
         sample_days=lineage_sample_days,
     )
     representative_candidates = _representative_candidates(dashboard)
+    recent_execution_intent_focus = _recent_execution_intent_focus(dashboard)
+    recent_contract_matching_intent_summary = _recent_contract_matching_intent_summary(dashboard)
     open_lineage_sample_summary = _open_lineage_samples(_family_set(lineage_families))
     active_lineage_samples = list(open_lineage_sample_summary.get("samples") or [])
     active_lineage_sample_focus = dict(active_lineage_samples[0]) if active_lineage_samples else None
@@ -1842,6 +2798,8 @@ def _build_stage_payload(
         "entry_timing_review_target": entry_timing_review_target,
         "execution_style_review_target": execution_style_review_target,
         "representative_candidates": representative_candidates,
+        "recent_execution_intent_focus": recent_execution_intent_focus,
+        "recent_contract_matching_intent_summary": recent_contract_matching_intent_summary,
         "open_lineage_sample_summary": open_lineage_sample_summary,
         "active_lineage_sample_focus": active_lineage_sample_focus,
         "active_lineage_sample_health": active_lineage_sample_health,
@@ -1896,6 +2854,7 @@ def _build_stage_payload(
         checklist=checklist,
         runtime_reopen_status=payload.get("runtime_reopen_status"),
     )
+    payload["runtime_live_cluster_guard_summary"] = _runtime_live_cluster_guard_summary(dashboard)
     payload["runtime_reopen_gate_summary"] = dict(
         (payload.get("runtime_signoff_summary") or {}).get("runtime_reopen_gate_summary") or {}
     )
@@ -1910,6 +2869,35 @@ def _reuse_recent_runtime_monitor_fields(
     *,
     now: datetime | None = None,
 ) -> dict[str, Any]:
+    def _runtime_signoff_richness(summary: dict[str, Any] | None) -> int:
+        item = dict(summary or {})
+        score = 0
+        if str(item.get("status") or "").strip():
+            score += 1
+        if dict(item.get("approval_template_focus") or {}):
+            score += 8
+        if dict(item.get("runtime_decision") or {}):
+            score += 4
+        if dict(item.get("runtime_reopen_gate_summary") or {}):
+            score += 2
+        if list(item.get("required_reviews") or []):
+            score += 1
+        if list(item.get("advisory_reviews") or []):
+            score += 1
+        return score
+
+    def _runtime_monitor_is_incomplete(item: dict[str, Any] | None) -> bool:
+        payload = dict(item or {})
+        signoff = dict(payload.get("runtime_signoff_summary") or {})
+        return (
+            not str(payload.get("runtime_decision_band") or "").strip()
+            and not str(payload.get("runtime_effective_action") or "").strip()
+            and not str(payload.get("runtime_allowed_reopen_scope") or "").strip()
+            and not dict(signoff.get("approval_template_focus") or {})
+            and not dict(signoff.get("runtime_decision") or {})
+            and not dict(signoff.get("runtime_reopen_gate_summary") or {})
+        )
+
     current = dict(payload or {})
     previous = dict(previous_stage or {})
     if not previous:
@@ -1919,38 +2907,191 @@ def _reuse_recent_runtime_monitor_fields(
     reference_now = now or datetime.now(timezone.utc)
     if previous_generated_at is None:
         return current
-    if (reference_now - previous_generated_at).total_seconds() > float(_RUNTIME_MONITOR_REUSE_SECONDS):
-        return current
-
     same_selected_trial = str(previous.get("selected_trial_run_id") or "") == str(current.get("selected_trial_run_id") or "")
     same_risk_state = str((previous.get("risk_gate_summary") or {}).get("risk_state") or "") == str(
         (current.get("risk_gate_summary") or {}).get("risk_state") or ""
     )
     same_checklist_status = str(previous.get("checklist_status") or "") == str(current.get("checklist_status") or "")
     same_playbook = str(previous.get("playbook_go_no_go") or "") == str(current.get("playbook_go_no_go") or "")
-    same_lineage_count = int(((previous.get("lineage_sample_summary") or {}).get("closed_trade_count") or 0)) == int(
-        ((current.get("lineage_sample_summary") or {}).get("closed_trade_count") or 0)
-    )
-
-    if not all((same_selected_trial, same_risk_state, same_checklist_status, same_playbook, same_lineage_count)):
+    if not all((same_selected_trial, same_risk_state, same_checklist_status, same_playbook)):
+        return current
+    previous_is_recent = (reference_now - previous_generated_at).total_seconds() <= float(_RUNTIME_MONITOR_REUSE_SECONDS)
+    if not previous_is_recent and not _runtime_monitor_is_incomplete(current):
         return current
 
+    prefer_current_when_present = {
+        "runtime_signoff_summary",
+        "runtime_reopen_gate_summary",
+        "runtime_contract_partition_summary",
+        "runtime_live_subset_performance_summary",
+    }
+    reuse_when_current_incomplete = {
+        "approval_template_focus",
+        "approval_template_focus_error",
+        "approval_worst",
+        "approval_worst_status",
+        "post_patch_sample_summary",
+        "live_eligible_post_patch_sample_summary",
+        "live_execution_post_patch_sample_summary",
+        "historical_execution_contract_proof_summary",
+        "historical_walk_forward_execution_contract_proof_summary",
+        "historical_walk_forward_strategy_proof_summary",
+        "trend_proof_post_patch_sample_summary",
+        "historical_walk_forward_trend_proof_summary",
+        "runtime_decision_band",
+        "runtime_effective_action",
+        "runtime_allowed_reopen_scope",
+        "post_patch_closed_trade_count",
+        "live_eligible_post_patch_closed_trade_count",
+        "live_execution_post_patch_closed_trade_count",
+        "historical_execution_contract_proof_closed_trade_count",
+        "historical_walk_forward_execution_contract_proof_closed_trade_count",
+        "historical_walk_forward_strategy_proof_closed_trade_count",
+        "trend_proof_post_patch_closed_trade_count",
+        "historical_walk_forward_trend_proof_closed_trade_count",
+        "runtime_live_contract_scope",
+    }
+    current_incomplete = _runtime_monitor_is_incomplete(current)
     for key in (
         "post_unlock_bundle_result",
         "runtime_reopen_status",
         "runtime_signoff_summary",
+        "runtime_live_cluster_guard_summary",
         "runtime_reopen_gate_summary",
         "runtime_preflight_summary",
         "runtime_operator_signoff_summary",
+        "runtime_contract_partition_summary",
+        "runtime_live_subset_performance_summary",
         "runtime_mitigation_summary",
         "runtime_mitigation_packet_result",
         "runtime_mitigation_wait_summary",
+        *tuple(reuse_when_current_incomplete),
     ):
         value = previous.get(key)
         if value is not None:
+            if key in reuse_when_current_incomplete and not current_incomplete:
+                continue
+            if key in prefer_current_when_present and current.get(key) not in (None, {}, [], ""):
+                if key == "runtime_signoff_summary":
+                    current_richness = _runtime_signoff_richness(current.get(key))
+                    previous_richness = _runtime_signoff_richness(value)
+                    if current_richness >= previous_richness:
+                        continue
+                else:
+                    continue
             current[key] = value
     current["runtime_monitor_snapshot_reused"] = True
     current["runtime_monitor_snapshot_reused_from"] = previous_generated_at.isoformat()
+    return current
+
+
+def _project_runtime_signoff_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    current = dict(payload or {})
+    signoff = dict(current.get("runtime_signoff_summary") or {})
+    if not signoff:
+        return current
+
+    focus = dict(signoff.get("approval_template_focus") or {})
+    decision = dict(signoff.get("runtime_decision") or {})
+    gate = dict(signoff.get("runtime_reopen_gate_summary") or {})
+    post_patch = dict(focus.get("post_patch_sample_summary") or {})
+    live_eligible_post_patch = dict(focus.get("live_eligible_post_patch_sample_summary") or {})
+    live_execution_post_patch = dict(focus.get("live_execution_post_patch_sample_summary") or {})
+    historical_execution_contract = dict(focus.get("historical_execution_contract_proof_summary") or {})
+    historical_walk_forward_execution_contract = dict(
+        focus.get("historical_walk_forward_execution_contract_proof_summary") or {}
+    )
+    historical_walk_forward_strategy = dict(focus.get("historical_walk_forward_strategy_proof_summary") or {})
+    trend_proof_post_patch = dict(focus.get("trend_proof_post_patch_sample_summary") or {})
+    historical_walk_forward_trend = dict(focus.get("historical_walk_forward_trend_proof_summary") or {})
+    required_reviews = [dict(item) for item in list(signoff.get("required_reviews") or [])]
+    advisory_reviews = [dict(item) for item in list(signoff.get("advisory_reviews") or [])]
+
+    if focus:
+        current["approval_template_focus"] = focus
+    if decision:
+        current["runtime_decision"] = decision
+    if gate:
+        current["runtime_reopen_gate_summary"] = gate
+    current["runtime_signoff_status"] = str(signoff.get("status") or "")
+    current["runtime_operator_recommendation"] = str(signoff.get("operator_recommendation") or "")
+    current["required_reviews"] = required_reviews
+    current["advisory_reviews"] = advisory_reviews
+    current["runtime_required_review_codes"] = [
+        str(item.get("code") or "").strip()
+        for item in required_reviews
+        if str(item.get("code") or "").strip()
+    ]
+    current["runtime_advisory_review_codes"] = [
+        str(item.get("code") or "").strip()
+        for item in advisory_reviews
+        if str(item.get("code") or "").strip()
+    ]
+    current["runtime_decision_band"] = str(decision.get("band") or "")
+    current["runtime_effective_action"] = str(decision.get("effective_action") or "")
+    current["runtime_allowed_reopen_scope"] = str(decision.get("allowed_reopen_scope") or "")
+    current["approval_worst"] = str(focus.get("worst_scenario") or "")
+    current["approval_worst_status"] = str(focus.get("worst_scenario_status") or "")
+    current["post_patch_sample_summary"] = post_patch
+    current["live_eligible_post_patch_sample_summary"] = live_eligible_post_patch
+    current["live_execution_post_patch_sample_summary"] = live_execution_post_patch
+    current["historical_execution_contract_proof_summary"] = historical_execution_contract
+    current["historical_walk_forward_execution_contract_proof_summary"] = historical_walk_forward_execution_contract
+    current["historical_walk_forward_strategy_proof_summary"] = historical_walk_forward_strategy
+    current["trend_proof_post_patch_sample_summary"] = trend_proof_post_patch
+    current["historical_walk_forward_trend_proof_summary"] = historical_walk_forward_trend
+    current["runtime_contract_partition_summary"] = dict(
+        current.get("runtime_contract_partition_summary")
+        or _build_runtime_contract_partition_summary(
+            post_patch,
+            live_eligible_post_patch,
+            live_execution_post_patch,
+            historical_execution_contract,
+            historical_walk_forward_execution_contract,
+            historical_walk_forward_strategy,
+            trend_proof_post_patch,
+            historical_walk_forward_trend,
+            str(dict(current.get("runtime_reopen_gate_summary") or {}).get("micro_live", {}).get("source_summary_key") or ""),
+        )
+    )
+    current["runtime_live_subset_performance_summary"] = dict(
+        current.get("runtime_live_subset_performance_summary")
+        or _build_runtime_live_subset_performance_summary(
+            post_patch,
+            live_eligible_post_patch,
+            live_execution_post_patch,
+            historical_execution_contract,
+            historical_walk_forward_execution_contract,
+            historical_walk_forward_strategy,
+            trend_proof_post_patch,
+            historical_walk_forward_trend,
+        )
+    )
+    current["post_patch_closed_trade_count"] = int(post_patch.get("closed_trade_count", 0) or 0)
+    current["live_eligible_post_patch_closed_trade_count"] = int(
+        live_eligible_post_patch.get("closed_trade_count", 0) or 0
+    )
+    current["live_execution_post_patch_closed_trade_count"] = int(
+        live_execution_post_patch.get("closed_trade_count", 0) or 0
+    )
+    current["historical_execution_contract_proof_closed_trade_count"] = int(
+        historical_execution_contract.get("closed_trade_count", 0) or 0
+    )
+    current["historical_walk_forward_execution_contract_proof_closed_trade_count"] = int(
+        historical_walk_forward_execution_contract.get("closed_trade_count", 0) or 0
+    )
+    current["historical_walk_forward_strategy_proof_closed_trade_count"] = int(
+        historical_walk_forward_strategy.get("closed_trade_count", 0) or 0
+    )
+    current["trend_proof_post_patch_closed_trade_count"] = int(
+        trend_proof_post_patch.get("closed_trade_count", 0) or 0
+    )
+    current["historical_walk_forward_trend_proof_closed_trade_count"] = int(
+        historical_walk_forward_trend.get("closed_trade_count", 0) or 0
+    )
+    current["runtime_live_contract_scope"] = str(
+        live_eligible_post_patch.get("contract_scope") or focus.get("live_contract_scope") or ""
+    )
     return current
 
 
@@ -1973,9 +3114,16 @@ def _print_human(payload: dict[str, Any]) -> None:
     print(_post_unlock_bundle_result_line(payload.get("post_unlock_bundle_result")))
     print(_runtime_reopen_status_line(payload.get("runtime_reopen_status")))
     print(_runtime_signoff_summary_line(payload.get("runtime_signoff_summary")))
+    print(_runtime_live_cluster_guard_summary_line(payload.get("runtime_live_cluster_guard_summary")))
     print(_runtime_reopen_gate_summary_line(payload.get("runtime_reopen_gate_summary")))
     print(_runtime_preflight_summary_line(payload.get("runtime_preflight_summary")))
     print(_runtime_operator_signoff_summary_line(payload.get("runtime_operator_signoff_summary")))
+    print(_runtime_operator_action_line(payload.get("runtime_operator_signoff_summary")))
+    print(_runtime_actionable_live_candidate_summary_line(payload.get("runtime_actionable_live_candidate_summary")))
+    print(_runtime_self_heal_summary_line(payload.get("runtime_self_heal_summary")))
+    print(_trend_proof_watch_summary_line(dict(payload.get("paper_lineage_watch_summary") or {}).get("trend_proof_candidate_summary")))
+    print(_runtime_contract_partition_summary_line(payload.get("runtime_contract_partition_summary")))
+    print(_runtime_live_subset_performance_summary_line(payload.get("runtime_live_subset_performance_summary")))
     print(_post_patch_sample_summary_line(payload.get("post_patch_sample_summary")))
     print(_runtime_mitigation_summary_line(payload.get("runtime_mitigation_summary")))
     print(_runtime_mitigation_wait_summary_line(payload.get("runtime_mitigation_wait_summary")))
@@ -2054,11 +3202,18 @@ def main() -> int:
         lineage_sample_days=args.lineage_sample_days,
     )
     payload = _reuse_recent_runtime_monitor_fields(payload, previous_stage)
+    payload = _project_runtime_signoff_fields(payload)
     payload["runtime_operator_signoff_summary"] = run_runtime_signoff_review._build_runtime_operator_signoff_summary(
-        runtime_decision=dict(payload.get("runtime_decision") or {}),
+        runtime_decision=dict(payload.get("runtime_decision") or dict((payload.get("runtime_signoff_summary") or {}).get("runtime_decision") or {})),
         runtime_preflight_summary=dict(payload.get("runtime_preflight_summary") or {}),
         runtime_signoff_summary=dict(payload.get("runtime_signoff_summary") or {}),
+        runtime_reopen_gate_summary=dict(payload.get("runtime_reopen_gate_summary") or {}),
+        base_url=args.base_url,
+        symbol=args.symbol,
+        universe=args.universe,
+        days=args.days,
     )
+    payload = _apply_runtime_actionable_live_candidate_summary(payload)
     payload = _apply_runtime_stage_override(payload)
     if not args.no_write_stage:
         _write_stage_file(stage_file_path, payload)

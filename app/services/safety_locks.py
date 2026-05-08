@@ -19,6 +19,7 @@ _SEVERITY_RANK = {
 class SafetyLockService:
     KILL_SWITCH_REASON = "kill_switch_active"
     CLOSE_ONLY_REASON = "close_only_active"
+    TRANSITION_EDGE_VARIANT_DISABLED_REASON = "transition_edge_variant_disabled"
 
     def __init__(self, *, repo: SafetyLockRepository, settings: Settings | None = None):
         self.repo = repo
@@ -246,6 +247,35 @@ class SafetyLockService:
             ]
         return self.release_reason(scope_type=LockScopeType.GLOBAL, reason_code=self.CLOSE_ONLY_REASON)
 
+    def set_transition_edge_variant_disabled(
+        self,
+        *,
+        active: bool,
+        family: str = "sweep_reversal",
+        reason_message: str,
+        unlock_at: datetime | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> list[SafetyLock]:
+        scope_key = self._normalize_scope_key(LockScopeType.FAMILY, family)
+        if active:
+            return [
+                self.set_lock(
+                    scope_type=LockScopeType.FAMILY,
+                    scope_key=scope_key,
+                    severity=LockSeverity.WARNING,
+                    reason_code=self.TRANSITION_EDGE_VARIANT_DISABLED_REASON,
+                    reason_message=reason_message,
+                    allow_closes=True,
+                    unlock_at=unlock_at,
+                    metadata=metadata,
+                )
+            ]
+        return self.release_reason(
+            scope_type=LockScopeType.FAMILY,
+            scope_key=scope_key,
+            reason_code=self.TRANSITION_EDGE_VARIANT_DISABLED_REASON,
+        )
+
     def safety_state(
         self,
         *,
@@ -256,9 +286,16 @@ class SafetyLockService:
     ) -> dict[str, Any]:
         active_locks = self.list_active(now=now)
         matching_locks = self._matching_locks(symbol=symbol, family=family, session_name=session_name, now=now)
+        transition_edge_variant_matching_locks = [
+            row for row in matching_locks if str(row.reason_code or "") == self.TRANSITION_EDGE_VARIANT_DISABLED_REASON
+        ]
+        blocking_matching_locks = [
+            row for row in matching_locks if str(row.reason_code or "") != self.TRANSITION_EDGE_VARIANT_DISABLED_REASON
+        ]
         config_close_only = bool(self.settings.auto_trading_close_only)
         kill_switch_active = any(str(row.reason_code or "") == self.KILL_SWITCH_REASON for row in active_locks)
         close_only_active = any(str(row.reason_code or "") == self.CLOSE_ONLY_REASON for row in active_locks)
+        transition_edge_variant_disabled_active = bool(transition_edge_variant_matching_locks)
 
         blocking_reason_code = ""
         blocking_reason_message = ""
@@ -267,8 +304,8 @@ class SafetyLockService:
             new_entry_allowed = False
             blocking_reason_code = "close_only_mode"
             blocking_reason_message = "Static close-only mode is enabled in settings."
-        elif matching_locks:
-            top = matching_locks[0]
+        elif blocking_matching_locks:
+            top = blocking_matching_locks[0]
             new_entry_allowed = False
             blocking_reason_code = str(top.reason_code or "safety_lock_active")
             blocking_reason_message = str(top.reason_message or "A safety lock blocks new entries.")
@@ -283,6 +320,8 @@ class SafetyLockService:
             "kill_switch_active": kill_switch_active,
             "close_only_active": close_only_active,
             "config_close_only_active": config_close_only,
+            "transition_edge_variant_disabled_active": transition_edge_variant_disabled_active,
+            "transition_edge_variant_matching_locks": [self._serialize_lock(row) for row in transition_edge_variant_matching_locks],
             "matching_locks": [self._serialize_lock(row) for row in matching_locks],
             "active_locks": [self._serialize_lock(row) for row in active_locks],
         }

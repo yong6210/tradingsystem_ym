@@ -155,6 +155,43 @@ def test_fetch_position_risk_uses_signed_request(monkeypatch) -> None:
     }
 
 
+def test_fetch_symbol_trading_rules_uses_exchange_info(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_public_request(self, path: str, params: dict[str, object] | None = None) -> dict[str, object]:
+        captured["path"] = path
+        captured["params"] = params
+        return {
+            "symbols": [
+                {
+                    "symbol": "XRPUSDC",
+                    "pricePrecision": 5,
+                    "quantityPrecision": 1,
+                    "filters": [
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.00010"},
+                        {"filterType": "LOT_SIZE", "minQty": "0.1", "stepSize": "0.1"},
+                    ],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(BinanceFuturesClient, "_public_request", fake_public_request)
+    client = BinanceFuturesClient()
+
+    rules = client.fetch_symbol_trading_rules("xrpusdc")
+
+    assert captured == {
+        "path": "/fapi/v1/exchangeInfo",
+        "params": {"symbol": "XRPUSDC"},
+    }
+    assert rules.symbol == "XRPUSDC"
+    assert rules.quantity_step == 0.1
+    assert rules.min_quantity == 0.1
+    assert rules.tick_size == 0.0001
+    assert rules.price_precision == 5
+    assert rules.quantity_precision == 1
+
+
 def test_normalize_user_stream_order_trade_update_and_account_update() -> None:
     trade_update = BinanceFuturesClient.normalize_user_stream_message(
         {

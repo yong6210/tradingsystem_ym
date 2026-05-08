@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings, get_settings
 from app.core.enums import ApprovalState, EntryModel, ExecutionMode, PlanState
 from app.db.models import Plan
+from app.services.common import clamp
 from app.services.execution.rollout import RolloutPolicyBootstrap
+from app.services.safety_locks import SafetyLockService
 
 _MODE_RANK = {
     ExecutionMode.SHADOW: 0,
@@ -40,6 +45,17 @@ class ExecutionPlanningService:
     @staticmethod
     def _bool(value: Any) -> bool:
         return bool(value)
+
+    @staticmethod
+    def _symbol_list(values: list[Any] | None, *, limit: int = 4) -> str:
+        symbols = [str(item or "").upper() for item in list(values or []) if str(item or "").strip()]
+        if not symbols:
+            return ""
+        deduped = list(dict.fromkeys(symbols))
+        head = deduped[: max(int(limit), 1)]
+        if len(deduped) > len(head):
+            head.append(f"+{len(deduped) - len(head)} more")
+        return ", ".join(head)
 
     @staticmethod
     def _utc(value: datetime) -> datetime:
@@ -77,9 +93,273 @@ class ExecutionPlanningService:
     def micro_live_allowed_families(self) -> set[str]:
         return {item.lower() for item in self._csv_set(getattr(self.settings, "auto_trading_micro_live_allowed_families", ""))}
 
+    def micro_live_allowed_entry_models(self) -> set[str]:
+        return self._csv_set(getattr(self.settings, "auto_trading_micro_live_allowed_entry_models", ""))
+
     def micro_live_allowed_sessions(self) -> set[str]:
         items = [item.strip().lower() for item in str(self.settings.auto_trading_micro_live_allowed_sessions or "").split(",") if item.strip()]
         return set(items)
+
+    @staticmethod
+    def _entry_model_rejection_code(allowed_entry_models: set[str]) -> str:
+        normalized = {str(item or "").strip().upper() for item in set(allowed_entry_models or set()) if str(item or "").strip()}
+        if normalized == {EntryModel.LIMIT.value}:
+            return "live_limit_only_entry_required"
+        return "live_entry_model_not_allowed"
+
+    def micro_live_direction_contract(self) -> dict[str, set[str]]:
+        mapping: dict[str, set[str]] = {}
+        raw = str(getattr(self.settings, "auto_trading_micro_live_direction_contract", "") or "")
+        for item in raw.split(","):
+            token = item.strip()
+            if not token or ":" not in token:
+                continue
+            symbol, raw_directions = token.split(":", 1)
+            normalized_symbol = str(symbol or "").strip().upper()
+            if not normalized_symbol:
+                continue
+            directions = {
+                direction.strip().upper()
+                for direction in str(raw_directions or "").replace("/", "|").split("|")
+                if direction.strip()
+            }
+            if directions:
+                mapping[normalized_symbol] = directions
+        return mapping
+
+    def micro_live_session_direction_blocked_hours(self) -> dict[tuple[str, str, str], set[int]]:
+        mapping: dict[tuple[str, str, str], set[int]] = {}
+        raw = str(getattr(self.settings, "auto_trading_micro_live_session_direction_blocked_hours_utc", "") or "")
+        for item in raw.split(","):
+            token = item.strip()
+            if not token:
+                continue
+            parts = [part.strip() for part in token.split(":", 3)]
+            if len(parts) != 4:
+                continue
+            symbol, session_name, direction, raw_hours = parts
+            normalized_symbol = str(symbol or "").strip().upper()
+            normalized_session = str(session_name or "").strip().lower()
+            normalized_direction = str(direction or "").strip().upper()
+            if not normalized_symbol or not normalized_session or not normalized_direction:
+                continue
+            hours: set[int] = set()
+            for raw_hour in str(raw_hours or "").replace("/", "|").split("|"):
+                text = raw_hour.strip()
+                if not text:
+                    continue
+                try:
+                    hour = int(text)
+                except ValueError:
+                    continue
+                if 0 <= hour <= 23:
+                    hours.add(hour)
+            if hours:
+                mapping[(normalized_symbol, normalized_session, normalized_direction)] = hours
+        return mapping
+
+    def micro_live_symbol_family_entry_direction_blocked_hours(self) -> dict[tuple[str, str, str, str], set[int]]:
+        mapping: dict[tuple[str, str, str, str], set[int]] = {}
+        raw = str(
+            getattr(self.settings, "auto_trading_micro_live_symbol_family_entry_direction_blocked_hours_utc", "") or ""
+        )
+        for item in raw.split(","):
+            token = item.strip()
+            if not token:
+                continue
+            parts = [part.strip() for part in token.split(":", 4)]
+            if len(parts) != 5:
+                continue
+            symbol, family, entry_model, direction, raw_hours = parts
+            normalized_symbol = str(symbol or "").strip().upper()
+            normalized_family = str(family or "").strip().lower()
+            normalized_entry_model = str(entry_model or "").strip().upper()
+            normalized_direction = str(direction or "").strip().upper()
+            if not normalized_symbol or not normalized_family or not normalized_entry_model or not normalized_direction:
+                continue
+            hours: set[int] = set()
+            for raw_hour in str(raw_hours or "").replace("/", "|").split("|"):
+                text = raw_hour.strip()
+                if not text:
+                    continue
+                try:
+                    hour = int(text)
+                except ValueError:
+                    continue
+                if 0 <= hour <= 23:
+                    hours.add(hour)
+            if hours:
+                mapping[(normalized_symbol, normalized_family, normalized_entry_model, normalized_direction)] = hours
+        return mapping
+
+    def micro_live_strategy_time_contract(
+        self,
+    ) -> list[dict[str, Any]]:
+        raw_path = str(getattr(self.settings, "auto_trading_micro_live_strategy_time_contract_path", "") or "").strip()
+        if not raw_path:
+            return []
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        entries = list(dict(payload).get("blocked_buckets") or payload or [])
+        contract: list[dict[str, Any]] = []
+        for item in entries:
+            row = dict(item or {})
+            symbol = str(row.get("symbol") or "").strip().upper()
+            family = str(row.get("strategy_family") or "").strip().lower()
+            entry_model = str(row.get("entry_model") or "").strip().upper()
+            direction = str(row.get("direction") or "").strip().upper()
+            if not symbol or not family or not entry_model or not direction:
+                continue
+            normalized: dict[str, Any] = {
+                "symbol": symbol,
+                "strategy_family": family,
+                "entry_model": entry_model,
+                "direction": direction,
+            }
+            valid = True
+            for key, lower, upper in (
+                ("year_utc", 2000, 3000),
+                ("month_utc", 1, 12),
+                ("day_utc", 1, 31),
+                ("weekday_utc", 0, 6),
+                ("hour_utc", 0, 23),
+                ("minute_utc", 0, 59),
+            ):
+                value = row.get(key)
+                if value in (None, ""):
+                    continue
+                try:
+                    number = int(value)
+                except (TypeError, ValueError):
+                    valid = False
+                    break
+                if not (lower <= number <= upper):
+                    valid = False
+                    break
+                normalized[key] = number
+            if valid:
+                contract.append(normalized)
+        return contract
+
+    @staticmethod
+    def _parse_utc_timestamp(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return ExecutionPlanningService._utc(parsed)
+
+    def micro_live_event_blackouts(self) -> list[dict[str, Any]]:
+        raw_path = str(getattr(self.settings, "auto_trading_micro_live_event_blackout_path", "") or "").strip()
+        if not raw_path:
+            return []
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        entries = list(dict(payload).get("windows") or payload or [])
+        windows: list[dict[str, Any]] = []
+        for item in entries:
+            row = dict(item or {})
+            start_utc = self._parse_utc_timestamp(row.get("start_utc"))
+            end_utc = self._parse_utc_timestamp(row.get("end_utc"))
+            if start_utc is None or end_utc is None or end_utc <= start_utc:
+                continue
+            normalized: dict[str, Any] = {
+                "label": str(row.get("label") or "").strip(),
+                "start_utc": start_utc,
+                "end_utc": end_utc,
+                "symbols": {
+                    str(item or "").strip().upper()
+                    for item in list(row.get("symbols") or [])
+                    if str(item or "").strip()
+                },
+                "strategy_families": {
+                    str(item or "").strip().lower()
+                    for item in list(row.get("strategy_families") or [])
+                    if str(item or "").strip()
+                },
+                "entry_models": {
+                    str(item or "").strip().upper()
+                    for item in list(row.get("entry_models") or [])
+                    if str(item or "").strip()
+                },
+                "directions": {
+                    str(item or "").strip().upper()
+                    for item in list(row.get("directions") or [])
+                    if str(item or "").strip()
+                },
+                "sessions": {
+                    str(item or "").strip().lower()
+                    for item in list(row.get("sessions") or [])
+                    if str(item or "").strip()
+                },
+            }
+            windows.append(normalized)
+        return windows
+
+    @staticmethod
+    def _matches_event_blackout(
+        current_utc: datetime,
+        *,
+        symbol: str,
+        family: str,
+        entry_model: str,
+        direction: str,
+        session_name: str,
+        blackout_row: dict[str, Any],
+    ) -> bool:
+        start_utc = blackout_row.get("start_utc")
+        end_utc = blackout_row.get("end_utc")
+        if not isinstance(start_utc, datetime) or not isinstance(end_utc, datetime):
+            return False
+        if not (start_utc <= current_utc < end_utc):
+            return False
+        symbols = set(blackout_row.get("symbols") or set())
+        if symbols and symbol not in symbols:
+            return False
+        families = set(blackout_row.get("strategy_families") or set())
+        if families and family not in families:
+            return False
+        entry_models = set(blackout_row.get("entry_models") or set())
+        if entry_models and entry_model not in entry_models:
+            return False
+        directions = set(blackout_row.get("directions") or set())
+        if directions and direction not in directions:
+            return False
+        sessions = set(blackout_row.get("sessions") or set())
+        if sessions and session_name not in sessions:
+            return False
+        return True
+
+    def micro_live_plan_blocklist(self) -> set[str]:
+        raw_path = str(getattr(self.settings, "auto_trading_micro_live_plan_blocklist_path", "") or "").strip()
+        if not raw_path:
+            return set()
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return set()
+        plan_ids = list(dict(payload).get("blocked_plan_ids") or payload or [])
+        return {
+            str(plan_id or "").strip()
+            for plan_id in plan_ids
+            if str(plan_id or "").strip()
+        }
 
     @staticmethod
     def _entry_type(entry_model: str) -> str:
@@ -87,6 +367,40 @@ class ExecutionPlanningService:
         if model == EntryModel.LIMIT.value:
             return "limit"
         return "stop_market"
+
+    @staticmethod
+    def _matches_strategy_time_bucket(
+        current_utc: datetime,
+        *,
+        symbol: str,
+        family: str,
+        entry_model: str,
+        direction: str,
+        contract_row: dict[str, Any],
+    ) -> bool:
+        if symbol != str(contract_row.get("symbol") or ""):
+            return False
+        if family != str(contract_row.get("strategy_family") or ""):
+            return False
+        if entry_model != str(contract_row.get("entry_model") or ""):
+            return False
+        if direction != str(contract_row.get("direction") or ""):
+            return False
+        checks = {
+            "year_utc": int(current_utc.year),
+            "month_utc": int(current_utc.month),
+            "day_utc": int(current_utc.day),
+            "weekday_utc": int(current_utc.weekday()),
+            "hour_utc": int(current_utc.hour),
+            "minute_utc": int(current_utc.minute),
+        }
+        for key, actual in checks.items():
+            expected = contract_row.get(key)
+            if expected is None:
+                continue
+            if int(expected) != actual:
+                return False
+        return True
 
     @staticmethod
     def _entry_semantics(entry_model: str) -> str:
@@ -327,6 +641,11 @@ class ExecutionPlanningService:
             0,
             int((self._utc(plan.valid_until) - datetime.now(timezone.utc)).total_seconds()),
         )
+        transition_edge_variant_payload = dict(validity.get("transition_edge_variant") or candidate.get("transition_edge_variant") or {})
+        transition_edge_variant_applied = bool(
+            validity.get("transition_edge_variant_applied")
+            or candidate.get("transition_edge_variant_applied")
+        )
         entry_model = self._text(plan.entry_model)
         entry_type = self._entry_type(entry_model)
         entry_trigger_price = float(plan.entry_price) if entry_type != "limit" else None
@@ -341,6 +660,8 @@ class ExecutionPlanningService:
             "strategy_family": family,
             "strategy_mode": self._text(validity.get("strategy_mode"), getattr(self.settings.strategy_mode, "value", "A_ONLY")),
             "execution_mode": effective_mode.value,
+            "transition_edge_variant_applied": transition_edge_variant_applied,
+            "transition_edge_variant_variant": self._text(transition_edge_variant_payload.get("variant")),
             "thesis_fingerprint": validity.get("thesis_fingerprint") or candidate.get("thesis_fingerprint"),
             "thesis_cluster_id": self._text(validity.get("thesis_cluster_id") or candidate.get("thesis_cluster_id")),
             "thesis_primary_symbol": self._text(
@@ -390,6 +711,92 @@ class ExecutionPlanningService:
             "strategy_scorecard_raw_components": dict(scorecard.get("raw_components") or validity.get("strategy_scorecard_raw_components") or {}),
         }
 
+    @staticmethod
+    def _transition_edge_variant_applied(
+        *,
+        plan: Plan,
+        executable_plan: dict[str, Any],
+        candidate: dict[str, Any],
+    ) -> bool:
+        validity = dict(plan.validity or {})
+        return bool(
+            executable_plan.get("transition_edge_variant_applied")
+            or candidate.get("transition_edge_variant_applied")
+            or validity.get("transition_edge_variant_applied")
+        )
+
+    @staticmethod
+    def _transition_edge_variant_name(
+        *,
+        plan: Plan,
+        executable_plan: dict[str, Any],
+        candidate: dict[str, Any],
+    ) -> str:
+        validity = dict(plan.validity or {})
+        payload = dict(executable_plan.get("transition_edge_variant") or {})
+        payload.update(dict(candidate.get("transition_edge_variant") or {}))
+        payload.update(dict(validity.get("transition_edge_variant") or {}))
+        return str(
+            executable_plan.get("transition_edge_variant_variant")
+            or payload.get("variant")
+            or ""
+        )
+
+    @staticmethod
+    def _stable_fraction(seed: str) -> float:
+        digest = hashlib.sha1(seed.encode("utf-8")).digest()
+        numerator = int.from_bytes(digest[:8], "big", signed=False)
+        denominator = float((1 << 64) - 1)
+        return numerator / denominator if denominator > 0 else 0.0
+
+    def _transition_edge_variant_sampling_decision(
+        self,
+        *,
+        plan: Plan,
+        executable_plan: dict[str, Any],
+    ) -> tuple[bool, float | None, float]:
+        ratio = clamp(float(self.settings.transition_edge_variant_partial_activation_ratio), 0.0, 1.0)
+        if ratio <= 0.0:
+            return False, None, ratio
+        if ratio >= 1.0:
+            return True, 0.0, ratio
+        cluster_id = str(executable_plan.get("thesis_cluster_id") or "").strip()
+        seed = "|".join(
+            [
+                str(plan.plan_id or ""),
+                str(plan.symbol or ""),
+                str(plan.direction or ""),
+                cluster_id,
+                str(executable_plan.get("transition_edge_variant_variant") or ""),
+            ]
+        )
+        fraction = self._stable_fraction(seed)
+        return fraction < ratio, fraction, ratio
+
+    def _session_impulse_retest_sampling_decision(
+        self,
+        *,
+        plan: Plan,
+        executable_plan: dict[str, Any],
+    ) -> tuple[bool, float | None, float]:
+        ratio = clamp(float(getattr(self.settings, "session_impulse_retest_partial_activation_ratio", 0.0)), 0.0, 1.0)
+        if ratio <= 0.0:
+            return False, None, ratio
+        if ratio >= 1.0:
+            return True, 0.0, ratio
+        cluster_id = str(executable_plan.get("thesis_cluster_id") or "").strip()
+        seed = "|".join(
+            [
+                str(plan.plan_id or ""),
+                str(plan.symbol or ""),
+                str(plan.direction or ""),
+                cluster_id,
+                "session_impulse_retest",
+            ]
+        )
+        fraction = self._stable_fraction(seed)
+        return fraction < ratio, fraction, ratio
+
     def approve(
         self,
         *,
@@ -402,18 +809,36 @@ class ExecutionPlanningService:
         safety_state: dict[str, Any] | None = None,
         current_exposure_count: int = 0,
         daily_new_entry_count: int = 0,
+        live_cluster_guard: dict[str, Any] | None = None,
+        micro_live_symbol_priority_guard: dict[str, Any] | None = None,
         paper_lineage_override: bool = False,
         outcome_inputs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         candidate = dict(candidate_row or {})
         safety = dict(safety_state or {})
+        cluster_guard = dict(live_cluster_guard or {})
+        symbol_priority_guard = dict(micro_live_symbol_priority_guard or {})
         requested_mode = self.coerce_execution_mode(requested_execution_mode or executable_plan.get("execution_mode"))
         family = str(executable_plan.get("strategy_family") or "legacy_zone_plan").lower()
         rollout_policy = self.rollout.get(family)
         allowed_execution_mode = self.min_execution_mode(requested_mode, rollout_policy.max_execution_mode)
 
         symbol = str(plan.symbol or "").upper()
+        transition_edge_variant_applied = self._transition_edge_variant_applied(
+            plan=plan,
+            executable_plan=executable_plan,
+            candidate=candidate,
+        )
+        transition_edge_variant_variant = self._transition_edge_variant_name(
+            plan=plan,
+            executable_plan=executable_plan,
+            candidate=candidate,
+        )
+        transition_edge_variant_disabled_active = bool(safety.get("transition_edge_variant_disabled_active", False))
+        transition_edge_variant_sampling_selected: bool | None = None
+        transition_edge_variant_sampling_fraction: float | None = None
+        transition_edge_variant_sampling_ratio = 0.0
         metrics_grade = str(metrics.get("grade") or "F").upper()
         metrics_recommendation = str(metrics.get("recommendation") or "do-not-deploy")
         risk_state = str(metrics.get("risk_state") or "CLOSED")
@@ -522,10 +947,22 @@ class ExecutionPlanningService:
                 "paper_lineage_override_applied": override_applied,
                 "paper_lineage_override_reason": override_reason,
                 "paper_lineage_override_source": override_source,
+                "transition_edge_variant_applied": transition_edge_variant_applied,
+                "transition_edge_variant_variant": transition_edge_variant_variant or None,
+                "transition_edge_variant_disabled_active": transition_edge_variant_disabled_active,
+                "transition_edge_variant_partial_activation_ratio": round(float(transition_edge_variant_sampling_ratio), 4),
+                "transition_edge_variant_sampling_selected": transition_edge_variant_sampling_selected,
+                "transition_edge_variant_sampling_fraction": (
+                    round(float(transition_edge_variant_sampling_fraction), 6)
+                    if transition_edge_variant_sampling_fraction is not None
+                    else None
+                ),
                 "top_candidate": bool(candidate),
                 "auto_trading_enabled": bool(self.settings.auto_trading_enabled),
                 "rollout_policy": rollout_policy.to_dict(),
                 "safety_state": safety,
+                "live_cluster_guard": cluster_guard or None,
+                "micro_live_symbol_priority_guard": symbol_priority_guard or None,
                 "outcome_approval_penalty": applied_penalty or None,
             }
 
@@ -565,6 +1002,16 @@ class ExecutionPlanningService:
                 ApprovalState.BLOCKED,
                 effective_block_reason,
                 effective_message,
+            )
+        if transition_edge_variant_applied and transition_edge_variant_disabled_active:
+            matching_variant_locks = list(safety.get("transition_edge_variant_matching_locks") or [])
+            lock_message = "Transition edge variant is temporarily disabled by safety lock."
+            if matching_variant_locks:
+                lock_message = str(matching_variant_locks[0].get("reason_message") or lock_message)
+            return result(
+                ApprovalState.APPROVED_SHADOW,
+                SafetyLockService.TRANSITION_EDGE_VARIANT_DISABLED_REASON,
+                lock_message,
             )
         if symbol and self.allowed_symbols() and symbol not in self.allowed_symbols():
             if not paper_lineage_sampling_mode:
@@ -667,17 +1114,176 @@ class ExecutionPlanningService:
                     "micro_live_session_not_allowed",
                     f"Current session {session_name} is outside the MICRO_LIVE session allowlist.",
                 )
+            direction_contract = self.micro_live_direction_contract()
+            allowed_directions = set(direction_contract.get(symbol) or set())
+            current_direction = str(executable_plan.get("direction") or "").strip().upper()
+            if allowed_directions and current_direction and current_direction not in allowed_directions:
+                return result(
+                    ApprovalState.BLOCKED,
+                    "micro_live_direction_not_allowed",
+                    f"{symbol} {current_direction} is outside the current MICRO_LIVE direction contract.",
+                )
+            blocked_hour_contract = self.micro_live_session_direction_blocked_hours()
+            blocked_hours = set(blocked_hour_contract.get((symbol, session_name, current_direction)) or set())
+            current_hour_utc = int(self._utc(now).hour)
+            if blocked_hours and current_hour_utc in blocked_hours:
+                return result(
+                    ApprovalState.BLOCKED,
+                    "micro_live_session_direction_hour_not_allowed",
+                    (
+                        f"{symbol} {session_name} {current_direction} is blocked for MICRO_LIVE at "
+                        f"{current_hour_utc:02d}:00 UTC by the current session-direction hour contract."
+                    ),
+                )
+            entry_model = str(executable_plan.get("entry_model") or plan.entry_model or "unknown").strip().upper() or "UNKNOWN"
+            blocked_strategy_hour_contract = self.micro_live_symbol_family_entry_direction_blocked_hours()
+            blocked_strategy_hours = set(
+                blocked_strategy_hour_contract.get((symbol, family, entry_model, current_direction)) or set()
+            )
+            if blocked_strategy_hours and current_hour_utc in blocked_strategy_hours:
+                return result(
+                    ApprovalState.BLOCKED,
+                    "micro_live_strategy_hour_not_allowed",
+                    (
+                        f"{symbol} {family} {entry_model} {current_direction} is blocked for MICRO_LIVE at "
+                        f"{current_hour_utc:02d}:00 UTC by the current strategy-hour contract."
+                    ),
+                )
+            current_utc = self._utc(now)
+            event_blackouts = self.micro_live_event_blackouts()
+            matching_blackout = next(
+                (
+                    blackout_row
+                    for blackout_row in event_blackouts
+                    if self._matches_event_blackout(
+                        current_utc,
+                        symbol=symbol,
+                        family=family,
+                        entry_model=entry_model,
+                        direction=current_direction,
+                        session_name=session_name,
+                        blackout_row=blackout_row,
+                    )
+                ),
+                None,
+            )
+            if matching_blackout:
+                label = str(matching_blackout.get("label") or "major_event_blackout")
+                start_utc = matching_blackout.get("start_utc")
+                end_utc = matching_blackout.get("end_utc")
+                start_text = start_utc.isoformat().replace("+00:00", "Z") if isinstance(start_utc, datetime) else "unknown"
+                end_text = end_utc.isoformat().replace("+00:00", "Z") if isinstance(end_utc, datetime) else "unknown"
+                return result(
+                    ApprovalState.BLOCKED,
+                    "micro_live_event_blackout_active",
+                    (
+                        f"{symbol} {family} {entry_model} is blocked for MICRO_LIVE during event blackout "
+                        f"{label} ({start_text} -> {end_text})."
+                    ),
+                )
+            strategy_time_contract = self.micro_live_strategy_time_contract()
+            if any(
+                self._matches_strategy_time_bucket(
+                    current_utc,
+                    symbol=symbol,
+                    family=family,
+                    entry_model=entry_model,
+                    direction=current_direction,
+                    contract_row=contract_row,
+                )
+                for contract_row in strategy_time_contract
+            ):
+                return result(
+                    ApprovalState.BLOCKED,
+                    "micro_live_strategy_time_bucket_not_allowed",
+                    (
+                        f"{symbol} {family} {entry_model} {current_direction} is blocked for MICRO_LIVE at "
+                        f"weekday={int(current_utc.weekday())} {int(current_utc.hour):02d}:{int(current_utc.minute):02d} UTC "
+                        "by the current strategy time-bucket contract."
+                    ),
+                )
+            blocked_plan_ids = self.micro_live_plan_blocklist()
+            if blocked_plan_ids and str(plan.plan_id or "").strip() in blocked_plan_ids:
+                return result(
+                    ApprovalState.BLOCKED,
+                    "micro_live_plan_id_blocklisted",
+                    (
+                        f"plan_id {str(plan.plan_id or '').strip()} is blocked by the current MICRO_LIVE "
+                        "historical plan blocklist contract."
+                    ),
+                )
             if current_exposure_count >= int(self.settings.auto_trading_micro_live_max_concurrent_positions):
                 return result(
                     ApprovalState.BLOCKED,
                     "micro_live_position_cap_reached",
                     f"Open exposure count {current_exposure_count} reached the MICRO_LIVE concurrent position cap.",
                 )
-            if daily_new_entry_count >= int(self.settings.auto_trading_micro_live_max_daily_new_entries):
+            daily_entry_cap = int(self.settings.auto_trading_micro_live_max_daily_new_entries)
+            if daily_entry_cap > 0 and daily_new_entry_count >= daily_entry_cap:
                 return result(
                     ApprovalState.BLOCKED,
                     "micro_live_daily_entry_cap_reached",
                     f"Today's new entry count {daily_new_entry_count} reached the MICRO_LIVE daily cap.",
+                )
+            if bool(symbol_priority_guard.get("blocked")):
+                preferred_symbol = str(symbol_priority_guard.get("preferred_symbol") or "")
+                preferred_created_at = str(symbol_priority_guard.get("preferred_created_at") or "")
+                preferred_suffix = f" (latest submit_ready at {preferred_created_at})" if preferred_created_at else ""
+                return result(
+                    ApprovalState.BLOCKED,
+                    "micro_live_higher_priority_symbol_available",
+                    f"{symbol} is currently fallback-only for MICRO_LIVE; prefer {preferred_symbol}{preferred_suffix}.",
+                )
+        if requested_mode in {ExecutionMode.LIVE, ExecutionMode.MICRO_LIVE}:
+            entry_model = str(executable_plan.get("entry_model") or plan.entry_model or "unknown").strip().upper() or "UNKNOWN"
+            allowed_entry_models = self.micro_live_allowed_entry_models()
+            if allowed_entry_models and entry_model not in allowed_entry_models:
+                reason_code = self._entry_model_rejection_code(allowed_entry_models)
+                return result(
+                    ApprovalState.BLOCKED,
+                    reason_code,
+                    (
+                        f"The current live rollout contract is limit-only; {entry_model} entries remain paper/research only."
+                        if reason_code == "live_limit_only_entry_required"
+                        else (
+                            f"{entry_model} is outside the current live rollout entry-model contract "
+                            f"({','.join(sorted(allowed_entry_models))})."
+                        )
+                    ),
+                )
+        if requested_mode in {ExecutionMode.LIVE, ExecutionMode.MICRO_LIVE} and cluster_guard:
+            window_cap = max(0, int(cluster_guard.get("max_same_family_entries_per_window", 0) or 0))
+            window_minutes = max(0, int(cluster_guard.get("cluster_window_minutes", 0) or 0))
+            window_count = max(0, int(cluster_guard.get("recent_family_window_entry_count", 0) or 0))
+            if window_cap > 0 and window_count >= window_cap:
+                symbols = self._symbol_list(cluster_guard.get("recent_family_window_symbols"))
+                symbol_suffix = f" ({symbols})" if symbols else ""
+                return result(
+                    ApprovalState.BLOCKED,
+                    "live_family_cluster_window_cap_reached",
+                    f"{family} already has {window_count} recent family entries inside the last {window_minutes}m cluster window{symbol_suffix}.",
+                )
+            direction_cap = max(0, int(cluster_guard.get("max_same_family_direction_exposures", 0) or 0))
+            direction_count = max(0, int(cluster_guard.get("recent_family_direction_exposure_count", 0) or 0))
+            direction = str(cluster_guard.get("direction") or getattr(plan, "direction", "") or "").upper()
+            if direction_cap > 0 and direction_count >= direction_cap:
+                symbols = self._symbol_list(cluster_guard.get("recent_family_direction_exposure_symbols"))
+                symbol_suffix = f" ({symbols})" if symbols else ""
+                return result(
+                    ApprovalState.BLOCKED,
+                    "live_family_direction_exposure_cap_reached",
+                    f"{family} already has {direction_count} active {direction or 'SAME-DIRECTION'} exposure(s) in {direction or 'the same direction'}{symbol_suffix}.",
+                )
+            loss_trigger = max(0, int(cluster_guard.get("loss_cooldown_trigger_count", 0) or 0))
+            loss_minutes = max(0, int(cluster_guard.get("loss_cooldown_minutes", 0) or 0))
+            loss_count = max(0, int(cluster_guard.get("recent_family_loss_count", 0) or 0))
+            if loss_trigger > 0 and loss_count >= loss_trigger:
+                symbols = self._symbol_list(cluster_guard.get("recent_family_loss_symbols"))
+                symbol_suffix = f" ({symbols})" if symbols else ""
+                return result(
+                    ApprovalState.BLOCKED,
+                    "live_family_loss_cooldown_active",
+                    f"{family} logged {loss_count} recent family losses inside the last {loss_minutes}m cooldown window{symbol_suffix}.",
                 )
         if recommended_risk_r > float(rollout_policy.max_risk_r) + 1e-9 and rollout_policy.max_risk_r > 0.0:
             return result(
@@ -722,6 +1328,65 @@ class ExecutionPlanningService:
                 "rollout_shadow_only",
                 "Current rollout stage is shadow-only for this family.",
             )
+        if family == "session_impulse_retest" and requested_mode in {ExecutionMode.MICRO_LIVE, ExecutionMode.LIVE}:
+            if not bool(getattr(self.settings, "session_impulse_retest_enabled", False)):
+                return result(
+                    ApprovalState.APPROVED_SHADOW,
+                    "session_impulse_retest_family_disabled",
+                    "session_impulse_retest is currently disabled.",
+                )
+            if bool(getattr(self.settings, "session_impulse_retest_shadow_only", False)):
+                return result(
+                    ApprovalState.APPROVED_SHADOW,
+                    "session_impulse_retest_shadow_only",
+                    "session_impulse_retest is currently configured as shadow-only.",
+                )
+            rollout_readiness = dict(safety.get("session_impulse_retest_rollout_readiness") or {})
+            if rollout_readiness and not bool(rollout_readiness.get("ready_for_partial", False)):
+                blockers = [str(item or "") for item in list(rollout_readiness.get("blockers") or []) if str(item or "").strip()]
+                blocker_text = ", ".join(blockers) if blockers else "not_ready"
+                return result(
+                    ApprovalState.APPROVED_SHADOW,
+                    "session_impulse_retest_rollout_not_ready",
+                    f"session_impulse_retest rollout readiness is not live-ready ({blocker_text}).",
+                )
+            (
+                session_impulse_sampling_selected,
+                _session_impulse_sampling_fraction,
+                session_impulse_sampling_ratio,
+            ) = self._session_impulse_retest_sampling_decision(
+                plan=plan,
+                executable_plan=executable_plan,
+            )
+            if not session_impulse_sampling_selected:
+                return result(
+                    ApprovalState.APPROVED_SHADOW,
+                    "session_impulse_retest_partial_holdout",
+                    (
+                        "session_impulse_retest remains in partial activation holdout for this sample."
+                        if session_impulse_sampling_ratio > 0.0
+                        else "session_impulse_retest is configured for holdout-only execution."
+                    ),
+                )
+        if transition_edge_variant_applied and requested_mode in {ExecutionMode.MICRO_LIVE, ExecutionMode.LIVE}:
+            (
+                transition_edge_variant_sampling_selected,
+                transition_edge_variant_sampling_fraction,
+                transition_edge_variant_sampling_ratio,
+            ) = self._transition_edge_variant_sampling_decision(
+                plan=plan,
+                executable_plan=executable_plan,
+            )
+            if not transition_edge_variant_sampling_selected:
+                return result(
+                    ApprovalState.APPROVED_SHADOW,
+                    "transition_edge_variant_partial_holdout",
+                    (
+                        "Transition rescue lane remains in partial activation holdout for this thesis-safe sample."
+                        if transition_edge_variant_sampling_ratio > 0.0
+                        else "Transition rescue lane is configured for holdout-only execution."
+                    ),
+                )
 
         rollout_code, rollout_message = self._rollout_reason(allowed_execution_mode)
         extra_reasons: list[dict[str, Any]] = []

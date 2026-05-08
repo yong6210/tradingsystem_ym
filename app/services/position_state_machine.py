@@ -8,6 +8,7 @@ from app.core.enums import ExecutionFillStage, PlanState
 from app.db.models import ExecutionFill
 from app.db.repositories import ExecutionFillRepository, PlanRepository
 from app.services.exit_engine import ExitEngineService
+from app.services.lane_tracker import get_execution_lane_tracker
 
 
 @dataclass(slots=True)
@@ -159,6 +160,17 @@ class PositionStateMachineService:
             strategy_version=self.strategy_version,
         )
         self.fill_repo.add(fill)
+        tracker = get_execution_lane_tracker()
+        is_variant = bool(dict(plan.validity or {}).get("transition_edge_variant_applied"))
+        if data.stage == ExecutionFillStage.ENTRY:
+            tracker.record_filled(is_variant=is_variant)
+        elif data.stage == ExecutionFillStage.CLOSED:
+            realized_r = payload.get("realized_r")
+            try:
+                realized_r_value = float(realized_r) if realized_r is not None else None
+            except (TypeError, ValueError):
+                realized_r_value = None
+            tracker.record_closed(is_variant=is_variant, realized_r=realized_r_value)
 
         return FillApplyResult(
             accepted=True,

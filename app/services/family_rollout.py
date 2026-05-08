@@ -11,16 +11,16 @@ class RolloutPolicyBootstrap:
     _DEFAULTS: dict[str, RolloutPolicy] = {
         "trend_continuation": RolloutPolicy(
             strategy_family="trend_continuation",
-            live_enabled=True,
-            max_execution_mode=ExecutionMode.MICRO_LIVE,
-            max_risk_r=1.0,
+            live_enabled=False,
+            max_execution_mode=ExecutionMode.PAPER,
+            max_risk_r=0.5,
             allowed_sessions=("london", "new_york"),
             min_quality_score=75.0,
         ),
         "sweep_reversal": RolloutPolicy(
             strategy_family="sweep_reversal",
-            live_enabled=False,
-            max_execution_mode=ExecutionMode.PAPER,
+            live_enabled=True,
+            max_execution_mode=ExecutionMode.MICRO_LIVE,
             max_risk_r=0.5,
             allowed_sessions=("london", "new_york"),
             min_quality_score=70.0,
@@ -32,6 +32,14 @@ class RolloutPolicyBootstrap:
             max_risk_r=0.25,
             allowed_sessions=("london", "new_york"),
             min_quality_score=68.0,
+        ),
+        "session_impulse_retest": RolloutPolicy(
+            strategy_family="session_impulse_retest",
+            live_enabled=True,
+            max_execution_mode=ExecutionMode.MICRO_LIVE,
+            max_risk_r=0.6,
+            allowed_sessions=("london", "new_york"),
+            min_quality_score=78.0,
         ),
     }
 

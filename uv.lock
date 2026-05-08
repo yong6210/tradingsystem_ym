@@ -535,6 +535,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "sqlalchemy" },
     { name = "uvicorn" },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -560,6 +561,7 @@ requires-dist = [
     { name = "redis", marker = "extra == 'integration'", specifier = ">=5.0.0" },
     { name = "sqlalchemy", specifier = ">=2.0.30" },
     { name = "uvicorn", specifier = ">=0.30.0" },
+    { name = "websockets", specifier = ">=16.0" },
     { name = "websockets", marker = "extra == 'integration'", specifier = ">=12.0" },
 ]
 provides-extras = ["dev", "integration"]

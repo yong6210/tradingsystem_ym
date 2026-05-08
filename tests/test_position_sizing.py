@@ -119,3 +119,35 @@ def test_position_sizing_zeroes_mixed_reaction() -> None:
     assert isclose(result["final_risk_r"], 0.0)
     assert result["blocked"] is True
     assert result["blocked_reason"] == "mixed_zero_risk"
+
+
+def test_position_sizing_soft_clamps_btc_sweep_reversal_long() -> None:
+    service = PositionSizingService()
+    settings = get_settings()
+
+    result = service.evaluate(
+        PositionSizingInput(
+            strategy_family="sweep_reversal",
+            strategy_grade="A",
+            regime="range",
+            reaction_classification="rejection_confirmed",
+            confirm_only=False,
+            entry_model=EntryModel.LIMIT.value,
+            active_thesis_clusters=0,
+            transition_state="none",
+            symbol="BTCUSDC",
+            direction="LONG",
+        )
+    )
+
+    expected = (
+        settings.sizing_grade_a_r
+        * settings.sizing_regime_factor_range
+        * settings.sizing_reaction_factor_confirmed
+        * settings.sizing_thesis_factor_none
+        * settings.sizing_execution_factor_limit
+        * settings.sizing_btc_sweep_reversal_long_factor
+    )
+    assert isclose(result["final_risk_r"], round(expected, 4))
+    assert result["blocked"] is False
+    assert result["notes"]["direction"] == "btc_sweep_reversal_long_size_clamp"

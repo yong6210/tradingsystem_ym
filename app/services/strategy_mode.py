@@ -45,7 +45,7 @@ class StrategyModeService:
         if active == StrategyMode.A_PLUS_B:
             return StrategyModePolicy(
                 mode=active,
-                allowed_families=("sweep_reversal", "trend_continuation"),
+                allowed_families=("sweep_reversal", "trend_continuation", "session_impulse_retest"),
                 allowed_grades=("A", "B"),
                 max_daily_trades=int(self.settings.strategy_mode_a_plus_b_max_daily_trades),
                 max_total_risk_r=float(self.settings.strategy_mode_a_plus_b_max_total_risk_r),
@@ -53,7 +53,7 @@ class StrategyModeService:
         if active == StrategyMode.RESEARCH:
             return StrategyModePolicy(
                 mode=active,
-                allowed_families=("sweep_reversal", "trend_continuation", "range_rotation"),
+                allowed_families=("sweep_reversal", "trend_continuation", "range_rotation", "session_impulse_retest"),
                 allowed_grades=("A", "B", "C"),
                 max_daily_trades=int(self.settings.strategy_mode_research_max_daily_trades),
                 max_total_risk_r=float(self.settings.strategy_mode_research_max_total_risk_r),
@@ -61,7 +61,7 @@ class StrategyModeService:
             )
         return StrategyModePolicy(
             mode=StrategyMode.A_ONLY,
-            allowed_families=("sweep_reversal", "trend_continuation"),
+            allowed_families=("sweep_reversal", "trend_continuation", "session_impulse_retest"),
             allowed_grades=("A",),
             max_daily_trades=int(self.settings.strategy_mode_a_only_max_daily_trades),
             max_total_risk_r=float(self.settings.strategy_mode_a_only_max_total_risk_r),

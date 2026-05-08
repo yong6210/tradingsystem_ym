@@ -152,3 +152,50 @@ def test_main_retries_transient_run_once_failures(monkeypatch, capsys) -> None:
 
     assert payload["overall_status"] == "FOUND_ELIGIBLE_CANDIDATE"
     assert calls["count"] == 2
+
+
+def test_main_surfaces_family_cluster_guard_summary_from_final_result(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        watch_paper_candidate_drill,
+        "parse_args",
+        lambda: SimpleNamespace(
+            interval_seconds=1,
+            max_attempts=1,
+            families="trend_continuation,sweep_reversal",
+            universe="usdc_perp_top30",
+            candidate_limit=100,
+            symbol=None,
+            limit_symbols=30,
+            symbol_concurrency=4,
+            limit_1m=900,
+            limit_5m=500,
+            limit_15m=500,
+            include_manual_review=False,
+            submit_paper=False,
+            paper_lineage_override=False,
+            paper_scenario="fill",
+            report_dir="reports/operations/paper_candidate_watch",
+            no_write_report=True,
+        ),
+    )
+    monkeypatch.setattr(
+        watch_paper_candidate_drill,
+        "_run_once",
+        lambda args: {
+            "generated_at": "2026-04-15T00:00:00+00:00",
+            "overall_status": "NOT_READY",
+            "summary_line": "2 blocking drill check(s) remain.",
+            "checks": [{"name": "eligible_candidate_found", "status": "FAIL"}],
+            "candidate": None,
+            "family_cluster_guard_summary": {
+                "active_families": ["sweep_reversal"],
+                "summary": "sweep_reversal:entries=0,losses=2,active=True",
+            },
+        },
+    )
+
+    assert watch_paper_candidate_drill.main() == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["family_cluster_guard_summary"]["active_families"] == ["sweep_reversal"]
+    assert any("family guard is active" in step for step in payload["next_steps"])

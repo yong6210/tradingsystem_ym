@@ -94,6 +94,11 @@ def _plan_to_item(plan: Plan, risk_state: RiskGateState) -> dict:
     friction_penalty = max(0.0, plan.cost_est * 100.0)
     rank = plan.ev * 100.0 + plan.confidence * 20.0 + plan.rr_base * 8.0 - friction_penalty
     validity = dict(plan.validity or {})
+    runtime_signal_shadow_tilt = dict(
+        validity.get("runtime_signal_shadow_tilt")
+        or dict(validity.get("strategy_sizing") or {}).get("runtime_signal_shadow_tilt")
+        or {}
+    )
     expectations = expectation_contract(
         validity=validity,
         ev=float(plan.ev),
@@ -132,6 +137,7 @@ def _plan_to_item(plan: Plan, risk_state: RiskGateState) -> dict:
         "location_reference": validity.get("location_reference"),
         "session_liquidity_reference": validity.get("session_liquidity_reference"),
         "strategy_sizing": validity.get("strategy_sizing"),
+        "runtime_signal_shadow_tilt": runtime_signal_shadow_tilt,
         "recommended_risk_r": float(validity.get("recommended_risk_r", 0.0) or 0.0),
         "expected_win_prob": expectations["expected_win_prob"],
         "expected_ev_r": expectations["expected_ev_r"],

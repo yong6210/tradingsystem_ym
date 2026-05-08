@@ -171,6 +171,31 @@ def _active_sample_duplicate_hold(payload: dict[str, Any]) -> bool:
     return duplicate_reason and bool(candidate.get("symbol"))
 
 
+def _paper_exit_monitor_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    source = dict(payload or {})
+    stale_cleanup_events = int(source.get("stale_cleanup_events", 0) or 0)
+    closed_events = int(source.get("closed_events", 0) or 0)
+    processed_plans = int(source.get("processed_plans", 0) or 0)
+    summary = (
+        f"processed={processed_plans}"
+        f" | closed={closed_events}"
+        f" | stale_cleanup={stale_cleanup_events}"
+        f" | fill_repairs={int(source.get('fill_repairs', 0) or 0)}"
+        f" | state_repairs={int(source.get('state_repairs', 0) or 0)}"
+    )
+    return {
+        "available": bool(source),
+        "processed_plans": processed_plans,
+        "paper_candidate_plans": int(source.get("paper_candidate_plans", 0) or 0),
+        "closed_events": closed_events,
+        "stale_cleanup_events": stale_cleanup_events,
+        "fill_repairs": int(source.get("fill_repairs", 0) or 0),
+        "state_repairs": int(source.get("state_repairs", 0) or 0),
+        "closed_validity_repairs": int(source.get("closed_validity_repairs", 0) or 0),
+        "summary": summary,
+    }
+
+
 def main() -> int:
     args = parse_args()
     completed = subprocess.run(
@@ -225,6 +250,7 @@ def main() -> int:
         raise RuntimeError(
             f"paper exit monitor returned invalid JSON stdout={exit_completed.stdout[:1000]} stderr={exit_completed.stderr.strip()}"
         ) from exc
+    payload["paper_exit_monitor_summary"] = _paper_exit_monitor_summary(dict(payload.get("paper_exit_monitor") or {}))
     payload["paper_exit_monitor_stderr"] = exit_completed.stderr.strip()
 
     latest_run_file = Path(args.latest_run_file).resolve()

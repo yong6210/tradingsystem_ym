@@ -154,6 +154,11 @@ class StrategyIndicatorsService:
         assessed_row: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         validity = dict(plan.validity or {})
+        runtime_signal_shadow_tilt = dict(
+            validity.get("runtime_signal_shadow_tilt")
+            or dict(validity.get("strategy_sizing") or {}).get("runtime_signal_shadow_tilt")
+            or {}
+        )
         recommended_risk_r = float(validity.get("recommended_risk_r", 0.0) or 0.0)
         expectations = expectation_contract(
             validity=validity,
@@ -194,6 +199,7 @@ class StrategyIndicatorsService:
             "ev": self._round(plan.ev, 4),
             "confluence_score": self._round(validity.get("confluence_score", 0.0), 2),
             "recommended_risk_r": self._round(recommended_risk_r, 4),
+            "runtime_signal_shadow_tilt": runtime_signal_shadow_tilt,
             "expected_win_prob": self._round(expectations["expected_win_prob"], 4),
             "expected_ev_r": self._round(expectations["expected_ev_r"], 4),
             "expected_tp1_prob": self._round(expectations["expected_tp1_prob"], 4),

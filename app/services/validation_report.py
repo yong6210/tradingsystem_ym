@@ -1088,6 +1088,7 @@ class ValidationReportService:
 
         scalp_payload = dict(strategy_v2_scalp_experiment or {})
         scalp_comparison = dict(scalp_payload.get("comparison") or {})
+        micro_main_shadow = dict(scalp_payload.get("micro_main_shadow") or {})
         scalp_lines: list[str] = []
         if scalp_payload:
             scalp_lines = [
@@ -1103,6 +1104,11 @@ class ValidationReportService:
                     f"candles_5m={int((scalp_payload.get('sample_counts') or {}).get('candles_5m', 0))}, "
                     f"candles_15m={int((scalp_payload.get('sample_counts') or {}).get('candles_15m', 0))}"
                 ),
+                f"- micro_main_shadow_status: {micro_main_shadow.get('status', 'not_available')}",
+                f"- micro_main_shadow_decision: {micro_main_shadow.get('decision', 'REJECT')}",
+                f"- micro_main_shadow_recent_closed: {int(micro_main_shadow.get('recent_closed', 0) or 0)}",
+                f"- micro_main_shadow_ev_r: {float(micro_main_shadow.get('ev_r', 0.0) or 0.0):+.4f}",
+                f"- micro_main_shadow_total_r: {float(micro_main_shadow.get('total_r', 0.0) or 0.0):+.4f}",
                 "",
             ]
 
@@ -3046,6 +3052,7 @@ class ValidationReportService:
                 "delta_top_expected_ev_at_size_r": float(scalp_comparison.get("delta_top_expected_ev_at_size_r", 0.0)),
                 "delta_top_expected_win_prob": float(scalp_comparison.get("delta_top_expected_win_prob", 0.0)),
                 "sample_counts": dict(scalp_payload.get("sample_counts") or {}),
+                "micro_main_shadow": micro_main_shadow if micro_main_shadow else None,
             }
             if scalp_payload
             else None,

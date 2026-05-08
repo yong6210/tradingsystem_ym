@@ -1,4 +1,7 @@
+import os
 from functools import lru_cache
+
+os.environ.setdefault("PYDANTIC_DISABLE_PLUGINS", "1")
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -84,6 +87,27 @@ class Settings(BaseSettings):
     weight_htf_alignment: float = 0.20
     weight_ob_freshness: float = 0.15
     weight_trend_proxy: float = 0.05
+    transition_edge_variant_enabled: bool = False
+    transition_edge_variant_shadow_only: bool = True
+    transition_edge_variant_min_confluence_delta: float = 8.0
+    transition_edge_variant_htf_alignment_weight_multiplier: float = 0.5
+    transition_edge_variant_trend_proxy_weight_multiplier: float = 0.25
+    transition_edge_variant_fvg_relax_factor: float = 0.7
+    transition_edge_variant_risk_multiplier: float = 0.35
+    transition_edge_variant_partial_activation_ratio: float = 0.3
+    transition_edge_variant_lane_tracker_window: int = 20
+    session_impulse_retest_enabled: bool = False
+    session_impulse_retest_shadow_only: bool = True
+    session_impulse_retest_allowed_symbols: str = "BTCUSDC"
+    session_impulse_retest_partial_activation_ratio: float = 0.3
+    session_impulse_retest_core_live_slots: int = 2
+    session_impulse_retest_secondary_live_enabled: bool = False
+    session_impulse_retest_saturday_risk_multiplier: float = 1.0
+    session_impulse_retest_miss_detector_enabled: bool = True
+    session_impulse_retest_miss_detector_lookback_hours: int = 24
+    session_impulse_retest_miss_detector_report_dir: str = "reports/validation/micro_main_miss_detectors"
+    session_impulse_retest_miss_alert_enabled: bool = True
+    session_impulse_retest_miss_alert_cooldown_seconds: int = 1800
 
     # Zone type importance multipliers (lower multiplier means less trust).
     weight_zone_ob: float = 1.00
@@ -106,8 +130,9 @@ class Settings(BaseSettings):
 
     # Binance Futures (USDC Perp under USD-M futures API).
     binance_rest_base_url: str = "https://fapi.binance.com"
-    binance_ws_base_url: str = "wss://fstream.binance.com/stream"
+    binance_ws_base_url: str = "wss://fstream.binancefuture.com/stream"
     binance_timeout_seconds: float = 10.0
+    binance_ws_receive_timeout_seconds: float = 30.0
     binance_api_key: str = ""
     binance_api_secret: str = ""
     binance_trade_recv_window: int = 5000
@@ -186,6 +211,15 @@ class Settings(BaseSettings):
     ws_reconnect_base_seconds: float = 1.0
     ws_reconnect_max_seconds: float = 20.0
     ws_refresh_cooldown_seconds: int = 20
+    runtime_worker_heartbeat_dir: str = "/tmp/trading_worker_heartbeats"
+    runtime_worker_loop_heartbeat_max_age_seconds: int = 420
+    runtime_worker_ws_heartbeat_max_age_seconds: int = 180
+    runtime_worker_ws_no_message_max_age_seconds: int = 180
+    ready_require_runtime_workers: bool = True
+    ready_disk_min_free_mb: int = 1024
+    ready_market_data_probe_symbol: str = "BTCUSDC"
+    ready_market_data_1m_max_age_seconds: int = 180
+    ready_market_data_5m_max_age_seconds: int = 600
 
     ready_http_timeout_seconds: float = 2.0
     ready_tcp_timeout_seconds: float = 2.0
@@ -267,6 +301,17 @@ class Settings(BaseSettings):
     sizing_thesis_factor_none: float = 1.0
     sizing_thesis_factor_one_active: float = 0.6
     sizing_thesis_factor_two_or_more: float = 0.0
+    sizing_btc_sweep_reversal_long_factor: float = 0.85
+    btc_sweep_reversal_limit_runtime_signal_shadow_tilt_enabled: bool = True
+    btc_sweep_reversal_limit_runtime_signal_shadow_tilt_long_weaken_close_vs_ema_fast_atr: float = -0.6978
+    btc_sweep_reversal_limit_runtime_signal_shadow_tilt_long_size_factor: float = 0.75
+    btc_sweep_reversal_limit_runtime_signal_shadow_tilt_short_strength_sweep_distance_atr: float = 0.4107
+    btc_sweep_reversal_limit_runtime_signal_shadow_tilt_short_size_factor: float = 1.4762
+    btc_sweep_reversal_limit_fast_failure_enabled: bool = True
+    btc_sweep_reversal_limit_fast_failure_allowed_sessions: str = ""
+    btc_sweep_reversal_limit_fast_failure_max_bars: int = 18
+    btc_sweep_reversal_limit_fast_failure_stop_r: float = 0.00000001
+    btc_sweep_reversal_limit_fast_failure_requires_sl_touch: bool = True
     alpha_research_pipeline_enabled: bool = True
     alpha_research_softened_risk_scale: float = 0.35
     alpha_research_max_candidates: int = 8
@@ -274,18 +319,52 @@ class Settings(BaseSettings):
     execution_quality_default_days: int = 30
     auto_trading_enabled: bool = False
     auto_trading_execution_mode: str = "SHADOW"
+    auto_trading_intent_recheck_cooldown_seconds: int = 300
     auto_trading_allowed_symbols: str = ""
     auto_trading_allowed_families: str = ""
     auto_trading_close_only: bool = False
     auto_trading_require_validation_go: bool = True
     auto_trading_notional_per_r: float = 25.0
+    auto_trading_live_sizing_mode: str = "NOTIONAL_PER_R"
+    auto_trading_live_account_equity_usdt: float = 0.0
+    auto_trading_live_risk_per_trade_pct: float = 0.0
+    auto_trading_live_usable_margin_fraction: float = 0.85
+    auto_trading_live_leverage_cap: float = 6.0
     auto_trading_max_slippage_bps: float = 12.0
     auto_trading_micro_live_allowed_symbols: str = "BTCUSDC,ETHUSDC"
-    auto_trading_micro_live_allowed_families: str = "trend_continuation"
+    auto_trading_micro_live_symbol_priority: str = "BTCUSDC,ETHUSDC"
+    auto_trading_micro_live_direction_contract: str = "BTCUSDC:LONG|SHORT,ETHUSDC:LONG|SHORT"
+    auto_trading_micro_live_session_direction_blocked_hours_utc: str = ""
+    auto_trading_micro_live_priority_submit_ready_lookback_minutes: int = 180
+    auto_trading_micro_live_allowed_families: str = "sweep_reversal,trend_continuation,session_impulse_retest"
+    auto_trading_micro_live_allowed_entry_models: str = "LIMIT"
+    auto_trading_micro_live_symbol_family_entry_direction_blocked_hours_utc: str = ""
+    auto_trading_micro_live_event_blackout_path: str = ""
+    auto_trading_micro_live_strategy_time_contract_path: str = ""
+    auto_trading_micro_live_plan_blocklist_path: str = ""
     auto_trading_micro_live_max_concurrent_positions: int = 2
     auto_trading_micro_live_max_daily_new_entries: int = 2
-    auto_trading_micro_live_allowed_sessions: str = "london,new_york,overlap"
+    auto_trading_micro_live_allowed_sessions: str = ""
+    auto_trading_trend_proof_allowed_symbols: str = "BTCUSDC,ETHUSDC"
+    auto_trading_trend_proof_regime_floor: float = 0.55
+    auto_trading_trend_proof_min_abs_velocity: float = 0.38
+    auto_trading_trend_proof_max_friction: float = 0.50
+    auto_trading_trend_proof_max_jump_rate: float = 0.26
+    auto_trading_historical_walk_forward_cache_hours: float = 6.0
+    auto_trading_historical_walk_forward_warmup_5m_bars: int = 300
+    auto_trading_historical_walk_forward_min_15m_bars: int = 60
+    auto_trading_historical_walk_forward_max_5m_window_bars: int = 300
+    auto_trading_historical_walk_forward_max_15m_window_bars: int = 300
+    auto_trading_live_family_cluster_window_minutes: int = 60
+    auto_trading_live_max_same_family_entries_per_window: int = 1
+    auto_trading_live_max_same_family_direction_exposures: int = 0
+    auto_trading_live_recent_loss_cooldown_minutes: int = 90
+    auto_trading_live_recent_loss_trigger_count: int = 2
     auto_trading_reconciliation_user_stream_stale_seconds: int = 180
+    auto_trading_paper_submission_stale_hours: int = 8
+    auto_trading_paper_stale_sample_cleanup_hours: int = 12
+    binance_live_min_quantity: float = 0.001
+    binance_live_quantity_step: float = 0.001
 
 
 @lru_cache(maxsize=1)

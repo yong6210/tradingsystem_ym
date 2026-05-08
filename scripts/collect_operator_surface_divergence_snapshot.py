@@ -141,12 +141,12 @@ def _edge_evolution_summary_line(summary: dict[str, Any] | None) -> str:
 
 def _edge_experiment_snapshot_line(funnel: dict[str, Any]) -> str:
     return (
-        f"- edge_experiment: state={funnel.get('edge_state', '')} | "
+        f"- live_validation: state={funnel.get('edge_state', '')} | "
         f"entry_timing={funnel.get('entry_timing_focus', '')} | "
         f"execution_style={funnel.get('execution_style_focus', '')} | "
-        f"proof={funnel.get('edge_proof_state', 'unknown')}/{funnel.get('edge_claim_state', 'unknown')} | "
-        f"closes={int(funnel.get('edge_closed_trade_count', 0) or 0)}/{int(funnel.get('edge_proof_goal_closed_trades', 0) or 0)} | "
-        f"remaining={int(funnel.get('remaining_closed_trades_to_edge_proof_goal', 0) or 0)} | "
+        f"validation={funnel.get('edge_proof_state', 'unknown')}/{funnel.get('edge_claim_state', 'unknown')} | "
+        f"closed={int(funnel.get('edge_closed_trade_count', 0) or 0)}/{int(funnel.get('edge_proof_goal_closed_trades', 0) or 0)} | "
+        f"remaining_to_goal={int(funnel.get('remaining_closed_trades_to_edge_proof_goal', 0) or 0)} | "
         f"regime={funnel.get('edge_regime_dependency_state', 'not_available')} | "
         f"true_edge={float(funnel.get('edge_true_edge_ratio', 0.0) or 0.0):.4f} | "
         f"decay={float(funnel.get('edge_decay_rate', 0.0) or 0.0):.4f}"

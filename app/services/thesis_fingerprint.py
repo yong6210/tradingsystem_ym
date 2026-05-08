@@ -19,7 +19,7 @@ _EQUIVALENT_NARRATIVES = {
     "range_lower_reject": "range_lower_reject",
 }
 
-_VALID_FAMILIES = {"sweep_reversal", "trend_continuation", "range_rotation"}
+_VALID_FAMILIES = {"sweep_reversal", "trend_continuation", "range_rotation", "session_impulse_retest"}
 _VALID_REGIMES = {"trend", "range", "shock", "transition"}
 _VALID_EVENTS = {
     "rejection_confirmed",
@@ -230,6 +230,8 @@ class ThesisFingerprintService:
             return classification
         if strategy_family == "trend_continuation":
             return "acceptance_tentative"
+        if strategy_family == "session_impulse_retest":
+            return "acceptance_confirmed"
         if strategy_family in {"sweep_reversal", "range_rotation"}:
             return "rejection_tentative"
         return "mixed"

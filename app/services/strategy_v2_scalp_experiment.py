@@ -8,6 +8,7 @@ from app.core.config import Settings, get_settings
 from app.db.models import Candle, Zone
 from app.services.candidate_expectations import expectation_contract
 from app.services.context_engine import ContextEngine
+from app.services.micro_main_strategy_research import build_session_impulse_retest_shadow_summary
 from app.services.plan_generator import PlanGenerator, RankedPlan
 from app.services.zone_engine import ZoneEngine
 
@@ -126,6 +127,7 @@ class StrategyV2ScalpExperimentService:
         baseline = dict(payload.get("baseline") or {})
         experiment = dict(payload.get("experiment") or {})
         comparison = dict(payload.get("comparison") or {})
+        micro_shadow = dict(payload.get("micro_main_shadow") or {})
         lines = [
             f"# Strategy v2 Scalp Experiment: {payload['symbol']}",
             "",
@@ -157,6 +159,17 @@ class StrategyV2ScalpExperimentService:
             f"- recommendation_reason: {comparison.get('recommendation_reason', 'not_available')}",
             f"- delta_top_expected_ev_at_size_r: {float(comparison.get('delta_top_expected_ev_at_size_r', 0.0)):+.4f}",
             f"- delta_top_expected_win_prob: {float(comparison.get('delta_top_expected_win_prob', 0.0)):+.4f}",
+            "",
+            "## Session Impulse Retest (shadow)",
+            f"- enabled: {bool(micro_shadow.get('enabled', False))}",
+            f"- available: {bool(micro_shadow.get('available', False))}",
+            f"- status: {micro_shadow.get('status', 'not_available')}",
+            f"- decision: {micro_shadow.get('decision', 'REJECT')}",
+            f"- recent_closed: {int(micro_shadow.get('recent_closed', 0) or 0)}",
+            f"- ev_r: {float(micro_shadow.get('ev_r', 0.0) or 0.0):+.4f}",
+            f"- total_r: {float(micro_shadow.get('total_r', 0.0) or 0.0):+.4f}",
+            f"- recent_window_hours: {float(micro_shadow.get('recent_window_hours', 0.0) or 0.0):.2f}",
+            f"- latest_trade: {micro_shadow.get('latest_trade')}",
             "",
             "## Next Steps",
         ]
@@ -205,6 +218,18 @@ class StrategyV2ScalpExperimentService:
                 "delta_top_expected_ev_at_size_r": 0.0,
                 "delta_top_expected_win_prob": 0.0,
             },
+            "micro_main_shadow": build_session_impulse_retest_shadow_summary(
+                symbol=symbol,
+                candles_1m=candles_1m,
+                candles_5m=candles_5m,
+                enabled=bool(self.settings.session_impulse_retest_enabled),
+                shadow_only=bool(self.settings.session_impulse_retest_shadow_only),
+                allowed_symbols=[
+                    item.strip().upper()
+                    for item in str(self.settings.session_impulse_retest_allowed_symbols or "").split(",")
+                    if item.strip()
+                ],
+            ),
             "blocked_by": blocked_by,
             "next_steps": [],
             "report_path": None,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError
 
@@ -165,6 +165,8 @@ def _checklist(*, overall_status: str = "FAIL"):
 def _dashboard(*, new_entries_allowed: bool = False, close_only_active: bool = True):
     return {
         "new_entries_allowed": new_entries_allowed,
+        "blocking_reason_code": "",
+        "blocking_reason_message": "",
         "active_locks": (
             [{"reason_code": "close_only_active"}] if close_only_active else []
         ),
@@ -174,6 +176,8 @@ def _dashboard(*, new_entries_allowed: bool = False, close_only_active: bool = T
             "act_value": "continue_candidate_review_under_portfolio_caps",
         },
         "signal_funnel": {
+            "blocked_reason_counts": {},
+            "current_entry_gate_reason": "",
             "edge_evolution_rule": {
                 "evolution_state": "reduce_candidate",
                 "recommended_action": "reduce_baseline_allocation_review",
@@ -484,12 +488,22 @@ def test_runtime_signoff_summary_collects_required_reviews():
                     "worst_loss_streak": 9,
                 },
                 "post_patch_sample_summary": {
-                    "closed_trade_count": 50,
+                    "closed_trade_count": 123,
                     "ready_for_replay_refresh": True,
-                    "replay_max_drawdown_r": 4.3114,
+                    "replay_max_drawdown_r": 6.8758,
                     "replay_p5_r": -1.05,
-                    "stop_loss_share": 0.3,
+                    "stop_loss_share": 0.418,
+                    "worst_loss_streak": 7,
+                },
+                "live_eligible_post_patch_sample_summary": {
+                    "closed_trade_count": 17,
+                    "ready_for_replay_refresh": True,
+                    "replay_max_drawdown_r": 4.0,
+                    "replay_p5_r": -1.0,
+                    "stop_loss_share": 0.4118,
                     "worst_loss_streak": 4,
+                    "contract_scope": "limit_only",
+                    "eligible_entry_models": ["LIMIT"],
                 },
             },
         ),
@@ -538,6 +552,51 @@ def test_runtime_signoff_summary_line_includes_decision_band():
     assert "band=RED_HOLD" in line
 
 
+def test_notify_runtime_signoff_summary_prefers_projected_top_level_values_over_stale_nested_summary():
+    summary = notify_stage_change._runtime_signoff_summary(
+        {
+            "runtime_signoff_summary": {
+                "status": "manual_signoff_required",
+                "required_reviews": [{"code": "approval_template_review"}],
+                "operator_recommendation": "hold_runtime_reopen",
+                "runtime_decision": {
+                    "band": "RED_HOLD",
+                    "effective_action": "hold_runtime_reopen",
+                },
+                "approval_template_focus": {
+                    "post_patch_sample_summary": {
+                        "closed_trade_count": 6,
+                    }
+                },
+            },
+            "required_reviews": [{"code": "approval_template_review"}],
+            "advisory_reviews": [{"code": "portfolio_headroom_review"}],
+            "runtime_operator_recommendation": "conditional_micro_live_signoff",
+            "runtime_decision": {
+                "band": "AMBER_CONDITIONAL",
+                "effective_action": "conditional_micro_live_signoff",
+                "allowed_reopen_scope": "MICRO_LIVE_ONLY",
+            },
+            "runtime_reopen_gate_summary": {
+                "micro_live": {"status": "ready", "closed_trade_count": 18, "min_closed_trades": 15},
+                "full_live": {"status": "not_ready", "closed_trade_count": 18, "min_closed_trades": 30},
+            },
+            "approval_template_focus": {
+                "post_patch_sample_summary": {
+                    "closed_trade_count": 127,
+                }
+            },
+        }
+    )
+
+    assert summary["operator_recommendation"] == "conditional_micro_live_signoff"
+    assert summary["runtime_decision"]["band"] == "AMBER_CONDITIONAL"
+    assert summary["runtime_reopen_gate_summary"]["micro_live"]["status"] == "ready"
+    assert summary["approval_template_focus"]["post_patch_sample_summary"]["closed_trade_count"] == 127
+    assert summary["required_count"] == 1
+    assert summary["advisory_count"] == 1
+
+
 def test_runtime_reopen_gate_summary_line_surfaces_micro_and_full_status():
     line = ops_stage_board._runtime_reopen_gate_summary_line(
         {
@@ -559,6 +618,115 @@ def test_runtime_reopen_gate_summary_line_surfaces_micro_and_full_status():
     assert "micro=ready(50/50)" in line
     assert "full=not_ready(50/80)" in line
     assert "scope=MICRO_LIVE_ONLY" in line
+
+
+def test_project_runtime_signoff_fields_promotes_nested_decision_and_post_patch_summary():
+    payload = ops_stage_board._project_runtime_signoff_fields(
+        {
+            "runtime_signoff_summary": {
+                "status": "manual_signoff_required",
+                "required_reviews": [{"code": "approval_template_review"}],
+                "advisory_reviews": [{"code": "portfolio_headroom_review"}],
+                "operator_recommendation": "conditional_micro_live_signoff",
+                "approval_template_focus": {
+                    "worst_scenario": "latency_plus_1_bar",
+                    "worst_scenario_status": "FAIL",
+                    "live_contract_scope": "limit_only",
+                    "post_patch_sample_summary": {"closed_trade_count": 127},
+                    "live_eligible_post_patch_sample_summary": {
+                        "closed_trade_count": 18,
+                        "contract_scope": "limit_only",
+                    },
+                    "historical_walk_forward_execution_contract_proof_summary": {
+                        "closed_trade_count": 3,
+                        "contract_scope": "historical_walk_forward_limit_only",
+                    },
+                    "trend_proof_post_patch_sample_summary": {
+                        "closed_trade_count": 3,
+                        "contract_scope": "trend_limit_only",
+                    },
+                    "historical_walk_forward_trend_proof_summary": {
+                        "closed_trade_count": 0,
+                        "contract_scope": "historical_walk_forward_trend_limit_only",
+                    },
+                },
+                "runtime_decision": {
+                    "band": "AMBER_CONDITIONAL",
+                    "effective_action": "conditional_micro_live_signoff",
+                    "allowed_reopen_scope": "MICRO_LIVE_ONLY",
+                },
+                "runtime_reopen_gate_summary": {
+                    "micro_live": {"status": "ready"},
+                    "full_live": {"status": "not_ready"},
+                },
+            }
+        }
+    )
+
+    assert payload["runtime_decision_band"] == "AMBER_CONDITIONAL"
+    assert payload["runtime_effective_action"] == "conditional_micro_live_signoff"
+    assert payload["runtime_allowed_reopen_scope"] == "MICRO_LIVE_ONLY"
+    assert payload["post_patch_closed_trade_count"] == 127
+    assert payload["live_eligible_post_patch_closed_trade_count"] == 18
+    assert payload["historical_walk_forward_execution_contract_proof_closed_trade_count"] == 3
+    assert payload["trend_proof_post_patch_closed_trade_count"] == 3
+    assert payload["historical_walk_forward_trend_proof_closed_trade_count"] == 0
+    assert payload["runtime_live_contract_scope"] == "limit_only"
+    assert payload["runtime_required_review_codes"] == ["approval_template_review"]
+    assert payload["runtime_advisory_review_codes"] == ["portfolio_headroom_review"]
+
+
+def test_runtime_live_cluster_guard_summary_surfaces_cluster_and_cooldown_pressure():
+    summary = ops_stage_board._runtime_live_cluster_guard_summary(
+        {
+            "blocking_reason_code": "live_family_cluster_window_cap_reached",
+            "blocking_reason_message": "cluster active",
+            "signal_funnel": {
+                "blocked_reason_counts": {
+                    "live_family_cluster_window_cap_reached": 2,
+                    "live_family_loss_cooldown_active": 1,
+                }
+            },
+            "portfolio_summary": {
+                "blocked_candidates": [
+                    {
+                        "symbol": "ETHUSDC",
+                        "strategy_family": "sweep_reversal",
+                        "block_reason": "live_family_cluster_window_cap_reached",
+                    },
+                    {
+                        "symbol": "ARBUSDC",
+                        "strategy_family": "sweep_reversal",
+                        "block_reason": "live_family_loss_cooldown_active",
+                    },
+                ]
+            },
+        }
+    )
+
+    assert summary["status"] == "cluster_window_cap_active"
+    assert summary["cluster_window_blocked_candidates"] == 2
+    assert summary["loss_cooldown_blocked_candidates"] == 1
+    assert summary["families"] == ["sweep_reversal"]
+    assert summary["symbols"] == ["ETHUSDC", "ARBUSDC"]
+
+
+def test_runtime_live_cluster_guard_summary_line_surfaces_counts_and_symbols():
+    line = ops_stage_board._runtime_live_cluster_guard_summary_line(
+        {
+            "status": "family_loss_cooldown_active",
+            "cluster_window_blocked_candidates": 1,
+            "loss_cooldown_blocked_candidates": 2,
+            "families": ["sweep_reversal"],
+            "symbols": ["ETHUSDC", "ARBUSDC"],
+            "current_reason_code": "live_family_loss_cooldown_active",
+        }
+    )
+
+    assert "status=family_loss_cooldown_active" in line
+    assert "cluster=1" in line
+    assert "cooldown=2" in line
+    assert "symbols=ETHUSDC,ARBUSDC" in line
 
 
 def test_request_json_retries_validation_report_with_refresh_true_on_cache_miss(monkeypatch):
@@ -632,6 +800,9 @@ def test_runtime_operator_signoff_summary_line_surfaces_manual_micro_live_ready(
             "preflight_status": "READY_FOR_MICRO_LIVE",
             "required_review_codes": ["approval_template_review"],
             "next_step": "review_required_warning_and_record_micro_live_signoff",
+            "intent_execution_mode": "MICRO_LIVE",
+            "contract_scope": "limit_only",
+            "review_command": "./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --no-write-report",
         }
     )
 
@@ -641,6 +812,607 @@ def test_runtime_operator_signoff_summary_line_surfaces_manual_micro_live_ready(
     assert "preflight=READY_FOR_MICRO_LIVE" in line
     assert "required=approval_template_review" in line
     assert "next=review_required_warning_and_record_micro_live_signoff" in line
+    assert "submit=MICRO_LIVE/live:true/limit_only" in line
+    assert "review_cmd=./.venv/bin/python scripts/run_micro_live_preflight.py" in line
+
+
+def test_runtime_operator_action_line_surfaces_operator_sequence():
+    line = ops_stage_board._runtime_operator_action_line(
+        {
+            "status": "ready_for_manual_micro_live_signoff",
+            "review_command": "./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --no-write-report",
+            "signoff_review_command": "./.venv/bin/python scripts/run_runtime_signoff_review.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30",
+            "submit_path_summary": "APPROVED_* -> order-intents(MICRO_LIVE) -> submit(live=true, limit_only)",
+            "candidate_requirements_summary": "use only APPROVED_* limit_only symbols=BTCUSDC priority=BTCUSDC families=sweep_reversal directions=BTCUSDC:LONG|SHORT sessions=london,new_york,overlap intents within MICRO_LIVE_ONLY",
+        }
+    )
+
+    assert "preflight=./.venv/bin/python scripts/run_micro_live_preflight.py" in line
+    assert "signoff=./.venv/bin/python scripts/run_runtime_signoff_review.py" in line
+    assert "submit=APPROVED_* -> order-intents(MICRO_LIVE) -> submit(live=true, limit_only)" in line
+    assert "candidate=use only APPROVED_* limit_only symbols=BTCUSDC priority=BTCUSDC families=sweep_reversal directions=BTCUSDC:LONG|SHORT sessions=london,new_york,overlap intents within MICRO_LIVE_ONLY" in line
+
+
+def test_runtime_actionable_live_candidate_summary_line_surfaces_no_candidate() -> None:
+    line = ops_stage_board._runtime_actionable_live_candidate_summary_line(
+        {
+            "status": "recent_paper_intent_requires_micro_live_promotion",
+            "candidate_symbol": "ARBUSDC",
+            "candidate_family": "legacy_zone_plan",
+            "candidate_status": "BLOCKED_SETUP",
+            "candidate_entry_type": "LIMIT",
+            "candidate_direction": "LONG",
+            "recent_intent_symbol": "BTCUSDC",
+            "recent_intent_family": "sweep_reversal",
+            "recent_intent_allowed_execution_mode": "PAPER",
+            "recent_intent_direction": "SHORT",
+            "recent_submit_ready_symbol": "ETHUSDC",
+            "recent_submit_ready_family": "sweep_reversal",
+            "recent_submit_ready_direction": "LONG",
+            "recent_submit_ready_created_at": "2026-04-15 14:48:09.972149",
+            "recent_contract_match_count": 0,
+            "historical_contract_match_count": 2,
+            "historical_contract_match_count_30d": 0,
+            "historical_contract_match_summary": "BTCUSDC=2/0",
+            "reason_code": "paper_intent_requires_micro_live_promotion",
+            "next_trigger": "operator_creates_micro_live_intent_for_allowed_candidate",
+            "summary": "latest surfaced intent BTCUSDC/sweep_reversal/PAPER is approved but was created by the PAPER drill; operator must create a MICRO_LIVE intent if the underlying plan still matches the limit-only contract; nearest surfaced candidate ARBUSDC/legacy_zone_plan remains blocked; no recent operator intents matched the MICRO_LIVE contract; historical contract intent counts BTCUSDC=2/0; current watch visibility BTCUSDC=legacy_zone_plan; current watch regime BTCUSDC=range",
+        }
+    )
+
+    assert "status=recent_paper_intent_requires_micro_live_promotion" in line
+    assert "candidate=ARBUSDC/legacy_zone_plan" in line
+    assert "candidate_status=BLOCKED_SETUP" in line
+    assert "entry=LIMIT/LONG" in line
+    assert "recent=BTCUSDC/sweep_reversal/PAPER/SHORT" in line
+    assert "last_submit_ready=ETHUSDC/sweep_reversal/LONG@2026-04-15 14:48:09.972149" in line
+    assert "recent_contract_matches=0" in line
+    assert "reason=paper_intent_requires_micro_live_promotion" in line
+    assert "next=operator_creates_micro_live_intent_for_allowed_candidate" in line
+
+
+def test_notify_stage_change_runtime_actionable_line_maps_entry_model_contract_statuses() -> None:
+    candidate_line = notify_stage_change._ko_runtime_actionable_live_candidate_line(
+        {
+            "runtime_actionable_live_candidate_summary": {
+                "status": "candidate_entry_model_outside_contract",
+                "candidate_symbol": "BTCUSDC",
+                "candidate_family": "sweep_reversal",
+                "candidate_direction": "LONG",
+                "summary": "candidate uses STOP_MARKET outside the current MICRO_LIVE entry-model contract",
+            }
+        }
+    )
+    recent_line = notify_stage_change._ko_runtime_actionable_live_candidate_line(
+        {
+            "runtime_actionable_live_candidate_summary": {
+                "status": "recent_intent_entry_model_outside_contract",
+                "recent_intent_symbol": "BTCUSDC",
+                "recent_intent_family": "sweep_reversal",
+                "recent_intent_allowed_execution_mode": "PAPER",
+                "recent_intent_direction": "SHORT",
+                "summary": "recent intent uses STOP_MARKET outside the current MICRO_LIVE entry-model contract",
+            }
+        }
+    )
+
+    assert "실행 후보: 후보가 entry-model 계약 밖" in candidate_line
+    assert "/ 후보=BTCUSDC:sweep_reversal/LONG" in candidate_line
+    assert "candidate_entry_model_outside_contract" not in candidate_line
+    assert "실행 후보: 최근 intent가 entry-model 계약 밖" in recent_line
+    assert "/ 최근 surface=BTCUSDC/sweep_reversal/PAPER/SHORT" in recent_line
+    assert "recent_intent_entry_model_outside_contract" not in recent_line
+
+
+def test_runtime_self_heal_summary_line_surfaces_cleanup_and_stale_unblocks() -> None:
+    line = ops_stage_board._runtime_self_heal_summary_line(
+        {
+            "active": True,
+            "stale_cleanup_events": 2,
+            "latest_reentry_block_ignored": True,
+            "latest_duplicate_intents_ignored": 1,
+            "latest_submit_ready_self_heal_applied": True,
+        }
+    )
+
+    assert "active=True" in line
+    assert "stale_cleanup=2" in line
+    assert "latest_reentry_ignored=True" in line
+    assert "latest_duplicate_ignored=1" in line
+    assert "last_submit_ready_self_heal=True" in line
+
+
+def test_notify_stage_change_runtime_self_heal_line_surfaces_active_state() -> None:
+    inactive_line = notify_stage_change._ko_runtime_self_heal_line(
+        {
+            "runtime_self_heal_summary": {
+                "active": False,
+                "stale_cleanup_events": 0,
+                "latest_reentry_block_ignored": False,
+                "latest_duplicate_intents_ignored": 0,
+                "latest_submit_ready_self_heal_applied": False,
+            }
+        }
+    )
+    active_line = notify_stage_change._ko_runtime_self_heal_line(
+        {
+            "runtime_self_heal_summary": {
+                "active": True,
+                "stale_cleanup_events": 2,
+                "latest_reentry_block_ignored": True,
+                "latest_duplicate_intents_ignored": 1,
+                "latest_submit_ready_self_heal_applied": True,
+            }
+        }
+    )
+
+    assert inactive_line == "자동 복구 상태: 비활성 / stale_cleanup=0 / reentry_ignore=False / duplicate_ignore=0 / submit_ready_self_heal=False"
+    assert active_line == "자동 복구 상태: 활성 / stale_cleanup=2 / reentry_ignore=True / duplicate_ignore=1 / submit_ready_self_heal=True"
+
+
+def test_trend_proof_watch_summary_line_surfaces_candidate_counts() -> None:
+    line = ops_stage_board._trend_proof_watch_summary_line(
+        {
+            "availability_state": "trend_limit_visible_but_not_runtime_eligible",
+            "scanner_candidate_count": 2,
+            "scanner_limit_candidate_count": 1,
+            "runtime_eligible_candidate_count": 0,
+            "summary": "BTC/ETH trend_continuation LIMIT candidates are visible, but none currently pass runtime eligibility.",
+        }
+    )
+
+    assert "state=trend_limit_visible_but_not_runtime_eligible" in line
+    assert "scanner=2" in line
+    assert "limit=1" in line
+    assert "runtime=0" in line
+
+
+def test_ops_stage_board_applies_runtime_actionable_live_candidate_summary() -> None:
+    payload = ops_stage_board._apply_runtime_actionable_live_candidate_summary(
+        {
+            "runtime_operator_signoff_summary": {
+                "status": "ready_for_manual_micro_live_signoff",
+                "allowed_scope": "MICRO_LIVE_ONLY",
+            },
+            "representative_candidates": {
+                "accepted": None,
+                "blocked": {
+                    "symbol": "ARBUSDC",
+                    "strategy_family": "legacy_zone_plan",
+                    "status": "BLOCKED_SETUP",
+                },
+            },
+            "recent_execution_intent_focus": {
+                "symbol": "BTCUSDC",
+                "strategy_family": "sweep_reversal",
+                "allowed_execution_mode": "PAPER",
+                "approval_state": "APPROVED_AUTO",
+                "decision_reason_code": "submit_ready",
+            },
+            "recent_contract_matching_intent_summary": {
+                "matching_intent_count": 0,
+            },
+            "runtime_live_contract_history_summary": {
+                "matching_intent_count_total": 2,
+                "matching_intent_count_30d": 0,
+                "symbol_counts_summary": "BTCUSDC=2/0",
+            },
+            "paper_lineage_watch_summary": {
+                "allowed_symbol_family_visibility": {
+                    "BTCUSDC": ["legacy_zone_plan", "sweep_reversal"],
+                },
+                "allowed_symbol_family_visibility_line": "BTCUSDC=legacy_zone_plan,sweep_reversal",
+                "allowed_symbol_regime_visibility": {
+                    "BTCUSDC": ["range"],
+                },
+                "allowed_symbol_regime_visibility_line": "BTCUSDC=range",
+            },
+        }
+    )
+
+    summary = payload["runtime_actionable_live_candidate_summary"]
+    assert summary["status"] == "recent_paper_intent_requires_micro_live_promotion"
+    assert summary["reason_code"] == "paper_intent_requires_micro_live_promotion"
+    assert summary["recent_intent_symbol"] == "BTCUSDC"
+    assert summary["next_trigger"] == "operator_creates_micro_live_intent_for_allowed_candidate"
+    assert summary["historical_contract_match_count"] == 2
+    assert summary["historical_contract_match_count_30d"] == 0
+    assert summary["historical_contract_match_summary"] == "BTCUSDC=2/0"
+    assert summary["watch_allowed_symbol_regime_visibility_line"] == "BTCUSDC=range"
+    assert "historical contract intent counts BTCUSDC=2/0" in summary["summary"]
+    assert "current watch regime BTCUSDC=range" in summary["summary"]
+
+
+def test_ops_stage_board_runtime_actionable_summary_prefers_recent_contract_match() -> None:
+    payload = ops_stage_board._apply_runtime_actionable_live_candidate_summary(
+        {
+            "runtime_operator_signoff_summary": {
+                "status": "ready_for_manual_micro_live_signoff",
+                "allowed_scope": "MICRO_LIVE_ONLY",
+            },
+            "representative_candidates": {
+                "accepted": None,
+                "blocked": {
+                    "symbol": "ARBUSDC",
+                    "strategy_family": "legacy_zone_plan",
+                    "status": "BLOCKED_SETUP",
+                },
+            },
+            "recent_execution_intent_focus": {
+                "symbol": "BTCUSDC",
+                "strategy_family": "sweep_reversal",
+                "entry_type": "stop_market",
+                "allowed_execution_mode": "PAPER",
+                "approval_state": "APPROVED_AUTO",
+                "decision_reason_code": "submit_ready",
+            },
+            "recent_contract_matching_intent_summary": {
+                "matching_intent_count": 3,
+                "latest_symbol": "BTCUSDC",
+                "latest_family": "sweep_reversal",
+                "latest_execution_mode": "PAPER",
+                "latest_allowed_execution_mode": "PAPER",
+                "latest_approval_state": "APPROVED_AUTO",
+                "latest_reason_code": "submit_ready",
+                "latest_entry_type": "limit",
+                "latest_entry_model": "LIMIT",
+            },
+        }
+    )
+
+    summary = payload["runtime_actionable_live_candidate_summary"]
+    assert summary["status"] == "recent_paper_intent_requires_micro_live_promotion"
+    assert summary["reason_code"] == "paper_intent_requires_micro_live_promotion"
+    assert summary["recent_intent_symbol"] == "BTCUSDC"
+    assert summary["recent_intent_family"] == "sweep_reversal"
+    assert summary["recent_intent_entry_type"] == "LIMIT"
+    assert summary["recent_contract_match_count"] == 3
+    assert summary["next_trigger"] == "operator_creates_micro_live_intent_for_allowed_candidate"
+    assert "BTCUSDC/sweep_reversal/PAPER" in summary["summary"]
+    assert "STOP_MARKET" not in summary["summary"]
+
+
+def test_ops_stage_board_runtime_actionable_summary_marks_recent_contract_match_not_submit_ready() -> None:
+    payload = ops_stage_board._apply_runtime_actionable_live_candidate_summary(
+        {
+            "runtime_operator_signoff_summary": {
+                "status": "ready_for_manual_micro_live_signoff",
+                "allowed_scope": "MICRO_LIVE_ONLY",
+            },
+            "representative_candidates": {
+                "accepted": None,
+                "blocked": {
+                    "symbol": "ARBUSDC",
+                    "strategy_family": "legacy_zone_plan",
+                    "status": "BLOCKED_SETUP",
+                },
+            },
+            "recent_execution_intent_focus": {
+                "symbol": "BTCUSDC",
+                "strategy_family": "sweep_reversal",
+                "entry_type": "stop_market",
+                "allowed_execution_mode": "PAPER",
+                "approval_state": "APPROVED_AUTO",
+                "decision_reason_code": "submit_ready",
+            },
+            "recent_contract_matching_intent_summary": {
+                "matching_intent_count": 44,
+                "latest_symbol": "TIAUSDC",
+                "latest_family": "sweep_reversal",
+                "latest_execution_mode": "PAPER",
+                "latest_allowed_execution_mode": "PAPER",
+                "latest_approval_state": "APPROVED_AUTO",
+                "latest_reason_code": "paper lineage override bypassed thesis duplicate block for eligible A-grade PAPER sampling.",
+                "latest_entry_type": "limit",
+                "latest_entry_model": "LIMIT",
+                "latest_submit_ready_symbol": "ETHUSDC",
+                "latest_submit_ready_family": "sweep_reversal",
+                "latest_submit_ready_direction": "LONG",
+                "latest_submit_ready_execution_mode": "PAPER",
+                "latest_submit_ready_allowed_execution_mode": "PAPER",
+                "latest_submit_ready_approval_state": "APPROVED_AUTO",
+                "latest_submit_ready_reason_code": "submit_ready",
+                "latest_submit_ready_entry_type": "limit",
+                "latest_submit_ready_entry_model": "LIMIT",
+                "latest_submit_ready_created_at": "2026-04-15 14:48:09.972149",
+            },
+        }
+    )
+
+    summary = payload["runtime_actionable_live_candidate_summary"]
+    assert summary["status"] == "recent_paper_intent_requires_micro_live_promotion"
+    assert summary["reason_code"] == "paper_intent_requires_micro_live_promotion"
+    assert summary["recent_intent_symbol"] == "ETHUSDC"
+    assert summary["recent_intent_family"] == "sweep_reversal"
+    assert summary["recent_intent_entry_type"] == "LIMIT"
+    assert summary["recent_submit_ready_symbol"] == "ETHUSDC"
+    assert summary["recent_submit_ready_family"] == "sweep_reversal"
+    assert summary["recent_submit_ready_direction"] == "LONG"
+    assert summary["recent_submit_ready_created_at"] == "2026-04-15 14:48:09.972149"
+    assert summary["recent_contract_match_count"] == 44
+    assert summary["next_trigger"] == "operator_creates_micro_live_intent_for_allowed_candidate"
+    assert "latest surfaced intent ETHUSDC/sweep_reversal/PAPER is approved but was created by the PAPER drill" in summary["summary"]
+    assert "last submit_ready limit candidate was ETHUSDC/sweep_reversal/LONG at 2026-04-15 14:48:09.972149" in summary["summary"]
+    assert "nearest surfaced candidate ARBUSDC/legacy_zone_plan remains blocked" in summary["summary"]
+
+
+def test_ops_stage_board_runtime_actionable_summary_marks_candidate_direction_outside_contract(monkeypatch) -> None:
+    class _Settings:
+        auto_trading_micro_live_allowed_symbols = "BTCUSDC"
+        auto_trading_micro_live_allowed_families = "sweep_reversal"
+        auto_trading_micro_live_allowed_entry_models = "LIMIT"
+        auto_trading_micro_live_direction_contract = "BTCUSDC:LONG"
+        auto_trading_micro_live_allowed_sessions = ""
+
+    monkeypatch.setattr("app.core.config.get_settings", lambda: _Settings())
+
+    payload = ops_stage_board._apply_runtime_actionable_live_candidate_summary(
+        {
+            "runtime_operator_signoff_summary": {
+                "status": "ready_for_manual_micro_live_signoff",
+                "allowed_scope": "MICRO_LIVE_ONLY",
+            },
+            "representative_candidates": {
+                "accepted": {
+                    "symbol": "BTCUSDC",
+                    "strategy_family": "sweep_reversal",
+                    "entry_model": "LIMIT",
+                    "entry_type": "LIMIT",
+                    "direction": "SHORT",
+                    "status": "ACCEPTED",
+                },
+                "blocked": None,
+            },
+            "recent_contract_matching_intent_summary": {
+                "matching_intent_count": 0,
+            },
+            "paper_lineage_watch_summary": {},
+        }
+    )
+
+    summary = payload["runtime_actionable_live_candidate_summary"]
+    assert summary["status"] == "candidate_direction_outside_contract"
+    assert summary["reason_code"] == "micro_live_direction_not_allowed"
+    assert summary["candidate_symbol"] == "BTCUSDC"
+    assert summary["candidate_entry_type"] == "LIMIT"
+    assert summary["candidate_direction"] == "SHORT"
+    assert summary["next_trigger"] == "allowed_direction_candidate_appears"
+    assert "direction SHORT is outside the current MICRO_LIVE direction contract" in summary["summary"]
+
+
+def test_recent_contract_matching_intent_summary_filters_non_contract_entry_models(monkeypatch) -> None:
+    now = datetime.now(timezone.utc)
+
+    class _Intent:
+        def __init__(self, *, symbol: str, family: str, created_at: datetime, entry_type: str, entry_model: str):
+            self.symbol = symbol
+            self.strategy_family = family
+            self.created_at = created_at
+            self.execution_mode = "PAPER"
+            self.approval_state = "APPROVED_AUTO"
+            self.decision_reason_code = "submit_ready"
+            self.plan_id = f"{symbol}-{entry_model}"
+            self.payload = {
+                "allowed_execution_mode": "PAPER",
+                "executable_plan": {
+                    "entry_type": entry_type,
+                    "entry_model": entry_model,
+                },
+            }
+
+    intents = [
+        _Intent(
+            symbol="BTCUSDC",
+            family="sweep_reversal",
+            created_at=now - timedelta(days=1),
+            entry_type="limit",
+            entry_model="LIMIT",
+        ),
+        _Intent(
+            symbol="BTCUSDC",
+            family="sweep_reversal",
+            created_at=now - timedelta(hours=1),
+            entry_type="stop_market",
+            entry_model="CONFIRM",
+        ),
+    ]
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return intents
+
+    class _Session:
+        def query(self, *args, **kwargs):
+            return _Query()
+
+        def close(self):
+            return None
+
+    class _Settings:
+        auto_trading_micro_live_allowed_symbols = "BTCUSDC"
+        auto_trading_micro_live_allowed_families = "sweep_reversal"
+        auto_trading_micro_live_allowed_entry_models = "LIMIT"
+
+    monkeypatch.setattr("app.db.session.SessionLocal", lambda: _Session())
+    monkeypatch.setattr("app.core.config.get_settings", lambda: _Settings())
+
+    summary = ops_stage_board._recent_contract_matching_intent_summary({"recent_intents": []})
+
+    assert summary["matching_intent_count"] == 1
+    assert summary["latest_symbol"] == "BTCUSDC"
+    assert summary["latest_entry_type"] == "limit"
+    assert summary["latest_entry_model"] == "LIMIT"
+    assert summary["latest_plan_id"] == "BTCUSDC-LIMIT"
+
+
+def test_recent_contract_matching_intent_summary_filters_direction_contract(monkeypatch) -> None:
+    now = datetime.now(timezone.utc)
+
+    class _Intent:
+        def __init__(self, *, symbol: str, family: str, created_at: datetime, entry_type: str, entry_model: str, direction: str):
+            self.symbol = symbol
+            self.strategy_family = family
+            self.created_at = created_at
+            self.execution_mode = "PAPER"
+            self.approval_state = "APPROVED_AUTO"
+            self.decision_reason_code = "submit_ready"
+            self.plan_id = f"{symbol}-{direction}"
+            self.payload = {
+                "allowed_execution_mode": "PAPER",
+                "direction": direction,
+                "executable_plan": {
+                    "entry_type": entry_type,
+                    "entry_model": entry_model,
+                    "direction": direction,
+                },
+            }
+
+    intents = [
+        _Intent(
+            symbol="BTCUSDC",
+            family="sweep_reversal",
+            created_at=now - timedelta(days=1),
+            entry_type="limit",
+            entry_model="LIMIT",
+            direction="LONG",
+        ),
+        _Intent(
+            symbol="BTCUSDC",
+            family="sweep_reversal",
+            created_at=now - timedelta(hours=1),
+            entry_type="limit",
+            entry_model="LIMIT",
+            direction="SHORT",
+        ),
+    ]
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return intents
+
+    class _Session:
+        def query(self, *args, **kwargs):
+            return _Query()
+
+        def close(self):
+            return None
+
+    class _Settings:
+        auto_trading_micro_live_allowed_symbols = "BTCUSDC"
+        auto_trading_micro_live_allowed_families = "sweep_reversal"
+        auto_trading_micro_live_allowed_entry_models = "LIMIT"
+        auto_trading_micro_live_direction_contract = "BTCUSDC:LONG"
+
+    monkeypatch.setattr("app.db.session.SessionLocal", lambda: _Session())
+    monkeypatch.setattr("app.core.config.get_settings", lambda: _Settings())
+
+    summary = ops_stage_board._recent_contract_matching_intent_summary({"recent_intents": []})
+
+    assert summary["matching_intent_count"] == 1
+    assert summary["latest_symbol"] == "BTCUSDC"
+    assert summary["latest_direction"] == "LONG"
+    assert summary["latest_plan_id"] == "BTCUSDC-LONG"
+
+
+def test_ko_runtime_live_cluster_guard_line_surfaces_korean_summary():
+    line = notify_stage_change._ko_runtime_live_cluster_guard_line(
+        {
+            "runtime_live_cluster_guard_summary": {
+                "status": "cluster_window_cap_active",
+                "cluster_window_blocked_candidates": 2,
+                "loss_cooldown_blocked_candidates": 0,
+                "families": ["sweep_reversal"],
+                "symbols": ["ETHUSDC"],
+                "current_reason_code": "live_family_cluster_window_cap_reached",
+            }
+        }
+    )
+
+    assert "같은 family 동시 진입 제한 active" in line
+    assert "cluster=2" in line
+    assert "symbol=ETHUSDC" in line
+    assert "reason=same-family 동시 진입 제한 도달" in line
+    assert "live_family_cluster_window_cap_reached" not in line
+
+
+def test_notify_stage_change_runtime_preflight_line_maps_statuses() -> None:
+    ready_line = notify_stage_change._ko_runtime_preflight_line(
+        {
+            "runtime_preflight_summary": {
+                "status": "READY_FOR_MICRO_LIVE",
+                "summary": "All preflight checks passed; MICRO_LIVE can proceed to final operator sign-off.",
+            }
+        }
+    )
+    assert "마이크로라이브 사전점검: 준비 완료" in ready_line
+    assert "READY_FOR_MICRO_LIVE" not in ready_line
+
+    not_ready_line = notify_stage_change._ko_runtime_preflight_line(
+        {
+            "runtime_preflight_summary": {
+                "status": "NOT_READY",
+                "summary": "1 blocking preflight check(s) remain.",
+                "failed_checks": [{"name": "reconciliation", "message": "healthy=False severity=ERROR"}],
+            }
+        }
+    )
+    assert "마이크로라이브 사전점검: 미준비" in not_ready_line
+    assert "첫 실패=reconciliation" in not_ready_line
+    assert "NOT_READY" not in not_ready_line
+
+    unknown_line = notify_stage_change._ko_runtime_preflight_line(
+        {
+            "runtime_preflight_summary": {
+                "status": "UNKNOWN",
+                "summary": "preflight payload did not return an explicit overall status.",
+            }
+        }
+    )
+    assert "마이크로라이브 사전점검: 상태 미상" in unknown_line
+    assert "UNKNOWN" not in unknown_line
+
+
+def test_ko_runtime_mitigation_wait_line_surfaces_paper_family_guard() -> None:
+    line = notify_stage_change._ko_runtime_mitigation_wait_line(
+        {
+            "runtime_mitigation_wait_summary": {
+                "available": True,
+                "status": "paper_family_guard_active",
+                "focus_label": "confirm 진입 타이밍 축소",
+                "current_session": "london",
+                "allowed_sessions": ["london", "new_york"],
+                "next_trigger": "recent_family_loss_cooldown_clears",
+                "watch_tick_status": "no_eligible_candidate",
+                "watch_guard_active": True,
+                "watch_guard_reason_code": "recent_family_loss_cooldown",
+                "watch_guard_families": ["sweep_reversal"],
+                "candidate_reason": "sweep_reversal:entries=0,losses=2,active=True",
+            }
+        }
+    )
+
+    assert "paper family guard 활성" in line
+    assert "guard=recent family loss cooldown:sweep_reversal" in line
+    assert "recent_family_loss_cooldown" not in line
+    assert "watcher=no_eligible_candidate" in line
 
 
 def test_apply_runtime_stage_override_promotes_conditional_micro_live_to_approval_review():
@@ -705,6 +1477,27 @@ def test_runtime_mitigation_wait_summary_line_surfaces_wait_reason():
     assert "allowed=london,new_york" in line
     assert "next=actionable_entry_timing_target_appears" in line
     assert "constraint=waiting_for_actionable_entry_timing_target" in line
+    assert "watcher=no_eligible_candidate" in line
+
+
+def test_runtime_mitigation_wait_summary_line_surfaces_paper_family_guard():
+    line = ops_stage_board._runtime_mitigation_wait_summary_line(
+        {
+            "focus_label": "confirm 진입 타이밍 축소",
+            "status": "paper_family_guard_active",
+            "current_session": "london",
+            "allowed_sessions": ["london", "new_york"],
+            "next_trigger": "recent_family_loss_cooldown_clears",
+            "watch_tick_status": "no_eligible_candidate",
+            "watch_guard_active": True,
+            "watch_guard_reason_code": "recent_family_loss_cooldown",
+            "watch_guard_families": ["sweep_reversal"],
+            "candidate_reason": "sweep_reversal:entries=0,losses=2,active=True",
+        }
+    )
+
+    assert "status=paper_family_guard_active" in line
+    assert "guard=recent_family_loss_cooldown:sweep_reversal" in line
     assert "watcher=no_eligible_candidate" in line
 
 
@@ -1140,6 +1933,37 @@ def test_collect_events_emits_runtime_operator_signoff_ready_event():
 
     assert "runtime_operator_signoff_ready" in event_types
     assert "runtime_operator_signoff_changed" in event_types
+
+
+def test_notify_stage_change_event_line_maps_all_emitted_event_titles() -> None:
+    event_types = [
+        "accepted_candidate_focus_changed",
+        "checklist_surface_changed",
+        "close_only_changed",
+        "dashboard_surface_changed",
+        "edge_evolution_changed",
+        "edge_experiment_changed",
+        "entry_timing_review_target_changed",
+        "execution_style_review_target_changed",
+        "playbook_changed",
+        "review_followup_changed",
+    ]
+    expected_titles = {
+        "accepted_candidate_focus_changed": "대표 승인 후보 변경",
+        "checklist_surface_changed": "체크리스트 표면 변경",
+        "close_only_changed": "close-only 상태 변경",
+        "dashboard_surface_changed": "대시보드 표면 변경",
+        "edge_evolution_changed": "edge evolution 변경",
+        "edge_experiment_changed": "edge experiment 변경",
+        "entry_timing_review_target_changed": "진입 타이밍 검토 대상 변경",
+        "execution_style_review_target_changed": "실행 스타일 검토 대상 변경",
+        "playbook_changed": "플레이북 변경",
+        "review_followup_changed": "후속 검토 변경",
+    }
+    for event_type in event_types:
+        line = notify_stage_change._event_line_ko({"type": event_type}, {})
+        assert expected_titles[event_type] in line
+        assert event_type not in line
 
 
 def test_collect_events_emits_lineage_sample_progress_event():
@@ -1665,7 +2489,32 @@ def test_render_message_uses_approval_surface_lines() -> None:
             "allowed_scope": "MICRO_LIVE_ONLY",
             "first_required_review_code": "approval_template_review",
             "next_step": "review_required_warning_and_record_micro_live_signoff",
+            "intent_execution_mode": "MICRO_LIVE",
+            "contract_scope": "limit_only",
+            "review_command": "./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --no-write-report",
+            "signoff_review_command": "./.venv/bin/python scripts/run_runtime_signoff_review.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30",
+            "candidate_requirements_summary": "use only APPROVED_* limit_only symbols=BTCUSDC priority=BTCUSDC families=sweep_reversal directions=BTCUSDC:LONG|SHORT sessions=london,new_york,overlap intents within MICRO_LIVE_ONLY",
         },
+            "runtime_actionable_live_candidate_summary": {
+                "status": "recent_paper_intent_requires_micro_live_promotion",
+                "candidate_symbol": "ARBUSDC",
+                "candidate_family": "legacy_zone_plan",
+                "candidate_direction": "LONG",
+                "recent_intent_symbol": "BTCUSDC",
+                "recent_intent_family": "sweep_reversal",
+                "recent_intent_allowed_execution_mode": "PAPER",
+                "recent_intent_direction": "SHORT",
+                "recent_submit_ready_symbol": "ETHUSDC",
+                "recent_submit_ready_family": "sweep_reversal",
+                "recent_submit_ready_direction": "LONG",
+                "recent_submit_ready_created_at": "2026-04-15 14:48:09.972149",
+                "recent_contract_match_count": 0,
+                "historical_contract_match_count": 2,
+                "historical_contract_match_count_30d": 0,
+                "historical_contract_match_summary": "BTCUSDC=2/0",
+                "next_trigger": "operator_creates_micro_live_intent_for_allowed_candidate",
+                "summary": "latest surfaced intent BTCUSDC/sweep_reversal/PAPER is approved but was created by the PAPER drill; operator must create a MICRO_LIVE intent if the underlying plan still matches the limit-only contract; nearest surfaced candidate ARBUSDC/legacy_zone_plan remains blocked; no recent operator intents matched the MICRO_LIVE contract; historical contract intent counts BTCUSDC=2/0; current watch visibility BTCUSDC=legacy_zone_plan; current watch regime BTCUSDC=range",
+            },
     }
 
     message = notify_stage_change._render_message(current, [])
@@ -1676,8 +2525,10 @@ def test_render_message_uses_approval_surface_lines() -> None:
     assert "리스크 잠금: 열림 / 사유=normal / 해제=n/a" in message
     assert "재개 상태: 운영 잠금 해제 대기" in message
     assert "최종 판정: 보류(RED) / 재개 보류 / 범위=재개 금지" in message
-    assert "마이크로라이브 사전점검: READY_FOR_MICRO_LIVE / All preflight checks passed; MICRO_LIVE can proceed to final operator sign-off." in message
-    assert "운영 서명 단계: MICRO_LIVE만 수동 서명 가능 / 범위=MICRO_LIVE만 / 우선 검토=승인 템플릿 경고 / 다음=경고 검토 후 MICRO_LIVE 서명" in message
+    assert "마이크로라이브 사전점검: 준비 완료 / All preflight checks passed; MICRO_LIVE can proceed to final operator sign-off." in message
+    assert "운영 서명 단계: MICRO_LIVE만 수동 서명 가능 / 범위=MICRO_LIVE만 / 우선 검토=승인 템플릿 경고 / 다음=경고 검토 후 MICRO_LIVE 서명 / 실행=MICRO_LIVE intent -> live submit (limit_only)" in message
+    assert "운영 실행: 1) preflight 재확인 -> 2) signoff review 재확인 -> 3) APPROVED_* plan을 MICRO_LIVE intent로 생성 (limit_only) -> 4) live=true submit / 조건=use only APPROVED_* limit_only symbols=BTCUSDC priority=BTCUSDC families=sweep_reversal directions=BTCUSDC:LONG|SHORT sessions=london,new_york,overlap intents within MICRO_LIVE_ONLY" in message
+    assert "실행 후보: 최근 intent가 MICRO_LIVE 승격 필요 / 후보=ARBUSDC:legacy_zone_plan/LONG / 최근 surface=BTCUSDC/sweep_reversal/PAPER/SHORT / 최근 submit_ready=ETHUSDC/sweep_reversal/LONG@2026-04-15 14:48:09.972149 / 최근 계약일치=0 / 다음=운영자가 허용 후보로 MICRO_LIVE intent 생성 / latest surfaced intent BTCUSDC/sweep_reversal/PAPER is approved but was created by the PAPER drill; operator must create a MICRO_LIVE intent if the underlying plan still matches the limit-only contract; nearest surfaced candidate ARBUSDC/legacy_zone_plan remains blocked; no recent operator intents matched the MICRO_LIVE contract; historical contract intent counts BTCUSDC=2/0; current watch visibility BTCUSDC=legacy_zone_plan; current watch regime BTCUSDC=range" in message
     assert "권장 판단: 재개 보류 권장" in message
     assert "수동 서명: 승인 템플릿 경고, 실행 정합성 점검, 포트폴리오 여유 검토" in message
     assert "핵심 경고: 최악 시나리오 latency_plus_1_bar = FAIL (catastrophic_drawdown:replay_output)" in message
@@ -1690,12 +2541,12 @@ def test_render_message_uses_approval_surface_lines() -> None:
     assert "실행 순서: 1) confirm 진입 타이밍 축소 (후보 대기), 2) non-confirm fail-fast (순서상 보류)" in message
     assert "권장 대응: range 진입 타이밍 재검토, fail-fast shadow review, loss wave cluster 검토" in message
     assert "대응 상태: entry timing split=후보 대기, fail-fast shadow=순서상 보류, loss wave 검토=수동 검토" in message
-    assert "실행 포커스: entry timing split / 후보 뜰 때 실행 / 제약=waiting_for_actionable_entry_timing_target" in message
-    assert "실행 패킷: confirm 진입 타이밍 축소 대기 / 상태=candidate_review_pending / 제약=waiting_for_actionable_entry_timing_target" in message
-    assert "대기 사유: confirm 진입 타이밍 축소 / watcher_found_candidate_pending_review_target / 세션=london / 허용=london,new_york / 다음 트리거=entry_timing_review_target_materializes / 최근 후보=WIFUSDC:sweep_reversal / 사유=Eligible PAPER lineage candidate found on attempt 1. / watcher=found_eligible_candidate" in message
+    assert "실행 포커스: entry timing split / 후보 뜰 때 실행 / 제약=실행 가능한 entry timing 대상 대기" in message
+    assert "실행 패킷: confirm 진입 타이밍 축소 대기 / 상태=후보 뜰 때 실행 / 제약=실행 가능한 entry timing 대상 대기" in message
+    assert "대기 사유: confirm 진입 타이밍 축소 / watcher 후보 포착, 검토 대상 대기 / 세션=london / 허용=london,new_york / 다음 트리거=entry timing 검토 대상 출현 / 최근 후보=WIFUSDC:sweep_reversal / 사유=Eligible PAPER lineage candidate found on attempt 1. / watcher=found_eligible_candidate" in message
     assert "해소 기준: 승인 템플릿 REVIEW 해제, 실행 정합성 degraded 해제, 포트폴리오 여유 검토" in message
-    assert "글로벌 표본: 12/100" in message
-    assert "BTCUSDC 표본: 6/100 / 상태=sample_building" in message
+    assert "글로벌 참고표본: 12/100" in message
+    assert "BTCUSDC 운영검증: 6/100 / 상태=sample_building" in message
     assert "준비 게이트: lineage=True, candidate=True, sample=False" in message
     assert "열린 샘플: 없음" in message
     assert "다음 액션: continue_candidate_review_under_portfolio_caps" in message
@@ -1731,7 +2582,7 @@ def test_collect_events_reports_runtime_mitigation_actionable_with_command() -> 
     assert "runtime_mitigation_actionable" in event_types
     actionable = next(event for event in events if event["type"] == "runtime_mitigation_actionable")
     rendered = notify_stage_change._event_line_ko(actionable, current)
-    assert "range_entry_timing_review / actionable_now" in rendered
+    assert "entry timing split / 지금 실행 가능" in rendered
     assert "--action run_entry_timing_split_review" in rendered
     summary_line = notify_stage_change._runtime_mitigation_summary_line(current)
     assert "focus=confirm 진입 타이밍 축소" in summary_line
@@ -1766,11 +2617,87 @@ def test_collect_events_reports_runtime_mitigation_actionable_with_command() -> 
             }
         }
     )
-    assert "status=watcher_found_candidate_pending_review_target" in wait_line
+    assert "status=watcher found candidate pending review target" in wait_line
     assert "focus=confirm 진입 타이밍 축소" in wait_line
     assert "session=london" in wait_line
     assert "allowed=london,new_york" in wait_line
     assert "next=entry_timing_review_target_materializes" in wait_line
+
+    no_candidate_line = notify_stage_change._ko_runtime_mitigation_wait_line(
+        {
+            "runtime_mitigation_wait_summary": {
+                "available": True,
+                "status": "no_lineage_candidate_visible",
+                "focus_label": "confirm 진입 타이밍 축소",
+                "current_session": "new_york",
+                "allowed_sessions": ["london", "new_york"],
+                "next_trigger": "actionable_entry_timing_target_appears",
+            }
+        }
+    )
+    assert "대기 사유: confirm 진입 타이밍 축소 / lineage 후보 없음" in no_candidate_line
+    assert "no_lineage_candidate_visible" not in no_candidate_line
+
+
+def test_notify_stage_change_runtime_operator_signoff_line_maps_current_statuses() -> None:
+    not_ready_line = notify_stage_change._ko_runtime_operator_signoff_line(
+        {
+            "runtime_operator_signoff_summary": {
+                "status": "not_ready",
+                "allowed_scope": "none",
+                "next_step": "clear_preflight_failures_before_manual_signoff",
+            }
+        }
+    )
+    assert "운영 서명 단계: 재개 준비 미완료" in not_ready_line
+    assert "범위=재개 금지" in not_ready_line
+    assert "다음=사전점검 실패 해소" in not_ready_line
+    assert "not_ready" not in not_ready_line
+
+    manual_line = notify_stage_change._ko_runtime_operator_signoff_line(
+        {
+            "runtime_operator_signoff_summary": {
+                "status": "manual_signoff_required",
+                "allowed_scope": "MICRO_LIVE_ONLY",
+                "first_required_review_code": "approval_template_review",
+                "intent_execution_mode": "MICRO_LIVE",
+                "contract_scope": "limit_only",
+            }
+        }
+    )
+    assert "운영 서명 단계: 수동 서명 필요" in manual_line
+    assert "범위=MICRO_LIVE만" in manual_line
+    assert "우선 검토=승인 템플릿 경고" in manual_line
+    assert "실행=MICRO_LIVE intent -> live submit (limit_only)" in manual_line
+    assert "manual_signoff_required" not in manual_line
+
+    waiting_line = notify_stage_change._ko_runtime_operator_signoff_line(
+        {
+            "runtime_operator_signoff_summary": {
+                "status": "waiting_for_preflight",
+                "allowed_scope": "MICRO_LIVE_ONLY",
+                "next_step": "wait_for_signoff_path",
+            }
+        }
+    )
+    assert "운영 서명 단계: 사전점검 대기" in waiting_line
+    assert "범위=MICRO_LIVE만" in waiting_line
+    assert "다음=운영 서명 경로 대기" in waiting_line
+    assert "wait_for_signoff_path" not in waiting_line
+
+
+def test_notify_stage_change_runtime_reopen_gate_line_maps_gate_statuses() -> None:
+    line = notify_stage_change._ko_runtime_reopen_gate_line(
+        {
+            "runtime_reopen_gate_summary": {
+                "micro_live": {"status": "ready", "closed_trade_count": 19, "min_closed_trades": 15},
+                "full_live": {"status": "not_ready", "closed_trade_count": 19, "min_closed_trades": 30},
+            }
+        }
+    )
+    assert "재개 게이트: MICRO=준비됨 (19/15), FULL=미준비 (19/30)" in line
+    assert "MICRO=ready" not in line
+    assert "FULL=not_ready" not in line
 
 
 def test_collect_events_reports_runtime_mitigation_packet_ready() -> None:
@@ -1796,8 +2723,24 @@ def test_collect_events_reports_runtime_mitigation_packet_ready() -> None:
     assert "runtime_mitigation_packet_ready" in event_types
     ready_event = next(event for event in events if event["type"] == "runtime_mitigation_packet_ready")
     rendered = notify_stage_change._event_line_ko(ready_event, current)
-    assert "fresh_packet_ready_exists / WIFUSDC" in rendered
+    assert "새 패킷 이미 준비됨 / WIFUSDC" in rendered
     assert "review_followup:existing" in rendered
+
+
+def test_notify_stage_change_runtime_mitigation_packet_line_maps_unknown_status() -> None:
+    line = notify_stage_change._ko_runtime_mitigation_packet_line(
+        {
+            "runtime_mitigation_packet_result": {
+                "available": True,
+                "status": "UNKNOWN",
+                "focus_label": "confirm 진입 타이밍 축소",
+                "target_symbol": "WIFUSDC",
+                "target_variant": "early_limit",
+            }
+        }
+    )
+    assert "실행 패킷: 패킷 상태 미상 / 포커스=confirm 진입 타이밍 축소 / 대상=WIFUSDC / variant=early_limit" in line
+    assert "UNKNOWN" not in line
 
 
 def test_main_returns_warning_without_writing_state_when_delivery_fails(monkeypatch, tmp_path, capsys) -> None:
@@ -1833,6 +2776,114 @@ def test_main_returns_warning_without_writing_state_when_delivery_fails(monkeypa
     assert captured["delivery"]["reason"] == "http_403"
     assert captured["warning"] == "discord delivery not completed: http_403"
     assert state_file.exists() is False
+
+
+def test_render_message_includes_contract_partition_and_live_subset_performance() -> None:
+    current = {
+        "stage": "3_APPROVAL_REVIEW",
+        "stage_reason": "conditional micro-live sign-off review",
+        "dashboard_approval_strip": {"approve_value": "entry_gate_blocked"},
+        "validation_approval_strip": {"approve_value": "approval usable"},
+        "checklist_approval_strip": {"approve_value": "approval usable"},
+        "risk_gate_summary": {"risk_state": "OPEN", "risk_reason": "normal", "unlock_at": ""},
+        "runtime_reopen_status": {"status": "manual_review_required"},
+        "runtime_signoff_summary": {
+            "operator_recommendation": "manual_signoff_required",
+            "required_reviews": [],
+            "runtime_decision": {
+                "band": "AMBER_CONDITIONAL",
+                "effective_action": "conditional_micro_live_signoff",
+                "allowed_reopen_scope": "MICRO_LIVE_ONLY",
+            },
+            "runtime_reopen_gate_summary": {
+                "micro_live": {"status": "ready", "closed_trade_count": 19, "min_closed_trades": 15},
+                "full_live": {"status": "not_ready", "closed_trade_count": 19, "min_closed_trades": 30},
+            },
+        },
+            "runtime_contract_partition_summary": {
+                "live_allowed_symbols": ["BTCUSDC"],
+                "live_symbol_priority": ["BTCUSDC"],
+                "live_direction_contract": {"BTCUSDC": ["LONG", "SHORT"]},
+                "active_gate_proof_source": "live_eligible_post_patch_sample_summary",
+            "live_execution_closed_trade_count": 1,
+            "historical_execution_contract_closed_trade_count": 14,
+            "historical_walk_forward_execution_contract_closed_trade_count": 3,
+            "historical_walk_forward_strategy_closed_trade_count": 12,
+            "trend_proof_closed_trade_count": 2,
+            "historical_walk_forward_trend_closed_trade_count": 0,
+            "live_allowed_families": ["sweep_reversal"],
+            "live_allowed_entry_models": ["LIMIT"],
+            "research_only_entry_models": ["SWEEP_CONFIRM", "CONFIRM"],
+            "full_truth_closed_trade_count": 140,
+            "live_eligible_closed_trade_count": 19,
+        },
+        "runtime_live_subset_performance_summary": {
+            "execution_subset": {
+                "closed_trade_count": 1,
+                "win_rate": 0.0,
+                "ev_r": -1.0,
+                "profit_factor": 0.0,
+                "stop_loss_share": 1.0,
+            },
+            "historical_execution_subset": {
+                "closed_trade_count": 14,
+                "win_rate": 0.5714,
+                "ev_r": 0.82,
+                "profit_factor": 2.8,
+                "stop_loss_share": 0.3571,
+            },
+            "historical_walk_forward_execution_subset": {
+                "closed_trade_count": 3,
+                "win_rate": 0.6667,
+                "ev_r": 0.55,
+                "profit_factor": 4.41,
+                "stop_loss_share": 0.6667,
+            },
+            "historical_walk_forward_strategy_subset": {
+                "closed_trade_count": 12,
+                "win_rate": 0.5833,
+                "ev_r": 0.74,
+                "profit_factor": 3.2,
+                "stop_loss_share": 0.4167,
+            },
+            "trend_proof_subset": {
+                "closed_trade_count": 2,
+                "win_rate": 0.5,
+                "ev_r": 0.85,
+                "profit_factor": 2.1,
+                "stop_loss_share": 0.5,
+            },
+            "historical_walk_forward_trend_subset": {
+                "closed_trade_count": 0,
+                "win_rate": 0.0,
+                "ev_r": 0.0,
+                "profit_factor": None,
+                "stop_loss_share": 0.0,
+            },
+            "live_subset": {
+                "closed_trade_count": 19,
+                "win_rate": 0.6316,
+                "ev_r": 1.677,
+                "profit_factor": 5.5518,
+                "stop_loss_share": 0.3684,
+            },
+            "full_truth": {
+                "closed_trade_count": 140,
+                "win_rate": 0.4857,
+                "ev_r": 0.619,
+                "profit_factor": 2.3633,
+                "stop_loss_share": 0.4,
+            },
+        },
+        "lineage_sample_summary": {"closed_trade_count": 317, "proof_goal_closed_trades": 100},
+        "edge_experiment_review": {"closed_trade_count": 12, "edge_proof_goal_closed_trades": 100, "edge_proof_posture": {}},
+        "top_operator_action": "review manual sign-off",
+    }
+
+    message = notify_stage_change._render_message(current, [])
+
+    assert "운영 계약 분리: symbols=BTCUSDC | priority=BTCUSDC | directions=BTCUSDC:LONG|SHORT | proof=live_eligible_post_patch_sample_summary | execution_subset=1 | historical_execution=14 | historical_walk_forward_execution=3 | historical_walk_forward_strategy=12 | trend_proof=2 | historical_walk_forward_trend=0 | live=sweep_reversal/LIMIT | research-only=SWEEP_CONFIRM,CONFIRM | full_truth=140 | live_subset=19" in message
+    assert "실사용 subset 성적: exec 1개 plan / exec 승률 0% / exec EV -1.00R / exec PF 0.00 / exec stop_loss 100% / historical 14개 plan / historical 승률 57% / historical EV +0.82R / historical PF 2.80 / historical stop_loss 36% / historical-wf 3개 plan / historical-wf 승률 67% / historical-wf EV +0.55R / historical-wf PF 4.41 / historical-wf stop_loss 67% / strategy-wf 12개 plan / strategy-wf 승률 58% / strategy-wf EV +0.74R / strategy-wf PF 3.20 / strategy-wf stop_loss 42% / trend 2개 plan / trend 승률 50% / trend EV +0.85R / trend PF 2.10 / trend stop_loss 50% / trend-wf 0개 plan / trend-wf 승률 0% / trend-wf EV +0.00R / trend-wf PF n/a / trend-wf stop_loss 0% / proxy 19개 plan / 승률 63% / EV +1.68R / PF 5.55 / stop_loss 37% / full 140개 plan / full 승률 49% / full EV +0.62R / full PF 2.36 / full stop_loss 40%" in message
 
 
 def test_reuse_recent_runtime_monitor_fields_keeps_authoritative_runtime_status() -> None:
@@ -1871,6 +2922,198 @@ def test_reuse_recent_runtime_monitor_fields_keeps_authoritative_runtime_status(
     assert reused["runtime_operator_signoff_summary"]["status"] == "ready_for_manual_micro_live_signoff"
     assert reused["runtime_mitigation_wait_summary"]["status"] == "no_lineage_candidate_visible"
     assert reused["runtime_monitor_snapshot_reused"] is True
+
+
+def test_reuse_recent_runtime_monitor_fields_preserves_fresh_runtime_signoff_summary() -> None:
+    payload = {
+        "generated_at": "2026-04-19T01:28:00+00:00",
+        "stage": "2_LINEAGE_READY",
+        "selected_trial_run_id": "LINEAGE_GLOBAL_v2_true_threshold",
+        "checklist_status": "WARN",
+        "playbook_go_no_go": "MANUAL_REVIEW",
+        "lineage_sample_summary": {"closed_trade_count": 187},
+        "risk_gate_summary": {"risk_state": "OPEN"},
+        "runtime_signoff_summary": {
+            "status": "manual_signoff_required",
+            "approval_template_focus": {
+                "historical_walk_forward_execution_contract_proof_summary": {
+                    "schema_version": "historical_walk_forward_contract_proof_v3",
+                    "simulation_start_ts": "2026-04-03T14:45:00+00:00",
+                    "simulation_end_ts": "2026-04-19T01:10:00+00:00",
+                }
+            },
+        },
+    }
+    previous = {
+        "generated_at": "2026-04-19T01:27:00+00:00",
+        "stage": "2_LINEAGE_READY",
+        "selected_trial_run_id": "LINEAGE_GLOBAL_v2_true_threshold",
+        "checklist_status": "WARN",
+        "playbook_go_no_go": "MANUAL_REVIEW",
+        "lineage_sample_summary": {"closed_trade_count": 187},
+        "risk_gate_summary": {"risk_state": "OPEN"},
+        "runtime_signoff_summary": {
+            "status": "manual_signoff_required",
+            "approval_template_focus": {
+                "historical_walk_forward_execution_contract_proof_summary": {
+                    "schema_version": "historical_walk_forward_contract_proof_v1",
+                }
+            },
+        },
+    }
+
+    reused = ops_stage_board._reuse_recent_runtime_monitor_fields(
+        payload,
+        previous,
+        now=datetime(2026, 4, 19, 1, 28, 30, tzinfo=timezone.utc),
+    )
+
+    summary = (
+        reused["runtime_signoff_summary"]["approval_template_focus"]["historical_walk_forward_execution_contract_proof_summary"]
+    )
+    assert summary["schema_version"] == "historical_walk_forward_contract_proof_v3"
+    assert summary["simulation_start_ts"] == "2026-04-03T14:45:00+00:00"
+    assert reused["runtime_monitor_snapshot_reused"] is True
+
+
+def test_reuse_recent_runtime_monitor_fields_prefers_richer_previous_runtime_signoff_summary() -> None:
+    payload = {
+        "generated_at": "2026-04-19T09:11:49+00:00",
+        "stage": "2_LINEAGE_READY",
+        "selected_trial_run_id": "LINEAGE_GLOBAL_v2_true_threshold",
+        "checklist_status": "WARN",
+        "playbook_go_no_go": "MANUAL_REVIEW",
+        "lineage_sample_summary": {"closed_trade_count": 187},
+        "risk_gate_summary": {"risk_state": "OPEN"},
+        "runtime_signoff_summary": {
+            "status": "manual_signoff_required",
+            "required_reviews": [{"code": "approval_template_review"}],
+            "approval_template_focus": {},
+            "runtime_decision": {},
+            "runtime_reopen_gate_summary": {},
+        },
+    }
+    previous = {
+        "generated_at": "2026-04-19T09:10:49+00:00",
+        "stage": "2_LINEAGE_READY",
+        "selected_trial_run_id": "LINEAGE_GLOBAL_v2_true_threshold",
+        "checklist_status": "WARN",
+        "playbook_go_no_go": "MANUAL_REVIEW",
+        "lineage_sample_summary": {"closed_trade_count": 187},
+        "risk_gate_summary": {"risk_state": "OPEN"},
+        "runtime_signoff_summary": {
+            "status": "manual_signoff_required",
+            "required_reviews": [{"code": "approval_template_review"}],
+            "approval_template_focus": {
+                "worst_scenario": "latency_plus_1_bar",
+                "live_eligible_post_patch_sample_summary": {"closed_trade_count": 40},
+                "historical_walk_forward_strategy_proof_summary": {"closed_trade_count": 64},
+            },
+            "runtime_decision": {"band": "RED_HOLD"},
+            "runtime_reopen_gate_summary": {"micro_live": {"closed_trade_count": 40}},
+        },
+    }
+
+    reused = ops_stage_board._reuse_recent_runtime_monitor_fields(
+        payload,
+        previous,
+        now=datetime(2026, 4, 19, 9, 12, 0, tzinfo=timezone.utc),
+    )
+
+    summary = dict(reused.get("runtime_signoff_summary") or {})
+    focus = dict(summary.get("approval_template_focus") or {})
+    assert dict(focus.get("live_eligible_post_patch_sample_summary") or {}).get("closed_trade_count") == 40
+    assert dict(focus.get("historical_walk_forward_strategy_proof_summary") or {}).get("closed_trade_count") == 64
+    assert dict(summary.get("runtime_decision") or {}).get("band") == "RED_HOLD"
+    assert reused["runtime_monitor_snapshot_reused"] is True
+
+
+def test_reuse_recent_runtime_monitor_fields_uses_older_previous_when_current_runtime_monitor_is_incomplete() -> None:
+    payload = {
+        "generated_at": "2026-04-19T10:04:23+00:00",
+        "stage": "2_LINEAGE_READY",
+        "selected_trial_run_id": "LINEAGE_GLOBAL_v2_true_threshold",
+        "checklist_status": "WARN",
+        "playbook_go_no_go": "MANUAL_REVIEW",
+        "risk_gate_summary": {"risk_state": "OPEN"},
+        "runtime_decision_band": "",
+        "runtime_effective_action": "",
+        "runtime_allowed_reopen_scope": "",
+        "runtime_signoff_summary": {
+            "status": "manual_signoff_required",
+            "required_reviews": [{"code": "approval_template_review"}],
+            "approval_template_focus": {},
+        },
+    }
+    previous = {
+        "generated_at": "2026-04-19T05:59:03+00:00",
+        "stage": "2_LINEAGE_READY",
+        "selected_trial_run_id": "LINEAGE_GLOBAL_v2_true_threshold",
+        "checklist_status": "WARN",
+        "playbook_go_no_go": "MANUAL_REVIEW",
+        "risk_gate_summary": {"risk_state": "OPEN"},
+        "runtime_decision_band": "RED_HOLD",
+        "runtime_effective_action": "hold_runtime_reopen",
+        "runtime_allowed_reopen_scope": "none",
+        "runtime_signoff_summary": {
+            "status": "manual_signoff_required",
+            "required_reviews": [{"code": "approval_template_review"}],
+            "approval_template_focus": {
+                "live_eligible_post_patch_sample_summary": {"closed_trade_count": 40},
+            },
+            "runtime_decision": {"band": "RED_HOLD"},
+            "runtime_reopen_gate_summary": {"micro_live": {"closed_trade_count": 40}},
+        },
+    }
+
+    reused = ops_stage_board._reuse_recent_runtime_monitor_fields(
+        payload,
+        previous,
+        now=datetime(2026, 4, 19, 10, 4, 30, tzinfo=timezone.utc),
+    )
+
+    assert reused["runtime_decision_band"] == "RED_HOLD"
+    assert reused["runtime_effective_action"] == "hold_runtime_reopen"
+    assert reused["runtime_allowed_reopen_scope"] == "none"
+    assert dict((reused.get("runtime_signoff_summary") or {}).get("approval_template_focus") or {})
+    assert reused["runtime_monitor_snapshot_reused"] is True
+
+
+def test_reuse_recent_runtime_monitor_fields_ignores_lineage_count_drift() -> None:
+    payload = {
+        "generated_at": "2026-04-15T15:30:00+00:00",
+        "stage": "2_LINEAGE_READY",
+        "selected_trial_run_id": "LINEAGE_GLOBAL_v2_true_threshold",
+        "checklist_status": "WARN",
+        "playbook_go_no_go": "MANUAL_REVIEW",
+        "lineage_sample_summary": {"closed_trade_count": 328},
+        "risk_gate_summary": {"risk_state": "OPEN"},
+        "runtime_reopen_status": {"status": "manual_review_required"},
+    }
+    previous = {
+        "generated_at": "2026-04-15T15:25:00+00:00",
+        "stage": "3_APPROVAL_REVIEW",
+        "selected_trial_run_id": "LINEAGE_GLOBAL_v2_true_threshold",
+        "checklist_status": "WARN",
+        "playbook_go_no_go": "MANUAL_REVIEW",
+        "lineage_sample_summary": {"closed_trade_count": 317},
+        "risk_gate_summary": {"risk_state": "OPEN"},
+        "runtime_reopen_status": {"status": "ready_to_reopen_runtime"},
+        "runtime_signoff_summary": {
+            "status": "manual_signoff_required",
+            "runtime_decision": {"band": "AMBER_CONDITIONAL", "effective_action": "conditional_micro_live_signoff"},
+        },
+    }
+
+    reused = ops_stage_board._reuse_recent_runtime_monitor_fields(
+        payload,
+        previous,
+        now=datetime(2026, 4, 15, 15, 32, tzinfo=timezone.utc),
+    )
+
+    assert reused["runtime_monitor_snapshot_reused"] is True
+    assert reused["runtime_reopen_status"]["status"] == "ready_to_reopen_runtime"
+    assert reused["runtime_signoff_summary"]["runtime_decision"]["band"] == "AMBER_CONDITIONAL"
 
 
 def test_dispatch_stage_notification_truncates_message_for_discord(monkeypatch) -> None:

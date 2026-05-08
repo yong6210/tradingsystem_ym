@@ -177,7 +177,7 @@
 - [x] family rollout bootstrap contract 추가
 - 목적: family별 execution mode cap을 코드 하드코딩 대신 운영 정책 레이어로 분리한다.
 - 구현 방식: Phase 1에서는 DB가 아니라 config/bootstrap dict로 시작한다.
-- 구현 방식: 초기 기본값은 `trend_continuation -> MICRO_LIVE`, `sweep_reversal -> PAPER`, `range_rotation -> SHADOW`로 고정한다.
+- 구현 방식: 초기 기본값은 `sweep_reversal -> MICRO_LIVE`, `trend_continuation -> PAPER`, `range_rotation -> SHADOW`로 고정한다.
 - 구현 방식: `live_enabled`, `max_execution_mode`, `max_risk_r`, `allowed_sessions`, `min_quality_score` 필드를 계약으로 고정한다.
 - 완료 기준: approval service가 family별 rollout cap을 읽을 수 있다.
 - 검증: family별 allow/deny 테스트를 추가한다.

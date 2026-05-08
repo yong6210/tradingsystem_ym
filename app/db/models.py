@@ -33,6 +33,125 @@ class Candle(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class FundingRateSnapshot(Base):
+    __tablename__ = "funding_rates"
+    __table_args__ = (
+        UniqueConstraint("symbol", "ts", name="uq_funding_rates_symbol_ts"),
+        Index("ix_funding_rates_symbol_ts", "symbol", "ts"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(30), nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    funding_rate: Mapped[float] = mapped_column(Float, nullable=False)
+    mark_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(30), default="binance", nullable=False)
+    raw: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class OpenInterestSnapshot(Base):
+    __tablename__ = "open_interest"
+    __table_args__ = (
+        UniqueConstraint("symbol", "period", "ts", name="uq_open_interest_symbol_period_ts"),
+        Index("ix_open_interest_symbol_period_ts", "symbol", "period", "ts"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(30), nullable=False)
+    period: Mapped[str] = mapped_column(String(10), nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    open_interest: Mapped[float] = mapped_column(Float, nullable=False)
+    open_interest_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(30), default="binance", nullable=False)
+    raw: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class BasisSnapshot(Base):
+    __tablename__ = "basis_snapshots"
+    __table_args__ = (
+        UniqueConstraint("symbol", "timeframe", "ts", name="uq_basis_snapshots_symbol_tf_ts"),
+        Index("ix_basis_snapshots_symbol_tf_ts", "symbol", "timeframe", "ts"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(30), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    basis_open: Mapped[float] = mapped_column(Float, nullable=False)
+    basis_high: Mapped[float] = mapped_column(Float, nullable=False)
+    basis_low: Mapped[float] = mapped_column(Float, nullable=False)
+    basis_close: Mapped[float] = mapped_column(Float, nullable=False)
+    basis_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    source: Mapped[str] = mapped_column(String(30), default="binance", nullable=False)
+    raw: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class LiquidationEvent(Base):
+    __tablename__ = "liquidation_events"
+    __table_args__ = (
+        UniqueConstraint("symbol", "ts", "side", "price", "qty", name="uq_liquidation_events_identity"),
+        Index("ix_liquidation_events_symbol_ts", "symbol", "ts"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(30), nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    qty: Mapped[float] = mapped_column(Float, nullable=False)
+    notional: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    source: Mapped[str] = mapped_column(String(30), default="binance", nullable=False)
+    raw: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MacroEvent(Base):
+    __tablename__ = "macro_events"
+    __table_args__ = (
+        UniqueConstraint("event_code", "event_ts", name="uq_macro_events_code_ts"),
+        Index("ix_macro_events_ts", "event_ts"),
+        Index("ix_macro_events_code_ts", "event_code", "event_ts"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    event_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    importance: Mapped[str] = mapped_column(String(20), nullable=False, default="high")
+    country: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    source: Mapped[str] = mapped_column(String(30), default="manual", nullable=False)
+    raw: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CrossAssetBreadthSnapshot(Base):
+    __tablename__ = "cross_asset_breadth"
+    __table_args__ = (
+        UniqueConstraint("leader_symbol", "confirm_symbol", "timeframe", "ts", name="uq_cross_asset_breadth_pair_tf_ts"),
+        Index("ix_cross_asset_breadth_pair_tf_ts", "leader_symbol", "confirm_symbol", "timeframe", "ts"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    leader_symbol: Mapped[str] = mapped_column(String(30), nullable=False)
+    confirm_symbol: Mapped[str] = mapped_column(String(30), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(10), nullable=False, default="15m")
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    leader_close: Mapped[float] = mapped_column(Float, nullable=False)
+    confirm_close: Mapped[float] = mapped_column(Float, nullable=False)
+    leader_ret_1h: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    confirm_ret_1h: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    leader_ret_4h: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    confirm_ret_4h: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    divergence_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    breadth_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    source: Mapped[str] = mapped_column(String(30), default="derived", nullable=False)
+    raw: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Zone(Base):
     __tablename__ = "zones"
     __table_args__ = (
@@ -494,6 +613,25 @@ class StrategyMetric(Base):
     p2r: Mapped[float] = mapped_column(Float, default=0.0)
     p3r: Mapped[float] = mapped_column(Float, default=0.0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SessionImpulseRetestRuntimeAudit(Base):
+    __tablename__ = "session_impulse_retest_runtime_audits"
+    __table_args__ = (
+        Index("ix_sir_runtime_audits_symbol_observed", "symbol", "observed_ts"),
+        Index("ix_sir_runtime_audits_phase_status", "phase", "status"),
+        Index("ix_sir_runtime_audits_plan_observed", "plan_id", "observed_ts"),
+    )
+
+    audit_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(30), nullable=False)
+    phase: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[str] = mapped_column(String(60), nullable=False)
+    plan_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    decision_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    observed_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class EventOutbox(Base):

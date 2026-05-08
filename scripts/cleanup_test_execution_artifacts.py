@@ -35,18 +35,35 @@ from app.db.session import SessionLocal, init_db
 
 
 TEST_SYMBOL_PATTERNS = (
+    r"^AQ[0-9]+USDC$",
+    r"^BTCPRIO[0-9]+USDC$",
+    r"^CLUSTER[0-9]+USDC$",
+    r"^OPS[0-9]+USDC$",
     r"^DBG[A-Z0-9]+USDC$",
+    r"^ETHPRIO[0-9]+USDC$",
     r"^LOCKSYM[0-9]+USDC$",
     r"^LOCKGLB[0-9]+USDC$",
+    r"^LK[0-9]+USDC$",
+    r"^LR[0-9]+USDC$",
+    r"^LS[0-9]+USDC$",
+    r"^OUTCOME[0-9]+USDC$",
     r"^PAPER[0-9]+USDC$",
+    r"^PCOLL[0-9]+USDC$",
+    r"^PEXCLOSE[0-9]+USDC$",
+    r"^PEXFAST[0-9]+USDC$",
+    r"^PEXFASTSKIP[0-9]+USDC$",
     r"^PEXIT[0-9]+USDC$",
+    r"^PEXTIME[0-9]+USDC$",
     r"^PEXWAIT[0-9]+USDC$",
+    r"^PQ[0-9]+USDC$",
     r"^PREENTRY[0-9]+USDC$",
     r"^PRESUB[0-9]+USDC$",
     r"^RECON[0-9]+USDC$",
     r"^DEDUPE[0-9]+USDC$",
     r"^EXECPRE[0-9]+USDC$",
     r"^FILLGAP[0-9]+USDC$",
+    r"^PLINE[0-9]+USDC$",
+    r"^PLNO[0-9]+USDC$",
     r"^REPOTEST[0-9]+USDC$",
     r"^LIVE[0-9]+USDC$",
     r"^LH[0-9]+USDC$",
@@ -55,6 +72,9 @@ TEST_SYMBOL_PATTERNS = (
     r"^PBOENGINE[0-9]+USDC$",
     r"^PLALW[0-9]+USDC$",
     r"^PLCF[0-9]+USDC$",
+    r"^STALEDUPE[0-9]+USDC$",
+    r"^STALESUB[0-9]+USDC$",
+    r"^XQ[0-9]+USDC$",
 )
 
 
@@ -144,6 +164,17 @@ def _count_matches(symbols: list[str]) -> dict[str, int]:
             db,
             select(SafetyLock.lock_id).where(SafetyLock.scope_type == "SYMBOL", SafetyLock.scope_key.in_(symbols)),
         )
+        counts["global_test_safety_locks"] = _count(
+            db,
+            select(SafetyLock.lock_id).where(
+                SafetyLock.scope_type == "GLOBAL",
+                SafetyLock.active.is_(True),
+                (
+                    SafetyLock.reason_message.ilike("%dashboard test%")
+                    | SafetyLock.lock_metadata.ilike("%test_operator_dashboard%")
+                ),
+            ),
+        )
     return counts
 
 
@@ -174,6 +205,17 @@ def _delete_matches(symbols: list[str]) -> dict[str, int]:
             (
                 "safety_locks",
                 delete(SafetyLock).where(SafetyLock.scope_type == "SYMBOL", SafetyLock.scope_key.in_(symbols)),
+            ),
+            (
+                "global_test_safety_locks",
+                delete(SafetyLock).where(
+                    SafetyLock.scope_type == "GLOBAL",
+                    SafetyLock.active.is_(True),
+                    (
+                        SafetyLock.reason_message.ilike("%dashboard test%")
+                        | SafetyLock.lock_metadata.ilike("%test_operator_dashboard%")
+                    ),
+                ),
             ),
         )
         for label, stmt in statements:

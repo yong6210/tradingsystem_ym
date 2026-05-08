@@ -33,8 +33,45 @@ class StrategyFamilyRouter:
         self.settings = settings or get_settings()
 
     @staticmethod
+    def _csv_items(raw: str | None) -> set[str]:
+        return {item.strip().upper() for item in str(raw or "").split(",") if item.strip()}
+
+    @staticmethod
     def _round_scores(values: dict[str, float]) -> dict[str, float]:
         return {key: round(float(value), 2) for key, value in values.items()}
+
+    def _trend_proof_allowed_symbols(self) -> set[str]:
+        configured = self._csv_items(getattr(self.settings, "auto_trading_trend_proof_allowed_symbols", ""))
+        if configured:
+            return configured
+        fallback = self._csv_items(getattr(self.settings, "auto_trading_micro_live_allowed_symbols", ""))
+        if fallback:
+            return fallback
+        return {"BTCUSDC", "ETHUSDC"}
+
+    def _trend_proof_regime_relaxed(self, *, symbol: str, context: ContextSnapshot, regime_name: str) -> bool:
+        if regime_name == "trend":
+            return True
+        if str(symbol or "").upper() not in self._trend_proof_allowed_symbols():
+            return False
+        if regime_name == "shock":
+            return False
+        if context.regime_15m < float(self.settings.auto_trading_trend_proof_regime_floor):
+            return False
+        if abs(float(context.v or 0.0)) < float(self.settings.auto_trading_trend_proof_min_abs_velocity):
+            return False
+        if float(context.friction_5m or 0.0) > float(self.settings.auto_trading_trend_proof_max_friction):
+            return False
+        if float(context.jump_rate_5m or 0.0) > float(self.settings.auto_trading_trend_proof_max_jump_rate):
+            return False
+        if regime_name == "transition":
+            return bool(context.transition_unlock_candidate)
+        if regime_name == "range":
+            return bool(
+                context.transition_state in {"transition_watch", "transition_confirmed"}
+                or context.transition_unlock_candidate
+            )
+        return False
 
     def _grade_thresholds(self, family: str) -> dict[str, float]:
         if family == "sweep_reversal":
@@ -381,7 +418,8 @@ class StrategyFamilyRouter:
         regime_name: str,
         candles_5m: list[Candle] | None,
     ) -> StrategyFamilyDecision:
-        if regime_name != "trend":
+        symbol = str(getattr(zone, "symbol", "") or context.symbol or "").upper()
+        if not self._trend_proof_regime_relaxed(symbol=symbol, context=context, regime_name=regime_name):
             return StrategyFamilyDecision(
                 available=False,
                 family="none",
@@ -418,7 +456,7 @@ class StrategyFamilyRouter:
         if not candles_5m or len(candles_5m) < 8:
             return StrategyFamilyDecision(
                 available=False,
-                family="trend_continuation",
+                family="trend_continuation" if regime_name == "trend" else "none",
                 grade="F",
                 score=0.0,
                 reason="trend_continuation_insufficient_candles",

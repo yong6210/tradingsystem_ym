@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -18,6 +19,7 @@ from app.db.repositories import (
 from app.services.execution.rollout import RolloutPolicyService
 from app.services.execution.safety import SafetyLockService
 from app.services.execution_operator_dashboard import ExecutionOperatorDashboardService
+from app.services.lane_tracker import reset_execution_lane_tracker
 from app.repositories.execution import (
     FamilyRolloutPolicyRepository,
     SafetyLockRepository,
@@ -59,6 +61,7 @@ def _empty_review_followup_ledger(*args, **kwargs) -> dict:
 
 
 def _apply_defaults(monkeypatch) -> None:
+    reset_execution_lane_tracker()
     settings = get_settings()
     monkeypatch.setattr(settings, "auto_trading_enabled", True)
     monkeypatch.setattr(settings, "auto_trading_execution_mode", ExecutionMode.MICRO_LIVE)
@@ -67,6 +70,9 @@ def _apply_defaults(monkeypatch) -> None:
     monkeypatch.setattr(settings, "alert_push_webhook_url", "")
     monkeypatch.setattr(settings, "alert_telegram_bot_token", "")
     monkeypatch.setattr(settings, "alert_telegram_chat_id", "")
+    monkeypatch.setattr(settings, "transition_edge_variant_enabled", True)
+    monkeypatch.setattr(settings, "transition_edge_variant_shadow_only", True)
+    monkeypatch.setattr(settings, "transition_edge_variant_partial_activation_ratio", 0.3)
     monkeypatch.setattr(
         "app.services.execution_operator_dashboard.summarize_split_review_followup_ledger",
         _empty_review_followup_ledger,
@@ -92,6 +98,214 @@ def _seed_rollout_and_lock(symbol: str) -> None:
             metadata={"updated_by": "test_operator_dashboard"},
         )
         db.commit()
+
+
+def test_execution_operator_dashboard_formats_active_contract_summary() -> None:
+    payload = ExecutionOperatorDashboardService._active_contract_summary(
+        {
+            "filters": {
+                "symbol": "BTCUSDC",
+                "execution_mode": "MICRO_LIVE",
+                "strategy_families": ["sweep_reversal"],
+                "entry_models": ["LIMIT"],
+            },
+            "raw_counts": {
+                "plans_total": 3,
+                "matured_plans": 3,
+                "filled_matured_plans": 2,
+                "unfilled_matured_plans": 1,
+                "submitted_plans": 2,
+                "filled_submitted_plans": 2,
+                "closed_filled_plans": 2,
+            },
+            "recent_intent_summary": {
+                "broad_recent_intent_count": 10,
+                "active_contract_recent_intent_count": 0,
+                "non_active_contract_recent_intent_count": 10,
+            },
+            "flow_cadence": {
+                "cadence_window_days": 30,
+                "cadence_window_basis": "recent_active_contract_intents",
+                "execution_sample_window_days": 30,
+                "execution_sample_window_basis": "contract_faithful_execution_sample",
+                "hours_since_last_active_contract_intent": 12.5,
+                "runtime_candidates_current_snapshot": 0,
+                "current_window_active_contract_intent_count": 0,
+                "current_window_active_contract_intents_per_week": 0.0,
+                "execution_sample_submitted_count": 2,
+                "execution_sample_closed_count": 2,
+                "execution_sample_submitted_per_week": 0.4667,
+                "execution_sample_closed_per_week": 0.4667,
+                "flow_state": "currently_sparse",
+            },
+            "replay_flow_baseline": {
+                "available": True,
+                "replay_window_days": 646.0,
+                "expected_active_contract_candidates_per_week_from_replay": 35.0,
+                "expected_closed_per_week_from_replay": 31.0,
+                "observed_current_window_active_contract_intents_per_week_live": 0.0,
+                "live_vs_replay_flow_ratio": 0.0,
+                "comparison_only": True,
+            },
+            "promotion_shadow_counter": {
+                "available": True,
+                "comparison_window_days": 30,
+                "runtime_recent_symbol_plans_same_window": 12,
+                "runtime_recent_entry_model_plans_same_window": 5,
+                "runtime_promoted_contract_plans_same_window": 1,
+                "runtime_rejected_same_entry_model_plans_same_window": 4,
+                "runtime_rejected_reason_counts": {
+                    "strategy_family_not_applicable": 2,
+                    "trend_continuation_not_applicable": 2,
+                },
+                "replay_contract_hits_same_window": 20,
+                "promotion_gap_count": 19,
+                "runtime_vs_replay_promotion_ratio": 0.05,
+                "shadow_mismatch_state": "runtime_below_replay_baseline",
+            },
+            "shadow_relaxation_priority": {
+                "available": True,
+                "apply_live": False,
+                "comparison_window_days": 30,
+                "runtime_promoted_contract_plans_same_window": 1,
+                "runtime_rejected_same_entry_model_plans_same_window": 4,
+                "runtime_rejected_not_applicable_count": 4,
+                "replay_contract_hits_same_window": 20,
+                "runtime_vs_replay_promotion_ratio": 0.05,
+                "runner_up_shadow_lanes": ["proof_reclaim_only", "one_bar_only"],
+                "status": "priority_candidate",
+                "recommended_shadow_lane": "proof_reclaim_plus_one_bar",
+                "rationale_code": "reaction_not_applicable_promotion_gap",
+                "operator_headline": "Proof reclaim plus one-bar is the current shadow priority because recent runtime LIMIT plans are being rejected as `reaction not applicable` while replay still shows contract-faithful hits, and the combined rescue lane has outperformed the strict baseline in future-blind variant sweeps. Keep this compare-only; do not apply live.",
+            },
+            "transition_edge_variant_shadow": {
+                "available": True,
+                "enabled": True,
+                "shadow_only": True,
+                "variant": "exp_6_fvg_relaxed_plus_transition_override",
+                "status": "shadow_only_compare",
+                "regime_profile": "transition",
+                "transition_state": "transition_watch",
+                "generation_state": "diagnosed",
+                "active_zone_count": 24,
+                "post_hard_gate_zone_count": 6,
+                "pre_generation_candidate_count": 1,
+                "shadow_evaluated_count": 9,
+                "shadow_pass_count": 3,
+                "shadow_pass_rate": 0.3333,
+                "shadow_rescue_reason_mix": {
+                    "fvg_relaxed": 2,
+                    "transition_override": 1,
+                },
+                "shadow_candidate_delta": 3,
+                "candidate_baseline": 1,
+                "candidate_shadow": 4,
+                "low_confluence_block_baseline": 12,
+                "low_confluence_block_shadow": 9,
+                "low_confluence_block_delta": -3,
+                "expected_ev_r_proxy": 0.31,
+                "current_snapshot_only": True,
+                "activation_note": "Structure/proxy validation only while shadow_only remains enabled.",
+            },
+            "selection_shortfall_breakdown": {
+                "runtime_candidates": 3,
+                "accepted_candidates": 1,
+                "blocked_candidates": 2,
+                "blocked_reason_counts": {
+                    "macro_blackout": 1,
+                    "thesis_duplicate_blocked": 1,
+                },
+                "blocked_gate_group_counts": {
+                    "quality": 0,
+                    "rollout": 0,
+                    "structural": 1,
+                    "safety": 0,
+                    "unknown": 1,
+                },
+            },
+            "execution_quality_summary": {
+                "symbol": "BTCUSDC",
+                "filters": {
+                    "strategy_families": ["sweep_reversal"],
+                    "entry_models": ["LIMIT"],
+                },
+                "fill_rate": 1.0,
+                "plans_total": 3,
+                "plans_matured": 3,
+                "fills_matched": 2,
+                "fill_events_total": 2,
+                "slippage_bps": {"avg": 0.0},
+                "fees": {"total": 0.0},
+                "target_exit_ratio": 0.5,
+                "forced_exit_ratio": 0.5,
+                "information_failure_ratio": 0.0,
+                "time_failure_ratio": 0.0,
+                "final_exit_reasons": {"stop_loss": 1, "time_failure": 1},
+                "entry_reach_diagnostics": {
+                    "expired_without_touch_count": 1,
+                    "avg_min_distance_to_entry_bps": 2.4972,
+                    "avg_bars_observed": 14.0,
+                    "avg_max_favorable_excursion_after_miss_bps": 35.0,
+                    "avg_max_adverse_excursion_after_miss_bps": 0.0,
+                    "moved_to_target_without_fill_count": 1,
+                    "invalidated_before_touch_count": 0,
+                    "avg_bars_until_invalidation": 0.0,
+                },
+            },
+            "score_to_outcome_funnel_summary": {
+                "available": True,
+                "filters": {
+                    "strategy_families": ["sweep_reversal"],
+                    "entry_models": ["LIMIT"],
+                },
+                "snapshot_selection": {"runtime_candidates": 2, "accepted_candidates": 1, "blocked_candidates": 1},
+                "historical_execution_outcomes": {
+                    "submitted": 2,
+                    "filled": 2,
+                    "closed": 2,
+                    "profitable": 1,
+                    "baseline_cost_profitable": 1,
+                    "fill_rate_from_submitted": 1.0,
+                    "close_rate_from_filled": 1.0,
+                    "profitable_rate_from_closed": 0.5,
+                    "baseline_cost_profitable_rate_from_closed": 0.5,
+                },
+                "decomposition": {},
+            },
+            "opportunity_capture_summary": {
+                "available": True,
+                "summary": "fills are occurring",
+            },
+        }
+    )
+
+    assert payload is not None
+    assert payload["filters"]["entry_models"] == ["LIMIT"]
+    assert payload["raw_counts"]["unfilled_matured_plans"] == 1
+    assert payload["recent_intent_summary"]["broad_recent_intent_count"] == 10
+    assert payload["flow_cadence"]["flow_state"] == "currently_sparse"
+    assert payload["flow_cadence"]["execution_sample_submitted_count"] == 2
+    assert payload["replay_flow_baseline"]["available"] is True
+    assert payload["promotion_shadow_counter"]["runtime_recent_entry_model_plans_same_window"] == 5
+    assert payload["promotion_shadow_counter"]["shadow_mismatch_state"] == "runtime_below_replay_baseline"
+    assert payload["shadow_relaxation_priority"]["recommended_shadow_lane"] == "proof_reclaim_plus_one_bar"
+    assert payload["shadow_relaxation_priority"]["status"] == "priority_candidate"
+    assert payload["transition_edge_variant_shadow"]["shadow_pass_count"] == 3
+    assert payload["transition_edge_variant_shadow"]["low_confluence_block_delta"] == -3
+    assert payload["transition_edge_variant_shadow"]["expected_ev_r_proxy"] == 0.31
+    assert payload["selection_shortfall_breakdown"]["blocked_gate_group_counts"]["structural"] == 1
+    assert payload["execution_quality_summary"]["filters"]["entry_models"] == ["LIMIT"]
+    assert payload["execution_quality_summary"]["plan_fill_rate_denominator"] == "matured_plans"
+    assert payload["execution_quality_summary"]["terminal_exit_ratio_denominator"] == "closed_plans"
+    assert payload["execution_quality_summary"]["final_exit_reasons"]["time_failure"] == 1
+    assert payload["execution_quality_summary"]["terminal_exit_split"]["planned_stop_loss"] == 1
+    assert payload["execution_quality_summary"]["operational_forced_exit_split"]["time_failure"] == 1
+    assert payload["execution_quality_summary"]["operational_forced_exit_count"] == 1
+    assert payload["execution_quality_summary"]["operational_forced_exit_ratio_denominator"] == "closed_plans"
+    assert payload["execution_quality_summary"]["entry_reach_diagnostics"]["moved_to_target_without_fill_count"] == 1
+    assert payload["score_to_outcome_funnel"]["filters"]["strategy_families"] == ["sweep_reversal"]
+    assert payload["score_to_outcome_funnel"]["submitted_to_fill_rate_denominator"] == "submitted_plans"
+    assert payload["opportunity_capture"]["available"] is True
 
 
 def test_execution_operator_dashboard_aggregates_runtime_state(monkeypatch) -> None:
@@ -131,7 +345,13 @@ def test_execution_operator_dashboard_aggregates_runtime_state(monkeypatch) -> N
                         "reason_codes": ["execution_degradation:watch"],
                     },
                 },
-                payload={"thesis_cluster_id": f"cluster_{symbol}"},
+                payload={
+                    "thesis_cluster_id": f"cluster_{symbol}",
+                    "executable_plan": {
+                        "entry_type": "limit",
+                        "entry_model": "LIMIT",
+                    },
+                },
                 created_at=now,
             )
         )
@@ -260,6 +480,8 @@ def test_execution_operator_dashboard_aggregates_runtime_state(monkeypatch) -> N
     assert isinstance(payload["signal_funnel"]["session_pass_rates"], list)
     assert "outcome_control_trace" in payload["signal_funnel"]
     assert payload["recent_intents"][0]["allowed_execution_mode"] == "MICRO_LIVE"
+    assert payload["recent_intents"][0]["entry_type"] == "limit"
+    assert payload["recent_intents"][0]["entry_model"] == "LIMIT"
     assert payload["recent_intents"][0]["playbook_action"] == "allow_new_entry"
     assert payload["recent_intents"][0]["outcome_approval_penalty"]["penalty_tier"] == "reason_only"
     assert all(item["plan_id"] != f"plan_old_{symbol}" for item in payload["recent_intents"])
@@ -274,6 +496,9 @@ def test_execution_operator_dashboard_aggregates_runtime_state(monkeypatch) -> N
     if payload["portfolio_summary"]["blocked_candidate_count"] > 0:
         assert sum(payload["portfolio_summary"]["blocked_reason_counts"].values()) >= payload["portfolio_summary"]["blocked_candidate_count"]
     assert "alert_summary" in payload
+    assert payload["transition_edge_variant"]["enabled"] is True
+    assert payload["transition_edge_variant"]["shadow_only"] is True
+    assert payload["transition_edge_variant"]["live_lane"]["counts"]["base"]["intent"] == 0
 
 
 def test_reconciliation_summary_ages_out_stale_events() -> None:
@@ -381,7 +606,14 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
                                 "applied": True,
                                 "multiplier": 0.75,
                                 "reason_codes": ["family_execution_degradation:watch"],
-                            }
+                            },
+                            "runtime_signal_shadow_tilt": {
+                                "classification": "strong_short_sweep",
+                                "shadow_size_multiplier": 1.4762,
+                                "base_recommended_risk_r": 0.5,
+                                "shadow_recommended_risk_r": 0.7381,
+                                "apply_live": False,
+                            },
                         },
                     }
                 ],
@@ -2013,6 +2245,16 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
     )
     assert payload["portfolio_summary"]["accepted_candidates"][0]["capital_allocator"]["tier"] == "boost"
     assert payload["portfolio_summary"]["accepted_candidates"][0]["allocated_risk_r"] == 0.55
+    assert (
+        payload["portfolio_summary"]["accepted_candidates"][0]["runtime_signal_shadow_tilt"]["classification"]
+        == "strong_short_sweep"
+    )
+    assert (
+        payload["portfolio_summary"]["accepted_candidates"][0]["strategy_sizing"]["runtime_signal_shadow_tilt"][
+            "shadow_recommended_risk_r"
+        ]
+        == 0.7381
+    )
     assert payload["portfolio_summary"]["accepted_candidates"][0]["edge_experiment_focus"]["edge_state"] == "watch_edge"
     assert (
         payload["portfolio_summary"]["accepted_candidates"][0]["edge_experiment_focus"]["entry_timing_preferred_variant"]
@@ -2021,4 +2263,51 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
     assert (
         payload["portfolio_summary"]["blocked_candidates"][0]["strategy_sizing"]["outcome_risk_adjustment"]["applied"]
         is True
+    )
+
+
+def test_execution_operator_dashboard_intent_row_and_contract_filter_respect_direction() -> None:
+    row = SimpleNamespace(
+        intent_id="intent_1",
+        plan_id="plan_1",
+        symbol="BTCUSDC",
+        strategy_family="sweep_reversal",
+        execution_mode="MICRO_LIVE",
+        approval_state="APPROVED",
+        submit_decision="SUBMIT",
+        decision_reason_code="ok",
+        decision_reason_message="ok",
+        approval_snapshot={"allowed_execution_mode": "MICRO_LIVE"},
+        payload={
+            "executable_plan": {
+                "entry_type": "limit",
+                "entry_model": "LIMIT",
+                "direction": "SHORT",
+            }
+        },
+        created_at=datetime.now(timezone.utc),
+    )
+
+    intent_row = ExecutionOperatorDashboardService._intent_row(row)
+
+    assert intent_row["direction"] == "SHORT"
+    assert not ExecutionOperatorDashboardService._row_matches_contract_filters(
+        intent_row,
+        {
+            "symbol": "BTCUSDC",
+            "execution_mode": "MICRO_LIVE",
+            "strategy_families": ["sweep_reversal"],
+            "entry_models": ["LIMIT"],
+            "directions": ["LONG"],
+        },
+    )
+    assert ExecutionOperatorDashboardService._row_matches_contract_filters(
+        intent_row,
+        {
+            "symbol": "BTCUSDC",
+            "execution_mode": "MICRO_LIVE",
+            "strategy_families": ["sweep_reversal"],
+            "entry_models": ["LIMIT"],
+            "directions": ["SHORT"],
+        },
     )

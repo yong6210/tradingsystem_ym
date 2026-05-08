@@ -13,18 +13,25 @@ from app.core.enums import EventStatus, PlanState, ZoneState
 from app.db.models import (
     AlertRetryTask,
     AlertSubscription,
+    BasisSnapshot,
     BinanceOrderLedger,
     BinancePositionSnapshot,
     Candle,
+    CrossAssetBreadthSnapshot,
     ExecutionReconciliationEvent,
     EventOutbox,
     ExecutionFill,
     FamilyRolloutPolicy,
+    FundingRateSnapshot,
+    LiquidationEvent,
+    MacroEvent,
+    OpenInterestSnapshot,
     OrderIntent,
     OrderSubmission,
     Plan,
     PromotionLifecycleHistory,
     SafetyLock,
+    SessionImpulseRetestRuntimeAudit,
     StrategyMetric,
     ValidationPboDsrSnapshot,
     ValidationTrialFoldScore,
@@ -152,6 +159,280 @@ class CandleRepository:
             )
             .order_by(Candle.ts.asc())
         )
+        return list(self.db.scalars(stmt))
+
+
+class FundingRateRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def upsert(self, row: FundingRateSnapshot) -> FundingRateSnapshot:
+        stmt = select(FundingRateSnapshot).where(
+            FundingRateSnapshot.symbol == row.symbol,
+            FundingRateSnapshot.ts == row.ts,
+        )
+        existing = self.db.scalar(stmt)
+        if existing:
+            existing.funding_rate = row.funding_rate
+            existing.mark_price = row.mark_price
+            existing.source = row.source
+            existing.raw = row.raw
+            self.db.add(existing)
+            return existing
+        self.db.add(row)
+        return row
+
+    def get_last(self, symbol: str) -> FundingRateSnapshot | None:
+        stmt = (
+            select(FundingRateSnapshot)
+            .where(FundingRateSnapshot.symbol == symbol.upper())
+            .order_by(desc(FundingRateSnapshot.ts))
+            .limit(1)
+        )
+        return self.db.scalar(stmt)
+
+    def list_range(self, *, symbol: str, start_ts: datetime, end_ts: datetime) -> list[FundingRateSnapshot]:
+        stmt = (
+            select(FundingRateSnapshot)
+            .where(
+                FundingRateSnapshot.symbol == symbol.upper(),
+                FundingRateSnapshot.ts >= start_ts,
+                FundingRateSnapshot.ts <= end_ts,
+            )
+            .order_by(FundingRateSnapshot.ts.asc())
+        )
+        return list(self.db.scalars(stmt))
+
+
+class OpenInterestRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def upsert(self, row: OpenInterestSnapshot) -> OpenInterestSnapshot:
+        stmt = select(OpenInterestSnapshot).where(
+            OpenInterestSnapshot.symbol == row.symbol,
+            OpenInterestSnapshot.period == row.period,
+            OpenInterestSnapshot.ts == row.ts,
+        )
+        existing = self.db.scalar(stmt)
+        if existing:
+            existing.open_interest = row.open_interest
+            existing.open_interest_value = row.open_interest_value
+            existing.source = row.source
+            existing.raw = row.raw
+            self.db.add(existing)
+            return existing
+        self.db.add(row)
+        return row
+
+    def get_last(self, symbol: str, period: str) -> OpenInterestSnapshot | None:
+        stmt = (
+            select(OpenInterestSnapshot)
+            .where(
+                OpenInterestSnapshot.symbol == symbol.upper(),
+                OpenInterestSnapshot.period == period,
+            )
+            .order_by(desc(OpenInterestSnapshot.ts))
+            .limit(1)
+        )
+        return self.db.scalar(stmt)
+
+    def list_range(self, *, symbol: str, period: str, start_ts: datetime, end_ts: datetime) -> list[OpenInterestSnapshot]:
+        stmt = (
+            select(OpenInterestSnapshot)
+            .where(
+                OpenInterestSnapshot.symbol == symbol.upper(),
+                OpenInterestSnapshot.period == period,
+                OpenInterestSnapshot.ts >= start_ts,
+                OpenInterestSnapshot.ts <= end_ts,
+            )
+            .order_by(OpenInterestSnapshot.ts.asc())
+        )
+        return list(self.db.scalars(stmt))
+
+
+class BasisSnapshotRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def upsert(self, row: BasisSnapshot) -> BasisSnapshot:
+        stmt = select(BasisSnapshot).where(
+            BasisSnapshot.symbol == row.symbol,
+            BasisSnapshot.timeframe == row.timeframe,
+            BasisSnapshot.ts == row.ts,
+        )
+        existing = self.db.scalar(stmt)
+        if existing:
+            existing.basis_open = row.basis_open
+            existing.basis_high = row.basis_high
+            existing.basis_low = row.basis_low
+            existing.basis_close = row.basis_close
+            existing.basis_bps = row.basis_bps
+            existing.source = row.source
+            existing.raw = row.raw
+            self.db.add(existing)
+            return existing
+        self.db.add(row)
+        return row
+
+    def get_last(self, symbol: str, timeframe: str) -> BasisSnapshot | None:
+        stmt = (
+            select(BasisSnapshot)
+            .where(
+                BasisSnapshot.symbol == symbol.upper(),
+                BasisSnapshot.timeframe == timeframe,
+            )
+            .order_by(desc(BasisSnapshot.ts))
+            .limit(1)
+        )
+        return self.db.scalar(stmt)
+
+    def list_range(self, *, symbol: str, timeframe: str, start_ts: datetime, end_ts: datetime) -> list[BasisSnapshot]:
+        stmt = (
+            select(BasisSnapshot)
+            .where(
+                BasisSnapshot.symbol == symbol.upper(),
+                BasisSnapshot.timeframe == timeframe,
+                BasisSnapshot.ts >= start_ts,
+                BasisSnapshot.ts <= end_ts,
+            )
+            .order_by(BasisSnapshot.ts.asc())
+        )
+        return list(self.db.scalars(stmt))
+
+
+class LiquidationEventRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def upsert(self, row: LiquidationEvent) -> LiquidationEvent:
+        stmt = select(LiquidationEvent).where(
+            LiquidationEvent.symbol == row.symbol,
+            LiquidationEvent.ts == row.ts,
+            LiquidationEvent.side == row.side,
+            LiquidationEvent.price == row.price,
+            LiquidationEvent.qty == row.qty,
+        )
+        existing = self.db.scalar(stmt)
+        if existing:
+            existing.notional = row.notional
+            existing.source = row.source
+            existing.raw = row.raw
+            self.db.add(existing)
+            return existing
+        self.db.add(row)
+        return row
+
+    def list_range(self, *, symbol: str, start_ts: datetime, end_ts: datetime) -> list[LiquidationEvent]:
+        stmt = (
+            select(LiquidationEvent)
+            .where(
+                LiquidationEvent.symbol == symbol.upper(),
+                LiquidationEvent.ts >= start_ts,
+                LiquidationEvent.ts <= end_ts,
+            )
+            .order_by(LiquidationEvent.ts.asc())
+        )
+        return list(self.db.scalars(stmt))
+
+
+class MacroEventRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def upsert(self, row: MacroEvent) -> MacroEvent:
+        stmt = select(MacroEvent).where(
+            MacroEvent.event_code == row.event_code,
+            MacroEvent.event_ts == row.event_ts,
+        )
+        existing = self.db.scalar(stmt)
+        if existing:
+            existing.importance = row.importance
+            existing.country = row.country
+            existing.title = row.title
+            existing.source = row.source
+            existing.raw = row.raw
+            self.db.add(existing)
+            return existing
+        self.db.add(row)
+        return row
+
+    def list_range(self, *, start_ts: datetime, end_ts: datetime) -> list[MacroEvent]:
+        stmt = (
+            select(MacroEvent)
+            .where(
+                MacroEvent.event_ts >= start_ts,
+                MacroEvent.event_ts <= end_ts,
+            )
+            .order_by(MacroEvent.event_ts.asc())
+        )
+        return list(self.db.scalars(stmt))
+
+
+class CrossAssetBreadthRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def upsert(self, row: CrossAssetBreadthSnapshot) -> CrossAssetBreadthSnapshot:
+        stmt = select(CrossAssetBreadthSnapshot).where(
+            CrossAssetBreadthSnapshot.leader_symbol == row.leader_symbol,
+            CrossAssetBreadthSnapshot.confirm_symbol == row.confirm_symbol,
+            CrossAssetBreadthSnapshot.timeframe == row.timeframe,
+            CrossAssetBreadthSnapshot.ts == row.ts,
+        )
+        existing = self.db.scalar(stmt)
+        if existing:
+            for attr in (
+                "leader_close",
+                "confirm_close",
+                "leader_ret_1h",
+                "confirm_ret_1h",
+                "leader_ret_4h",
+                "confirm_ret_4h",
+                "divergence_bps",
+                "breadth_score",
+                "source",
+                "raw",
+            ):
+                setattr(existing, attr, getattr(row, attr))
+            self.db.add(existing)
+            return existing
+        self.db.add(row)
+        return row
+
+    def get_last(self, *, leader_symbol: str, confirm_symbol: str, timeframe: str) -> CrossAssetBreadthSnapshot | None:
+        stmt = (
+            select(CrossAssetBreadthSnapshot)
+            .where(
+                CrossAssetBreadthSnapshot.leader_symbol == leader_symbol.upper(),
+                CrossAssetBreadthSnapshot.confirm_symbol == confirm_symbol.upper(),
+                CrossAssetBreadthSnapshot.timeframe == timeframe,
+            )
+            .order_by(desc(CrossAssetBreadthSnapshot.ts))
+            .limit(1)
+        )
+        return self.db.scalar(stmt)
+
+    def list_range(
+        self,
+        *,
+        leader_symbol: str | None = None,
+        confirm_symbol: str | None = None,
+        timeframe: str | None = None,
+        start_ts: datetime,
+        end_ts: datetime,
+    ) -> list[CrossAssetBreadthSnapshot]:
+        stmt = select(CrossAssetBreadthSnapshot).where(
+            CrossAssetBreadthSnapshot.ts >= start_ts,
+            CrossAssetBreadthSnapshot.ts <= end_ts,
+        )
+        if leader_symbol is not None:
+            stmt = stmt.where(CrossAssetBreadthSnapshot.leader_symbol == leader_symbol.upper())
+        if confirm_symbol is not None:
+            stmt = stmt.where(CrossAssetBreadthSnapshot.confirm_symbol == confirm_symbol.upper())
+        if timeframe is not None:
+            stmt = stmt.where(CrossAssetBreadthSnapshot.timeframe == timeframe)
+        stmt = stmt.order_by(CrossAssetBreadthSnapshot.ts.asc())
         return list(self.db.scalars(stmt))
 
 
@@ -1209,6 +1490,7 @@ class MetricsRepository:
             "validation_pbo_dsr_snapshots": ValidationPboDsrSnapshot,
             "alerts": AlertSubscription,
             "alert_retry_queue": AlertRetryTask,
+            "session_impulse_retest_runtime_audits": SessionImpulseRetestRuntimeAudit,
             "event_outbox": EventOutbox,
         }
         model = table_map.get(table_name)
@@ -1216,6 +1498,37 @@ class MetricsRepository:
             return 0
         stmt = select(func.count()).select_from(model)
         return int(self.db.scalar(stmt) or 0)
+
+
+class SessionImpulseRetestRuntimeAuditRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def add(self, row: SessionImpulseRetestRuntimeAudit) -> SessionImpulseRetestRuntimeAudit:
+        self.db.add(row)
+        return row
+
+    def list_recent(
+        self,
+        *,
+        hours: int = 24,
+        symbol: str | None = None,
+        phase: str | None = None,
+        status: str | None = None,
+        limit: int = 500,
+    ) -> list[SessionImpulseRetestRuntimeAudit]:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours)))
+        stmt = select(SessionImpulseRetestRuntimeAudit).where(
+            SessionImpulseRetestRuntimeAudit.observed_ts >= cutoff
+        )
+        if symbol:
+            stmt = stmt.where(SessionImpulseRetestRuntimeAudit.symbol == symbol.upper())
+        if phase:
+            stmt = stmt.where(SessionImpulseRetestRuntimeAudit.phase == str(phase))
+        if status:
+            stmt = stmt.where(SessionImpulseRetestRuntimeAudit.status == str(status))
+        stmt = stmt.order_by(desc(SessionImpulseRetestRuntimeAudit.observed_ts)).limit(limit)
+        return list(self.db.scalars(stmt))
 
 
 class ValidationArtifactRepository:

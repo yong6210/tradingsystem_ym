@@ -181,6 +181,60 @@ def test_signal_alert_channel_dedupe_and_cooldown(monkeypatch) -> None:
         assert len(calls) == 1
 
 
+def test_session_impulse_retest_confirm_message_uses_prop_manual_format(monkeypatch) -> None:
+    init_db()
+    symbol = f"SIGPROP{int(datetime.now(timezone.utc).timestamp() * 1_000_000)}USDC"
+    plan_id = f"{symbol}_p1"
+
+    with SessionLocal() as db:
+        plan = _seed_plan(db, symbol=symbol, plan_id=plan_id)
+        plan.validity = {
+            **dict(plan.validity or {}),
+            "strategy_family": "session_impulse_retest",
+            "strategy_grade": "A",
+            "expected_summary": "session_impulse_retest benchmark | win≈67.0% EV≈+0.65R | tier=core",
+            "strategy_family_time_stop_max_bars": 8,
+        }
+        db.add(plan)
+        db.commit()
+
+        engine = StrategyEngine(db)
+        engine.subscribe_alert(symbol=symbol, channel="discord", alert_type="confirm", plan_id=plan_id, payload={})
+
+        calls: list[dict] = []
+
+        def _fake_dispatch(*, channel: str, alert_type: str, symbol: str, payload: dict) -> dict:
+            calls.append({"channel": channel, "alert_type": alert_type, "symbol": symbol, "payload": dict(payload)})
+            return {
+                "channel": channel,
+                "delivered": True,
+                "skipped": False,
+                "reason": "delivered",
+                "status_code": 204,
+                "target": f"{channel}:unit-test",
+                "latency_ms": 1.2,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+
+        monkeypatch.setattr(engine.notification_dispatcher, "dispatch", _fake_dispatch)
+
+        summary = engine._emit_pre_entry_plan_alerts(
+            symbol=symbol,
+            plans=[plan],
+            current_price=100.0,
+            candle_low=99.8,
+            candle_high=100.2,
+            atr_reference=1.0,
+            event_ts=datetime.now(timezone.utc),
+        )
+
+        assert summary["confirm"] == 1
+        assert len(calls) == 1
+        message = str(calls[0]["payload"]["message"])
+        assert "LONG e=100.0000 sl=98.8000 tp1=101.0000 tp2=102.0000" in message
+        assert "exp=" in message
+
+
 def test_ingest_execution_fill_emits_entry_tp_and_closed_alerts(monkeypatch) -> None:
     init_db()
     symbol = f"SIGFILL{int(datetime.now(timezone.utc).timestamp() * 1_000_000)}USDC"
@@ -236,9 +290,67 @@ def test_ingest_execution_fill_emits_entry_tp_and_closed_alerts(monkeypatch) -> 
         assert entry["accepted"] is True
         assert closed["accepted"] is True
         assert [row["alert_type"] for row in calls] == ["entry", "closed", "tp"]
-        assert "entry filled:" in calls[0]["payload"]["message"]
+        assert "fill=" in calls[0]["payload"]["message"]
         assert "position closed:" in calls[1]["payload"]["message"]
         assert "target exit:" in calls[2]["payload"]["message"]
+
+
+def test_duplicate_fill_does_not_reemit_fill_stage_alerts(monkeypatch) -> None:
+    init_db()
+    symbol = f"SIGDUP{int(datetime.now(timezone.utc).timestamp() * 1_000_000)}USDC"
+    plan_id = f"{symbol}_p1"
+    fill_ts = datetime.now(timezone.utc)
+
+    with SessionLocal() as db:
+        _seed_plan(db, symbol=symbol, plan_id=plan_id)
+        engine = StrategyEngine(db)
+        engine.subscribe_alert(symbol=symbol, channel="discord", alert_type="closed", plan_id=plan_id, payload={})
+        engine.subscribe_alert(symbol=symbol, channel="discord", alert_type="tp", plan_id=plan_id, payload={})
+
+        calls: list[dict] = []
+
+        def _fake_dispatch(*, channel: str, alert_type: str, symbol: str, payload: dict) -> dict:
+            calls.append({"channel": channel, "alert_type": alert_type, "symbol": symbol, "payload": dict(payload)})
+            return {
+                "channel": channel,
+                "delivered": True,
+                "skipped": False,
+                "reason": "delivered",
+                "status_code": 204,
+                "target": f"{channel}:unit-test",
+                "latency_ms": 1.2,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+
+        monkeypatch.setattr(engine.notification_dispatcher, "dispatch", _fake_dispatch)
+
+        first = engine.ingest_execution_fill(
+            fill_id=f"{plan_id}_closed",
+            plan_id=plan_id,
+            symbol=symbol,
+            stage=ExecutionFillStage.CLOSED,
+            fill_ts=fill_ts,
+            price=101.0,
+            qty=1.0,
+            fee=0.01,
+            payload={"exit_reason": "target_tp1", "realized_r": 1.0},
+        )
+        second = engine.ingest_execution_fill(
+            fill_id=f"{plan_id}_closed",
+            plan_id=plan_id,
+            symbol=symbol,
+            stage=ExecutionFillStage.CLOSED,
+            fill_ts=fill_ts,
+            price=101.0,
+            qty=1.0,
+            fee=0.01,
+            payload={"exit_reason": "target_tp1", "realized_r": 1.0},
+        )
+
+        assert first["accepted"] is True
+        assert second["accepted"] is True
+        assert second["duplicate"] is True
+        assert [row["alert_type"] for row in calls] == ["closed", "tp"]
 
 
 def test_tv_webhook_fanouts_confirm_subscription(monkeypatch) -> None:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-
 from app.core.enums import EntryModel
 from app.db.models import Candle, Zone
 from app.services.acceptance_rejection_classifier import AcceptanceRejectionResult
@@ -630,6 +629,498 @@ def test_trend_continuation_strategy_family_fields_are_written(monkeypatch) -> N
     assert validity["strategy_scorecard_trendline_bonus"] == 0.0
 
 
+def test_btc_sweep_reversal_limit_adds_fast_failure_guard(monkeypatch) -> None:
+    generator = PlanGenerator()
+    monkeypatch.setattr(generator.settings, "btc_sweep_reversal_limit_fast_failure_enabled", True)
+    monkeypatch.setattr(generator.settings, "btc_sweep_reversal_limit_fast_failure_allowed_sessions", "new_york")
+    monkeypatch.setattr(generator.settings, "btc_sweep_reversal_limit_fast_failure_max_bars", 1)
+    monkeypatch.setattr(generator.settings, "btc_sweep_reversal_limit_fast_failure_stop_r", 0.6)
+    monkeypatch.setattr(generator.settings, "btc_sweep_reversal_limit_fast_failure_requires_sl_touch", True)
+    zones = [
+        _base_zone(
+            zone_id="z_sr_limit",
+            zone_type="OB",
+            dir_bias="support",
+            low=98.9,
+            high=99.2,
+            mid=99.05,
+            stats={"p1r": 0.72, "p2r": 0.54, "p3r": 0.34, "ev_r": 0.58, "sample_size": 120},
+        ),
+        _base_zone(zone_id="z_target", zone_type="LP", dir_bias="resistance", low=101.6, high=102.2, mid=101.9, stats={}),
+    ]
+    context = ContextSnapshot(
+        symbol="BTCUSDC",
+        regime_15m=0.48,
+        jump_rate_5m=0.06,
+        friction_5m=0.11,
+        atr5=0.42,
+        atr15=0.88,
+        sdir=0.2,
+        sevt=-0.12,
+        f=0.15,
+        v=0.25,
+        a=0.08,
+        vz=0.18,
+        az=0.09,
+        last_price=99.08,
+        regime_label="range",
+    )
+    monkeypatch.setattr(
+        generator.reaction_classifier,
+        "classify_zone",
+        lambda **kwargs: AcceptanceRejectionResult(
+            available=True,
+            classification="rejection_confirmed",
+            rejection_score=84.0,
+            acceptance_score=20.0,
+            rejection_hard_count=3,
+            acceptance_hard_count=0,
+            mixed_reasons=[],
+            input={"outside_close_count": 1, "session_quality": 0.86},
+        ),
+    )
+    monkeypatch.setattr(
+        generator.strategy_family_router,
+        "route",
+        lambda **kwargs: StrategyFamilyDecision(
+            available=True,
+            family="sweep_reversal",
+            grade="A",
+            score=87.0,
+            reason="sweep_reversal_limit",
+            entry_model=EntryModel.LIMIT,
+            components={"location": 18.0, "reaction_quality": 20.0},
+            clean_case=True,
+            confirm_only=False,
+            split={"tp1": 0.4, "tp2": 0.3, "runner": 0.3},
+            time_stop_min_bars=3,
+            time_stop_max_bars=5,
+            scorecard={
+                "family": "sweep_reversal",
+                "grade": "A",
+                "score": 87.0,
+                "buckets": {
+                    "location": 29.0,
+                    "liquidity": 18.0,
+                    "reaction": 35.0,
+                    "invalidation": 5.0,
+                    "session": 0.0,
+                    "trendline_bonus": 0.0,
+                },
+                "raw_components": {"location": 18.0, "reaction_quality": 20.0},
+            },
+        ),
+    )
+
+    ranked = generator.generate(symbol="BTCUSDC", zones=zones, context=context, now=datetime(2026, 3, 9, 14, 0, tzinfo=timezone.utc))
+    assert ranked
+    plan = ranked[0].plan
+    validity = dict(plan.validity or {})
+    assert plan.entry_model == "LIMIT"
+    assert validity["strategy_fast_failure_enabled"] is True
+    assert validity["strategy_fast_failure_policy"] == "btc_sweep_reversal_limit_initial_guard_stop"
+    assert validity["strategy_fast_failure_max_bars"] == 1
+    assert validity["strategy_fast_failure_stop_r"] == 0.6
+    assert validity["strategy_fast_failure_requires_sl_touch"] is True
+
+
+def test_btc_sweep_reversal_limit_adds_fast_failure_guard_for_london_session(monkeypatch) -> None:
+    generator = PlanGenerator()
+    monkeypatch.setattr(generator.settings, "btc_sweep_reversal_limit_fast_failure_enabled", True)
+    monkeypatch.setattr(generator.settings, "btc_sweep_reversal_limit_fast_failure_allowed_sessions", "london,new_york")
+    monkeypatch.setattr(generator.settings, "btc_sweep_reversal_limit_fast_failure_max_bars", 5)
+    monkeypatch.setattr(generator.settings, "btc_sweep_reversal_limit_fast_failure_stop_r", 0.6)
+    monkeypatch.setattr(generator.settings, "btc_sweep_reversal_limit_fast_failure_requires_sl_touch", True)
+    zones = [
+        _base_zone(
+            zone_id="z_sr_limit_london",
+            zone_type="OB",
+            dir_bias="support",
+            low=98.9,
+            high=99.2,
+            mid=99.05,
+            stats={"p1r": 0.72, "p2r": 0.54, "p3r": 0.34, "ev_r": 0.58, "sample_size": 120},
+        ),
+        _base_zone(zone_id="z_target", zone_type="LP", dir_bias="resistance", low=101.6, high=102.2, mid=101.9, stats={}),
+    ]
+    context = ContextSnapshot(
+        symbol="BTCUSDC",
+        regime_15m=0.48,
+        jump_rate_5m=0.06,
+        friction_5m=0.11,
+        atr5=0.42,
+        atr15=0.88,
+        sdir=0.2,
+        sevt=-0.12,
+        f=0.15,
+        v=0.25,
+        a=0.08,
+        vz=0.18,
+        az=0.09,
+        last_price=99.08,
+        regime_label="range",
+    )
+    monkeypatch.setattr(
+        generator.reaction_classifier,
+        "classify_zone",
+        lambda **kwargs: AcceptanceRejectionResult(
+            available=True,
+            classification="rejection_confirmed",
+            rejection_score=84.0,
+            acceptance_score=20.0,
+            rejection_hard_count=3,
+            acceptance_hard_count=0,
+            mixed_reasons=[],
+            input={"outside_close_count": 1, "session_quality": 0.86},
+        ),
+    )
+    monkeypatch.setattr(
+        generator.strategy_family_router,
+        "route",
+        lambda **kwargs: StrategyFamilyDecision(
+            available=True,
+            family="sweep_reversal",
+            grade="A",
+            score=87.0,
+            reason="sweep_reversal_limit",
+            entry_model=EntryModel.LIMIT,
+            components={"location": 18.0, "reaction_quality": 20.0},
+            clean_case=True,
+            confirm_only=False,
+            split={"tp1": 0.4, "tp2": 0.3, "runner": 0.3},
+            time_stop_min_bars=3,
+            time_stop_max_bars=5,
+            scorecard={
+                "family": "sweep_reversal",
+                "grade": "A",
+                "score": 87.0,
+                "buckets": {
+                    "location": 29.0,
+                    "liquidity": 18.0,
+                    "reaction": 35.0,
+                    "invalidation": 5.0,
+                    "session": 0.0,
+                    "trendline_bonus": 0.0,
+                },
+                "raw_components": {"location": 18.0, "reaction_quality": 20.0},
+            },
+        ),
+    )
+
+    ranked = generator.generate(symbol="BTCUSDC", zones=zones, context=context, now=datetime(2026, 3, 9, 8, 0, tzinfo=timezone.utc))
+    assert ranked
+    validity = dict(ranked[0].plan.validity or {})
+    assert validity["strategy_fast_failure_enabled"] is True
+    assert validity["strategy_fast_failure_session_name"] == "london"
+    assert validity["strategy_fast_failure_max_bars"] == 5
+    assert validity["strategy_fast_failure_stop_r"] == 0.6
+    assert validity["strategy_fast_failure_requires_sl_touch"] is True
+
+
+def test_btc_sweep_reversal_limit_preserves_fast_failure_micro_stop_precision(monkeypatch) -> None:
+    generator = PlanGenerator()
+    monkeypatch.setattr(generator.settings, "btc_sweep_reversal_limit_fast_failure_enabled", True)
+    monkeypatch.setattr(generator.settings, "btc_sweep_reversal_limit_fast_failure_allowed_sessions", "new_york")
+    monkeypatch.setattr(generator.settings, "btc_sweep_reversal_limit_fast_failure_max_bars", 18)
+    monkeypatch.setattr(generator.settings, "btc_sweep_reversal_limit_fast_failure_stop_r", 0.000001)
+    monkeypatch.setattr(generator.settings, "btc_sweep_reversal_limit_fast_failure_requires_sl_touch", True)
+    zones = [
+        _base_zone(
+            zone_id="z_sr_limit_micro_stop",
+            zone_type="OB",
+            dir_bias="support",
+            low=98.9,
+            high=99.2,
+            mid=99.05,
+            stats={"p1r": 0.72, "p2r": 0.54, "p3r": 0.34, "ev_r": 0.58, "sample_size": 120},
+        ),
+        _base_zone(zone_id="z_target", zone_type="LP", dir_bias="resistance", low=101.6, high=102.2, mid=101.9, stats={}),
+    ]
+    context = ContextSnapshot(
+        symbol="BTCUSDC",
+        regime_15m=0.48,
+        jump_rate_5m=0.06,
+        friction_5m=0.11,
+        atr5=0.42,
+        atr15=0.88,
+        sdir=0.2,
+        sevt=-0.12,
+        f=0.15,
+        v=0.25,
+        a=0.08,
+        vz=0.18,
+        az=0.09,
+        last_price=99.08,
+        regime_label="range",
+    )
+    monkeypatch.setattr(
+        generator.reaction_classifier,
+        "classify_zone",
+        lambda **kwargs: AcceptanceRejectionResult(
+            available=True,
+            classification="rejection_confirmed",
+            rejection_score=84.0,
+            acceptance_score=20.0,
+            rejection_hard_count=3,
+            acceptance_hard_count=0,
+            mixed_reasons=[],
+            input={"outside_close_count": 1, "session_quality": 0.86},
+        ),
+    )
+    monkeypatch.setattr(
+        generator.strategy_family_router,
+        "route",
+        lambda **kwargs: StrategyFamilyDecision(
+            available=True,
+            family="sweep_reversal",
+            grade="A",
+            score=87.0,
+            reason="sweep_reversal_limit",
+            entry_model=EntryModel.LIMIT,
+            components={"location": 18.0, "reaction_quality": 20.0},
+            clean_case=True,
+            confirm_only=False,
+            split={"tp1": 0.4, "tp2": 0.3, "runner": 0.3},
+            time_stop_min_bars=3,
+            time_stop_max_bars=5,
+            scorecard={
+                "family": "sweep_reversal",
+                "grade": "A",
+                "score": 87.0,
+                "buckets": {
+                    "location": 29.0,
+                    "liquidity": 18.0,
+                    "reaction": 35.0,
+                    "invalidation": 5.0,
+                    "session": 0.0,
+                    "trendline_bonus": 0.0,
+                },
+                "raw_components": {"location": 18.0, "reaction_quality": 20.0},
+            },
+        ),
+    )
+
+    ranked = generator.generate(symbol="BTCUSDC", zones=zones, context=context, now=datetime(2026, 3, 9, 14, 0, tzinfo=timezone.utc))
+    assert ranked
+    validity = dict(ranked[0].plan.validity or {})
+    assert validity["strategy_fast_failure_enabled"] is True
+    assert validity["strategy_fast_failure_max_bars"] == 18
+    assert validity["strategy_fast_failure_stop_r"] == 0.000001
+    assert validity["strategy_fast_failure_requires_sl_touch"] is True
+
+
+def test_btc_sweep_reversal_limit_writes_shadow_tilt_for_weak_long(monkeypatch) -> None:
+    generator = PlanGenerator()
+    zones = [
+        _base_zone(
+            zone_id="z_sr_limit_shadow_long",
+            zone_type="OB",
+            dir_bias="support",
+            low=98.9,
+            high=99.2,
+            mid=99.05,
+            stats={"p1r": 0.72, "p2r": 0.54, "p3r": 0.34, "ev_r": 0.58, "sample_size": 120},
+        ),
+        _base_zone(zone_id="z_target_shadow_long", zone_type="LP", dir_bias="resistance", low=101.6, high=102.2, mid=101.9, stats={}),
+    ]
+    context = ContextSnapshot(
+        symbol="BTCUSDC",
+        regime_15m=0.48,
+        jump_rate_5m=0.06,
+        friction_5m=0.11,
+        atr5=0.42,
+        atr15=0.88,
+        sdir=0.2,
+        sevt=-0.12,
+        f=0.15,
+        v=0.25,
+        a=0.08,
+        vz=0.18,
+        az=0.09,
+        last_price=99.08,
+        regime_label="range",
+        signal_telemetry={
+            "telemetry_source": "context_snapshot",
+            "telemetry_version": "v1",
+            "prior_window_bars": 24,
+            "close_position": 0.74,
+            "body_fraction": 0.62,
+            "range_atr": 0.71,
+            "body_atr": 0.32,
+            "prior_range_atr": 2.4,
+            "ema_spread_atr": 0.41,
+            "close_vs_ema_fast_atr": -0.62,
+            "long_sweep_distance_atr": 0.26,
+            "short_sweep_distance_atr": 0.08,
+            "long_reclaim_distance_atr": 0.35,
+            "short_reclaim_distance_atr": 0.04,
+        },
+    )
+    monkeypatch.setattr(
+        generator.reaction_classifier,
+        "classify_zone",
+        lambda **kwargs: AcceptanceRejectionResult(
+            available=True,
+            classification="rejection_confirmed",
+            rejection_score=84.0,
+            acceptance_score=20.0,
+            rejection_hard_count=3,
+            acceptance_hard_count=0,
+            mixed_reasons=[],
+            input={"outside_close_count": 1, "session_quality": 0.86},
+        ),
+    )
+    monkeypatch.setattr(
+        generator.strategy_family_router,
+        "route",
+        lambda **kwargs: StrategyFamilyDecision(
+            available=True,
+            family="sweep_reversal",
+            grade="A",
+            score=87.0,
+            reason="sweep_reversal_limit",
+            entry_model=EntryModel.LIMIT,
+            components={"location": 18.0, "reaction_quality": 20.0},
+            clean_case=True,
+            confirm_only=False,
+            split={"tp1": 0.4, "tp2": 0.3, "runner": 0.3},
+            time_stop_min_bars=3,
+            time_stop_max_bars=5,
+            scorecard={
+                "family": "sweep_reversal",
+                "grade": "A",
+                "score": 87.0,
+                "buckets": {
+                    "location": 29.0,
+                    "liquidity": 18.0,
+                    "reaction": 35.0,
+                    "invalidation": 5.0,
+                    "session": 0.0,
+                    "trendline_bonus": 0.0,
+                },
+                "raw_components": {"location": 18.0, "reaction_quality": 20.0},
+            },
+        ),
+    )
+
+    ranked = generator.generate(symbol="BTCUSDC", zones=zones, context=context, now=datetime(2026, 3, 9, 14, 0, tzinfo=timezone.utc))
+    assert ranked
+    validity = dict(ranked[0].plan.validity or {})
+    shadow_tilt = dict(validity.get("runtime_signal_shadow_tilt") or {})
+    strategy_shadow_tilt = dict(dict(validity.get("strategy_sizing") or {}).get("runtime_signal_shadow_tilt") or {})
+    assert shadow_tilt["classification"] == "weak_long_understretch"
+    assert shadow_tilt["shadow_size_multiplier"] == 0.75
+    assert shadow_tilt["apply_live"] is False
+    assert strategy_shadow_tilt["reason_code"] == "shadow_reduce_weak_long"
+    assert strategy_shadow_tilt["shadow_recommended_risk_r"] < strategy_shadow_tilt["base_recommended_risk_r"]
+
+
+def test_btc_sweep_reversal_limit_writes_shadow_tilt_for_strong_short(monkeypatch) -> None:
+    generator = PlanGenerator()
+    zones = [
+        _base_zone(
+            zone_id="z_sr_limit_shadow_short",
+            zone_type="OB",
+            dir_bias="resistance",
+            low=100.8,
+            high=101.2,
+            mid=101.0,
+            stats={"p1r": 0.72, "p2r": 0.54, "p3r": 0.34, "ev_r": 0.58, "sample_size": 120},
+        ),
+        _base_zone(zone_id="z_target_shadow_short", zone_type="LP", dir_bias="support", low=98.1, high=98.6, mid=98.35, stats={}),
+    ]
+    context = ContextSnapshot(
+        symbol="BTCUSDC",
+        regime_15m=0.48,
+        jump_rate_5m=0.06,
+        friction_5m=0.11,
+        atr5=0.42,
+        atr15=0.88,
+        sdir=-0.2,
+        sevt=0.12,
+        f=-0.15,
+        v=-0.25,
+        a=-0.08,
+        vz=-0.18,
+        az=-0.09,
+        last_price=101.02,
+        regime_label="range",
+        signal_telemetry={
+            "telemetry_source": "context_snapshot",
+            "telemetry_version": "v1",
+            "prior_window_bars": 24,
+            "close_position": 0.24,
+            "body_fraction": 0.81,
+            "range_atr": 0.74,
+            "body_atr": 0.39,
+            "prior_range_atr": 2.2,
+            "ema_spread_atr": 0.45,
+            "close_vs_ema_fast_atr": 0.58,
+            "long_sweep_distance_atr": 0.02,
+            "short_sweep_distance_atr": 0.46,
+            "long_reclaim_distance_atr": 0.05,
+            "short_reclaim_distance_atr": 0.31,
+        },
+    )
+    monkeypatch.setattr(
+        generator.reaction_classifier,
+        "classify_zone",
+        lambda **kwargs: AcceptanceRejectionResult(
+            available=True,
+            classification="rejection_confirmed",
+            rejection_score=84.0,
+            acceptance_score=20.0,
+            rejection_hard_count=3,
+            acceptance_hard_count=0,
+            mixed_reasons=[],
+            input={"outside_close_count": 1, "session_quality": 0.86},
+        ),
+    )
+    monkeypatch.setattr(
+        generator.strategy_family_router,
+        "route",
+        lambda **kwargs: StrategyFamilyDecision(
+            available=True,
+            family="sweep_reversal",
+            grade="A",
+            score=87.0,
+            reason="sweep_reversal_limit",
+            entry_model=EntryModel.LIMIT,
+            components={"location": 18.0, "reaction_quality": 20.0},
+            clean_case=True,
+            confirm_only=False,
+            split={"tp1": 0.4, "tp2": 0.3, "runner": 0.3},
+            time_stop_min_bars=3,
+            time_stop_max_bars=5,
+            scorecard={
+                "family": "sweep_reversal",
+                "grade": "A",
+                "score": 87.0,
+                "buckets": {
+                    "location": 29.0,
+                    "liquidity": 18.0,
+                    "reaction": 35.0,
+                    "invalidation": 5.0,
+                    "session": 0.0,
+                    "trendline_bonus": 0.0,
+                },
+                "raw_components": {"location": 18.0, "reaction_quality": 20.0},
+            },
+        ),
+    )
+
+    ranked = generator.generate(symbol="BTCUSDC", zones=zones, context=context, now=datetime(2026, 3, 9, 14, 0, tzinfo=timezone.utc))
+    assert ranked
+    validity = dict(ranked[0].plan.validity or {})
+    shadow_tilt = dict(validity.get("runtime_signal_shadow_tilt") or {})
+    strategy_shadow_tilt = dict(dict(validity.get("strategy_sizing") or {}).get("runtime_signal_shadow_tilt") or {})
+    assert shadow_tilt["classification"] == "strong_short_sweep"
+    assert shadow_tilt["shadow_size_multiplier"] == 1.4762
+    assert shadow_tilt["apply_live"] is False
+    assert strategy_shadow_tilt["reason_code"] == "shadow_increase_strong_short"
+    assert strategy_shadow_tilt["shadow_recommended_risk_r"] > strategy_shadow_tilt["base_recommended_risk_r"]
+
+
 def test_legacy_plan_preserves_router_reason_when_family_is_none(monkeypatch) -> None:
     generator = PlanGenerator()
     zones = [
@@ -699,6 +1190,8 @@ def test_legacy_plan_preserves_router_reason_when_family_is_none(monkeypatch) ->
 
 def test_generation_diagnostics_reports_low_confluence_hard_gate(monkeypatch) -> None:
     generator = PlanGenerator()
+    generator.settings.transition_edge_variant_enabled = False
+    generator.settings.transition_edge_variant_shadow_only = True
     zones = [
         _base_zone(zone_id="z_diag_1", zone_type="LP", dir_bias="support", low=98.9, high=99.1, mid=99.0),
         _base_zone(zone_id="z_diag_2", zone_type="OB", dir_bias="resistance", low=100.9, high=101.1, mid=101.0),
@@ -737,8 +1230,500 @@ def test_generation_diagnostics_reports_low_confluence_hard_gate(monkeypatch) ->
     assert payload["post_hard_gate_zone_count"] == 0
     assert payload["pre_generation_candidate_count"] == 0
     assert payload["hard_gate_block_counts"] == {"low_confluence": 2}
+    assert payload["transition_edge_variant_shadow_counts"] == {}
+    assert payload["transition_edge_variant_shadow_summary"] == {
+        "available": False,
+        "shadow_only": True,
+        "variant": "exp_6_fvg_relaxed_plus_transition_override",
+        "evaluated": 2,
+        "pass": 0,
+        "pass_rate": 0.0,
+        "reason_mix": {},
+        "candidate_baseline": 0,
+        "candidate_shadow": 0,
+        "shadow_candidate_delta": 0,
+        "low_confluence_block_baseline": 2,
+        "low_confluence_block_shadow": 2,
+        "low_confluence_block_delta": 0,
+        "expected_ev_r_proxy": 0.0,
+    }
+    assert payload["reaction_unavailable_reason_counts"] == {}
     assert payload["block_examples"][0]["stage"] == "hard_gate"
     assert payload["block_examples"][0]["reason"] == "low_confluence"
+
+
+def test_transition_edge_variant_can_rescue_low_confluence_transition_candidate(monkeypatch) -> None:
+    generator = PlanGenerator()
+    generator.settings.transition_edge_variant_enabled = True
+    generator.settings.transition_edge_variant_shadow_only = False
+    zones = [
+        _base_zone(zone_id="z_transition_variant", zone_type="OB", dir_bias="support", low=98.8, high=99.4, mid=99.1),
+        _base_zone(zone_id="z_target", zone_type="LP", dir_bias="resistance", low=101.7, high=102.3, mid=102.0, stats={}),
+    ]
+    context = ContextSnapshot(
+        symbol="BTCUSDC",
+        regime_15m=0.72,
+        jump_rate_5m=0.04,
+        friction_5m=0.10,
+        atr5=0.45,
+        atr15=0.9,
+        sdir=0.1,
+        sevt=0.0,
+        f=0.1,
+        v=0.12,
+        a=0.03,
+        vz=0.2,
+        az=0.1,
+        last_price=99.0,
+        regime_label="transition",
+        transition_score=48.0,
+        transition_state="transition_watch",
+    )
+
+    monkeypatch.setattr(
+        generator,
+        "_confluence_score",
+        lambda *args, **kwargs: (
+            55.0,
+            {
+                "liquidity": 82.0,
+                "fvg_displacement": 56.0,
+                "htf_alignment": 58.0,
+                "ob_freshness": 100.0,
+                "trend_proxy": 58.0,
+            },
+            {
+                "liquidity": 0.44,
+                "fvg_displacement": 0.24,
+                "htf_alignment": 0.14,
+                "ob_freshness": 0.13,
+                "trend_proxy": 0.05,
+            },
+            {
+                "liquidity": 0.44,
+                "fvg_displacement": 0.24,
+                "htf_alignment": 0.14,
+                "ob_freshness": 0.13,
+                "trend_proxy": 0.05,
+            },
+            1.0,
+        ),
+    )
+
+    def _fake_build_input_with_reason(**kwargs):
+        if kwargs.get("min_event_bars") == 1:
+            return "one_bar_payload", "ok"
+        return None, "insufficient_post_sweep_bars"
+
+    def _fake_classify(payload):
+        if payload == "one_bar_payload":
+            return AcceptanceRejectionResult(
+                available=True,
+                classification="rejection_tentative",
+                rejection_score=64.0,
+                acceptance_score=8.0,
+                rejection_hard_count=2,
+                acceptance_hard_count=0,
+                mixed_reasons=[],
+                input={"bars": [], "session_quality": 0.8, "outside_close_count": 0},
+            )
+        return AcceptanceRejectionResult(
+            available=False,
+            classification="not_applicable",
+            rejection_score=0.0,
+            acceptance_score=0.0,
+            rejection_hard_count=0,
+            acceptance_hard_count=0,
+            mixed_reasons=[],
+            input={},
+        )
+
+    monkeypatch.setattr(generator.reaction_classifier, "build_input_with_reason", _fake_build_input_with_reason)
+    monkeypatch.setattr(generator.reaction_classifier, "classify", _fake_classify)
+    monkeypatch.setattr(
+        generator.strategy_family_router,
+        "route",
+        lambda **kwargs: StrategyFamilyDecision(
+            available=True,
+            family="sweep_reversal",
+            grade="A",
+            score=88.0,
+            reason="sweep_reversal_limit",
+            entry_model=EntryModel.LIMIT,
+        ),
+    )
+    monkeypatch.setattr(generator.strategy_mode, "allow_candidate", lambda **kwargs: (True, None))
+    monkeypatch.setattr(generator, "_meta_filter", lambda **kwargs: (True, 65.0, 54.0, "meta_pass"))
+
+    ranked = generator.generate(symbol="BTCUSDC", zones=zones, context=context, candles_5m=_trend_candles())
+
+    assert ranked
+    validity = dict(ranked[0].plan.validity or {})
+    assert validity["transition_edge_variant_applied"] is True
+    assert validity["transition_edge_variant_shadow_evaluated"] is True
+    assert validity["transition_edge_variant"]["variant"] == "exp_6_fvg_relaxed_plus_transition_override"
+    assert validity["transition_edge_variant"]["rescue_reason"] == "one_bar_shadow"
+    assert validity["strategy_family"] == "sweep_reversal"
+
+
+def test_transition_edge_variant_shadow_only_does_not_change_generation(monkeypatch) -> None:
+    generator = PlanGenerator()
+    generator.settings.transition_edge_variant_enabled = True
+    generator.settings.transition_edge_variant_shadow_only = True
+    zones = [
+        _base_zone(
+            zone_id="z_transition_shadow",
+            zone_type="OB",
+            dir_bias="support",
+            low=98.8,
+            high=99.4,
+            mid=99.1,
+            stats={"p1r": 0.68, "p2r": 0.52, "p3r": 0.31, "sample_size": 80, "ev_r": 0.25},
+        ),
+        _base_zone(zone_id="z_target", zone_type="LP", dir_bias="resistance", low=101.7, high=102.3, mid=102.0, stats={}),
+    ]
+    context = ContextSnapshot(
+        symbol="BTCUSDC",
+        regime_15m=0.72,
+        jump_rate_5m=0.04,
+        friction_5m=0.10,
+        atr5=0.45,
+        atr15=0.9,
+        sdir=0.1,
+        sevt=0.0,
+        f=0.1,
+        v=0.12,
+        a=0.03,
+        vz=0.2,
+        az=0.1,
+        last_price=99.0,
+        regime_label="transition",
+        transition_score=48.0,
+        transition_state="transition_watch",
+    )
+
+    monkeypatch.setattr(
+        generator,
+        "_confluence_score",
+        lambda *args, **kwargs: (
+            55.0,
+            {
+                "liquidity": 82.0,
+                "fvg_displacement": 56.0,
+                "htf_alignment": 58.0,
+                "ob_freshness": 100.0,
+                "trend_proxy": 58.0,
+            },
+            {},
+            {},
+            1.0,
+        ),
+    )
+    monkeypatch.setattr(
+        generator.reaction_classifier,
+        "build_input_with_reason",
+        lambda **kwargs: (
+            ("one_bar_payload", "ok")
+            if kwargs.get("min_event_bars") == 1 and getattr(kwargs.get("zone"), "zone_id", "") == "z_transition_shadow"
+            else (None, "insufficient_post_sweep_bars")
+        ),
+    )
+    monkeypatch.setattr(
+        generator.reaction_classifier,
+        "classify",
+        lambda payload: AcceptanceRejectionResult(
+            available=payload == "one_bar_payload",
+            classification="rejection_tentative" if payload == "one_bar_payload" else "not_applicable",
+            rejection_score=64.0 if payload == "one_bar_payload" else 0.0,
+            acceptance_score=8.0 if payload == "one_bar_payload" else 0.0,
+            rejection_hard_count=2 if payload == "one_bar_payload" else 0,
+            acceptance_hard_count=0,
+            mixed_reasons=[],
+            input={"bars": [], "session_quality": 0.8, "outside_close_count": 0} if payload == "one_bar_payload" else {},
+        ),
+    )
+    monkeypatch.setattr(
+        generator.strategy_family_router,
+        "route",
+        lambda **kwargs: StrategyFamilyDecision(
+            available=True,
+            family="sweep_reversal",
+            grade="A",
+            score=88.0,
+            reason="sweep_reversal_limit",
+            entry_model=EntryModel.LIMIT,
+        ),
+    )
+
+    ranked = generator.generate(symbol="BTCUSDC", zones=zones, context=context, candles_5m=_trend_candles())
+    diagnostics = generator.generation_diagnostics(
+        symbol="BTCUSDC",
+        zones=zones,
+        context=context,
+        candles_5m=_trend_candles(),
+    )
+
+    assert ranked == []
+    assert diagnostics["transition_edge_variant_shadow_summary"] == {
+        "available": True,
+        "shadow_only": True,
+        "variant": "exp_6_fvg_relaxed_plus_transition_override",
+        "evaluated": 2,
+        "pass": 1,
+        "pass_rate": 0.5,
+        "reason_mix": {"one_bar_shadow": 1},
+        "candidate_baseline": 0,
+        "candidate_shadow": 1,
+        "shadow_candidate_delta": 1,
+        "low_confluence_block_baseline": 2,
+        "low_confluence_block_shadow": 1,
+        "low_confluence_block_delta": -1,
+        "expected_ev_r_proxy": 0.25,
+    }
+
+
+def test_generation_diagnostics_reports_zone_band_shadow_rescue(monkeypatch) -> None:
+    generator = PlanGenerator()
+    zones = [
+        _base_zone(zone_id="z_shadow", zone_type="LP", dir_bias="support", low=99.0, high=100.0, mid=99.5),
+    ]
+    context = ContextSnapshot(
+        symbol="BTCUSDC",
+        regime_15m=0.28,
+        jump_rate_5m=0.03,
+        friction_5m=0.06,
+        atr5=0.45,
+        atr15=0.9,
+        sdir=0.02,
+        sevt=0.0,
+        f=0.01,
+        v=0.02,
+        a=0.01,
+        vz=0.1,
+        az=0.1,
+        last_price=99.6,
+        regime_label="range",
+    )
+    monkeypatch.setattr(
+        generator,
+        "_confluence_score",
+        lambda *args, **kwargs: (85.0, {"trend_proxy": 70.0}, {}, {}, 1.0),
+    )
+    monkeypatch.setattr(generator, "_find_near_lp", lambda *args, **kwargs: False)
+    monkeypatch.setattr(generator, "_zone_strength", lambda *args, **kwargs: 80.0)
+    monkeypatch.setattr(generator.strategy_mode, "allow_candidate", lambda **kwargs: (True, None))
+
+    def _fake_build_input_with_reason(**kwargs):
+        if kwargs.get("swept_level_type_override") == "zone_band_shadow":
+            return "shadow_payload", "ok"
+        return None, "no_recent_level_sweep"
+
+    def _fake_classify(payload):
+        if payload == "shadow_payload":
+            return AcceptanceRejectionResult(
+                available=True,
+                classification="rejection_confirmed",
+                rejection_score=70.0,
+                acceptance_score=10.0,
+                rejection_hard_count=3,
+                acceptance_hard_count=0,
+                mixed_reasons=[],
+                input={"bars": []},
+            )
+        return AcceptanceRejectionResult(
+            available=False,
+            classification="not_applicable",
+            rejection_score=0.0,
+            acceptance_score=0.0,
+            rejection_hard_count=0,
+            acceptance_hard_count=0,
+            mixed_reasons=[],
+            input={},
+        )
+
+    monkeypatch.setattr(generator.reaction_classifier, "build_input_with_reason", _fake_build_input_with_reason)
+    monkeypatch.setattr(generator.reaction_classifier, "classify", _fake_classify)
+    monkeypatch.setattr(
+        generator.strategy_family_router,
+        "route",
+        lambda **kwargs: StrategyFamilyDecision(
+            available=True,
+            family="sweep_reversal",
+            grade="A",
+            score=88.0,
+            reason="sweep_reversal_limit",
+            entry_model=EntryModel.LIMIT,
+        ),
+    )
+
+    payload = generator.generation_diagnostics(symbol="BTCUSDC", zones=zones, context=context, candles_5m=_trend_candles())
+
+    assert payload["reaction_unavailable_reason_counts"] == {"no_recent_level_sweep": 1}
+    assert payload["reaction_shadow_zone_band_counts"]["exact_unavailable_zones"] == 1
+    assert payload["reaction_shadow_zone_band_counts"]["zone_band:shadow_input_available"] == 1
+    assert payload["reaction_shadow_zone_band_counts"]["zone_band:rescued_from:no_recent_level_sweep"] == 1
+    assert payload["reaction_shadow_zone_band_counts"]["zone_band:shadow_classification:rejection_confirmed"] == 1
+    assert payload["reaction_shadow_zone_band_counts"]["zone_band:shadow_available_family"] == 1
+    assert payload["reaction_shadow_zone_band_counts"]["zone_band:shadow_available_family:sweep_reversal"] == 1
+    assert payload["reaction_shadow_zone_band_counts"]["zone_band:shadow_available_entry_model:LIMIT"] == 1
+
+
+def test_generation_diagnostics_reports_one_bar_shadow_rescue(monkeypatch) -> None:
+    generator = PlanGenerator()
+    zones = [
+        _base_zone(zone_id="z_one_bar", zone_type="LP", dir_bias="support", low=99.0, high=100.0, mid=99.5),
+    ]
+    context = ContextSnapshot(
+        symbol="BTCUSDC",
+        regime_15m=0.28,
+        jump_rate_5m=0.03,
+        friction_5m=0.06,
+        atr5=0.45,
+        atr15=0.9,
+        sdir=0.02,
+        sevt=0.0,
+        f=0.01,
+        v=0.02,
+        a=0.01,
+        vz=0.1,
+        az=0.1,
+        last_price=99.6,
+        regime_label="range",
+    )
+    monkeypatch.setattr(
+        generator,
+        "_confluence_score",
+        lambda *args, **kwargs: (85.0, {"trend_proxy": 70.0}, {}, {}, 1.0),
+    )
+    monkeypatch.setattr(generator, "_find_near_lp", lambda *args, **kwargs: False)
+    monkeypatch.setattr(generator, "_zone_strength", lambda *args, **kwargs: 80.0)
+    monkeypatch.setattr(generator.strategy_mode, "allow_candidate", lambda **kwargs: (True, None))
+
+    def _fake_build_input_with_reason(**kwargs):
+        if kwargs.get("min_event_bars") == 1:
+            return "one_bar_payload", "ok"
+        return None, "insufficient_post_sweep_bars"
+
+    def _fake_classify(payload):
+        if payload == "one_bar_payload":
+            return AcceptanceRejectionResult(
+                available=True,
+                classification="rejection_tentative",
+                rejection_score=62.0,
+                acceptance_score=8.0,
+                rejection_hard_count=2,
+                acceptance_hard_count=0,
+                mixed_reasons=[],
+                input={"bars": []},
+            )
+        return AcceptanceRejectionResult(
+            available=False,
+            classification="not_applicable",
+            rejection_score=0.0,
+            acceptance_score=0.0,
+            rejection_hard_count=0,
+            acceptance_hard_count=0,
+            mixed_reasons=[],
+            input={},
+        )
+
+    monkeypatch.setattr(generator.reaction_classifier, "build_input_with_reason", _fake_build_input_with_reason)
+    monkeypatch.setattr(generator.reaction_classifier, "classify", _fake_classify)
+    monkeypatch.setattr(
+        generator.strategy_family_router,
+        "route",
+        lambda **kwargs: StrategyFamilyDecision(
+            available=True,
+            family="sweep_reversal",
+            grade="B",
+            score=77.0,
+            reason="sweep_reversal_limit",
+            entry_model=EntryModel.LIMIT,
+        ),
+    )
+
+    payload = generator.generation_diagnostics(symbol="BTCUSDC", zones=zones, context=context, candles_5m=_trend_candles())
+
+    assert payload["reaction_unavailable_reason_counts"] == {"insufficient_post_sweep_bars": 1}
+    assert payload["reaction_shadow_one_bar_counts"]["exact_insufficient_post_sweep_zones"] == 1
+    assert payload["reaction_shadow_one_bar_counts"]["one_bar:shadow_input_available"] == 1
+    assert payload["reaction_shadow_one_bar_counts"]["one_bar:rescued_from:insufficient_post_sweep_bars"] == 1
+    assert payload["reaction_shadow_one_bar_counts"]["one_bar:shadow_classification:rejection_tentative"] == 1
+    assert payload["reaction_shadow_one_bar_counts"]["one_bar:shadow_available_family:sweep_reversal"] == 1
+    assert payload["reaction_shadow_one_bar_counts"]["one_bar:shadow_available_entry_model:LIMIT"] == 1
+
+
+def test_generation_diagnostics_reports_proof_reclaim_shadow_signal(monkeypatch) -> None:
+    generator = PlanGenerator()
+    zones = [
+        _base_zone(zone_id="z_proof_shadow", zone_type="LP", dir_bias="support", low=99.0, high=100.0, mid=99.5),
+    ]
+    context = ContextSnapshot(
+        symbol="BTCUSDC",
+        regime_15m=0.28,
+        jump_rate_5m=0.03,
+        friction_5m=0.06,
+        atr5=0.45,
+        atr15=0.9,
+        sdir=0.02,
+        sevt=0.0,
+        f=0.01,
+        v=0.02,
+        a=0.01,
+        vz=0.1,
+        az=0.1,
+        last_price=99.6,
+        regime_label="range",
+    )
+    monkeypatch.setattr(
+        generator,
+        "_confluence_score",
+        lambda *args, **kwargs: (85.0, {"trend_proxy": 70.0}, {}, {}, 1.0),
+    )
+    monkeypatch.setattr(generator, "_find_near_lp", lambda *args, **kwargs: False)
+    monkeypatch.setattr(generator, "_zone_strength", lambda *args, **kwargs: 80.0)
+    monkeypatch.setattr(generator.strategy_mode, "allow_candidate", lambda **kwargs: (True, None))
+    monkeypatch.setattr(
+        generator.reaction_classifier,
+        "build_input_with_reason",
+        lambda **kwargs: (None, "no_recent_level_sweep"),
+    )
+    monkeypatch.setattr(
+        generator.reaction_classifier,
+        "classify",
+        lambda payload: AcceptanceRejectionResult(
+            available=False,
+            classification="not_applicable",
+            rejection_score=0.0,
+            acceptance_score=0.0,
+            rejection_hard_count=0,
+            acceptance_hard_count=0,
+            mixed_reasons=[],
+            input={},
+        ),
+    )
+    monkeypatch.setattr(
+        generator,
+        "_proof_reclaim_shadow_signal",
+        lambda **kwargs: (
+            {
+                "family": "sweep_reversal",
+                "direction": "long",
+                "entry_model": "LIMIT",
+                "swept_level": 99.1,
+            },
+            "ok",
+        ),
+    )
+
+    payload = generator.generation_diagnostics(symbol="BTCUSDC", zones=zones, context=context, candles_5m=_trend_candles())
+
+    assert payload["reaction_unavailable_reason_counts"] == {"no_recent_level_sweep": 1}
+    assert payload["reaction_shadow_proof_reclaim_counts"]["exact_unavailable_zones"] == 1
+    assert payload["reaction_shadow_proof_reclaim_counts"]["proof_reclaim_signal_detected"] == 1
+    assert payload["reaction_shadow_proof_reclaim_counts"]["rescued_from:no_recent_level_sweep"] == 1
+    assert payload["reaction_shadow_proof_reclaim_counts"]["proof_reclaim_family:sweep_reversal"] == 1
+    assert payload["reaction_shadow_proof_reclaim_counts"]["proof_reclaim_entry_model:LIMIT"] == 1
 
 
 def test_range_rotation_research_only_candidate_is_blocked(monkeypatch) -> None:

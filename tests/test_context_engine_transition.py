@@ -62,3 +62,7 @@ def test_context_engine_marks_transition_regime_when_conflict_churn_is_high() ->
     assert snapshot.transition_features["reaction_failure_cluster"] == 1
     assert snapshot.transition_features["wick_dominance"] == 1
     assert snapshot.transition_features["zone_invalidation_churn"] == 1
+    assert snapshot.signal_telemetry["telemetry_source"] == "context_snapshot"
+    assert "range_atr" in snapshot.signal_telemetry
+    assert "close_vs_ema_fast_atr" in snapshot.signal_telemetry
+    assert "long_sweep_distance_atr" in snapshot.signal_telemetry

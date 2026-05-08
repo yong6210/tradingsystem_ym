@@ -11,6 +11,7 @@ from app.services.strategy_family_router import StrategyFamilyRouter
 
 def _zone(
     *,
+    symbol: str = "BTCUSDC",
     zone_type: str = "LP",
     dir_bias: str = "support",
     width_atr: float = 0.32,
@@ -20,7 +21,7 @@ def _zone(
 ) -> Zone:
     return Zone(
         zone_id="z_router",
-        symbol="BTCUSDC",
+        symbol=symbol,
         timeframe="15m",
         type=zone_type,
         low=low,
@@ -84,8 +85,10 @@ def _trend_candles(*, long_setup: bool = True, protected_break: bool = False) ->
 
 def _context(
     *,
+    symbol: str = "BTCUSDC",
     regime_label: str = "range",
     transition_state: str = "none",
+    transition_unlock_candidate: bool = False,
     friction: float = 0.10,
     jump_rate: float = 0.05,
     v: float = 0.4,
@@ -94,7 +97,7 @@ def _context(
     regime_15m: float = 0.55,
 ) -> ContextSnapshot:
     return ContextSnapshot(
-        symbol="BTCUSDC",
+        symbol=symbol,
         regime_15m=regime_15m,
         jump_rate_5m=jump_rate,
         friction_5m=friction,
@@ -110,6 +113,7 @@ def _context(
         last_price=last_price,
         regime_label=regime_label,
         transition_state=transition_state,
+        transition_unlock_candidate=transition_unlock_candidate,
     )
 
 
@@ -284,6 +288,122 @@ def test_router_marks_trend_continuation_a_grade_and_prefers_limit() -> None:
         decision.components["impulse_quality"] + decision.components["pullback_quality"], 2
     )
     assert decision.scorecard["buckets"]["trendline_bonus"] == 0.0
+
+
+def test_router_allows_btc_trend_proof_limit_from_transition_watch_context() -> None:
+    router = StrategyFamilyRouter()
+
+    decision = router.route(
+        zone=_zone(symbol="BTCUSDC", zone_type="OB", dir_bias="support", width_atr=0.34, low=101.9, high=102.2, mid=102.05),
+        context=_context(
+            symbol="BTCUSDC",
+            regime_label="range",
+            transition_state="transition_watch",
+            transition_unlock_candidate=True,
+            friction=0.12,
+            jump_rate=0.05,
+            v=0.9,
+            last_price=102.6,
+            atr5=1.0,
+            regime_15m=0.61,
+        ),
+        reaction=AcceptanceRejectionResult(
+            available=False,
+            classification="not_applicable",
+            rejection_score=0.0,
+            acceptance_score=0.0,
+            rejection_hard_count=0,
+            acceptance_hard_count=0,
+            mixed_reasons=[],
+            input={},
+        ),
+        near_lp=False,
+        zone_strength=87.0,
+        confluence_score=82.0,
+        regime_name="range",
+        candles_5m=_trend_candles(),
+    )
+
+    assert decision.available is True
+    assert decision.family == "trend_continuation"
+    assert decision.entry_model == EntryModel.LIMIT
+
+
+def test_router_allows_btc_trend_proof_with_slightly_weaker_transition_metrics() -> None:
+    router = StrategyFamilyRouter()
+
+    decision = router.route(
+        zone=_zone(symbol="BTCUSDC", zone_type="OB", dir_bias="support", width_atr=0.34, low=101.9, high=102.2, mid=102.05),
+        context=_context(
+            symbol="BTCUSDC",
+            regime_label="range",
+            transition_state="transition_watch",
+            transition_unlock_candidate=True,
+            friction=0.48,
+            jump_rate=0.24,
+            v=0.40,
+            last_price=102.6,
+            atr5=1.0,
+            regime_15m=0.56,
+        ),
+        reaction=AcceptanceRejectionResult(
+            available=False,
+            classification="not_applicable",
+            rejection_score=0.0,
+            acceptance_score=0.0,
+            rejection_hard_count=0,
+            acceptance_hard_count=0,
+            mixed_reasons=[],
+            input={},
+        ),
+        near_lp=False,
+        zone_strength=87.0,
+        confluence_score=82.0,
+        regime_name="range",
+        candles_5m=_trend_candles(),
+    )
+
+    assert decision.available is True
+    assert decision.family == "trend_continuation"
+    assert decision.entry_model == EntryModel.LIMIT
+
+
+def test_router_keeps_trend_proof_relaxation_disabled_for_non_btc_eth_symbols() -> None:
+    router = StrategyFamilyRouter()
+
+    decision = router.route(
+        zone=_zone(symbol="SOLUSDC", zone_type="OB", dir_bias="support", width_atr=0.34, low=101.9, high=102.2, mid=102.05),
+        context=_context(
+            symbol="SOLUSDC",
+            regime_label="range",
+            transition_state="transition_watch",
+            transition_unlock_candidate=True,
+            friction=0.12,
+            jump_rate=0.05,
+            v=0.9,
+            last_price=102.6,
+            atr5=1.0,
+            regime_15m=0.61,
+        ),
+        reaction=AcceptanceRejectionResult(
+            available=False,
+            classification="not_applicable",
+            rejection_score=0.0,
+            acceptance_score=0.0,
+            rejection_hard_count=0,
+            acceptance_hard_count=0,
+            mixed_reasons=[],
+            input={},
+        ),
+        near_lp=False,
+        zone_strength=87.0,
+        confluence_score=82.0,
+        regime_name="range",
+        candles_5m=_trend_candles(),
+    )
+
+    assert decision.available is False
+    assert decision.reason == "trend_continuation_not_applicable"
 
 
 def test_router_blocks_trend_continuation_when_protected_level_breaks() -> None:

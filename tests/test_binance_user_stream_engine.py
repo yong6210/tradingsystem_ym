@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from app.core.enums import OrderLifecycleState, PlanState
+from app.core.enums import ExecutionFillStage, OrderLifecycleState, PlanState
 from app.db.models import OrderSubmission, Plan
 from app.db.session import SessionLocal, init_db
 from app.services.strategy_engine import StrategyEngine
@@ -222,6 +222,107 @@ def test_ingest_binance_user_stream_reduce_only_trade_can_close_plan() -> None:
         refreshed = db.get(Plan, plan.plan_id)
         assert refreshed is not None
         assert refreshed.state == PlanState.CLOSED.value
+
+
+def test_ingest_binance_user_stream_skips_duplicate_submit_response_entry_fill() -> None:
+    init_db()
+    symbol = f"BUS{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 2}USDC"
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        plan = _seed_plan(db, symbol=symbol, plan_id=f"{symbol}_dup_plan", direction="long", state="ARMED")
+        trade_id = int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 2
+
+        engine.binance_order_repo.upsert(
+            client_order_id="usr-dup-1",
+            exchange_order_id=32345,
+            plan_id=plan.plan_id,
+            symbol=symbol,
+            side="BUY",
+            order_type="MARKET",
+            status="FILLED",
+            reduce_only=False,
+            requested_live=True,
+            live_enabled=True,
+            test_order=False,
+            price=100.0,
+            orig_qty=0.01,
+            executed_qty=0.01,
+            time_in_force="GTC",
+            last_event_type="submit",
+            last_trade_id=None,
+            last_event_ts=datetime.now(timezone.utc),
+            raw={"seed": True},
+        )
+        entry_response = engine.ingest_execution_fill(
+            fill_id="binance_submit_32345_filled",
+            plan_id=plan.plan_id,
+            symbol=plan.symbol,
+            stage=ExecutionFillStage.ENTRY,
+            fill_ts=datetime.now(timezone.utc),
+            price=100.0,
+            qty=0.01,
+            fee=0.0,
+            payload={
+                "source": "binance_submit_response",
+                "client_order_id": "usr-dup-1",
+                "exchange_order_id": "32345",
+                "submit_status": "FILLED",
+            },
+        )
+        assert entry_response["accepted"] is True
+        db.commit()
+
+        engine.market_data.binance.fetch_position_risk = lambda symbol=None: [  # type: ignore[assignment]
+            {
+                "symbol": symbol or "BTCUSDC",
+                "positionSide": "LONG",
+                "positionAmt": "0.01",
+                "entryPrice": "100.0",
+                "breakEvenPrice": "100.0",
+                "markPrice": "100.5",
+                "liquidationPrice": "50.0",
+                "unRealizedProfit": "0.5",
+                "notional": "1.005",
+                "leverage": "5",
+                "marginType": "isolated",
+                "isolatedWallet": "10.0",
+                "updateTime": 1700000000000,
+            }
+        ]
+
+        result = engine.ingest_binance_user_stream_event(
+            payload={
+                "e": "ORDER_TRADE_UPDATE",
+                "E": 1700000007000,
+                "o": {
+                    "s": symbol,
+                    "i": 32345,
+                    "c": "usr-dup-1",
+                    "S": "BUY",
+                    "o": "MARKET",
+                    "f": "GTC",
+                    "X": "FILLED",
+                    "x": "TRADE",
+                    "R": False,
+                    "ps": "LONG",
+                    "l": "0.01",
+                    "L": "100.0",
+                    "z": "0.01",
+                    "q": "0.01",
+                    "ap": "100.0",
+                    "rp": "0",
+                    "t": trade_id,
+                },
+            }
+        )
+
+        assert result["accepted"] is True
+        assert result["fill_ingest"] is not None
+        assert result["fill_ingest"]["duplicate"] is True
+        assert result["fill_ingest"]["reason"] == "submit_response_fill_already_recorded"
+
+        fills = engine.fill_repo.list_for_plans(plan_ids=[plan.plan_id], symbol=plan.symbol)
+        assert len(fills) == 1
 
 
 def test_ingest_binance_user_stream_cancel_updates_submission_state() -> None:

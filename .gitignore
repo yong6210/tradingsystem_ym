@@ -8,7 +8,14 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 
-trading.db
+# Runtime SQLite/database artifacts.
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
 reports/
 
 .DS_Store

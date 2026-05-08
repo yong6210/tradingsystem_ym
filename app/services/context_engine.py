@@ -41,6 +41,7 @@ class ContextSnapshot:
     transition_features: dict[str, float | int | bool] = field(default_factory=dict)
     transition_unlock_candidate: bool = False
     transition_lock_reason: str | None = None
+    signal_telemetry: dict[str, float | int | bool | str] = field(default_factory=dict)
 
 
 class KalmanFVA:
@@ -407,6 +408,49 @@ class ContextEngine:
             return "trend"
         return "range"
 
+    def _signal_telemetry(
+        self,
+        *,
+        candles_5m: list[Candle],
+        candles_15m: list[Candle],
+        atr15: float,
+    ) -> dict[str, float | int | bool | str]:
+        latest_5 = candles_5m[-1]
+        latest_open = float(latest_5.o)
+        latest_close = float(latest_5.c)
+        latest_high = float(latest_5.h)
+        latest_low = float(latest_5.l)
+        range_abs = max(latest_high - latest_low, 1e-9)
+        atr_abs = max(float(atr15), 1e-9)
+        close_position = (latest_close - latest_low) / range_abs
+        body_abs = abs(latest_close - latest_open)
+        prior_5 = candles_5m[-30:-6] if len(candles_5m) >= 30 else candles_5m[:-6]
+        if not prior_5:
+            prior_5 = candles_5m[:-1] or [latest_5]
+        prior_high = max(float(c.h) for c in prior_5)
+        prior_low = min(float(c.l) for c in prior_5)
+        prior_range = max(prior_high - prior_low, 0.0)
+        closes_15 = [float(c.c) for c in candles_15m[-60:]]
+        ema_fast = ema_series(closes_15[-30:], 20)[-1]
+        ema_slow = ema_series(closes_15[-60:], 50)[-1]
+
+        return {
+            "telemetry_source": "context_snapshot",
+            "telemetry_version": "v1",
+            "prior_window_bars": int(len(prior_5)),
+            "close_position": round(float(close_position), 4),
+            "body_fraction": round(float(body_abs / range_abs), 4),
+            "range_atr": round(float(range_abs / atr_abs), 4),
+            "body_atr": round(float(body_abs / atr_abs), 4),
+            "prior_range_atr": round(float(prior_range / atr_abs), 4),
+            "ema_spread_atr": round(float(abs(ema_fast - ema_slow) / atr_abs), 4),
+            "close_vs_ema_fast_atr": round(float((latest_close - ema_fast) / atr_abs), 4),
+            "long_sweep_distance_atr": round(float(max(prior_low - latest_low, 0.0) / atr_abs), 4),
+            "short_sweep_distance_atr": round(float(max(latest_high - prior_high, 0.0) / atr_abs), 4),
+            "long_reclaim_distance_atr": round(float(max(latest_close - prior_low, 0.0) / atr_abs), 4),
+            "short_reclaim_distance_atr": round(float(max(prior_high - latest_close, 0.0) / atr_abs), 4),
+        }
+
     def build_snapshot(self, symbol: str, candles_5m: list[Candle], candles_15m: list[Candle]) -> ContextSnapshot:
         if not candles_5m or not candles_15m:
             raise ValueError("context requires both 5m and 15m candles")
@@ -478,4 +522,5 @@ class ContextEngine:
             transition_features=transition_features,
             transition_unlock_candidate=transition_unlock_candidate,
             transition_lock_reason=transition_lock_reason,
+            signal_telemetry=self._signal_telemetry(candles_5m=candles_5m, candles_15m=candles_15m, atr15=atr15),
         )

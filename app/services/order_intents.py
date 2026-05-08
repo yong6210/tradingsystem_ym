@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 from uuid import uuid4
 
@@ -8,6 +8,7 @@ from app.core.config import Settings, get_settings
 from app.core.enums import ApprovalState, ExecutionMode, PlanState, SubmitDecision
 from app.db.models import OrderIntent, OrderSubmission, Plan
 from app.repositories.execution import OrderIntentRepository, OrderSubmissionRepository, PlanRepository
+from app.services.lane_tracker import get_execution_lane_tracker
 from app.services.execution.approval import ExecutionPlanningService
 from app.services.thesis_fingerprint import ThesisFingerprintService
 
@@ -41,10 +42,40 @@ class OrderIntentService:
     def _is_stale(plan: Plan) -> bool:
         return plan.state not in {PlanState.PLANNED.value, PlanState.ARMED.value} or OrderIntentService._utc(plan.valid_until) <= datetime.now(timezone.utc)
 
+    def _submission_reference_ts(self, submission: OrderSubmission | None) -> datetime | None:
+        if submission is None:
+            return None
+        for attr in ("acknowledged_at", "submitted_at", "updated_at", "created_at"):
+            value = getattr(submission, attr, None)
+            if isinstance(value, datetime):
+                return self._utc(value)
+        return None
+
     @staticmethod
-    def _submission_keeps_thesis_open(submission: OrderSubmission | None) -> bool:
+    def _is_transition_edge_variant(executable_plan: dict[str, object] | None) -> bool:
+        payload = dict(executable_plan or {})
+        if bool(payload.get("transition_edge_variant_applied")):
+            return True
+        return bool(dict(payload.get("transition_edge_variant") or {}))
+
+    def _is_stale_paper_submission(self, submission: OrderSubmission | None) -> bool:
+        if submission is None:
+            return False
+        if str(submission.adapter or "").lower() != "paper":
+            return False
+        threshold_hours = float(getattr(self.settings, "auto_trading_paper_submission_stale_hours", 0) or 0)
+        if threshold_hours <= 0:
+            return False
+        reference_ts = self._submission_reference_ts(submission)
+        if reference_ts is None:
+            return False
+        return reference_ts <= datetime.now(timezone.utc) - timedelta(hours=threshold_hours)
+
+    def _submission_keeps_thesis_open(self, submission: OrderSubmission | None) -> bool:
         if submission is None:
             return True
+        if self._is_stale_paper_submission(submission):
+            return False
         return str(submission.state or "") in {
             "CREATED",
             "SUBMITTED",
@@ -52,11 +83,12 @@ class OrderIntentService:
             "PARTIALLY_FILLED",
         }
 
-    @staticmethod
-    def _submission_blocks_plan_reentry(submission: OrderSubmission | None) -> bool:
+    def _submission_blocks_plan_reentry(self, submission: OrderSubmission | None) -> bool:
         if submission is None:
             return False
         if str(submission.adapter or "").lower() == "none":
+            return False
+        if self._is_stale_paper_submission(submission):
             return False
         return str(submission.state or "") in {
             "CREATED",
@@ -66,18 +98,34 @@ class OrderIntentService:
             "FILLED",
         }
 
-    def _latest_routed_submission_for_plan(self, plan_id: str) -> OrderSubmission | None:
+    def _latest_routed_submission_for_plan(self, plan_id: str) -> tuple[OrderSubmission | None, dict]:
         if self.submission_repo is None:
-            return None
+            return None, {
+                "stale_paper_submission_ignored": False,
+                "ignored_stale_submission_count": 0,
+                "ignored_stale_submission_ids": [],
+            }
+        ignored: list[str] = []
         for submission in self.submission_repo.list_for_plan(plan_id, limit=20):
             if self._submission_blocks_plan_reentry(submission):
-                return submission
-        return None
+                return submission, {
+                    "stale_paper_submission_ignored": bool(ignored),
+                    "ignored_stale_submission_count": len(ignored),
+                    "ignored_stale_submission_ids": ignored[:3],
+                }
+            if self._is_stale_paper_submission(submission):
+                ignored.append(str(submission.submission_id))
+        return None, {
+            "stale_paper_submission_ignored": bool(ignored),
+            "ignored_stale_submission_count": len(ignored),
+            "ignored_stale_submission_ids": ignored[:3],
+        }
 
-    def _dedupe_via_open_intents(self, *, plan: Plan, fingerprint: dict) -> dict | None:
+    def _dedupe_via_open_intents(self, *, plan: Plan, fingerprint: dict) -> tuple[dict | None, dict]:
         validity = dict(plan.validity or {})
         current_primary_symbol = str(validity.get("thesis_primary_symbol") or plan.symbol or "").upper()
         recent_intents = self.intent_repo.list_recent(limit=500)
+        ignored_stale_intents: list[dict[str, str]] = []
         for intent in recent_intents:
             if intent.plan_id == plan.plan_id:
                 continue
@@ -97,6 +145,14 @@ class OrderIntentService:
 
             latest_submission = self.submission_repo.latest_for_intent(intent.intent_id) if self.submission_repo else None
             if not plan_still_open and not self._submission_keeps_thesis_open(latest_submission):
+                if self._is_stale_paper_submission(latest_submission):
+                    ignored_stale_intents.append(
+                        {
+                            "intent_id": str(intent.intent_id or ""),
+                            "plan_id": str(intent.plan_id or ""),
+                            "symbol": str(intent.symbol or ""),
+                        }
+                    )
                 continue
 
             other_fingerprint = dict(intent.thesis_fingerprint or {})
@@ -125,14 +181,20 @@ class OrderIntentService:
                 "matched_symbol": intent.symbol,
                 "cluster_id": self.thesis.thesis_cluster_id(fingerprint),
                 "source": "open_intent",
+            }, {
+                "ignored_stale_paper_intent_count": len(ignored_stale_intents),
+                "ignored_stale_paper_intents": ignored_stale_intents[:3],
             }
-        return None
+        return None, {
+            "ignored_stale_paper_intent_count": len(ignored_stale_intents),
+            "ignored_stale_paper_intents": ignored_stale_intents[:3],
+        }
 
     def _dedupe_result(self, plan: Plan) -> dict:
         fingerprint = self.thesis.build_from_plan(plan)
-        from_open_intents = self._dedupe_via_open_intents(plan=plan, fingerprint=fingerprint)
+        from_open_intents, dedupe_meta = self._dedupe_via_open_intents(plan=plan, fingerprint=fingerprint)
         if from_open_intents is not None:
-            return from_open_intents
+            return {**dedupe_meta, **from_open_intents}
 
         for exposure in self.exposure_loader():
             if exposure.plan_id == plan.plan_id:
@@ -162,6 +224,7 @@ class OrderIntentService:
             "matched_symbol": None,
             "cluster_id": self.thesis.thesis_cluster_id(fingerprint),
             "source": "none",
+            **dedupe_meta,
         }
 
     @staticmethod
@@ -285,9 +348,13 @@ class OrderIntentService:
         )
         approval = dict(approval_bundle["approval"])
         executable_plan = dict(approval_bundle["executable_plan"])
+        effective_mode = ExecutionPlanningService.coerce_execution_mode(
+            approval.get("allowed_execution_mode"),
+            default=requested_mode,
+        )
         approval_state = ApprovalState(str(approval.get("approval_state") or ApprovalState.BLOCKED.value))
         stale = self._is_stale(plan)
-        existing_submission = self._latest_routed_submission_for_plan(plan.plan_id)
+        existing_submission, existing_submission_summary = self._latest_routed_submission_for_plan(plan.plan_id)
         already_submitted = existing_submission is not None
         dedupe_result = self._dedupe_result(plan)
         duplicate = dedupe_result.get("status") == "duplicate_active_thesis"
@@ -299,7 +366,7 @@ class OrderIntentService:
             and dedupe_source == "active_plan"
         )
         decision, reason_code, reason_message = self._decision_for(
-            execution_mode=requested_mode,
+            execution_mode=effective_mode,
             approval_state=approval_state,
             stale=stale,
             duplicate=duplicate,
@@ -336,12 +403,29 @@ class OrderIntentService:
             reason_message = str(approval.get("playbook_message") or reason_message)
 
         quality_snapshot = self._quality_snapshot(approval=approval, executable_plan=executable_plan)
+        self_heal_summary = {
+            "stale_paper_reentry_block_ignored": bool(existing_submission_summary.get("stale_paper_submission_ignored", False)),
+            "stale_paper_reentry_block_ignored_count": int(
+                existing_submission_summary.get("ignored_stale_submission_count", 0) or 0
+            ),
+            "stale_paper_reentry_block_submission_ids": list(
+                existing_submission_summary.get("ignored_stale_submission_ids") or []
+            ),
+            "stale_paper_duplicate_intents_ignored_count": int(
+                dedupe_result.get("ignored_stale_paper_intent_count", 0) or 0
+            ),
+            "stale_paper_duplicate_intents_ignored": list(dedupe_result.get("ignored_stale_paper_intents") or []),
+        }
+        self_heal_summary["applied"] = bool(
+            self_heal_summary["stale_paper_reentry_block_ignored"]
+            or self_heal_summary["stale_paper_duplicate_intents_ignored_count"]
+        )
         row = OrderIntent(
             intent_id=f"intent_{uuid4().hex[:20]}",
             plan_id=plan.plan_id,
             symbol=plan.symbol,
             strategy_family=str(executable_plan.get("strategy_family") or "legacy_zone_plan"),
-            execution_mode=requested_mode.value,
+            execution_mode=effective_mode.value,
             approval_state=approval_state.value,
             submit_decision=decision.value,
             decision_reason_code=reason_code,
@@ -365,9 +449,13 @@ class OrderIntentService:
                     "paper_lineage_override_applied": bool(approval.get("paper_lineage_override_applied")),
                     "paper_lineage_override_reason": str(approval.get("paper_lineage_override_reason") or ""),
                     "paper_lineage_override_source": str(approval.get("paper_lineage_override_source") or ""),
+                    "self_heal_summary": self_heal_summary,
                     "source_of_truth_hint": "execution_approval_snapshot",
                 },
+                "self_heal_summary": self_heal_summary,
             },
         )
         self.intent_repo.add(row)
+        tracker = get_execution_lane_tracker(window=int(self.settings.transition_edge_variant_lane_tracker_window))
+        tracker.record_intent(is_variant=self._is_transition_edge_variant(executable_plan))
         return row

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -76,10 +77,81 @@ class ScoreToOutcomeFunnelService:
         return str(getattr(plan, "entry_model", "") or "unknown").upper()
 
     @staticmethod
+    def _direction_from_plan(plan: Plan | None) -> str:
+        return str(getattr(plan, "direction", "") or "unknown").upper()
+
+    @staticmethod
+    def _normalized_string_set(
+        values: Collection[str] | None,
+        *,
+        case: str,
+    ) -> set[str]:
+        normalized: set[str] = set()
+        for value in values or ():
+            item = str(value or "").strip()
+            if not item:
+                continue
+            if case == "upper":
+                normalized.add(item.upper())
+            elif case == "lower":
+                normalized.add(item.lower())
+            else:
+                normalized.add(item)
+        return normalized
+
+    @staticmethod
     def _entry_model_from_row(row: dict[str, Any]) -> str:
         payload = dict(row or {})
         validity = dict(payload.get("validity") or {})
         return str(payload.get("entry_model") or validity.get("entry_model") or "unknown").upper()
+
+    @staticmethod
+    def _direction_from_row(row: dict[str, Any]) -> str:
+        payload = dict(row or {})
+        validity = dict(payload.get("validity") or {})
+        return str(payload.get("direction") or validity.get("direction") or "unknown").upper()
+
+    @classmethod
+    def _runtime_family_from_row(cls, row: dict[str, Any]) -> str:
+        payload = dict(row or {})
+        validity = dict(payload.get("validity") or {})
+        return str(payload.get("strategy_family") or validity.get("strategy_family") or "unknown").lower()
+
+    @classmethod
+    def _plan_matches_filters(
+        cls,
+        plan: Plan | None,
+        *,
+        strategy_families: set[str],
+        entry_models: set[str],
+        directions: set[str],
+    ) -> bool:
+        if plan is None:
+            return False
+        if strategy_families and cls._plan_family(plan).lower() not in strategy_families:
+            return False
+        if entry_models and cls._entry_model_from_plan(plan) not in entry_models:
+            return False
+        if directions and cls._direction_from_plan(plan) not in directions:
+            return False
+        return True
+
+    @classmethod
+    def _runtime_row_matches_filters(
+        cls,
+        row: dict[str, Any],
+        *,
+        strategy_families: set[str],
+        entry_models: set[str],
+        directions: set[str],
+    ) -> bool:
+        if strategy_families and cls._runtime_family_from_row(row) not in strategy_families:
+            return False
+        if entry_models and cls._entry_model_from_row(row) not in entry_models:
+            return False
+        if directions and cls._direction_from_row(row) not in directions:
+            return False
+        return True
 
     @staticmethod
     def _entry_timing_variant(entry_model: str) -> str:
@@ -92,7 +164,19 @@ class ScoreToOutcomeFunnelService:
 
     @staticmethod
     def _execution_mode_from_submission(submission: OrderSubmission | None) -> str:
+        if not ScoreToOutcomeFunnelService._submission_counts_as_routed_submission(submission):
+            return "UNKNOWN"
         return str(getattr(submission, "execution_mode", "") or "unknown").upper()
+
+    @staticmethod
+    def _submission_counts_as_routed_submission(submission: OrderSubmission | None) -> bool:
+        if submission is None:
+            return False
+        if str(getattr(submission, "adapter", "") or "").lower() == "none":
+            return False
+        if str(getattr(submission, "state", "") or "").upper() == "REJECTED":
+            return False
+        return True
 
     @staticmethod
     def _execution_mode_from_row(row: dict[str, Any]) -> str:
@@ -282,10 +366,22 @@ class ScoreToOutcomeFunnelService:
 
     @staticmethod
     def _latest_submission_by_plan(rows: list[OrderSubmission]) -> dict[str, OrderSubmission]:
+        def _priority(row: OrderSubmission) -> tuple[int, int]:
+            adapter = str(getattr(row, "adapter", "") or "").lower()
+            state = str(getattr(row, "state", "") or "").upper()
+            if adapter != "none" and state != "REJECTED":
+                return (0, 0)
+            if adapter != "none":
+                return (1, 0)
+            return (2, 0)
+
         out: dict[str, OrderSubmission] = {}
         for row in rows:
             plan_id = str(getattr(row, "plan_id", "") or "")
-            if plan_id and plan_id not in out:
+            if not plan_id:
+                continue
+            current = out.get(plan_id)
+            if current is None or _priority(row) < _priority(current):
                 out[plan_id] = row
         return out
 
@@ -562,6 +658,8 @@ class ScoreToOutcomeFunnelService:
                     closed_record=closed_records.get(plan_id),
                     baseline_adjusted_row=baseline_adjusted.get(plan_id),
                 )
+            if not self._submission_counts_as_routed_submission(submission):
+                continue
             buckets[key]["submitted_ids"].add(plan_id)
             buckets[key]["submitted_expected_r"] += self._expected_r_from_plan(plan)
 
@@ -687,13 +785,25 @@ class ScoreToOutcomeFunnelService:
         version: str,
         days: int,
         portfolio_budget: dict[str, Any] | None = None,
+        strategy_families: Collection[str] | None = None,
+        entry_models: Collection[str] | None = None,
+        directions: Collection[str] | None = None,
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         report_window_days = max(1, int(days))
+        family_filters = self._normalized_string_set(strategy_families, case="lower")
+        entry_model_filters = self._normalized_string_set(entry_models, case="upper")
+        direction_filters = self._normalized_string_set(directions, case="upper")
         plans = [
             plan
             for plan in self.plan_repo.list_recent(symbol=symbol, days=report_window_days)
             if str(getattr(plan, "strategy_version", "") or "") == str(version)
+            and self._plan_matches_filters(
+                plan,
+                strategy_families=family_filters,
+                entry_models=entry_model_filters,
+                directions=direction_filters,
+            )
         ]
         plan_lookup = {str(plan.plan_id): plan for plan in plans}
         plan_ids = list(plan_lookup)
@@ -718,10 +828,32 @@ class ScoreToOutcomeFunnelService:
         closed_records = self._closed_records(plans=plans, symbol=symbol, version=version)
         baseline_adjusted = self._baseline_adjusted_by_plan(plans=plans, closed_records=closed_records)
 
-        accepted_rows = list(dict(portfolio_budget or {}).get("accepted_candidates") or [])
-        blocked_rows = list(dict(portfolio_budget or {}).get("blocked_candidates") or [])
+        accepted_rows = [
+            dict(row)
+            for row in list(dict(portfolio_budget or {}).get("accepted_candidates") or [])
+            if self._runtime_row_matches_filters(
+                dict(row),
+                strategy_families=family_filters,
+                entry_models=entry_model_filters,
+                directions=direction_filters,
+            )
+        ]
+        blocked_rows = [
+            dict(row)
+            for row in list(dict(portfolio_budget or {}).get("blocked_candidates") or [])
+            if self._runtime_row_matches_filters(
+                dict(row),
+                strategy_families=family_filters,
+                entry_models=entry_model_filters,
+                directions=direction_filters,
+            )
+        ]
 
-        submitted_plan_ids = set(submission_lookup)
+        submitted_plan_ids = {
+            plan_id
+            for plan_id, submission in submission_lookup.items()
+            if self._submission_counts_as_routed_submission(submission)
+        }
         closed_plan_ids = set(closed_records)
         profitable_plan_ids = {plan_id for plan_id, record in closed_records.items() if float(record.realized_r) > 0.0}
         baseline_profitable_plan_ids = {
@@ -832,12 +964,26 @@ class ScoreToOutcomeFunnelService:
             ),
         }
 
+        filtered_portfolio_budget = {
+            "accepted_candidates": accepted_rows,
+            "blocked_candidates": blocked_rows,
+            "blocked_reason_counts": {},
+            "blocked_gate_group_counts": {},
+        }
+
         return {
             "available": available,
             "reason": reason,
             "report_window_days": report_window_days,
+            "filters": {
+                "strategy_families": sorted(family_filters),
+                "entry_models": sorted(entry_model_filters),
+                "directions": sorted(direction_filters),
+            }
+            if family_filters or entry_model_filters or direction_filters
+            else None,
             "coverage_note": coverage_note,
-            "snapshot_selection": self._selection_snapshot(portfolio_budget),
+            "snapshot_selection": self._selection_snapshot(filtered_portfolio_budget),
             "historical_execution_outcomes": historical_execution_outcomes,
             "money_funnel": money_funnel,
             "decomposition": {

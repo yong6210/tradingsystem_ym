@@ -17,6 +17,8 @@ class PositionSizingInput:
     entry_model: str
     active_thesis_clusters: int
     transition_state: str = "none"
+    symbol: str = ""
+    direction: str = ""
 
 
 class PositionSizingService:
@@ -27,6 +29,7 @@ class PositionSizingService:
 
     def evaluate(self, payload: PositionSizingInput) -> dict[str, Any]:
         grade = str(payload.strategy_grade or "B").upper()
+        family = str(payload.strategy_family or "legacy_zone_plan").lower()
         regime = str(payload.regime or "range").lower()
         reaction = str(payload.reaction_classification or "not_applicable").lower()
         transition_state = str(payload.transition_state or "none").lower()
@@ -39,15 +42,25 @@ class PositionSizingService:
         )
         thesis_factor, thesis_reason = self._thesis_factor(int(payload.active_thesis_clusters))
         execution_factor = self._execution_factor(str(payload.entry_model or EntryModel.CONFIRM.value))
+        direction_factor, direction_reason = self._direction_factor(
+            symbol=str(payload.symbol or ""),
+            strategy_family=family,
+            direction=str(payload.direction or ""),
+        )
 
-        final_risk_r = round(grade_risk * regime_factor * reaction_factor * thesis_factor * execution_factor, 4)
+        final_risk_r = round(
+            grade_risk * regime_factor * reaction_factor * thesis_factor * execution_factor * direction_factor,
+            4,
+        )
         blocked_reason = regime_reason or reaction_reason or thesis_reason
 
         return {
             "schema_version": "v2",
-            "strategy_family": str(payload.strategy_family or "legacy_zone_plan"),
+            "strategy_family": family,
             "strategy_grade": grade,
             "grade_source": "strategy_grade" if grade in {"A", "B", "C"} and payload.strategy_grade is not None else "legacy_default_b",
+            "symbol": str(payload.symbol or ""),
+            "direction": str(payload.direction or ""),
             "active_thesis_clusters": int(payload.active_thesis_clusters),
             "transition_state": transition_state,
             "reaction_classification": reaction,
@@ -59,6 +72,7 @@ class PositionSizingService:
                 "reaction_factor": round(reaction_factor, 4),
                 "thesis_factor": round(thesis_factor, 4),
                 "execution_factor": round(execution_factor, 4),
+                "direction_factor": round(direction_factor, 4),
             },
             "final_risk_r": final_risk_r,
             "blocked": final_risk_r <= 0.0,
@@ -67,6 +81,7 @@ class PositionSizingService:
                 "regime": regime_reason,
                 "reaction": reaction_reason,
                 "thesis": thesis_reason,
+                "direction": direction_reason,
             },
         }
 
@@ -82,6 +97,8 @@ class PositionSizingService:
                 entry_model=str(row.get("entry_model") or validity.get("entry_model", EntryModel.CONFIRM.value)),
                 active_thesis_clusters=active_thesis_clusters,
                 transition_state=str(validity.get("transition_state", "none")),
+                symbol=str(row.get("symbol") or validity.get("symbol", "")),
+                direction=str(row.get("direction") or validity.get("direction", "")),
             )
         )
 
@@ -125,3 +142,17 @@ class PositionSizingService:
         if entry_model == EntryModel.SWEEP_CONFIRM.value:
             return float(self.settings.sizing_execution_factor_sweep_confirm)
         return float(self.settings.sizing_execution_factor_confirm)
+
+    def _direction_factor(self, *, symbol: str, strategy_family: str, direction: str) -> tuple[float, str | None]:
+        normalized_symbol = str(symbol or "").strip().upper()
+        normalized_family = str(strategy_family or "").strip().lower()
+        normalized_direction = str(direction or "").strip().upper()
+        if (
+            normalized_symbol == "BTCUSDC"
+            and normalized_family == "sweep_reversal"
+            and normalized_direction == "LONG"
+        ):
+            factor = float(self.settings.sizing_btc_sweep_reversal_long_factor)
+            reason = "btc_sweep_reversal_long_size_clamp" if factor < 1.0 else None
+            return factor, reason
+        return 1.0, None

@@ -29,6 +29,61 @@ class BinanceKline:
     is_final: bool
 
 
+@dataclass(slots=True)
+class BinanceFundingRate:
+    symbol: str
+    ts: datetime
+    funding_rate: float
+    mark_price: float | None
+    raw: dict[str, Any]
+
+
+@dataclass(slots=True)
+class BinanceOpenInterestStat:
+    symbol: str
+    period: str
+    ts: datetime
+    open_interest: float
+    open_interest_value: float | None
+    raw: dict[str, Any]
+
+
+@dataclass(slots=True)
+class BinanceBasisKline:
+    symbol: str
+    interval: str
+    open_time: datetime
+    basis_open: float
+    basis_high: float
+    basis_low: float
+    basis_close: float
+    raw: list[Any]
+
+
+@dataclass(slots=True)
+class BinanceLiquidationOrder:
+    symbol: str
+    side: str
+    ts: datetime
+    price: float
+    avg_price: float
+    qty: float
+    filled_qty: float
+    status: str
+    raw: dict[str, Any]
+
+
+@dataclass(slots=True)
+class BinanceSymbolTradingRules:
+    symbol: str
+    quantity_step: float
+    min_quantity: float
+    tick_size: float | None
+    price_precision: int | None
+    quantity_precision: int | None
+    raw: dict[str, Any]
+
+
 class BinanceFuturesClient:
     """Binance USD-M futures client for REST backfill and optional WS streaming."""
 
@@ -46,12 +101,14 @@ class BinanceFuturesClient:
         self.rest_base_url = (rest_base_url or settings.binance_rest_base_url).rstrip("/")
         self.ws_base_url = (ws_base_url or settings.binance_ws_base_url).rstrip("/")
         self.timeout_seconds = timeout_seconds or settings.binance_timeout_seconds
+        self.ws_receive_timeout_seconds = float(settings.binance_ws_receive_timeout_seconds)
         self.api_key = api_key if api_key is not None else settings.binance_api_key
         self.api_secret = api_secret if api_secret is not None else settings.binance_api_secret
         self.recv_window = int(recv_window if recv_window is not None else settings.binance_trade_recv_window)
         self.live_trade_enabled = (
             bool(live_trade_enabled) if live_trade_enabled is not None else bool(settings.binance_trade_live_enabled)
         )
+        self._symbol_trading_rules_cache: dict[str, BinanceSymbolTradingRules] = {}
 
     @staticmethod
     def _to_dt(ms: int) -> datetime:
@@ -70,6 +127,63 @@ class BinanceFuturesClient:
             c=float(row[4]),
             v=float(row[5]),
             is_final=True,
+        )
+
+    @staticmethod
+    def _parse_funding_rate_row(symbol: str, row: dict[str, Any]) -> BinanceFundingRate:
+        ts_ms = int(row.get("fundingTime") or row.get("time") or 0)
+        return BinanceFundingRate(
+            symbol=symbol.upper(),
+            ts=BinanceFuturesClient._to_dt(ts_ms),
+            funding_rate=float(row.get("fundingRate") or 0.0),
+            mark_price=float(row.get("markPrice")) if row.get("markPrice") not in {None, ""} else None,
+            raw=dict(row),
+        )
+
+    @staticmethod
+    def _parse_open_interest_hist_row(symbol: str, period: str, row: dict[str, Any]) -> BinanceOpenInterestStat:
+        ts_ms = int(row.get("timestamp") or row.get("time") or 0)
+        return BinanceOpenInterestStat(
+            symbol=symbol.upper(),
+            period=period,
+            ts=BinanceFuturesClient._to_dt(ts_ms),
+            open_interest=float(row.get("sumOpenInterest") or row.get("openInterest") or 0.0),
+            open_interest_value=float(row.get("sumOpenInterestValue")) if row.get("sumOpenInterestValue") not in {None, ""} else None,
+            raw=dict(row),
+        )
+
+    @staticmethod
+    def _parse_basis_kline_row(symbol: str, interval: str, row: list[Any]) -> BinanceBasisKline:
+        return BinanceBasisKline(
+            symbol=symbol.upper(),
+            interval=interval,
+            open_time=BinanceFuturesClient._to_dt(int(row[0])),
+            basis_open=float(row[1]),
+            basis_high=float(row[2]),
+            basis_low=float(row[3]),
+            basis_close=float(row[4]),
+            raw=list(row),
+        )
+
+    @staticmethod
+    def _parse_force_order_event(payload: dict[str, Any]) -> BinanceLiquidationOrder | None:
+        data = dict(payload.get("data") or payload)
+        if str(data.get("e") or "").lower() != "forceorder":
+            return None
+        order = dict(data.get("o") or {})
+        ts_ms = int(order.get("T") or data.get("E") or 0)
+        if ts_ms <= 0:
+            return None
+        return BinanceLiquidationOrder(
+            symbol=str(order.get("s") or "").upper(),
+            side=str(order.get("S") or "").upper(),
+            ts=BinanceFuturesClient._to_dt(ts_ms),
+            price=float(order.get("p") or 0.0),
+            avg_price=float(order.get("ap") or 0.0),
+            qty=float(order.get("q") or 0.0),
+            filled_qty=float(order.get("z") or order.get("l") or 0.0),
+            status=str(order.get("X") or ""),
+            raw=data,
         )
 
     @staticmethod
@@ -145,6 +259,19 @@ class BinanceFuturesClient:
                 return response.json()
         return {}
 
+    def _public_request(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        request_params = {
+            key: self._stringify_param(value)
+            for key, value in (params or {}).items()
+            if value is not None
+        }
+        with httpx.Client(base_url=self.rest_base_url, timeout=self.timeout_seconds) as client:
+            response = client.get(path, params=request_params or None)
+            response.raise_for_status()
+            if response.content:
+                return response.json()
+        return {}
+
     @staticmethod
     def _ws_root(base_url: str) -> str:
         if base_url.endswith("/stream"):
@@ -152,6 +279,51 @@ class BinanceFuturesClient:
         if "/stream" in base_url:
             return base_url.split("/stream", 1)[0]
         return base_url.rstrip("/")
+
+    @staticmethod
+    def _parse_symbol_trading_rules_row(row: dict[str, Any]) -> BinanceSymbolTradingRules:
+        filters = {
+            str(item.get("filterType") or "").upper(): item
+            for item in list(row.get("filters") or [])
+            if isinstance(item, dict)
+        }
+        lot_size = dict(filters.get("LOT_SIZE") or {})
+        price_filter = dict(filters.get("PRICE_FILTER") or {})
+
+        quantity_step = float(lot_size.get("stepSize") or 0.0)
+        min_quantity = float(lot_size.get("minQty") or quantity_step or 0.0)
+        tick_size_raw = price_filter.get("tickSize")
+        tick_size = float(tick_size_raw) if tick_size_raw not in {None, ""} else None
+
+        return BinanceSymbolTradingRules(
+            symbol=str(row.get("symbol") or "").upper(),
+            quantity_step=quantity_step,
+            min_quantity=min_quantity,
+            tick_size=tick_size,
+            price_precision=int(row["pricePrecision"]) if row.get("pricePrecision") is not None else None,
+            quantity_precision=int(row["quantityPrecision"]) if row.get("quantityPrecision") is not None else None,
+            raw=dict(row),
+        )
+
+    def fetch_symbol_trading_rules(self, symbol: str) -> BinanceSymbolTradingRules:
+        normalized_symbol = str(symbol or "").upper()
+        if not normalized_symbol:
+            raise ValueError("symbol_required")
+        cached = self._symbol_trading_rules_cache.get(normalized_symbol)
+        if cached is not None:
+            return cached
+
+        payload = self._public_request("/fapi/v1/exchangeInfo", {"symbol": normalized_symbol})
+        symbol_rows = payload.get("symbols") if isinstance(payload, dict) else None
+        if not isinstance(symbol_rows, list):
+            raise RuntimeError("binance_symbol_exchange_info_missing")
+        for row in symbol_rows:
+            if str((row or {}).get("symbol") or "").upper() != normalized_symbol:
+                continue
+            rules = self._parse_symbol_trading_rules_row(dict(row))
+            self._symbol_trading_rules_cache[normalized_symbol] = rules
+            return rules
+        raise RuntimeError(f"binance_symbol_exchange_info_not_found:{normalized_symbol}")
 
     def submit_order(
         self,
@@ -429,6 +601,76 @@ class BinanceFuturesClient:
 
         return [self._parse_kline_row(symbol.upper(), interval, row) for row in payload]
 
+    def fetch_funding_rates(
+        self,
+        *,
+        symbol: str,
+        limit: int = 100,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+    ) -> list[BinanceFundingRate]:
+        params: dict[str, Any] = {
+            "symbol": symbol.upper(),
+            "limit": max(1, min(limit, 1000)),
+        }
+        if start_time_ms is not None:
+            params["startTime"] = start_time_ms
+        if end_time_ms is not None:
+            params["endTime"] = end_time_ms
+        with httpx.Client(base_url=self.rest_base_url, timeout=self.timeout_seconds) as client:
+            response = client.get("/fapi/v1/fundingRate", params=params)
+            response.raise_for_status()
+            payload = response.json()
+        return [self._parse_funding_rate_row(symbol.upper(), row) for row in payload]
+
+    def fetch_open_interest_hist(
+        self,
+        *,
+        symbol: str,
+        period: str = "15m",
+        limit: int = 500,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+    ) -> list[BinanceOpenInterestStat]:
+        params: dict[str, Any] = {
+            "symbol": symbol.upper(),
+            "period": period,
+            "limit": max(1, min(limit, 500)),
+        }
+        if start_time_ms is not None:
+            params["startTime"] = start_time_ms
+        if end_time_ms is not None:
+            params["endTime"] = end_time_ms
+        with httpx.Client(base_url=self.rest_base_url, timeout=self.timeout_seconds) as client:
+            response = client.get("/futures/data/openInterestHist", params=params)
+            response.raise_for_status()
+            payload = response.json()
+        return [self._parse_open_interest_hist_row(symbol.upper(), period, row) for row in payload]
+
+    def fetch_premium_index_klines(
+        self,
+        *,
+        symbol: str,
+        interval: str = "15m",
+        limit: int = 500,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+    ) -> list[BinanceBasisKline]:
+        params: dict[str, Any] = {
+            "symbol": symbol.upper(),
+            "interval": interval,
+            "limit": max(1, min(limit, 1500)),
+        }
+        if start_time_ms is not None:
+            params["startTime"] = start_time_ms
+        if end_time_ms is not None:
+            params["endTime"] = end_time_ms
+        with httpx.Client(base_url=self.rest_base_url, timeout=self.timeout_seconds) as client:
+            response = client.get("/fapi/v1/premiumIndexKlines", params=params)
+            response.raise_for_status()
+            payload = response.json()
+        return [self._parse_basis_kline_row(symbol.upper(), interval, row) for row in payload]
+
     def ping(self) -> bool:
         with httpx.Client(base_url=self.rest_base_url, timeout=self.timeout_seconds) as client:
             response = client.get("/fapi/v1/ping")
@@ -465,9 +707,14 @@ class BinanceFuturesClient:
         streams = "/".join(f"{s.lower()}@kline_{interval}" for s in symbols)
         url = f"{self.ws_base_url}?streams={streams}"
 
-        async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
+        async with websockets.connect(
+            url,
+            ping_interval=20,
+            ping_timeout=20,
+            open_timeout=self.timeout_seconds,
+        ) as ws:
             while True:
-                raw = await ws.recv()
+                raw = await asyncio.wait_for(ws.recv(), timeout=self.ws_receive_timeout_seconds)
                 data = json.loads(raw)
                 k = data.get("data", {}).get("k", {})
                 symbol = str(k.get("s", ""))
@@ -486,6 +733,36 @@ class BinanceFuturesClient:
                     v=float(k.get("v", 0.0)),
                     is_final=bool(k.get("x", False)),
                 )
+
+    async def stream_force_orders(
+        self,
+        symbols: list[str],
+        *,
+        max_events: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> AsyncIterator[BinanceLiquidationOrder]:
+        try:
+            import websockets
+        except Exception as exc:  # pragma: no cover - optional runtime dependency
+            raise RuntimeError("liquidation stream requires `websockets` package") from exc
+
+        streams = "/".join(f"{s.lower()}@forceOrder" for s in symbols)
+        url = f"{self.ws_base_url}?streams={streams}"
+        processed = 0
+        async with websockets.connect(url, ping_interval=20, ping_timeout=20, open_timeout=self.timeout_seconds) as ws:
+            while max_events is None or processed < max_events:
+                try:
+                    if timeout_seconds is None:
+                        raw = await ws.recv()
+                    else:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=float(timeout_seconds))
+                except TimeoutError:
+                    break
+                event = self._parse_force_order_event(json.loads(raw))
+                if event is None or not event.symbol:
+                    continue
+                processed += 1
+                yield event
 
     async def warmup_and_stream(
         self,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -90,6 +91,25 @@ class ExecutionQualityService:
         if isinstance(entry_model, EntryModel):
             return entry_model.value
         return str(entry_model).upper()
+
+    @staticmethod
+    def _normalized_string_set(
+        values: Collection[str] | None,
+        *,
+        case: str,
+    ) -> set[str]:
+        normalized: set[str] = set()
+        for value in values or ():
+            item = str(value or "").strip()
+            if not item:
+                continue
+            if case == "upper":
+                normalized.add(item.upper())
+            elif case == "lower":
+                normalized.add(item.lower())
+            else:
+                normalized.add(item)
+        return normalized
 
     def _aggregate_actual_entries(
         self,
@@ -305,9 +325,108 @@ class ExecutionQualityService:
         return "touch_no_confirmation", "expired_after_touch_confirmation"
 
     @staticmethod
+    def _min_distance_to_entry_bps(*, candles: list[Any], entry_price: float) -> float:
+        if entry_price <= 0.0 or not candles:
+            return 0.0
+        distances: list[float] = []
+        for candle in candles:
+            low = float(candle.l)
+            high = float(candle.h)
+            if low <= entry_price <= high:
+                return 0.0
+            if high < entry_price:
+                distances.append((entry_price - high) / entry_price * 10_000.0)
+            elif low > entry_price:
+                distances.append((low - entry_price) / entry_price * 10_000.0)
+        return float(min(distances)) if distances else 0.0
+
+    def _entry_reach_diagnostic(
+        self,
+        *,
+        plan: Plan,
+        now: datetime,
+    ) -> dict[str, float] | None:
+        end_ts = min(_utc(plan.valid_until), now)
+        start_ts = _utc(plan.valid_from)
+        if end_ts < start_ts:
+            end_ts = start_ts
+        candles = self.candle_repo.list_range(
+            symbol=plan.symbol,
+            timeframe=plan.timeframe,
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
+        if not candles:
+            return None
+        bars_observed = len(candles)
+        entry_price = float(plan.entry_price or 0.0)
+        if entry_price <= 0.0:
+            return None
+        min_distance_bps = self._min_distance_to_entry_bps(candles=candles, entry_price=float(plan.entry_price))
+        direction = str(plan.direction or "").strip().lower()
+        highs = [float(candle.h) for candle in candles]
+        lows = [float(candle.l) for candle in candles]
+        max_high = max(highs) if highs else entry_price
+        min_low = min(lows) if lows else entry_price
+
+        if direction == "short":
+            max_favorable_excursion_bps = max((entry_price - min_low) / entry_price * 10_000.0, 0.0)
+            max_adverse_excursion_bps = max((max_high - entry_price) / entry_price * 10_000.0, 0.0)
+            moved_to_target_without_fill = bool(float(plan.tp1 or 0.0) > 0.0 and min_low <= float(plan.tp1))
+            invalidated_before_touch = bool(float(plan.sl or 0.0) > 0.0 and max_high >= float(plan.sl))
+        else:
+            max_favorable_excursion_bps = max((max_high - entry_price) / entry_price * 10_000.0, 0.0)
+            max_adverse_excursion_bps = max((entry_price - min_low) / entry_price * 10_000.0, 0.0)
+            moved_to_target_without_fill = bool(float(plan.tp1 or 0.0) > 0.0 and max_high >= float(plan.tp1))
+            invalidated_before_touch = bool(float(plan.sl or 0.0) > 0.0 and min_low <= float(plan.sl))
+
+        bars_until_invalidation = 0.0
+        if invalidated_before_touch and float(plan.sl or 0.0) > 0.0:
+            stop_price = float(plan.sl)
+            for index, candle in enumerate(candles, start=1):
+                if direction == "short":
+                    if float(candle.h) >= stop_price:
+                        bars_until_invalidation = float(index)
+                        break
+                else:
+                    if float(candle.l) <= stop_price:
+                        bars_until_invalidation = float(index)
+                        break
+        return {
+            "bars_observed": float(bars_observed),
+            "min_distance_to_entry_bps": float(min_distance_bps),
+            "max_favorable_excursion_after_miss_bps": float(max_favorable_excursion_bps),
+            "max_adverse_excursion_after_miss_bps": float(max_adverse_excursion_bps),
+            "moved_to_target_without_fill": float(1.0 if moved_to_target_without_fill else 0.0),
+            "invalidated_before_touch": float(1.0 if invalidated_before_touch else 0.0),
+            "bars_until_invalidation": float(bars_until_invalidation),
+        }
+
+    @staticmethod
     def _strategy_family(plan: Plan) -> str:
         validity = dict(plan.validity or {})
         return str(validity.get("strategy_family") or "legacy_zone_plan")
+
+    @staticmethod
+    def _direction(plan: Plan) -> str:
+        return str(getattr(plan, "direction", "") or "").upper()
+
+    @classmethod
+    def _plan_matches_filters(
+        cls,
+        plan: Plan,
+        *,
+        strategy_families: set[str],
+        entry_models: set[str],
+        directions: set[str],
+    ) -> bool:
+        if strategy_families and cls._strategy_family(plan).lower() not in strategy_families:
+            return False
+        if entry_models and cls._model_value(plan.entry_model) not in entry_models:
+            return False
+        if directions and cls._direction(plan) not in directions:
+            return False
+        return True
 
     @staticmethod
     def _final_exit_reason(plan: Plan, plan_fills: list[ExecutionFill]) -> str | None:
@@ -352,6 +471,25 @@ class ExecutionQualityService:
         all_bucket_fills: list[ExecutionFill] = []
         unfilled_reasons = self._empty_unfilled_reasons()
         unfilled_reason_details = self._empty_unfilled_reason_details()
+        entry_reach_diagnostics = {
+            "expired_without_touch_count": 0,
+            "avg_min_distance_to_entry_bps": 0.0,
+            "min_min_distance_to_entry_bps": 0.0,
+            "max_min_distance_to_entry_bps": 0.0,
+            "avg_bars_observed": 0.0,
+            "avg_max_favorable_excursion_after_miss_bps": 0.0,
+            "avg_max_adverse_excursion_after_miss_bps": 0.0,
+            "moved_to_target_without_fill_count": 0,
+            "invalidated_before_touch_count": 0,
+            "avg_bars_until_invalidation": 0.0,
+        }
+        expired_without_touch_distances: list[float] = []
+        expired_without_touch_bars: list[float] = []
+        expired_without_touch_favorable_excursions: list[float] = []
+        expired_without_touch_adverse_excursions: list[float] = []
+        expired_without_touch_moved_to_target = 0
+        expired_without_touch_invalidated = 0
+        expired_without_touch_bars_to_invalidation: list[float] = []
         exit_reasons = self._empty_exit_reasons()
         final_exit_reasons = self._empty_exit_reasons()
         by_strategy_family: dict[str, dict[str, Any]] = defaultdict(
@@ -434,6 +572,30 @@ class ExecutionQualityService:
                 )
                 unfilled_reasons[reason_group] = int(unfilled_reasons.get(reason_group, 0)) + 1
                 unfilled_reason_details[reason_detail] = int(unfilled_reason_details.get(reason_detail, 0)) + 1
+                if reason_detail == "expired_without_touch":
+                    diagnostic = self._entry_reach_diagnostic(plan=plan, now=now)
+                    if diagnostic:
+                        expired_without_touch_distances.append(
+                            float(diagnostic.get("min_distance_to_entry_bps", 0.0) or 0.0)
+                        )
+                        expired_without_touch_bars.append(float(diagnostic.get("bars_observed", 0.0) or 0.0))
+                        expired_without_touch_favorable_excursions.append(
+                            float(diagnostic.get("max_favorable_excursion_after_miss_bps", 0.0) or 0.0)
+                        )
+                        expired_without_touch_adverse_excursions.append(
+                            float(diagnostic.get("max_adverse_excursion_after_miss_bps", 0.0) or 0.0)
+                        )
+                        expired_without_touch_moved_to_target += int(
+                            float(diagnostic.get("moved_to_target_without_fill", 0.0) or 0.0) > 0.0
+                        )
+                        invalidated_before_touch = int(
+                            float(diagnostic.get("invalidated_before_touch", 0.0) or 0.0) > 0.0
+                        )
+                        expired_without_touch_invalidated += invalidated_before_touch
+                        if invalidated_before_touch:
+                            expired_without_touch_bars_to_invalidation.append(
+                                float(diagnostic.get("bars_until_invalidation", 0.0) or 0.0)
+                            )
 
             for reason in self._all_exit_reasons(plan, plan_fills):
                 if reason in exit_reasons:
@@ -498,6 +660,36 @@ class ExecutionQualityService:
             }
 
         fill_fee_total = float(sum(float(fill.fee) for fill in all_bucket_fills))
+        if expired_without_touch_distances:
+            entry_reach_diagnostics = {
+                "expired_without_touch_count": len(expired_without_touch_distances),
+                "avg_min_distance_to_entry_bps": float(
+                    sum(expired_without_touch_distances) / len(expired_without_touch_distances)
+                ),
+                "min_min_distance_to_entry_bps": float(min(expired_without_touch_distances)),
+                "max_min_distance_to_entry_bps": float(max(expired_without_touch_distances)),
+                "avg_bars_observed": float(sum(expired_without_touch_bars) / len(expired_without_touch_bars))
+                if expired_without_touch_bars
+                else 0.0,
+                "avg_max_favorable_excursion_after_miss_bps": float(
+                    sum(expired_without_touch_favorable_excursions) / len(expired_without_touch_favorable_excursions)
+                )
+                if expired_without_touch_favorable_excursions
+                else 0.0,
+                "avg_max_adverse_excursion_after_miss_bps": float(
+                    sum(expired_without_touch_adverse_excursions) / len(expired_without_touch_adverse_excursions)
+                )
+                if expired_without_touch_adverse_excursions
+                else 0.0,
+                "moved_to_target_without_fill_count": int(expired_without_touch_moved_to_target),
+                "invalidated_before_touch_count": int(expired_without_touch_invalidated),
+                "avg_bars_until_invalidation": float(
+                    sum(expired_without_touch_bars_to_invalidation)
+                    / len(expired_without_touch_bars_to_invalidation)
+                )
+                if expired_without_touch_bars_to_invalidation
+                else 0.0,
+            }
         return {
             "plans_total": len(plans),
             "plans_matured": matured_plans,
@@ -523,6 +715,7 @@ class ExecutionQualityService:
             },
             "unfilled_reasons": unfilled_reasons,
             "unfilled_reason_details": unfilled_reason_details,
+            "entry_reach_diagnostics": entry_reach_diagnostics,
             "exit_reasons": exit_reasons,
             "final_exit_reasons": final_exit_reasons,
             "target_exit_ratio": float(target_exit_count / closed_plans) if closed_plans else 0.0,
@@ -596,6 +789,24 @@ class ExecutionQualityService:
         )
         for reason, count in sorted(payload["unfilled_reason_details"].items()):
             lines.append(f"- {reason}: {count}")
+
+        entry_reach = dict(payload.get("entry_reach_diagnostics") or {})
+        lines.extend(
+            [
+                "",
+                "## Entry Reach Diagnostics",
+                f"- expired_without_touch_count: {int(entry_reach.get('expired_without_touch_count', 0) or 0)}",
+                f"- avg_min_distance_to_entry_bps: {float(entry_reach.get('avg_min_distance_to_entry_bps', 0.0) or 0.0):.4f}",
+                f"- min_min_distance_to_entry_bps: {float(entry_reach.get('min_min_distance_to_entry_bps', 0.0) or 0.0):.4f}",
+                f"- max_min_distance_to_entry_bps: {float(entry_reach.get('max_min_distance_to_entry_bps', 0.0) or 0.0):.4f}",
+                f"- avg_bars_observed: {float(entry_reach.get('avg_bars_observed', 0.0) or 0.0):.2f}",
+                f"- avg_max_favorable_excursion_after_miss_bps: {float(entry_reach.get('avg_max_favorable_excursion_after_miss_bps', 0.0) or 0.0):.4f}",
+                f"- avg_max_adverse_excursion_after_miss_bps: {float(entry_reach.get('avg_max_adverse_excursion_after_miss_bps', 0.0) or 0.0):.4f}",
+                f"- moved_to_target_without_fill_count: {int(entry_reach.get('moved_to_target_without_fill_count', 0) or 0)}",
+                f"- invalidated_before_touch_count: {int(entry_reach.get('invalidated_before_touch_count', 0) or 0)}",
+                f"- avg_bars_until_invalidation: {float(entry_reach.get('avg_bars_until_invalidation', 0.0) or 0.0):.2f}",
+            ]
+        )
 
         lines.extend(
             [
@@ -692,10 +903,31 @@ class ExecutionQualityService:
         file_path.write_text("\n".join(lines), encoding="utf-8")
         return str(file_path)
 
-    def generate(self, *, symbol: str, days: int, write_report: bool = True) -> dict[str, Any]:
+    def generate(
+        self,
+        *,
+        symbol: str,
+        days: int,
+        write_report: bool = True,
+        strategy_families: Collection[str] | None = None,
+        entry_models: Collection[str] | None = None,
+        directions: Collection[str] | None = None,
+    ) -> dict[str, Any]:
         now = datetime.now(timezone.utc).replace(microsecond=0)
         lookback_days = max(1, int(days))
-        plans = list(self.plan_repo.list_recent(symbol=symbol, timeframe="5m", days=lookback_days))
+        family_filters = self._normalized_string_set(strategy_families, case="lower")
+        entry_model_filters = self._normalized_string_set(entry_models, case="upper")
+        direction_filters = self._normalized_string_set(directions, case="upper")
+        plans = [
+            plan
+            for plan in self.plan_repo.list_recent(symbol=symbol, timeframe="5m", days=lookback_days)
+            if self._plan_matches_filters(
+                plan,
+                strategy_families=family_filters,
+                entry_models=entry_model_filters,
+                directions=direction_filters,
+            )
+        ]
 
         actual_entries: dict[str, MatchedEntry] = {}
         _stage_counts: dict[str, int] = {}
@@ -768,6 +1000,13 @@ class ExecutionQualityService:
             "symbol": symbol,
             "days": lookback_days,
             "generated_at": now.isoformat(),
+            "filters": {
+                "strategy_families": sorted(family_filters),
+                "entry_models": sorted(entry_model_filters),
+                "directions": sorted(direction_filters),
+            }
+            if family_filters or entry_model_filters or direction_filters
+            else None,
             "comparison_axis": "strategy_version",
             "versions_compared": len(by_strategy_version),
             **overall,

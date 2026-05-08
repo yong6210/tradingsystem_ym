@@ -9,6 +9,7 @@ from app.core.config import get_settings
 from app.core.enums import Direction, EntryModel, PlanState
 from app.db.models import Candle, Plan, Zone
 from app.services.acceptance_rejection_classifier import AcceptanceRejectionClassifierService
+from app.services.acceptance_rejection_classifier import AcceptanceRejectionResult
 from app.services.common import clamp
 from app.services.context_engine import ContextSnapshot
 from app.services.execution_router import EntryDecision, EntryModelRouter
@@ -40,6 +41,12 @@ class RegimeProfile:
 
 
 class PlanGenerator:
+    _REACTION_SHADOW_ZONE_BAND_FRACTION = 0.25
+    _REACTION_SHADOW_ONE_BAR_MIN_EVENT_BARS = 1
+    _PROOF_RECLAIM_LOOKBACK_TOTAL_BARS = 30
+    _PROOF_RECLAIM_EXCLUDE_RECENT_BARS = 6
+    _PROOF_RECLAIM_SWEEP_ATR_THRESHOLD = 0.08
+
     def __init__(self):
         self.settings = get_settings()
         self.router = EntryModelRouter()
@@ -49,6 +56,44 @@ class PlanGenerator:
         self.thesis = ThesisFingerprintService()
         self.sizing = PositionSizingService(self.settings)
         self.session_guidance = SessionGuidanceService(self.settings)
+
+    def _fast_failure_validity(
+        self,
+        *,
+        symbol: str,
+        strategy_family: str,
+        entry_model: EntryModel,
+        session_name: str,
+    ) -> dict[str, Any]:
+        if str(symbol or "").strip().upper() != "BTCUSDC":
+            return {}
+        if str(strategy_family or "").strip().lower() != "sweep_reversal":
+            return {}
+        if str(entry_model.value if isinstance(entry_model, EntryModel) else entry_model).strip().upper() != EntryModel.LIMIT.value:
+            return {}
+        if not bool(self.settings.btc_sweep_reversal_limit_fast_failure_enabled):
+            return {}
+        allowed_sessions = {
+            item.strip().lower()
+            for item in str(self.settings.btc_sweep_reversal_limit_fast_failure_allowed_sessions or "").split(",")
+            if item.strip()
+        }
+        normalized_session_name = str(session_name or "").strip().lower()
+        if allowed_sessions and normalized_session_name not in allowed_sessions:
+            return {}
+        max_bars = max(int(self.settings.btc_sweep_reversal_limit_fast_failure_max_bars), 0)
+        stop_r = float(self.settings.btc_sweep_reversal_limit_fast_failure_stop_r)
+        requires_sl_touch = bool(self.settings.btc_sweep_reversal_limit_fast_failure_requires_sl_touch)
+        if max_bars <= 0 or stop_r <= 0.0 or stop_r >= 1.0:
+            return {}
+        return {
+            "strategy_fast_failure_enabled": True,
+            "strategy_fast_failure_policy": "btc_sweep_reversal_limit_initial_guard_stop",
+            "strategy_fast_failure_session_name": normalized_session_name,
+            "strategy_fast_failure_max_bars": max_bars,
+            "strategy_fast_failure_stop_r": round(stop_r, 8),
+            "strategy_fast_failure_requires_sl_touch": requires_sl_touch,
+        }
 
     def resolve_regime_label(self, context: ContextSnapshot) -> str:
         return self._resolve_regime_label(context)
@@ -536,6 +581,143 @@ class PlanGenerator:
             return None
         return self._compact_alias(reaction_evidence)
 
+    def _build_runtime_signal_telemetry(
+        self,
+        *,
+        context: ContextSnapshot,
+        zone: Zone,
+        direction: Direction,
+        strategy_family: str,
+        entry_price: float,
+        sl: float,
+        location_reference: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        base = dict(getattr(context, "signal_telemetry", {}) or {})
+        if not base:
+            return None
+
+        latest_close = float(context.last_price)
+        entry_price = float(entry_price)
+        sl = float(sl)
+        risk_abs = max(abs(entry_price - sl), 1e-9)
+        atr_abs = max(float(context.atr15), 1e-9)
+        close_position = float(base.get("close_position", 0.5) or 0.5)
+        close_vs_ema_fast_atr = float(base.get("close_vs_ema_fast_atr", 0.0) or 0.0)
+
+        if direction == Direction.SHORT:
+            directional_close_position = 1.0 - close_position
+            sweep_distance_atr = float(base.get("short_sweep_distance_atr", 0.0) or 0.0)
+            reclaim_distance_atr = float(base.get("short_reclaim_distance_atr", 0.0) or 0.0)
+            directional_close_vs_ema_fast_atr = -close_vs_ema_fast_atr
+            entry_offset_abs = max(entry_price - latest_close, 0.0)
+        else:
+            directional_close_position = close_position
+            sweep_distance_atr = float(base.get("long_sweep_distance_atr", 0.0) or 0.0)
+            reclaim_distance_atr = float(base.get("long_reclaim_distance_atr", 0.0) or 0.0)
+            directional_close_vs_ema_fast_atr = close_vs_ema_fast_atr
+            entry_offset_abs = max(latest_close - entry_price, 0.0)
+
+        telemetry = {
+            "telemetry_source": str(base.get("telemetry_source") or "context_snapshot"),
+            "telemetry_version": str(base.get("telemetry_version") or "v1"),
+            "signal_family": str(strategy_family or "").strip().lower() or None,
+            "direction": direction.value,
+            "zone_type": str(zone.type or "").upper() or None,
+            "zone_width_atr": round(float(zone.width_atr), 4),
+            "prior_window_bars": int(base.get("prior_window_bars", 0) or 0),
+            "close_position": round(close_position, 4),
+            "directional_close_position": round(directional_close_position, 4),
+            "body_fraction": round(float(base.get("body_fraction", 0.0) or 0.0), 4),
+            "range_atr": round(float(base.get("range_atr", 0.0) or 0.0), 4),
+            "body_atr": round(float(base.get("body_atr", 0.0) or 0.0), 4),
+            "prior_range_atr": round(float(base.get("prior_range_atr", 0.0) or 0.0), 4),
+            "sweep_distance_atr": round(sweep_distance_atr, 4),
+            "reclaim_distance_atr": round(reclaim_distance_atr, 4),
+            "ema_spread_atr": round(float(base.get("ema_spread_atr", 0.0) or 0.0), 4),
+            "directional_close_vs_ema_fast_atr": round(directional_close_vs_ema_fast_atr, 4),
+            "entry_offset_atr": round(float(entry_offset_abs / atr_abs), 4),
+            "entry_offset_r": round(float(entry_offset_abs / risk_abs), 4),
+            "risk_atr": round(float(risk_abs / atr_abs), 4),
+            "edge_proximity_atr": location_reference.get("edge_proximity_atr") if location_reference else None,
+        }
+        return self._compact_alias(telemetry)
+
+    def _build_runtime_signal_shadow_tilt(
+        self,
+        *,
+        symbol: str,
+        strategy_family: str,
+        entry_model: EntryModel,
+        direction: Direction,
+        runtime_signal_telemetry: dict[str, Any] | None,
+        base_recommended_risk_r: float,
+        expected_ev_r: float,
+    ) -> dict[str, Any] | None:
+        if not bool(self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_enabled):
+            return None
+        if str(symbol or "").strip().upper() != "BTCUSDC":
+            return None
+        if str(strategy_family or "").strip().lower() != "sweep_reversal":
+            return None
+        if entry_model != EntryModel.LIMIT:
+            return None
+        telemetry = dict(runtime_signal_telemetry or {})
+        if not telemetry:
+            return None
+
+        policy = "btc_sweep_reversal_limit_runtime_signal_shadow_tilt_v1"
+        multiplier = 1.0
+        classification = "neutral"
+        reason_code = "shadow_hold_neutral"
+        reason = "No honest-runtime tilt matched; keep baseline size in live and only log the shadow view."
+
+        if direction == Direction.LONG:
+            weaken_threshold = float(
+                self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_long_weaken_close_vs_ema_fast_atr
+            )
+            observed = float(telemetry.get("directional_close_vs_ema_fast_atr", 0.0) or 0.0)
+            if observed >= weaken_threshold:
+                multiplier = float(self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_long_size_factor)
+                classification = "weak_long_understretch"
+                reason_code = "shadow_reduce_weak_long"
+                reason = "Honest BTC subset showed weaker long EV when close-vs-EMA stretch was not deep enough."
+        elif direction == Direction.SHORT:
+            strength_threshold = float(
+                self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_short_strength_sweep_distance_atr
+            )
+            observed = float(telemetry.get("sweep_distance_atr", 0.0) or 0.0)
+            if observed >= strength_threshold:
+                multiplier = float(self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_short_size_factor)
+                classification = "strong_short_sweep"
+                reason_code = "shadow_increase_strong_short"
+                reason = "Honest BTC subset showed stronger short EV when sweep distance expanded into the upper bucket."
+
+        shadow_recommended_risk_r = round(float(base_recommended_risk_r) * multiplier, 4)
+        shadow_expected_ev_at_size_r = round(float(expected_ev_r) * shadow_recommended_risk_r, 4)
+        base_expected_ev_at_size_r = round(float(expected_ev_r) * float(base_recommended_risk_r), 4)
+        payload = {
+            "policy": policy,
+            "apply_live": False,
+            "classification": classification,
+            "reason_code": reason_code,
+            "reason": reason,
+            "base_recommended_risk_r": round(float(base_recommended_risk_r), 4),
+            "shadow_recommended_risk_r": shadow_recommended_risk_r,
+            "shadow_size_multiplier": round(float(multiplier), 4),
+            "base_expected_ev_at_size_r": base_expected_ev_at_size_r,
+            "shadow_expected_ev_at_size_r": shadow_expected_ev_at_size_r,
+            "delta_expected_ev_at_size_r": round(shadow_expected_ev_at_size_r - base_expected_ev_at_size_r, 4),
+            "long_weaken_close_vs_ema_fast_atr_threshold": round(
+                float(self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_long_weaken_close_vs_ema_fast_atr),
+                4,
+            ),
+            "short_strength_sweep_distance_atr_threshold": round(
+                float(self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_short_strength_sweep_distance_atr),
+                4,
+            ),
+        }
+        return self._compact_alias(payload)
+
     def _zone_is_stale_for_scalp(self, zone: Zone, *, now: datetime) -> bool:
         return self._zone_age_hours(zone, now=now) > float(self.settings.scalp_zone_hard_max_age_hours)
 
@@ -643,6 +825,207 @@ class PlanGenerator:
             round(zone_type_multiplier, 6),
         )
 
+    def _transition_edge_variant_profile(self, profile: RegimeProfile) -> RegimeProfile:
+        if profile.name != "transition":
+            return profile
+        return RegimeProfile(
+            name=profile.name,
+            min_confluence=max(
+                float(self.settings.min_confluence_score),
+                float(profile.min_confluence) - float(self.settings.transition_edge_variant_min_confluence_delta),
+            ),
+            rr_floor=profile.rr_floor,
+            ev_floor=profile.ev_floor,
+            weight_liquidity=profile.weight_liquidity,
+            weight_fvg_displacement=profile.weight_fvg_displacement,
+            weight_htf_alignment=profile.weight_htf_alignment,
+            weight_ob_freshness=profile.weight_ob_freshness,
+            weight_trend_proxy=profile.weight_trend_proxy,
+        )
+
+    def _transition_edge_variant_confluence(
+        self,
+        *,
+        profile: RegimeProfile,
+        confluence_components: dict[str, float],
+        feature_weights_base: dict[str, float] | None,
+        feature_weights_active: dict[str, float] | None,
+        zone_type_multiplier: float,
+    ) -> tuple[RegimeProfile, float, dict[str, float], dict[str, float], dict[str, float]]:
+        variant_profile = self._transition_edge_variant_profile(profile)
+        base_weights = dict(feature_weights_base or self.feature_weights_for_regime(profile.name))
+        adjusted_weights = dict(feature_weights_active or base_weights)
+        adjusted_weights["htf_alignment"] = float(adjusted_weights.get("htf_alignment", 0.0)) * float(
+            self.settings.transition_edge_variant_htf_alignment_weight_multiplier
+        )
+        adjusted_weights["trend_proxy"] = float(adjusted_weights.get("trend_proxy", 0.0)) * float(
+            self.settings.transition_edge_variant_trend_proxy_weight_multiplier
+        )
+        adjusted_weights = self._normalize_weights(adjusted_weights, min_weight=0.0)
+
+        floor = 45.0
+        relax_factor = max(float(self.settings.transition_edge_variant_fvg_relax_factor), 1e-6)
+        raw_fvg = float(confluence_components.get("fvg_displacement", 0.0))
+        fvg_relaxed = clamp(floor + max(raw_fvg - floor, 0.0) / relax_factor, 0.0, 100.0)
+        adjusted_components = dict(confluence_components)
+        adjusted_components["fvg_displacement"] = round(fvg_relaxed, 2)
+
+        weighted = (
+            adjusted_weights.get("liquidity", 0.0) * float(adjusted_components.get("liquidity", 0.0))
+            + adjusted_weights.get("fvg_displacement", 0.0) * float(adjusted_components.get("fvg_displacement", 0.0))
+            + adjusted_weights.get("htf_alignment", 0.0) * float(adjusted_components.get("htf_alignment", 0.0))
+            + adjusted_weights.get("ob_freshness", 0.0) * float(adjusted_components.get("ob_freshness", 0.0))
+            + adjusted_weights.get("trend_proxy", 0.0) * float(adjusted_components.get("trend_proxy", 0.0))
+        )
+        adjusted_score = clamp(weighted * float(zone_type_multiplier or 1.0), 0.0, 100.0)
+        return (
+            variant_profile,
+            adjusted_score,
+            adjusted_components,
+            {key: round(float(value), 6) for key, value in base_weights.items()},
+            {key: round(float(value), 6) for key, value in adjusted_weights.items()},
+        )
+
+    def _proof_reclaim_transition_result(
+        self,
+        *,
+        signal: dict[str, Any],
+        context: ContextSnapshot,
+    ) -> AcceptanceRejectionResult:
+        entry_model = str(signal.get("entry_model") or "")
+        confirmed = entry_model == EntryModel.LIMIT.value
+        session_quality = clamp(
+            1.0 - (0.65 * float(context.friction_5m or 0.0) + 0.35 * float(context.jump_rate_5m or 0.0)),
+            0.0,
+            1.0,
+        )
+        return AcceptanceRejectionResult(
+            available=True,
+            classification="rejection_confirmed" if confirmed else "rejection_tentative",
+            rejection_score=82.0 if confirmed else 68.0,
+            acceptance_score=18.0,
+            rejection_hard_count=3 if confirmed else 2,
+            acceptance_hard_count=0,
+            mixed_reasons=[],
+            input={
+                "shadow_variant": "proof_reclaim",
+                "swept_level": float(signal.get("swept_level") or 0.0),
+                "sweep_side": str(signal.get("sweep_side") or ""),
+                "outside_close_count": 0,
+                "session_quality": float(session_quality),
+            },
+        )
+
+    @staticmethod
+    def _is_rejection_reaction(reaction: AcceptanceRejectionResult) -> bool:
+        return bool(reaction.available) and str(reaction.classification or "") in {
+            "rejection_confirmed",
+            "rejection_tentative",
+        }
+
+    def _transition_edge_variant_reaction(
+        self,
+        *,
+        zone: Zone,
+        context: ContextSnapshot,
+        candles_5m: list[Candle] | None,
+    ) -> tuple[AcceptanceRejectionResult | None, str]:
+        exact_input, _ = self.reaction_classifier.build_input_with_reason(
+            zone=zone,
+            context=context,
+            candles_5m=candles_5m,
+        )
+        exact_reaction = self.reaction_classifier.classify(exact_input)
+        if self._is_rejection_reaction(exact_reaction):
+            return exact_reaction, "exact_rejection"
+
+        one_bar_input, _ = self.reaction_classifier.build_input_with_reason(
+            zone=zone,
+            context=context,
+            candles_5m=candles_5m,
+            min_event_bars=self._REACTION_SHADOW_ONE_BAR_MIN_EVENT_BARS,
+            swept_level_type_override="one_bar_shadow",
+        )
+        one_bar_reaction = self.reaction_classifier.classify(one_bar_input)
+        if self._is_rejection_reaction(one_bar_reaction):
+            one_bar_reaction.input = dict(one_bar_reaction.input or {})
+            one_bar_reaction.input["shadow_variant"] = "one_bar"
+            return one_bar_reaction, "one_bar_shadow"
+
+        proof_signal, proof_reason = self._proof_reclaim_shadow_signal(
+            zone=zone,
+            context=context,
+            candles_5m=candles_5m,
+        )
+        if proof_signal is not None and str(proof_signal.get("family") or "") == "sweep_reversal":
+            return self._proof_reclaim_transition_result(signal=proof_signal, context=context), "proof_reclaim_shadow"
+        return None, str(proof_reason or "no_transition_edge_reaction")
+
+    def _transition_edge_variant_candidate(
+        self,
+        *,
+        zone: Zone,
+        context: ContextSnapshot,
+        candles_5m: list[Candle] | None,
+        zone_strength: float,
+        near_lp: bool,
+        confluence_components: dict[str, float],
+        feature_weights_base: dict[str, float],
+        feature_weights_active: dict[str, float],
+        zone_type_multiplier_active: float,
+        profile: RegimeProfile,
+    ) -> dict[str, Any] | None:
+        if not bool(self.settings.transition_edge_variant_enabled):
+            return None
+        if profile.name != "transition":
+            return None
+
+        reaction, rescue_reason = self._transition_edge_variant_reaction(
+            zone=zone,
+            context=context,
+            candles_5m=candles_5m,
+        )
+        if reaction is None:
+            return None
+
+        variant_profile, variant_score, variant_components, variant_weights_base, variant_weights_active = self._transition_edge_variant_confluence(
+            profile=profile,
+            confluence_components=confluence_components,
+            feature_weights_base=feature_weights_base,
+            feature_weights_active=feature_weights_active,
+            zone_type_multiplier=zone_type_multiplier_active,
+        )
+        if variant_score < variant_profile.min_confluence:
+            return None
+
+        strategy_family = self.strategy_family_router.route(
+            zone=zone,
+            context=context,
+            reaction=reaction,
+            near_lp=near_lp,
+            zone_strength=zone_strength,
+            confluence_score=variant_score,
+            regime_name=variant_profile.name,
+            candles_5m=candles_5m,
+        )
+        if (
+            not strategy_family.available
+            or strategy_family.family != "sweep_reversal"
+            or strategy_family.entry_model != EntryModel.LIMIT
+        ):
+            return None
+
+        return {
+            "reaction": reaction,
+            "rescue_reason": rescue_reason,
+            "profile": variant_profile,
+            "strategy_family": strategy_family,
+            "confluence_score": variant_score,
+            "confluence_components": variant_components,
+            "feature_weights_base": variant_weights_base,
+            "feature_weights_active": variant_weights_active,
+        }
+
     def _meta_threshold(self, regime_name: str) -> float:
         if regime_name == "trend":
             return self.settings.meta_filter_min_score_trend
@@ -728,6 +1111,143 @@ class PlanGenerator:
     def _sorted_counts(counter: Counter[str]) -> dict[str, int]:
         return {str(key): int(value) for key, value in sorted(counter.items(), key=lambda item: (-item[1], str(item[0])))}
 
+    @classmethod
+    def _reaction_shadow_zone_band_level(cls, zone: Zone) -> float | None:
+        width = max(float(zone.high) - float(zone.low), 0.0)
+        if width <= 1e-9:
+            return None
+        band = width * cls._REACTION_SHADOW_ZONE_BAND_FRACTION
+        if str(zone.dir_bias or "") == "support":
+            return float(zone.low) + band
+        if str(zone.dir_bias or "") == "resistance":
+            return float(zone.high) - band
+        return None
+
+    def _record_shadow_reaction_lane(
+        self,
+        *,
+        counter: Counter[str],
+        lane_prefix: str,
+        exact_reason: str,
+        zone: Zone,
+        context: ContextSnapshot,
+        candles_5m: list[Candle] | None,
+        near_lp: bool,
+        zone_strength: float,
+        confluence_score: float,
+        regime_name: str,
+        sweep_level_override: float | None = None,
+        swept_level_type_override: str | None = None,
+        min_event_bars: int = 2,
+    ) -> None:
+        shadow_input, shadow_reason = self.reaction_classifier.build_input_with_reason(
+            zone=zone,
+            context=context,
+            candles_5m=candles_5m,
+            sweep_level_override=sweep_level_override,
+            swept_level_type_override=swept_level_type_override,
+            min_event_bars=min_event_bars,
+        )
+        if shadow_input is None:
+            counter[f"{lane_prefix}:shadow_unavailable:{shadow_reason}"] += 1
+            return
+
+        counter[f"{lane_prefix}:shadow_input_available"] += 1
+        counter[f"{lane_prefix}:rescued_from:{exact_reason}"] += 1
+        shadow_reaction = self.reaction_classifier.classify(shadow_input)
+        shadow_classification = str(shadow_reaction.classification or "unknown")
+        counter[f"{lane_prefix}:shadow_classification:{shadow_classification}"] += 1
+
+        shadow_strategy_family = self.strategy_family_router.route(
+            zone=zone,
+            context=context,
+            reaction=shadow_reaction,
+            near_lp=near_lp,
+            zone_strength=zone_strength,
+            confluence_score=confluence_score,
+            regime_name=regime_name,
+            candles_5m=candles_5m,
+        )
+        if shadow_strategy_family.family != "none":
+            counter[f"{lane_prefix}:shadow_family:{shadow_strategy_family.family}"] += 1
+        if shadow_strategy_family.available:
+            counter[f"{lane_prefix}:shadow_available_family"] += 1
+            counter[
+                f"{lane_prefix}:shadow_available_family:{shadow_strategy_family.family}"
+            ] += 1
+            if shadow_strategy_family.entry_model is not None:
+                counter[
+                    f"{lane_prefix}:shadow_available_entry_model:{shadow_strategy_family.entry_model.value}"
+                ] += 1
+
+    def _proof_reclaim_shadow_signal(
+        self,
+        *,
+        zone: Zone,
+        context: ContextSnapshot,
+        candles_5m: list[Candle] | None,
+    ) -> tuple[dict[str, Any] | None, str]:
+        if not candles_5m:
+            return None, "insufficient_candles"
+        total_bars = int(self._PROOF_RECLAIM_LOOKBACK_TOTAL_BARS)
+        exclude_recent = int(self._PROOF_RECLAIM_EXCLUDE_RECENT_BARS)
+        if len(candles_5m) < total_bars:
+            return None, "insufficient_candles"
+
+        prior_window = candles_5m[-total_bars:-exclude_recent]
+        if not prior_window:
+            return None, "insufficient_prior_window"
+
+        atr15 = float(context.atr15 or 0.0)
+        if atr15 <= 1e-9:
+            return None, "insufficient_atr"
+
+        latest = candles_5m[-1]
+        latest_high = float(latest.h)
+        latest_low = float(latest.l)
+        latest_close = float(latest.c)
+        latest_range = max(latest_high - latest_low, 1e-9)
+        close_position = (latest_close - latest_low) / latest_range
+        sweep_threshold = atr15 * float(self._PROOF_RECLAIM_SWEEP_ATR_THRESHOLD)
+
+        if str(zone.dir_bias or "") == "support":
+            prior_level = min(float(c.l) for c in prior_window)
+            if latest_low < prior_level - sweep_threshold and latest_close > prior_level and close_position >= 0.4:
+                entry_model = (
+                    EntryModel.LIMIT
+                    if close_position >= 0.68
+                    else EntryModel.SWEEP_CONFIRM
+                    if close_position >= 0.52
+                    else EntryModel.CONFIRM
+                )
+                return {
+                    "family": "sweep_reversal",
+                    "direction": "long",
+                    "entry_model": entry_model.value,
+                    "swept_level": round(prior_level, 6),
+                }, "ok"
+            return None, "proof_reclaim_not_met"
+
+        if str(zone.dir_bias or "") == "resistance":
+            prior_level = max(float(c.h) for c in prior_window)
+            if latest_high > prior_level + sweep_threshold and latest_close < prior_level and close_position <= 0.6:
+                entry_model = (
+                    EntryModel.LIMIT
+                    if close_position <= 0.32
+                    else EntryModel.SWEEP_CONFIRM
+                    if close_position <= 0.48
+                    else EntryModel.CONFIRM
+                )
+                return {
+                    "family": "sweep_reversal",
+                    "direction": "short",
+                    "entry_model": entry_model.value,
+                    "swept_level": round(prior_level, 6),
+                }, "ok"
+            return None, "proof_reclaim_not_met"
+
+        return None, "unsupported_zone_direction"
+
     def generation_diagnostics(
         self,
         *,
@@ -741,8 +1261,13 @@ class PlanGenerator:
         profile = self._regime_profile(context)
         mode_policy = self.strategy_mode.policy()
         hard_gate_counts: Counter[str] = Counter()
+        transition_edge_variant_counts: Counter[str] = Counter()
         setup_disable_counts: Counter[str] = Counter()
         reaction_skip_counts: Counter[str] = Counter()
+        reaction_unavailable_reason_counts: Counter[str] = Counter()
+        reaction_shadow_zone_band_counts: Counter[str] = Counter()
+        reaction_shadow_one_bar_counts: Counter[str] = Counter()
+        reaction_shadow_proof_reclaim_counts: Counter[str] = Counter()
         router_block_counts: Counter[str] = Counter()
         legacy_router_reason_counts: Counter[str] = Counter()
         generic_setup_block_counts: Counter[str] = Counter()
@@ -750,6 +1275,9 @@ class PlanGenerator:
         block_examples: list[dict[str, Any]] = []
         post_hard_gate_zone_count = 0
         pre_generation_candidate_count = 0
+        transition_edge_variant_evaluated_count = 0
+        transition_edge_variant_expected_ev_sum = 0.0
+        transition_edge_variant_expected_ev_count = 0
 
         for zone in zones:
             stats = dict(zone.stats or {})
@@ -780,6 +1308,26 @@ class PlanGenerator:
             )
             gate_reason = self._hard_gate(zone, context, confluence_score, profile)
             if gate_reason is not None:
+                if gate_reason == "low_confluence":
+                    transition_edge_variant_evaluated_count += 1
+                    variant_candidate = self._transition_edge_variant_candidate(
+                        zone=zone,
+                        context=context,
+                        candles_5m=candles_5m,
+                        zone_strength=self._zone_strength(zone, context),
+                        near_lp=near_lp,
+                        confluence_components=confluence_components,
+                        feature_weights_base=self.feature_weights_for_regime(profile.name),
+                        feature_weights_active=self.feature_weights_for_regime(profile.name),
+                        zone_type_multiplier_active=1.0,
+                        profile=profile,
+                    )
+                    if variant_candidate is not None:
+                        transition_edge_variant_counts["eligible_shadow_rescue"] += 1
+                        transition_edge_variant_counts[f"rescue_reason:{variant_candidate['rescue_reason']}"] += 1
+                        transition_edge_variant_counts[f"family:{variant_candidate['strategy_family'].family}"] += 1
+                        transition_edge_variant_expected_ev_sum += float(stats.get("ev_r", 0.0) or 0.0)
+                        transition_edge_variant_expected_ev_count += 1
                 hard_gate_counts[gate_reason] += 1
                 if len(block_examples) < 8:
                     block_examples.append(
@@ -795,8 +1343,71 @@ class PlanGenerator:
                 continue
             post_hard_gate_zone_count += 1
 
-            reaction = self.reaction_classifier.classify_zone(zone=zone, context=context, candles_5m=candles_5m)
+            reaction_input, reaction_input_reason = self.reaction_classifier.build_input_with_reason(
+                zone=zone,
+                context=context,
+                candles_5m=candles_5m,
+            )
+            reaction = self.reaction_classifier.classify(reaction_input)
             classification = str(reaction.classification)
+            if not reaction.available:
+                reaction_unavailable_reason_counts[reaction_input_reason] += 1
+                reaction_shadow_zone_band_counts["exact_unavailable_zones"] += 1
+                shadow_level = self._reaction_shadow_zone_band_level(zone)
+                if shadow_level is not None:
+                    self._record_shadow_reaction_lane(
+                        counter=reaction_shadow_zone_band_counts,
+                        lane_prefix="zone_band",
+                        exact_reason=reaction_input_reason,
+                        zone=zone,
+                        context=context,
+                        candles_5m=candles_5m,
+                        near_lp=near_lp,
+                        zone_strength=self._zone_strength(zone, context),
+                        confluence_score=confluence_score,
+                        regime_name=profile.name,
+                        sweep_level_override=shadow_level,
+                        swept_level_type_override="zone_band_shadow",
+                    )
+
+                if reaction_input_reason == "insufficient_post_sweep_bars":
+                    reaction_shadow_one_bar_counts["exact_insufficient_post_sweep_zones"] += 1
+                    self._record_shadow_reaction_lane(
+                        counter=reaction_shadow_one_bar_counts,
+                        lane_prefix="one_bar",
+                        exact_reason=reaction_input_reason,
+                        zone=zone,
+                        context=context,
+                        candles_5m=candles_5m,
+                        near_lp=near_lp,
+                        zone_strength=self._zone_strength(zone, context),
+                        confluence_score=confluence_score,
+                        regime_name=profile.name,
+                        min_event_bars=self._REACTION_SHADOW_ONE_BAR_MIN_EVENT_BARS,
+                        swept_level_type_override="one_bar_shadow",
+                    )
+
+                reaction_shadow_proof_reclaim_counts["exact_unavailable_zones"] += 1
+                proof_shadow_signal, proof_shadow_reason = self._proof_reclaim_shadow_signal(
+                    zone=zone,
+                    context=context,
+                    candles_5m=candles_5m,
+                )
+                if proof_shadow_signal is None:
+                    reaction_shadow_proof_reclaim_counts[
+                        f"proof_reclaim_unavailable:{proof_shadow_reason}"
+                    ] += 1
+                else:
+                    reaction_shadow_proof_reclaim_counts["proof_reclaim_signal_detected"] += 1
+                    reaction_shadow_proof_reclaim_counts[
+                        f"rescued_from:{reaction_input_reason}"
+                    ] += 1
+                    reaction_shadow_proof_reclaim_counts[
+                        f"proof_reclaim_family:{proof_shadow_signal['family']}"
+                    ] += 1
+                    reaction_shadow_proof_reclaim_counts[
+                        f"proof_reclaim_entry_model:{proof_shadow_signal['entry_model']}"
+                    ] += 1
             if reaction.available and classification == "mixed":
                 reaction_skip_counts["mixed"] += 1
                 if len(block_examples) < 8:
@@ -912,6 +1523,40 @@ class PlanGenerator:
 
             pre_generation_candidate_count += 1
 
+        low_confluence_block_count = int(hard_gate_counts.get("low_confluence", 0) or 0)
+        shadow_pass_count = int(transition_edge_variant_counts.get("eligible_shadow_rescue", 0) or 0)
+        rescue_reason_mix = {
+            str(key).split("rescue_reason:", 1)[1]: int(value)
+            for key, value in transition_edge_variant_counts.items()
+            if str(key).startswith("rescue_reason:")
+        }
+        transition_edge_variant_shadow_summary = {
+            "available": bool(self.settings.transition_edge_variant_enabled),
+            "shadow_only": bool(self.settings.transition_edge_variant_shadow_only),
+            "variant": "exp_6_fvg_relaxed_plus_transition_override",
+            "evaluated": int(transition_edge_variant_evaluated_count),
+            "pass": shadow_pass_count,
+            "pass_rate": round(
+                shadow_pass_count / max(int(transition_edge_variant_evaluated_count), 1),
+                4,
+            )
+            if transition_edge_variant_evaluated_count > 0
+            else 0.0,
+            "reason_mix": rescue_reason_mix,
+            "candidate_baseline": int(pre_generation_candidate_count),
+            "candidate_shadow": int(pre_generation_candidate_count + shadow_pass_count),
+            "shadow_candidate_delta": int(shadow_pass_count),
+            "low_confluence_block_baseline": low_confluence_block_count,
+            "low_confluence_block_shadow": max(low_confluence_block_count - shadow_pass_count, 0),
+            "low_confluence_block_delta": -int(shadow_pass_count),
+            "expected_ev_r_proxy": round(
+                transition_edge_variant_expected_ev_sum / max(transition_edge_variant_expected_ev_count, 1),
+                4,
+            )
+            if transition_edge_variant_expected_ev_count > 0
+            else 0.0,
+        }
+
         return {
             "schema_version": "plan_generation_diagnostics_v1",
             "symbol": symbol,
@@ -924,6 +1569,12 @@ class PlanGenerator:
             "pre_generation_candidate_count": int(pre_generation_candidate_count),
             "setup_disable_counts": self._sorted_counts(setup_disable_counts),
             "hard_gate_block_counts": self._sorted_counts(hard_gate_counts),
+            "transition_edge_variant_shadow_counts": self._sorted_counts(transition_edge_variant_counts),
+            "transition_edge_variant_shadow_summary": transition_edge_variant_shadow_summary,
+            "reaction_unavailable_reason_counts": self._sorted_counts(reaction_unavailable_reason_counts),
+            "reaction_shadow_zone_band_counts": self._sorted_counts(reaction_shadow_zone_band_counts),
+            "reaction_shadow_one_bar_counts": self._sorted_counts(reaction_shadow_one_bar_counts),
+            "reaction_shadow_proof_reclaim_counts": self._sorted_counts(reaction_shadow_proof_reclaim_counts),
             "reaction_skip_counts": self._sorted_counts(reaction_skip_counts),
             "router_block_counts": self._sorted_counts(router_block_counts),
             "legacy_router_reason_counts": self._sorted_counts(legacy_router_reason_counts),
@@ -1111,6 +1762,7 @@ class PlanGenerator:
         mode_policy = self.strategy_mode.policy()
         session_guidance = self.session_guidance.snapshot(strategy_mode=mode_policy.mode, now=now)
         session_state = str(session_guidance.get("state", "unknown"))
+        session_name = str((session_guidance.get("current_session") or {}).get("name") or "inactive").strip().lower() or "inactive"
         if session_state == "preferred_live_window":
             session_score_bias = float(self.settings.scalp_session_boost_score)
             session_probability_adjustment = 0.012
@@ -1152,17 +1804,46 @@ class PlanGenerator:
                 feature_overrides=feature_overrides,
                 importance_calibration=importance_calibration,
             )
-            gate_reason = self._hard_gate(zone, context, confluence_score, regime)
+            zone_profile = regime
+            transition_edge_variant: dict[str, Any] | None = None
+            transition_edge_variant_shadow = False
+            strategy_family_override: StrategyFamilyDecision | None = None
+            reaction_override: AcceptanceRejectionResult | None = None
+            gate_reason = self._hard_gate(zone, context, confluence_score, zone_profile)
+            if gate_reason == "low_confluence":
+                transition_edge_variant = self._transition_edge_variant_candidate(
+                    zone=zone,
+                    context=context,
+                    candles_5m=candles_5m,
+                    zone_strength=zs,
+                    near_lp=near_lp,
+                    confluence_components=confluence_components,
+                    feature_weights_base=feature_weights_base,
+                    feature_weights_active=feature_weights_active,
+                    zone_type_multiplier_active=zone_type_multiplier_active,
+                    profile=zone_profile,
+                )
+                if transition_edge_variant is not None:
+                    transition_edge_variant_shadow = bool(self.settings.transition_edge_variant_shadow_only)
+                    if not transition_edge_variant_shadow:
+                        zone_profile = transition_edge_variant["profile"]
+                        confluence_score = float(transition_edge_variant["confluence_score"])
+                        confluence_components = dict(transition_edge_variant["confluence_components"])
+                        feature_weights_base = dict(transition_edge_variant["feature_weights_base"])
+                        feature_weights_active = dict(transition_edge_variant["feature_weights_active"])
+                        strategy_family_override = transition_edge_variant["strategy_family"]
+                        reaction_override = transition_edge_variant["reaction"]
+                        gate_reason = self._hard_gate(zone, context, confluence_score, zone_profile)
             if gate_reason is not None:
                 continue
 
-            reaction = self.reaction_classifier.classify_zone(zone=zone, context=context, candles_5m=candles_5m)
+            reaction = reaction_override or self.reaction_classifier.classify_zone(zone=zone, context=context, candles_5m=candles_5m)
             if reaction.available and reaction.classification == "mixed":
                 continue
             if reaction.available and reaction.classification in {"acceptance_confirmed", "acceptance_tentative"}:
                 continue
 
-            strategy_family = StrategyFamilyDecision(
+            strategy_family = strategy_family_override or StrategyFamilyDecision(
                 available=False,
                 family="legacy_zone_plan",
                 grade="F",
@@ -1170,29 +1851,30 @@ class PlanGenerator:
                 reason="strategy_family_not_applicable",
                 entry_model=None,
             )
-            routed_family = self.strategy_family_router.route(
-                zone=zone,
-                context=context,
-                reaction=reaction,
-                near_lp=near_lp,
-                zone_strength=zs,
-                confluence_score=confluence_score,
-                regime_name=regime.name,
-                candles_5m=candles_5m,
-            )
-            if routed_family.family != "none":
-                strategy_family = routed_family
-                if not strategy_family.available:
-                    continue
-            elif str(routed_family.reason or "").strip():
-                strategy_family = StrategyFamilyDecision(
-                    available=False,
-                    family="legacy_zone_plan",
-                    grade="F",
-                    score=0.0,
-                    reason=str(routed_family.reason),
-                    entry_model=None,
+            if strategy_family_override is None:
+                routed_family = self.strategy_family_router.route(
+                    zone=zone,
+                    context=context,
+                    reaction=reaction,
+                    near_lp=near_lp,
+                    zone_strength=zs,
+                    confluence_score=confluence_score,
+                    regime_name=zone_profile.name,
+                    candles_5m=candles_5m,
                 )
+                if routed_family.family != "none":
+                    strategy_family = routed_family
+                    if not strategy_family.available:
+                        continue
+                elif str(routed_family.reason or "").strip():
+                    strategy_family = StrategyFamilyDecision(
+                        available=False,
+                        family="legacy_zone_plan",
+                        grade="F",
+                        score=0.0,
+                        reason=str(routed_family.reason),
+                        entry_model=None,
+                    )
             generic_block_reason = self._generic_setup_block_reason(
                 zone=zone,
                 near_lp=near_lp,
@@ -1215,7 +1897,7 @@ class PlanGenerator:
                 decision = EntryDecision(model=strategy_family.entry_model, reason=strategy_family.reason)
             else:
                 decision = self.router.choose(zone, context, zs, near_lp, confluence_score=confluence_score)
-                if regime.name == "shock" and decision.model == EntryModel.LIMIT:
+                if zone_profile.name == "shock" and decision.model == EntryModel.LIMIT:
                     decision = EntryDecision(model=EntryModel.CONFIRM, reason="shock_regime_no_limit")
                 if context.transition_state == "transition_watch" and decision.model == EntryModel.LIMIT:
                     decision = EntryDecision(model=EntryModel.CONFIRM, reason="transition_watch_confirm_only")
@@ -1244,18 +1926,18 @@ class PlanGenerator:
             ev_r = float(stats.get("ev_r", 0.0))
             prior_prob = (
                 0.50
-                if regime.name == "trend"
+                if zone_profile.name == "trend"
                 else 0.40
-                if regime.name == "shock"
+                if zone_profile.name == "shock"
                 else 0.36
-                if regime.name == "transition"
+                if zone_profile.name == "transition"
                 else 0.46
             )
             learned_prob = clamp(p2 + 0.12 * p1 + 0.08 * max(0.0, ev_r), 0.20, 0.88)
             base_win_prob = clamp(prior_prob * (1.0 - reliability) + learned_prob * reliability, 0.20, 0.86)
             win_prob_adjustment, win_prob_components = self._expected_probability_adjustment(
                 context=context,
-                regime=regime,
+                regime=zone_profile,
                 strategy_family=strategy_family,
                 reaction_classification=reaction.classification,
                 decision=decision,
@@ -1274,8 +1956,8 @@ class PlanGenerator:
 
             cost_est = self._cost_in_r(decision.model, entry, sl, context.friction_5m)
             ev = win_prob * rr_base - (1.0 - win_prob) * 1.0 - cost_est
-            rr_floor = max(self.settings.min_rr, regime.rr_floor)
-            if ev <= regime.ev_floor or rr_min < rr_floor:
+            rr_floor = max(self.settings.min_rr, zone_profile.rr_floor)
+            if ev <= zone_profile.ev_floor or rr_min < rr_floor:
                 continue
 
             split = strategy_family.split if strategy_family.available and strategy_family.split else self._split(stats, context.friction_5m)
@@ -1291,7 +1973,7 @@ class PlanGenerator:
             friction_penalty = context.friction_5m * 8
             width_penalty = max(0.0, zone.width_atr - 0.9) * 5
             penalties = friction_penalty + width_penalty + counter_trend_penalty
-            if regime.name == "shock":
+            if zone_profile.name == "shock":
                 penalties += 4.0
             if context.transition_state == "transition_watch":
                 penalties += 6.0
@@ -1299,7 +1981,7 @@ class PlanGenerator:
             final_score = 0.40 * confluence_score + 0.30 * zs + 0.20 * approach + 0.10 * plan_score - penalties + session_score_bias
             confidence = clamp(final_score / 100.0, 0.0, 1.0)
             meta_pass, meta_score, meta_threshold, meta_reason = self._meta_filter(
-                profile=regime,
+                profile=zone_profile,
                 context=context,
                 reliability=reliability,
                 ev=ev,
@@ -1317,7 +1999,7 @@ class PlanGenerator:
             thesis_fingerprint = self.thesis.build(
                 symbol=symbol,
                 direction=direction.value,
-                regime=regime.name,
+                regime=zone_profile.name,
                 strategy_family=strategy_family.family,
                 reaction_classification=reaction.classification,
                 zone_type=zone.type,
@@ -1343,6 +2025,15 @@ class PlanGenerator:
                 reaction_classification=reaction.classification,
                 reaction_input=dict(reaction.input or {}),
             )
+            runtime_signal_telemetry = self._build_runtime_signal_telemetry(
+                context=context,
+                zone=zone,
+                direction=direction,
+                strategy_family=str(strategy_family.family),
+                entry_price=entry,
+                sl=sl,
+                location_reference=location_reference,
+            )
             thesis_cluster_id = self.thesis.thesis_cluster_id(thesis_fingerprint)
             confirm_only = bool(strategy_family.confirm_only) or (
                 not strategy_family.available and decision.model == EntryModel.CONFIRM
@@ -1351,14 +2042,28 @@ class PlanGenerator:
                 PositionSizingInput(
                     strategy_family=strategy_family.family,
                     strategy_grade=strategy_family.grade if strategy_family.available else None,
-                    regime=regime.name,
+                    regime=zone_profile.name,
                     reaction_classification=reaction.classification,
                     confirm_only=confirm_only,
                     entry_model=decision.model.value,
                     active_thesis_clusters=active_thesis_clusters,
                     transition_state=context.transition_state,
+                    symbol=symbol,
+                    direction=direction.value,
                 )
             )
+            runtime_signal_shadow_tilt = self._build_runtime_signal_shadow_tilt(
+                symbol=symbol,
+                strategy_family=str(strategy_family.family),
+                entry_model=decision.model,
+                direction=direction,
+                runtime_signal_telemetry=runtime_signal_telemetry,
+                base_recommended_risk_r=float(strategy_sizing.get("final_risk_r", 0.0) or 0.0),
+                expected_ev_r=float(ev),
+            )
+            if runtime_signal_shadow_tilt is not None:
+                strategy_sizing = dict(strategy_sizing)
+                strategy_sizing["runtime_signal_shadow_tilt"] = runtime_signal_shadow_tilt
             strategy_sizing = self.strategy_mode.apply_to_sizing(strategy_sizing, mode=mode_policy.mode)
             expected_ev_at_recommended_size_r = float(strategy_sizing.get("final_risk_r", 0.0) or 0.0) * float(ev)
             expected_summary = (
@@ -1381,7 +2086,7 @@ class PlanGenerator:
             validity_minutes = max(30, min(120, validity_minutes))
 
             validity = {
-                "regime": regime.name,
+                "regime": zone_profile.name,
                 "regime_min": 0.0,
                 "friction_max": 0.85,
                 "jump_rate_max": 0.35,
@@ -1432,7 +2137,7 @@ class PlanGenerator:
                 "feature_calibration_samples": int((importance_calibration or {}).get("matched_samples", 0)),
                 "reliability_factor": round(reliability, 3),
                 "rr_floor": rr_floor,
-                "ev_floor": regime.ev_floor,
+                "ev_floor": zone_profile.ev_floor,
                 "meta_score": round(meta_score, 2),
                 "meta_threshold": round(meta_threshold, 2),
                 "meta_reason": meta_reason,
@@ -1457,17 +2162,42 @@ class PlanGenerator:
                 "zone_age_hours": round(self._zone_age_hours(zone, now=now), 2),
                 "scalp_zone_hard_max_age_hours": int(self.settings.scalp_zone_hard_max_age_hours),
                 "session_guidance_state": session_state,
+                "session_guidance_session_name": session_name,
                 "session_guidance_summary": str(session_guidance.get("summary", "")),
                 "session_score_bias": round(session_score_bias, 4),
                 "session_probability_adjustment": round(session_probability_adjustment, 4),
                 "plan_validity_minutes": validity_minutes,
+                "transition_edge_variant_enabled": bool(self.settings.transition_edge_variant_enabled),
+                "transition_edge_variant_shadow_only": bool(self.settings.transition_edge_variant_shadow_only),
+                "transition_edge_variant_applied": bool(transition_edge_variant is not None and not transition_edge_variant_shadow),
+                "transition_edge_variant_shadow_evaluated": bool(transition_edge_variant is not None),
             }
+            if transition_edge_variant is not None:
+                validity["transition_edge_variant"] = {
+                    "variant": "exp_6_fvg_relaxed_plus_transition_override",
+                    "rescue_reason": str(transition_edge_variant.get("rescue_reason") or ""),
+                    "shadow_only": bool(transition_edge_variant_shadow),
+                    "confluence_score": round(float(transition_edge_variant.get("confluence_score") or 0.0), 2),
+                    "min_confluence": round(float(transition_edge_variant["profile"].min_confluence), 2),
+                }
             if location_reference is not None:
                 validity["location_reference"] = location_reference
             if session_liquidity_reference is not None:
                 validity["session_liquidity_reference"] = session_liquidity_reference
             if reaction_evidence is not None:
                 validity["reaction_evidence"] = reaction_evidence
+            if runtime_signal_telemetry is not None:
+                validity["runtime_signal_telemetry"] = runtime_signal_telemetry
+            if runtime_signal_shadow_tilt is not None:
+                validity["runtime_signal_shadow_tilt"] = runtime_signal_shadow_tilt
+            validity.update(
+                self._fast_failure_validity(
+                    symbol=symbol,
+                    strategy_family=str(strategy_family.family),
+                    entry_model=decision.model,
+                    session_name=session_name,
+                )
+            )
 
             plan = Plan(
                 plan_id=f"plan_{zone.zone_id}_{decision.model.value.lower()}",

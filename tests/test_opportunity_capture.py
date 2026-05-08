@@ -89,3 +89,60 @@ def test_opportunity_capture_summarizes_blocking_heavy_runtime_to_submit() -> No
     assert payload["regime_modifier"]["state"] == "negative"
     assert payload["session_modifier"]["state"] == "negative"
     assert "blocking" in payload["summary"]
+
+
+def test_opportunity_capture_uses_selection_shortfall_when_blocked_mix_is_empty() -> None:
+    service = OpportunityCaptureService()
+
+    payload = service.generate(
+        score_to_outcome_funnel={
+            "available": True,
+            "report_window_days": 10,
+            "snapshot_selection": {
+                "runtime_candidates": 0,
+                "accepted_candidates": 0,
+                "blocked_candidates": 0,
+                "accept_rate": 0.0,
+                "blocked_gate_group_counts": {},
+            },
+            "historical_execution_outcomes": {
+                "submitted": 2,
+                "filled": 2,
+                "closed": 2,
+                "fill_rate_from_submitted": 1.0,
+                "close_rate_from_filled": 1.0,
+            },
+            "decomposition": {
+                "family": [
+                    {
+                        "key": "sweep_reversal",
+                        "runtime_candidates": 0,
+                        "accepted_candidates": 0,
+                        "blocked_candidates": 0,
+                        "submitted": 2,
+                        "filled": 2,
+                        "closed": 2,
+                        "accept_rate": 0.0,
+                        "fill_rate_from_submitted": 1.0,
+                        "close_rate_from_filled": 1.0,
+                    }
+                ],
+                "regime": [],
+                "session": [],
+            },
+        },
+        execution_quality={
+            "fill_rate": 1.0,
+            "fill_events_total": 2,
+        },
+    )
+
+    assert payload is not None
+    assert payload["blocked_mix"] == {
+        "quality": 0,
+        "rollout": 0,
+        "structural": 0,
+        "safety": 0,
+        "unknown": 0,
+    }
+    assert payload["dominant_bottleneck"]["reason"] == "selection_shortfall"

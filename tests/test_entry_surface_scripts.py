@@ -246,8 +246,8 @@ def test_render_message_includes_all_sections_and_reasons():
         "act=continue_candidate_review_under_portfolio_caps | runtime=GO/go_runtime_gate_open | playbook=GO"
     ) in message
     assert (
-        "edge_experiment: state=watch_edge | entry_timing=early_limit | execution_style=passive_limit | "
-        "proof=sample_building/do_not_claim_edge_yet | closes=5/100 | remaining=95 | "
+        "live_validation: state=watch_edge | entry_timing=early_limit | execution_style=passive_limit | "
+        "validation=sample_building/do_not_claim_edge_yet | closed=5/100 | remaining_to_goal=95 | "
         "regime=single_regime_observed | true_edge=0.8100 | decay=-0.0200 | focus=BTCUSDC/ACTIONABLE_ENTRY"
     ) in message
     assert (

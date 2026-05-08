@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timedelta, timezone
+import json
 from types import SimpleNamespace
 
 from app.core.enums import PlanState
@@ -60,6 +61,7 @@ def test_sync_universe_from_binance_with_mocked_market_data() -> None:
                 "total": limit_1m + 20,
             }
         )
+        engine.runtime_sync_symbols = lambda limit_symbols=30: ["BTCUSDC", "ETHUSDC"]  # type: ignore[assignment]
         engine.refresh_symbol = lambda symbol: {"symbol": symbol, "updated": True, "zones": 1, "plans": 1}  # type: ignore[assignment]
 
         payload = engine.sync_universe_from_binance(limit_symbols=2, limit_5m=120, limit_15m=120)
@@ -80,6 +82,7 @@ def test_sync_universe_from_binance_parallel_respects_concurrency_limit() -> Non
         symbols = ["BTCUSDC", "ETHUSDC", "SOLUSDC"]
 
         engine.market_data.refresh_universe = lambda limit=30: symbols  # type: ignore[assignment]
+        engine.runtime_sync_symbols = lambda limit_symbols=30: symbols  # type: ignore[assignment]
 
         def fake_isolated_sync(*, symbol: str, limit_1m: int, limit_5m: int, limit_15m: int) -> dict:
             delay = {"BTCUSDC": 0.04, "ETHUSDC": 0.01, "SOLUSDC": 0.02}.get(symbol, 0.0)
@@ -757,3 +760,516 @@ def test_merge_global_lineage_stress_replay_fallback_applies_when_replay_output_
             == "replay_output"
         )
         assert merged["stress_replay_output_artifacts"]["available"] is True
+
+
+def test_active_contract_summary_filters_portfolio_budget_to_contract_lane(tmp_path) -> None:
+    report_dir = tmp_path / "reports" / "validation" / "historical_walk_forward_cache"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "strategy_proof_contract_live_subset.json").write_text(
+        json.dumps(
+            {
+                "trade_rows": [
+                    {
+                        "generated_ts": "2026-04-21T01:15:00+00:00",
+                        "symbol": "BTCUSDC",
+                        "strategy_family": "sweep_reversal",
+                        "entry_model": "LIMIT",
+                        "direction": "LONG",
+                    },
+                    {
+                        "generated_ts": "2026-04-20T01:15:00+00:00",
+                        "symbol": "BTCUSDC",
+                        "strategy_family": "sweep_reversal",
+                        "entry_model": "LIMIT",
+                        "direction": "LONG",
+                    },
+                    {
+                        "generated_ts": "2026-04-19T01:15:00+00:00",
+                        "symbol": "BTCUSDC",
+                        "strategy_family": "sweep_reversal",
+                        "entry_model": "LIMIT",
+                        "direction": "SHORT",
+                    },
+                ]
+            }
+        )
+    )
+
+    engine = object.__new__(StrategyEngine)
+    engine.settings = SimpleNamespace(
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
+        auto_trading_micro_live_allowed_families="sweep_reversal",
+        auto_trading_micro_live_allowed_entry_models="LIMIT",
+        auto_trading_micro_live_direction_contract="BTCUSDC:LONG",
+        strategy_version="v1",
+        validation_report_dir=str(tmp_path / "reports" / "validation"),
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_execution_quality_report(**kwargs):
+        captured["execution_quality_kwargs"] = kwargs
+        return {
+            "symbol": "BTCUSDC",
+            "fill_rate": 1.0,
+            "plans_total": 3,
+            "plans_matured": 2,
+            "fills_matched": 1,
+        }
+
+    def _fake_generate(**kwargs):
+        captured["score_kwargs"] = kwargs
+        return {
+            "available": True,
+            "snapshot_selection": {
+                "runtime_candidates": len(kwargs["portfolio_budget"]["accepted_candidates"])
+                + len(kwargs["portfolio_budget"]["blocked_candidates"]),
+                "accepted_candidates": len(kwargs["portfolio_budget"]["accepted_candidates"]),
+                "blocked_candidates": len(kwargs["portfolio_budget"]["blocked_candidates"]),
+            },
+            "historical_execution_outcomes": {
+                "submitted": 0,
+                "filled": 0,
+                "closed": 0,
+                "fill_rate_from_submitted": 0.0,
+                "close_rate_from_filled": 0.0,
+            },
+            "decomposition": {},
+        }
+
+    def _fake_opportunity_capture_summary(**kwargs):
+        captured["opportunity_kwargs"] = kwargs
+        return {"available": True}
+
+    engine.execution_quality_report = _fake_execution_quality_report  # type: ignore[assignment]
+    engine.score_to_outcome_funnel = SimpleNamespace(generate=_fake_generate)
+    engine._opportunity_capture_summary = _fake_opportunity_capture_summary  # type: ignore[assignment]
+    engine._active_contract_transition_edge_variant_shadow = lambda **kwargs: {  # type: ignore[assignment]
+        "available": True,
+        "enabled": True,
+        "shadow_only": True,
+        "variant": "exp_6_fvg_relaxed_plus_transition_override",
+        "status": "shadow_only_compare",
+        "regime_profile": "transition",
+        "transition_state": "transition_watch",
+        "generation_state": "diagnosed",
+        "active_zone_count": 24,
+        "post_hard_gate_zone_count": 6,
+        "pre_generation_candidate_count": 1,
+        "shadow_evaluated_count": 9,
+        "shadow_pass_count": 3,
+        "shadow_pass_rate": 0.3333,
+        "shadow_rescue_reason_mix": {"fvg_relaxed": 2, "transition_override": 1},
+        "shadow_candidate_delta": 3,
+        "candidate_baseline": 1,
+        "candidate_shadow": 4,
+        "low_confluence_block_baseline": 12,
+        "low_confluence_block_shadow": 9,
+        "low_confluence_block_delta": -3,
+        "expected_ev_r_proxy": 0.31,
+        "current_snapshot_only": True,
+        "activation_note": "Structure/proxy validation only while shadow_only remains enabled.",
+    }
+    engine.plan_repo = SimpleNamespace(
+        list_recent=lambda **kwargs: [
+            SimpleNamespace(
+                symbol="BTCUSDC",
+                entry_model="LIMIT",
+                direction="long",
+                state="ARCHIVED",
+                validity={"strategy_family": "legacy_zone_plan", "strategy_family_reason": "strategy_family_not_applicable", "reaction_classification": "not_applicable"},
+            ),
+            SimpleNamespace(
+                symbol="BTCUSDC",
+                entry_model="LIMIT",
+                direction="long",
+                state="ARCHIVED",
+                validity={"strategy_family": "legacy_zone_plan", "strategy_family_reason": "trend_continuation_not_applicable", "reaction_classification": "not_applicable"},
+            ),
+            SimpleNamespace(
+                symbol="BTCUSDC",
+                entry_model="LIMIT",
+                direction="long",
+                state="ARCHIVED",
+                validity={"strategy_family": "sweep_reversal", "strategy_family_reason": "sweep_reversal_limit", "reaction_classification": "rejection_confirmed"},
+            ),
+            SimpleNamespace(
+                symbol="BTCUSDC",
+                entry_model="LIMIT",
+                direction="short",
+                state="ARCHIVED",
+                validity={"strategy_family": "sweep_reversal", "strategy_family_reason": "sweep_reversal_limit", "reaction_classification": "rejection_confirmed"},
+            ),
+            SimpleNamespace(
+                symbol="BTCUSDC",
+                entry_model="CONFIRM",
+                direction="long",
+                state="ARCHIVED",
+                validity={"strategy_family": "legacy_zone_plan", "strategy_family_reason": "strategy_family_not_applicable", "reaction_classification": "not_applicable"},
+            ),
+        ]
+    )
+
+    result = engine._active_contract_summary(
+        symbol="BTCUSDC",
+        days=30,
+        portfolio_summary={
+            "accepted_candidates": [
+                {"symbol": "BTCUSDC", "strategy_family": "sweep_reversal", "entry_model": "LIMIT", "direction": "LONG"},
+                {"symbol": "BTCUSDC", "strategy_family": "sweep_reversal", "entry_model": "LIMIT", "direction": "SHORT"},
+                {"symbol": "ETHUSDC", "strategy_family": "sweep_reversal", "entry_model": "LIMIT", "direction": "LONG"},
+                {"strategy_family": "trend_continuation", "entry_model": "CONFIRM"},
+            ],
+            "blocked_candidates": [
+                {"symbol": "BTCUSDC", "strategy_family": "sweep_reversal", "entry_model": "LIMIT", "direction": "LONG", "block_reason": "thesis_duplicate_blocked"},
+                {"symbol": "BTCUSDC", "strategy_family": "sweep_reversal", "entry_model": "LIMIT", "direction": "SHORT", "block_reason": "thesis_duplicate_blocked"},
+                {"symbol": "ETHUSDC", "strategy_family": "sweep_reversal", "entry_model": "LIMIT", "direction": "LONG", "block_reason": "thesis_duplicate_blocked"},
+                {"strategy_family": "trend_continuation", "entry_model": "CONFIRM", "block_reason": "family_not_live_enabled"},
+            ],
+        },
+    )
+
+    assert result is not None
+    assert result["filters"]["strategy_families"] == ["sweep_reversal"]
+    assert result["filters"]["directions"] == ["LONG"]
+    assert captured["execution_quality_kwargs"]["strategy_families"] == ["sweep_reversal"]
+    assert captured["execution_quality_kwargs"]["entry_models"] == ["LIMIT"]
+    assert captured["execution_quality_kwargs"]["directions"] == ["LONG"]
+    assert captured["score_kwargs"]["directions"] == ["LONG"]
+    filtered_budget = captured["score_kwargs"]["portfolio_budget"]
+    assert filtered_budget["accepted_candidates"] == [{"symbol": "BTCUSDC", "strategy_family": "sweep_reversal", "entry_model": "LIMIT", "direction": "LONG"}]
+    assert filtered_budget["blocked_candidates"] == [
+        {"symbol": "BTCUSDC", "strategy_family": "sweep_reversal", "entry_model": "LIMIT", "direction": "LONG", "block_reason": "thesis_duplicate_blocked"}
+    ]
+    assert filtered_budget["blocked_reason_counts"] == {"thesis_duplicate_blocked": 1}
+    assert filtered_budget["blocked_gate_group_counts"] == {
+        "quality": 0,
+        "rollout": 0,
+        "structural": 1,
+        "safety": 0,
+        "unknown": 0,
+    }
+    assert result["promotion_shadow_counter"]["replay_contract_hits_same_window"] == 2
+    assert result["selection_shortfall_breakdown"] == {
+        "runtime_candidates": 2,
+        "accepted_candidates": 1,
+        "blocked_candidates": 1,
+        "blocked_reason_counts": {"thesis_duplicate_blocked": 1},
+        "blocked_gate_group_counts": {
+            "quality": 0,
+            "rollout": 0,
+            "structural": 1,
+            "safety": 0,
+            "unknown": 0,
+        },
+    }
+    assert result["raw_counts"] == {
+        "plans_total": 3,
+        "matured_plans": 2,
+        "filled_matured_plans": 1,
+        "unfilled_matured_plans": 1,
+        "submitted_plans": 0,
+        "filled_submitted_plans": 0,
+        "closed_filled_plans": 0,
+    }
+    assert result["promotion_shadow_counter"] == {
+        "available": True,
+        "comparison_window_days": 30,
+        "comparison_note": "Window-level shadow comparison only; not a one-to-one replay/runtime candidate match.",
+        "runtime_recent_symbol_plans_same_window": 5,
+        "runtime_recent_entry_model_plans_same_window": 4,
+        "runtime_promoted_contract_plans_same_window": 1,
+        "runtime_rejected_same_entry_model_plans_same_window": 3,
+        "runtime_rejected_reason_counts": {
+            "strategy_family_not_applicable": 1,
+            "trend_continuation_not_applicable": 1,
+            "sweep_reversal_limit": 1,
+        },
+        "runtime_rejected_reaction_counts": {"not_applicable": 2, "rejection_confirmed": 1},
+        "runtime_rejected_family_counts": {"legacy_zone_plan": 2, "sweep_reversal": 1},
+        "runtime_promoted_state_counts": {"ARCHIVED": 1},
+        "runtime_rejected_state_counts": {"ARCHIVED": 3},
+        "replay_contract_hits_same_window": 2,
+        "promotion_gap_count": 1,
+        "runtime_vs_replay_promotion_ratio": 0.5,
+        "dominant_rejected_reason": "trend_continuation_not_applicable",
+        "shadow_mismatch_state": "runtime_below_replay_baseline",
+    }
+    assert result["shadow_relaxation_priority"] == {
+        "available": True,
+        "apply_live": False,
+        "comparison_window_days": 30,
+        "runtime_promoted_contract_plans_same_window": 1,
+        "runtime_rejected_same_entry_model_plans_same_window": 3,
+        "runtime_rejected_not_applicable_count": 2,
+        "replay_contract_hits_same_window": 2,
+        "runtime_vs_replay_promotion_ratio": 0.5,
+        "runner_up_shadow_lanes": ["proof_reclaim_only", "one_bar_only"],
+        "status": "priority_candidate",
+        "recommended_shadow_lane": "proof_reclaim_plus_one_bar",
+        "rationale_code": "reaction_not_applicable_promotion_gap",
+        "operator_headline": "Proof reclaim plus one-bar is the current shadow priority because recent runtime LIMIT plans are being rejected as `reaction not applicable` while replay still shows contract-faithful hits, and the combined rescue lane has outperformed the strict baseline in future-blind variant sweeps. Keep this compare-only; do not apply live.",
+    }
+    assert result["transition_edge_variant_shadow"] == {
+        "available": True,
+        "enabled": True,
+        "shadow_only": True,
+        "variant": "exp_6_fvg_relaxed_plus_transition_override",
+        "status": "shadow_only_compare",
+        "regime_profile": "transition",
+        "transition_state": "transition_watch",
+        "generation_state": "diagnosed",
+        "active_zone_count": 24,
+        "post_hard_gate_zone_count": 6,
+        "pre_generation_candidate_count": 1,
+        "shadow_evaluated_count": 9,
+        "shadow_pass_count": 3,
+        "shadow_pass_rate": 0.3333,
+        "shadow_rescue_reason_mix": {"fvg_relaxed": 2, "transition_override": 1},
+        "shadow_candidate_delta": 3,
+        "candidate_baseline": 1,
+        "candidate_shadow": 4,
+        "low_confluence_block_baseline": 12,
+        "low_confluence_block_shadow": 9,
+        "low_confluence_block_delta": -3,
+        "expected_ev_r_proxy": 0.31,
+        "current_snapshot_only": True,
+        "activation_note": "Structure/proxy validation only while shadow_only remains enabled.",
+    }
+
+
+def test_current_exposure_rows_ignores_non_live_modes_during_micro_live() -> None:
+    engine = object.__new__(StrategyEngine)
+    engine.settings = SimpleNamespace(
+        auto_trading_execution_mode="MICRO_LIVE",
+        portfolio_overlay_include_planned_exposure=False,
+    )
+    micro_live_row = SimpleNamespace(plan_id="micro_live_plan", validity={"execution_mode": "MICRO_LIVE"})
+    live_row = SimpleNamespace(plan_id="live_plan", validity={"execution_mode": "LIVE"})
+    paper_row = SimpleNamespace(plan_id="paper_plan", validity={"execution_mode": "PAPER"})
+    unknown_row = SimpleNamespace(plan_id="unknown_plan", validity={})
+    rejected_live_row = SimpleNamespace(plan_id="rejected_live_plan", validity={})
+
+    engine.plan_repo = SimpleNamespace(
+        list_exposure_candidates=lambda **kwargs: [micro_live_row, live_row, paper_row, unknown_row, rejected_live_row]
+    )
+    engine.submission_repo = SimpleNamespace(
+        list_recent=lambda **kwargs: [
+            SimpleNamespace(
+                plan_id="unknown_plan",
+                adapter="binance",
+                state="FILLED",
+                requested_live=True,
+                execution_mode="MICRO_LIVE",
+            ),
+            SimpleNamespace(
+                plan_id="rejected_live_plan",
+                adapter="binance",
+                state="REJECTED",
+                requested_live=True,
+                execution_mode="MICRO_LIVE",
+            ),
+        ]
+    )
+
+    rows = engine._current_exposure_rows()
+    assert rows == [micro_live_row, live_row, unknown_row]
+
+
+def test_active_contract_transition_edge_variant_shadow_uses_generation_diagnostics_snapshot() -> None:
+    engine = object.__new__(StrategyEngine)
+    engine.settings = SimpleNamespace(
+        transition_edge_variant_enabled=True,
+        transition_edge_variant_shadow_only=True,
+    )
+    engine.market_data = SimpleNamespace(
+        recent_candles=lambda symbol, timeframe, limit=300: [SimpleNamespace()] * 60
+    )
+    engine.context_engine = SimpleNamespace(
+        build_snapshot=lambda **kwargs: SimpleNamespace(
+            jump_rate_5m=0.03,
+            transition_state="transition_watch",
+            transition_lock_reason="",
+        )
+    )
+    engine.zone_repo = SimpleNamespace(list_all=lambda **kwargs: [])
+    engine.zone_engine = SimpleNamespace(
+        refresh=lambda **kwargs: [
+            SimpleNamespace(state="active"),
+            SimpleNamespace(state="expired"),
+        ]
+    )
+    engine._evaluate_gate = lambda **kwargs: (SimpleNamespace(value="OPEN"), True, "", None)  # type: ignore[assignment]
+    engine._runtime_feature_calibration = lambda **kwargs: ("transition", None)  # type: ignore[assignment]
+    engine.plan_generator = SimpleNamespace(
+        resolve_regime_label=lambda context: "transition",
+        generation_diagnostics=lambda **kwargs: {
+            "regime_profile": "transition",
+            "transition_state": "transition_watch",
+            "transition_lock_reason": "",
+            "generation_state": "diagnosed",
+            "active_zone_count": 1,
+            "post_hard_gate_zone_count": 2,
+            "pre_generation_candidate_count": 3,
+            "hard_gate_block_counts": {"low_confluence": 5},
+            "transition_edge_variant_shadow_summary": {
+                "evaluated": 5,
+                "pass": 2,
+                "pass_rate": 0.4,
+                "reason_mix": {"fvg_relaxed": 1, "transition_override": 1},
+                "shadow_candidate_delta": 2,
+                "candidate_baseline": 3,
+                "candidate_shadow": 5,
+                "low_confluence_block_shadow": 3,
+                "low_confluence_block_delta": -2,
+                "expected_ev_r_proxy": 0.28,
+            },
+        },
+    )
+
+    result = engine._active_contract_transition_edge_variant_shadow(
+        symbol="BTCUSDC",
+        filters={
+            "symbol": "BTCUSDC",
+            "strategy_families": ["sweep_reversal"],
+            "entry_models": ["LIMIT"],
+        },
+    )
+
+    assert result == {
+        "available": True,
+        "enabled": True,
+        "shadow_only": True,
+        "variant": "exp_6_fvg_relaxed_plus_transition_override",
+        "status": "shadow_only_compare",
+        "regime_profile": "transition",
+        "transition_state": "transition_watch",
+        "transition_lock_reason": "",
+        "generation_state": "diagnosed",
+        "active_zone_count": 1,
+        "post_hard_gate_zone_count": 2,
+        "pre_generation_candidate_count": 3,
+        "shadow_evaluated_count": 5,
+        "shadow_pass_count": 2,
+        "shadow_pass_rate": 0.4,
+        "shadow_rescue_reason_mix": {"fvg_relaxed": 1, "transition_override": 1},
+        "shadow_candidate_delta": 2,
+        "candidate_baseline": 3,
+        "candidate_shadow": 5,
+        "low_confluence_block_baseline": 5,
+        "low_confluence_block_shadow": 3,
+        "low_confluence_block_delta": -2,
+        "expected_ev_r_proxy": 0.28,
+        "current_snapshot_only": True,
+        "activation_note": "Structure/proxy validation only while shadow_only remains enabled.",
+    }
+
+
+def test_active_contract_transition_edge_variant_shadow_marks_direction_scoped_contract_unsupported() -> None:
+    engine = object.__new__(StrategyEngine)
+    engine.settings = SimpleNamespace(
+        transition_edge_variant_enabled=True,
+        transition_edge_variant_shadow_only=True,
+    )
+
+    result = engine._active_contract_transition_edge_variant_shadow(
+        symbol="BTCUSDC",
+        filters={
+            "symbol": "BTCUSDC",
+            "strategy_families": ["sweep_reversal"],
+            "entry_models": ["LIMIT"],
+            "directions": ["LONG"],
+        },
+    )
+
+    assert result == {
+        "available": False,
+        "enabled": True,
+        "shadow_only": True,
+        "variant": "exp_6_fvg_relaxed_plus_transition_override",
+        "status": "direction_contract_not_supported",
+        "required_contract_directions": ["LONG"],
+        "current_snapshot_only": True,
+        "activation_note": "Direction-scoped active contract is narrower than the current symbol-wide transition shadow diagnostics.",
+    }
+
+
+def test_today_trade_count_ignores_non_live_modes_during_micro_live() -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    start_of_day = now.replace(hour=0, minute=0, second=0)
+
+    engine = object.__new__(StrategyEngine)
+    engine.settings = SimpleNamespace(auto_trading_execution_mode="MICRO_LIVE")
+    engine.plan_repo = SimpleNamespace(
+        list_recent_global=lambda **kwargs: [
+            SimpleNamespace(plan_id="live_plan", valid_from=start_of_day + timedelta(hours=1), validity={"execution_mode": "MICRO_LIVE"}),
+            SimpleNamespace(plan_id="paper_plan", valid_from=start_of_day + timedelta(hours=2), validity={"execution_mode": "PAPER"}),
+            SimpleNamespace(plan_id="submission_live_plan", valid_from=start_of_day + timedelta(hours=3), validity={}),
+            SimpleNamespace(plan_id="submission_rejected_live_plan", valid_from=start_of_day + timedelta(hours=3), validity={}),
+            SimpleNamespace(plan_id="yesterday_live", valid_from=start_of_day - timedelta(hours=1), validity={"execution_mode": "MICRO_LIVE"}),
+        ]
+    )
+    engine.submission_repo = SimpleNamespace(
+        list_recent=lambda **kwargs: [
+            SimpleNamespace(
+                plan_id="submission_live_plan",
+                adapter="binance",
+                state="FILLED",
+                requested_live=True,
+                execution_mode="MICRO_LIVE",
+                submitted_at=start_of_day + timedelta(hours=3),
+            ),
+            SimpleNamespace(
+                plan_id="submission_rejected_live_plan",
+                adapter="binance",
+                state="REJECTED",
+                requested_live=True,
+                execution_mode="MICRO_LIVE",
+                submitted_at=start_of_day + timedelta(hours=3),
+            ),
+            SimpleNamespace(
+                plan_id="paper_submission_plan",
+                adapter="paper",
+                state="FILLED",
+                requested_live=False,
+                execution_mode="PAPER",
+                submitted_at=start_of_day + timedelta(hours=4),
+            ),
+        ]
+    )
+
+    assert engine._today_trade_count() == 2
+
+
+def test_active_contract_filters_include_direction_contract_and_apply_it() -> None:
+    engine = object.__new__(StrategyEngine)
+    engine.settings = SimpleNamespace(
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
+        auto_trading_micro_live_allowed_families="sweep_reversal",
+        auto_trading_micro_live_allowed_entry_models="LIMIT",
+        auto_trading_micro_live_direction_contract="BTCUSDC:LONG",
+    )
+
+    filters = engine._active_contract_filters(symbol="BTCUSDC")
+
+    assert filters is not None
+    assert filters["directions"] == ["LONG"]
+    assert engine._row_matches_contract_filters(
+        {
+            "symbol": "BTCUSDC",
+            "strategy_family": "sweep_reversal",
+            "entry_model": "LIMIT",
+            "direction": "LONG",
+        },
+        filters,
+    )
+    assert not engine._row_matches_contract_filters(
+        {
+            "symbol": "BTCUSDC",
+            "strategy_family": "sweep_reversal",
+            "entry_model": "LIMIT",
+            "direction": "SHORT",
+        },
+        filters,
+    )

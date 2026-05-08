@@ -271,3 +271,45 @@ def test_backfill_history_before_latest_prepends_older_rows() -> None:
             base + timedelta(minutes=5),
             base + timedelta(minutes=10),
         ]
+
+
+def test_backfill_history_before_latest_allows_stale_historical_rows() -> None:
+    init_db()
+    symbol = f"STAL{uuid4().hex[:6].upper()}USDC"
+    base = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(days=45)
+
+    with SessionLocal() as db:
+        repo = CandleRepository(db)
+        repo.upsert(
+            Candle(
+                symbol=symbol,
+                timeframe="5m",
+                ts=base + timedelta(minutes=10),
+                o=100.0,
+                h=101.0,
+                l=99.0,
+                c=100.5,
+                v=1000.0,
+                source="seed",
+                is_final=True,
+            )
+        )
+        db.commit()
+
+        service = MarketDataService(repo)
+        service.binance.fetch_klines = lambda **kwargs: [  # type: ignore[assignment]
+            BinanceKline(symbol=symbol, interval="5m", open_time=base, close_time=base + timedelta(minutes=5), o=99.0, h=99.5, l=98.5, c=99.3, v=900.0, is_final=True),
+            BinanceKline(symbol=symbol, interval="5m", open_time=base + timedelta(minutes=5), close_time=base + timedelta(minutes=10), o=99.3, h=100.0, l=99.0, c=99.8, v=950.0, is_final=True),
+        ]
+
+        ingested = service.backfill_history_before_latest(symbol=symbol, timeframe="5m", limit=2, batches=1)
+        db.commit()
+
+        candles = repo.list_recent(symbol=symbol, timeframe="5m", limit=10)
+
+        assert ingested == 2
+        assert [DataQualityGate._as_utc(row.ts) for row in candles] == [
+            base,
+            base + timedelta(minutes=5),
+            base + timedelta(minutes=10),
+        ]

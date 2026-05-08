@@ -1078,6 +1078,7 @@ class ScalpExperimentOut(ORMModel):
     baseline: dict[str, Any]
     experiment: dict[str, Any]
     comparison: dict[str, Any]
+    micro_main_shadow: dict[str, Any] | None = None
     blocked_by: list[str]
     next_steps: list[str]
     report_path: str | None = None
