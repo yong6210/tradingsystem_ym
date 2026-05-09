@@ -34,6 +34,11 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_root_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path)
+    return path if path.is_absolute() else ROOT_DIR / path
+
+
 def _utc_from_iso(raw: str | None) -> datetime | None:
     text = str(raw or "").strip()
     if not text:
@@ -55,7 +60,7 @@ def _dominant_reason(mapping: dict[str, int] | None, default: str) -> str:
 
 
 def _load_replay_rows(*, replay_path: str, symbol: str, family: str, entry_model: str, days: int, positive_only: bool) -> list[dict[str, Any]]:
-    payload = json.loads(Path(replay_path).read_text(encoding="utf-8"))
+    payload = json.loads(_resolve_root_path(replay_path).read_text(encoding="utf-8"))
     rows = list(payload.get("trade_rows") or [])
     latest_source_ts = _utc_from_iso(str(payload.get("latest_source_ts") or "")) or datetime.now(UTC)
     cutoff = latest_source_ts - timedelta(days=max(int(days), 1))

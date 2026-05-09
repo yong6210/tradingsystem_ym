@@ -1,6 +1,7 @@
 import os
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import unquote
 
 os.environ.setdefault("PYDANTIC_DISABLE_PLUGINS", "1")
 
@@ -10,6 +11,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.core.enums import StrategyMode
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+SQLITE_URL_PREFIXES = ("sqlite+pysqlite:///", "sqlite:///")
+
+
+def sqlite_database_path_from_url(database_url: str) -> Path | None:
+    raw = str(database_url or "").strip()
+    for prefix in SQLITE_URL_PREFIXES:
+        if not raw.startswith(prefix):
+            continue
+        path_part = unquote(raw[len(prefix) :].split("?", 1)[0])
+        if path_part in {"", ":memory:"}:
+            return None
+        path = Path(path_part).expanduser()
+        return path if path.is_absolute() else (ROOT_DIR / path).resolve()
+    return None
 
 
 class Settings(BaseSettings):
@@ -385,16 +400,40 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_sqlite_database_url(cls, value: str) -> str:
         raw = str(value or "").strip()
-        for prefix in ("sqlite+pysqlite:///", "sqlite:///"):
+        for prefix in SQLITE_URL_PREFIXES:
             if not raw.startswith(prefix):
                 continue
             body = raw[len(prefix) :]
             path_part, separator, query = body.partition("?")
             if path_part in {"", ":memory:"} or path_part.startswith("/"):
                 return raw
-            absolute_path = (ROOT_DIR / path_part).resolve()
+            absolute_path = (ROOT_DIR / unquote(path_part)).resolve()
             return f"{prefix}{absolute_path}{separator}{query}"
         return raw
+
+    @field_validator(
+        "session_impulse_retest_miss_detector_report_dir",
+        "validation_report_dir",
+        "operations_checklist_report_dir",
+        "kill_condition_automation_report_dir",
+        "strategy_family_edge_review_report_dir",
+        "live_alpha_operating_review_report_dir",
+        "replay_evidence_review_report_dir",
+        "execution_quality_report_dir",
+        "feature_calibration_report_dir",
+        "feature_calibration_snapshot_dir",
+        "parameter_changelog_path",
+        "parameter_snapshot_dir",
+        "alert_metrics_report_dir",
+        "portfolio_budget_report_dir",
+    )
+    @classmethod
+    def normalize_root_relative_path(cls, value: str) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return raw
+        path = Path(raw).expanduser()
+        return str(path if path.is_absolute() else (ROOT_DIR / path).resolve())
 
 
 @lru_cache(maxsize=1)

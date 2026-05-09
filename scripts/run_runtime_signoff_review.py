@@ -8,16 +8,20 @@ from datetime import UTC, datetime, timedelta
 import os
 from pathlib import Path
 import socket
+import sys
 import time
 from types import SimpleNamespace
 from typing import Any
 from urllib import error, parse, request
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from app.core.config import get_settings
 from app.core import operator_surface_contracts as osc
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_STAGE_FILE = ROOT_DIR / "reports/operations/stage_monitor/current_stage.json"
 _POST_PATCH_BASELINE_TEXT = os.environ.get("RUNTIME_MITIGATION_BASELINE_TS", "2026-04-10T00:00:00+09:00")
 _POST_PATCH_SAMPLE_GOAL = max(int(os.environ.get("RUNTIME_MITIGATION_BASELINE_GOAL", "20")), 1)

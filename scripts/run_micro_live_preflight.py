@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,9 +12,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from app.core import operator_surface_contracts as osc
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
 _REQUEST_RETRY_ATTEMPTS = 3
 _REQUEST_RETRY_BASE_DELAY_SECONDS = 0.5
 _REQUEST_TIMEOUT_SECONDS = 90

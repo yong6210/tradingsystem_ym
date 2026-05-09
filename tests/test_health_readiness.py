@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from app.core.config import get_settings
 from app.services.health_check import HealthCheckService
@@ -62,6 +63,27 @@ def test_health_ready_is_degraded_when_disk_is_low(monkeypatch) -> None:
     assert snapshot.status == "degraded"
     assert snapshot.checks["disk_free"] is False
     assert snapshot.details["disk_free"].startswith("disk_low")
+
+
+def test_health_disk_free_uses_sqlite_pysqlite_database_directory(monkeypatch, tmp_path) -> None:
+    service = HealthCheckService()
+    db_dir = tmp_path / "db"
+    db_dir.mkdir()
+    seen: dict[str, str] = {}
+    service.settings.database_url = f"sqlite+pysqlite:///{db_dir / 'runtime.db'}?mode=ro"
+    service.settings.ready_disk_min_free_mb = 1
+
+    def fake_disk_usage(path: str) -> SimpleNamespace:
+        seen["path"] = path
+        return SimpleNamespace(free=2 * 1024 * 1024)
+
+    monkeypatch.setattr("app.services.health_check.shutil.disk_usage", fake_disk_usage)
+
+    ok, detail = service._check_disk_free()
+
+    assert ok is True
+    assert detail == "ok:2MB"
+    assert seen["path"] == str(db_dir)
 
 
 def test_health_ready_is_degraded_when_worker_heartbeat_missing(monkeypatch, tmp_path) -> None:

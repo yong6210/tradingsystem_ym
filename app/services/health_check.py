@@ -6,7 +6,7 @@ import socket
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from app.core.config import get_settings
+from app.core.config import get_settings, sqlite_database_path_from_url
 from app.db.repositories import CandleRepository
 from app.db.session import SessionLocal
 from app.db.session import db_ready
@@ -78,11 +78,10 @@ class HealthCheckService:
         min_free_mb = int(self.settings.ready_disk_min_free_mb or 0)
         if min_free_mb <= 0:
             return True, "disabled"
-        database_url = str(self.settings.database_url or "")
         path = os.getcwd()
-        if database_url.startswith("sqlite:///"):
-            db_path = database_url.removeprefix("sqlite:///")
-            path = os.path.dirname(os.path.abspath(db_path)) or os.getcwd()
+        db_path = sqlite_database_path_from_url(str(self.settings.database_url or ""))
+        if db_path is not None:
+            path = str(db_path.parent)
         try:
             usage = shutil.disk_usage(path)
         except Exception as exc:

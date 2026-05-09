@@ -31,3 +31,20 @@ def test_validation_payload_cache_invalidates_memory_when_database_is_newer(tmp_
         assert cache.load("BTCUSDC") is None
     finally:
         READ_ONLY_RECOMPUTE_CACHE.clear()
+
+
+def test_validation_payload_cache_tracks_sqlite_pysqlite_artifacts(tmp_path) -> None:
+    db_path = tmp_path / "trading.db"
+    cache = ValidationPayloadCacheService(
+        SimpleNamespace(
+            database_url=f"sqlite+pysqlite:///{db_path}?mode=ro",
+            strategy_version="v1",
+            validation_report_dir=str(tmp_path / "reports"),
+        )
+    )
+
+    assert cache.sqlite_database_artifact_paths() == [
+        db_path,
+        tmp_path / "trading.db-wal",
+        tmp_path / "trading.db-shm",
+    ]

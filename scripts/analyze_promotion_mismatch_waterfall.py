@@ -49,6 +49,18 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_root_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path)
+    return path if path.is_absolute() else ROOT_DIR / path
+
+
+def _connect_readonly_sqlite(path: str | Path) -> sqlite3.Connection:
+    db_path = _resolve_root_path(path).resolve()
+    if not db_path.exists():
+        raise FileNotFoundError(f"SQLite database not found: {db_path}")
+    return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+
+
 def _json_loads(value: Any, default: Any) -> Any:
     if value in (None, ""):
         return default
@@ -147,7 +159,7 @@ def _minutes_apart(left: datetime | None, right: datetime | None) -> float | Non
 
 
 def _load_runtime_data(*, db_path: str, symbol: str, days: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    conn = sqlite3.connect(db_path)
+    conn = _connect_readonly_sqlite(db_path)
     conn.row_factory = sqlite3.Row
     cutoff = (datetime.now(UTC) - timedelta(days=max(int(days), 1))).isoformat()
 
@@ -180,7 +192,7 @@ def _load_runtime_data(*, db_path: str, symbol: str, days: int) -> tuple[list[di
 
 
 def _load_replay_rows(*, replay_path: str, symbol: str, days: int, family: str, entry_model: str) -> list[dict[str, Any]]:
-    payload = json.loads(Path(replay_path).read_text(encoding="utf-8"))
+    payload = json.loads(_resolve_root_path(replay_path).read_text(encoding="utf-8"))
     rows = list(payload.get("trade_rows") or [])
     latest_source_ts = _utc_from_iso(str(payload.get("latest_source_ts") or "")) or datetime.now(UTC)
     cutoff = latest_source_ts - timedelta(days=max(int(days), 1))

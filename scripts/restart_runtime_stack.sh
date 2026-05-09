@@ -15,11 +15,19 @@ WORKER_SCRIPT="$ROOT_DIR/scripts/run_worker.py"
 HEARTBEAT_DIR="/tmp/trading_worker_heartbeats"
 API_HOST="${API_HOST:-127.0.0.1}"
 API_PORT="${API_PORT:-8000}"
+LAUNCHD_API_LABEL="${LAUNCHD_API_LABEL:-com.yumin.trading.api}"
 READY_URL="http://$API_HOST:$API_PORT/health/ready"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "missing python runtime: $PYTHON_BIN" >&2
   exit 1
+fi
+
+if [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
+  LAUNCHD_DOMAIN="gui/$(id -u)"
+  if launchctl print "$LAUNCHD_DOMAIN/$LAUNCHD_API_LABEL" >/dev/null 2>&1; then
+    launchctl bootout "$LAUNCHD_DOMAIN/$LAUNCHD_API_LABEL" >/dev/null 2>&1 || true
+  fi
 fi
 
 if command -v lsof >/dev/null 2>&1; then

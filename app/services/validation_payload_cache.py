@@ -6,10 +6,9 @@ import json
 from pathlib import Path
 import time
 from typing import Any
-from urllib.parse import unquote
 from uuid import uuid4
 
-from app.core.config import Settings
+from app.core.config import Settings, sqlite_database_path_from_url
 
 
 READ_ONLY_RECOMPUTE_CACHE_TTL_SECONDS = 120.0
@@ -39,13 +38,9 @@ class ValidationPayloadCacheService:
         return "|".join([report_dir, self.scope(), str(symbol).upper()])
 
     def sqlite_database_artifact_paths(self) -> list[Path]:
-        database_url = str(getattr(self.settings, "database_url", ""))
-        if not database_url.startswith("sqlite:///"):
+        db_path = sqlite_database_path_from_url(str(getattr(self.settings, "database_url", "")))
+        if db_path is None:
             return []
-        raw_path = unquote(database_url.removeprefix("sqlite:///").split("?", 1)[0])
-        if not raw_path or raw_path == ":memory:":
-            return []
-        db_path = Path(raw_path).expanduser()
         return [db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")]
 
     def stale_for_database(self, cache_mtime: float) -> bool:
