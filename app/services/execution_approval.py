@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from app.core.config import ROOT_DIR, Settings, get_settings
 from app.core.enums import ApprovalState, EntryModel, ExecutionMode, PlanState
@@ -22,8 +23,8 @@ _MODE_RANK = {
 
 
 class ExecutionPlanningService:
-    _PAPER_LINEAGE_OVERRIDE_FAMILIES = {"trend_continuation", "sweep_reversal"}
-    _PAPER_LINEAGE_OVERRIDE_BLOCKS = {"thesis_duplicate_blocked", "thesis_active_cap_reached"}
+    _PAPER_LINEAGE_OVERRIDE_FAMILIES: ClassVar[set[str]] = {"trend_continuation", "sweep_reversal"}
+    _PAPER_LINEAGE_OVERRIDE_BLOCKS: ClassVar[set[str]] = {"thesis_duplicate_blocked", "thesis_active_cap_reached"}
 
     def __init__(
         self,
@@ -45,6 +46,26 @@ class ExecutionPlanningService:
     @staticmethod
     def _bool(value: Any) -> bool:
         return bool(value)
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
 
     @staticmethod
     def _symbol_list(values: list[Any] | None, *, limit: int = 4) -> str:
@@ -424,13 +445,13 @@ class ExecutionPlanningService:
             return "sweep then confirm"
         return "server plan required"
 
-    @staticmethod
-    def _tp_targets(plan: Plan) -> list[dict[str, Any]]:
+    @classmethod
+    def _tp_targets(cls, plan: Plan) -> list[dict[str, Any]]:
         split = dict(plan.split or {})
         return [
-            {"label": "TP1", "price": float(plan.tp1), "size_fraction": float(split.get("tp1", 0.0) or 0.0)},
-            {"label": "TP2", "price": float(plan.tp2), "size_fraction": float(split.get("tp2", 0.0) or 0.0)},
-            {"label": "TP3", "price": float(plan.tp3), "size_fraction": float(split.get("runner", 0.0) or 0.0)},
+            {"label": "TP1", "price": cls._safe_float(plan.tp1), "size_fraction": cls._safe_float(split.get("tp1"))},
+            {"label": "TP2", "price": cls._safe_float(plan.tp2), "size_fraction": cls._safe_float(split.get("tp2"))},
+            {"label": "TP3", "price": cls._safe_float(plan.tp3), "size_fraction": cls._safe_float(split.get("runner"))},
         ]
 
     @staticmethod
@@ -645,7 +666,7 @@ class ExecutionPlanningService:
         validity = dict(plan.validity or {})
         candidate = dict(candidate_row or {})
         effective_mode = execution_mode or self.active_execution_mode()
-        recommended_risk_r = float(validity.get("recommended_risk_r", candidate.get("recommended_risk_r", 0.0)) or 0.0)
+        recommended_risk_r = self._safe_float(validity.get("recommended_risk_r", candidate.get("recommended_risk_r", 0.0)))
         family = self._text(validity.get("strategy_family"), "legacy_zone_plan").lower()
         tf = self._text(plan.timeframe, "5m")
         valid_for_seconds = max(
@@ -659,8 +680,9 @@ class ExecutionPlanningService:
         )
         entry_model = self._text(plan.entry_model)
         entry_type = self._entry_type(entry_model)
-        entry_trigger_price = float(plan.entry_price) if entry_type != "limit" else None
-        entry_limit_price = float(plan.entry_price) if entry_type == "limit" else None
+        entry_price = self._safe_float(plan.entry_price)
+        entry_trigger_price = entry_price if entry_type != "limit" else None
+        entry_limit_price = entry_price if entry_type == "limit" else None
         timeout_seconds = min(max(valid_for_seconds, 0), 900 if entry_type == "limit" else 1200)
         scorecard = dict(validity.get("strategy_scorecard") or {})
         return {
@@ -680,9 +702,8 @@ class ExecutionPlanningService:
             ),
             "direction": plan.direction,
             "setup_grade": self._text(validity.get("strategy_grade"), candidate.get("strategy_grade") or "B"),
-            "setup_score": float(
+            "setup_score": self._safe_float(
                 validity.get("strategy_family_score", validity.get("confluence_score", candidate.get("final_rank_score", 0.0)))
-                or 0.0
             ),
             "entry_model": entry_model,
             "entry_type": entry_type,
@@ -691,19 +712,25 @@ class ExecutionPlanningService:
             "entry_limit_price": entry_limit_price,
             "entry_timeout_seconds": timeout_seconds,
             "cancel_if_not_filled": True,
-            "stop_price": float(plan.sl),
+            "stop_price": self._safe_float(plan.sl),
             "tp_targets": self._tp_targets(plan),
             "recommended_risk_r": recommended_risk_r,
-            "max_position_notional": round(max(0.0, recommended_risk_r) * float(self.settings.auto_trading_notional_per_r), 4),
-            "expected_fee_bps": float(self.settings.taker_fee_bps if entry_type != "limit" else self.settings.maker_fee_bps),
-            "max_slippage_bps": float(self.settings.auto_trading_max_slippage_bps),
+            "max_position_notional": round(
+                max(0.0, recommended_risk_r) * self._safe_float(self.settings.auto_trading_notional_per_r, default=25.0),
+                4,
+            ),
+            "expected_fee_bps": self._safe_float(
+                self.settings.taker_fee_bps if entry_type != "limit" else self.settings.maker_fee_bps,
+                default=4.0 if entry_type != "limit" else 2.0,
+            ),
+            "max_slippage_bps": self._safe_float(self.settings.auto_trading_max_slippage_bps, default=12.0),
             "valid_from": self._utc(plan.valid_from),
             "valid_until": self._utc(plan.valid_until),
             "kill_if_transition_lock": True,
             "kill_if_regime_changes": True,
             "expected_summary": {
-                "expected_win_prob": float(candidate.get("expected_win_prob", validity.get("expected_win_prob", 0.0)) or 0.0),
-                "expected_ev_r": float(candidate.get("expected_ev_r", validity.get("expected_ev_r", plan.ev)) or 0.0),
+                "expected_win_prob": self._safe_float(candidate.get("expected_win_prob", validity.get("expected_win_prob", 0.0))),
+                "expected_ev_r": self._safe_float(candidate.get("expected_ev_r", validity.get("expected_ev_r", plan.ev))),
                 "expected_source": "runtime_candidate_overlay",
                 "expected_summary": self._text(candidate.get("expected_summary"), validity.get("expected_summary", "")),
             },
@@ -766,7 +793,7 @@ class ExecutionPlanningService:
         plan: Plan,
         executable_plan: dict[str, Any],
     ) -> tuple[bool, float | None, float]:
-        ratio = clamp(float(self.settings.transition_edge_variant_partial_activation_ratio), 0.0, 1.0)
+        ratio = clamp(self._safe_float(self.settings.transition_edge_variant_partial_activation_ratio, default=0.3), 0.0, 1.0)
         if ratio <= 0.0:
             return False, None, ratio
         if ratio >= 1.0:
@@ -790,7 +817,11 @@ class ExecutionPlanningService:
         plan: Plan,
         executable_plan: dict[str, Any],
     ) -> tuple[bool, float | None, float]:
-        ratio = clamp(float(getattr(self.settings, "session_impulse_retest_partial_activation_ratio", 0.0)), 0.0, 1.0)
+        ratio = clamp(
+            self._safe_float(getattr(self.settings, "session_impulse_retest_partial_activation_ratio", 0.0), default=0.3),
+            0.0,
+            1.0,
+        )
         if ratio <= 0.0:
             return False, None, ratio
         if ratio >= 1.0:
@@ -861,12 +892,13 @@ class ExecutionPlanningService:
         block_reason_message = str(candidate.get("block_reason_message") or deployment_message)
         risk_reason = str(metrics.get("risk_reason") or candidate.get("risk_reason") or "normal")
         session_guidance = dict(candidate.get("session_guidance") or {})
-        setup_score = float(executable_plan.get("setup_score", 0.0) or 0.0)
-        recommended_risk_r = float(executable_plan.get("recommended_risk_r", 0.0) or 0.0)
+        setup_score = self._safe_float(executable_plan.get("setup_score", 0.0))
+        recommended_risk_r = self._safe_float(executable_plan.get("recommended_risk_r", 0.0))
         setup_grade = str(executable_plan.get("setup_grade") or "").upper()
         session_name = self._session_name(candidate, operating_lock)
         requested_mode_exceeds_cap = _MODE_RANK[requested_mode] > _MODE_RANK[rollout_policy.max_execution_mode]
         override_applied = False
+        override_block_applied = False
         override_reason = ""
         override_source = ""
         outcome_approval_penalty = self._outcome_approval_penalty(
@@ -876,25 +908,28 @@ class ExecutionPlanningService:
         )
 
         thesis_rejected_reason = str(candidate.get("thesis_rejected_reason") or "")
-        override_block_candidate = block_reason in self._PAPER_LINEAGE_OVERRIDE_BLOCKS or thesis_rejected_reason == "duplicate_active_thesis"
-        if (
+        paper_lineage_candidate = (
             paper_lineage_override
             and requested_mode == ExecutionMode.PAPER
             and family in self._PAPER_LINEAGE_OVERRIDE_FAMILIES
             and setup_grade == "A"
-            and override_block_candidate
-        ):
+        )
+        override_block_candidate = block_reason in self._PAPER_LINEAGE_OVERRIDE_BLOCKS or thesis_rejected_reason == "duplicate_active_thesis"
+        if paper_lineage_candidate and (not block_reason or override_block_candidate):
             override_applied = True
             override_source = "paper_lineage_override"
-            if block_reason == "thesis_active_cap_reached":
+            override_block_applied = override_block_candidate
+            if not override_block_candidate:
+                override_reason = "paper lineage override allowed eligible A-grade PAPER sampling."
+            elif block_reason == "thesis_active_cap_reached":
                 override_reason = "paper lineage override bypassed thesis active-cap block for eligible A-grade PAPER sampling."
             else:
                 override_reason = "paper lineage override bypassed thesis duplicate block for eligible A-grade PAPER sampling."
         paper_lineage_sampling_mode = override_applied and requested_mode == ExecutionMode.PAPER
         lineage_override_extra_reasons: list[dict[str, Any]] = []
 
-        effective_block_reason = "" if override_applied else block_reason
-        effective_block_reason_message = "" if override_applied else block_reason_message
+        effective_block_reason = "" if override_block_applied else block_reason
+        effective_block_reason_message = "" if override_block_applied else block_reason_message
 
         def result(state: ApprovalState, reason_code: str, reason: str, extra_reasons: list[dict[str, Any]] | None = None) -> dict[str, Any]:
             final_state = state
@@ -1229,13 +1264,17 @@ class ExecutionPlanningService:
                         "historical plan blocklist contract."
                     ),
                 )
-            if current_exposure_count >= int(self.settings.auto_trading_micro_live_max_concurrent_positions):
+            max_concurrent_positions = self._safe_int(
+                self.settings.auto_trading_micro_live_max_concurrent_positions,
+                default=2,
+            )
+            if current_exposure_count >= max_concurrent_positions:
                 return result(
                     ApprovalState.BLOCKED,
                     "micro_live_position_cap_reached",
                     f"Open exposure count {current_exposure_count} reached the MICRO_LIVE concurrent position cap.",
                 )
-            daily_entry_cap = int(self.settings.auto_trading_micro_live_max_daily_new_entries)
+            daily_entry_cap = self._safe_int(self.settings.auto_trading_micro_live_max_daily_new_entries, default=2)
             if daily_entry_cap > 0 and daily_new_entry_count >= daily_entry_cap:
                 return result(
                     ApprovalState.BLOCKED,
@@ -1269,9 +1308,9 @@ class ExecutionPlanningService:
                     ),
                 )
         if requested_mode in {ExecutionMode.LIVE, ExecutionMode.MICRO_LIVE} and cluster_guard:
-            window_cap = max(0, int(cluster_guard.get("max_same_family_entries_per_window", 0) or 0))
-            window_minutes = max(0, int(cluster_guard.get("cluster_window_minutes", 0) or 0))
-            window_count = max(0, int(cluster_guard.get("recent_family_window_entry_count", 0) or 0))
+            window_cap = max(0, self._safe_int(cluster_guard.get("max_same_family_entries_per_window", 0)))
+            window_minutes = max(0, self._safe_int(cluster_guard.get("cluster_window_minutes", 0)))
+            window_count = max(0, self._safe_int(cluster_guard.get("recent_family_window_entry_count", 0)))
             if window_cap > 0 and window_count >= window_cap:
                 symbols = self._symbol_list(cluster_guard.get("recent_family_window_symbols"))
                 symbol_suffix = f" ({symbols})" if symbols else ""
@@ -1280,8 +1319,8 @@ class ExecutionPlanningService:
                     "live_family_cluster_window_cap_reached",
                     f"{family} already has {window_count} recent family entries inside the last {window_minutes}m cluster window{symbol_suffix}.",
                 )
-            direction_cap = max(0, int(cluster_guard.get("max_same_family_direction_exposures", 0) or 0))
-            direction_count = max(0, int(cluster_guard.get("recent_family_direction_exposure_count", 0) or 0))
+            direction_cap = max(0, self._safe_int(cluster_guard.get("max_same_family_direction_exposures", 0)))
+            direction_count = max(0, self._safe_int(cluster_guard.get("recent_family_direction_exposure_count", 0)))
             direction = str(cluster_guard.get("direction") or getattr(plan, "direction", "") or "").upper()
             if direction_cap > 0 and direction_count >= direction_cap:
                 symbols = self._symbol_list(cluster_guard.get("recent_family_direction_exposure_symbols"))
@@ -1291,9 +1330,9 @@ class ExecutionPlanningService:
                     "live_family_direction_exposure_cap_reached",
                     f"{family} already has {direction_count} active {direction or 'SAME-DIRECTION'} exposure(s) in {direction or 'the same direction'}{symbol_suffix}.",
                 )
-            loss_trigger = max(0, int(cluster_guard.get("loss_cooldown_trigger_count", 0) or 0))
-            loss_minutes = max(0, int(cluster_guard.get("loss_cooldown_minutes", 0) or 0))
-            loss_count = max(0, int(cluster_guard.get("recent_family_loss_count", 0) or 0))
+            loss_trigger = max(0, self._safe_int(cluster_guard.get("loss_cooldown_trigger_count", 0)))
+            loss_minutes = max(0, self._safe_int(cluster_guard.get("loss_cooldown_minutes", 0)))
+            loss_count = max(0, self._safe_int(cluster_guard.get("recent_family_loss_count", 0)))
             if loss_trigger > 0 and loss_count >= loss_trigger:
                 symbols = self._symbol_list(cluster_guard.get("recent_family_loss_symbols"))
                 symbol_suffix = f" ({symbols})" if symbols else ""
@@ -1302,17 +1341,19 @@ class ExecutionPlanningService:
                     "live_family_loss_cooldown_active",
                     f"{family} logged {loss_count} recent family losses inside the last {loss_minutes}m cooldown window{symbol_suffix}.",
                 )
-        if recommended_risk_r > float(rollout_policy.max_risk_r) + 1e-9 and rollout_policy.max_risk_r > 0.0:
+        rollout_max_risk = self._safe_float(rollout_policy.max_risk_r)
+        rollout_min_quality = self._safe_float(rollout_policy.min_quality_score)
+        if recommended_risk_r > rollout_max_risk + 1e-9 and rollout_max_risk > 0.0:
             return result(
                 ApprovalState.APPROVED_MANUAL,
                 "rollout_risk_cap_exceeded",
-                f"Recommended risk {recommended_risk_r:.2f}R exceeds the family rollout cap {rollout_policy.max_risk_r:.2f}R.",
+                f"Recommended risk {recommended_risk_r:.2f}R exceeds the family rollout cap {rollout_max_risk:.2f}R.",
             )
-        if setup_score < float(rollout_policy.min_quality_score):
+        if setup_score < rollout_min_quality:
             return result(
                 ApprovalState.APPROVED_MANUAL,
                 "rollout_min_quality_not_met",
-                f"Setup score {setup_score:.1f} is below the family rollout minimum {rollout_policy.min_quality_score:.1f}.",
+                f"Setup score {setup_score:.1f} is below the family rollout minimum {rollout_min_quality:.1f}.",
             )
         if self.settings.auto_trading_require_validation_go:
             if allowed_execution_mode == ExecutionMode.LIVE and metrics_grade != "A":

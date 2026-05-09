@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.error import URLError
+from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlparse
 
 
-ROOT_DIR = Path("/Users/yumin/Documents/trading")
+ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
 def _load_module(name: str, path: Path):
@@ -23,6 +25,20 @@ run_micro_live_preflight = _load_module(
     "run_micro_live_preflight_test_module",
     ROOT_DIR / "scripts/run_micro_live_preflight.py",
 )
+
+
+class _JsonResponse:
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):  # noqa: ANN001
+        return False
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode("utf-8")
 
 
 def _ready_payload() -> dict:
@@ -272,6 +288,24 @@ def _empty_scanner_payload() -> list[dict]:
     return []
 
 
+def _dashboard_with_rollout_policies() -> dict:
+    payload = _dashboard_payload()
+    payload["execution_mode"] = "MICRO_LIVE"
+    payload["rollout_policies"] = [
+        {
+            "strategy_family": "legacy_zone_plan",
+            "live_enabled": False,
+            "max_execution_mode": "SHADOW",
+        },
+        {
+            "strategy_family": "sweep_reversal",
+            "live_enabled": True,
+            "max_execution_mode": "MICRO_LIVE",
+        },
+    ]
+    return payload
+
+
 def test_surface_strip_summary_prefers_nested_validation_strip() -> None:
     summary = run_micro_live_preflight._surface_strip_summary(
         _validation_payload(approve_value="validation no_go"),
@@ -395,9 +429,245 @@ def test_main_keeps_preflight_ready_when_no_candidate_is_live(monkeypatch, capsy
     payload = json.loads(capsys.readouterr().out)
 
     assert payload["overall_status"] == "READY_FOR_MICRO_LIVE"
+    assert "no live-routable scanner candidate" in payload["summary_line"]
     candidate_check = next(item for item in payload["checks"] if item["name"] == "candidate_available")
     assert candidate_check["status"] == "PASS"
-    assert "No accepted scanner candidate is live right now" in candidate_check["message"]
+    assert "No accepted scanner candidate is live-routable right now" in candidate_check["message"]
+    assert any("wait for the next live-routable scanner candidate" in item for item in payload["next_steps"])
+
+
+def test_main_blocks_preflight_on_manual_review_approval_surface(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        run_micro_live_preflight,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            days=7,
+            candidate_limit=10,
+            report_dir="reports/operations/micro_live_preflight",
+            no_write_report=True,
+        ),
+    )
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/health/ready":
+            return _ready_payload()
+        if path == "/execution/operator-dashboard":
+            return _dashboard_payload()
+        if path == "/execution/safety-state":
+            return _safety_payload()
+        if path == "/execution/reconcile":
+            return _reconcile_payload()
+        if path == "/validation/report":
+            return _validation_payload(approve_value="manual review first")
+        if path == "/operations/checklist":
+            return _checklist_payload()
+        if path == "/alerts/metrics":
+            return _alerts_payload()
+        if path == "/scanner/top":
+            return _scanner_payload()
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(run_micro_live_preflight, "_request_json", _request_json)
+
+    assert run_micro_live_preflight.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["overall_status"] == "NOT_READY"
+    validation_check = next(item for item in payload["checks"] if item["name"] == "validation_language")
+    assert validation_check["status"] == "FAIL"
+    assert "approve=manual review first" in validation_check["message"]
+
+
+def test_main_ignores_non_routable_scanner_candidate(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        run_micro_live_preflight,
+        "get_settings",
+        lambda: SimpleNamespace(
+            auto_trading_allowed_symbols="BTCUSDC,ETHUSDC",
+            auto_trading_allowed_families="sweep_reversal",
+            auto_trading_micro_live_allowed_symbols="BTCUSDC,ETHUSDC",
+            auto_trading_micro_live_allowed_families="sweep_reversal",
+        ),
+    )
+    monkeypatch.setattr(
+        run_micro_live_preflight,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            days=7,
+            candidate_limit=10,
+            report_dir="reports/operations/micro_live_preflight",
+            no_write_report=True,
+        ),
+    )
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/health/ready":
+            return _ready_payload()
+        if path == "/execution/operator-dashboard":
+            return _dashboard_with_rollout_policies()
+        if path == "/execution/safety-state":
+            return _safety_payload()
+        if path == "/execution/reconcile":
+            return _reconcile_payload()
+        if path == "/validation/report":
+            return _validation_payload()
+        if path == "/operations/checklist":
+            return _checklist_payload()
+        if path == "/alerts/metrics":
+            return _alerts_payload()
+        if path == "/scanner/top":
+            return [
+                {
+                    "plan_id": "legacy-plan",
+                    "symbol": "BTCUSDC",
+                    "strategy_family": "legacy_zone_plan",
+                    "deployment_go_no_go": "GO",
+                },
+                {
+                    "plan_id": "sweep-plan",
+                    "symbol": "ETHUSDC",
+                    "strategy_family": "sweep_reversal",
+                    "deployment_go_no_go": "GO",
+                },
+            ]
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(run_micro_live_preflight, "_request_json", _request_json)
+
+    assert run_micro_live_preflight.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["candidate"]["plan_id"] == "sweep-plan"
+    assert payload["ignored_non_routable_candidate_count"] == 1
+
+
+def test_main_does_not_select_scanner_candidate_when_policy_is_shadow_only(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        run_micro_live_preflight,
+        "get_settings",
+        lambda: SimpleNamespace(
+            auto_trading_allowed_symbols="BTCUSDC,ETHUSDC",
+            auto_trading_allowed_families="sweep_reversal",
+            auto_trading_micro_live_allowed_symbols="BTCUSDC,ETHUSDC",
+            auto_trading_micro_live_allowed_families="sweep_reversal",
+        ),
+    )
+    monkeypatch.setattr(
+        run_micro_live_preflight,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            days=7,
+            candidate_limit=10,
+            report_dir="reports/operations/micro_live_preflight",
+            no_write_report=True,
+        ),
+    )
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/health/ready":
+            return _ready_payload()
+        if path == "/execution/operator-dashboard":
+            return _dashboard_with_rollout_policies()
+        if path == "/execution/safety-state":
+            return _safety_payload()
+        if path == "/execution/reconcile":
+            return _reconcile_payload()
+        if path == "/validation/report":
+            return _validation_payload()
+        if path == "/operations/checklist":
+            return _checklist_payload()
+        if path == "/alerts/metrics":
+            return _alerts_payload()
+        if path == "/scanner/top":
+            return [
+                {
+                    "plan_id": "legacy-plan",
+                    "symbol": "BTCUSDC",
+                    "strategy_family": "legacy_zone_plan",
+                    "deployment_go_no_go": "GO",
+                }
+            ]
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(run_micro_live_preflight, "_request_json", _request_json)
+
+    assert run_micro_live_preflight.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["candidate"] == {}
+    assert payload["ignored_non_routable_candidate_count"] == 1
+    assert "no live-routable scanner candidate" in payload["summary_line"]
+    candidate_check = next(item for item in payload["checks"] if item["name"] == "candidate_available")
+    assert "ignored_non_routable_candidates=1" in candidate_check["message"]
+
+
+def test_main_does_not_select_scanner_candidate_outside_symbol_allowlist(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        run_micro_live_preflight,
+        "get_settings",
+        lambda: SimpleNamespace(
+            auto_trading_allowed_symbols="BTCUSDC,ETHUSDC",
+            auto_trading_allowed_families="sweep_reversal",
+            auto_trading_micro_live_allowed_symbols="BTCUSDC,ETHUSDC",
+            auto_trading_micro_live_allowed_families="sweep_reversal",
+        ),
+    )
+    monkeypatch.setattr(
+        run_micro_live_preflight,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            days=7,
+            candidate_limit=10,
+            report_dir="reports/operations/micro_live_preflight",
+            no_write_report=True,
+        ),
+    )
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/health/ready":
+            return _ready_payload()
+        if path == "/execution/operator-dashboard":
+            return _dashboard_with_rollout_policies()
+        if path == "/execution/safety-state":
+            return _safety_payload()
+        if path == "/execution/reconcile":
+            return _reconcile_payload()
+        if path == "/validation/report":
+            return _validation_payload()
+        if path == "/operations/checklist":
+            return _checklist_payload()
+        if path == "/alerts/metrics":
+            return _alerts_payload()
+        if path == "/scanner/top":
+            return [
+                {
+                    "plan_id": "fil-sweep-plan",
+                    "symbol": "FILUSDC",
+                    "strategy_family": "sweep_reversal",
+                    "deployment_go_no_go": "GO",
+                }
+            ]
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(run_micro_live_preflight, "_request_json", _request_json)
+
+    assert run_micro_live_preflight.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["candidate"] == {}
+    assert payload["ignored_non_routable_candidate_count"] == 1
 
 
 def test_main_uses_read_only_queries_for_reconcile_validation_and_checklist(monkeypatch, capsys) -> None:
@@ -445,3 +715,36 @@ def test_main_uses_read_only_queries_for_reconcile_validation_and_checklist(monk
     assert calls["/execution/reconcile"]["query"] == {"apply_lock": "false", "auto_resolve": "false"}
     assert calls["/validation/report"]["query"] == {"symbol": "BTCUSDC", "refresh": "false"}
     assert calls["/operations/checklist"]["query"] == {"symbol": "BTCUSDC", "write_report": "false"}
+
+
+def test_request_json_refreshes_validation_report_when_read_only_cache_is_missing(monkeypatch) -> None:
+    calls: list[dict[str, list[str]]] = []
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001, ARG001
+        parsed = urlparse(request.full_url)
+        query = parse_qs(parsed.query)
+        calls.append(query)
+        if query.get("refresh") == ["false"]:
+            raise HTTPError(
+                request.full_url,
+                404,
+                "not found",
+                hdrs=None,
+                fp=io.BytesIO(b'{"detail":"cached validation payload is not available yet; call with refresh=true first"}'),
+            )
+        return _JsonResponse({"symbol": "BTCUSDC", "validation_report": {"cached": False}})
+
+    monkeypatch.setattr(run_micro_live_preflight, "urlopen", fake_urlopen)
+
+    payload = run_micro_live_preflight._request_json(
+        "http://127.0.0.1:8000",
+        "POST",
+        "/validation/report",
+        query={"symbol": "BTCUSDC", "refresh": "false"},
+    )
+
+    assert payload == {"symbol": "BTCUSDC", "validation_report": {"cached": False}}
+    assert calls == [
+        {"symbol": ["BTCUSDC"], "refresh": ["false"]},
+        {"symbol": ["BTCUSDC"], "refresh": ["true"]},
+    ]

@@ -31,7 +31,11 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _parse_target_date(raw: str) -> datetime:
-    parsed = date.fromisoformat(str(raw).strip())
+    text = str(raw or "").strip()
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(f"invalid --target-date YYYY-MM-DD value: {text}") from exc
     return datetime(parsed.year, parsed.month, parsed.day, tzinfo=UTC)
 
 
@@ -101,7 +105,10 @@ def main() -> int:
     init_db()
     settings = get_settings()
     generated_at = datetime.now(UTC)
-    target_ts = _parse_target_date(args.target_date)
+    try:
+        target_ts = _parse_target_date(args.target_date)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     symbols = [item.strip().upper() for item in str(args.symbols or "").split(",") if item.strip()]
 
     payload: dict[str, Any] = {

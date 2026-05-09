@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from typing import Any
 
 from app.core.config import Settings, get_settings
@@ -49,6 +50,16 @@ class ThesisFingerprintService:
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
 
     def build(
         self,
@@ -287,28 +298,37 @@ class ThesisFingerprintService:
         return "others"
 
     def _time_bucket_label(self, dt: datetime) -> str:
-        bucket_minutes = max(1, int(self.settings.thesis_time_bucket_minutes))
+        bucket_minutes = max(1, self._safe_int(self.settings.thesis_time_bucket_minutes, default=30))
         minute = (dt.minute // bucket_minutes) * bucket_minutes
         bucket = dt.replace(minute=minute, second=0, microsecond=0)
         return f"{bucket.strftime('%Y-%m-%dT%H:%MZ')}_{bucket_minutes}m"
 
     def _normalize_time_bucket(self, value: str, *, fallback: datetime) -> str:
-        bucket_minutes = max(1, int(self.settings.thesis_time_bucket_minutes))
-        if value.endswith(f"_{bucket_minutes}m"):
+        bucket_minutes = max(1, self._safe_int(self.settings.thesis_time_bucket_minutes, default=30))
+        if value.endswith(f"_{bucket_minutes}m") and self._bucket_dt(value) is not None:
             return value
         return self._time_bucket_label(fallback)
 
-    def _bucket_dt(self, value: str) -> datetime:
+    def _bucket_dt(self, value: str) -> datetime | None:
         stem = value.rsplit("_", maxsplit=1)[0]
-        parsed = datetime.strptime(stem, "%Y-%m-%dT%H:%MZ")
-        return parsed.replace(tzinfo=timezone.utc)
+        try:
+            parsed = datetime.fromisoformat(stem.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def _same_or_adjacent_bucket(self, left: str, right: str) -> bool:
         if left == right:
             return True
         left_dt = self._bucket_dt(left)
         right_dt = self._bucket_dt(right)
-        return abs(left_dt - right_dt) <= timedelta(minutes=max(1, int(self.settings.thesis_time_bucket_minutes)))
+        if left_dt is None or right_dt is None:
+            return False
+        return abs(left_dt - right_dt) <= timedelta(
+            minutes=max(1, self._safe_int(self.settings.thesis_time_bucket_minutes, default=30))
+        )
 
     def _canonical_narrative(self, narrative: str) -> str:
         return _EQUIVALENT_NARRATIVES.get(str(narrative).lower(), self._normalize_liquidity_narrative(narrative))

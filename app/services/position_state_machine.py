@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 
 from app.core.enums import ExecutionFillStage, PlanState
 from app.db.models import ExecutionFill
@@ -40,14 +40,14 @@ class FillApplyResult:
 
 
 class PositionStateMachineService:
-    _stage_to_state = {
+    _stage_to_state: ClassVar[dict[ExecutionFillStage, PlanState]] = {
         ExecutionFillStage.TRIGGERED: PlanState.TRIGGERED,
         ExecutionFillStage.ENTRY: PlanState.ENTERED,
         ExecutionFillStage.PARTIAL_EXIT: PlanState.PARTIAL_EXIT,
         ExecutionFillStage.CLOSED: PlanState.CLOSED,
     }
 
-    _state_rank = {
+    _state_rank: ClassVar[dict[PlanState, int]] = {
         PlanState.PLANNED: 0,
         PlanState.ARMED: 0,
         PlanState.TRIGGERED: 1,

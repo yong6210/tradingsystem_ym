@@ -37,6 +37,11 @@ _STAGE_BOARD_REQUEST_RETRY_ATTEMPTS = 2
 _STAGE_BOARD_REQUEST_RETRY_BASE_DELAY_SECONDS = 0.5
 
 
+def _resolve_root_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else ROOT_DIR / path
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the stage monitor board build and stage-change notifier in one Python process."
@@ -2154,9 +2159,9 @@ def _apply_runtime_mitigation_wait_summary(current: dict[str, Any]) -> dict[str,
 
 
 def _run_stage_board(args: argparse.Namespace) -> dict[str, object]:
-    stage_file = Path(args.stage_file).resolve()
-    latest_board_file = Path(args.latest_board_file).resolve()
-    state_file = Path(args.state_file).resolve()
+    stage_file = _resolve_root_path(args.stage_file).resolve()
+    latest_board_file = _resolve_root_path(args.latest_board_file).resolve()
+    state_file = _resolve_root_path(args.state_file).resolve()
     previous_timeout = ops_stage_board._REQUEST_TIMEOUT_SECONDS
     previous_attempts = ops_stage_board._REQUEST_RETRY_ATTEMPTS
     previous_delay = ops_stage_board._REQUEST_RETRY_BASE_DELAY_SECONDS
@@ -2243,8 +2248,8 @@ def _run_stage_board(args: argparse.Namespace) -> dict[str, object]:
 
 
 def _run_notifier(args: argparse.Namespace) -> dict[str, object]:
-    stage_file = Path(args.stage_file).resolve()
-    state_file = Path(args.state_file).resolve()
+    stage_file = _resolve_root_path(args.stage_file).resolve()
+    state_file = _resolve_root_path(args.state_file).resolve()
     current = notify_stage_change._load_stage(stage_file)
     previous = notify_stage_change._read_json(state_file)
     current = _apply_edge_sample_stall(

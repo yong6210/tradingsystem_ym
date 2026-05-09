@@ -32,7 +32,10 @@ def _parse_optional_ts(raw: str | None) -> datetime | None:
     value = str(raw or "").strip()
     if not value:
         return None
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"invalid ISO8601 timestamp: {value}") from exc
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
@@ -42,14 +45,19 @@ def main() -> int:
     args = _parse_args()
     settings = get_settings()
     generated_at = datetime.now(UTC)
+    try:
+        start_ts = _parse_optional_ts(args.start_ts)
+        end_ts = _parse_optional_ts(args.end_ts)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     payload = run_futures_csv_backtest(
         csv_path=args.csv,
         symbol=args.symbol,
         profile_name=str(args.profile or "baseline").strip().lower(),
         timezone_name=str(args.timezone or "America/Chicago").strip() or "America/Chicago",
         lookback_days=int(args.days) if args.days else None,
-        start_ts=_parse_optional_ts(args.start_ts),
-        end_ts=_parse_optional_ts(args.end_ts),
+        start_ts=start_ts,
+        end_ts=end_ts,
     )
     payload["generated_at"] = generated_at.isoformat()
 

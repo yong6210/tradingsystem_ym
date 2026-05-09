@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from math import isfinite
+from typing import Any
 
 from app.core.config import get_settings
 from app.db.models import Candle
@@ -113,6 +115,16 @@ class KalmanFVA:
 class ContextEngine:
     def __init__(self):
         self.settings = get_settings()
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
 
     @staticmethod
     def _atr(candles: list[Candle], period: int = 14) -> float:
@@ -272,12 +284,13 @@ class ContextEngine:
     def _mixed_like_count(self, candles: list[Candle], atr5: float) -> int:
         count = 0
         sample = candles[-6:]
+        wick_body_ratio_confirmed = self._safe_float(self.settings.transition_wick_body_ratio_confirmed, default=2.2)
         for candle in sample:
             body_atr = abs(candle.c - candle.o) / max(atr5, 1e-6)
             ratio = self._wick_body_ratio(candle)
             bar_range = max(candle.h - candle.l, 1e-6)
             close_mid_distance = abs(candle.c - ((candle.h + candle.l) / 2.0)) / bar_range
-            if ratio >= self.settings.transition_wick_body_ratio_confirmed and body_atr <= 0.35 and close_mid_distance <= 0.22:
+            if ratio >= wick_body_ratio_confirmed and body_atr <= 0.35 and close_mid_distance <= 0.22:
                 count += 1
         return count
 
@@ -343,7 +356,11 @@ class ContextEngine:
             if recent_5m
             else 0.0
         )
-        f4 = int(wick_ratio_avg >= self.settings.transition_wick_body_ratio_confirmed)
+        transition_confirmed_score = self._safe_float(self.settings.transition_confirmed_score, default=55.0)
+        transition_watch_score = self._safe_float(self.settings.transition_watch_score, default=40.0)
+        transition_wick_body_ratio_confirmed = self._safe_float(self.settings.transition_wick_body_ratio_confirmed, default=2.2)
+        transition_wick_body_ratio_unlock = self._safe_float(self.settings.transition_wick_body_ratio_unlock, default=1.5)
+        f4 = int(wick_ratio_avg >= transition_wick_body_ratio_confirmed)
         f5, disagreement_count = self._state_disagreement(recent_5m, recent_15m, recent_features)
         f6, invalidation_failures = self._zone_invalidation_churn(recent_5m, atr5)
 
@@ -360,10 +377,10 @@ class ContextEngine:
         if hard_reason is not None:
             state = "transition_confirmed"
             lock_reason = hard_reason
-        elif score >= float(self.settings.transition_confirmed_score):
+        elif score >= transition_confirmed_score:
             state = "transition_confirmed"
             lock_reason = "transition_score_confirmed"
-        elif score >= float(self.settings.transition_watch_score):
+        elif score >= transition_watch_score:
             state = "transition_watch"
             lock_reason = "transition_score_watch"
         else:
@@ -371,9 +388,9 @@ class ContextEngine:
             lock_reason = None
 
         unlock_candidate = bool(
-            score < float(self.settings.transition_watch_score)
+            score < transition_watch_score
             and mixed_like_count <= 1
-            and wick_ratio_avg < float(self.settings.transition_wick_body_ratio_unlock)
+            and wick_ratio_avg < transition_wick_body_ratio_unlock
         )
 
         features = {

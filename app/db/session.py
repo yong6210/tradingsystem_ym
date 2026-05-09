@@ -1,15 +1,25 @@
 from collections.abc import Generator
+from dataclasses import dataclass
 from threading import Lock
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.config import get_settings
+from app.core.config import get_settings, sqlite_database_path_from_url
 from app.db.base import Base
 
 settings = get_settings()
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _SQLITE_WAL_ENABLED = ":memory:" not in settings.database_url and "mode=memory" not in settings.database_url
+
+
+def _ensure_sqlite_parent_dir(database_url: str) -> None:
+    db_path = sqlite_database_path_from_url(str(database_url or ""))
+    if db_path is not None:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+_ensure_sqlite_parent_dir(settings.database_url)
 
 engine_kwargs = {"future": True, "pool_pre_ping": True}
 if settings.database_url.startswith("sqlite"):
@@ -18,7 +28,14 @@ if settings.database_url.startswith("sqlite"):
 engine = create_engine(settings.database_url, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 _init_lock = Lock()
-_initialized = False
+
+
+@dataclass
+class _InitState:
+    initialized: bool = False
+
+
+_init_state = _InitState()
 
 
 if settings.database_url.startswith("sqlite"):
@@ -38,16 +55,15 @@ if settings.database_url.startswith("sqlite"):
 
 
 def init_db() -> None:
-    global _initialized
-    if _initialized:
+    if _init_state.initialized:
         return
     with _init_lock:
-        if _initialized:
+        if _init_state.initialized:
             return
         from app.db import models  # noqa: F401
 
         Base.metadata.create_all(bind=engine)
-        _initialized = True
+        _init_state.initialized = True
 
 
 def db_ready() -> bool:

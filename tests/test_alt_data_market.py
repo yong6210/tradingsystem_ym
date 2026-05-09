@@ -5,7 +5,8 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
 from app.db.models import Candle
-from app.db.repositories import BasisSnapshotRepository, CandleRepository, CrossAssetBreadthRepository, FundingRateRepository, OpenInterestRepository
+from app.db.models import MacroEvent
+from app.db.repositories import BasisSnapshotRepository, CandleRepository, CrossAssetBreadthRepository, FundingRateRepository, MacroEventRepository, OpenInterestRepository
 from app.services.alt_data_market import AltDataMarketService
 
 
@@ -66,6 +67,35 @@ class _FakeClient:
         return list(self._basis)
 
 
+class _FakeHttpResponse:
+    text = """
+    <p>For 2026:</p>
+    <ul>
+      <li>Tuesday, Notamonth 1, and Wednesday, Notamonth 2, 2026</li>
+      <li>Tuesday, June 16, and Wednesday, June 17, 2026</li>
+    </ul>
+    """
+
+    @staticmethod
+    def raise_for_status() -> None:
+        return None
+
+
+class _FakeHttpClient:
+    def __init__(self, **_: object) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):  # noqa: ANN001
+        return False
+
+    @staticmethod
+    def get(_url: str) -> _FakeHttpResponse:
+        return _FakeHttpResponse()
+
+
 def test_alt_data_market_service_backfills_three_series() -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
@@ -103,3 +133,26 @@ def test_alt_data_market_service_backfills_three_series() -> None:
         assert len(OpenInterestRepository(db).list_range(symbol="BTCUSDC", period="15m", start_ts=datetime(2025, 1, 1, tzinfo=UTC), end_ts=datetime(2027, 1, 1, tzinfo=UTC))) == 2
         assert len(BasisSnapshotRepository(db).list_range(symbol="BTCUSDC", timeframe="15m", start_ts=datetime(2025, 1, 1, tzinfo=UTC), end_ts=datetime(2027, 1, 1, tzinfo=UTC))) == 2
         assert len(CrossAssetBreadthRepository(db).list_range(leader_symbol="BTCUSDC", confirm_symbol="ETHUSDC", timeframe="15m", start_ts=datetime(2025, 1, 1, tzinfo=UTC), end_ts=datetime(2027, 1, 1, tzinfo=UTC))) == breadth_rows
+
+
+def test_macro_event_backfill_skips_malformed_fomc_dates(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+    monkeypatch.setattr("app.services.alt_data_market.httpx.Client", _FakeHttpClient)
+    with session_factory() as db:
+        macro_repo = MacroEventRepository(db)
+        service = AltDataMarketService(
+            funding_repo=FundingRateRepository(db),
+            open_interest_repo=OpenInterestRepository(db),
+            basis_repo=BasisSnapshotRepository(db),
+            macro_event_repo=macro_repo,
+            client=_FakeClient(),
+        )
+
+        rows = service.backfill_macro_events(lookback_days=365)
+        db.commit()
+
+        assert rows == 1
+        assert db.query(MacroEvent).count() == 1

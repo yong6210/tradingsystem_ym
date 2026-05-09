@@ -29,6 +29,38 @@ def test_stress_replay_lineage_reports_unavailable_without_closed_v2_trades() ->
         assert payload["reason"] == "no_closed_v2_trades"
 
 
+def test_stress_replay_lineage_tolerates_malformed_threshold_settings_without_closed_trades() -> None:
+    init_db()
+    with SessionLocal() as db:
+        db.execute(delete(ExecutionFill))
+        db.execute(delete(Candle))
+        db.execute(delete(Plan))
+        db.commit()
+        service = StrategyV2StressReplayLineageService(
+            plan_repo=PlanRepository(db),
+            fill_repo=ExecutionFillRepository(db),
+            candle_repo=CandleRepository(db),
+        )
+        original_values = {
+            "stress_replay_lineage_min_execution_fill_coverage": service.settings.stress_replay_lineage_min_execution_fill_coverage,
+            "stress_replay_lineage_min_latency_candle_coverage": service.settings.stress_replay_lineage_min_latency_candle_coverage,
+            "stress_replay_lineage_min_candle_path_coverage": service.settings.stress_replay_lineage_min_candle_path_coverage,
+        }
+        try:
+            service.settings.stress_replay_lineage_min_execution_fill_coverage = "bad"
+            service.settings.stress_replay_lineage_min_latency_candle_coverage = float("inf")
+            service.settings.stress_replay_lineage_min_candle_path_coverage = "bad"
+
+            payload = service.generate(symbol="BTCUSDC", version="v2", write_report=False)
+
+            assert payload["lineage_contract"]["min_execution_fill_coverage"] == 0.7
+            assert payload["lineage_contract"]["min_latency_candle_coverage"] == 0.7
+            assert payload["lineage_contract"]["min_candle_path_coverage"] == 0.8
+        finally:
+            for key, value in original_values.items():
+                setattr(service.settings, key, value)
+
+
 def test_stress_replay_lineage_computes_fill_and_candle_coverage() -> None:
     init_db()
     now = datetime(2026, 3, 8, 10, 0, tzinfo=timezone.utc)
@@ -184,7 +216,6 @@ def test_stress_replay_lineage_computes_fill_and_candle_coverage() -> None:
 
 def test_stress_replay_lineage_includes_latency_bar_when_exit_shares_entry_bar() -> None:
     init_db()
-    now = datetime(2026, 4, 7, 10, 58, tzinfo=timezone.utc)
     with SessionLocal() as db:
         db.execute(delete(ExecutionFill))
         db.execute(delete(Candle))

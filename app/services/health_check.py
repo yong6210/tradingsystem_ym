@@ -5,6 +5,8 @@ import shutil
 import socket
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import isfinite
+from typing import Any
 
 from app.core.config import get_settings, sqlite_database_path_from_url
 from app.db.repositories import CandleRepository
@@ -25,8 +27,38 @@ class HealthCheckService:
     def __init__(self):
         self.settings = get_settings()
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
+
+    @classmethod
+    def _parse_required_int(cls, value: Any) -> int | None:
+        if value in (None, "", "None"):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return int(parsed) if isfinite(parsed) else None
+
     def _check_binance_rest(self) -> tuple[bool, str]:
-        client = BinanceFuturesClient(timeout_seconds=self.settings.ready_http_timeout_seconds)
+        client = BinanceFuturesClient(timeout_seconds=self._safe_float(self.settings.ready_http_timeout_seconds, default=2.0))
         try:
             ok = client.ping()
         except Exception as exc:
@@ -41,14 +73,14 @@ class HealthCheckService:
             return True, "memory"
         if backend == "redis":
             try:
-                import redis  # type: ignore
+                import redis  # type: ignore[import-not-found,import-untyped]
             except Exception:
                 return False, "redis_package_missing"
             try:
                 client = redis.Redis.from_url(
                     self.settings.event_redis_url,
-                    socket_connect_timeout=self.settings.ready_tcp_timeout_seconds,
-                    socket_timeout=self.settings.ready_tcp_timeout_seconds,
+                    socket_connect_timeout=self._safe_float(self.settings.ready_tcp_timeout_seconds, default=2.0),
+                    socket_timeout=self._safe_float(self.settings.ready_tcp_timeout_seconds, default=2.0),
                     decode_responses=True,
                 )
                 pong = client.ping()
@@ -61,13 +93,13 @@ class HealthCheckService:
                 return False, "kafka_host_port_invalid"
             host, port_text = host_port.rsplit(":", 1)
             try:
-                port = int(port_text)
-            except ValueError:
+                port = int(float(port_text))
+            except (TypeError, ValueError, OverflowError):
                 return False, "kafka_port_invalid"
             try:
                 with socket.create_connection(
                     (host, port),
-                    timeout=self.settings.ready_tcp_timeout_seconds,
+                    timeout=self._safe_float(self.settings.ready_tcp_timeout_seconds, default=2.0),
                 ):
                     return True, "ok"
             except Exception as exc:
@@ -75,7 +107,7 @@ class HealthCheckService:
         return False, f"unsupported_backend:{backend}"
 
     def _check_disk_free(self) -> tuple[bool, str]:
-        min_free_mb = int(self.settings.ready_disk_min_free_mb or 0)
+        min_free_mb = self._safe_int(self.settings.ready_disk_min_free_mb, default=1024)
         if min_free_mb <= 0:
             return True, "disabled"
         path = os.getcwd()
@@ -109,7 +141,7 @@ class HealthCheckService:
             return False, "heartbeat_starting"
         pid_raw = payload.get("pid")
         try:
-            pid = int(pid_raw)
+            pid = int(float(pid_raw))
         except Exception:
             return False, "heartbeat_pid_invalid"
         if pid <= 0:
@@ -131,21 +163,31 @@ class HealthCheckService:
             return False, "heartbeat_ts_invalid"
         age_seconds = max(0.0, (datetime.now(timezone.utc) - ts).total_seconds())
         max_age = (
-            float(self.settings.runtime_worker_loop_heartbeat_max_age_seconds)
+            self._safe_float(self.settings.runtime_worker_loop_heartbeat_max_age_seconds, default=420.0)
             if role == "loop"
-            else float(self.settings.runtime_worker_ws_heartbeat_max_age_seconds)
+            else self._safe_float(self.settings.runtime_worker_ws_heartbeat_max_age_seconds, default=180.0)
         )
         if age_seconds > max_age:
             return False, f"heartbeat_stale:{int(age_seconds)}s"
         if role == "ws":
             try:
-                processed_messages = int(details_payload.get("processed_messages", 0) or 0)
-                reconnects = int(details_payload.get("reconnects", 0) or 0)
-                ingest_errors = int(details_payload.get("ingest_errors", 0) or 0)
-                refresh_errors = int(details_payload.get("refresh_errors", 0) or 0)
-                auto_route_errors = int(details_payload.get("auto_route_errors", 0) or 0)
-                no_message_max_age = float(self.settings.runtime_worker_ws_no_message_max_age_seconds)
-            except (TypeError, ValueError):
+                processed_messages = self._parse_required_int(details_payload.get("processed_messages", 0) or 0)
+                reconnects = self._parse_required_int(details_payload.get("reconnects", 0) or 0)
+                ingest_errors = self._parse_required_int(details_payload.get("ingest_errors", 0) or 0)
+                refresh_errors = self._parse_required_int(details_payload.get("refresh_errors", 0) or 0)
+                auto_route_errors = self._parse_required_int(details_payload.get("auto_route_errors", 0) or 0)
+                progress_callback_errors = self._parse_required_int(details_payload.get("progress_callback_errors", 0) or 0)
+                no_message_max_age = self._safe_float(self.settings.runtime_worker_ws_no_message_max_age_seconds, default=180.0)
+            except (TypeError, ValueError, OverflowError):
+                return False, "heartbeat_ws_stats_invalid"
+            if (
+                processed_messages is None
+                or reconnects is None
+                or ingest_errors is None
+                or refresh_errors is None
+                or auto_route_errors is None
+                or progress_callback_errors is None
+            ):
                 return False, "heartbeat_ws_stats_invalid"
             if ingest_errors > 0:
                 last_error = str(details_payload.get("last_ingest_error") or "").strip()
@@ -156,6 +198,9 @@ class HealthCheckService:
             if auto_route_errors > 0:
                 last_error = str(details_payload.get("last_auto_route_error") or "").strip()
                 return False, f"heartbeat_ws_auto_route_errors:{auto_route_errors}:{last_error or 'unknown'}"
+            if progress_callback_errors > 0:
+                last_error = str(details_payload.get("last_progress_callback_error") or "").strip()
+                return False, f"heartbeat_ws_progress_callback_errors:{progress_callback_errors}:{last_error or 'unknown'}"
             started_at_raw = str(details_payload.get("started_at") or "").strip()
             if processed_messages <= 0 and not started_at_raw and no_message_max_age > 0:
                 return False, "heartbeat_ws_started_at_missing"
@@ -193,9 +238,9 @@ class HealthCheckService:
         ts = row.ts if row.ts.tzinfo else row.ts.replace(tzinfo=timezone.utc)
         age_seconds = max(0.0, (datetime.now(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds())
         max_age = (
-            float(self.settings.ready_market_data_1m_max_age_seconds)
+            self._safe_float(self.settings.ready_market_data_1m_max_age_seconds, default=180.0)
             if normalized_tf == "1m"
-            else float(self.settings.ready_market_data_5m_max_age_seconds)
+            else self._safe_float(self.settings.ready_market_data_5m_max_age_seconds, default=600.0)
         )
         if age_seconds > max_age:
             return False, f"stale:{symbol}:{normalized_tf}:{int(age_seconds)}s"

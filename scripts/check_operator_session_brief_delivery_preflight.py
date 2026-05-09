@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -41,12 +41,29 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
+def _resolve_root_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else ROOT_DIR / path
+
+
+def _launchctl_executable() -> str:
+    return shutil.which("launchctl") or "/bin/launchctl"
+
+
 def _launchctl_getenv(name: str) -> str:
     completed = subprocess.run(
-        ["launchctl", "getenv", name],
+        [_launchctl_executable(), "getenv", name],
         capture_output=True,
         text=True,
         cwd=str(ROOT_DIR),
+        check=False,
     )
     if completed.returncode != 0:
         return ""
@@ -194,11 +211,11 @@ def main() -> int:
     channels = [item.strip().lower() for item in args.channels.split(",") if item.strip()]
     payload = evaluate_delivery_preflight(channels)
     if args.write_report:
-        report_dir = Path(args.report_dir).resolve()
+        report_dir = _resolve_root_path(args.report_dir).resolve()
         timestamp = _now().strftime("%Y%m%dT%H%M%SZ")
         report_path = report_dir / f"operator_session_brief_delivery_preflight_{timestamp}.md"
         _write_report(report_path, payload)
-        payload["report_path"] = str(report_path.relative_to(ROOT_DIR))
+        payload["report_path"] = _display_path(report_path)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     if args.strict and not payload["healthy"]:
         return 1

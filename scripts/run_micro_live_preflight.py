@@ -9,13 +9,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from app.core.config import get_settings
 from app.core import operator_surface_contracts as osc
 
 _REQUEST_RETRY_ATTEMPTS = 3
@@ -45,6 +46,19 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
+def _ensure_http_url(url: str) -> None:
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported request URL scheme: {scheme or 'missing'}")
+
+
 def _request_json(
     base_url: str,
     method: str,
@@ -56,19 +70,28 @@ def _request_json(
     url = f"{base_url.rstrip('/')}{path}"
     if query:
         url += f"?{urlencode(query, doseq=True)}"
+    _ensure_http_url(url)
     data: bytes | None = None
     headers = {"Accept": "application/json"}
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    request = Request(url=url, data=data, headers=headers, method=method.upper())
+    request = Request(url=url, data=data, headers=headers, method=method.upper())  # noqa: S310
     last_error: RuntimeError | None = None
+    retry_with_refresh = (
+        path == "/validation/report"
+        and str((query or {}).get("refresh", "")).lower() in {"false", "0"}
+    )
     for attempt in range(1, _REQUEST_RETRY_ATTEMPTS + 1):
         try:
-            with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
+            with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:  # noqa: S310
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             payload = exc.read().decode("utf-8", errors="replace")
+            if retry_with_refresh and exc.code == 404 and "cached validation payload is not available yet" in payload.lower():
+                refreshed_query = dict(query or {})
+                refreshed_query["refresh"] = "true"
+                return _request_json(base_url, method, path, query=refreshed_query, body=body)
             retryable = exc.code >= 500 or "database is locked" in payload.lower()
             last_error = RuntimeError(f"{method.upper()} {path} failed with HTTP {exc.code}: {payload}")
             if retryable and attempt < _REQUEST_RETRY_ATTEMPTS:
@@ -87,8 +110,7 @@ def _request_json(
                 time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
                 continue
             raise last_error from exc
-    assert last_error is not None
-    raise last_error
+    raise last_error or RuntimeError(f"{method.upper()} {path} failed without an exception payload")
 
 
 def _truthy_ready(payload: dict[str, Any]) -> bool:
@@ -186,13 +208,83 @@ def _surface_summary_line(label: str, summary: dict[str, str]) -> str:
 
 def _surface_allows_preflight(summary: dict[str, str]) -> bool:
     approve_value = str(summary.get("approve_value") or "").strip().lower()
-    return approve_value not in {"runtime no_go", "validation no_go", "validation/checklist no_go", "entry gate blocked"}
+    return approve_value in {"approval usable", "approved", "go"}
+
+
+_EXECUTION_MODE_RANK = {
+    "SHADOW": 0,
+    "PAPER": 1,
+    "MICRO_LIVE": 2,
+    "LIVE": 3,
+}
+
+
+def _csv_set(value: Any, *, lower: bool = False) -> set[str]:
+    items = {str(item or "").strip() for item in str(value or "").split(",") if str(item or "").strip()}
+    return {item.lower() for item in items} if lower else {item.upper() for item in items}
+
+
+def _live_routable_candidate(candidate: dict[str, Any], *, dashboard_payload: dict[str, Any]) -> bool:
+    policies = list(dashboard_payload.get("rollout_policies") or [])
+    if not policies:
+        return True
+    family = str(candidate.get("strategy_family") or "").strip().lower()
+    symbol = str(candidate.get("symbol") or "").strip().upper()
+    if not family:
+        return False
+    settings = get_settings()
+    allowed_symbols = _csv_set(getattr(settings, "auto_trading_allowed_symbols", ""))
+    if allowed_symbols and symbol not in allowed_symbols:
+        return False
+    allowed_families = _csv_set(getattr(settings, "auto_trading_allowed_families", ""), lower=True)
+    if allowed_families and family not in allowed_families:
+        return False
+    policy = next(
+        (
+            dict(item)
+            for item in policies
+            if str(item.get("strategy_family") or "").strip().lower() == family
+        ),
+        None,
+    )
+    if not policy or not bool(policy.get("live_enabled")):
+        return False
+    execution_mode = str(dashboard_payload.get("execution_mode") or "MICRO_LIVE").strip().upper()
+    if execution_mode == "MICRO_LIVE":
+        micro_live_symbols = _csv_set(getattr(settings, "auto_trading_micro_live_allowed_symbols", ""))
+        if micro_live_symbols and symbol not in micro_live_symbols:
+            return False
+        micro_live_families = _csv_set(
+            getattr(settings, "auto_trading_micro_live_allowed_families", ""),
+            lower=True,
+        )
+        if micro_live_families and family not in micro_live_families:
+            return False
+    max_mode = str(policy.get("max_execution_mode") or "").strip().upper()
+    return _EXECUTION_MODE_RANK.get(max_mode, -1) >= _EXECUTION_MODE_RANK.get(execution_mode, 2)
+
+
+def _select_live_routable_candidate(
+    *,
+    scanner: list[Any],
+    symbol: str,
+    dashboard_payload: dict[str, Any],
+) -> tuple[dict[str, Any] | None, int]:
+    rows = [dict(row) for row in scanner if isinstance(row, dict)]
+    routable = [row for row in rows if _live_routable_candidate(row, dashboard_payload=dashboard_payload)]
+    ignored_count = max(0, len(rows) - len(routable))
+    if not routable:
+        return None, ignored_count
+    normalized_symbol = str(symbol or "").upper()
+    matching = [row for row in routable if str(row.get("symbol", "")).upper() == normalized_symbol]
+    return (matching[0] if matching else routable[0]), ignored_count
 
 
 def _candidate_availability_check(
     *,
     candidate: dict[str, Any] | None,
     dashboard_strip: dict[str, str],
+    ignored_non_routable_candidates: int = 0,
 ) -> dict[str, str]:
     if candidate:
         return {
@@ -203,12 +295,17 @@ def _candidate_availability_check(
                 f"{candidate.get('deployment_go_no_go', '') or candidate.get('operator_status', '')}"
             ),
         }
+    ignored_text = (
+        f" ignored_non_routable_candidates={ignored_non_routable_candidates}"
+        if ignored_non_routable_candidates
+        else ""
+    )
     return {
         "name": "candidate_available",
         "status": "PASS",
         "message": (
-            "No accepted scanner candidate is live right now; runtime may stay open and wait for the next "
-            f"eligible session candidate. act={dashboard_strip.get('act_value', '')}"
+            "No accepted scanner candidate is live-routable right now; runtime may stay open and wait for the next "
+            f"eligible session candidate. act={dashboard_strip.get('act_value', '')}{ignored_text}"
         ),
     }
 
@@ -695,9 +792,13 @@ def main() -> int:
     )
 
     candidate: dict[str, Any] | None = None
+    ignored_non_routable_candidates = 0
     if isinstance(scanner, list) and scanner:
-        matching = [row for row in scanner if str(row.get("symbol", "")).upper() == args.symbol.upper()]
-        candidate = matching[0] if matching else scanner[0]
+        candidate, ignored_non_routable_candidates = _select_live_routable_candidate(
+            scanner=scanner,
+            symbol=args.symbol,
+            dashboard_payload=dashboard,
+        )
     dashboard_strip = _surface_strip_summary(dashboard, surface_type="dashboard")
     validation_strip = _surface_strip_summary(validation, surface_type="validation")
     checklist_strip = _surface_strip_summary(checklist, surface_type="checklist")
@@ -820,11 +921,22 @@ def main() -> int:
             "message": f"latest_validation_alert={bool(latest_validation_alert)}",
         }
     )
-    checks.append(_candidate_availability_check(candidate=candidate, dashboard_strip=dashboard_strip))
+    checks.append(
+        _candidate_availability_check(
+            candidate=candidate,
+            dashboard_strip=dashboard_strip,
+            ignored_non_routable_candidates=ignored_non_routable_candidates,
+        )
+    )
 
     failed = [item for item in checks if item["status"] != "PASS"]
     overall_status = osc.MICRO_LIVE_PREFLIGHT_STATUS_READY if not failed else osc.MICRO_LIVE_PREFLIGHT_STATUS_NOT_READY
-    next_steps = [item["message"] for item in failed] if failed else ["Proceed to the live go-live checklist and final operator sign-off."]
+    if failed:
+        next_steps = [item["message"] for item in failed]
+    elif candidate:
+        next_steps = ["Proceed to the live go-live checklist and final operator sign-off."]
+    else:
+        next_steps = ["Runtime gates are ready; wait for the next live-routable scanner candidate before expecting an order."]
     advisory_next_step = _edge_experiment_next_step(edge_experiment_review)
     if advisory_next_step:
         next_steps.append(advisory_next_step)
@@ -841,11 +953,12 @@ def main() -> int:
     ]
     if targeted_reviews:
         next_steps.append("Advisory only: run split review packet(s) with " + "; ".join(targeted_reviews) + ".")
-    summary_line = (
-        "All preflight checks passed; MICRO_LIVE can proceed to final operator sign-off."
-        if not failed
-        else f"{len(failed)} blocking preflight check(s) remain."
-    )
+    if failed:
+        summary_line = f"{len(failed)} blocking preflight check(s) remain."
+    elif candidate:
+        summary_line = "All preflight checks passed; MICRO_LIVE can proceed to final operator sign-off."
+    else:
+        summary_line = "Runtime gates are ready; no live-routable scanner candidate is available yet."
 
     payload: dict[str, Any] = {
         "generated_at": generated_at.isoformat(),
@@ -855,6 +968,7 @@ def main() -> int:
         "summary_line": summary_line,
         "checks": checks,
         "candidate": candidate or {},
+        "ignored_non_routable_candidate_count": ignored_non_routable_candidates,
         "health_ready": ready,
         "operator_dashboard": dashboard,
         "operator_dashboard_summary": {
@@ -904,7 +1018,7 @@ def main() -> int:
         ts = generated_at.strftime("%Y%m%dT%H%M%SZ")
         report_path = ROOT_DIR / args.report_dir / f"micro_live_preflight_{args.symbol.upper()}_{ts}.md"
         _write_report(report_path, payload)
-        payload["report_path"] = str(report_path.relative_to(ROOT_DIR))
+        payload["report_path"] = _display_path(report_path)
 
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     return 0

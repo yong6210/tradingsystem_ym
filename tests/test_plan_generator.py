@@ -7,6 +7,49 @@ from app.services.context_engine import ContextSnapshot
 from app.services.plan_generator import PlanGenerator
 
 
+def test_plan_generator_tolerates_malformed_numeric_settings() -> None:
+    now = datetime.now(timezone.utc)
+    generator = PlanGenerator()
+    generator.settings.btc_sweep_reversal_limit_fast_failure_enabled = True
+    generator.settings.btc_sweep_reversal_limit_fast_failure_max_bars = "inf"
+    generator.settings.btc_sweep_reversal_limit_fast_failure_stop_r = "bad-stop"
+    generator.settings.scalp_zone_hard_max_age_hours = "nan"
+    generator.settings.scalp_zone_recent_boost_hours = "bad-boost"
+    generator.settings.scalp_zone_age_penalty_per_hour = "inf"
+    generator.settings.scalp_session_boost_score = "bad-session-boost"
+    generator.settings.scalp_plan_validity_minutes = "inf"
+    zone = Zone(
+        zone_id="z_malformed_settings",
+        symbol="BTCUSDC",
+        timeframe="15m",
+        type="OB",
+        low=98.0,
+        high=100.0,
+        mid=99.0,
+        width_atr=0.4,
+        dir_bias="support",
+        created_ts=now - timedelta(hours=30),
+        touch_count=1,
+        base_strength=80.0,
+        quality=78.0,
+        state="active",
+        stats={},
+        strategy_version="v1",
+    )
+
+    fast_failure = generator._fast_failure_validity(
+        symbol="BTCUSDC",
+        strategy_family="sweep_reversal",
+        entry_model="LIMIT",
+        session_name="new_york",
+    )
+
+    assert fast_failure["strategy_fast_failure_max_bars"] == 18
+    assert fast_failure["strategy_fast_failure_stop_r"] == 0.00000001
+    assert generator._zone_is_stale_for_scalp(zone, now=now) is True
+    assert generator._ob_freshness_score(zone, now=now) >= 0.0
+
+
 def test_plan_generator_builds_positive_ev_plan() -> None:
     now = datetime.now(timezone.utc)
     zones = [

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,16 @@ from app.services.multi_strategy_ab import MultiStrategyABExpansionService
 
 def _dict(payload: dict[str, Any] | None) -> dict[str, Any]:
     return dict(payload or {})
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    if value in (None, "", "None"):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return int(parsed) if isfinite(parsed) else default
 
 
 def _plan_regime(plan: Plan) -> str:
@@ -349,7 +360,7 @@ class PortfolioBudgetReportService:
         by_kind = Counter()
         cluster_by_direction = Counter()
 
-        for plan, metrics in zip(exposure_plans, exposure_metrics):
+        for plan, metrics in zip(exposure_plans, exposure_metrics, strict=True):
             direction = str(plan.direction).lower()
             state = str(plan.state)
             regime = _plan_regime(plan)
@@ -435,7 +446,11 @@ class PortfolioBudgetReportService:
                     "long": long_cluster,
                     "short": short_cluster,
                 },
-                "remaining_thesis_clusters": max(0, int(self.settings.thesis_max_active_clusters) - int(exposure_summary.get("active_thesis_clusters", 0))),
+                "remaining_thesis_clusters": max(
+                    0,
+                    _safe_int(self.settings.thesis_max_active_clusters, default=2)
+                    - _safe_int(exposure_summary.get("active_thesis_clusters", 0)),
+                ),
             }
         return headroom
 

@@ -157,3 +157,31 @@ def test_strategy_v2_lock_validation_handles_empty_input() -> None:
     assert payload["reason"] == "no_closed_v2_trades"
     assert payload["lock_metrics"]["before_lock"]["trades"] == 0
     assert payload["lock_metrics"]["after_lock"]["trades"] == 0
+
+
+def test_strategy_v2_lock_validation_tolerates_malformed_shock_factor() -> None:
+    service = StrategyV2LockValidationService()
+    original = service.settings.sizing_regime_factor_shock
+    try:
+        service.settings.sizing_regime_factor_shock = float("inf")
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        plan = _closed_plan(
+            plan_id="shock_clamped_bad_setting",
+            symbol="BTCUSDC",
+            regime="shock",
+            transition_state="none",
+            grade="A",
+            family="trend_continuation",
+            reaction_classification="not_applicable",
+            realized_r=-1.0,
+            exit_reason="time_failure",
+            held_bars=7,
+            closed_ts=now,
+        )
+
+        payload = service.generate(symbol="BTCUSDC", version="v1", plans=[plan], write_report=False)
+
+        assert payload["available"] is True
+        assert payload["lock_metrics"]["after_lock"]["ev"] == -0.4
+    finally:
+        service.settings.sizing_regime_factor_shock = original

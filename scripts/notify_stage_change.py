@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -16,6 +17,17 @@ if str(ROOT_DIR) not in sys.path:
 from app.core.config import get_settings
 from app.core import operator_surface_contracts as osc
 from app.services.notification_dispatcher import NotificationDispatcher
+
+
+def _resolve_root_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else ROOT_DIR / path
+
+
+def _ensure_http_url(url: str) -> None:
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported webhook URL scheme: {scheme or 'missing'}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -2313,15 +2325,16 @@ def _event_line_ko(event: dict[str, str], current: dict[str, Any]) -> str:
 
 
 def _post_discord(webhook_url: str, message: str) -> dict[str, Any]:
+    _ensure_http_url(webhook_url)
     payload = json.dumps({"content": message}).encode("utf-8")
-    request = Request(
+    request = Request(  # noqa: S310
         url=webhook_url,
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
     try:
-        with urlopen(request, timeout=30) as response:
+        with urlopen(request, timeout=30) as response:  # noqa: S310
             return {"ok": True, "status": getattr(response, "status", 204)}
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
@@ -2369,8 +2382,8 @@ def _dispatch_stage_notification(current: dict[str, Any], *, message: str, webho
 
 def main() -> int:
     args = parse_args()
-    stage_file = Path(args.stage_file).resolve()
-    state_file = Path(args.state_file).resolve()
+    stage_file = _resolve_root_path(args.stage_file).resolve()
+    state_file = _resolve_root_path(args.state_file).resolve()
     current = _load_stage(stage_file)
     previous = _read_json(state_file)
     events = _collect_events(previous, current)

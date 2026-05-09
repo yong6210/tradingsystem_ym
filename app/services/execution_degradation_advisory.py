@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from math import isfinite
 from typing import Any
 
 from app.core.config import Settings, get_settings
@@ -23,8 +24,18 @@ class ExecutionDegradationAdvisoryService:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
     def _slippage_thresholds(self) -> dict[str, float]:
-        manual = float(self.settings.auto_trading_max_slippage_bps)
+        manual = self._safe_float(self.settings.auto_trading_max_slippage_bps, default=12.0)
         watch = max(6.0, round(manual * 0.7, 4))
         return {
             "watch_slippage_p95_bps": watch,

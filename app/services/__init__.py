@@ -1,12 +1,7 @@
 from __future__ import annotations
 
 from importlib import import_module
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from app.services.metrics import MetricSnapshot, summarize_outcomes
-    from app.services.risk_gate import RiskSnapshot, evaluate_risk_gate
-    from app.services.scoring import StrategyScore, score_strategy
+from typing import Any
 
 _EXPORTS = {
     "MetricSnapshot": ("app.services.metrics", "MetricSnapshot"),
@@ -17,7 +12,14 @@ _EXPORTS = {
     "score_strategy": ("app.services.scoring", "score_strategy"),
 }
 
-__all__ = sorted(_EXPORTS)
+__all__ = [
+    "MetricSnapshot",
+    "RiskSnapshot",
+    "StrategyScore",
+    "evaluate_risk_gate",
+    "score_strategy",
+    "summarize_outcomes",
+]
 
 
 def __getattr__(name: str) -> Any:

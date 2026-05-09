@@ -6,6 +6,13 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, text
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+
+
+def _resolve_root_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else ROOT_DIR / path
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run TimescaleDB SQL migrations")
@@ -38,7 +45,7 @@ def split_sql(sql: str) -> list[str]:
 
 def main() -> int:
     args = parse_args()
-    migrations = sorted(Path(args.migrations_dir).glob("*.sql"))
+    migrations = sorted(_resolve_root_path(args.migrations_dir).glob("*.sql"))
     if not migrations:
         print("No migration files found.")
         return 0

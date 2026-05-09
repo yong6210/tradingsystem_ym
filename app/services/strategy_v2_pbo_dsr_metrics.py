@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import NormalDist
-from typing import Any
+from typing import Any, ClassVar
 
 from app.core.config import Settings, get_settings
 from app.db.models import ValidationPboDsrSnapshot, ValidationTrialFoldScore, ValidationTrialRun
@@ -17,8 +17,8 @@ class StrategyV2PboDsrMetricsService:
     _EULER_GAMMA = 0.5772156649015329
     _RUNTIME_PROXY_SELECTION_RULE_PREFIXES = ("runtime_validation_proxy",)
     _TRUE_THRESHOLD_SELECTION_RULE_PREFIXES = ("true_threshold_sweep",)
-    _RUNTIME_PROXY_WRITER_SOURCES = {"runtime_validation_proxy_v1"}
-    _TRUE_THRESHOLD_WRITER_SOURCES = {"true_threshold_sweep_runner_v1"}
+    _RUNTIME_PROXY_WRITER_SOURCES: ClassVar[set[str]] = {"runtime_validation_proxy_v1"}
+    _TRUE_THRESHOLD_WRITER_SOURCES: ClassVar[set[str]] = {"true_threshold_sweep_runner_v1"}
 
     def __init__(
         self,

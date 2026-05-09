@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from sqlalchemy import func, select
@@ -47,11 +47,24 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
 def _float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _ensure_http_url(url: str) -> None:
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported request URL scheme: {scheme or 'missing'}")
 
 
 def _request_json(
@@ -65,16 +78,17 @@ def _request_json(
     url = f"{base_url.rstrip('/')}{path}"
     if query:
         url += f"?{urlencode(query, doseq=True)}"
+    _ensure_http_url(url)
     data: bytes | None = None
     headers = {"Accept": "application/json"}
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    request = Request(url=url, data=data, headers=headers, method=method.upper())
+    request = Request(url=url, data=data, headers=headers, method=method.upper())  # noqa: S310
     last_error: RuntimeError | None = None
     for attempt in range(1, _REQUEST_RETRY_ATTEMPTS + 1):
         try:
-            with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
+            with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:  # noqa: S310
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             payload = exc.read().decode("utf-8", errors="replace")
@@ -96,8 +110,7 @@ def _request_json(
                 time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
                 continue
             raise last_error from exc
-    assert last_error is not None
-    raise last_error
+    raise last_error or RuntimeError(f"{method.upper()} {path} failed without an exception payload")
 
 
 def _surface_strip_summary(payload: dict[str, Any] | None, *, surface_type: str = "generic") -> dict[str, str]:
@@ -700,7 +713,7 @@ def main() -> int:
         ts = generated_at.strftime("%Y%m%dT%H%M%SZ")
         report_path = ROOT_DIR / args.report_dir / f"post_live_pruning_review_{args.symbol.upper()}_{ts}.md"
         _write_report(report_path, payload)
-        payload["report_path"] = str(report_path.relative_to(ROOT_DIR))
+        payload["report_path"] = _display_path(report_path)
 
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     return 0

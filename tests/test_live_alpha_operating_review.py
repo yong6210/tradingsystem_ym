@@ -66,7 +66,7 @@ def test_live_alpha_operating_review_combines_a_b_and_writes_report(tmp_path: Pa
     a_values = [1.2, 0.9, 1.1, 0.8, -0.3, 1.0, 0.7, 1.1]
     b_values = [0.6, 0.5, 0.4, 0.6, 0.5, 0.4, 0.6, 0.5]
     peer_values = [-1.1, 0.9, -1.0, 0.8, -1.0, 0.9, -0.9, 0.8]
-    for idx, (a_value, b_value, peer_value) in enumerate(zip(a_values, b_values, peer_values), start=1):
+    for idx, (a_value, b_value, peer_value) in enumerate(zip(a_values, b_values, peer_values, strict=True), start=1):
         closed_ts = (now - timedelta(days=8 - idx)).replace(hour=9)
         regime = "trend" if idx % 2 else "range"
         plans.append(

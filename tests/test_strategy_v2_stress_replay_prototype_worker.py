@@ -59,6 +59,28 @@ def test_stress_replay_prototype_worker_waits_for_dependencies(tmp_path: Path) -
     assert "stress_replay_worker_dependencies_unavailable" in payload["blocked_by"]
 
 
+def test_stress_replay_prototype_worker_skips_rows_with_invalid_closed_ts() -> None:
+    service = StrategyV2StressReplayPrototypeWorkerService()
+
+    metrics = service._summary_metrics(
+        replay_rows=[
+            {
+                "plan_id": "bad_ts",
+                "closed_ts": "legacy-invalid-timestamp",
+                "replayed_realized_r": 1.0,
+                "final_exit_held_bars": 3,
+                "final_exit_reason": "target_tp1",
+                "strategy_family": "sweep_reversal",
+                "strategy_grade": "A",
+            }
+        ],
+        symbol="BTCUSDC",
+        version="v2",
+    )
+
+    assert metrics["trades"] == 0
+
+
 def test_stress_replay_prototype_worker_reads_batches_and_writes_outputs(tmp_path: Path) -> None:
     service = StrategyV2StressReplayPrototypeWorkerService()
     service.settings.validation_report_dir = str(tmp_path)

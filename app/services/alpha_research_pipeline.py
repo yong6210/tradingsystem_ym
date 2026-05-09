@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,16 @@ class AlphaResearchPipelineService:
             if value and value not in out:
                 out.append(value)
         return out
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
 
     @staticmethod
     def _session_state(row: dict[str, Any]) -> str:
@@ -851,6 +862,7 @@ class AlphaResearchPipelineService:
             suspects.append(
                 {
                     "reason": cls._top_key(reason_counts),
+                    "focus": focus_name,
                     "axis": axis,
                     "bucket": bucket,
                     "matched_candidates": len(matched_rows),
@@ -943,7 +955,7 @@ class AlphaResearchPipelineService:
         if not suspects:
             return None
 
-        action_by_bucket = {
+        action_by_focus_bucket = {
             (str(row.get("focus") or ""), str(row.get("bucket") or "")): dict(row)
             for row in recommended_actions
         }
@@ -951,8 +963,9 @@ class AlphaResearchPipelineService:
         review_items: list[dict[str, Any]] = []
         for suspect in suspects:
             axis = str(suspect.get("axis") or "global")
+            focus_name = str(suspect.get("focus") or "")
             bucket = str(suspect.get("bucket") or "")
-            action = next(
+            action = action_by_focus_bucket.get((focus_name, bucket)) or next(
                 (
                     row
                     for row in recommended_actions
@@ -974,6 +987,7 @@ class AlphaResearchPipelineService:
             review_items.append(
                 {
                     "reason": suspect.get("reason"),
+                    "focus": focus_name,
                     "bucket": bucket,
                     "axis": axis,
                     "review_priority": priority,
@@ -1446,7 +1460,7 @@ class AlphaResearchPipelineService:
             "reason": "ok" if available else "no_alpha_research_candidates",
             "summary": summary,
             "priorities": priorities[:5],
-            "candidates": rows[: int(self.settings.alpha_research_max_candidates)],
+            "candidates": rows[: self._safe_int(self.settings.alpha_research_max_candidates, default=20)],
             "performance_decomposition_summary": performance_decomposition_summary,
             "alpha_research_evidence_summary": alpha_research_evidence_summary,
             "softening_candidate_review": softening_candidate_review,

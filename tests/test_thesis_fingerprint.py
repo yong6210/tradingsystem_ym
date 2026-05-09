@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from app.core.config import get_settings
 from app.services.thesis_fingerprint import ThesisFingerprintService
 
 
@@ -60,3 +61,42 @@ def test_same_thesis_rejects_different_event_groups() -> None:
     )
 
     assert service.same_thesis(rejection, acceptance) is False
+
+
+def test_same_thesis_tolerates_legacy_invalid_time_bucket() -> None:
+    service = ThesisFingerprintService()
+    left = {
+        "direction": "long",
+        "regime": "range",
+        "strategy_family": "sweep_reversal",
+        "liquidity_narrative": "session_low_sweep",
+        "event_classification": "rejection_confirmed",
+        "time_bucket": "not-a-date_30m",
+        "correlation_cluster": "majors",
+    }
+    right = {
+        **left,
+        "time_bucket": "2026-03-07T09:00Z_30m",
+    }
+
+    assert service.same_thesis(left, right) is False
+    assert service.normalize(left)["time_bucket"].endswith("_30m")
+
+
+def test_thesis_fingerprint_tolerates_malformed_bucket_setting() -> None:
+    settings = get_settings().model_copy(deep=True)
+    settings.thesis_time_bucket_minutes = "inf"
+    service = ThesisFingerprintService(settings)
+
+    payload = service.build(
+        symbol="BTCUSDC",
+        direction="long",
+        regime="range",
+        strategy_family="sweep_reversal",
+        reaction_classification="rejection_confirmed",
+        zone_type="LP",
+        near_lp=True,
+        at=datetime(2026, 3, 7, 9, 35, tzinfo=timezone.utc),
+    )
+
+    assert payload["time_bucket"] == "2026-03-07T09:30Z_30m"

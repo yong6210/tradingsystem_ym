@@ -66,3 +66,19 @@ def test_context_engine_marks_transition_regime_when_conflict_churn_is_high() ->
     assert "range_atr" in snapshot.signal_telemetry
     assert "close_vs_ema_fast_atr" in snapshot.signal_telemetry
     assert "long_sweep_distance_atr" in snapshot.signal_telemetry
+
+
+def test_context_engine_tolerates_malformed_transition_settings() -> None:
+    engine = ContextEngine()
+    engine.settings.transition_confirmed_score = "bad-confirmed"
+    engine.settings.transition_watch_score = "inf"
+    engine.settings.transition_wick_body_ratio_confirmed = "bad-wick"
+    engine.settings.transition_wick_body_ratio_unlock = "nan"
+    base = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    candles_5m = [_candle(base + timedelta(minutes=5 * index), 100.0 + index, 100.5 + index) for index in range(12)]
+    candles_15m = [_candle(base + timedelta(minutes=15 * index), 100.0 + index, 100.5 + index) for index in range(6)]
+
+    snapshot = engine.build_snapshot(symbol="BTCUSDC", candles_5m=candles_5m, candles_15m=candles_15m)
+
+    assert snapshot.symbol == "BTCUSDC"
+    assert snapshot.transition_state in {"none", "transition_watch", "transition_confirmed"}

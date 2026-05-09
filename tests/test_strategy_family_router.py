@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from app.core.config import get_settings
 from app.core.enums import EntryModel
 from app.db.models import Candle, Zone
 from app.services.acceptance_rejection_classifier import AcceptanceRejectionResult
@@ -64,7 +65,7 @@ def _trend_candles(*, long_setup: bool = True, protected_break: bool = False) ->
             (101.2, 101.3 if not protected_break else 104.1, 100.6, 100.8),
         ]
     candles: list[Candle] = []
-    for index, (o, h, l, c) in enumerate(rows):
+    for o, h, low, c in rows:
         candles.append(
             Candle(
                 symbol="BTCUSDC",
@@ -72,7 +73,7 @@ def _trend_candles(*, long_setup: bool = True, protected_break: bool = False) ->
                 ts=base,
                 o=o,
                 h=h,
-                l=l,
+                l=low,
                 c=c,
                 v=1_000.0,
                 source="test",
@@ -134,6 +135,36 @@ def _reaction(
         acceptance_hard_count=0,
         mixed_reasons=[],
         input={"outside_close_count": outside_close_count, "session_quality": session_quality},
+    )
+
+
+def test_strategy_family_router_tolerates_malformed_numeric_settings() -> None:
+    settings = get_settings().model_copy(deep=True)
+    settings.sweep_reversal_grade_a_score = "bad-a"
+    settings.sweep_reversal_grade_b_score = "inf"
+    settings.sweep_reversal_grade_c_score = "nan"
+    settings.auto_trading_trend_proof_regime_floor = "bad-floor"
+    settings.auto_trading_trend_proof_min_abs_velocity = "bad-velocity"
+    settings.auto_trading_trend_proof_max_friction = "bad-friction"
+    settings.auto_trading_trend_proof_max_jump_rate = "bad-jump"
+    router = StrategyFamilyRouter(settings)
+
+    assert router._grade_thresholds("sweep_reversal") == {"A": 85.0, "B": 75.0, "C": 68.0}
+    assert (
+        router._trend_proof_regime_relaxed(
+            symbol="BTCUSDC",
+            context=_context(
+                regime_label="range",
+                transition_state="transition_watch",
+                transition_unlock_candidate=True,
+                regime_15m=0.56,
+                v=0.39,
+                friction=0.49,
+                jump_rate=0.25,
+            ),
+            regime_name="range",
+        )
+        is True
     )
 
 

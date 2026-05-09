@@ -38,11 +38,14 @@ class StrategyV2StressReplayPrototypeWorkerService:
             return 0
 
     @staticmethod
-    def _normalize_ts(value: Any) -> datetime:
+    def _normalize_ts(value: Any) -> datetime | None:
         text = str(value or "")
         if text.endswith("Z"):
             text = text[:-1] + "+00:00"
-        parsed = datetime.fromisoformat(text)
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
         if parsed.tzinfo is None:
             return parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
@@ -126,21 +129,25 @@ class StrategyV2StressReplayPrototypeWorkerService:
         return replay_rows
 
     def _summary_metrics(self, *, replay_rows: list[dict[str, Any]], version: str, symbol: str) -> dict[str, Any]:
-        records = [
-            ClosedTradeRecord(
-                plan_id=str(row.get("plan_id", "")),
-                symbol=symbol,
-                closed_ts=self._normalize_ts(row.get("closed_ts")),
-                realized_r=float(row.get("replayed_realized_r", 0.0)),
-                held_bars=self._safe_int(row.get("final_exit_held_bars")),
-                exit_reason=str(row.get("final_exit_reason", "unknown") or "unknown"),
-                regime=str(row.get("regime", "unknown") or "unknown").lower(),
-                strategy_family=str(row.get("strategy_family", "unknown") or "unknown"),
-                strategy_grade=str(row.get("strategy_grade", "C") or "C"),
-                strategy_version=version,
+        records: list[ClosedTradeRecord] = []
+        for row in replay_rows:
+            closed_ts = self._normalize_ts(row.get("closed_ts"))
+            if closed_ts is None:
+                continue
+            records.append(
+                ClosedTradeRecord(
+                    plan_id=str(row.get("plan_id", "")),
+                    symbol=symbol,
+                    closed_ts=closed_ts,
+                    realized_r=float(row.get("replayed_realized_r", 0.0)),
+                    held_bars=self._safe_int(row.get("final_exit_held_bars")),
+                    exit_reason=str(row.get("final_exit_reason", "unknown") or "unknown"),
+                    regime=str(row.get("regime", "unknown") or "unknown").lower(),
+                    strategy_family=str(row.get("strategy_family", "unknown") or "unknown"),
+                    strategy_grade=str(row.get("strategy_grade", "C") or "C"),
+                    strategy_version=version,
+                )
             )
-            for row in replay_rows
-        ]
         return self._base._mode_metrics(records)
 
     def _coverage_summary(self, *, replay_rows: list[dict[str, Any]]) -> dict[str, Any]:

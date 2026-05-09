@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -74,7 +75,8 @@ class StrategyV2StressReplayLineageService:
     @classmethod
     def _bar_start_5m(cls, ts: datetime) -> datetime:
         normalized = cls._normalize_ts(ts)
-        assert normalized is not None
+        if normalized is None:
+            raise ValueError("5m bar start requires a timestamp")
         minute = (normalized.minute // 5) * 5
         return normalized.replace(minute=minute, second=0, microsecond=0)
 
@@ -83,6 +85,16 @@ class StrategyV2StressReplayLineageService:
         if denominator <= 0:
             return 0.0
         return round(float(numerator) / float(denominator), 4)
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
 
     def _plans(self, *, symbol: str, version: str) -> list[Any]:
         if self.plan_repo is None:
@@ -122,7 +134,7 @@ class StrategyV2StressReplayLineageService:
         matched = [fill for fill in fills if str(getattr(fill, "stage", "")) == stage.value]
         if not matched:
             return None
-        matched.sort(key=lambda fill: getattr(fill, "fill_ts"))
+        matched.sort(key=lambda fill: fill.fill_ts)
         return matched[0]
 
     def _entry_anchor(self, *, plan: Any, record: ClosedTradeRecord, fills: list[Any]) -> tuple[datetime, str]:
@@ -186,7 +198,7 @@ class StrategyV2StressReplayLineageService:
         latency_bar_exists = latency_bar in timestamps
         exit_bar_exists = exit_bar in timestamps
         first_available_bar = min(timestamps) if timestamps else None
-        min_path_coverage = float(self.settings.stress_replay_lineage_min_candle_path_coverage)
+        min_path_coverage = self._safe_float(self.settings.stress_replay_lineage_min_candle_path_coverage, 0.80)
         entry_bar_boundary_fallback_used = (
             not entry_bar_exists
             and entry_fill is not None
@@ -357,6 +369,9 @@ class StrategyV2StressReplayLineageService:
             for plan, record in rows
         ]
         eligible_closed_trades = len(trades)
+        min_execution_fill_coverage = self._safe_float(self.settings.stress_replay_lineage_min_execution_fill_coverage, 0.70)
+        min_latency_candle_coverage = self._safe_float(self.settings.stress_replay_lineage_min_latency_candle_coverage, 0.70)
+        min_candle_path_coverage = self._safe_float(self.settings.stress_replay_lineage_min_candle_path_coverage, 0.80)
 
         if eligible_closed_trades <= 0:
             payload = {
@@ -384,9 +399,9 @@ class StrategyV2StressReplayLineageService:
                     "required_plan_validity_fields": ["final_exit_ts", "final_exit_realized_r", "final_exit_reason"],
                     "candle_timeframe": self._CANDLE_TIMEFRAME,
                     "required_candle_nodes": ["entry_bar", "latency_plus_1_bar", "exit_bar"],
-                    "min_execution_fill_coverage": float(self.settings.stress_replay_lineage_min_execution_fill_coverage),
-                    "min_latency_candle_coverage": float(self.settings.stress_replay_lineage_min_latency_candle_coverage),
-                    "min_candle_path_coverage": float(self.settings.stress_replay_lineage_min_candle_path_coverage),
+                    "min_execution_fill_coverage": min_execution_fill_coverage,
+                    "min_latency_candle_coverage": min_latency_candle_coverage,
+                    "min_candle_path_coverage": min_candle_path_coverage,
                 },
                 "blocked_by": ["no_closed_v2_trades"],
                 "next_steps": ["accumulate closed v2 trades before evaluating replay lineage"],
@@ -442,11 +457,11 @@ class StrategyV2StressReplayLineageService:
             "candle_path_below_threshold": eligible_closed_trades - complete_candle_path_trades,
         }
         blocked_by: list[str] = []
-        if coverage["execution_fill_coverage"] < float(self.settings.stress_replay_lineage_min_execution_fill_coverage):
+        if coverage["execution_fill_coverage"] < min_execution_fill_coverage:
             blocked_by.append("execution_fill_coverage_below_threshold")
-        if coverage["latency_candle_coverage"] < float(self.settings.stress_replay_lineage_min_latency_candle_coverage):
+        if coverage["latency_candle_coverage"] < min_latency_candle_coverage:
             blocked_by.append("latency_candle_coverage_below_threshold")
-        if coverage["candle_path_coverage"] < float(self.settings.stress_replay_lineage_min_candle_path_coverage):
+        if coverage["candle_path_coverage"] < min_candle_path_coverage:
             blocked_by.append("candle_path_coverage_below_threshold")
 
         next_steps: list[str] = []
@@ -491,9 +506,9 @@ class StrategyV2StressReplayLineageService:
                 "required_plan_validity_fields": ["final_exit_ts", "final_exit_realized_r", "final_exit_reason"],
                 "candle_timeframe": self._CANDLE_TIMEFRAME,
                 "required_candle_nodes": ["entry_bar", "latency_plus_1_bar", "exit_bar"],
-                "min_execution_fill_coverage": float(self.settings.stress_replay_lineage_min_execution_fill_coverage),
-                "min_latency_candle_coverage": float(self.settings.stress_replay_lineage_min_latency_candle_coverage),
-                "min_candle_path_coverage": float(self.settings.stress_replay_lineage_min_candle_path_coverage),
+                "min_execution_fill_coverage": min_execution_fill_coverage,
+                "min_latency_candle_coverage": min_latency_candle_coverage,
+                "min_candle_path_coverage": min_candle_path_coverage,
             },
             "blocked_by": blocked_by,
             "next_steps": next_steps,

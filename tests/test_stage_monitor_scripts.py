@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 
 
-ROOT_DIR = Path("/Users/yumin/Documents/trading")
+ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
 def _load_module(name: str, path: Path):
@@ -1144,7 +1144,7 @@ def test_ops_stage_board_runtime_actionable_summary_marks_candidate_direction_ou
         auto_trading_micro_live_direction_contract = "BTCUSDC:LONG"
         auto_trading_micro_live_allowed_sessions = ""
 
-    monkeypatch.setattr("app.core.config.get_settings", lambda: _Settings())
+    monkeypatch.setattr("app.core.config.get_settings", _Settings)
 
     payload = ops_stage_board._apply_runtime_actionable_live_candidate_summary(
         {
@@ -1242,8 +1242,8 @@ def test_recent_contract_matching_intent_summary_filters_non_contract_entry_mode
         auto_trading_micro_live_allowed_families = "sweep_reversal"
         auto_trading_micro_live_allowed_entry_models = "LIMIT"
 
-    monkeypatch.setattr("app.db.session.SessionLocal", lambda: _Session())
-    monkeypatch.setattr("app.core.config.get_settings", lambda: _Settings())
+    monkeypatch.setattr("app.db.session.SessionLocal", _Session)
+    monkeypatch.setattr("app.core.config.get_settings", _Settings)
 
     summary = ops_stage_board._recent_contract_matching_intent_summary({"recent_intents": []})
 
@@ -1321,8 +1321,8 @@ def test_recent_contract_matching_intent_summary_filters_direction_contract(monk
         auto_trading_micro_live_allowed_entry_models = "LIMIT"
         auto_trading_micro_live_direction_contract = "BTCUSDC:LONG"
 
-    monkeypatch.setattr("app.db.session.SessionLocal", lambda: _Session())
-    monkeypatch.setattr("app.core.config.get_settings", lambda: _Settings())
+    monkeypatch.setattr("app.db.session.SessionLocal", _Session)
+    monkeypatch.setattr("app.core.config.get_settings", _Settings)
 
     summary = ops_stage_board._recent_contract_matching_intent_summary({"recent_intents": []})
 

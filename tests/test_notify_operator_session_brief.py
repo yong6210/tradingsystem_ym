@@ -276,7 +276,7 @@ def test_main_dispatches_when_allow_live_send(monkeypatch, tmp_path: Path, capsy
     class _Settings:
         alert_discord_webhook_url = ""
 
-    monkeypatch.setattr(notify_operator_session_brief, "get_settings", lambda: _Settings())
+    monkeypatch.setattr(notify_operator_session_brief, "get_settings", _Settings)
 
     class _Dispatcher:
         def __init__(self, settings):  # noqa: ANN001

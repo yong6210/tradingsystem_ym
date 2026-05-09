@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any
 
 from app.core.config import Settings, get_settings
@@ -40,6 +41,16 @@ class StrategyFamilyRouter:
     def _round_scores(values: dict[str, float]) -> dict[str, float]:
         return {key: round(float(value), 2) for key, value in values.items()}
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
     def _trend_proof_allowed_symbols(self) -> set[str]:
         configured = self._csv_items(getattr(self.settings, "auto_trading_trend_proof_allowed_symbols", ""))
         if configured:
@@ -56,13 +67,13 @@ class StrategyFamilyRouter:
             return False
         if regime_name == "shock":
             return False
-        if context.regime_15m < float(self.settings.auto_trading_trend_proof_regime_floor):
+        if context.regime_15m < self._safe_float(self.settings.auto_trading_trend_proof_regime_floor, default=0.55):
             return False
-        if abs(float(context.v or 0.0)) < float(self.settings.auto_trading_trend_proof_min_abs_velocity):
+        if abs(float(context.v or 0.0)) < self._safe_float(self.settings.auto_trading_trend_proof_min_abs_velocity, default=0.38):
             return False
-        if float(context.friction_5m or 0.0) > float(self.settings.auto_trading_trend_proof_max_friction):
+        if float(context.friction_5m or 0.0) > self._safe_float(self.settings.auto_trading_trend_proof_max_friction, default=0.50):
             return False
-        if float(context.jump_rate_5m or 0.0) > float(self.settings.auto_trading_trend_proof_max_jump_rate):
+        if float(context.jump_rate_5m or 0.0) > self._safe_float(self.settings.auto_trading_trend_proof_max_jump_rate, default=0.26):
             return False
         if regime_name == "transition":
             return bool(context.transition_unlock_candidate)
@@ -76,21 +87,21 @@ class StrategyFamilyRouter:
     def _grade_thresholds(self, family: str) -> dict[str, float]:
         if family == "sweep_reversal":
             return {
-                "A": float(self.settings.sweep_reversal_grade_a_score),
-                "B": float(self.settings.sweep_reversal_grade_b_score),
-                "C": float(self.settings.sweep_reversal_grade_c_score),
+                "A": self._safe_float(self.settings.sweep_reversal_grade_a_score, default=85.0),
+                "B": self._safe_float(self.settings.sweep_reversal_grade_b_score, default=75.0),
+                "C": self._safe_float(self.settings.sweep_reversal_grade_c_score, default=68.0),
             }
         if family == "trend_continuation":
             return {
-                "A": float(self.settings.trend_continuation_grade_a_score),
-                "B": float(self.settings.trend_continuation_grade_b_score),
-                "C": float(self.settings.trend_continuation_grade_c_score),
+                "A": self._safe_float(self.settings.trend_continuation_grade_a_score, default=85.0),
+                "B": self._safe_float(self.settings.trend_continuation_grade_b_score, default=75.0),
+                "C": self._safe_float(self.settings.trend_continuation_grade_c_score, default=70.0),
             }
         if family == "range_rotation":
             return {
-                "A": float(self.settings.range_rotation_grade_a_score),
-                "B": float(self.settings.range_rotation_grade_b_score),
-                "C": float(self.settings.range_rotation_grade_c_score),
+                "A": self._safe_float(self.settings.range_rotation_grade_a_score, default=83.0),
+                "B": self._safe_float(self.settings.range_rotation_grade_b_score, default=74.0),
+                "C": self._safe_float(self.settings.range_rotation_grade_c_score, default=68.0),
             }
         return {"A": 0.0, "B": 0.0, "C": 0.0}
 

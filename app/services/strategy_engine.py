@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import json
+from math import isfinite
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -110,7 +112,7 @@ from app.services.operator_action_priority import OperatorActionPriorityService
 from app.services.opportunity_capture import OpportunityCaptureService
 from app.services.split_review_followup_ledger import summarize_split_review_followup_ledger
 from app.services.parameter_changelog import ParameterChangelogService
-from app.services.plan_generator import PlanGenerator, RankedPlan
+from app.services.plan_generator import PlanGenerator
 from app.services.positive_evidence_expansion import PositiveEvidenceExpansionService
 from app.services.portfolio_budget_report import PortfolioBudgetReportService
 from app.services.position_sizing import PositionSizingInput
@@ -126,6 +128,7 @@ from app.services.research_promotion_operating_loop import ResearchPromotionOper
 from app.services.risk_gate import RiskGate, RiskGateInput
 from app.services.rollout_recommendation import RolloutRecommendationService
 from app.services.runtime_kline_stream import RuntimeKlineStreamService
+from app.services.runtime_worker_heartbeat import read_worker_heartbeat
 from app.services.runtime_validation_orchestrator import RuntimeValidationOrchestrator
 from app.services.scanner import ScannerService, _runtime_deployment_language
 from app.services.scoring import score_strategy
@@ -164,6 +167,11 @@ from app.services.zone_engine import ZoneEngine
 _AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY = "session_impulse_retest"
 _READ_ONLY_RECOMPUTE_CACHE = READ_ONLY_RECOMPUTE_CACHE
 _ACTIVE_CONTRACT_REPLAY_BASELINE_FILE = "strategy_proof_contract_live_subset.json"
+
+
+def _safe_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
 
 _SAFETY_REASON_PREFIXES = (
     "reconciliation_",
@@ -617,6 +625,41 @@ class StrategyEngine:
         except OSError:
             return None
 
+    def _session_impulse_retest_runtime_started_at(self) -> datetime | None:
+        payload = read_worker_heartbeat("ws", settings=self.settings)
+        if not payload:
+            return None
+        details_payload = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+        started_at_raw = str(details_payload.get("started_at") or "").strip()
+        if not started_at_raw:
+            return None
+        return self._maybe_utc(started_at_raw)
+
+    def _ws_stream_auto_route_active(self, *, now: datetime | None = None) -> bool:
+        payload = read_worker_heartbeat("ws", settings=self.settings)
+        if not isinstance(payload, dict):
+            return False
+        if str(payload.get("status") or "").lower() != "ok":
+            return False
+        details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+        phase = str(details.get("phase") or "").lower()
+        if not phase.startswith("streaming"):
+            return False
+        ts_raw = str(payload.get("ts") or "").strip()
+        if not ts_raw:
+            return False
+        try:
+            heartbeat_ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if heartbeat_ts.tzinfo is None:
+            heartbeat_ts = heartbeat_ts.replace(tzinfo=timezone.utc)
+        else:
+            heartbeat_ts = heartbeat_ts.astimezone(timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        max_age = max(1.0, self._maybe_float(self.settings.runtime_worker_ws_heartbeat_max_age_seconds) or 180.0)
+        return 0 <= (current - heartbeat_ts).total_seconds() <= max_age
+
     def detect_session_impulse_retest_recent_misses(
         self,
         *,
@@ -672,13 +715,16 @@ class StrategyEngine:
                 "disabled_reason": disabled_reason,
             }
 
-        hours = max(1, int(lookback_hours or self.settings.session_impulse_retest_miss_detector_lookback_hours or 24))
+        hours = max(1, self._maybe_int(lookback_hours) or self._maybe_int(self.settings.session_impulse_retest_miss_detector_lookback_hours) or 24)
         cutoff = now - timedelta(hours=hours)
+        runtime_started_at = self._session_impulse_retest_runtime_started_at()
+        effective_window_start = max(cutoff, runtime_started_at) if runtime_started_at is not None else cutoff
         target_symbols = self._session_impulse_retest_miss_detector_symbols(symbols=symbols)
         misses: list[dict[str, Any]] = []
         by_symbol: dict[str, dict[str, Any]] = {}
         expected_trade_count = 0
         runtime_observed_count = 0
+        skipped_before_runtime_start_count = 0
 
         for symbol in target_symbols:
             replay_trades = self._session_impulse_retest_recent_replay_trades(
@@ -690,23 +736,49 @@ class StrategyEngine:
                 "expected_trades": len(replay_trades),
                 "runtime_observed_trades": 0,
                 "misses": 0,
+                "skipped_before_runtime_start": 0,
             }
             expected_trade_count += len(replay_trades)
             for trade in replay_trades:
-                entry_ts = self._to_utc(getattr(trade, "entry_ts"))
+                entry_ts = self._to_utc(trade.entry_ts)
+                if runtime_started_at is not None and entry_ts < runtime_started_at:
+                    skipped_before_runtime_start_count += 1
+                    symbol_summary["skipped_before_runtime_start"] += 1
+                    continue
                 direction = str(getattr(trade, "direction", "") or "").lower()
                 observation = self._session_impulse_retest_runtime_plan_observation(
                     symbol=symbol,
                     entry_ts=entry_ts,
                     direction=direction,
                 )
+                plan_id = str(observation.get("plan_id") or "")
+                intents = self.intent_repo.list_for_plan(plan_id, limit=20) if plan_id else []
+                submissions = self.submission_repo.list_for_plan(plan_id, limit=20) if plan_id else []
                 if not bool(observation.get("seen")):
+                    if intents or submissions:
+                        runtime_observed_count += 1
+                        symbol_summary["runtime_observed_trades"] += 1
+                        continue
+                    misses.append(
+                        {
+                            "symbol": symbol,
+                            "plan_id": plan_id,
+                            "direction": direction,
+                            "entry_ts": entry_ts.isoformat(),
+                            "runtime_observed_at": "",
+                            "valid_from": "",
+                            "valid_until": "",
+                            "intent_count": 0,
+                            "submission_count": 0,
+                            "miss_reason": "runtime_plan_not_seen",
+                            "trade_r_value": round(float(getattr(trade, "r_value", 0.0) or 0.0), 4),
+                            "trade_exit_reason": str(getattr(trade, "exit_reason", "") or ""),
+                        }
+                    )
+                    symbol_summary["misses"] += 1
                     continue
                 runtime_observed_count += 1
                 symbol_summary["runtime_observed_trades"] += 1
-                plan_id = str(observation.get("plan_id") or "")
-                intents = self.intent_repo.list_for_plan(plan_id, limit=20)
-                submissions = self.submission_repo.list_for_plan(plan_id, limit=20)
                 if intents:
                     continue
                 misses.append(
@@ -739,10 +811,14 @@ class StrategyEngine:
             "generated_at": now.isoformat(),
             "lookback_hours": hours,
             "window_start": cutoff.isoformat(),
+            "requested_window_start": cutoff.isoformat(),
+            "effective_window_start": effective_window_start.isoformat(),
+            "runtime_started_at": runtime_started_at.isoformat() if runtime_started_at is not None else None,
             "window_end": now.isoformat(),
             "symbols": target_symbols,
             "expected_trade_count": expected_trade_count,
             "runtime_observed_count": runtime_observed_count,
+            "skipped_before_runtime_start_count": skipped_before_runtime_start_count,
             "miss_count": len(misses),
             "misses": misses,
             "by_symbol": by_symbol,
@@ -756,14 +832,14 @@ class StrategyEngine:
         if not bool(self.settings.session_impulse_retest_miss_alert_enabled):
             return None
 
-        miss_count = int(report.get("miss_count") or 0)
+        miss_count = self._maybe_int(report.get("miss_count")) or 0
         if miss_count <= 0:
             return None
 
         alert_type = "session_impulse_retest_miss"
         alert_symbol = "SESSION_IMPULSE_RETEST"
         channel = self.settings.validation_alert_channel
-        cooldown_seconds = max(0, int(self.settings.session_impulse_retest_miss_alert_cooldown_seconds))
+        cooldown_seconds = max(0, self._maybe_int(self.settings.session_impulse_retest_miss_alert_cooldown_seconds) or 0)
         recent = self.alert_repo.find_recent(
             symbol=alert_symbol,
             channel=channel,
@@ -890,7 +966,6 @@ class StrategyEngine:
             limit=2000,
         )
         submissions = self.submission_repo.list_recent(days=3, limit=10000)
-        counted_execution_modes = {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value}
         counted_plan_ids: set[str] = set()
         seen_plan_ids: set[str] = set()
         for row in submissions:
@@ -957,7 +1032,9 @@ class StrategyEngine:
             plan_id = str(getattr(row, "plan_id", "") or "")
             if not plan_id:
                 continue
-            submitted_at = self._to_utc(getattr(row, "submitted_at", None))
+            submitted_at = self._maybe_utc(getattr(row, "submitted_at", None))
+            if submitted_at is None:
+                continue
             if submitted_at < start_of_day:
                 continue
             if self._submission_counts_as_live_contract(row):
@@ -972,7 +1049,9 @@ class StrategyEngine:
             limit=5000,
         )
         for row in recent_plans:
-            valid_from = self._to_utc(getattr(row, "valid_from", None))
+            valid_from = self._maybe_utc(getattr(row, "valid_from", None))
+            if valid_from is None:
+                continue
             if valid_from < start_of_day:
                 continue
             validity = dict(getattr(row, "validity", {}) or {})
@@ -1046,12 +1125,14 @@ class StrategyEngine:
         remaining_notional = self._maybe_float(tranche.get("remaining_notional")) or 0.0
         min_tranche_notional = max(
             0.0,
-            float(getattr(self.settings, "auto_trading_live_liquidity_gate_min_tranche_notional_usdt", 0.0) or 0.0),
+            self._maybe_float(getattr(self.settings, "auto_trading_live_liquidity_gate_min_tranche_notional_usdt", 0.0)) or 0.0,
         )
-        tranche_index = int(tranche.get("tranche_index") or 1)
+        tranche_index = max(1, self._maybe_int(tranche.get("tranche_index")) or 1)
         max_tranches = max(
             1,
-            int(tranche.get("max_tranches") or getattr(self.settings, "auto_trading_live_liquidity_gate_max_tranches", 1) or 1),
+            self._maybe_int(tranche.get("max_tranches"))
+            or self._maybe_int(getattr(self.settings, "auto_trading_live_liquidity_gate_max_tranches", 1))
+            or 1,
         )
         return remaining_notional >= min_tranche_notional and tranche_index < max_tranches
 
@@ -1152,14 +1233,14 @@ class StrategyEngine:
             or getattr(plan, "direction", "")
             or ""
         ).lower()
-        cluster_window_minutes = max(0, int(self.settings.auto_trading_live_family_cluster_window_minutes or 0))
-        max_same_family_entries = max(0, int(self.settings.auto_trading_live_max_same_family_entries_per_window or 0))
+        cluster_window_minutes = max(0, self._maybe_int(self.settings.auto_trading_live_family_cluster_window_minutes) or 0)
+        max_same_family_entries = max(0, self._maybe_int(self.settings.auto_trading_live_max_same_family_entries_per_window) or 0)
         max_same_family_direction_exposures = max(
             0,
-            int(self.settings.auto_trading_live_max_same_family_direction_exposures or 0),
+            self._maybe_int(self.settings.auto_trading_live_max_same_family_direction_exposures) or 0,
         )
-        loss_cooldown_minutes = max(0, int(self.settings.auto_trading_live_recent_loss_cooldown_minutes or 0))
-        loss_trigger_count = max(0, int(self.settings.auto_trading_live_recent_loss_trigger_count or 0))
+        loss_cooldown_minutes = max(0, self._maybe_int(self.settings.auto_trading_live_recent_loss_cooldown_minutes) or 0)
+        loss_trigger_count = max(0, self._maybe_int(self.settings.auto_trading_live_recent_loss_trigger_count) or 0)
         now = datetime.now(timezone.utc)
 
         recent_window_entries: list[dict[str, Any]] = []
@@ -1175,7 +1256,9 @@ class StrategyEngine:
                 row_family = str(validity.get("strategy_family") or "legacy_zone_plan").lower()
                 if row_family != family:
                     continue
-                opened_ts = self._to_utc(validity.get("entry_ts") or getattr(row, "valid_from", None))
+                opened_ts = self._maybe_utc(validity.get("entry_ts") or getattr(row, "valid_from", None))
+                if opened_ts is None:
+                    continue
                 if opened_ts < cluster_cutoff:
                     continue
                 recent_window_entries.append(
@@ -1204,14 +1287,14 @@ class StrategyEngine:
                 ).lower()
                 if row_direction != requested_direction:
                     continue
-                opened_ts = self._to_utc(validity.get("entry_ts") or getattr(row, "valid_from", None))
+                opened_ts = self._maybe_utc(validity.get("entry_ts") or getattr(row, "valid_from", None))
                 recent_direction_exposures.append(
                     {
                         "plan_id": str(getattr(row, "plan_id", "") or ""),
                         "symbol": str(getattr(row, "symbol", "") or "").upper(),
                         "state": str(getattr(row, "state", "") or ""),
                         "direction": row_direction,
-                        "opened_ts": opened_ts.isoformat(),
+                        "opened_ts": opened_ts.isoformat() if opened_ts is not None else "",
                     }
                 )
 
@@ -1235,7 +1318,9 @@ class StrategyEngine:
                 closed_ts_raw = validity.get("final_exit_ts") or validity.get("last_exit_ts")
                 if not closed_ts_raw:
                     continue
-                closed_ts = self._to_utc(closed_ts_raw)
+                closed_ts = self._maybe_utc(closed_ts_raw)
+                if closed_ts is None:
+                    continue
                 if closed_ts < loss_cutoff:
                     continue
                 realized_r = self._maybe_float(validity.get("final_exit_realized_r"))
@@ -1338,14 +1423,16 @@ class StrategyEngine:
             }
 
         higher_priority_symbols = set(priority_symbols[:symbol_index])
-        lookback_minutes = max(1, int(self.settings.auto_trading_micro_live_priority_submit_ready_lookback_minutes or 180))
+        lookback_minutes = max(1, self._maybe_int(self.settings.auto_trading_micro_live_priority_submit_ready_lookback_minutes) or 180)
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
         lookback_days = max(1, int((lookback_minutes // (24 * 60)) + 2))
         recent_intents = self.intent_repo.list_recent(limit=500, days=lookback_days)
 
-        latest_by_plan: dict[str, Any] = {}
+        latest_by_plan: dict[str, tuple[Any, datetime]] = {}
         for row in recent_intents:
-            created_at = self._to_utc(getattr(row, "created_at", None))
+            created_at = self._maybe_utc(getattr(row, "created_at", None))
+            if created_at is None:
+                continue
             if created_at < cutoff:
                 continue
             row_symbol = str(getattr(row, "symbol", "") or "").upper()
@@ -1357,10 +1444,10 @@ class StrategyEngine:
             plan_id = str(getattr(row, "plan_id", "") or "")
             if not plan_id or plan_id in latest_by_plan:
                 continue
-            latest_by_plan[plan_id] = row
+            latest_by_plan[plan_id] = (row, created_at)
 
         preferred_candidates: list[dict[str, Any]] = []
-        for row in latest_by_plan.values():
+        for row, row_created_at in latest_by_plan.values():
             approval_state = str(getattr(row, "approval_state", "") or "")
             if not approval_state.startswith("APPROVED"):
                 continue
@@ -1374,14 +1461,14 @@ class StrategyEngine:
                 {
                     "symbol": str(getattr(row, "symbol", "") or "").upper(),
                     "plan_id": str(getattr(row, "plan_id", "") or ""),
-                    "created_at": self._to_utc(getattr(row, "created_at", None)).isoformat(),
+                    "created_at": row_created_at.isoformat(),
                 }
             )
 
         preferred_candidates.sort(
             key=lambda item: (
                 priority_symbols.index(str(item.get("symbol") or "").upper()),
-                -datetime.fromisoformat(str(item.get("created_at") or "1970-01-01T00:00:00+00:00")).timestamp(),
+                -self._to_utc(item.get("created_at")).timestamp(),
             )
         )
         if not preferred_candidates:
@@ -1422,6 +1509,9 @@ class StrategyEngine:
         gate_state, _, gate_reason, operating_lock = self._evaluate_gate(symbol=symbol, jump_rate=jump_rate)
         return context, gate_state, gate_reason, operating_lock
 
+    def _max_candidate_plans_per_symbol(self) -> int:
+        return max(1, self._maybe_int(self.settings.max_candidate_plans_per_symbol) or 10)
+
     def _execution_candidate_rows(
         self,
         *,
@@ -1431,7 +1521,7 @@ class StrategyEngine:
         base_rows = self.scanner.candidate_rows(
             symbols=[symbol],
             risk_state=gate_state,
-            plans_per_symbol=max(10, int(self.settings.max_candidate_plans_per_symbol)),
+            plans_per_symbol=max(10, self._max_candidate_plans_per_symbol()),
         )
         operating_lock_dict = operating_lock.to_dict()
         deployment_language = _runtime_deployment_language(
@@ -1775,8 +1865,8 @@ class StrategyEngine:
             universe_policy=universe_policy,
             enabled=bool(self.settings.session_impulse_retest_enabled),
             shadow_only=bool(self.settings.session_impulse_retest_shadow_only),
-            partial_ratio=float(self.settings.session_impulse_retest_partial_activation_ratio),
-            core_live_slots=int(self.settings.session_impulse_retest_core_live_slots),
+            partial_ratio=self._maybe_float(self.settings.session_impulse_retest_partial_activation_ratio) or 0.0,
+            core_live_slots=self._maybe_int(self.settings.session_impulse_retest_core_live_slots) or 0,
             secondary_live_enabled=bool(self.settings.session_impulse_retest_secondary_live_enabled),
         )
         return micro_main_live_readiness_to_dict(readiness)
@@ -1971,7 +2061,7 @@ class StrategyEngine:
         if signal_weekday_utc == 5:
             saturday_risk_multiplier = max(
                 0.0,
-                float(self.settings.session_impulse_retest_saturday_risk_multiplier or 1.0),
+                self._maybe_float(self.settings.session_impulse_retest_saturday_risk_multiplier) or 1.0,
             )
         strategy_sizing["post_mode_final_risk_r"] = round(post_mode_final_risk_r, 4)
         strategy_sizing["session_impulse_retest_weekday_utc"] = int(signal_weekday_utc)
@@ -2582,8 +2672,8 @@ class StrategyEngine:
             recent_reconciliation_summary=recent_reconciliation_summary,
             strategy_v2_stress_validation=strategy_v2_stress_validation,
             approval_caps={
-                "expected_fee_bps": float(self.settings.taker_fee_bps),
-                "max_slippage_bps": float(self.settings.auto_trading_max_slippage_bps),
+                "expected_fee_bps": self._maybe_float(self.settings.taker_fee_bps) or 0.0,
+                "max_slippage_bps": self._maybe_float(self.settings.auto_trading_max_slippage_bps) or 0.0,
             },
         )
         return payload if payload else None
@@ -3195,6 +3285,8 @@ class StrategyEngine:
             "submit_decision": row.submit_decision,
             "decision_reason_code": row.decision_reason_code,
             "decision_reason_message": row.decision_reason_message,
+            "requested_execution_mode": str(payload.get("requested_execution_mode") or row.execution_mode or ""),
+            "paper_lineage_override_requested": bool(payload.get("paper_lineage_override_requested", False)),
             "allowed_execution_mode": approval.get("allowed_execution_mode", ""),
             "deployment_go_no_go": approval.get("deployment_go_no_go", ""),
             "deployment_code": approval.get("deployment_code", ""),
@@ -3278,14 +3370,27 @@ class StrategyEngine:
             return None
         return requested_mode
 
-    def _auto_route_recent_intent_cooldown(self, *, plan_id: str, now: datetime) -> dict[str, Any] | None:
+    def _auto_route_recent_intent_cooldown(
+        self,
+        *,
+        plan_id: str,
+        requested_mode: ExecutionMode,
+        now: datetime,
+    ) -> dict[str, Any] | None:
         latest_intent = self.intent_repo.latest_for_plan(plan_id)
         if latest_intent is None:
             return None
-        cooldown_seconds = max(0, int(self.settings.auto_trading_intent_recheck_cooldown_seconds or 0))
+        cooldown_seconds = max(0, self._maybe_int(self.settings.auto_trading_intent_recheck_cooldown_seconds) or 0)
         if cooldown_seconds <= 0:
             return None
-        created_at = self._to_utc(getattr(latest_intent, "created_at", None))
+        payload = dict(getattr(latest_intent, "payload", {}) or {})
+        latest_requested_mode = str(payload.get("requested_execution_mode") or getattr(latest_intent, "execution_mode", "") or "")
+        if latest_requested_mode != requested_mode.value:
+            return None
+        created_at_raw = getattr(latest_intent, "created_at", None)
+        if not isinstance(created_at_raw, datetime):
+            return None
+        created_at = self._to_utc(created_at_raw)
         if created_at < now - timedelta(seconds=cooldown_seconds):
             return None
         return {
@@ -3295,6 +3400,7 @@ class StrategyEngine:
             "approval_state": str(getattr(latest_intent, "approval_state", "") or ""),
             "decision_reason_code": str(getattr(latest_intent, "decision_reason_code", "") or ""),
             "cooldown_seconds": cooldown_seconds,
+            "requested_mode": requested_mode.value,
         }
 
     def _session_impulse_retest_runtime_audit_json_safe(self, value: Any) -> Any:
@@ -3390,7 +3496,11 @@ class StrategyEngine:
                 "status": str(getattr(row, "status", "") or ""),
                 "plan_id": str(getattr(row, "plan_id", "") or ""),
                 "decision_code": str(getattr(row, "decision_code", "") or ""),
-                "observed_ts": self._to_utc(getattr(row, "observed_ts", None)).isoformat(),
+                "observed_ts": (
+                    observed_ts.isoformat()
+                    if (observed_ts := self._maybe_utc(getattr(row, "observed_ts", None))) is not None
+                    else ""
+                ),
                 "payload": self._session_impulse_retest_runtime_audit_json_safe(
                     dict(getattr(row, "payload", {}) or {})
                 ),
@@ -3411,7 +3521,11 @@ class StrategyEngine:
             "strategy_family": _AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY,
             "status": "intent_attempted",
         }
-        recent_intent = self._auto_route_recent_intent_cooldown(plan_id=str(plan.plan_id), now=now)
+        recent_intent = self._auto_route_recent_intent_cooldown(
+            plan_id=str(plan.plan_id),
+            requested_mode=requested_mode,
+            now=now,
+        )
         if recent_intent is not None:
             return self._finalize_session_impulse_retest_auto_route_audit(
                 symbol=symbol,
@@ -3422,16 +3536,16 @@ class StrategyEngine:
                     "requested_mode": requested_mode.value,
                     "reason": "recent_intent_cooldown_active",
                     "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
-                "plans_considered": 1,
-                "intents_created": 0,
-                "submit_calls": 0,
-                "results": [
-                    {
-                        **result_item,
-                        "status": "skipped_recent_intent",
-                        "recent_intent": recent_intent,
-                    }
-                ],
+                    "plans_considered": 1,
+                    "intents_created": 0,
+                    "submit_calls": 0,
+                    "results": [
+                        {
+                            **result_item,
+                            "status": "skipped_recent_intent",
+                            "recent_intent": recent_intent,
+                        }
+                    ],
                 },
             )
 
@@ -3451,16 +3565,16 @@ class StrategyEngine:
                     "requested_mode": requested_mode.value,
                     "reason": "intent_creation_failed",
                     "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
-                "plans_considered": 1,
-                "intents_created": 0,
-                "submit_calls": 0,
-                "results": [
-                    {
-                        **result_item,
-                        "status": "intent_error",
-                        "error": str(exc),
-                    }
-                ],
+                    "plans_considered": 1,
+                    "intents_created": 0,
+                    "submit_calls": 0,
+                    "results": [
+                        {
+                            **result_item,
+                            "status": "intent_error",
+                            "error": str(exc),
+                        }
+                    ],
                 },
             )
 
@@ -3506,7 +3620,7 @@ class StrategyEngine:
                 "requested_mode": requested_mode.value,
                 "reason": result_item["status"],
                 "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
-            "plans_considered": 1,
+                "plans_considered": 1,
                 "intents_created": intents_created,
                 "submit_calls": submit_calls,
                 "results": [result_item],
@@ -3602,8 +3716,8 @@ class StrategyEngine:
                     "enabled": True,
                     "requested_mode": requested_mode.value,
                     "reason": "no_matching_session_impulse_retest_plan_ids",
-                "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
-                "plans_considered": 0,
+                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                    "plans_considered": 0,
                     "intents_created": 0,
                     "submit_calls": 0,
                     "results": [],
@@ -3685,7 +3799,7 @@ class StrategyEngine:
             symbol=normalized_symbol,
             timeframe="5m",
             states=[PlanState.PLANNED.value, PlanState.ARMED.value],
-            limit=max(20, int(self.settings.max_candidate_plans_per_symbol) * 4),
+            limit=max(20, self._max_candidate_plans_per_symbol() * 4),
         )
         session_plans = [
             plan
@@ -3702,8 +3816,8 @@ class StrategyEngine:
                     "enabled": True,
                     "requested_mode": requested_mode.value,
                     "reason": "no_session_impulse_retest_plan",
-                "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
-                "plans_considered": 0,
+                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                    "plans_considered": 0,
                     "intents_created": 0,
                     "submit_calls": 0,
                     "results": [],
@@ -3742,7 +3856,7 @@ class StrategyEngine:
     def _paper_sample_stale_cleanup_ready(self, *, plan: Any, submission: Any) -> bool:
         if str(getattr(submission, "adapter", "") or "").lower() != "paper":
             return False
-        threshold_hours = float(getattr(self.settings, "auto_trading_paper_stale_sample_cleanup_hours", 0) or 0)
+        threshold_hours = self._maybe_float(getattr(self.settings, "auto_trading_paper_stale_sample_cleanup_hours", 0)) or 0.0
         if threshold_hours <= 0:
             return False
         reference_ts = self._paper_submission_reference_ts(submission)
@@ -4334,37 +4448,44 @@ class StrategyEngine:
                 qty: float,
                 exit_reason: str,
                 trigger_detail: dict[str, Any] | None = None,
+                _plan: Plan = plan,
+                _submission: Any = submission,
+                _fill_ts: datetime = fill_ts,
+                _candle_timeframe: str = candle_timeframe,
+                _candle_ts_text: str = candle_ts_text,
+                _family: str = family,
+                _actions_for_plan: list[dict[str, Any]] = actions_for_plan,
             ) -> None:
-                nonlocal remaining_qty, actions_for_plan
+                nonlocal remaining_qty
                 response = self.ingest_execution_fill(
-                    fill_id=f"paper_exit_{plan.plan_id}_{leg}",
-                    plan_id=plan.plan_id,
-                    symbol=plan.symbol,
+                    fill_id=f"paper_exit_{_plan.plan_id}_{leg}",
+                    plan_id=_plan.plan_id,
+                    symbol=_plan.symbol,
                     stage=stage,
-                    fill_ts=fill_ts,
+                    fill_ts=_fill_ts,
                     price=price,
                     qty=max(float(qty), 0.0),
                     fee=0.0,
                     payload={
                         "source": "paper_exit_monitor",
-                        "client_order_id": submission.client_order_id,
+                        "client_order_id": _submission.client_order_id,
                         "execution_adapter": "paper",
                         "exit_reason": exit_reason,
                         "remaining_qty": 0.0 if stage == ExecutionFillStage.CLOSED else max(remaining_qty - qty, 0.0),
                         "trigger_detail": dict(trigger_detail or {}),
                         "notes": {
                             "monitor": "paper_exit_monitor_v1",
-                            "candle_timeframe": candle_timeframe,
-                            "candle_ts": candle_ts_text,
+                            "candle_timeframe": _candle_timeframe,
+                            "candle_ts": _candle_ts_text,
                         },
                     },
                 )
                 remaining_qty = max(0.0, remaining_qty - qty)
-                actions_for_plan.append(
+                _actions_for_plan.append(
                     {
-                        "plan_id": plan.plan_id,
-                        "symbol": plan.symbol,
-                        "family": family,
+                        "plan_id": _plan.plan_id,
+                        "symbol": _plan.symbol,
+                        "family": _family,
                         "leg": leg,
                         "stage": stage.value,
                         "exit_reason": exit_reason,
@@ -4592,7 +4713,9 @@ class StrategyEngine:
             session_name=session_name,
         )
         payload["rollout_policies"] = [item.to_dict() for item in self.rollout_policy_service.list_all()]
-        tracker = get_execution_lane_tracker(window=int(self.settings.transition_edge_variant_lane_tracker_window))
+        tracker = get_execution_lane_tracker(
+            window=max(1, self._maybe_int(self.settings.transition_edge_variant_lane_tracker_window) or 1)
+        )
         variant_locks = list(payload.get("transition_edge_variant_matching_locks") or [])
         payload["transition_edge_variant"] = {
             "enabled": bool(self.settings.transition_edge_variant_enabled),
@@ -4600,14 +4723,14 @@ class StrategyEngine:
             "killed": bool(payload.get("transition_edge_variant_disabled_active", False)),
             "reason": str((variant_locks[0] or {}).get("reason_code") or "") if variant_locks else None,
             "reason_message": str((variant_locks[0] or {}).get("reason_message") or "") if variant_locks else None,
-            "partial_ratio": round(float(self.settings.transition_edge_variant_partial_activation_ratio), 4),
+            "partial_ratio": round(self._maybe_float(self.settings.transition_edge_variant_partial_activation_ratio) or 0.0, 4),
             "live_lane": tracker.snapshot(),
         }
         payload["session_impulse_retest_universe_policy"] = build_micro_main_rollout_contract_snapshot(
             enabled=bool(self.settings.session_impulse_retest_enabled),
             shadow_only=bool(self.settings.session_impulse_retest_shadow_only),
-            partial_activation_ratio=float(self.settings.session_impulse_retest_partial_activation_ratio),
-            core_live_slots=int(self.settings.session_impulse_retest_core_live_slots),
+            partial_activation_ratio=self._maybe_float(self.settings.session_impulse_retest_partial_activation_ratio) or 0.0,
+            core_live_slots=self._maybe_int(self.settings.session_impulse_retest_core_live_slots) or 0,
             secondary_live_enabled=bool(self.settings.session_impulse_retest_secondary_live_enabled),
         )
         if symbol:
@@ -5049,8 +5172,8 @@ class StrategyEngine:
         payload["session_impulse_retest_universe_policy"] = build_micro_main_rollout_contract_snapshot(
             enabled=bool(self.settings.session_impulse_retest_enabled),
             shadow_only=bool(self.settings.session_impulse_retest_shadow_only),
-            partial_activation_ratio=float(self.settings.session_impulse_retest_partial_activation_ratio),
-            core_live_slots=int(self.settings.session_impulse_retest_core_live_slots),
+            partial_activation_ratio=self._maybe_float(self.settings.session_impulse_retest_partial_activation_ratio) or 0.0,
+            core_live_slots=self._maybe_int(self.settings.session_impulse_retest_core_live_slots) or 0,
             secondary_live_enabled=bool(self.settings.session_impulse_retest_secondary_live_enabled),
         )
         return payload
@@ -5246,18 +5369,20 @@ class StrategyEngine:
         if value in (None, "", "None"):
             return None
         try:
-            return float(value)
+            parsed = float(value)
         except (TypeError, ValueError):
             return None
+        return parsed if isfinite(parsed) else None
 
     @staticmethod
     def _maybe_int(value: Any) -> int | None:
         if value in (None, "", "None"):
             return None
         try:
-            return int(value)
+            parsed = float(value)
         except (TypeError, ValueError):
             return None
+        return int(parsed) if isfinite(parsed) else None
 
     @staticmethod
     def _to_utc(value: Any) -> datetime:
@@ -5266,11 +5391,33 @@ class StrategyEngine:
                 return value.replace(tzinfo=timezone.utc)
             return value.astimezone(timezone.utc)
         if isinstance(value, str):
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return datetime.now(timezone.utc)
             if parsed.tzinfo is None:
                 return parsed.replace(tzinfo=timezone.utc)
             return parsed.astimezone(timezone.utc)
         return datetime.now(timezone.utc)
+
+    @staticmethod
+    def _maybe_utc(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        return None
 
     @staticmethod
     def _default_binance_client_order_id(plan_id: str | None = None) -> str:
@@ -5295,8 +5442,9 @@ class StrategyEngine:
         client_order_id: str | None = None,
         plan_id: str | None = None,
     ) -> dict[str, Any]:
+        raw_payload = _safe_dict(raw)
         live_enabled = bool(self.settings.binance_trade_live_enabled)
-        status = raw.get("status")
+        status = raw_payload.get("status")
         if not status and action == "submit" and not requested_live:
             status = "TEST_ACCEPTED"
         return {
@@ -5305,19 +5453,19 @@ class StrategyEngine:
             "requested_live": requested_live,
             "live_enabled": live_enabled,
             "test_order": not requested_live,
-            "symbol": str(raw.get("symbol") or symbol).upper(),
+            "symbol": str(raw_payload.get("symbol") or symbol).upper(),
             "plan_id": plan_id,
-            "order_id": self._maybe_int(raw.get("orderId")),
-            "client_order_id": str(raw.get("clientOrderId") or client_order_id or ""),
+            "order_id": self._maybe_int(raw_payload.get("orderId")),
+            "client_order_id": str(raw_payload.get("clientOrderId") or client_order_id or ""),
             "status": str(status or ""),
-            "side": str(raw.get("side") or side or ""),
-            "order_type": str(raw.get("type") or order_type or ""),
-            "price": self._maybe_float(raw.get("price")) if raw.get("price") not in (None, "") else price,
-            "orig_qty": self._maybe_float(raw.get("origQty")) if raw.get("origQty") not in (None, "") else quantity,
-            "executed_qty": self._maybe_float(raw.get("executedQty")),
-            "reduce_only": bool(raw.get("reduceOnly")) if raw.get("reduceOnly") is not None else reduce_only,
-            "time_in_force": str(raw.get("timeInForce") or time_in_force or ""),
-            "raw": raw,
+            "side": str(raw_payload.get("side") or side or ""),
+            "order_type": str(raw_payload.get("type") or order_type or ""),
+            "price": self._maybe_float(raw_payload.get("price")) if raw_payload.get("price") not in (None, "") else price,
+            "orig_qty": self._maybe_float(raw_payload.get("origQty")) if raw_payload.get("origQty") not in (None, "") else quantity,
+            "executed_qty": self._maybe_float(raw_payload.get("executedQty")),
+            "reduce_only": bool(raw_payload.get("reduceOnly")) if raw_payload.get("reduceOnly") is not None else reduce_only,
+            "time_in_force": str(raw_payload.get("timeInForce") or time_in_force or ""),
+            "raw": raw_payload,
         }
 
     def _persist_binance_order_payload(
@@ -5350,7 +5498,7 @@ class StrategyEngine:
             last_event_type=event_type,
             last_trade_id=trade_id,
             last_event_ts=event_ts,
-            raw=dict(payload.get("raw") or payload),
+            raw=_safe_dict(payload.get("raw")) or _safe_dict(payload),
         )
         self.db.flush()
         return {
@@ -5400,7 +5548,13 @@ class StrategyEngine:
         from app.db.models import BinancePositionSnapshot
 
         for row in rows:
-            snapshot = BinancePositionSnapshot(**row)
+            row_payload = _safe_dict(row)
+            if not row_payload:
+                continue
+            try:
+                snapshot = BinancePositionSnapshot(**row_payload)
+            except TypeError:
+                continue
             model_rows.append(snapshot)
             normalized.append(self._position_row_to_dict(snapshot))
         self.binance_position_repo.upsert_many(model_rows)
@@ -5433,8 +5587,8 @@ class StrategyEngine:
         plan: Any | None,
         current_positions: list[dict[str, Any]],
     ) -> ExecutionFillStage | None:
-        last_fill_qty = float(event.get("last_fill_qty") or 0.0)
-        last_fill_price = float(event.get("last_fill_price") or 0.0)
+        last_fill_qty = self._maybe_float(event.get("last_fill_qty")) or 0.0
+        last_fill_price = self._maybe_float(event.get("last_fill_price")) or 0.0
         if last_fill_qty <= 0.0 or last_fill_price <= 0.0:
             return None
         if not bool(event.get("reduce_only")):
@@ -5447,9 +5601,9 @@ class StrategyEngine:
             side = "LONG" if str(plan.direction).lower() == "long" else "SHORT"
             side_rows = [row for row in matching if str(row.get("position_side") or "BOTH").upper() in {side, "BOTH"}]
             target_row = side_rows[0] if side_rows else matching[0]
-            remaining_amt = abs(float(target_row.get("position_amt") or 0.0))
+            remaining_amt = abs(self._maybe_float(target_row.get("position_amt")) or 0.0)
         elif matching:
-            remaining_amt = abs(float(matching[0].get("position_amt") or 0.0))
+            remaining_amt = abs(self._maybe_float(matching[0].get("position_amt")) or 0.0)
 
         if remaining_amt is not None:
             return ExecutionFillStage.CLOSED if remaining_amt <= 1e-10 else ExecutionFillStage.PARTIAL_EXIT
@@ -5486,9 +5640,10 @@ class StrategyEngine:
                 continue
             if str(payload.get("exchange_order_id") or "") != str(order_id):
                 continue
-            if qty > 0.0 and abs(float(getattr(fill, "qty", 0.0) or 0.0) - qty) > 1e-9:
+            fill_qty = self._maybe_float(getattr(fill, "qty", 0.0)) or 0.0
+            if qty > 0.0 and abs(fill_qty - qty) > 1e-9:
                 continue
-            fill_price = float(getattr(fill, "price", 0.0) or 0.0)
+            fill_price = self._maybe_float(getattr(fill, "price", 0.0)) or 0.0
             if price > 0.0 and abs(fill_price - price) > self._paper_exit_price_tolerance(price):
                 continue
             return fill
@@ -5617,7 +5772,7 @@ class StrategyEngine:
     ) -> dict[str, Any]:
         normalized_symbol = str(symbol or "").upper()
         normalized_side = str(side or "").upper()
-        depth_limit = int(getattr(self.settings, "auto_trading_live_liquidity_gate_orderbook_limit", 100) or 100)
+        depth_limit = max(1, self._maybe_int(getattr(self.settings, "auto_trading_live_liquidity_gate_orderbook_limit", 100)) or 100)
         order_book = self.market_data.binance.fetch_order_book(symbol=normalized_symbol, limit=depth_limit)
 
         def _levels(raw_rows: Any) -> list[tuple[float, float]]:
@@ -5625,8 +5780,10 @@ class StrategyEngine:
             for row in list(raw_rows or []):
                 if not isinstance(row, (list, tuple)) or len(row) < 2:
                     continue
-                level_price = float(row[0])
-                level_qty = float(row[1])
+                level_price = self._maybe_float(row[0])
+                level_qty = self._maybe_float(row[1])
+                if level_price is None or level_qty is None:
+                    continue
                 if level_price > 0.0 and level_qty > 0.0:
                     levels.append((level_price, level_qty))
             return levels
@@ -5636,20 +5793,22 @@ class StrategyEngine:
         best_bid = bids[0][0] if bids else 0.0
         best_ask = asks[0][0] if asks else 0.0
         mid_price = (best_bid + best_ask) / 2.0 if best_bid > 0.0 and best_ask > 0.0 else 0.0
-        effective_reference = float(price or reference_price or mid_price or 0.0)
+        effective_reference = self._maybe_float(price) or self._maybe_float(reference_price) or mid_price or 0.0
         spread_bps = ((best_ask - best_bid) / mid_price * 10_000.0) if mid_price > 0.0 else None
         normalized_order_type = str(order_type or "").upper()
         is_marketable_now = normalized_order_type != "LIMIT"
         if normalized_order_type == "LIMIT" and price is not None:
             if normalized_side == "BUY":
-                is_marketable_now = best_ask > 0.0 and float(price) >= best_ask
+                limit_price = self._maybe_float(price) or 0.0
+                is_marketable_now = best_ask > 0.0 and limit_price >= best_ask
             else:
-                is_marketable_now = best_bid > 0.0 and float(price) <= best_bid
+                limit_price = self._maybe_float(price) or 0.0
+                is_marketable_now = best_bid > 0.0 and limit_price <= best_bid
 
         opposite_levels = asks if normalized_side == "BUY" else bids
         opposite_depth_notional = sum(level_price * level_qty for level_price, level_qty in opposite_levels)
 
-        remaining_qty = max(float(quantity or 0.0), 0.0)
+        remaining_qty = max(self._maybe_float(quantity) or 0.0, 0.0)
         simulated_cost = 0.0
         simulated_qty = 0.0
         for level_price, level_qty in opposite_levels:
@@ -5669,10 +5828,15 @@ class StrategyEngine:
                 market_slippage_bps = max(0.0, (effective_reference - market_fill_avg_price) / effective_reference * 10_000.0)
 
         klines_1m = self.market_data.binance.fetch_klines(symbol=normalized_symbol, interval="1m", limit=5)
-        quote_volumes = [float(row.c) * float(row.v) for row in klines_1m if float(row.c) > 0.0 and float(row.v) >= 0.0]
+        quote_volumes = []
+        for row in klines_1m:
+            close_price = self._maybe_float(row.c)
+            volume = self._maybe_float(row.v)
+            if close_price is not None and volume is not None and close_price > 0.0 and volume >= 0.0:
+                quote_volumes.append(close_price * volume)
         recent_1m_quote_volume = quote_volumes[-1] if quote_volumes else None
         recent_5m_quote_volume = sum(quote_volumes) if quote_volumes else None
-        order_notional = max(float(quantity or 0.0), 0.0) * max(effective_reference, 0.0)
+        order_notional = max(self._maybe_float(quantity) or 0.0, 0.0) * max(effective_reference, 0.0)
 
         return {
             "source": "binance_public_depth_klines",
@@ -5690,7 +5854,7 @@ class StrategyEngine:
             "opposite_depth_notional": round(opposite_depth_notional, 4),
             "market_fill_avg_price": round(float(market_fill_avg_price), 8) if market_fill_avg_price is not None else None,
             "market_slippage_bps": round(float(market_slippage_bps), 4) if market_slippage_bps is not None else None,
-            "simulated_fill_coverage": round(simulated_qty / max(float(quantity or 0.0), 1e-12), 6),
+            "simulated_fill_coverage": round(simulated_qty / max(self._maybe_float(quantity) or 0.0, 1e-12), 6),
             "recent_1m_quote_volume": round(float(recent_1m_quote_volume), 4)
             if recent_1m_quote_volume is not None
             else None,
@@ -5774,7 +5938,7 @@ class StrategyEngine:
         rows = [self.market_data.binance.normalize_position_risk_row(row) for row in self.market_data.binance.fetch_position_risk(symbol)]
         normalized = self._upsert_binance_positions(rows)
         self.db.commit()
-        open_positions = [row for row in normalized if abs(float(row.get("position_amt") or 0.0)) > 1e-10]
+        open_positions = [row for row in normalized if abs(self._maybe_float(row.get("position_amt")) or 0.0) > 1e-10]
         return {
             "symbol": symbol.upper() if symbol else None,
             "synced": len(normalized),
@@ -5793,14 +5957,17 @@ class StrategyEngine:
         }
 
     def ingest_binance_user_stream_event(self, *, payload: dict[str, Any]) -> dict[str, Any]:
+        payload_map = _safe_dict(payload)
         normalized = (
-            dict(payload)
-            if "kind" in payload and "event_type" in payload
+            payload_map
+            if "kind" in payload_map and "event_type" in payload_map
             else self.market_data.binance.normalize_user_stream_message(payload)
         )
+        normalized = _safe_dict(normalized)
         kind = str(normalized.get("kind") or "unknown")
         if kind == "account_update":
-            positions = self._upsert_binance_positions(list(normalized.get("positions") or []))
+            positions_source = normalized.get("positions")
+            positions = self._upsert_binance_positions(list(positions_source) if isinstance(positions_source, list) else [])
             self.db.commit()
             return {
                 "accepted": True,
@@ -5813,7 +5980,9 @@ class StrategyEngine:
                 "fill_ingest": None,
                 "position_sync": {
                     "synced": len(positions),
-                    "open_positions": len([row for row in positions if abs(float(row.get("position_amt") or 0.0)) > 1e-10]),
+                    "open_positions": len(
+                        [row for row in positions if abs(self._maybe_float(row.get("position_amt")) or 0.0) > 1e-10]
+                    ),
                     "positions": positions,
                 },
             }
@@ -5848,7 +6017,7 @@ class StrategyEngine:
             "executed_qty": self._maybe_float(normalized.get("cumulative_fill_qty")),
             "reduce_only": bool(normalized.get("reduce_only")),
             "time_in_force": str(normalized.get("time_in_force") or ""),
-            "raw": dict(normalized.get("raw") or {}),
+            "raw": _safe_dict(normalized.get("raw")),
         }
         order_snapshot = self._persist_binance_order_payload(
             payload=order_payload,
@@ -5878,11 +6047,11 @@ class StrategyEngine:
             plan=plan,
             order_id=self._maybe_int(normalized.get("order_id")),
             stage=stage,
-            qty=float(normalized.get("last_fill_qty") or 0.0),
-            price=float(normalized.get("last_fill_price") or normalized.get("avg_price") or 0.0),
+            qty=self._maybe_float(normalized.get("last_fill_qty")) or 0.0,
+            price=self._maybe_float(normalized.get("last_fill_price")) or self._maybe_float(normalized.get("avg_price")) or 0.0,
         )
         if duplicate_submit_fill is not None:
-            payload = dict(getattr(duplicate_submit_fill, "payload", {}) or {})
+            payload = _safe_dict(getattr(duplicate_submit_fill, "payload", None))
             self.db.commit()
             fill_ingest = {
                 "accepted": True,
@@ -5919,8 +6088,8 @@ class StrategyEngine:
                 symbol=plan.symbol,
                 stage=stage,
                 fill_ts=self._to_utc(normalized.get("event_ts")),
-                price=float(normalized.get("last_fill_price") or normalized.get("avg_price") or 0.0),
-                qty=float(normalized.get("last_fill_qty") or 0.0),
+                price=self._maybe_float(normalized.get("last_fill_price")) or self._maybe_float(normalized.get("avg_price")) or 0.0,
+                qty=self._maybe_float(normalized.get("last_fill_qty")) or 0.0,
                 fee=0.0,
                 payload=fill_payload,
             )
@@ -5989,7 +6158,6 @@ class StrategyEngine:
 
     def _signal_message(self, *, alert_type: str, payload: dict[str, Any]) -> str:
         plan_id = str(payload.get("plan_id") or "")
-        symbol = str(payload.get("symbol") or "")
         strategy_family = str(payload.get("strategy_family") or "").strip().lower()
         direction = str(payload.get("direction") or "").lower()
         entry_model = str(payload.get("entry_model") or "")
@@ -6203,7 +6371,8 @@ class StrategyEngine:
         event_ts: datetime,
     ) -> dict[str, Any]:
         summary: dict[str, Any] = {"near": 0, "touch": 0, "confirm": 0, "emitted_total": 0}
-        near_threshold = max(float(atr_reference) * float(self.settings.signal_alert_near_atr_multiple), 1e-6)
+        near_atr_multiple = self._maybe_float(self.settings.signal_alert_near_atr_multiple) or 0.35
+        near_threshold = max(float(atr_reference) * near_atr_multiple, 1e-6)
         for plan in plans:
             entry_price = float(plan.entry_price)
             distance_abs = abs(float(current_price) - entry_price)
@@ -6983,7 +7152,7 @@ class StrategyEngine:
             symbol=symbol,
             timeframe="5m",
             states=[PlanState.PLANNED.value, PlanState.ARMED.value],
-            limit=max(20, int(self.settings.max_candidate_plans_per_symbol) * 4),
+            limit=max(20, self._max_candidate_plans_per_symbol() * 4),
         )
         signal_alerts = self._emit_pre_entry_plan_alerts(
             symbol=symbol,
@@ -7684,7 +7853,7 @@ class StrategyEngine:
     ) -> dict:
         portfolio_budget = self.portfolio_budget_report(
             universe=universe,
-            limit=max(20, int(self.settings.alpha_research_max_candidates)),
+            limit=max(20, self._maybe_int(self.settings.alpha_research_max_candidates) or 20),
             write_report=False,
         )
         analysis_symbol = self._alpha_research_analysis_symbol(
@@ -7844,11 +8013,26 @@ class StrategyEngine:
         self.db.commit()
         refresh = self.refresh_symbol(symbol)
         plan_ids = list(refresh.get("session_impulse_retest_plan_ids") or [])
-        auto_route = (
-            self.auto_route_session_impulse_retest_plans(symbol=symbol, plan_ids=plan_ids)
-            if plan_ids
-            else self.auto_route_symbol(symbol=symbol)
-        )
+        normalized_symbol = str(symbol or "").upper()
+        if self._ws_stream_auto_route_active():
+            requested_mode = self._auto_route_requested_mode()
+            auto_route = {
+                "symbol": normalized_symbol,
+                "enabled": False,
+                "requested_mode": requested_mode.value if requested_mode is not None else "",
+                "reason": "ws_stream_active_route_suppressed",
+                "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                "plans_considered": len(plan_ids),
+                "intents_created": 0,
+                "submit_calls": 0,
+                "results": [],
+            }
+        else:
+            auto_route = (
+                self.auto_route_session_impulse_retest_plans(symbol=symbol, plan_ids=plan_ids)
+                if plan_ids
+                else self.auto_route_symbol(symbol=symbol)
+            )
         return {
             "symbol": symbol,
             "status": "ok",

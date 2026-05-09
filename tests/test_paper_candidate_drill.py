@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-ROOT_DIR = Path("/Users/yumin/Documents/trading")
+ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
 def _load_module(name: str, path: Path):
@@ -881,6 +881,174 @@ def test_main_skips_already_submitted_candidate_and_uses_next_submit_ready_candi
     assert payload["candidate"]["plan_id"] == "plan-fil-2"
     assert payload["submission"]["submit_status"] == "FILLED"
     assert any("DOGEUSDC[plan_reentry_blocked]" in step for step in payload["next_steps"])
+
+
+def test_main_skips_non_submit_ready_candidate_and_uses_next_submit_ready_candidate(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        paper_drill,
+        "_load_family_cluster_guard_snapshot",
+        lambda **kwargs: {"available": True, "families": {}, "active_families": [], "summary": "disabled in test"},
+    )
+    monkeypatch.setattr(
+        paper_drill,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol=None,
+            universe="usdc_perp_top30",
+            families="sweep_reversal,trend_continuation",
+            candidate_limit=100,
+            include_manual_review=False,
+            skip_sync=True,
+            limit_symbols=30,
+            symbol_concurrency=4,
+            limit_1m=900,
+            limit_5m=500,
+            limit_15m=500,
+            submit_paper=True,
+            paper_scenario="fill",
+            paper_lineage_override=True,
+            report_dir="reports/operations/paper_candidate_drill",
+            no_write_report=True,
+            symbol_diversity_min_cohort_trades=5,
+            symbol_diversity_soft_cap_count=3,
+            symbol_diversity_soft_cap_share=0.4,
+        ),
+    )
+
+    candidate_a = {
+        **_candidate(),
+        "symbol": "FILUSDC",
+        "plan_id": "plan-fil-blocked",
+        "expected_ev_at_recommended_size_r": 0.30,
+        "expected_ev_r": 0.60,
+    }
+    candidate_b = {
+        **_candidate(),
+        "symbol": "ARBUSDC",
+        "plan_id": "plan-arb-submit",
+        "expected_ev_at_recommended_size_r": 0.20,
+        "expected_ev_r": 0.40,
+    }
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/scanner/top":
+            return [candidate_a, candidate_b]
+        if path == "/validation/report":
+            return _validation()
+        if path == "/execution/plans/preview":
+            return {"entry_type": "limit", "entry_semantics": "limit_on_touch"}
+        if path == "/execution/approve-plan":
+            return _approval()
+        if path == "/execution/order-intents":
+            plan_id = kwargs["body"]["plan_id"]
+            if plan_id == "plan-fil-blocked":
+                return {
+                    "intent_id": "intent-fil",
+                    "submit_decision": "SKIP_BLOCKED",
+                    "decision_reason_code": "symbol_not_live_enabled",
+                    "decision_reason_message": "FILUSDC is not in the current auto-trading allowlist.",
+                }
+            if plan_id == "plan-arb-submit":
+                return {
+                    "intent_id": "intent-arb",
+                    "submit_decision": "SUBMIT",
+                    "decision_reason_code": "submit_ready",
+                }
+            raise AssertionError(f"unexpected plan_id: {plan_id}")
+        if path == "/execution/submit":
+            return {"submit_status": "FILLED", "state": "FILLED"}
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(paper_drill, "_request_json", _request_json)
+
+    assert paper_drill.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["overall_status"] == "READY_FOR_PAPER_SAMPLE"
+    assert payload["candidate"]["symbol"] == "ARBUSDC"
+    assert payload["candidate"]["plan_id"] == "plan-arb-submit"
+    assert payload["submission"]["submit_status"] == "FILLED"
+    assert any("FILUSDC[symbol_not_live_enabled]" in step for step in payload["next_steps"])
+
+
+def test_main_uses_submit_intent_snapshot_when_preview_approval_is_stale(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        paper_drill,
+        "_load_family_cluster_guard_snapshot",
+        lambda **kwargs: {"available": True, "families": {}, "active_families": [], "summary": "disabled in test"},
+    )
+    monkeypatch.setattr(
+        paper_drill,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol=None,
+            universe="usdc_perp_top30",
+            families="sweep_reversal,trend_continuation",
+            candidate_limit=100,
+            include_manual_review=False,
+            skip_sync=True,
+            limit_symbols=30,
+            symbol_concurrency=4,
+            limit_1m=900,
+            limit_5m=500,
+            limit_15m=500,
+            submit_paper=True,
+            paper_scenario="fill",
+            paper_lineage_override=True,
+            report_dir="reports/operations/paper_candidate_drill",
+            no_write_report=True,
+            symbol_diversity_min_cohort_trades=5,
+            symbol_diversity_soft_cap_count=3,
+            symbol_diversity_soft_cap_share=0.4,
+        ),
+    )
+
+    stale_preview_approval = {
+        "approval_state": "BLOCKED",
+        "allowed_execution_mode": "MICRO_LIVE",
+        "playbook_go_no_go": "NO_GO",
+        "playbook_action": "block_new_entries_until_execution_issue_is_cleared",
+        "playbook_message": "MICRO_LIVE route is blocked.",
+    }
+    intent_approval = {
+        **_approval(),
+        "paper_lineage_override_applied": True,
+        "paper_lineage_override_reason": "paper lineage override allowed PAPER sampling.",
+    }
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/scanner/top":
+            return [_candidate()]
+        if path == "/validation/report":
+            return _validation()
+        if path == "/execution/plans/preview":
+            return {"entry_type": "limit", "entry_semantics": "limit_on_touch"}
+        if path == "/execution/approve-plan":
+            return stale_preview_approval
+        if path == "/execution/order-intents":
+            return {
+                "intent_id": "intent-paper",
+                "submit_decision": "SUBMIT",
+                "decision_reason_code": "submit_ready",
+                "allowed_execution_mode": "PAPER",
+                "approval": intent_approval,
+            }
+        if path == "/execution/submit":
+            return {"submit_status": "FILLED", "state": "FILLED"}
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(paper_drill, "_request_json", _request_json)
+
+    assert paper_drill.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    approval_check = next(check for check in payload["checks"] if check["name"] == "approval_for_paper")
+
+    assert payload["overall_status"] == "READY_FOR_PAPER_SAMPLE"
+    assert payload["submission"]["submit_status"] == "FILLED"
+    assert approval_check["status"] == "PASS"
+    assert "source=intent_snapshot" in approval_check["message"]
 
 
 def test_choose_override_candidate_falls_back_to_validity_grade_and_missing_runtime_state() -> None:

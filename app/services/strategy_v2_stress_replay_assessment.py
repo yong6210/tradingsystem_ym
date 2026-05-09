@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from app.core.config import Settings, get_settings
 
 
 class StrategyV2StressReplayAssessmentService:
     _MIN_SAMPLE_SIZE = 30
-    _REPLACEMENT_DECISIONS = {"prepare_full_replay", "recommend_full_replay"}
+    _REPLACEMENT_DECISIONS: ClassVar[set[str]] = {"prepare_full_replay", "recommend_full_replay"}
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
@@ -21,17 +22,31 @@ class StrategyV2StressReplayAssessmentService:
         return round(float(numerator) / float(denominator), 4)
 
     @staticmethod
-    def _candle_latency_hits(latency_source_counts: dict[str, int]) -> int:
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
+    @classmethod
+    def _safe_int(cls, value: Any, default: int = 0) -> int:
+        return int(cls._safe_float(value, float(default)))
+
+    @classmethod
+    def _candle_latency_hits(cls, latency_source_counts: dict[str, int]) -> int:
         return sum(
-            int(count or 0)
+            cls._safe_int(count)
             for source, count in (latency_source_counts or {}).items()
             if str(source).startswith("candle_open:")
         )
 
-    @staticmethod
-    def _fallback_latency_hits(latency_source_counts: dict[str, int]) -> int:
+    @classmethod
+    def _fallback_latency_hits(cls, latency_source_counts: dict[str, int]) -> int:
         return sum(
-            int(count or 0)
+            cls._safe_int(count)
             for source, count in (latency_source_counts or {}).items()
             if str(source).startswith("fallback_slippage:")
         )
@@ -135,14 +150,14 @@ class StrategyV2StressReplayAssessmentService:
         if not critical_scenarios and worst_scenario not in {"", "stressed_cost"}:
             critical_scenarios = [worst_scenario]
 
-        min_exec = float(self.settings.stress_true_replay_min_execution_fill_coverage)
-        min_latency = float(self.settings.stress_true_replay_min_latency_candle_coverage)
-        min_path = float(self.settings.stress_true_replay_min_candle_path_coverage)
-        min_compared = int(self.settings.stress_true_replay_min_scenarios_compared)
+        min_exec = self._safe_float(self.settings.stress_true_replay_min_execution_fill_coverage, 0.85)
+        min_latency = self._safe_float(self.settings.stress_true_replay_min_latency_candle_coverage, 0.80)
+        min_path = self._safe_float(self.settings.stress_true_replay_min_candle_path_coverage, 0.90)
+        min_compared = self._safe_int(self.settings.stress_true_replay_min_scenarios_compared, 2)
 
         summary_counts = dict(stress_replay_output_artifacts.get("summary_counts") or {})
         scenario_outputs = dict(stress_replay_output_artifacts.get("scenario_outputs") or {})
-        scenarios_compared = int(summary_counts.get("scenarios_compared", 0) or 0)
+        scenarios_compared = self._safe_int(summary_counts.get("scenarios_compared", 0))
         available_outputs = [
             name
             for name, row in scenario_outputs.items()
@@ -229,7 +244,7 @@ class StrategyV2StressReplayAssessmentService:
         lineage_audit = dict(metrics_payload.get("lineage_audit") or {})
         summary_counts = dict(artifacts_payload.get("summary_counts") or {})
         lineage_summary = dict(artifacts_payload.get("lineage_summary") or {})
-        scenarios_compared = int(summary_counts.get("scenarios_compared", 0) or 0)
+        scenarios_compared = cls._safe_int(summary_counts.get("scenarios_compared", 0))
         available = bool(artifacts_payload.get("available", False)) and scenarios_compared > 0
         selected_trial_writer_source = str(lineage_audit.get("selected_trial_writer_source", "unknown"))
         selected_trial_selection_rule = str(lineage_audit.get("selected_trial_selection_rule", ""))
@@ -265,8 +280,8 @@ class StrategyV2StressReplayAssessmentService:
             "compared_scenarios": list(lineage_summary.get("compared_scenarios") or []),
             "scenarios_with_lineage": list(lineage_summary.get("scenarios_with_lineage") or []),
             "worker_modes": list(lineage_summary.get("worker_modes") or []),
-            "input_batch_count": int(lineage_summary.get("input_batch_count", 0) or 0),
-            "input_trade_rows": int(lineage_summary.get("input_trade_rows", 0) or 0),
+            "input_batch_count": cls._safe_int(lineage_summary.get("input_batch_count", 0)),
+            "input_trade_rows": cls._safe_int(lineage_summary.get("input_trade_rows", 0)),
             "selected_trial_writer_source": selected_trial_writer_source,
             "selected_trial_selection_rule": selected_trial_selection_rule,
             "selected_trial_from_runtime_proxy": selected_trial_from_runtime_proxy,
@@ -386,7 +401,7 @@ class StrategyV2StressReplayAssessmentService:
             "replay_derived_worst_scenario_divergence_reason": worst_scenario_divergence_reason,
             "replay_derived_worst_scenario_has_output_lineage": worst_scenario_has_output_lineage,
             "replay_output_compared_scenarios": replay_output_compared_scenarios,
-            "replay_output_input_trade_rows": int(lineage_summary.get("input_trade_rows", 0) or 0),
+            "replay_output_input_trade_rows": cls._safe_int(lineage_summary.get("input_trade_rows", 0)),
             "approval_warning_locked": approval_warning_locked,
             "approval_warning_code": approval_warning_code,
             "approval_warning_message": approval_warning_message,
@@ -644,19 +659,19 @@ class StrategyV2StressReplayAssessmentService:
         sample_counts = dict(stress_validation.get("sample_counts") or {})
         lineage_sample_counts = dict(stress_replay_lineage.get("sample_counts") or {})
         lineage_coverage = dict(stress_replay_lineage.get("coverage") or {})
-        eligible_closed_trades = int(
-            lineage_sample_counts.get("eligible_closed_trades", sample_counts.get("eligible_closed_trades", 0)) or 0
+        eligible_closed_trades = self._safe_int(
+            lineage_sample_counts.get("eligible_closed_trades", sample_counts.get("eligible_closed_trades", 0))
         )
-        execution_data_trades = int(
-            lineage_sample_counts.get("full_fill_path_trades", sample_counts.get("execution_data_trades", 0)) or 0
+        execution_data_trades = self._safe_int(
+            lineage_sample_counts.get("full_fill_path_trades", sample_counts.get("execution_data_trades", 0))
         )
-        estimate_only_trades = int(
-            lineage_sample_counts.get("estimate_only_trades", sample_counts.get("estimate_only_trades", 0)) or 0
+        estimate_only_trades = self._safe_int(
+            lineage_sample_counts.get("estimate_only_trades", sample_counts.get("estimate_only_trades", 0))
         )
-        latency_reference_trades = int(
-            lineage_sample_counts.get("latency_bar_trades", sample_counts.get("latency_reference_trades", 0)) or 0
+        latency_reference_trades = self._safe_int(
+            lineage_sample_counts.get("latency_bar_trades", sample_counts.get("latency_reference_trades", 0))
         )
-        shock_regime_trades = int(sample_counts.get("shock_regime_trades", 0) or 0)
+        shock_regime_trades = self._safe_int(sample_counts.get("shock_regime_trades", 0))
         latency_source_counts = dict(stress_validation.get("latency_source_counts") or {})
         candle_latency_hits = self._candle_latency_hits(latency_source_counts)
         fallback_latency_hits = self._fallback_latency_hits(latency_source_counts)
@@ -667,27 +682,29 @@ class StrategyV2StressReplayAssessmentService:
         catastrophic_scenarios = [
             name for name, row in scenario_statuses.items() if bool(row.get("catastrophic_loss_detected", False))
         ]
-        execution_fill_coverage = float(
-            lineage_coverage.get("execution_fill_coverage", self._ratio(execution_data_trades, eligible_closed_trades))
+        execution_fill_coverage = self._safe_float(
+            lineage_coverage.get("execution_fill_coverage"),
+            self._ratio(execution_data_trades, eligible_closed_trades),
         )
-        estimate_only_share = float(
-            lineage_coverage.get("estimate_only_share", self._ratio(estimate_only_trades, eligible_closed_trades))
+        estimate_only_share = self._safe_float(
+            lineage_coverage.get("estimate_only_share"),
+            self._ratio(estimate_only_trades, eligible_closed_trades),
         )
-        latency_candle_coverage = float(
-            lineage_coverage.get(
-                "latency_candle_coverage",
-                self._ratio(candle_latency_hits, max(eligible_closed_trades, latency_reference_trades)),
-            )
+        latency_candle_coverage = self._safe_float(
+            lineage_coverage.get("latency_candle_coverage"),
+            self._ratio(candle_latency_hits, max(eligible_closed_trades, latency_reference_trades)),
         )
         latency_fallback_share = self._ratio(fallback_latency_hits, max(eligible_closed_trades, latency_reference_trades))
         shock_regime_trade_share = self._ratio(shock_regime_trades, eligible_closed_trades)
-        candle_path_coverage = float(lineage_coverage.get("candle_path_coverage", 0.0))
+        candle_path_coverage = self._safe_float(lineage_coverage.get("candle_path_coverage", 0.0))
         lineage_contract = dict(stress_replay_lineage.get("lineage_contract") or {})
-        min_execution_fill_coverage = float(
-            lineage_contract.get("min_execution_fill_coverage", self.settings.stress_replay_lineage_min_execution_fill_coverage)
+        min_execution_fill_coverage = self._safe_float(
+            lineage_contract.get("min_execution_fill_coverage"),
+            self._safe_float(self.settings.stress_replay_lineage_min_execution_fill_coverage, 0.70),
         )
-        min_latency_candle_coverage = float(
-            lineage_contract.get("min_latency_candle_coverage", self.settings.stress_replay_lineage_min_latency_candle_coverage)
+        min_latency_candle_coverage = self._safe_float(
+            lineage_contract.get("min_latency_candle_coverage"),
+            self._safe_float(self.settings.stress_replay_lineage_min_latency_candle_coverage, 0.70),
         )
 
         full_replay_ready, replacement_recommended, decision, reason, blocked_by, next_steps = self._decision(

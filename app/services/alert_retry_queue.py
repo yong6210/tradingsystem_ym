@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from math import isfinite
 import random
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -23,6 +24,26 @@ class AlertRetryQueueService:
         self.alert_repo = alert_repo
         self.dispatcher = dispatcher
         self.settings = settings or get_settings()
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
 
     def capture_delivery_failure(
         self,
@@ -57,7 +78,7 @@ class AlertRetryQueueService:
                 payload=dict(payload or {}),
                 status="queued",
                 attempts=0,
-                max_attempts=max(1, int(self.settings.alert_retry_queue_max_attempts)),
+                max_attempts=max(1, self._safe_int(self.settings.alert_retry_queue_max_attempts, default=4)),
                 next_retry_ts=now + timedelta(seconds=self._next_delay_seconds(reason=str(item.get('reason', '')), attempt=0)),
                 last_reason=str(item.get("reason", "unknown"))[:200],
                 last_status_code=self._status_code(item),
@@ -169,10 +190,10 @@ class AlertRetryQueueService:
             "dead_letter_oldest_age_seconds": dead_letter_oldest_age_seconds,
             "next_retry_in_seconds": next_retry_in_seconds,
             "retry_policy": {
-                "max_attempts": int(self.settings.alert_retry_queue_max_attempts),
-                "retry_backoff_seconds": float(self.settings.alert_retry_queue_backoff_seconds),
-                "retry_jitter_seconds": float(self.settings.alert_retry_queue_jitter_seconds),
-                "circuit_cooldown_seconds": int(self.settings.alert_circuit_breaker_cooldown_seconds),
+                "max_attempts": self._safe_int(self.settings.alert_retry_queue_max_attempts, default=4),
+                "retry_backoff_seconds": self._safe_float(self.settings.alert_retry_queue_backoff_seconds, default=30.0),
+                "retry_jitter_seconds": self._safe_float(self.settings.alert_retry_queue_jitter_seconds),
+                "circuit_cooldown_seconds": self._safe_int(self.settings.alert_circuit_breaker_cooldown_seconds, default=90),
             },
         }
 
@@ -224,10 +245,10 @@ class AlertRetryQueueService:
 
     def _next_delay_seconds(self, *, reason: str, attempt: int) -> float:
         if reason == "circuit_open":
-            return float(max(0, int(self.settings.alert_circuit_breaker_cooldown_seconds)))
+            return float(max(0, self._safe_int(self.settings.alert_circuit_breaker_cooldown_seconds, default=90)))
 
-        base = max(0.0, float(self.settings.alert_retry_queue_backoff_seconds))
-        jitter = max(0.0, float(self.settings.alert_retry_queue_jitter_seconds))
+        base = max(0.0, self._safe_float(self.settings.alert_retry_queue_backoff_seconds, default=30.0))
+        jitter = max(0.0, self._safe_float(self.settings.alert_retry_queue_jitter_seconds))
         delay = base * (2 ** max(0, attempt))
         if jitter > 0:
             delay += random.uniform(0.0, jitter)

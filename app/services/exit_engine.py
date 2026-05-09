@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, ClassVar
 
 from app.core.enums import ExitReason, ExecutionFillStage
 from app.db.models import ExecutionFill, Plan
@@ -31,7 +31,7 @@ class ExitEvaluation:
 
 
 class ExitEngineService:
-    _explicit_reason_tokens = {
+    _explicit_reason_tokens: ClassVar[dict[str, ExitReason]] = {
         "risk_lock": ExitReason.RISK_LOCK_FLATTEN,
         "risk_lock_flatten": ExitReason.RISK_LOCK_FLATTEN,
         "session_end": ExitReason.SESSION_END_FLATTEN,
@@ -46,7 +46,7 @@ class ExitEngineService:
         "time_failure": ExitReason.TIME_FAILURE,
         "information_failure": ExitReason.INFORMATION_FAILURE,
     }
-    _leg_map = {
+    _leg_map: ClassVar[dict[str, ExitReason]] = {
         "tp1": ExitReason.TARGET_TP1,
         "tp2": ExitReason.TARGET_TP2,
         "tp3": ExitReason.TARGET_TP3,

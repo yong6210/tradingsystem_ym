@@ -4,9 +4,11 @@ import asyncio
 import hashlib
 import hmac
 import json
+from collections.abc import Mapping
 from decimal import Decimal
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import isfinite
 from typing import Any, AsyncIterator
 from urllib.parse import urlencode
 
@@ -23,7 +25,7 @@ class BinanceKline:
     close_time: datetime
     o: float
     h: float
-    l: float
+    l: float  # noqa: E741
     c: float
     v: float
     is_final: bool
@@ -100,11 +102,11 @@ class BinanceFuturesClient:
         settings = get_settings()
         self.rest_base_url = (rest_base_url or settings.binance_rest_base_url).rstrip("/")
         self.ws_base_url = (ws_base_url or settings.binance_ws_base_url).rstrip("/")
-        self.timeout_seconds = timeout_seconds or settings.binance_timeout_seconds
-        self.ws_receive_timeout_seconds = float(settings.binance_ws_receive_timeout_seconds)
+        self.timeout_seconds = self._safe_float(timeout_seconds if timeout_seconds is not None else settings.binance_timeout_seconds, 10.0)
+        self.ws_receive_timeout_seconds = self._safe_float(settings.binance_ws_receive_timeout_seconds, 30.0)
         self.api_key = api_key if api_key is not None else settings.binance_api_key
         self.api_secret = api_secret if api_secret is not None else settings.binance_api_secret
-        self.recv_window = int(recv_window if recv_window is not None else settings.binance_trade_recv_window)
+        self.recv_window = self._safe_int(recv_window if recv_window is not None else settings.binance_trade_recv_window, 5000)
         self.live_trade_enabled = (
             bool(live_trade_enabled) if live_trade_enabled is not None else bool(settings.binance_trade_live_enabled)
         )
@@ -130,25 +132,41 @@ class BinanceFuturesClient:
         )
 
     @staticmethod
+    def _try_parse_kline_row(symbol: str, interval: str, row: list[Any]) -> BinanceKline | None:
+        try:
+            parsed = BinanceFuturesClient._parse_kline_row(symbol, interval, row)
+        except (TypeError, ValueError, OverflowError, IndexError):
+            return None
+        if min(parsed.o, parsed.h, parsed.l, parsed.c) <= 0.0:
+            return None
+        return parsed
+
+    @staticmethod
     def _parse_funding_rate_row(symbol: str, row: dict[str, Any]) -> BinanceFundingRate:
-        ts_ms = int(row.get("fundingTime") or row.get("time") or 0)
+        ts_ms = BinanceFuturesClient._safe_int(row.get("fundingTime") or row.get("time"))
+        mark_price = None
+        if row.get("markPrice") not in {None, ""}:
+            mark_price = BinanceFuturesClient._safe_float(row.get("markPrice"))
         return BinanceFundingRate(
             symbol=symbol.upper(),
             ts=BinanceFuturesClient._to_dt(ts_ms),
-            funding_rate=float(row.get("fundingRate") or 0.0),
-            mark_price=float(row.get("markPrice")) if row.get("markPrice") not in {None, ""} else None,
+            funding_rate=BinanceFuturesClient._safe_float(row.get("fundingRate")),
+            mark_price=mark_price,
             raw=dict(row),
         )
 
     @staticmethod
     def _parse_open_interest_hist_row(symbol: str, period: str, row: dict[str, Any]) -> BinanceOpenInterestStat:
-        ts_ms = int(row.get("timestamp") or row.get("time") or 0)
+        ts_ms = BinanceFuturesClient._safe_int(row.get("timestamp") or row.get("time"))
+        open_interest_value = None
+        if row.get("sumOpenInterestValue") not in {None, ""}:
+            open_interest_value = BinanceFuturesClient._safe_float(row.get("sumOpenInterestValue"))
         return BinanceOpenInterestStat(
             symbol=symbol.upper(),
             period=period,
             ts=BinanceFuturesClient._to_dt(ts_ms),
-            open_interest=float(row.get("sumOpenInterest") or row.get("openInterest") or 0.0),
-            open_interest_value=float(row.get("sumOpenInterestValue")) if row.get("sumOpenInterestValue") not in {None, ""} else None,
+            open_interest=BinanceFuturesClient._safe_float(row.get("sumOpenInterest") or row.get("openInterest")),
+            open_interest_value=open_interest_value,
             raw=dict(row),
         )
 
@@ -157,31 +175,32 @@ class BinanceFuturesClient:
         return BinanceBasisKline(
             symbol=symbol.upper(),
             interval=interval,
-            open_time=BinanceFuturesClient._to_dt(int(row[0])),
-            basis_open=float(row[1]),
-            basis_high=float(row[2]),
-            basis_low=float(row[3]),
-            basis_close=float(row[4]),
+            open_time=BinanceFuturesClient._to_dt(BinanceFuturesClient._safe_int(row[0] if len(row) > 0 else 0)),
+            basis_open=BinanceFuturesClient._safe_float(row[1] if len(row) > 1 else 0.0),
+            basis_high=BinanceFuturesClient._safe_float(row[2] if len(row) > 2 else 0.0),
+            basis_low=BinanceFuturesClient._safe_float(row[3] if len(row) > 3 else 0.0),
+            basis_close=BinanceFuturesClient._safe_float(row[4] if len(row) > 4 else 0.0),
             raw=list(row),
         )
 
     @staticmethod
     def _parse_force_order_event(payload: dict[str, Any]) -> BinanceLiquidationOrder | None:
-        data = dict(payload.get("data") or payload)
+        payload_map = BinanceFuturesClient._safe_dict(payload)
+        data = BinanceFuturesClient._safe_dict(payload_map.get("data")) or payload_map
         if str(data.get("e") or "").lower() != "forceorder":
             return None
-        order = dict(data.get("o") or {})
-        ts_ms = int(order.get("T") or data.get("E") or 0)
+        order = BinanceFuturesClient._safe_dict(data.get("o"))
+        ts_ms = BinanceFuturesClient._safe_int(order.get("T") or data.get("E"))
         if ts_ms <= 0:
             return None
         return BinanceLiquidationOrder(
             symbol=str(order.get("s") or "").upper(),
             side=str(order.get("S") or "").upper(),
             ts=BinanceFuturesClient._to_dt(ts_ms),
-            price=float(order.get("p") or 0.0),
-            avg_price=float(order.get("ap") or 0.0),
-            qty=float(order.get("q") or 0.0),
-            filled_qty=float(order.get("z") or order.get("l") or 0.0),
+            price=BinanceFuturesClient._safe_float(order.get("p")),
+            avg_price=BinanceFuturesClient._safe_float(order.get("ap")),
+            qty=BinanceFuturesClient._safe_float(order.get("q")),
+            filled_qty=BinanceFuturesClient._safe_float(order.get("z") or order.get("l")),
             status=str(order.get("X") or ""),
             raw=data,
         )
@@ -189,6 +208,26 @@ class BinanceFuturesClient:
     @staticmethod
     def _timestamp_ms() -> int:
         return int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        return parsed if isfinite(parsed) else float(default)
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return int(default)
+        return int(parsed) if isfinite(parsed) else int(default)
+
+    @staticmethod
+    def _safe_dict(value: Any) -> dict[str, Any]:
+        return dict(value) if isinstance(value, Mapping) else {}
 
     @staticmethod
     def _format_decimal(value: float | int | str | Decimal) -> str:
@@ -287,21 +326,21 @@ class BinanceFuturesClient:
             for item in list(row.get("filters") or [])
             if isinstance(item, dict)
         }
-        lot_size = dict(filters.get("LOT_SIZE") or {})
-        price_filter = dict(filters.get("PRICE_FILTER") or {})
+        lot_size = BinanceFuturesClient._safe_dict(filters.get("LOT_SIZE"))
+        price_filter = BinanceFuturesClient._safe_dict(filters.get("PRICE_FILTER"))
 
-        quantity_step = float(lot_size.get("stepSize") or 0.0)
-        min_quantity = float(lot_size.get("minQty") or quantity_step or 0.0)
+        quantity_step = BinanceFuturesClient._safe_float(lot_size.get("stepSize"))
+        min_quantity = BinanceFuturesClient._safe_float(lot_size.get("minQty"), quantity_step)
         tick_size_raw = price_filter.get("tickSize")
-        tick_size = float(tick_size_raw) if tick_size_raw not in {None, ""} else None
+        tick_size = BinanceFuturesClient._safe_float(tick_size_raw) if tick_size_raw not in {None, ""} else None
 
         return BinanceSymbolTradingRules(
             symbol=str(row.get("symbol") or "").upper(),
             quantity_step=quantity_step,
             min_quantity=min_quantity,
             tick_size=tick_size,
-            price_precision=int(row["pricePrecision"]) if row.get("pricePrecision") is not None else None,
-            quantity_precision=int(row["quantityPrecision"]) if row.get("quantityPrecision") is not None else None,
+            price_precision=BinanceFuturesClient._safe_int(row.get("pricePrecision")) if row.get("pricePrecision") is not None else None,
+            quantity_precision=BinanceFuturesClient._safe_int(row.get("quantityPrecision")) if row.get("quantityPrecision") is not None else None,
             raw=dict(row),
         )
 
@@ -318,9 +357,10 @@ class BinanceFuturesClient:
         if not isinstance(symbol_rows, list):
             raise RuntimeError("binance_symbol_exchange_info_missing")
         for row in symbol_rows:
-            if str((row or {}).get("symbol") or "").upper() != normalized_symbol:
+            symbol_row = BinanceFuturesClient._safe_dict(row)
+            if str(symbol_row.get("symbol") or "").upper() != normalized_symbol:
                 continue
-            rules = self._parse_symbol_trading_rules_row(dict(row))
+            rules = self._parse_symbol_trading_rules_row(symbol_row)
             self._symbol_trading_rules_cache[normalized_symbol] = rules
             return rules
         raise RuntimeError(f"binance_symbol_exchange_info_not_found:{normalized_symbol}")
@@ -454,21 +494,21 @@ class BinanceFuturesClient:
 
     @staticmethod
     def normalize_position_risk_row(row: dict[str, Any]) -> dict[str, Any]:
-        update_ms = int(row.get("updateTime") or BinanceFuturesClient._timestamp_ms())
+        update_ms = BinanceFuturesClient._safe_int(row.get("updateTime"), default=BinanceFuturesClient._timestamp_ms())
         return {
             "position_key": f"{str(row.get('symbol') or '').upper()}:{BinanceFuturesClient._normalize_position_side(row.get('positionSide'))}",
             "symbol": str(row.get("symbol") or "").upper(),
             "position_side": BinanceFuturesClient._normalize_position_side(row.get("positionSide")),
-            "position_amt": float(row.get("positionAmt") or 0.0),
-            "entry_price": float(row.get("entryPrice") or 0.0),
-            "break_even_price": float(row.get("breakEvenPrice") or 0.0),
-            "mark_price": float(row.get("markPrice") or 0.0),
-            "liquidation_price": float(row.get("liquidationPrice") or 0.0),
-            "unrealized_pnl": float(row.get("unRealizedProfit") or 0.0),
-            "notional": float(row.get("notional") or 0.0),
-            "leverage": int(float(row.get("leverage") or 0.0)),
+            "position_amt": BinanceFuturesClient._safe_float(row.get("positionAmt")),
+            "entry_price": BinanceFuturesClient._safe_float(row.get("entryPrice")),
+            "break_even_price": BinanceFuturesClient._safe_float(row.get("breakEvenPrice")),
+            "mark_price": BinanceFuturesClient._safe_float(row.get("markPrice")),
+            "liquidation_price": BinanceFuturesClient._safe_float(row.get("liquidationPrice")),
+            "unrealized_pnl": BinanceFuturesClient._safe_float(row.get("unRealizedProfit")),
+            "notional": BinanceFuturesClient._safe_float(row.get("notional")),
+            "leverage": BinanceFuturesClient._safe_int(row.get("leverage")),
             "margin_type": str(row.get("marginType") or ""),
-            "isolated_wallet": float(row.get("isolatedWallet") or 0.0),
+            "isolated_wallet": BinanceFuturesClient._safe_float(row.get("isolatedWallet")),
             "update_ts": BinanceFuturesClient._to_dt(update_ms),
             "raw": row,
         }
@@ -481,35 +521,39 @@ class BinanceFuturesClient:
             "position_key": f"{symbol}:{position_side}",
             "symbol": symbol,
             "position_side": position_side,
-            "position_amt": float(row.get("pa") or row.get("positionAmt") or 0.0),
-            "entry_price": float(row.get("ep") or row.get("entryPrice") or 0.0),
-            "break_even_price": float(row.get("bep") or row.get("breakEvenPrice") or 0.0),
-            "mark_price": float(row.get("mp") or row.get("markPrice") or 0.0),
-            "liquidation_price": float(row.get("lp") or row.get("liquidationPrice") or 0.0),
-            "unrealized_pnl": float(row.get("up") or row.get("unRealizedProfit") or 0.0),
-            "notional": float(row.get("notional") or 0.0),
-            "leverage": int(float(row.get("leverage") or 0.0)),
+            "position_amt": BinanceFuturesClient._safe_float(row.get("pa") or row.get("positionAmt")),
+            "entry_price": BinanceFuturesClient._safe_float(row.get("ep") or row.get("entryPrice")),
+            "break_even_price": BinanceFuturesClient._safe_float(row.get("bep") or row.get("breakEvenPrice")),
+            "mark_price": BinanceFuturesClient._safe_float(row.get("mp") or row.get("markPrice")),
+            "liquidation_price": BinanceFuturesClient._safe_float(row.get("lp") or row.get("liquidationPrice")),
+            "unrealized_pnl": BinanceFuturesClient._safe_float(row.get("up") or row.get("unRealizedProfit")),
+            "notional": BinanceFuturesClient._safe_float(row.get("notional")),
+            "leverage": BinanceFuturesClient._safe_int(row.get("leverage")),
             "margin_type": str(row.get("mt") or row.get("marginType") or ""),
-            "isolated_wallet": float(row.get("iw") or row.get("isolatedWallet") or 0.0),
+            "isolated_wallet": BinanceFuturesClient._safe_float(row.get("iw") or row.get("isolatedWallet")),
             "update_ts": BinanceFuturesClient._to_dt(event_ts_ms),
             "raw": row,
         }
 
     @staticmethod
     def normalize_user_stream_message(payload: dict[str, Any]) -> dict[str, Any]:
-        data = dict(payload.get("data") or payload)
+        payload_map = BinanceFuturesClient._safe_dict(payload)
+        data = BinanceFuturesClient._safe_dict(payload_map.get("data")) or payload_map
         event_type = str(data.get("e") or "")
-        event_ts_ms = int(data.get("E") or data.get("T") or BinanceFuturesClient._timestamp_ms())
+        event_ts_ms = BinanceFuturesClient._safe_int(
+            data.get("E") or data.get("T"),
+            default=BinanceFuturesClient._timestamp_ms(),
+        )
         event_ts = BinanceFuturesClient._to_dt(event_ts_ms).isoformat()
 
         if event_type == "ORDER_TRADE_UPDATE":
-            order = dict(data.get("o") or {})
+            order = BinanceFuturesClient._safe_dict(data.get("o"))
             return {
                 "kind": "order_trade_update",
                 "event_type": event_type,
                 "event_ts": event_ts,
                 "symbol": str(order.get("s") or "").upper(),
-                "order_id": int(order.get("i") or 0) or None,
+                "order_id": BinanceFuturesClient._safe_int(order.get("i")) or None,
                 "client_order_id": str(order.get("c") or ""),
                 "status": str(order.get("X") or ""),
                 "execution_type": str(order.get("x") or ""),
@@ -518,13 +562,13 @@ class BinanceFuturesClient:
                 "time_in_force": str(order.get("f") or ""),
                 "reduce_only": bool(order.get("R")),
                 "position_side": BinanceFuturesClient._normalize_position_side(order.get("ps")),
-                "last_fill_qty": float(order.get("l") or 0.0),
-                "last_fill_price": float(order.get("L") or 0.0),
-                "cumulative_fill_qty": float(order.get("z") or 0.0),
-                "original_qty": float(order.get("q") or 0.0),
-                "avg_price": float(order.get("ap") or 0.0),
-                "realized_pnl": float(order.get("rp") or 0.0),
-                "trade_id": int(order.get("t") or 0) or None,
+                "last_fill_qty": BinanceFuturesClient._safe_float(order.get("l")),
+                "last_fill_price": BinanceFuturesClient._safe_float(order.get("L")),
+                "cumulative_fill_qty": BinanceFuturesClient._safe_float(order.get("z")),
+                "original_qty": BinanceFuturesClient._safe_float(order.get("q")),
+                "avg_price": BinanceFuturesClient._safe_float(order.get("ap")),
+                "realized_pnl": BinanceFuturesClient._safe_float(order.get("rp")),
+                "trade_id": BinanceFuturesClient._safe_int(order.get("t")) or None,
                 "raw": data,
             }
 
@@ -534,7 +578,7 @@ class BinanceFuturesClient:
                 "event_type": event_type,
                 "event_ts": event_ts,
                 "symbol": str(data.get("s") or "").upper(),
-                "order_id": int(data.get("i") or 0) or None,
+                "order_id": BinanceFuturesClient._safe_int(data.get("i")) or None,
                 "client_order_id": str(data.get("c") or ""),
                 "status": str(data.get("X") or ""),
                 "execution_type": str(data.get("x") or ""),
@@ -543,21 +587,22 @@ class BinanceFuturesClient:
                 "time_in_force": str(data.get("f") or ""),
                 "reduce_only": bool(data.get("R")),
                 "position_side": BinanceFuturesClient._normalize_position_side(data.get("ps")),
-                "last_fill_qty": float(data.get("l") or 0.0),
-                "last_fill_price": float(data.get("L") or 0.0),
-                "cumulative_fill_qty": float(data.get("z") or 0.0),
-                "original_qty": float(data.get("q") or 0.0),
-                "avg_price": float(data.get("ap") or 0.0),
-                "realized_pnl": float(data.get("rp") or 0.0),
-                "trade_id": int(data.get("t") or 0) or None,
+                "last_fill_qty": BinanceFuturesClient._safe_float(data.get("l")),
+                "last_fill_price": BinanceFuturesClient._safe_float(data.get("L")),
+                "cumulative_fill_qty": BinanceFuturesClient._safe_float(data.get("z")),
+                "original_qty": BinanceFuturesClient._safe_float(data.get("q")),
+                "avg_price": BinanceFuturesClient._safe_float(data.get("ap")),
+                "realized_pnl": BinanceFuturesClient._safe_float(data.get("rp")),
+                "trade_id": BinanceFuturesClient._safe_int(data.get("t")) or None,
                 "raw": data,
             }
 
         if event_type == "ACCOUNT_UPDATE":
-            account = dict(data.get("a") or {})
+            account = BinanceFuturesClient._safe_dict(data.get("a"))
             positions = [
                 BinanceFuturesClient.normalize_account_update_position(row, event_ts_ms=event_ts_ms)
                 for row in list(account.get("P") or [])
+                if isinstance(row, Mapping)
             ]
             return {
                 "kind": "account_update",
@@ -599,7 +644,12 @@ class BinanceFuturesClient:
             response.raise_for_status()
             payload = response.json()
 
-        return [self._parse_kline_row(symbol.upper(), interval, row) for row in payload]
+        rows = []
+        for row in payload:
+            parsed = self._try_parse_kline_row(symbol.upper(), interval, row)
+            if parsed is not None:
+                rows.append(parsed)
+        return rows
 
     def fetch_order_book(self, symbol: str, limit: int = 100) -> dict[str, Any]:
         allowed_limits = [5, 10, 20, 50, 100, 500, 1000]
@@ -701,7 +751,7 @@ class BinanceFuturesClient:
             symbol = str(row.get("symbol", ""))
             if not symbol.endswith("USDC"):
                 continue
-            quote_vol = float(row.get("quoteVolume", 0.0))
+            quote_vol = self._safe_float(row.get("quoteVolume"))
             candidates.append((symbol, quote_vol))
 
         candidates.sort(key=lambda x: x[1], reverse=True)
@@ -734,16 +784,27 @@ class BinanceFuturesClient:
                 if not symbol:
                     continue
 
+                open_ms = self._safe_int(k.get("t"))
+                close_ms = self._safe_int(k.get("T"))
+                if open_ms <= 0 or close_ms <= 0:
+                    continue
+                o = self._safe_float(k.get("o"))
+                h = self._safe_float(k.get("h"))
+                low = self._safe_float(k.get("l"))
+                c = self._safe_float(k.get("c"))
+                if min(o, h, low, c) <= 0.0:
+                    continue
+
                 yield BinanceKline(
                     symbol=symbol,
                     interval=str(k.get("i", interval)),
-                    open_time=self._to_dt(int(k.get("t"))),
-                    close_time=self._to_dt(int(k.get("T"))),
-                    o=float(k.get("o", 0.0)),
-                    h=float(k.get("h", 0.0)),
-                    l=float(k.get("l", 0.0)),
-                    c=float(k.get("c", 0.0)),
-                    v=float(k.get("v", 0.0)),
+                    open_time=self._to_dt(open_ms),
+                    close_time=self._to_dt(close_ms),
+                    o=o,
+                    h=h,
+                    l=low,
+                    c=c,
+                    v=max(self._safe_float(k.get("v")), 0.0),
                     is_final=bool(k.get("x", False)),
                 )
 

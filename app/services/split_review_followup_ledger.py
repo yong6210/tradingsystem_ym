@@ -210,7 +210,8 @@ def _relative_path(path: Path) -> str:
 def split_review_followup_ledger_path(*, ledger_path: str | Path | None = None) -> Path:
     if ledger_path is None:
         return DEFAULT_LEDGER_PATH
-    return Path(ledger_path)
+    path = Path(ledger_path)
+    return path if path.is_absolute() else ROOT_DIR / path
 
 
 def _followup_command(*, action: str, symbol: str, universe: str, days: int) -> str:

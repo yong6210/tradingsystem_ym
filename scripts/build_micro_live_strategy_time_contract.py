@@ -13,18 +13,38 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 CACHE_DIR = ROOT_DIR / "reports" / "validation" / "historical_walk_forward_cache"
 
 
-def _parse_ts(value: Any) -> datetime:
-    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _realized_r(row: dict[str, Any]) -> float:
     value = row.get("replayed_realized_r")
     if value is None:
         value = row.get("final_exit_realized_r")
-    return float(value or 0.0)
+    return _safe_float(value)
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,8 +66,10 @@ def main() -> int:
     payload = json.loads(cache_path.read_text(encoding="utf-8"))
     rows = [dict(row) for row in list(payload.get("trade_rows") or [])]
 
-    def bucket_key(row: dict[str, Any]) -> tuple[str, str, str, str, tuple[tuple[str, int], ...]]:
+    def bucket_key(row: dict[str, Any]) -> tuple[str, str, str, str, tuple[tuple[str, int], ...]] | None:
         ts = _parse_ts(row.get("generated_ts") or row.get("closed_ts"))
+        if ts is None:
+            return None
         symbol = str(row.get("symbol") or "").strip().upper()
         family = str(row.get("strategy_family") or "").strip().lower()
         entry_model = str(row.get("entry_model") or "").strip().upper()
@@ -82,9 +104,11 @@ def main() -> int:
             ]
         return (symbol, family, entry_model, direction, tuple(fields))
 
-    grouped: dict[tuple[str, str, str, str, int, int, int], list[dict[str, Any]]] = defaultdict(list)
+    grouped: dict[tuple[str, str, str, str, tuple[tuple[str, int], ...]], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         key = bucket_key(row)
+        if key is None:
+            continue
         grouped[key].append(row)
 
     min_trades = max(int(args.min_trades), 1)
@@ -123,7 +147,7 @@ def main() -> int:
     print(
         json.dumps(
             {
-                "output_path": str(output_path.relative_to(ROOT_DIR)),
+                "output_path": _display_path(output_path),
                 "blocked_bucket_count": len(blocked_buckets),
                 "source_cache_key": str(args.cache_key).strip(),
                 "min_trades": min_trades,

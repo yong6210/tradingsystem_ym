@@ -136,6 +136,73 @@ def test_ingest_binance_user_stream_order_trade_update_maps_to_entry() -> None:
         assert refreshed.state == PlanState.ENTERED.value
 
 
+def test_ingest_binance_user_stream_malformed_fill_numbers_do_not_crash() -> None:
+    init_db()
+    symbol = f"BUS{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 9}USDC"
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        plan = _seed_plan(db, symbol=symbol, plan_id=f"{symbol}_bad_fill_plan", direction="long", state="ARMED")
+
+        engine.binance_order_repo.upsert(
+            client_order_id="usr-bad-fill-1",
+            exchange_order_id=92345,
+            plan_id=plan.plan_id,
+            symbol=symbol,
+            side="BUY",
+            order_type="LIMIT",
+            status="NEW",
+            reduce_only=False,
+            requested_live=True,
+            live_enabled=True,
+            test_order=False,
+            price=100.0,
+            orig_qty=0.01,
+            executed_qty=0.0,
+            time_in_force="GTC",
+            last_event_type="submit",
+            last_trade_id=None,
+            last_event_ts=datetime.now(timezone.utc),
+            raw={"seed": True},
+        )
+        db.commit()
+        engine.market_data.binance.fetch_position_risk = lambda symbol=None: []  # type: ignore[assignment]
+
+        result = engine.ingest_binance_user_stream_event(
+            payload={
+                "e": "ORDER_TRADE_UPDATE",
+                "E": "bad-event-ts",
+                "o": {
+                    "s": symbol,
+                    "i": 92345,
+                    "c": "usr-bad-fill-1",
+                    "S": "BUY",
+                    "o": "LIMIT",
+                    "f": "GTC",
+                    "X": "FILLED",
+                    "x": "TRADE",
+                    "R": False,
+                    "ps": "LONG",
+                    "l": "bad-qty",
+                    "L": "bad-price",
+                    "z": "bad-cumulative",
+                    "q": "bad-original",
+                    "ap": "bad-average",
+                    "rp": "bad-pnl",
+                    "t": "bad-trade-id",
+                },
+            }
+        )
+
+        assert result["accepted"] is True
+        assert result["fill_ingest"] is None
+        assert result["order_snapshot"]["client_order_id"] == "usr-bad-fill-1"
+
+        db.expire_all()
+        refreshed = db.get(Plan, plan.plan_id)
+        assert refreshed is not None
+        assert refreshed.state == PlanState.ARMED.value
+
+
 def test_ingest_binance_user_stream_reduce_only_trade_can_close_plan() -> None:
     init_db()
     symbol = f"BUS{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 1}USDC"

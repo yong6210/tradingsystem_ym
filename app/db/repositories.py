@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Iterable
+from typing import ClassVar, Iterable
 from uuid import uuid4
 
 from sqlalchemy import delete, desc, func, or_, select
@@ -485,11 +485,11 @@ class ZoneRepository:
 
 
 class PlanRepository:
-    _REPLACEABLE_STATES = {
+    _REPLACEABLE_STATES: ClassVar[set[str]] = {
         PlanState.PLANNED.value,
         PlanState.ARMED.value,
     }
-    _ROUTED_SUBMISSION_STATES = {
+    _ROUTED_SUBMISSION_STATES: ClassVar[set[str]] = {
         "CREATED",
         "SUBMITTED",
         "ACKNOWLEDGED",
@@ -972,7 +972,7 @@ class OrderIntentRepository:
 
 
 class OrderSubmissionRepository:
-    _OPEN_STATES = {
+    _OPEN_STATES: ClassVar[set[str]] = {
         "CREATED",
         "SUBMITTED",
         "ACKNOWLEDGED",

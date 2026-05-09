@@ -61,6 +61,13 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
 def _required_json(response: Any, method: str, path: str) -> dict[str, Any]:
     if response.status_code != 200:
         raise RuntimeError(f"{method} {path} failed with HTTP {response.status_code}: {response.text}")
@@ -844,7 +851,7 @@ def main() -> int:
         ts = generated_at.strftime("%Y%m%dT%H%M%SZ")
         report_path = ROOT_DIR / args.report_dir / f"operator_surface_divergence_{args.symbol.upper()}_{ts}.md"
         _write_report(report_path, payload)
-        payload["report_path"] = str(report_path.relative_to(ROOT_DIR))
+        payload["report_path"] = _display_path(report_path)
 
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     return 0

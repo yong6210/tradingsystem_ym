@@ -28,6 +28,33 @@ def test_position_sizing_full_a_grade_risk() -> None:
     assert result["blocked_reason"] is None
 
 
+def test_position_sizing_tolerates_malformed_numeric_settings() -> None:
+    settings = get_settings().model_copy(deep=True)
+    settings.sizing_grade_a_r = "bad-grade"
+    settings.sizing_regime_factor_trend = "inf"
+    settings.sizing_reaction_factor_confirmed = "nan"
+    settings.sizing_thesis_factor_none = "bad-thesis"
+    settings.sizing_execution_factor_limit = "bad-execution"
+    service = PositionSizingService(settings)
+
+    result = service.evaluate(
+        PositionSizingInput(
+            strategy_family="trend_continuation",
+            strategy_grade="A",
+            regime="trend",
+            reaction_classification="acceptance_confirmed",
+            confirm_only=False,
+            entry_model=EntryModel.LIMIT.value,
+            active_thesis_clusters="inf",
+            transition_state="none",
+        )
+    )
+
+    assert isclose(result["final_risk_r"], 1.0)
+    assert result["active_thesis_clusters"] == 0
+    assert result["blocked"] is False
+
+
 def test_position_sizing_composes_clamps_multiplicatively() -> None:
     service = PositionSizingService()
     settings = get_settings()

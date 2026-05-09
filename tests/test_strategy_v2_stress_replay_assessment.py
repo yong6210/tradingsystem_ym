@@ -396,3 +396,51 @@ def test_stress_replay_assessment_holds_true_runner_when_threshold_lineage_audit
         payload["deployment_recommendation"]["approval_cross_display"]["approval_warning_code"]
         == "proxy_selected_trial_against_replay_backed_worst_scenario"
     )
+
+
+def test_stress_replay_assessment_tolerates_malformed_threshold_settings_and_counts() -> None:
+    service = StrategyV2StressReplayAssessmentService()
+    original_values = {
+        "stress_true_replay_min_execution_fill_coverage": service.settings.stress_true_replay_min_execution_fill_coverage,
+        "stress_true_replay_min_latency_candle_coverage": service.settings.stress_true_replay_min_latency_candle_coverage,
+        "stress_true_replay_min_candle_path_coverage": service.settings.stress_true_replay_min_candle_path_coverage,
+        "stress_true_replay_min_scenarios_compared": service.settings.stress_true_replay_min_scenarios_compared,
+        "stress_replay_lineage_min_execution_fill_coverage": service.settings.stress_replay_lineage_min_execution_fill_coverage,
+        "stress_replay_lineage_min_latency_candle_coverage": service.settings.stress_replay_lineage_min_latency_candle_coverage,
+    }
+    try:
+        service.settings.stress_true_replay_min_execution_fill_coverage = float("inf")
+        service.settings.stress_true_replay_min_latency_candle_coverage = "bad"
+        service.settings.stress_true_replay_min_candle_path_coverage = "bad"
+        service.settings.stress_true_replay_min_scenarios_compared = "bad"
+        service.settings.stress_replay_lineage_min_execution_fill_coverage = "bad"
+        service.settings.stress_replay_lineage_min_latency_candle_coverage = float("inf")
+
+        payload = service.generate(
+            symbol="BTCUSDC",
+            version="v2",
+            stress_validation={
+                "sample_counts": {"eligible_closed_trades": "bad", "shock_regime_trades": float("inf")},
+                "latency_source_counts": {"candle_open:1": "bad", "fallback_slippage:1": float("inf")},
+                "deployment_recommendation": {"scenario_statuses": {}},
+            },
+            stress_replay_lineage={
+                "available": True,
+                "sample_counts": {"eligible_closed_trades": "bad", "full_fill_path_trades": float("inf")},
+                "coverage": {"execution_fill_coverage": "bad", "latency_candle_coverage": float("inf")},
+                "lineage_contract": {"min_execution_fill_coverage": "bad", "min_latency_candle_coverage": float("inf")},
+            },
+            stress_replay_output_artifacts={"available": True, "comparison_ready": True, "summary_counts": {"scenarios_compared": "bad"}},
+            write_report=False,
+        )
+
+        assert payload["available"] is False
+        assert payload["readiness_gates"]["min_execution_fill_coverage"] == 0.7
+        assert payload["readiness_gates"]["min_latency_candle_coverage"] == 0.7
+        assert payload["true_runner_readiness"]["gates"]["min_execution_fill_coverage"] == 0.85
+        assert payload["true_runner_readiness"]["gates"]["min_latency_candle_coverage"] == 0.8
+        assert payload["true_runner_readiness"]["gates"]["min_candle_path_coverage"] == 0.9
+        assert payload["true_runner_readiness"]["gates"]["min_scenarios_compared"] == 2
+    finally:
+        for key, value in original_values.items():
+            setattr(service.settings, key, value)

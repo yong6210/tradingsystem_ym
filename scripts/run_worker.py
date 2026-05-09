@@ -47,6 +47,13 @@ def _parse_csv(raw: str) -> list[str]:
     return [item.strip().upper() for item in raw.split(",") if item.strip()]
 
 
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def _worker_role(args: argparse.Namespace) -> str:
     if bool(args.ws_stream):
         return "ws"
@@ -133,18 +140,20 @@ def run_ws_stream(args: argparse.Namespace) -> dict:
                     "started_at": str(stats.get("started_at") or ws_started_at),
                     "symbols": symbols,
                     "intervals": intervals,
-                    "processed_messages": int(stats.get("processed_messages", 0) or 0),
-                    "refresh_calls": int(stats.get("refresh_calls", 0) or 0),
-                    "auto_route_calls": int(stats.get("auto_route_calls", 0) or 0),
-                    "auto_route_submit_calls": int(stats.get("auto_route_submit_calls", 0) or 0),
-                    "reconnects": int(stats.get("reconnects", 0) or 0),
-                    "ingest_errors": int(stats.get("ingest_errors", 0) or 0),
-                    "skipped_reverse_timestamp": int(stats.get("skipped_reverse_timestamp", 0) or 0),
-                    "refresh_errors": int(stats.get("refresh_errors", 0) or 0),
-                    "auto_route_errors": int(stats.get("auto_route_errors", 0) or 0),
+                    "processed_messages": _safe_int(stats.get("processed_messages")),
+                    "refresh_calls": _safe_int(stats.get("refresh_calls")),
+                    "auto_route_calls": _safe_int(stats.get("auto_route_calls")),
+                    "auto_route_submit_calls": _safe_int(stats.get("auto_route_submit_calls")),
+                    "reconnects": _safe_int(stats.get("reconnects")),
+                    "ingest_errors": _safe_int(stats.get("ingest_errors")),
+                    "skipped_reverse_timestamp": _safe_int(stats.get("skipped_reverse_timestamp")),
+                    "refresh_errors": _safe_int(stats.get("refresh_errors")),
+                    "auto_route_errors": _safe_int(stats.get("auto_route_errors")),
+                    "progress_callback_errors": _safe_int(stats.get("progress_callback_errors")),
                     "last_ingest_error": str(stats.get("last_ingest_error") or ""),
                     "last_refresh_error": str(stats.get("last_refresh_error") or ""),
                     "last_auto_route_error": str(stats.get("last_auto_route_error") or ""),
+                    "last_progress_callback_error": str(stats.get("last_progress_callback_error") or ""),
                     "last_stream_error": str(stats.get("last_stream_error") or ""),
                 },
             )
@@ -187,10 +196,25 @@ def run_ws_stream(args: argparse.Namespace) -> dict:
             "ws",
             status="ok",
             details={
-                "processed_messages": int(payload.get("processed_messages", 0) or 0),
-                "refresh_calls": int(payload.get("refresh_calls", 0) or 0),
-                "auto_route_calls": int(payload.get("auto_route_calls", 0) or 0),
-                "auto_route_submit_calls": int(payload.get("auto_route_submit_calls", 0) or 0),
+                "phase": "completed",
+                "started_at": ws_started_at,
+                "symbols": symbols,
+                "intervals": intervals,
+                "processed_messages": _safe_int(payload.get("processed_messages")),
+                "refresh_calls": _safe_int(payload.get("refresh_calls")),
+                "auto_route_calls": _safe_int(payload.get("auto_route_calls")),
+                "auto_route_submit_calls": _safe_int(payload.get("auto_route_submit_calls")),
+                "reconnects": _safe_int(payload.get("reconnects")),
+                "ingest_errors": _safe_int(payload.get("ingest_errors")),
+                "skipped_reverse_timestamp": _safe_int(payload.get("skipped_reverse_timestamp")),
+                "refresh_errors": _safe_int(payload.get("refresh_errors")),
+                "auto_route_errors": _safe_int(payload.get("auto_route_errors")),
+                "progress_callback_errors": _safe_int(payload.get("progress_callback_errors")),
+                "last_ingest_error": str(payload.get("last_ingest_error") or ""),
+                "last_refresh_error": str(payload.get("last_refresh_error") or ""),
+                "last_auto_route_error": str(payload.get("last_auto_route_error") or ""),
+                "last_progress_callback_error": str(payload.get("last_progress_callback_error") or ""),
+                "last_stream_error": str(payload.get("last_stream_error") or ""),
             },
         )
         payload["ts"] = datetime.now(timezone.utc).isoformat()

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
+from math import isfinite
 from statistics import fmean, pstdev
 from typing import Any
 
@@ -62,6 +62,26 @@ class PortfolioRiskOverlayService:
         self._corr_cache: dict[tuple[str, str], float | None] = {}
         self._returns_cache: dict[str, dict[datetime, float]] = {}
         self._vol_cache: dict[str, float] = {}
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
 
     def _reset_cache(self) -> None:
         self._corr_cache.clear()
@@ -304,7 +324,7 @@ class PortfolioRiskOverlayService:
         if not self._transition_edge_variant_enabled_for_row(validity):
             row["transition_edge_variant_risk_multiplier"] = None
             return
-        multiplier = clamp(float(self.settings.transition_edge_variant_risk_multiplier), 0.0, 1.0)
+        multiplier = clamp(self._safe_float(self.settings.transition_edge_variant_risk_multiplier, default=0.35), 0.0, 1.0)
         base_risk_r = float(row.get("recommended_risk_r", 0.0) or 0.0)
         adjusted_risk_r = round(base_risk_r * multiplier, 4)
         row["transition_edge_variant_risk_multiplier"] = round(multiplier, 4)
@@ -345,18 +365,18 @@ class PortfolioRiskOverlayService:
 
         recommended_risk_r = float(row.get("recommended_risk_r", 0.0) or 0.0)
         expected_ev_r = float(row.get("expected_ev_r", 0.0) or 0.0)
-        if recommended_risk_r <= 0.0 or expected_ev_r < float(self.settings.quality_gate_softening_min_expected_ev_r):
+        if recommended_risk_r <= 0.0 or expected_ev_r < self._safe_float(self.settings.quality_gate_softening_min_expected_ev_r):
             return False
 
         gap = None
         if reason == "risk_budget_below_min":
-            threshold = float(self.settings.portfolio_overlay_min_risk_budget_score)
+            threshold = self._safe_float(self.settings.portfolio_overlay_min_risk_budget_score, default=35.0)
             gap = max(0.0, threshold - float(row.get("risk_budget_score", 0.0) or 0.0))
-            if gap > float(self.settings.quality_gate_softening_max_risk_budget_gap):
+            if gap > self._safe_float(self.settings.quality_gate_softening_max_risk_budget_gap, default=10.0):
                 return False
         elif reason == "adjusted_score_non_positive":
             gap = max(0.0, 0.0 - float(row.get("adjusted_rank_score", 0.0) or 0.0))
-            if gap > float(self.settings.quality_gate_softening_max_adjusted_score_gap):
+            if gap > self._safe_float(self.settings.quality_gate_softening_max_adjusted_score_gap, default=6.0):
                 return False
         else:
             return False
@@ -367,7 +387,7 @@ class PortfolioRiskOverlayService:
             "Quality gate near-miss routed to alpha research for shadow review instead of being dropped from follow-up."
         )
         row["alpha_research_softened_risk_r"] = round(
-            max(0.0, recommended_risk_r * float(self.settings.alpha_research_softened_risk_scale)),
+            max(0.0, recommended_risk_r * self._safe_float(self.settings.alpha_research_softened_risk_scale, default=0.35)),
             4,
         )
         row["alpha_research_gap"] = round(float(gap or 0.0), 4)
@@ -1229,7 +1249,7 @@ class PortfolioRiskOverlayService:
                 self.settings.thesis_dedupe_enabled
                 and thesis_fingerprint
                 and matched_thesis is None
-                and len(thesis_clusters) >= self.settings.thesis_max_active_clusters
+                and len(thesis_clusters) >= self._safe_int(self.settings.thesis_max_active_clusters, default=2)
             ):
                 row["block_reason"] = "thesis_active_cap_reached"
                 row["block_reason_message"] = block_reason_message(row["block_reason"])
@@ -1356,26 +1376,26 @@ class PortfolioRiskOverlayService:
 
     def _budget_caps(self, regime: str) -> _BudgetCaps:
         multiplier = {
-            "trend": float(self.settings.portfolio_overlay_cap_multiplier_trend),
-            "shock": float(self.settings.portfolio_overlay_cap_multiplier_shock),
-        }.get(regime, float(self.settings.portfolio_overlay_cap_multiplier_range))
+            "trend": self._safe_float(self.settings.portfolio_overlay_cap_multiplier_trend, default=0.85),
+            "shock": self._safe_float(self.settings.portfolio_overlay_cap_multiplier_shock, default=0.5),
+        }.get(regime, self._safe_float(self.settings.portfolio_overlay_cap_multiplier_range, default=1.0))
         multiplier = clamp(multiplier, 0.2, 1.0)
         return _BudgetCaps(
-            total=max(1, int(self.settings.portfolio_overlay_max_total_exposure * multiplier)),
-            directional=max(1, int(self.settings.portfolio_overlay_max_directional_exposure * multiplier)),
-            cluster=max(1, int(self.settings.portfolio_overlay_max_cluster_exposure * multiplier)),
+            total=max(1, int(self._safe_int(self.settings.portfolio_overlay_max_total_exposure, default=10) * multiplier)),
+            directional=max(1, int(self._safe_int(self.settings.portfolio_overlay_max_directional_exposure, default=6) * multiplier)),
+            cluster=max(1, int(self._safe_int(self.settings.portfolio_overlay_max_cluster_exposure, default=2) * multiplier)),
         )
 
     def _regime_penalty(self, regime: str) -> float:
         return {
-            "trend": float(self.settings.portfolio_overlay_regime_penalty_trend),
-            "shock": float(self.settings.portfolio_overlay_regime_penalty_shock),
-        }.get(regime, float(self.settings.portfolio_overlay_regime_penalty_range))
+            "trend": self._safe_float(self.settings.portfolio_overlay_regime_penalty_trend, default=4.0),
+            "shock": self._safe_float(self.settings.portfolio_overlay_regime_penalty_shock, default=12.0),
+        }.get(regime, self._safe_float(self.settings.portfolio_overlay_regime_penalty_range))
 
     def _volatility_penalty(self, volatility: float) -> float:
-        target = max(1e-9, float(self.settings.portfolio_overlay_volatility_target))
-        hard_cap = max(target, float(self.settings.portfolio_overlay_volatility_hard_cap))
-        scale = float(self.settings.portfolio_overlay_penalty_volatility_scale)
+        target = max(1e-9, self._safe_float(self.settings.portfolio_overlay_volatility_target, default=0.006))
+        hard_cap = max(target, self._safe_float(self.settings.portfolio_overlay_volatility_hard_cap, default=0.018))
+        scale = self._safe_float(self.settings.portfolio_overlay_penalty_volatility_scale, default=18.0)
 
         ratio_penalty = max(0.0, (volatility / target) - 1.0) * scale
         hard_cap_penalty = 0.0
@@ -1397,7 +1417,7 @@ class PortfolioRiskOverlayService:
             (high_corr_count + 1) / max(1, caps.cluster),
         )
         excess = max(0.0, utilization - 0.55)
-        return excess * float(self.settings.portfolio_overlay_penalty_exposure_scale)
+        return excess * self._safe_float(self.settings.portfolio_overlay_penalty_exposure_scale, default=12.0)
 
     def _correlation(self, symbol_a: str, symbol_b: str) -> float | None:
         key = tuple(sorted((symbol_a, symbol_b)))
@@ -1425,7 +1445,7 @@ class PortfolioRiskOverlayService:
             self._corr_cache[key] = None
             return None
 
-        cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+        cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys, strict=True))
         corr = max(-1.0, min(1.0, cov / (var_x**0.5 * var_y**0.5)))
         self._corr_cache[key] = corr
         return corr

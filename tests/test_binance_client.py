@@ -5,6 +5,13 @@ import pytest
 from app.integrations.binance_futures import BinanceFuturesClient
 
 
+def test_binance_client_tolerates_malformed_constructor_numeric_values() -> None:
+    client = BinanceFuturesClient(timeout_seconds=float("inf"), recv_window=float("inf"))
+
+    assert client.timeout_seconds == 10.0
+    assert client.recv_window == 5000
+
+
 def test_parse_kline_row() -> None:
     row = [
         1700000000000,
@@ -30,6 +37,53 @@ def test_parse_kline_row() -> None:
     assert k.c == 101.0
     assert k.v == 1234.56
     assert k.open_time < k.close_time
+
+
+def test_try_parse_kline_row_skips_malformed_rows() -> None:
+    malformed_row = [
+        "bad-open-time",
+        "100.0",
+        "101.5",
+        "99.3",
+        "101.0",
+        "1234.56",
+        1700000299999,
+    ]
+
+    assert BinanceFuturesClient._try_parse_kline_row("BTCUSDC", "5m", malformed_row) is None
+    assert BinanceFuturesClient._try_parse_kline_row("BTCUSDC", "5m", [float("inf"), "100", "101", "99", "100", "1", 1700000299999]) is None
+    assert BinanceFuturesClient._try_parse_kline_row("BTCUSDC", "5m", [1700000000000, "0", "0", "0", "0", "1", 1700000299999]) is None
+
+
+def test_market_stat_parsers_tolerate_malformed_numeric_fields() -> None:
+    funding = BinanceFuturesClient._parse_funding_rate_row(
+        "btcusdc",
+        {
+            "fundingTime": "bad-ts",
+            "fundingRate": "nan",
+            "markPrice": "inf",
+        },
+    )
+    open_interest = BinanceFuturesClient._parse_open_interest_hist_row(
+        "btcusdc",
+        "5m",
+        {
+            "timestamp": "inf",
+            "sumOpenInterest": "bad-oi",
+            "sumOpenInterestValue": "nan",
+        },
+    )
+    basis = BinanceFuturesClient._parse_basis_kline_row("btcusdc", "5m", ["bad-ts", "bad-open"])
+    position = BinanceFuturesClient.normalize_position_risk_row({"symbol": "BTCUSDC", "updateTime": "inf"})
+
+    assert funding.symbol == "BTCUSDC"
+    assert funding.funding_rate == 0.0
+    assert funding.mark_price == 0.0
+    assert open_interest.open_interest == 0.0
+    assert open_interest.open_interest_value == 0.0
+    assert basis.basis_open == 0.0
+    assert basis.basis_close == 0.0
+    assert position["update_ts"].timestamp() > 0
 
 
 def test_submit_order_uses_test_endpoint_and_echoes_payload(monkeypatch) -> None:
@@ -192,6 +246,50 @@ def test_fetch_symbol_trading_rules_uses_exchange_info(monkeypatch) -> None:
     assert rules.quantity_precision == 1
 
 
+def test_parse_symbol_trading_rules_tolerates_malformed_filter_numbers() -> None:
+    rules = BinanceFuturesClient._parse_symbol_trading_rules_row(
+        {
+            "symbol": "BADUSDC",
+            "pricePrecision": "bad-price-precision",
+            "quantityPrecision": "bad-quantity-precision",
+            "filters": [
+                {"filterType": "LOT_SIZE", "stepSize": "bad-step", "minQty": "bad-min"},
+                {"filterType": "PRICE_FILTER", "tickSize": "bad-tick"},
+            ],
+        }
+    )
+
+    assert rules.symbol == "BADUSDC"
+    assert rules.quantity_step == 0.0
+    assert rules.min_quantity == 0.0
+    assert rules.tick_size == 0.0
+    assert rules.price_precision == 0
+    assert rules.quantity_precision == 0
+
+
+def test_fetch_symbol_trading_rules_skips_malformed_exchange_info_rows(monkeypatch) -> None:
+    def fake_public_request(self, path: str, params: dict[str, object] | None = None) -> dict[str, object]:
+        return {
+            "symbols": [
+                ["bad-row"],
+                "bad-row",
+                {
+                    "symbol": "XRPUSDC",
+                    "filters": [
+                        {"filterType": "LOT_SIZE", "minQty": "0.1", "stepSize": "0.1"},
+                    ],
+                },
+            ]
+        }
+
+    monkeypatch.setattr(BinanceFuturesClient, "_public_request", fake_public_request)
+
+    rules = BinanceFuturesClient().fetch_symbol_trading_rules("xrpusdc")
+
+    assert rules.symbol == "XRPUSDC"
+    assert rules.quantity_step == 0.1
+
+
 def test_normalize_user_stream_order_trade_update_and_account_update() -> None:
     trade_update = BinanceFuturesClient.normalize_user_stream_message(
         {
@@ -249,3 +347,98 @@ def test_normalize_user_stream_order_trade_update_and_account_update() -> None:
     assert account_update["event_reason"] == "ORDER"
     assert account_update["positions"][0]["position_key"] == "BTCUSDC:LONG"
     assert account_update["positions"][0]["position_amt"] == 0.01
+
+
+def test_normalize_user_stream_tolerates_malformed_numeric_fields() -> None:
+    trade_update = BinanceFuturesClient.normalize_user_stream_message(
+        {
+            "e": "ORDER_TRADE_UPDATE",
+            "E": "bad-event-ts",
+            "o": {
+                "s": "BTCUSDC",
+                "i": "bad-order-id",
+                "c": "test-order-bad",
+                "S": "BUY",
+                "o": "LIMIT",
+                "X": "FILLED",
+                "x": "TRADE",
+                "l": "bad-qty",
+                "L": "bad-price",
+                "z": "nan",
+                "q": "bad-original",
+                "ap": "bad-average",
+                "rp": "bad-pnl",
+                "t": "inf",
+            },
+        }
+    )
+
+    assert trade_update["kind"] == "order_trade_update"
+    assert trade_update["order_id"] is None
+    assert trade_update["last_fill_qty"] == 0.0
+    assert trade_update["last_fill_price"] == 0.0
+    assert trade_update["cumulative_fill_qty"] == 0.0
+    assert trade_update["trade_id"] is None
+
+    account_update = BinanceFuturesClient.normalize_user_stream_message(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "E": "bad-event-ts",
+            "a": {
+                "m": "ORDER",
+                "P": [
+                    {
+                        "s": "BTCUSDC",
+                        "ps": "LONG",
+                        "pa": "bad-position",
+                        "ep": "bad-entry",
+                        "leverage": "bad-leverage",
+                        "iw": "bad-wallet",
+                    }
+                ],
+            },
+        }
+    )
+
+    assert account_update["positions"][0]["position_amt"] == 0.0
+    assert account_update["positions"][0]["entry_price"] == 0.0
+    assert account_update["positions"][0]["leverage"] == 0
+
+
+def test_normalize_user_stream_tolerates_malformed_payload_shapes() -> None:
+    assert BinanceFuturesClient.normalize_user_stream_message(["bad-row"])["kind"] == "unknown"
+    assert BinanceFuturesClient.normalize_user_stream_message({"data": ["bad-row"]})["kind"] == "unknown"
+
+    trade_update = BinanceFuturesClient.normalize_user_stream_message(
+        {
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 1700000000000,
+            "o": ["bad-order"],
+        }
+    )
+    assert trade_update["kind"] == "order_trade_update"
+    assert trade_update["symbol"] == ""
+    assert trade_update["order_id"] is None
+
+    account_update = BinanceFuturesClient.normalize_user_stream_message(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "E": 1700000000000,
+            "a": {
+                "m": "ORDER",
+                "P": [
+                    ["bad-position"],
+                    {"s": "BTCUSDC", "ps": "LONG", "pa": "0.01"},
+                ],
+            },
+        }
+    )
+    assert account_update["kind"] == "account_update"
+    assert len(account_update["positions"]) == 1
+    assert account_update["positions"][0]["position_key"] == "BTCUSDC:LONG"
+
+
+def test_parse_force_order_event_tolerates_malformed_payload_shapes() -> None:
+    assert BinanceFuturesClient._parse_force_order_event(["bad-row"]) is None
+    assert BinanceFuturesClient._parse_force_order_event({"data": ["bad-row"]}) is None
+    assert BinanceFuturesClient._parse_force_order_event({"data": {"e": "forceOrder", "o": ["bad-order"]}}) is None

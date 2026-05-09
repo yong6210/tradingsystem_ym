@@ -457,6 +457,8 @@ class PromotionRemediationQueueService:
             reason_codes.append(f"family_execution:{family_execution_status}")
         if rollout_state:
             reason_codes.append(f"rollout_recommendation:{rollout_state}")
+        if rollout_maturity and rollout_maturity != "unknown":
+            reason_codes.append(f"rollout_maturity:{rollout_maturity}")
         if lifecycle_state and lifecycle_state != "unknown":
             reason_codes.append(f"lifecycle:{lifecycle_state}")
         if condition_drag_state == "active":
@@ -475,6 +477,7 @@ class PromotionRemediationQueueService:
             "summary": self._summary(family=family, action=action),
             "reason_codes": self._dedupe(reason_codes),
             "_lifecycle_state": lifecycle_state or "unknown",
+            "_rollout_maturity": rollout_maturity or "unknown",
             "_review_priority_rank": int(review_priority_rank),
         }
 

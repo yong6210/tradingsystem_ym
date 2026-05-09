@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 
 from app.core.config import Settings, get_settings
@@ -27,6 +28,26 @@ class PositionSizingService:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
+
     def evaluate(self, payload: PositionSizingInput) -> dict[str, Any]:
         grade = str(payload.strategy_grade or "B").upper()
         family = str(payload.strategy_family or "legacy_zone_plan").lower()
@@ -40,7 +61,8 @@ class PositionSizingService:
             reaction_classification=reaction,
             confirm_only=bool(payload.confirm_only),
         )
-        thesis_factor, thesis_reason = self._thesis_factor(int(payload.active_thesis_clusters))
+        active_thesis_clusters = self._safe_int(payload.active_thesis_clusters)
+        thesis_factor, thesis_reason = self._thesis_factor(active_thesis_clusters)
         execution_factor = self._execution_factor(str(payload.entry_model or EntryModel.CONFIRM.value))
         direction_factor, direction_reason = self._direction_factor(
             symbol=str(payload.symbol or ""),
@@ -61,7 +83,7 @@ class PositionSizingService:
             "grade_source": "strategy_grade" if grade in {"A", "B", "C"} and payload.strategy_grade is not None else "legacy_default_b",
             "symbol": str(payload.symbol or ""),
             "direction": str(payload.direction or ""),
-            "active_thesis_clusters": int(payload.active_thesis_clusters),
+            "active_thesis_clusters": active_thesis_clusters,
             "transition_state": transition_state,
             "reaction_classification": reaction,
             "confirm_only": bool(payload.confirm_only),
@@ -104,44 +126,44 @@ class PositionSizingService:
 
     def _grade_risk(self, grade: str) -> float:
         if grade == "A":
-            return float(self.settings.sizing_grade_a_r)
+            return self._safe_float(self.settings.sizing_grade_a_r, default=1.0)
         if grade == "B":
-            return float(self.settings.sizing_grade_b_r)
+            return self._safe_float(self.settings.sizing_grade_b_r, default=0.5)
         if grade == "C":
-            return float(self.settings.sizing_grade_c_r)
+            return self._safe_float(self.settings.sizing_grade_c_r, default=0.25)
         return 0.0
 
     def _regime_factor(self, *, regime: str, transition_state: str) -> tuple[float, str | None]:
         if transition_state in {"transition_confirmed", "transition_watch"} or regime == "transition":
-            return float(self.settings.sizing_regime_factor_transition), "transition_zero_risk"
+            return self._safe_float(self.settings.sizing_regime_factor_transition), "transition_zero_risk"
         if regime == "trend":
-            return float(self.settings.sizing_regime_factor_trend), None
+            return self._safe_float(self.settings.sizing_regime_factor_trend, default=1.0), None
         if regime == "shock":
-            return float(self.settings.sizing_regime_factor_shock), "shock_size_clamp"
-        return float(self.settings.sizing_regime_factor_range), None
+            return self._safe_float(self.settings.sizing_regime_factor_shock, default=0.4), "shock_size_clamp"
+        return self._safe_float(self.settings.sizing_regime_factor_range, default=0.8), None
 
     def _reaction_factor(self, *, reaction_classification: str, confirm_only: bool) -> tuple[float, str | None]:
         if reaction_classification == "mixed":
-            return float(self.settings.sizing_reaction_factor_mixed), "mixed_zero_risk"
+            return self._safe_float(self.settings.sizing_reaction_factor_mixed), "mixed_zero_risk"
         if confirm_only:
-            return float(self.settings.sizing_reaction_factor_confirm_only), "confirm_only_size_clamp"
+            return self._safe_float(self.settings.sizing_reaction_factor_confirm_only, default=0.7), "confirm_only_size_clamp"
         if reaction_classification.endswith("tentative"):
-            return float(self.settings.sizing_reaction_factor_confirm_only), "tentative_reaction_size_clamp"
-        return float(self.settings.sizing_reaction_factor_confirmed), None
+            return self._safe_float(self.settings.sizing_reaction_factor_confirm_only, default=0.7), "tentative_reaction_size_clamp"
+        return self._safe_float(self.settings.sizing_reaction_factor_confirmed, default=1.0), None
 
     def _thesis_factor(self, active_thesis_clusters: int) -> tuple[float, str | None]:
         if active_thesis_clusters >= 2:
-            return float(self.settings.sizing_thesis_factor_two_or_more), "thesis_cluster_cap_zero_risk"
+            return self._safe_float(self.settings.sizing_thesis_factor_two_or_more), "thesis_cluster_cap_zero_risk"
         if active_thesis_clusters == 1:
-            return float(self.settings.sizing_thesis_factor_one_active), "active_thesis_size_clamp"
-        return float(self.settings.sizing_thesis_factor_none), None
+            return self._safe_float(self.settings.sizing_thesis_factor_one_active, default=0.6), "active_thesis_size_clamp"
+        return self._safe_float(self.settings.sizing_thesis_factor_none, default=1.0), None
 
     def _execution_factor(self, entry_model: str) -> float:
         if entry_model == EntryModel.LIMIT.value:
-            return float(self.settings.sizing_execution_factor_limit)
+            return self._safe_float(self.settings.sizing_execution_factor_limit, default=1.0)
         if entry_model == EntryModel.SWEEP_CONFIRM.value:
-            return float(self.settings.sizing_execution_factor_sweep_confirm)
-        return float(self.settings.sizing_execution_factor_confirm)
+            return self._safe_float(self.settings.sizing_execution_factor_sweep_confirm, default=0.75)
+        return self._safe_float(self.settings.sizing_execution_factor_confirm, default=0.85)
 
     def _direction_factor(self, *, symbol: str, strategy_family: str, direction: str) -> tuple[float, str | None]:
         normalized_symbol = str(symbol or "").strip().upper()
@@ -152,7 +174,7 @@ class PositionSizingService:
             and normalized_family == "sweep_reversal"
             and normalized_direction == "LONG"
         ):
-            factor = float(self.settings.sizing_btc_sweep_reversal_long_factor)
+            factor = self._safe_float(self.settings.sizing_btc_sweep_reversal_long_factor, default=0.85)
             reason = "btc_sweep_reversal_long_size_clamp" if factor < 1.0 else None
             return factor, reason
         return 1.0, None

@@ -5,8 +5,8 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
-import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,10 +50,26 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
+def _resolve_root_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else ROOT_DIR / path
+
+
+def _launchctl_executable() -> str:
+    return shutil.which("launchctl") or "/bin/launchctl"
+
+
 def _run_launchctl_print(label: str) -> str:
     uid = os.getuid()
-    command = ["launchctl", "print", f"gui/{uid}/{label}"]
-    completed = subprocess.run(command, capture_output=True, text=True, cwd=str(ROOT_DIR))
+    command = [_launchctl_executable(), "print", f"gui/{uid}/{label}"]
+    completed = subprocess.run(command, capture_output=True, text=True, cwd=str(ROOT_DIR), check=False)
     if completed.returncode != 0:
         stderr = completed.stderr.strip() or completed.stdout.strip()
         raise RuntimeError(f"launchctl print failed for {label}: {stderr}")
@@ -254,14 +270,14 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
 
 def main() -> int:
     args = parse_args()
-    report_dir = Path(args.report_dir).resolve()
+    report_dir = _resolve_root_path(args.report_dir).resolve()
     payload = evaluate_status(report_dir, args.max_age_minutes)
 
     if args.write_report:
         timestamp = _now().strftime("%Y%m%dT%H%M%SZ")
         report_path = report_dir / f"operator_session_brief_automation_health_{timestamp}.md"
         _write_report(report_path, payload)
-        payload["report_path"] = str(report_path.relative_to(ROOT_DIR))
+        payload["report_path"] = _display_path(report_path)
 
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     if args.strict and not payload["healthy"]:

@@ -399,6 +399,7 @@ class ValidationReportService:
             "playbook_message": playbook_mapping["playbook_message"],
             "template_status": template_status,
             "template_reason": template_reason,
+            "replay_output_lineage_alignment_reason": replay_alignment_reason,
             "threshold_lineage_winner_run_id": threshold_lineage_winner_run_id or None,
             "threshold_lineage_winner_source": threshold_lineage_winner_source,
             "threshold_lineage_winner_selection_rule": threshold_lineage_winner_selection_rule,
@@ -2594,6 +2595,7 @@ class ValidationReportService:
                 f"- playbook_message: {deployment_approval_template.get('playbook_message', 'NO-GO: approval template is unavailable. Do not proceed until validation summary is generated.')}",
                 f"- template_status: {deployment_approval_template.get('template_status', 'NOT_AVAILABLE')}",
                 f"- template_reason: {deployment_approval_template.get('template_reason', 'approval_cross_display_unavailable')}",
+                f"- replay_output_lineage_alignment_reason: {deployment_approval_template.get('replay_output_lineage_alignment_reason', 'not_available')}",
                 f"- threshold_lineage_winner_source: {deployment_approval_template.get('threshold_lineage_winner_source', 'unknown')}",
                 (
                     f"- threshold_lineage_winner_selection_rule: "

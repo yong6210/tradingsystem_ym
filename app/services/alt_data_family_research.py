@@ -3,8 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import inspect
-from sqlalchemy.sql import text
+from sqlalchemy import MetaData, Table, func, inspect, select
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +105,7 @@ def default_alt_data_family_specs() -> tuple[AltDataFamilySpec, ...]:
 
 def inspect_alt_data_feasibility(*, bind: Any) -> dict[str, Any]:
     inspector = inspect(bind)
+    metadata = MetaData()
     table_names = set(inspector.get_table_names())
     columns_by_table: dict[str, set[str]] = {}
     for table_name in table_names:
@@ -141,7 +141,8 @@ def inspect_alt_data_feasibility(*, bind: Any) -> dict[str, Any]:
         if matched_table is not None and not missing_columns:
             try:
                 with bind.connect() as conn:
-                    row_count = int(conn.execute(text(f"SELECT COUNT(*) FROM {matched_table}")).scalar() or 0)
+                    table = Table(matched_table, metadata, autoload_with=conn)
+                    row_count = int(conn.execute(select(func.count()).select_from(table)).scalar() or 0)
             except Exception:
                 row_count = 0
             datasets_payload[dataset_key]["row_count"] = row_count

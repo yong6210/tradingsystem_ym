@@ -47,6 +47,55 @@ def _with_overlay_settings() -> dict[str, float | int | bool]:
     }
 
 
+def test_portfolio_overlay_tolerates_malformed_numeric_settings() -> None:
+    settings = get_settings().model_copy(deep=True)
+    settings.transition_edge_variant_risk_multiplier = "inf"
+    settings.portfolio_overlay_cap_multiplier_trend = "bad-trend-multiplier"
+    settings.portfolio_overlay_max_total_exposure = "bad-total-cap"
+    settings.portfolio_overlay_max_directional_exposure = "bad-direction-cap"
+    settings.portfolio_overlay_max_cluster_exposure = "bad-cluster-cap"
+    settings.portfolio_overlay_regime_penalty_trend = "bad-regime-penalty"
+    settings.portfolio_overlay_volatility_target = "bad-vol-target"
+    settings.portfolio_overlay_volatility_hard_cap = "inf"
+    settings.portfolio_overlay_penalty_volatility_scale = "nan"
+    settings.portfolio_overlay_penalty_exposure_scale = "bad-exposure-scale"
+    settings.portfolio_overlay_min_risk_budget_score = "bad-risk-budget"
+    settings.quality_gate_softening_max_risk_budget_gap = "inf"
+    settings.alpha_research_pipeline_enabled = True
+    settings.quality_gate_softening_enabled = True
+    settings.alpha_research_softened_risk_scale = "bad-soften"
+    service = PortfolioRiskOverlayService(candle_repo=_CandleRepoStub({}), settings=settings)
+    transition_row = {
+        "validity": {"transition_edge_variant_applied": True},
+        "recommended_risk_r": 1.0,
+        "strategy_sizing": {"final_risk_r": 1.0},
+    }
+    alpha_row = {
+        "recommended_risk_r": 1.0,
+        "expected_ev_r": 0.1,
+        "risk_budget_score": 34.0,
+    }
+
+    service._apply_transition_edge_variant_risk_adjustment(transition_row)
+    routed = service._maybe_route_to_alpha_research(row=alpha_row, reason="risk_budget_below_min")
+
+    assert transition_row["recommended_risk_r"] == 0.35
+    assert service.budget_caps_for_regime("trend") == {"total": 8, "directional": 5, "cluster": 1}
+    assert service._regime_penalty("trend") == 4.0
+    assert service._volatility_penalty(0.012) == 18.0
+    assert round(
+        service._exposure_penalty(
+            projected_total=10,
+            projected_directional=1,
+            high_corr_count=0,
+            caps=service._budget_caps("range"),
+        ),
+        4,
+    ) == 5.4
+    assert routed is True
+    assert alpha_row["alpha_research_softened_risk_r"] == 0.35
+
+
 def test_portfolio_overlay_blocks_high_corr_cluster() -> None:
     settings = get_settings()
     updates = _with_overlay_settings()

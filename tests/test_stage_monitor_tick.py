@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-ROOT_DIR = Path("/Users/yumin/Documents/trading")
+ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
 def _load_module(name: str, path: Path):
@@ -1767,8 +1767,8 @@ def test_apply_runtime_live_contract_history_summary_filters_non_contract_entry_
         auto_trading_micro_live_allowed_entry_models = "LIMIT"
         auto_trading_micro_live_direction_contract = "BTCUSDC:LONG"
 
-    monkeypatch.setattr(stage_monitor_tick, "SessionLocal", lambda: _Session())
-    monkeypatch.setattr(stage_monitor_tick, "get_settings", lambda: _Settings())
+    monkeypatch.setattr(stage_monitor_tick, "SessionLocal", _Session)
+    monkeypatch.setattr(stage_monitor_tick, "get_settings", _Settings)
 
     payload = stage_monitor_tick._apply_runtime_live_contract_history_summary(
         {

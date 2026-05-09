@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 
 from app.core.config import Settings, get_settings
@@ -31,6 +32,26 @@ class StrategyModeService:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
+
     def current_mode(self) -> StrategyMode:
         value = getattr(self.settings, "strategy_mode", StrategyMode.A_ONLY)
         if isinstance(value, StrategyMode):
@@ -47,24 +68,24 @@ class StrategyModeService:
                 mode=active,
                 allowed_families=("sweep_reversal", "trend_continuation", "session_impulse_retest"),
                 allowed_grades=("A", "B"),
-                max_daily_trades=int(self.settings.strategy_mode_a_plus_b_max_daily_trades),
-                max_total_risk_r=float(self.settings.strategy_mode_a_plus_b_max_total_risk_r),
+                max_daily_trades=self._safe_int(self.settings.strategy_mode_a_plus_b_max_daily_trades, default=5),
+                max_total_risk_r=self._safe_float(self.settings.strategy_mode_a_plus_b_max_total_risk_r, default=2.0),
             )
         if active == StrategyMode.RESEARCH:
             return StrategyModePolicy(
                 mode=active,
                 allowed_families=("sweep_reversal", "trend_continuation", "range_rotation", "session_impulse_retest"),
                 allowed_grades=("A", "B", "C"),
-                max_daily_trades=int(self.settings.strategy_mode_research_max_daily_trades),
-                max_total_risk_r=float(self.settings.strategy_mode_research_max_total_risk_r),
+                max_daily_trades=self._safe_int(self.settings.strategy_mode_research_max_daily_trades, default=99),
+                max_total_risk_r=self._safe_float(self.settings.strategy_mode_research_max_total_risk_r),
                 shadow_only=True,
             )
         return StrategyModePolicy(
             mode=StrategyMode.A_ONLY,
             allowed_families=("sweep_reversal", "trend_continuation", "session_impulse_retest"),
             allowed_grades=("A",),
-            max_daily_trades=int(self.settings.strategy_mode_a_only_max_daily_trades),
-            max_total_risk_r=float(self.settings.strategy_mode_a_only_max_total_risk_r),
+            max_daily_trades=self._safe_int(self.settings.strategy_mode_a_only_max_daily_trades, default=3),
+            max_total_risk_r=self._safe_float(self.settings.strategy_mode_a_only_max_total_risk_r, default=1.5),
         )
 
     def allow_candidate(

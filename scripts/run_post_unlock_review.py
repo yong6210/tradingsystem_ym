@@ -36,12 +36,20 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
 def _run_json_command(command: list[str]) -> dict[str, Any]:
     completed = subprocess.run(
         command,
         cwd=str(ROOT_DIR),
         capture_output=True,
         text=True,
+        check=False,
     )
     stdout = str(completed.stdout or "").strip()
     if not stdout:
@@ -188,7 +196,7 @@ def main() -> int:
         ts = generated_at.strftime("%Y%m%dT%H%M%SZ")
         report_path = ROOT_DIR / args.report_dir / f"post_unlock_review_{args.symbol.upper()}_{ts}.md"
         _write_report(report_path, payload)
-        payload["report_path"] = str(report_path.relative_to(ROOT_DIR))
+        payload["report_path"] = _display_path(report_path)
 
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     return 0

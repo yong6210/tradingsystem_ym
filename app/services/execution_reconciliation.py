@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from typing import Any
 from uuid import uuid4
 
@@ -84,6 +85,16 @@ class ExecutionReconciliationService:
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
 
     @staticmethod
     def _severity_max(items: list[dict[str, Any]]) -> ReconciliationSeverity:
@@ -256,7 +267,13 @@ class ExecutionReconciliationService:
         if (exchange_orders or exchange_positions) and (
             latest_stream_event is None
             or latest_stream_event
-            <= now - timedelta(seconds=int(self.settings.auto_trading_reconciliation_user_stream_stale_seconds))
+            <= now
+            - timedelta(
+                seconds=self._safe_int(
+                    self.settings.auto_trading_reconciliation_user_stream_stale_seconds,
+                    default=self.USER_STREAM_STALE_SECONDS,
+                )
+            )
         ):
             mismatches.append(
                 self._mismatch(

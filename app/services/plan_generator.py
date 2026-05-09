@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from typing import Any
 
 from app.core.config import get_settings
@@ -57,6 +58,26 @@ class PlanGenerator:
         self.sizing = PositionSizingService(self.settings)
         self.session_guidance = SessionGuidanceService(self.settings)
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
+
     def _fast_failure_validity(
         self,
         *,
@@ -81,8 +102,8 @@ class PlanGenerator:
         normalized_session_name = str(session_name or "").strip().lower()
         if allowed_sessions and normalized_session_name not in allowed_sessions:
             return {}
-        max_bars = max(int(self.settings.btc_sweep_reversal_limit_fast_failure_max_bars), 0)
-        stop_r = float(self.settings.btc_sweep_reversal_limit_fast_failure_stop_r)
+        max_bars = max(self._safe_int(self.settings.btc_sweep_reversal_limit_fast_failure_max_bars, default=18), 0)
+        stop_r = self._safe_float(self.settings.btc_sweep_reversal_limit_fast_failure_stop_r, default=0.00000001)
         requires_sl_touch = bool(self.settings.btc_sweep_reversal_limit_fast_failure_requires_sl_touch)
         if max_bars <= 0 or stop_r <= 0.0 or stop_r >= 1.0:
             return {}
@@ -287,16 +308,16 @@ class PlanGenerator:
             if isinstance(calibrated, dict):
                 for key, value in calibrated.items():
                     if key in active_weights:
-                        active_weights[key] = float(value)
+                        active_weights[key] = self._safe_float(value, default=active_weights[key])
 
         if feature_overrides:
             for key, value in feature_overrides.items():
                 if key in active_weights:
-                    active_weights[key] = max(0.0, float(value))
+                    active_weights[key] = max(0.0, self._safe_float(value))
 
         active_weights = self._normalize_weights(
             active_weights,
-            min_weight=max(0.0, float(self.settings.feature_calibration_min_weight)),
+            min_weight=max(0.0, self._safe_float(self.settings.feature_calibration_min_weight, default=0.05)),
         )
         return base_weights, active_weights
 
@@ -672,22 +693,30 @@ class PlanGenerator:
         reason = "No honest-runtime tilt matched; keep baseline size in live and only log the shadow view."
 
         if direction == Direction.LONG:
-            weaken_threshold = float(
-                self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_long_weaken_close_vs_ema_fast_atr
+            weaken_threshold = self._safe_float(
+                self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_long_weaken_close_vs_ema_fast_atr,
+                default=-0.6978,
             )
             observed = float(telemetry.get("directional_close_vs_ema_fast_atr", 0.0) or 0.0)
             if observed >= weaken_threshold:
-                multiplier = float(self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_long_size_factor)
+                multiplier = self._safe_float(
+                    self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_long_size_factor,
+                    default=0.75,
+                )
                 classification = "weak_long_understretch"
                 reason_code = "shadow_reduce_weak_long"
                 reason = "Honest BTC subset showed weaker long EV when close-vs-EMA stretch was not deep enough."
         elif direction == Direction.SHORT:
-            strength_threshold = float(
-                self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_short_strength_sweep_distance_atr
+            strength_threshold = self._safe_float(
+                self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_short_strength_sweep_distance_atr,
+                default=0.4107,
             )
             observed = float(telemetry.get("sweep_distance_atr", 0.0) or 0.0)
             if observed >= strength_threshold:
-                multiplier = float(self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_short_size_factor)
+                multiplier = self._safe_float(
+                    self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_short_size_factor,
+                    default=1.4762,
+                )
                 classification = "strong_short_sweep"
                 reason_code = "shadow_increase_strong_short"
                 reason = "Honest BTC subset showed stronger short EV when sweep distance expanded into the upper bucket."
@@ -708,29 +737,38 @@ class PlanGenerator:
             "shadow_expected_ev_at_size_r": shadow_expected_ev_at_size_r,
             "delta_expected_ev_at_size_r": round(shadow_expected_ev_at_size_r - base_expected_ev_at_size_r, 4),
             "long_weaken_close_vs_ema_fast_atr_threshold": round(
-                float(self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_long_weaken_close_vs_ema_fast_atr),
+                self._safe_float(
+                    self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_long_weaken_close_vs_ema_fast_atr,
+                    default=-0.6978,
+                ),
                 4,
             ),
             "short_strength_sweep_distance_atr_threshold": round(
-                float(self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_short_strength_sweep_distance_atr),
+                self._safe_float(
+                    self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_short_strength_sweep_distance_atr,
+                    default=0.4107,
+                ),
                 4,
             ),
         }
         return self._compact_alias(payload)
 
     def _zone_is_stale_for_scalp(self, zone: Zone, *, now: datetime) -> bool:
-        return self._zone_age_hours(zone, now=now) > float(self.settings.scalp_zone_hard_max_age_hours)
+        return self._zone_age_hours(zone, now=now) > self._safe_float(self.settings.scalp_zone_hard_max_age_hours, default=24.0)
 
     def _ob_freshness_score(self, zone: Zone, *, now: datetime) -> float:
         freshness = 100.0 - max(0, zone.touch_count - 1) * 14.0 - max(0.0, zone.width_atr - 0.8) * 22.0
         if zone.type == "OB":
             freshness += 8.0
         age_hours = self._zone_age_hours(zone, now=now)
-        recent_boost_hours = float(self.settings.scalp_zone_recent_boost_hours)
+        recent_boost_hours = self._safe_float(self.settings.scalp_zone_recent_boost_hours, default=6.0)
         if age_hours <= recent_boost_hours:
             freshness += 10.0
         else:
-            freshness -= (age_hours - recent_boost_hours) * float(self.settings.scalp_zone_age_penalty_per_hour)
+            freshness -= (age_hours - recent_boost_hours) * self._safe_float(
+                self.settings.scalp_zone_age_penalty_per_hour,
+                default=1.6,
+            )
         return clamp(freshness, 0.0, 100.0)
 
     @staticmethod
@@ -831,8 +869,9 @@ class PlanGenerator:
         return RegimeProfile(
             name=profile.name,
             min_confluence=max(
-                float(self.settings.min_confluence_score),
-                float(profile.min_confluence) - float(self.settings.transition_edge_variant_min_confluence_delta),
+                self._safe_float(self.settings.min_confluence_score, default=62.0),
+                float(profile.min_confluence)
+                - self._safe_float(self.settings.transition_edge_variant_min_confluence_delta, default=8.0),
             ),
             rr_floor=profile.rr_floor,
             ev_floor=profile.ev_floor,
@@ -856,15 +895,15 @@ class PlanGenerator:
         base_weights = dict(feature_weights_base or self.feature_weights_for_regime(profile.name))
         adjusted_weights = dict(feature_weights_active or base_weights)
         adjusted_weights["htf_alignment"] = float(adjusted_weights.get("htf_alignment", 0.0)) * float(
-            self.settings.transition_edge_variant_htf_alignment_weight_multiplier
+            self._safe_float(self.settings.transition_edge_variant_htf_alignment_weight_multiplier, default=0.5)
         )
         adjusted_weights["trend_proxy"] = float(adjusted_weights.get("trend_proxy", 0.0)) * float(
-            self.settings.transition_edge_variant_trend_proxy_weight_multiplier
+            self._safe_float(self.settings.transition_edge_variant_trend_proxy_weight_multiplier, default=0.25)
         )
         adjusted_weights = self._normalize_weights(adjusted_weights, min_weight=0.0)
 
         floor = 45.0
-        relax_factor = max(float(self.settings.transition_edge_variant_fvg_relax_factor), 1e-6)
+        relax_factor = max(self._safe_float(self.settings.transition_edge_variant_fvg_relax_factor, default=0.7), 1e-6)
         raw_fvg = float(confluence_components.get("fvg_displacement", 0.0))
         fvg_relaxed = clamp(floor + max(raw_fvg - floor, 0.0) / relax_factor, 0.0, 100.0)
         adjusted_components = dict(confluence_components)
@@ -1764,13 +1803,13 @@ class PlanGenerator:
         session_state = str(session_guidance.get("state", "unknown"))
         session_name = str((session_guidance.get("current_session") or {}).get("name") or "inactive").strip().lower() or "inactive"
         if session_state == "preferred_live_window":
-            session_score_bias = float(self.settings.scalp_session_boost_score)
+            session_score_bias = self._safe_float(self.settings.scalp_session_boost_score, default=4.0)
             session_probability_adjustment = 0.012
         elif session_state == "session_lock_active":
-            session_score_bias = -float(self.settings.scalp_session_lock_penalty_score)
+            session_score_bias = -self._safe_float(self.settings.scalp_session_lock_penalty_score, default=3.0)
             session_probability_adjustment = -0.010
         else:
-            session_score_bias = -float(self.settings.scalp_dead_session_penalty_score)
+            session_score_bias = -self._safe_float(self.settings.scalp_dead_session_penalty_score, default=6.0)
             session_probability_adjustment = -0.018
 
         for zone in zones:
@@ -2074,7 +2113,7 @@ class PlanGenerator:
                 f"TP3≈{p3_est * 100.0:.1f}%"
             )
 
-            validity_minutes = int(self.settings.scalp_plan_validity_minutes)
+            validity_minutes = self._safe_int(self.settings.scalp_plan_validity_minutes, default=90)
             if decision.model == EntryModel.LIMIT:
                 validity_minutes -= 20
             elif decision.model == EntryModel.SWEEP_CONFIRM:
@@ -2160,7 +2199,7 @@ class PlanGenerator:
                 "thesis_primary_symbol": symbol,
                 "thesis_rejected_reason": None,
                 "zone_age_hours": round(self._zone_age_hours(zone, now=now), 2),
-                "scalp_zone_hard_max_age_hours": int(self.settings.scalp_zone_hard_max_age_hours),
+                "scalp_zone_hard_max_age_hours": self._safe_int(self.settings.scalp_zone_hard_max_age_hours, default=24),
                 "session_guidance_state": session_state,
                 "session_guidance_session_name": session_name,
                 "session_guidance_summary": str(session_guidance.get("summary", "")),

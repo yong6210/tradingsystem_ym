@@ -1,15 +1,7 @@
 from __future__ import annotations
 
 from importlib import import_module
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from app.services.execution.approval import ExecutionPlanningService
-    from app.services.execution.coordinator import ExecutionCoordinator, PaperExecutionAdapter
-    from app.services.execution.intents import OrderIntentService
-    from app.services.execution.reconciliation import ExecutionReconciliationService
-    from app.services.execution.rollout import RolloutPolicyBootstrap, RolloutPolicyService
-    from app.services.execution.safety import SafetyLockService
+from typing import Any
 
 _EXPORTS = {
     "ExecutionCoordinator": ("app.services.execution.coordinator", "ExecutionCoordinator"),
@@ -22,7 +14,16 @@ _EXPORTS = {
     "SafetyLockService": ("app.services.execution.safety", "SafetyLockService"),
 }
 
-__all__ = sorted(_EXPORTS)
+__all__ = [
+    "ExecutionCoordinator",
+    "ExecutionPlanningService",
+    "ExecutionReconciliationService",
+    "OrderIntentService",
+    "PaperExecutionAdapter",
+    "RolloutPolicyBootstrap",
+    "RolloutPolicyService",
+    "SafetyLockService",
+]
 
 
 def __getattr__(name: str) -> Any:

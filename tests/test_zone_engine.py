@@ -56,3 +56,16 @@ def test_zone_engine_expires_old_zone_for_scalp() -> None:
 
     carried = next((row for row in refreshed if row.zone_id == old_zone.zone_id), None)
     assert carried is None or carried.state == "expired"
+
+
+def test_zone_engine_tolerates_malformed_scalp_age_setting() -> None:
+    candles = make_15m_candles()
+    engine = ZoneEngine()
+    engine.settings.scalp_zone_hard_max_age_hours = "inf"
+    old_zone = engine.refresh(symbol="BTCUSDC", candles_15m=candles, existing=[])[0]
+    old_zone.created_ts = datetime.now(timezone.utc) - timedelta(hours=30)
+
+    refreshed = engine.refresh(symbol="BTCUSDC", candles_15m=candles, existing=[old_zone])
+
+    carried = next((row for row in refreshed if row.zone_id == old_zone.zone_id), None)
+    assert carried is None or carried.state == "expired"

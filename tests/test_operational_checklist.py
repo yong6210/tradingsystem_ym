@@ -1874,3 +1874,20 @@ def test_operational_checklist_maps_execution_degradation_manual_review_to_warn_
     assert outcome_control_item["status"] == "WARN"
     assert outcome_control_item["evidence"]["sizing_penalty_tier"] == "hard_clamp"
     assert payload["overall_status"] == "WARN"
+
+
+def test_operational_checklist_tolerates_malformed_numeric_settings() -> None:
+    settings = Settings(alert_discord_webhook_url="https://discord.example/webhook")
+    settings.event_late_seconds = "bad"
+    settings.thesis_max_active_clusters = float("inf")
+    service = OperationalChecklistService(alert_repo=_AlertRepoStub([]), settings=settings)
+
+    outbox_item = service._outbox_item(
+        outbox_status={"counts": {"pending": 0, "failed": 0}, "backlog_age_seconds": 91}
+    )
+    portfolio_item = service._portfolio_item(
+        portfolio_budget={"current_exposure": {"active_thesis_clusters": 2}, "blocked_reason_counts": {}}
+    )
+
+    assert outbox_item["status"] == "FAIL"
+    assert portfolio_item["status"] == "WARN"

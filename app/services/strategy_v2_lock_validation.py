@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings, get_settings
-from app.core.enums import ExitReason
 from app.services.strategy_v2_validation import ClosedTradeRecord, StrategyV2ValidationService
 
 
@@ -33,6 +33,16 @@ class StrategyV2LockValidationService:
         for record in records:
             counts[record.base.exit_reason] = int(counts.get(record.base.exit_reason, 0)) + 1
         return dict(sorted(counts.items()))
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
 
     def _before_metrics(self, records: list[ClosedTradeRecord]) -> dict[str, Any]:
         return self._base._mode_metrics(records)
@@ -81,11 +91,12 @@ class StrategyV2LockValidationService:
         if regime == "shock":
             if family == "sweep_reversal" and not (grade == "A" and reaction == "rejection_confirmed"):
                 return None, "shock_requires_a_grade_rejection_block"
+            shock_factor = self._safe_float(self.settings.sizing_regime_factor_shock, default=0.4)
             return (
                 LockAdjustedTradeRecord(
                     base=record,
-                    adjusted_realized_r=round(float(record.realized_r) * float(self.settings.sizing_regime_factor_shock), 4),
-                    lock_factor=float(self.settings.sizing_regime_factor_shock),
+                    adjusted_realized_r=round(float(record.realized_r) * shock_factor, 4),
+                    lock_factor=shock_factor,
                     impact_reason="shock_size_clamp",
                     regime=regime,
                     transition_state=transition_state,

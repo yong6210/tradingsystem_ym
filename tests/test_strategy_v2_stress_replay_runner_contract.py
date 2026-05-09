@@ -204,3 +204,61 @@ def test_stress_replay_runner_contract_allows_prototype_path_before_full_replay_
     ]
     assert payload["scenario_contract"]["latency_plus_1_bar"]["prototype_ready"] is True
     assert payload["scenario_contract"]["latency_plus_1_bar"]["ready"] is False
+
+
+def test_stress_replay_runner_contract_tolerates_malformed_numeric_settings() -> None:
+    service = StrategyV2StressReplayRunnerContractService()
+    original_values = {
+        "stress_replay_lineage_min_execution_fill_coverage": service.settings.stress_replay_lineage_min_execution_fill_coverage,
+        "stress_replay_lineage_min_latency_candle_coverage": service.settings.stress_replay_lineage_min_latency_candle_coverage,
+        "stress_replay_lineage_min_candle_path_coverage": service.settings.stress_replay_lineage_min_candle_path_coverage,
+        "stress_replay_runner_target_trades_per_job": service.settings.stress_replay_runner_target_trades_per_job,
+        "stress_replay_runner_min_trades_per_job": service.settings.stress_replay_runner_min_trades_per_job,
+        "stress_replay_runner_max_parallel_jobs": service.settings.stress_replay_runner_max_parallel_jobs,
+    }
+    try:
+        service.settings.stress_replay_lineage_min_execution_fill_coverage = float("inf")
+        service.settings.stress_replay_lineage_min_latency_candle_coverage = "bad"
+        service.settings.stress_replay_lineage_min_candle_path_coverage = "bad"
+        service.settings.stress_replay_runner_target_trades_per_job = "bad"
+        service.settings.stress_replay_runner_min_trades_per_job = float("inf")
+        service.settings.stress_replay_runner_max_parallel_jobs = "bad"
+
+        payload = service.generate(
+            symbol="BTCUSDC",
+            version="v2",
+            stress_validation={
+                "sample_counts": {"shock_regime_trades": 8},
+                "deployment_recommendation": {
+                    "priority": "high",
+                    "scenario_statuses": {
+                        "shock_concentration": {"status": "WARN", "reason": "test", "catastrophic_loss_detected": False}
+                    },
+                },
+            },
+            stress_replay_lineage={
+                "available": True,
+                "runtime_inputs_ready": True,
+                "sample_counts": {"eligible_closed_trades": 8, "latency_bar_trades": 8, "full_fill_path_trades": 8},
+                "coverage": {"execution_fill_coverage": 1.0, "latency_candle_coverage": 1.0, "candle_path_coverage": 1.0},
+                "fill_path": {"full_fill_path_coverage": 1.0},
+                "blocked_by": [],
+                "next_steps": [],
+            },
+            stress_replay_assessment={
+                "available": True,
+                "full_replay_ready": True,
+                "replacement_recommended": True,
+                "true_runner_readiness": {"true_runner_ready": False, "next_steps": []},
+                "deployment_recommendation": {"priority": "high"},
+            },
+            write_report=False,
+        )
+
+        assert payload["runner_contract"]["batching"]["target_trades_per_job"] == 20
+        assert payload["runner_contract"]["batching"]["min_trades_per_job"] == 8
+        assert payload["runner_contract"]["batching"]["max_parallel_jobs"] == 2
+        assert payload["scenario_contract"]["shock_concentration"]["ready"] is True
+    finally:
+        for key, value in original_values.items():
+            setattr(service.settings, key, value)

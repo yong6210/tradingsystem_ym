@@ -103,7 +103,10 @@ class AltDataMarketService:
             section_year = int(section_year_text)
             for month1, day1, month2, day2, explicit_year in item_pattern.findall(section_html):
                 year = int(explicit_year) if explicit_year else section_year
-                event_local = datetime.strptime(f"{month2} {day2} {year} 14:00", "%B %d %Y %H:%M").replace(tzinfo=self._ny_tz)
+                try:
+                    event_local = datetime.strptime(f"{month2} {day2} {year} 14:00", "%B %d %Y %H:%M").replace(tzinfo=self._ny_tz)
+                except ValueError:
+                    continue
                 event_ts = event_local.astimezone(UTC)
                 if event_ts < cutoff:
                     continue

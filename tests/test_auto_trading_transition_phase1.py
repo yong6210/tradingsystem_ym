@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
 
-from app.core.config import Settings, get_settings
+from app.core.config import Settings
 from app.core.enums import ApprovalState, ExecutionMode, StrategyMode
 from app.db.models import Plan
 from app.db.session import SessionLocal, init_db
@@ -197,6 +198,97 @@ def test_execution_plan_builder_maps_entry_models(entry_model: str, expected_ent
     assert payload["execution_mode"] == ExecutionMode.PAPER.value
     assert (payload["entry_limit_price"] is not None) is expects_limit
     assert (payload["entry_trigger_price"] is None) is expects_limit
+
+
+def test_execution_plan_builder_tolerates_malformed_numeric_settings() -> None:
+    settings = Settings(_env_file=None, auto_trading_execution_mode="PAPER")
+    settings.auto_trading_notional_per_r = "bad-notional"
+    settings.maker_fee_bps = "nan"
+    settings.auto_trading_max_slippage_bps = "inf"
+    service = ExecutionPlanningService(settings=settings)
+    plan = _plan(
+        plan_id="builder_malformed_numeric_inputs",
+        validity={
+            "strategy_family": "trend_continuation",
+            "strategy_grade": "A",
+            "strategy_family_score": "bad-score",
+            "recommended_risk_r": "bad-risk",
+            "strategy_mode": StrategyMode.A_ONLY.value,
+        },
+    )
+    plan.entry_price = "bad-entry"
+    plan.sl = "bad-stop"
+    plan.tp1 = "bad-tp"
+    plan.split = {"tp1": "bad-split", "tp2": "inf", "runner": "nan"}
+
+    payload = service.build_executable_plan(
+        plan=plan,
+        context=None,
+        candidate_row={
+            "accepted": True,
+            "deployment_go_no_go": "GO",
+            "expected_win_prob": "bad-win",
+            "expected_ev_r": "inf",
+        },
+    )
+
+    assert payload["setup_score"] == 0.0
+    assert payload["recommended_risk_r"] == 0.0
+    assert payload["entry_limit_price"] == 0.0
+    assert payload["stop_price"] == 0.0
+    assert payload["tp_targets"][0]["price"] == 0.0
+    assert payload["tp_targets"][1]["size_fraction"] == 0.0
+    assert payload["max_position_notional"] == 0.0
+    assert payload["expected_fee_bps"] == 2.0
+    assert payload["max_slippage_bps"] == 12.0
+    assert payload["expected_summary"]["expected_win_prob"] == 0.0
+
+
+def test_micro_live_approval_tolerates_malformed_numeric_settings() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_allowed_symbols="BTCUSDC",
+        auto_trading_allowed_families="trend_continuation",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
+        auto_trading_micro_live_allowed_families="trend_continuation",
+    )
+    settings.auto_trading_micro_live_max_concurrent_positions = "bad-position-cap"
+    settings.auto_trading_micro_live_max_daily_new_entries = "bad-daily-cap"
+    settings.transition_edge_variant_partial_activation_ratio = "bad-ratio"
+    settings.session_impulse_retest_partial_activation_ratio = "inf"
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(plan_id="approve_malformed_numeric_settings")
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_candidate",
+        "deployment_message": "GO",
+        "session_guidance": {"state": "unknown"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={
+            "grade": "A",
+            "recommendation": "deploy",
+            "risk_state": "OPEN",
+            "operating_lock": {"active": False},
+        },
+        requested_execution_mode=ExecutionMode.MICRO_LIVE,
+        safety_state={"new_entry_allowed": True},
+        current_exposure_count=0,
+        daily_new_entry_count=0,
+    )
+
+    assert payload["approval_state"] == ApprovalState.APPROVED_AUTO.value
+    assert payload["transition_edge_variant_partial_activation_ratio"] == 0.0
+    assert service._transition_edge_variant_sampling_decision(plan=plan, executable_plan=executable_plan)[2] == 0.3
+    assert service._session_impulse_retest_sampling_decision(plan=plan, executable_plan=executable_plan)[2] == 0.3
 
 
 @pytest.mark.parametrize(
@@ -543,6 +635,51 @@ def test_approval_service_paper_lineage_override_bypasses_paper_sampling_gates_o
     assert "paper_lineage_override_bypassed_validation_do_not_deploy" in reason_codes
     assert "paper_lineage_override_retained_paper_auto_submit" in reason_codes
     assert "execution_degradation:manual_review" in reason_codes
+
+
+def test_approval_service_paper_lineage_override_allows_clean_candidate_outside_live_allowlist() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="PAPER",
+        auto_trading_allowed_symbols="BTCUSDC",
+        auto_trading_allowed_families="trend_continuation",
+        auto_trading_require_validation_go=True,
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_OpenRolloutProvider())
+    plan = _plan(
+        plan_id="paper_lineage_clean_allowlist_case",
+        symbol="FILUSDC",
+        validity={
+            "strategy_family": "sweep_reversal",
+            "strategy_grade": "A",
+            "regime": "range",
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "recommended_risk_r": 0.4,
+        },
+    )
+    candidate = {
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+        "operating_lock": {"active": False, "current_session": {"name": "london", "active": True}},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+        paper_lineage_override=True,
+    )
+
+    assert payload["paper_lineage_override_applied"] is True
+    assert payload["approval_state"] == ApprovalState.APPROVED_AUTO.value
+    assert payload["playbook_go_no_go"] == "GO"
+    reason_codes = {reason["code"] for reason in payload["approval_reasons"]}
+    assert "paper_lineage_override_bypassed_symbol_allowlist" in reason_codes
+    assert "paper_lineage_override_bypassed_family_allowlist" in reason_codes
 
 
 def test_approval_service_blocks_micro_live_on_same_window_family_cluster() -> None:

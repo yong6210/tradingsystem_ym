@@ -8,7 +8,6 @@ from app.db.models import Plan
 from app.db.repositories import ValidationArtifactRepository
 from app.db.session import SessionLocal, init_db
 from app.services.strategy_engine import StrategyEngine
-from app.services.strategy_v2_pbo_dsr_threshold_runner import StrategyV2PboDsrThresholdRunnerService
 from app.services.strategy_v2_pbo_dsr_trial_writer import StrategyV2PboDsrTrialWriterService
 
 
@@ -295,3 +294,43 @@ def test_recompute_learning_seeds_trial_writer_and_pbo_dsr_metrics() -> None:
             "runtime_validation_proxy_v1",
             "true_threshold_sweep_runner_v1",
         }
+
+
+def test_strategy_v2_pbo_dsr_trial_writer_tolerates_malformed_numeric_settings() -> None:
+    service = StrategyV2PboDsrTrialWriterService()
+    original_values = {
+        "min_confluence_score": service.settings.min_confluence_score,
+        "transition_watch_score": service.settings.transition_watch_score,
+        "transition_confirmed_score": service.settings.transition_confirmed_score,
+        "reaction_classifier_rejection_confirmed_score": service.settings.reaction_classifier_rejection_confirmed_score,
+        "reaction_classifier_rejection_tentative_score": service.settings.reaction_classifier_rejection_tentative_score,
+        "reaction_classifier_acceptance_confirmed_score": service.settings.reaction_classifier_acceptance_confirmed_score,
+        "reaction_classifier_acceptance_tentative_score": service.settings.reaction_classifier_acceptance_tentative_score,
+        "sizing_grade_a_r": service.settings.sizing_grade_a_r,
+        "sizing_grade_b_r": service.settings.sizing_grade_b_r,
+        "sizing_grade_c_r": service.settings.sizing_grade_c_r,
+    }
+    try:
+        for key in original_values:
+            setattr(service.settings, key, "bad")
+        service.settings.sizing_grade_a_r = float("inf")
+        plans = _sample_plans("PBOWRITERBADUSDC")
+        plan_pairs = service._closed_plan_pairs(plans=plans, symbol="PBOWRITERBADUSDC", version="v1")
+
+        trials = [
+            *service._scoring_threshold_trials(plan_pairs=plan_pairs),
+            *service._transition_threshold_trials(plan_pairs=plan_pairs),
+            *service._acceptance_rejection_threshold_trials(plan_pairs=plan_pairs),
+            *service._sizing_clamp_trials(plan_pairs=plan_pairs),
+        ]
+
+        assert trials
+        assert {trial.parameter_family for trial in trials} >= {
+            "scoring_thresholds",
+            "transition_threshold",
+            "acceptance_rejection_thresholds",
+            "sizing_clamps",
+        }
+    finally:
+        for key, value in original_values.items():
+            setattr(service.settings, key, value)

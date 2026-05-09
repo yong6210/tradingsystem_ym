@@ -63,6 +63,13 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
 def _edge_experiment_summary(payload: dict[str, Any] | None) -> dict[str, Any] | None:
     source = dict((payload or {}).get("edge_experiment_review") or {})
     if not source:
@@ -331,7 +338,8 @@ def main() -> int:
                 if retry_attempt >= _TRANSIENT_FAILURE_RETRY_ATTEMPTS or not _is_retryable_run_error(str(exc)):
                     raise
                 time.sleep(_TRANSIENT_FAILURE_RETRY_BASE_DELAY_SECONDS * retry_attempt)
-        assert payload is not None
+        if payload is None:
+            raise RuntimeError("paper candidate drill attempt ended without a payload")
         attempts.append(
             {
                 "attempt": index,
@@ -342,19 +350,20 @@ def main() -> int:
                     (row.get("status") == "PASS" for row in payload.get("checks", []) if row.get("name") == "eligible_candidate_found"),
                     False,
                 ),
+                "paper_sample_ready": str(payload.get("overall_status") or "") == "READY_FOR_PAPER_SAMPLE",
                 "candidate": payload.get("candidate"),
                 "submission": payload.get("submission"),
                 "report_path": payload.get("report_path"),
             }
         )
-        eligible = attempts[-1]["eligible_candidate_found"]
+        eligible = attempts[-1]["paper_sample_ready"]
         final_payload = payload
         if eligible:
             break
         if index < args.max_attempts:
             time.sleep(max(args.interval_seconds, 1))
 
-    found = bool(attempts and attempts[-1]["eligible_candidate_found"])
+    found = bool(attempts and attempts[-1]["paper_sample_ready"])
     overall_status = "FOUND_ELIGIBLE_CANDIDATE" if found else "NO_ELIGIBLE_CANDIDATE"
     edge_experiment_review = _edge_experiment_summary(final_payload)
     candidate_edge_experiment_focus = _candidate_edge_experiment_focus(final_payload)
@@ -363,7 +372,7 @@ def main() -> int:
     summary_line = (
         f"Eligible PAPER lineage candidate found on attempt {attempts[-1]['attempt']}."
         if found
-        else f"No eligible PAPER lineage candidate found after {len(attempts)} attempt(s)."
+        else f"No submit-ready PAPER lineage candidate found after {len(attempts)} attempt(s)."
     )
     next_steps = (
         [
@@ -375,9 +384,15 @@ def main() -> int:
         else [
             "Rerun this watcher during London/New York preferred sessions.",
             "Keep focus on trend_continuation or sweep_reversal families; legacy_zone_plan does not advance MICRO_LIVE lineage.",
-            "No PAPER lineage submission occurred because no eligible family candidate appeared.",
+            "No PAPER lineage submission occurred because no submit-ready family candidate appeared.",
         ]
     )
+    final_intent = dict((final_payload or {}).get("intent") or {})
+    if not found and final_intent and str(final_intent.get("submit_decision") or "") != "SUBMIT":
+        next_steps.append(
+            "Latest family candidate was not submit-ready: "
+            f"{final_intent.get('decision_reason_code') or 'unknown'}"
+        )
     advisory_next_step = _edge_experiment_next_step(edge_experiment_review)
     if advisory_next_step:
         next_steps.append(advisory_next_step)
@@ -408,7 +423,7 @@ def main() -> int:
         ts = generated_at.strftime("%Y%m%dT%H%M%SZ")
         report_path = ROOT_DIR / args.report_dir / f"paper_candidate_watch_{ts}.md"
         _write_report(report_path, result)
-        result["report_path"] = str(report_path.relative_to(ROOT_DIR))
+        result["report_path"] = _display_path(report_path)
     else:
         result["report_path"] = None
 

@@ -21,6 +21,11 @@ from app.services.notification_dispatcher import NotificationDispatcher
 BRIEF_SCRIPT = ROOT_DIR / "scripts" / "generate_operator_session_brief.py"
 
 
+def _resolve_root_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else ROOT_DIR / path
+
+
 def _env_default(name: str, fallback: str) -> str:
     value = os.environ.get(name)
     if value is None:
@@ -108,7 +113,7 @@ def _run_brief(args: argparse.Namespace) -> dict[str, Any]:
         "--reconcile-limit",
         str(args.reconcile_limit),
     ]
-    completed = subprocess.run(command, capture_output=True, text=True, cwd=str(ROOT_DIR))
+    completed = subprocess.run(command, capture_output=True, text=True, cwd=str(ROOT_DIR), check=False)
     if completed.returncode != 0:
         stderr = completed.stderr.strip() or completed.stdout.strip()
         raise RuntimeError(f"brief script failed: {stderr}")
@@ -508,12 +513,12 @@ def _render_message(brief: dict[str, Any], *, brief_mode: str) -> str:
 def main() -> int:
     args = parse_args()
     state_file = (
-        Path(args.state_file).resolve()
+        _resolve_root_path(args.state_file).resolve()
         if str(args.state_file).strip()
         else _default_state_file(brief_mode=args.brief_mode, channel=args.channel)
     )
     latest_run_file = (
-        Path(args.latest_run_file).resolve()
+        _resolve_root_path(args.latest_run_file).resolve()
         if str(args.latest_run_file).strip()
         else _default_latest_run_file(brief_mode=args.brief_mode)
     )

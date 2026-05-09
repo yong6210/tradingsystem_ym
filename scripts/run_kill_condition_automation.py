@@ -43,6 +43,13 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
 def _write_report(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -98,7 +105,13 @@ def _parse_unlock_at(value: str | None) -> datetime | None:
     if not value:
         return None
     normalized = value.replace("Z", "+00:00")
-    return datetime.fromisoformat(normalized)
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError(f"invalid --unlock-at ISO8601 timestamp: {value}") from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def main() -> int:
@@ -107,7 +120,10 @@ def main() -> int:
     settings = get_settings()
     report_dir_input = Path(args.report_dir or settings.kill_condition_automation_report_dir)
     report_dir = report_dir_input if report_dir_input.is_absolute() else ROOT_DIR / report_dir_input
-    unlock_at = _parse_unlock_at(args.unlock_at)
+    try:
+        unlock_at = _parse_unlock_at(args.unlock_at)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     with SessionLocal() as db:
         engine = StrategyEngine(db)
@@ -130,10 +146,7 @@ def main() -> int:
     payload["generated_at"] = payload["generated_at"].isoformat()
     payload["unlock_at"] = unlock_at.isoformat() if unlock_at else None
     report_path = report_dir / f"kill_condition_automation_{args.symbol}_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.md"
-    try:
-        payload["report_path"] = str(report_path.relative_to(ROOT_DIR))
-    except ValueError:
-        payload["report_path"] = str(report_path)
+    payload["report_path"] = _display_path(report_path)
     if not args.no_write_report:
         _write_report(report_path, payload)
 

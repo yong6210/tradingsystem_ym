@@ -16,6 +16,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.db.base import Base
 
 
+def _resolve_root_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify Timescale runtime end-to-end")
     parser.add_argument("--database-url", required=True, help="PostgreSQL DSN")
@@ -55,8 +60,8 @@ def split_sql(sql: str) -> list[str]:
     return chunks
 
 
-def find_migrations(migrations_dir: str) -> list[Path]:
-    return sorted(Path(migrations_dir).glob("*.sql"))
+def find_migrations(migrations_dir: str | Path) -> list[Path]:
+    return sorted(_resolve_root_path(migrations_dir).glob("*.sql"))
 
 
 def apply_migrations(conn: Connection, migrations: list[Path]) -> list[tuple[str, int]]:
@@ -283,9 +288,10 @@ def main() -> int:
     # Ensure model metadata is loaded before create_all.
     from app.db import models  # noqa: F401
 
-    migrations = find_migrations(args.migrations_dir)
+    migrations_dir = _resolve_root_path(args.migrations_dir)
+    migrations = find_migrations(migrations_dir)
     if not migrations:
-        raise RuntimeError(f"no SQL migration files in: {args.migrations_dir}")
+        raise RuntimeError(f"no SQL migration files in: {migrations_dir}")
 
     engine = create_engine(args.database_url, future=True)
     with engine.begin() as conn:
@@ -302,8 +308,8 @@ def main() -> int:
             details[f"compression_job_run_{table_name}"] = info
 
     status = "PASS" if all(checks.values()) else "FAIL"
-    report_path = Path(args.report_path) if args.report_path else Path(
-        f"reports/timescale/validation_{now_utc.strftime('%Y%m%d_%H%M%S')}.md"
+    report_path = _resolve_root_path(
+        args.report_path or f"reports/timescale/validation_{now_utc.strftime('%Y%m%d_%H%M%S')}.md"
     )
     write_report(
         report_path=report_path,

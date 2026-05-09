@@ -39,6 +39,13 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
 def _run_snapshot(args: argparse.Namespace) -> dict[str, Any]:
     command = [
         sys.executable,
@@ -56,7 +63,7 @@ def _run_snapshot(args: argparse.Namespace) -> dict[str, Any]:
         "--reconcile-limit",
         str(args.reconcile_limit),
     ]
-    completed = subprocess.run(command, capture_output=True, text=True, cwd=str(ROOT_DIR))
+    completed = subprocess.run(command, capture_output=True, text=True, cwd=str(ROOT_DIR), check=False)
     if completed.returncode != 0:
         stderr = completed.stderr.strip() or completed.stdout.strip()
         raise RuntimeError(f"snapshot script failed: {stderr}")
@@ -374,7 +381,7 @@ def main() -> int:
         ts = generated_at.strftime("%Y%m%dT%H%M%SZ")
         report_path = ROOT_DIR / args.report_dir / f"operator_session_brief_{args.symbol.upper()}_{ts}.md"
         _write_report(report_path, payload)
-        payload["report_path"] = str(report_path.relative_to(ROOT_DIR))
+        payload["report_path"] = _display_path(report_path)
 
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     return 0

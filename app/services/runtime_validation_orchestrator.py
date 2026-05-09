@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from math import isfinite
 from typing import Any
 
 from app.core.enums import PlanState
@@ -27,6 +28,16 @@ class RuntimeValidationOrchestrator:
             symbol,
             persist_runtime_validation_artifacts=persist_runtime_validation_artifacts,
         )
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    if value in (None, "", "None"):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return int(parsed) if isfinite(parsed) else default
 
 
 def _run_engine_recompute_learning(
@@ -192,7 +203,7 @@ def _run_engine_recompute_learning(
     )
     portfolio_budget_for_research = self.portfolio_budget_report(
         universe=self.settings.universe_name,
-        limit=max(20, int(self.settings.alpha_research_max_candidates)),
+        limit=max(20, _safe_int(self.settings.alpha_research_max_candidates, default=20)),
         write_report=False,
     )
     alpha_research_pipeline = self.alpha_research_pipeline.generate(

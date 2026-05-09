@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import sys
 from datetime import UTC, datetime
+from math import isfinite
 from pathlib import Path
+from typing import Any
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -14,6 +16,20 @@ from app.db.session import SessionLocal, init_db
 from app.services.micro_main_live_readiness import evaluate_micro_main_live_readiness, micro_main_live_readiness_to_dict
 from app.services.micro_main_universe_policy import build_micro_main_universe_policy_snapshot
 from app.services.strategy_engine import StrategyEngine
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    if value in (None, "", "None"):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if isfinite(parsed) else default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    return int(_safe_float(value, float(default)))
 
 
 def main() -> None:
@@ -38,8 +54,8 @@ def main() -> None:
                 universe_policy=policy,
                 enabled=bool(settings.session_impulse_retest_enabled),
                 shadow_only=bool(settings.session_impulse_retest_shadow_only),
-                partial_ratio=float(settings.session_impulse_retest_partial_activation_ratio),
-                core_live_slots=int(settings.session_impulse_retest_core_live_slots),
+                partial_ratio=_safe_float(settings.session_impulse_retest_partial_activation_ratio, 0.3),
+                core_live_slots=_safe_int(settings.session_impulse_retest_core_live_slots, 2),
                 secondary_live_enabled=bool(settings.session_impulse_retest_secondary_live_enabled),
             )
             results.append(micro_main_live_readiness_to_dict(readiness))

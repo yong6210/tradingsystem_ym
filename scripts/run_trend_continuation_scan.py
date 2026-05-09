@@ -40,19 +40,29 @@ def _normalized_csv(raw: str) -> tuple[str, ...]:
     return tuple(item for item in values if item)
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def _daily_pnl(rows: list[dict[str, Any]]) -> dict[str, float]:
     out: dict[str, float] = {}
     for row in rows:
         raw_ts = str(row.get("closed_ts") or "").strip()
         if not raw_ts:
             continue
-        ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        try:
+            ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        except ValueError:
+            continue
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=UTC)
         else:
             ts = ts.astimezone(UTC)
         day_key = ts.date().isoformat()
-        realized_r = float(row.get("replayed_realized_r") or row.get("final_exit_realized_r") or 0.0)
+        realized_r = _safe_float(row.get("replayed_realized_r") or row.get("final_exit_realized_r"))
         out[day_key] = out.get(day_key, 0.0) + realized_r
     return out
 
@@ -69,7 +79,7 @@ def _correlation(a_rows: list[dict[str, Any]], b_rows: list[dict[str, Any]]) -> 
     b_values = [float(b_daily.get(day, 0.0)) for day in days]
     mean_a = sum(a_values) / len(a_values)
     mean_b = sum(b_values) / len(b_values)
-    cov = sum((x - mean_a) * (y - mean_b) for x, y in zip(a_values, b_values))
+    cov = sum((x - mean_a) * (y - mean_b) for x, y in zip(a_values, b_values, strict=True))
     var_a = sum((x - mean_a) ** 2 for x in a_values)
     var_b = sum((y - mean_b) ** 2 for y in b_values)
     if var_a <= 1e-12 or var_b <= 1e-12:
@@ -83,7 +93,7 @@ def _regime_breakdown(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         regime = str(row.get("regime") or "unknown").strip().lower() or "unknown"
         payload = buckets.setdefault(regime, {"closed": 0.0, "total_r": 0.0})
         payload["closed"] += 1.0
-        payload["total_r"] += float(row.get("replayed_realized_r") or row.get("final_exit_realized_r") or 0.0)
+        payload["total_r"] += _safe_float(row.get("replayed_realized_r") or row.get("final_exit_realized_r"))
     return [
         {"regime": regime, "closed": int(values["closed"]), "total_r": round(values["total_r"], 4)}
         for regime, values in sorted(buckets.items(), key=lambda item: (-item[1]["closed"], item[0]))

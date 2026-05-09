@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from math import ceil
+from math import ceil, isfinite
 from pathlib import Path
 from typing import Any
 
@@ -19,18 +19,24 @@ class StrategyV2StressReplayRunnerContractService:
         self.settings = settings or get_settings()
 
     @staticmethod
-    def _int(value: Any) -> int:
+    def _int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
         try:
-            return int(value or 0)
+            parsed = float(value)
         except (TypeError, ValueError):
-            return 0
+            return default
+        return int(parsed) if isfinite(parsed) else default
 
     @staticmethod
-    def _float(value: Any) -> float:
+    def _float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
         try:
-            return float(value or 0.0)
+            parsed = float(value)
         except (TypeError, ValueError):
-            return 0.0
+            return default
+        return parsed if isfinite(parsed) else default
 
     @staticmethod
     def _job_count(*, trades: int, min_trades_per_job: int, target_trades_per_job: int) -> int:
@@ -51,11 +57,11 @@ class StrategyV2StressReplayRunnerContractService:
         scenario_statuses = dict(
             (dict(stress_validation.get("deployment_recommendation") or {})).get("scenario_statuses") or {}
         )
-        min_exec = float(self.settings.stress_replay_lineage_min_execution_fill_coverage)
-        min_latency = float(self.settings.stress_replay_lineage_min_latency_candle_coverage)
-        min_path = float(self.settings.stress_replay_lineage_min_candle_path_coverage)
-        target = int(self.settings.stress_replay_runner_target_trades_per_job)
-        minimum = int(self.settings.stress_replay_runner_min_trades_per_job)
+        min_exec = self._float(self.settings.stress_replay_lineage_min_execution_fill_coverage, 0.70)
+        min_latency = self._float(self.settings.stress_replay_lineage_min_latency_candle_coverage, 0.70)
+        min_path = self._float(self.settings.stress_replay_lineage_min_candle_path_coverage, 0.80)
+        target = self._int(self.settings.stress_replay_runner_target_trades_per_job, 20)
+        minimum = self._int(self.settings.stress_replay_runner_min_trades_per_job, 8)
 
         runtime_inputs_ready = bool(stress_replay_lineage.get("runtime_inputs_ready", False))
         latency_trades = self._int(sample_counts.get("latency_bar_trades"))
@@ -390,9 +396,9 @@ class StrategyV2StressReplayRunnerContractService:
                 ],
                 "idempotency_key_fields": ["symbol", "version", "scenario", "batch_index", "lineage_schema_version"],
                 "batching": {
-                    "target_trades_per_job": int(self.settings.stress_replay_runner_target_trades_per_job),
-                    "min_trades_per_job": int(self.settings.stress_replay_runner_min_trades_per_job),
-                    "max_parallel_jobs": int(self.settings.stress_replay_runner_max_parallel_jobs),
+                    "target_trades_per_job": self._int(self.settings.stress_replay_runner_target_trades_per_job, 20),
+                    "min_trades_per_job": self._int(self.settings.stress_replay_runner_min_trades_per_job, 8),
+                    "max_parallel_jobs": self._int(self.settings.stress_replay_runner_max_parallel_jobs, 2),
                     "suggested_jobs": {
                         name: int((scenario_contract.get(name) or {}).get("suggested_job_count", 0))
                         for name in self._SCENARIO_ORDER

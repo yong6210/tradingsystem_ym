@@ -54,6 +54,16 @@ class StrategyV2PboDsrTrialWriterService:
         return round(float(value), digits)
 
     @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if math.isfinite(parsed) else default
+
+    @staticmethod
     def _mean(values: list[float]) -> float:
         if not values:
             return 0.0
@@ -128,7 +138,7 @@ class StrategyV2PboDsrTrialWriterService:
     ) -> _RuntimeTrialSeries | None:
         if not closed_trades or not returns or len(closed_trades) != len(returns):
             return None
-        ordered = sorted(zip(closed_trades, returns), key=lambda item: item[0].closed_ts)
+        ordered = sorted(zip(closed_trades, returns, strict=True), key=lambda item: item[0].closed_ts)
         return _RuntimeTrialSeries(
             trial_key=trial_key,
             parameter_family=parameter_family,
@@ -278,11 +288,12 @@ class StrategyV2PboDsrTrialWriterService:
         if not plan_pairs:
             return []
         settings = self.settings
+        min_confluence_score = self._safe_float(settings.min_confluence_score, 62.0)
         thresholds = sorted(
             {
-                max(0.0, float(settings.min_confluence_score) - 4.0),
-                float(settings.min_confluence_score),
-                float(settings.min_confluence_score) + 4.0,
+                max(0.0, min_confluence_score - 4.0),
+                min_confluence_score,
+                min_confluence_score + 4.0,
             }
         )
         trials: list[_RuntimeTrialSeries] = []
@@ -312,11 +323,13 @@ class StrategyV2PboDsrTrialWriterService:
         if not plan_pairs:
             return []
         settings = self.settings
+        transition_watch_score = self._safe_float(settings.transition_watch_score, 40.0)
+        transition_confirmed_score = self._safe_float(settings.transition_confirmed_score, 55.0)
         thresholds = sorted(
             {
-                max(0.0, float(settings.transition_watch_score) - 5.0),
-                float(settings.transition_watch_score),
-                float(settings.transition_watch_score) + 5.0,
+                max(0.0, transition_watch_score - 5.0),
+                transition_watch_score,
+                transition_watch_score + 5.0,
             }
         )
         trials: list[_RuntimeTrialSeries] = []
@@ -331,7 +344,7 @@ class StrategyV2PboDsrTrialWriterService:
                 parameter_family="transition_threshold",
                 parameter_values={
                     "max_transition_score": float(threshold),
-                    "transition_confirmed_score": float(settings.transition_confirmed_score),
+                    "transition_confirmed_score": transition_confirmed_score,
                 },
                 closed_trades=subset,
                 returns=[float(record.realized_r) for record in subset],
@@ -350,9 +363,9 @@ class StrategyV2PboDsrTrialWriterService:
         validity = cls._validity(plan)
         classification = str(validity.get("reaction_classification", "unknown") or "unknown")
         if classification.startswith("rejection"):
-            return classification, float(validity.get("reaction_rejection_score", 0.0) or 0.0)
+            return classification, cls._safe_float(validity.get("reaction_rejection_score", 0.0))
         if classification.startswith("acceptance"):
-            return classification, float(validity.get("reaction_acceptance_score", 0.0) or 0.0)
+            return classification, cls._safe_float(validity.get("reaction_acceptance_score", 0.0))
         return classification, 0.0
 
     def _acceptance_rejection_threshold_trials(
@@ -367,11 +380,11 @@ class StrategyV2PboDsrTrialWriterService:
         def passes(plan: Any, variant: str) -> bool:
             classification, score = self._reaction_score_for_plan(plan)
             if classification.startswith("rejection"):
-                confirmed = float(settings.reaction_classifier_rejection_confirmed_score)
-                tentative = float(settings.reaction_classifier_rejection_tentative_score)
+                confirmed = self._safe_float(settings.reaction_classifier_rejection_confirmed_score, 75.0)
+                tentative = self._safe_float(settings.reaction_classifier_rejection_tentative_score, 60.0)
             elif classification.startswith("acceptance"):
-                confirmed = float(settings.reaction_classifier_acceptance_confirmed_score)
-                tentative = float(settings.reaction_classifier_acceptance_tentative_score)
+                confirmed = self._safe_float(settings.reaction_classifier_acceptance_confirmed_score, 70.0)
+                tentative = self._safe_float(settings.reaction_classifier_acceptance_tentative_score, 55.0)
             else:
                 return False
             if variant == "tentative_enabled":
@@ -393,10 +406,10 @@ class StrategyV2PboDsrTrialWriterService:
                 parameter_family="acceptance_rejection_thresholds",
                 parameter_values={
                     "variant": variant,
-                    "rejection_confirmed_score": float(settings.reaction_classifier_rejection_confirmed_score),
-                    "rejection_tentative_score": float(settings.reaction_classifier_rejection_tentative_score),
-                    "acceptance_confirmed_score": float(settings.reaction_classifier_acceptance_confirmed_score),
-                    "acceptance_tentative_score": float(settings.reaction_classifier_acceptance_tentative_score),
+                    "rejection_confirmed_score": self._safe_float(settings.reaction_classifier_rejection_confirmed_score, 75.0),
+                    "rejection_tentative_score": self._safe_float(settings.reaction_classifier_rejection_tentative_score, 60.0),
+                    "acceptance_confirmed_score": self._safe_float(settings.reaction_classifier_acceptance_confirmed_score, 70.0),
+                    "acceptance_tentative_score": self._safe_float(settings.reaction_classifier_acceptance_tentative_score, 55.0),
                 },
                 closed_trades=subset,
                 returns=[float(record.realized_r) for record in subset],
@@ -414,14 +427,18 @@ class StrategyV2PboDsrTrialWriterService:
         if not plan_pairs:
             return []
         settings = self.settings
-        caps = [float(settings.sizing_grade_a_r), float(settings.sizing_grade_b_r), float(settings.sizing_grade_c_r)]
+        caps = [
+            self._safe_float(settings.sizing_grade_a_r, 1.0),
+            self._safe_float(settings.sizing_grade_b_r, 0.5),
+            self._safe_float(settings.sizing_grade_c_r, 0.25),
+        ]
         trials: list[_RuntimeTrialSeries] = []
         for cap in sorted(set(caps), reverse=True):
             closed_trades: list[ClosedTradeRecord] = []
             returns: list[float] = []
             for plan, record in plan_pairs:
                 validity = self._validity(plan)
-                recommended = float(validity.get("recommended_risk_r", 0.0) or 0.0)
+                recommended = self._safe_float(validity.get("recommended_risk_r", 0.0))
                 if recommended <= 0.0:
                     continue
                 factor = min(recommended, float(cap)) / recommended

@@ -6,6 +6,7 @@ import json
 import sys
 from collections import Counter
 from datetime import UTC, datetime, timedelta
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -45,10 +46,25 @@ def _utc_from_iso(raw: str | None) -> datetime | None:
     text = str(raw or "").strip()
     if not text:
         return None
-    value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    try:
+        value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return parsed if isfinite(parsed) else float(default)
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    return int(_safe_float(value, float(default)))
 
 
 def _load_replay_rows(*, replay_path: str, symbol: str, family: str, entry_model: str, days: int) -> list[dict[str, Any]]:
@@ -67,7 +83,7 @@ def _load_replay_rows(*, replay_path: str, symbol: str, family: str, entry_model
         generated_ts = _utc_from_iso(str(row.get("generated_ts") or ""))
         if generated_ts is None or generated_ts < cutoff:
             continue
-        if float(row.get("final_exit_realized_r") or 0.0) <= 0.0:
+        if _safe_float(row.get("final_exit_realized_r")) <= 0.0:
             continue
         item = dict(row)
         item["generated_dt"] = generated_ts
@@ -90,10 +106,10 @@ def main() -> int:
 
     init_db()
     settings = get_settings()
-    warmup_5m_bars = max(int(settings.auto_trading_historical_walk_forward_warmup_5m_bars), 30)
-    min_15m_bars = max(int(settings.auto_trading_historical_walk_forward_min_15m_bars), 30)
-    max_5m_window = max(int(settings.auto_trading_historical_walk_forward_max_5m_window_bars), warmup_5m_bars)
-    max_15m_window = max(int(settings.auto_trading_historical_walk_forward_max_15m_window_bars), min_15m_bars)
+    warmup_5m_bars = max(_safe_int(settings.auto_trading_historical_walk_forward_warmup_5m_bars, 300), 30)
+    min_15m_bars = max(_safe_int(settings.auto_trading_historical_walk_forward_min_15m_bars, 60), 30)
+    max_5m_window = max(_safe_int(settings.auto_trading_historical_walk_forward_max_5m_window_bars, 300), warmup_5m_bars)
+    max_15m_window = max(_safe_int(settings.auto_trading_historical_walk_forward_max_15m_window_bars, 300), min_15m_bars)
 
     target_timestamps = {row["generated_dt"] for row in replay_rows}
     start_ts = min(target_timestamps) - timedelta(days=10)
@@ -118,7 +134,8 @@ def main() -> int:
 
         for idx_5, candle in enumerate(candles_5m):
             current_ts = proof._normalize_ts(candle.ts)
-            assert current_ts is not None
+            if current_ts is None:
+                continue
             if current_ts not in target_timestamps:
                 continue
             advanced_15m = False

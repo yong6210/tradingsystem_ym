@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from statistics import median
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from app.db.models import Candle
 
@@ -79,7 +79,7 @@ class SessionImpulseRetestResearch:
     _MAX_HOLD_MINUTES = 40
     _TIME_GUARD_10M_MIN_MFE_R = 0.20
     _TIME_GUARD_20M_MIN_MFE_R = 0.35
-    _PROFILE_DEFAULTS: dict[str, dict[str, float]] = {
+    _PROFILE_DEFAULTS: ClassVar[dict[str, dict[str, float]]] = {
         "baseline": {
             "min_offset_bars": 5.0,
             "max_offset_bars": 20.0,
@@ -129,7 +129,7 @@ class SessionImpulseRetestResearch:
             "min_risk_pct": 0.0009,
         },
     }
-    _PROFILE_SYMBOL_OVERRIDES: dict[str, dict[str, dict[str, float]]] = {
+    _PROFILE_SYMBOL_OVERRIDES: ClassVar[dict[str, dict[str, dict[str, float]]]] = {
         "baseline": {
             "BTCUSDC": {
                 "min_reclaim_body_atr": 0.30,

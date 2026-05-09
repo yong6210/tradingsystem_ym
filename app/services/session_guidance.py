@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from typing import Any
 
 from app.core.config import Settings, get_settings
@@ -19,6 +20,26 @@ class SessionGuidanceService:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
+
     def _mode_value(self, mode: StrategyMode | str | None) -> str:
         if isinstance(mode, StrategyMode):
             return mode.value
@@ -30,10 +51,10 @@ class SessionGuidanceService:
     def session_windows(self, *, now: datetime) -> dict[str, dict[str, Any]]:
         current = self._utc(now)
         day_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
-        london_start = day_start + timedelta(hours=int(self.settings.trading_session_london_start_hour_utc))
-        london_end = day_start + timedelta(hours=int(self.settings.trading_session_london_end_hour_utc))
-        new_york_start = day_start + timedelta(hours=int(self.settings.trading_session_new_york_start_hour_utc))
-        new_york_end = day_start + timedelta(hours=int(self.settings.trading_session_new_york_end_hour_utc))
+        london_start = day_start + timedelta(hours=self._safe_int(self.settings.trading_session_london_start_hour_utc, default=7))
+        london_end = day_start + timedelta(hours=self._safe_int(self.settings.trading_session_london_end_hour_utc, default=12))
+        new_york_start = day_start + timedelta(hours=self._safe_int(self.settings.trading_session_new_york_start_hour_utc, default=13))
+        new_york_end = day_start + timedelta(hours=self._safe_int(self.settings.trading_session_new_york_end_hour_utc, default=18))
         overlap_start = max(london_start, new_york_start)
         overlap_end = min(london_end, new_york_end)
         overlap_defined = overlap_start < overlap_end
@@ -83,7 +104,7 @@ class SessionGuidanceService:
             state = "dead_session"
             status = "WARN"
             summary = "current window is dead session; live entries are guidance-only discouraged"
-            soft_penalty = float(self.settings.session_guidance_penalty_dead_session)
+            soft_penalty = self._safe_float(self.settings.session_guidance_penalty_dead_session, default=6.0)
         elif session_lock_active:
             state = "session_lock_active"
             status = "WARN"
@@ -91,7 +112,7 @@ class SessionGuidanceService:
                 f"{session_name} session is active, but session lock is currently active until "
                 f"{lock_payload.get('unlock_at', 'session_end')}"
             )
-            soft_penalty = float(self.settings.session_guidance_penalty_session_lock)
+            soft_penalty = self._safe_float(self.settings.session_guidance_penalty_session_lock, default=3.0)
         else:
             state = "preferred_live_window"
             status = "PASS"

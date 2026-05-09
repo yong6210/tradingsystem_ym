@@ -4,7 +4,7 @@ import importlib.util
 from pathlib import Path
 
 
-ROOT_DIR = Path("/Users/yumin/Documents/trading")
+ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
 def _load_module(name: str, path: Path):

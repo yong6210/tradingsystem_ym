@@ -218,6 +218,43 @@ def test_alpha_research_pipeline_summarizes_softened_candidates() -> None:
     assert "## Candidates" in body
 
 
+def test_softening_candidate_review_matches_recommended_action_by_focus_and_bucket() -> None:
+    payload = AlphaResearchPipelineService._softening_candidate_review(
+        evidence_summary={
+            "false_negative_suspects": [
+                {
+                    "reason": "risk_budget_below_min",
+                    "focus": "session_negative_ev",
+                    "axis": "session",
+                    "bucket": "dead_session",
+                    "alignment_strength": "high",
+                    "execution_drag_conflict": False,
+                    "confidence": "high",
+                }
+            ]
+        },
+        recommended_actions=[
+            {
+                "focus": "family_information_failure",
+                "bucket": "dead_session",
+                "recommended_action": "run_shadow_exit_review",
+                "observe_metrics": ["information_failure_rate"],
+            },
+            {
+                "focus": "session_negative_ev",
+                "bucket": "dead_session",
+                "recommended_action": "run_shadow_session_review",
+                "observe_metrics": ["ev"],
+            },
+        ],
+    )
+
+    assert payload is not None
+    assert payload["top_candidate"]["focus"] == "session_negative_ev"
+    assert payload["top_candidate"]["recommended_research_action"] == "run_shadow_session_review"
+    assert payload["top_candidate"]["required_evidence"] == ["ev"]
+
+
 def test_alpha_research_pipeline_defers_exit_review_until_entry_sequence_is_locked() -> None:
     service = AlphaResearchPipelineService()
 
@@ -349,3 +386,38 @@ def test_alpha_research_pipeline_defers_exit_review_until_entry_sequence_is_lock
     assert payload["top_shadow_experiment"]["deferred_by_experiment_sequence"] is True
     assert payload["top_shadow_experiment"]["sequencing_reason"]
     assert payload["next_steps"][0].startswith("lock entry timing first")
+
+
+def test_alpha_research_pipeline_tolerates_malformed_candidate_limit_setting() -> None:
+    service = AlphaResearchPipelineService()
+    original = service.settings.alpha_research_max_candidates
+    try:
+        service.settings.alpha_research_max_candidates = float("inf")
+
+        payload = service.generate(
+            universe="usdc_perp_top30",
+            focus_symbol="BTCUSDC",
+            analysis_symbol="BTCUSDC",
+            portfolio_budget={
+                "alpha_research_candidates": [
+                    {
+                        "symbol": "BTCUSDC",
+                        "plan_id": f"plan_{index}",
+                        "direction": "long",
+                        "entry_model": "LIMIT",
+                        "strategy_family": "trend_continuation",
+                        "regime": "range",
+                        "alpha_research_candidate": True,
+                        "alpha_research_reason": "risk_budget_below_min",
+                        "alpha_research_softened_risk_r": 0.1,
+                    }
+                    for index in range(25)
+                ]
+            },
+            write_report=False,
+        )
+
+        assert payload["available"] is True
+        assert len(payload["candidates"]) == 20
+    finally:
+        service.settings.alpha_research_max_candidates = original

@@ -37,6 +37,20 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    if value in (None, "", "None"):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if math.isfinite(parsed) else default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    return int(_safe_float(value, float(default)))
+
+
 class FeatureCalibrationService:
     def __init__(
         self,
@@ -79,6 +93,16 @@ class FeatureCalibrationService:
             return None
 
     @staticmethod
+    def _snapshot_generated_at(latest: dict[str, Any]) -> datetime:
+        raw = str(latest.get("generated_at") or "").strip()
+        if raw:
+            try:
+                return _utc(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+            except ValueError:
+                pass
+        return datetime.now(timezone.utc)
+
+    @staticmethod
     def _normalize_with_floor(weights: dict[str, float], *, target_total: float, min_weight: float) -> dict[str, float]:
         keys = list(weights.keys())
         if not keys:
@@ -87,7 +111,7 @@ class FeatureCalibrationService:
             even = target_total / len(keys)
             return {key: round(even, 6) for key in keys}
 
-        extras = {key: max(0.0, float(value) - min_weight) for key, value in weights.items()}
+        extras = {key: max(0.0, _safe_float(value) - min_weight) for key, value in weights.items()}
         extras_total = sum(extras.values())
         if extras_total <= 1e-12:
             even = target_total / len(keys)
@@ -110,26 +134,29 @@ class FeatureCalibrationService:
             return {}
 
         centered = {}
-        avg_score = sum(ewma_scores.values()) / max(1, len(ewma_scores))
+        score_values = [_safe_float(value) for value in ewma_scores.values()]
+        avg_score = sum(score_values) / max(1, len(score_values))
         for key in FEATURE_KEYS:
-            centered[key] = float(ewma_scores.get(key, 0.0)) - avg_score
+            centered[key] = _safe_float(ewma_scores.get(key, 0.0)) - avg_score
 
         max_abs = max((abs(value) for value in centered.values()), default=0.0)
         if max_abs <= 1e-12:
             return {key: round(float(value), 6) for key, value in base_weights.items()}
 
         adjusted = {}
+        max_delta = _safe_float(self.settings.feature_calibration_max_delta, 0.04)
+        min_weight = _safe_float(self.settings.feature_calibration_min_weight, 0.05)
         for key in FEATURE_KEYS:
-            delta = centered[key] / max_abs * float(self.settings.feature_calibration_max_delta)
+            delta = centered[key] / max_abs * max_delta
             adjusted[key] = max(
-                float(self.settings.feature_calibration_min_weight),
-                float(base_weights[key]) * (1.0 + delta),
+                min_weight,
+                _safe_float(base_weights[key]) * (1.0 + delta),
             )
 
         return self._normalize_with_floor(
             adjusted,
-            target_total=sum(base_weights.values()),
-            min_weight=float(self.settings.feature_calibration_min_weight),
+            target_total=sum(_safe_float(value) for value in base_weights.values()),
+            min_weight=min_weight,
         )
 
     def _limit_delta(
@@ -139,15 +166,15 @@ class FeatureCalibrationService:
         target_weights: dict[str, float],
     ) -> dict[str, float]:
         bounded = {}
-        max_delta = float(self.settings.feature_calibration_max_delta)
+        max_delta = _safe_float(self.settings.feature_calibration_max_delta, 0.04)
         for key in FEATURE_KEYS:
-            prev = float(previous_weights.get(key, 0.0))
-            target = float(target_weights.get(key, prev))
+            prev = _safe_float(previous_weights.get(key, 0.0))
+            target = _safe_float(target_weights.get(key, prev), prev)
             bounded[key] = prev + clamp(target - prev, -max_delta, max_delta)
         return self._normalize_with_floor(
             bounded,
-            target_total=sum(previous_weights.values()) or 1.0,
-            min_weight=float(self.settings.feature_calibration_min_weight),
+            target_total=sum(_safe_float(value) for value in previous_weights.values()) or 1.0,
+            min_weight=_safe_float(self.settings.feature_calibration_min_weight, 0.05),
         )
 
     @staticmethod
@@ -221,7 +248,7 @@ class FeatureCalibrationService:
             "regime_label": regime_label,
             "baseline_generated_plans": int(baseline_generated_plans),
             "matched_samples": int(matched_samples),
-            "alpha": round(clamp(float(self.settings.feature_calibration_alpha), 0.0, 1.0), 6),
+            "alpha": round(clamp(_safe_float(self.settings.feature_calibration_alpha, 0.35), 0.0, 1.0), 6),
             "baseline_weights": baseline_weights,
             "previous_weights": previous_weights,
             "current_scores": current_scores,
@@ -238,23 +265,23 @@ class FeatureCalibrationService:
     def _normalize_snapshot(self, *, latest: dict[str, Any], regime_label: str) -> dict[str, Any]:
         base_weights = self.generator.feature_weights_for_regime(regime_label)
         baseline_weights = {
-            key: float((latest.get("baseline_weights") or {}).get(key, base_weights[key]))
+            key: _safe_float((latest.get("baseline_weights") or {}).get(key, base_weights[key]), base_weights[key])
             for key in FEATURE_KEYS
         }
         previous_weights = {
-            key: float((latest.get("previous_weights") or {}).get(key, baseline_weights[key]))
+            key: _safe_float((latest.get("previous_weights") or {}).get(key, baseline_weights[key]), baseline_weights[key])
             for key in FEATURE_KEYS
         }
         recommended_weights = {
-            key: float((latest.get("recommended_weights") or {}).get(key, previous_weights[key]))
+            key: _safe_float((latest.get("recommended_weights") or {}).get(key, previous_weights[key]), previous_weights[key])
             for key in FEATURE_KEYS
         }
         current_scores = {
-            key: float((latest.get("current_scores") or {}).get(key, 0.0))
+            key: _safe_float((latest.get("current_scores") or {}).get(key, 0.0))
             for key in FEATURE_KEYS
         }
         ewma_scores = {
-            key: float((latest.get("ewma_scores") or {}).get(key, current_scores[key]))
+            key: _safe_float((latest.get("ewma_scores") or {}).get(key, current_scores[key]), current_scores[key])
             for key in FEATURE_KEYS
         }
 
@@ -262,23 +289,29 @@ class FeatureCalibrationService:
         feature_rows = dict(row.get("feature_rows") or {})
         if row:
             baseline_weights = {
-                key: float((row.get("feature_weights_base") or {}).get(key, baseline_weights[key]))
+                key: _safe_float((row.get("feature_weights_base") or {}).get(key, baseline_weights[key]), baseline_weights[key])
                 for key in FEATURE_KEYS
             }
             previous_weights = {
-                key: float((row.get("feature_weights_previous") or {}).get(key, previous_weights[key]))
+                key: _safe_float(
+                    (row.get("feature_weights_previous") or {}).get(key, previous_weights[key]),
+                    previous_weights[key],
+                )
                 for key in FEATURE_KEYS
             }
             recommended_weights = {
-                key: float((row.get("feature_weights_active") or {}).get(key, recommended_weights[key]))
+                key: _safe_float(
+                    (row.get("feature_weights_active") or {}).get(key, recommended_weights[key]),
+                    recommended_weights[key],
+                )
                 for key in FEATURE_KEYS
             }
             current_scores = {
-                key: float((row.get("current_scores") or {}).get(key, current_scores[key]))
+                key: _safe_float((row.get("current_scores") or {}).get(key, current_scores[key]), current_scores[key])
                 for key in FEATURE_KEYS
             }
             ewma_scores = {
-                key: float((row.get("ewma_scores") or {}).get(key, ewma_scores[key]))
+                key: _safe_float((row.get("ewma_scores") or {}).get(key, ewma_scores[key]), ewma_scores[key])
                 for key in FEATURE_KEYS
             }
 
@@ -287,22 +320,22 @@ class FeatureCalibrationService:
         for zone_type in ZONE_TYPES:
             zone_row = dict(raw_zone_type_multipliers.get(zone_type, {}))
             zone_type_multipliers[zone_type] = {
-                "baseline_multiplier": round(float(zone_row.get("baseline_multiplier", 1.0)), 6),
-                "active_multiplier": round(float(zone_row.get("active_multiplier", 1.0)), 6),
-                "delta": round(float(zone_row.get("delta", 0.0)), 6),
-                "signal": round(float(zone_row.get("signal", 0.0)), 6),
-                "weighted_realized_r": round(float(zone_row.get("weighted_realized_r", 0.0)), 6),
-                "matched_samples": int(zone_row.get("matched_samples", 0) or 0),
+                "baseline_multiplier": round(_safe_float(zone_row.get("baseline_multiplier", 1.0), 1.0), 6),
+                "active_multiplier": round(_safe_float(zone_row.get("active_multiplier", 1.0), 1.0), 6),
+                "delta": round(_safe_float(zone_row.get("delta", 0.0)), 6),
+                "signal": round(_safe_float(zone_row.get("signal", 0.0)), 6),
+                "weighted_realized_r": round(_safe_float(zone_row.get("weighted_realized_r", 0.0)), 6),
+                "matched_samples": _safe_int(zone_row.get("matched_samples", 0)),
             }
 
         normalized = self._base_payload(
             symbol=str(latest.get("symbol", "")),
             regime_label=str(latest.get("regime_label", regime_label) or regime_label),
-            now=datetime.fromisoformat(str(latest.get("generated_at"))),
+            now=self._snapshot_generated_at(latest),
             available=bool(latest.get("available")),
             reason=latest.get("reason"),
-            baseline_generated_plans=int(latest.get("baseline_generated_plans", 0) or 0),
-            matched_samples=int(latest.get("matched_samples", row.get("matched_samples", 0) or 0) or 0),
+            baseline_generated_plans=_safe_int(latest.get("baseline_generated_plans", 0)),
+            matched_samples=_safe_int(latest.get("matched_samples", row.get("matched_samples", 0) or 0)),
             baseline_weights=baseline_weights,
             previous_weights=previous_weights,
             current_scores=current_scores,
@@ -336,7 +369,7 @@ class FeatureCalibrationService:
         return -1.0
 
     def _decay_weight(self, *, ts: datetime, now: datetime) -> float:
-        half_life_days = max(1e-6, float(self.settings.feature_calibration_half_life_days))
+        half_life_days = max(1e-6, _safe_float(self.settings.feature_calibration_half_life_days, 21.0))
         age_days = max(0.0, (now - _utc(ts)).total_seconds() / 86400.0)
         return float(0.5 ** (age_days / half_life_days))
 
@@ -348,10 +381,10 @@ class FeatureCalibrationService:
             self.plan_repo.list_recent(
                 symbol=symbol,
                 timeframe="5m",
-                days=int(self.settings.feature_calibration_lookback_days),
+                days=_safe_int(self.settings.feature_calibration_lookback_days, 120),
             )
         )
-        outcomes = list(self.outcome_repo.list_recent(symbol=symbol, days=int(self.settings.feature_calibration_lookback_days)))
+        outcomes = list(self.outcome_repo.list_recent(symbol=symbol, days=_safe_int(self.settings.feature_calibration_lookback_days, 120)))
         by_zone: dict[str, list[ZoneOutcome]] = {}
         for outcome in outcomes:
             by_zone.setdefault(outcome.zone_id, []).append(outcome)
@@ -401,7 +434,7 @@ class FeatureCalibrationService:
                     entry_model=self._plan_model(plan),
                     realized_r=self._realized_r(outcome),
                     decay_weight=self._decay_weight(ts=outcome.entry_ts, now=now),
-                    components={key: float(components_raw.get(key, 0.0)) for key in FEATURE_KEYS},
+                    components={key: _safe_float(components_raw.get(key, 0.0)) for key in FEATURE_KEYS},
                     entry_ts=_utc(outcome.entry_ts),
                 )
             )
@@ -436,7 +469,7 @@ class FeatureCalibrationService:
                 "weighted_component": round(weighted_component, 6),
                 "weighted_realized_r": round(weighted_realized_r, 6),
                 "target_multiplier": round(
-                    1.0 + float(self.settings.feature_calibration_max_delta) * math.tanh(float(signal)),
+                    1.0 + _safe_float(self.settings.feature_calibration_max_delta, 0.04) * math.tanh(float(signal)),
                     6,
                 ),
             }
@@ -455,13 +488,13 @@ class FeatureCalibrationService:
             else 0.0
         )
         previous_rows = dict((previous_snapshot or {}).get("zone_type_multipliers") or {})
-        max_zone_delta = float(self.settings.feature_calibration_max_zone_delta)
+        max_zone_delta = _safe_float(self.settings.feature_calibration_max_zone_delta, 0.14)
         out = self._default_zone_type_multipliers()
 
         for zone_type in ZONE_TYPES:
             zone_rows = [item for item in rows if item.zone_type == zone_type]
-            previous_active = float(dict(previous_rows.get(zone_type, {})).get("active_multiplier", 1.0))
-            if len(zone_rows) < max(1, int(self.settings.feature_calibration_min_regime_matches)):
+            previous_active = _safe_float(dict(previous_rows.get(zone_type, {})).get("active_multiplier", 1.0), 1.0)
+            if len(zone_rows) < max(1, _safe_int(self.settings.feature_calibration_min_regime_matches, 4)):
                 out[zone_type] = {
                     "baseline_multiplier": 1.0,
                     "active_multiplier": round(previous_active, 6),
@@ -517,7 +550,7 @@ class FeatureCalibrationService:
         recommended = row.get("feature_weights_active") or latest.get("recommended_weights")
         if not isinstance(recommended, dict):
             return None
-        return {key: float(recommended[key]) for key in FEATURE_KEYS if key in recommended}
+        return {key: _safe_float(recommended[key]) for key in FEATURE_KEYS if key in recommended}
 
     def _write_report(self, *, payload: dict[str, Any], now: datetime) -> str:
         out_dir = self._report_dir()
@@ -584,7 +617,7 @@ class FeatureCalibrationService:
         now = datetime.now(timezone.utc).replace(microsecond=0)
         base_weights = self.generator.feature_weights_for_regime(regime_label)
         baseline = feature_importance.get("baseline", {}) if isinstance(feature_importance, dict) else {}
-        baseline_generated_plans = int(baseline.get("generated_plans", 0) or 0)
+        baseline_generated_plans = _safe_int(baseline.get("generated_plans", 0))
         empty_scores = {key: 0.0 for key in FEATURE_KEYS}
         empty_feature_rows = {
             key: {
@@ -596,7 +629,7 @@ class FeatureCalibrationService:
             for key in FEATURE_KEYS
         }
         fallback_current_scores = {
-            key: float(((feature_importance.get("by_feature") or {}).get(key) or {}).get("importance_score", 0.0))
+            key: _safe_float(((feature_importance.get("by_feature") or {}).get(key) or {}).get("importance_score", 0.0))
             for key in FEATURE_KEYS
         }
         fallback_feature_rows = {
@@ -605,7 +638,9 @@ class FeatureCalibrationService:
                 "weighted_component": 0.0,
                 "weighted_realized_r": 0.0,
                 "target_multiplier": round(
-                    1.0 + float(self.settings.feature_calibration_max_delta) * math.tanh(fallback_current_scores[key]),
+                    1.0
+                    + _safe_float(self.settings.feature_calibration_max_delta, 0.04)
+                    * math.tanh(fallback_current_scores[key]),
                     6,
                 ),
             }
@@ -624,10 +659,10 @@ class FeatureCalibrationService:
         elif not bool(feature_importance.get("available")):
             available = False
             reason = str(feature_importance.get("reason", "feature_importance_unavailable"))
-        elif baseline_generated_plans < int(self.settings.feature_calibration_min_generated_plans):
+        elif baseline_generated_plans < _safe_int(self.settings.feature_calibration_min_generated_plans, 3):
             available = False
             reason = "insufficient_generated_plans"
-        elif has_learning_repos and matched_samples < int(self.settings.feature_calibration_min_matches):
+        elif has_learning_repos and matched_samples < _safe_int(self.settings.feature_calibration_min_matches, 12):
             available = False
             reason = "insufficient_matches"
 
@@ -681,9 +716,10 @@ class FeatureCalibrationService:
                 feature_rows = fallback_feature_rows
                 current_scores = fallback_current_scores
                 zone_type_multipliers = self._default_zone_type_multipliers()
-            alpha = clamp(float(self.settings.feature_calibration_alpha), 0.0, 1.0)
+            alpha = clamp(_safe_float(self.settings.feature_calibration_alpha, 0.35), 0.0, 1.0)
             ewma_scores = {
-                key: alpha * float(current_scores.get(key, 0.0)) + (1.0 - alpha) * float(previous_ewma_scores.get(key, 0.0))
+                key: alpha * _safe_float(current_scores.get(key, 0.0))
+                + (1.0 - alpha) * _safe_float(previous_ewma_scores.get(key, 0.0))
                 for key in FEATURE_KEYS
             }
             target_weights = self._scores_to_target_weights(
@@ -691,7 +727,10 @@ class FeatureCalibrationService:
                 ewma_scores=ewma_scores,
             )
             recommended_weights = self._limit_delta(
-                previous_weights={key: float(previous_weights.get(key, base_weights[key])) for key in FEATURE_KEYS},
+                previous_weights={
+                    key: _safe_float(previous_weights.get(key, base_weights[key]), base_weights[key])
+                    for key in FEATURE_KEYS
+                },
                 target_weights=target_weights,
             )
             payload = self._base_payload(

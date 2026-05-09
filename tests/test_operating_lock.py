@@ -111,3 +111,28 @@ def test_operating_lock_research_mode_does_not_block() -> None:
     assert snapshot.active is False
     assert snapshot.enforced is False
     assert snapshot.reason == "research_mode_shadow_only"
+
+
+def test_operating_lock_tolerates_malformed_numeric_settings_and_trade_values() -> None:
+    settings = get_settings().model_copy(deep=True)
+    settings.trading_session_london_start_hour_utc = "bad-start"
+    settings.trading_session_london_end_hour_utc = "bad-end"
+    settings.trading_session_new_york_start_hour_utc = "bad-ny-start"
+    settings.trading_session_new_york_end_hour_utc = "bad-ny-end"
+    settings.operating_lock_daily_loss_limit_r = "bad-daily-limit"
+    settings.operating_lock_session_loss_limit_r = "inf"
+    settings.operating_lock_daily_consecutive_losses = "bad-daily-streak"
+    settings.operating_lock_daily_a_grade_failures = "bad-a-streak"
+    settings.operating_lock_session_consecutive_losses = "nan"
+    service = OperatingLockService(settings)
+    now = datetime(2026, 3, 7, 9, 0, tzinfo=timezone.utc)
+    malformed = _closed_plan(plan_id="bad_realized_r", closed_ts=now - timedelta(minutes=30), realized_r=-0.4, grade="A")
+    malformed.validity = {**dict(malformed.validity or {}), "final_exit_realized_r": "inf"}
+
+    snapshot = service.evaluate(plans=[malformed], now=now, mode=StrategyMode.A_ONLY)
+
+    assert snapshot.active is False
+    assert snapshot.current_session["name"] == "london"
+    assert snapshot.daily_stats["trades"] == 0
+    assert snapshot.daily_stats["loss_limit_r"] == -2.0
+    assert snapshot.session_stats["loss_limit_r"] == -1.5

@@ -228,3 +228,21 @@ def test_alert_metrics_report_aggregates_leaf_channels_and_system_fanout() -> No
             assert payload["retry_queue"]["counts"]["dead_letter"] == 1
     finally:
         settings.alert_slo_min_attempts = old_min_attempts
+
+
+def test_alert_metrics_tolerates_malformed_slo_settings() -> None:
+    settings = get_settings().model_copy(deep=True)
+    settings.alert_slo_min_attempts = "inf"
+    settings.alert_slo_target_success_rate = "bad-target"
+    settings.alert_slo_warn_success_rate = "nan"
+    settings.alert_slo_max_p95_latency_ms = "bad-latency"
+    settings.alert_slo_warn_p95_latency_ms = "inf"
+    service = AlertMetricsService(alert_repo=None, settings=settings)
+
+    slo = service._evaluate_slo(success_rate=1.0, p95_latency_ms=100.0, attempted=5)
+    budget = service._error_budget(failed=0, attempted=5)
+
+    assert slo["status"] == "PASS"
+    assert slo["target_success_rate"] == 0.995
+    assert slo["warn_p95_latency_ms"] == 5000.0
+    assert budget["status"] == "PASS"

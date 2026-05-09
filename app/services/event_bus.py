@@ -5,6 +5,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import isfinite
 from typing import Any
 
 from sqlalchemy import func, select
@@ -48,7 +49,7 @@ class _MemoryBackend:
 class _RedisStreamBackend:
     def __init__(self, redis_url: str, stream: str):
         try:
-            import redis  # type: ignore
+            import redis  # type: ignore[import-not-found,import-untyped]
         except Exception as exc:  # pragma: no cover - dependency optional
             raise EventPublisherError("redis backend requires `redis` package") from exc
         self._redis = redis.Redis.from_url(redis_url, decode_responses=True)
@@ -61,7 +62,7 @@ class _RedisStreamBackend:
 class _KafkaBackend:
     def __init__(self, bootstrap_servers: str, topic: str):
         try:
-            from kafka import KafkaProducer  # type: ignore
+            from kafka import KafkaProducer  # type: ignore[import-not-found,import-untyped]
         except Exception as exc:  # pragma: no cover - dependency optional
             raise EventPublisherError("kafka backend requires `kafka-python` package") from exc
 
@@ -114,11 +115,24 @@ class EventBus:
                 return value.replace(tzinfo=timezone.utc)
             return value.astimezone(timezone.utc)
         if isinstance(value, str):
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return datetime.now(timezone.utc)
             if parsed.tzinfo is None:
                 return parsed.replace(tzinfo=timezone.utc)
             return parsed.astimezone(timezone.utc)
         return datetime.now(timezone.utc)
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
 
     def _build_envelope(self, event_type: str, payload: dict[str, Any]) -> EventEnvelope:
         event_ts = self._to_utc(payload.get("event_ts"))
@@ -151,7 +165,7 @@ class EventBus:
             self.repo.mark_failed(
                 row=row,
                 error=str(exc),
-                retry_after_seconds=self.settings.event_retry_backoff_seconds,
+                retry_after_seconds=self._safe_int(self.settings.event_retry_backoff_seconds, default=10),
             )
 
     def publish(self, event_type: str, payload: dict[str, Any]) -> EventOutbox:
@@ -160,7 +174,7 @@ class EventBus:
         envelope = self._build_envelope(event_type=event_type, payload=payload)
         prev = self.repo.find_recent_by_dedupe_key(
             dedupe_key=envelope.dedupe_key,
-            within_seconds=self.settings.event_dedupe_window_seconds,
+            within_seconds=self._safe_int(self.settings.event_dedupe_window_seconds, default=120),
         )
         row = EventOutbox(
             event_id=envelope.event_id,
@@ -175,7 +189,7 @@ class EventBus:
         self.repo.add(row)
 
         now = datetime.now(timezone.utc)
-        if (now - envelope.event_ts).total_seconds() > self.settings.event_late_seconds:
+        if (now - envelope.event_ts).total_seconds() > self._safe_int(self.settings.event_late_seconds, default=90):
             self.repo.mark_skipped_late(row)
             return row
 
@@ -188,8 +202,8 @@ class EventBus:
 
     def reprocess_pending(self, limit: int | None = None) -> dict[str, int]:
         rows = self.repo.list_reprocessable(
-            limit=limit or self.settings.event_reprocess_batch_size,
-            max_attempts=self.settings.event_max_attempts,
+            limit=limit or self._safe_int(self.settings.event_reprocess_batch_size, default=100),
+            max_attempts=self._safe_int(self.settings.event_max_attempts, default=8),
         )
         stats = {
             "scanned": len(rows),
@@ -223,9 +237,9 @@ class EventBus:
             "counts": counts,
             "backlog_age_seconds": backlog_age_seconds,
             "retry_policy": {
-                "max_attempts": self.settings.event_max_attempts,
-                "retry_backoff_seconds": self.settings.event_retry_backoff_seconds,
-                "late_seconds": self.settings.event_late_seconds,
-                "dedupe_window_seconds": self.settings.event_dedupe_window_seconds,
+                "max_attempts": self._safe_int(self.settings.event_max_attempts, default=8),
+                "retry_backoff_seconds": self._safe_int(self.settings.event_retry_backoff_seconds, default=10),
+                "late_seconds": self._safe_int(self.settings.event_late_seconds, default=90),
+                "dedupe_window_seconds": self._safe_int(self.settings.event_dedupe_window_seconds, default=120),
             },
         }

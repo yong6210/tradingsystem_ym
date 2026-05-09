@@ -18,6 +18,9 @@ Current defaults:
 /Users/yumin/Documents/trading/.venv/bin/python /Users/yumin/Documents/trading/scripts/paper_lineage_watch_tick.py
 ```
 
+By default stdout is a compact one-line summary for launchd log hygiene.
+Use `--stdout-mode json` when a manual run needs the full payload on stdout; the full latest payload is always written to `latest_launchd_run.json`.
+
 Artifacts:
 - latest automation run:
   - `/Users/yumin/Documents/trading/reports/operations/paper_candidate_watch/latest_launchd_run.json`
@@ -27,6 +30,8 @@ Artifacts:
   - `/Users/yumin/Documents/trading/reports/operations/paper_candidate_watch/launchd.out.log`
 - launchd stderr:
   - `/Users/yumin/Documents/trading/reports/operations/paper_candidate_watch/launchd.err.log`
+- archived launchd log tails:
+  - `/Users/yumin/Documents/trading/reports/operations/paper_candidate_watch/log_archive/`
 
 ## launchd
 

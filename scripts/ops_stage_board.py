@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -23,6 +23,11 @@ _REQUEST_RETRY_ATTEMPTS = 5
 _REQUEST_RETRY_BASE_DELAY_SECONDS = 1.0
 _RUNTIME_MONITOR_REUSE_SECONDS = 900
 _REQUEST_TIMEOUT_SECONDS = 90
+
+
+def _resolve_root_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else ROOT_DIR / path
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,6 +106,12 @@ def _entry_model_block_contract(*, entry_model: str, entry_type: str, allowed_en
     )
 
 
+def _ensure_http_url(url: str) -> None:
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported request URL scheme: {scheme or 'missing'}")
+
+
 def _request_json(
     base_url: str,
     method: str,
@@ -111,7 +122,8 @@ def _request_json(
     url = f"{base_url.rstrip('/')}{path}"
     if query:
         url += f"?{urlencode(query, doseq=True)}"
-    request = Request(url=url, headers={"Accept": "application/json"}, method=method.upper())
+    _ensure_http_url(url)
+    request = Request(url=url, headers={"Accept": "application/json"}, method=method.upper())  # noqa: S310
     last_error: RuntimeError | None = None
     retry_with_refresh = (
         path == "/validation/report"
@@ -119,7 +131,7 @@ def _request_json(
     )
     for attempt in range(1, _REQUEST_RETRY_ATTEMPTS + 1):
         try:
-            with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
+            with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:  # noqa: S310
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             payload = exc.read().decode("utf-8", errors="replace")
@@ -145,8 +157,7 @@ def _request_json(
                 time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
                 continue
             raise last_error from exc
-    assert last_error is not None
-    raise last_error
+    raise last_error or RuntimeError(f"{method.upper()} {path} failed without an exception payload")
 
 
 def _write_stage_file(path: Path, payload: dict[str, Any]) -> None:
@@ -1818,7 +1829,7 @@ def _runtime_actionable_live_candidate_summary_line(item: dict[str, Any] | None)
         )
         + (f" | recent={recent_hint}" if recent_hint else "")
         + (
-            f" | last_submit_ready="
+            " | last_submit_ready="
             + "/".join(
                 item
                 for item in [
@@ -3153,7 +3164,7 @@ def _print_human(payload: dict[str, Any]) -> None:
 
 def main() -> int:
     args = parse_args()
-    stage_file_path = Path(args.stage_file).resolve()
+    stage_file_path = _resolve_root_path(args.stage_file).resolve()
     previous_stage = _read_stage_file(stage_file_path)
     validation = _request_json(
         args.base_url,

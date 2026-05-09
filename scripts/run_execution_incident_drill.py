@@ -50,6 +50,13 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
 def _write_report(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
@@ -251,7 +258,7 @@ def main() -> int:
             ts = generated_at.strftime("%Y%m%dT%H%M%SZ")
             report_path = ROOT_DIR / args.report_dir / f"execution_incident_drill_{args.symbol}_{ts}.md"
             _write_report(report_path, payload)
-            payload["report_path"] = str(report_path.relative_to(ROOT_DIR))
+            payload["report_path"] = _display_path(report_path)
 
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     return 0

@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-ROOT_DIR = Path("/Users/yumin/Documents/trading")
+ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
 def _load_module(name: str, path: Path):
@@ -258,7 +258,7 @@ def test_build_historical_walk_forward_contract_proof_summary_uses_simulation_wi
     import app.db.session as session_module
     import app.services.historical_walk_forward_proof as walk_forward_module
 
-    monkeypatch.setattr(session_module, "SessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(session_module, "SessionLocal", _FakeSession)
     monkeypatch.setattr(repo_module, "CandleRepository", lambda db: {"db": db})
     monkeypatch.setattr(walk_forward_module, "HistoricalWalkForwardProofService", _FakeService)
 

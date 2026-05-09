@@ -23,6 +23,11 @@ from app.db.base import Base
 TARGET_TABLES = ("candles", "zone_outcomes")
 
 
+def _resolve_root_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
 @dataclass(frozen=True)
 class LatencyStats:
     p50_ms: float
@@ -181,8 +186,8 @@ def split_sql(sql_text: str) -> list[str]:
     return statements
 
 
-def find_migrations(migrations_dir: str) -> list[Path]:
-    return sorted(Path(migrations_dir).glob("*.sql"))
+def find_migrations(migrations_dir: str | Path) -> list[Path]:
+    return sorted(_resolve_root_path(migrations_dir).glob("*.sql"))
 
 
 def apply_migrations(conn: Connection, migrations: Sequence[Path]) -> list[tuple[str, int]]:
@@ -591,9 +596,10 @@ def main() -> int:
     # Ensure model metadata is loaded before create_all.
     from app.db import models  # noqa: F401
 
-    migrations = find_migrations(args.migrations_dir)
+    migrations_dir = _resolve_root_path(args.migrations_dir)
+    migrations = find_migrations(migrations_dir)
     if not migrations:
-        raise RuntimeError(f"no SQL migration files in: {args.migrations_dir}")
+        raise RuntimeError(f"no SQL migration files in: {migrations_dir}")
 
     engine = create_engine(args.database_url, future=True)
 
@@ -892,10 +898,8 @@ def main() -> int:
     else:
         status = "PASS"
 
-    report_path = (
-        Path(args.report_path)
-        if args.report_path
-        else Path(f"reports/timescale/benchmark_{now_utc.strftime('%Y%m%d_%H%M%S')}.md")
+    report_path = _resolve_root_path(
+        args.report_path or f"reports/timescale/benchmark_{now_utc.strftime('%Y%m%d_%H%M%S')}.md"
     )
     _write_report(
         report_path=report_path,

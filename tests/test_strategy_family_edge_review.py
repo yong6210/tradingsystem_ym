@@ -132,7 +132,7 @@ def test_strategy_family_edge_review_validates_b_diversification_when_overlap_is
     target_values = [0.6, 0.5, 0.4, 0.6, 0.5, 0.4, 0.6, 0.5]
     peer_values = [-1.1, 0.9, -1.0, 0.8, -1.0, 0.9, -0.9, 0.8]
     plans: list[Plan] = []
-    for idx, (target_value, peer_value) in enumerate(zip(target_values, peer_values), start=1):
+    for idx, (target_value, peer_value) in enumerate(zip(target_values, peer_values, strict=True), start=1):
         closed_ts = (now - timedelta(days=8 - idx)).replace(hour=9)
         regime = "trend" if idx % 2 else "range"
         plans.append(

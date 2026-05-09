@@ -79,6 +79,7 @@ class RuntimeKlineStreamService:
             "auto_route_submit_calls": 0,
             "auto_route_intents_created": 0,
             "auto_route_errors": 0,
+            "progress_callback_errors": 0,
             "reconnects": 0,
             "per_interval": {iv: 0 for iv in selected_intervals},
             "per_symbol": {symbol: 0 for symbol in symbols},
@@ -91,8 +92,9 @@ class RuntimeKlineStreamService:
                 return
             try:
                 progress_callback(dict(stats))
-            except Exception:
-                pass
+            except Exception as exc:
+                stats["progress_callback_errors"] = int(stats.get("progress_callback_errors", 0) or 0) + 1
+                stats["last_progress_callback_error"] = f"{exc.__class__.__name__}:{exc}"
 
         async def _stream_one_interval(interval: str) -> None:
             nonlocal stop

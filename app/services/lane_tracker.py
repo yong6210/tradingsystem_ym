@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -89,19 +90,26 @@ class ExecutionLaneTracker:
         }
 
 
-_TRACKER: ExecutionLaneTracker | None = None
+@dataclass
+class _TrackerState:
+    tracker: ExecutionLaneTracker | None = None
+
+
+_TRACKER_STATE = _TrackerState()
 
 
 def get_execution_lane_tracker(*, window: int = 20) -> ExecutionLaneTracker:
-    global _TRACKER
     target_window = max(int(window or 20), 1)
-    if _TRACKER is None or _TRACKER.window != target_window:
-        _TRACKER = ExecutionLaneTracker(window=target_window)
-    return _TRACKER
+    tracker = _TRACKER_STATE.tracker
+    if tracker is None or tracker.window != target_window:
+        tracker = ExecutionLaneTracker(window=target_window)
+        _TRACKER_STATE.tracker = tracker
+    return tracker
 
 
 def reset_execution_lane_tracker(*, window: int | None = None) -> ExecutionLaneTracker:
-    global _TRACKER
-    target_window = _TRACKER.window if _TRACKER is not None and window is None else max(int(window or 20), 1)
-    _TRACKER = ExecutionLaneTracker(window=target_window)
-    return _TRACKER
+    tracker = _TRACKER_STATE.tracker
+    target_window = tracker.window if tracker is not None and window is None else max(int(window or 20), 1)
+    tracker = ExecutionLaneTracker(window=target_window)
+    _TRACKER_STATE.tracker = tracker
+    return tracker

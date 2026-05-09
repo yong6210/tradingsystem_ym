@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,16 @@ class StrategyV2StressValidationService:
         return str(value or EntryModel.CONFIRM.value).upper()
 
     @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
+    @staticmethod
     def _risk_abs(plan: Any) -> float:
         return abs(float(getattr(plan, "entry_price", 0.0)) - float(getattr(plan, "sl", 0.0)))
 
@@ -82,9 +93,20 @@ class StrategyV2StressValidationService:
         return ts.astimezone(timezone.utc)
 
     @classmethod
+    def _parse_ts(cls, value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return cls._normalize_ts(datetime.fromisoformat(text.replace("Z", "+00:00")))
+        except ValueError:
+            return None
+
+    @classmethod
     def _bar_start_5m(cls, ts: datetime) -> datetime:
         normalized = cls._normalize_ts(ts)
-        assert normalized is not None
+        if normalized is None:
+            raise ValueError("5m bar start requires a timestamp")
         minute = (normalized.minute // 5) * 5
         return normalized.replace(minute=minute, second=0, microsecond=0)
 
@@ -124,7 +146,11 @@ class StrategyV2StressValidationService:
             return 0.0
         entry = float(getattr(plan, "entry_price", 0.0) or 0.0)
         model = self._entry_model(plan)
-        fee_bps = float(self.settings.maker_fee_bps) if model == EntryModel.LIMIT.value else float(self.settings.taker_fee_bps)
+        fee_bps = (
+            self._safe_float(self.settings.maker_fee_bps, default=2.0)
+            if model == EntryModel.LIMIT.value
+            else self._safe_float(self.settings.taker_fee_bps, default=4.0)
+        )
         return float((entry * ((fee_bps * 2.0) / 10_000.0)) / risk_abs)
 
     @staticmethod
@@ -139,7 +165,7 @@ class StrategyV2StressValidationService:
         entries = [fill for fill in fills if str(getattr(fill, "stage", "")) == ExecutionFillStage.ENTRY.value]
         if not entries:
             return None
-        entries.sort(key=lambda fill: getattr(fill, "fill_ts"))
+        entries.sort(key=lambda fill: fill.fill_ts)
         return entries[0]
 
     def _entry_anchor(self, *, plan: Any, fills: list[Any]) -> tuple[datetime, float, str]:
@@ -402,10 +428,16 @@ class StrategyV2StressValidationService:
 
     def _replay_divergence_thresholds(self) -> dict[str, float]:
         return {
-            "warn_ev_delta": float(self.settings.stress_replay_divergence_warn_ev_delta),
-            "fail_ev_delta": float(self.settings.stress_replay_divergence_fail_ev_delta),
-            "warn_max_drawdown_delta": float(self.settings.stress_replay_divergence_warn_max_drawdown_delta),
-            "fail_max_drawdown_delta": float(self.settings.stress_replay_divergence_fail_max_drawdown_delta),
+            "warn_ev_delta": self._safe_float(self.settings.stress_replay_divergence_warn_ev_delta, default=-0.10),
+            "fail_ev_delta": self._safe_float(self.settings.stress_replay_divergence_fail_ev_delta, default=-0.25),
+            "warn_max_drawdown_delta": self._safe_float(
+                self.settings.stress_replay_divergence_warn_max_drawdown_delta,
+                default=0.25,
+            ),
+            "fail_max_drawdown_delta": self._safe_float(
+                self.settings.stress_replay_divergence_fail_max_drawdown_delta,
+                default=0.75,
+            ),
         }
 
     def _replay_divergence_status(self, *, approximation_delta: dict[str, Any]) -> dict[str, Any]:
@@ -749,7 +781,7 @@ class StrategyV2StressValidationService:
             stress_replay_output_artifacts=stress_replay_output_artifacts,
         )
         if write_report:
-            generated_at = datetime.fromisoformat(str(enriched["generated_at"]).replace("Z", "+00:00"))
+            generated_at = self._parse_ts(enriched.get("generated_at")) or datetime.now(timezone.utc)
             enriched["report_path"] = self._write_report(payload=enriched, now=generated_at)
         return enriched
 

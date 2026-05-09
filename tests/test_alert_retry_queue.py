@@ -1,14 +1,29 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from sqlalchemy import delete
 
 from app.core.config import get_settings
 from app.db.models import AlertRetryTask, AlertSubscription
 from app.db.session import SessionLocal, init_db
+from app.services.alert_retry_queue import AlertRetryQueueService
 from app.services.notification_dispatcher import NotificationDispatcher
 from app.services.strategy_engine import StrategyEngine
+
+
+def test_alert_retry_queue_tolerates_malformed_numeric_settings() -> None:
+    settings = get_settings().model_copy(deep=True)
+    settings.alert_retry_queue_backoff_seconds = "inf"
+    settings.alert_retry_queue_jitter_seconds = "bad-jitter"
+    settings.alert_circuit_breaker_cooldown_seconds = "nan"
+    service = AlertRetryQueueService(
+        repo=None,
+        alert_repo=None,
+        dispatcher=NotificationDispatcher(settings),
+        settings=settings,
+    )
+
+    assert service._next_delay_seconds(reason="http_503", attempt=1) == 60.0
+    assert service._next_delay_seconds(reason="circuit_open", attempt=0) == 90.0
 
 
 def test_failed_alert_is_enqueued_and_retry_processor_delivers(monkeypatch) -> None:

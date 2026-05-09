@@ -11,7 +11,7 @@ import socket
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -29,6 +29,11 @@ RESEARCH_ONLY_SETUP = "RESEARCH_ONLY_SETUP"
 _REQUEST_RETRY_ATTEMPTS = 5
 _REQUEST_RETRY_BASE_DELAY_SECONDS = 1.0
 _REQUEST_TIMEOUT_SECONDS = 90
+
+
+def _resolve_root_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else ROOT_DIR / path
 
 
 def parse_args() -> argparse.Namespace:
@@ -78,6 +83,12 @@ def _emit_result(path: Path | None, payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _ensure_http_url(url: str) -> None:
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported request URL scheme: {scheme or 'missing'}")
+
+
 def _request_json(
     base_url: str,
     method: str,
@@ -88,11 +99,12 @@ def _request_json(
     url = f"{base_url.rstrip('/')}{path}"
     if query:
         url += f"?{urlencode(query, doseq=True)}"
+    _ensure_http_url(url)
     last_error: RuntimeError | None = None
     for attempt in range(1, _REQUEST_RETRY_ATTEMPTS + 1):
-        request = Request(url=url, headers={"Accept": "application/json"}, method=method.upper())
+        request = Request(url=url, headers={"Accept": "application/json"}, method=method.upper())  # noqa: S310
         try:
-            with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
+            with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:  # noqa: S310
                 payload = json.loads(response.read().decode("utf-8"))
                 break
         except HTTPError as exc:
@@ -111,8 +123,7 @@ def _request_json(
                 continue
             raise last_error from exc
     else:
-        assert last_error is not None
-        raise last_error
+        raise last_error or RuntimeError(f"{method.upper()} {path} failed without an exception payload")
 
     if not isinstance(payload, dict):
         raise RuntimeError(f"{method.upper()} {path} returned a non-object payload")
@@ -571,9 +582,9 @@ def _has_alertable_rows(snapshot: dict[str, Any]) -> bool:
 
 def main() -> int:
     args = parse_args()
-    state_file = Path(args.state_file).resolve()
+    state_file = _resolve_root_path(args.state_file).resolve()
     output_file_raw = str(getattr(args, "output_file", "") or "").strip()
-    output_file = Path(output_file_raw).resolve() if output_file_raw else None
+    output_file = _resolve_root_path(output_file_raw).resolve() if output_file_raw else None
     payload = _request_json(
         args.base_url,
         "GET",

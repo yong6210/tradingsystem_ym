@@ -59,3 +59,35 @@ def test_strategy_v2_pbo_dsr_threshold_runner_seeds_separate_lineage() -> None:
             write_report=False,
         )
         assert artifact_payload["selection_rule_counts"] == selection_rule_counts
+
+
+def test_strategy_v2_pbo_dsr_threshold_runner_tolerates_malformed_numeric_settings() -> None:
+    init_db()
+    with SessionLocal() as db:
+        service = StrategyV2PboDsrThresholdRunnerService(repo=ValidationArtifactRepository(db))
+        original_values = {
+            "min_confluence_score": service.settings.min_confluence_score,
+            "transition_watch_score": service.settings.transition_watch_score,
+            "transition_confirmed_score": service.settings.transition_confirmed_score,
+            "reaction_classifier_rejection_confirmed_score": service.settings.reaction_classifier_rejection_confirmed_score,
+            "reaction_classifier_rejection_tentative_score": service.settings.reaction_classifier_rejection_tentative_score,
+            "reaction_classifier_acceptance_confirmed_score": service.settings.reaction_classifier_acceptance_confirmed_score,
+            "reaction_classifier_acceptance_tentative_score": service.settings.reaction_classifier_acceptance_tentative_score,
+            "sizing_grade_a_r": service.settings.sizing_grade_a_r,
+            "sizing_grade_b_r": service.settings.sizing_grade_b_r,
+            "sizing_grade_c_r": service.settings.sizing_grade_c_r,
+        }
+        try:
+            for key in original_values:
+                setattr(service.settings, key, "bad")
+            service.settings.sizing_grade_a_r = float("inf")
+
+            payload = service.generate(symbol="BTCUSDC", version="v1", plans=[], write_report=False)
+
+            assert payload["available"] is False
+            assert payload["sweep_grid"]["scoring_thresholds"] == [56.0, 58.0, 60.0, 62.0, 64.0, 66.0, 68.0]
+            assert payload["sweep_grid"]["transition_threshold"] == [32.5, 35.0, 37.5, 40.0, 42.5, 45.0, 47.5]
+            assert payload["sweep_grid"]["sizing_clamps"] == [0.25, 0.5, 0.75, 1.0]
+        finally:
+            for key, value in original_values.items():
+                setattr(service.settings, key, value)

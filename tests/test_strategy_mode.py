@@ -21,6 +21,18 @@ def test_strategy_mode_policy_defaults_to_a_only() -> None:
         settings.strategy_mode = old_mode
 
 
+def test_strategy_mode_policy_tolerates_malformed_numeric_settings() -> None:
+    settings = get_settings().model_copy(deep=True)
+    settings.strategy_mode = StrategyMode.A_ONLY
+    settings.strategy_mode_a_only_max_daily_trades = "inf"
+    settings.strategy_mode_a_only_max_total_risk_r = "bad-risk"
+
+    policy = StrategyModeService(settings).policy()
+
+    assert policy.max_daily_trades == 3
+    assert policy.max_total_risk_r == 1.5
+
+
 def test_strategy_mode_research_zeroes_live_risk() -> None:
     settings = get_settings()
     old_mode = settings.strategy_mode

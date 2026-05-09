@@ -62,9 +62,11 @@ class ConfluenceShadowPlanGenerator(VariantPlanGenerator):
         profile = super()._regime_profile(context)
         if not self.confluence_variant.transition_override or profile.name != "transition":
             return profile
+        min_confluence_score = self._safe_float(self.settings.min_confluence_score, default=62.0)
+        profile_min_confluence = self._safe_float(profile.min_confluence, default=min_confluence_score)
         return RegimeProfile(
             name=profile.name,
-            min_confluence=max(float(self.settings.min_confluence_score), float(profile.min_confluence) - self._TRANSITION_MIN_CONFLUENCE_DELTA),
+            min_confluence=max(min_confluence_score, profile_min_confluence - self._TRANSITION_MIN_CONFLUENCE_DELTA),
             rr_floor=profile.rr_floor,
             ev_floor=profile.ev_floor,
             weight_liquidity=profile.weight_liquidity,

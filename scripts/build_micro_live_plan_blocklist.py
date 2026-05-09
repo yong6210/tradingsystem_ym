@@ -15,6 +15,13 @@ if str(ROOT_DIR) not in sys.path:
 from app.services.historical_walk_forward_split_review import HistoricalWalkForwardSplitReviewService
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a MICRO_LIVE historical plan blocklist from replay cache.")
     parser.add_argument("--cache-key", required=True)
@@ -71,7 +78,7 @@ def main() -> int:
     print(
         json.dumps(
             {
-                "output_path": str(output_path.relative_to(ROOT_DIR)),
+                "output_path": _display_path(output_path),
                 "blocked_plan_count": len(deduped),
                 "max_realized_r": threshold,
             },

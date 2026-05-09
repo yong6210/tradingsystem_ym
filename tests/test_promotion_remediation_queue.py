@@ -120,6 +120,7 @@ def test_promotion_remediation_queue_prioritizes_execution_before_condition_when
     assert payload["top_remediation_action"] == "execution_remediation"
     assert payload["remediation_queue"][0]["family"] == "trend_continuation"
     assert payload["remediation_queue"][0]["remediation_action"] == "execution_remediation"
+    assert "rollout_maturity:mature" in payload["remediation_queue"][0]["reason_codes"]
     assert payload["remediation_queue"][1]["family"] == "sweep_reversal"
     assert payload["remediation_queue"][1]["remediation_action"] == "condition_remediation"
     assert payload["source_summary"]["execution_first_count"] == 1

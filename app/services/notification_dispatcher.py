@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from threading import Lock
 import time
 from typing import Any, ClassVar
@@ -44,13 +45,33 @@ class _CircuitState:
 class NotificationDispatcher:
     """Dispatches operational alerts to external channels."""
 
-    SUPPORTED_CHANNELS = {"telegram", "discord", "push", "system"}
+    SUPPORTED_CHANNELS: ClassVar[set[str]] = {"telegram", "discord", "push", "system"}
     _DISCORD_MAX_MESSAGE_CHARS = 1800
     _circuit_states: ClassVar[dict[str, _CircuitState]] = {}
     _circuit_lock: ClassVar[Lock] = Lock()
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
 
     @classmethod
     def reset_circuit_state(cls) -> None:
@@ -284,12 +305,12 @@ class NotificationDispatcher:
             result["attempts"] = 0
             return result
 
-        attempts = max(1, int(self.settings.alert_retry_attempts))
-        base_backoff = max(0.0, float(self.settings.alert_retry_backoff_seconds))
+        attempts = max(1, self._safe_int(self.settings.alert_retry_attempts, default=3))
+        base_backoff = max(0.0, self._safe_float(self.settings.alert_retry_backoff_seconds, default=0.4))
         for attempt in range(1, attempts + 1):
             started = time.perf_counter()
             try:
-                with httpx.Client(timeout=self.settings.alert_http_timeout_seconds) as client:
+                with httpx.Client(timeout=self._safe_float(self.settings.alert_http_timeout_seconds, default=5.0)) as client:
                     response = client.post(url, json=json_payload, headers=headers)
                 elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
 
@@ -360,8 +381,8 @@ class NotificationDispatcher:
         return f"{channel}:{target}"
 
     def _record_send_result(self, circuit_key: str, *, success: bool) -> None:
-        threshold = max(1, int(self.settings.alert_circuit_breaker_failures))
-        cooldown_seconds = max(0, int(self.settings.alert_circuit_breaker_cooldown_seconds))
+        threshold = max(1, self._safe_int(self.settings.alert_circuit_breaker_failures, default=3))
+        cooldown_seconds = max(0, self._safe_int(self.settings.alert_circuit_breaker_cooldown_seconds, default=90))
         now = datetime.now(timezone.utc)
         with self._circuit_lock:
             state = self._circuit_states.setdefault(circuit_key, _CircuitState())

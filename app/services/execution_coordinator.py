@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from datetime import datetime, timezone
+from math import isfinite
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -185,6 +187,10 @@ class ExecutionCoordinator:
         return f"intent-{intent_id[-16:]}"
 
     @staticmethod
+    def _safe_dict(value: Any) -> dict[str, Any]:
+        return dict(value) if isinstance(value, Mapping) else {}
+
+    @staticmethod
     def _submission_blocks_plan_reentry(row: OrderSubmission | None) -> bool:
         if row is None:
             return False
@@ -200,11 +206,11 @@ class ExecutionCoordinator:
 
     @staticmethod
     def _intent_is_transition_edge_variant(intent: OrderIntent) -> bool:
-        payload = dict(intent.payload or {})
-        executable_plan = dict(payload.get("executable_plan") or {})
+        payload = ExecutionCoordinator._safe_dict(intent.payload)
+        executable_plan = ExecutionCoordinator._safe_dict(payload.get("executable_plan"))
         if bool(executable_plan.get("transition_edge_variant_applied")):
             return True
-        return bool(dict(executable_plan.get("transition_edge_variant") or {}))
+        return bool(ExecutionCoordinator._safe_dict(executable_plan.get("transition_edge_variant")))
 
     @staticmethod
     def _terminal_state(status: str) -> OrderLifecycleState:
@@ -228,6 +234,7 @@ class ExecutionCoordinator:
         client_order_id: str,
         requested_live: bool = False,
     ) -> OrderSubmission:
+        session_guidance = self._safe_dict(intent.session_guidance)
         row = OrderSubmission(
             submission_id=f"sub_{uuid4().hex[:20]}",
             intent_id=intent.intent_id,
@@ -243,11 +250,11 @@ class ExecutionCoordinator:
             side="BUY" if str(plan.direction).lower() == "long" else "SELL",
             order_type="LIMIT" if str(plan.entry_model).upper() == "LIMIT" else "MARKET",
             requested_live=bool(requested_live),
-            attachments={"session_guidance": dict(intent.session_guidance or {})},
+            attachments={"session_guidance": session_guidance},
             raw={
                 "rejected": True,
                 "submit_status": submit_status,
-                "intent_snapshot": {"session_guidance": dict(intent.session_guidance or {})},
+                "intent_snapshot": {"session_guidance": session_guidance},
             },
         )
         self.submission_repo.add(row)
@@ -277,8 +284,8 @@ class ExecutionCoordinator:
         if self.live_symbol_rules_loader is None:
             return None, None
         try:
-            loaded = self.live_symbol_rules_loader(normalized_symbol) or {}
-            symbol_rules = dict(loaded)
+            loaded = self.live_symbol_rules_loader(normalized_symbol)
+            symbol_rules = self._safe_dict(loaded)
             if symbol_rules:
                 self._live_symbol_rules_cache[normalized_symbol] = dict(symbol_rules)
             return symbol_rules or None, None
@@ -299,7 +306,7 @@ class ExecutionCoordinator:
         symbol_rules, symbol_rules_error = self._live_symbol_rules(symbol)
         if symbol_rules_error:
             details["price_rules_loader_error"] = symbol_rules_error
-        tick_size = float((symbol_rules or {}).get("tick_size") or 0.0)
+        tick_size = self._float_or((symbol_rules or {}).get("tick_size"), 0.0)
         if tick_size <= 0.0:
             details["price_rules_source"] = str((symbol_rules or {}).get("source") or "settings_passthrough")
             details["normalized_limit_price"] = round(float(requested_price), 8)
@@ -324,30 +331,52 @@ class ExecutionCoordinator:
         if value in (None, ""):
             return None
         try:
-            return float(value)
+            parsed = float(value)
         except (TypeError, ValueError):
             return None
+        return parsed if isfinite(parsed) else None
+
+    @classmethod
+    def _float_or(cls, value: Any, default: float = 0.0) -> float:
+        parsed = cls._maybe_float(value)
+        return float(default) if parsed is None else parsed
+
+    @classmethod
+    def _int_or(cls, value: Any, default: int = 0) -> int:
+        parsed = cls._maybe_float(value)
+        return int(default) if parsed is None else int(parsed)
 
     def _partial_submit_enabled(self) -> bool:
         return bool(getattr(self.settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", False))
 
+    def _lane_tracker(self):
+        return get_execution_lane_tracker(
+            window=max(
+                1,
+                self._int_or(getattr(self.settings, "transition_edge_variant_lane_tracker_window", 1), 1),
+            )
+        )
+
     def _min_tranche_notional(self) -> float:
-        return max(0.0, float(getattr(self.settings, "auto_trading_live_liquidity_gate_min_tranche_notional_usdt", 0.0) or 0.0))
+        return max(
+            0.0,
+            self._float_or(getattr(self.settings, "auto_trading_live_liquidity_gate_min_tranche_notional_usdt", 0.0)),
+        )
 
     @staticmethod
     def _live_tranche_from_submission(row: OrderSubmission | None) -> dict[str, Any]:
         if row is None:
             return {}
-        attachments = dict(getattr(row, "attachments", {}) or {})
-        raw = dict(getattr(row, "raw", {}) or {})
-        tranche = dict(attachments.get("live_tranche") or raw.get("live_tranche") or {})
+        attachments = ExecutionCoordinator._safe_dict(getattr(row, "attachments", None))
+        raw = ExecutionCoordinator._safe_dict(getattr(row, "raw", None))
+        tranche = ExecutionCoordinator._safe_dict(attachments.get("live_tranche") or raw.get("live_tranche"))
         return tranche
 
     def _intent_tranche_continuation(self, intent: OrderIntent) -> dict[str, Any]:
-        dedupe = dict(intent.dedupe_result or {})
+        dedupe = self._safe_dict(intent.dedupe_result)
         if str(dedupe.get("status") or "") != "tranche_continuation_available":
             return {}
-        return dict(dedupe.get("tranche_continuation") or {})
+        return self._safe_dict(dedupe.get("tranche_continuation"))
 
     def _apply_tranche_remaining_cap(
         self,
@@ -369,10 +398,10 @@ class ExecutionCoordinator:
             "parent_intent_id": str(continuation.get("parent_intent_id") or ""),
             "parent_submission_id": str(continuation.get("parent_submission_id") or ""),
             "parent_plan_id": str(continuation.get("parent_plan_id") or ""),
-            "target_notional": round(float(continuation.get("target_notional") or max_position_notional), 4),
+            "target_notional": round(self._float_or(continuation.get("target_notional"), max_position_notional), 4),
             "remaining_notional_before": round(float(remaining_notional), 4),
-            "next_tranche_index": int(continuation.get("next_tranche_index") or 1),
-            "max_tranches": int(continuation.get("max_tranches") or 0),
+            "next_tranche_index": max(1, self._int_or(continuation.get("next_tranche_index"), 1)),
+            "max_tranches": max(0, self._int_or(continuation.get("max_tranches"), 0)),
             "capped_max_position_notional": round(capped_notional, 4),
         }
         return capped_notional
@@ -389,15 +418,15 @@ class ExecutionCoordinator:
     ) -> tuple[float | None, dict[str, Any], str | None]:
         if not self._partial_submit_enabled():
             return None, {}, "partial_submit_disabled"
-        target_notional = max(float(live_sizing.get("max_position_notional") or 0.0), 0.0)
+        target_notional = max(self._float_or(live_sizing.get("max_position_notional")), 0.0)
         if target_notional <= 0.0:
-            target_notional = max(float(live_quantity or 0.0), 0.0) * max(float(reference_price or 0.0), 0.0)
+            target_notional = max(self._float_or(live_quantity), 0.0) * max(self._float_or(reference_price), 0.0)
         if target_notional <= 0.0 or reference_price <= 0.0:
             return None, {}, "partial_submit_invalid_target_notional"
 
         allowed_notional = self._maybe_float(liquidity_gate.get("allowed_notional"))
         if allowed_notional is None:
-            allowed_notional = self._maybe_float(dict(liquidity_gate.get("derived") or {}).get("allowed_notional"))
+            allowed_notional = self._maybe_float(self._safe_dict(liquidity_gate.get("derived")).get("allowed_notional"))
         if allowed_notional is None or allowed_notional <= 0.0:
             return None, {}, "partial_submit_allowed_notional_unavailable"
 
@@ -406,8 +435,14 @@ class ExecutionCoordinator:
         if submitted_target_notional < min_tranche_notional:
             return None, {}, "partial_submit_allowed_notional_below_minimum"
 
-        step = max(float(live_sizing.get("quantity_step") or getattr(self.settings, "binance_live_quantity_step", 0.001) or 0.001), 1e-9)
-        min_quantity = max(float(live_sizing.get("min_quantity") or getattr(self.settings, "binance_live_min_quantity", step) or step), step)
+        step = max(
+            self._float_or(live_sizing.get("quantity_step"), self._float_or(getattr(self.settings, "binance_live_quantity_step", 0.001), 0.001)),
+            1e-9,
+        )
+        min_quantity = max(
+            self._float_or(live_sizing.get("min_quantity"), self._float_or(getattr(self.settings, "binance_live_min_quantity", step), step)),
+            step,
+        )
         partial_quantity = self._round_down_to_step(submitted_target_notional / reference_price, step=step)
         if partial_quantity + 1e-12 < min_quantity:
             return None, {}, "partial_submit_quantity_below_minimum"
@@ -424,11 +459,11 @@ class ExecutionCoordinator:
         if total_target_notional is None or total_target_notional <= 0.0:
             total_target_notional = target_notional
 
-        tranche_index = int((continuation or {}).get("next_tranche_index") or 1)
-        max_tranches = max(1, int(getattr(self.settings, "auto_trading_live_liquidity_gate_max_tranches", 1) or 1))
+        tranche_index = max(1, self._int_or((continuation or {}).get("next_tranche_index"), 1))
+        max_tranches = max(1, self._int_or(getattr(self.settings, "auto_trading_live_liquidity_gate_max_tranches", 1), 1))
         remaining_after = max(0.0, float(remaining_before) - submitted_notional)
         additive_allowed = remaining_after >= min_tranche_notional and tranche_index < max_tranches
-        cluster_id = str((intent.dedupe_result or {}).get("cluster_id") or "")
+        cluster_id = str(self._safe_dict(intent.dedupe_result).get("cluster_id") or "")
         live_tranche = {
             "enabled": True,
             "reason": "liquidity_split_partial_submit",
@@ -448,7 +483,7 @@ class ExecutionCoordinator:
             "reason_codes": list(liquidity_gate.get("reason_codes") or []),
         }
         adjusted_sizing = {
-            **dict(live_sizing or {}),
+            **self._safe_dict(live_sizing),
             "liquidity_gate_decision": "SPLIT_PARTIAL_SUBMIT",
             "original_normalized_quantity": round(float(live_quantity or 0.0), 8),
             "original_max_position_notional": round(float(target_notional), 4),
@@ -474,27 +509,27 @@ class ExecutionCoordinator:
         thresholds = {
             "min_depth_usdt": max(
                 0.0,
-                float(getattr(self.settings, "auto_trading_live_liquidity_gate_min_depth_usdt", 0.0) or 0.0),
+                self._float_or(getattr(self.settings, "auto_trading_live_liquidity_gate_min_depth_usdt", 0.0)),
             ),
             "max_depth_participation": max(
                 0.0,
-                float(getattr(self.settings, "auto_trading_live_liquidity_gate_max_depth_participation", 0.0) or 0.0),
+                self._float_or(getattr(self.settings, "auto_trading_live_liquidity_gate_max_depth_participation", 0.0)),
             ),
             "max_1m_volume_participation": max(
                 0.0,
-                float(getattr(self.settings, "auto_trading_live_liquidity_gate_max_1m_volume_participation", 0.0) or 0.0),
+                self._float_or(getattr(self.settings, "auto_trading_live_liquidity_gate_max_1m_volume_participation", 0.0)),
             ),
             "max_5m_volume_participation": max(
                 0.0,
-                float(getattr(self.settings, "auto_trading_live_liquidity_gate_max_5m_volume_participation", 0.0) or 0.0),
+                self._float_or(getattr(self.settings, "auto_trading_live_liquidity_gate_max_5m_volume_participation", 0.0)),
             ),
             "max_spread_bps": max(
                 0.0,
-                float(getattr(self.settings, "auto_trading_live_liquidity_gate_max_spread_bps", 0.0) or 0.0),
+                self._float_or(getattr(self.settings, "auto_trading_live_liquidity_gate_max_spread_bps", 0.0)),
             ),
             "max_market_slippage_bps": max(
                 0.0,
-                float(getattr(self.settings, "auto_trading_live_liquidity_gate_max_market_slippage_bps", 0.0) or 0.0),
+                self._float_or(getattr(self.settings, "auto_trading_live_liquidity_gate_max_market_slippage_bps", 0.0)),
             ),
         }
         fail_closed = bool(getattr(self.settings, "auto_trading_live_liquidity_gate_fail_closed", True))
@@ -531,7 +566,7 @@ class ExecutionCoordinator:
                 "order_notional": round(order_notional, 4),
             }
 
-        snapshot_payload = dict(snapshot or {})
+        snapshot_payload = self._safe_dict(snapshot)
         if not snapshot_payload:
             decision = "BLOCK" if fail_closed else "PASS"
             return {
@@ -622,14 +657,17 @@ class ExecutionCoordinator:
         elif fail_closed:
             block_codes.append("five_minute_volume_unavailable")
 
-        valid_caps = [
-            {
-                "source": str(item.get("source") or ""),
-                "allowed_notional": round(float(item.get("allowed_notional") or 0.0), 4),
-            }
-            for item in notional_caps
-            if float(item.get("allowed_notional") or 0.0) > 0.0
-        ]
+        valid_caps = []
+        for item in notional_caps:
+            allowed_cap = self._maybe_float(item.get("allowed_notional"))
+            if allowed_cap is None or allowed_cap <= 0.0:
+                continue
+            valid_caps.append(
+                {
+                    "source": str(item.get("source") or ""),
+                    "allowed_notional": round(allowed_cap, 4),
+                }
+            )
         allowed_notional = min((float(item["allowed_notional"]) for item in valid_caps), default=0.0)
         if valid_caps:
             derived["notional_caps"] = valid_caps
@@ -671,7 +709,7 @@ class ExecutionCoordinator:
         if status not in {"PARTIALLY_FILLED", "FILLED"}:
             return None
 
-        raw = dict(live_result.get("raw") or {})
+        raw = self._safe_dict(live_result.get("raw"))
         executed_qty = (
             self._maybe_float(live_result.get("executed_qty"))
             or self._maybe_float(raw.get("executedQty"))
@@ -711,32 +749,33 @@ class ExecutionCoordinator:
         return fill_id, float(fill_price), float(executed_qty), fill_payload
 
     def _live_order_sizing(self, *, intent: OrderIntent, plan: Plan) -> tuple[float | None, dict[str, Any], str | None]:
-        payload = dict(intent.payload or {})
-        executable_plan = dict(payload.get("executable_plan") or {})
-        quality_snapshot = dict(intent.quality_snapshot or {})
+        payload = self._safe_dict(intent.payload)
+        executable_plan = self._safe_dict(payload.get("executable_plan"))
+        quality_snapshot = self._safe_dict(intent.quality_snapshot)
         sizing_mode = str(getattr(self.settings, "auto_trading_live_sizing_mode", "NOTIONAL_PER_R") or "NOTIONAL_PER_R").strip().upper()
-        reference_price = float(
+        reference_price = self._float_or(
             executable_plan.get("entry_limit_price")
             or executable_plan.get("entry_trigger_price")
             or getattr(plan, "entry_price", 0.0)
-            or 0.0
         )
-        stop_price = float(executable_plan.get("stop_price") or getattr(plan, "sl", 0.0) or 0.0)
-        default_step = float(getattr(self.settings, "binance_live_quantity_step", 0.001) or 0.001)
-        default_min_quantity = float(getattr(self.settings, "binance_live_min_quantity", default_step) or default_step)
+        stop_price = self._float_or(executable_plan.get("stop_price") or getattr(plan, "sl", 0.0))
+        default_step = self._float_or(getattr(self.settings, "binance_live_quantity_step", 0.001), 0.001)
+        default_min_quantity = self._float_or(getattr(self.settings, "binance_live_min_quantity", default_step), default_step)
         step = default_step
         min_quantity = default_min_quantity
         symbol_rules_source = "settings_default"
         symbol_rules_error: str | None = None
         symbol_rules, symbol_rules_error = self._live_symbol_rules(str(plan.symbol or "").upper())
         if symbol_rules:
-            step = float(symbol_rules.get("quantity_step") or default_step)
-            min_quantity = float(symbol_rules.get("min_quantity") or default_min_quantity or step)
+            step = self._float_or(symbol_rules.get("quantity_step"), default_step)
+            min_quantity = self._float_or(symbol_rules.get("min_quantity"), default_min_quantity or step)
             symbol_rules_source = str(symbol_rules.get("source") or "binance_exchange_info")
+        step = max(step, 1e-9)
+        min_quantity = max(min_quantity, step)
 
         sizing_details = {
             "sizing_mode": sizing_mode,
-            "recommended_risk_r": float(quality_snapshot.get("recommended_risk_r", 0.0) or 0.0),
+            "recommended_risk_r": self._float_or(quality_snapshot.get("recommended_risk_r")),
             "reference_price": round(reference_price, 8),
             "stop_price": round(stop_price, 8),
             "quantity_step": round(step, 8),
@@ -748,15 +787,17 @@ class ExecutionCoordinator:
         if symbol_rules:
             tick_size = symbol_rules.get("tick_size")
             if tick_size not in {None, ""}:
-                sizing_details["tick_size"] = round(float(tick_size), 8)
+                parsed_tick_size = self._maybe_float(tick_size)
+                if parsed_tick_size is not None and parsed_tick_size > 0.0:
+                    sizing_details["tick_size"] = round(parsed_tick_size, 8)
         if reference_price <= 0.0:
             return None, sizing_details, "Live submit requires a positive reference price."
         max_position_notional = 0.0
         if sizing_mode == "RISK_PCT":
-            account_equity_usdt = float(getattr(self.settings, "auto_trading_live_account_equity_usdt", 0.0) or 0.0)
-            risk_per_trade_pct = float(getattr(self.settings, "auto_trading_live_risk_per_trade_pct", 0.0) or 0.0)
-            usable_margin_fraction = float(getattr(self.settings, "auto_trading_live_usable_margin_fraction", 0.0) or 0.0)
-            leverage_cap = float(getattr(self.settings, "auto_trading_live_leverage_cap", 0.0) or 0.0)
+            account_equity_usdt = self._float_or(getattr(self.settings, "auto_trading_live_account_equity_usdt", 0.0))
+            risk_per_trade_pct = self._float_or(getattr(self.settings, "auto_trading_live_risk_per_trade_pct", 0.0))
+            usable_margin_fraction = self._float_or(getattr(self.settings, "auto_trading_live_usable_margin_fraction", 0.0))
+            leverage_cap = self._float_or(getattr(self.settings, "auto_trading_live_leverage_cap", 0.0))
             stop_pct = abs(reference_price - stop_price) / reference_price if reference_price > 0.0 else 0.0
             target_risk_usdt = account_equity_usdt * risk_per_trade_pct
             usable_margin_usdt = account_equity_usdt * usable_margin_fraction
@@ -798,17 +839,16 @@ class ExecutionCoordinator:
             if stop_pct <= 0.0:
                 return None, sizing_details, "Live risk sizing requires a positive stop distance."
         else:
-            max_position_notional = float(
+            max_position_notional = self._float_or(
                 executable_plan.get(
                     "max_position_notional",
                     quality_snapshot.get("max_position_notional", 0.0),
                 )
-                or 0.0
             )
             if max_position_notional <= 0.0:
                 max_position_notional = round(
-                    max(float(quality_snapshot.get("recommended_risk_r", 0.0) or 0.0), 0.0)
-                    * float(self.settings.auto_trading_notional_per_r),
+                    max(self._float_or(quality_snapshot.get("recommended_risk_r")), 0.0)
+                    * self._float_or(self.settings.auto_trading_notional_per_r),
                     4,
                 )
             sizing_details.update(
@@ -884,20 +924,29 @@ class ExecutionCoordinator:
 
         requested_mode = ExecutionPlanningService.coerce_execution_mode(intent.execution_mode)
         client_order_id = self._client_order_id(intent.intent_id)
-        paper_lineage_override = bool(dict(intent.approval_snapshot or {}).get("paper_lineage_override_applied"))
-        approval_bundle = self.approval_loader(
-            plan.plan_id,
-            requested_mode,
-            paper_lineage_override=paper_lineage_override,
+        paper_lineage_override = bool(self._safe_dict(intent.approval_snapshot).get("paper_lineage_override_applied"))
+        approval_bundle = self._safe_dict(
+            self.approval_loader(
+                plan.plan_id,
+                requested_mode,
+                paper_lineage_override=paper_lineage_override,
+            )
         )
-        approval = dict(approval_bundle["approval"])
-        approval_state = ApprovalState(str(approval.get("approval_state") or ApprovalState.BLOCKED.value))
+        approval = self._safe_dict(approval_bundle.get("approval"))
+        try:
+            approval_state = ApprovalState(str(approval.get("approval_state") or ApprovalState.BLOCKED.value))
+        except ValueError:
+            approval_state = ApprovalState.BLOCKED
         effective_mode = ExecutionPlanningService.coerce_execution_mode(
             approval.get("allowed_execution_mode"),
             default=requested_mode,
         )
 
-        if SubmitDecision(str(intent.submit_decision)) != SubmitDecision.SUBMIT:
+        try:
+            submit_decision = SubmitDecision(str(intent.submit_decision))
+        except ValueError:
+            submit_decision = None
+        if submit_decision != SubmitDecision.SUBMIT:
             row = self._rejection_submission(
                 intent=intent,
                 plan=plan,
@@ -976,18 +1025,18 @@ class ExecutionCoordinator:
                 order_type=adapter_result.order_type,
                 reduce_only=adapter_result.reduce_only,
                 requested_live=False,
-                attachments={**adapter_result.attachments, "session_guidance": dict(intent.session_guidance or {})},
+                attachments={**self._safe_dict(adapter_result.attachments), "session_guidance": self._safe_dict(intent.session_guidance)},
                 raw={
-                    **adapter_result.raw,
+                    **self._safe_dict(adapter_result.raw),
                     "fill_results": fill_results,
-                    "intent_snapshot": {"session_guidance": dict(intent.session_guidance or {})},
+                    "intent_snapshot": {"session_guidance": self._safe_dict(intent.session_guidance)},
                 },
                 submitted_at=datetime.now(timezone.utc),
                 acknowledged_at=adapter_result.acknowledged_at,
                 cancelled_at=adapter_result.cancelled_at,
             )
             self.submission_repo.add(row)
-            tracker = get_execution_lane_tracker(window=int(self.settings.transition_edge_variant_lane_tracker_window))
+            tracker = self._lane_tracker()
             tracker.record_submitted(is_variant=self._intent_is_transition_edge_variant(intent))
             return row, fill_results, False
 
@@ -1043,12 +1092,12 @@ class ExecutionCoordinator:
                 requested_live=live,
             )
             row.attachments = {
-                **dict(row.attachments or {}),
+                **self._safe_dict(row.attachments),
                 "live_order_sizing": live_sizing,
-                "session_guidance": dict(intent.session_guidance or {}),
+                "session_guidance": self._safe_dict(intent.session_guidance),
             }
             row.raw = {
-                **dict(row.raw or {}),
+                **self._safe_dict(row.raw),
                 "live_order_sizing": live_sizing,
             }
             return row, [], False
@@ -1062,7 +1111,7 @@ class ExecutionCoordinator:
             requested_price=live_limit_price,
         )
         live_sizing = {
-            **dict(live_sizing or {}),
+            **self._safe_dict(live_sizing),
             **({"live_limit_price": live_price_details} if live_price_details else {}),
         }
         if live_order_type == "LIMIT" and (normalized_live_price is None or normalized_live_price <= 0.0):
@@ -1075,12 +1124,12 @@ class ExecutionCoordinator:
                 requested_live=live,
             )
             row.attachments = {
-                **dict(row.attachments or {}),
+                **self._safe_dict(row.attachments),
                 "live_order_sizing": live_sizing,
-                "session_guidance": dict(intent.session_guidance or {}),
+                "session_guidance": self._safe_dict(intent.session_guidance),
             }
             row.raw = {
-                **dict(row.raw or {}),
+                **self._safe_dict(row.raw),
                 "live_order_sizing": live_sizing,
             }
             return row, [], False
@@ -1101,7 +1150,7 @@ class ExecutionCoordinator:
         )
         if bool(liquidity_gate.get("enabled")):
             live_sizing = {
-                **dict(live_sizing or {}),
+                **self._safe_dict(live_sizing),
                 "liquidity_gate_decision": str(liquidity_gate.get("decision") or ""),
             }
         if str(liquidity_gate.get("decision") or "PASS").upper() != "PASS":
@@ -1119,16 +1168,16 @@ class ExecutionCoordinator:
                 if partial_error is None and partial_quantity is not None:
                     live_quantity = partial_quantity
                     live_sizing = adjusted_sizing
-                    live_tranche = dict(adjusted_sizing.get("live_tranche") or {})
+                    live_tranche = self._safe_dict(adjusted_sizing.get("live_tranche"))
                     liquidity_gate = {
-                        **dict(liquidity_gate or {}),
+                        **self._safe_dict(liquidity_gate),
                         "decision": "SPLIT_PARTIAL_SUBMIT",
                         "message": "Live order size was reduced by liquidity gate and routed as a tranche.",
                     }
                     decision = "PASS"
                 else:
                     liquidity_gate = {
-                        **dict(liquidity_gate or {}),
+                        **self._safe_dict(liquidity_gate),
                         "partial_submit_error": partial_error,
                     }
             if decision == "PASS":
@@ -1143,13 +1192,13 @@ class ExecutionCoordinator:
                     requested_live=live,
                 )
                 row.attachments = {
-                    **dict(row.attachments or {}),
+                    **self._safe_dict(row.attachments),
                     "live_order_sizing": live_sizing,
                     "live_liquidity_gate": liquidity_gate,
-                    "session_guidance": dict(intent.session_guidance or {}),
+                    "session_guidance": self._safe_dict(intent.session_guidance),
                 }
                 row.raw = {
-                    **dict(row.raw or {}),
+                    **self._safe_dict(row.raw),
                     "live_order_sizing": live_sizing,
                     "live_liquidity_gate": liquidity_gate,
                 }
@@ -1158,7 +1207,7 @@ class ExecutionCoordinator:
             live_tranche = {}
 
         try:
-            live_result = self.live_submitter(
+            live_result_raw = self.live_submitter(
                 symbol=plan.symbol,
                 side=live_side,
                 order_type=live_order_type,
@@ -1171,6 +1220,9 @@ class ExecutionCoordinator:
                 live=True,
                 new_order_resp_type="RESULT",
             )
+            if not isinstance(live_result_raw, Mapping):
+                raise RuntimeError(f"live_submitter_malformed_response:{type(live_result_raw).__name__}")
+            live_result = dict(live_result_raw)
         except Exception as exc:
             session = getattr(self.submission_repo, "db", None)
             if session is not None and not bool(getattr(session, "is_active", True)):
@@ -1201,7 +1253,7 @@ class ExecutionCoordinator:
                 attachments={
                     "requires_reconciliation": True,
                     "reentry_blocked_until_reconciled": True,
-                    "session_guidance": dict(intent.session_guidance or {}),
+                    "session_guidance": self._safe_dict(intent.session_guidance),
                     "live_order_sizing": live_sizing,
                     **({"live_tranche": live_tranche} if live_tranche else {}),
                     **({"live_liquidity_gate": liquidity_gate} if bool(liquidity_gate.get("enabled")) else {}),
@@ -1214,7 +1266,7 @@ class ExecutionCoordinator:
                     **({"live_tranche": live_tranche} if live_tranche else {}),
                     **({"live_liquidity_gate": liquidity_gate} if bool(liquidity_gate.get("enabled")) else {}),
                     "live_submit_error": live_submit_error,
-                    "intent_snapshot": {"session_guidance": dict(intent.session_guidance or {})},
+                    "intent_snapshot": {"session_guidance": self._safe_dict(intent.session_guidance)},
                 },
                 submitted_at=datetime.now(timezone.utc),
             )
@@ -1249,14 +1301,14 @@ class ExecutionCoordinator:
                 "live_order_sizing": live_sizing,
                 **({"live_tranche": live_tranche} if live_tranche else {}),
                 **({"live_liquidity_gate": liquidity_gate} if bool(liquidity_gate.get("enabled")) else {}),
-                "session_guidance": dict(intent.session_guidance or {}),
+                "session_guidance": self._safe_dict(intent.session_guidance),
             },
             raw={
-                **dict(live_result),
+                **live_result,
                 "live_order_sizing": live_sizing,
                 **({"live_tranche": live_tranche} if live_tranche else {}),
                 **({"live_liquidity_gate": liquidity_gate} if bool(liquidity_gate.get("enabled")) else {}),
-                "intent_snapshot": {"session_guidance": dict(intent.session_guidance or {})},
+                "intent_snapshot": {"session_guidance": self._safe_dict(intent.session_guidance)},
             },
             submitted_at=datetime.now(timezone.utc),
             acknowledged_at=acknowledged_at,
@@ -1285,13 +1337,13 @@ class ExecutionCoordinator:
                 )
             )
             row.attachments = {
-                **dict(row.attachments or {}),
+                **self._safe_dict(row.attachments),
                 "immediate_fill_ingested": True,
             }
             row.raw = {
-                **dict(row.raw or {}),
+                **self._safe_dict(row.raw),
                 "fill_results": fill_results,
             }
-        tracker = get_execution_lane_tracker(window=int(self.settings.transition_edge_variant_lane_tracker_window))
+        tracker = self._lane_tracker()
         tracker.record_submitted(is_variant=self._intent_is_transition_edge_variant(intent))
         return row, fill_results, False

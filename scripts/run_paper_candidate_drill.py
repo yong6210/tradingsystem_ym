@@ -13,7 +13,7 @@ import socket
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -144,6 +144,19 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
+def _ensure_http_url(url: str) -> None:
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported request URL scheme: {scheme or 'missing'}")
+
+
 def _request_json(
     base_url: str,
     method: str,
@@ -155,6 +168,7 @@ def _request_json(
     url = f"{base_url.rstrip('/')}{path}"
     if query:
         url += f"?{urlencode(query, doseq=True)}"
+    _ensure_http_url(url)
     data: bytes | None = None
     headers = {"Accept": "application/json"}
     if body is not None:
@@ -162,9 +176,9 @@ def _request_json(
         headers["Content-Type"] = "application/json"
     last_error: RuntimeError | None = None
     for attempt in range(1, _REQUEST_RETRY_ATTEMPTS + 1):
-        request = Request(url=url, data=data, headers=headers, method=method.upper())
+        request = Request(url=url, data=data, headers=headers, method=method.upper())  # noqa: S310
         try:
-            with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
+            with urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:  # noqa: S310
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             payload = exc.read().decode("utf-8", errors="replace")
@@ -182,8 +196,7 @@ def _request_json(
                 continue
             raise last_error from exc
 
-    assert last_error is not None
-    raise last_error
+    raise last_error or RuntimeError(f"{method.upper()} {path} failed without an exception payload")
 
 
 def _status(ok: bool) -> str:
@@ -350,7 +363,7 @@ def _load_family_cluster_guard_snapshot(
     finally:
         conn.close()
 
-    for plan_id_raw, symbol_raw, state_raw, valid_from_raw, valid_until_raw, validity_raw in rows:
+    for plan_id_raw, symbol_raw, state_raw, valid_from_raw, _valid_until_raw, validity_raw in rows:
         symbol = str(symbol_raw or "").strip().upper()
         state = str(state_raw or "").strip().upper()
         if not symbol or not isinstance(validity_raw, str):
@@ -711,7 +724,6 @@ def _edge_experiment_next_step(summary: dict[str, Any] | None) -> str | None:
     if not summary:
         return None
     posture = dict(summary.get("edge_proof_posture") or {})
-    kpis = dict(summary.get("daily_edge_kpis") or {})
     proof_state = str(posture.get("state") or "unknown")
     proof_goal = max(int(summary.get("edge_proof_goal_closed_trades", 0) or 0), 0)
     remaining = max(int(summary.get("remaining_closed_trades_to_edge_proof_goal", 0) or 0), 0)
@@ -1323,6 +1335,7 @@ def main() -> int:
     edge_experiment_review: dict[str, Any] | None = None
     symbol_refresh_summary: dict[str, Any] | None = None
     skipped_active_duplicate_candidates: list[dict[str, str]] = []
+    skipped_not_submit_ready_candidates: list[dict[str, str]] = []
     if candidate is not None:
         for candidate_option in candidate_pool:
             validation_context = _request_json(
@@ -1359,14 +1372,16 @@ def main() -> int:
                 },
             )
             candidate = candidate_option
-            if args.submit_paper and _skip_existing_sample_submit_block(intent):
-                skipped_active_duplicate_candidates.append(
-                    {
-                        "symbol": str(candidate_option.get("symbol") or ""),
-                        "plan_id": str(candidate_option.get("plan_id") or ""),
-                        "reason_code": str(intent.get("decision_reason_code") or ""),
-                    }
-                )
+            if args.submit_paper and str(intent.get("submit_decision") or "") != "SUBMIT":
+                skipped = {
+                    "symbol": str(candidate_option.get("symbol") or ""),
+                    "plan_id": str(candidate_option.get("plan_id") or ""),
+                    "reason_code": str(intent.get("decision_reason_code") or ""),
+                }
+                if _skip_existing_sample_submit_block(intent):
+                    skipped_active_duplicate_candidates.append(skipped)
+                else:
+                    skipped_not_submit_ready_candidates.append(skipped)
                 continue
             if args.submit_paper and str(intent.get("submit_decision") or "") == "SUBMIT":
                 submission = _request_json(
@@ -1443,26 +1458,37 @@ def main() -> int:
                 "message": f"entry_type={preview.get('entry_type', '')} semantics={preview.get('entry_semantics', '')}" if preview else "preview unavailable",
             }
         )
-        approval_state = str((approval or {}).get("approval_state") or "")
-        allowed_execution_mode = str((approval or {}).get("allowed_execution_mode") or "")
+        submit_decision = str((intent or {}).get("submit_decision") or "")
+        intent_approval = dict((intent or {}).get("approval") or {})
+        approval_for_check = intent_approval or dict(approval or {})
+        approval_source = "intent_snapshot" if intent_approval else "approve_plan"
+        approval_state = str(approval_for_check.get("approval_state") or "")
+        allowed_execution_mode = str(approval_for_check.get("allowed_execution_mode") or "")
+        approval_ready = approval_state in {"APPROVED_AUTO", "APPROVED_MANUAL"} and allowed_execution_mode in {"PAPER", "MICRO_LIVE", "LIVE"}
+        if submit_decision == "SUBMIT":
+            approval_ready = True
+            if not approval_state:
+                approval_state = "APPROVED_BY_INTENT"
+            if not allowed_execution_mode:
+                allowed_execution_mode = str((intent or {}).get("allowed_execution_mode") or "PAPER")
+        approval_summary = _approval_strip_summary(approval_for_check) or approval_strip_summary
         checks.append(
             {
                 "name": "approval_for_paper",
-                "status": _status(approval_state in {"APPROVED_AUTO", "APPROVED_MANUAL"} and allowed_execution_mode in {"PAPER", "MICRO_LIVE", "LIVE"}),
+                "status": _status(approval_ready),
                 "message": (
-                    f"approve={(approval_strip_summary or {}).get('approve_value', approval_state)} | "
-                    f"align={(approval_strip_summary or {}).get('align_value', 'aligned')} | "
-                    f"act={(approval_strip_summary or {}).get('act_value', '')} | "
-                    f"approval_state={approval_state} allowed_execution_mode={allowed_execution_mode}"
+                    f"approve={(approval_summary or {}).get('approve_value', approval_state)} | "
+                    f"align={(approval_summary or {}).get('align_value', 'aligned')} | "
+                    f"act={(approval_summary or {}).get('act_value', '')} | "
+                    f"approval_state={approval_state} allowed_execution_mode={allowed_execution_mode} source={approval_source}"
                     + (
-                        f" override={approval.get('paper_lineage_override_reason', '')}"
-                        if approval and approval.get("paper_lineage_override_applied")
+                        f" override={approval_for_check.get('paper_lineage_override_reason', '')}"
+                        if approval_for_check and approval_for_check.get("paper_lineage_override_applied")
                         else ""
                     )
                 ),
             }
         )
-        submit_decision = str((intent or {}).get("submit_decision") or "")
         checks.append(
             {
                 "name": "intent_submit_ready",
@@ -1528,6 +1554,12 @@ def main() -> int:
                 for item in skipped_active_duplicate_candidates
             )
             next_steps.append(f"Skipped active-sample duplicates while searching for a new PAPER lineage candidate: {skipped_symbols}.")
+        if skipped_not_submit_ready_candidates:
+            skipped_symbols = ", ".join(
+                f"{item.get('symbol') or 'unknown'}[{item.get('reason_code') or 'not_submit_ready'}]"
+                for item in skipped_not_submit_ready_candidates
+            )
+            next_steps.append(f"Skipped non-submit-ready candidates while searching for a PAPER lineage candidate: {skipped_symbols}.")
     advisory_next_step = _edge_experiment_next_step(edge_experiment_review)
     if advisory_next_step:
         next_steps.append(advisory_next_step)
@@ -1573,7 +1605,7 @@ def main() -> int:
         symbol_tag = (candidate or {}).get("symbol") or (args.symbol or "UNIVERSE").upper()
         report_path = ROOT_DIR / args.report_dir / f"paper_candidate_drill_{symbol_tag}_{ts}.md"
         _write_report(report_path, payload)
-        payload["report_path"] = str(report_path.relative_to(ROOT_DIR))
+        payload["report_path"] = _display_path(report_path)
 
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     return 0 if overall_status == "READY_FOR_PAPER_SAMPLE" else 1

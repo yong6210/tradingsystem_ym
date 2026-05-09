@@ -5,6 +5,7 @@ from bisect import bisect_left
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,16 @@ class HistoricalWalkForwardProofService:
             return value.replace(tzinfo=UTC)
         return value.astimezone(UTC)
 
+    @classmethod
+    def _parse_ts(cls, value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return cls._normalize_ts(datetime.fromisoformat(text.replace("Z", "+00:00")))
+        except ValueError:
+            return None
+
     @staticmethod
     def _json_default(value: Any) -> str:
         if isinstance(value, datetime):
@@ -74,6 +85,20 @@ class HistoricalWalkForwardProofService:
     @staticmethod
     def _price_tolerance(value: float) -> float:
         return max(abs(float(value)) * 0.0005, 1e-6)
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
+    @classmethod
+    def _safe_int(cls, value: Any, default: int = 0) -> int:
+        return int(cls._safe_float(value, float(default)))
 
     @staticmethod
     def _ema(values: list[float], length: int) -> float:
@@ -368,10 +393,10 @@ class HistoricalWalkForwardProofService:
                 getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_allowed_sessions", "") or ""
             ),
             "btc_sweep_reversal_limit_fast_failure_max_bars": int(
-                getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_max_bars", 0) or 0
+                self._safe_int(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_max_bars", 0), 18)
             ),
             "btc_sweep_reversal_limit_fast_failure_stop_r": round(
-                float(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_stop_r", 0.0) or 0.0),
+                self._safe_float(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_stop_r", 0.0), 0.00000001),
                 8,
             ),
             "btc_sweep_reversal_limit_fast_failure_requires_sl_touch": bool(
@@ -407,12 +432,8 @@ class HistoricalWalkForwardProofService:
             return None
         if not isinstance(payload, dict):
             return None
-        age_hours = float(self.settings.auto_trading_historical_walk_forward_cache_hours)
-        generated_at = self._normalize_ts(
-            datetime.fromisoformat(str(payload.get("generated_at", "")).replace("Z", "+00:00"))
-            if str(payload.get("generated_at", "")).strip()
-            else None
-        )
+        age_hours = self._safe_float(self.settings.auto_trading_historical_walk_forward_cache_hours, 6.0)
+        generated_at = self._parse_ts(payload.get("generated_at"))
         if generated_at is None:
             return None
         if age_hours > 0 and generated_at < datetime.now(UTC) - timedelta(hours=age_hours):
@@ -449,18 +470,10 @@ class HistoricalWalkForwardProofService:
             return None
         if dict(payload.get("latest_source_ts_by_symbol") or {}) != dict(latest_source_ts_by_symbol):
             return None
-        payload_first = self._normalize_ts(
-            datetime.fromisoformat(str(payload.get("first_source_ts", "")).replace("Z", "+00:00"))
-            if str(payload.get("first_source_ts", "")).strip()
-            else None
-        )
+        payload_first = self._parse_ts(payload.get("first_source_ts"))
         if payload_first != first_source_ts:
             return None
-        payload_latest = self._normalize_ts(
-            datetime.fromisoformat(str(payload.get("latest_source_ts", "")).replace("Z", "+00:00"))
-            if str(payload.get("latest_source_ts", "")).strip()
-            else None
-        )
+        payload_latest = self._parse_ts(payload.get("latest_source_ts"))
         if payload_latest != latest_source_ts:
             return None
         if dict(payload.get("replay_settings_fingerprint") or {}) != self._replay_settings_fingerprint():
@@ -748,7 +761,8 @@ class HistoricalWalkForwardProofService:
         valid_until = self._normalize_ts(plan.valid_until)
         for candle in candles_5m[generated_idx_5 + 1 :]:
             current_ts = self._normalize_ts(candle.ts)
-            assert current_ts is not None
+            if current_ts is None:
+                continue
             if active is None:
                 if valid_until is not None and current_ts > valid_until:
                     return None, "expired_unfilled"
@@ -790,10 +804,16 @@ class HistoricalWalkForwardProofService:
         candles_15m = self._load_symbol_candles(symbol=symbol, timeframe="15m", start_ts=start_ts, end_ts=end_ts)
         candles_5m = [candle for candle in candles_5m if self._normalize_ts(candle.ts) is not None]
         candles_15m = [candle for candle in candles_15m if self._normalize_ts(candle.ts) is not None]
-        warmup_5m_bars = max(int(self.settings.auto_trading_historical_walk_forward_warmup_5m_bars), 30)
-        min_15m_bars = max(int(self.settings.auto_trading_historical_walk_forward_min_15m_bars), 30)
-        max_5m_window = max(int(self.settings.auto_trading_historical_walk_forward_max_5m_window_bars), warmup_5m_bars)
-        max_15m_window = max(int(self.settings.auto_trading_historical_walk_forward_max_15m_window_bars), min_15m_bars)
+        warmup_5m_bars = max(self._safe_int(self.settings.auto_trading_historical_walk_forward_warmup_5m_bars, 300), 30)
+        min_15m_bars = max(self._safe_int(self.settings.auto_trading_historical_walk_forward_min_15m_bars, 60), 30)
+        max_5m_window = max(
+            self._safe_int(self.settings.auto_trading_historical_walk_forward_max_5m_window_bars, 300),
+            warmup_5m_bars,
+        )
+        max_15m_window = max(
+            self._safe_int(self.settings.auto_trading_historical_walk_forward_max_15m_window_bars, 300),
+            min_15m_bars,
+        )
         if len(candles_5m) < warmup_5m_bars or len(candles_15m) < min_15m_bars:
             return {
                 "symbol": symbol,
@@ -819,7 +839,8 @@ class HistoricalWalkForwardProofService:
 
         for idx_5, candle in enumerate(candles_5m):
             current_ts = self._normalize_ts(candle.ts)
-            assert current_ts is not None
+            if current_ts is None:
+                continue
             advanced_15m = False
             while idx_15 + 1 < len(candles_15m):
                 next_ts = self._normalize_ts(candles_15m[idx_15 + 1].ts)
@@ -1090,8 +1111,8 @@ class HistoricalWalkForwardProofService:
         ).strip().lower() or "inactive"
         if allowed_sessions and session_name not in allowed_sessions:
             return {}
-        max_bars = max(int(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_max_bars", 0) or 0), 0)
-        stop_r = float(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_stop_r", 0.0) or 0.0)
+        max_bars = max(self._safe_int(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_max_bars", 0), 18), 0)
+        stop_r = self._safe_float(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_stop_r", 0.0), 0.00000001)
         requires_sl_touch = bool(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_requires_sl_touch", False))
         if max_bars <= 0 or stop_r <= 0.0 or stop_r >= 1.0:
             return {}
@@ -1380,7 +1401,8 @@ class HistoricalWalkForwardProofService:
 
         for idx_5, candle in enumerate(candles_5m):
             current_ts = self._normalize_ts(candle.ts)
-            assert current_ts is not None
+            if current_ts is None:
+                continue
             advanced_15m = False
             while idx_15 + 1 < len(candles_15m):
                 next_ts = self._normalize_ts(candles_15m[idx_15 + 1].ts)
@@ -1506,10 +1528,16 @@ class HistoricalWalkForwardProofService:
         candles_15m = self._load_symbol_candles(symbol=symbol, timeframe="15m", start_ts=start_ts, end_ts=end_ts)
         candles_5m = [candle for candle in candles_5m if self._normalize_ts(candle.ts) is not None]
         candles_15m = [candle for candle in candles_15m if self._normalize_ts(candle.ts) is not None]
-        warmup_5m_bars = max(int(self.settings.auto_trading_historical_walk_forward_warmup_5m_bars), 30)
-        min_15m_bars = max(int(self.settings.auto_trading_historical_walk_forward_min_15m_bars), 30)
-        max_5m_window = max(int(self.settings.auto_trading_historical_walk_forward_max_5m_window_bars), warmup_5m_bars)
-        max_15m_window = max(int(self.settings.auto_trading_historical_walk_forward_max_15m_window_bars), min_15m_bars)
+        warmup_5m_bars = max(self._safe_int(self.settings.auto_trading_historical_walk_forward_warmup_5m_bars, 300), 30)
+        min_15m_bars = max(self._safe_int(self.settings.auto_trading_historical_walk_forward_min_15m_bars, 60), 30)
+        max_5m_window = max(
+            self._safe_int(self.settings.auto_trading_historical_walk_forward_max_5m_window_bars, 300),
+            warmup_5m_bars,
+        )
+        max_15m_window = max(
+            self._safe_int(self.settings.auto_trading_historical_walk_forward_max_15m_window_bars, 300),
+            min_15m_bars,
+        )
         if len(candles_5m) < warmup_5m_bars or len(candles_15m) < min_15m_bars:
             return {
                 "symbol": symbol,
@@ -1534,7 +1562,8 @@ class HistoricalWalkForwardProofService:
 
         for idx_5, candle in enumerate(candles_5m):
             current_ts = self._normalize_ts(candle.ts)
-            assert current_ts is not None
+            if current_ts is None:
+                continue
             advanced_15m = False
             while idx_15 + 1 < len(candles_15m):
                 next_ts = self._normalize_ts(candles_15m[idx_15 + 1].ts)
@@ -1566,7 +1595,7 @@ class HistoricalWalkForwardProofService:
                 if closed_row is not None:
                     rows.append(closed_row)
                     blocked_until_by_thesis[active.thesis_key] = current_ts + timedelta(
-                        minutes=max(int(self.settings.thesis_time_bucket_minutes), 5)
+                        minutes=max(self._safe_int(self.settings.thesis_time_bucket_minutes, 30), 5)
                     )
                     active = None
                     fills_happened_this_bar = True
@@ -1714,9 +1743,7 @@ class HistoricalWalkForwardProofService:
 
         trade_rows.sort(
             key=lambda row: (
-                self._normalize_ts(datetime.fromisoformat(str(row.get("closed_ts")).replace("Z", "+00:00")))
-                if str(row.get("closed_ts") or "").strip()
-                else datetime.min.replace(tzinfo=UTC),
+                self._parse_ts(row.get("closed_ts")) or datetime.min.replace(tzinfo=UTC),
                 str(row.get("plan_id") or ""),
             )
         )

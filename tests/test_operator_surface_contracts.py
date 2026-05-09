@@ -30,7 +30,7 @@ def test_operator_surface_contract_label_maps_cover_known_codes() -> None:
 
 
 def test_operator_surface_scripts_do_not_embed_raw_shared_contract_literals() -> None:
-    root = Path("/Users/yumin/Documents/trading")
+    root = Path(__file__).resolve().parents[1]
     script_paths = [
         root / "scripts/notify_stage_change.py",
         root / "scripts/stage_monitor_tick.py",

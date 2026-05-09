@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -281,6 +282,108 @@ def test_feature_calibration_requires_minimum_generated_plans(tmp_path: Path) ->
         settings.feature_calibration_report_dir = original_report_dir
         settings.feature_calibration_min_matches = original_min_matches
         settings.feature_calibration_min_generated_plans = original_min_generated_plans
+
+
+def test_feature_calibration_runtime_payload_tolerates_legacy_snapshot_without_generated_at(tmp_path: Path) -> None:
+    settings = PlanGenerator().settings
+    original_snapshot_dir = settings.feature_calibration_snapshot_dir
+    try:
+        settings.feature_calibration_snapshot_dir = str(tmp_path / "snapshots")
+        service = FeatureCalibrationService(PlanGenerator(), settings=settings)
+        snapshot_path = service._latest_snapshot_path(service._snapshot_dir(), symbol="BTCUSDC", regime_label="range")
+        snapshot_path.write_text(
+            json.dumps(
+                {
+                    "available": True,
+                    "symbol": "BTCUSDC",
+                    "regime_label": "range",
+                    "baseline_generated_plans": 5,
+                    "matched_samples": 3,
+                    "baseline_weights": {},
+                    "previous_weights": {},
+                    "recommended_weights": {},
+                    "current_scores": {},
+                    "ewma_scores": {},
+                    "by_regime": {},
+                    "zone_type_multipliers": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        payload = service.runtime_payload(symbol="BTCUSDC", regime_label="range")
+
+        assert payload is not None
+        assert payload["available"] is True
+        assert payload["generated_at"]
+    finally:
+        settings.feature_calibration_snapshot_dir = original_snapshot_dir
+
+
+def test_feature_calibration_tolerates_malformed_numeric_settings_and_snapshot(tmp_path: Path) -> None:
+    settings = PlanGenerator().settings
+    original_values = {
+        "feature_calibration_snapshot_dir": settings.feature_calibration_snapshot_dir,
+        "feature_calibration_report_dir": settings.feature_calibration_report_dir,
+        "feature_calibration_alpha": settings.feature_calibration_alpha,
+        "feature_calibration_max_delta": settings.feature_calibration_max_delta,
+        "feature_calibration_min_weight": settings.feature_calibration_min_weight,
+        "feature_calibration_min_generated_plans": settings.feature_calibration_min_generated_plans,
+    }
+    try:
+        settings.feature_calibration_snapshot_dir = str(tmp_path / "snapshots")
+        settings.feature_calibration_report_dir = str(tmp_path / "reports")
+        settings.feature_calibration_alpha = "bad"
+        settings.feature_calibration_max_delta = float("inf")
+        settings.feature_calibration_min_weight = "bad"
+        settings.feature_calibration_min_generated_plans = "bad"
+
+        service = FeatureCalibrationService(PlanGenerator(), settings=settings)
+        payload = service.generate(
+            symbol="BTCUSDC",
+            regime_label="range",
+            feature_importance={
+                "available": True,
+                "baseline": {"generated_plans": "4"},
+                "by_feature": {"liquidity": {"importance_score": "bad"}},
+            },
+            write_report=False,
+        )
+
+        assert payload["available"] is True
+        assert payload["alpha"] == 0.35
+        assert payload["baseline_generated_plans"] == 4
+
+        snapshot_path = service._latest_snapshot_path(service._snapshot_dir(), symbol="BTCUSDC", regime_label="range")
+        snapshot_path.write_text(
+            json.dumps(
+                {
+                    "available": True,
+                    "symbol": "BTCUSDC",
+                    "regime_label": "range",
+                    "baseline_generated_plans": "bad",
+                    "matched_samples": float("inf"),
+                    "baseline_weights": {"liquidity": "bad"},
+                    "previous_weights": {"liquidity": float("inf")},
+                    "recommended_weights": {"liquidity": "bad"},
+                    "current_scores": {"liquidity": "bad"},
+                    "ewma_scores": {"liquidity": float("inf")},
+                    "by_regime": {"range": {"matched_samples": "bad", "feature_weights_active": {"liquidity": "bad"}}},
+                    "zone_type_multipliers": {"OB": {"active_multiplier": "bad", "matched_samples": "bad"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        runtime = service.runtime_payload(symbol="BTCUSDC", regime_label="range")
+
+        assert runtime is not None
+        assert runtime["baseline_generated_plans"] == 0
+        assert runtime["matched_samples"] == 0
+        assert runtime["zone_type_multipliers"]["OB"]["active_multiplier"] == 1.0
+    finally:
+        for key, value in original_values.items():
+            setattr(settings, key, value)
 
 
 def test_plan_generator_applies_feature_calibration_to_validity_metadata() -> None:

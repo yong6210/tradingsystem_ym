@@ -202,7 +202,7 @@ class StrategyFamilyEdgeReviewService:
             return None
         mean_x = sum(xs) / len(xs)
         mean_y = sum(ys) / len(ys)
-        num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+        num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys, strict=True))
         den_x = sqrt(sum((x - mean_x) ** 2 for x in xs))
         den_y = sqrt(sum((y - mean_y) ** 2 for y in ys))
         if den_x <= 0.0 or den_y <= 0.0:
@@ -241,7 +241,7 @@ class StrategyFamilyEdgeReviewService:
 
         union_target = [float(target_daily.get(day, 0.0)) for day in union_days]
         union_peer = [float(peer_daily.get(day, 0.0)) for day in union_days]
-        combined = [round(x + y, 4) for x, y in zip(union_target, union_peer)]
+        combined = [round(x + y, 4) for x, y in zip(union_target, union_peer, strict=True)]
         target_dd = self._drawdown_metrics(union_target)
         peer_dd = self._drawdown_metrics(union_peer)
         combined_dd = self._drawdown_metrics(combined)
@@ -487,7 +487,6 @@ class StrategyFamilyEdgeReviewService:
         target_post_cost = [self._to_adjusted_record(row) for row in target_adjusted]
         peer_post_cost = [self._to_adjusted_record(row) for row in peer_adjusted]
         target_raw = [row.base for row in target_adjusted]
-        peer_raw = [row.base for row in peer_adjusted]
 
         target_metrics = self.validation._mode_metrics(target_post_cost)
         peer_metrics = self.validation._mode_metrics(peer_post_cost)

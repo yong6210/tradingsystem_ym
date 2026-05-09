@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,26 @@ class DeliveryObservation:
     attempts: int
     latency_ms: float | None
     is_leaf: bool
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    if value in (None, "", "None"):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if isfinite(parsed) else default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    if value in (None, "", "None"):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return int(parsed) if isfinite(parsed) else default
 
 
 def _percentile(values: list[float], ratio: float) -> float:
@@ -102,8 +123,8 @@ class AlertMetricsService:
         return observations
 
     def _error_budget(self, *, failed: int, attempted: int) -> dict[str, Any]:
-        min_attempts = max(1, int(self.settings.alert_slo_min_attempts))
-        target_success_rate = float(self.settings.alert_slo_target_success_rate)
+        min_attempts = max(1, _safe_int(self.settings.alert_slo_min_attempts, default=5))
+        target_success_rate = _safe_float(self.settings.alert_slo_target_success_rate, default=0.995)
         if attempted < min_attempts:
             return {
                 "status": "INSUFFICIENT_DATA",
@@ -183,21 +204,26 @@ class AlertMetricsService:
         return out
 
     def _evaluate_slo(self, *, success_rate: float, p95_latency_ms: float, attempted: int) -> dict[str, Any]:
-        if attempted < max(1, int(self.settings.alert_slo_min_attempts)):
+        min_attempts = max(1, _safe_int(self.settings.alert_slo_min_attempts, default=5))
+        target_success_rate = _safe_float(self.settings.alert_slo_target_success_rate, default=0.995)
+        warn_success_rate = _safe_float(self.settings.alert_slo_warn_success_rate, default=0.97)
+        target_p95_latency_ms = _safe_float(self.settings.alert_slo_max_p95_latency_ms, default=3000.0)
+        warn_p95_latency_ms = _safe_float(self.settings.alert_slo_warn_p95_latency_ms, default=5000.0)
+        if attempted < min_attempts:
             return {
                 "status": "INSUFFICIENT_DATA",
                 "met": False,
                 "reason": "insufficient_attempts",
-                "target_success_rate": float(self.settings.alert_slo_target_success_rate),
-                "warn_success_rate": float(self.settings.alert_slo_warn_success_rate),
-                "target_p95_latency_ms": float(self.settings.alert_slo_max_p95_latency_ms),
-                "warn_p95_latency_ms": float(self.settings.alert_slo_warn_p95_latency_ms),
+                "target_success_rate": target_success_rate,
+                "warn_success_rate": warn_success_rate,
+                "target_p95_latency_ms": target_p95_latency_ms,
+                "warn_p95_latency_ms": warn_p95_latency_ms,
             }
 
-        pass_success = success_rate >= float(self.settings.alert_slo_target_success_rate)
-        pass_latency = p95_latency_ms <= float(self.settings.alert_slo_max_p95_latency_ms)
-        warn_success = success_rate >= float(self.settings.alert_slo_warn_success_rate)
-        warn_latency = p95_latency_ms <= float(self.settings.alert_slo_warn_p95_latency_ms)
+        pass_success = success_rate >= target_success_rate
+        pass_latency = p95_latency_ms <= target_p95_latency_ms
+        warn_success = success_rate >= warn_success_rate
+        warn_latency = p95_latency_ms <= warn_p95_latency_ms
 
         if pass_success and pass_latency:
             status = "PASS"
@@ -216,10 +242,10 @@ class AlertMetricsService:
             "status": status,
             "met": met,
             "reason": reason,
-            "target_success_rate": float(self.settings.alert_slo_target_success_rate),
-            "warn_success_rate": float(self.settings.alert_slo_warn_success_rate),
-            "target_p95_latency_ms": float(self.settings.alert_slo_max_p95_latency_ms),
-            "warn_p95_latency_ms": float(self.settings.alert_slo_warn_p95_latency_ms),
+            "target_success_rate": target_success_rate,
+            "warn_success_rate": warn_success_rate,
+            "target_p95_latency_ms": target_p95_latency_ms,
+            "warn_p95_latency_ms": warn_p95_latency_ms,
         }
 
     @staticmethod
@@ -422,9 +448,9 @@ class AlertMetricsService:
                 ),
                 "next_retry_in_seconds": next_retry_in_seconds,
                 "retry_policy": {
-                    "max_attempts": int(self.settings.alert_retry_queue_max_attempts),
-                    "retry_backoff_seconds": float(self.settings.alert_retry_queue_backoff_seconds),
-                    "retry_jitter_seconds": float(self.settings.alert_retry_queue_jitter_seconds),
+                    "max_attempts": _safe_int(self.settings.alert_retry_queue_max_attempts, default=4),
+                    "retry_backoff_seconds": _safe_float(self.settings.alert_retry_queue_backoff_seconds, default=30.0),
+                    "retry_jitter_seconds": _safe_float(self.settings.alert_retry_queue_jitter_seconds),
                 },
             }
 

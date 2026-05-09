@@ -374,3 +374,46 @@ def test_dispatcher_circuit_breaker_skips_after_threshold(monkeypatch) -> None:
         settings.alert_retry_backoff_seconds = old_backoff
         settings.alert_circuit_breaker_failures = old_failures
         settings.alert_circuit_breaker_cooldown_seconds = old_cooldown
+
+
+def test_dispatcher_tolerates_malformed_retry_and_circuit_settings(monkeypatch) -> None:
+    NotificationDispatcher.reset_circuit_state()
+    settings = get_settings().model_copy(deep=True)
+    settings.alert_discord_webhook_url = "https://discord.example/malformed-settings"
+    settings.alert_retry_attempts = "bad-attempts"
+    settings.alert_retry_backoff_seconds = "nan"
+    settings.alert_http_timeout_seconds = "bad-timeout"
+    settings.alert_circuit_breaker_failures = "inf"
+    settings.alert_circuit_breaker_cooldown_seconds = "bad-cooldown"
+    calls: list[dict] = []
+
+    class _Response:
+        status_code = 503
+
+    class _Client:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001
+            return False
+
+        def post(self, url, json=None, headers=None):  # noqa: ANN001
+            calls.append({"url": url, "json": json, "headers": headers})
+            return _Response()
+
+    monkeypatch.setattr("app.services.notification_dispatcher.httpx.Client", _Client)
+    monkeypatch.setattr("app.services.notification_dispatcher.time.sleep", lambda seconds: None)
+
+    result = NotificationDispatcher(settings).dispatch(
+        channel="discord",
+        alert_type="validation_warn",
+        symbol="BTCUSDC",
+        payload={"status": "WARN"},
+    )
+
+    assert result["attempts"] == 3
+    assert result["reason"] == "http_503"
+    assert len(calls) == 3

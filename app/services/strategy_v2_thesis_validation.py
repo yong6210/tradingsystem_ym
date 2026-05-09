@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,16 @@ class StrategyV2ThesisValidationService:
         self.thesis = ThesisFingerprintService(self.settings)
 
     @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
+
+    @staticmethod
     def _utc(value: datetime) -> datetime:
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
@@ -50,7 +61,7 @@ class StrategyV2ThesisValidationService:
             plan_id = str(getattr(row, "plan_id", "") or "")
             if not plan_id:
                 continue
-            fill_ts = self._utc(getattr(row, "fill_ts"))
+            fill_ts = self._utc(row.fill_ts)
             current = entry_ts.get(plan_id)
             if current is None or fill_ts < current:
                 entry_ts[plan_id] = fill_ts
@@ -239,7 +250,7 @@ class StrategyV2ThesisValidationService:
                 impact_counts["thesis_duplicate_blocked"] = int(impact_counts.get("thesis_duplicate_blocked", 0)) + 1
                 continue
 
-            if len(active_clusters) >= int(self.settings.thesis_max_active_clusters):
+            if len(active_clusters) >= self._safe_int(self.settings.thesis_max_active_clusters, default=2):
                 blocked_active_cluster_cap += 1
                 impact_counts["thesis_active_cluster_cap_reached"] = int(
                     impact_counts.get("thesis_active_cluster_cap_reached", 0)

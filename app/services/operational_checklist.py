@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from math import ceil
+from math import ceil, isfinite
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,16 @@ class OperationalChecklistService:
         if ts.tzinfo is None:
             return ts.replace(tzinfo=timezone.utc)
         return ts.astimezone(timezone.utc)
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
 
     @staticmethod
     def _leaf_delivery_rows(alert: AlertSubscription) -> list[dict[str, Any]]:
@@ -634,7 +644,7 @@ class OperationalChecklistService:
         pending = int(counts.get("pending", 0))
         failed = int(counts.get("failed", 0))
         backlog_age_seconds = int(outbox_status.get("backlog_age_seconds", 0) or 0)
-        if failed > 0 or backlog_age_seconds > int(self.settings.event_late_seconds):
+        if failed > 0 or backlog_age_seconds > self._safe_int(self.settings.event_late_seconds, default=90):
             status = "FAIL"
             blocking = True
             summary = f"outbox backlog unhealthy (failed={failed}, backlog_age_seconds={backlog_age_seconds})"
@@ -711,6 +721,7 @@ class OperationalChecklistService:
         blocked_reason_counts = dict(portfolio_budget.get("blocked_reason_counts") or {})
         current_exposure = dict(portfolio_budget.get("current_exposure") or {})
         active_clusters = int(current_exposure.get("active_thesis_clusters", 0) or 0)
+        thesis_max_active_clusters = self._safe_int(self.settings.thesis_max_active_clusters, default=2)
         cap_related_blocks = sum(
             int(count)
             for reason, count in blocked_reason_counts.items()
@@ -722,7 +733,7 @@ class OperationalChecklistService:
                 "thesis_active_cap_reached",
             }
         )
-        if active_clusters >= int(self.settings.thesis_max_active_clusters) or cap_related_blocks > 0:
+        if active_clusters >= thesis_max_active_clusters or cap_related_blocks > 0:
             status = "WARN"
             summary = "portfolio headroom is constrained"
         else:

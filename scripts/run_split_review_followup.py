@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -113,6 +113,19 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
+def _ensure_http_url(url: str) -> None:
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported request URL scheme: {scheme or 'missing'}")
+
+
 def _request_json(
     base_url: str,
     method: str,
@@ -124,14 +137,15 @@ def _request_json(
     url = f"{base_url.rstrip('/')}{path}"
     if query:
         url += f"?{urlencode(query, doseq=True)}"
+    _ensure_http_url(url)
     data: bytes | None = None
     headers = {"Accept": "application/json"}
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    request = Request(url=url, data=data, headers=headers, method=method.upper())
+    request = Request(url=url, data=data, headers=headers, method=method.upper())  # noqa: S310
     try:
-        with urlopen(request, timeout=20) as response:
+        with urlopen(request, timeout=20) as response:  # noqa: S310
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         payload = exc.read().decode("utf-8", errors="replace")
@@ -704,7 +718,7 @@ def main() -> int:
     if not args.no_write_report:
         ts = generated_at.strftime("%Y%m%dT%H%M%SZ")
         report_path = ROOT_DIR / args.report_dir / f"split_review_followup_{args.symbol.upper()}_{ts}.md"
-        payload["report_path"] = str(report_path.relative_to(ROOT_DIR))
+        payload["report_path"] = _display_path(report_path)
 
     if not args.no_write_ledger:
         recorded_entry = record_split_review_followup_ledger_entry(payload, ledger_path=ledger_path)

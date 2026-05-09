@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from app.core.config import ROOT_DIR, Settings, sqlite_database_path_from_url
+from app.db.session import _ensure_sqlite_parent_dir
 
 
 def test_sqlite_database_url_is_root_anchored_when_relative() -> None:
@@ -14,6 +15,14 @@ def test_sqlite_database_url_preserves_absolute_path(tmp_path: Path) -> None:
     settings = Settings(database_url=f"sqlite:///{db_path}")
 
     assert settings.database_url == f"sqlite:///{db_path}"
+
+
+def test_sqlite_session_ensures_parent_dir(tmp_path: Path) -> None:
+    db_path = tmp_path / "nested" / "runtime.db"
+
+    _ensure_sqlite_parent_dir(f"sqlite:///{db_path}")
+
+    assert db_path.parent.is_dir()
 
 
 def test_sqlite_pysqlite_database_url_is_root_anchored_when_relative() -> None:

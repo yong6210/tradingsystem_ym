@@ -10,7 +10,6 @@ from pathlib import Path
 import socket
 import sys
 import time
-from types import SimpleNamespace
 from typing import Any
 from urllib import error, parse, request
 
@@ -40,6 +39,11 @@ _TREND_PROOF_MIN_CLOSED_TRADES = max(
     int(os.environ.get("RUNTIME_TREND_PROOF_MIN_CLOSED_TRADES", "5")),
     1,
 )
+
+
+def _resolve_root_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else ROOT_DIR / path
 
 
 def _live_execution_allowed_entry_models() -> tuple[str, ...]:
@@ -666,13 +670,20 @@ def _runtime_signoff_command(*, symbol: str, universe: str, days: int) -> str:
     )
 
 
+def _ensure_http_url(url: str) -> None:
+    scheme = parse.urlparse(url).scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported request URL scheme: {scheme or 'missing'}")
+
+
 def _request_json(base_url: str, path: str, *, query: dict[str, Any]) -> dict[str, Any]:
     params = parse.urlencode({key: value for key, value in query.items() if value is not None})
     url = f"{base_url.rstrip('/')}{path}"
     if params:
         url = f"{url}?{params}"
+    _ensure_http_url(url)
     try:
-        with request.urlopen(url, timeout=30) as response:
+        with request.urlopen(url, timeout=30) as response:  # noqa: S310
             payload = json.load(response)
     except (error.URLError, TimeoutError, socket.timeout) as exc:
         raise RuntimeError(f"request failed for {url}: {exc}") from exc
@@ -717,7 +728,7 @@ def _request_json_with_retry(
             )
             last_error = runtime_exc
             if not _is_retryable_request_error(str(exc)) or attempt + 1 >= max(int(attempts), 1):
-                raise runtime_exc
+                raise runtime_exc from exc
             time.sleep(sleep_seconds * float(attempt + 1))
     if last_error is not None:
         raise last_error
@@ -1942,13 +1953,9 @@ def _build_historical_walk_forward_contract_proof_summary(
             source_mode=source_mode,
         )
     except Exception:
-        db.close()
         return None
     finally:
-        try:
-            db.close()
-        except Exception:
-            pass
+        db.close()
 
     trade_rows = [dict(row) for row in list(payload.get("trade_rows") or [])]
     trade_rows = _filter_post_patch_rows_by_direction_contract(trade_rows, eligible_direction_contract)
@@ -2015,7 +2022,6 @@ def _load_post_patch_rows_from_lineage(*, focus_symbol: str, cutoff: datetime, v
         from sqlalchemy import select
         from app.core.enums import ExecutionFillStage
         from app.db.models import ExecutionFill, Plan
-        from app.db.repositories import ExecutionFillRepository, PlanRepository
         from app.db.session import SessionLocal
     except Exception:
         return None
@@ -2245,7 +2251,7 @@ def _find_latest_replay_artifact_path(current_artifact_path: str) -> str:
     if not candidates:
         return artifact_rel
     latest = candidates[-1]
-    return str(latest.relative_to(ROOT_DIR))
+    return _report_path_value(latest)
 
 
 def _replay_artifact_trade_row_count(artifact_path: str) -> int:
@@ -2288,7 +2294,7 @@ def _list_previous_replay_artifact_paths(current_artifact_path: str, *, limit: i
     previous = [path for path in candidates if path.name < current_name]
     if not previous:
         return []
-    return [str(path.relative_to(ROOT_DIR)) for path in reversed(previous[-limit:])]
+    return [_report_path_value(path) for path in reversed(previous[-limit:])]
 
 
 def _refresh_focus_from_local_artifact(
@@ -3305,7 +3311,7 @@ def _report_path_value(path: Path) -> str:
 
 def main() -> int:
     args = parse_args()
-    stage = _read_stage(Path(args.stage_file))
+    stage = _read_stage(_resolve_root_path(args.stage_file))
     payload = _build_payload(
         stage,
         symbol=args.symbol,

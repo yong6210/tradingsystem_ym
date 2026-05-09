@@ -16,6 +16,11 @@ EXIT_SCRIPT = ROOT_DIR / "scripts" / "run_paper_exit_monitor.py"
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "reports" / "operations" / "paper_candidate_watch"
 
 
+def _resolve_root_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else ROOT_DIR / path
+
+
 def _env_flag(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -95,6 +100,12 @@ def parse_args() -> argparse.Namespace:
             "PAPER_LINEAGE_WATCH_LATEST_RUN_FILE",
             str(DEFAULT_OUTPUT_DIR / "latest_launchd_run.json"),
         ),
+    )
+    parser.add_argument(
+        "--stdout-mode",
+        choices=["summary", "json"],
+        default=os.environ.get("PAPER_LINEAGE_WATCH_STDOUT_MODE", "summary"),
+        help="Print a compact launchd-safe summary by default; use json for the full payload.",
     )
     parser.add_argument("--no-write-report", action="store_true", default=_env_flag("PAPER_LINEAGE_WATCH_NO_WRITE_REPORT", False))
     return parser.parse_args()
@@ -196,6 +207,34 @@ def _paper_exit_monitor_summary(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compact_row(source: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    return {key: source.get(key) for key in keys if source.get(key) not in {None, ""}}
+
+
+def _stdout_summary(payload: dict[str, Any], *, latest_run_file: Path) -> dict[str, Any]:
+    final_result = dict(payload.get("final_result") or {})
+    candidate = dict(payload.get("candidate") or final_result.get("candidate") or {})
+    submission = dict(payload.get("submission") or final_result.get("submission") or {})
+    return {
+        "generated_at": payload.get("generated_at"),
+        "tick_status": payload.get("tick_status"),
+        "overall_status": payload.get("overall_status"),
+        "summary_line": payload.get("summary_line"),
+        "watch_process_return_code": payload.get("watch_process_return_code"),
+        "candidate": _compact_row(
+            candidate,
+            ("symbol", "plan_id", "strategy_family", "entry_model", "block_reason"),
+        ),
+        "submission": _compact_row(
+            submission,
+            ("submission_id", "submit_status", "state", "adapter", "requested_live"),
+        ),
+        "paper_exit_monitor_summary": dict(payload.get("paper_exit_monitor_summary") or {}).get("summary"),
+        "report_path": payload.get("report_path"),
+        "latest_run_file": str(latest_run_file),
+    }
+
+
 def main() -> int:
     args = parse_args()
     completed = subprocess.run(
@@ -253,9 +292,12 @@ def main() -> int:
     payload["paper_exit_monitor_summary"] = _paper_exit_monitor_summary(dict(payload.get("paper_exit_monitor") or {}))
     payload["paper_exit_monitor_stderr"] = exit_completed.stderr.strip()
 
-    latest_run_file = Path(args.latest_run_file).resolve()
+    latest_run_file = _resolve_root_path(args.latest_run_file).resolve()
     _write_json(latest_run_file, payload)
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if getattr(args, "stdout_mode", "json") == "json":
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps(_stdout_summary(payload, latest_run_file=latest_run_file), ensure_ascii=False, sort_keys=True))
     return 0
 
 

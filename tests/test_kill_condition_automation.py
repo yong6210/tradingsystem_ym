@@ -1,6 +1,24 @@
 from __future__ import annotations
 
+import importlib.util
+from datetime import UTC
+from pathlib import Path
+
+import pytest
+
 from app.services.kill_condition_automation import KillConditionAutomationService
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+
+
+def _load_script_module():
+    path = ROOT_DIR / "scripts/run_kill_condition_automation.py"
+    spec = importlib.util.spec_from_file_location("run_kill_condition_automation_test_module", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"failed to load module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_kill_condition_automation_defers_to_manual_override() -> None:
@@ -66,3 +84,14 @@ def test_kill_condition_automation_escalates_to_kill_switch_review_on_multi_axis
     assert "friction:degraded" in payload["reason_codes"]
     assert "generalization:insufficient" in payload["reason_codes"]
     assert "reconciliation:critical" in payload["reason_codes"]
+
+
+def test_run_kill_condition_automation_unlock_at_parser_normalizes_and_rejects_invalid_values() -> None:
+    module = _load_script_module()
+
+    parsed = module._parse_unlock_at("2026-05-09T07:00:00Z")
+
+    assert parsed.tzinfo == UTC
+    assert parsed.isoformat() == "2026-05-09T07:00:00+00:00"
+    with pytest.raises(ValueError, match="invalid --unlock-at ISO8601 timestamp"):
+        module._parse_unlock_at("not-a-timestamp")

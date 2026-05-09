@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from typing import Callable
 from uuid import uuid4
 
@@ -39,8 +40,82 @@ class OrderIntentService:
         return value.astimezone(timezone.utc)
 
     @staticmethod
+    def _maybe_utc(value: object) -> datetime | None:
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    @staticmethod
     def _is_stale(plan: Plan) -> bool:
-        return plan.state not in {PlanState.PLANNED.value, PlanState.ARMED.value} or OrderIntentService._utc(plan.valid_until) <= datetime.now(timezone.utc)
+        valid_until = OrderIntentService._maybe_utc(getattr(plan, "valid_until", None))
+        return (
+            plan.state not in {PlanState.PLANNED.value, PlanState.ARMED.value}
+            or valid_until is None
+            or valid_until <= datetime.now(timezone.utc)
+        )
+
+    @staticmethod
+    def _safe_float(value: object, default: float = 0.0) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        return parsed if isfinite(parsed) else float(default)
+
+    @staticmethod
+    def _safe_int(value: object, default: int = 0) -> int:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return int(default)
+        return int(parsed) if isfinite(parsed) else int(default)
+
+    @staticmethod
+    def _coerce_approval_state(value: object) -> ApprovalState:
+        try:
+            return ApprovalState(str(value or ApprovalState.BLOCKED.value))
+        except ValueError:
+            return ApprovalState.BLOCKED
+
+    def _recent_reusable_intent_for_plan(
+        self,
+        plan_id: str,
+        *,
+        requested_mode: ExecutionMode,
+        paper_lineage_override: bool,
+    ) -> OrderIntent | None:
+        cooldown_seconds = max(
+            0,
+            self._safe_int(getattr(self.settings, "auto_trading_intent_recheck_cooldown_seconds", 0)),
+        )
+        if cooldown_seconds <= 0:
+            return None
+        if self.submission_repo is not None and self.submission_repo.list_for_plan(plan_id, limit=1):
+            return None
+        latest = self.intent_repo.latest_for_plan(plan_id)
+        if latest is None:
+            return None
+        created_at = getattr(latest, "created_at", None)
+        if not isinstance(created_at, datetime):
+            return None
+        if self._utc(created_at) < datetime.now(timezone.utc) - timedelta(seconds=cooldown_seconds):
+            return None
+        payload = dict(getattr(latest, "payload", {}) or {})
+        latest_requested_mode = str(payload.get("requested_execution_mode") or getattr(latest, "execution_mode", "") or "")
+        if latest_requested_mode != requested_mode.value:
+            return None
+        intent_snapshot = dict(payload.get("intent_snapshot") or {})
+        latest_override_requested = bool(
+            payload.get(
+                "paper_lineage_override_requested",
+                intent_snapshot.get("paper_lineage_override_applied", False),
+            )
+        )
+        if latest_override_requested != bool(paper_lineage_override):
+            return None
+        return latest
 
     def _submission_reference_ts(self, submission: OrderSubmission | None) -> datetime | None:
         if submission is None:
@@ -63,7 +138,7 @@ class OrderIntentService:
             return False
         if str(submission.adapter or "").lower() != "paper":
             return False
-        threshold_hours = float(getattr(self.settings, "auto_trading_paper_submission_stale_hours", 0) or 0)
+        threshold_hours = self._safe_float(getattr(self.settings, "auto_trading_paper_submission_stale_hours", 0))
         if threshold_hours <= 0:
             return False
         reference_ts = self._submission_reference_ts(submission)
@@ -102,7 +177,12 @@ class OrderIntentService:
         return bool(getattr(self.settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", False))
 
     def _min_tranche_notional(self) -> float:
-        return max(0.0, float(getattr(self.settings, "auto_trading_live_liquidity_gate_min_tranche_notional_usdt", 0.0) or 0.0))
+        return max(
+            0.0,
+            self._safe_float(
+                getattr(self.settings, "auto_trading_live_liquidity_gate_min_tranche_notional_usdt", 0.0),
+            ),
+        )
 
     @staticmethod
     def _submission_live_tranche(submission: OrderSubmission | None) -> dict:
@@ -122,11 +202,17 @@ class OrderIntentService:
         tranche = self._submission_live_tranche(submission)
         if not tranche or not bool(tranche.get("additive_allowed")):
             return None
-        remaining_notional = float(tranche.get("remaining_notional") or 0.0)
+        remaining_notional = self._safe_float(tranche.get("remaining_notional"))
         if remaining_notional < self._min_tranche_notional():
             return None
-        tranche_index = int(tranche.get("tranche_index") or 1)
-        max_tranches = max(1, int(tranche.get("max_tranches") or getattr(self.settings, "auto_trading_live_liquidity_gate_max_tranches", 1) or 1))
+        tranche_index = max(1, self._safe_int(tranche.get("tranche_index"), default=1))
+        max_tranches = max(
+            1,
+            self._safe_int(
+                tranche.get("max_tranches") or getattr(self.settings, "auto_trading_live_liquidity_gate_max_tranches", 1),
+                default=1,
+            ),
+        )
         if tranche_index >= max_tranches:
             return None
         return {
@@ -134,7 +220,7 @@ class OrderIntentService:
             "parent_submission_id": str(tranche.get("parent_submission_id") or submission.submission_id),
             "parent_plan_id": str(tranche.get("parent_plan_id") or submission.plan_id),
             "thesis_cluster_id": str(tranche.get("thesis_cluster_id") or ""),
-            "target_notional": float(tranche.get("target_notional") or 0.0),
+            "target_notional": self._safe_float(tranche.get("target_notional")),
             "remaining_notional": remaining_notional,
             "next_tranche_index": tranche_index + 1,
             "max_tranches": max_tranches,
@@ -313,9 +399,9 @@ class OrderIntentService:
             "risk_state": str(approval.get("risk_state") or ""),
             "risk_reason": str(approval.get("risk_reason") or ""),
             "setup_grade": str(executable_plan.get("setup_grade") or ""),
-            "setup_score": float(executable_plan.get("setup_score", 0.0) or 0.0),
-            "recommended_risk_r": float(executable_plan.get("recommended_risk_r", 0.0) or 0.0),
-            "expected_ev_r": float(expected_summary.get("expected_ev_r", 0.0) or 0.0),
+            "setup_score": OrderIntentService._safe_float(executable_plan.get("setup_score", 0.0)),
+            "recommended_risk_r": OrderIntentService._safe_float(executable_plan.get("recommended_risk_r", 0.0)),
+            "expected_ev_r": OrderIntentService._safe_float(expected_summary.get("expected_ev_r", 0.0)),
         }
 
     @classmethod
@@ -418,19 +504,46 @@ class OrderIntentService:
             raise ValueError("plan_not_found")
 
         requested_mode = ExecutionPlanningService.coerce_execution_mode(execution_mode, default=ExecutionMode.SHADOW)
-        approval_bundle = self.approval_loader(
-            plan_id,
-            requested_mode,
-            paper_lineage_override=paper_lineage_override,
-        )
-        approval = dict(approval_bundle["approval"])
-        executable_plan = dict(approval_bundle["executable_plan"])
+        stale = self._is_stale(plan)
+        if not stale:
+            recent_intent = self._recent_reusable_intent_for_plan(
+                plan.plan_id,
+                requested_mode=requested_mode,
+                paper_lineage_override=paper_lineage_override,
+            )
+            if recent_intent is not None:
+                return recent_intent
+
+        if stale:
+            validity = dict(plan.validity or {})
+            executable_plan = {
+                "plan_id": plan.plan_id,
+                "symbol": plan.symbol,
+                "direction": str(getattr(plan, "direction", "") or ""),
+                "entry_model": str(getattr(plan, "entry_model", "") or ""),
+                "strategy_family": str(validity.get("strategy_family") or "legacy_zone_plan"),
+                "thesis_fingerprint": dict(validity.get("thesis_fingerprint") or {}),
+            }
+            approval = {
+                "approval_state": ApprovalState.BLOCKED.value,
+                "allowed_execution_mode": requested_mode.value,
+                "approval_reasons": [{"code": "stale_plan", "message": "Plan is no longer valid."}],
+                "playbook_code": "stale_plan",
+                "playbook_message": "Plan is no longer valid for a new entry.",
+            }
+        else:
+            approval_bundle = self.approval_loader(
+                plan_id,
+                requested_mode,
+                paper_lineage_override=paper_lineage_override,
+            )
+            approval = dict(approval_bundle["approval"])
+            executable_plan = dict(approval_bundle["executable_plan"])
         effective_mode = ExecutionPlanningService.coerce_execution_mode(
             approval.get("allowed_execution_mode"),
             default=requested_mode,
         )
-        approval_state = ApprovalState(str(approval.get("approval_state") or ApprovalState.BLOCKED.value))
-        stale = self._is_stale(plan)
+        approval_state = self._coerce_approval_state(approval.get("approval_state"))
         existing_submission, existing_submission_summary = self._latest_routed_submission_for_plan(plan.plan_id)
         already_submitted = existing_submission is not None
         dedupe_result = self._dedupe_result(plan)
@@ -470,7 +583,9 @@ class OrderIntentService:
             matched_plan = dedupe_result.get("matched_plan_id")
             reason_message = f"Duplicate thesis detected against active plan {matched_plan}."
         elif decision == SubmitDecision.SKIP_BLOCKED:
-            reason_code = str(approval.get("playbook_code") or approval.get("approval_reasons", [{}])[0].get("code") or reason_code)
+            approval_reasons = list(approval.get("approval_reasons") or [])
+            first_reason = dict(approval_reasons[0]) if approval_reasons and isinstance(approval_reasons[0], dict) else {}
+            reason_code = str(approval.get("playbook_code") or first_reason.get("code") or reason_code)
             reason_message = str(approval.get("playbook_message") or reason_message)
         elif decision == SubmitDecision.SKIP_MANUAL_ONLY:
             reason_code = str(approval.get("playbook_code") or reason_code)
@@ -482,14 +597,14 @@ class OrderIntentService:
         quality_snapshot = self._quality_snapshot(approval=approval, executable_plan=executable_plan)
         self_heal_summary = {
             "stale_paper_reentry_block_ignored": bool(existing_submission_summary.get("stale_paper_submission_ignored", False)),
-            "stale_paper_reentry_block_ignored_count": int(
-                existing_submission_summary.get("ignored_stale_submission_count", 0) or 0
+            "stale_paper_reentry_block_ignored_count": self._safe_int(
+                existing_submission_summary.get("ignored_stale_submission_count", 0)
             ),
             "stale_paper_reentry_block_submission_ids": list(
                 existing_submission_summary.get("ignored_stale_submission_ids") or []
             ),
-            "stale_paper_duplicate_intents_ignored_count": int(
-                dedupe_result.get("ignored_stale_paper_intent_count", 0) or 0
+            "stale_paper_duplicate_intents_ignored_count": self._safe_int(
+                dedupe_result.get("ignored_stale_paper_intent_count", 0)
             ),
             "stale_paper_duplicate_intents_ignored": list(dedupe_result.get("ignored_stale_paper_intents") or []),
         }
@@ -515,6 +630,7 @@ class OrderIntentService:
             payload={
                 "executable_plan": self._json_safe(executable_plan),
                 "requested_execution_mode": requested_mode.value,
+                "paper_lineage_override_requested": bool(paper_lineage_override),
                 "intent_snapshot": {
                     "allowed_execution_mode": str(approval.get("allowed_execution_mode") or ""),
                     "deployment_go_no_go": str(approval.get("deployment_go_no_go") or ""),
@@ -533,6 +649,8 @@ class OrderIntentService:
             },
         )
         self.intent_repo.add(row)
-        tracker = get_execution_lane_tracker(window=int(self.settings.transition_edge_variant_lane_tracker_window))
+        tracker = get_execution_lane_tracker(
+            window=max(1, self._safe_int(self.settings.transition_edge_variant_lane_tracker_window, default=1))
+        )
         tracker.record_intent(is_variant=self._is_transition_edge_variant(executable_plan))
         return row

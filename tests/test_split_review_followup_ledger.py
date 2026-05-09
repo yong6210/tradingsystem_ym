@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from app.services.split_review_followup_ledger import (
+    ROOT_DIR,
     record_split_review_followup_ledger_entry,
     record_split_review_followup_ledger_transition,
     resolve_split_review_followup_ledger_packet,
+    split_review_followup_ledger_path,
     summarize_split_review_followup_ledger,
 )
+
+
+def test_split_review_followup_ledger_path_is_root_anchored_when_relative() -> None:
+    assert split_review_followup_ledger_path(ledger_path="reports/ledger.jsonl") == ROOT_DIR / "reports/ledger.jsonl"
 
 
 def test_split_review_followup_ledger_records_and_summarizes_recent_packets(tmp_path) -> None:

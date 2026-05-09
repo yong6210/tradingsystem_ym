@@ -86,6 +86,24 @@ def test_health_disk_free_uses_sqlite_pysqlite_database_directory(monkeypatch, t
     assert seen["path"] == str(db_dir)
 
 
+def test_health_disk_free_tolerates_malformed_min_free_setting(monkeypatch, tmp_path) -> None:
+    service = HealthCheckService()
+    db_dir = tmp_path / "db"
+    db_dir.mkdir()
+    service.settings.database_url = f"sqlite+pysqlite:///{db_dir / 'runtime.db'}?mode=ro"
+    service.settings.ready_disk_min_free_mb = "bad-min-free"
+
+    def fake_disk_usage(path: str) -> SimpleNamespace:
+        return SimpleNamespace(free=2 * 1024 * 1024 * 1024)
+
+    monkeypatch.setattr("app.services.health_check.shutil.disk_usage", fake_disk_usage)
+
+    ok, detail = service._check_disk_free()
+
+    assert ok is True
+    assert detail == "ok:2048MB"
+
+
 def test_health_ready_is_degraded_when_worker_heartbeat_missing(monkeypatch, tmp_path) -> None:
     service = HealthCheckService()
     service.settings.runtime_worker_heartbeat_dir = str(tmp_path)
@@ -221,6 +239,32 @@ def test_health_ws_heartbeat_with_invalid_stats_is_degraded(tmp_path) -> None:
     assert detail == "heartbeat_ws_stats_invalid"
 
 
+def test_health_worker_tolerates_malformed_age_settings(tmp_path) -> None:
+    service = HealthCheckService()
+    service.settings.runtime_worker_heartbeat_dir = str(tmp_path)
+    service.settings.ready_require_runtime_workers = True
+    service.settings.runtime_worker_loop_heartbeat_max_age_seconds = "inf"
+    service.settings.runtime_worker_ws_heartbeat_max_age_seconds = "bad-ws-age"
+    service.settings.runtime_worker_ws_no_message_max_age_seconds = "nan"
+    settings = get_settings().model_copy(update={"runtime_worker_heartbeat_dir": str(tmp_path)})
+    write_worker_heartbeat("loop", settings=settings, status="ok", pid=os.getpid())
+    write_worker_heartbeat(
+        "ws",
+        settings=settings,
+        status="ok",
+        pid=os.getpid(),
+        details={"phase": "streaming", "started_at": datetime.now(timezone.utc).isoformat(), "processed_messages": 1},
+    )
+
+    loop_ok, loop_detail = service._check_runtime_worker("loop")
+    ws_ok, ws_detail = service._check_runtime_worker("ws")
+
+    assert loop_ok is True
+    assert loop_detail.startswith("ok:")
+    assert ws_ok is True
+    assert "processed=1" in ws_detail
+
+
 def test_health_ws_heartbeat_with_ingest_errors_is_degraded(tmp_path) -> None:
     service = HealthCheckService()
     service.settings.runtime_worker_heartbeat_dir = str(tmp_path)
@@ -291,6 +335,30 @@ def test_health_ws_heartbeat_with_auto_route_errors_is_degraded(tmp_path) -> Non
     ok, detail = service._check_runtime_worker("ws")
     assert ok is False
     assert detail.startswith("heartbeat_ws_auto_route_errors:1:")
+
+
+def test_health_ws_heartbeat_with_progress_callback_errors_is_degraded(tmp_path) -> None:
+    service = HealthCheckService()
+    service.settings.runtime_worker_heartbeat_dir = str(tmp_path)
+    service.settings.ready_require_runtime_workers = True
+    settings = get_settings().model_copy(update={"runtime_worker_heartbeat_dir": str(tmp_path)})
+    write_worker_heartbeat(
+        "ws",
+        settings=settings,
+        status="ok",
+        pid=os.getpid(),
+        details={
+            "phase": "streaming",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "processed_messages": 10,
+            "progress_callback_errors": 1,
+            "last_progress_callback_error": "RuntimeError:heartbeat write failed",
+        },
+    )
+
+    ok, detail = service._check_runtime_worker("ws")
+    assert ok is False
+    assert detail.startswith("heartbeat_ws_progress_callback_errors:1:")
 
 
 def test_health_ws_heartbeat_with_messages_remains_ready(tmp_path) -> None:

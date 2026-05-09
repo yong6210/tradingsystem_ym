@@ -312,7 +312,10 @@ def _filtered_rows(rows: list[dict[str, Any]], *, start_ts: datetime, end_ts: da
         raw_ts = str(row.get("generated_ts") or row.get("entry_ts") or row.get("closed_ts") or "").strip()
         if not raw_ts:
             continue
-        ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        try:
+            ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        except ValueError:
+            continue
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=UTC)
         else:

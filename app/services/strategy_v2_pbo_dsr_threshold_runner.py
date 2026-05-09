@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -41,11 +42,21 @@ class StrategyV2PboDsrThresholdRunnerService(StrategyV2PboDsrTrialWriterService)
             }
         )
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
     def _scoring_threshold_trials(self, *, plan_pairs: list[tuple[Any, Any]]) -> list[_RuntimeTrialSeries]:
         if not plan_pairs:
             return []
         thresholds = self._numeric_grid(
-            center=float(self.settings.min_confluence_score),
+            center=self._safe_float(self.settings.min_confluence_score, 62.0),
             step=2.0,
             radius_steps=3,
         )
@@ -76,9 +87,10 @@ class StrategyV2PboDsrThresholdRunnerService(StrategyV2PboDsrTrialWriterService)
     def _transition_threshold_trials(self, *, plan_pairs: list[tuple[Any, Any]]) -> list[_RuntimeTrialSeries]:
         if not plan_pairs:
             return []
-        center = float(self.settings.transition_watch_score)
+        center = self._safe_float(self.settings.transition_watch_score, 40.0)
         thresholds = self._numeric_grid(center=center, step=2.5, radius_steps=3)
-        max_threshold = float(self.settings.transition_confirmed_score) + 2.5
+        transition_confirmed_score = self._safe_float(self.settings.transition_confirmed_score, 55.0)
+        max_threshold = transition_confirmed_score + 2.5
         trials: list[_RuntimeTrialSeries] = []
         for threshold in [value for value in thresholds if value <= max_threshold]:
             subset = [
@@ -91,7 +103,7 @@ class StrategyV2PboDsrThresholdRunnerService(StrategyV2PboDsrTrialWriterService)
                 parameter_family="transition_threshold",
                 parameter_values={
                     "max_transition_score": float(threshold),
-                    "transition_confirmed_score": float(self.settings.transition_confirmed_score),
+                    "transition_confirmed_score": transition_confirmed_score,
                 },
                 closed_trades=subset,
                 returns=[float(record.realized_r) for record in subset],
@@ -119,11 +131,11 @@ class StrategyV2PboDsrThresholdRunnerService(StrategyV2PboDsrTrialWriterService)
         def passes(plan: Any, delta: float) -> bool:
             classification, score = self._reaction_score_for_plan(plan)
             if classification.startswith("rejection"):
-                confirmed = float(self.settings.reaction_classifier_rejection_confirmed_score) + delta
-                tentative = float(self.settings.reaction_classifier_rejection_tentative_score) + delta
+                confirmed = self._safe_float(self.settings.reaction_classifier_rejection_confirmed_score, 75.0) + delta
+                tentative = self._safe_float(self.settings.reaction_classifier_rejection_tentative_score, 60.0) + delta
             elif classification.startswith("acceptance"):
-                confirmed = float(self.settings.reaction_classifier_acceptance_confirmed_score) + delta
-                tentative = float(self.settings.reaction_classifier_acceptance_tentative_score) + delta
+                confirmed = self._safe_float(self.settings.reaction_classifier_acceptance_confirmed_score, 70.0) + delta
+                tentative = self._safe_float(self.settings.reaction_classifier_acceptance_tentative_score, 55.0) + delta
             else:
                 return False
             if classification.endswith("confirmed"):
@@ -140,10 +152,22 @@ class StrategyV2PboDsrThresholdRunnerService(StrategyV2PboDsrTrialWriterService)
                 parameter_family="acceptance_rejection_thresholds",
                 parameter_values={
                     "delta": float(delta),
-                    "rejection_confirmed_score": float(self.settings.reaction_classifier_rejection_confirmed_score) + delta,
-                    "rejection_tentative_score": float(self.settings.reaction_classifier_rejection_tentative_score) + delta,
-                    "acceptance_confirmed_score": float(self.settings.reaction_classifier_acceptance_confirmed_score) + delta,
-                    "acceptance_tentative_score": float(self.settings.reaction_classifier_acceptance_tentative_score) + delta,
+                    "rejection_confirmed_score": self._safe_float(
+                        self.settings.reaction_classifier_rejection_confirmed_score, 75.0
+                    )
+                    + delta,
+                    "rejection_tentative_score": self._safe_float(
+                        self.settings.reaction_classifier_rejection_tentative_score, 60.0
+                    )
+                    + delta,
+                    "acceptance_confirmed_score": self._safe_float(
+                        self.settings.reaction_classifier_acceptance_confirmed_score, 70.0
+                    )
+                    + delta,
+                    "acceptance_tentative_score": self._safe_float(
+                        self.settings.reaction_classifier_acceptance_tentative_score, 55.0
+                    )
+                    + delta,
                 },
                 closed_trades=subset,
                 returns=[float(record.realized_r) for record in subset],
@@ -163,10 +187,10 @@ class StrategyV2PboDsrThresholdRunnerService(StrategyV2PboDsrTrialWriterService)
             return []
         caps = sorted(
             {
-                float(self.settings.sizing_grade_c_r),
+                self._safe_float(self.settings.sizing_grade_c_r, 0.25),
                 0.75,
-                float(self.settings.sizing_grade_b_r),
-                float(self.settings.sizing_grade_a_r),
+                self._safe_float(self.settings.sizing_grade_b_r, 0.5),
+                self._safe_float(self.settings.sizing_grade_a_r, 1.0),
             }
         )
         trials: list[_RuntimeTrialSeries] = []
@@ -175,7 +199,7 @@ class StrategyV2PboDsrThresholdRunnerService(StrategyV2PboDsrTrialWriterService)
             returns: list[float] = []
             for plan, record in plan_pairs:
                 validity = self._validity(plan)
-                recommended = float(validity.get("recommended_risk_r", 0.0) or 0.0)
+                recommended = self._safe_float(validity.get("recommended_risk_r", 0.0))
                 if recommended <= 0.0:
                     continue
                 factor = min(recommended, float(cap)) / recommended
@@ -359,26 +383,26 @@ class StrategyV2PboDsrThresholdRunnerService(StrategyV2PboDsrTrialWriterService)
             },
             "sweep_grid": {
                 "scoring_thresholds": self._numeric_grid(
-                    center=float(self.settings.min_confluence_score),
+                    center=self._safe_float(self.settings.min_confluence_score, 62.0),
                     step=2.0,
                     radius_steps=3,
                 ),
                 "transition_threshold": [
                     value
                     for value in self._numeric_grid(
-                        center=float(self.settings.transition_watch_score),
+                        center=self._safe_float(self.settings.transition_watch_score, 40.0),
                         step=2.5,
                         radius_steps=3,
                     )
-                    if value <= float(self.settings.transition_confirmed_score) + 2.5
+                    if value <= self._safe_float(self.settings.transition_confirmed_score, 55.0) + 2.5
                 ],
                 "acceptance_rejection_thresholds": [-5.0, 0.0, 5.0],
                 "sizing_clamps": sorted(
                     {
-                        float(self.settings.sizing_grade_c_r),
+                        self._safe_float(self.settings.sizing_grade_c_r, 0.25),
                         0.75,
-                        float(self.settings.sizing_grade_b_r),
-                        float(self.settings.sizing_grade_a_r),
+                        self._safe_float(self.settings.sizing_grade_b_r, 0.5),
+                        self._safe_float(self.settings.sizing_grade_a_r, 1.0),
                     }
                 ),
             },

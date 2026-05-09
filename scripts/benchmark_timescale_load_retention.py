@@ -18,6 +18,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.db.base import Base
 
 
+def _resolve_root_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
 @dataclass(slots=True)
 class TimedMetric:
     name: str
@@ -73,8 +78,8 @@ def split_sql(sql: str) -> list[str]:
     return chunks
 
 
-def find_migrations(migrations_dir: str) -> list[Path]:
-    return sorted(Path(migrations_dir).glob("*.sql"))
+def find_migrations(migrations_dir: str | Path) -> list[Path]:
+    return sorted(_resolve_root_path(migrations_dir).glob("*.sql"))
 
 
 def apply_migrations(conn: Connection, migration_paths: list[Path]) -> list[tuple[str, int]]:
@@ -236,7 +241,7 @@ def p95_seconds(values: list[float]) -> float:
 def relation_size_bytes(conn: Connection, table_name: str) -> int:
     if table_name in {"candles", "zone_outcomes"}:
         value = conn.execute(
-            text(f"SELECT COALESCE(total_bytes, 0) FROM hypertable_detailed_size('{table_name}')")
+            text(f"SELECT COALESCE(total_bytes, 0) FROM hypertable_detailed_size('{table_name}')")  # noqa: S608
         ).scalar_one_or_none()
         return int(value or 0)
     value = conn.execute(text("SELECT pg_total_relation_size(to_regclass(:table_name))"), {"table_name": table_name}).scalar_one()
@@ -246,7 +251,7 @@ def relation_size_bytes(conn: Connection, table_name: str) -> int:
 def table_row_count(conn: Connection, table_name: str) -> int:
     if table_name not in {"candles", "zone_outcomes"}:
         raise RuntimeError(f"unsupported table_name for row count: {table_name}")
-    value = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar_one()
+    value = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar_one()  # noqa: S608
     return int(value or 0)
 
 
@@ -296,14 +301,11 @@ def run_manual_compression(conn: Connection) -> list[TimedMetric]:
     for table_name, older_than in config:
         begin = time.perf_counter()
         try:
-            rows = conn.execute(
-                text(
-                    f"""
-                    SELECT compress_chunk(chunk_name, if_not_compressed => TRUE)
-                    FROM show_chunks('{table_name}', older_than => INTERVAL '{older_than}') AS chunk_name
-                    """
-                )
-            ).all()
+            stmt = f"""
+            SELECT compress_chunk(chunk_name, if_not_compressed => TRUE)
+            FROM show_chunks('{table_name}', older_than => INTERVAL '{older_than}') AS chunk_name
+            """  # noqa: S608
+            rows = conn.execute(text(stmt)).all()
             metrics.append(
                 TimedMetric(
                     name=f"manual_compress_{table_name}",
@@ -479,9 +481,10 @@ def main() -> int:
 
     from app.db import models  # noqa: F401
 
-    migrations = find_migrations(args.migrations_dir)
+    migrations_dir = _resolve_root_path(args.migrations_dir)
+    migrations = find_migrations(migrations_dir)
     if not migrations:
-        raise RuntimeError(f"no SQL migration files in: {args.migrations_dir}")
+        raise RuntimeError(f"no SQL migration files in: {migrations_dir}")
 
     scenario = {
         "symbols": int(args.symbols),
@@ -636,8 +639,8 @@ def main() -> int:
         )
 
     status = "PASS" if all(checks.values()) else "FAIL"
-    report_path = Path(args.report_path) if args.report_path else Path(
-        f"reports/timescale/load_retention_{now_utc.strftime('%Y%m%d_%H%M%S')}.md"
+    report_path = _resolve_root_path(
+        args.report_path or f"reports/timescale/load_retention_{now_utc.strftime('%Y%m%d_%H%M%S')}.md"
     )
 
     write_report(

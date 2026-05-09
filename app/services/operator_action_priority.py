@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 
 
 class OperatorActionPriorityService:
     _REVIEW_PACKET_FRESH_HOURS = 12
     _REVIEW_PACKET_NO_TARGET_COOLDOWN_HOURS = 6
     _REVIEW_PACKET_REPEAT_LIMIT = 3
-    _PRIORITY_RANK = {
+    _PRIORITY_RANK: ClassVar[dict[str, int]] = {
         "urgent": 3,
         "watch": 2,
         "research": 1,
         "monitor": 0,
     }
-    _SOURCE_RANK = {
+    _SOURCE_RANK: ClassVar[dict[str, int]] = {
         "playbook": 6,
         "execution_degradation": 5,
         "family_execution_degradation": 4,
@@ -25,7 +25,7 @@ class OperatorActionPriorityService:
         "alpha_research": 0,
         "monitor": 0,
     }
-    _REVIEW_FOLLOWUP_ACTION_TARGETS = {
+    _REVIEW_FOLLOWUP_ACTION_TARGETS: ClassVar[dict[str, str]] = {
         "run_entry_timing_split_review": "entry_timing_target",
         "run_execution_style_split_review": "execution_style_target",
         "promote_entry_timing_branch_review": "entry_timing_target",

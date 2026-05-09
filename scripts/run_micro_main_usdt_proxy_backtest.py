@@ -133,7 +133,8 @@ def _fetch_klines_api(
             retry_after = float(response.headers.get("Retry-After", "0") or 0.0)
             backoff = retry_after if retry_after > 0 else min(2 ** attempt, 30)
             time.sleep(backoff)
-        assert response is not None
+        if response is None:
+            raise RuntimeError("Binance kline request did not produce a response")
         response.raise_for_status()
         payload = response.json()
         if not payload:

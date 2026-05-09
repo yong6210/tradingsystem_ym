@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from typing import Any
 
 from app.core.config import Settings, get_settings
@@ -74,6 +75,26 @@ class OperatingLockService:
         return value.astimezone(timezone.utc)
 
     @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if isfinite(parsed) else default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
+
+    @staticmethod
     def _mode_value(mode: StrategyMode | str | None) -> StrategyMode:
         if isinstance(mode, StrategyMode):
             return mode
@@ -91,13 +112,13 @@ class OperatingLockService:
         now = self._utc(now)
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-        london_start = day_start + timedelta(hours=int(self.settings.trading_session_london_start_hour_utc))
-        london_end = day_start + timedelta(hours=int(self.settings.trading_session_london_end_hour_utc))
+        london_start = day_start + timedelta(hours=self._safe_int(self.settings.trading_session_london_start_hour_utc, default=7))
+        london_end = day_start + timedelta(hours=self._safe_int(self.settings.trading_session_london_end_hour_utc, default=12))
         if london_start <= now < london_end:
             return SessionWindow(name="london", start=london_start, end=london_end, active=True)
 
-        ny_start = day_start + timedelta(hours=int(self.settings.trading_session_new_york_start_hour_utc))
-        ny_end = day_start + timedelta(hours=int(self.settings.trading_session_new_york_end_hour_utc))
+        ny_start = day_start + timedelta(hours=self._safe_int(self.settings.trading_session_new_york_start_hour_utc, default=13))
+        ny_end = day_start + timedelta(hours=self._safe_int(self.settings.trading_session_new_york_end_hour_utc, default=18))
         if ny_start <= now < ny_end:
             return SessionWindow(name="new_york", start=ny_start, end=ny_end, active=True)
 
@@ -123,9 +144,8 @@ class OperatingLockService:
         realized_r_raw = validity.get("final_exit_realized_r")
         if realized_r_raw is None:
             return None
-        try:
-            realized_r = float(realized_r_raw)
-        except (TypeError, ValueError):
+        realized_r = OperatingLockService._safe_float(realized_r_raw, default=float("nan"))
+        if not isfinite(realized_r):
             return None
 
         grade = validity.get("strategy_grade")
@@ -207,14 +227,14 @@ class OperatingLockService:
             "loss_streak": int(daily_loss_streak),
             "a_grade_loss_streak": int(daily_a_loss_streak),
             "last_trade": self._trade_dict(daily_trades[-1] if daily_trades else None),
-            "loss_limit_r": float(self.settings.operating_lock_daily_loss_limit_r),
+            "loss_limit_r": self._safe_float(self.settings.operating_lock_daily_loss_limit_r, default=-2.0),
         }
         session_stats = {
             "trades": len(session_trades),
             "realized_r": session_realized_r,
             "loss_streak": int(session_loss_streak),
             "last_trade": self._trade_dict(session_trades[-1] if session_trades else None),
-            "loss_limit_r": float(self.settings.operating_lock_session_loss_limit_r),
+            "loss_limit_r": self._safe_float(self.settings.operating_lock_session_loss_limit_r, default=-1.5),
         }
 
         enforced = active_mode != StrategyMode.RESEARCH
@@ -232,7 +252,13 @@ class OperatingLockService:
                 session_stats=session_stats,
             )
 
-        if daily_realized_r <= float(self.settings.operating_lock_daily_loss_limit_r):
+        daily_loss_limit_r = self._safe_float(self.settings.operating_lock_daily_loss_limit_r, default=-2.0)
+        session_loss_limit_r = self._safe_float(self.settings.operating_lock_session_loss_limit_r, default=-1.5)
+        daily_loss_cap = self._safe_int(self.settings.operating_lock_daily_consecutive_losses, default=3)
+        daily_a_loss_cap = self._safe_int(self.settings.operating_lock_daily_a_grade_failures, default=2)
+        session_loss_cap = self._safe_int(self.settings.operating_lock_session_consecutive_losses, default=2)
+
+        if daily_realized_r <= daily_loss_limit_r:
             return OperatingLockSnapshot(
                 state=RiskGateState.CLOSED,
                 active=True,
@@ -245,7 +271,7 @@ class OperatingLockService:
                 daily_stats=daily_stats,
                 session_stats=session_stats,
             )
-        if daily_loss_streak >= int(self.settings.operating_lock_daily_consecutive_losses):
+        if daily_loss_streak >= daily_loss_cap:
             return OperatingLockSnapshot(
                 state=RiskGateState.CLOSED,
                 active=True,
@@ -258,7 +284,7 @@ class OperatingLockService:
                 daily_stats=daily_stats,
                 session_stats=session_stats,
             )
-        if daily_a_loss_streak >= int(self.settings.operating_lock_daily_a_grade_failures):
+        if daily_a_loss_streak >= daily_a_loss_cap:
             return OperatingLockSnapshot(
                 state=RiskGateState.CLOSED,
                 active=True,
@@ -274,7 +300,7 @@ class OperatingLockService:
 
         if session.active:
             unlock_at = session.end.isoformat()
-            if session_realized_r <= float(self.settings.operating_lock_session_loss_limit_r):
+            if session_realized_r <= session_loss_limit_r:
                 return OperatingLockSnapshot(
                     state=RiskGateState.CLOSED,
                     active=True,
@@ -287,7 +313,7 @@ class OperatingLockService:
                     daily_stats=daily_stats,
                     session_stats=session_stats,
                 )
-            if session_loss_streak >= int(self.settings.operating_lock_session_consecutive_losses):
+            if session_loss_streak >= session_loss_cap:
                 return OperatingLockSnapshot(
                     state=RiskGateState.CLOSED,
                     active=True,

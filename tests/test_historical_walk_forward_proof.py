@@ -12,14 +12,25 @@ from app.services.historical_walk_forward_proof import HistoricalWalkForwardProo
 from app.services.plan_generator import RankedPlan
 
 
-def _candle(*, symbol: str, timeframe: str, ts: datetime, o: float, h: float, l: float, c: float) -> Candle:
+def _candle(
+    *,
+    symbol: str,
+    timeframe: str,
+    ts: datetime,
+    o: float,
+    h: float,
+    c: float,
+    low: float | None = None,
+    **kwargs: Any,
+) -> Candle:
+    low = float(kwargs.get("l", 0.0) if low is None else low)
     return Candle(
         symbol=symbol,
         timeframe=timeframe,
         ts=ts,
         o=o,
         h=h,
-        l=l,
+        l=low,
         c=c,
         v=1000.0,
         source="test",
@@ -1148,3 +1159,51 @@ def test_historical_walk_forward_raw_candle_heuristic_generates_strategy_samples
         and "risk_atr" in dict(row.get("raw_signal_features") or {})
         for row in payload["trade_rows"]
     )
+
+
+def test_historical_walk_forward_tolerates_malformed_numeric_settings(tmp_path) -> None:
+    init_db()
+    with SessionLocal() as db:
+        repo = CandleRepository(db)
+        settings = SimpleNamespace(
+            strategy_version="test",
+            validation_report_dir=str(tmp_path),
+            auto_trading_historical_walk_forward_cache_hours="bad",
+            auto_trading_historical_walk_forward_warmup_5m_bars="bad",
+            auto_trading_historical_walk_forward_min_15m_bars=float("inf"),
+            auto_trading_historical_walk_forward_max_5m_window_bars="bad",
+            auto_trading_historical_walk_forward_max_15m_window_bars=float("inf"),
+            thesis_time_bucket_minutes="bad",
+            btc_sweep_reversal_limit_fast_failure_enabled=True,
+            btc_sweep_reversal_limit_fast_failure_allowed_sessions="",
+            btc_sweep_reversal_limit_fast_failure_max_bars=float("inf"),
+            btc_sweep_reversal_limit_fast_failure_stop_r="bad",
+            btc_sweep_reversal_limit_fast_failure_requires_sl_touch=True,
+        )
+        service = HistoricalWalkForwardProofService(
+            candle_repo=repo,
+            settings=settings,
+            context_engine=_DummyContextEngine(),
+            zone_engine=_DummyZoneEngine(),
+            plan_generator=_DummyPlanGenerator(trigger_ts=datetime(2026, 1, 1, tzinfo=timezone.utc)),
+        )
+
+        fingerprint = service._replay_settings_fingerprint()
+        payload = service._simulate_symbol(
+            symbol="BTCUSDC",
+            start_ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            end_ts=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            eligible_symbols={"BTCUSDC"},
+            eligible_families={"sweep_reversal"},
+            eligible_entry_models={"LIMIT"},
+            generate_on_new_15m_only=True,
+            independent_signal_mode=False,
+            max_candidates_per_bar=1,
+            source_mode="engine_regenerated",
+            blocked_time_contract=[],
+            blocked_plan_ids=set(),
+        )
+
+    assert fingerprint["btc_sweep_reversal_limit_fast_failure_max_bars"] == 18
+    assert fingerprint["btc_sweep_reversal_limit_fast_failure_stop_r"] == 0.00000001
+    assert payload["eligible_bar_count"] == 0

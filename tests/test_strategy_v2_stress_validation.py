@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from app.core.config import Settings
 from app.core.enums import ExecutionFillStage, PlanState
 from app.db.models import Candle, ExecutionFill, Plan
 from app.services.strategy_v2_stress_validation import StrategyV2StressValidationService
@@ -205,6 +206,43 @@ def test_strategy_v2_stress_validation_handles_empty_input() -> None:
     assert payload["scenario_metrics"]["latency_plus_1_bar"]["trades"] == 0
 
 
+def test_strategy_v2_stress_validation_tolerates_malformed_numeric_settings() -> None:
+    settings = Settings(_env_file=None)
+    settings.maker_fee_bps = "bad-maker"
+    settings.taker_fee_bps = "inf"
+    settings.stress_replay_divergence_warn_ev_delta = "bad-warn"
+    settings.stress_replay_divergence_fail_ev_delta = "nan"
+    settings.stress_replay_divergence_warn_max_drawdown_delta = "bad-dd"
+    settings.stress_replay_divergence_fail_max_drawdown_delta = "inf"
+    service = StrategyV2StressValidationService(settings=settings, fill_repo=_FillRepoStub([]), candle_repo=_CandleRepoStub([]))
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    limit_plan = _closed_plan(
+        plan_id="malformed_fee_limit",
+        symbol="BTCUSDC",
+        realized_r=0.2,
+        cost_est=0.05,
+        entry_model="LIMIT",
+        closed_ts=now - timedelta(days=1),
+    )
+    confirm_plan = _closed_plan(
+        plan_id="malformed_fee_confirm",
+        symbol="BTCUSDC",
+        realized_r=0.1,
+        cost_est=0.04,
+        entry_model="CONFIRM",
+        closed_ts=now - timedelta(days=1),
+    )
+
+    assert service._estimated_fee_r(plan=limit_plan, risk_abs=1.0) == 0.04
+    assert service._estimated_fee_r(plan=confirm_plan, risk_abs=1.0) == 0.08
+    assert service._replay_divergence_thresholds() == {
+        "warn_ev_delta": -0.10,
+        "fail_ev_delta": -0.25,
+        "warn_max_drawdown_delta": 0.25,
+        "fail_max_drawdown_delta": 0.75,
+    }
+
+
 def test_strategy_v2_stress_validation_uses_replay_output_for_deployment_gate() -> None:
     now = datetime.now(timezone.utc).replace(microsecond=0)
     base_plan = _closed_plan(
@@ -355,3 +393,29 @@ def test_strategy_v2_stress_validation_can_fail_deployment_on_replay_divergence_
     assert recommendation["scenario_statuses"]["latency_plus_1_bar"]["status"] == "FAIL"
     assert recommendation["scenario_statuses"]["latency_plus_1_bar"]["divergence_status"] == "FAIL"
     assert recommendation["scenario_statuses"]["latency_plus_1_bar"]["divergence_reason"] == "replay_divergence_fail:ev"
+
+
+def test_strategy_v2_stress_validation_tolerates_invalid_generated_at_when_attaching_report() -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    base_plan = _closed_plan(
+        plan_id="invalid_generated_at_case",
+        symbol="BTCUSDC",
+        realized_r=0.5,
+        cost_est=0.04,
+        entry_model="CONFIRM",
+        closed_ts=now - timedelta(days=1),
+    )
+    service = StrategyV2StressValidationService(fill_repo=_FillRepoStub([]), candle_repo=_CandleRepoStub([]))
+
+    baseline_payload = service.generate(symbol="BTCUSDC", version="v1", plans=[base_plan], write_report=False)
+    baseline_payload["generated_at"] = "legacy-invalid-timestamp"
+
+    enriched = service.attach_replay_output_artifacts(
+        payload=baseline_payload,
+        stress_replay_output_artifacts=None,
+        write_report=True,
+    )
+
+    report_path = Path(str(enriched["report_path"]))
+    assert report_path.exists()
+    assert "legacy-invalid-timestamp" in report_path.read_text(encoding="utf-8")

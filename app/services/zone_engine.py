@@ -3,6 +3,8 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from math import isfinite
+from typing import Any
 
 from app.core.config import get_settings
 from app.core.enums import DirBias, ZoneState, ZoneType
@@ -26,6 +28,16 @@ class ZoneCandidate:
 class ZoneEngine:
     def __init__(self):
         self.settings = get_settings()
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value in (None, "", "None"):
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return int(parsed) if isfinite(parsed) else default
 
     @staticmethod
     def _atr(candles: list[Candle], period: int = 14) -> float:
@@ -278,7 +290,7 @@ class ZoneEngine:
         if created.tzinfo is None:
             created = created.replace(tzinfo=timezone.utc)
         age = now - created
-        if age > timedelta(hours=int(self.settings.scalp_zone_hard_max_age_hours)):
+        if age > timedelta(hours=self._safe_int(self.settings.scalp_zone_hard_max_age_hours, default=24)):
             return ZoneState.EXPIRED.value
         if age > timedelta(days=self.settings.zone_max_age_days) and zone.quality < 55:
             return ZoneState.EXPIRED.value

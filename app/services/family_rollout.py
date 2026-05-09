@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from app.core.enums import ExecutionMode
 from app.repositories.execution import FamilyRolloutPolicyRepository
@@ -8,7 +8,7 @@ from app.domain.execution import RolloutPolicy
 
 
 class RolloutPolicyBootstrap:
-    _DEFAULTS: dict[str, RolloutPolicy] = {
+    _DEFAULTS: ClassVar[dict[str, RolloutPolicy]] = {
         "trend_continuation": RolloutPolicy(
             strategy_family="trend_continuation",
             live_enabled=False,

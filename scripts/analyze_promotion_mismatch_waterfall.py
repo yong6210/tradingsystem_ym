@@ -76,10 +76,20 @@ def _utc_from_iso(raw: str | None) -> datetime | None:
     text = str(raw or "").strip()
     if not text:
         return None
-    value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    try:
+        value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _floor_15m(ts: datetime) -> str:
@@ -384,7 +394,7 @@ def _rescue_buckets(
 
     out: dict[str, dict[str, Any]] = {}
     for bucket, rows in buckets.items():
-        realized = [float(row.get("final_exit_realized_r") or 0.0) for row in rows]
+        realized = [_safe_float(row.get("final_exit_realized_r")) for row in rows]
         profitable = [value for value in realized if value > 0.0]
         out[bucket] = {
             "count": len(rows),
@@ -414,7 +424,7 @@ def _classify_false_negatives(
     promotion_breakdown: Counter[str] = Counter()
     policy_breakdown: Counter[str] = Counter()
     for row in replay_rows:
-        if float(row.get("final_exit_realized_r") or 0.0) <= 0.0:
+        if _safe_float(row.get("final_exit_realized_r")) <= 0.0:
             continue
         exact_key = _replay_match_key(row)
         if exact_key in runtime_promoted_keys:
@@ -484,7 +494,6 @@ def _classify_false_negatives(
                 else:
                     stage = "contract"
             same_entry_count = len(same_entry_matches)
-            broad_count = len(broad_matches)
             nearest_same_entry_minutes = None
             for match in same_entry_matches:
                 reaction = str(match.get("reaction_classification") or "unknown")
@@ -502,7 +511,7 @@ def _classify_false_negatives(
                 "direction": row.get("direction"),
                 "generated_ts": row.get("generated_ts"),
                 "entry_model": row.get("entry_model"),
-                "final_exit_realized_r": float(row.get("final_exit_realized_r") or 0.0),
+                "final_exit_realized_r": _safe_float(row.get("final_exit_realized_r")),
                 "failure_stage": stage,
                 "failure_reason": reason,
                 "same_bucket_plan_count": len(broad_matches),

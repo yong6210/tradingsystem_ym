@@ -91,7 +91,7 @@ def _parse_timestamp(raw: str, *, timezone_name: str) -> datetime:
 
     for fmt in _DATETIME_FORMATS:
         try:
-            parsed = datetime.strptime(value, fmt)
+            parsed = datetime.strptime(value, fmt)  # noqa: DTZ007
             parsed = parsed.replace(tzinfo=ZoneInfo(timezone_name))
             return parsed.astimezone(UTC)
         except ValueError:

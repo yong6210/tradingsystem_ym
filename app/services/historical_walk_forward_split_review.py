@@ -294,8 +294,6 @@ class HistoricalWalkForwardSplitReviewService:
             generated_ts = self._parse_ts(row.get("generated_ts")) or self._parse_ts(row.get("closed_ts"))
             session_name = self._session_bucket(generated_ts)
             hour_utc = int(generated_ts.hour) if generated_ts is not None else None
-            minute_utc = int(generated_ts.minute) if generated_ts is not None else None
-            weekday_utc = int(generated_ts.weekday()) if generated_ts is not None else None
             symbol = str(row.get("symbol") or "").strip().upper()
             family = str(row.get("strategy_family") or "").strip().lower()
             entry_model = str(row.get("entry_model") or "").strip().upper()
@@ -495,6 +493,8 @@ class HistoricalWalkForwardSplitReviewService:
         overall = dict(payload.get("overall") or {})
         breakdowns = dict(payload.get("breakdowns") or {})
         headline = dict(payload.get("headline") or {})
+        profit_factor = overall.get("profit_factor")
+        profit_factor_text = f"{float(profit_factor):.4f}" if profit_factor is not None else "n/a"
 
         lines = [
             f"# Historical Walk-Forward Split Review: {review_name}",
@@ -515,7 +515,7 @@ class HistoricalWalkForwardSplitReviewService:
             f"- win_rate: {float(overall.get('win_rate', 0.0) or 0.0) * 100.0:.2f}%",
             f"- ev_r: {float(overall.get('ev_r', 0.0) or 0.0):+.4f}",
             f"- total_r: {float(overall.get('total_r', 0.0) or 0.0):+.4f}",
-            f"- profit_factor: {(f'{float(overall.get('profit_factor')):.4f}' if overall.get('profit_factor') is not None else 'n/a')}",
+            f"- profit_factor: {profit_factor_text}",
             f"- stop_loss_share: {float(overall.get('stop_loss_share', 0.0) or 0.0) * 100.0:.2f}%",
             f"- max_drawdown_r: {float(overall.get('max_drawdown_r', 0.0) or 0.0):.4f}",
             f"- p5_r: {float(overall.get('p5_r', 0.0) or 0.0):+.4f}",
