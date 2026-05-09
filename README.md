@@ -1173,10 +1173,15 @@ open "http://127.0.0.1:8000/execution/operator-ui?symbol=BTCUSDC&universe=usdc_p
 - Default database URL uses local SQLite for bootstrap.
 - Production target is Postgres/TimescaleDB plus Redis.
 - All timestamps are stored in UTC.
+- Runtime settings load `.env` from the repository root, and relative SQLite URLs plus runtime safety/validation contract paths are anchored to the repository root to keep API, worker, and review processes on the same inputs.
+- `app.services.execution` exports are lazy-loaded so direct service imports do not depend on import order during API, worker, script, or test startup.
+- Repository read helpers keep one active implementation per method; `PlanRepository.list_recent(..., limit=...)` is part of the runtime/report contract and includes still-open plans whose `valid_until` remains in the requested window.
+- Runtime contract JSON files accept either wrapped payloads like `{"blocked_buckets": [...]}` / `{"blocked_plan_ids": [...]}` or raw list payloads, and both live approval and walk-forward review use the same parser behavior.
+- If a Binance live submit raises before exchange acknowledgement, the submission is recorded as `adapter=binance`, `state=SUBMITTED`, `submit_status=LIVE_SUBMIT_ERROR`, and `requires_reconciliation=true`. This intentionally blocks same-plan reentry and counts as live exposure until reconciliation proves the exchange did not accept the order.
 - `/health/ready` checks `db`, `binance_rest`, `event_backend`, live worker heartbeats/PIDs, WS no-message timeout, and 1m/5m market-data freshness.
 - Runtime scripts disable Pydantic plugin loading and bytecode writes by default for stable startup and cleaner git state.
 - `POST /internal/binance/order` is a test order by default. Live submit or cancel opens only when `BINANCE_TRADE_LIVE_ENABLED=true` and the request payload sets `live=true`.
-- `AUTO_TRADING_LIVE_LIQUIDITY_GATE_ENABLED=true` adds a final pre-submit live gate using Binance public order-book depth plus recent 1m turnover. It blocks or marks split-required when visible depth, spread, simulated slippage, or volume participation is outside configured limits.
+- `AUTO_TRADING_LIVE_LIQUIDITY_GATE_ENABLED=true` adds a final pre-submit live gate using Binance public order-book depth plus recent 1m turnover. It blocks or marks split-required when visible depth, spread, simulated slippage, or volume participation is outside configured limits. If `AUTO_TRADING_LIVE_LIQUIDITY_GATE_PARTIAL_SUBMIT_ENABLED=true`, split-required orders can be reduced to a safe first tranche and the remaining notional is recorded for a later same-thesis live signal, bounded by `AUTO_TRADING_LIVE_LIQUIDITY_GATE_MAX_TRANCHES`.
 - `POST /internal/binance/user-stream/process` requires the optional `websockets` dependency.
 - Binance sync and backfill skip overlap history so older overlapping candles do not trigger reverse-timestamp failures.
 - `/indicators/*`, Pine mirror output, and TradingView chart alerts are context surfaces. They do not replace execution approval or live runtime truth.

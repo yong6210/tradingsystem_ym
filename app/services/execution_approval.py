@@ -6,11 +6,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.core.config import Settings, get_settings
+from app.core.config import ROOT_DIR, Settings, get_settings
 from app.core.enums import ApprovalState, EntryModel, ExecutionMode, PlanState
 from app.db.models import Plan
 from app.services.common import clamp
-from app.services.execution.rollout import RolloutPolicyBootstrap
+from app.services.family_rollout import RolloutPolicyBootstrap
 from app.services.safety_locks import SafetyLockService
 
 _MODE_RANK = {
@@ -198,14 +198,12 @@ class ExecutionPlanningService:
         raw_path = str(getattr(self.settings, "auto_trading_micro_live_strategy_time_contract_path", "") or "").strip()
         if not raw_path:
             return []
-        path = Path(raw_path)
-        if not path.is_absolute():
-            path = Path.cwd() / path
+        path = self._runtime_contract_path(raw_path)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return []
-        entries = list(dict(payload).get("blocked_buckets") or payload or [])
+        entries = self._json_list_payload(payload, key="blocked_buckets")
         contract: list[dict[str, Any]] = []
         for item in entries:
             row = dict(item or {})
@@ -261,14 +259,12 @@ class ExecutionPlanningService:
         raw_path = str(getattr(self.settings, "auto_trading_micro_live_event_blackout_path", "") or "").strip()
         if not raw_path:
             return []
-        path = Path(raw_path)
-        if not path.is_absolute():
-            path = Path.cwd() / path
+        path = self._runtime_contract_path(raw_path)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return []
-        entries = list(dict(payload).get("windows") or payload or [])
+        entries = self._json_list_payload(payload, key="windows")
         windows: list[dict[str, Any]] = []
         for item in entries:
             row = dict(item or {})
@@ -347,19 +343,34 @@ class ExecutionPlanningService:
         raw_path = str(getattr(self.settings, "auto_trading_micro_live_plan_blocklist_path", "") or "").strip()
         if not raw_path:
             return set()
-        path = Path(raw_path)
-        if not path.is_absolute():
-            path = Path.cwd() / path
+        path = self._runtime_contract_path(raw_path)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return set()
-        plan_ids = list(dict(payload).get("blocked_plan_ids") or payload or [])
+        plan_ids = self._json_list_payload(payload, key="blocked_plan_ids")
         return {
             str(plan_id or "").strip()
             for plan_id in plan_ids
             if str(plan_id or "").strip()
         }
+
+    @staticmethod
+    def _json_list_payload(payload: Any, *, key: str) -> list[Any]:
+        if isinstance(payload, dict):
+            raw = payload.get(key) or []
+        else:
+            raw = payload
+        if not isinstance(raw, (list, tuple, set)):
+            return []
+        return list(raw)
+
+    @staticmethod
+    def _runtime_contract_path(raw_path: str) -> Path:
+        path = Path(str(raw_path or "")).expanduser()
+        if path.is_absolute():
+            return path
+        return (ROOT_DIR / path).resolve()
 
     @staticmethod
     def _entry_type(entry_model: str) -> str:

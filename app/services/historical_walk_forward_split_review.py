@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from app.core.config import Settings, get_settings
+from app.core.config import ROOT_DIR, Settings, get_settings
 from app.services.strategy_v2_validation import StrategyV2ValidationService
 
 
@@ -162,12 +162,12 @@ class HistoricalWalkForwardSplitReviewService:
             return []
         path = Path(text)
         if not path.is_absolute():
-            path = Path.cwd() / path
+            path = ROOT_DIR / path
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return []
-        rows = list(dict(payload).get("blocked_buckets") or payload or [])
+        rows = HistoricalWalkForwardSplitReviewService._json_list_payload(payload, key="blocked_buckets")
         blocked: list[dict[str, Any]] = []
         for item in rows:
             row = dict(item or {})
@@ -249,17 +249,27 @@ class HistoricalWalkForwardSplitReviewService:
             return set()
         path = Path(text)
         if not path.is_absolute():
-            path = Path.cwd() / path
+            path = ROOT_DIR / path
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return set()
-        rows = list(dict(payload).get("blocked_plan_ids") or payload or [])
+        rows = HistoricalWalkForwardSplitReviewService._json_list_payload(payload, key="blocked_plan_ids")
         return {
             str(item or "").strip()
             for item in rows
             if str(item or "").strip()
         }
+
+    @staticmethod
+    def _json_list_payload(payload: Any, *, key: str) -> list[Any]:
+        if isinstance(payload, dict):
+            raw = payload.get(key) or []
+        else:
+            raw = payload
+        if not isinstance(raw, (list, tuple, set)):
+            return []
+        return list(raw)
 
     def filter_payload(
         self,

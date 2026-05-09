@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from app.core.config import Settings, get_settings
+from app.core.config import ROOT_DIR, Settings, get_settings
 from app.db.models import Candle, Plan, Zone
 from app.db.repositories import CandleRepository
 from app.services.context_engine import ContextEngine
@@ -189,12 +189,12 @@ class HistoricalWalkForwardProofService:
             return []
         path = Path(text)
         if not path.is_absolute():
-            path = Path.cwd() / path
+            path = ROOT_DIR / path
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return []
-        rows = list(dict(payload).get("blocked_buckets") or payload or [])
+        rows = HistoricalWalkForwardProofService._json_list_payload(payload, key="blocked_buckets")
         blocked: list[dict[str, Any]] = []
         for item in rows:
             row = dict(item or {})
@@ -276,17 +276,27 @@ class HistoricalWalkForwardProofService:
             return set()
         path = Path(text)
         if not path.is_absolute():
-            path = Path.cwd() / path
+            path = ROOT_DIR / path
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return set()
-        rows = list(dict(payload).get("blocked_plan_ids") or payload or [])
+        rows = HistoricalWalkForwardProofService._json_list_payload(payload, key="blocked_plan_ids")
         return {
             str(item or "").strip()
             for item in rows
             if str(item or "").strip()
         }
+
+    @staticmethod
+    def _json_list_payload(payload: Any, *, key: str) -> list[Any]:
+        if isinstance(payload, dict):
+            raw = payload.get(key) or []
+        else:
+            raw = payload
+        if not isinstance(raw, (list, tuple, set)):
+            return []
+        return list(raw)
 
     def _candidate_passes_selection_filters(
         self,

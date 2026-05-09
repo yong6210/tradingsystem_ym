@@ -1157,19 +1157,69 @@ class ExecutionCoordinator:
         else:
             live_tranche = {}
 
-        live_result = self.live_submitter(
-            symbol=plan.symbol,
-            side=live_side,
-            order_type=live_order_type,
-            quantity=live_quantity,
-            price=normalized_live_price if live_order_type == "LIMIT" else None,
-            time_in_force="GTC",
-            reduce_only=False,
-            client_order_id=client_order_id,
-            plan_id=plan.plan_id,
-            live=True,
-            new_order_resp_type="RESULT",
-        )
+        try:
+            live_result = self.live_submitter(
+                symbol=plan.symbol,
+                side=live_side,
+                order_type=live_order_type,
+                quantity=live_quantity,
+                price=normalized_live_price if live_order_type == "LIMIT" else None,
+                time_in_force="GTC",
+                reduce_only=False,
+                client_order_id=client_order_id,
+                plan_id=plan.plan_id,
+                live=True,
+                new_order_resp_type="RESULT",
+            )
+        except Exception as exc:
+            session = getattr(self.submission_repo, "db", None)
+            if session is not None and not bool(getattr(session, "is_active", True)):
+                session.rollback()
+            live_submit_error = {
+                "type": exc.__class__.__name__,
+                "message": str(exc),
+            }
+            row = OrderSubmission(
+                submission_id=f"sub_{uuid4().hex[:20]}",
+                intent_id=intent.intent_id,
+                plan_id=plan.plan_id,
+                symbol=plan.symbol,
+                client_order_id=client_order_id,
+                exchange_order_id=None,
+                state=OrderLifecycleState.SUBMITTED.value,
+                submit_status="LIVE_SUBMIT_ERROR",
+                message=(
+                    "Live submitter raised before exchange acknowledgement; reconcile the exchange "
+                    f"before retrying: {live_submit_error['message']}"
+                ),
+                adapter="binance",
+                execution_mode=effective_mode.value,
+                side=live_side,
+                order_type=live_order_type,
+                reduce_only=False,
+                requested_live=True,
+                attachments={
+                    "requires_reconciliation": True,
+                    "reentry_blocked_until_reconciled": True,
+                    "session_guidance": dict(intent.session_guidance or {}),
+                    "live_order_sizing": live_sizing,
+                    **({"live_tranche": live_tranche} if live_tranche else {}),
+                    **({"live_liquidity_gate": liquidity_gate} if bool(liquidity_gate.get("enabled")) else {}),
+                    "live_submit_error": live_submit_error,
+                },
+                raw={
+                    "unknown_exchange_state": True,
+                    "requires_reconciliation": True,
+                    "live_order_sizing": live_sizing,
+                    **({"live_tranche": live_tranche} if live_tranche else {}),
+                    **({"live_liquidity_gate": liquidity_gate} if bool(liquidity_gate.get("enabled")) else {}),
+                    "live_submit_error": live_submit_error,
+                    "intent_snapshot": {"session_guidance": dict(intent.session_guidance or {})},
+                },
+                submitted_at=datetime.now(timezone.utc),
+            )
+            self.submission_repo.add(row)
+            return row, [], False
         status = str(live_result.get("status") or "NEW").upper()
         state = self._terminal_state(status)
         acknowledged_at = datetime.now(timezone.utc) if state in {

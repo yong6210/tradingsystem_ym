@@ -717,19 +717,6 @@ class PlanRepository:
         )
         return list(self.db.scalars(stmt))
 
-    def list_recent(self, *, symbol: str, timeframe: str = "5m", days: int = 30) -> list[Plan]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, days))
-        stmt = (
-            select(Plan)
-            .where(
-                Plan.symbol == symbol,
-                Plan.timeframe == timeframe,
-                Plan.valid_from >= cutoff,
-            )
-            .order_by(desc(Plan.valid_from), desc(Plan.ev))
-        )
-        return list(self.db.scalars(stmt))
-
     def invalidate_expired(self) -> int:
         now = datetime.now(timezone.utc)
         stmt = select(Plan).where(

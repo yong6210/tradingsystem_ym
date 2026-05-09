@@ -169,8 +169,20 @@ def test_operating_lock_snapshot_ignores_paper_only_closed_plans() -> None:
 
         engine.plan_repo.list_recent_global = lambda **kwargs: [paper_plan, live_plan]  # type: ignore[assignment]
         engine.submission_repo.list_recent = lambda **kwargs: [  # type: ignore[assignment]
-            SimpleNamespace(plan_id="live_plan", requested_live=True, execution_mode="MICRO_LIVE"),
-            SimpleNamespace(plan_id="paper_plan", requested_live=False, execution_mode="PAPER"),
+            SimpleNamespace(
+                plan_id="live_plan",
+                adapter="binance",
+                state="FILLED",
+                requested_live=True,
+                execution_mode="MICRO_LIVE",
+            ),
+            SimpleNamespace(
+                plan_id="paper_plan",
+                adapter="paper",
+                state="FILLED",
+                requested_live=False,
+                execution_mode="PAPER",
+            ),
         ]
 
         captured: dict[str, list[str]] = {}
@@ -1230,6 +1242,22 @@ def test_today_trade_count_ignores_non_live_modes_during_micro_live() -> None:
                 submitted_at=start_of_day + timedelta(hours=3),
             ),
             SimpleNamespace(
+                plan_id="submission_cancelled_live_plan",
+                adapter="binance",
+                state="CANCELLED",
+                requested_live=True,
+                execution_mode="MICRO_LIVE",
+                submitted_at=start_of_day + timedelta(hours=3),
+            ),
+            SimpleNamespace(
+                plan_id="submission_only_live_plan",
+                adapter="binance",
+                state="SUBMITTED",
+                requested_live=True,
+                execution_mode="MICRO_LIVE",
+                submitted_at=start_of_day + timedelta(hours=4),
+            ),
+            SimpleNamespace(
                 plan_id="paper_submission_plan",
                 adapter="paper",
                 state="FILLED",
@@ -1240,7 +1268,7 @@ def test_today_trade_count_ignores_non_live_modes_during_micro_live() -> None:
         ]
     )
 
-    assert engine._today_trade_count() == 2
+    assert engine._today_trade_count() == 3
 
 
 def test_active_contract_filters_include_direction_contract_and_apply_it() -> None:

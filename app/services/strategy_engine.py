@@ -13,7 +13,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import ROOT_DIR, get_settings
 from app.core.events import (
     ENTRY_TRIGGERED,
     PLAN_GENERATED,
@@ -607,7 +607,7 @@ class StrategyEngine:
     ) -> str | None:
         out_dir = Path(self.settings.session_impulse_retest_miss_detector_report_dir)
         if not out_dir.is_absolute():
-            out_dir = Path.cwd() / out_dir
+            out_dir = ROOT_DIR / out_dir
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
             ts = now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -907,7 +907,13 @@ class StrategyEngine:
     def _submission_counts_as_live_contract(row: Any) -> bool:
         if str(getattr(row, "adapter", "") or "").lower() == "none":
             return False
-        if str(getattr(row, "state", "") or "").upper() == OrderLifecycleState.REJECTED.value:
+        if str(getattr(row, "state", "") or "").upper() not in {
+            OrderLifecycleState.CREATED.value,
+            OrderLifecycleState.SUBMITTED.value,
+            OrderLifecycleState.ACKNOWLEDGED.value,
+            OrderLifecycleState.PARTIALLY_FILLED.value,
+            OrderLifecycleState.FILLED.value,
+        }:
             return False
         execution_mode = str(getattr(row, "execution_mode", "") or "").upper()
         requested_live = bool(getattr(row, "requested_live", False))
@@ -957,7 +963,8 @@ class StrategyEngine:
             if self._submission_counts_as_live_contract(row):
                 recent_live_submission_plan_ids.add(plan_id)
 
-        count = 0
+        count = len(recent_live_submission_plan_ids)
+        counted_plan_ids = set(recent_live_submission_plan_ids)
         recent_plans = self.plan_repo.list_recent_global(
             timeframe="5m",
             days=2,
@@ -970,7 +977,11 @@ class StrategyEngine:
                 continue
             validity = dict(getattr(row, "validity", {}) or {})
             row_mode = str(validity.get("execution_mode") or "").upper()
-            if row_mode in {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value} or str(getattr(row, "plan_id", "") or "") in recent_live_submission_plan_ids:
+            plan_id = str(getattr(row, "plan_id", "") or "")
+            if plan_id in counted_plan_ids:
+                continue
+            if row_mode in {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value}:
+                counted_plan_ids.add(plan_id)
                 count += 1
         return count
 
@@ -999,6 +1010,13 @@ class StrategyEngine:
             row_mode = str(validity.get("execution_mode") or "").upper()
             if row_mode in allowed_live_modes or str(getattr(row, "plan_id", "") or "") in recent_live_submission_plan_ids:
                 filtered_rows.append(row)
+        present_plan_ids = {str(getattr(row, "plan_id", "") or "") for row in filtered_rows}
+        get_plan = getattr(self.plan_repo, "get", None)
+        if callable(get_plan):
+            for plan_id in sorted(recent_live_submission_plan_ids - present_plan_ids):
+                row = get_plan(plan_id)
+                if row is not None:
+                    filtered_rows.append(row)
         return filtered_rows
 
     @staticmethod
@@ -1071,7 +1089,15 @@ class StrategyEngine:
             return candidate_row
         block_reason = str(candidate_row.get("block_reason") or "")
         thesis_rejected_reason = str(candidate_row.get("thesis_rejected_reason") or "")
-        if block_reason != "thesis_duplicate_blocked" and thesis_rejected_reason != "duplicate_active_thesis":
+        continuation_overridable_blocks = {
+            "thesis_duplicate_blocked",
+            "thesis_active_cap_reached",
+            "mode_total_risk_cap_reached",
+            "total_cap_reached",
+            "directional_cap_reached",
+            "cluster_cap_reached",
+        }
+        if block_reason not in continuation_overridable_blocks and thesis_rejected_reason != "duplicate_active_thesis":
             return candidate_row
         if not self._has_live_tranche_continuation(
             plan=plan,
@@ -3415,6 +3441,7 @@ class StrategyEngine:
                 execution_mode=requested_mode,
             )
         except Exception as exc:
+            self.db.rollback()
             return self._finalize_session_impulse_retest_auto_route_audit(
                 symbol=symbol,
                 observed_ts=now,
@@ -3464,6 +3491,7 @@ class StrategyEngine:
                 }
                 submit_calls = 1
             except Exception as exc:
+                self.db.rollback()
                 result_item["status"] = "submit_error"
                 result_item["error"] = str(exc)
         else:

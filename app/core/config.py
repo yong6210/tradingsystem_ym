@@ -1,16 +1,19 @@
 import os
 from functools import lru_cache
+from pathlib import Path
 
 os.environ.setdefault("PYDANTIC_DISABLE_PLUGINS", "1")
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.enums import StrategyMode
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=str(ROOT_DIR / ".env"), env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "Trading Engine v1"
     api_prefix: str = ""
@@ -377,6 +380,21 @@ class Settings(BaseSettings):
     auto_trading_paper_stale_sample_cleanup_hours: int = 12
     binance_live_min_quantity: float = 0.001
     binance_live_quantity_step: float = 0.001
+
+    @field_validator("database_url")
+    @classmethod
+    def normalize_sqlite_database_url(cls, value: str) -> str:
+        raw = str(value or "").strip()
+        for prefix in ("sqlite+pysqlite:///", "sqlite:///"):
+            if not raw.startswith(prefix):
+                continue
+            body = raw[len(prefix) :]
+            path_part, separator, query = body.partition("?")
+            if path_part in {"", ":memory:"} or path_part.startswith("/"):
+                return raw
+            absolute_path = (ROOT_DIR / path_part).resolve()
+            return f"{prefix}{absolute_path}{separator}{query}"
+        return raw
 
 
 @lru_cache(maxsize=1)

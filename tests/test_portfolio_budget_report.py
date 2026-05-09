@@ -7,6 +7,9 @@ from sqlalchemy import delete
 from app.core.config import get_settings
 from app.db.models import OrderSubmission, Plan
 from app.db.session import SessionLocal, init_db
+from app.services import operating_lock as operating_lock_module
+from app.services import portfolio_budget_report as portfolio_budget_report_module
+from app.services import strategy_engine as strategy_engine_module
 from app.services.strategy_engine import StrategyEngine
 
 
@@ -462,7 +465,7 @@ def test_portfolio_budget_report_collects_alpha_research_candidates() -> None:
             setattr(settings, key, value)
 
 
-def test_portfolio_budget_report_reflects_daily_operating_lock() -> None:
+def test_portfolio_budget_report_reflects_daily_operating_lock(monkeypatch) -> None:
     init_db()
     settings = get_settings()
     updates = {
@@ -474,7 +477,16 @@ def test_portfolio_budget_report_reflects_daily_operating_lock() -> None:
         "trading_session_london_end_hour_utc": 24,
     }
     old_values = {key: getattr(settings, key) for key in updates}
-    now = datetime.now(timezone.utc).replace(microsecond=0)
+    now = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            return now.astimezone(tz) if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(operating_lock_module, "datetime", FrozenDatetime)
+    monkeypatch.setattr(portfolio_budget_report_module, "datetime", FrozenDatetime)
+    monkeypatch.setattr(strategy_engine_module, "datetime", FrozenDatetime)
     suffix = str(int(now.timestamp() * 1_000_000) + 1)
 
     try:

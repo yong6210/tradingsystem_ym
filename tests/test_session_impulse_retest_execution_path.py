@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.core.enums import ApprovalState, ExecutionMode, SubmitDecision
-from app.db.models import ExecutionFill, Plan
+from app.db.models import ExecutionFill, OrderSubmission, Plan
 from app.db.session import SessionLocal, init_db
 from app.domain.execution import RolloutPolicy
 from app.services.strategy_engine import StrategyEngine
@@ -391,6 +391,109 @@ def test_failed_live_submit_does_not_count_as_live_exposure_or_trade_count() -> 
         assert engine._today_trade_count() == 0
 
 
+def test_live_submitter_exception_records_unknown_live_state_and_blocks_reentry() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        _patch_live_contract(engine, allowed_symbols=["BTCUSDC"])
+        plan = _micro_plan(symbol="BTCUSDC", plan_id="sir_BTCUSDC_live_submit_error")
+        db.add(plan)
+        db.commit()
+
+        _patch_runtime(engine, candidate_row=_candidate_for(plan))
+        engine.execution_coordinator.live_submitter = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("binance timeout"))  # type: ignore[assignment]
+
+        intent = engine.create_order_intent(plan_id=plan.plan_id, execution_mode=ExecutionMode.MICRO_LIVE)
+        submission = engine.submit_order_intent(intent_id=intent["intent_id"], live=True)
+
+        assert submission["submit_status"] == "LIVE_SUBMIT_ERROR"
+        assert submission["requested_live"] is True
+        assert submission["adapter"] == "binance"
+        assert submission["state"] == "SUBMITTED"
+        assert submission["attachments"]["requires_reconciliation"] is True
+        assert submission["attachments"]["reentry_blocked_until_reconciled"] is True
+        assert submission["attachments"]["live_submit_error"]["type"] == "RuntimeError"
+        assert "before retrying: binance timeout" in submission["message"]
+
+        followup_intent = engine.create_order_intent(plan_id=plan.plan_id, execution_mode=ExecutionMode.MICRO_LIVE)
+        assert followup_intent["submit_decision"] == "SKIP_ALREADY_SUBMITTED"
+        assert followup_intent["decision_reason_code"] == "plan_reentry_blocked"
+        counter_engine = StrategyEngine(db)
+        counter_engine.settings.auto_trading_execution_mode = ExecutionMode.MICRO_LIVE
+        assert counter_engine._today_trade_count() == 1
+
+
+def test_live_submitter_exception_rolls_back_failed_session_before_unknown_submission() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        _patch_live_contract(engine, allowed_symbols=["BTCUSDC"])
+        plan = _micro_plan(symbol="BTCUSDC", plan_id="sir_BTCUSDC_live_submit_db_error")
+        db.add(plan)
+        db.add(
+            OrderSubmission(
+                submission_id="duplicate_submission_for_failed_session",
+                intent_id="seed_intent_for_failed_session",
+                plan_id=plan.plan_id,
+                symbol=plan.symbol,
+                client_order_id="seed-client-order",
+                state="REJECTED",
+                submit_status="SEEDED",
+                message="seed row",
+                adapter="none",
+                execution_mode="MICRO_LIVE",
+                attachments={},
+                side="BUY",
+                order_type="MARKET",
+                reduce_only=False,
+                requested_live=False,
+                raw={},
+            )
+        )
+        db.commit()
+        db.expunge_all()
+        plan = db.get(Plan, "sir_BTCUSDC_live_submit_db_error")
+        assert plan is not None
+
+        _patch_runtime(engine, candidate_row=_candidate_for(plan))
+
+        def failing_submitter(**_kwargs):
+            for obj in list(db.identity_map.values()):
+                if isinstance(obj, OrderSubmission) and obj.submission_id == "duplicate_submission_for_failed_session":
+                    db.expunge(obj)
+            db.add(
+                OrderSubmission(
+                    submission_id="duplicate_submission_for_failed_session",
+                    intent_id="transient_failed_insert",
+                    plan_id=plan.plan_id,
+                    symbol=plan.symbol,
+                    client_order_id="transient-client-order",
+                    state="REJECTED",
+                    submit_status="TRANSIENT",
+                    message="transient duplicate",
+                    adapter="none",
+                    execution_mode="MICRO_LIVE",
+                    attachments={},
+                    side="BUY",
+                    order_type="MARKET",
+                    reduce_only=False,
+                    requested_live=False,
+                    raw={},
+                )
+            )
+            db.flush()
+
+        engine.execution_coordinator.live_submitter = failing_submitter  # type: ignore[assignment]
+
+        intent = engine.create_order_intent(plan_id=plan.plan_id, execution_mode=ExecutionMode.MICRO_LIVE)
+        submission = engine.submit_order_intent(intent_id=intent["intent_id"], live=True)
+
+        assert submission["submit_status"] == "LIVE_SUBMIT_ERROR"
+        assert submission["adapter"] == "binance"
+        assert submission["state"] == "SUBMITTED"
+        assert submission["attachments"]["requires_reconciliation"] is True
+
+
 def test_session_impulse_retest_auto_route_creates_and_submits_live_intent() -> None:
     init_db()
     with SessionLocal() as db:
@@ -636,11 +739,14 @@ def test_current_exposure_rows_include_recent_live_submission_without_plan_execu
         validity = dict(plan.validity or {})
         validity.pop("execution_mode", None)
         plan.validity = validity
+        plan.state = "PLANNED"
         db.add(plan)
         db.commit()
 
         class _Submission:
             plan_id = plan.plan_id
+            adapter = "binance"
+            state = "SUBMITTED"
             execution_mode = ExecutionMode.MICRO_LIVE.value
             requested_live = True
 
@@ -1186,6 +1292,43 @@ def test_session_impulse_retest_auto_route_writes_runtime_audit() -> None:
         assert latest["status"] == "submitted"
         assert latest["plan_id"] == plan.plan_id
         assert latest["payload"]["requested_mode"] == ExecutionMode.MICRO_LIVE.value
+
+
+def test_session_impulse_retest_auto_route_rolls_back_before_intent_error_audit() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        _patch_live_contract(engine, allowed_symbols=["BTCUSDC"])
+        plan = _micro_plan(symbol="BTCUSDC", plan_id="sir_BTCUSDC_intent_error_audit")
+        db.add(plan)
+        db.commit()
+
+        rollbacks: list[str] = []
+        original_rollback = db.rollback
+
+        def _rollback() -> None:
+            rollbacks.append("rollback")
+            original_rollback()
+
+        db.rollback = _rollback  # type: ignore[method-assign]
+        engine.create_order_intent = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("intent db error"))  # type: ignore[assignment]
+
+        payload = engine.auto_route_session_impulse_retest_plans(
+            symbol="BTCUSDC",
+            plan_ids=[plan.plan_id],
+        )
+
+        assert payload["reason"] == "intent_creation_failed"
+        assert rollbacks
+        audits = engine.session_impulse_retest_runtime_audits_recent(
+            hours=1,
+            symbol="BTCUSDC",
+            phase="auto_route",
+            limit=5,
+        )
+        assert audits[0]["status"] == "intent_creation_failed"
+        assert audits[0]["plan_id"] == plan.plan_id
+        assert "intent db error" in audits[0]["payload"]["results"][0]["error"]
 
 
 def test_session_impulse_retest_refresh_audit_status_stays_no_fresh_without_sir_plan(monkeypatch) -> None:

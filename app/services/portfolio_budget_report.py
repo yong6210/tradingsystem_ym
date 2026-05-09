@@ -89,7 +89,13 @@ class PortfolioBudgetReportService:
     def _submission_counts_as_live_contract(row: Any) -> bool:
         if str(getattr(row, "adapter", "") or "").lower() == "none":
             return False
-        if str(getattr(row, "state", "") or "").upper() == OrderLifecycleState.REJECTED.value:
+        if str(getattr(row, "state", "") or "").upper() not in {
+            OrderLifecycleState.CREATED.value,
+            OrderLifecycleState.SUBMITTED.value,
+            OrderLifecycleState.ACKNOWLEDGED.value,
+            OrderLifecycleState.PARTIALLY_FILLED.value,
+            OrderLifecycleState.FILLED.value,
+        }:
             return False
         execution_mode = str(getattr(row, "execution_mode", "") or "").upper()
         requested_live = bool(getattr(row, "requested_live", False))
