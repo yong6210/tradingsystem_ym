@@ -842,6 +842,58 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       `;
     }
 
+    function renderLiveCandidateReadiness(liveReadiness) {
+      const payload = liveReadiness || {};
+      const reviewItems = Array.isArray(payload.operator_review_items) ? payload.operator_review_items : [];
+      const flags = payload.attention_flags || {};
+      const headlineSymbols = Array.isArray(payload.headline_candidate_symbols)
+        ? payload.headline_candidate_symbols.join(', ')
+        : 'n/a';
+      const flagSummary = [
+        `submit_gap=${boolLabel(flags.has_submit_ready_gap)}`,
+        `gate_block=${boolLabel(flags.has_gate_block)}`,
+        `hard_validation=${boolLabel(flags.has_hard_validation_block)}`,
+        `shadow_only=${boolLabel(flags.has_shadow_only_signal)}`,
+        `headline_stale=${boolLabel(flags.headline_has_stale_or_missing_evidence)}`,
+      ].join(' | ');
+
+      return `
+        <div class="stack" style="margin-top:12px;">
+          <div class="section-note">Live Candidate Review</div>
+          <div class="desk-strip">
+            ${badge('Decision', payload.promotion_decision || 'n/a')}
+            ${badge('Headline Freshness', payload.headline_evidence_freshness || 'n/a')}
+            ${badge('Authority', payload.authority || 'n/a')}
+          </div>
+          <div class="kv">
+            <div class="k">Headline Evidence</div>
+            <div class="v">${esc(payload.headline_evidence_at || 'n/a')} | symbols=${esc(headlineSymbols)}</div>
+          </div>
+          <div class="kv">
+            <div class="k">Latest Evidence</div>
+            <div class="v">${esc(payload.latest_evidence_at || 'n/a')} | freshness=${esc(payload.latest_evidence_freshness || 'n/a')}</div>
+          </div>
+          <div class="kv">
+            <div class="k">Attention Flags</div>
+            <div class="v">${esc(flagSummary)}</div>
+          </div>
+          ${renderTable(
+            reviewItems,
+            [
+              { label: 'Symbol', key: 'symbol' },
+              { label: 'Family', key: 'strategy_family' },
+              { label: 'Attention', key: 'attention' },
+              { label: 'State', key: 'promotion_state' },
+              { label: 'Blocker', key: 'primary_blocker' },
+              { label: 'Freshness', key: 'evidence_freshness' },
+              { label: 'Next Action', key: 'next_action' },
+            ],
+            '현재 우선 review 대상 live candidate가 없습니다.'
+          )}
+        </div>
+      `;
+    }
+
     function extractRuntimeSignalShadowTilt(row) {
       if (!row) return null;
       return row?.validity?.runtime_signal_shadow_tilt
@@ -1783,7 +1835,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             ${badge('Live Candidate', liveReadiness?.headline_state || 'n/a')}
           </div>
           <div class="summary-grid">
-            ${renderSummaryBox('Live Candidate Readiness', liveReadiness?.headline_state || 'n/a', `${liveReadiness?.headline_reason || 'n/a'} | ${liveReadiness?.headline_action || 'readiness unavailable'}`)}
+            ${renderSummaryBox('Live Candidate Readiness', liveReadiness?.headline_state || 'n/a', `${liveReadiness?.promotion_decision || 'n/a'} | ${liveReadiness?.headline_reason || 'n/a'} | ${liveReadiness?.headline_action || 'readiness unavailable'}`)}
             ${renderSummaryBox('Promotion Governance', governance?.state || 'n/a', governance?.summary || governance?.promotion_bias || 'promotion governance unavailable')}
             ${renderSummaryBox('Promotion Review Queue', reviewQueue?.queue_state || 'n/a', reviewQueue?.top_review_action || 'review queue unavailable')}
             ${renderSummaryBox('Promotion Remediation Queue', remediationQueue?.queue_state || 'n/a', remediationQueue?.top_remediation_action || 'remediation queue unavailable')}
@@ -1794,6 +1846,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             ${renderSummaryBox('Research Promotion Loop', researchLoop?.loop_state || 'n/a', researchLoop?.recommended_action || researchLoop?.summary || 'research loop unavailable')}
             ${renderSummaryBox('Promotion Lifecycle History', history?.history_state || 'n/a', history?.latest_event_type || history?.summary || 'lifecycle history unavailable')}
           </div>
+          ${renderLiveCandidateReadiness(liveReadiness)}
           <div class="grid two" style="margin-top:12px;">
             <div class="hint-card">
               <div class="title">남은 Guardrail Domain</div>
@@ -3711,7 +3764,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const universe = $('universe').value.trim() || 'usdc_perp_top30';
       const days = Math.max(parseInt($('days').value || '7', 10), 1);
       $('status').textContent = '운영 화면 데이터를 불러오는 중...';
-      const dashboardUrl = `/execution/operator-dashboard?symbol=${encodeURIComponent(symbol)}&universe=${encodeURIComponent(universe)}&portfolio_limit=10&intent_limit=10&reconcile_limit=10&days=${days}`;
+      const dashboardUrl = `/execution/operator-dashboard?symbol=${encodeURIComponent(symbol)}&universe=${encodeURIComponent(universe)}&portfolio_limit=10&intent_limit=10&reconcile_limit=10&days=${days}&fast=true`;
       const plansUrl = `/plans/top?symbol=${encodeURIComponent(symbol)}&tf=5m&limit=5&refresh=true`;
       const scannerUrl = `/scanner/top?universe=${encodeURIComponent(universe)}&limit=50`;
       try {

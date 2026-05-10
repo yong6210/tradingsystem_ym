@@ -82,7 +82,7 @@ Primary runtime scripts:
   - [/Users/yumin/Documents/trading/scripts/run_session_impulse_retest_runtime_audit_report.py](/Users/yumin/Documents/trading/scripts/run_session_impulse_retest_runtime_audit_report.py)
 - live candidate promotion readiness:
   - [/Users/yumin/Documents/trading/scripts/run_live_candidate_promotion_readiness.py](/Users/yumin/Documents/trading/scripts/run_live_candidate_promotion_readiness.py)
-  - compresses existing runtime audits and order-intent blockers into compare-only states such as `GATE_BLOCKED`, `SHADOW_SIGNAL_ONLY`, and `SUBMIT_READY_GAP`; it supports `--symbol ADAUSDC`, prints latest evidence timestamps, and never expands live authority
+  - compresses existing runtime audits and order-intent blockers into compare-only states such as `GATE_BLOCKED`, `SHADOW_SIGNAL_ONLY`, and `SUBMIT_READY_GAP`; it supports `--symbol ADAUSDC`, prints latest evidence timestamps plus `fresh`/`recent`/`stale`/`old` freshness labels, separates headline evidence from overall latest evidence, adds `promotion_decision` / `attention_flags` / `operator_review_items`, and never expands live authority
 
 Recommended checks:
 

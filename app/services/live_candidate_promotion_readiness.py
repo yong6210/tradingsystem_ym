@@ -68,6 +68,14 @@ _GATE_BLOCKER_PRIORITY = {
 }
 
 
+_FRESH_SECONDS = 15 * 60
+_RECENT_SECONDS = 60 * 60
+_STALE_SECONDS = 6 * 60 * 60
+
+
+_STALE_FRESHNESS = {"stale", "old", "no_evidence"}
+
+
 class LiveCandidatePromotionReadinessService:
     """Compare-only candidate readiness summary for live promotion decisions.
 
@@ -160,6 +168,29 @@ class LiveCandidatePromotionReadinessService:
         return dt.timestamp() if dt is not None else 0.0
 
     @classmethod
+    def _now(cls, value: Any = None) -> datetime:
+        return cls._timestamp(value) or datetime.now(timezone.utc)
+
+    @classmethod
+    def _age_seconds(cls, *, now: datetime, value: Any) -> int | None:
+        dt = cls._timestamp(value)
+        if dt is None:
+            return None
+        return max(0, int((now - dt).total_seconds()))
+
+    @staticmethod
+    def _freshness(age_seconds: int | None) -> str:
+        if age_seconds is None:
+            return "no_evidence"
+        if age_seconds <= _FRESH_SECONDS:
+            return "fresh"
+        if age_seconds <= _RECENT_SECONDS:
+            return "recent"
+        if age_seconds <= _STALE_SECONDS:
+            return "stale"
+        return "old"
+
+    @classmethod
     def _remember_latest(cls, candidate: dict[str, Any], field: str, value: Any) -> None:
         dt = cls._timestamp(value)
         if dt is None:
@@ -168,6 +199,135 @@ class LiveCandidatePromotionReadinessService:
         if not isinstance(current, datetime) or dt > current:
             candidate[f"_{field}_dt"] = dt
             candidate[field] = dt.isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _headline_rows(rows: list[dict[str, Any]], headline: dict[str, str]) -> list[dict[str, Any]]:
+        state = str(headline.get("state") or "")
+        reason = str(headline.get("reason") or "")
+        if state == "FAIL":
+            return [row for row in rows if row.get("promotion_state") == "SUBMIT_READY_GAP"]
+        elif state == "BLOCKED":
+            matched = [
+                row
+                for row in rows
+                if row.get("promotion_state") == "GATE_BLOCKED" and row.get("primary_blocker") == reason
+            ]
+            if not matched:
+                matched = [row for row in rows if row.get("promotion_state") == "GATE_BLOCKED"]
+            return matched
+        if state == "WATCH" and reason == "shadow_signal_only":
+            return [row for row in rows if row.get("promotion_state") == "SHADOW_SIGNAL_ONLY"]
+        if state == "WAIT":
+            return [
+                row
+                for row in rows
+                if row.get("promotion_state")
+                in {"COOLDOWN_WAIT", "NO_FRESH_LIVE_CANDIDATE", "OBSERVE_RUNTIME", "NO_RECENT_RUNTIME_EVIDENCE"}
+            ]
+        return list(rows)
+
+    @classmethod
+    def _headline_evidence(
+        cls,
+        *,
+        rows: list[dict[str, Any]],
+        headline: dict[str, str],
+        now: datetime,
+    ) -> dict[str, Any]:
+        matched = cls._headline_rows(rows, headline)
+        latest = ""
+        for row in matched:
+            if cls._timestamp_epoch(row.get("latest_evidence_at")) > cls._timestamp_epoch(latest):
+                latest = str(row.get("latest_evidence_at") or "")
+        age = cls._age_seconds(now=now, value=latest)
+        symbols = sorted({str(row.get("symbol") or "") for row in matched if row.get("symbol")})
+        states = Counter(str(row.get("promotion_state") or "unknown") for row in matched)
+        return {
+            "headline_evidence_at": latest,
+            "headline_evidence_age_seconds": age,
+            "headline_evidence_freshness": cls._freshness(age),
+            "headline_candidate_count": len(matched),
+            "headline_candidate_symbols": symbols,
+            "headline_candidate_state_counts": dict(states.most_common()),
+        }
+
+    @staticmethod
+    def _promotion_decision(headline: dict[str, str]) -> str:
+        state = str(headline.get("state") or "")
+        reason = str(headline.get("reason") or "")
+        if state == "FAIL":
+            return "investigate_submission_gap"
+        if state == "BLOCKED" and reason == "validation_do_not_deploy":
+            return "do_not_promote_validation_block"
+        if state == "BLOCKED":
+            return "do_not_promote_gate_blocked"
+        if state == "WATCH" and reason == "shadow_signal_only":
+            return "observe_shadow_only"
+        if state == "WAIT":
+            return "wait_for_fresh_promotable_candidate"
+        return "observe_runtime"
+
+    @staticmethod
+    def _attention_for(row: dict[str, Any]) -> str:
+        state = str(row.get("promotion_state") or "")
+        blocker = str(row.get("primary_blocker") or "")
+        if state == "SUBMIT_READY_GAP":
+            return "investigate_submission_path"
+        if blocker == "validation_do_not_deploy":
+            return "validation_report_required"
+        if blocker == "no_runtime_candidate":
+            return "runtime_candidate_contract_review"
+        if blocker == "adjusted_score_non_positive":
+            return "score_quality_review"
+        if state == "SHADOW_SIGNAL_ONLY":
+            return "shadow_validation_queue"
+        if state == "COOLDOWN_WAIT":
+            return "cooldown_capacity_wait"
+        if state == "NO_FRESH_LIVE_CANDIDATE":
+            return "wait_for_fresh_setup"
+        return "observe"
+
+    @classmethod
+    def _operator_review_items(
+        cls,
+        *,
+        rows: list[dict[str, Any]],
+        headline: dict[str, str],
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        matched = cls._headline_rows(rows, headline) or list(rows)
+        items: list[dict[str, Any]] = []
+        for row in matched[: max(1, int(limit))]:
+            items.append(
+                {
+                    "symbol": row.get("symbol"),
+                    "strategy_family": row.get("strategy_family"),
+                    "promotion_state": row.get("promotion_state"),
+                    "primary_blocker": row.get("primary_blocker"),
+                    "secondary_blockers": row.get("secondary_blockers") or {},
+                    "attention": cls._attention_for(row),
+                    "latest_evidence_at": row.get("latest_evidence_at") or "",
+                    "evidence_freshness": row.get("evidence_freshness"),
+                    "next_action": row.get("next_action"),
+                }
+            )
+        return items
+
+    @classmethod
+    def _attention_flags(cls, *, rows: list[dict[str, Any]], headline: dict[str, str]) -> dict[str, bool]:
+        headline_rows = cls._headline_rows(rows, headline)
+        return {
+            "has_live_submission": any(row.get("promotion_state") == "LIVE_SUBMITTED" for row in rows),
+            "has_submit_ready_gap": any(row.get("promotion_state") == "SUBMIT_READY_GAP" for row in rows),
+            "has_gate_block": any(row.get("promotion_state") == "GATE_BLOCKED" for row in rows),
+            "has_hard_validation_block": any(row.get("primary_blocker") == "validation_do_not_deploy" for row in rows),
+            "has_shadow_only_signal": any(row.get("promotion_state") == "SHADOW_SIGNAL_ONLY" for row in rows),
+            "has_stale_or_missing_evidence": any(row.get("evidence_freshness") in _STALE_FRESHNESS for row in rows),
+            "headline_has_stale_or_missing_evidence": any(
+                row.get("evidence_freshness") in _STALE_FRESHNESS for row in headline_rows
+            ),
+            "headline_requires_operator_review": str(headline.get("state") or "") in {"FAIL", "BLOCKED"},
+        }
 
     @classmethod
     def _stage(
@@ -272,7 +432,9 @@ class LiveCandidatePromotionReadinessService:
         intent_rows: list[dict[str, Any]],
         submission_rows: list[dict[str, Any]],
         limit: int = 20,
+        now: Any = None,
     ) -> dict[str, Any]:
+        now_dt = self._now(now)
         candidates: dict[str, dict[str, Any]] = {}
 
         def ensure(symbol: str, family: str = "") -> dict[str, Any]:
@@ -348,6 +510,7 @@ class LiveCandidatePromotionReadinessService:
         action_counts: Counter[str] = Counter()
         intent_reason_evidence_counts: Counter[str] = Counter()
         audit_status_evidence_counts: Counter[str] = Counter()
+        evidence_freshness_counts: Counter[str] = Counter()
         latest_evidence_at = ""
         symbols_by_state: dict[str, list[str]] = defaultdict(list)
         for candidate in candidates.values():
@@ -355,6 +518,8 @@ class LiveCandidatePromotionReadinessService:
                 self._remember_latest(candidate, "latest_evidence_at", candidate.get(field))
             if self._timestamp_epoch(candidate.get("latest_evidence_at")) > self._timestamp_epoch(latest_evidence_at):
                 latest_evidence_at = str(candidate.get("latest_evidence_at") or "")
+            evidence_age_seconds = self._age_seconds(now=now_dt, value=candidate.get("latest_evidence_at"))
+            evidence_freshness = self._freshness(evidence_age_seconds)
             state, severity, primary_blocker, next_action = self._stage(
                 audit_status_counts=candidate["audit_status_counts"],
                 intent_reason_counts=candidate["intent_reason_counts"],
@@ -366,6 +531,7 @@ class LiveCandidatePromotionReadinessService:
             severity_counts[severity] += 1
             blocker_counts[primary_blocker] += 1
             action_counts[next_action] += 1
+            evidence_freshness_counts[evidence_freshness] += 1
             intent_reason_evidence_counts.update(candidate["intent_reason_counts"])
             audit_status_evidence_counts.update(candidate["audit_status_counts"])
             symbol = str(candidate["symbol"])
@@ -387,6 +553,8 @@ class LiveCandidatePromotionReadinessService:
                     "latest_intent_at": str(candidate.get("latest_intent_at") or ""),
                     "latest_submission_at": str(candidate.get("latest_submission_at") or ""),
                     "latest_evidence_at": str(candidate.get("latest_evidence_at") or ""),
+                    "evidence_age_seconds": evidence_age_seconds,
+                    "evidence_freshness": evidence_freshness,
                     "audit_status_counts": dict(candidate["audit_status_counts"].most_common()),
                     "intent_reason_counts": dict(candidate["intent_reason_counts"].most_common()),
                     "submission_state_counts": dict(candidate["submission_state_counts"].most_common()),
@@ -403,18 +571,29 @@ class LiveCandidatePromotionReadinessService:
             )
         )
         headline = self._headline(state_counts=state_counts, blocker_counts=blocker_counts)
+        headline_evidence = self._headline_evidence(rows=rows, headline=headline, now=now_dt)
+        latest_evidence_age_seconds = self._age_seconds(now=now_dt, value=latest_evidence_at)
+        promotion_decision = self._promotion_decision(headline)
         return {
             "available": bool(rows),
             "advisory_only": True,
             "authority": "compare_only_no_live_authority_change",
             "hours": max(1, int(hours)),
+            "evaluated_at": now_dt.isoformat().replace("+00:00", "Z"),
             "latest_evidence_at": latest_evidence_at,
+            "latest_evidence_age_seconds": latest_evidence_age_seconds,
+            "latest_evidence_freshness": self._freshness(latest_evidence_age_seconds),
             "headline_state": headline["state"],
             "headline_reason": headline["reason"],
             "headline_action": headline["action"],
+            "promotion_decision": promotion_decision,
+            **headline_evidence,
+            "attention_flags": self._attention_flags(rows=rows, headline=headline),
+            "operator_review_items": self._operator_review_items(rows=rows, headline=headline, limit=5),
             "candidate_count": len(rows),
             "state_counts": dict(state_counts.most_common()),
             "severity_counts": dict(severity_counts.most_common()),
+            "evidence_freshness_counts": dict(evidence_freshness_counts.most_common()),
             "top_blockers": dict(blocker_counts.most_common(8)),
             "top_intent_reasons": dict(intent_reason_evidence_counts.most_common(8)),
             "top_audit_statuses": dict(audit_status_evidence_counts.most_common(8)),

@@ -290,6 +290,10 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "현재 A/B mix" in execution_operator_ui.text
     assert "Promotion Operating Stack" in execution_operator_ui.text
     assert "승격 review, remediation, clearance, reopen, semi-auto execution, history, research followthrough를 한 번에 읽습니다." in execution_operator_ui.text
+    assert "Live Candidate Review" in execution_operator_ui.text
+    assert "Headline Freshness" in execution_operator_ui.text
+    assert "Headline Evidence" in execution_operator_ui.text
+    assert "Attention Flags" in execution_operator_ui.text
     assert "남은 Guardrail Domain" in execution_operator_ui.text
     assert "최근 Promotion Transition" in execution_operator_ui.text
     assert "Promotion Case Inspector" in execution_operator_ui.text
@@ -402,6 +406,10 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "auto_promotion_rollout_execution" in execution_operator_ui.text
     assert "promotion_lifecycle_history" in execution_operator_ui.text
     assert "research_promotion_operating_loop" in execution_operator_ui.text
+    assert "live_candidate_promotion_readiness" in execution_operator_ui.text
+    assert "promotion_decision" in execution_operator_ui.text
+    assert "operator_review_items" in execution_operator_ui.text
+    assert "attention_flags" in execution_operator_ui.text
     assert "write_scope" in execution_operator_ui.text
     assert "remaining_guardrail_domains" in execution_operator_ui.text
     assert "recent_transitions" in execution_operator_ui.text
@@ -417,6 +425,7 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "location_reference" in execution_operator_ui.text
     assert "session_liquidity_reference" in execution_operator_ui.text
     assert "file://" in execution_operator_ui.text
+    assert "fast=true" in execution_operator_ui.text
     assert "/execution/operator-dashboard" in execution_operator_ui.text
     assert "/operations/checklist" in execution_operator_ui.text
     assert "/validation/report" in execution_operator_ui.text

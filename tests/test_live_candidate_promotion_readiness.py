@@ -31,8 +31,13 @@ def test_readiness_marks_validation_block_without_live_authority_change() -> Non
     assert payload["authority"] == "compare_only_no_live_authority_change"
     assert payload["headline_state"] == "BLOCKED"
     assert payload["headline_reason"] == "validation_do_not_deploy"
+    assert payload["promotion_decision"] == "do_not_promote_validation_block"
+    assert payload["attention_flags"]["has_hard_validation_block"] is True
+    assert payload["attention_flags"]["headline_requires_operator_review"] is True
     assert payload["candidates"][0]["promotion_state"] == "GATE_BLOCKED"
     assert "Keep live blocked" in payload["candidates"][0]["next_action"]
+    assert payload["operator_review_items"][0]["attention"] == "validation_report_required"
+    assert payload["operator_review_items"][0]["symbol"] == "ADAUSDC"
 
 
 def test_readiness_keeps_secondary_blockers_visible() -> None:
@@ -213,6 +218,7 @@ def test_readiness_classifies_duplicate_thesis_as_cooldown_wait() -> None:
 def test_readiness_tracks_latest_evidence_timestamps() -> None:
     payload = LiveCandidatePromotionReadinessService().build(
         hours=24,
+        now="2026-05-10T02:10:00Z",
         audit_rows=[
             {
                 "symbol": "ADAUSDC",
@@ -243,3 +249,93 @@ def test_readiness_tracks_latest_evidence_timestamps() -> None:
     assert row["latest_audit_at"] == "2026-05-10T01:00:00Z"
     assert row["latest_intent_at"] == "2026-05-10T02:00:00Z"
     assert row["latest_evidence_at"] == "2026-05-10T02:00:00Z"
+    assert row["evidence_age_seconds"] == 600
+    assert row["evidence_freshness"] == "fresh"
+    assert payload["latest_evidence_age_seconds"] == 600
+    assert payload["latest_evidence_freshness"] == "fresh"
+    assert payload["evidence_freshness_counts"] == {"fresh": 1}
+
+
+def test_readiness_marks_stale_and_missing_evidence_freshness() -> None:
+    payload = LiveCandidatePromotionReadinessService().build(
+        hours=24,
+        now="2026-05-10T12:00:00Z",
+        audit_rows=[
+            {
+                "symbol": "ADAUSDC",
+                "strategy_family": "session_impulse_retest",
+                "phase": "auto_route",
+                "status": "recent_intent_cooldown_active",
+                "count": 1,
+                "latest_observed_ts": "2026-05-10T09:00:00Z",
+            },
+            {
+                "symbol": "DOGEUSDC",
+                "strategy_family": "session_impulse_retest",
+                "phase": "auto_route",
+                "status": "no_live_route_candidate_plan",
+                "count": 1,
+            },
+        ],
+        intent_rows=[],
+        submission_rows=[],
+    )
+
+    by_symbol = {row["symbol"]: row for row in payload["candidates"]}
+    assert by_symbol["ADAUSDC"]["evidence_age_seconds"] == 10800
+    assert by_symbol["ADAUSDC"]["evidence_freshness"] == "stale"
+    assert by_symbol["DOGEUSDC"]["evidence_age_seconds"] is None
+    assert by_symbol["DOGEUSDC"]["evidence_freshness"] == "no_evidence"
+
+
+def test_readiness_tracks_headline_evidence_separately_from_latest_evidence() -> None:
+    payload = LiveCandidatePromotionReadinessService().build(
+        hours=24,
+        now="2026-05-10T03:10:00Z",
+        audit_rows=[
+            {
+                "symbol": "SUIUSDC",
+                "strategy_family": "session_impulse_retest",
+                "phase": "auto_route",
+                "status": "symbol_not_live_enabled_for_auto_route",
+                "count": 1,
+                "latest_observed_ts": "2026-05-10T03:00:00Z",
+            }
+        ],
+        intent_rows=[
+            {
+                "symbol": "ADAUSDC",
+                "strategy_family": "session_impulse_retest",
+                "execution_mode": "MICRO_LIVE",
+                "approval_state": "BLOCKED",
+                "submit_decision": "SKIP_BLOCKED",
+                "decision_reason_code": "validation_do_not_deploy",
+                "count": 1,
+                "latest_created_at": "2026-05-10T02:00:00Z",
+            }
+        ],
+        submission_rows=[],
+    )
+
+    assert payload["headline_state"] == "BLOCKED"
+    assert payload["headline_reason"] == "validation_do_not_deploy"
+    assert payload["latest_evidence_at"] == "2026-05-10T03:00:00Z"
+    assert payload["headline_evidence_at"] == "2026-05-10T02:00:00Z"
+    assert payload["headline_evidence_age_seconds"] == 4200
+    assert payload["headline_evidence_freshness"] == "stale"
+    assert payload["headline_candidate_symbols"] == ["ADAUSDC"]
+    assert payload["attention_flags"]["has_stale_or_missing_evidence"] is True
+    assert payload["attention_flags"]["headline_has_stale_or_missing_evidence"] is True
+    assert payload["operator_review_items"] == [
+        {
+            "symbol": "ADAUSDC",
+            "strategy_family": "session_impulse_retest",
+            "promotion_state": "GATE_BLOCKED",
+            "primary_blocker": "validation_do_not_deploy",
+            "secondary_blockers": {},
+            "attention": "validation_report_required",
+            "latest_evidence_at": "2026-05-10T02:00:00Z",
+            "evidence_freshness": "stale",
+            "next_action": "Keep live blocked; run validation/report and fix the validation primary cause before probation.",
+        }
+    ]

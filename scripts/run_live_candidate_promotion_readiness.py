@@ -85,23 +85,49 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         f"- headline_state: {readiness.get('headline_state')}",
         f"- headline_reason: {readiness.get('headline_reason')}",
         f"- headline_action: {readiness.get('headline_action')}",
+        f"- promotion_decision: {readiness.get('promotion_decision')}",
         f"- latest_evidence_at: {readiness.get('latest_evidence_at') or 'n/a'}",
+        f"- latest_evidence_age_seconds: {readiness.get('latest_evidence_age_seconds')}",
+        f"- latest_evidence_freshness: {readiness.get('latest_evidence_freshness')}",
+        f"- headline_evidence_at: {readiness.get('headline_evidence_at') or 'n/a'}",
+        f"- headline_evidence_age_seconds: {readiness.get('headline_evidence_age_seconds')}",
+        f"- headline_evidence_freshness: {readiness.get('headline_evidence_freshness')}",
+        f"- headline_candidate_symbols: {readiness.get('headline_candidate_symbols')}",
         f"- candidate_count: {readiness.get('candidate_count')}",
         f"- state_counts: {readiness.get('state_counts')}",
+        f"- evidence_freshness_counts: {readiness.get('evidence_freshness_counts')}",
+        f"- attention_flags: {readiness.get('attention_flags')}",
         f"- top_blockers: {readiness.get('top_blockers')}",
         f"- top_intent_reasons: {readiness.get('top_intent_reasons')}",
         f"- top_audit_statuses: {readiness.get('top_audit_statuses')}",
         "",
-        "## Candidate Rows",
+        "## Operator Review Items",
         "",
     ]
+    for item in list(readiness.get("operator_review_items") or [])[:10]:
+        lines.append(
+            "- "
+            f"{item.get('symbol')}/{item.get('strategy_family')}: "
+            f"attention={item.get('attention')} state={item.get('promotion_state')} "
+            f"blocker={item.get('primary_blocker')} latest={item.get('latest_evidence_at') or 'n/a'} "
+            f"freshness={item.get('evidence_freshness')} action={item.get('next_action')}"
+        )
+    if not readiness.get("operator_review_items"):
+        lines.append("- none")
+    lines.extend(
+        [
+            "",
+            "## Candidate Rows",
+            "",
+        ]
+    )
     for row in list(readiness.get("candidates") or [])[:20]:
         lines.append(
             "- "
             f"{row.get('symbol')}/{row.get('strategy_family')}: "
             f"state={row.get('promotion_state')} severity={row.get('severity')} "
             f"blocker={row.get('primary_blocker')} secondary={row.get('secondary_blockers')} "
-            f"latest={row.get('latest_evidence_at') or 'n/a'} "
+            f"latest={row.get('latest_evidence_at') or 'n/a'} freshness={row.get('evidence_freshness')} "
             f"action={row.get('next_action')}"
         )
     if not readiness.get("candidates"):
@@ -120,12 +146,28 @@ def _compact_text(payload: dict[str, Any]) -> str:
         "live_candidate_promotion_readiness:",
         f"- symbol={payload.get('symbol') or 'ALL'}",
         f"- state={readiness.get('headline_state')} reason={readiness.get('headline_reason')}",
+        f"- promotion_decision={readiness.get('promotion_decision')}",
         f"- action={readiness.get('headline_action')}",
-        f"- latest_evidence_at={readiness.get('latest_evidence_at') or 'n/a'}",
+        f"- latest_evidence_at={readiness.get('latest_evidence_at') or 'n/a'} "
+        f"age_seconds={readiness.get('latest_evidence_age_seconds')} "
+        f"freshness={readiness.get('latest_evidence_freshness')}",
+        f"- headline_evidence_at={readiness.get('headline_evidence_at') or 'n/a'} "
+        f"age_seconds={readiness.get('headline_evidence_age_seconds')} "
+        f"freshness={readiness.get('headline_evidence_freshness')} "
+        f"symbols={readiness.get('headline_candidate_symbols')}",
         f"- candidate_count={readiness.get('candidate_count')} state_counts={readiness.get('state_counts')}",
+        f"- evidence_freshness_counts={readiness.get('evidence_freshness_counts')}",
+        f"- attention_flags={readiness.get('attention_flags')}",
         f"- top_blockers={readiness.get('top_blockers')}",
         f"- top_intent_reasons={readiness.get('top_intent_reasons')}",
     ]
+    for item in list(readiness.get("operator_review_items") or [])[:5]:
+        lines.append(
+            "- review "
+            f"{item.get('symbol')}/{item.get('strategy_family')} "
+            f"attention={item.get('attention')} state={item.get('promotion_state')} "
+            f"blocker={item.get('primary_blocker')} freshness={item.get('evidence_freshness')}"
+        )
     for row in list(readiness.get("candidates") or [])[:8]:
         secondary = dict(row.get("secondary_blockers") or {})
         secondary_text = f" secondary={secondary}" if secondary else ""
@@ -133,7 +175,8 @@ def _compact_text(payload: dict[str, Any]) -> str:
             "- "
             f"{row.get('symbol')}/{row.get('strategy_family')} "
             f"state={row.get('promotion_state')} blocker={row.get('primary_blocker')} "
-            f"latest={row.get('latest_evidence_at') or 'n/a'}{secondary_text}"
+            f"latest={row.get('latest_evidence_at') or 'n/a'} "
+            f"freshness={row.get('evidence_freshness')}{secondary_text}"
         )
     return "\n".join(lines)
 

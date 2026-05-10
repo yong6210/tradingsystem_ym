@@ -48,6 +48,12 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "현재 A/B mix" in html
     assert "Promotion Operating Stack" in html
     assert "승격 review, remediation, clearance, reopen, semi-auto execution, history, research followthrough를 한 번에 읽습니다." in html
+    assert "Live Candidate Review" in html
+    assert "Decision" in html
+    assert "Headline Freshness" in html
+    assert "Headline Evidence" in html
+    assert "Attention Flags" in html
+    assert "현재 우선 review 대상 live candidate가 없습니다." in html
     assert "남은 Guardrail Domain" in html
     assert "최근 Promotion Transition" in html
     assert "Promotion Case Inspector" in html
@@ -179,6 +185,10 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "auto_promotion_rollout_execution" in html
     assert "promotion_lifecycle_history" in html
     assert "research_promotion_operating_loop" in html
+    assert "live_candidate_promotion_readiness" in html
+    assert "promotion_decision" in html
+    assert "operator_review_items" in html
+    assert "attention_flags" in html
     assert "write_scope" in html
     assert "remaining_guardrail_domains" in html
     assert "recent_transitions" in html
@@ -225,4 +235,5 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "location_reference" in html
     assert "session_liquidity_reference" in html
     assert "file://" in html
+    assert "fast=true" in html
     assert "/execution/quality" in html

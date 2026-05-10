@@ -309,7 +309,7 @@ Live 후보 승격 상태 확인:
 ./scripts/run_live_candidate_promotion_readiness.py --symbol ADAUSDC --compact --no-write-report
 ```
 
-이 리포트는 기존 런타임 audit과 order intent blocker만 읽어 `GATE_BLOCKED`, `SHADOW_SIGNAL_ONLY`, `SUBMIT_READY_GAP`, `NO_FRESH_LIVE_CANDIDATE` 같은 compare-only 상태로 압축한다. `--symbol`을 주면 해당 심볼의 승격 상태만 분리해서 보고, 후보별 `latest_evidence_at`으로 차단 근거의 최신성을 확인한다. live allowlist, sizing, approval, 주문 제출 권한은 바꾸지 않는다.
+이 리포트는 기존 런타임 audit과 order intent blocker만 읽어 `GATE_BLOCKED`, `SHADOW_SIGNAL_ONLY`, `SUBMIT_READY_GAP`, `NO_FRESH_LIVE_CANDIDATE` 같은 compare-only 상태로 압축한다. `--symbol`을 주면 해당 심볼의 승격 상태만 분리해서 보고, 후보별 `latest_evidence_at`, `age_seconds`, `fresh`/`recent`/`stale`/`old` 라벨로 차단 근거의 최신성을 확인한다. 전역 `latest_evidence_at`과 headline을 만든 후보만의 `headline_evidence_at`은 분리해서 읽는다. `promotion_decision`, `attention_flags`, `operator_review_items`는 먼저 볼 blocker와 심볼을 지정하는 운영 힌트일 뿐이고, live allowlist, sizing, approval, 주문 제출 권한은 바꾸지 않는다.
 
 ### 4.2. 운영 요약
 ```bash
