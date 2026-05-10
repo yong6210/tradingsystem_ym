@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import get_settings
+from app.services.report_io import atomic_write_text
 
 TRACKED_PARAMETER_KEYS = [
     "strategy_version",
@@ -291,8 +292,7 @@ class ParameterChangelogService:
                 "- Triggered by validation/report workflows.",
                 "",
             ]
-            changelog_path.parent.mkdir(parents=True, exist_ok=True)
-            changelog_path.write_text("\n".join(header), encoding="utf-8")
+            atomic_write_text(changelog_path, "\n".join(header))
 
         lines: list[str] = []
         lines.append(f"## {now.isoformat()} | version={version} | trigger={trigger}")
@@ -306,8 +306,10 @@ class ParameterChangelogService:
                 lines.append(f"- `{key}`: {old_str} -> {new_str}")
         lines.append("")
 
-        with changelog_path.open("a", encoding="utf-8") as fp:
-            fp.write("\n".join(lines))
+        existing = changelog_path.read_text(encoding="utf-8") if changelog_path.exists() else ""
+        separator = "" if not existing or existing.endswith("\n") else "\n"
+        entry = "\n".join(lines)
+        atomic_write_text(changelog_path, f"{existing}{separator}{entry}")
 
     def generate(self, *, version: str, trigger: str = "validation_report") -> dict[str, Any]:
         changelog_path = Path(self.settings.parameter_changelog_path)
@@ -340,11 +342,9 @@ class ParameterChangelogService:
             snapshot_file = snapshot_dir / f"params_{now.strftime('%Y%m%dT%H%M%SZ')}_{suffix}.json"
         old_payload = self._load_latest(snapshot_dir)
         if old_payload is None:
-            snapshot_file.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
-            self._latest_snapshot_file(snapshot_dir).write_text(
-                json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
+            serialized = json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
+            atomic_write_text(snapshot_file, serialized)
+            atomic_write_text(self._latest_snapshot_file(snapshot_dir), serialized)
             self._append_entry(
                 changelog_path=changelog_path,
                 now=now,
@@ -365,9 +365,9 @@ class ParameterChangelogService:
         old_params = dict(old_payload.get("parameters", {}))
         changes = self._diff(old_params, params)
         if not changes:
-            self._latest_snapshot_file(snapshot_dir).write_text(
+            atomic_write_text(
+                self._latest_snapshot_file(snapshot_dir),
                 json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True),
-                encoding="utf-8",
             )
             return ChangelogResult(
                 updated=False,
@@ -378,11 +378,9 @@ class ParameterChangelogService:
                 changes={},
             ).to_dict()
 
-        snapshot_file.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
-        self._latest_snapshot_file(snapshot_dir).write_text(
-            json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        serialized = json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
+        atomic_write_text(snapshot_file, serialized)
+        atomic_write_text(self._latest_snapshot_file(snapshot_dir), serialized)
         self._append_entry(
             changelog_path=changelog_path,
             now=now,

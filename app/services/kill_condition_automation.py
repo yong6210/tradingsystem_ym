@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from math import isfinite
 from typing import Any
 
 
@@ -7,6 +8,21 @@ class KillConditionAutomationService:
     @staticmethod
     def _dict(payload: dict[str, Any] | None) -> dict[str, Any]:
         return dict(payload or {})
+
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value) if isfinite(float(value)) else bool(default)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
 
     @staticmethod
     def _dedupe(values: list[str]) -> list[str]:
@@ -54,7 +70,7 @@ class KillConditionAutomationService:
         highest_severity = str(recent_reconciliation_summary.get("highest_severity") or "INFO").upper()
         critical_count = int(recent_reconciliation_summary.get("critical_count", 0) or 0)
         lock_required_count = int(recent_reconciliation_summary.get("lock_required_count", 0) or 0)
-        degraded = bool(recent_reconciliation_summary.get("degraded", False))
+        degraded = KillConditionAutomationService._safe_bool(recent_reconciliation_summary.get("degraded", False))
         if highest_severity == "CRITICAL" or critical_count > 0 or lock_required_count > 0:
             return "critical"
         if degraded or highest_severity in {"WARNING", "WARN", "ERROR"}:
@@ -78,11 +94,11 @@ class KillConditionAutomationService:
 
     @staticmethod
     def _manual_override_reason(safety_state: dict[str, Any]) -> str:
-        if bool(safety_state.get("kill_switch_active", False)):
+        if KillConditionAutomationService._safe_bool(safety_state.get("kill_switch_active", False)):
             return "kill_switch_active"
-        if bool(safety_state.get("close_only_active", False)):
+        if KillConditionAutomationService._safe_bool(safety_state.get("close_only_active", False)):
             return "close_only_active"
-        if bool(safety_state.get("config_close_only_active", False)):
+        if KillConditionAutomationService._safe_bool(safety_state.get("config_close_only_active", False)):
             return "config_close_only_active"
         active_locks = list(safety_state.get("active_locks") or [])
         if active_locks:
@@ -359,9 +375,9 @@ class KillConditionAutomationService:
             "reconciliation_state": reconciliation_state,
             "execution_degradation_state": execution_degradation_state,
             "family_execution_degradation_state": family_execution_state,
-            "kill_switch_active": bool(safety_state_payload.get("kill_switch_active", False)),
-            "close_only_active": bool(safety_state_payload.get("close_only_active", False)),
-            "config_close_only_active": bool(safety_state_payload.get("config_close_only_active", False)),
+            "kill_switch_active": cls._safe_bool(safety_state_payload.get("kill_switch_active", False)),
+            "close_only_active": cls._safe_bool(safety_state_payload.get("close_only_active", False)),
+            "config_close_only_active": cls._safe_bool(safety_state_payload.get("config_close_only_active", False)),
             "active_lock_count": len(list(safety_state_payload.get("active_locks") or [])),
             "matching_lock_count": len(list(safety_state_payload.get("matching_locks") or [])),
             "available_source_count": available_source_count,

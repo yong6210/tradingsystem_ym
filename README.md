@@ -58,9 +58,22 @@ Primary runtime scripts:
 
 - stack status:
   - [/Users/yumin/Documents/trading/scripts/check_runtime_stack.sh](/Users/yumin/Documents/trading/scripts/check_runtime_stack.sh)
+  - uses `~/Library/Application Support/trading/runtime_venv` + `~/Library/Application Support/trading/runtime_src` automatically when that durable runtime exists, so diagnostics still work when the workspace `.venv` or source tree is slow to read
 - stack restart:
   - [/Users/yumin/Documents/trading/scripts/restart_runtime_stack.sh](/Users/yumin/Documents/trading/scripts/restart_runtime_stack.sh)
   - clears stale worker heartbeats and exits non-zero unless `/health/ready` reaches `ready`
+- durable stack restart:
+  - [/Users/yumin/Documents/trading/scripts/restart_runtime_stack_tmp.sh](/Users/yumin/Documents/trading/scripts/restart_runtime_stack_tmp.sh)
+  - starts API, loop worker, and WS worker from `~/Library/Application Support/trading`, using the durable DB, reports, archives, logs, and heartbeats there
+- durable stack bootstrap:
+  - [/Users/yumin/Documents/trading/scripts/bootstrap_durable_runtime.sh](/Users/yumin/Documents/trading/scripts/bootstrap_durable_runtime.sh)
+  - creates the durable venv/source/data/report layout without installing the package editable into the workspace
+- durable stack watchdog:
+  - [/Users/yumin/Documents/trading/scripts/watch_runtime_stack_tmp.sh](/Users/yumin/Documents/trading/scripts/watch_runtime_stack_tmp.sh)
+  - intended for LaunchAgent `com.yumin.trading.runtime-stack`; it restarts the durable stack only after repeated `/health/ready` failures
+- LaunchAgent install:
+  - [/Users/yumin/Documents/trading/scripts/install_runtime_stack_launchd.sh](/Users/yumin/Documents/trading/scripts/install_runtime_stack_launchd.sh)
+  - installs `com.yumin.trading.runtime-stack` and moves legacy noisy LaunchAgents into `~/Library/LaunchAgents.disabled/...`
 - runtime scripts default to `PYDANTIC_DISABLE_PLUGINS=1` and `PYTHONDONTWRITEBYTECODE=1` to avoid slow startup scans and dirty tracked pycache files.
 - recent family runtime audits:
   - [/Users/yumin/Documents/trading/scripts/run_session_impulse_retest_runtime_audit_report.py](/Users/yumin/Documents/trading/scripts/run_session_impulse_retest_runtime_audit_report.py)
@@ -1198,7 +1211,7 @@ Replay validation bridge audit:
 ```
 
 This is audit-only and does not change live approval. It checks whether the current replay cache clears conservative bridge floors before any manual review of replay-backed MICRO_LIVE sampling. The bridge now requires both headline expectancy and a non-negative `ev_r_lower_95`, and it adds material slice diagnostics for `direction`, `strategy_family`, and `entry_model`. `ELIGIBLE_FOR_MANUAL_BRIDGE_REVIEW_WITH_SLICE_WARNINGS` is not a clean approval; it means the aggregate passed but at least one material slice needs manual review first. The default action remains to keep the validation gate closed unless an operator explicitly reviews the bridge output.
-The bridge writes `latest.md` and `latest.json` beside timestamped reports for stable operator reads.
+The bridge writes `latest.md` and `latest.json` beside timestamped reports for stable operator reads. Operational timestamp reports and latest/state aliases are written with atomic replace where these guards are on the live operating path, so interrupted runs should not leave partial reports as operator evidence.
 
 Session impulse retest runtime audit:
 
@@ -1206,7 +1219,7 @@ Session impulse retest runtime audit:
 ./.venv/bin/python scripts/run_session_impulse_retest_runtime_audit_report.py --hours 3 --no-fail-exit
 ```
 
-This summarizes DB-backed `session_impulse_retest` refresh/auto-route audit rows, including signal generation, no fresh candidate, policy-disabled route, WS-route suppression, intent creation failure, submit error, and submitted states. It writes `latest.md` and `latest.json` beside timestamped reports so no-order investigations can start from a stable path.
+This summarizes DB-backed `session_impulse_retest` refresh/auto-route audit rows, including signal generation, no fresh candidate, policy-disabled route, WS-route suppression, intent creation failure, submit error, and submitted states. It writes timestamped reports plus `latest.md` and `latest.json` atomically so no-order investigations can start from a stable path.
 
 Scheduled guard heartbeat:
 
@@ -1214,7 +1227,15 @@ Scheduled guard heartbeat:
 ./.venv/bin/python scripts/run_micro_live_ops_heartbeat.py --no-fail-exit
 ```
 
-This checks whether runtime guard, no-order watchdog, reconciliation watchdog, synthetic canary, boot check, replay validation bridge, session impulse retest runtime audit, Binance rule drift, and macro blackout reports are still being produced on time. It also reads the latest report content where possible, so a fresh `ALERT`, `WATCH`, `DRIFT`, or `FAIL` report is surfaced instead of being hidden behind a freshness-only `PASS`. Report jobs look for report files directly, not state files, and a checked report with no readable status is treated as a failure. Macro blackout contracts are checked for future event horizon directly from their `windows`, not just for file presence; heartbeat uses the configured `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH` before falling back to glob discovery, so it audits the same contract live approval uses. Stale blackout contract mtime is a `WATCH` when the horizon is still sufficient, while short/expired horizon remains a hard failure. Notifications separate `FAIL` items from `WATCH` items so urgent fixes are not mixed with review-only warnings, and repeated identical issue sets are cooldown-suppressed by default. Cooldown state is written only after confirmed delivery, so failed alert attempts do not suppress the next run. The script also writes `latest.md` and `latest.json` aliases beside timestamped reports for stable operator/dashboard reads, using atomic replace to avoid partial latest/state files.
+This checks whether runtime guard, no-order watchdog, reconciliation watchdog, synthetic canary, boot check, replay validation bridge, session impulse retest runtime audit, failure-contract drill, Binance rule drift, and macro blackout reports are still being produced on time. It also reads the latest report content where possible, so a fresh `ALERT`, `WATCH`, `DRIFT`, or `FAIL` report is surfaced instead of being hidden behind a freshness-only `PASS`. Report jobs look for report files directly, not state files, and a checked report with no readable status is treated as a failure. Macro blackout contracts are checked for future event horizon directly from their `windows`, not just for file presence; heartbeat uses the configured `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH` before falling back to glob discovery, so it audits the same contract live approval uses. Stale blackout contract mtime is a `WATCH` when the horizon is still sufficient, while short/expired horizon remains a hard failure. Notifications separate `FAIL` items from `WATCH` items so urgent fixes are not mixed with review-only warnings, and repeated identical issue sets are cooldown-suppressed by default. Cooldown state is written only after confirmed delivery, so failed alert attempts do not suppress the next run. The script also writes `latest.md` and `latest.json` aliases beside timestamped reports for stable operator/dashboard reads, using atomic replace to avoid partial latest/state files.
+
+MICRO_LIVE failure contract drill:
+
+```bash
+./.venv/bin/python scripts/run_micro_live_failure_drill.py --no-fail-exit
+```
+
+This non-live drill verifies that missing/stale/malformed reports, short macro blackout horizon, failed alert delivery, stale submitted orders without Binance ledger, submit-ready intents without submission, and runtime audit hard failures do not get hidden as `PASS`. It does not submit live orders or mutate live control switches. It writes timestamped reports plus `latest.md` and `latest.json` atomically under `reports/operations/micro_live_failure_drill`.
 
 Generate optional macOS launchd plists for the operating guards:
 
@@ -1222,7 +1243,7 @@ Generate optional macOS launchd plists for the operating guards:
 ./.venv/bin/python scripts/install_micro_live_ops_launchd.py
 ```
 
-By default this only writes plists under `reports/operations/launchd`. Use `--install --load` only when you want macOS to actually run runtime guard, no-order watchdog, reconciliation watchdog, synthetic canary, boot check, ops heartbeat, replay validation bridge, session impulse retest runtime audit, rule drift, and macro calendar refresh on schedule.
+By default this only writes plists under `reports/operations/launchd`. Use `--install --load` only when you want macOS to actually run runtime guard, no-order watchdog, reconciliation watchdog, synthetic canary, boot check, ops heartbeat, replay validation bridge, session impulse retest runtime audit, failure-contract drill, rule drift, and macro calendar refresh on schedule. Generated and installed plist files are replaced atomically, and `launchctl bootstrap` failure exits non-zero instead of looking successful. Boot check also runs the failure-contract drill before a MICRO_LIVE/LIVE worker starts. The macro refresh job writes to `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH` when configured, including values supplied through `--env-file`, so the scheduled refresh updates the same blackout contract that live approval and heartbeat read.
 
 Split review followup packet:
 
@@ -1282,12 +1303,13 @@ open "http://127.0.0.1:8000/execution/operator-ui?symbol=BTCUSDC&universe=usdc_p
 - Runtime settings load `.env` from the repository root, and relative SQLite URLs plus runtime safety/validation contract paths are anchored to the repository root to keep API, worker, and review processes on the same inputs.
 - `app.services.execution` exports are lazy-loaded so direct service imports do not depend on import order during API, worker, script, or test startup.
 - Repository read helpers keep one active implementation per method; `PlanRepository.list_recent(..., limit=...)` is part of the runtime/report contract and includes still-open plans whose `valid_until` remains in the requested window.
-- Runtime contract JSON files accept either wrapped payloads like `{"blocked_buckets": [...]}` / `{"blocked_plan_ids": [...]}` or raw list payloads, and both live approval and walk-forward review use the same parser behavior.
+- Runtime contract JSON files accept either wrapped payloads like `{"blocked_buckets": [...]}` / `{"blocked_plan_ids": [...]}` or raw list payloads, and both live approval and walk-forward review use the same parser behavior. The macro blackout, strategy-time contract, and plan blocklist builders write these contracts atomically and include `output_path` in the saved payload.
 - If a Binance live submit raises before exchange acknowledgement, the submission is recorded as `adapter=binance`, `state=SUBMITTED`, `submit_status=LIVE_SUBMIT_ERROR`, and `requires_reconciliation=true`. This intentionally blocks same-plan reentry and counts as live exposure until reconciliation proves the exchange did not accept the order.
 - `/health/ready` checks `db`, `binance_rest`, `event_backend`, live worker heartbeats/PIDs, WS no-message timeout, and 1m/5m market-data freshness.
 - Runtime scripts disable Pydantic plugin loading and bytecode writes by default for stable startup and cleaner git state.
 - `POST /internal/binance/order` is a test order by default. Live submit or cancel opens only when `BINANCE_TRADE_LIVE_ENABLED=true` and the request payload sets `live=true`.
 - `AUTO_TRADING_LIVE_LIQUIDITY_GATE_ENABLED=true` adds a final pre-submit live gate using Binance public order-book depth plus recent 1m turnover. It blocks or marks split-required when visible depth, spread, simulated slippage, or volume participation is outside configured limits. If `AUTO_TRADING_LIVE_LIQUIDITY_GATE_PARTIAL_SUBMIT_ENABLED=true`, split-required orders can be reduced to a safe first tranche and the remaining notional is recorded for a later same-thesis live signal, bounded by `AUTO_TRADING_LIVE_LIQUIDITY_GATE_MAX_TRANCHES`.
+- `AUTO_TRADING_REPLAY_VALIDATION_BRIDGE_ENABLED=true` lets `session_impulse_retest` use the latest 3-year USDT proxy backtest plus yearly portfolio replay as validation evidence when the live DB sample is still below the confidence floor. It does not bypass runtime GO, session rollout, safety locks, liquidity, or existing sufficient live-sample failures.
 - `POST /internal/binance/user-stream/process` requires the optional `websockets` dependency.
 - Binance sync and backfill skip overlap history so older overlapping candles do not trigger reverse-timestamp failures.
 - `/indicators/*`, Pine mirror output, and TradingView chart alerts are context surfaces. They do not replace execution approval or live runtime truth.

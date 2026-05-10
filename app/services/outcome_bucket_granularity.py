@@ -3,6 +3,20 @@ from __future__ import annotations
 from typing import Any
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
+
+
 _CONDITION_AXES = (
     "volatility_condition",
     "cost_condition",
@@ -109,7 +123,7 @@ class OutcomeBucketGranularityService:
 
         return {
             "axis": axis,
-            "available": bool(normalized_rows),
+            "available": _safe_bool(normalized_rows),
             "usable_bucket_count": len(usable_rows),
             "mature_bucket_count": len(mature_rows),
             "divergence": divergence,
@@ -208,7 +222,7 @@ class OutcomeBucketGranularityService:
         )
 
         return {
-            "available": bool(payload.get("available", False)),
+            "available": _safe_bool(payload.get("available", False)),
             "advisory_only": True,
             "report_window_days": int(payload.get("report_window_days", 0) or 0),
             "family_focus": family_focus,

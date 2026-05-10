@@ -102,6 +102,19 @@ class ExecutionOperatorDashboardService:
         return str(getattr(mode, "value", mode))
 
     @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
+    @staticmethod
     def _split_review_followup_command(*, action: str, symbol: str, universe: str, days: int) -> str:
         if action not in {"run_entry_timing_split_review", "run_execution_style_split_review"} or not symbol:
             return ""
@@ -486,7 +499,7 @@ class ExecutionOperatorDashboardService:
         *,
         runtime_candidates: int,
     ) -> dict[str, Any]:
-        alpha_rows = [row for row in blocked_rows if bool(row.get("alpha_research_candidate"))]
+        alpha_rows = [row for row in blocked_rows if ExecutionOperatorDashboardService._safe_bool(row.get("alpha_research_candidate"))]
         if not alpha_rows:
             return {
                 "candidates": 0,
@@ -528,7 +541,7 @@ class ExecutionOperatorDashboardService:
                 "alpha_research_candidate_count": int(summary.get("alpha_research_candidate_count", 0)),
             }
         return {
-            "available": bool(alignment.get("available", False)),
+            "available": ExecutionOperatorDashboardService._safe_bool(alignment.get("available", False)),
             "analysis_symbol": alignment.get("analysis_symbol") or payload.get("analysis_symbol"),
             "aligned_candidate_count": int(alignment.get("aligned_candidate_count", 0)),
             "top_focus": alignment.get("top_focus"),
@@ -576,11 +589,15 @@ class ExecutionOperatorDashboardService:
             "confidence": summary.get("confidence"),
             "sample_note": summary.get("sample_note"),
             "aligned_candidates": int(summary.get("aligned_candidates", 0) or 0),
-            "deferred_by_experiment_sequence": bool(summary.get("deferred_by_experiment_sequence", False)),
+            "deferred_by_experiment_sequence": ExecutionOperatorDashboardService._safe_bool(
+                summary.get("deferred_by_experiment_sequence", False)
+            ),
             "experiment_sequence_state": summary.get("experiment_sequence_state"),
             "current_priority_experiment": summary.get("current_priority_experiment"),
             "current_priority_action": summary.get("current_priority_action"),
-            "exit_optimization_allowed": bool(summary.get("exit_optimization_allowed", False)),
+            "exit_optimization_allowed": ExecutionOperatorDashboardService._safe_bool(
+                summary.get("exit_optimization_allowed", False)
+            ),
             "sequencing_reason": summary.get("sequencing_reason"),
             "recommended_actions": actions[:3],
         }
@@ -632,11 +649,15 @@ class ExecutionOperatorDashboardService:
             "bucket": top.get("bucket"),
             "confidence": top.get("confidence"),
             "sample_note": top.get("sample_note"),
-            "deferred_by_experiment_sequence": bool(top.get("deferred_by_experiment_sequence", False)),
+            "deferred_by_experiment_sequence": ExecutionOperatorDashboardService._safe_bool(
+                top.get("deferred_by_experiment_sequence", False)
+            ),
             "experiment_sequence_state": top.get("experiment_sequence_state"),
             "current_priority_experiment": top.get("current_priority_experiment"),
             "current_priority_action": top.get("current_priority_action"),
-            "exit_optimization_allowed": bool(top.get("exit_optimization_allowed", False)),
+            "exit_optimization_allowed": ExecutionOperatorDashboardService._safe_bool(
+                top.get("exit_optimization_allowed", False)
+            ),
             "sequencing_reason": top.get("sequencing_reason"),
             "observe_metrics": list(top.get("observe_metrics") or []),
             "success_criteria": list(top.get("success_criteria") or []),
@@ -667,9 +688,9 @@ class ExecutionOperatorDashboardService:
                 "top_session_bottleneck": None,
                 "suspect_count": 0,
                 "top_suspect": None,
-            }
+        }
         return {
-            "available": bool(evidence.get("available", False)),
+            "available": ExecutionOperatorDashboardService._safe_bool(evidence.get("available", False)),
             "analysis_symbol": evidence.get("analysis_symbol") or payload.get("analysis_symbol"),
             "top_reason": reason_summary.get("top_reason"),
             "aligned_candidate_count": int(focus_summary.get("aligned_candidate_count", 0) or 0),
@@ -692,9 +713,9 @@ class ExecutionOperatorDashboardService:
                 "available": False,
                 "top_candidate": None,
                 "review_items": [],
-            }
+        }
         return {
-            "available": bool(review.get("available", False)),
+            "available": ExecutionOperatorDashboardService._safe_bool(review.get("available", False)),
             "top_candidate": dict(review.get("top_candidate") or {}),
             "review_items": list(review.get("review_items") or [])[:3],
         }
@@ -713,7 +734,7 @@ class ExecutionOperatorDashboardService:
             }
         items = list(watchlist.get("watch_items") or [])
         return {
-            "available": bool(watchlist.get("available", False)),
+            "available": ExecutionOperatorDashboardService._safe_bool(watchlist.get("available", False)),
             "watchlist_count": int(watchlist.get("watchlist_count", 0) or 0),
             "top_watch": dict((items[:1] or [{}])[0]),
             "watch_items": items[:3],
@@ -762,7 +783,7 @@ class ExecutionOperatorDashboardService:
             "execution_mode": row.execution_mode,
             "client_order_id": row.client_order_id,
             "exchange_order_id": row.exchange_order_id,
-            "requested_live": bool(row.requested_live),
+            "requested_live": ExecutionOperatorDashboardService._safe_bool(row.requested_live),
             "submitted_at": row.submitted_at,
             "acknowledged_at": row.acknowledged_at,
             "cancelled_at": row.cancelled_at,
@@ -794,8 +815,8 @@ class ExecutionOperatorDashboardService:
             "mismatch_type": row.mismatch_type,
             "severity": normalized,
             "message": row.message,
-            "lock_required": bool(row.lock_required),
-            "lock_applied": bool(row.lock_applied),
+            "lock_required": ExecutionOperatorDashboardService._safe_bool(row.lock_required),
+            "lock_applied": ExecutionOperatorDashboardService._safe_bool(row.lock_applied),
             "lock_scope": row.lock_scope,
             "created_at": row.created_at,
         }
@@ -868,7 +889,9 @@ class ExecutionOperatorDashboardService:
         highest = max(active_events, key=lambda item: _SEVERITY_ORDER.get(str(item.get("severity") or "INFO"), 0))
         highest_severity = str(highest.get("severity") or "INFO")
         critical_count = sum(1 for item in active_events if str(item.get("severity") or "") == "CRITICAL")
-        lock_required_count = sum(1 for item in active_events if bool(item.get("lock_required")))
+        lock_required_count = sum(
+            1 for item in active_events if ExecutionOperatorDashboardService._safe_bool(item.get("lock_required"))
+        )
         degraded = _SEVERITY_ORDER.get(highest_severity, 0) >= _SEVERITY_ORDER["WARNING"]
         stale_highest = max(
             stale_events,
@@ -1042,7 +1065,7 @@ class ExecutionOperatorDashboardService:
         money_funnel = dict(payload.get("money_funnel") or {})
         operating_kpis = build_outcome_funnel_operating_kpis(payload)
         return {
-            "available": bool(payload.get("available", False)),
+            "available": ExecutionOperatorDashboardService._safe_bool(payload.get("available", False)),
             "reason": payload.get("reason", "not_available"),
             "report_window_days": int(payload.get("report_window_days", 0) or 0),
             "filters": dict(payload.get("filters") or {}) or None,
@@ -1241,9 +1264,9 @@ class ExecutionOperatorDashboardService:
             return None
         reasons = list(payload.get("reasons") or [])
         return {
-            "available": bool(payload.get("available", False)),
+            "available": ExecutionOperatorDashboardService._safe_bool(payload.get("available", False)),
             "status": payload.get("status", "healthy"),
-            "healthy": bool(payload.get("healthy", True)),
+            "healthy": ExecutionOperatorDashboardService._safe_bool(payload.get("healthy", True), default=True),
             "summary": payload.get("summary", ""),
             "recommended_action": payload.get("recommended_action", "continue_runtime_monitoring"),
             "reason_codes": list(payload.get("reason_codes") or []),
@@ -1256,7 +1279,7 @@ class ExecutionOperatorDashboardService:
         if not payload:
             return None
         return {
-            "available": bool(payload.get("available", False)),
+            "available": ExecutionOperatorDashboardService._safe_bool(payload.get("available", False)),
             "coverage_note": payload.get("coverage_note"),
             "family_top": dict((list(payload.get("family") or [])[:1] or [{}])[0]),
             "regime_top": dict((list(payload.get("regime") or [])[:1] or [{}])[0]),
@@ -1269,7 +1292,7 @@ class ExecutionOperatorDashboardService:
             return None
         families = list(payload.get("families") or [])
         return {
-            "available": bool(payload.get("available", False)),
+            "available": ExecutionOperatorDashboardService._safe_bool(payload.get("available", False)),
             "coverage_note": payload.get("coverage_note"),
             "family_count": len(families),
             "top_family": dict((families[:1] or [{}])[0]),
@@ -1293,7 +1316,7 @@ class ExecutionOperatorDashboardService:
             days=days,
         )
         return {
-            "available": bool(priority.get("available", False)),
+            "available": ExecutionOperatorDashboardService._safe_bool(priority.get("available", False)),
             "top_action": priority.get("top_action", "continue_runtime_monitoring"),
             "top_reason": priority.get("top_reason", ""),
             "top_action_followup_command": priority.get("top_action_followup_command", ""),
@@ -1309,7 +1332,10 @@ class ExecutionOperatorDashboardService:
             "deferred_experiment_actions": [
                 dict(item) for item in list(priority.get("deferred_experiment_actions") or [])[:3]
             ],
-            "advisory_only": bool(priority.get("advisory_only", True)),
+            "advisory_only": ExecutionOperatorDashboardService._safe_bool(
+                priority.get("advisory_only", True),
+                default=True,
+            ),
         }
 
     @staticmethod
@@ -1332,7 +1358,12 @@ class ExecutionOperatorDashboardService:
         deployment_message = str(portfolio.get("deployment_message") or "")
         blocking_reason_code = str(safety.get("blocking_reason_code") or "")
         blocking_reason_message = str(safety.get("blocking_reason_message") or "")
-        entries_allowed = safety.get("new_entry_allowed")
+        raw_entries_allowed = safety.get("new_entry_allowed")
+        entries_allowed = (
+            ExecutionOperatorDashboardService._safe_bool(raw_entries_allowed)
+            if raw_entries_allowed is not None
+            else None
+        )
 
         primary_reason = (
             blocking_reason_message
@@ -1695,9 +1726,9 @@ class ExecutionOperatorDashboardService:
             "symbol": symbol.upper() if symbol else None,
             "report_window_days": max(int(days), 1),
             "execution_mode": self._execution_mode_value(),
-            "auto_trading_enabled": bool(self.settings.auto_trading_enabled),
+            "auto_trading_enabled": self._safe_bool(self.settings.auto_trading_enabled),
             "source_of_truth_hint": "execution_runtime_aggregate",
-            "new_entries_allowed": bool(safety_state.get("new_entry_allowed", False)),
+            "new_entries_allowed": self._safe_bool(safety_state.get("new_entry_allowed", False)),
             "blocking_reason_code": str(safety_state.get("blocking_reason_code", "")),
             "blocking_reason_message": str(safety_state.get("blocking_reason_message", "")),
             "deployment_go_no_go": portfolio_summary.get("deployment_go_no_go", ""),
@@ -1708,9 +1739,9 @@ class ExecutionOperatorDashboardService:
             "playbook_action": portfolio_summary.get("playbook_action", ""),
             "playbook_message": portfolio_summary.get("playbook_message", ""),
             "approval_strip_summary": approval_strip_summary,
-            "kill_switch_active": bool(safety_state.get("kill_switch_active", False)),
-            "close_only_active": bool(safety_state.get("close_only_active", False)),
-            "config_close_only_active": bool(safety_state.get("config_close_only_active", False)),
+            "kill_switch_active": self._safe_bool(safety_state.get("kill_switch_active", False)),
+            "close_only_active": self._safe_bool(safety_state.get("close_only_active", False)),
+            "config_close_only_active": self._safe_bool(safety_state.get("config_close_only_active", False)),
             "active_locks": list(safety_state.get("active_locks") or []),
             "matching_locks": list(safety_state.get("matching_locks") or []),
             "rollout_policies": list(safety_state.get("rollout_policies") or []),

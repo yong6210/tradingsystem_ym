@@ -7,6 +7,7 @@ from typing import Any
 from app.core.config import Settings, get_settings
 from app.db.models import ValidationPboDsrSnapshot
 from app.db.repositories import ValidationArtifactRepository
+from app.services.report_io import atomic_write_text
 
 
 class StrategyV2PboDsrArtifactStoreService:
@@ -214,7 +215,7 @@ class StrategyV2PboDsrArtifactStoreService:
                 "",
             ]
         )
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(self, *, symbol: str, version: str, write_report: bool = True) -> dict[str, Any]:

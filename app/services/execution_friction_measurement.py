@@ -23,6 +23,21 @@ class ExecutionFrictionMeasurementService:
             return int(default)
 
     @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
+    @staticmethod
     def _dedupe(values: list[str]) -> list[str]:
         out: list[str] = []
         for value in values:
@@ -104,7 +119,7 @@ class ExecutionFrictionMeasurementService:
         highest_severity = str(summary.get("highest_severity") or "INFO").upper()
         critical_count = cls._int(summary.get("critical_count", 0))
         lock_required_count = cls._int(summary.get("lock_required_count", 0))
-        degraded = bool(summary.get("degraded", False))
+        degraded = cls._safe_bool(summary.get("degraded", False))
         if highest_severity == "CRITICAL" or critical_count > 0 or lock_required_count > 0:
             return "degraded_reconciliation"
         if degraded or highest_severity == "WARNING":
@@ -114,7 +129,7 @@ class ExecutionFrictionMeasurementService:
     @classmethod
     def _stress_drag_state(cls, *, strategy_v2_stress_validation: dict[str, Any]) -> str:
         payload = dict(strategy_v2_stress_validation or {})
-        if not payload or not bool(payload.get("available", False)):
+        if not payload or not cls._safe_bool(payload.get("available", False)):
             return "unknown_stress_drag"
 
         recommendation = dict(payload.get("deployment_recommendation") or {})
@@ -126,9 +141,9 @@ class ExecutionFrictionMeasurementService:
                 str(recommendation.get("worst_scenario") or ""),
             ]
         ).lower()
-        stress_pass = bool(recommendation.get("stress_pass", False))
-        replay_gate_applied = bool(recommendation.get("replay_gate_applied", False))
-        divergence_gate_applied = bool(recommendation.get("divergence_gate_applied", False))
+        stress_pass = cls._safe_bool(recommendation.get("stress_pass", False))
+        replay_gate_applied = cls._safe_bool(recommendation.get("replay_gate_applied", False))
+        divergence_gate_applied = cls._safe_bool(recommendation.get("divergence_gate_applied", False))
 
         if (not stress_pass) or any(
             token in reason_text for token in ("reduce", "research_only", "hold", "manual", "defer")
@@ -434,7 +449,7 @@ class ExecutionFrictionMeasurementService:
             "source_summary": {
                 "execution_quality_report_path": execution_quality_payload.get("report_path"),
                 "stress_validation_report_path": stress_payload.get("report_path"),
-                "stress_available": bool(stress_payload.get("available", False)),
+                "stress_available": cls._safe_bool(stress_payload.get("available", False)),
                 "fill_sources": fill_sources,
                 "reconciliation_highest_severity": str(reconciliation_payload.get("highest_severity") or "INFO"),
                 "approval_slippage_cap_bps": approval_slippage_cap_bps,

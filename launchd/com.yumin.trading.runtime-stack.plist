@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.yumin.trading.runtime-stack</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/yumin/Library/Application Support/trading/runtime_src/scripts/watch_runtime_stack_tmp.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/yumin/Library/Application Support/trading/runtime_src</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYDANTIC_DISABLE_PLUGINS</key>
+    <string>1</string>
+    <key>PYTHONDONTWRITEBYTECODE</key>
+    <string>1</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/yumin/Library/Application Support/trading/logs/runtime_stack_watchdog.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/yumin/Library/Application Support/trading/logs/runtime_stack_watchdog.err.log</string>
+</dict>
+</plist>

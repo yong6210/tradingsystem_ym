@@ -15,10 +15,25 @@ if str(ROOT_DIR) not in sys.path:
 from app.core.config import get_settings
 from scripts import run_binance_rule_drift_snapshot
 from scripts import run_live_reconciliation_watchdog
+from scripts import run_micro_live_failure_drill
 from scripts import run_micro_live_runtime_guard
 from scripts import run_micro_live_synthetic_canary
-from scripts.operation_report_io import atomic_write_text, display_path, write_latest_aliases
+from scripts.operation_report_io import atomic_write_text, display_path, parse_report_generated_at, write_latest_aliases
 from scripts.run_micro_live_preflight import _csv_set
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
 
 
 def parse_args() -> argparse.Namespace:
@@ -119,8 +134,8 @@ def build_payload(
     components.append(
         _component(
             "reconciliation_watchdog",
-            "FAIL" if bool(reconciliation_eval.get("alert")) else "PASS",
-            blocking=bool(reconciliation_eval.get("alert")),
+            "FAIL" if _safe_bool(reconciliation_eval.get("alert")) else "PASS",
+            blocking=_safe_bool(reconciliation_eval.get("alert")),
             summary=str(reconciliation_eval.get("message") or ""),
             payload=reconciliation,
         )
@@ -144,6 +159,20 @@ def build_payload(
         )
     )
 
+    failure_drill = run_micro_live_failure_drill.build_payload()
+    components.append(
+        _component(
+            "failure_contract_drill",
+            str(failure_drill.get("overall_status") or "FAIL"),
+            blocking=str(failure_drill.get("overall_status") or "").upper() != "PASS",
+            summary=(
+                f"scenarios={failure_drill.get('scenario_count')} "
+                f"failed={failure_drill.get('failed_count')}"
+            ),
+            payload=failure_drill,
+        )
+    )
+
     if check_binance_rules:
         try:
             components.append(_rule_drift_component())
@@ -158,7 +187,7 @@ def build_payload(
                 )
             )
 
-    blocking_failures = [item for item in components if bool(item.get("blocking"))]
+    blocking_failures = [item for item in components if _safe_bool(item.get("blocking"))]
     return {
         "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
         "overall_status": "FAIL" if blocking_failures else "PASS",
@@ -189,7 +218,7 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
     if atomic:
         atomic_write_text(path, content)
     else:
-        path.write_text(content, encoding="utf-8")
+        atomic_write_text(path, content)
 
 
 def main() -> int:
@@ -202,13 +231,13 @@ def main() -> int:
         canary_network=bool(args.canary_network),
     )
     if not args.no_write_report:
-        generated = datetime.fromisoformat(str(payload["generated_at"]).replace("Z", "+00:00"))
+        generated = parse_report_generated_at(payload.get("generated_at"))
         report_dir = ROOT_DIR / args.report_dir
         report_path = report_dir / f"micro_live_boot_check_{generated.strftime('%Y%m%dT%H%M%SZ')}.md"
         payload["report_path"] = _display_path(report_path)
         payload["latest_report_path"] = _display_path(report_dir / "latest.md")
         payload["latest_json_path"] = _display_path(report_dir / "latest.json")
-        _write_report(report_path, payload)
+        _write_report(report_path, payload, atomic=True)
         payload.update(
             write_latest_aliases(
                 report_dir=report_dir,

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings, get_settings
+from app.services.report_io import atomic_write_text
 from app.services.strategy_v2_validation import ClosedTradeRecord, StrategyV2ValidationService
 
 
@@ -38,6 +39,21 @@ class StrategyV2StressReplayPrototypeWorkerService:
             return 0
 
     @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
+    @staticmethod
     def _normalize_ts(value: Any) -> datetime | None:
         text = str(value or "")
         if text.endswith("Z"):
@@ -63,12 +79,18 @@ class StrategyV2StressReplayPrototypeWorkerService:
     @staticmethod
     def _coverage_flags(row: dict[str, Any]) -> dict[str, Any]:
         return {
-            "has_entry_fill": bool(row.get("has_entry_fill", False)),
-            "has_close_fill": bool(row.get("has_close_fill", False)),
-            "has_partial_exit_fill": bool(row.get("has_partial_exit_fill", False)),
-            "latency_bar_exists": bool(row.get("latency_bar_exists", False)),
-            "full_fill_path": bool(row.get("full_fill_path", False)),
-            "complete_candle_path": bool(row.get("complete_candle_path", False)),
+            "has_entry_fill": StrategyV2StressReplayPrototypeWorkerService._safe_bool(row.get("has_entry_fill", False)),
+            "has_close_fill": StrategyV2StressReplayPrototypeWorkerService._safe_bool(row.get("has_close_fill", False)),
+            "has_partial_exit_fill": StrategyV2StressReplayPrototypeWorkerService._safe_bool(
+                row.get("has_partial_exit_fill", False)
+            ),
+            "latency_bar_exists": StrategyV2StressReplayPrototypeWorkerService._safe_bool(
+                row.get("latency_bar_exists", False)
+            ),
+            "full_fill_path": StrategyV2StressReplayPrototypeWorkerService._safe_bool(row.get("full_fill_path", False)),
+            "complete_candle_path": StrategyV2StressReplayPrototypeWorkerService._safe_bool(
+                row.get("complete_candle_path", False)
+            ),
             "path_coverage_ratio": round(float(row.get("path_coverage_ratio", 0.0) or 0.0), 4),
             "entry_anchor_source": str(row.get("entry_anchor_source", "unknown")),
             "exit_anchor_source": str(row.get("exit_anchor_source", "unknown")),
@@ -93,7 +115,7 @@ class StrategyV2StressReplayPrototypeWorkerService:
             replayed_r = base_r - (0.05 + coverage_penalty + anchor_penalty)
             reasons.append("latency_plus_1_bar_penalty")
         elif scenario == "partial_fills_only":
-            fill_factor = 0.75 if bool(row.get("has_partial_exit_fill", False)) else 0.60
+            fill_factor = 0.75 if self._safe_bool(row.get("has_partial_exit_fill", False)) else 0.60
             replayed_r = (base_r * fill_factor) - (coverage_penalty + anchor_penalty)
             reasons.append(f"partial_fill_factor:{fill_factor:.2f}")
         else:
@@ -188,9 +210,9 @@ class StrategyV2StressReplayPrototypeWorkerService:
             entry_anchor_sources[entry_anchor] = int(entry_anchor_sources.get(entry_anchor, 0)) + 1
             exit_anchor_sources[exit_anchor] = int(exit_anchor_sources.get(exit_anchor, 0)) + 1
             regime_counts[regime] = int(regime_counts.get(regime, 0)) + 1
-            if bool(row.get("full_fill_path", False)):
+            if StrategyV2StressReplayPrototypeWorkerService._safe_bool(row.get("full_fill_path", False)):
                 full_fill_path_count += 1
-            if bool(row.get("complete_candle_path", False)):
+            if StrategyV2StressReplayPrototypeWorkerService._safe_bool(row.get("complete_candle_path", False)):
                 complete_candle_path_count += 1
             path_coverage_ratio_sum += float(row.get("path_coverage_ratio", 0.0) or 0.0)
         total_rows = len(rows)
@@ -274,7 +296,7 @@ class StrategyV2StressReplayPrototypeWorkerService:
             "approximation_gap": approximation_gap,
             "input_lineage_summary": dict(input_lineage_summary or {}),
         }
-        file_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        atomic_write_text(file_path, json.dumps(payload, ensure_ascii=True, indent=2))
         return str(file_path)
 
     def _write_scenario_report(
@@ -310,7 +332,7 @@ class StrategyV2StressReplayPrototypeWorkerService:
             "- It is a deterministic approximation intended to validate runner/output contracts, not a full market replay.",
             "",
         ]
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def _write_overall_report(self, *, payload: dict[str, Any], now: datetime) -> str:
@@ -340,8 +362,8 @@ class StrategyV2StressReplayPrototypeWorkerService:
             row = dict((payload.get("scenario_runs") or {}).get(scenario) or {})
             summary = dict(row.get("summary") or {})
             lines.append(
-                f"- {scenario}: ready={bool(row.get('ready', False))}, prototype_ready={bool(row.get('prototype_ready', False))}, "
-                f"executed={bool(row.get('executed', False))}, "
+                f"- {scenario}: ready={self._safe_bool(row.get('ready', False))}, prototype_ready={self._safe_bool(row.get('prototype_ready', False))}, "
+                f"executed={self._safe_bool(row.get('executed', False))}, "
                 f"batches_read={int(row.get('batches_read', 0) or 0)}, trades={int(summary.get('trades', 0) or 0)}, "
                 f"ev={float(summary.get('ev', 0.0)):.4f}, max_dd={float(summary.get('max_drawdown', 0.0)):.4f}"
             )
@@ -360,7 +382,7 @@ class StrategyV2StressReplayPrototypeWorkerService:
                 "",
             ]
         )
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(
@@ -376,8 +398,10 @@ class StrategyV2StressReplayPrototypeWorkerService:
         now = datetime.now(timezone.utc).replace(microsecond=0)
         writer_payload = dict(stress_replay_lineage_writer or {})
         runner_payload = dict(stress_replay_runner_contract or {})
-        available = bool(writer_payload.get("available", False)) and bool(runner_payload.get("available", False))
-        runtime_job_ready = bool(writer_payload.get("runtime_job_ready", False)) and bool(
+        available = self._safe_bool(writer_payload.get("available", False)) and self._safe_bool(
+            runner_payload.get("available", False)
+        )
+        runtime_job_ready = self._safe_bool(writer_payload.get("runtime_job_ready", False)) and self._safe_bool(
             runner_payload.get("runtime_job_ready", False)
         )
         blocked_by = list(dict.fromkeys([*(writer_payload.get("blocked_by") or []), *(runner_payload.get("blocked_by") or [])]))
@@ -395,10 +419,10 @@ class StrategyV2StressReplayPrototypeWorkerService:
             for scenario in self._SCENARIO_ORDER:
                 batch_row = dict(scenario_batches.get(scenario) or {})
                 contract_row = dict(scenario_contract.get(scenario) or {})
-                batch_ready = bool(batch_row.get("ready", False))
-                batch_prototype_ready = bool(batch_row.get("prototype_ready", False))
-                contract_ready = bool(contract_row.get("ready", False))
-                contract_prototype_ready = bool(contract_row.get("prototype_ready", False))
+                batch_ready = self._safe_bool(batch_row.get("ready", False))
+                batch_prototype_ready = self._safe_bool(batch_row.get("prototype_ready", False))
+                contract_ready = self._safe_bool(contract_row.get("ready", False))
+                contract_prototype_ready = self._safe_bool(contract_row.get("prototype_ready", False))
                 ready = batch_ready and contract_ready
                 prototype_ready = (batch_ready or batch_prototype_ready) and (contract_ready or contract_prototype_ready)
                 if prototype_ready:

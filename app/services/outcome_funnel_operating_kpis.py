@@ -3,6 +3,20 @@ from __future__ import annotations
 from typing import Any
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
+
+
 def _int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
@@ -51,7 +65,7 @@ def build_outcome_funnel_operating_kpis(score_to_outcome_funnel: dict[str, Any] 
     closed_trades_per_day = round(closed / report_window_days, 4) if report_window_days > 0 else 0.0
 
     return {
-        "available": bool(payload.get("available", False)),
+        "available": _safe_bool(payload.get("available", False)),
         "primary_focus": "after_cost_edge_proof",
         "report_window_days": report_window_days,
         "closed_trades_per_day": closed_trades_per_day,

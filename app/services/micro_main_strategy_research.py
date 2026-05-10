@@ -10,6 +10,21 @@ from app.db.models import Candle
 Direction = Literal["long", "short"]
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
+
+
 _SESSION_IMPULSE_RETEST_PROFILE_BY_SYMBOL: dict[str, str] = {
     "BTCUSDC": "baseline",
     "BNBUSDC": "baseline",
@@ -598,11 +613,13 @@ def build_session_impulse_retest_shadow_summary(
 ) -> dict[str, Any]:
     normalized_symbol = str(symbol or "").upper()
     normalized_allowed = {str(item or "").upper() for item in allowed_symbols if str(item or "").strip()}
+    enabled = _safe_bool(enabled)
+    shadow_only = _safe_bool(shadow_only)
     payload: dict[str, Any] = {
         "family": "session_impulse_retest",
         "symbol": normalized_symbol,
-        "enabled": bool(enabled),
-        "shadow_only": bool(shadow_only),
+        "enabled": enabled,
+        "shadow_only": shadow_only,
         "available": False,
         "status": "disabled",
         "reason": "session_impulse_retest_disabled",

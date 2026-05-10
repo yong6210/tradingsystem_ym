@@ -23,6 +23,7 @@ from app.services.split_review_followup_ledger import (
     resolve_split_review_followup_ledger_packet,
     summarize_split_review_followup_ledger,
 )
+from scripts.operation_report_io import atomic_write_text
 
 _REVIEW_ACTIONS: dict[str, dict[str, str]] = {
     "run_entry_timing_split_review": {
@@ -70,6 +71,20 @@ _DECISION_STATUSES = [
     "REDUCE_CONFIRMED",
     "KILL_REVIEW_ESCALATED",
 ]
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
 
 
 def parse_args() -> argparse.Namespace:
@@ -238,7 +253,7 @@ def _edge_evolution_rule(
         "allocation_bias": str(source.get("allocation_bias") or "hold_current_baseline"),
         "confidence": str(source.get("confidence") or "low"),
         "recommendation_strength": str(source.get("recommendation_strength") or "baseline"),
-        "kill_review_triggered": bool(source.get("kill_review_triggered", False)),
+        "kill_review_triggered": _safe_bool(source.get("kill_review_triggered", False)),
         "promotion_candidate_axis": str(
             source.get("promotion_candidate_axis") or promotion_candidate.get("axis") or "none"
         ),
@@ -571,7 +586,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
             "## Followup Ledger",
             "",
             (
-                f"- available: {bool(ledger_summary.get('available', False))} "
+                f"- available: {_safe_bool(ledger_summary.get('available', False))} "
                 f"| recent_entries={int(ledger_summary.get('recent_entry_count', 0) or 0)} "
                 f"| last_generated_status={ledger_summary.get('last_status', 'none')} "
                 f"| last_decision_status={ledger_summary.get('last_decision_status', 'none')}"
@@ -600,7 +615,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
             "```",
         ]
     )
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def main() -> int:
@@ -609,7 +624,7 @@ def main() -> int:
     ledger_path = ROOT_DIR / args.ledger_path
     transition_status = str(getattr(args, "transition_status", "") or "")
     if transition_status:
-        if bool(getattr(args, "no_write_ledger", False)):
+        if _safe_bool(getattr(args, "no_write_ledger", False)):
             raise RuntimeError("--transition-status requires ledger writes")
         transition_entry = record_split_review_followup_ledger_transition(
             symbol=args.symbol,

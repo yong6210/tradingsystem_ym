@@ -17,6 +17,21 @@ if str(ROOT_DIR) not in sys.path:
 from app.core.config import get_settings
 from app.core import operator_surface_contracts as osc
 from app.services.notification_dispatcher import NotificationDispatcher
+from scripts.operation_report_io import atomic_write_text
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
 
 
 def _resolve_root_path(raw_path: str | Path) -> Path:
@@ -51,8 +66,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
 def _load_stage(path: Path) -> dict[str, Any]:
@@ -110,26 +124,32 @@ def _manual_review_trigger(previous: dict[str, Any] | None, current: dict[str, A
 def _gate_flipped_ready(previous: dict[str, Any] | None, current: dict[str, Any], key: str) -> bool:
     if previous is None:
         return False
-    return not bool(previous.get(key, False)) and bool(current.get(key, False))
+    return not _safe_bool(previous.get(key, False)) and _safe_bool(
+        current.get(key, False)
+    )
 
 
 def _edge_sample_stall_trigger(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
-    current_active = bool(dict(current.get("edge_sample_stall") or {}).get("active", False))
+    current_active = _safe_bool(dict(current.get("edge_sample_stall") or {}).get("active", False))
     if not current_active:
         return False
     if previous is None:
         return True
-    previous_active = bool(dict(previous.get("edge_sample_stall") or {}).get("active", False))
+    previous_active = _safe_bool(dict(previous.get("edge_sample_stall") or {}).get("active", False))
     return not previous_active
 
 
 def _active_lineage_sample_stall_trigger(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
-    current_active = bool(dict(current.get("active_lineage_sample_health") or {}).get("active", False))
+    current_active = _safe_bool(
+        dict(current.get("active_lineage_sample_health") or {}).get("active", False)
+    )
     if not current_active:
         return False
     if previous is None:
         return True
-    previous_active = bool(dict(previous.get("active_lineage_sample_health") or {}).get("active", False))
+    previous_active = _safe_bool(
+        dict(previous.get("active_lineage_sample_health") or {}).get("active", False)
+    )
     return not previous_active
 
 
@@ -173,7 +193,7 @@ def _risk_gate_unlock_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
 def _risk_gate_unlock_summary_line(payload: dict[str, Any] | None) -> str:
     summary = _risk_gate_unlock_summary(payload)
     return (
-        f"risk_gate_unlock: active={bool(summary.get('active', False))} | "
+        f"risk_gate_unlock: active={_safe_bool(summary.get('active', False))} | "
         f"status={summary.get('status') or 'not_available'} | "
         f"unlock_at={summary.get('unlock_at') or 'n/a'}"
     )
@@ -182,8 +202,8 @@ def _risk_gate_unlock_summary_line(payload: dict[str, Any] | None) -> str:
 def _post_unlock_review_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
     source = dict((payload or {}).get("post_unlock_review_summary") or {})
     return {
-        "active": bool(source.get("active", False)),
-        "review_window_open": bool(source.get("review_window_open", False)),
+        "active": _safe_bool(source.get("active", False)),
+        "review_window_open": _safe_bool(source.get("review_window_open", False)),
         "current_stage": str(source.get("current_stage") or "unknown"),
         "current_checklist_status": str(source.get("current_checklist_status") or "UNKNOWN"),
         "current_validation_playbook_go_no_go": str(source.get("current_validation_playbook_go_no_go") or ""),
@@ -227,8 +247,8 @@ def _post_unlock_review_commands_line(payload: dict[str, Any] | None) -> str:
 def _post_unlock_bundle_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
     source = dict((payload or {}).get("post_unlock_bundle_result") or {})
     return {
-        "active": bool(source.get("active", False)),
-        "executed": bool(source.get("executed", False)),
+        "active": _safe_bool(source.get("active", False)),
+        "executed": _safe_bool(source.get("executed", False)),
         "status": str(source.get("status") or "NOT_AVAILABLE"),
         "summary": str(source.get("summary") or ""),
         "bundle_review_command": str(source.get("bundle_review_command") or ""),
@@ -252,7 +272,7 @@ def _runtime_reopen_status_summary(payload: dict[str, Any] | None) -> dict[str, 
     source = dict((payload or {}).get("runtime_reopen_status") or {})
     return {
         "status": str(source.get("status") or "not_available"),
-        "ready": bool(source.get("ready", False)),
+        "ready": _safe_bool(source.get("ready", False)),
         "summary": str(source.get("summary") or ""),
     }
 
@@ -284,7 +304,7 @@ def _runtime_live_cluster_guard_summary(payload: dict[str, Any] | None) -> dict[
     source = dict((payload or {}).get("runtime_live_cluster_guard_summary") or {})
     return {
         "status": str(source.get("status") or "not_available"),
-        "active": bool(source.get("active", False)),
+        "active": _safe_bool(source.get("active", False)),
         "current_reason_code": str(source.get("current_reason_code") or ""),
         "current_reason_message": str(source.get("current_reason_message") or ""),
         "cluster_window_blocked_candidates": int(source.get("cluster_window_blocked_candidates", 0) or 0),
@@ -388,7 +408,7 @@ def _runtime_signoff_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
 def _runtime_mitigation_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
     source = dict((payload or {}).get("runtime_mitigation_summary") or {})
     return {
-        "available": bool(source.get("available", False)),
+        "available": _safe_bool(source.get("available", False)),
         "primary_action_code": str(source.get("primary_action_code") or ""),
         "primary_action_status": str(source.get("primary_action_status") or ""),
         "primary_action_command": str(source.get("primary_action_command") or ""),
@@ -422,9 +442,9 @@ def _runtime_mitigation_summary_line(payload: dict[str, Any] | None) -> str:
 def _runtime_mitigation_packet_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
     source = dict((payload or {}).get("runtime_mitigation_packet_result") or {})
     return {
-        "available": bool(source.get("available", False)),
+        "available": _safe_bool(source.get("available", False)),
         "status": str(source.get("status") or "inactive"),
-        "executed": bool(source.get("executed", False)),
+        "executed": _safe_bool(source.get("executed", False)),
         "packet_id": str(source.get("packet_id") or ""),
         "command": str(source.get("command") or ""),
         "target_symbol": str(source.get("target_symbol") or ""),
@@ -439,13 +459,13 @@ def _runtime_mitigation_packet_summary(payload: dict[str, Any] | None) -> dict[s
 def _runtime_mitigation_wait_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
     source = dict((payload or {}).get("runtime_mitigation_wait_summary") or {})
     return {
-        "available": bool(source.get("available", False)),
+        "available": _safe_bool(source.get("available", False)),
         "status": str(source.get("status") or "inactive"),
         "focus_label": str(source.get("focus_label") or ""),
         "wait_constraint": str(source.get("wait_constraint") or ""),
         "next_trigger": str(source.get("next_trigger") or ""),
         "current_session": str(source.get("current_session") or ""),
-        "session_active": bool(source.get("session_active", False)),
+        "session_active": _safe_bool(source.get("session_active", False)),
         "allowed_sessions": [str(item) for item in list(source.get("allowed_sessions") or []) if str(item).strip()],
         "candidate_symbol": str(source.get("candidate_symbol") or ""),
         "candidate_family": str(source.get("candidate_family") or ""),
@@ -453,7 +473,7 @@ def _runtime_mitigation_wait_summary(payload: dict[str, Any] | None) -> dict[str
         "candidate_reason": str(source.get("candidate_reason") or ""),
         "watch_tick_status": str(source.get("watch_tick_status") or ""),
         "watch_generated_at": str(source.get("watch_generated_at") or ""),
-        "watch_guard_active": bool(source.get("watch_guard_active", False)),
+        "watch_guard_active": _safe_bool(source.get("watch_guard_active", False)),
         "watch_guard_family": str(source.get("watch_guard_family") or ""),
         "watch_guard_families": [str(item) for item in list(source.get("watch_guard_families") or []) if str(item).strip()],
         "watch_guard_reason_code": str(source.get("watch_guard_reason_code") or ""),
@@ -483,7 +503,7 @@ def _runtime_mitigation_wait_summary_line(payload: dict[str, Any] | None) -> str
     status = str(summary.get("status") or "").strip().lower()
     allowed_sessions = ",".join(str(item) for item in list(summary.get("allowed_sessions") or []) if str(item).strip())
     guard_text = ""
-    if bool(summary.get("watch_guard_active", False)):
+    if _safe_bool(summary.get("watch_guard_active", False)):
         families = ",".join(str(item) for item in list(summary.get("watch_guard_families") or []) if str(item).strip())
         guard_family = str(summary.get("watch_guard_family") or "")
         guard_scope = families or guard_family or "none"
@@ -527,7 +547,9 @@ def _post_unlock_review_ready(previous: dict[str, Any] | None, current: dict[str
         return False
     before = _post_unlock_review_summary(previous)
     after = _post_unlock_review_summary(current)
-    return not bool(before.get("review_window_open", False)) and bool(after.get("review_window_open", False))
+    return not _safe_bool(
+        before.get("review_window_open", False)
+    ) and _safe_bool(after.get("review_window_open", False))
 
 
 def _post_unlock_bundle_changed(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
@@ -824,7 +846,7 @@ def _lineage_closed_fill_health_summary(payload: dict[str, Any] | None) -> dict[
     source = dict((payload or {}).get("lineage_closed_fill_health") or {})
     return {
         "status": str(source.get("status") or "unknown"),
-        "healthy": bool(source.get("healthy", False)),
+        "healthy": _safe_bool(source.get("healthy", False)),
         "closed_trade_count": int(source.get("closed_trade_count", 0) or 0),
         "latest_closed_trade_at": str(source.get("latest_closed_trade_at") or ""),
         "summary": str(source.get("summary") or ""),
@@ -876,10 +898,18 @@ def _readiness_gates_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
     current = dict(payload or {})
     source = dict(current.get("readiness_gates") or {})
     return {
-        "lineage_gate_ready": bool(source.get("lineage_gate_ready", current.get("lineage_gate_ready", False))),
-        "candidate_gate_ready": bool(source.get("candidate_gate_ready", current.get("candidate_gate_ready", False))),
-        "edge_sample_gate_ready": bool(source.get("edge_sample_gate_ready", current.get("edge_sample_gate_ready", False))),
-        "all_ready": bool(source.get("all_ready", current.get("all_readiness_gates_ready", False))),
+        "lineage_gate_ready": _safe_bool(
+            source.get("lineage_gate_ready", current.get("lineage_gate_ready", False))
+        ),
+        "candidate_gate_ready": _safe_bool(
+            source.get("candidate_gate_ready", current.get("candidate_gate_ready", False))
+        ),
+        "edge_sample_gate_ready": _safe_bool(
+            source.get("edge_sample_gate_ready", current.get("edge_sample_gate_ready", False))
+        ),
+        "all_ready": _safe_bool(
+            source.get("all_ready", current.get("all_readiness_gates_ready", False))
+        ),
         "summary": str(source.get("summary") or ""),
     }
 
@@ -897,7 +927,7 @@ def _readiness_gates_summary_line(payload: dict[str, Any] | None) -> str:
 def _active_lineage_sample_health_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
     source = dict((payload or {}).get("active_lineage_sample_health") or {})
     return {
-        "active": bool(source.get("active", False)),
+        "active": _safe_bool(source.get("active", False)),
         "status": str(source.get("status") or "none"),
         "threshold_hours": int(source.get("threshold_hours", 0) or 0),
         "hours_open": round(_float(source.get("hours_open", 0.0)), 2),
@@ -958,7 +988,7 @@ def _active_lineage_sample_focus_summary_line(payload: dict[str, Any] | None) ->
 def _edge_sample_stall_summary(payload: dict[str, Any] | None) -> dict[str, Any]:
     source = dict((payload or {}).get("edge_sample_stall") or {})
     return {
-        "active": bool(source.get("active", False)),
+        "active": _safe_bool(source.get("active", False)),
         "threshold_hours": int(source.get("threshold_hours", 0) or 0),
         "hours_since_progress": round(_float(source.get("hours_since_progress", 0.0)), 2),
         "progress_count": int(source.get("progress_count", 0) or 0),
@@ -1440,9 +1470,9 @@ def _render_message(current: dict[str, Any], events: list[dict[str, str]]) -> st
     else:
         active_sample_line = active_symbol
     readiness = (
-        f"lineage={bool(current.get('lineage_gate_ready', False))}, "
-        f"candidate={bool(current.get('candidate_gate_ready', False))}, "
-        f"sample={bool(current.get('edge_sample_gate_ready', False))}"
+        f"lineage={_safe_bool(current.get('lineage_gate_ready', False))}, "
+        f"candidate={_safe_bool(current.get('candidate_gate_ready', False))}, "
+        f"sample={_safe_bool(current.get('edge_sample_gate_ready', False))}"
     )
     required_reviews = list(signoff.get("required_reviews") or [])
     signoff_line = (
@@ -1809,11 +1839,11 @@ def _ko_runtime_self_heal_line(current: dict[str, Any] | None) -> str:
         return ""
     return (
         "자동 복구 상태: "
-        f"{'활성' if bool(summary.get('active', False)) else '비활성'}"
+        f"{'활성' if _safe_bool(summary.get('active', False)) else '비활성'}"
         f" / stale_cleanup={int(summary.get('stale_cleanup_events', 0) or 0)}"
-        f" / reentry_ignore={bool(summary.get('latest_reentry_block_ignored', False))}"
+        f" / reentry_ignore={_safe_bool(summary.get('latest_reentry_block_ignored', False))}"
         f" / duplicate_ignore={int(summary.get('latest_duplicate_intents_ignored', 0) or 0)}"
-        f" / submit_ready_self_heal={bool(summary.get('latest_submit_ready_self_heal_applied', False))}"
+        f" / submit_ready_self_heal={_safe_bool(summary.get('latest_submit_ready_self_heal_applied', False))}"
     )
 
 
@@ -2164,7 +2194,7 @@ def _ko_runtime_mitigation_wait_status(value: Any) -> str:
 
 def _ko_runtime_mitigation_action_line(current: dict[str, Any] | None) -> str:
     summary = _runtime_mitigation_summary(current)
-    if not bool(summary.get("available", False)):
+    if not _safe_bool(summary.get("available", False)):
         return ""
     status = str(summary.get("primary_action_status") or "")
     code = str(summary.get("primary_action_code") or "")
@@ -2180,7 +2210,7 @@ def _ko_runtime_mitigation_action_line(current: dict[str, Any] | None) -> str:
 
 def _ko_runtime_mitigation_packet_line(current: dict[str, Any] | None) -> str:
     summary = _runtime_mitigation_packet_summary(current)
-    if not bool(summary.get("available", False)):
+    if not _safe_bool(summary.get("available", False)):
         return ""
     status = str(summary.get("status") or "")
     if status == "inactive":
@@ -2204,7 +2234,7 @@ def _ko_runtime_mitigation_packet_line(current: dict[str, Any] | None) -> str:
 
 def _ko_runtime_mitigation_wait_line(current: dict[str, Any] | None) -> str:
     summary = _runtime_mitigation_wait_summary(current)
-    if not bool(summary.get("available", False)):
+    if not _safe_bool(summary.get("available", False)):
         return ""
     status = str(summary.get("status") or "")
     session_name = str(summary.get("current_session") or "unknown")
@@ -2218,7 +2248,7 @@ def _ko_runtime_mitigation_wait_line(current: dict[str, Any] | None) -> str:
     if summary.get("candidate_reason"):
         reason_text = f" / 사유={summary.get('candidate_reason')}"
     guard_text = ""
-    if bool(summary.get("watch_guard_active", False)):
+    if _safe_bool(summary.get("watch_guard_active", False)):
         families = ",".join(str(item) for item in list(summary.get("watch_guard_families") or []) if str(item).strip())
         guard_scope = families or str(summary.get("watch_guard_family") or "none")
         guard_text = f" / guard={_ko_runtime_mitigation_guard_reason(summary.get('watch_guard_reason_code'))}:{guard_scope}"
@@ -2413,7 +2443,7 @@ def main() -> int:
 
     delivery = _dispatch_stage_notification(current, message=message, webhook_url=args.webhook_url)
     result["delivery"] = delivery
-    result["notified"] = bool(delivery.get("delivered"))
+    result["notified"] = _safe_bool(delivery.get("delivered"))
     if not result["notified"]:
         result["warning"] = f"discord delivery not completed: {delivery.get('reason')}"
         print(json.dumps(result, ensure_ascii=False, indent=2))

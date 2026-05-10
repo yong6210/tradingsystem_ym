@@ -6,6 +6,7 @@ from typing import Any
 
 from app.core.config import Settings, get_settings
 from app.db.repositories import CandleRepository, ExecutionFillRepository, PlanRepository
+from app.services.report_io import atomic_write_text
 from app.services.strategy_family_edge_review import StrategyFamilyEdgeReviewService
 from app.services.strategy_v2_stress_replay_assessment import StrategyV2StressReplayAssessmentService
 from app.services.strategy_v2_stress_replay_lineage import StrategyV2StressReplayLineageService
@@ -44,6 +45,21 @@ class ReplayEvidenceReviewService:
         self.replay_assessment = StrategyV2StressReplayAssessmentService(self.settings)
 
     @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
+    @staticmethod
     def _confidence_state(
         *,
         a_review: dict[str, Any],
@@ -51,7 +67,9 @@ class ReplayEvidenceReviewService:
         replay_lineage: dict[str, Any],
         replay_assessment: dict[str, Any],
     ) -> tuple[str, str, str]:
-        lineage_ready = bool(replay_lineage.get("available", False)) and bool(replay_lineage.get("runtime_inputs_ready", False))
+        lineage_ready = ReplayEvidenceReviewService._safe_bool(
+            replay_lineage.get("available", False)
+        ) and ReplayEvidenceReviewService._safe_bool(replay_lineage.get("runtime_inputs_ready", False))
         eligible_closed = int(dict(replay_assessment.get("sample_counts") or {}).get("eligible_closed_trades", 0) or 0)
         a_state = str(a_review.get("edge_state") or "insufficient_sample")
         b_state = str(b_review.get("edge_state") or "insufficient_sample")
@@ -144,17 +162,17 @@ class ReplayEvidenceReviewService:
             "a_review": a_review,
             "b_review": b_review,
             "replay_lineage": {
-                "available": bool(replay_lineage.get("available", False)),
-                "runtime_inputs_ready": bool(replay_lineage.get("runtime_inputs_ready", False)),
+                "available": self._safe_bool(replay_lineage.get("available", False)),
+                "runtime_inputs_ready": self._safe_bool(replay_lineage.get("runtime_inputs_ready", False)),
                 "reason": replay_lineage.get("reason"),
                 "coverage": dict(replay_lineage.get("coverage") or {}),
                 "blocked_by": list(replay_lineage.get("blocked_by") or []),
                 "next_steps": list(replay_lineage.get("next_steps") or []),
             },
             "replay_assessment": {
-                "available": bool(replay_assessment.get("available", False)),
-                "full_replay_ready": bool(replay_assessment.get("full_replay_ready", False)),
-                "replacement_recommended": bool(replay_assessment.get("replacement_recommended", False)),
+                "available": self._safe_bool(replay_assessment.get("available", False)),
+                "full_replay_ready": self._safe_bool(replay_assessment.get("full_replay_ready", False)),
+                "replacement_recommended": self._safe_bool(replay_assessment.get("replacement_recommended", False)),
                 "reason": replay_assessment.get("reason"),
                 "sample_counts": dict(replay_assessment.get("sample_counts") or {}),
                 "coverage": dict(replay_assessment.get("coverage") or {}),
@@ -223,7 +241,7 @@ class ReplayEvidenceReviewService:
         ]
         for step in payload.get("next_actions") or []:
             lines.append(f"- {step}")
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(

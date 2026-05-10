@@ -21,23 +21,27 @@
 - `scripts/run_micro_live_synthetic_canary.py`
 - `scripts/run_micro_live_boot_check.py`
 - `scripts/run_micro_live_ops_heartbeat.py`
+- `scripts/run_micro_live_failure_drill.py`
 - `scripts/run_replay_validation_bridge.py`
 - `scripts/run_session_impulse_retest_runtime_audit_report.py`
 - `scripts/run_binance_rule_drift_snapshot.py`
 - `scripts/build_micro_live_event_blackouts.py`
 - `scripts/install_micro_live_ops_launchd.py`
 
-현재 상태 해석은 `scripts/run_micro_live_ops_heartbeat.py --no-fail-exit`를 우선한다. `PASS`는 운영 리포트가 최신이고 내부 status도 통과했다는 뜻이고, `WATCH`는 주문 차단/no-order/replay bridge 같은 검토 상태가 있다는 뜻이며, `FAIL`은 live routing 전에 즉시 조치해야 한다는 뜻이다.
+현재 상태 해석은 `scripts/run_micro_live_ops_heartbeat.py --no-fail-exit`를 우선한다. `PASS`는 운영 리포트와 failure-contract drill이 최신이고 내부 status도 통과했다는 뜻이고, `WATCH`는 주문 차단/no-order/replay bridge 같은 검토 상태가 있다는 뜻이며, `FAIL`은 live routing 전에 즉시 조치해야 한다는 뜻이다.
 
 ## 3. 단계별 하드닝
 ### Phase 1. 단일 관측 경로
 - 모든 운영 가드는 timestamp report와 함께 `latest.md/latest.json`을 atomic write로 남긴다.
 - heartbeat는 report 파일의 freshness뿐 아니라 내부 `overall_status/status/evaluation.status`를 읽는다.
 - macro blackout은 파일 존재가 아니라 live approval이 실제 쓰는 configured path와 future horizon을 확인한다.
+- macro calendar refresh 스케줄은 configured path가 있으면 live approval이 실제 쓰는 blackout 계약 파일을 직접 갱신한다.
+- live approval이 읽는 macro blackout, strategy-time contract, plan blocklist JSON은 builder에서 atomic write로 갱신한다.
+- launchd plist 생성/설치도 atomic replace로 처리하고, `launchctl bootstrap` 실패는 non-zero exit로 드러낸다.
 - 알림 cooldown state는 전송 성공이 확인된 경우에만 기록한다.
 
 완료 기준:
-- `runtime_guard`, `no_order_watchdog`, `reconciliation_watchdog`, `synthetic_canary`, `boot_check`, `ops_heartbeat`, `replay_validation_bridge`, `binance_rule_drift`가 고정 경로로 읽힌다.
+- `runtime_guard`, `no_order_watchdog`, `reconciliation_watchdog`, `synthetic_canary`, `boot_check`, `ops_heartbeat`, `replay_validation_bridge`, `failure_drill`, `binance_rule_drift`가 고정 경로로 읽힌다.
 - stale/malformed/missing report는 `PASS`로 숨지 않는다.
 
 ### Phase 2. 주문 경로 증명
@@ -71,6 +75,8 @@
 - stale open submission without Binance ledger
 - user-stream stale open ledger/open position
 - worker boot check failure
+
+기본 non-live 검증은 `scripts/run_micro_live_failure_drill.py --no-fail-exit`로 실행한다. 이 스크립트는 실제 주문/실 DB/control switch를 건드리지 않고, missing/stale/malformed report, 짧은 macro horizon, 알림 전송 실패, stale submission, submit-ready gap, runtime audit hard failure가 `PASS`로 숨지 않는지만 검증한다.
 
 완료 기준:
 - 각 장애가 `PASS`로 숨지 않고 `WATCH` 또는 `FAIL`로 올라온다.
@@ -106,4 +112,4 @@ MICRO_LIVE에서 LIVE로 확대하려면 다음을 동시에 본다.
 2. reconciliation watchdog도 알림 전송 성공 확인 후에만 cooldown state를 기록하게 한다.
 3. boot/runtime/reconciliation/canary latest alias를 테스트로 고정한다.
 4. Phase 2 주문 경로 audit row를 더 강화해 `신호 있음/승인 차단/intent 생성/submit 경계`를 DB에서 직접 재생 가능하게 한다.
-5. Phase 4 장애 훈련 테스트를 늘려 silent success를 줄인다.
+5. Phase 4 장애 훈련 테스트를 늘려 silent success를 줄인다. 기본 계약 드릴은 `run_micro_live_failure_drill.py`가 담당한다.

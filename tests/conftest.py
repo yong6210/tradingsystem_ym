@@ -26,6 +26,12 @@ def _configure_test_env() -> None:
         "STRATEGY_FAMILY_EDGE_REVIEW_REPORT_DIR": str(_TEST_REPORTS / "validation" / "edge_reviews"),
         "LIVE_ALPHA_OPERATING_REVIEW_REPORT_DIR": str(_TEST_REPORTS / "validation" / "live_alpha_reviews"),
         "REPLAY_EVIDENCE_REVIEW_REPORT_DIR": str(_TEST_REPORTS / "validation" / "replay_evidence_reviews"),
+        "AUTO_TRADING_REPLAY_VALIDATION_BRIDGE_BACKTEST_DIR": str(
+            _TEST_REPORTS / "validation" / "micro_main_usdt_proxy_backtests"
+        ),
+        "AUTO_TRADING_REPLAY_VALIDATION_BRIDGE_PORTFOLIO_DIR": str(
+            _TEST_REPORTS / "validation" / "micro_main_risk_sweeps"
+        ),
         "EXECUTION_QUALITY_REPORT_DIR": str(_TEST_REPORTS / "execution"),
         "FEATURE_CALIBRATION_REPORT_DIR": str(_TEST_REPORTS / "calibration"),
         "FEATURE_CALIBRATION_SNAPSHOT_DIR": str(_TEST_REPORTS / "calibration" / "snapshots"),

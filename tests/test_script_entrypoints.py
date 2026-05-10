@@ -24,6 +24,7 @@ import scripts.notify_entry_surface as notify_entry_surface
 import scripts.notify_operator_session_brief as notify_operator_session_brief
 import scripts.notify_stage_change as notify_stage_change
 import scripts.ops_stage_board as ops_stage_board
+import scripts.operation_report_io as operation_report_io
 import scripts.paper_lineage_watch_tick as paper_lineage_watch_tick
 import scripts.install_micro_live_ops_launchd as install_micro_live_ops_launchd
 import scripts.run_micro_main_data_backfill as micro_data_backfill
@@ -138,6 +139,13 @@ def test_script_timestamp_helpers_tolerate_invalid_legacy_values() -> None:
     start = datetime(2026, 5, 9, tzinfo=UTC)
     end = datetime(2026, 5, 10, tzinfo=UTC)
 
+    assert live_order_lifecycle_report._parse_generated_at("2026-05-10T12:00:00Z").tzinfo == UTC
+    assert live_order_lifecycle_report._parse_generated_at("2026-05-10T12:00:00").tzinfo == UTC
+    assert operation_report_io.parse_report_generated_at("2026-05-10T12:00:00Z").tzinfo == UTC
+    assert operation_report_io.parse_report_generated_at("2026-05-10T12:00:00").tzinfo == UTC
+    assert operation_report_io.parse_report_generated_at(datetime(2026, 5, 10, 12, 0, 0)).tzinfo == UTC
+    assert binance_rule_drift._parse_generated_at("2026-05-10T12:00:00Z").tzinfo == UTC
+    assert binance_rule_drift._parse_generated_at(datetime(2026, 5, 10, 12, 0, 0)).tzinfo == UTC
     assert build_time_contract._parse_ts("legacy-invalid-timestamp") is None
     assert low_confluence._utc_from_iso("legacy-invalid-timestamp") is None
     assert replay_input_diff._utc_from_iso("legacy-invalid-timestamp") is None

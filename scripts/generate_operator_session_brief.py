@@ -11,7 +11,25 @@ from typing import Any
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 SNAPSHOT_SCRIPT = ROOT_DIR / "scripts" / "collect_operator_surface_divergence_snapshot.py"
+
+from scripts.operation_report_io import atomic_write_text
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,7 +95,7 @@ def _run_snapshot(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _brief_status(snapshot: dict[str, Any]) -> str:
-    if not bool(((snapshot.get("operator_ui_sections") or {}).get("all_present"))):
+    if not _safe_bool(((snapshot.get("operator_ui_sections") or {}).get("all_present"))):
         return "UI_REGRESSION_REVIEW"
     if str(snapshot.get("deployment_alignment") or "") == "DIVERGED":
         return "DEPLOYMENT_REVIEW_REQUIRED"
@@ -357,7 +375,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append("```json")
     lines.append(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     lines.append("```")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def main() -> int:

@@ -1,7 +1,134 @@
 # Self-Check 로그 (Living)
 
-현재 기준선: 2026-05-10 MICRO_LIVE content-aware ops heartbeat guard
+현재 기준선: 2026-05-10 MICRO_LIVE failure contract + live submit claim + partial-fill lifecycle guard + atomic report stack + boolean parser guard
 참고: 각 Iteration의 테스트 수치/리포트 경로는 해당 시점 기록이며, 최신 운영 기준은 "현재 기준선"을 따른다.
+
+## 2026-05-10 MICRO_LIVE Failure Contract Drill Guard
+### 무엇을 발견했는가
+- 운영 가드가 많이 늘었지만, 장애를 사람이 머릿속으로만 상상하면 missing/stale/malformed report, 짧은 macro horizon, alert delivery failure, submit-ready gap 같은 실패가 `PASS`로 숨지 않는지 반복 검증하기 어렵다.
+- 기존 incident drill은 control-plane rehearsal 중심이라, 실제 운영 리포트/주문 경로 계약의 negative case를 live 상태 변경 없이 한 번에 검증하는 경로가 부족했다.
+
+### 무엇을 수정했는가
+- `scripts/run_micro_live_failure_drill.py`를 추가했다.
+- 이 드릴은 temp 파일과 순수 평가 함수만 사용해 실제 주문/실 DB/control switch를 건드리지 않는다.
+- 검증 시나리오는 `ops_missing_report`, `ops_malformed_report`, `ops_stale_report`, `macro_short_horizon`, `alert_delivery_failure_contract`, `reconciliation_stale_submission_without_ledger`, `no_order_submit_ready_gap`, `runtime_audit_hard_failure_contract`다.
+- timestamp 리포트와 함께 `reports/operations/micro_live_failure_drill/latest.md/latest.json`을 남긴다.
+- ops heartbeat가 failure drill 최신성과 내부 `PASS` 상태를 감시하도록 추가했다.
+- launchd generator에 daily `failure-drill` job을 추가했다.
+- launchd macro calendar refresh가 기본 auto file만 갱신하지 않고, `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH`가 있으면 live approval/heartbeat가 실제 읽는 configured blackout 계약 파일을 직접 갱신하게 했다.
+- launchd 생성 시 `--env-file`을 쓰는 경우도 해당 env 파일의 `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH`를 우선해 macro refresh output을 정하게 했다.
+- launchd plist 생성과 `~/Library/LaunchAgents` 설치 복사를 atomic replace로 바꿔, 중간 종료 시 partial/corrupt plist가 남지 않게 했다.
+- `launchctl bootstrap` 실패는 `overall_status=FAIL`과 non-zero exit로 드러내고, 기존 job이 로드되어 있지 않은 `bootout` 실패는 `WARN`으로만 남기게 했다.
+- live approval이 읽는 runtime contract builder 3종을 atomic write로 통일했다: macro blackout, strategy-time contract, plan blocklist.
+- 세 contract builder 모두 저장 JSON 안에 `output_path`를 포함해, 어떤 파일이 실제 갱신됐는지 payload 자체로 확인할 수 있게 했다.
+- worker boot check가 failure-contract drill도 실행하게 해, guard 계약 자체가 깨진 상태에서는 `MICRO_LIVE/LIVE` worker 시작 전에 차단되게 했다.
+- `run_worker.py --mode once`에서 boot check 실패 시 unsupported `once` heartbeat를 쓰려다 원래 실패 원인이 가려지는 문제를 막았다.
+- worker heartbeat 파일도 UUID 임시 파일과 cleanup을 사용하게 해 같은 프로세스 내 빠른 재기록에서 tmp 충돌 가능성을 줄였다.
+- no-order watchdog, ops heartbeat, replay validation bridge의 latest/state writer도 고정 `.tmp` 대신 UUID 임시 파일과 cleanup을 사용하게 했다.
+- 공통 `operation_report_io.atomic_write_text`도 예외 시 tmp cleanup을 보장하게 했다.
+- runtime guard, boot check, reconciliation watchdog, synthetic canary, no-order watchdog, ops heartbeat, replay validation bridge, session impulse retest runtime audit, failure drill의 timestamp report 쓰기도 atomic으로 통일했다.
+- preflight/review/brief/stage/notify/watch 계열 운영 파일 writer도 공통 atomic writer를 쓰게 해, 중간 종료 시 partial markdown/json이 운영 증거로 남는 가능성을 줄였다.
+- Binance live/order/user-stream 정규화에서 문자열 boolean(`"false"`, `"0"`, `"no"`)을 Python truthy 문자열로 오판하지 않도록 `_safe_bool`을 추가했다. 이로써 `reduceOnly="false"`가 엔트리 주문을 reduce-only 청산 주문처럼 보이게 하는 방어 취약점을 막았다.
+- 알림 dispatcher/retry/heartbeat/watchdog cooldown 경로도 같은 boolean parser를 쓰게 해, `delivered="false"` 같은 문자열 payload가 전송 성공처럼 기록되어 이후 알림을 suppress하는 상황을 막았다.
+- live submit/approval/safety lock/rollout/preflight/plan generation/reconciliation/dashboard 계열도 같은 boolean parser를 쓰게 해, `live="false"`, `auto_trading_close_only="false"`, `shadow_only="false"`, `live_enabled="false"` 같은 문자열 설정/페이로드가 주문 승인, 차단, 리컨실리에이션, 운영 표시를 뒤집지 않게 했다.
+- 추가 점검에서 no-order/reconciliation watchdog의 `alert`, 운영 대시보드/체크리스트의 `available/advisory_only/accepted`, 포지션 사이징의 `confirm_only`, 백테스트 캐시 플래그도 문자열 boolean에 흔들리지 않게 정리했다.
+- `session_impulse_retest` miss detector JSON과 feature calibration latest/snapshot JSON도 UUID 임시 파일 후 atomic replace로 쓰게 해, 중간 종료 시 partial runtime evidence가 남지 않도록 했다.
+- operator action priority와 ops stage board의 `new_entries_allowed/readiness gate/blocking` 판정도 문자열 boolean을 안전하게 해석하게 해, 운영 보드가 entry gate 상태를 잘못 표시하지 않게 했다.
+- live submit은 Binance 호출 전에 `LIVE_SUBMITTING` claim row를 먼저 커밋하게 해, 같은 intent 동시 호출이 거래소 중복 주문으로 이어지지 않게 했다. claim row에는 `clientOrderId`, sizing, liquidity, tranche 정보를 남겨 장애 시 reconciliation anchor로 쓴다.
+- live submitter가 claim 이후 예외를 내거나 malformed response를 돌려도 새 submission을 만들지 않고 같은 claim row를 `LIVE_SUBMIT_ERROR`로 갱신해, retry 전에 거래소 상태 확인이 필요하다는 사실을 DB에 남기게 했다.
+- Binance submit response와 user-stream에서 `PARTIALLY_FILLED`가 들어오면 fill ingest payload에 `partial=True`를 전달하게 해, 부분 체결 submission이 `FILLED`로 잘못 승격되는 수명주기 오류를 막았다.
+- repaired fill, paper exit monitor, user-stream fill ingest의 `accepted/duplicate/partial` 판정도 문자열 boolean 안전 해석을 쓰게 해, `"false"`가 성공/중복/완전체결처럼 처리되지 않게 했다.
+- `paper_lineage_override_applied`, `transition_edge_variant_applied`, `operating_lock.active`, `new_entry_allowed`, stage/preflight/checklist/notify surface의 `available/advisory_only/healthy` 계열도 추가로 문자열 boolean 안전 해석을 적용했다.
+- feature calibration과 plan generation의 runtime `available/apply/enabled` 판정도 문자열 boolean 안전 해석으로 맞춰, `"false"` 설정이나 payload가 calibration 적용을 켜는 상황을 막았다.
+- session impulse retest auto-route/refresh audit 저장 실패가 이미 생성/제출된 주문 라우팅 결과나 plan refresh 결과를 가리지 않도록, core 결과 commit과 audit commit을 분리하고 audit 실패는 rollback 후 `runtime_audit_error`로 응답에 남기게 했다.
+- 대용량 archive 산출물이 untracked로 계속 잡혀 git status/push 작업을 느리게 만들지 않도록 `.gitignore`에 `archives/`를 추가했다.
+- `app.services.report_io.atomic_write_text`를 추가하고 operational checklist, validation report, portfolio budget, alert metrics, execution quality, historical walk-forward cache, parameter changelog, stress replay lineage writer, v2 validation/research/stress/PBO 리포트 writer를 atomic replace로 통일했다.
+- 추가 문자열 boolean 패스에서 session guidance, scanner operating lock, alert subscription, stage-change 알림, ops stage board, operator action priority, execution dashboard, stress/replay readiness, edge experiment/evolution, outcome control, opportunity capture, kill-condition automation 경로도 `_safe_bool`로 맞췄다.
+- 이로써 `"false"`/`"0"`/`"off"` 문자열이 세션 active, operating lock active, subscription active, replay ready, edge comparison ready, post-unlock ready, stress pass, outcome penalty applied 같은 운영 판단을 참으로 뒤집는 잔여 케이스를 줄였다.
+- validation report, alpha research, PBO/DSR design/metrics, outcome attribution/funnel/granularity, runtime signoff, replay bridge, paper drill, preflight, plan generation, position sizing, strategy-v2 session bucket, thesis fingerprint, promotion mismatch waterfall까지 추가로 훑어 `available/ready/active/confirm_only/kill_review_triggered` 계열 문자열 boolean 오판을 더 줄였다.
+- 특히 `strategy_family_confirm_only`, `active_manual_override`, preflight `kill_review_triggered`, session window `active`, replay bridge material slice 같은 값이 `"false"` 문자열일 때 실제 판단이나 운영 리포트가 반대로 보일 수 있는 경로를 정리했다.
+- watchdog/heartbeat의 알림 전달 판정은 `NotificationDispatcher._safe_bool` 클래스 메서드에 직접 의존하지 않게 로컬 parser로 분리했다. 테스트나 장애 대응에서 fake dispatcher를 주입해도 cooldown/notification 경로가 깨지지 않는다.
+- 같은 fake dispatcher 취약점이 `notify_entry_surface`, `notify_operator_session_brief`, `notify_stage_change`, `stage_monitor_tick`에도 남아 있어 알림/상태 스냅샷 parser를 dispatcher 클래스에서 분리했다.
+- 추가 검색에서 PBO/DSR metrics의 `available`, edge evolution closed-loop feedback, B-continuation activation annotation도 raw truthy 판정이 남아 있어 `_safe_bool`로 맞췄다.
+- 모든 `_safe_bool`/`_bool` 계열 false literal에 `"none"`/`"null"`을 추가했다. `default=True`인 `available/advisory_only/fail_closed` 계열에서 문자열 nullish 값이 참으로 뒤집히는 케이스를 막았다.
+- Binance websocket kline의 `x` final flag도 `_safe_bool`로 읽게 해, `"false"` 문자열이 마감봉처럼 처리되어 runtime signal timing을 앞당기는 위험을 줄였다.
+- `@staticmethod`/`@classmethod` 내부에서 `self._safe_bool` 또는 잘못된 클래스명(`ExecutionApprovalService`)을 참조하던 런타임 NameError를 정리했다. 대상은 execution approval, order intent 응답 직렬화, live contract counting, operator dashboard approval strip, kill-condition automation source summary다.
+- runtime worker heartbeat JSON이 깨졌을 때 `missing`으로 숨기지 않고 `status=invalid`로 반환하게 해, readiness 진단에서 corrupt heartbeat와 missing heartbeat를 구분할 수 있게 했다.
+- runtime worker heartbeat의 naive ISO timestamp를 로컬 타임존이 아니라 UTC로 고정해서 해석/저장하게 했다. 수동/이전/외부 heartbeat 파일이 timezone 없는 ISO를 남겨도 KST 오프셋 때문에 stale 또는 recovered 판단이 틀어지는 위험을 줄였다.
+- micro-main readiness/proxy backtest/reaction variant/promotion mismatch report writer도 공통 atomic write로 바꿔, 검증 산출물이 중간 종료로 partial JSON을 남길 위험을 줄였다.
+- README, operating runbook, incident drill playbook, near-100 hardening plan을 같은 명령어 기준으로 갱신했다.
+
+### 왜 그렇게 판단했는가
+- 지금 남은 구조적 리스크는 “버그 하나”보다 “실패가 정상처럼 보이는 상태”다.
+- negative contract drill을 고정하면 다음부터는 운영 가드 자체가 실패를 숨기는지 먼저 검증할 수 있다.
+
+### 최신 검증 스냅샷
+- 정적 검증:
+  - `./.venv/bin/python -m py_compile scripts/run_micro_live_failure_drill.py scripts/run_micro_live_ops_heartbeat.py scripts/run_micro_live_no_order_watchdog.py scripts/run_replay_validation_bridge.py scripts/install_micro_live_ops_launchd.py scripts/run_worker.py scripts/operation_report_io.py app/services/runtime_worker_heartbeat.py app/services/strategy_engine.py tests/test_run_worker_boot_check.py tests/test_session_impulse_retest_audit_guard.py`
+- 테스트 실행 결과:
+  - `./.venv/bin/python -c 'from _pytest.config import main; raise SystemExit(main(["-q","tests/test_run_worker_boot_check.py","tests/test_health_readiness.py::test_worker_heartbeat_replaces_existing_file_atomically","tests/test_micro_live_operational_guards.py::test_launchd_generator_replaces_plists_atomically","tests/test_micro_live_operational_guards.py::test_launchd_installer_copies_plists_atomically","tests/test_micro_live_operational_guards.py::test_launchd_generator_returns_failure_when_load_fails","tests/test_micro_live_operational_guards.py::test_launchd_generator_keeps_unload_failure_as_warning","-q"]))'`
+  - `6 passed`
+  - UUID tmp writer 직접 검증: `atomic_writers_ok`
+  - auto-route audit guard 직접 검증: `audit_guard_ok`
+  - worker boot check 직접 검증: `worker_boot_check_once_guard_ok`
+  - worker heartbeat 직접 검증: `worker_heartbeat_atomic_ok`
+  - launchd plist 직접 검증: `launchd_plist_atomic_ok`
+  - 추가 atomic ops writer 정적 검증: `./.venv/bin/python -m py_compile scripts/run_micro_live_runtime_guard.py scripts/run_micro_live_boot_check.py scripts/run_micro_live_synthetic_canary.py scripts/run_live_reconciliation_watchdog.py scripts/run_session_impulse_retest_runtime_audit_report.py scripts/run_micro_live_failure_drill.py scripts/run_micro_live_no_order_watchdog.py scripts/run_micro_live_ops_heartbeat.py scripts/run_replay_validation_bridge.py scripts/run_micro_live_preflight.py scripts/run_runtime_signoff_review.py scripts/stage_monitor_tick.py scripts/ops_stage_board.py scripts/notify_entry_surface.py scripts/notify_operator_session_brief.py scripts/notify_stage_change.py scripts/paper_lineage_watch_tick.py scripts/watch_paper_candidate_drill.py`
+  - 추가 atomic ops writer diff check: `git diff --check`
+  - boolean parser 정적 검증: `./.venv/bin/python -m py_compile app/integrations/binance_futures.py app/services/strategy_engine.py app/services/execution_coordinator.py app/services/notification_dispatcher.py app/services/alert_retry_queue.py tests/test_binance_client.py tests/test_binance_trade_api.py`
+  - 확장 boolean parser 정적 검증: `./.venv/bin/python -m py_compile app/services/execution_approval.py app/services/order_intents.py app/services/safety_locks.py app/services/execution_reconciliation.py app/services/live_order_lifecycle.py app/services/execution_operator_dashboard.py app/services/plan_generator.py app/services/fast_failure_guard.py app/services/portfolio_risk_overlay.py app/services/micro_main_live_readiness.py app/services/micro_main_universe_policy.py app/services/micro_main_strategy_research.py`
+  - 보조 운영/리포트 boolean parser 정적 검증: `./.venv/bin/python -m py_compile app/services/b_continuation_activation.py app/services/multi_strategy_ab.py app/services/feature_calibration.py app/services/historical_walk_forward_proof.py app/services/portfolio_budget_report.py app/services/strategy_v2_pbo_dsr_trial_writer.py app/services/strategy_v2_scalp_experiment.py app/services/validation_payload_cache.py`
+  - 추가 운영 표면/atomic writer 정적 검증: `./.venv/bin/python -m py_compile app/services/notification_dispatcher.py scripts/run_live_reconciliation_watchdog.py scripts/run_micro_live_no_order_watchdog.py app/services/execution_operator_dashboard.py app/services/operational_checklist.py app/services/portfolio_budget_report.py app/services/scanner.py app/services/strategy_cluster_balance.py app/services/strategy_indicators.py app/services/strategy_engine.py app/services/portfolio_risk_overlay.py app/services/position_sizing.py app/services/historical_walk_forward_proof.py app/services/feature_calibration.py app/services/multi_strategy_ab.py`
+  - 운영 stage/action 보드 정적 검증: `./.venv/bin/python -m py_compile app/services/operator_action_priority.py scripts/ops_stage_board.py`
+  - live submit claim/추가 boolean parser 정적 검증: `./.venv/bin/python -m py_compile app/services/execution_coordinator.py app/services/order_intents.py app/services/position_state_machine.py app/services/execution_operator_dashboard.py app/services/operational_checklist.py app/services/kill_condition_automation.py app/services/strategy_engine.py app/services/plan_generator.py scripts/run_micro_live_preflight.py scripts/collect_operator_surface_divergence_snapshot.py scripts/run_paper_candidate_drill.py scripts/stage_monitor_tick.py scripts/ops_stage_board.py scripts/notify_stage_change.py scripts/run_post_live_pruning_review.py scripts/notify_entry_surface.py scripts/watch_paper_candidate_drill.py`
+  - live submit claim/추가 boolean parser diff check: `git diff --check -- app/services/execution_coordinator.py app/services/order_intents.py app/services/position_state_machine.py app/services/execution_operator_dashboard.py app/services/operational_checklist.py app/services/kill_condition_automation.py app/services/strategy_engine.py app/services/plan_generator.py scripts/run_micro_live_preflight.py scripts/collect_operator_surface_divergence_snapshot.py scripts/run_paper_candidate_drill.py scripts/stage_monitor_tick.py scripts/ops_stage_board.py scripts/notify_stage_change.py scripts/run_post_live_pruning_review.py scripts/notify_entry_surface.py scripts/watch_paper_candidate_drill.py`
+  - partial-fill lifecycle/atomic report stack 정적 검증: `./.venv/bin/python -m py_compile app/services/strategy_engine.py app/services/execution_coordinator.py app/services/report_io.py app/services/alpha_research_pipeline.py app/services/strategy_v2_stress_replay_assessment.py app/services/strategy_v2_pbo_dsr_design.py app/services/strategy_family_edge_review.py app/services/strategy_v2_scalp_experiment.py app/services/replay_evidence_review.py app/services/strategy_v2_stress_validation.py app/services/strategy_v2_pbo_dsr_trial_writer.py app/services/strategy_v2_pbo_dsr_artifact_store.py app/services/strategy_v2_stress_replay_prototype_worker.py app/services/strategy_v2_stress_replay_lineage.py app/services/historical_walk_forward_split_review.py app/services/strategy_v2_validation.py app/services/strategy_v2_thesis_validation.py app/services/strategy_v2_lock_validation.py app/services/strategy_v2_pbo_dsr_metrics.py app/services/strategy_v2_stress_replay_output_artifacts.py app/services/strategy_v2_stress_replay_runner_contract.py app/services/strategy_v2_pbo_dsr_threshold_runner.py app/services/live_alpha_operating_review.py app/services/plan_generator.py app/services/feature_calibration.py app/services/historical_walk_forward_proof.py app/services/parameter_changelog.py app/services/strategy_v2_stress_replay_lineage_writer.py scripts/stage_monitor_tick.py scripts/ops_stage_board.py scripts/notify_stage_change.py`
+  - partial-fill lifecycle/atomic report stack diff check: `git diff --check -- docs/SELF_CHECK_LOG.md app/services/strategy_engine.py app/services/execution_coordinator.py app/services/report_io.py app/services/alpha_research_pipeline.py app/services/strategy_v2_stress_replay_assessment.py app/services/strategy_v2_pbo_dsr_design.py app/services/strategy_family_edge_review.py app/services/strategy_v2_scalp_experiment.py app/services/replay_evidence_review.py app/services/strategy_v2_stress_validation.py app/services/strategy_v2_pbo_dsr_trial_writer.py app/services/strategy_v2_pbo_dsr_artifact_store.py app/services/strategy_v2_stress_replay_prototype_worker.py app/services/strategy_v2_stress_replay_lineage.py app/services/historical_walk_forward_split_review.py app/services/strategy_v2_validation.py app/services/strategy_v2_thesis_validation.py app/services/strategy_v2_lock_validation.py app/services/strategy_v2_pbo_dsr_metrics.py app/services/strategy_v2_stress_replay_output_artifacts.py app/services/strategy_v2_stress_replay_runner_contract.py app/services/strategy_v2_pbo_dsr_threshold_runner.py app/services/live_alpha_operating_review.py app/services/plan_generator.py app/services/feature_calibration.py app/services/historical_walk_forward_proof.py app/services/parameter_changelog.py app/services/strategy_v2_stress_replay_lineage_writer.py scripts/stage_monitor_tick.py scripts/ops_stage_board.py scripts/notify_stage_change.py`
+  - 추가 boolean hardening 정적 검증: `./.venv/bin/python -m py_compile app/db/repositories.py app/services/scanner.py app/services/alert_metrics.py app/services/forward_stress_regime_validation.py app/services/edge_evolution_rule.py app/services/replay_evidence_review.py app/services/strategy_v2_stress_replay_runner_contract.py app/services/strategy_v2_stress_replay_output_artifacts.py app/services/strategy_v2_stress_replay_lineage_writer.py app/services/strategy_v2_stress_replay_prototype_worker.py scripts/notify_stage_change.py app/services/edge_experiment_review.py app/services/outcome_control_trace.py app/services/opportunity_capture.py app/services/kill_condition_automation.py app/services/feature_calibration.py app/services/strategy_v2_stress_validation.py app/services/strategy_engine.py app/services/operator_action_priority.py app/services/execution_operator_dashboard.py app/services/session_guidance.py app/services/execution_friction_measurement.py app/services/execution_degradation_advisory.py scripts/stage_monitor_tick.py scripts/ops_stage_board.py`
+  - 추가 boolean hardening diff check: `git diff --check -- docs/SELF_CHECK_LOG.md app/db/repositories.py app/services/scanner.py app/services/alert_metrics.py app/services/forward_stress_regime_validation.py app/services/edge_evolution_rule.py app/services/replay_evidence_review.py app/services/strategy_v2_stress_replay_runner_contract.py app/services/strategy_v2_stress_replay_output_artifacts.py app/services/strategy_v2_stress_replay_lineage_writer.py app/services/strategy_v2_stress_replay_prototype_worker.py scripts/notify_stage_change.py app/services/edge_experiment_review.py app/services/outcome_control_trace.py app/services/opportunity_capture.py app/services/kill_condition_automation.py app/services/feature_calibration.py app/services/strategy_v2_stress_validation.py app/services/strategy_engine.py app/services/operator_action_priority.py app/services/execution_operator_dashboard.py app/services/session_guidance.py app/services/execution_friction_measurement.py app/services/execution_degradation_advisory.py scripts/stage_monitor_tick.py scripts/ops_stage_board.py`
+  - 추가 report/preflight/plan boolean hardening 정적 검증: `./.venv/bin/python -m py_compile app/services/validation_report.py app/services/alpha_research_pipeline.py app/services/strategy_v2_pbo_dsr_design.py app/services/outcome_funnel_operating_kpis.py app/services/outcome_bucket_granularity.py app/services/alt_data_family_research.py app/services/outcome_attribution.py app/services/strategy_v2_pbo_dsr_metrics.py app/services/historical_walk_forward_proof.py app/services/thesis_fingerprint.py app/services/position_sizing.py app/services/strategy_v2_validation.py app/services/plan_generator.py scripts/setup_micro_main_prop_alerts.py scripts/generate_operator_session_brief.py scripts/run_split_review_followup.py scripts/run_runtime_signoff_review.py scripts/run_paper_candidate_drill.py scripts/run_replay_validation_bridge.py scripts/notify_operator_session_brief.py scripts/run_micro_live_boot_check.py scripts/run_micro_live_failure_drill.py scripts/run_micro_live_preflight.py scripts/analyze_promotion_mismatch_waterfall.py`
+  - 추가 report/preflight/plan boolean hardening diff check: `git diff --check -- docs/SELF_CHECK_LOG.md app/services/validation_report.py app/services/alpha_research_pipeline.py app/services/strategy_v2_pbo_dsr_design.py app/services/outcome_funnel_operating_kpis.py app/services/outcome_bucket_granularity.py app/services/alt_data_family_research.py app/services/outcome_attribution.py app/services/strategy_v2_pbo_dsr_metrics.py app/services/historical_walk_forward_proof.py app/services/thesis_fingerprint.py app/services/position_sizing.py app/services/strategy_v2_validation.py app/services/plan_generator.py scripts/setup_micro_main_prop_alerts.py scripts/generate_operator_session_brief.py scripts/run_split_review_followup.py scripts/run_runtime_signoff_review.py scripts/run_paper_candidate_drill.py scripts/run_replay_validation_bridge.py scripts/notify_operator_session_brief.py scripts/run_micro_live_boot_check.py scripts/run_micro_live_failure_drill.py scripts/run_micro_live_preflight.py scripts/analyze_promotion_mismatch_waterfall.py`
+  - notification/fake-dispatcher 회귀 검증: `./.venv/bin/pytest -q tests/test_notify_operator_session_brief.py tests/test_entry_surface_scripts.py -q`
+  - 결과: `12 passed`
+  - stage notification fake-dispatcher 회귀 검증: `./.venv/bin/pytest -q tests/test_stage_monitor_scripts.py::test_dispatch_stage_notification_truncates_message_for_discord -q`
+  - 결과: `1 passed`
+  - `./.venv/bin/pytest -q tests/test_micro_live_operational_guards.py -q`
+  - `57 passed`
+  - nullish boolean parser 정적 스캔: `_safe_bool/_bool` 중 `"true"/"false"`를 처리하면서 `"none"/"null"`이 빠진 함수 `0건`
+  - static/classmethod self-reference AST 스캔: `0건`
+  - 추가 정적 검증: `rg -l '"none", "null"' app scripts | xargs ./.venv/bin/python -m py_compile`
+  - 추가 정적 검증: `./.venv/bin/python -m py_compile app/services/runtime_worker_heartbeat.py app/services/execution_approval.py app/services/execution_operator_dashboard.py app/services/strategy_engine.py app/services/kill_condition_automation.py scripts/operation_report_io.py scripts/run_micro_main_live_readiness.py scripts/run_micro_main_usdt_proxy_backtest.py scripts/run_reaction_gate_variant_backtest.py scripts/analyze_promotion_mismatch_waterfall.py scripts/run_replay_validation_bridge.py tests/test_notification_dispatcher.py tests/test_binance_trade_api.py tests/test_health_readiness.py`
+  - 추가 diff check: `rg -l '"none", "null"' app scripts | xargs git diff --check --`
+  - 추가 diff check: `git diff --check -- app/services/runtime_worker_heartbeat.py app/services/execution_approval.py app/services/execution_operator_dashboard.py app/services/strategy_engine.py app/services/kill_condition_automation.py scripts/operation_report_io.py scripts/run_micro_main_live_readiness.py scripts/run_micro_main_usdt_proxy_backtest.py scripts/run_reaction_gate_variant_backtest.py scripts/analyze_promotion_mismatch_waterfall.py scripts/run_replay_validation_bridge.py tests/test_notification_dispatcher.py tests/test_binance_trade_api.py tests/test_health_readiness.py`
+  - 추가 타깃 회귀 검증: `./.venv/bin/pytest -q tests/test_notification_dispatcher.py tests/test_binance_trade_api.py tests/test_health_readiness.py::test_health_worker_corrupt_heartbeat_is_invalid_not_missing tests/test_kill_condition_automation.py tests/test_execution_operator_dashboard.py tests/test_execution_transition.py -k 'micro_live_submit or live_submit or execution_lane_tracker or notification or binance or corrupt_heartbeat or kill_condition or operator_dashboard' -q`
+  - 결과: `42 passed`
+  - 추가 실행 경로 회귀 검증: `./.venv/bin/pytest -q tests/test_session_impulse_retest_execution_path.py -q`
+  - 결과: `73 passed`
+  - 추가 실행 경로 회귀 검증: `./.venv/bin/pytest -q tests/test_micro_live_preflight.py -q`
+  - 결과: `21 passed`
+  - 추가 실행 경로 회귀 검증: `./.venv/bin/pytest -q tests/test_api_smoke.py -q`
+  - 결과: `1 passed`
+  - 추가 실행 경로 회귀 검증: `./.venv/bin/pytest -q tests/test_binance_client.py -q`
+  - 결과: `20 passed`
+  - 추가 실행 경로 회귀 검증: `./.venv/bin/pytest -q tests/test_execution_transition.py -q`
+  - 결과: `52 passed`
+  - heartbeat timezone 회귀 검증: `./.venv/bin/pytest -q tests/test_health_readiness.py -q`
+  - 결과: `25 passed`
+  - heartbeat/worker/session 통합 회귀 검증: `./.venv/bin/pytest -q tests/test_health_readiness.py tests/test_micro_live_preflight.py tests/test_session_impulse_retest_execution_path.py -q`
+  - 결과: `119 passed`
+  - timezone parser 재검색: `fromisoformat(...).astimezone(...)` 직접 패턴 `0건`
+  - 중복 class/method AST 스캔: `0건`
+  - 전체 Python 컴파일 검증: `find app scripts tests -name '*.py' -print0 | xargs -0 ./.venv/bin/python -m py_compile`
+  - 최신 전체 회귀 검증: `./.venv/bin/pytest -q -rs`
+  - 결과: `968 passed, 1 skipped`
+  - 이번 추가 수정 후 전체 회귀는 재시도했지만 pytest 출력 없이 실행 세션이 종료되어 확정 결과로 기록하지 않는다. 현재 확정값은 위 정적 검증과 타깃 테스트다.
+- 드릴 실행 결과:
+  - `./.venv/bin/python scripts/run_micro_live_failure_drill.py --no-fail-exit`
+  - 결과: `PASS`, scenario_count `8`, failed_count `0`
+  - latest: `reports/operations/micro_live_failure_drill/latest.md`, `latest.json`
+- heartbeat 확인:
+  - `./.venv/bin/python scripts/run_micro_live_ops_heartbeat.py --no-fail-exit`
+  - 결과: `WATCH`, hard failure `0`; `failure_drill=PASS`
 
 ## 2026-05-10 MICRO_LIVE Content-Aware Ops Heartbeat Guard
 ### 무엇을 발견했는가
@@ -2964,3 +3091,29 @@
   - `./.venv/bin/python -m py_compile app/services/execution_operator_dashboard.py app/services/execution_operator_ui.py`
 - 테스트 실행 결과:
   - `./.venv/bin/pytest -q tests/test_execution_operator_dashboard.py tests/test_api_smoke.py -q`
+
+## 2026-05-10 Iteration #134
+### 무엇을 발견했는가
+- 일부 운영 리포트 스크립트가 `generated_at`을 파일명으로 바꿀 때 각자 `datetime.fromisoformat(...replace("Z", "+00:00"))`를 직접 호출하고 있었다.
+- 현재 생성 payload는 대부분 UTC `Z`라 즉시 장애 가능성은 낮지만, 레거시 JSON이나 테스트 주입 값이 naive timestamp/datetime이면 스크립트마다 UTC 정규화가 달라질 수 있었다.
+
+### 무엇을 수정했는가
+- `scripts/operation_report_io.py`에 `parse_report_generated_at` 공통 파서를 추가해 `Z`, naive string, naive `datetime`을 모두 UTC aware timestamp로 정규화하게 했다.
+- live replay parity, replay validation bridge, stage monitor, failure drill, session impulse retest audit, synthetic canary, reconciliation watchdog, ops heartbeat, runtime guard, no-order watchdog, boot check의 직접 파싱을 공통 파서로 교체했다.
+- ops heartbeat/no-order watchdog의 로컬 atomic writer를 공통 atomic writer에 위임하게 하고, launchd plist/copy atomic writer cleanup도 `OSError`를 삼켜 cleanup 실패가 원래 성공한 replace를 덮지 않게 했다.
+- 스크립트 엔트리포인트 테스트에 공통 파서의 `Z`/naive string/naive datetime 회귀 케이스를 추가했다.
+
+### 왜 그렇게 판단했는가
+- 운영 리포트 파일명 생성은 작은 문제처럼 보여도 launchd/Discord/watchdog 체인에서는 한 스크립트 예외가 곧 “상태 확인 불가”로 이어진다.
+- 공통 파서로 모으면 같은 형태의 타임스탬프 버그가 새 스크립트에 반복될 가능성을 줄일 수 있다.
+
+### 최신 검증 스냅샷
+- 정적 검증:
+  - `./.venv/bin/python -m py_compile scripts/operation_report_io.py scripts/run_live_replay_parity_audit.py scripts/run_replay_validation_bridge.py scripts/stage_monitor_tick.py scripts/run_micro_live_failure_drill.py scripts/run_session_impulse_retest_runtime_audit_report.py scripts/run_micro_live_synthetic_canary.py scripts/run_live_reconciliation_watchdog.py scripts/run_micro_live_ops_heartbeat.py scripts/run_micro_live_runtime_guard.py scripts/run_micro_live_no_order_watchdog.py scripts/run_micro_live_boot_check.py`
+  - `git diff --check -- scripts/operation_report_io.py scripts/run_live_replay_parity_audit.py scripts/run_replay_validation_bridge.py scripts/stage_monitor_tick.py scripts/run_micro_live_failure_drill.py scripts/run_session_impulse_retest_runtime_audit_report.py scripts/run_micro_live_synthetic_canary.py scripts/run_live_reconciliation_watchdog.py scripts/run_micro_live_ops_heartbeat.py scripts/run_micro_live_runtime_guard.py scripts/run_micro_live_no_order_watchdog.py scripts/run_micro_live_boot_check.py tests/test_script_entrypoints.py`
+- 테스트 실행 결과:
+  - `./.venv/bin/pytest -q tests/test_script_entrypoints.py -q`
+  - `./.venv/bin/pytest -q tests/test_micro_live_operational_guards.py::test_binance_rule_drift_snapshot_main_writes_latest_json_atomically tests/test_live_order_lifecycle.py -q`
+  - `./.venv/bin/pytest -q tests/test_micro_live_operational_guards.py::test_launchd_generator_replaces_plists_atomically tests/test_micro_live_operational_guards.py::test_launchd_installer_copies_plists_atomically tests/test_micro_live_operational_guards.py::test_report_atomic_writers_use_unique_tmp_cleanup -q`
+  - `./.venv/bin/pytest -q tests/test_micro_live_operational_guards.py -q`
+  - `./.venv/bin/pytest -q` (`968 passed, 1 skipped`)

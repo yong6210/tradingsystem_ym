@@ -12,6 +12,12 @@ def test_binance_client_tolerates_malformed_constructor_numeric_values() -> None
     assert client.recv_window == 5000
 
 
+def test_binance_client_parses_string_false_live_trade_flag() -> None:
+    client = BinanceFuturesClient(live_trade_enabled="false")
+
+    assert client.live_trade_enabled is False
+
+
 def test_parse_kline_row() -> None:
     row = [
         1700000000000,
@@ -398,6 +404,27 @@ def test_normalize_user_stream_order_trade_update_and_account_update() -> None:
     assert account_update["event_reason"] == "ORDER"
     assert account_update["positions"][0]["position_key"] == "BTCUSDC:LONG"
     assert account_update["positions"][0]["position_amt"] == 0.01
+
+
+def test_normalize_user_stream_parses_string_false_reduce_only() -> None:
+    trade_update = BinanceFuturesClient.normalize_user_stream_message(
+        {
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 1700000000000,
+            "o": {
+                "s": "BTCUSDC",
+                "i": 12345,
+                "c": "entry-order-1",
+                "S": "BUY",
+                "o": "LIMIT",
+                "X": "NEW",
+                "x": "NEW",
+                "R": "false",
+            },
+        }
+    )
+
+    assert trade_update["reduce_only"] is False
 
 
 def test_normalize_user_stream_tolerates_malformed_numeric_fields() -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.db.session import SessionLocal, init_db
 from app.services.live_order_lifecycle import LiveOrderLifecycleReporter
+from scripts.operation_report_io import atomic_write_text
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,6 +39,11 @@ def _display_path(path: Path) -> str:
         return str(path.resolve().relative_to(ROOT_DIR))
     except ValueError:
         return str(path)
+
+
+def _parse_generated_at(value: Any) -> datetime:
+    parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
 
 
 def _write_report(path: Path, payload: dict[str, Any]) -> None:
@@ -93,7 +99,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.extend(["", "## Raw Payload", "", "```json"])
     lines.append(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     lines.append("```")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def main() -> int:
@@ -107,7 +113,7 @@ def main() -> int:
             limit=max(1, int(args.limit)),
         )
     if not args.no_write_report:
-        generated = datetime.fromisoformat(str(payload["generated_at"]))
+        generated = _parse_generated_at(payload["generated_at"])
         symbol = str(payload.get("symbol") or "ALL")
         report_path = ROOT_DIR / args.report_dir / f"live_order_lifecycle_{symbol}_{generated.strftime('%Y%m%dT%H%M%SZ')}.md"
         _write_report(report_path, payload)

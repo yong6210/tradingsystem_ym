@@ -11,6 +11,10 @@ from typing import Any
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from scripts.operation_report_io import atomic_write_text
 
 
 def parse_args() -> argparse.Namespace:
@@ -103,7 +107,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append("```json")
     lines.append(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     lines.append("```")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def main() -> int:

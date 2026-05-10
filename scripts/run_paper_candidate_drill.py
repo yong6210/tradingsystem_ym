@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sqlite3
+import sys
 from collections import Counter
 from datetime import UTC, datetime
 from http.client import RemoteDisconnected
@@ -18,6 +19,8 @@ from urllib.request import Request, urlopen
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 _REQUEST_RETRY_ATTEMPTS = 5
 _REQUEST_RETRY_BASE_DELAY_SECONDS = 1.0
 _REQUEST_TIMEOUT_SECONDS = 90
@@ -36,6 +39,8 @@ _ENTRY_VARIANT_PREFERENCE = {
     "confirm": 2,
     "unknown": 3,
 }
+
+from scripts.operation_report_io import atomic_write_text
 
 
 def _database_url() -> str:
@@ -201,6 +206,19 @@ def _request_json(
 
 def _status(ok: bool) -> str:
     return "PASS" if ok else "FAIL"
+
+
+def _bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return True if value else False
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -483,8 +501,8 @@ def _decorate_family_cluster_guard(
     snapshot = dict(guard_snapshot or {})
     family = str(item.get("strategy_family") or "").strip().lower()
     family_state = dict((snapshot.get("families") or {}).get(family) or {})
-    item["family_cluster_guard_active"] = bool(family_state.get("cluster_guard_active", False))
-    item["family_loss_cooldown_active"] = bool(family_state.get("loss_cooldown_active", False))
+    item["family_cluster_guard_active"] = _bool(family_state.get("cluster_guard_active", False))
+    item["family_loss_cooldown_active"] = _bool(family_state.get("loss_cooldown_active", False))
     item["family_cluster_window_entry_count"] = int(family_state.get("recent_window_entry_count", 0) or 0)
     item["family_recent_loss_count"] = int(family_state.get("recent_loss_count", 0) or 0)
     item["family_cluster_guard_summary"] = family_state
@@ -506,8 +524,8 @@ def _decorate_trend_proof_priority(
         for value in (snapshot.get("eligible_symbols") or [])
         if str(value or "").strip()
     }
-    active = bool(snapshot.get("active", False))
-    item["trend_proof_priority_active"] = bool(
+    active = _bool(snapshot.get("active", False))
+    item["trend_proof_priority_active"] = _bool(
         active
         and family == "trend_continuation"
         and entry_variant == "limit"
@@ -607,8 +625,8 @@ def _edge_experiment_summary(validation_payload: dict[str, Any] | None) -> dict[
     edge_proof_posture = dict(source.get("edge_proof_posture") or {})
     daily_edge_kpis = dict(source.get("daily_edge_kpis") or {})
     return {
-        "available": bool(source.get("available", True)),
-        "advisory_only": bool(source.get("advisory_only", True)),
+        "available": _bool(source.get("available", True), default=True),
+        "advisory_only": _bool(source.get("advisory_only", True), default=True),
         "edge_state": str(source.get("edge_state") or "insufficient_edge_measurement"),
         "summary": str(source.get("summary") or ""),
         "true_edge_ratio": round(_float(source.get("true_edge_ratio")), 4),
@@ -673,7 +691,7 @@ def _symbol_refresh_summary(indicator_payload: dict[str, Any] | None) -> dict[st
     top_block_reason, top_block_count = _top_refresh_block(diagnostics)
     summary = {
         "symbol": str(refresh.get("symbol") or (indicator_payload or {}).get("symbol") or "").upper() or None,
-        "updated": bool(refresh.get("updated", False)),
+        "updated": _bool(refresh.get("updated", False)),
         "generated_plan_count": int(refresh.get("plans", 0) or 0),
         "active_signal_plan_count": int(refresh.get("active_signal_plan_count", 0) or 0),
         "active_zone_count": int(refresh.get("active_zone_count", diagnostics.get("active_zone_count", 0)) or 0),
@@ -850,16 +868,16 @@ def _rank_candidates(
         item = _decorate_family_cluster_guard(item, guard_snapshot=family_guard_snapshot)
         item = _decorate_trend_proof_priority(item, trend_proof_snapshot=trend_proof_snapshot)
         item["entry_variant_preference"] = _candidate_entry_variant(item)
-        if bool(item.get("family_cluster_guard_active")) or bool(item.get("family_loss_cooldown_active")):
+        if _bool(item.get("family_cluster_guard_active")) or _bool(item.get("family_loss_cooldown_active")):
             continue
         filtered.append(item)
     if not filtered:
         return None
     filtered.sort(
         key=lambda row: (
-            not bool(row.get("trend_proof_priority_active")),
-            bool(row.get("symbol_diversity_active_open_symbol")),
-            bool(row.get("symbol_diversity_overrepresented")),
+            not _bool(row.get("trend_proof_priority_active")),
+            _bool(row.get("symbol_diversity_active_open_symbol")),
+            _bool(row.get("symbol_diversity_overrepresented")),
             int(_ENTRY_VARIANT_PREFERENCE.get(str(row.get("entry_variant_preference") or "unknown"), 3)),
             -float(row.get("expected_ev_at_recommended_size_r") or 0.0),
             -float(row.get("expected_ev_r") or 0.0),
@@ -904,7 +922,7 @@ def _trend_proof_candidate_summary(
     trend_proof_snapshot: dict[str, Any] | None,
 ) -> dict[str, Any]:
     snapshot = dict(trend_proof_snapshot or {})
-    if not bool(snapshot.get("available", False)):
+    if not _bool(snapshot.get("available", False)):
         return {
             "available": False,
             "active": False,
@@ -979,7 +997,7 @@ def _trend_proof_candidate_summary(
     top_ranked = dict(ranked[0] or {}) if ranked else {}
     return {
         "available": True,
-        "active": bool(snapshot.get("active", False)),
+        "active": _bool(snapshot.get("active", False)),
         "availability_state": state,
         "eligible_symbols": sorted(eligible_symbols),
         "scanner_candidate_count": len(scanner_matches),
@@ -1097,15 +1115,15 @@ def _rank_override_candidates(
         item = _decorate_symbol_diversity(row, diversity_snapshot=diversity_snapshot)
         item = _decorate_family_cluster_guard(item, guard_snapshot=family_guard_snapshot)
         item["entry_variant_preference"] = _candidate_entry_variant(item)
-        if bool(item.get("family_cluster_guard_active")) or bool(item.get("family_loss_cooldown_active")):
+        if _bool(item.get("family_cluster_guard_active")) or _bool(item.get("family_loss_cooldown_active")):
             continue
         filtered.append(item)
     if not filtered:
         return None
     filtered.sort(
         key=lambda row: (
-            bool(row.get("symbol_diversity_active_open_symbol")),
-            bool(row.get("symbol_diversity_overrepresented")),
+            _bool(row.get("symbol_diversity_active_open_symbol")),
+            _bool(row.get("symbol_diversity_overrepresented")),
             int(_ENTRY_VARIANT_PREFERENCE.get(str(row.get("entry_variant_preference") or "unknown"), 3)),
             -float(row.get("expected_ev_r") or 0.0),
             -float(row.get("expected_ev_at_recommended_size_r") or 0.0),
@@ -1244,7 +1262,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append("```json")
     lines.append(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     lines.append("```")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def main() -> int:
@@ -1483,7 +1501,7 @@ def main() -> int:
                     f"approval_state={approval_state} allowed_execution_mode={allowed_execution_mode} source={approval_source}"
                     + (
                         f" override={approval_for_check.get('paper_lineage_override_reason', '')}"
-                        if approval_for_check and approval_for_check.get("paper_lineage_override_applied")
+                        if approval_for_check and _bool(approval_for_check.get("paper_lineage_override_applied"))
                         else ""
                     )
                 ),
@@ -1527,16 +1545,16 @@ def main() -> int:
             next_steps.append("Requested PAPER lineage families are absent from both scanner and portfolio surfaces; this is a market-availability wait, not an approval blockage.")
         else:
             next_steps.append("Requested PAPER lineage families are present but not eligible; inspect portfolio block reasons before widening scope.")
-        if bool(trend_proof_candidate_summary.get("available", False)) and str(
+        if _bool(trend_proof_candidate_summary.get("available", False)) and str(
             trend_proof_candidate_summary.get("availability_state") or ""
         ) != "trend_limit_candidate_ready":
             next_steps.append(str(trend_proof_candidate_summary.get("summary") or "Trend proof candidate is still not ready."))
         if symbol_refresh_summary and str(symbol_refresh_summary.get("message") or ""):
             next_steps.append(str(symbol_refresh_summary["message"]))
     else:
-        if bool(diversity_snapshot.get("available", False)) and (
-            bool(candidate.get("symbol_diversity_active_open_symbol"))
-            or bool(candidate.get("symbol_diversity_overrepresented"))
+        if _bool(diversity_snapshot.get("available", False)) and (
+            _bool(candidate.get("symbol_diversity_active_open_symbol"))
+            or _bool(candidate.get("symbol_diversity_overrepresented"))
         ):
             next_steps.append(
                 "Selected candidate still carries symbol concentration pressure because no cleaner family alternative was eligible in this pass."

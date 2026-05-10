@@ -19,6 +19,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.core.config import get_settings
 from app.core import operator_surface_contracts as osc
+from scripts.operation_report_io import atomic_write_text
 
 
 DEFAULT_STAGE_FILE = ROOT_DIR / "reports/operations/stage_monitor/current_stage.json"
@@ -61,6 +62,22 @@ def _live_execution_allowed_entry_models() -> tuple[str, ...]:
         if item.strip()
     )
     return configured or ("LIMIT",)
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
+
+
 _HISTORICAL_CONTRACT_PROOF_LOOKBACK_DAYS = max(
     int(os.environ.get("RUNTIME_HISTORICAL_CONTRACT_PROOF_LOOKBACK_DAYS", "180")),
     1,
@@ -393,7 +410,7 @@ def _build_runtime_reopen_gate_summary(
             code_prefix=code_prefix,
         )
         closed_trade_count = int(post_patch.get("closed_trade_count", 0) or 0)
-        ready = bool(post_patch.get("ready_for_replay_refresh", False)) and not breaches
+        ready = _safe_bool(post_patch.get("ready_for_replay_refresh", False)) and not breaches
         remaining_to_min = max(int(min_closed_trades) - closed_trade_count, 0)
         summary = (
             f"{label} ready"
@@ -825,7 +842,7 @@ def _build_runtime_decision(
                 max_loss_streak=_LIVE_ELIGIBLE_FULL_LIVE_MAX_LOSS_STREAK,
                 code_prefix="live_eligible_full_live",
             )
-            if bool(post_patch.get("ready_for_replay_refresh", False)) and not full_live_post_patch_breaches:
+            if _safe_bool(post_patch.get("ready_for_replay_refresh", False)) and not full_live_post_patch_breaches:
                 return {
                     "band": osc.RUNTIME_DECISION_BAND_AMBER_CONDITIONAL,
                     "effective_action": osc.RUNTIME_REOPEN_ACTION_CONDITIONAL_FULL_LIVE_SIGNOFF,
@@ -839,7 +856,7 @@ def _build_runtime_decision(
                     "post_patch_override_active": True,
                     "post_patch_summary_key": post_patch_source,
                 }
-            if bool(post_patch.get("ready_for_replay_refresh", False)) and not micro_live_post_patch_breaches:
+            if _safe_bool(post_patch.get("ready_for_replay_refresh", False)) and not micro_live_post_patch_breaches:
                 return {
                     "band": osc.RUNTIME_DECISION_BAND_AMBER_CONDITIONAL,
                     "effective_action": osc.RUNTIME_REOPEN_ACTION_CONDITIONAL_MICRO_LIVE_SIGNOFF,
@@ -859,7 +876,7 @@ def _build_runtime_decision(
                 "allowed_reopen_scope": osc.RUNTIME_DECISION_SCOPE_NONE,
                 "summary": "replay downside exceeds operating tolerance; keep runtime closed",
                 "breached_thresholds": breached_thresholds,
-                "post_patch_breached_thresholds": micro_live_post_patch_breaches if bool(post_patch) else [],
+                "post_patch_breached_thresholds": micro_live_post_patch_breaches if _safe_bool(post_patch) else [],
                 "post_patch_override_active": False,
                 "post_patch_summary_key": post_patch_source,
             }
@@ -903,7 +920,7 @@ def _apply_runtime_decision(payload: dict[str, Any]) -> dict[str, Any]:
     approval_template_focus = dict(enriched.get("approval_template_focus") or {})
     decision = _build_runtime_decision(
         runtime_ready=_runtime_signoff_eligible_status(runtime_reopen.get("status"))
-        or bool(runtime_reopen.get("ready", False)),
+        or _safe_bool(runtime_reopen.get("ready", False)),
         required_reviews=required_reviews,
         approval_template_focus=approval_template_focus,
     )
@@ -1175,7 +1192,7 @@ def _build_mitigation_review_summary(
                 days=days,
                 action="run_entry_timing_split_review",
             )
-            has_target = bool(entry_target.get("symbol"))
+            has_target = _safe_bool(entry_target.get("symbol"))
             item.update(
                 {
                     "review_mode": "live_split_review",
@@ -2697,7 +2714,7 @@ def _build_payload(stage: dict[str, Any], *, symbol: str, universe: str, days: i
     advisory_reviews = [dict(item) for item in list(signoff.get("advisory_reviews") or [])]
     primary_required = dict(required_reviews[0] or {}) if required_reviews else {}
 
-    runtime_ready = _runtime_signoff_eligible_status(runtime_reopen.get("status")) or bool(runtime_reopen.get("ready", False))
+    runtime_ready = _runtime_signoff_eligible_status(runtime_reopen.get("status")) or _safe_bool(runtime_reopen.get("ready", False))
     if not runtime_ready:
         status = "NOT_READY_FOR_SIGNOFF"
         summary_line = "Runtime reopen is not ready yet; operator sign-off should not proceed."
@@ -2742,7 +2759,7 @@ def _build_payload(stage: dict[str, Any], *, symbol: str, universe: str, days: i
         "runtime_signoff_review_command": _runtime_signoff_command(symbol=symbol, universe=universe, days=days),
         "runtime_reopen_status": {
             "status": str(runtime_reopen.get("status") or "not_available"),
-            "ready": bool(runtime_reopen.get("ready", False)),
+            "ready": _safe_bool(runtime_reopen.get("ready", False)),
         },
         "risk_gate": {
             "status": str(risk.get("status") or "NOT_AVAILABLE"),
@@ -2974,7 +2991,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
             lines.append(
                 f"- post_patch_sample: {int(post_patch.get('closed_trade_count', 0) or 0)}/"
                 f"{int(post_patch.get('target_closed_trades', 0) or 0)} | "
-                f"ready={bool(post_patch.get('ready_for_replay_refresh', False))} | "
+                f"ready={_safe_bool(post_patch.get('ready_for_replay_refresh', False))} | "
                 f"stop_loss={float(post_patch.get('stop_loss_share', 0.0) or 0.0):.0%} | "
                 f"confirm_loss={float(post_patch.get('confirm_named_loss_share', 0.0) or 0.0):.0%} | "
                 f"median_held_bars={float(post_patch.get('median_held_bars', 0.0) or 0.0):.0f}"
@@ -2990,7 +3007,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
                 f"- live_eligible_post_patch_sample: {int(live_eligible_post_patch.get('closed_trade_count', 0) or 0)}/"
                 f"{int(live_eligible_post_patch.get('target_closed_trades', 0) or 0)} | "
                 f"contract={str(live_eligible_post_patch.get('contract_scope') or 'none')} | "
-                f"ready={bool(live_eligible_post_patch.get('ready_for_replay_refresh', False))} | "
+                f"ready={_safe_bool(live_eligible_post_patch.get('ready_for_replay_refresh', False))} | "
                 f"stop_loss={float(live_eligible_post_patch.get('stop_loss_share', 0.0) or 0.0):.0%} | "
                 f"p5={float(live_eligible_post_patch.get('replay_p5_r', 0.0) or 0.0):+.2f}R | "
                 f"maxDD={float(live_eligible_post_patch.get('replay_max_drawdown_r', 0.0) or 0.0):.2f}R"
@@ -3006,7 +3023,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
                 f"- historical_execution_contract_proof: {int(historical_contract.get('closed_trade_count', 0) or 0)}/"
                 f"{int(historical_contract.get('target_closed_trades', 0) or 0)} | "
                 f"lookback={int(historical_contract.get('lookback_days', 0) or 0)}d | "
-                f"advisory_only={bool(historical_contract.get('advisory_only', False))} | "
+                f"advisory_only={_safe_bool(historical_contract.get('advisory_only', False))} | "
                 f"stop_loss={float(historical_contract.get('stop_loss_share', 0.0) or 0.0):.0%} | "
                 f"p5={float(historical_contract.get('replay_p5_r', 0.0) or 0.0):+.2f}R | "
                 f"maxDD={float(historical_contract.get('replay_max_drawdown_r', 0.0) or 0.0):.2f}R"
@@ -3021,7 +3038,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
             lines.append(
                 f"- historical_walk_forward_execution: {int(historical_walk_forward_execution.get('closed_trade_count', 0) or 0)}/"
                 f"{int(historical_walk_forward_execution.get('target_closed_trades', 0) or 0)} | "
-                f"advisory_only={bool(historical_walk_forward_execution.get('advisory_only', False))} | "
+                f"advisory_only={_safe_bool(historical_walk_forward_execution.get('advisory_only', False))} | "
                 f"stop_loss={float(historical_walk_forward_execution.get('stop_loss_share', 0.0) or 0.0):.0%} | "
                 f"p5={float(historical_walk_forward_execution.get('replay_p5_r', 0.0) or 0.0):+.2f}R | "
                 f"maxDD={float(historical_walk_forward_execution.get('replay_max_drawdown_r', 0.0) or 0.0):.2f}R"
@@ -3036,7 +3053,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
             lines.append(
                 f"- historical_walk_forward_strategy: {int(historical_walk_forward_strategy.get('closed_trade_count', 0) or 0)}/"
                 f"{int(historical_walk_forward_strategy.get('target_closed_trades', 0) or 0)} | "
-                f"advisory_only={bool(historical_walk_forward_strategy.get('advisory_only', False))} | "
+                f"advisory_only={_safe_bool(historical_walk_forward_strategy.get('advisory_only', False))} | "
                 f"stop_loss={float(historical_walk_forward_strategy.get('stop_loss_share', 0.0) or 0.0):.0%} | "
                 f"p5={float(historical_walk_forward_strategy.get('replay_p5_r', 0.0) or 0.0):+.2f}R | "
                 f"maxDD={float(historical_walk_forward_strategy.get('replay_max_drawdown_r', 0.0) or 0.0):.2f}R"
@@ -3051,7 +3068,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
             lines.append(
                 f"- historical_walk_forward_trend: {int(historical_walk_forward_trend.get('closed_trade_count', 0) or 0)}/"
                 f"{int(historical_walk_forward_trend.get('target_closed_trades', 0) or 0)} | "
-                f"advisory_only={bool(historical_walk_forward_trend.get('advisory_only', False))} | "
+                f"advisory_only={_safe_bool(historical_walk_forward_trend.get('advisory_only', False))} | "
                 f"stop_loss={float(historical_walk_forward_trend.get('stop_loss_share', 0.0) or 0.0):.0%} | "
                 f"p5={float(historical_walk_forward_trend.get('replay_p5_r', 0.0) or 0.0):+.2f}R | "
                 f"maxDD={float(historical_walk_forward_trend.get('replay_max_drawdown_r', 0.0) or 0.0):.2f}R"
@@ -3077,7 +3094,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append("```json")
     lines.append(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     lines.append("```")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def _write_confirm_loss_cluster_report(path: Path, payload: dict[str, Any]) -> None:
@@ -3172,7 +3189,7 @@ def _write_confirm_loss_cluster_report(path: Path, payload: dict[str, Any]) -> N
         "- Prioritize `range_entry_timing_review` before any reopen decision; "
         "treat `shadow_fail_fast_review` as the next shadow-only mitigation."
     )
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def _write_entry_timing_loss_report(path: Path, payload: dict[str, Any]) -> None:
@@ -3257,7 +3274,7 @@ def _write_entry_timing_loss_report(path: Path, payload: dict[str, Any]) -> None
     lines.append("## Next Step")
     lines.append("")
     lines.append("- Prioritize `range_entry_timing_review`; confirm cohort dominates the replay downside.")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def _write_runtime_mitigation_plan_report(path: Path, payload: dict[str, Any]) -> None:
@@ -3299,7 +3316,7 @@ def _write_runtime_mitigation_plan_report(path: Path, payload: dict[str, Any]) -
             f"constraint={str(item.get('current_constraint') or 'none')} / "
             f"command={str(item.get('command') or 'n/a')}"
         )
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def _report_path_value(path: Path) -> str:

@@ -17,6 +17,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.core.config import get_settings
 from app.services.notification_dispatcher import NotificationDispatcher
+from scripts.operation_report_io import atomic_write_text
 
 
 def parse_args() -> argparse.Namespace:
@@ -203,7 +204,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append("```json")
     lines.append(json.dumps(payload, ensure_ascii=False, indent=2))
     lines.append("```")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def main() -> int:

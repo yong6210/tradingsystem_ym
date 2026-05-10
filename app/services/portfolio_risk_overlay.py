@@ -44,6 +44,21 @@ class _ThesisCluster:
 class PortfolioRiskOverlayService:
     """Apply portfolio-level exposure limits to ranked scanner candidates."""
 
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value) if isfinite(float(value)) else bool(default)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
     _OUTCOME_BIAS_MIN_CLOSED = 4
     _OUTCOME_BIAS_POSITIVE_RATE = 0.5
     _OUTCOME_BIAS_NEGATIVE_RATE = 0.3
@@ -292,10 +307,10 @@ class PortfolioRiskOverlayService:
     @staticmethod
     def _transition_edge_variant_enabled_for_row(validity: dict[str, Any] | None) -> bool:
         payload = dict(validity or {})
-        if bool(payload.get("transition_edge_variant_applied")):
+        if PortfolioRiskOverlayService._safe_bool(payload.get("transition_edge_variant_applied")):
             return True
         variant = dict(payload.get("transition_edge_variant") or {})
-        return bool(variant) and not bool(variant.get("shadow_only"))
+        return bool(variant) and not PortfolioRiskOverlayService._safe_bool(variant.get("shadow_only"), default=False)
 
     def _transition_edge_variant_overlay_key(
         self,
@@ -1363,7 +1378,7 @@ class PortfolioRiskOverlayService:
             outcome_inputs_by_symbol=outcome_inputs_by_symbol,
             apply_outcome_bias=apply_outcome_bias,
         )
-        accepted = [row for row in assessed if bool(row.get("accepted"))]
+        accepted = [row for row in assessed if self._safe_bool(row.get("accepted"))]
         accepted.sort(key=lambda item: float(item.get("final_rank_score", 0.0)), reverse=True)
         return accepted[:limit]
 

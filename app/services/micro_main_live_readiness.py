@@ -4,6 +4,21 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
+
+
 @dataclass(frozen=True, slots=True)
 class MicroMainLiveReadiness:
     symbol: str
@@ -39,7 +54,10 @@ def evaluate_micro_main_live_readiness(
     rollout_priority = int((entry or {}).get("rollout_priority", 0) or 0)
     risk_multiplier = float((entry or {}).get("risk_multiplier", 0.0) or 0.0)
 
-    available = bool(shadow.get("available", False))
+    enabled = _safe_bool(enabled)
+    shadow_only = _safe_bool(shadow_only)
+    secondary_live_enabled = _safe_bool(secondary_live_enabled)
+    available = _safe_bool(shadow.get("available", False))
     decision = str(shadow.get("decision") or "REJECT").upper()
     recent_closed = int(shadow.get("recent_closed", 0) or 0)
     ev_r = float(shadow.get("ev_r", 0.0) or 0.0)
@@ -89,8 +107,8 @@ def evaluate_micro_main_live_readiness(
 
     return MicroMainLiveReadiness(
         symbol=normalized_symbol,
-        enabled=bool(enabled),
-        shadow_only=bool(shadow_only),
+        enabled=enabled,
+        shadow_only=shadow_only,
         tier=tier,
         rollout_priority=rollout_priority,
         risk_multiplier=risk_multiplier,
@@ -107,7 +125,7 @@ def evaluate_micro_main_live_readiness(
             "latest_trade": dict(shadow.get("latest_trade") or {}) or None,
             "partial_activation_ratio": round(float(partial_ratio), 4),
             "core_live_slots": int(core_live_slots),
-            "secondary_live_enabled": bool(secondary_live_enabled),
+            "secondary_live_enabled": secondary_live_enabled,
         },
     )
 

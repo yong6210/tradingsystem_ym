@@ -6,6 +6,20 @@ from typing import Any
 from sqlalchemy import MetaData, Table, func, inspect, select
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
+
+
 @dataclass(frozen=True, slots=True)
 class AltDataDatasetRequirement:
     dataset_key: str
@@ -150,7 +164,7 @@ def inspect_alt_data_feasibility(*, bind: Any) -> dict[str, Any]:
 
     families_payload: dict[str, Any] = {}
     for spec in default_alt_data_family_specs():
-        missing_datasets = [key for key in spec.required_datasets if not bool(datasets_payload.get(key, {}).get("available", False))]
+        missing_datasets = [key for key in spec.required_datasets if not _safe_bool(datasets_payload.get(key, {}).get("available", False))]
         families_payload[spec.key] = {
             "regime_hint": spec.regime_hint,
             "thesis": spec.thesis,

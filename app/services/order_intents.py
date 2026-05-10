@@ -73,6 +73,21 @@ class OrderIntentService:
         return int(parsed) if isfinite(parsed) else int(default)
 
     @staticmethod
+    def _safe_bool(value: object, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value) if isfinite(float(value)) else bool(default)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
+    @staticmethod
     def _coerce_approval_state(value: object) -> ApprovalState:
         try:
             return ApprovalState(str(value or ApprovalState.BLOCKED.value))
@@ -107,13 +122,13 @@ class OrderIntentService:
         if latest_requested_mode != requested_mode.value:
             return None
         intent_snapshot = dict(payload.get("intent_snapshot") or {})
-        latest_override_requested = bool(
+        latest_override_requested = self._safe_bool(
             payload.get(
                 "paper_lineage_override_requested",
                 intent_snapshot.get("paper_lineage_override_applied", False),
             )
         )
-        if latest_override_requested != bool(paper_lineage_override):
+        if latest_override_requested != self._safe_bool(paper_lineage_override):
             return None
         return latest
 
@@ -129,7 +144,7 @@ class OrderIntentService:
     @staticmethod
     def _is_transition_edge_variant(executable_plan: dict[str, object] | None) -> bool:
         payload = dict(executable_plan or {})
-        if bool(payload.get("transition_edge_variant_applied")):
+        if OrderIntentService._safe_bool(payload.get("transition_edge_variant_applied")):
             return True
         return bool(dict(payload.get("transition_edge_variant") or {}))
 
@@ -174,7 +189,7 @@ class OrderIntentService:
         }
 
     def _partial_submit_enabled(self) -> bool:
-        return bool(getattr(self.settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", False))
+        return self._safe_bool(getattr(self.settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", False))
 
     def _min_tranche_notional(self) -> float:
         return max(
@@ -195,12 +210,12 @@ class OrderIntentService:
     def _tranche_continuation(self, submission: OrderSubmission | None) -> dict | None:
         if not self._partial_submit_enabled() or submission is None:
             return None
-        if str(submission.adapter or "").lower() != "binance" or not bool(submission.requested_live):
+        if str(submission.adapter or "").lower() != "binance" or not self._safe_bool(submission.requested_live):
             return None
         if str(submission.state or "") != "FILLED":
             return None
         tranche = self._submission_live_tranche(submission)
-        if not tranche or not bool(tranche.get("additive_allowed")):
+        if not tranche or not self._safe_bool(tranche.get("additive_allowed")):
             return None
         remaining_notional = self._safe_float(tranche.get("remaining_notional"))
         if remaining_notional < self._min_tranche_notional():
@@ -549,7 +564,7 @@ class OrderIntentService:
         dedupe_result = self._dedupe_result(plan)
         duplicate = dedupe_result.get("status") == "duplicate_active_thesis"
         dedupe_source = str(dedupe_result.get("source") or "")
-        override_applied = bool(approval.get("paper_lineage_override_applied"))
+        override_applied = self._safe_bool(approval.get("paper_lineage_override_applied"))
         override_active_plan_duplicate = (
             override_applied
             and requested_mode == ExecutionMode.PAPER
@@ -596,7 +611,9 @@ class OrderIntentService:
 
         quality_snapshot = self._quality_snapshot(approval=approval, executable_plan=executable_plan)
         self_heal_summary = {
-            "stale_paper_reentry_block_ignored": bool(existing_submission_summary.get("stale_paper_submission_ignored", False)),
+            "stale_paper_reentry_block_ignored": self._safe_bool(
+                existing_submission_summary.get("stale_paper_submission_ignored", False)
+            ),
             "stale_paper_reentry_block_ignored_count": self._safe_int(
                 existing_submission_summary.get("ignored_stale_submission_count", 0)
             ),
@@ -608,7 +625,7 @@ class OrderIntentService:
             ),
             "stale_paper_duplicate_intents_ignored": list(dedupe_result.get("ignored_stale_paper_intents") or []),
         }
-        self_heal_summary["applied"] = bool(
+        self_heal_summary["applied"] = self._safe_bool(
             self_heal_summary["stale_paper_reentry_block_ignored"]
             or self_heal_summary["stale_paper_duplicate_intents_ignored_count"]
         )
@@ -630,7 +647,7 @@ class OrderIntentService:
             payload={
                 "executable_plan": self._json_safe(executable_plan),
                 "requested_execution_mode": requested_mode.value,
-                "paper_lineage_override_requested": bool(paper_lineage_override),
+                "paper_lineage_override_requested": self._safe_bool(paper_lineage_override),
                 "intent_snapshot": {
                     "allowed_execution_mode": str(approval.get("allowed_execution_mode") or ""),
                     "deployment_go_no_go": str(approval.get("deployment_go_no_go") or ""),
@@ -639,7 +656,7 @@ class OrderIntentService:
                     "playbook_code": str(approval.get("playbook_code") or ""),
                     "playbook_action": str(approval.get("playbook_action") or ""),
                     "playbook_message": str(approval.get("playbook_message") or ""),
-                    "paper_lineage_override_applied": bool(approval.get("paper_lineage_override_applied")),
+                    "paper_lineage_override_applied": self._safe_bool(approval.get("paper_lineage_override_applied")),
                     "paper_lineage_override_reason": str(approval.get("paper_lineage_override_reason") or ""),
                     "paper_lineage_override_source": str(approval.get("paper_lineage_override_source") or ""),
                     "self_heal_summary": self_heal_summary,

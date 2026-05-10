@@ -13,6 +13,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.services.historical_walk_forward_split_review import HistoricalWalkForwardSplitReviewService
+from scripts.operation_report_io import write_json
 
 
 def _display_path(path: Path) -> str:
@@ -73,12 +74,13 @@ def main() -> int:
         "strategy_time_contract_path": str(args.strategy_time_contract_path or "").strip(),
         "max_realized_r": threshold,
         "blocked_plan_ids": deduped,
+        "output_path": _display_path(output_path),
     }
-    output_path.write_text(json.dumps(payload_out, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(output_path, payload_out)
     print(
         json.dumps(
             {
-                "output_path": _display_path(output_path),
+                "output_path": payload_out["output_path"],
                 "blocked_plan_count": len(deduped),
                 "max_realized_r": threshold,
             },

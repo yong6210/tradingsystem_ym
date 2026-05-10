@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import sys
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -14,10 +15,25 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import get_settings
+from scripts.operation_report_io import parse_report_generated_at
 from scripts.run_live_replay_parity_audit import _active_contract_filters_from_settings, _as_utc, _safe_float
 
 
 DEFAULT_REPLAY_CACHE = "reports/validation/historical_walk_forward_cache/strategy_proof_contract_live_subset.json"
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
 
 
 def parse_args() -> argparse.Namespace:
@@ -80,9 +96,16 @@ def _load_replay_payload(path: Path) -> dict[str, Any]:
 
 def _atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    tmp_path.write_text(content, encoding="utf-8")
-    tmp_path.replace(path)
+    tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
 
 
 def _realized_r(row: dict[str, Any]) -> float:
@@ -261,7 +284,7 @@ def _row_payload(*, payload: dict[str, Any], symbol: str, thresholds: dict[str, 
             "sample_size": dict(item.get("replay_metrics") or {}).get("sample_size"),
         }
         for item in slices
-        if bool(item.get("material"))
+        if _safe_bool(item.get("material"))
         and str(dict(item.get("bridge_decision") or {}).get("status") or "") == "NOT_ELIGIBLE"
     ]
     if str(decision.get("status") or "") == "ELIGIBLE_FOR_MANUAL_BRIDGE_REVIEW" and weak_material_slices:
@@ -360,7 +383,7 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
     if atomic:
         _atomic_write_text(path, content)
     else:
-        path.write_text(content, encoding="utf-8")
+        _atomic_write_text(path, content)
 
 
 def _write_latest_aliases(*, report_dir: Path, payload: dict[str, Any]) -> dict[str, str]:
@@ -393,13 +416,13 @@ def main() -> int:
         thresholds=thresholds,
     )
     if not args.no_write_report:
-        generated = datetime.fromisoformat(str(payload["generated_at"]).replace("Z", "+00:00"))
+        generated = parse_report_generated_at(payload.get("generated_at"))
         report_dir = ROOT_DIR / args.report_dir
         report_path = report_dir / f"replay_validation_bridge_{generated.strftime('%Y%m%dT%H%M%SZ')}.md"
         payload["report_path"] = _display_path(report_path)
         payload["latest_report_path"] = _display_path(report_dir / "latest.md")
         payload["latest_json_path"] = _display_path(report_dir / "latest.json")
-        _write_report(report_path, payload)
+        _write_report(report_path, payload, atomic=True)
         payload.update(_write_latest_aliases(report_dir=report_dir, payload=payload))
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     fail = payload["overall_status"] in {"ALERT", "INSUFFICIENT_BASELINE"}

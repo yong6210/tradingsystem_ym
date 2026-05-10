@@ -20,6 +20,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.db.models import OrderSubmission
 from app.db.session import SessionLocal, init_db
+from scripts.operation_report_io import atomic_write_text
 
 _REQUEST_RETRY_ATTEMPTS = 3
 _REQUEST_RETRY_BASE_DELAY_SECONDS = 0.5
@@ -59,6 +60,19 @@ def _float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
 
 
 def _ensure_http_url(url: str) -> None:
@@ -174,8 +188,8 @@ def _edge_experiment_summary(
     edge_proof_posture = dict(source.get("edge_proof_posture") or {})
     daily_edge_kpis = dict(source.get("daily_edge_kpis") or {})
     return {
-        "available": bool(source.get("available", True)),
-        "advisory_only": bool(source.get("advisory_only", True)),
+        "available": _safe_bool(source.get("available", True), default=True),
+        "advisory_only": _safe_bool(source.get("advisory_only", True), default=True),
         "edge_state": str(source.get("edge_state") or "insufficient_edge_measurement"),
         "summary": str(source.get("summary") or ""),
         "true_edge_ratio": round(_float(source.get("true_edge_ratio")), 4),
@@ -263,13 +277,13 @@ def _edge_evolution_summary(
     if not source:
         return None
     return {
-        "available": bool(source.get("available", True)),
-        "advisory_only": bool(source.get("advisory_only", True)),
+        "available": _safe_bool(source.get("available", True), default=True),
+        "advisory_only": _safe_bool(source.get("advisory_only", True), default=True),
         "evolution_state": str(source.get("evolution_state") or "insufficient_sample"),
         "recommended_action": str(source.get("recommended_action") or "keep_current_baseline"),
         "allocation_bias": str(source.get("allocation_bias") or "hold_current_baseline"),
         "summary": str(source.get("summary") or ""),
-        "kill_review_triggered": bool(source.get("kill_review_triggered", False)),
+        "kill_review_triggered": _safe_bool(source.get("kill_review_triggered", False)),
         "promotion_candidate_axis": str(source.get("promotion_candidate_axis") or "none"),
         "promotion_candidate_variant": str(source.get("promotion_candidate_variant") or "none"),
     }
@@ -299,7 +313,7 @@ def _review_followup_summary(
     if not source:
         return None
     return {
-        "available": bool(source.get("available", False)),
+        "available": _safe_bool(source.get("available", False)),
         "last_status": str(source.get("last_status") or "none"),
         "last_generated_status": str(source.get("last_generated_status") or source.get("last_status") or "none"),
         "last_decision_status": str(source.get("last_decision_status") or "none"),
@@ -511,7 +525,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append("```json")
     lines.append(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     lines.append("```")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def main() -> int:
@@ -599,7 +613,7 @@ def main() -> int:
         },
         {
             "name": "reconciliation_recently_healthy",
-            "status": "PASS" if bool(reconcile_summary.get("healthy", False)) else "FAIL",
+            "status": "PASS" if _safe_bool(reconcile_summary.get("healthy", False)) else "FAIL",
             "message": f"healthy={reconcile_summary.get('healthy', False)} severity={reconcile_summary.get('highest_severity', 'UNKNOWN')}",
         },
         {
@@ -628,7 +642,7 @@ def main() -> int:
         live_submission_count > 0
         and live_binance_submission_count > 0
         and filled_like_submission_count > 0
-        and bool(reconcile_summary.get("healthy", False))
+        and _safe_bool(reconcile_summary.get("healthy", False))
         and _surface_allows_pruning_reopen(validation_strip)
         and _surface_allows_pruning_reopen(checklist_strip)
     )

@@ -5,6 +5,21 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings, get_settings
+from app.services.report_io import atomic_write_text
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
 
 
 class StrategyV2PboDsrDesignService:
@@ -50,9 +65,9 @@ class StrategyV2PboDsrDesignService:
             f"- fields: {(payload.get('storage_contract') or {}).get('required_fields', [])}",
             "",
             "## Runtime Artifact Store",
-            f"- artifact_store_ready: {bool(artifact_store.get('artifact_store_ready', False))}",
-            f"- available: {bool(artifact_store.get('available', False))}",
-            f"- metrics_available: {bool(artifact_store.get('metrics_available', False))}",
+            f"- artifact_store_ready: {_safe_bool(artifact_store.get('artifact_store_ready', False))}",
+            f"- available: {_safe_bool(artifact_store.get('available', False))}",
+            f"- metrics_available: {_safe_bool(artifact_store.get('metrics_available', False))}",
             f"- implementation_status: {artifact_store.get('implementation_status', 'not_available')}",
             f"- counts: {(artifact_store.get('counts') or {})}",
             f"- selection_rule_counts: {(artifact_store.get('selection_rule_counts') or {})}",
@@ -70,7 +85,7 @@ class StrategyV2PboDsrDesignService:
         for item in payload.get("next_steps", []):
             lines.append(f"- {item}")
         lines.extend(["", "## Notes"])
-        if bool(payload.get("available", False)):
+        if _safe_bool(payload.get("available", False)):
             lines.append("- This artifact now coexists with computed runtime PBO / DSR metrics; design readiness remains the contract source.")
         else:
             lines.append("- This artifact freezes the future PBO / DSR contract but does not compute either metric yet.")
@@ -81,7 +96,7 @@ class StrategyV2PboDsrDesignService:
             ]
         )
 
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(
@@ -94,9 +109,9 @@ class StrategyV2PboDsrDesignService:
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc).replace(microsecond=0)
         artifact_store = dict(artifact_store or {})
-        artifact_ready = bool(artifact_store.get("artifact_store_ready", False))
-        artifact_available = bool(artifact_store.get("available", False))
-        artifact_metrics_available = bool(artifact_store.get("metrics_available", False))
+        artifact_ready = _safe_bool(artifact_store.get("artifact_store_ready", False))
+        artifact_available = _safe_bool(artifact_store.get("available", False))
+        artifact_metrics_available = _safe_bool(artifact_store.get("metrics_available", False))
         selection_rule_counts = dict(artifact_store.get("selection_rule_counts") or {})
         has_true_threshold_runner = "true_threshold_sweep_top_in_sample_ev" in selection_rule_counts
         has_runtime_proxy = "runtime_validation_proxy_top_in_sample_ev" in selection_rule_counts
@@ -162,7 +177,7 @@ class StrategyV2PboDsrDesignService:
             "version": version,
             "generated_at": now.isoformat(),
             "design_ready": True,
-            "available": bool(artifact_metrics_available),
+            "available": _safe_bool(artifact_metrics_available),
             "implementation_status": implementation_status,
             "reason": reason,
             "pbo": {

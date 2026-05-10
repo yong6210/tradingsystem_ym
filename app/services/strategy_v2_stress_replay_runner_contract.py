@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings, get_settings
+from app.services.report_io import atomic_write_text
 
 
 class StrategyV2StressReplayRunnerContractService:
@@ -39,6 +40,21 @@ class StrategyV2StressReplayRunnerContractService:
         return parsed if isfinite(parsed) else default
 
     @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
+    @staticmethod
     def _job_count(*, trades: int, min_trades_per_job: int, target_trades_per_job: int) -> int:
         if trades < max(1, int(min_trades_per_job)):
             return 0
@@ -63,7 +79,7 @@ class StrategyV2StressReplayRunnerContractService:
         target = self._int(self.settings.stress_replay_runner_target_trades_per_job, 20)
         minimum = self._int(self.settings.stress_replay_runner_min_trades_per_job, 8)
 
-        runtime_inputs_ready = bool(stress_replay_lineage.get("runtime_inputs_ready", False))
+        runtime_inputs_ready = self._safe_bool(stress_replay_lineage.get("runtime_inputs_ready", False))
         latency_trades = self._int(sample_counts.get("latency_bar_trades"))
         full_fill_trades = self._int(sample_counts.get("full_fill_path_trades"))
         eligible_trades = self._int(sample_counts.get("eligible_closed_trades"))
@@ -118,7 +134,7 @@ class StrategyV2StressReplayRunnerContractService:
                 "gating_reason": gating_reason,
                 "scenario_status": str(status.get("status", "UNKNOWN")),
                 "scenario_reason": str(status.get("reason", "not_available")),
-                "catastrophic_loss_detected": bool(status.get("catastrophic_loss_detected", False)),
+                "catastrophic_loss_detected": self._safe_bool(status.get("catastrophic_loss_detected", False)),
                 "eligible_trade_count": scenario_trades,
                 "suggested_job_count": jobs,
                 "required_inputs": required_inputs,
@@ -139,20 +155,24 @@ class StrategyV2StressReplayRunnerContractService:
         stress_replay_assessment: dict[str, Any],
         scenario_contract: dict[str, dict[str, Any]],
     ) -> tuple[bool, str, str, list[str], list[str], dict[str, Any], dict[str, Any]]:
-        lineage_available = bool(stress_replay_lineage.get("available", False))
-        runtime_inputs_ready = bool(stress_replay_lineage.get("runtime_inputs_ready", False))
-        full_replay_ready = bool(stress_replay_assessment.get("full_replay_ready", False))
-        replacement_recommended = bool(stress_replay_assessment.get("replacement_recommended", False))
+        lineage_available = self._safe_bool(stress_replay_lineage.get("available", False))
+        runtime_inputs_ready = self._safe_bool(stress_replay_lineage.get("runtime_inputs_ready", False))
+        full_replay_ready = self._safe_bool(stress_replay_assessment.get("full_replay_ready", False))
+        replacement_recommended = self._safe_bool(stress_replay_assessment.get("replacement_recommended", False))
         priority = str((dict(stress_replay_assessment.get("deployment_recommendation") or {})).get("priority", "low"))
         true_runner_readiness = dict(stress_replay_assessment.get("true_runner_readiness") or {})
-        true_runner_ready = bool(true_runner_readiness.get("true_runner_ready", False))
+        true_runner_ready = self._safe_bool(true_runner_readiness.get("true_runner_ready", False))
 
-        ready_scenarios = [name for name, row in scenario_contract.items() if bool(row.get("ready", False))]
+        ready_scenarios = [name for name, row in scenario_contract.items() if self._safe_bool(row.get("ready", False))]
         prototype_ready_scenarios = [
-            name for name, row in scenario_contract.items() if bool(row.get("prototype_ready", False))
+            name for name, row in scenario_contract.items() if self._safe_bool(row.get("prototype_ready", False))
         ]
-        blocked_scenarios = [name for name, row in scenario_contract.items() if not bool(row.get("ready", False))]
-        total_jobs = sum(self._int(row.get("suggested_job_count")) for row in scenario_contract.values() if bool(row.get("ready", False)))
+        blocked_scenarios = [name for name, row in scenario_contract.items() if not self._safe_bool(row.get("ready", False))]
+        total_jobs = sum(
+            self._int(row.get("suggested_job_count"))
+            for row in scenario_contract.values()
+            if self._safe_bool(row.get("ready", False))
+        )
 
         blocked_by = list(dict.fromkeys([*(stress_replay_lineage.get("blocked_by") or [])]))
         next_steps = list(dict.fromkeys([*(stress_replay_lineage.get("next_steps") or [])]))
@@ -257,15 +277,15 @@ class StrategyV2StressReplayRunnerContractService:
             f"- reason: {payload['reason']}",
             "",
             "## Readiness",
-            f"- lineage_available: {bool(readiness.get('lineage_available', False))}",
-            f"- lineage_runtime_inputs_ready: {bool(readiness.get('lineage_runtime_inputs_ready', False))}",
-            f"- full_replay_ready: {bool(readiness.get('full_replay_ready', False))}",
-            f"- replacement_recommended: {bool(readiness.get('replacement_recommended', False))}",
+            f"- lineage_available: {self._safe_bool(readiness.get('lineage_available', False))}",
+            f"- lineage_runtime_inputs_ready: {self._safe_bool(readiness.get('lineage_runtime_inputs_ready', False))}",
+            f"- full_replay_ready: {self._safe_bool(readiness.get('full_replay_ready', False))}",
+            f"- replacement_recommended: {self._safe_bool(readiness.get('replacement_recommended', False))}",
             f"- priority: {readiness.get('priority', 'low')}",
             f"- ready_scenarios: {readiness.get('ready_scenarios', [])}",
             f"- blocked_scenarios: {readiness.get('blocked_scenarios', [])}",
             f"- suggested_total_jobs: {int(readiness.get('suggested_total_jobs', 0) or 0)}",
-            f"- true_runner_ready: {bool(true_runner_readiness.get('true_runner_ready', False))}",
+            f"- true_runner_ready: {self._safe_bool(true_runner_readiness.get('true_runner_ready', False))}",
             f"- true_runner_stage: {true_runner_readiness.get('stage', 'prototype_only')}",
             "",
             "## Dependencies",
@@ -288,7 +308,7 @@ class StrategyV2StressReplayRunnerContractService:
         for scenario in self._SCENARIO_ORDER:
             row = dict((payload.get("scenario_contract") or {}).get(scenario) or {})
             lines.append(
-                f"- {scenario}: ready={bool(row.get('ready', False))}, status={row.get('scenario_status', 'UNKNOWN')}, "
+                f"- {scenario}: ready={self._safe_bool(row.get('ready', False))}, status={row.get('scenario_status', 'UNKNOWN')}, "
                 f"reason={row.get('gating_reason', 'not_available')}, eligible_trade_count={int(row.get('eligible_trade_count', 0) or 0)}, "
                 f"suggested_job_count={int(row.get('suggested_job_count', 0) or 0)}"
             )
@@ -322,7 +342,7 @@ class StrategyV2StressReplayRunnerContractService:
                 "",
             ]
         )
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(
@@ -353,7 +373,7 @@ class StrategyV2StressReplayRunnerContractService:
             stress_replay_assessment=stress_replay_assessment,
             scenario_contract=scenario_contract,
         )
-        ready_scenarios = [name for name, row in scenario_contract.items() if bool(row.get("ready", False))]
+        ready_scenarios = [name for name, row in scenario_contract.items() if self._safe_bool(row.get("ready", False))]
 
         payload: dict[str, Any] = {
             "schema_version": "strategy_v2_stress_replay_runner_contract_v1",

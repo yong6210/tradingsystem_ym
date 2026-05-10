@@ -22,6 +22,21 @@ def _dict(payload: dict[str, Any] | None) -> dict[str, Any]:
     return dict(payload or {})
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
+
+
 def _dedupe(values: list[str]) -> list[str]:
     out: list[str] = []
     for value in values:
@@ -57,8 +72,8 @@ def _raise_confidence(current: str, minimum: str) -> str:
 def _promotion_candidate(edge_summary: dict[str, Any]) -> dict[str, Any]:
     entry_preferred = str(edge_summary.get("entry_timing_preferred_variant") or "none")
     execution_preferred = str(edge_summary.get("execution_style_preferred_variant") or "none")
-    entry_ready = bool(edge_summary.get("entry_timing_comparison_ready", False))
-    execution_ready = bool(edge_summary.get("execution_style_comparison_ready", False))
+    entry_ready = _safe_bool(edge_summary.get("entry_timing_comparison_ready", False))
+    execution_ready = _safe_bool(edge_summary.get("execution_style_comparison_ready", False))
 
     if entry_ready and entry_preferred not in {"", "none", "reaction_confirmed"}:
         return {
@@ -88,14 +103,14 @@ def _experiment_snapshot(edge_summary: dict[str, Any], *, axis: str) -> dict[str
     if axis == "entry_timing":
         payload = _dict(source.get("entry_timing_experiment"))
         return payload or {
-            "comparison_ready": bool(source.get("entry_timing_comparison_ready", False)),
+            "comparison_ready": _safe_bool(source.get("entry_timing_comparison_ready", False)),
             "preferred_variant": str(source.get("entry_timing_preferred_variant") or "none"),
             "recommendation_reason": str(source.get("entry_timing_recommendation_reason") or "not_available"),
         }
     if axis == "execution_style":
         payload = _dict(source.get("execution_style_experiment"))
         return payload or {
-            "comparison_ready": bool(source.get("execution_style_comparison_ready", False)),
+            "comparison_ready": _safe_bool(source.get("execution_style_comparison_ready", False)),
             "preferred_variant": str(source.get("execution_style_preferred_variant") or "none"),
             "recommendation_reason": str(source.get("execution_style_recommendation_reason") or "not_available"),
         }
@@ -299,7 +314,7 @@ def _closed_loop_feedback(
             feedback["reason"] = "preferred_variant_changed_after_review_packet"
             return feedback
         if (
-            bool(experiment_snapshot.get("comparison_ready", False))
+            _safe_bool(experiment_snapshot.get("comparison_ready", False))
             and current_closed_trade_count >= 6
             and current_true_edge_ratio >= 1.0
             and edge_decay_rate > -0.05
@@ -329,7 +344,7 @@ def build_edge_evolution_rule(
     review_followup_ledger: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     edge_summary = _dict(edge_experiment_review)
-    if not edge_summary or not bool(edge_summary.get("available", False)):
+    if not edge_summary or not _safe_bool(edge_summary.get("available", False)):
         return None
 
     rollout_summary = _dict(rollout_recommendation)
@@ -490,7 +505,7 @@ def build_edge_evolution_rule(
             f"closed_loop:{closed_loop_confirmation_state}",
             (
                 f"closed_loop_prior_action:{closed_loop_feedback.get('prior_action')}"
-                if closed_loop_feedback.get("available")
+                if _safe_bool(closed_loop_feedback.get("available", False))
                 else ""
             ),
             f"regime_dependency:{regime_dependency_state}",
@@ -554,8 +569,8 @@ def summarize_edge_evolution_rule(payload: dict[str, Any] | None) -> dict[str, A
     source_summary = _dict(source.get("source_summary"))
     closed_loop_feedback = _dict(source.get("closed_loop_feedback"))
     return {
-        "available": bool(source.get("available", False)),
-        "advisory_only": bool(source.get("advisory_only", True)),
+        "available": _safe_bool(source.get("available", False)),
+        "advisory_only": _safe_bool(source.get("advisory_only", True), default=True),
         "evolution_state": str(source.get("evolution_state") or "insufficient_sample"),
         "recommended_action": str(source.get("recommended_action") or "keep_current_baseline"),
         "allocation_bias": str(source.get("allocation_bias") or "hold_current_baseline"),
@@ -566,7 +581,7 @@ def summarize_edge_evolution_rule(payload: dict[str, Any] | None) -> dict[str, A
             or closed_loop_feedback.get("confirmation_state")
             or "not_available"
         ),
-        "kill_review_triggered": bool(source.get("kill_review_triggered", False)),
+        "kill_review_triggered": _safe_bool(source.get("kill_review_triggered", False)),
         "true_edge_ratio": round(_float(source.get("true_edge_ratio", 0.0)), 4),
         "edge_decay_rate": round(_float(source.get("edge_decay_rate", 0.0)), 4),
         "closed_trade_count": _int(source.get("closed_trade_count", 0)),

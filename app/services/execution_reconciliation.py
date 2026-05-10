@@ -97,6 +97,21 @@ class ExecutionReconciliationService:
         return int(parsed) if isfinite(parsed) else default
 
     @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value) if isfinite(float(value)) else bool(default)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
+    @staticmethod
     def _severity_max(items: list[dict[str, Any]]) -> ReconciliationSeverity:
         ranking = {
             ReconciliationSeverity.INFO: 0,
@@ -218,7 +233,7 @@ class ExecutionReconciliationService:
             )
 
         if exchange_positions:
-            reduce_only_orders = [row for row in exchange_orders if bool(row.reduce_only)]
+            reduce_only_orders = [row for row in exchange_orders if self._safe_bool(row.reduce_only)]
             stop_present = any("STOP" in str(row.order_type or "").upper() for row in reduce_only_orders)
             tp_present = any("TAKE_PROFIT" in str(row.order_type or "").upper() for row in reduce_only_orders)
             if not stop_present:

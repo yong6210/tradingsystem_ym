@@ -124,6 +124,7 @@ from app.services.promotion_lifecycle_history import PromotionLifecycleHistorySe
 from app.services.promotion_remediation_queue import PromotionRemediationQueueService
 from app.services.promotion_reopen_queue import PromotionReopenQueueService
 from app.services.promotion_review_queue import PromotionReviewQueueService
+from app.services.replay_validation_bridge import UsdtProxyReplayValidationBridge
 from app.services.research_promotion_operating_loop import ResearchPromotionOperatingLoopService
 from app.services.risk_gate import RiskGate, RiskGateInput
 from app.services.rollout_recommendation import RolloutRecommendationService
@@ -244,6 +245,7 @@ class StrategyEngine:
         self.alert_retry_repo = AlertRetryQueueRepository(db)
         self.session_impulse_retest_runtime_audit_repo = SessionImpulseRetestRuntimeAuditRepository(db)
         self.metrics_repo = MetricsRepository(db)
+        self.replay_validation_bridge = UsdtProxyReplayValidationBridge(self.settings)
 
         self.market_data = MarketDataService(self.candle_repo)
         self.zone_engine = ZoneEngine()
@@ -623,7 +625,16 @@ class StrategyEngine:
             out_dir.mkdir(parents=True, exist_ok=True)
             ts = now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             out_path = out_dir / f"session_impulse_retest_miss_detector_{ts}.json"
-            out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+            tmp_path = out_path.with_name(f".{out_path.name}.{uuid4().hex}.tmp")
+            try:
+                tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+                tmp_path.replace(out_path)
+            finally:
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except OSError:
+                    pass
             return str(out_path)
         except OSError:
             return None
@@ -671,7 +682,7 @@ class StrategyEngine:
         write_report: bool = False,
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
-        if not bool(self.settings.session_impulse_retest_miss_detector_enabled):
+        if not self._safe_bool(self.settings.session_impulse_retest_miss_detector_enabled):
             return {
                 "enabled": False,
                 "family": "session_impulse_retest",
@@ -757,7 +768,7 @@ class StrategyEngine:
                 plan_id = str(observation.get("plan_id") or "")
                 intents = self.intent_repo.list_for_plan(plan_id, limit=20) if plan_id else []
                 submissions = self.submission_repo.list_for_plan(plan_id, limit=20) if plan_id else []
-                if not bool(observation.get("seen")):
+                if not self._safe_bool(observation.get("seen")):
                     if intents or submissions:
                         runtime_observed_count += 1
                         symbol_summary["runtime_observed_trades"] += 1
@@ -832,7 +843,7 @@ class StrategyEngine:
         return payload
 
     def _maybe_emit_session_impulse_retest_miss_alert(self, *, report: dict[str, Any]) -> dict | None:
-        if not bool(self.settings.session_impulse_retest_miss_alert_enabled):
+        if not self._safe_bool(self.settings.session_impulse_retest_miss_alert_enabled):
             return None
 
         miss_count = self._maybe_int(report.get("miss_count")) or 0
@@ -994,7 +1005,7 @@ class StrategyEngine:
         }:
             return False
         execution_mode = str(getattr(row, "execution_mode", "") or "").upper()
-        requested_live = bool(getattr(row, "requested_live", False))
+        requested_live = StrategyEngine._safe_bool(getattr(row, "requested_live", False))
         return requested_live or execution_mode in {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value}
 
     def _evaluate_gate(self, *, symbol: str, jump_rate: float) -> tuple[RiskGateState, bool, str, OperatingLockSnapshot]:
@@ -1110,7 +1121,7 @@ class StrategyEngine:
         return _safe_dict(attachments.get("live_tranche") or raw.get("live_tranche"))
 
     def _plan_allows_live_tranche_continuation(self, plan: Plan) -> bool:
-        if not bool(getattr(self.settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", False)):
+        if not self._safe_bool(getattr(self.settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", False)):
             return False
         latest_intent = self.intent_repo.latest_for_plan(str(plan.plan_id))
         if latest_intent is None:
@@ -1118,12 +1129,12 @@ class StrategyEngine:
         latest_submission = self.submission_repo.latest_for_intent(str(latest_intent.intent_id))
         if latest_submission is None:
             return False
-        if str(latest_submission.adapter or "").lower() != "binance" or not bool(latest_submission.requested_live):
+        if str(latest_submission.adapter or "").lower() != "binance" or not self._safe_bool(latest_submission.requested_live):
             return False
         if str(latest_submission.state or "") != OrderLifecycleState.FILLED.value:
             return False
         tranche = self._submission_live_tranche_payload(latest_submission)
-        if not bool(tranche.get("additive_allowed")):
+        if not self._safe_bool(tranche.get("additive_allowed")):
             return False
         remaining_notional = self._maybe_float(tranche.get("remaining_notional")) or 0.0
         min_tranche_notional = max(
@@ -1758,8 +1769,8 @@ class StrategyEngine:
         if directions and directions != {"LONG", "SHORT"}:
             return {
                 "available": False,
-                "enabled": bool(self.settings.transition_edge_variant_enabled),
-                "shadow_only": bool(self.settings.transition_edge_variant_shadow_only),
+                "enabled": self._safe_bool(self.settings.transition_edge_variant_enabled),
+                "shadow_only": self._safe_bool(self.settings.transition_edge_variant_shadow_only),
                 "variant": "exp_6_fvg_relaxed_plus_transition_override",
                 "status": "direction_contract_not_supported",
                 "required_contract_directions": sorted(directions),
@@ -1772,8 +1783,8 @@ class StrategyEngine:
         if len(candles5) < 60 or len(candles15) < 60:
             return {
                 "available": False,
-                "enabled": bool(self.settings.transition_edge_variant_enabled),
-                "shadow_only": bool(self.settings.transition_edge_variant_shadow_only),
+                "enabled": self._safe_bool(self.settings.transition_edge_variant_enabled),
+                "shadow_only": self._safe_bool(self.settings.transition_edge_variant_shadow_only),
                 "variant": "exp_6_fvg_relaxed_plus_transition_override",
                 "status": "insufficient_candles",
                 "required_candles": 60,
@@ -1792,8 +1803,8 @@ class StrategyEngine:
         if not can_open:
             return {
                 "available": False,
-                "enabled": bool(self.settings.transition_edge_variant_enabled),
-                "shadow_only": bool(self.settings.transition_edge_variant_shadow_only),
+                "enabled": self._safe_bool(self.settings.transition_edge_variant_enabled),
+                "shadow_only": self._safe_bool(self.settings.transition_edge_variant_shadow_only),
                 "variant": "exp_6_fvg_relaxed_plus_transition_override",
                 "status": "skipped_by_gate",
                 "risk_state": str(getattr(gate_state, "value", gate_state) or ""),
@@ -1817,11 +1828,11 @@ class StrategyEngine:
             dict(diagnostics.get("hard_gate_block_counts") or {}).get("low_confluence", 0) or 0
         )
         return {
-            "available": bool(shadow_summary) or bool(self.settings.transition_edge_variant_enabled),
-            "enabled": bool(self.settings.transition_edge_variant_enabled),
-            "shadow_only": bool(self.settings.transition_edge_variant_shadow_only),
+            "available": bool(shadow_summary) or self._safe_bool(self.settings.transition_edge_variant_enabled),
+            "enabled": self._safe_bool(self.settings.transition_edge_variant_enabled),
+            "shadow_only": self._safe_bool(self.settings.transition_edge_variant_shadow_only),
             "variant": "exp_6_fvg_relaxed_plus_transition_override",
-            "status": "shadow_only_compare" if bool(self.settings.transition_edge_variant_shadow_only) else "live_enabled",
+            "status": "shadow_only_compare" if self._safe_bool(self.settings.transition_edge_variant_shadow_only) else "live_enabled",
             "regime_profile": diagnostics.get("regime_profile"),
             "transition_state": diagnostics.get("transition_state"),
             "transition_lock_reason": diagnostics.get("transition_lock_reason"),
@@ -1856,8 +1867,8 @@ class StrategyEngine:
             symbol=symbol,
             candles_1m=candles_1m,
             candles_5m=candles_5m,
-            enabled=bool(self.settings.session_impulse_retest_enabled),
-            shadow_only=bool(self.settings.session_impulse_retest_shadow_only),
+            enabled=self._safe_bool(self.settings.session_impulse_retest_enabled),
+            shadow_only=self._safe_bool(self.settings.session_impulse_retest_shadow_only),
             allowed_symbols=allowed_symbols,
         )
 
@@ -1867,11 +1878,11 @@ class StrategyEngine:
             symbol=symbol,
             shadow_summary=shadow_summary,
             universe_policy=universe_policy,
-            enabled=bool(self.settings.session_impulse_retest_enabled),
-            shadow_only=bool(self.settings.session_impulse_retest_shadow_only),
+            enabled=self._safe_bool(self.settings.session_impulse_retest_enabled),
+            shadow_only=self._safe_bool(self.settings.session_impulse_retest_shadow_only),
             partial_ratio=self._maybe_float(self.settings.session_impulse_retest_partial_activation_ratio) or 0.0,
             core_live_slots=self._maybe_int(self.settings.session_impulse_retest_core_live_slots) or 0,
-            secondary_live_enabled=bool(self.settings.session_impulse_retest_secondary_live_enabled),
+            secondary_live_enabled=self._safe_bool(self.settings.session_impulse_retest_secondary_live_enabled),
         )
         return micro_main_live_readiness_to_dict(readiness)
 
@@ -1928,9 +1939,9 @@ class StrategyEngine:
         return live_allowed | micro_live_allowed
 
     def _session_impulse_retest_live_auto_route_allowed(self) -> tuple[bool, str]:
-        if not bool(self.settings.session_impulse_retest_enabled):
+        if not self._safe_bool(self.settings.session_impulse_retest_enabled):
             return False, "family_disabled"
-        if bool(self.settings.session_impulse_retest_shadow_only):
+        if self._safe_bool(self.settings.session_impulse_retest_shadow_only):
             return False, "family_shadow_only"
         return True, "ok"
 
@@ -1995,7 +2006,7 @@ class StrategyEngine:
         active_thesis_clusters: int,
     ) -> Plan | None:
         normalized_symbol = str(symbol or "").upper()
-        if not bool(self.settings.session_impulse_retest_enabled):
+        if not self._safe_bool(self.settings.session_impulse_retest_enabled):
             return None
         allowed_symbols = self._session_impulse_retest_allowed_symbols()
         if allowed_symbols and normalized_symbol not in allowed_symbols:
@@ -2657,7 +2668,7 @@ class StrategyEngine:
         events = [
             {
                 "severity": getattr(row, "severity", "INFO"),
-                "lock_required": bool(getattr(row, "lock_required", False)),
+                "lock_required": self._safe_bool(getattr(row, "lock_required", False)),
                 "created_at": getattr(row, "created_at", None),
             }
             for row in self.reconciliation_event_repo.list_recent(symbol=symbol, limit=limit, days=days)
@@ -3161,8 +3172,8 @@ class StrategyEngine:
         candidate_rows: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
         portfolio_budget = {
-            "accepted_candidates": [dict(row) for row in candidate_rows if bool(row.get("accepted"))],
-            "blocked_candidates": [dict(row) for row in candidate_rows if not bool(row.get("accepted"))],
+            "accepted_candidates": [dict(row) for row in candidate_rows if self._safe_bool(row.get("accepted"))],
+            "blocked_candidates": [dict(row) for row in candidate_rows if not self._safe_bool(row.get("accepted"))],
             "blocked_reason_counts": {},
             "blocked_gate_group_counts": {},
         }
@@ -3230,6 +3241,12 @@ class StrategyEngine:
             requested_mode=requested_mode,
         )
         metrics = self.metrics(symbol=plan.symbol, version=self.settings.strategy_version)
+        metrics = self.replay_validation_bridge.apply_to_metrics(
+            metrics,
+            symbol=plan.symbol,
+            family=family,
+            requested_mode=requested_mode.value,
+        )
         safety_state = self.safety_locks.safety_state(
             symbol=plan.symbol,
             family=family,
@@ -3306,7 +3323,9 @@ class StrategyEngine:
             "decision_reason_code": row.decision_reason_code,
             "decision_reason_message": row.decision_reason_message,
             "requested_execution_mode": str(payload.get("requested_execution_mode") or row.execution_mode or ""),
-            "paper_lineage_override_requested": bool(payload.get("paper_lineage_override_requested", False)),
+            "paper_lineage_override_requested": StrategyEngine._safe_bool(
+                payload.get("paper_lineage_override_requested", False)
+            ),
             "allowed_execution_mode": approval.get("allowed_execution_mode", ""),
             "deployment_go_no_go": approval.get("deployment_go_no_go", ""),
             "deployment_code": approval.get("deployment_code", ""),
@@ -3314,7 +3333,9 @@ class StrategyEngine:
             "playbook_code": approval.get("playbook_code", ""),
             "playbook_action": approval.get("playbook_action", ""),
             "playbook_message": approval.get("playbook_message", ""),
-            "paper_lineage_override_applied": bool(approval.get("paper_lineage_override_applied")),
+            "paper_lineage_override_applied": StrategyEngine._safe_bool(
+                approval.get("paper_lineage_override_applied")
+            ),
             "paper_lineage_override_reason": approval.get("paper_lineage_override_reason", ""),
             "paper_lineage_override_source": approval.get("paper_lineage_override_source", ""),
             "self_heal_summary": self_heal_summary,
@@ -3340,7 +3361,7 @@ class StrategyEngine:
             "client_order_id": row.client_order_id,
             "exchange_order_id": row.exchange_order_id,
             "adapter": row.adapter,
-            "requested_live": bool(row.requested_live),
+            "requested_live": StrategyEngine._safe_bool(row.requested_live),
             "attachments": _safe_dict(row.attachments),
             "fill_results": fill_results,
             "submitted_at": row.submitted_at,
@@ -3380,7 +3401,7 @@ class StrategyEngine:
         return self._submission_to_dict(row, fill_results=fill_results, idempotent_reuse=idempotent_reuse)
 
     def _auto_route_requested_mode(self) -> ExecutionMode | None:
-        if not bool(self.settings.auto_trading_enabled):
+        if not self._safe_bool(self.settings.auto_trading_enabled):
             return None
         requested_mode = ExecutionPlanningService.coerce_execution_mode(
             getattr(self.settings, "auto_trading_execution_mode", None),
@@ -3467,6 +3488,33 @@ class StrategyEngine:
         )
         self.session_impulse_retest_runtime_audit_repo.add(row)
 
+    def _commit_session_impulse_retest_runtime_audit(
+        self,
+        *,
+        symbol: str,
+        phase: str,
+        status: str,
+        plan_id: str | None = None,
+        decision_code: str | None = None,
+        observed_ts: datetime | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> str | None:
+        try:
+            self._record_session_impulse_retest_runtime_audit(
+                symbol=symbol,
+                phase=phase,
+                status=status,
+                plan_id=plan_id,
+                decision_code=decision_code,
+                observed_ts=observed_ts,
+                payload=payload,
+            )
+            self.db.commit()
+            return None
+        except Exception as exc:
+            self.db.rollback()
+            return f"{exc.__class__.__name__}:{exc}"
+
     def _finalize_session_impulse_retest_auto_route_audit(
         self,
         *,
@@ -3480,7 +3528,7 @@ class StrategyEngine:
         intent_payload = first_result.get("intent") or {}
         if isinstance(intent_payload, dict):
             decision_code = str(intent_payload.get("decision_reason_code") or "").strip() or None
-        self._record_session_impulse_retest_runtime_audit(
+        audit_error = self._commit_session_impulse_retest_runtime_audit(
             symbol=symbol,
             phase="auto_route",
             status=str(response.get("reason") or first_result.get("status") or "unknown"),
@@ -3489,7 +3537,8 @@ class StrategyEngine:
             observed_ts=observed_ts,
             payload=response,
         )
-        self.db.commit()
+        if audit_error:
+            response["runtime_audit_error"] = audit_error
         return response
 
     def session_impulse_retest_runtime_audits_recent(
@@ -3727,7 +3776,7 @@ class StrategyEngine:
                     "submit_status": str(submission.get("submit_status") or ""),
                     "state": str(submission.get("state") or ""),
                     "adapter": str(submission.get("adapter") or ""),
-                    "requested_live": bool(submission.get("requested_live")),
+                    "requested_live": self._safe_bool(submission.get("requested_live")),
                 }
                 submit_calls = 1
             except Exception as exc:
@@ -4412,7 +4461,7 @@ class StrategyEngine:
             summary["processed_plans"] += 1
 
             repaired_fill = self._repair_missing_paper_entry_fill_from_submission(plan=plan, submission=submission)
-            if repaired_fill is not None and bool(repaired_fill.get("accepted")):
+            if repaired_fill is not None and self._safe_bool(repaired_fill.get("accepted")):
                 summary["fill_repairs"] += 1
 
             previous_fills = sorted(
@@ -4487,8 +4536,8 @@ class StrategyEngine:
                             "exit_reason": "paper_sample_stale_cleanup",
                             "price": float(plan.entry_price or 0.0),
                             "qty": round(float(cleanup_qty), 4),
-                            "accepted": bool(response.get("accepted")),
-                            "duplicate": bool(response.get("duplicate")),
+                            "accepted": self._safe_bool(response.get("accepted")),
+                            "duplicate": self._safe_bool(response.get("duplicate")),
                             "to_state": response.get("to_state"),
                         }
                     )
@@ -4592,8 +4641,8 @@ class StrategyEngine:
                         "exit_reason": exit_reason,
                         "price": float(price),
                         "qty": round(float(qty), 4),
-                        "accepted": bool(response.get("accepted")),
-                        "duplicate": bool(response.get("duplicate")),
+                        "accepted": self._safe_bool(response.get("accepted")),
+                        "duplicate": self._safe_bool(response.get("duplicate")),
                         "to_state": response.get("to_state"),
                     }
                 )
@@ -4736,7 +4785,7 @@ class StrategyEngine:
         entry_result = None
         for item in fill_results:
             row = _safe_dict(item)
-            if not bool(row.get("accepted")):
+            if not self._safe_bool(row.get("accepted")):
                 continue
             if str(row.get("stage") or "") == ExecutionFillStage.ENTRY.value:
                 entry_result = row
@@ -4820,20 +4869,20 @@ class StrategyEngine:
         )
         variant_locks = list(payload.get("transition_edge_variant_matching_locks") or [])
         payload["transition_edge_variant"] = {
-            "enabled": bool(self.settings.transition_edge_variant_enabled),
-            "shadow_only": bool(self.settings.transition_edge_variant_shadow_only),
-            "killed": bool(payload.get("transition_edge_variant_disabled_active", False)),
+            "enabled": self._safe_bool(self.settings.transition_edge_variant_enabled),
+            "shadow_only": self._safe_bool(self.settings.transition_edge_variant_shadow_only),
+            "killed": self._safe_bool(payload.get("transition_edge_variant_disabled_active", False)),
             "reason": str((variant_locks[0] or {}).get("reason_code") or "") if variant_locks else None,
             "reason_message": str((variant_locks[0] or {}).get("reason_message") or "") if variant_locks else None,
             "partial_ratio": round(self._maybe_float(self.settings.transition_edge_variant_partial_activation_ratio) or 0.0, 4),
             "live_lane": tracker.snapshot(),
         }
         payload["session_impulse_retest_universe_policy"] = build_micro_main_rollout_contract_snapshot(
-            enabled=bool(self.settings.session_impulse_retest_enabled),
-            shadow_only=bool(self.settings.session_impulse_retest_shadow_only),
+            enabled=self._safe_bool(self.settings.session_impulse_retest_enabled),
+            shadow_only=self._safe_bool(self.settings.session_impulse_retest_shadow_only),
             partial_activation_ratio=self._maybe_float(self.settings.session_impulse_retest_partial_activation_ratio) or 0.0,
             core_live_slots=self._maybe_int(self.settings.session_impulse_retest_core_live_slots) or 0,
-            secondary_live_enabled=bool(self.settings.session_impulse_retest_secondary_live_enabled),
+            secondary_live_enabled=self._safe_bool(self.settings.session_impulse_retest_secondary_live_enabled),
         )
         if symbol:
             shadow_summary = self._session_impulse_retest_shadow_summary(symbol=symbol)
@@ -5059,7 +5108,7 @@ class StrategyEngine:
             dashboard={
                 "playbook_action": portfolio_summary.get("playbook_action", ""),
                 "playbook_message": portfolio_summary.get("playbook_message", ""),
-                "new_entries_allowed": bool(safety_state.get("new_entry_allowed", False)),
+                "new_entries_allowed": self._safe_bool(safety_state.get("new_entry_allowed", False)),
                 "blocking_reason_code": str(safety_state.get("blocking_reason_code", "")),
                 "signal_funnel": {
                     "execution_degradation_advisory": execution_degradation_advisory_summary,
@@ -5274,11 +5323,11 @@ class StrategyEngine:
                 shadow_summary=shadow_summary,
             )
         payload["session_impulse_retest_universe_policy"] = build_micro_main_rollout_contract_snapshot(
-            enabled=bool(self.settings.session_impulse_retest_enabled),
-            shadow_only=bool(self.settings.session_impulse_retest_shadow_only),
+            enabled=self._safe_bool(self.settings.session_impulse_retest_enabled),
+            shadow_only=self._safe_bool(self.settings.session_impulse_retest_shadow_only),
             partial_activation_ratio=self._maybe_float(self.settings.session_impulse_retest_partial_activation_ratio) or 0.0,
             core_live_slots=self._maybe_int(self.settings.session_impulse_retest_core_live_slots) or 0,
-            secondary_live_enabled=bool(self.settings.session_impulse_retest_secondary_live_enabled),
+            secondary_live_enabled=self._safe_bool(self.settings.session_impulse_retest_secondary_live_enabled),
         )
         return payload
 
@@ -5329,9 +5378,9 @@ class StrategyEngine:
         kill_condition_state = str(summary.get("kill_condition_state") or "observe_only")
         automation_bias = str(summary.get("automation_bias") or "observe_only")
         trigger_axis = str(summary.get("trigger_axis") or "")
-        active_manual_override = bool(summary.get("active_manual_override", False))
+        active_manual_override = self._safe_bool(summary.get("active_manual_override", False))
         configured_arm_token = str(self.settings.kill_condition_automation_arm_token or "")
-        live_enabled = bool(self.settings.kill_condition_automation_live_enabled)
+        live_enabled = self._safe_bool(self.settings.kill_condition_automation_live_enabled)
         arm_valid = bool(configured_arm_token and arm_token and arm_token == configured_arm_token)
 
         action_target = "none"
@@ -5402,7 +5451,7 @@ class StrategyEngine:
             "symbol": symbol.upper() if symbol else None,
             "universe": universe,
             "dry_run": bool(dry_run),
-            "allow_live_write": bool(allow_live_write),
+            "allow_live_write": self._safe_bool(allow_live_write),
             "arm_valid": bool(arm_valid),
             "explicit_arm_required": True,
             "eligible_for_live_write": eligible_for_live_write,
@@ -5489,6 +5538,21 @@ class StrategyEngine:
         return int(parsed) if isfinite(parsed) else None
 
     @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value) if isfinite(float(value)) else bool(default)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
+    @staticmethod
     def _to_utc(value: Any) -> datetime:
         if isinstance(value, datetime):
             if value.tzinfo is None:
@@ -5547,7 +5611,7 @@ class StrategyEngine:
         plan_id: str | None = None,
     ) -> dict[str, Any]:
         raw_payload = _safe_dict(raw)
-        live_enabled = bool(self.settings.binance_trade_live_enabled)
+        live_enabled = self._safe_bool(self.settings.binance_trade_live_enabled)
         status = raw_payload.get("status")
         if not status and action == "submit" and not requested_live:
             status = "TEST_ACCEPTED"
@@ -5567,7 +5631,11 @@ class StrategyEngine:
             "price": self._maybe_float(raw_payload.get("price")) if raw_payload.get("price") not in (None, "") else price,
             "orig_qty": self._maybe_float(raw_payload.get("origQty")) if raw_payload.get("origQty") not in (None, "") else quantity,
             "executed_qty": self._maybe_float(raw_payload.get("executedQty")),
-            "reduce_only": bool(raw_payload.get("reduceOnly")) if raw_payload.get("reduceOnly") is not None else reduce_only,
+            "reduce_only": (
+                self._safe_bool(raw_payload.get("reduceOnly"))
+                if raw_payload.get("reduceOnly") is not None
+                else self._safe_bool(reduce_only)
+            ),
             "time_in_force": str(raw_payload.get("timeInForce") or time_in_force or ""),
             "raw": raw_payload,
         }
@@ -5591,10 +5659,10 @@ class StrategyEngine:
             side=str(payload.get("side") or ""),
             order_type=str(payload.get("order_type") or ""),
             status=str(payload.get("status") or ""),
-            reduce_only=bool(payload.get("reduce_only")),
-            requested_live=bool(payload.get("requested_live")),
-            live_enabled=bool(payload.get("live_enabled")),
-            test_order=bool(payload.get("test_order")),
+            reduce_only=self._safe_bool(payload.get("reduce_only")),
+            requested_live=self._safe_bool(payload.get("requested_live")),
+            live_enabled=self._safe_bool(payload.get("live_enabled")),
+            test_order=self._safe_bool(payload.get("test_order")),
             price=self._maybe_float(payload.get("price")),
             orig_qty=self._maybe_float(payload.get("orig_qty")),
             executed_qty=self._maybe_float(payload.get("executed_qty")),
@@ -5611,9 +5679,9 @@ class StrategyEngine:
             "plan_id": row.plan_id,
             "symbol": row.symbol,
             "status": row.status,
-            "reduce_only": bool(row.reduce_only),
-            "requested_live": bool(row.requested_live),
-            "test_order": bool(row.test_order),
+            "reduce_only": self._safe_bool(row.reduce_only),
+            "requested_live": self._safe_bool(row.requested_live),
+            "test_order": self._safe_bool(row.test_order),
             "last_event_type": row.last_event_type,
             "last_trade_id": row.last_trade_id,
         }
@@ -5675,7 +5743,7 @@ class StrategyEngine:
         return f"binance_order_{order_id}_{execution_type}"
 
     def _infer_exit_reason_from_binance_event(self, event: dict[str, Any]) -> str | None:
-        if not bool(event.get("reduce_only")):
+        if not self._safe_bool(event.get("reduce_only")):
             return None
         order_type = str(event.get("order_type") or "").upper()
         if "TAKE_PROFIT" in order_type:
@@ -5695,7 +5763,7 @@ class StrategyEngine:
         last_fill_price = self._maybe_float(event.get("last_fill_price")) or 0.0
         if last_fill_qty <= 0.0 or last_fill_price <= 0.0:
             return None
-        if not bool(event.get("reduce_only")):
+        if not self._safe_bool(event.get("reduce_only")):
             return ExecutionFillStage.ENTRY
 
         symbol = str(event.get("symbol") or "")
@@ -6034,7 +6102,7 @@ class StrategyEngine:
         return {
             "action": "close",
             "listen_key": payload["listen_key"],
-            "closed": bool(payload.get("closed")),
+            "closed": self._safe_bool(payload.get("closed")),
             "raw": payload.get("raw") or {},
         }
 
@@ -6107,7 +6175,7 @@ class StrategyEngine:
             "action": "user_stream",
             "mode": "live",
             "requested_live": True,
-            "live_enabled": bool(self.settings.binance_trade_live_enabled),
+            "live_enabled": self._safe_bool(self.settings.binance_trade_live_enabled),
             "test_order": False,
             "symbol": str(normalized.get("symbol") or ""),
             "plan_id": plan_id,
@@ -6119,7 +6187,7 @@ class StrategyEngine:
             "price": self._maybe_float(normalized.get("avg_price")) or self._maybe_float(normalized.get("last_fill_price")),
             "orig_qty": self._maybe_float(normalized.get("original_qty")),
             "executed_qty": self._maybe_float(normalized.get("cumulative_fill_qty")),
-            "reduce_only": bool(normalized.get("reduce_only")),
+            "reduce_only": self._safe_bool(normalized.get("reduce_only")),
             "time_in_force": str(normalized.get("time_in_force") or ""),
             "raw": _safe_dict(normalized.get("raw")),
         }
@@ -6178,7 +6246,8 @@ class StrategyEngine:
                 "trade_id": normalized.get("trade_id"),
                 "execution_type": normalized.get("execution_type"),
                 "status": normalized.get("status"),
-                "reduce_only": bool(normalized.get("reduce_only")),
+                "partial": str(normalized.get("status") or "").upper() == OrderLifecycleState.PARTIALLY_FILLED.value,
+                "reduce_only": self._safe_bool(normalized.get("reduce_only")),
                 "position_side": normalized.get("position_side"),
                 "realized_pnl": normalized.get("realized_pnl"),
                 "notes": {"binance_event_type": normalized.get("event_type")},
@@ -6244,7 +6313,7 @@ class StrategyEngine:
                 order_updates += 1
             if result.get("kind") == "account_update":
                 account_updates += 1
-            if result.get("fill_ingest") is not None and bool((result.get("fill_ingest") or {}).get("accepted")):
+            if result.get("fill_ingest") is not None and self._safe_bool((result.get("fill_ingest") or {}).get("accepted")):
                 fills_ingested += 1
             positions_synced += int(((result.get("position_sync") or {}).get("synced") or 0))
 
@@ -6762,12 +6831,12 @@ class StrategyEngine:
             fallback_selected.get("selection_rule") or fallback_lineage.get("selected_trial_selection_rule") or ""
         )
         primary_from_runtime_proxy = (
-            bool(primary_lineage.get("selected_trial_from_runtime_proxy", False))
+            self._safe_bool(primary_lineage.get("selected_trial_from_runtime_proxy", False))
             or primary_writer_source == "runtime_validation_proxy_v1"
             or primary_selection_rule.startswith("runtime_validation_proxy")
         )
         fallback_from_true_threshold = (
-            bool(fallback_lineage.get("selected_trial_from_true_threshold", False))
+            self._safe_bool(fallback_lineage.get("selected_trial_from_true_threshold", False))
             or fallback_writer_source == "true_threshold_sweep_runner_v1"
             or fallback_selection_rule.startswith("true_threshold_sweep")
         )
@@ -6785,7 +6854,7 @@ class StrategyEngine:
                             "",
                         }
                         or primary_reason in {"pbo_dsr_trial_runs_missing", ""}
-                        or not bool(primary_payload.get("available", False))
+                        or not self._safe_bool(primary_payload.get("available", False))
                     )
                 )
                 or (
@@ -6799,8 +6868,8 @@ class StrategyEngine:
 
         merged = dict(primary_payload)
         merged["global_lineage_fallback"] = {
-            "available": bool(fallback_payload.get("available", False)),
-            "metrics_complete": bool(fallback_payload.get("metrics_complete", False)),
+            "available": self._safe_bool(fallback_payload.get("available", False)),
+            "metrics_complete": self._safe_bool(fallback_payload.get("metrics_complete", False)),
             "reason": fallback_payload.get("reason", "not_available"),
             "validation_scope": dict(fallback_payload.get("validation_scope") or {}),
             "selected_trial": fallback_selected,
@@ -6944,7 +7013,7 @@ class StrategyEngine:
                 stress_replay_runner_contract=stress_replay_runner_contract,
                 write_report=write_report,
             )
-            if bool((stress_replay_prototype_worker or {}).get("executed", False)):
+            if self._safe_bool((stress_replay_prototype_worker or {}).get("executed", False)):
                 (
                     stress_validation,
                     stress_replay_output_artifacts,
@@ -6993,7 +7062,7 @@ class StrategyEngine:
         )
 
         fallback_summary = {
-            "available": bool(fallback_assessment.get("available", False)),
+            "available": self._safe_bool(fallback_assessment.get("available", False)),
             "reason": fallback_assessment.get("reason", "not_available"),
             "deployment_recommendation": fallback_recommendation,
             "stress_replay_lineage": dict(fallback.get("stress_replay_lineage") or {}),
@@ -7008,9 +7077,13 @@ class StrategyEngine:
         primary_assessment["symbol_scope_deployment_recommendation"] = primary_recommendation
         primary_assessment["deployment_recommendation"] = fallback_recommendation
         merged["stress_replay_assessment"] = primary_assessment
-        if not bool(dict(merged.get("stress_replay_output_artifacts") or {}).get("available", False)) and bool(
+        current_artifacts_available = self._safe_bool(
+            dict(merged.get("stress_replay_output_artifacts") or {}).get("available", False)
+        )
+        fallback_artifacts_available = self._safe_bool(
             dict(fallback.get("stress_replay_output_artifacts") or {}).get("available", False)
-        ):
+        )
+        if not current_artifacts_available and fallback_artifacts_available:
             merged["stress_replay_output_artifacts"] = dict(fallback.get("stress_replay_output_artifacts") or {})
         return merged
 
@@ -7114,7 +7187,7 @@ class StrategyEngine:
                 stress_replay_runner_contract=stress_replay_runner_contract,
                 write_report=write_report,
             )
-            if bool((stress_replay_prototype_worker or {}).get("executed", False)):
+            if self._safe_bool((stress_replay_prototype_worker or {}).get("executed", False)):
                 (
                     stress_validation,
                     stress_replay_output_artifacts,
@@ -7162,7 +7235,7 @@ class StrategyEngine:
                 "available_5m": len(candles5),
                 "available_15m": len(candles15),
             }
-            self._record_session_impulse_retest_runtime_audit(
+            audit_error = self._commit_session_impulse_retest_runtime_audit(
                 symbol=symbol,
                 phase="refresh",
                 status="insufficient_candles",
@@ -7170,7 +7243,8 @@ class StrategyEngine:
                 observed_ts=datetime.now(timezone.utc),
                 payload=response,
             )
-            self.db.commit()
+            if audit_error:
+                response["runtime_audit_error"] = audit_error
             return response
 
         context = self.context_engine.build_snapshot(symbol=symbol, candles_5m=candles5, candles_15m=candles15)
@@ -7292,11 +7366,11 @@ class StrategyEngine:
             "active_thesis_clusters": active_thesis_clusters,
             "session_impulse_retest_active_thesis_clusters": session_impulse_retest_active_thesis_clusters,
             "strategy_mode": getattr(self.settings.strategy_mode, "value", str(self.settings.strategy_mode)),
-            "feature_calibration_available": bool(feature_calibration and feature_calibration.get("available")),
+            "feature_calibration_available": self._safe_bool((feature_calibration or {}).get("available")),
             "feature_calibration_samples": int((feature_calibration or {}).get("matched_samples", 0)),
             "signal_alerts": signal_alerts,
         }
-        family_enabled = bool(self.settings.session_impulse_retest_enabled)
+        family_enabled = self._safe_bool(self.settings.session_impulse_retest_enabled)
         refresh_status = (
             "family_disabled"
             if not family_enabled
@@ -7314,7 +7388,8 @@ class StrategyEngine:
         if refresh_status == "family_disabled":
             decision_code = "family_disabled"
         refresh_plan_ids = list(response.get("session_impulse_retest_plan_ids") or [])
-        self._record_session_impulse_retest_runtime_audit(
+        self.db.commit()
+        audit_error = self._commit_session_impulse_retest_runtime_audit(
             symbol=symbol,
             phase="refresh",
             status=refresh_status,
@@ -7323,7 +7398,8 @@ class StrategyEngine:
             observed_ts=self._to_utc(candles5[-1].ts),
             payload=response,
         )
-        self.db.commit()
+        if audit_error:
+            response["runtime_audit_error"] = audit_error
 
         return response
 
@@ -7732,7 +7808,11 @@ class StrategyEngine:
         if client_order_id:
             submission = self.submission_repo.get_by_client_order_id(client_order_id)
             if submission is not None and stage == ExecutionFillStage.ENTRY:
-                next_state = OrderLifecycleState.PARTIALLY_FILLED if bool(fill_payload.get("partial")) else OrderLifecycleState.FILLED
+                next_state = (
+                    OrderLifecycleState.PARTIALLY_FILLED
+                    if self._safe_bool(fill_payload.get("partial"))
+                    else OrderLifecycleState.FILLED
+                )
                 self.submission_repo.transition(
                     submission,
                     state=next_state.value,

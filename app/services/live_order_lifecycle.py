@@ -31,6 +31,21 @@ class LiveOrderLifecycleReporter:
         return dict(value) if isinstance(value, dict) else {}
 
     @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value) if isfinite(float(value)) else bool(default)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
+    @staticmethod
     def _is_blank_detail(value: Any) -> bool:
         return value is None or value == "" or value == [] or value == {}
 
@@ -347,7 +362,7 @@ class LiveOrderLifecycleReporter:
                     "approval_state": str(getattr(intent, "approval_state", "") or ""),
                     "submit_decision": str(getattr(intent, "submit_decision", "") or ""),
                     "decision_reason_code": str(getattr(intent, "decision_reason_code", "") or ""),
-                    "requested_live": bool(submission.requested_live),
+                    "requested_live": self._safe_bool(submission.requested_live),
                     "adapter": submission.adapter,
                     "state": submission.state,
                     "submit_status": submission.submit_status,
@@ -371,8 +386,8 @@ class LiveOrderLifecycleReporter:
                     "lifecycle_status": lifecycle_status,
                     "binance_ledger_status": str(getattr(ledger, "status", "") or ""),
                     "binance_executed_qty": self._safe_float(getattr(ledger, "executed_qty", 0.0)) if ledger else None,
-                    "binance_live_enabled": bool(getattr(ledger, "live_enabled", False)) if ledger else None,
-                    "binance_test_order": bool(getattr(ledger, "test_order", False)) if ledger else None,
+                    "binance_live_enabled": self._safe_bool(getattr(ledger, "live_enabled", False)) if ledger else None,
+                    "binance_test_order": self._safe_bool(getattr(ledger, "test_order", False)) if ledger else None,
                 }
             )
 
@@ -381,10 +396,10 @@ class LiveOrderLifecycleReporter:
             "window_start": cutoff.isoformat(),
             "window_days": max(1, int(days)),
             "symbol": symbol.upper() if symbol else "",
-            "live_only": bool(live_only),
+            "live_only": self._safe_bool(live_only),
             "summary": {
                 "submission_count": len(submissions),
-                "requested_live_count": sum(1 for row in submissions if bool(row.requested_live)),
+                "requested_live_count": sum(1 for row in submissions if self._safe_bool(row.requested_live)),
                 "entry_fill_count": sum(int(row["entry_fill_count"]) for row in rows),
                 "closed_count": int(status_counts.get("closed", 0)),
                 "open_after_entry_count": int(status_counts.get("open_after_entry", 0)),
@@ -395,7 +410,7 @@ class LiveOrderLifecycleReporter:
                 "avg_realized_r": round(sum(realized_values) / len(realized_values), 4) if realized_values else None,
                 "by_lifecycle_status": dict(sorted(status_counts.items())),
                 "by_symbol": dict(symbol_counts.most_common()),
-                "live_intents": self._intent_counts(cutoff=cutoff, symbol=symbol, live_only=bool(live_only)),
+                "live_intents": self._intent_counts(cutoff=cutoff, symbol=symbol, live_only=self._safe_bool(live_only)),
             },
             "rows": rows,
         }

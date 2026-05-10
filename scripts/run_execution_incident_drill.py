@@ -14,9 +14,23 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.db.session import SessionLocal, init_db
 from app.services.strategy_engine import StrategyEngine
+from scripts.operation_report_io import atomic_write_text
 
 
 DEFAULT_SCENARIOS = ["dashboard", "reconcile", "kill_switch", "close_only", "rollout_block"]
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,7 +120,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append("```json")
     lines.append(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     lines.append("```")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def _dashboard(engine: StrategyEngine, *, symbol: str, universe: str, intent_limit: int, reconcile_limit: int, days: int) -> dict[str, Any]:
@@ -230,7 +244,7 @@ def main() -> int:
                 if not args.no_restore:
                     engine.upsert_rollout_policy(
                         family=args.family,
-                        live_enabled=bool(before_policy.get("live_enabled")),
+                        live_enabled=_safe_bool(before_policy.get("live_enabled")),
                         max_execution_mode=str(before_policy.get("max_execution_mode") or "SHADOW"),
                         max_risk_r=float(before_policy.get("max_risk_r") or 0.0),
                         allowed_sessions=list(before_policy.get("allowed_sessions") or []),

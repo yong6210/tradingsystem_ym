@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from app.core.config import Settings, get_settings
 from app.db.models import Plan, ZoneOutcome
@@ -49,6 +50,35 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 def _safe_int(value: Any, default: int = 0) -> int:
     return int(_safe_float(value, float(default)))
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value) if math.isfinite(float(value)) else bool(default)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
 
 
 class FeatureCalibrationService:
@@ -332,7 +362,7 @@ class FeatureCalibrationService:
             symbol=str(latest.get("symbol", "")),
             regime_label=str(latest.get("regime_label", regime_label) or regime_label),
             now=self._snapshot_generated_at(latest),
-            available=bool(latest.get("available")),
+            available=_safe_bool(latest.get("available")),
             reason=latest.get("reason"),
             baseline_generated_plans=_safe_int(latest.get("baseline_generated_plans", 0)),
             matched_samples=_safe_int(latest.get("matched_samples", row.get("matched_samples", 0) or 0)),
@@ -343,7 +373,7 @@ class FeatureCalibrationService:
             recommended_weights=recommended_weights,
             feature_rows=feature_rows,
             zone_type_multipliers=zone_type_multipliers,
-            applied_runtime=bool(latest.get("applied_runtime")),
+            applied_runtime=_safe_bool(latest.get("applied_runtime")),
             snapshot_path=latest.get("snapshot_path"),
             report_path=latest.get("report_path"),
         )
@@ -530,15 +560,15 @@ class FeatureCalibrationService:
         latest_path = self._latest_snapshot_path(snapshot_dir, symbol=symbol, regime_label=regime_label)
         timestamped_path = self._timestamped_snapshot_path(snapshot_dir, symbol=symbol, regime_label=regime_label, now=now)
         serialized = json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
-        latest_path.write_text(serialized, encoding="utf-8")
-        timestamped_path.write_text(serialized, encoding="utf-8")
+        _atomic_write_text(latest_path, serialized)
+        _atomic_write_text(timestamped_path, serialized)
         return str(timestamped_path)
 
     def runtime_payload(self, *, symbol: str, regime_label: str) -> dict[str, Any] | None:
-        if not self.settings.feature_calibration_enabled or not self.settings.feature_calibration_apply_runtime:
+        if not _safe_bool(self.settings.feature_calibration_enabled) or not _safe_bool(self.settings.feature_calibration_apply_runtime):
             return None
         latest = self._load_latest(symbol=symbol, regime_label=regime_label)
-        if not latest or not bool(latest.get("available")):
+        if not latest or not _safe_bool(latest.get("available")):
             return None
         return self._normalize_snapshot(latest=latest, regime_label=regime_label)
 
@@ -603,7 +633,7 @@ class FeatureCalibrationService:
             )
 
         lines.append("")
-        path.write_text("\n".join(lines), encoding="utf-8")
+        _atomic_write_text(path, "\n".join(lines))
         return str(path)
 
     def generate(
@@ -653,10 +683,10 @@ class FeatureCalibrationService:
         matched = self._match_trades(symbol=symbol, regime_label=regime_label, now=now) if has_learning_repos else []
         matched_samples = len(matched) if has_learning_repos else baseline_generated_plans
 
-        if not self.settings.feature_calibration_enabled:
+        if not _safe_bool(self.settings.feature_calibration_enabled):
             available = False
             reason = "feature_calibration_disabled"
-        elif not bool(feature_importance.get("available")):
+        elif not _safe_bool(feature_importance.get("available")):
             available = False
             reason = str(feature_importance.get("reason", "feature_importance_unavailable"))
         elif baseline_generated_plans < _safe_int(self.settings.feature_calibration_min_generated_plans, 3):
@@ -748,7 +778,7 @@ class FeatureCalibrationService:
                 recommended_weights=recommended_weights,
                 feature_rows=feature_rows,
                 zone_type_multipliers=zone_type_multipliers,
-                applied_runtime=bool(self.settings.feature_calibration_apply_runtime),
+                applied_runtime=_safe_bool(self.settings.feature_calibration_apply_runtime),
             )
 
         if write_report:
@@ -757,6 +787,6 @@ class FeatureCalibrationService:
             report_path = self._write_report(payload=payload, now=now)
             payload["report_path"] = report_path
             latest = self._latest_snapshot_path(self._snapshot_dir(), symbol=symbol, regime_label=regime_label)
-            latest.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+            _atomic_write_text(latest, json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True))
 
         return payload

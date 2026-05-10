@@ -4,6 +4,21 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
+
+
 @dataclass(frozen=True, slots=True)
 class MicroMainUniverseEntry:
     symbol: str
@@ -193,10 +208,10 @@ def build_micro_main_rollout_contract_snapshot(
 ) -> dict[str, Any]:
     snapshot = build_micro_main_universe_policy_snapshot()
     snapshot["rollout_contract"] = {
-        "enabled": bool(enabled),
-        "shadow_only": bool(shadow_only),
+        "enabled": _safe_bool(enabled),
+        "shadow_only": _safe_bool(shadow_only),
         "partial_activation_ratio": round(float(partial_activation_ratio), 4),
         "core_live_slots": max(int(core_live_slots), 0),
-        "secondary_live_enabled": bool(secondary_live_enabled),
+        "secondary_live_enabled": _safe_bool(secondary_live_enabled),
     }
     return snapshot

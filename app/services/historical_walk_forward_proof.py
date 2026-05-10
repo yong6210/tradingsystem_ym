@@ -17,6 +17,7 @@ from app.db.repositories import CandleRepository
 from app.services.context_engine import ContextEngine
 from app.services.fast_failure_guard import fast_failure_hit, fast_failure_trigger_detail, resolve_fast_failure_policy
 from app.services.plan_generator import PlanGenerator, RankedPlan
+from app.services.report_io import atomic_write_text
 from app.services.session_guidance import SessionGuidanceService
 from app.services.zone_engine import ZoneEngine
 
@@ -99,6 +100,21 @@ class HistoricalWalkForwardProofService:
     @classmethod
     def _safe_int(cls, value: Any, default: int = 0) -> int:
         return int(cls._safe_float(value, float(default)))
+
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value) if isfinite(float(value)) else bool(default)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
 
     @staticmethod
     def _ema(values: list[float], length: int) -> float:
@@ -454,9 +470,9 @@ class HistoricalWalkForwardProofService:
             return None
         if str(payload.get("blocked_plan_ids_path") or "") != str(blocked_plan_ids_path or ""):
             return None
-        if bool(payload.get("generate_on_new_15m_only", False)) != bool(generate_on_new_15m_only):
+        if self._safe_bool(payload.get("generate_on_new_15m_only", False)) != self._safe_bool(generate_on_new_15m_only):
             return None
-        if bool(payload.get("independent_signal_mode", False)) != bool(independent_signal_mode):
+        if self._safe_bool(payload.get("independent_signal_mode", False)) != self._safe_bool(independent_signal_mode):
             return None
         if str(payload.get("source_mode") or "engine_regenerated") != str(source_mode or "engine_regenerated"):
             return None
@@ -482,8 +498,7 @@ class HistoricalWalkForwardProofService:
 
     def _store_cached_payload(self, *, cache_key: str, payload: dict[str, Any]) -> None:
         path = self._cache_path(cache_key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, ensure_ascii=False, default=self._json_default), encoding="utf-8")
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, default=self._json_default))
 
     def _load_symbol_candles(
         self,
@@ -623,9 +638,9 @@ class HistoricalWalkForwardProofService:
             "session_guidance_session_name": str(validity.get("session_guidance_session_name") or "").strip().lower(),
             "session_score_bias": round(float(validity.get("session_score_bias") or 0.0), 4),
             "session_probability_adjustment": round(float(validity.get("session_probability_adjustment") or 0.0), 4),
-            "near_lp": bool(validity.get("near_lp")),
+            "near_lp": self._safe_bool(validity.get("near_lp")),
             "zone_age_hours": round(float(validity.get("zone_age_hours") or 0.0), 4),
-            "historical_raw_signal": bool(validity.get("historical_raw_signal")),
+            "historical_raw_signal": self._safe_bool(validity.get("historical_raw_signal")),
             "raw_signal_features": copy.deepcopy(dict(validity.get("raw_signal_features") or {})),
             "final_exit_reason": str(exit_reason or "unknown"),
             "final_exit_price": float(exit_price),
@@ -1099,7 +1114,7 @@ class HistoricalWalkForwardProofService:
             return {}
         if str(entry_model or "").strip().upper() != "LIMIT":
             return {}
-        if not bool(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_enabled", False)):
+        if not self._safe_bool(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_enabled", False)):
             return {}
         allowed_sessions = {
             item.strip().lower()
@@ -1113,7 +1128,7 @@ class HistoricalWalkForwardProofService:
             return {}
         max_bars = max(self._safe_int(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_max_bars", 0), 18), 0)
         stop_r = self._safe_float(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_stop_r", 0.0), 0.00000001)
-        requires_sl_touch = bool(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_requires_sl_touch", False))
+        requires_sl_touch = self._safe_bool(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_requires_sl_touch", False))
         if max_bars <= 0 or stop_r <= 0.0 or stop_r >= 1.0:
             return {}
         return {

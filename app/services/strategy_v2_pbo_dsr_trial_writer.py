@@ -12,6 +12,7 @@ from app.core.config import Settings, get_settings
 from app.core.enums import StrategyMode
 from app.db.models import ValidationTrialFoldScore, ValidationTrialRun
 from app.db.repositories import ValidationArtifactRepository
+from app.services.report_io import atomic_write_text
 from app.services.strategy_v2_lock_validation import StrategyV2LockValidationService
 from app.services.strategy_v2_stress_validation import StrategyV2StressValidationService
 from app.services.strategy_v2_validation import ClosedTradeRecord, StrategyV2ValidationService
@@ -48,6 +49,21 @@ class StrategyV2PboDsrTrialWriterService:
             fill_repo=fill_repo,
             candle_repo=candle_repo,
         )
+
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value) if math.isfinite(float(value)) else bool(default)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
 
     @staticmethod
     def _round(value: float, digits: int = 6) -> float:
@@ -701,7 +717,7 @@ class StrategyV2PboDsrTrialWriterService:
                 "",
             ]
         )
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(
@@ -717,7 +733,7 @@ class StrategyV2PboDsrTrialWriterService:
         if self.repo is None:
             raise RuntimeError("ValidationArtifactRepository is required")
 
-        if not bool(self.settings.pbo_dsr_trial_writer_enabled):
+        if not self._safe_bool(self.settings.pbo_dsr_trial_writer_enabled):
             persist_summary = None
             if persist:
                 persist_summary = self.repo.replace_seed_for_selection_rules(

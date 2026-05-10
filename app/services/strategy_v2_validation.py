@@ -9,6 +9,7 @@ from typing import Any
 from app.core.config import Settings, get_settings
 from app.core.enums import ExitReason, PlanState, StrategyMode
 from app.db.models import Plan
+from app.services.report_io import atomic_write_text
 from app.services.session_guidance import SessionGuidanceService
 from app.services.strategy_mode import StrategyModeService
 
@@ -44,6 +45,20 @@ class StrategyV2ValidationService:
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "y", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+                return False
+        return True if value else False
 
     @staticmethod
     def _parse_ts(value: Any) -> datetime | None:
@@ -161,11 +176,11 @@ class StrategyV2ValidationService:
     def _session_bucket(self, closed_ts: datetime) -> str:
         guidance = self.session_guidance.snapshot(now=closed_ts)
         windows = dict(guidance.get("preferred_windows_utc") or {})
-        if bool(dict(windows.get("overlap") or {}).get("active")):
+        if self._safe_bool(dict(windows.get("overlap") or {}).get("active")):
             return "overlap"
-        if bool(dict(windows.get("london") or {}).get("active")):
+        if self._safe_bool(dict(windows.get("london") or {}).get("active")):
             return "london"
-        if bool(dict(windows.get("new_york") or {}).get("active")):
+        if self._safe_bool(dict(windows.get("new_york") or {}).get("active")):
             return "new_york"
         return "dead_session"
 
@@ -399,7 +414,7 @@ class StrategyV2ValidationService:
             "",
             ]
         )
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(

@@ -16,6 +16,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.main import app
+from scripts.operation_report_io import atomic_write_text
 
 
 EXPECTED_OPERATOR_UI_SECTIONS = (
@@ -66,6 +67,19 @@ def _display_path(path: Path) -> str:
         return str(path.resolve().relative_to(ROOT_DIR))
     except ValueError:
         return str(path)
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
 
 
 def _required_json(response: Any, method: str, path: str) -> dict[str, Any]:
@@ -301,7 +315,7 @@ def _approval_strip_snapshot(
     dashboard_strip = _surface_strip_summary(dashboard, surface_type="dashboard")
     validation_strip = _surface_strip_summary(validation, surface_type="validation")
     checklist_strip = _surface_strip_summary(checklist, surface_type="checklist")
-    entries_allowed = dashboard.get("new_entries_allowed", False) is not False
+    entries_allowed = _safe_bool(dashboard.get("new_entries_allowed", False))
     primary_reason = str(
         dashboard.get("blocking_reason_message")
         or validation_strip.get("primary_reason")
@@ -541,7 +555,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append("```json")
     lines.append(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     lines.append("```")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def main() -> int:
@@ -818,7 +832,7 @@ def main() -> int:
             "edge_evolution_promotion_axis": (edge_evolution.get("promotion_candidate_axis") or ""),
             "edge_evolution_promotion_variant": (edge_evolution.get("promotion_candidate_variant") or ""),
             "review_followup_ledger": {
-                "available": bool(review_followup_ledger.get("available", False)),
+                "available": _safe_bool(review_followup_ledger.get("available", False)),
                 "last_status": (review_followup_ledger.get("last_status") or ""),
                 "last_action": (review_followup_ledger.get("last_action") or ""),
                 "recent_entry_count": int(review_followup_ledger.get("recent_entry_count", 0) or 0),

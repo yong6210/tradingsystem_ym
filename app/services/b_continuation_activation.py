@@ -13,6 +13,21 @@ class BContinuationActivationService:
     _TARGET_FAMILY = "trend_continuation"
 
     @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return True if value else False
+
+    @staticmethod
     def _dict(payload: dict[str, Any] | None) -> dict[str, Any]:
         return dict(payload or {})
 
@@ -201,7 +216,7 @@ class BContinuationActivationService:
         positive_state: str,
     ) -> dict[str, Any]:
         cluster_status = str(overlay.get("strategy_cluster_status") or "overlay_unavailable").strip().lower()
-        live_eligible = bool(overlay.get("live_eligible", False))
+        live_eligible = self._safe_bool(overlay.get("live_eligible", False))
         guardrail_reasons = self._dedupe(list(overlay.get("guardrail_reasons") or []))
         reason_codes = self._dedupe(
             [
@@ -295,7 +310,7 @@ class BContinuationActivationService:
             "activation_bias": activation_bias,
             "target_mode": mode,
             "confidence": confidence,
-            "live_eligible": bool(live_eligible),
+            "live_eligible": live_eligible,
             "summary": summary,
             "reason_codes": reason_codes,
             "source_summary": {
@@ -458,6 +473,6 @@ class BContinuationActivationService:
                 auto_promotion_rollout_execution={},
                 positive_evidence_expansion={},
             )
-            item["b_continuation_activation"] = summary if summary.get("available", False) else None
+            item["b_continuation_activation"] = summary if self._safe_bool(summary.get("available", False)) else None
             annotated.append(item)
         return annotated

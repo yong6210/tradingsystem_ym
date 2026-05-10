@@ -107,6 +107,8 @@ PAPER exit criteria:
 - [ ] `scripts/run_live_replay_parity_audit.py --all-live-symbols --days 3 --no-fail-exit`에서 개별 심볼 ALERT/WATCH와 `flow_diagnosis.stage`, `order_flow_status`를 확인함
 - [ ] `scripts/run_replay_validation_bridge.py --all-live-symbols --no-fail-exit`로 replay-backed validation bridge 후보를 audit-only로 확인함. `ev_r_lower_95`와 material slice warnings를 같이 확인하며, slice warning은 clean pass로 보지 않음. 이 결과만으로 live gate를 자동 개방하지 않음
 - [ ] `scripts/run_micro_live_ops_heartbeat.py --no-fail-exit`가 scheduled guard report freshness와 최신 리포트 내부 상태 확인을 통과함. hard failure는 즉시 조치하고, `WATCH`는 no-order/replay bridge 등 운영상 확인이 필요한 상태로 분리함
+- [ ] `scripts/run_micro_live_failure_drill.py --no-fail-exit`가 failure-contract drill을 통과하고, heartbeat의 `failure_drill` job도 `PASS`로 표시됨
+- [ ] launchd macro calendar refresh가 `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH`에 지정된 live blackout 계약 파일을 갱신하도록 생성됐는지 확인함
 
 MICRO_LIVE exit criteria:
 - [ ] fee/slippage 포함 후 기대치 유지

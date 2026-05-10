@@ -55,6 +55,21 @@ class OperatorActionPriorityService:
             return int(default)
 
     @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
+    @staticmethod
     def _parse_datetime(value: Any) -> datetime | None:
         text = str(value or "").strip()
         if not text:
@@ -437,7 +452,7 @@ class OperatorActionPriorityService:
 
     def _capture_context(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
         summary = self._dict(payload)
-        if not summary or not bool(summary.get("available", False)):
+        if not summary or not self._safe_bool(summary.get("available", False)):
             return None
         return {
             "available": True,
@@ -627,7 +642,7 @@ class OperatorActionPriorityService:
         command_context: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         summary = self._dict(payload)
-        if not summary or not bool(summary.get("available", False)):
+        if not summary or not self._safe_bool(summary.get("available", False)):
             return None
         command_context_payload = self._dict(command_context)
         context = {
@@ -649,12 +664,12 @@ class OperatorActionPriorityService:
             "entry_timing_recommendation_reason": str(
                 summary.get("entry_timing_recommendation_reason") or "not_available"
             ),
-            "entry_timing_comparison_ready": bool(summary.get("entry_timing_comparison_ready", False)),
+            "entry_timing_comparison_ready": self._safe_bool(summary.get("entry_timing_comparison_ready", False)),
             "execution_style_preferred_variant": str(summary.get("execution_style_preferred_variant") or "none"),
             "execution_style_recommendation_reason": str(
                 summary.get("execution_style_recommendation_reason") or "not_available"
             ),
-            "execution_style_comparison_ready": bool(summary.get("execution_style_comparison_ready", False)),
+            "execution_style_comparison_ready": self._safe_bool(summary.get("execution_style_comparison_ready", False)),
         }
         candidate_context = self._edge_experiment_candidate_context(dashboard_payload)
         accepted_focus = self._dict(candidate_context.get("accepted_candidate_focus"))
@@ -704,7 +719,7 @@ class OperatorActionPriorityService:
 
         priority_level = "watch"
         actions: list[dict[str, Any]] = []
-        if bool(context.get("entry_timing_comparison_ready", False)):
+        if self._safe_bool(context.get("entry_timing_comparison_ready", False)):
             preferred = str(context.get("entry_timing_preferred_variant") or "none")
             reason = str(context.get("entry_timing_recommendation_reason") or "not_available")
             target = self._dict(context.get("entry_timing_target"))
@@ -735,7 +750,7 @@ class OperatorActionPriorityService:
                     "advisory_only": True,
                 }
             )
-        if bool(context.get("execution_style_comparison_ready", False)):
+        if self._safe_bool(context.get("execution_style_comparison_ready", False)):
             preferred = str(context.get("execution_style_preferred_variant") or "none")
             reason = str(context.get("execution_style_recommendation_reason") or "not_available")
             target = self._dict(context.get("execution_style_target"))
@@ -779,7 +794,7 @@ class OperatorActionPriorityService:
         command_context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         summary = self._dict(payload)
-        if not summary or not bool(summary.get("available", False)):
+        if not summary or not self._safe_bool(summary.get("available", False)):
             return []
 
         evolution_state = str(summary.get("evolution_state") or "insufficient_sample")
@@ -1224,7 +1239,7 @@ class OperatorActionPriorityService:
                 supporting_signals.append(f"strongest_regime:{strongest_regime}")
             if weakest_regime and weakest_regime != "none":
                 supporting_signals.append(f"weakest_regime:{weakest_regime}")
-            if bool(experiment_context.get("entry_timing_comparison_ready", False)):
+            if self._safe_bool(experiment_context.get("entry_timing_comparison_ready", False)):
                 supporting_signals.append(
                     f"entry_timing:{experiment_context.get('entry_timing_preferred_variant')}"
                 )
@@ -1233,7 +1248,7 @@ class OperatorActionPriorityService:
                     supporting_signals.append(
                         f"entry_target:{entry_target.get('symbol')}:{entry_target.get('status') or 'UNKNOWN'}"
                     )
-            if bool(experiment_context.get("execution_style_comparison_ready", False)):
+            if self._safe_bool(experiment_context.get("execution_style_comparison_ready", False)):
                 supporting_signals.append(
                     f"execution_style:{experiment_context.get('execution_style_preferred_variant')}"
                 )
@@ -1289,7 +1304,7 @@ class OperatorActionPriorityService:
             if session_state == "negative":
                 supporting_signals.append("capture_session:negative")
 
-        if dashboard_payload.get("new_entries_allowed") is False:
+        if not self._safe_bool(dashboard_payload.get("new_entries_allowed"), default=True):
             blocking_signals.append(
                 f"entry_gate:{dashboard_payload.get('blocking_reason_code') or 'blocked'}"
             )

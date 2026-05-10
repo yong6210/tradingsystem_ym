@@ -267,16 +267,40 @@ family 리뷰:
 
 ## 4. 세션 시작 전 점검
 ### 4.1. 프로세스/헬스
-기본 API 런타임은 LaunchAgent `com.yumin.trading.api`가 유지한다. 상태 확인:
+일반 상태 확인은 통합 점검 스크립트를 우선 사용한다. `~/Library/Application Support/trading` durable 런타임이 있으면 이 스크립트가 durable Python/소스를 자동으로 사용한다.
+
+```bash
+cd /Users/yumin/Documents/trading
+./scripts/check_runtime_stack.sh
+```
+
+기존 단일 API LaunchAgent는 `com.yumin.trading.api`다. 워크스페이스 파일 읽기가 느려졌거나 API/워커 전체를 함께 복구해야 하면 `com.yumin.trading.runtime-stack` LaunchAgent가 `~/Library/Application Support/trading` durable 런타임 watchdog 역할을 한다.
 
 ```bash
 launchctl print gui/$(id -u)/com.yumin.trading.api | sed -n '1,80p'
+launchctl print gui/$(id -u)/com.yumin.trading.runtime-stack | sed -n '1,80p'
 ```
 
 ```bash
 curl -s "http://127.0.0.1:8000/health/live" | jq
 curl -s "http://127.0.0.1:8000/health/ready" | jq
 ```
+
+수동 복구:
+
+```bash
+./scripts/bootstrap_durable_runtime.sh
+./scripts/restart_runtime_stack_tmp.sh
+TRADING_RUNTIME_WATCHDOG_ONCE=1 ./scripts/watch_runtime_stack_tmp.sh
+```
+
+LaunchAgent 재설치:
+
+```bash
+./scripts/install_runtime_stack_launchd.sh
+```
+
+이 설치 스크립트는 `com.yumin.trading.runtime-stack`을 설치하고, `com.yumin.trading.api`, `com.yumin.trading.stage-monitor`, `com.yumin.trading.paper-lineage-watch`의 사용자 LaunchAgent plist를 `~/Library/LaunchAgents.disabled/...`로 옮긴다.
 
 ### 4.2. 운영 요약
 ```bash
@@ -482,6 +506,7 @@ curl -s "http://127.0.0.1:8000/plans/top?symbol=BTCUSDC&tf=5m&limit=5&refresh=tr
 ./.venv/bin/python scripts/run_replay_validation_bridge.py --all-live-symbols --no-fail-exit
 ./.venv/bin/python scripts/run_session_impulse_retest_runtime_audit_report.py --hours 3 --no-fail-exit
 ./.venv/bin/python scripts/run_micro_live_ops_heartbeat.py --no-fail-exit
+./.venv/bin/python scripts/run_micro_live_failure_drill.py --no-fail-exit
 ```
 
 용도:
@@ -491,11 +516,12 @@ curl -s "http://127.0.0.1:8000/plans/top?symbol=BTCUSDC&tf=5m&limit=5&refresh=tr
 - `run_live_order_lifecycle_report.py`: intent, submission, fill, Binance ledger를 연결해 `no signal / approval blocked / submit skipped / submitted without fill / rejected-error / open / closed`를 분리한다.
 - `run_micro_live_no_order_watchdog.py`: live intent가 쌓였는데 live submission이 없는 구간을 감지한다. 알림은 `intent/제출/원인/상세/다음`만 짧게 보낸다. 알림을 보낼 때만 `--notify`를 붙인다. timestamp 리포트와 함께 `latest.md/latest.json`을 쓰고, 알림 cooldown state는 실제 전송 성공 후에만 기록한다.
 - `run_live_reconciliation_watchdog.py`: stale open submission, ledger terminal mismatch, user-stream stale, fresh critical reconciliation event를 감지한다. 알림을 보낼 때만 `--notify`를 붙인다.
-- `run_micro_live_boot_check.py`: worker 시작 전 runtime guard, reconciliation watchdog, synthetic canary를 한 번에 묶어 확인한다. 실제 주문은 보내지 않는다.
+- `run_micro_live_boot_check.py`: worker 시작 전 runtime guard, reconciliation watchdog, synthetic canary, failure-contract drill을 한 번에 묶어 확인한다. 실제 주문은 보내지 않는다.
 - `run_live_replay_parity_audit.py --all-live-symbols`: 11개 live symbol 전체의 replay 기대 빈도 대비 live intent 빈도를 한 번에 보고, 심볼별 `flow_diagnosis.stage`로 signal/plan 생성 공백, approval 차단, intent->submission 공백, exchange reject/error를 분리한다. 후보 빈도는 충분하지만 모든 intent가 승인 차단이면 `PASS`가 아니라 `WATCH`로 본다.
 - `run_replay_validation_bridge.py --all-live-symbols`: replay cache가 보수적 bridge 기준을 넘는지 audit-only로 확인한다. 평균 EV뿐 아니라 `ev_r_lower_95`가 음수가 아닌지 보고, `direction/strategy_family/entry_model`별 material slice가 약하면 `ELIGIBLE_FOR_MANUAL_BRIDGE_REVIEW_WITH_SLICE_WARNINGS`로 낮춘다. timestamp 리포트와 함께 `latest.md/latest.json`도 쓴다. 이 스크립트는 live approval을 변경하지 않는다.
 - `run_session_impulse_retest_runtime_audit_report.py`: DB에 남은 `session_impulse_retest` refresh/auto_route audit row를 요약한다. `signal_generated`, `no_fresh_candidates`, `intent_blocked`, `submitted`, `ws_stream_active_route_suppressed`, `intent_creation_failed`, `submit_error`를 한 리포트에서 본다. timestamp 리포트와 함께 `latest.md/latest.json`도 쓴다.
-- `run_micro_live_ops_heartbeat.py`: launchd/수동 스케줄이 실제로 최신 리포트를 계속 만들고 있는지 확인한다. 가능한 리포트는 내부 `overall_status/status/evaluation.status`까지 읽어서, 최신 파일이어도 `ALERT/WATCH/DRIFT/FAIL`이면 heartbeat에 노출한다. 리포트 job은 `state.json` 같은 상태 파일이 아니라 실제 report 파일을 보고, 읽어야 하는 status가 없으면 failure로 처리한다. macro blackout 계약은 파일 존재만 보지 않고 `windows`의 future horizon도 직접 검증한다. 이때 glob 최신 파일보다 `.env`의 `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH`를 우선해 live approval이 실제로 쓰는 계약을 감사한다. blackout 파일 mtime이 오래됐지만 horizon이 충분하면 `WATCH`, horizon 부족/만료는 hard failure로 본다. 알림 메시지는 `긴급(FAIL)`과 `주의(WATCH)`를 분리해 보여주고, 같은 issue 조합은 cooldown으로 반복 발송을 억제한다. 단, cooldown state는 실제 전송 성공이 확인된 뒤에만 기록한다. timestamp 리포트와 함께 `latest.md/latest.json`도 써서 운영 화면이나 수동 확인은 고정 경로를 볼 수 있고, latest/state 쓰기는 atomic replace로 처리한다.
+- `run_micro_live_ops_heartbeat.py`: launchd/수동 스케줄이 실제로 최신 리포트를 계속 만들고 있는지 확인한다. 가능한 리포트는 내부 `overall_status/status/evaluation.status`까지 읽어서, 최신 파일이어도 `ALERT/WATCH/DRIFT/FAIL`이면 heartbeat에 노출한다. failure-contract drill 최신성도 같이 감시해 드릴이 stale 되면 운영 heartbeat에서 바로 보이게 한다. 리포트 job은 `state.json` 같은 상태 파일이 아니라 실제 report 파일을 보고, 읽어야 하는 status가 없으면 failure로 처리한다. macro blackout 계약은 파일 존재만 보지 않고 `windows`의 future horizon도 직접 검증한다. 이때 glob 최신 파일보다 `.env`의 `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH`를 우선해 live approval이 실제로 쓰는 계약을 감사한다. blackout 파일 mtime이 오래됐지만 horizon이 충분하면 `WATCH`, horizon 부족/만료는 hard failure로 본다. 알림 메시지는 `긴급(FAIL)`과 `주의(WATCH)`를 분리해 보여주고, 같은 issue 조합은 cooldown으로 반복 발송을 억제한다. 단, cooldown state는 실제 전송 성공이 확인된 뒤에만 기록한다. timestamp 리포트와 함께 `latest.md/latest.json`도 써서 운영 화면이나 수동 확인은 고정 경로를 볼 수 있고, timestamp/latest/state 쓰기는 atomic replace로 처리한다.
+- `run_micro_live_failure_drill.py`: 실제 주문/실 DB/control switch를 건드리지 않는 failure-contract drill이다. missing/stale/malformed report, 짧은 macro horizon, 알림 전송 실패, stale submission, submit-ready gap, runtime audit hard failure가 `PASS`로 숨지 않는지 한 번에 확인하고 timestamp/latest 리포트를 atomic replace로 남긴다.
 
 `AUTO_TRADING_EXECUTION_MODE`가 `MICRO_LIVE` 또는 `LIVE`이면 `run_worker.py`는 시작 전에 boot check를 먼저 실행한다. 실패하면 worker는 live routing을 시작하지 않는다. `--skip-boot-check`는 운영자가 의도적으로 우회할 때만 사용한다.
 
@@ -522,7 +548,7 @@ macOS에서 반복 점검을 자동화하려면 먼저 plist만 생성한다.
 ./.venv/bin/python scripts/install_micro_live_ops_launchd.py
 ```
 
-실제 등록은 운영자가 확인한 뒤 `--install --load`를 붙인다. 이 스케줄은 runtime guard, no-order watchdog, reconciliation watchdog, synthetic canary, boot check, ops heartbeat, replay validation bridge, session impulse retest runtime audit, Binance rule drift, macro calendar refresh를 분리 실행한다.
+실제 등록은 운영자가 확인한 뒤 `--install --load`를 붙인다. 이 스케줄은 runtime guard, no-order watchdog, reconciliation watchdog, synthetic canary, boot check, ops heartbeat, replay validation bridge, session impulse retest runtime audit, failure-contract drill, Binance rule drift, macro calendar refresh를 분리 실행한다. macro calendar refresh는 `.env` 또는 `--env-file`의 `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH`가 있으면 그 live 계약 파일을 직접 갱신하고, 값이 없을 때만 기본 auto output을 쓴다.
 
 ## 6. 실행 절차
 ### 6.1. 실행용 preview

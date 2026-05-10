@@ -157,6 +157,28 @@ python scripts/run_execution_incident_drill.py \
 - JSON stdout
 - Markdown report: `reports/execution/incident_drills/execution_incident_drill_<SYMBOL>_<UTC>.md`
 
+## MICRO_LIVE Failure Contract Drill
+
+control-plane 상태를 바꾸지 않는 운영 장애 계약 검증은 아래 스크립트로 실행한다.
+
+```bash
+./.venv/bin/python scripts/run_micro_live_failure_drill.py --no-fail-exit
+```
+
+이 drill은 실제 주문, 실 DB 변경, kill switch/close-only 변경을 하지 않는다. 대신 temp 파일과 순수 평가 함수로 아래 실패가 `PASS`로 숨지 않는지 확인한다.
+
+- missing/stale/malformed operating report
+- macro blackout short horizon
+- alert delivery failure cooldown contract
+- stale submitted order without Binance ledger
+- submit-ready intent without live submission
+- session impulse retest runtime audit hard failure
+
+기본 출력:
+- JSON stdout
+- Markdown report: `reports/operations/micro_live_failure_drill/micro_live_failure_drill_<UTC>.md`
+- stable aliases: `reports/operations/micro_live_failure_drill/latest.md`, `latest.json`
+
 ## Drill 성공 기준
 
 - kill switch 적용 시 `new_entries_allowed=false`

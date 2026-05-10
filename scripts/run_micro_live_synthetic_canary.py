@@ -16,7 +16,7 @@ if str(ROOT_DIR) not in sys.path:
 from app.core.config import get_settings
 from app.integrations.binance_futures import BinanceFuturesClient
 from app.services.execution_coordinator import ExecutionCoordinator
-from scripts.operation_report_io import atomic_write_text, display_path, write_latest_aliases
+from scripts.operation_report_io import atomic_write_text, display_path, parse_report_generated_at, write_latest_aliases
 from scripts.run_micro_live_preflight import _csv_set, _micro_live_config_drift_checks
 
 
@@ -323,7 +323,7 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
     if atomic:
         atomic_write_text(path, content)
     else:
-        path.write_text(content, encoding="utf-8")
+        atomic_write_text(path, content)
 
 
 def main() -> int:
@@ -337,13 +337,13 @@ def main() -> int:
         use_network=not bool(args.no_network),
     )
     if not args.no_write_report:
-        generated = datetime.fromisoformat(str(payload["generated_at"]).replace("Z", "+00:00"))
+        generated = parse_report_generated_at(payload.get("generated_at"))
         report_dir = ROOT_DIR / args.report_dir
         report_path = report_dir / f"micro_live_synthetic_canary_{payload['symbol']}_{generated.strftime('%Y%m%dT%H%M%SZ')}.md"
         payload["report_path"] = _display_path(report_path)
         payload["latest_report_path"] = _display_path(report_dir / "latest.md")
         payload["latest_json_path"] = _display_path(report_dir / "latest.json")
-        _write_report(report_path, payload)
+        _write_report(report_path, payload, atomic=True)
         payload.update(
             write_latest_aliases(
                 report_dir=report_dir,

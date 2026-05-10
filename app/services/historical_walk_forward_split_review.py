@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.core.config import ROOT_DIR, Settings, get_settings
+from app.services.report_io import atomic_write_text
 from app.services.strategy_v2_validation import StrategyV2ValidationService
 
 
@@ -586,7 +587,7 @@ class HistoricalWalkForwardSplitReviewService:
         )
         lines.extend(self._markdown_table(list(breakdowns.get("generated_month_recent") or []), limit=12))
 
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def summarize_payload(

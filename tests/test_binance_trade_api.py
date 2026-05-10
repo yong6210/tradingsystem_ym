@@ -1,11 +1,43 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
+from app.integrations.binance_futures import BinanceFuturesClient
 from app.main import app
+from app.services.strategy_engine import StrategyEngine
 
 
 client = TestClient(app)
+
+
+def test_binance_order_payload_parses_string_false_reduce_only() -> None:
+    engine = StrategyEngine.__new__(StrategyEngine)
+    engine.settings = SimpleNamespace(binance_trade_live_enabled=True)
+
+    payload = engine._normalize_binance_order_payload(
+        action="submit",
+        symbol="BTCUSDC",
+        requested_live=True,
+        raw={
+            "symbol": "BTCUSDC",
+            "orderId": 12345,
+            "clientOrderId": "entry-order-1",
+            "status": "NEW",
+            "side": "BUY",
+            "type": "LIMIT",
+            "reduceOnly": "false",
+        },
+    )
+
+    assert payload["reduce_only"] is False
+
+
+def test_binance_safe_bool_treats_string_nullish_values_as_false() -> None:
+    assert BinanceFuturesClient._safe_bool("false", default=True) is False
+    assert BinanceFuturesClient._safe_bool("none", default=True) is False
+    assert BinanceFuturesClient._safe_bool("null", default=True) is False
 
 
 def test_submit_binance_order_route(monkeypatch) -> None:

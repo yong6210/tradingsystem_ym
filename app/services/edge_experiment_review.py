@@ -19,6 +19,21 @@ def _int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
+
+
 def _ratio(numerator: float, denominator: float) -> float:
     if abs(float(denominator)) <= 1e-9:
         return 0.0
@@ -188,7 +203,7 @@ def _edge_proof_posture(
 ) -> dict[str, Any]:
     count = max(_int(closed_trade_count, 0), 0)
     proof_goal = _int(sample_progress.get("edge_proof_goal_closed_trades", _EDGE_PROOF_GOAL_CLOSED_TRADES))
-    proof_goal_ready = bool(sample_progress.get("edge_proof_goal_ready", False))
+    proof_goal_ready = _safe_bool(sample_progress.get("edge_proof_goal_ready", False))
     remaining_to_goal = max(_int(sample_progress.get("remaining_closed_trades_to_edge_proof_goal", 0)), 0)
     maturity = str(sample_progress.get("sample_maturity_state") or "unknown")
     regime_dependency_state = str(regime_edge_breakdown.get("dependency_state") or "not_available")
@@ -309,11 +324,11 @@ def _operating_discipline(
         loss_driven_rewrite_allowed = not early_loss_rewrite_embargo_active
         alpha_generator_review_allowed = rollout_expansion_allowed
         capital_scale_review_allowed = (
-            rollout_expansion_allowed and bool(experiment_sequence.get("execution_style_locked", False))
+            rollout_expansion_allowed and _safe_bool(experiment_sequence.get("execution_style_locked", False))
         )
         signal_density_control_review_allowed = rollout_expansion_allowed
         execution_strategy_automation_review_allowed = (
-            rollout_expansion_allowed and bool(experiment_sequence.get("execution_style_locked", False))
+            rollout_expansion_allowed and _safe_bool(experiment_sequence.get("execution_style_locked", False))
         )
         multi_strategy_expansion_review_allowed = rollout_expansion_allowed
         summary = (
@@ -394,15 +409,15 @@ def _experiment_sequence(
     execution_style: dict[str, Any],
     sample_progress: dict[str, Any],
 ) -> dict[str, Any]:
-    decision_ready = bool(sample_progress.get("decision_ready", False))
-    promotion_ready = bool(sample_progress.get("promotion_ready", False))
+    decision_ready = _safe_bool(sample_progress.get("decision_ready", False))
+    promotion_ready = _safe_bool(sample_progress.get("promotion_ready", False))
     entry_preferred = str(entry_timing.get("preferred_variant") or "none")
     execution_preferred = str(execution_style.get("preferred_variant") or "none")
-    entry_timing_locked = bool(entry_timing.get("comparison_ready", False)) and decision_ready and entry_preferred not in {
+    entry_timing_locked = _safe_bool(entry_timing.get("comparison_ready", False)) and decision_ready and entry_preferred not in {
         "",
         "none",
     }
-    execution_style_locked = bool(execution_style.get("comparison_ready", False)) and decision_ready and execution_preferred not in {
+    execution_style_locked = _safe_bool(execution_style.get("comparison_ready", False)) and decision_ready and execution_preferred not in {
         "",
         "none",
     }
@@ -690,8 +705,8 @@ def summarize_edge_experiment_review(payload: dict[str, Any] | None) -> dict[str
         experiment_sequence=experiment_sequence,
     )
     return {
-        "available": bool(source.get("available", False)),
-        "advisory_only": bool(source.get("advisory_only", True)),
+        "available": _safe_bool(source.get("available", False)),
+        "advisory_only": _safe_bool(source.get("advisory_only", True), default=True),
         "edge_state": str(source.get("edge_state") or "insufficient_edge_measurement"),
         "closed_trade_count": _int(true_edge.get("closed_trade_count", 0)),
         "true_edge_ratio": round(_float(true_edge.get("true_edge_ratio", 0.0)), 4),
@@ -701,27 +716,27 @@ def summarize_edge_experiment_review(payload: dict[str, Any] | None) -> dict[str
         "edge_stability": round(_float(true_edge.get("edge_stability", 0.0)), 4),
         "closed_expected_r": round(_float(true_edge.get("closed_expected_r", 0.0)), 4),
         "post_cost_closed_realized_r": round(_float(true_edge.get("post_cost_closed_realized_r", 0.0)), 4),
-        "entry_timing_available": bool(entry_timing.get("available", False)),
-        "entry_timing_comparison_ready": bool(entry_timing.get("comparison_ready", False)),
+        "entry_timing_available": _safe_bool(entry_timing.get("available", False)),
+        "entry_timing_comparison_ready": _safe_bool(entry_timing.get("comparison_ready", False)),
         "entry_timing_preferred_variant": str(entry_timing.get("preferred_variant") or "none"),
         "entry_timing_recommendation_reason": str(entry_timing.get("recommendation_reason") or "not_available"),
-        "execution_style_available": bool(execution_style.get("available", False)),
-        "execution_style_comparison_ready": bool(execution_style.get("comparison_ready", False)),
+        "execution_style_available": _safe_bool(execution_style.get("available", False)),
+        "execution_style_comparison_ready": _safe_bool(execution_style.get("comparison_ready", False)),
         "execution_style_preferred_variant": str(execution_style.get("preferred_variant") or "none"),
         "execution_style_recommendation_reason": str(
             execution_style.get("recommendation_reason") or "not_available"
         ),
         "sample_maturity_state": str(sample_progress.get("sample_maturity_state") or "unknown"),
-        "directional_ready": bool(sample_progress.get("directional_ready", False)),
-        "decision_ready": bool(sample_progress.get("decision_ready", False)),
-        "promotion_ready": bool(sample_progress.get("promotion_ready", False)),
-        "operator_sample_floor_ready": bool(sample_progress.get("operator_sample_floor_ready", False)),
+        "directional_ready": _safe_bool(sample_progress.get("directional_ready", False)),
+        "decision_ready": _safe_bool(sample_progress.get("decision_ready", False)),
+        "promotion_ready": _safe_bool(sample_progress.get("promotion_ready", False)),
+        "operator_sample_floor_ready": _safe_bool(sample_progress.get("operator_sample_floor_ready", False)),
         "next_sample_target_closed_trades": _int(sample_progress.get("next_sample_target_closed_trades", 0)),
         "remaining_closed_trades_to_next_target": _int(
             sample_progress.get("remaining_closed_trades_to_next_target", 0)
         ),
         "edge_proof_goal_closed_trades": _int(sample_progress.get("edge_proof_goal_closed_trades", 0)),
-        "edge_proof_goal_ready": bool(sample_progress.get("edge_proof_goal_ready", False)),
+        "edge_proof_goal_ready": _safe_bool(sample_progress.get("edge_proof_goal_ready", False)),
         "remaining_closed_trades_to_edge_proof_goal": _int(
             sample_progress.get("remaining_closed_trades_to_edge_proof_goal", 0)
         ),

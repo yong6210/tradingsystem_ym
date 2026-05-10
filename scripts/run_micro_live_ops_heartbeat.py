@@ -16,6 +16,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.core.config import get_settings
 from app.services.notification_dispatcher import NotificationDispatcher
+from scripts.operation_report_io import atomic_write_text, parse_report_generated_at
 
 
 _DEFAULT_JOBS: dict[str, Any] = {
@@ -64,6 +65,11 @@ _DEFAULT_JOBS: dict[str, Any] = {
         "pass_statuses": {"PASS"},
         "watch_statuses": {"WATCH"},
     },
+    "failure_drill": {
+        "pattern": "reports/operations/micro_live_failure_drill/*.md",
+        "max_age_minutes": 1800,
+        "pass_statuses": {"PASS"},
+    },
     "macro_calendar_blackouts": {
         "pattern": "reports/validation/contracts/micro_live_event_blackouts_*",
         "path_setting": "auto_trading_micro_live_event_blackout_path",
@@ -73,6 +79,20 @@ _DEFAULT_JOBS: dict[str, Any] = {
         "stale_status": "WATCH",
     },
 }
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
 
 
 def parse_args() -> argparse.Namespace:
@@ -183,10 +203,7 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    tmp_path.write_text(content, encoding="utf-8")
-    tmp_path.replace(path)
+    atomic_write_text(path, content)
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -295,10 +312,10 @@ def _content_status_row(*, report_status: str, pass_statuses: set[str], watch_st
     return {"content_status": "FAIL", "content_reason": f"content_status_{report_status.lower() or 'unaccepted'}"}
 
 
-def evaluate_ops_heartbeat(*, now: datetime | None = None) -> dict[str, Any]:
+def evaluate_ops_heartbeat(*, now: datetime | None = None, jobs: dict[str, Any] | None = None) -> dict[str, Any]:
     current = (now or datetime.now(UTC)).astimezone(UTC)
     rows: list[dict[str, Any]] = []
-    for name, raw_config in _DEFAULT_JOBS.items():
+    for name, raw_config in (jobs or _DEFAULT_JOBS).items():
         config = _coerce_job_config(raw_config)
         pattern = str(config.get("pattern") or "")
         max_age_minutes = int(config.get("max_age_minutes") or 0)
@@ -429,7 +446,7 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
     if atomic:
         _atomic_write_text(path, content)
     else:
-        path.write_text(content, encoding="utf-8")
+        _atomic_write_text(path, content)
 
 
 def _write_latest_aliases(*, report_dir: Path, payload: dict[str, Any]) -> dict[str, str]:
@@ -516,20 +533,20 @@ def _cooldown_allows(*, state_file: Path, dedupe_key: str, cooldown_minutes: int
 
 
 def _notification_delivered(result: dict[str, Any]) -> bool:
-    return bool(dict(result or {}).get("delivered"))
+    return _safe_bool(dict(result or {}).get("delivered"))
 
 
 def main() -> int:
     args = parse_args()
     payload = build_payload()
     if not args.no_write_report:
-        generated = datetime.fromisoformat(str(payload["generated_at"]).replace("Z", "+00:00"))
+        generated = parse_report_generated_at(payload.get("generated_at"))
         report_dir = ROOT_DIR / args.report_dir
         report_path = report_dir / f"micro_live_ops_heartbeat_{generated.strftime('%Y%m%dT%H%M%SZ')}.md"
         payload["report_path"] = _display_path(report_path)
         payload["latest_report_path"] = _display_path(report_dir / "latest.md")
         payload["latest_json_path"] = _display_path(report_dir / "latest.json")
-        _write_report(report_path, payload)
+        _write_report(report_path, payload, atomic=True)
         payload.update(_write_latest_aliases(report_dir=report_dir, payload=payload))
     if bool(args.notify) and payload["overall_status"] != "PASS":
         state_file = _resolve_root_path(str(args.state_file))

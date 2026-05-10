@@ -12,9 +12,13 @@ from typing import Any
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 DRILL_SCRIPT = ROOT_DIR / "scripts" / "run_paper_candidate_drill.py"
 _TRANSIENT_FAILURE_RETRY_ATTEMPTS = 3
 _TRANSIENT_FAILURE_RETRY_BASE_DELAY_SECONDS = 1.0
+
+from scripts.operation_report_io import atomic_write_text
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,6 +74,19 @@ def _display_path(path: Path) -> str:
         return str(path)
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
+
+
 def _edge_experiment_summary(payload: dict[str, Any] | None) -> dict[str, Any] | None:
     source = dict((payload or {}).get("edge_experiment_review") or {})
     if not source:
@@ -77,8 +94,8 @@ def _edge_experiment_summary(payload: dict[str, Any] | None) -> dict[str, Any] |
     edge_proof_posture = dict(source.get("edge_proof_posture") or {})
     daily_edge_kpis = dict(source.get("daily_edge_kpis") or {})
     return {
-        "available": bool(source.get("available", True)),
-        "advisory_only": bool(source.get("advisory_only", True)),
+        "available": _safe_bool(source.get("available", True), default=True),
+        "advisory_only": _safe_bool(source.get("advisory_only", True), default=True),
         "edge_state": str(source.get("edge_state") or "insufficient_edge_measurement"),
         "true_edge_ratio": float(source.get("true_edge_ratio", 0.0) or 0.0),
         "edge_decay_rate": float(source.get("edge_decay_rate", 0.0) or 0.0),
@@ -319,7 +336,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     else:
         lines.append("- trend proof unavailable")
     lines.extend(["", "## Raw Payload", "", "```json", json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default), "```"])
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def main() -> int:

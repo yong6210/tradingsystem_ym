@@ -84,16 +84,18 @@ def _run_boot_check(args: argparse.Namespace) -> dict:
         canary_network=bool(args.boot_check_canary_network),
     )
     if str(payload.get("overall_status") or "").upper() != "PASS":
-        write_worker_heartbeat(
-            _worker_role(args),
-            status="error",
-            details={
-                "phase": "boot_check_failed",
-                "overall_status": payload.get("overall_status"),
-                "blocking_failure_count": payload.get("blocking_failure_count"),
-                "next_actions": list(payload.get("next_actions") or []),
-            },
-        )
+        role = _worker_role(args)
+        if role in {"loop", "ws"}:
+            write_worker_heartbeat(
+                role,
+                status="error",
+                details={
+                    "phase": "boot_check_failed",
+                    "overall_status": payload.get("overall_status"),
+                    "blocking_failure_count": payload.get("blocking_failure_count"),
+                    "next_actions": list(payload.get("next_actions") or []),
+                },
+            )
     return payload
 
 

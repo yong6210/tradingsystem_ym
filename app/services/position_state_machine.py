@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from math import isfinite
 from typing import Any, ClassVar
 
 from app.core.enums import ExecutionFillStage, PlanState
@@ -67,6 +68,21 @@ class PositionStateMachineService:
         self.fill_repo = fill_repo
         self.strategy_version = strategy_version
         self.exit_engine = ExitEngineService()
+
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value) if isfinite(float(value)) else bool(default)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
 
     def apply(self, data: FillApplyInput) -> FillApplyResult:
         existing = self.fill_repo.get(data.fill_id)
@@ -161,7 +177,7 @@ class PositionStateMachineService:
         )
         self.fill_repo.add(fill)
         tracker = get_execution_lane_tracker()
-        is_variant = bool(dict(plan.validity or {}).get("transition_edge_variant_applied"))
+        is_variant = self._safe_bool(dict(plan.validity or {}).get("transition_edge_variant_applied"))
         if data.stage == ExecutionFillStage.ENTRY:
             tracker.record_filled(is_variant=is_variant)
         elif data.stage == ExecutionFillStage.CLOSED:

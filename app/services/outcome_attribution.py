@@ -3,6 +3,20 @@ from __future__ import annotations
 from typing import Any
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
+
+
 def _float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -140,8 +154,8 @@ def summarize_outcome_attribution(payload: dict[str, Any] | None) -> dict[str, A
     if not source:
         return None
     return {
-        "available": bool(source.get("available", False)),
-        "advisory_only": bool(source.get("advisory_only", True)),
+        "available": _safe_bool(source.get("available", False)),
+        "advisory_only": _safe_bool(source.get("advisory_only", True)),
         "confidence": str(source.get("confidence") or "low"),
         "closed_trade_count": _int(source.get("closed_trade_count", 0)),
         "strategy_component_r": round(_float(source.get("strategy_component_r", 0.0)), 4),

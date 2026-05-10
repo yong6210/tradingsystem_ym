@@ -23,6 +23,21 @@ class ForwardStressRegimeValidationService:
             return float(default)
 
     @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
+    @staticmethod
     def _dedupe(values: list[str]) -> list[str]:
         out: list[str] = []
         for value in values:
@@ -59,10 +74,10 @@ class ForwardStressRegimeValidationService:
         recommendation = dict(payload.get("deployment_recommendation") or {})
         eligible_closed_trades = cls._int(sample_counts.get("eligible_closed_trades", 0))
         reason = str(recommendation.get("reason") or "not_available")
-        if not payload or not bool(payload.get("available", False)) or eligible_closed_trades == 0:
+        if not payload or not cls._safe_bool(payload.get("available", False)) or eligible_closed_trades == 0:
             return "insufficient_stress", reason
         if (
-            not bool(recommendation.get("stress_pass", False))
+            not cls._safe_bool(recommendation.get("stress_pass", False))
             or reason.startswith("scenario_catastrophic_drawdown")
             or reason.startswith("replay_divergence_fail")
             or reason.startswith("replay_divergence_warn")
@@ -85,15 +100,15 @@ class ForwardStressRegimeValidationService:
         decision = str(recommendation.get("decision") or "keep_approximation")
         if (
             not lineage
-            or not bool(lineage.get("available", False))
-            or not bool(lineage.get("runtime_inputs_ready", False))
+            or not cls._safe_bool(lineage.get("available", False))
+            or not cls._safe_bool(lineage.get("runtime_inputs_ready", False))
             or assessment_reason == "insufficient_runtime_lineage"
         ):
             return "replay_lineage_thin", assessment_reason
         if (
             decision in {"prepare_full_replay", "promote_true_market_runner"}
-            or bool(assessment.get("replacement_recommended", False))
-            or bool(recommendation.get("true_runner_promotion_ready", False))
+            or cls._safe_bool(assessment.get("replacement_recommended", False))
+            or cls._safe_bool(recommendation.get("true_runner_promotion_ready", False))
         ):
             return "replay_followup_required", decision
         return "approximation_confirmed", decision
@@ -400,7 +415,7 @@ class ForwardStressRegimeValidationService:
                     "p5_ev": round(wf_p5_ev, 4),
                 },
                 "strategy_v2_validation": {
-                    "available": bool(v2.get("available", False)),
+                    "available": cls._safe_bool(v2.get("available", False)),
                     "eligible_closed_trades": eligible_closed_trades,
                     "preferred_live_mode": preferred_live_mode,
                     "best_regime": best_regime,
@@ -409,31 +424,31 @@ class ForwardStressRegimeValidationService:
                     "fragile_session_bucket": fragile_session_bucket,
                 },
                 "strategy_v2_stress_validation": {
-                    "available": bool(stress.get("available", False)),
-                    "stress_pass": bool(stress_recommendation.get("stress_pass", False)),
+                    "available": cls._safe_bool(stress.get("available", False)),
+                    "stress_pass": cls._safe_bool(stress_recommendation.get("stress_pass", False)),
                     "reason": stress_reason,
                     "worst_scenario": worst_scenario,
-                    "replay_gate_applied": bool(stress_recommendation.get("replay_gate_applied", False)),
-                    "divergence_gate_applied": bool(stress_recommendation.get("divergence_gate_applied", False)),
+                    "replay_gate_applied": cls._safe_bool(stress_recommendation.get("replay_gate_applied", False)),
+                    "divergence_gate_applied": cls._safe_bool(stress_recommendation.get("divergence_gate_applied", False)),
                     "execution_data_trades": execution_data_trades,
                 },
                 "strategy_v2_stress_replay_assessment": {
-                    "available": bool(replay_assessment.get("available", False)),
+                    "available": cls._safe_bool(replay_assessment.get("available", False)),
                     "decision": str(
                         dict(replay_assessment.get("deployment_recommendation") or {}).get("decision")
                         or "keep_approximation"
                     ),
                     "reason": str(replay_assessment.get("reason") or "not_available"),
-                    "replacement_recommended": bool(replay_assessment.get("replacement_recommended", False)),
-                    "true_runner_promotion_ready": bool(
+                    "replacement_recommended": cls._safe_bool(replay_assessment.get("replacement_recommended", False)),
+                    "true_runner_promotion_ready": cls._safe_bool(
                         dict(replay_assessment.get("deployment_recommendation") or {}).get(
                             "true_runner_promotion_ready", False
                         )
                     ),
                 },
                 "strategy_v2_stress_replay_lineage": {
-                    "available": bool(replay_lineage.get("available", False)),
-                    "runtime_inputs_ready": bool(replay_lineage.get("runtime_inputs_ready", False)),
+                    "available": cls._safe_bool(replay_lineage.get("available", False)),
+                    "runtime_inputs_ready": cls._safe_bool(replay_lineage.get("runtime_inputs_ready", False)),
                     "reason": replay_reason,
                     "coverage": dict(replay_lineage.get("coverage") or {}),
                 },

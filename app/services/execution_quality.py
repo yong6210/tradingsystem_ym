@@ -12,6 +12,7 @@ from app.core.enums import EntryModel, ExecutionFillStage, ExitReason, PlanState
 from app.db.models import ExecutionFill, Plan, ZoneOutcome
 from app.db.repositories import CandleRepository, ExecutionFillRepository, OutcomeRepository, PlanRepository
 from app.services.exit_engine import FORCED_EXIT_REASONS, TARGET_EXIT_REASONS
+from app.services.report_io import atomic_write_text
 
 
 @dataclass(slots=True)
@@ -900,7 +901,7 @@ class ExecutionQualityService:
                 "",
             ]
         )
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(

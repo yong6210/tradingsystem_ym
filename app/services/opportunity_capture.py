@@ -69,6 +69,21 @@ class OpportunityCaptureService:
     def _round(value: float) -> float:
         return round(float(value), 4)
 
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
     @classmethod
     def _rate(cls, numerator: int | float, denominator: int | float) -> float:
         if float(denominator or 0.0) <= 0.0:
@@ -358,7 +373,7 @@ class OpportunityCaptureService:
         )
 
         return {
-            "available": bool(payload.get("available", False)),
+            "available": self._safe_bool(payload.get("available", False)),
             "advisory_only": True,
             "summary": self._summary(
                 dominant_bottleneck=dominant_bottleneck,

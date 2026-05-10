@@ -8,23 +8,48 @@ cd "$ROOT_DIR"
 export PYDANTIC_DISABLE_PLUGINS="${PYDANTIC_DISABLE_PLUGINS:-1}"
 export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 
-PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+RUNTIME_BASE="${TRADING_RUNTIME_BASE:-$HOME/Library/Application Support/trading}"
+TMP_ROOT="${TRADING_TMP_RUNTIME_ROOT:-$RUNTIME_BASE/runtime_src}"
+TMP_VENV="${TRADING_TMP_RUNTIME_VENV:-$RUNTIME_BASE/runtime_venv}"
+RUNTIME_DB="${TRADING_RUNTIME_DB:-$RUNTIME_BASE/data/trading.db}"
+HEARTBEAT_DIR="${TRADING_HEARTBEAT_DIR:-$RUNTIME_BASE/heartbeats}"
+if [[ -x "$TMP_VENV/bin/python" && -d "$TMP_ROOT/app" ]]; then
+  PYTHON_ROOT="$TMP_ROOT"
+  PYTHON_BIN="$TMP_VENV/bin/python"
+  if [[ "$TMP_ROOT" == /private/tmp/* || "$TMP_ROOT" == /tmp/* ]]; then
+    PYTHON_RUNTIME_KIND="tmp"
+  else
+    PYTHON_RUNTIME_KIND="durable"
+  fi
+else
+  PYTHON_ROOT="$ROOT_DIR"
+  PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+  PYTHON_RUNTIME_KIND="workspace"
+fi
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "missing python runtime: $PYTHON_BIN" >&2
   exit 1
 fi
 
+echo "== python runtime =="
+echo "kind=$PYTHON_RUNTIME_KIND"
+echo "python=$PYTHON_BIN"
+echo "source=$PYTHON_ROOT"
+echo
+
 echo "== processes =="
 ps -axo pid,lstart,command | awk '/uvicorn app[.]main:app|run_worker[.]py --mode loop --sync-universe|run_worker[.]py --ws-stream --sync-universe/ && $0 !~ /awk|check_runtime_stack[.]sh/ { print }'
 echo
 if [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
-  echo "== launchd api =="
-  if launchctl print "gui/$(id -u)/com.yumin.trading.api" >/dev/null 2>&1; then
-    echo "loaded"
-  else
-    echo "not_loaded"
-  fi
+  echo "== launchd =="
+  for label in com.yumin.trading.api com.yumin.trading.runtime-stack; do
+    if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+      echo "$label=loaded"
+    else
+      echo "$label=not_loaded"
+    fi
+  done
   echo
 fi
 echo "== disk =="
@@ -32,12 +57,14 @@ df -h "$ROOT_DIR"
 echo
 echo "== workspace storage =="
 du -sh .git trading.db trading.db-wal trading.db-shm 2>/dev/null || true
+du -sh "$RUNTIME_DB" "$RUNTIME_DB-wal" "$RUNTIME_DB-shm" 2>/dev/null || true
 if git rev-parse --git-dir >/dev/null 2>&1; then
   git count-objects -vH || true
 fi
 if command -v lsof >/dev/null 2>&1; then
   echo "-- sqlite holders --"
   lsof trading.db trading.db-wal trading.db-shm 2>/dev/null | sed -n '1,40p' || true
+  lsof "$RUNTIME_DB" "$RUNTIME_DB-wal" "$RUNTIME_DB-shm" 2>/dev/null | sed -n '1,40p' || true
 fi
 echo
 echo "== ready =="
@@ -45,7 +72,7 @@ curl -sS --max-time 10 http://127.0.0.1:8000/health/ready || true
 echo
 echo
 echo "== heartbeats =="
-for f in /tmp/trading_worker_heartbeats/loop.json /tmp/trading_worker_heartbeats/ws.json; do
+for f in "$HEARTBEAT_DIR/loop.json" "$HEARTBEAT_DIR/ws.json"; do
   if [ -f "$f" ]; then
     echo "-- $f --"
     cat "$f"
@@ -57,7 +84,7 @@ done
 
 echo
 echo "== candle freshness =="
-PYTHONPATH="$ROOT_DIR" "$PYTHON_BIN" - <<'PY'
+(cd "$PYTHON_ROOT" && PYTHONPATH="$PYTHON_ROOT" "$PYTHON_BIN" - <<'PY'
 from app.db.session import SessionLocal
 from app.db.repositories import CandleRepository
 with SessionLocal() as db:
@@ -67,15 +94,17 @@ with SessionLocal() as db:
         row5 = repo.get_last_candle(sym, "5m")
         print(sym, "1m", row1.ts.isoformat() if row1 else None, "5m", row5.ts.isoformat() if row5 else None)
 PY
+)
 
 echo
 echo "== miss detector (6h) =="
-PYTHONPATH="$ROOT_DIR" "$PYTHON_BIN" "$ROOT_DIR/scripts/run_session_impulse_retest_miss_detector.py" --lookback-hours 6
+(cd "$PYTHON_ROOT" && CHECK_HEARTBEAT_DIR="$HEARTBEAT_DIR" PYTHONPATH="$PYTHON_ROOT" "$PYTHON_BIN" "$PYTHON_ROOT/scripts/run_session_impulse_retest_miss_detector.py" --lookback-hours 6)
 
 echo
 echo "== execution summary (24h) =="
-PYTHONPATH="$ROOT_DIR" "$PYTHON_BIN" - <<'PY'
+(cd "$PYTHON_ROOT" && CHECK_HEARTBEAT_DIR="$HEARTBEAT_DIR" PYTHONPATH="$PYTHON_ROOT" "$PYTHON_BIN" - <<'PY'
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -97,7 +126,7 @@ def _parse_utc(value: str) -> datetime | None:
 
 def _ws_started_at() -> datetime | None:
     try:
-        payload = json.loads(Path("/tmp/trading_worker_heartbeats/ws.json").read_text(encoding="utf-8"))
+        payload = json.loads((Path(os.environ.get("CHECK_HEARTBEAT_DIR", "/tmp/trading_worker_heartbeats")) / "ws.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
@@ -106,7 +135,7 @@ def _ws_started_at() -> datetime | None:
 
 def _ws_stats() -> dict:
     try:
-        payload = json.loads(Path("/tmp/trading_worker_heartbeats/ws.json").read_text(encoding="utf-8"))
+        payload = json.loads((Path(os.environ.get("CHECK_HEARTBEAT_DIR", "/tmp/trading_worker_heartbeats")) / "ws.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     details = payload.get("details")
@@ -153,11 +182,46 @@ def _diagnose_live_route(
     refresh_errors = _as_int(ws_stats.get("refresh_errors"))
     ingest_errors = _as_int(ws_stats.get("ingest_errors"))
     progress_errors = _as_int(ws_stats.get("progress_callback_errors"))
-    if auto_route_errors or refresh_errors or ingest_errors or progress_errors:
+
+    def _unrecovered_error(count: int, *, error_at_key: str, success_at_key: str) -> bool:
+        if count <= 0:
+            return False
+        error_at = _parse_utc(str(ws_stats.get(error_at_key) or ""))
+        success_at = _parse_utc(str(ws_stats.get(success_at_key) or ""))
+        if error_at is None or success_at is None:
+            return True
+        return error_at >= success_at
+
+    active_error_labels = []
+    if _unrecovered_error(
+        auto_route_errors,
+        error_at_key="last_auto_route_error_at",
+        success_at_key="last_auto_route_success_at",
+    ):
+        active_error_labels.append(f"auto_route_errors={auto_route_errors}")
+    if _unrecovered_error(
+        refresh_errors,
+        error_at_key="last_refresh_error_at",
+        success_at_key="last_refresh_success_at",
+    ):
+        active_error_labels.append(f"refresh_errors={refresh_errors}")
+    if _unrecovered_error(
+        ingest_errors,
+        error_at_key="last_ingest_error_at",
+        success_at_key="last_ingest_success_at",
+    ):
+        active_error_labels.append(f"ingest_errors={ingest_errors}")
+    if _unrecovered_error(
+        progress_errors,
+        error_at_key="last_progress_callback_error_at",
+        success_at_key="last_progress_callback_success_at",
+    ):
+        active_error_labels.append(f"progress_errors={progress_errors}")
+    if active_error_labels:
         return (
             "ERROR",
             "runtime_errors_present",
-            f"auto_route_errors={auto_route_errors} refresh_errors={refresh_errors} ingest_errors={ingest_errors} progress_errors={progress_errors}",
+            " ".join(active_error_labels),
         )
     if live_submission_total > 0 or auto_route_submit_calls > 0:
         return ("OK", "live_route_submitted", f"requested_live_24h={live_submission_total} auto_route_submit_calls={auto_route_submit_calls}")
@@ -350,3 +414,4 @@ if runtime_cutoff is not None:
     else:
         print("- none")
 PY
+)

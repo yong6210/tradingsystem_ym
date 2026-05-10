@@ -17,6 +17,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from scripts import notify_stage_change, ops_stage_board, run_runtime_signoff_review
+from scripts.operation_report_io import atomic_write_text, parse_report_generated_at
 from app.core.config import get_settings
 from app.core import operator_surface_contracts as osc
 from app.db.models import OrderIntent
@@ -127,8 +128,7 @@ def _entry_model_block_contract(*, entry_model: str, entry_type: str, allowed_en
 
 
 def _write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    atomic_write_text(path, content)
 
 
 def _load_stage_board_fallback(
@@ -164,7 +164,7 @@ def _load_stage_board_fallback(
         generated_at = str(payload.get("generated_at") or "")
         recency = 0
         try:
-            recency = int(datetime.fromisoformat(generated_at.replace("Z", "+00:00")).timestamp())
+            recency = int(parse_report_generated_at(generated_at).timestamp())
         except Exception:
             recency = 0
         return (richness, recency)
@@ -256,9 +256,9 @@ def _load_latest_lineage_watch_summary(*, max_age_seconds: int = _PAPER_LINEAGE_
     active_families = [str(item) for item in list(family_guard_summary.get("active_families") or []) if str(item).strip()]
     primary_guard_family = str(active_families[0] if active_families else "").strip().lower()
     primary_guard = dict((family_guard_summary.get("families") or {}).get(primary_guard_family) or {})
-    if bool(primary_guard.get("loss_cooldown_active", False)):
+    if ops_stage_board._safe_bool(primary_guard.get("loss_cooldown_active", False)):
         primary_guard_reason_code = osc.MITIGATION_GUARD_REASON_RECENT_FAMILY_LOSS
-    elif bool(primary_guard.get("cluster_guard_active", False)):
+    elif ops_stage_board._safe_bool(primary_guard.get("cluster_guard_active", False)):
         primary_guard_reason_code = osc.MITIGATION_GUARD_REASON_WINDOW_CAP
     else:
         primary_guard_reason_code = ""
@@ -346,7 +346,7 @@ def _runtime_mitigation_session_context(*, family: str | None) -> dict[str, Any]
     allowed_sessions = [str(item).strip().lower() for item in list(policy.allowed_sessions or []) if str(item).strip()]
     return {
         "current_session": str(session.get("name") or "inactive").lower(),
-        "session_active": bool(session.get("active", False)),
+        "session_active": ops_stage_board._safe_bool(session.get("active", False)),
         "allowed_sessions": allowed_sessions,
     }
 
@@ -417,7 +417,7 @@ def _apply_edge_sample_stall(
     elapsed_hours = max((current_generated_at - last_progress_at).total_seconds() / 3600.0, 0.0)
     active = (
         current_closed_count > 0
-        and not bool(snapshot.get("edge_sample_gate_ready", False))
+        and not ops_stage_board._safe_bool(snapshot.get("edge_sample_gate_ready", False))
         and elapsed_hours >= float(max(1, threshold_hours))
     )
     snapshot["edge_sample_stall"] = {
@@ -506,12 +506,12 @@ def _apply_post_unlock_review_bundle(
 ) -> dict[str, Any]:
     snapshot = dict(current or {})
     summary = dict(snapshot.get("post_unlock_review_summary") or {})
-    review_window_open = bool(summary.get("review_window_open", False)) or _post_patch_review_window_open(
+    review_window_open = ops_stage_board._safe_bool(summary.get("review_window_open", False)) or _post_patch_review_window_open(
         snapshot,
         previous=previous,
     )
     bundle_command = str(summary.get("bundle_review_command") or "")
-    if review_window_open and not bool(summary.get("review_window_open", False)):
+    if review_window_open and not ops_stage_board._safe_bool(summary.get("review_window_open", False)):
         summary["review_window_open"] = True
         summary["active"] = True
         if not str(summary.get("next_review_step") or "").strip():
@@ -519,7 +519,7 @@ def _apply_post_unlock_review_bundle(
         snapshot["post_unlock_review_summary"] = summary
     if not review_window_open:
         snapshot["post_unlock_bundle_result"] = {
-            "active": bool(summary.get("active", False)),
+            "active": ops_stage_board._safe_bool(summary.get("active", False)),
             "executed": False,
             "status": osc.RUNTIME_REOPEN_STATUS_WAITING_FOR_REVIEW_WINDOW,
             "summary": "post-unlock bundle review is waiting for the review window to open",
@@ -583,7 +583,9 @@ def _apply_runtime_reopen_status(current: dict[str, Any]) -> dict[str, Any]:
     risk_gate_summary = dict(snapshot.get("risk_gate_summary") or {})
 
     risk_closed = str(risk_gate_summary.get("risk_state") or "").upper() == "CLOSED"
-    review_window_open = bool(review_summary.get("review_window_open", False)) or _post_patch_review_window_open(snapshot)
+    review_window_open = ops_stage_board._safe_bool(
+        review_summary.get("review_window_open", False)
+    ) or _post_patch_review_window_open(snapshot)
     bundle_status = str(bundle_result.get("status") or "").upper()
 
     if risk_closed:
@@ -629,15 +631,17 @@ def _post_patch_review_window_open(
         str(risk_gate_summary.get("status") or "").upper() == "PASS"
         and str(risk_gate_summary.get("risk_state") or "").upper() == "OPEN"
     )
-    if not risk_open or not bool(snapshot.get("all_readiness_gates_ready", False)):
+    if not risk_open or not ops_stage_board._safe_bool(snapshot.get("all_readiness_gates_ready", False)):
         return False
-    if bool(snapshot.get("post_patch_ready_for_replay_refresh", False)):
+    if ops_stage_board._safe_bool(snapshot.get("post_patch_ready_for_replay_refresh", False)):
         return True
-    if bool(previous_snapshot.get("post_patch_ready_for_replay_refresh", False)):
+    if ops_stage_board._safe_bool(previous_snapshot.get("post_patch_ready_for_replay_refresh", False)):
         return True
     current_focus = dict(snapshot.get("approval_template_focus") or {})
     previous_focus = dict(previous_snapshot.get("approval_template_focus") or {})
-    return bool(dict(current_focus.get("post_patch_sample_summary") or {}).get("ready_for_replay_refresh", False)) or bool(
+    return ops_stage_board._safe_bool(
+        dict(current_focus.get("post_patch_sample_summary") or {}).get("ready_for_replay_refresh", False)
+    ) or ops_stage_board._safe_bool(
         dict(previous_focus.get("post_patch_sample_summary") or {}).get("ready_for_replay_refresh", False)
     )
 
@@ -824,7 +828,9 @@ def _apply_runtime_signoff_projection(current: dict[str, Any]) -> dict[str, Any]
     )
     snapshot["post_patch_target_closed_trades"] = int(post_patch.get("target_closed_trades", 0) or 0)
     snapshot["post_patch_remaining_to_target"] = int(post_patch.get("remaining_to_target", 0) or 0)
-    snapshot["post_patch_ready_for_replay_refresh"] = bool(post_patch.get("ready_for_replay_refresh", False))
+    snapshot["post_patch_ready_for_replay_refresh"] = ops_stage_board._safe_bool(
+        post_patch.get("ready_for_replay_refresh", False)
+    )
     snapshot["runtime_contract_partition_summary"] = _build_runtime_contract_partition_summary(
         post_patch=post_patch,
         live_eligible_post_patch=live_eligible_post_patch,
@@ -1484,9 +1490,9 @@ def _apply_runtime_self_heal_summary(current: dict[str, Any]) -> dict[str, Any]:
     latest_submit_ready_self_heal = dict(recent_contract_match.get("latest_submit_ready_self_heal_summary") or {})
 
     stale_cleanup_events = int(exit_monitor.get("stale_cleanup_events", 0) or 0)
-    reentry_ignored = bool(latest_self_heal.get("stale_paper_reentry_block_ignored", False))
+    reentry_ignored = ops_stage_board._safe_bool(latest_self_heal.get("stale_paper_reentry_block_ignored", False))
     duplicate_ignored = int(latest_self_heal.get("stale_paper_duplicate_intents_ignored_count", 0) or 0)
-    latest_submit_ready_applied = bool(latest_submit_ready_self_heal.get("applied", False))
+    latest_submit_ready_applied = ops_stage_board._safe_bool(latest_submit_ready_self_heal.get("applied", False))
     active = bool(stale_cleanup_events or reentry_ignored or duplicate_ignored or latest_submit_ready_applied)
 
     summary = (
@@ -1838,7 +1844,7 @@ def _apply_runtime_mitigation_packet(current: dict[str, Any], args: argparse.Nam
     action, target, preferred_variant = _runtime_mitigation_action_key(snapshot)
 
     result: dict[str, Any] = {
-        "available": bool(summary.get("available", False)),
+        "available": ops_stage_board._safe_bool(summary.get("available", False)),
         "status": "inactive",
         "executed": False,
         "packet_id": "",
@@ -1850,7 +1856,7 @@ def _apply_runtime_mitigation_packet(current: dict[str, Any], args: argparse.Nam
         "primary_action_status": status,
         "summary": "runtime mitigation packet is inactive",
     }
-    if not bool(summary.get("available", False)):
+    if not ops_stage_board._safe_bool(summary.get("available", False)):
         snapshot["runtime_mitigation_packet_result"] = result
         return snapshot
     watch_summary = _load_latest_lineage_watch_summary()
@@ -1858,7 +1864,7 @@ def _apply_runtime_mitigation_packet(current: dict[str, Any], args: argparse.Nam
         status == osc.MITIGATION_ACTION_STATUS_CANDIDATE_REVIEW_PENDING
         and action == "run_entry_timing_split_review"
         and not str(target.get("symbol") or "").strip()
-        and bool(watch_summary.get("fresh"))
+            and ops_stage_board._safe_bool(watch_summary.get("fresh"))
         and str(watch_summary.get("tick_status") or "") == "found_eligible_candidate"
         and str(watch_summary.get("candidate_symbol") or "").strip()
     ):
@@ -1963,15 +1969,15 @@ def _apply_runtime_mitigation_wait_summary(current: dict[str, Any]) -> dict[str,
     session_context = _runtime_mitigation_session_context(family=focus_family or None)
     watch_summary = _load_latest_lineage_watch_summary()
     snapshot["paper_lineage_watch_summary"] = {
-        "available": bool(watch_summary.get("available", False)),
-        "fresh": bool(watch_summary.get("fresh", False)),
+        "available": ops_stage_board._safe_bool(watch_summary.get("available", False)),
+        "fresh": ops_stage_board._safe_bool(watch_summary.get("fresh", False)),
         "generated_at": str(watch_summary.get("generated_at") or ""),
         "tick_status": str(watch_summary.get("tick_status") or ""),
         "summary_line": str(watch_summary.get("summary_line") or ""),
         "candidate_symbol": str(watch_summary.get("candidate_symbol") or ""),
         "candidate_family": str(watch_summary.get("candidate_family") or ""),
         "candidate_status": str(watch_summary.get("candidate_status") or ""),
-        "family_guard_active": bool(watch_summary.get("family_guard_active", False)),
+        "family_guard_active": ops_stage_board._safe_bool(watch_summary.get("family_guard_active", False)),
         "family_guard_families": list(watch_summary.get("family_guard_families") or []),
         "family_guard_family": str(watch_summary.get("family_guard_family") or ""),
         "family_guard_reason_code": str(watch_summary.get("family_guard_reason_code") or ""),
@@ -1987,13 +1993,13 @@ def _apply_runtime_mitigation_wait_summary(current: dict[str, Any]) -> dict[str,
     }
 
     result: dict[str, Any] = {
-        "available": bool(mitigation.get("available", False)),
+        "available": ops_stage_board._safe_bool(mitigation.get("available", False)),
         "status": osc.MITIGATION_WAIT_STATUS_INACTIVE,
         "focus_label": str(mitigation.get("primary_focus_label") or mitigation.get("primary_action_code") or ""),
         "wait_constraint": str(mitigation.get("primary_action_constraint") or ""),
         "next_trigger": "",
         "current_session": str(session_context.get("current_session") or ""),
-        "session_active": bool(session_context.get("session_active", False)),
+        "session_active": ops_stage_board._safe_bool(session_context.get("session_active", False)),
         "allowed_sessions": list(session_context.get("allowed_sessions") or []),
         "candidate_symbol": "",
         "candidate_family": "",
@@ -2001,13 +2007,13 @@ def _apply_runtime_mitigation_wait_summary(current: dict[str, Any]) -> dict[str,
         "candidate_reason": "",
         "watch_tick_status": str(watch_summary.get("tick_status") or ""),
         "watch_generated_at": str(watch_summary.get("generated_at") or ""),
-        "watch_guard_active": bool(watch_summary.get("family_guard_active", False)),
+        "watch_guard_active": ops_stage_board._safe_bool(watch_summary.get("family_guard_active", False)),
         "watch_guard_family": str(watch_summary.get("family_guard_family") or ""),
         "watch_guard_families": list(watch_summary.get("family_guard_families") or []),
         "watch_guard_reason_code": str(watch_summary.get("family_guard_reason_code") or ""),
         "summary": "runtime mitigation wait is inactive",
     }
-    if not bool(mitigation.get("available", False)):
+    if not ops_stage_board._safe_bool(mitigation.get("available", False)):
         snapshot["runtime_mitigation_wait_summary"] = result
         return snapshot
 
@@ -2096,7 +2102,9 @@ def _apply_runtime_mitigation_wait_summary(current: dict[str, Any]) -> dict[str,
         snapshot["runtime_mitigation_wait_summary"] = result
         return snapshot
 
-    if bool(watch_summary.get("fresh")) and bool(watch_summary.get("family_guard_active")):
+    if ops_stage_board._safe_bool(watch_summary.get("fresh")) and ops_stage_board._safe_bool(
+        watch_summary.get("family_guard_active")
+    ):
         guard_reason = str(watch_summary.get("family_guard_reason_code") or "")
         next_trigger = osc.MITIGATION_NEXT_TRIGGER_GUARD_CLEARS
         if guard_reason == osc.MITIGATION_GUARD_REASON_RECENT_FAMILY_LOSS:
@@ -2116,7 +2124,10 @@ def _apply_runtime_mitigation_wait_summary(current: dict[str, Any]) -> dict[str,
         snapshot["runtime_mitigation_wait_summary"] = result
         return snapshot
 
-    if bool(watch_summary.get("fresh")) and str(watch_summary.get("tick_status") or "") == "found_eligible_candidate":
+    if (
+        ops_stage_board._safe_bool(watch_summary.get("fresh"))
+        and str(watch_summary.get("tick_status") or "") == "found_eligible_candidate"
+    ):
         result.update(
             {
                 "status": osc.MITIGATION_WAIT_STATUS_WATCHER_PENDING_TARGET,
@@ -2309,7 +2320,7 @@ def _run_notifier(args: argparse.Namespace) -> dict[str, object]:
         webhook_url=args.webhook_url,
     )
     result["delivery"] = delivery
-    result["notified"] = bool(delivery.get("delivered"))
+    result["notified"] = notify_stage_change._safe_bool(delivery.get("delivered"))
     if not result["notified"]:
         result["warning"] = f"discord delivery not completed: {delivery.get('reason')}"
         return result

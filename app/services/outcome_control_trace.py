@@ -83,15 +83,30 @@ def _dedup_reason_codes(*groups: list[str]) -> list[str]:
     return codes
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
+
+
 def _trace_summary(approval: dict[str, Any], sizing: dict[str, Any], portfolio: dict[str, Any]) -> str:
     approval_text = "approval unchanged"
     if str(approval.get("penalty_tier") or "") == "downgrade_to_manual":
         approval_text = "approval downgraded"
-    elif bool(approval.get("applied")):
+    elif _safe_bool(approval.get("applied")):
         approval_text = "approval review raised"
 
     sizing_text = "risk allowance unchanged"
-    if bool(sizing.get("applied")):
+    if _safe_bool(sizing.get("applied")):
         sizing_text = "risk allowance reduced"
 
     portfolio_tier = str(portfolio.get("tier") or "neutral")
@@ -307,7 +322,7 @@ def summarize_outcome_control_trace(trace: dict[str, Any] | None) -> dict[str, A
         list(portfolio.get("reason_codes") or []),
     )
     return {
-        "available": bool(payload.get("available", False)),
+        "available": _safe_bool(payload.get("available", False)),
         "summary": str(payload.get("summary") or ""),
         "approval_penalty_status": str(approval.get("status") or "healthy"),
         "approval_penalty_tier": str(approval.get("penalty_tier") or "none"),
@@ -372,7 +387,7 @@ def runtime_outcome_control_trace(
             tier = "neutral"
         portfolio_bias = {
             "tier": tier,
-            "applied": any(bool(row.get("applied")) for row in bias_rows),
+            "applied": any(_safe_bool(row.get("applied")) for row in bias_rows),
             "score_delta": average_score_delta,
             "reason_codes": _dedup_reason_codes(*[list(row.get("reason_codes") or []) for row in bias_rows]),
             "distribution": {

@@ -47,6 +47,21 @@ class HealthCheckService:
             return default
         return int(parsed) if isfinite(parsed) else default
 
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value) if isfinite(float(value)) else bool(default)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
     @classmethod
     def _parse_required_int(cls, value: Any) -> int | None:
         if value in (None, "", "None"):
@@ -63,9 +78,12 @@ class HealthCheckService:
         if not raw:
             return None
         try:
-            return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         except Exception:
             return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     @classmethod
     def _error_recovered(cls, details: dict[str, Any], *, error_at_key: str, success_at_key: str) -> bool:
@@ -145,7 +163,7 @@ class HealthCheckService:
         return True, f"ok:{free_mb}MB"
 
     def _check_runtime_worker(self, role: str) -> tuple[bool, str]:
-        if not bool(self.settings.ready_require_runtime_workers):
+        if not self._safe_bool(self.settings.ready_require_runtime_workers):
             return True, "disabled"
         payload = read_worker_heartbeat(role, settings=self.settings)
         if payload is None:
@@ -178,9 +196,8 @@ class HealthCheckService:
         ts_raw = str(payload.get("ts") or "").strip()
         if not ts_raw:
             return False, "heartbeat_ts_missing"
-        try:
-            ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).astimezone(timezone.utc)
-        except Exception:
+        ts = self._parse_optional_datetime(ts_raw)
+        if ts is None:
             return False, "heartbeat_ts_invalid"
         age_seconds = max(0.0, (datetime.now(timezone.utc) - ts).total_seconds())
         max_age = (
@@ -250,9 +267,8 @@ class HealthCheckService:
             if processed_messages <= 0 and not started_at_raw and no_message_max_age > 0:
                 return False, "heartbeat_ws_started_at_missing"
             if processed_messages <= 0 and started_at_raw and no_message_max_age > 0:
-                try:
-                    started_at = datetime.fromisoformat(started_at_raw.replace("Z", "+00:00")).astimezone(timezone.utc)
-                except Exception:
+                started_at = self._parse_optional_datetime(started_at_raw)
+                if started_at is None:
                     return False, "heartbeat_ws_started_at_invalid"
                 no_message_age = max(0.0, (datetime.now(timezone.utc) - started_at).total_seconds())
                 if no_message_age > no_message_max_age:

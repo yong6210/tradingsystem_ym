@@ -43,6 +43,13 @@ def _resolve_root_path(raw_path: str) -> Path:
     return path if path.is_absolute() else ROOT_DIR / path
 
 
+def _parse_generated_at(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -116,7 +123,7 @@ def main() -> int:
     payload["overall_status"] = "DRIFT" if changes else "PASS"
     if not args.no_write:
         snapshot_dir.mkdir(parents=True, exist_ok=True)
-        generated = datetime.fromisoformat(payload["generated_at"].replace("Z", "+00:00"))
+        generated = _parse_generated_at(payload["generated_at"])
         snapshot_path = snapshot_dir / f"binance_rules_{generated.strftime('%Y%m%dT%H%M%SZ')}.json"
         latest_path = snapshot_dir / "latest.json"
         payload["snapshot_path"] = _display_path(snapshot_path)

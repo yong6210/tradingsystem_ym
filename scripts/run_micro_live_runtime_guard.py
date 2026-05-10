@@ -14,7 +14,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.db.session import SessionLocal, init_db
 from app.services.live_order_lifecycle import LiveOrderLifecycleReporter
-from scripts.operation_report_io import atomic_write_text, display_path, write_latest_aliases
+from scripts.operation_report_io import atomic_write_text, display_path, parse_report_generated_at, write_latest_aliases
 from scripts.run_micro_live_preflight import _micro_live_config_drift_checks
 
 
@@ -221,7 +221,7 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
     if atomic:
         atomic_write_text(path, content)
     else:
-        path.write_text(content, encoding="utf-8")
+        atomic_write_text(path, content)
 
 
 def main() -> int:
@@ -232,13 +232,13 @@ def main() -> int:
         check_binance_rules=bool(args.check_binance_rules),
     )
     if not args.no_write_report:
-        generated = datetime.fromisoformat(str(payload["generated_at"]).replace("Z", "+00:00"))
+        generated = parse_report_generated_at(payload.get("generated_at"))
         report_dir = ROOT_DIR / args.report_dir
         report_path = report_dir / f"micro_live_runtime_guard_{generated.strftime('%Y%m%dT%H%M%SZ')}.md"
         payload["report_path"] = _display_path(report_path)
         payload["latest_report_path"] = _display_path(report_dir / "latest.md")
         payload["latest_json_path"] = _display_path(report_dir / "latest.json")
-        _write_report(report_path, payload)
+        _write_report(report_path, payload, atomic=True)
         payload.update(
             write_latest_aliases(
                 report_dir=report_dir,

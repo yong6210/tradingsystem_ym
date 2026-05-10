@@ -13,6 +13,21 @@ class StrategyIndicatorsService:
     _NO_CANDIDATE_MESSAGE = "No active candidate for this symbol."
 
     @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
+    @staticmethod
     def _round(value: Any, digits: int = 4) -> float:
         try:
             return round(float(value), digits)
@@ -23,7 +38,7 @@ class StrategyIndicatorsService:
     def _operator_status(row: dict[str, Any] | None) -> str:
         if not row:
             return "none"
-        if bool(row.get("accepted")):
+        if StrategyIndicatorsService._safe_bool(row.get("accepted")):
             return "accepted"
         if row.get("block_reason"):
             return "blocked"
@@ -33,7 +48,7 @@ class StrategyIndicatorsService:
     def _trade_now_status(cls, row: dict[str, Any] | None) -> str:
         if not row:
             return "NO_CANDIDATE"
-        if not bool(row.get("accepted")) or row.get("block_reason") or str(row.get("deployment_go_no_go") or "") == "NO_GO":
+        if not cls._safe_bool(row.get("accepted")) or row.get("block_reason") or str(row.get("deployment_go_no_go") or "") == "NO_GO":
             return "NO_GO"
         if str(row.get("deployment_go_no_go") or "") == "MANUAL_REVIEW":
             return "MANUAL_REVIEW"

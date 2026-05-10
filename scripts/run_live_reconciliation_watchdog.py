@@ -19,7 +19,7 @@ from app.core.config import get_settings
 from app.db.models import BinanceOrderLedger, BinancePositionSnapshot, ExecutionReconciliationEvent, OrderSubmission
 from app.db.session import SessionLocal, init_db
 from app.services.notification_dispatcher import NotificationDispatcher
-from scripts.operation_report_io import atomic_write_text, display_path, write_json, write_latest_aliases
+from scripts.operation_report_io import atomic_write_text, display_path, parse_report_generated_at, write_json, write_latest_aliases
 
 
 _OPEN_SUBMISSION_STATES = {"CREATED", "SUBMITTED", "ACKNOWLEDGED", "PARTIALLY_FILLED"}
@@ -89,6 +89,20 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     return parsed if isfinite(parsed) else default
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -115,7 +129,7 @@ def _submission_dict(row: OrderSubmission) -> dict[str, Any]:
         "exchange_order_id": row.exchange_order_id,
         "state": row.state,
         "submit_status": row.submit_status,
-        "requested_live": bool(row.requested_live),
+        "requested_live": _safe_bool(row.requested_live),
         "submitted_at": _model_dt(row, "submitted_at"),
         "updated_at": _model_dt(row, "updated_at"),
     }
@@ -128,8 +142,8 @@ def _ledger_dict(row: BinanceOrderLedger) -> dict[str, Any]:
         "plan_id": row.plan_id,
         "symbol": row.symbol,
         "status": row.status,
-        "requested_live": bool(row.requested_live),
-        "test_order": bool(row.test_order),
+        "requested_live": _safe_bool(row.requested_live),
+        "test_order": _safe_bool(row.test_order),
         "executed_qty": _safe_float(row.executed_qty),
         "last_event_ts": _model_dt(row, "last_event_ts"),
         "updated_at": _model_dt(row, "updated_at"),
@@ -155,8 +169,8 @@ def _event_dict(row: ExecutionReconciliationEvent) -> dict[str, Any]:
         "mismatch_type": row.mismatch_type,
         "severity": row.severity,
         "message": row.message,
-        "lock_required": bool(row.lock_required),
-        "lock_applied": bool(row.lock_applied),
+        "lock_required": _safe_bool(row.lock_required),
+        "lock_applied": _safe_bool(row.lock_applied),
         "created_at": _model_dt(row, "created_at"),
     }
 
@@ -435,11 +449,11 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
     if atomic:
         atomic_write_text(path, content)
     else:
-        path.write_text(content, encoding="utf-8")
+        atomic_write_text(path, content)
 
 
 def _notification_delivered(payload: dict[str, Any]) -> bool:
-    return bool(dict(payload or {}).get("delivered"))
+    return _safe_bool(dict(payload or {}).get("delivered"))
 
 
 def _cooldown_allows(*, state_file: Path, dedupe_key: str, cooldown_minutes: int, now: datetime, force: bool) -> bool:
@@ -481,13 +495,13 @@ def main() -> int:
         event_lookback_minutes=max(1, int(args.event_lookback_minutes)),
     )
     if not args.no_write_report:
-        generated = datetime.fromisoformat(str(payload["generated_at"]).replace("Z", "+00:00"))
+        generated = parse_report_generated_at(payload.get("generated_at"))
         report_dir = ROOT_DIR / args.report_dir
         report_path = report_dir / f"live_reconciliation_watchdog_{generated.strftime('%Y%m%dT%H%M%SZ')}.md"
         payload["report_path"] = _display_path(report_path)
         payload["latest_report_path"] = _display_path(report_dir / "latest.md")
         payload["latest_json_path"] = _display_path(report_dir / "latest.json")
-        _write_report(report_path, payload)
+        _write_report(report_path, payload, atomic=True)
         payload.update(
             write_latest_aliases(
                 report_dir=report_dir,
@@ -499,7 +513,8 @@ def main() -> int:
         )
 
     evaluation = dict(payload.get("evaluation") or {})
-    if bool(args.notify) and bool(evaluation.get("alert")):
+    alert_active = _safe_bool(evaluation.get("alert"))
+    if bool(args.notify) and alert_active:
         now = datetime.now(UTC)
         first_issue = dict((evaluation.get("issues") or [{}])[0])
         dedupe_key = f"{evaluation.get('reason')}:{first_issue.get('symbol')}:{first_issue.get('client_order_id')}"
@@ -532,7 +547,7 @@ def main() -> int:
             payload["notification"] = {"skipped": True, "reason": "cooldown_active"}
 
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
-    return 1 if bool(evaluation.get("alert")) and not bool(args.no_fail_exit) else 0
+    return 1 if alert_active and not bool(args.no_fail_exit) else 0
 
 
 if __name__ == "__main__":

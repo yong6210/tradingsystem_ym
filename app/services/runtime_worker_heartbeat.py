@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,8 @@ def write_worker_heartbeat(
     active = _settings_or_default(settings)
     out_dir = heartbeat_dir(settings=active)
     out_dir.mkdir(parents=True, exist_ok=True)
-    ts = (at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    raw_ts = at or datetime.now(timezone.utc)
+    ts = raw_ts.replace(tzinfo=timezone.utc) if raw_ts.tzinfo is None else raw_ts.astimezone(timezone.utc)
     payload = {
         "role": str(role or "").strip().lower(),
         "status": str(status or "ok"),
@@ -46,9 +48,16 @@ def write_worker_heartbeat(
         "details": details or {},
     }
     out_path = heartbeat_path(role, settings=active)
-    tmp_path = out_path.with_name(f".{out_path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(out_path)
+    tmp_path = out_path.with_name(f".{out_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(out_path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
     return str(out_path)
 
 
@@ -56,7 +65,19 @@ def read_worker_heartbeat(role: str, *, settings: Settings | None = None) -> dic
     path = heartbeat_path(role, settings=settings)
     if not path.exists():
         return None
+    normalized_role = str(role or "").strip().lower()
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "role": normalized_role,
+            "status": "invalid",
+            "details": {"read_error": f"{exc.__class__.__name__}:{exc}"},
+        }
+    if not isinstance(payload, dict):
+        return {
+            "role": normalized_role,
+            "status": "invalid",
+            "details": {"read_error": f"unexpected_payload:{type(payload).__name__}"},
+        }
+    return payload

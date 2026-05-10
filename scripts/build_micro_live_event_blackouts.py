@@ -17,6 +17,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import get_settings
+from scripts.operation_report_io import write_json
 from scripts.run_micro_live_preflight import _csv_set
 
 
@@ -436,8 +437,8 @@ def main() -> int:
     if not args.no_write and (payload["overall_status"] != "SOURCE_ERROR" or bool(args.write_on_source_error)):
         output_path = _resolve_root_path(str(args.output))
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
         payload["output_path"] = _display_path(output_path)
+        write_json(output_path, payload, json_default=_json_default)
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     return 1 if payload["overall_status"] == "SOURCE_ERROR" else 0
 

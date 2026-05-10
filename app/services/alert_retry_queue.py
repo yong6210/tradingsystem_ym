@@ -131,7 +131,7 @@ class AlertRetryQueueService:
                 )
             )
 
-            if bool(delivery.get("delivered")):
+            if NotificationDispatcher._safe_bool(delivery.get("delivered")):
                 self.repo.mark_delivered(
                     row,
                     reason=str(delivery.get("reason", "delivered")),
@@ -230,11 +230,11 @@ class AlertRetryQueueService:
         return int(max(0.0, (now - ts).total_seconds()))
 
     def _should_queue(self, delivery: dict[str, Any]) -> bool:
-        if bool(delivery.get("delivered")):
+        if NotificationDispatcher._safe_bool(delivery.get("delivered")):
             return False
 
         reason = str(delivery.get("reason", ""))
-        if bool(delivery.get("skipped")):
+        if NotificationDispatcher._safe_bool(delivery.get("skipped")):
             return reason == "circuit_open"
 
         if reason == "delivery_failed_unknown":

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from app.core.config import Settings, get_settings
+from app.services.report_io import atomic_write_text
 
 
 class StrategyV2StressReplayAssessmentService:
@@ -34,6 +35,21 @@ class StrategyV2StressReplayAssessmentService:
     @classmethod
     def _safe_int(cls, value: Any, default: int = 0) -> int:
         return int(cls._safe_float(value, float(default)))
+
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
 
     @classmethod
     def _candle_latency_hits(cls, latency_source_counts: dict[str, int]) -> int:
@@ -161,7 +177,7 @@ class StrategyV2StressReplayAssessmentService:
         available_outputs = [
             name
             for name, row in scenario_outputs.items()
-            if bool((dict(row or {})).get("available", False)) and bool((dict(row or {})).get("summary"))
+            if self._safe_bool((dict(row or {})).get("available", False)) and bool((dict(row or {})).get("summary"))
         ]
         critical_scenarios_with_outputs = [name for name in critical_scenarios if name in available_outputs]
 
@@ -177,9 +193,9 @@ class StrategyV2StressReplayAssessmentService:
             blocked_by.append("true_runner_latency_candle_coverage_below_threshold")
         if candle_path_coverage < min_path:
             blocked_by.append("true_runner_candle_path_coverage_below_threshold")
-        if not bool(stress_replay_output_artifacts.get("available", False)):
+        if not self._safe_bool(stress_replay_output_artifacts.get("available", False)):
             blocked_by.append("prototype_replay_outputs_unavailable")
-        if not bool(stress_replay_output_artifacts.get("comparison_ready", False)):
+        if not self._safe_bool(stress_replay_output_artifacts.get("comparison_ready", False)):
             blocked_by.append("prototype_replay_outputs_not_compared")
         if scenarios_compared < min_compared:
             blocked_by.append("prototype_replay_output_coverage_below_threshold")
@@ -245,11 +261,11 @@ class StrategyV2StressReplayAssessmentService:
         summary_counts = dict(artifacts_payload.get("summary_counts") or {})
         lineage_summary = dict(artifacts_payload.get("lineage_summary") or {})
         scenarios_compared = cls._safe_int(summary_counts.get("scenarios_compared", 0))
-        available = bool(artifacts_payload.get("available", False)) and scenarios_compared > 0
+        available = cls._safe_bool(artifacts_payload.get("available", False)) and scenarios_compared > 0
         selected_trial_writer_source = str(lineage_audit.get("selected_trial_writer_source", "unknown"))
         selected_trial_selection_rule = str(lineage_audit.get("selected_trial_selection_rule", ""))
-        selected_trial_from_runtime_proxy = bool(lineage_audit.get("selected_trial_from_runtime_proxy", False))
-        selected_trial_from_true_threshold = bool(lineage_audit.get("selected_trial_from_true_threshold", False))
+        selected_trial_from_runtime_proxy = cls._safe_bool(lineage_audit.get("selected_trial_from_runtime_proxy", False))
+        selected_trial_from_true_threshold = cls._safe_bool(lineage_audit.get("selected_trial_from_true_threshold", False))
         threshold_lineage_audit_status = str(lineage_audit.get("audit_status", "not_available"))
         if not available:
             status = "NOT_AVAILABLE"
@@ -313,8 +329,12 @@ class StrategyV2StressReplayAssessmentService:
             selected_trial.get("selection_rule") or lineage_audit.get("selected_trial_selection_rule", "")
         )
         threshold_lineage_winner_run_id = str(selected_trial.get("trial_run_id") or "")
-        threshold_lineage_from_runtime_proxy = bool(lineage_audit.get("selected_trial_from_runtime_proxy", False))
-        threshold_lineage_from_true_threshold = bool(lineage_audit.get("selected_trial_from_true_threshold", False))
+        threshold_lineage_from_runtime_proxy = cls._safe_bool(
+            lineage_audit.get("selected_trial_from_runtime_proxy", False)
+        )
+        threshold_lineage_from_true_threshold = cls._safe_bool(
+            lineage_audit.get("selected_trial_from_true_threshold", False)
+        )
         if threshold_lineage_from_true_threshold:
             threshold_lineage_winner_type = "true_threshold"
         elif threshold_lineage_from_runtime_proxy:
@@ -333,7 +353,9 @@ class StrategyV2StressReplayAssessmentService:
             if "divergence_reason" in worst_scenario_row
             else "not_available"
         )
-        worst_scenario_has_output_lineage = bool((dict(scenario_outputs.get(worst_scenario) or {})).get("available", False))
+        worst_scenario_has_output_lineage = cls._safe_bool(
+            (dict(scenario_outputs.get(worst_scenario) or {})).get("available", False)
+        )
         if worst_scenario_source == "stressed_cost" and worst_scenario_has_output_lineage:
             worst_scenario_source = "replay_output"
         replay_output_compared_scenarios = list(lineage_summary.get("compared_scenarios") or [])
@@ -425,14 +447,14 @@ class StrategyV2StressReplayAssessmentService:
         metrics_payload = dict(pbo_dsr_metrics or {})
         lineage_audit = dict(metrics_payload.get("lineage_audit") or {})
         pbo_recommendation = dict(metrics_payload.get("deployment_recommendation") or {})
-        metrics_complete = bool(metrics_payload.get("metrics_complete", False))
-        meets_protocol_gate = bool(pbo_recommendation.get("meets_protocol_gate", False))
-        true_runner_ready = bool(true_runner_readiness.get("true_runner_ready", False))
+        metrics_complete = cls._safe_bool(metrics_payload.get("metrics_complete", False))
+        meets_protocol_gate = cls._safe_bool(pbo_recommendation.get("meets_protocol_gate", False))
+        true_runner_ready = cls._safe_bool(true_runner_readiness.get("true_runner_ready", False))
 
         selected_trial_writer_source = str(lineage_audit.get("selected_trial_writer_source", "unknown"))
         selected_trial_selection_rule = str(lineage_audit.get("selected_trial_selection_rule", ""))
-        selected_trial_from_runtime_proxy = bool(lineage_audit.get("selected_trial_from_runtime_proxy", False))
-        selected_trial_from_true_threshold = bool(lineage_audit.get("selected_trial_from_true_threshold", False))
+        selected_trial_from_runtime_proxy = cls._safe_bool(lineage_audit.get("selected_trial_from_runtime_proxy", False))
+        selected_trial_from_true_threshold = cls._safe_bool(lineage_audit.get("selected_trial_from_true_threshold", False))
         threshold_lineage_audit_status = str(
             lineage_audit.get("audit_status", "not_available" if not metrics_payload else "WARN")
         )
@@ -474,7 +496,7 @@ class StrategyV2StressReplayAssessmentService:
                 promotion_blocked_by.append("pbo_dsr_protocol_gate_not_met")
                 promotion_next_steps.append("raise the selected threshold lineage trial above the PBO/DSR protocol gate")
             elif (
-                bool(replay_output_lineage_alignment.get("gate_applied", False))
+                cls._safe_bool(replay_output_lineage_alignment.get("gate_applied", False))
                 and str(replay_output_lineage_alignment.get("status", "NOT_AVAILABLE")) == "WARN"
             ):
                 promotion_status = "BLOCKED"
@@ -518,7 +540,9 @@ class StrategyV2StressReplayAssessmentService:
         updated["selected_trial_selection_rule"] = selected_trial_selection_rule
         updated["selected_trial_from_runtime_proxy"] = selected_trial_from_runtime_proxy
         updated["selected_trial_from_true_threshold"] = selected_trial_from_true_threshold
-        updated["replay_output_lineage_gate_applied"] = bool(replay_output_lineage_alignment.get("gate_applied", False))
+        updated["replay_output_lineage_gate_applied"] = cls._safe_bool(
+            replay_output_lineage_alignment.get("gate_applied", False)
+        )
         updated["replay_output_lineage_alignment_status"] = replay_output_lineage_alignment.get("status", "NOT_AVAILABLE")
         updated["replay_output_lineage_alignment_reason"] = replay_output_lineage_alignment.get("reason", "not_available")
         updated["replay_output_lineage_scenarios_compared"] = replay_output_lineage_alignment.get("scenarios_compared", 0)
@@ -586,8 +610,8 @@ class StrategyV2StressReplayAssessmentService:
             f"- decision: {recommendation.get('decision', 'keep_approximation')}",
             f"- priority: {recommendation.get('priority', 'low')}",
             f"- reason: {recommendation.get('reason', 'not_available')}",
-            f"- true_runner_promotion_gate_applied: {bool(recommendation.get('true_runner_promotion_gate_applied', False))}",
-            f"- true_runner_promotion_ready: {bool(recommendation.get('true_runner_promotion_ready', False))}",
+            f"- true_runner_promotion_gate_applied: {self._safe_bool(recommendation.get('true_runner_promotion_gate_applied', False))}",
+            f"- true_runner_promotion_ready: {self._safe_bool(recommendation.get('true_runner_promotion_ready', False))}",
             f"- true_runner_promotion_status: {recommendation.get('true_runner_promotion_status', 'NOT_APPLICABLE')}",
             f"- true_runner_promotion_action: {recommendation.get('true_runner_promotion_action', 'keep_current_path')}",
             f"- true_runner_promotion_reason: {recommendation.get('true_runner_promotion_reason', 'not_available')}",
@@ -606,7 +630,7 @@ class StrategyV2StressReplayAssessmentService:
             f"- approval_cross_display: {recommendation.get('approval_cross_display', {})}",
             "",
             "## True Runner Readiness",
-            f"- true_runner_ready: {bool(true_runner_readiness.get('true_runner_ready', False))}",
+            f"- true_runner_ready: {self._safe_bool(true_runner_readiness.get('true_runner_ready', False))}",
             f"- stage: {true_runner_readiness.get('stage', 'prototype_only')}",
             f"- critical_scenarios: {true_runner_readiness.get('critical_scenarios', [])}",
             f"- critical_scenarios_with_outputs: {true_runner_readiness.get('critical_scenarios_with_outputs', [])}",
@@ -638,7 +662,7 @@ class StrategyV2StressReplayAssessmentService:
                 "",
             ]
         )
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(
@@ -680,7 +704,7 @@ class StrategyV2StressReplayAssessmentService:
             name for name, row in scenario_statuses.items() if str(row.get("status", "PASS")) != "PASS"
         ]
         catastrophic_scenarios = [
-            name for name, row in scenario_statuses.items() if bool(row.get("catastrophic_loss_detected", False))
+            name for name, row in scenario_statuses.items() if self._safe_bool(row.get("catastrophic_loss_detected", False))
         ]
         execution_fill_coverage = self._safe_float(
             lineage_coverage.get("execution_fill_coverage"),
@@ -716,7 +740,7 @@ class StrategyV2StressReplayAssessmentService:
             degraded_scenarios=degraded_scenarios,
             catastrophic_scenarios=catastrophic_scenarios,
         )
-        if stress_replay_lineage.get("available"):
+        if self._safe_bool(stress_replay_lineage.get("available")):
             lineage_blockers = [str(item) for item in stress_replay_lineage.get("blocked_by", [])]
             blocked_by = list(dict.fromkeys(lineage_blockers + blocked_by))
             next_steps = list(dict.fromkeys([*(stress_replay_lineage.get("next_steps") or []), *next_steps]))
@@ -750,7 +774,7 @@ class StrategyV2StressReplayAssessmentService:
             "symbol": symbol,
             "version": version,
             "generated_at": now.isoformat(),
-            "available": bool(stress_validation.get("available", False)),
+            "available": self._safe_bool(stress_validation.get("available", False)),
             "reason": reason if eligible_closed_trades > 0 else "no_closed_v2_trades",
             "evaluation_basis": (
                 f"{stress_validation.get('schema_version', 'strategy_v2_stress_validation_v2')} + "
@@ -785,7 +809,7 @@ class StrategyV2StressReplayAssessmentService:
                 "catastrophic_scenarios": catastrophic_scenarios,
                 "worst_scenario": worst_scenario,
                 "scenario_statuses": scenario_statuses,
-                "lineage_runtime_inputs_ready": bool(stress_replay_lineage.get("runtime_inputs_ready", False))
+                "lineage_runtime_inputs_ready": self._safe_bool(stress_replay_lineage.get("runtime_inputs_ready", False))
                 if stress_replay_lineage
                 else None,
             },

@@ -16,7 +16,22 @@ from app.services.outcome_control_trace import (
     summarize_outcome_control_trace,
 )
 from app.services.outcome_funnel_operating_kpis import build_outcome_funnel_operating_kpis
+from app.services.report_io import atomic_write_text
 from app.services.split_review_followup_ledger import summarize_split_review_followup_ledger
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
 
 
 def validation_report_cache_miss_payload(symbol: str) -> dict[str, Any]:
@@ -244,7 +259,7 @@ class ValidationReportService:
         topline_message = str(template.get("topline_message") or "")
         template_status = str(template.get("template_status") or "NOT_AVAILABLE")
         replay_alignment_status = str(template.get("replay_output_lineage_alignment_status") or "NOT_AVAILABLE")
-        approval_warning_locked = bool(template.get("approval_warning_locked", False))
+        approval_warning_locked = _safe_bool(template.get("approval_warning_locked", False))
         priority = dict(operator_action_priority_summary or {})
 
         approve_value = "approval usable"
@@ -391,7 +406,7 @@ class ValidationReportService:
         replay_alignment_reason = str(
             stress_replay_recommendation.get("replay_output_lineage_alignment_reason", "not_available")
         )
-        approval_warning_locked = bool(approval_cross_display.get("approval_warning_locked", False))
+        approval_warning_locked = _safe_bool(approval_cross_display.get("approval_warning_locked", False))
         approval_warning_code = str(approval_cross_display.get("approval_warning_code", "none"))
         approval_warning_message = str(
             approval_cross_display.get("approval_warning_message", "approval_template_cross_display_is_consistent")
@@ -774,7 +789,7 @@ class ValidationReportService:
         status = self._overall_status(wf=wf, mc=mc, metric=metric)
         file_path = out_dir / f"{symbol}_{version}_{now.strftime('%Y%m%dT%H%M%SZ')}.md"
 
-        fi_available = bool((feature_importance or {}).get("available"))
+        fi_available = _safe_bool((feature_importance or {}).get("available"))
         fi_ranking = list((feature_importance or {}).get("ranking", []))[:3]
         fi_lines: list[str] = []
         if fi_available:
@@ -795,7 +810,7 @@ class ValidationReportService:
                 "",
             ]
 
-        fc_available = bool((feature_calibration or {}).get("available"))
+        fc_available = _safe_bool((feature_calibration or {}).get("available"))
         fc_regime = str((feature_calibration or {}).get("regime_label", "n/a"))
         fc_row = dict(((feature_calibration or {}).get("by_regime") or {}).get(fc_regime, {}))
         fc_base = dict(fc_row.get("feature_weights_base") or (feature_calibration or {}).get("baseline_weights") or {})
@@ -857,8 +872,8 @@ class ValidationReportService:
             source_summary = dict(execution_friction_measurement_payload.get("source_summary") or {})
             execution_friction_measurement_lines = [
                 "## Execution Friction Measurement",
-                f"- available: {bool(execution_friction_measurement_payload.get('available', False))}",
-                f"- advisory_only: {bool(execution_friction_measurement_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(execution_friction_measurement_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(execution_friction_measurement_payload.get('advisory_only', True))}",
                 (
                     f"- friction_state: {execution_friction_measurement_payload.get('friction_state', 'insufficient_measurement')} "
                     f"| friction_bias={execution_friction_measurement_payload.get('friction_bias', 'gather_more_execution_evidence')} "
@@ -906,8 +921,8 @@ class ValidationReportService:
             source_summary = dict(forward_stress_regime_validation_payload.get("source_summary") or {})
             forward_stress_regime_validation_lines = [
                 "## Forward Stress Regime Validation",
-                f"- available: {bool(forward_stress_regime_validation_payload.get('available', False))}",
-                f"- advisory_only: {bool(forward_stress_regime_validation_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(forward_stress_regime_validation_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(forward_stress_regime_validation_payload.get('advisory_only', True))}",
                 (
                     f"- validation_state: {forward_stress_regime_validation_payload.get('validation_state', 'insufficient_evidence')} "
                     f"| validation_bias={forward_stress_regime_validation_payload.get('validation_bias', 'gather_more_validation_evidence')}"
@@ -941,8 +956,8 @@ class ValidationReportService:
             source_summary = dict(kill_condition_automation_payload.get("source_summary") or {})
             kill_condition_automation_lines = [
                 "## Kill Condition Automation",
-                f"- available: {bool(kill_condition_automation_payload.get('available', False))}",
-                f"- advisory_only: {bool(kill_condition_automation_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(kill_condition_automation_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(kill_condition_automation_payload.get('advisory_only', True))}",
                 (
                     f"- kill_condition_state: {kill_condition_automation_payload.get('kill_condition_state', 'observe_only')} "
                     f"| automation_bias={kill_condition_automation_payload.get('automation_bias', 'observe_only')} "
@@ -950,8 +965,8 @@ class ValidationReportService:
                 ),
                 (
                     f"- trigger_axis: {kill_condition_automation_payload.get('trigger_axis', 'none')} "
-                    f"| active_manual_override={bool(kill_condition_automation_payload.get('active_manual_override', False))} "
-                    f"| arm_required={bool(kill_condition_automation_payload.get('arm_required', False))}"
+                    f"| active_manual_override={_safe_bool(kill_condition_automation_payload.get('active_manual_override', False))} "
+                    f"| arm_required={_safe_bool(kill_condition_automation_payload.get('arm_required', False))}"
                 ),
                 (
                     f"- manual_override_reason: {kill_condition_automation_payload.get('manual_override_reason') or 'none'} "
@@ -976,7 +991,7 @@ class ValidationReportService:
         if v2_payload:
             v2_lines = [
                 "## Strategy v2 Mode Comparison",
-                f"- available: {bool(v2_payload.get('available', False))}",
+                f"- available: {_safe_bool(v2_payload.get('available', False))}",
                 f"- comparison_axis: {v2_payload.get('comparison_axis', 'strategy_mode')}",
                 f"- eligible_closed_trades: {int((v2_payload.get('sample_counts') or {}).get('eligible_closed_trades', 0))}",
                 f"- incremental_b_trades: {int((v2_payload.get('sample_counts') or {}).get('incremental_b_trades', 0))}",
@@ -1010,8 +1025,8 @@ class ValidationReportService:
         if multi_strategy_ab_payload:
             multi_strategy_ab_lines = [
                 "## Multi Strategy AB Expansion",
-                f"- available: {bool(multi_strategy_ab_payload.get('available', False))}",
-                f"- advisory_only: {bool(multi_strategy_ab_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(multi_strategy_ab_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(multi_strategy_ab_payload.get('advisory_only', True))}",
                 f"- mode: {multi_strategy_ab_payload.get('mode', 'A_ONLY')}",
                 f"- raw_family_anchor: {multi_strategy_ab_payload.get('raw_family_anchor', 'sweep_reversal')}",
                 f"- summary: {multi_strategy_ab_payload.get('summary', '')}",
@@ -1029,8 +1044,8 @@ class ValidationReportService:
             source_summary = dict(b_continuation_activation_payload.get("source_summary") or {})
             b_continuation_activation_lines = [
                 "## B Continuation Activation",
-                f"- available: {bool(b_continuation_activation_payload.get('available', False))}",
-                f"- advisory_only: {bool(b_continuation_activation_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(b_continuation_activation_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(b_continuation_activation_payload.get('advisory_only', True))}",
                 f"- family: {b_continuation_activation_payload.get('family', 'trend_continuation')}",
                 (
                     f"- activation_state: {b_continuation_activation_payload.get('activation_state', 'research_only')} "
@@ -1039,7 +1054,7 @@ class ValidationReportService:
                     f"| confidence={b_continuation_activation_payload.get('confidence', 'low')}"
                 ),
                 (
-                    f"- live_eligible: {bool(b_continuation_activation_payload.get('live_eligible', False))} "
+                    f"- live_eligible: {_safe_bool(b_continuation_activation_payload.get('live_eligible', False))} "
                     f"| summary: {b_continuation_activation_payload.get('summary', '')}"
                 ),
                 f"- reason_codes: {list(b_continuation_activation_payload.get('reason_codes') or [])}",
@@ -1053,8 +1068,8 @@ class ValidationReportService:
             source_summary = dict(b_continuation_edge_validation_payload.get("source_summary") or {})
             b_continuation_edge_validation_lines = [
                 "## B Continuation Edge Validation",
-                f"- available: {bool(b_continuation_edge_validation_payload.get('available', False))}",
-                f"- advisory_only: {bool(b_continuation_edge_validation_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(b_continuation_edge_validation_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(b_continuation_edge_validation_payload.get('advisory_only', True))}",
                 (
                     f"- raw_family: {b_continuation_edge_validation_payload.get('raw_family', 'trend_continuation')} "
                     f"| strategy_cluster={b_continuation_edge_validation_payload.get('strategy_cluster', 'b_continuation')}"
@@ -1090,8 +1105,8 @@ class ValidationReportService:
             source_summary = dict(strategy_cluster_balance_payload.get("source_summary") or {})
             strategy_cluster_balance_lines = [
                 "## Strategy Cluster Balance",
-                f"- available: {bool(strategy_cluster_balance_payload.get('available', False))}",
-                f"- advisory_only: {bool(strategy_cluster_balance_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(strategy_cluster_balance_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(strategy_cluster_balance_payload.get('advisory_only', True))}",
                 f"- mode: {strategy_cluster_balance_payload.get('mode', 'A_ONLY')}",
                 (
                     f"- balance_state: {strategy_cluster_balance_payload.get('balance_state', 'a_concentrated')} "
@@ -1113,8 +1128,8 @@ class ValidationReportService:
             source_summary = dict(a_strategy_post_cost_edge_validation_payload.get("source_summary") or {})
             a_strategy_post_cost_edge_validation_lines = [
                 "## A Strategy Post-Cost Edge Validation",
-                f"- available: {bool(a_strategy_post_cost_edge_validation_payload.get('available', False))}",
-                f"- advisory_only: {bool(a_strategy_post_cost_edge_validation_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(a_strategy_post_cost_edge_validation_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(a_strategy_post_cost_edge_validation_payload.get('advisory_only', True))}",
                 f"- family: {a_strategy_post_cost_edge_validation_payload.get('family', 'sweep_reversal')}",
                 (
                     f"- edge_state: {a_strategy_post_cost_edge_validation_payload.get('edge_state', 'insufficient_sample')} "
@@ -1143,7 +1158,7 @@ class ValidationReportService:
         if scalp_payload:
             scalp_lines = [
                 "## Scalp Experiment (5m zone / 1m execution)",
-                f"- available: {bool(scalp_payload.get('available', False))}",
+                f"- available: {_safe_bool(scalp_payload.get('available', False))}",
                 f"- reason: {scalp_payload.get('reason', 'not_available')}",
                 f"- preferred_branch: {scalp_comparison.get('preferred_branch', 'none')}",
                 f"- recommendation_reason: {scalp_comparison.get('recommendation_reason', 'not_available')}",
@@ -1184,7 +1199,7 @@ class ValidationReportService:
         if alpha_research_payload:
             alpha_research_lines = [
                 "## Alpha Research Pipeline",
-                f"- available: {bool(alpha_research_payload.get('available', False))}",
+                f"- available: {_safe_bool(alpha_research_payload.get('available', False))}",
                 f"- reason: {alpha_research_payload.get('reason', 'not_available')}",
                 f"- analysis_symbol: {alpha_research_payload.get('analysis_symbol')}",
                 f"- alpha_research_candidate_count: {int(alpha_research_summary.get('alpha_research_candidate_count', 0))}",
@@ -1205,49 +1220,49 @@ class ValidationReportService:
                 f"- recommended_bucket: {alpha_research_action_summary.get('bucket')}",
                 f"- confidence: {alpha_research_action_summary.get('confidence')}",
                 f"- sample_note: {alpha_research_action_summary.get('sample_note')}",
-                f"- recommended_action_deferred_by_sequence: {bool(alpha_research_action_summary.get('deferred_by_experiment_sequence', False))}",
+                f"- recommended_action_deferred_by_sequence: {_safe_bool(alpha_research_action_summary.get('deferred_by_experiment_sequence', False))}",
                 f"- recommended_action_current_priority: {alpha_research_action_summary.get('current_priority_experiment')}:{alpha_research_action_summary.get('current_priority_action')}",
                 f"- top_shadow_experiment_id: {alpha_research_top_experiment.get('experiment_id')}",
                 f"- top_shadow_experiment_title: {alpha_research_top_experiment.get('title')}",
                 f"- top_shadow_experiment_target: {alpha_research_top_experiment.get('target')}",
                 f"- top_shadow_experiment_confidence: {alpha_research_top_experiment.get('confidence')}",
                 f"- top_shadow_experiment_objective: {alpha_research_top_experiment.get('objective')}",
-                f"- top_shadow_experiment_deferred_by_sequence: {bool(alpha_research_top_experiment.get('deferred_by_experiment_sequence', False))}",
+                f"- top_shadow_experiment_deferred_by_sequence: {_safe_bool(alpha_research_top_experiment.get('deferred_by_experiment_sequence', False))}",
                 (
                     f"- experiment_sequence: state={alpha_research_experiment_sequence.get('state')} | "
-                    f"entry_timing_locked={bool(alpha_research_experiment_sequence.get('entry_timing_locked', False))} | "
-                    f"execution_style_locked={bool(alpha_research_experiment_sequence.get('execution_style_locked', False))} | "
-                    f"exit_optimization_allowed={bool(alpha_research_experiment_sequence.get('exit_optimization_allowed', False))} | "
+                    f"entry_timing_locked={_safe_bool(alpha_research_experiment_sequence.get('entry_timing_locked', False))} | "
+                    f"execution_style_locked={_safe_bool(alpha_research_experiment_sequence.get('execution_style_locked', False))} | "
+                    f"exit_optimization_allowed={_safe_bool(alpha_research_experiment_sequence.get('exit_optimization_allowed', False))} | "
                     f"current_priority={alpha_research_experiment_sequence.get('current_priority_experiment')}:{alpha_research_experiment_sequence.get('current_priority_action')}"
                 ),
                 f"- experiment_sequence_summary: {alpha_research_experiment_sequence.get('summary')}",
-                f"- evidence_available: {bool(alpha_research_evidence_summary.get('available', False))}",
+                f"- evidence_available: {_safe_bool(alpha_research_evidence_summary.get('available', False))}",
                 f"- evidence_top_reason: {alpha_research_reason_summary.get('top_reason')}",
                 f"- evidence_focus_aligned_candidates: {int(alpha_research_focus_summary.get('aligned_candidate_count', 0) or 0)}",
                 f"- evidence_top_focus: {alpha_research_focus_summary.get('top_focus')}:{alpha_research_focus_summary.get('top_bucket')}",
                 f"- evidence_top_family_bottleneck: {dict(alpha_research_outcome_summary.get('top_family_bottleneck') or {}).get('key')}",
                 f"- evidence_top_regime_bottleneck: {dict(alpha_research_outcome_summary.get('top_regime_bottleneck') or {}).get('key')}",
                 f"- evidence_top_session_bottleneck: {dict(alpha_research_outcome_summary.get('top_session_bottleneck') or {}).get('key')}",
-                f"- softening_review_available: {bool(alpha_research_softening_review.get('available', False))}",
+                f"- softening_review_available: {_safe_bool(alpha_research_softening_review.get('available', False))}",
                 f"- softening_top_bucket: {dict(alpha_research_softening_review.get('top_candidate') or {}).get('bucket')}",
                 f"- softening_top_priority: {dict(alpha_research_softening_review.get('top_candidate') or {}).get('review_priority')}",
-                f"- promotion_watchlist_available: {bool(alpha_research_promotion_watchlist.get('available', False))}",
+                f"- promotion_watchlist_available: {_safe_bool(alpha_research_promotion_watchlist.get('available', False))}",
                 f"- promotion_watchlist_count: {int(alpha_research_promotion_watchlist.get('watchlist_count', 0) or 0)}",
                 f"- improvement_priority: {edge_operating_discipline_preview.get('improvement_priority')}",
                 f"- current_system_identity: {edge_operating_discipline_preview.get('current_system_identity')}",
                 f"- next_system_stage: {edge_operating_discipline_preview.get('next_system_stage')}",
                 f"- resilience_claim: {edge_operating_discipline_preview.get('resilience_claim')}",
-                f"- fail_safe_claim: {bool(edge_operating_discipline_preview.get('fail_safe_claim', False))}",
+                f"- fail_safe_claim: {_safe_bool(edge_operating_discipline_preview.get('fail_safe_claim', False))}",
                 (
                     "- realized_edge_dependency_domains: "
                     f"{list(edge_operating_discipline_preview.get('realized_edge_dependency_domains') or [])}"
                 ),
                 f"- post_proof_scale_spec_id: {edge_operating_discipline_preview.get('post_proof_scale_spec_id')}",
-                f"- alpha_generator_review_allowed: {bool(edge_operating_discipline_preview.get('alpha_generator_review_allowed', False))}",
-                f"- capital_scale_review_allowed: {bool(edge_operating_discipline_preview.get('capital_scale_review_allowed', False))}",
-                f"- signal_density_control_review_allowed: {bool(edge_operating_discipline_preview.get('signal_density_control_review_allowed', False))}",
-                f"- execution_strategy_automation_review_allowed: {bool(edge_operating_discipline_preview.get('execution_strategy_automation_review_allowed', False))}",
-                f"- multi_strategy_expansion_review_allowed: {bool(edge_operating_discipline_preview.get('multi_strategy_expansion_review_allowed', False))}",
+                f"- alpha_generator_review_allowed: {_safe_bool(edge_operating_discipline_preview.get('alpha_generator_review_allowed', False))}",
+                f"- capital_scale_review_allowed: {_safe_bool(edge_operating_discipline_preview.get('capital_scale_review_allowed', False))}",
+                f"- signal_density_control_review_allowed: {_safe_bool(edge_operating_discipline_preview.get('signal_density_control_review_allowed', False))}",
+                f"- execution_strategy_automation_review_allowed: {_safe_bool(edge_operating_discipline_preview.get('execution_strategy_automation_review_allowed', False))}",
+                f"- multi_strategy_expansion_review_allowed: {_safe_bool(edge_operating_discipline_preview.get('multi_strategy_expansion_review_allowed', False))}",
                 (
                     "- deferred_system_upgrade_backlog: "
                     f"{list(edge_operating_discipline_preview.get('deferred_system_upgrade_backlog') or [])}"
@@ -1270,13 +1285,13 @@ class ValidationReportService:
                 alpha_research_lines.append(
                     f"- suspect_{idx}: {row.get('axis')}:{row.get('bucket')} "
                     f"reason={row.get('reason')} alignment={row.get('alignment_strength')} "
-                    f"execution_drag_conflict={bool(row.get('execution_drag_conflict', False))}"
+                    f"execution_drag_conflict={_safe_bool(row.get('execution_drag_conflict', False))}"
                 )
             for idx, row in enumerate(list(alpha_research_softening_review.get("review_items") or [])[:3], start=1):
                 alpha_research_lines.append(
                     f"- softening_{idx}: {row.get('review_priority')} {row.get('axis')}:{row.get('bucket')} "
                     f"reason={row.get('reason')} action={row.get('recommended_research_action')} "
-                    f"conflict={bool(row.get('execution_drag_conflict', False))}"
+                    f"conflict={_safe_bool(row.get('execution_drag_conflict', False))}"
                 )
             for idx, row in enumerate(list(alpha_research_promotion_watchlist.get("watch_items") or [])[:3], start=1):
                 alpha_research_lines.append(
@@ -1295,7 +1310,7 @@ class ValidationReportService:
         if score_to_outcome_payload:
             score_to_outcome_lines = [
                 "## Score To Outcome Funnel",
-                f"- available: {bool(score_to_outcome_payload.get('available', False))}",
+                f"- available: {_safe_bool(score_to_outcome_payload.get('available', False))}",
                 f"- reason: {score_to_outcome_payload.get('reason', 'not_available')}",
                 f"- report_window_days: {int(score_to_outcome_payload.get('report_window_days', 0) or 0)}",
                 f"- coverage_note: {score_to_outcome_payload.get('coverage_note', '')}",
@@ -1346,7 +1361,7 @@ class ValidationReportService:
             historical_gap = dict(money_funnel_payload.get("historical_gap_r") or {})
             money_funnel_lines = [
                 "## Money Funnel",
-                f"- available: {bool(money_funnel_payload.get('available', False))}",
+                f"- available: {_safe_bool(money_funnel_payload.get('available', False))}",
                 f"- coverage_note: {money_funnel_payload.get('coverage_note', '')}",
                 (
                     f"- snapshot_expected_r: runtime={float(snapshot_expected.get('runtime_candidates', 0.0) or 0.0):.4f}, "
@@ -1380,9 +1395,9 @@ class ValidationReportService:
         if execution_degradation_payload:
             execution_degradation_lines = [
                 "## Execution Degradation Advisory",
-                f"- available: {bool(execution_degradation_payload.get('available', False))}",
+                f"- available: {_safe_bool(execution_degradation_payload.get('available', False))}",
                 f"- status: {execution_degradation_payload.get('status', 'healthy')}",
-                f"- healthy: {bool(execution_degradation_payload.get('healthy', True))}",
+                f"- healthy: {_safe_bool(execution_degradation_payload.get('healthy', True))}",
                 f"- summary: {execution_degradation_payload.get('summary', '')}",
                 f"- recommended_action: {execution_degradation_payload.get('recommended_action', 'continue_runtime_monitoring')}",
                 f"- reason_codes: {list(execution_degradation_payload.get('reason_codes') or [])}",
@@ -1402,7 +1417,7 @@ class ValidationReportService:
         if family_execution_degradation_payload:
             family_execution_degradation_lines = [
                 "## Family Execution Degradation Advisory",
-                f"- available: {bool(family_execution_degradation_payload.get('available', False))}",
+                f"- available: {_safe_bool(family_execution_degradation_payload.get('available', False))}",
                 f"- coverage_note: {family_execution_degradation_payload.get('coverage_note', '')}",
             ]
             for idx, row in enumerate(family_execution_degradation_rows[:3], start=1):
@@ -1418,7 +1433,7 @@ class ValidationReportService:
         if mode_advisory_payload:
             mode_advisory_lines = [
                 "## Mode Advisory",
-                f"- available: {bool(mode_advisory_payload.get('available', False))}",
+                f"- available: {_safe_bool(mode_advisory_payload.get('available', False))}",
                 f"- coverage_note: {mode_advisory_payload.get('coverage_note', '')}",
             ]
             for axis in ("family", "regime", "session"):
@@ -1439,14 +1454,14 @@ class ValidationReportService:
         if operator_action_priority_payload:
             operator_action_priority_lines = [
                 "## Operator Action Priority",
-                f"- available: {bool(operator_action_priority_payload.get('available', False))}",
+                f"- available: {_safe_bool(operator_action_priority_payload.get('available', False))}",
                 f"- top_action: {operator_action_priority_payload.get('top_action', 'continue_runtime_monitoring')}",
                 f"- top_reason: {operator_action_priority_payload.get('top_reason', '')}",
                 f"- top_action_followup_command: {operator_action_priority_payload.get('top_action_followup_command', '')}",
                 f"- priority_level: {operator_action_priority_payload.get('priority_level', 'monitor')}",
                 f"- priority_source: {operator_action_priority_payload.get('priority_source', 'monitor')}",
                 f"- action_family: {operator_action_priority_payload.get('action_family', 'monitor')}",
-                f"- advisory_only: {bool(operator_action_priority_payload.get('advisory_only', True))}",
+                f"- advisory_only: {_safe_bool(operator_action_priority_payload.get('advisory_only', True))}",
             ]
             experiment_policy = dict(operator_action_priority_payload.get("experiment_execution_policy") or {})
             if experiment_policy:
@@ -1483,12 +1498,12 @@ class ValidationReportService:
                         ),
                         (
                             f"- experiment_context.entry_timing: preferred={experiment_context.get('entry_timing_preferred_variant')} "
-                            f"ready={bool(experiment_context.get('entry_timing_comparison_ready', False))} "
+                            f"ready={_safe_bool(experiment_context.get('entry_timing_comparison_ready', False))} "
                             f"reason={experiment_context.get('entry_timing_recommendation_reason')}"
                         ),
                         (
                             f"- experiment_context.execution_style: preferred={experiment_context.get('execution_style_preferred_variant')} "
-                            f"ready={bool(experiment_context.get('execution_style_comparison_ready', False))} "
+                            f"ready={_safe_bool(experiment_context.get('execution_style_comparison_ready', False))} "
                             f"reason={experiment_context.get('execution_style_recommendation_reason')}"
                         ),
                     ]
@@ -1540,7 +1555,7 @@ class ValidationReportService:
         if outcome_control_trace_summary:
             outcome_control_trace_lines = [
                 "## Outcome Control Trace",
-                f"- available: {bool(outcome_control_trace_summary.get('available', False))}",
+                f"- available: {_safe_bool(outcome_control_trace_summary.get('available', False))}",
                 f"- summary: {outcome_control_trace_summary.get('summary', '')}",
                 (
                     f"- approval_penalty: status={outcome_control_trace_summary.get('approval_penalty_status', 'healthy')} "
@@ -1567,8 +1582,8 @@ class ValidationReportService:
             top_modifier = dict(rollout_recommendation_payload.get("top_modifier") or {})
             rollout_recommendation_lines = [
                 "## Outcome-First Rollout Recommendation",
-                f"- available: {bool(rollout_recommendation_payload.get('available', False))}",
-                f"- advisory_only: {bool(rollout_recommendation_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(rollout_recommendation_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(rollout_recommendation_payload.get('advisory_only', True))}",
                 f"- family: {rollout_recommendation_payload.get('family', 'unknown')}",
                 (
                     f"- recommendation: {rollout_recommendation_payload.get('recommendation', 'hold')} "
@@ -1577,7 +1592,7 @@ class ValidationReportService:
                 ),
                 f"- summary: {rollout_recommendation_payload.get('summary', '')}",
                 (
-                    f"- current_policy: live_enabled={bool(current_policy.get('live_enabled', False))} "
+                    f"- current_policy: live_enabled={_safe_bool(current_policy.get('live_enabled', False))} "
                     f"max_execution_mode={current_policy.get('max_execution_mode', 'SHADOW')} "
                     f"max_risk_r={float(current_policy.get('max_risk_r', 0.0) or 0.0):.4f} "
                     f"allowed_sessions={list(current_policy.get('allowed_sessions') or [])} "
@@ -1606,8 +1621,8 @@ class ValidationReportService:
             source_summary = dict(strategy_lifecycle_payload.get("source_summary") or {})
             strategy_lifecycle_lines = [
                 "## Strategy Lifecycle",
-                f"- available: {bool(strategy_lifecycle_payload.get('available', False))}",
-                f"- advisory_only: {bool(strategy_lifecycle_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(strategy_lifecycle_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(strategy_lifecycle_payload.get('advisory_only', True))}",
                 f"- family: {strategy_lifecycle_payload.get('family', 'unknown')}",
                 (
                     f"- state: {strategy_lifecycle_payload.get('state', 'research')} "
@@ -1627,8 +1642,8 @@ class ValidationReportService:
             source_summary = dict(promotion_governance_payload.get("source_summary") or {})
             promotion_governance_lines = [
                 "## Promotion Governance",
-                f"- available: {bool(promotion_governance_payload.get('available', False))}",
-                f"- advisory_only: {bool(promotion_governance_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(promotion_governance_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(promotion_governance_payload.get('advisory_only', True))}",
                 f"- family: {promotion_governance_payload.get('family', 'unknown')}",
                 (
                     f"- state: {promotion_governance_payload.get('state', 'defer')} "
@@ -1648,8 +1663,8 @@ class ValidationReportService:
             source_summary = dict(promotion_review_queue_payload.get("source_summary") or {})
             promotion_review_queue_lines = [
                 "## Promotion Review Queue",
-                f"- available: {bool(promotion_review_queue_payload.get('available', False))}",
-                f"- advisory_only: {bool(promotion_review_queue_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(promotion_review_queue_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(promotion_review_queue_payload.get('advisory_only', True))}",
                 (
                     f"- queue_state: {promotion_review_queue_payload.get('queue_state', 'empty_queue')} "
                     f"| headline_family={promotion_review_queue_payload.get('headline_family', '') or 'none'} "
@@ -1668,8 +1683,8 @@ class ValidationReportService:
             source_summary = dict(promotion_remediation_queue_payload.get("source_summary") or {})
             promotion_remediation_queue_lines = [
                 "## Promotion Remediation Queue",
-                f"- available: {bool(promotion_remediation_queue_payload.get('available', False))}",
-                f"- advisory_only: {bool(promotion_remediation_queue_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(promotion_remediation_queue_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(promotion_remediation_queue_payload.get('advisory_only', True))}",
                 (
                     f"- queue_state: {promotion_remediation_queue_payload.get('queue_state', 'empty_queue')} "
                     f"| headline_family={promotion_remediation_queue_payload.get('headline_family', '') or 'none'} "
@@ -1688,8 +1703,8 @@ class ValidationReportService:
             source_summary = dict(promotion_clearance_tracker_payload.get("source_summary") or {})
             promotion_clearance_tracker_lines = [
                 "## Promotion Clearance Tracker",
-                f"- available: {bool(promotion_clearance_tracker_payload.get('available', False))}",
-                f"- advisory_only: {bool(promotion_clearance_tracker_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(promotion_clearance_tracker_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(promotion_clearance_tracker_payload.get('advisory_only', True))}",
                 f"- family: {promotion_clearance_tracker_payload.get('family', 'unknown')}",
                 (
                     f"- clearance_state: {promotion_clearance_tracker_payload.get('clearance_state', 'observe_only')} "
@@ -1713,8 +1728,8 @@ class ValidationReportService:
             source_summary = dict(promotion_reopen_queue_payload.get("source_summary") or {})
             promotion_reopen_queue_lines = [
                 "## Promotion Reopen Queue",
-                f"- available: {bool(promotion_reopen_queue_payload.get('available', False))}",
-                f"- advisory_only: {bool(promotion_reopen_queue_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(promotion_reopen_queue_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(promotion_reopen_queue_payload.get('advisory_only', True))}",
                 (
                     f"- queue_state: {promotion_reopen_queue_payload.get('queue_state', 'empty_queue')} "
                     f"| headline_family={promotion_reopen_queue_payload.get('headline_family', '') or 'none'} "
@@ -1733,8 +1748,8 @@ class ValidationReportService:
             source_summary = dict(promotion_decision_brief_payload.get("source_summary") or {})
             promotion_decision_brief_lines = [
                 "## Promotion Decision Brief",
-                f"- available: {bool(promotion_decision_brief_payload.get('available', False))}",
-                f"- advisory_only: {bool(promotion_decision_brief_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(promotion_decision_brief_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(promotion_decision_brief_payload.get('advisory_only', True))}",
                 f"- family: {promotion_decision_brief_payload.get('family', 'unknown')}",
                 (
                     f"- brief_state: {promotion_decision_brief_payload.get('brief_state', 'observe_case')} "
@@ -1754,8 +1769,8 @@ class ValidationReportService:
             source_summary = dict(auto_promotion_rollout_execution_payload.get("source_summary") or {})
             auto_promotion_rollout_execution_lines = [
                 "## Auto Promotion Rollout Execution",
-                f"- available: {bool(auto_promotion_rollout_execution_payload.get('available', False))}",
-                f"- advisory_only: {bool(auto_promotion_rollout_execution_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(auto_promotion_rollout_execution_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(auto_promotion_rollout_execution_payload.get('advisory_only', True))}",
                 f"- target_family: {auto_promotion_rollout_execution_payload.get('target_family', 'unknown')}",
                 (
                     f"- execution_stage: {auto_promotion_rollout_execution_payload.get('execution_stage', 'advisory_only')} "
@@ -1765,7 +1780,7 @@ class ValidationReportService:
                 (
                     f"- target_posture: {auto_promotion_rollout_execution_payload.get('target_posture', 'keep_current')} "
                     f"| write_scope={auto_promotion_rollout_execution_payload.get('write_scope', 'none')} "
-                    f"| dry_run_only={bool(auto_promotion_rollout_execution_payload.get('dry_run_only', False))} "
+                    f"| dry_run_only={_safe_bool(auto_promotion_rollout_execution_payload.get('dry_run_only', False))} "
                     f"| confidence={auto_promotion_rollout_execution_payload.get('confidence', 'low')}"
                 ),
                 f"- summary: {auto_promotion_rollout_execution_payload.get('summary', '')}",
@@ -1780,8 +1795,8 @@ class ValidationReportService:
             source_summary = dict(promotion_lifecycle_history_payload.get("source_summary") or {})
             promotion_lifecycle_history_lines = [
                 "## Promotion Lifecycle History",
-                f"- available: {bool(promotion_lifecycle_history_payload.get('available', False))}",
-                f"- advisory_only: {bool(promotion_lifecycle_history_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(promotion_lifecycle_history_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(promotion_lifecycle_history_payload.get('advisory_only', True))}",
                 f"- family: {promotion_lifecycle_history_payload.get('family', 'unknown')}",
                 (
                     f"- history_state: {promotion_lifecycle_history_payload.get('history_state', 'history_unavailable')} "
@@ -1802,8 +1817,8 @@ class ValidationReportService:
             source_summary = dict(research_promotion_operating_loop_payload.get("source_summary") or {})
             research_promotion_operating_loop_lines = [
                 "## Research Promotion Operating Loop",
-                f"- available: {bool(research_promotion_operating_loop_payload.get('available', False))}",
-                f"- advisory_only: {bool(research_promotion_operating_loop_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(research_promotion_operating_loop_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(research_promotion_operating_loop_payload.get('advisory_only', True))}",
                 f"- family: {research_promotion_operating_loop_payload.get('family', 'unknown')}",
                 (
                     f"- loop_state: {research_promotion_operating_loop_payload.get('loop_state', 'research_backlog')} "
@@ -1814,7 +1829,7 @@ class ValidationReportService:
                 (
                     f"- recommended_action: {research_promotion_operating_loop_payload.get('recommended_action') or 'none'} "
                     f"| shadow_experiment_id={research_promotion_operating_loop_payload.get('shadow_experiment_id') or 'none'} "
-                    f"| watchlist_ready={bool(research_promotion_operating_loop_payload.get('watchlist_ready', False))}"
+                    f"| watchlist_ready={_safe_bool(research_promotion_operating_loop_payload.get('watchlist_ready', False))}"
                 ),
                 f"- summary: {research_promotion_operating_loop_payload.get('summary', '')}",
                 f"- reason_codes: {list(research_promotion_operating_loop_payload.get('reason_codes') or [])}",
@@ -1828,8 +1843,8 @@ class ValidationReportService:
             source_summary = dict(positive_evidence_expansion_payload.get("source_summary") or {})
             positive_evidence_expansion_lines = [
                 "## Positive Evidence Expansion",
-                f"- available: {bool(positive_evidence_expansion_payload.get('available', False))}",
-                f"- advisory_only: {bool(positive_evidence_expansion_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(positive_evidence_expansion_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(positive_evidence_expansion_payload.get('advisory_only', True))}",
                 f"- family: {positive_evidence_expansion_payload.get('family', 'unknown')}",
                 (
                     f"- state: {positive_evidence_expansion_payload.get('state', 'not_ready')} "
@@ -1849,8 +1864,8 @@ class ValidationReportService:
             top_condition_bucket = dict(outcome_bucket_granularity_payload.get("top_condition_bucket") or {})
             outcome_bucket_granularity_lines = [
                 "## Outcome Bucket Granularity",
-                f"- available: {bool(outcome_bucket_granularity_payload.get('available', False))}",
-                f"- advisory_only: {bool(outcome_bucket_granularity_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(outcome_bucket_granularity_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(outcome_bucket_granularity_payload.get('advisory_only', True))}",
                 (
                     f"- family_focus: key={family_focus.get('key', 'unknown')} "
                     f"closed={int(family_focus.get('closed', 0) or 0)} "
@@ -1877,8 +1892,8 @@ class ValidationReportService:
             session_modifier = dict(opportunity_capture_payload.get("session_modifier") or {})
             opportunity_capture_lines = [
                 "## Opportunity Capture",
-                f"- available: {bool(opportunity_capture_payload.get('available', False))}",
-                f"- advisory_only: {bool(opportunity_capture_payload.get('advisory_only', True))}",
+                f"- available: {_safe_bool(opportunity_capture_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(opportunity_capture_payload.get('advisory_only', True))}",
                 f"- summary: {opportunity_capture_payload.get('summary', '')}",
                 f"- report_window_days: {int(opportunity_capture_payload.get('report_window_days', 0) or 0)}",
                 f"- trades_per_day: {dict(opportunity_capture_payload.get('trades_per_day') or {})}",
@@ -1912,8 +1927,8 @@ class ValidationReportService:
         if capital_allocator_payload:
             capital_allocator_lines = [
                 "## Capital Allocator",
-                f"- available: {bool(capital_allocator_payload.get('available', False))}",
-                f"- advisory_only: {bool(capital_allocator_payload.get('advisory_only', False))}",
+                f"- available: {_safe_bool(capital_allocator_payload.get('available', False))}",
+                f"- advisory_only: {_safe_bool(capital_allocator_payload.get('advisory_only', False))}",
                 f"- allocator_state: {capital_allocator_payload.get('allocator_state', 'neutral')}",
                 f"- family_focus: {capital_allocator_payload.get('family_focus')}",
                 f"- capital_pressure: {capital_allocator_payload.get('capital_pressure', 'neutral')}",
@@ -1932,7 +1947,7 @@ class ValidationReportService:
         if lock_payload:
             lock_lines = [
                 "## Transition / Shock Lock Comparison",
-                f"- available: {bool(lock_payload.get('available', False))}",
+                f"- available: {_safe_bool(lock_payload.get('available', False))}",
                 f"- comparison_axis: {lock_payload.get('comparison_axis', 'transition_shock_lock')}",
                 f"- blocked_transition_trades: {int((lock_payload.get('sample_counts') or {}).get('blocked_transition_trades', 0))}",
                 f"- blocked_shock_trades: {int((lock_payload.get('sample_counts') or {}).get('blocked_shock_trades', 0))}",
@@ -1969,7 +1984,7 @@ class ValidationReportService:
             writer_counts = dict(pbo_dsr_trial_writer_payload.get("sample_counts") or {})
             pbo_dsr_trial_writer_lines = [
                 "## PBO / DSR Trial Writer",
-                f"- available: {bool(pbo_dsr_trial_writer_payload.get('available', False))}",
+                f"- available: {_safe_bool(pbo_dsr_trial_writer_payload.get('available', False))}",
                 f"- implementation_status: {pbo_dsr_trial_writer_payload.get('implementation_status', 'not_available')}",
                 f"- reason: {pbo_dsr_trial_writer_payload.get('reason', 'not_available')}",
                 (
@@ -1988,7 +2003,7 @@ class ValidationReportService:
             threshold_counts = dict(pbo_dsr_threshold_runner_payload.get("sample_counts") or {})
             pbo_dsr_threshold_runner_lines = [
                 "## PBO / DSR Threshold Runner",
-                f"- available: {bool(pbo_dsr_threshold_runner_payload.get('available', False))}",
+                f"- available: {_safe_bool(pbo_dsr_threshold_runner_payload.get('available', False))}",
                 f"- implementation_status: {pbo_dsr_threshold_runner_payload.get('implementation_status', 'not_available')}",
                 f"- reason: {pbo_dsr_threshold_runner_payload.get('reason', 'not_available')}",
                 f"- selection_rule: {pbo_dsr_threshold_runner_payload.get('selection_rule', 'not_available')}",
@@ -2012,9 +2027,9 @@ class ValidationReportService:
         if artifact_store_payload:
             artifact_store_lines = [
                 "## PBO / DSR Artifact Store",
-                f"- artifact_store_ready: {bool(artifact_store_payload.get('artifact_store_ready', False))}",
-                f"- available: {bool(artifact_store_payload.get('available', False))}",
-                f"- metrics_available: {bool(artifact_store_payload.get('metrics_available', False))}",
+                f"- artifact_store_ready: {_safe_bool(artifact_store_payload.get('artifact_store_ready', False))}",
+                f"- available: {_safe_bool(artifact_store_payload.get('available', False))}",
+                f"- metrics_available: {_safe_bool(artifact_store_payload.get('metrics_available', False))}",
                 f"- implementation_status: {artifact_store_payload.get('implementation_status', 'not_available')}",
                 f"- reason: {artifact_store_payload.get('reason', 'not_available')}",
                 (
@@ -2030,8 +2045,8 @@ class ValidationReportService:
                 artifact_store_lines.append(
                     (
                         f"- latest_snapshot: state={artifact_store_snapshot.get('computation_state', 'n/a')}, "
-                        f"pbo_available={bool(artifact_store_snapshot.get('pbo_available', False))}, "
-                        f"dsr_available={bool(artifact_store_snapshot.get('dsr_available', False))}"
+                        f"pbo_available={_safe_bool(artifact_store_snapshot.get('pbo_available', False))}, "
+                        f"dsr_available={_safe_bool(artifact_store_snapshot.get('dsr_available', False))}"
                     )
                 )
             artifact_store_lines.append("")
@@ -2039,8 +2054,8 @@ class ValidationReportService:
         if pbo_dsr_payload:
             pbo_dsr_lines = [
                 "## PBO / DSR Design Status",
-                f"- design_ready: {bool(pbo_dsr_payload.get('design_ready', False))}",
-                f"- available: {bool(pbo_dsr_payload.get('available', False))}",
+                f"- design_ready: {_safe_bool(pbo_dsr_payload.get('design_ready', False))}",
+                f"- available: {_safe_bool(pbo_dsr_payload.get('available', False))}",
                 f"- implementation_status: {pbo_dsr_payload.get('implementation_status', 'not_available')}",
                 f"- reason: {pbo_dsr_payload.get('reason', 'not_available')}",
                 (
@@ -2065,8 +2080,8 @@ class ValidationReportService:
             recommendation = dict(pbo_dsr_metrics_payload.get("deployment_recommendation") or {})
             pbo_dsr_metrics_lines = [
                 "## PBO / DSR Metrics",
-                f"- available: {bool(pbo_dsr_metrics_payload.get('available', False))}",
-                f"- metrics_complete: {bool(pbo_dsr_metrics_payload.get('metrics_complete', False))}",
+                f"- available: {_safe_bool(pbo_dsr_metrics_payload.get('available', False))}",
+                f"- metrics_complete: {_safe_bool(pbo_dsr_metrics_payload.get('metrics_complete', False))}",
                 f"- reason: {pbo_dsr_metrics_payload.get('reason', 'not_available')}",
                 f"- decision: {recommendation.get('decision', 'not_ready')}",
                 f"- meets_protocol_gate: {recommendation.get('meets_protocol_gate', False)}",
@@ -2116,8 +2131,8 @@ class ValidationReportService:
             lineage_candle_path = dict(stress_replay_lineage_payload.get("candle_path") or {})
             stress_replay_lineage_lines = [
                 "## Stress Replay Lineage",
-                f"- available: {bool(stress_replay_lineage_payload.get('available', False))}",
-                f"- runtime_inputs_ready: {bool(stress_replay_lineage_payload.get('runtime_inputs_ready', False))}",
+                f"- available: {_safe_bool(stress_replay_lineage_payload.get('available', False))}",
+                f"- runtime_inputs_ready: {_safe_bool(stress_replay_lineage_payload.get('runtime_inputs_ready', False))}",
                 f"- reason: {stress_replay_lineage_payload.get('reason', 'not_available')}",
                 f"- execution_fill_coverage: {float(lineage_coverage.get('execution_fill_coverage', 0.0)):.4f}",
                 f"- latency_candle_coverage: {float(lineage_coverage.get('latency_candle_coverage', 0.0)):.4f}",
@@ -2133,7 +2148,7 @@ class ValidationReportService:
         if stress_payload:
             stress_lines = [
                 "## Stressed Cost Comparison",
-                f"- available: {bool(stress_payload.get('available', False))}",
+                f"- available: {_safe_bool(stress_payload.get('available', False))}",
                 f"- comparison_axis: {stress_payload.get('comparison_axis', 'baseline_vs_stressed_cost')}",
                 f"- execution_data_trades: {int((stress_payload.get('sample_counts') or {}).get('execution_data_trades', 0))}",
                 f"- estimate_only_trades: {int((stress_payload.get('sample_counts') or {}).get('estimate_only_trades', 0))}",
@@ -2143,9 +2158,9 @@ class ValidationReportService:
                 f"- recommendation_reason: {stress_recommendation.get('reason', 'not_available')}",
                 f"- worst_scenario: {stress_recommendation.get('worst_scenario', 'stressed_cost')}",
                 f"- worst_scenario_source: {stress_recommendation.get('worst_scenario_source', 'stressed_cost')}",
-                f"- replay_gate_applied: {bool(stress_recommendation.get('replay_gate_applied', False))}",
+                f"- replay_gate_applied: {_safe_bool(stress_recommendation.get('replay_gate_applied', False))}",
                 f"- replay_gate_reason: {stress_recommendation.get('replay_gate_reason', 'approximation_only')}",
-                f"- divergence_gate_applied: {bool(stress_recommendation.get('divergence_gate_applied', False))}",
+                f"- divergence_gate_applied: {_safe_bool(stress_recommendation.get('divergence_gate_applied', False))}",
                 f"- divergence_problem_scenarios: {stress_recommendation.get('divergence_problem_scenarios', [])}",
                 f"- worst_divergence_scenario: {stress_recommendation.get('worst_divergence_scenario')}",
                 (
@@ -2184,7 +2199,7 @@ class ValidationReportService:
                 )
                 if replay_row:
                     stress_lines.append(
-                        f"  replay_output: available={bool(replay_row.get('available', False))}, "
+                        f"  replay_output: available={_safe_bool(replay_row.get('available', False))}, "
                         f"reason={replay_row.get('reason', 'not_available')}, ev={float(replay_summary.get('ev', 0.0)):.4f}, "
                         f"max_dd={float(replay_summary.get('max_drawdown', 0.0)):.4f}, "
                         f"delta_replay_minus_approx_ev={float(replay_delta.get('ev', 0.0)):.4f}, "
@@ -2192,7 +2207,7 @@ class ValidationReportService:
                     )
             stress_lines.extend(
                 [
-                    f"- replay_output_artifacts_available: {bool(stress_replay_output_artifacts.get('available', False))}",
+                    f"- replay_output_artifacts_available: {_safe_bool(stress_replay_output_artifacts.get('available', False))}",
                     f"- replay_output_artifacts_reason: {stress_replay_output_artifacts.get('reason', 'not_available')}",
                     f"- replay_output_summary_counts: {stress_replay_output_artifacts.get('summary_counts', {})}",
                 ]
@@ -2206,15 +2221,15 @@ class ValidationReportService:
             true_runner_readiness = dict(stress_replay_payload.get("true_runner_readiness") or {})
             stress_replay_lines = [
                 "## Stress Replay Assessment",
-                f"- available: {bool(stress_replay_payload.get('available', False))}",
-                f"- full_replay_ready: {bool(stress_replay_payload.get('full_replay_ready', False))}",
-                f"- replacement_recommended: {bool(stress_replay_payload.get('replacement_recommended', False))}",
-                f"- true_runner_ready: {bool(true_runner_readiness.get('true_runner_ready', False))}",
+                f"- available: {_safe_bool(stress_replay_payload.get('available', False))}",
+                f"- full_replay_ready: {_safe_bool(stress_replay_payload.get('full_replay_ready', False))}",
+                f"- replacement_recommended: {_safe_bool(stress_replay_payload.get('replacement_recommended', False))}",
+                f"- true_runner_ready: {_safe_bool(true_runner_readiness.get('true_runner_ready', False))}",
                 f"- true_runner_stage: {true_runner_readiness.get('stage', 'prototype_only')}",
                 f"- decision: {stress_replay_recommendation.get('decision', 'keep_approximation')}",
                 f"- priority: {stress_replay_recommendation.get('priority', 'low')}",
                 f"- reason: {stress_replay_recommendation.get('reason', 'not_available')}",
-                f"- true_runner_promotion_ready: {bool(stress_replay_recommendation.get('true_runner_promotion_ready', False))}",
+                f"- true_runner_promotion_ready: {_safe_bool(stress_replay_recommendation.get('true_runner_promotion_ready', False))}",
                 f"- true_runner_promotion_status: {stress_replay_recommendation.get('true_runner_promotion_status', 'NOT_APPLICABLE')}",
                 f"- true_runner_promotion_action: {stress_replay_recommendation.get('true_runner_promotion_action', 'keep_current_path')}",
                 f"- true_runner_promotion_reason: {stress_replay_recommendation.get('true_runner_promotion_reason', 'not_available')}",
@@ -2247,15 +2262,15 @@ class ValidationReportService:
             true_runner_readiness = dict(stress_replay_runner_payload.get("true_runner_readiness") or {})
             stress_replay_runner_lines = [
                 "## Stress Replay Runner Contract",
-                f"- available: {bool(stress_replay_runner_payload.get('available', False))}",
-                f"- runtime_job_ready: {bool(stress_replay_runner_payload.get('runtime_job_ready', False))}",
+                f"- available: {_safe_bool(stress_replay_runner_payload.get('available', False))}",
+                f"- runtime_job_ready: {_safe_bool(stress_replay_runner_payload.get('runtime_job_ready', False))}",
                 f"- implementation_status: {stress_replay_runner_payload.get('implementation_status', 'not_available')}",
                 f"- reason: {stress_replay_runner_payload.get('reason', 'not_available')}",
                 f"- priority: {readiness.get('priority', 'low')}",
                 f"- ready_scenarios: {readiness.get('ready_scenarios', [])}",
                 f"- blocked_scenarios: {readiness.get('blocked_scenarios', [])}",
                 f"- suggested_total_jobs: {int(readiness.get('suggested_total_jobs', 0) or 0)}",
-                f"- true_runner_ready: {bool(true_runner_readiness.get('true_runner_ready', False))}",
+                f"- true_runner_ready: {_safe_bool(true_runner_readiness.get('true_runner_ready', False))}",
                 f"- true_runner_stage: {true_runner_readiness.get('stage', 'prototype_only')}",
                 (
                     f"- batching: target={int(batching.get('target_trades_per_job', 0) or 0)}, "
@@ -2270,9 +2285,9 @@ class ValidationReportService:
             writer_counts = dict(stress_replay_writer_payload.get("sample_counts") or {})
             stress_replay_writer_lines = [
                 "## Stress Replay Lineage Writer",
-                f"- available: {bool(stress_replay_writer_payload.get('available', False))}",
-                f"- artifacts_written: {bool(stress_replay_writer_payload.get('artifacts_written', False))}",
-                f"- runtime_job_ready: {bool(stress_replay_writer_payload.get('runtime_job_ready', False))}",
+                f"- available: {_safe_bool(stress_replay_writer_payload.get('available', False))}",
+                f"- artifacts_written: {_safe_bool(stress_replay_writer_payload.get('artifacts_written', False))}",
+                f"- runtime_job_ready: {_safe_bool(stress_replay_writer_payload.get('runtime_job_ready', False))}",
                 f"- implementation_status: {stress_replay_writer_payload.get('implementation_status', 'not_available')}",
                 f"- reason: {stress_replay_writer_payload.get('reason', 'not_available')}",
                 f"- trade_rows_written: {int(writer_counts.get('trade_rows_written', 0) or 0)}",
@@ -2286,9 +2301,9 @@ class ValidationReportService:
             prototype_counts = dict(stress_replay_prototype_worker_payload.get("sample_counts") or {})
             stress_replay_prototype_worker_lines = [
                 "## Stress Replay Prototype Worker",
-                f"- available: {bool(stress_replay_prototype_worker_payload.get('available', False))}",
-                f"- executed: {bool(stress_replay_prototype_worker_payload.get('executed', False))}",
-                f"- runtime_job_ready: {bool(stress_replay_prototype_worker_payload.get('runtime_job_ready', False))}",
+                f"- available: {_safe_bool(stress_replay_prototype_worker_payload.get('available', False))}",
+                f"- executed: {_safe_bool(stress_replay_prototype_worker_payload.get('executed', False))}",
+                f"- runtime_job_ready: {_safe_bool(stress_replay_prototype_worker_payload.get('runtime_job_ready', False))}",
                 f"- reason: {stress_replay_prototype_worker_payload.get('reason', 'not_available')}",
                 f"- ready_scenarios: {int(prototype_counts.get('ready_scenarios', 0) or 0)}",
                 f"- executed_scenarios: {int(prototype_counts.get('executed_scenarios', 0) or 0)}",
@@ -2384,8 +2399,8 @@ class ValidationReportService:
         if outcome_attribution_summary:
             outcome_attribution_lines = [
                 "## Outcome Attribution",
-                f"- available: {bool(outcome_attribution_summary.get('available', False))}",
-                f"- advisory_only: {bool(outcome_attribution_summary.get('advisory_only', True))}",
+                f"- available: {_safe_bool(outcome_attribution_summary.get('available', False))}",
+                f"- advisory_only: {_safe_bool(outcome_attribution_summary.get('advisory_only', True))}",
                 (
                     f"- confidence: {outcome_attribution_summary.get('confidence', 'low')} | "
                     f"closed_trade_count={int(outcome_attribution_summary.get('closed_trade_count', 0) or 0)} | "
@@ -2423,8 +2438,8 @@ class ValidationReportService:
             experiment_sequence = dict(edge_experiment_summary.get("experiment_sequence") or {})
             edge_experiment_lines = [
                 "## Edge Experiment Review",
-                f"- available: {bool(edge_experiment_summary.get('available', False))}",
-                f"- advisory_only: {bool(edge_experiment_summary.get('advisory_only', True))}",
+                f"- available: {_safe_bool(edge_experiment_summary.get('available', False))}",
+                f"- advisory_only: {_safe_bool(edge_experiment_summary.get('advisory_only', True))}",
                 (
                     f"- edge_state: {edge_experiment_summary.get('edge_state', 'insufficient_edge_measurement')} | "
                     f"closed_trade_count={int(edge_experiment_summary.get('closed_trade_count', 0) or 0)} | "
@@ -2437,14 +2452,14 @@ class ValidationReportService:
                     f"stability={float(edge_experiment_summary.get('edge_stability', 0.0) or 0.0):.4f}"
                 ),
                 (
-                    f"- entry_timing_experiment: available={bool(edge_experiment_summary.get('entry_timing_available', False))} | "
-                    f"comparison_ready={bool(edge_experiment_summary.get('entry_timing_comparison_ready', False))} | "
+                    f"- entry_timing_experiment: available={_safe_bool(edge_experiment_summary.get('entry_timing_available', False))} | "
+                    f"comparison_ready={_safe_bool(edge_experiment_summary.get('entry_timing_comparison_ready', False))} | "
                     f"preferred={edge_experiment_summary.get('entry_timing_preferred_variant', 'none')} | "
                     f"reason={edge_experiment_summary.get('entry_timing_recommendation_reason', 'not_available')}"
                 ),
                 (
-                    f"- execution_style_experiment: available={bool(edge_experiment_summary.get('execution_style_available', False))} | "
-                    f"comparison_ready={bool(edge_experiment_summary.get('execution_style_comparison_ready', False))} | "
+                    f"- execution_style_experiment: available={_safe_bool(edge_experiment_summary.get('execution_style_available', False))} | "
+                    f"comparison_ready={_safe_bool(edge_experiment_summary.get('execution_style_comparison_ready', False))} | "
                     f"preferred={edge_experiment_summary.get('execution_style_preferred_variant', 'none')} | "
                     f"reason={edge_experiment_summary.get('execution_style_recommendation_reason', 'not_available')}"
                 ),
@@ -2466,30 +2481,30 @@ class ValidationReportService:
                     f"identity={dict(edge_experiment_summary.get('operating_discipline') or {}).get('current_system_identity', 'edge_proof_engine')} | "
                     f"next_stage={dict(edge_experiment_summary.get('operating_discipline') or {}).get('next_system_stage', 'post_first_verified_edge')} | "
                     f"resilience={dict(edge_experiment_summary.get('operating_discipline') or {}).get('resilience_claim', 'harder_to_fail_from_self_deception')} | "
-                    f"fail_safe_claim={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('fail_safe_claim', False))} | "
+                    f"fail_safe_claim={_safe_bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('fail_safe_claim', False))} | "
                     f"dependencies={'/'.join(list(dict(edge_experiment_summary.get('operating_discipline') or {}).get('realized_edge_dependency_domains') or [])) or 'market_edge/execution_quality/operating_discipline'} | "
                     f"scale_spec={dict(edge_experiment_summary.get('operating_discipline') or {}).get('post_proof_scale_spec_id', 'edge_proof_capital_scale_v1')} | "
                     f"primary_goal={dict(edge_experiment_summary.get('operating_discipline') or {}).get('primary_goal', 'find_first_verified_edge')} | "
                     f"improvement_priority={dict(edge_experiment_summary.get('operating_discipline') or {}).get('improvement_priority', 'prove_single_edge_before_density_or_strategy_expansion')} | "
                     f"evaluation_focus={dict(edge_experiment_summary.get('operating_discipline') or {}).get('evaluation_focus', 'after_cost_edge_only')} | "
                     f"min_closed_trades={int(dict(edge_experiment_summary.get('operating_discipline') or {}).get('minimum_closed_trades_for_edge_evaluation', 0) or 0)} | "
-                    f"profit_claim_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('profit_claim_allowed', False))} | "
-                    f"structure_change_review_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('structure_change_review_allowed', False))} | "
-                    f"loss_driven_rewrite_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('loss_driven_rewrite_allowed', False))} | "
-                    f"early_loss_embargo_active={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('early_loss_rewrite_embargo_active', False))} | "
-                    f"rollout_expansion_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('rollout_expansion_allowed', False))} | "
-                    f"alpha_generator_review_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('alpha_generator_review_allowed', False))} | "
-                    f"capital_scale_review_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('capital_scale_review_allowed', False))} | "
-                    f"signal_density_review_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('signal_density_control_review_allowed', False))} | "
-                    f"execution_strategy_automation_review_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('execution_strategy_automation_review_allowed', False))} | "
-                    f"multi_strategy_expansion_review_allowed={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('multi_strategy_expansion_review_allowed', False))} | "
-                    f"single_experiment_only={bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('single_experiment_only', True))}"
+                    f"profit_claim_allowed={_safe_bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('profit_claim_allowed', False))} | "
+                    f"structure_change_review_allowed={_safe_bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('structure_change_review_allowed', False))} | "
+                    f"loss_driven_rewrite_allowed={_safe_bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('loss_driven_rewrite_allowed', False))} | "
+                    f"early_loss_embargo_active={_safe_bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('early_loss_rewrite_embargo_active', False))} | "
+                    f"rollout_expansion_allowed={_safe_bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('rollout_expansion_allowed', False))} | "
+                    f"alpha_generator_review_allowed={_safe_bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('alpha_generator_review_allowed', False))} | "
+                    f"capital_scale_review_allowed={_safe_bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('capital_scale_review_allowed', False))} | "
+                    f"signal_density_review_allowed={_safe_bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('signal_density_control_review_allowed', False))} | "
+                    f"execution_strategy_automation_review_allowed={_safe_bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('execution_strategy_automation_review_allowed', False))} | "
+                    f"multi_strategy_expansion_review_allowed={_safe_bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('multi_strategy_expansion_review_allowed', False))} | "
+                    f"single_experiment_only={_safe_bool(dict(edge_experiment_summary.get('operating_discipline') or {}).get('single_experiment_only', True))}"
                 ),
                 (
                     f"- experiment_sequence: state={experiment_sequence.get('state', 'unknown')} | "
-                    f"entry_timing_locked={bool(experiment_sequence.get('entry_timing_locked', False))} | "
-                    f"execution_style_locked={bool(experiment_sequence.get('execution_style_locked', False))} | "
-                    f"exit_optimization_allowed={bool(experiment_sequence.get('exit_optimization_allowed', False))} | "
+                    f"entry_timing_locked={_safe_bool(experiment_sequence.get('entry_timing_locked', False))} | "
+                    f"execution_style_locked={_safe_bool(experiment_sequence.get('execution_style_locked', False))} | "
+                    f"exit_optimization_allowed={_safe_bool(experiment_sequence.get('exit_optimization_allowed', False))} | "
                     f"current_priority={experiment_sequence.get('current_priority_experiment', 'unknown')}:{experiment_sequence.get('current_priority_action', 'unknown')}"
                 ),
                 f"- experiment_sequence_summary: {experiment_sequence.get('summary', '')}",
@@ -2543,8 +2558,8 @@ class ValidationReportService:
         if edge_evolution_summary:
             edge_evolution_lines = [
                 "## Edge Evolution Rule",
-                f"- available: {bool(edge_evolution_summary.get('available', False))}",
-                f"- advisory_only: {bool(edge_evolution_summary.get('advisory_only', True))}",
+                f"- available: {_safe_bool(edge_evolution_summary.get('available', False))}",
+                f"- advisory_only: {_safe_bool(edge_evolution_summary.get('advisory_only', True))}",
                 (
                     f"- evolution_state: {edge_evolution_summary.get('evolution_state', 'insufficient_sample')} | "
                     f"recommended_action={edge_evolution_summary.get('recommended_action', 'keep_current_baseline')} | "
@@ -2555,7 +2570,7 @@ class ValidationReportService:
                     f"- edge_basis: true_edge_ratio={float(edge_evolution_summary.get('true_edge_ratio', 0.0) or 0.0):.4f} | "
                     f"edge_decay_rate={float(edge_evolution_summary.get('edge_decay_rate', 0.0) or 0.0):+.4f} | "
                     f"closed_trade_count={int(edge_evolution_summary.get('closed_trade_count', 0) or 0)} | "
-                    f"kill_review_triggered={bool(edge_evolution_summary.get('kill_review_triggered', False))}"
+                    f"kill_review_triggered={_safe_bool(edge_evolution_summary.get('kill_review_triggered', False))}"
                 ),
                 (
                     f"- regime_guard: state={edge_evolution_summary.get('regime_guard_state', 'not_applicable')} | "
@@ -2576,7 +2591,7 @@ class ValidationReportService:
         if review_followup_ledger_summary:
             review_followup_ledger_lines = [
                 "## Review Followup Ledger",
-                f"- available: {bool(review_followup_ledger_summary.get('available', False))}",
+                f"- available: {_safe_bool(review_followup_ledger_summary.get('available', False))}",
                 (
                     f"- last_status: {review_followup_ledger_summary.get('last_status', 'none')} | "
                     f"last_action={review_followup_ledger_summary.get('last_action', 'none')} | "
@@ -2605,7 +2620,7 @@ class ValidationReportService:
         if thesis_payload:
             thesis_lines = [
                 "## Thesis Dedupe Comparison",
-                f"- available: {bool(thesis_payload.get('available', False))}",
+                f"- available: {_safe_bool(thesis_payload.get('available', False))}",
                 f"- comparison_axis: {thesis_payload.get('comparison_axis', 'thesis_dedupe')}",
                 f"- evaluation_scope: {thesis_payload.get('evaluation_scope', 'portfolio_global')}",
                 f"- blocked_duplicate_trades: {int((thesis_payload.get('sample_counts') or {}).get('blocked_duplicate_trades', 0))}",
@@ -2671,7 +2686,7 @@ class ValidationReportService:
                 ),
                 f"- replay_output_compared_scenarios: {deployment_approval_template.get('replay_output_compared_scenarios', [])}",
                 f"- replay_output_input_trade_rows: {int(deployment_approval_template.get('replay_output_input_trade_rows', 0) or 0)}",
-                f"- approval_warning_locked: {bool(deployment_approval_template.get('approval_warning_locked', False))}",
+                f"- approval_warning_locked: {_safe_bool(deployment_approval_template.get('approval_warning_locked', False))}",
                 f"- approval_warning_code: {deployment_approval_template.get('approval_warning_code', 'none')}",
                 f"- approval_warning_message: {deployment_approval_template.get('approval_warning_message', 'approval_template_cross_display_is_consistent')}",
                 (
@@ -2795,7 +2810,7 @@ class ValidationReportService:
             "- Always re-run after major parameter or execution-policy changes.",
             "",
         ]
-        file_path.write_text("\n".join(content), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(content))
 
         return {
             "status": status,
@@ -2814,7 +2829,7 @@ class ValidationReportService:
             }
             if execution_quality
             else None,
-            "execution_friction_measurement_available": bool(
+            "execution_friction_measurement_available": _safe_bool(
                 execution_friction_measurement_payload.get("available", False)
             )
             if execution_friction_measurement_payload
@@ -2822,7 +2837,7 @@ class ValidationReportService:
             "execution_friction_measurement_summary": (
                 execution_friction_measurement_payload if execution_friction_measurement_payload else None
             ),
-            "forward_stress_regime_validation_available": bool(
+            "forward_stress_regime_validation_available": _safe_bool(
                 forward_stress_regime_validation_payload.get("available", False)
             )
             if forward_stress_regime_validation_payload
@@ -2830,7 +2845,7 @@ class ValidationReportService:
             "forward_stress_regime_validation_summary": (
                 forward_stress_regime_validation_payload if forward_stress_regime_validation_payload else None
             ),
-            "kill_condition_automation_available": bool(
+            "kill_condition_automation_available": _safe_bool(
                 kill_condition_automation_payload.get("available", False)
             )
             if kill_condition_automation_payload
@@ -2842,7 +2857,7 @@ class ValidationReportService:
             "feature_importance_top": fi_ranking,
             "feature_calibration_available": fc_available,
             "feature_calibration_top": fc_top_adjustments,
-            "strategy_v2_validation_available": bool(v2_payload.get("available", False)),
+            "strategy_v2_validation_available": _safe_bool(v2_payload.get("available", False)),
             "strategy_v2_validation_summary": {
                 "preferred_live_mode": v2_recommendation.get("preferred_live_mode", "A_ONLY"),
                 "recommendation_reason": v2_recommendation.get("reason", "not_available"),
@@ -2859,7 +2874,7 @@ class ValidationReportService:
             "performance_decomposition_summary": performance_decomposition_summary,
             "score_to_outcome_funnel": score_to_outcome_payload if score_to_outcome_payload else None,
             "score_to_outcome_funnel_summary": {
-                "available": bool(score_to_outcome_payload.get("available", False)),
+                "available": _safe_bool(score_to_outcome_payload.get("available", False)),
                 "reason": score_to_outcome_payload.get("reason", "not_available"),
                 "report_window_days": int(score_to_outcome_payload.get("report_window_days", 0) or 0),
                 "snapshot_selection": score_to_outcome_snapshot,
@@ -2899,10 +2914,10 @@ class ValidationReportService:
             }
             if score_to_outcome_payload
             else None,
-            "execution_degradation_advisory_available": bool(execution_degradation_payload.get("available", False)),
+            "execution_degradation_advisory_available": _safe_bool(execution_degradation_payload.get("available", False)),
             "execution_degradation_advisory_summary": {
                 "status": execution_degradation_payload.get("status", "healthy"),
-                "healthy": bool(execution_degradation_payload.get("healthy", True)),
+                "healthy": _safe_bool(execution_degradation_payload.get("healthy", True)),
                 "summary": execution_degradation_payload.get("summary", ""),
                 "recommended_action": execution_degradation_payload.get("recommended_action", "continue_runtime_monitoring"),
                 "reason_codes": list(execution_degradation_payload.get("reason_codes") or []),
@@ -2915,7 +2930,7 @@ class ValidationReportService:
                 family_execution_degradation_payload if family_execution_degradation_payload else None
             ),
             "family_execution_degradation_advisory_summary": {
-                "available": bool(family_execution_degradation_payload.get("available", False)),
+                "available": _safe_bool(family_execution_degradation_payload.get("available", False)),
                 "coverage_note": family_execution_degradation_payload.get("coverage_note", ""),
                 "family_count": len(family_execution_degradation_rows),
                 "top_family": dict((family_execution_degradation_rows[:1] or [{}])[0]),
@@ -2924,7 +2939,7 @@ class ValidationReportService:
             else None,
             "mode_advisory": mode_advisory_payload if mode_advisory_payload else None,
             "mode_advisory_summary": {
-                "available": bool(mode_advisory_payload.get("available", False)),
+                "available": _safe_bool(mode_advisory_payload.get("available", False)),
                 "family_top": dict((list(mode_advisory_payload.get("family") or [])[:1] or [{}])[0]),
                 "regime_top": dict((list(mode_advisory_payload.get("regime") or [])[:1] or [{}])[0]),
                 "session_top": dict((list(mode_advisory_payload.get("session") or [])[:1] or [{}])[0]),
@@ -2935,7 +2950,7 @@ class ValidationReportService:
                 operator_action_priority_payload if operator_action_priority_payload else None
             ),
             "operator_action_priority_summary": {
-                "available": bool(operator_action_priority_payload.get("available", False)),
+                "available": _safe_bool(operator_action_priority_payload.get("available", False)),
                 "top_action": operator_action_priority_payload.get("top_action", "continue_runtime_monitoring"),
                 "top_reason": operator_action_priority_payload.get("top_reason", ""),
                 "top_action_followup_command": operator_action_priority_payload.get("top_action_followup_command", ""),
@@ -2953,70 +2968,70 @@ class ValidationReportService:
                 "deferred_experiment_actions": [
                     dict(item) for item in list(operator_action_priority_payload.get("deferred_experiment_actions") or [])[:3]
                 ],
-                "advisory_only": bool(operator_action_priority_payload.get("advisory_only", True)),
+                "advisory_only": _safe_bool(operator_action_priority_payload.get("advisory_only", True)),
             }
             if operator_action_priority_payload
             else None,
-            "outcome_control_trace_available": bool(outcome_control_trace_summary.get("available", False))
+            "outcome_control_trace_available": _safe_bool(outcome_control_trace_summary.get("available", False))
             if outcome_control_trace_summary
             else False,
             "outcome_control_trace_summary": outcome_control_trace_summary,
-            "outcome_attribution_available": bool(outcome_attribution_summary.get("available", False))
+            "outcome_attribution_available": _safe_bool(outcome_attribution_summary.get("available", False))
             if outcome_attribution_summary
             else False,
             "outcome_attribution_summary": outcome_attribution_summary,
-            "edge_experiment_review_available": bool(edge_experiment_summary.get("available", False))
+            "edge_experiment_review_available": _safe_bool(edge_experiment_summary.get("available", False))
             if edge_experiment_summary
             else False,
             "edge_experiment_review_summary": edge_experiment_summary,
-            "edge_evolution_rule_available": bool(edge_evolution_summary.get("available", False))
+            "edge_evolution_rule_available": _safe_bool(edge_evolution_summary.get("available", False))
             if edge_evolution_summary
             else False,
             "edge_evolution_rule_summary": edge_evolution_summary,
-            "review_followup_ledger_available": bool(review_followup_ledger_summary.get("available", False))
+            "review_followup_ledger_available": _safe_bool(review_followup_ledger_summary.get("available", False))
             if review_followup_ledger_summary
             else False,
             "review_followup_ledger_summary": review_followup_ledger_summary,
             "rollout_recommendation": rollout_recommendation_payload if rollout_recommendation_payload else None,
-            "rollout_recommendation_available": bool(rollout_recommendation_payload.get("available", False))
+            "rollout_recommendation_available": _safe_bool(rollout_recommendation_payload.get("available", False))
             if rollout_recommendation_payload
             else False,
             "rollout_recommendation_summary": rollout_recommendation_payload if rollout_recommendation_payload else None,
-            "strategy_lifecycle_available": bool(strategy_lifecycle_payload.get("available", False))
+            "strategy_lifecycle_available": _safe_bool(strategy_lifecycle_payload.get("available", False))
             if strategy_lifecycle_payload
             else False,
             "strategy_lifecycle_summary": strategy_lifecycle_payload if strategy_lifecycle_payload else None,
-            "promotion_governance_available": bool(promotion_governance_payload.get("available", False))
+            "promotion_governance_available": _safe_bool(promotion_governance_payload.get("available", False))
             if promotion_governance_payload
             else False,
             "promotion_governance_summary": promotion_governance_payload if promotion_governance_payload else None,
-            "promotion_review_queue_available": bool(promotion_review_queue_payload.get("available", False))
+            "promotion_review_queue_available": _safe_bool(promotion_review_queue_payload.get("available", False))
             if promotion_review_queue_payload
             else False,
             "promotion_review_queue_summary": promotion_review_queue_payload if promotion_review_queue_payload else None,
-            "promotion_remediation_queue_available": bool(promotion_remediation_queue_payload.get("available", False))
+            "promotion_remediation_queue_available": _safe_bool(promotion_remediation_queue_payload.get("available", False))
             if promotion_remediation_queue_payload
             else False,
             "promotion_remediation_queue_summary": (
                 promotion_remediation_queue_payload if promotion_remediation_queue_payload else None
             ),
-            "promotion_clearance_tracker_available": bool(promotion_clearance_tracker_payload.get("available", False))
+            "promotion_clearance_tracker_available": _safe_bool(promotion_clearance_tracker_payload.get("available", False))
             if promotion_clearance_tracker_payload
             else False,
             "promotion_clearance_tracker_summary": (
                 promotion_clearance_tracker_payload if promotion_clearance_tracker_payload else None
             ),
-            "promotion_reopen_queue_available": bool(promotion_reopen_queue_payload.get("available", False))
+            "promotion_reopen_queue_available": _safe_bool(promotion_reopen_queue_payload.get("available", False))
             if promotion_reopen_queue_payload
             else False,
             "promotion_reopen_queue_summary": promotion_reopen_queue_payload if promotion_reopen_queue_payload else None,
-            "promotion_decision_brief_available": bool(promotion_decision_brief_payload.get("available", False))
+            "promotion_decision_brief_available": _safe_bool(promotion_decision_brief_payload.get("available", False))
             if promotion_decision_brief_payload
             else False,
             "promotion_decision_brief_summary": (
                 promotion_decision_brief_payload if promotion_decision_brief_payload else None
             ),
-            "auto_promotion_rollout_execution_available": bool(
+            "auto_promotion_rollout_execution_available": _safe_bool(
                 auto_promotion_rollout_execution_payload.get("available", False)
             )
             if auto_promotion_rollout_execution_payload
@@ -3024,13 +3039,13 @@ class ValidationReportService:
             "auto_promotion_rollout_execution_summary": (
                 auto_promotion_rollout_execution_payload if auto_promotion_rollout_execution_payload else None
             ),
-            "promotion_lifecycle_history_available": bool(promotion_lifecycle_history_payload.get("available", False))
+            "promotion_lifecycle_history_available": _safe_bool(promotion_lifecycle_history_payload.get("available", False))
             if promotion_lifecycle_history_payload
             else False,
             "promotion_lifecycle_history_summary": (
                 promotion_lifecycle_history_payload if promotion_lifecycle_history_payload else None
             ),
-            "research_promotion_operating_loop_available": bool(
+            "research_promotion_operating_loop_available": _safe_bool(
                 research_promotion_operating_loop_payload.get("available", False)
             )
             if research_promotion_operating_loop_payload
@@ -3038,11 +3053,11 @@ class ValidationReportService:
             "research_promotion_operating_loop_summary": (
                 research_promotion_operating_loop_payload if research_promotion_operating_loop_payload else None
             ),
-            "multi_strategy_ab_available": bool(multi_strategy_ab_payload.get("available", False))
+            "multi_strategy_ab_available": _safe_bool(multi_strategy_ab_payload.get("available", False))
             if multi_strategy_ab_payload
             else False,
             "multi_strategy_ab_summary": multi_strategy_ab_payload if multi_strategy_ab_payload else None,
-            "b_continuation_activation_available": bool(
+            "b_continuation_activation_available": _safe_bool(
                 b_continuation_activation_payload.get("available", False)
             )
             if b_continuation_activation_payload
@@ -3050,7 +3065,7 @@ class ValidationReportService:
             "b_continuation_activation_summary": (
                 b_continuation_activation_payload if b_continuation_activation_payload else None
             ),
-            "b_continuation_edge_validation_available": bool(
+            "b_continuation_edge_validation_available": _safe_bool(
                 b_continuation_edge_validation_payload.get("available", False)
             )
             if b_continuation_edge_validation_payload
@@ -3058,7 +3073,7 @@ class ValidationReportService:
             "b_continuation_edge_validation_summary": (
                 b_continuation_edge_validation_payload if b_continuation_edge_validation_payload else None
             ),
-            "strategy_cluster_balance_available": bool(
+            "strategy_cluster_balance_available": _safe_bool(
                 strategy_cluster_balance_payload.get("available", False)
             )
             if strategy_cluster_balance_payload
@@ -3066,7 +3081,7 @@ class ValidationReportService:
             "strategy_cluster_balance_summary": (
                 strategy_cluster_balance_payload if strategy_cluster_balance_payload else None
             ),
-            "a_strategy_post_cost_edge_validation_available": bool(
+            "a_strategy_post_cost_edge_validation_available": _safe_bool(
                 a_strategy_post_cost_edge_validation_payload.get("available", False)
             )
             if a_strategy_post_cost_edge_validation_payload
@@ -3076,27 +3091,27 @@ class ValidationReportService:
                 if a_strategy_post_cost_edge_validation_payload
                 else None
             ),
-            "positive_evidence_expansion_available": bool(positive_evidence_expansion_payload.get("available", False))
+            "positive_evidence_expansion_available": _safe_bool(positive_evidence_expansion_payload.get("available", False))
             if positive_evidence_expansion_payload
             else False,
             "positive_evidence_expansion_summary": (
                 positive_evidence_expansion_payload if positive_evidence_expansion_payload else None
             ),
-            "outcome_bucket_granularity_available": bool(outcome_bucket_granularity_payload.get("available", False))
+            "outcome_bucket_granularity_available": _safe_bool(outcome_bucket_granularity_payload.get("available", False))
             if outcome_bucket_granularity_payload
             else False,
             "outcome_bucket_granularity_summary": (
                 outcome_bucket_granularity_payload if outcome_bucket_granularity_payload else None
             ),
-            "opportunity_capture_available": bool(opportunity_capture_payload.get("available", False))
+            "opportunity_capture_available": _safe_bool(opportunity_capture_payload.get("available", False))
             if opportunity_capture_payload
             else False,
             "opportunity_capture_summary": opportunity_capture_payload if opportunity_capture_payload else None,
-            "capital_allocator_available": bool(capital_allocator_payload.get("available", False))
+            "capital_allocator_available": _safe_bool(capital_allocator_payload.get("available", False))
             if capital_allocator_payload
             else False,
             "capital_allocator_summary": capital_allocator_payload if capital_allocator_payload else None,
-            "strategy_v2_scalp_experiment_available": bool(scalp_payload.get("available", False)),
+            "strategy_v2_scalp_experiment_available": _safe_bool(scalp_payload.get("available", False)),
             "strategy_v2_scalp_experiment_summary": {
                 "preferred_branch": scalp_comparison.get("preferred_branch", "none"),
                 "recommendation_reason": scalp_comparison.get("recommendation_reason", "not_available"),
@@ -3107,7 +3122,7 @@ class ValidationReportService:
             }
             if scalp_payload
             else None,
-            "alpha_research_pipeline_available": bool(alpha_research_payload.get("available", False)),
+            "alpha_research_pipeline_available": _safe_bool(alpha_research_payload.get("available", False)),
             "alpha_research_pipeline_summary": {
                 "alpha_research_candidate_count": int(alpha_research_summary.get("alpha_research_candidate_count", 0)),
                 "focus_symbol_candidate_count": int(alpha_research_summary.get("focus_symbol_candidate_count", 0)),
@@ -3128,7 +3143,7 @@ class ValidationReportService:
                 "recommended_bucket": alpha_research_action_summary.get("bucket"),
                 "confidence": alpha_research_action_summary.get("confidence"),
                 "sample_note": alpha_research_action_summary.get("sample_note"),
-                "recommended_action_deferred_by_sequence": bool(
+                "recommended_action_deferred_by_sequence": _safe_bool(
                     alpha_research_action_summary.get("deferred_by_experiment_sequence", False)
                 ),
                 "recommended_action_current_priority_experiment": alpha_research_action_summary.get(
@@ -3145,20 +3160,20 @@ class ValidationReportService:
                 "top_shadow_experiment_observe_metrics": list(alpha_research_top_experiment.get("observe_metrics") or []),
                 "top_shadow_experiment_success_criteria": list(alpha_research_top_experiment.get("success_criteria") or []),
                 "top_shadow_experiment_stop_conditions": list(alpha_research_top_experiment.get("stop_conditions") or []),
-                "top_shadow_experiment_deferred_by_sequence": bool(
+                "top_shadow_experiment_deferred_by_sequence": _safe_bool(
                     alpha_research_top_experiment.get("deferred_by_experiment_sequence", False)
                 ),
                 "experiment_sequence_state": alpha_research_experiment_sequence.get("state"),
                 "experiment_sequence_summary": alpha_research_experiment_sequence.get("summary"),
-                "entry_timing_locked": bool(alpha_research_experiment_sequence.get("entry_timing_locked", False)),
-                "execution_style_locked": bool(alpha_research_experiment_sequence.get("execution_style_locked", False)),
-                "exit_optimization_allowed": bool(
+                "entry_timing_locked": _safe_bool(alpha_research_experiment_sequence.get("entry_timing_locked", False)),
+                "execution_style_locked": _safe_bool(alpha_research_experiment_sequence.get("execution_style_locked", False)),
+                "exit_optimization_allowed": _safe_bool(
                     alpha_research_experiment_sequence.get("exit_optimization_allowed", False)
                 ),
                 "current_priority_experiment": alpha_research_experiment_sequence.get("current_priority_experiment"),
                 "current_priority_action": alpha_research_experiment_sequence.get("current_priority_action"),
                 "shadow_experiment_template_count": len(alpha_research_experiment_templates),
-                "evidence_available": bool(alpha_research_evidence_summary.get("available", False)),
+                "evidence_available": _safe_bool(alpha_research_evidence_summary.get("available", False)),
                 "evidence_top_reason": alpha_research_reason_summary.get("top_reason"),
                 "evidence_focus_aligned_candidates": int(alpha_research_focus_summary.get("aligned_candidate_count", 0)),
                 "evidence_top_focus": alpha_research_focus_summary.get("top_focus"),
@@ -3167,11 +3182,11 @@ class ValidationReportService:
                 "evidence_top_regime_bottleneck": dict(alpha_research_outcome_summary.get("top_regime_bottleneck") or {}).get("key"),
                 "evidence_top_session_bottleneck": dict(alpha_research_outcome_summary.get("top_session_bottleneck") or {}).get("key"),
                 "false_negative_suspect_count": len(alpha_research_evidence_summary.get("false_negative_suspects") or []),
-                "softening_review_available": bool(alpha_research_softening_review.get("available", False)),
+                "softening_review_available": _safe_bool(alpha_research_softening_review.get("available", False)),
                 "softening_top_bucket": dict(alpha_research_softening_review.get("top_candidate") or {}).get("bucket"),
                 "softening_top_priority": dict(alpha_research_softening_review.get("top_candidate") or {}).get("review_priority"),
                 "softening_review_count": len(alpha_research_softening_review.get("review_items") or []),
-                "promotion_watchlist_available": bool(alpha_research_promotion_watchlist.get("available", False)),
+                "promotion_watchlist_available": _safe_bool(alpha_research_promotion_watchlist.get("available", False)),
                 "promotion_watchlist_count": int(alpha_research_promotion_watchlist.get("watchlist_count", 0) or 0),
                 "promotion_top_bucket": dict((list(alpha_research_promotion_watchlist.get("watch_items") or [])[:1] or [{}])[0]).get("bucket"),
                 "promotion_top_not_ready_reason": dict((list(alpha_research_promotion_watchlist.get("watch_items") or [])[:1] or [{}])[0]).get("not_ready_reason"),
@@ -3195,7 +3210,7 @@ class ValidationReportService:
                 )
                 if edge_experiment_summary
                 else None,
-                "fail_safe_claim": bool(
+                "fail_safe_claim": _safe_bool(
                     dict(edge_experiment_summary.get("operating_discipline") or {}).get("fail_safe_claim", False)
                 )
                 if edge_experiment_summary
@@ -3213,35 +3228,35 @@ class ValidationReportService:
                 )
                 if edge_experiment_summary
                 else None,
-                "alpha_generator_review_allowed": bool(
+                "alpha_generator_review_allowed": _safe_bool(
                     dict(edge_experiment_summary.get("operating_discipline") or {}).get(
                         "alpha_generator_review_allowed", False
                     )
                 )
                 if edge_experiment_summary
                 else False,
-                "capital_scale_review_allowed": bool(
+                "capital_scale_review_allowed": _safe_bool(
                     dict(edge_experiment_summary.get("operating_discipline") or {}).get(
                         "capital_scale_review_allowed", False
                     )
                 )
                 if edge_experiment_summary
                 else False,
-                "signal_density_control_review_allowed": bool(
+                "signal_density_control_review_allowed": _safe_bool(
                     dict(edge_experiment_summary.get("operating_discipline") or {}).get(
                         "signal_density_control_review_allowed", False
                     )
                 )
                 if edge_experiment_summary
                 else False,
-                "execution_strategy_automation_review_allowed": bool(
+                "execution_strategy_automation_review_allowed": _safe_bool(
                     dict(edge_experiment_summary.get("operating_discipline") or {}).get(
                         "execution_strategy_automation_review_allowed", False
                     )
                 )
                 if edge_experiment_summary
                 else False,
-                "multi_strategy_expansion_review_allowed": bool(
+                "multi_strategy_expansion_review_allowed": _safe_bool(
                     dict(edge_experiment_summary.get("operating_discipline") or {}).get(
                         "multi_strategy_expansion_review_allowed", False
                     )
@@ -3264,9 +3279,9 @@ class ValidationReportService:
             }
             if alpha_research_payload
             else None,
-            "strategy_v2_lock_validation_available": bool(lock_payload.get("available", False)),
+            "strategy_v2_lock_validation_available": _safe_bool(lock_payload.get("available", False)),
             "strategy_v2_lock_validation_summary": {
-                "keep_lock_enabled": bool(lock_recommendation.get("keep_lock_enabled", True)),
+                "keep_lock_enabled": _safe_bool(lock_recommendation.get("keep_lock_enabled", True)),
                 "recommendation_reason": lock_recommendation.get("reason", "not_available"),
                 "blocked_transition_trades": int((lock_payload.get("sample_counts") or {}).get("blocked_transition_trades", 0)),
                 "blocked_shock_trades": int((lock_payload.get("sample_counts") or {}).get("blocked_shock_trades", 0)),
@@ -3276,7 +3291,7 @@ class ValidationReportService:
             }
             if lock_payload
             else None,
-            "strategy_v2_pbo_dsr_trial_writer_available": bool(pbo_dsr_trial_writer_payload.get("available", False)),
+            "strategy_v2_pbo_dsr_trial_writer_available": _safe_bool(pbo_dsr_trial_writer_payload.get("available", False)),
             "strategy_v2_pbo_dsr_trial_writer_summary": {
                 "implementation_status": pbo_dsr_trial_writer_payload.get("implementation_status", "not_available"),
                 "reason": pbo_dsr_trial_writer_payload.get("reason", "not_available"),
@@ -3286,7 +3301,7 @@ class ValidationReportService:
             }
             if pbo_dsr_trial_writer_payload
             else None,
-            "strategy_v2_pbo_dsr_threshold_runner_available": bool(pbo_dsr_threshold_runner_payload.get("available", False)),
+            "strategy_v2_pbo_dsr_threshold_runner_available": _safe_bool(pbo_dsr_threshold_runner_payload.get("available", False)),
             "strategy_v2_pbo_dsr_threshold_runner_summary": {
                 "implementation_status": pbo_dsr_threshold_runner_payload.get("implementation_status", "not_available"),
                 "reason": pbo_dsr_threshold_runner_payload.get("reason", "not_available"),
@@ -3300,10 +3315,10 @@ class ValidationReportService:
             }
             if pbo_dsr_threshold_runner_payload
             else None,
-            "strategy_v2_pbo_dsr_artifact_store_ready": bool(artifact_store_payload.get("artifact_store_ready", False)),
+            "strategy_v2_pbo_dsr_artifact_store_ready": _safe_bool(artifact_store_payload.get("artifact_store_ready", False)),
             "strategy_v2_pbo_dsr_artifact_store_summary": {
-                "available": bool(artifact_store_payload.get("available", False)),
-                "metrics_available": bool(artifact_store_payload.get("metrics_available", False)),
+                "available": _safe_bool(artifact_store_payload.get("available", False)),
+                "metrics_available": _safe_bool(artifact_store_payload.get("metrics_available", False)),
                 "implementation_status": artifact_store_payload.get("implementation_status", "not_available"),
                 "reason": artifact_store_payload.get("reason", "not_available"),
                 "counts": artifact_store_counts,
@@ -3313,9 +3328,9 @@ class ValidationReportService:
             }
             if artifact_store_payload
             else None,
-            "strategy_v2_pbo_dsr_design_ready": bool(pbo_dsr_payload.get("design_ready", False)),
+            "strategy_v2_pbo_dsr_design_ready": _safe_bool(pbo_dsr_payload.get("design_ready", False)),
             "strategy_v2_pbo_dsr_design_summary": {
-                "available": bool(pbo_dsr_payload.get("available", False)),
+                "available": _safe_bool(pbo_dsr_payload.get("available", False)),
                 "implementation_status": pbo_dsr_payload.get("implementation_status", "not_available"),
                 "reason": pbo_dsr_payload.get("reason", "not_available"),
                 "blocked_by": list(pbo_dsr_payload.get("blocked_by") or []),
@@ -3323,9 +3338,9 @@ class ValidationReportService:
             }
             if pbo_dsr_payload
             else None,
-            "strategy_v2_pbo_dsr_metrics_available": bool(pbo_dsr_metrics_payload.get("available", False)),
+            "strategy_v2_pbo_dsr_metrics_available": _safe_bool(pbo_dsr_metrics_payload.get("available", False)),
             "strategy_v2_pbo_dsr_metrics_summary": {
-                "metrics_complete": bool(pbo_dsr_metrics_payload.get("metrics_complete", False)),
+                "metrics_complete": _safe_bool(pbo_dsr_metrics_payload.get("metrics_complete", False)),
                 "reason": pbo_dsr_metrics_payload.get("reason", "not_available"),
                 "pbo_value": dict(pbo_dsr_metrics_payload.get("pbo") or {}).get("value"),
                 "pbo_status": dict(pbo_dsr_metrics_payload.get("pbo") or {}).get("status", "not_available"),
@@ -3341,29 +3356,29 @@ class ValidationReportService:
                 "lineage_audit_reason": dict(pbo_dsr_metrics_payload.get("lineage_audit") or {}).get(
                     "reason", "not_available"
                 ),
-                "selected_trial_from_runtime_proxy": bool(
+                "selected_trial_from_runtime_proxy": _safe_bool(
                     dict(pbo_dsr_metrics_payload.get("lineage_audit") or {}).get("selected_trial_from_runtime_proxy", False)
                 ),
-                "selected_trial_from_true_threshold": bool(
+                "selected_trial_from_true_threshold": _safe_bool(
                     dict(pbo_dsr_metrics_payload.get("lineage_audit") or {}).get("selected_trial_from_true_threshold", False)
                 ),
                 "selection_universe_summary": dict(pbo_dsr_metrics_payload.get("selection_universe_summary") or {}),
                 "decision": dict(pbo_dsr_metrics_payload.get("deployment_recommendation") or {}).get("decision", "not_ready"),
-                "meets_protocol_gate": bool(
+                "meets_protocol_gate": _safe_bool(
                     dict(pbo_dsr_metrics_payload.get("deployment_recommendation") or {}).get("meets_protocol_gate", False)
                 ),
             }
             if pbo_dsr_metrics_payload
             else None,
-            "strategy_v2_stress_validation_available": bool(stress_payload.get("available", False)),
+            "strategy_v2_stress_validation_available": _safe_bool(stress_payload.get("available", False)),
             "strategy_v2_stress_validation_summary": {
-                "stress_pass": bool(stress_recommendation.get("stress_pass", False)),
+                "stress_pass": _safe_bool(stress_recommendation.get("stress_pass", False)),
                 "recommendation_reason": stress_recommendation.get("reason", "not_available"),
                 "worst_scenario": stress_recommendation.get("worst_scenario", "stressed_cost"),
                 "worst_scenario_source": stress_recommendation.get("worst_scenario_source", "stressed_cost"),
-                "replay_gate_applied": bool(stress_recommendation.get("replay_gate_applied", False)),
+                "replay_gate_applied": _safe_bool(stress_recommendation.get("replay_gate_applied", False)),
                 "replay_gate_reason": stress_recommendation.get("replay_gate_reason", "approximation_only"),
-                "divergence_gate_applied": bool(stress_recommendation.get("divergence_gate_applied", False)),
+                "divergence_gate_applied": _safe_bool(stress_recommendation.get("divergence_gate_applied", False)),
                 "divergence_problem_scenarios": list(stress_recommendation.get("divergence_problem_scenarios") or []),
                 "worst_divergence_scenario": stress_recommendation.get("worst_divergence_scenario"),
                 "execution_data_trades": int((stress_payload.get("sample_counts") or {}).get("execution_data_trades", 0)),
@@ -3373,7 +3388,7 @@ class ValidationReportService:
                 "delta_ev_stressed_minus_baseline": float(stress_comparison.get("ev", 0.0)),
                 "delta_max_drawdown_stressed_minus_baseline": float(stress_comparison.get("max_drawdown", 0.0)),
                 "scenario_statuses": stress_scenario_statuses,
-                "replay_output_artifacts_available": bool(stress_replay_output_artifacts.get("available", False)),
+                "replay_output_artifacts_available": _safe_bool(stress_replay_output_artifacts.get("available", False)),
                 "replay_output_scenarios_compared": int(
                     (stress_replay_output_artifacts.get("summary_counts") or {}).get("scenarios_compared", 0)
                 ),
@@ -3381,25 +3396,25 @@ class ValidationReportService:
             }
             if stress_payload
             else None,
-            "strategy_v2_stress_replay_lineage_available": bool(stress_replay_lineage_payload.get("available", False)),
+            "strategy_v2_stress_replay_lineage_available": _safe_bool(stress_replay_lineage_payload.get("available", False)),
             "strategy_v2_stress_replay_lineage_summary": {
-                "runtime_inputs_ready": bool(stress_replay_lineage_payload.get("runtime_inputs_ready", False)),
+                "runtime_inputs_ready": _safe_bool(stress_replay_lineage_payload.get("runtime_inputs_ready", False)),
                 "reason": stress_replay_lineage_payload.get("reason", "not_available"),
                 "coverage": dict(stress_replay_lineage_payload.get("coverage") or {}),
                 "gap_counts": dict(stress_replay_lineage_payload.get("gap_counts") or {}),
             }
             if stress_replay_lineage_payload
             else None,
-            "strategy_v2_stress_replay_assessment_available": bool(stress_replay_payload.get("available", False)),
+            "strategy_v2_stress_replay_assessment_available": _safe_bool(stress_replay_payload.get("available", False)),
             "strategy_v2_stress_replay_assessment_summary": {
-                "full_replay_ready": bool(stress_replay_payload.get("full_replay_ready", False)),
-                "replacement_recommended": bool(stress_replay_payload.get("replacement_recommended", False)),
-                "true_runner_ready": bool(dict(stress_replay_payload.get("true_runner_readiness") or {}).get("true_runner_ready", False)),
+                "full_replay_ready": _safe_bool(stress_replay_payload.get("full_replay_ready", False)),
+                "replacement_recommended": _safe_bool(stress_replay_payload.get("replacement_recommended", False)),
+                "true_runner_ready": _safe_bool(dict(stress_replay_payload.get("true_runner_readiness") or {}).get("true_runner_ready", False)),
                 "true_runner_stage": dict(stress_replay_payload.get("true_runner_readiness") or {}).get("stage", "prototype_only"),
                 "decision": stress_replay_recommendation.get("decision", "keep_approximation"),
                 "priority": stress_replay_recommendation.get("priority", "low"),
                 "reason": stress_replay_recommendation.get("reason", "not_available"),
-                "true_runner_promotion_ready": bool(stress_replay_recommendation.get("true_runner_promotion_ready", False)),
+                "true_runner_promotion_ready": _safe_bool(stress_replay_recommendation.get("true_runner_promotion_ready", False)),
                 "true_runner_promotion_status": stress_replay_recommendation.get(
                     "true_runner_promotion_status", "NOT_APPLICABLE"
                 ),
@@ -3430,10 +3445,10 @@ class ValidationReportService:
             }
             if stress_replay_payload
             else None,
-            "strategy_v2_stress_replay_runner_contract_available": bool(stress_replay_runner_payload.get("available", False)),
+            "strategy_v2_stress_replay_runner_contract_available": _safe_bool(stress_replay_runner_payload.get("available", False)),
             "strategy_v2_stress_replay_runner_contract_summary": {
-                "runtime_job_ready": bool(stress_replay_runner_payload.get("runtime_job_ready", False)),
-                "true_runner_ready": bool(dict(stress_replay_runner_payload.get("true_runner_readiness") or {}).get("true_runner_ready", False)),
+                "runtime_job_ready": _safe_bool(stress_replay_runner_payload.get("runtime_job_ready", False)),
+                "true_runner_ready": _safe_bool(dict(stress_replay_runner_payload.get("true_runner_readiness") or {}).get("true_runner_ready", False)),
                 "true_runner_stage": dict(stress_replay_runner_payload.get("true_runner_readiness") or {}).get("stage", "prototype_only"),
                 "implementation_status": stress_replay_runner_payload.get("implementation_status", "not_available"),
                 "reason": stress_replay_runner_payload.get("reason", "not_available"),
@@ -3441,30 +3456,30 @@ class ValidationReportService:
             }
             if stress_replay_runner_payload
             else None,
-            "strategy_v2_stress_replay_lineage_writer_available": bool(stress_replay_writer_payload.get("available", False)),
+            "strategy_v2_stress_replay_lineage_writer_available": _safe_bool(stress_replay_writer_payload.get("available", False)),
             "strategy_v2_stress_replay_lineage_writer_summary": {
-                "artifacts_written": bool(stress_replay_writer_payload.get("artifacts_written", False)),
-                "runtime_job_ready": bool(stress_replay_writer_payload.get("runtime_job_ready", False)),
+                "artifacts_written": _safe_bool(stress_replay_writer_payload.get("artifacts_written", False)),
+                "runtime_job_ready": _safe_bool(stress_replay_writer_payload.get("runtime_job_ready", False)),
                 "implementation_status": stress_replay_writer_payload.get("implementation_status", "not_available"),
                 "reason": stress_replay_writer_payload.get("reason", "not_available"),
                 "sample_counts": dict(stress_replay_writer_payload.get("sample_counts") or {}),
             }
             if stress_replay_writer_payload
             else None,
-            "strategy_v2_stress_replay_prototype_worker_available": bool(
+            "strategy_v2_stress_replay_prototype_worker_available": _safe_bool(
                 stress_replay_prototype_worker_payload.get("available", False)
             ),
             "strategy_v2_stress_replay_prototype_worker_summary": {
-                "executed": bool(stress_replay_prototype_worker_payload.get("executed", False)),
-                "runtime_job_ready": bool(stress_replay_prototype_worker_payload.get("runtime_job_ready", False)),
+                "executed": _safe_bool(stress_replay_prototype_worker_payload.get("executed", False)),
+                "runtime_job_ready": _safe_bool(stress_replay_prototype_worker_payload.get("runtime_job_ready", False)),
                 "reason": stress_replay_prototype_worker_payload.get("reason", "not_available"),
                 "sample_counts": dict(stress_replay_prototype_worker_payload.get("sample_counts") or {}),
             }
             if stress_replay_prototype_worker_payload
             else None,
-            "strategy_v2_thesis_validation_available": bool(thesis_payload.get("available", False)),
+            "strategy_v2_thesis_validation_available": _safe_bool(thesis_payload.get("available", False)),
             "strategy_v2_thesis_validation_summary": {
-                "keep_dedupe_enabled": bool(thesis_recommendation.get("keep_dedupe_enabled", True)),
+                "keep_dedupe_enabled": _safe_bool(thesis_recommendation.get("keep_dedupe_enabled", True)),
                 "recommendation_reason": thesis_recommendation.get("reason", "not_available"),
                 "blocked_duplicate_trades": int((thesis_payload.get("sample_counts") or {}).get("blocked_duplicate_trades", 0)),
                 "blocked_active_cluster_cap_trades": int(

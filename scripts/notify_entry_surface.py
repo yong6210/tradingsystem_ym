@@ -21,6 +21,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.core.config import get_settings
 from app.services.notification_dispatcher import NotificationDispatcher
+from scripts.operation_report_io import atomic_write_text
 
 
 ACTIONABLE_ENTRY = "ACTIONABLE_ENTRY"
@@ -29,6 +30,20 @@ RESEARCH_ONLY_SETUP = "RESEARCH_ONLY_SETUP"
 _REQUEST_RETRY_ATTEMPTS = 5
 _REQUEST_RETRY_BASE_DELAY_SECONDS = 1.0
 _REQUEST_TIMEOUT_SECONDS = 90
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
 
 
 def _resolve_root_path(raw_path: str | Path) -> Path:
@@ -73,8 +88,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
 def _emit_result(path: Path | None, payload: dict[str, Any]) -> None:
@@ -212,8 +226,8 @@ def _edge_experiment_summary(payload: dict[str, Any]) -> dict[str, Any] | None:
     edge_proof_posture = dict(summary.get("edge_proof_posture") or {})
     daily_edge_kpis = dict(summary.get("daily_edge_kpis") or {})
     return {
-        "available": bool(summary.get("available", True)),
-        "advisory_only": bool(summary.get("advisory_only", True)),
+        "available": _safe_bool(summary.get("available", True), default=True),
+        "advisory_only": _safe_bool(summary.get("advisory_only", True), default=True),
         "edge_state": str(summary.get("edge_state") or "insufficient_edge_measurement"),
         "true_edge_ratio": float(summary.get("true_edge_ratio", 0.0) or 0.0),
         "edge_decay_rate": float(summary.get("edge_decay_rate", 0.0) or 0.0),
@@ -253,8 +267,8 @@ def _edge_evolution_summary(payload: dict[str, Any]) -> dict[str, Any] | None:
     if not summary:
         return None
     return {
-        "available": bool(summary.get("available", True)),
-        "advisory_only": bool(summary.get("advisory_only", True)),
+        "available": _safe_bool(summary.get("available", True), default=True),
+        "advisory_only": _safe_bool(summary.get("advisory_only", True), default=True),
         "evolution_state": str(summary.get("evolution_state") or "insufficient_sample"),
         "recommended_action": str(summary.get("recommended_action") or "keep_current_baseline"),
         "allocation_bias": str(summary.get("allocation_bias") or "hold_current_baseline"),
@@ -269,7 +283,7 @@ def _review_followup_summary(payload: dict[str, Any]) -> dict[str, Any] | None:
     if not summary:
         return None
     return {
-        "available": bool(summary.get("available", False)),
+        "available": _safe_bool(summary.get("available", False)),
         "last_status": str(summary.get("last_status") or "none"),
         "last_generated_status": str(summary.get("last_generated_status") or summary.get("last_status") or "none"),
         "last_decision_status": str(summary.get("last_decision_status") or "none"),
@@ -666,9 +680,9 @@ def main() -> int:
         symbol=str(snapshot.get("scope") or args.universe).upper(),
         payload={"message": message},
     )
-    result["notified"] = bool(delivery.get("delivered"))
+    result["notified"] = _safe_bool(delivery.get("delivered"))
     result["delivery"] = delivery
-    if bool(delivery.get("delivered")):
+    if _safe_bool(delivery.get("delivered")):
         _write_json(
             state_file,
             {

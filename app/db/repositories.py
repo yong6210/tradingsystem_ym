@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from typing import ClassVar, Iterable
 from uuid import uuid4
 
@@ -40,6 +41,21 @@ from app.db.models import (
     ZoneOutcome,
     utcnow,
 )
+
+
+def _safe_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value) if isfinite(float(value)) else bool(default)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
 
 
 class CandleRepository:
@@ -844,10 +860,10 @@ class BinanceOrderLedgerRepository:
                 side=side,
                 order_type=order_type,
                 status=status,
-                reduce_only=reduce_only,
-                requested_live=requested_live,
-                live_enabled=live_enabled,
-                test_order=test_order,
+                reduce_only=_safe_bool(reduce_only),
+                requested_live=_safe_bool(requested_live),
+                live_enabled=_safe_bool(live_enabled),
+                test_order=_safe_bool(test_order),
                 price=price,
                 orig_qty=orig_qty,
                 executed_qty=executed_qty,
@@ -866,10 +882,10 @@ class BinanceOrderLedgerRepository:
         row.side = side or row.side
         row.order_type = order_type or row.order_type
         row.status = status or row.status
-        row.reduce_only = bool(reduce_only)
-        row.requested_live = bool(requested_live)
-        row.live_enabled = bool(live_enabled)
-        row.test_order = bool(test_order)
+        row.reduce_only = _safe_bool(reduce_only)
+        row.requested_live = _safe_bool(requested_live)
+        row.live_enabled = _safe_bool(live_enabled)
+        row.test_order = _safe_bool(test_order)
         row.price = price if price is not None else row.price
         row.orig_qty = orig_qty if orig_qty is not None else row.orig_qty
         row.executed_qty = executed_qty if executed_qty is not None else row.executed_qty
@@ -1146,7 +1162,7 @@ class FamilyRolloutPolicyRepository:
         row = self.get(family)
         if row is None:
             row = FamilyRolloutPolicy(family=family)
-        row.live_enabled = bool(live_enabled)
+        row.live_enabled = _safe_bool(live_enabled)
         row.max_execution_mode = str(max_execution_mode)
         row.max_risk_r = float(max_risk_r)
         row.allowed_sessions = dict(allowed_sessions or {})
@@ -1300,7 +1316,7 @@ class AlertRepository:
             stmt = stmt.where(AlertSubscription.plan_id == plan_id)
         rows = list(self.db.scalars(stmt))
         for row in rows:
-            if not bool((row.payload or {}).get("subscription_active")):
+            if not _safe_bool((row.payload or {}).get("subscription_active")):
                 return row
         return None
 
@@ -1322,7 +1338,7 @@ class AlertRepository:
             stmt = stmt.where(or_(AlertSubscription.plan_id.is_(None), AlertSubscription.plan_id == plan_id))
         stmt = stmt.order_by(desc(AlertSubscription.triggered_ts)).limit(limit)
         rows = list(self.db.scalars(stmt))
-        return [row for row in rows if bool((row.payload or {}).get("subscription_active"))]
+        return [row for row in rows if _safe_bool((row.payload or {}).get("subscription_active"))]
 
 
 class AlertRetryQueueRepository:

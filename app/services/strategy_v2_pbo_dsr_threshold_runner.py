@@ -7,6 +7,7 @@ from typing import Any
 
 from app.core.config import Settings, get_settings
 from app.db.repositories import ValidationArtifactRepository
+from app.services.report_io import atomic_write_text
 from app.services.strategy_v2_pbo_dsr_trial_writer import (
     StrategyV2PboDsrTrialWriterService,
     _RuntimeTrialSeries,
@@ -284,7 +285,7 @@ class StrategyV2PboDsrThresholdRunnerService(StrategyV2PboDsrTrialWriterService)
                 "",
             ]
         )
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(

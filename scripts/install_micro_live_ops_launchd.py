@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +18,11 @@ from typing import Any
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+from app.core.config import get_settings
+
+
+_DEFAULT_MACRO_BLACKOUT_OUTPUT = "reports/validation/contracts/micro_live_event_blackouts_major_us_macro_auto.json"
 
 
 @dataclass(frozen=True)
@@ -63,7 +69,47 @@ def _script(path: str) -> str:
     return str(ROOT_DIR / "scripts" / path)
 
 
-def build_jobs(*, label_prefix: str, python_bin: str) -> list[LaunchdJob]:
+def _env_file_value(env_file: str, key: str) -> str:
+    raw_path = str(env_file or "").strip()
+    if not raw_path:
+        return ""
+    path = _resolve_root_path(raw_path)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    prefix = f"{key}="
+    export_prefix = f"export {key}="
+    value = ""
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith(export_prefix):
+            value = line[len(export_prefix) :].strip()
+        elif line.startswith(prefix):
+            value = line[len(prefix) :].strip()
+    if not value:
+        return ""
+    try:
+        parts = shlex.split(value, comments=True, posix=True)
+    except ValueError:
+        parts = []
+    if parts:
+        return str(parts[0]).strip()
+    return value.strip().strip("\"'")
+
+
+def _macro_blackout_output_path(*, env_file: str = "") -> str:
+    configured = (
+        _env_file_value(env_file, "AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH")
+        or os.environ.get("AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH")
+        or getattr(get_settings(), "auto_trading_micro_live_event_blackout_path", "")
+    )
+    return str(configured or "").strip() or _DEFAULT_MACRO_BLACKOUT_OUTPUT
+
+
+def build_jobs(*, label_prefix: str, python_bin: str, env_file: str = "") -> list[LaunchdJob]:
     prefix = str(label_prefix or "com.trading.micro-live").strip().rstrip(".")
     py = str(python_bin or sys.executable)
     return [
@@ -133,6 +179,12 @@ def build_jobs(*, label_prefix: str, python_bin: str) -> list[LaunchdJob]:
             start_interval=30 * 60,
         ),
         LaunchdJob(
+            name="failure_drill",
+            label=f"{prefix}.failure-drill",
+            args=[py, _script("run_micro_live_failure_drill.py"), "--no-fail-exit"],
+            start_calendar_interval={"Hour": 3, "Minute": 40},
+        ),
+        LaunchdJob(
             name="macro_calendar_blackouts",
             label=f"{prefix}.macro-calendar-blackouts",
             args=[
@@ -141,7 +193,7 @@ def build_jobs(*, label_prefix: str, python_bin: str) -> list[LaunchdJob]:
                 "--years",
                 "2026,2027",
                 "--output",
-                "reports/validation/contracts/micro_live_event_blackouts_major_us_macro_auto.json",
+                _macro_blackout_output_path(env_file=env_file),
             ],
             start_calendar_interval={"Hour": 2, "Minute": 30},
         ),
@@ -189,14 +241,42 @@ def plist_payload(*, job: LaunchdJob, working_dir: Path, env_file: str) -> dict[
     return payload
 
 
+def _write_plist_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with tmp_path.open("wb") as handle:
+            plistlib.dump(payload, handle, sort_keys=True)
+        tmp_path.replace(path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+
+
+def _copy_file_atomic(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        shutil.copy2(source, tmp_path)
+        tmp_path.replace(target)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+
+
 def write_plists(*, output_dir: Path, jobs: list[LaunchdJob], working_dir: Path, env_file: str) -> list[dict[str, Any]]:
     output_dir.mkdir(parents=True, exist_ok=True)
     (ROOT_DIR / "reports/operations/launchd/logs").mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     for job in jobs:
         path = output_dir / f"{job.label}.plist"
-        with path.open("wb") as handle:
-            plistlib.dump(plist_payload(job=job, working_dir=working_dir, env_file=env_file), handle, sort_keys=True)
+        _write_plist_atomic(path, plist_payload(job=job, working_dir=working_dir, env_file=env_file))
         rows.append({"name": job.name, "label": job.label, "path": _display_path(path)})
     return rows
 
@@ -223,7 +303,7 @@ def install_plists(*, rows: list[dict[str, Any]], unload: bool, load: bool) -> l
         target = launch_agents / source.name
         if unload and target.exists():
             operations.append(_launchctl("unload", target))
-        shutil.copy2(source, target)
+        _copy_file_atomic(source, target)
         op = {"action": "install", "source": _display_path(source), "target": str(target)}
         operations.append(op)
         if load:
@@ -235,7 +315,7 @@ def main() -> int:
     args = parse_args()
     output_dir = _resolve_root_path(str(args.output_dir))
     working_dir = _resolve_root_path(str(args.working_dir))
-    jobs = build_jobs(label_prefix=str(args.label_prefix), python_bin=str(args.python))
+    jobs = build_jobs(label_prefix=str(args.label_prefix), python_bin=str(args.python), env_file=str(args.env_file or ""))
     rows = write_plists(output_dir=output_dir, jobs=jobs, working_dir=working_dir, env_file=str(args.env_file or ""))
     payload: dict[str, Any] = {
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -250,10 +330,14 @@ def main() -> int:
         operations = install_plists(rows=rows, unload=bool(args.unload), load=bool(args.load))
         payload["installed"] = True
         payload["operations"] = operations
-        if any(int(item.get("returncode", 0)) != 0 for item in operations if item.get("action") in {"load", "unload"}):
+        load_failed = any(int(item.get("returncode", 0)) != 0 for item in operations if item.get("action") == "load")
+        unload_failed = any(int(item.get("returncode", 0)) != 0 for item in operations if item.get("action") == "unload")
+        if load_failed:
+            payload["overall_status"] = "FAIL"
+        elif unload_failed:
             payload["overall_status"] = "WARN"
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
-    return 0
+    return 1 if payload["overall_status"] == "FAIL" else 0
 
 
 if __name__ == "__main__":

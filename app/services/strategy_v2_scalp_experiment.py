@@ -10,7 +10,23 @@ from app.services.candidate_expectations import expectation_contract
 from app.services.context_engine import ContextEngine
 from app.services.micro_main_strategy_research import build_session_impulse_retest_shadow_summary
 from app.services.plan_generator import PlanGenerator, RankedPlan
+from app.services.report_io import atomic_write_text
 from app.services.zone_engine import ZoneEngine
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
 
 
 class StrategyV2ScalpExperimentService:
@@ -161,8 +177,8 @@ class StrategyV2ScalpExperimentService:
             f"- delta_top_expected_win_prob: {float(comparison.get('delta_top_expected_win_prob', 0.0)):+.4f}",
             "",
             "## Session Impulse Retest (shadow)",
-            f"- enabled: {bool(micro_shadow.get('enabled', False))}",
-            f"- available: {bool(micro_shadow.get('available', False))}",
+            f"- enabled: {_safe_bool(micro_shadow.get('enabled', False))}",
+            f"- available: {_safe_bool(micro_shadow.get('available', False))}",
             f"- status: {micro_shadow.get('status', 'not_available')}",
             f"- decision: {micro_shadow.get('decision', 'REJECT')}",
             f"- recent_closed: {int(micro_shadow.get('recent_closed', 0) or 0)}",
@@ -176,7 +192,7 @@ class StrategyV2ScalpExperimentService:
         for step in payload.get("next_steps") or []:
             lines.append(f"- {step}")
         lines.append("")
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(
@@ -222,8 +238,8 @@ class StrategyV2ScalpExperimentService:
                 symbol=symbol,
                 candles_1m=candles_1m,
                 candles_5m=candles_5m,
-                enabled=bool(self.settings.session_impulse_retest_enabled),
-                shadow_only=bool(self.settings.session_impulse_retest_shadow_only),
+                enabled=_safe_bool(self.settings.session_impulse_retest_enabled),
+                shadow_only=_safe_bool(self.settings.session_impulse_retest_shadow_only),
                 allowed_symbols=[
                     item.strip().upper()
                     for item in str(self.settings.session_impulse_retest_allowed_symbols or "").split(",")

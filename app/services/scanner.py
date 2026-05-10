@@ -181,7 +181,7 @@ def _runtime_deployment_language(
     operating_lock: dict | None,
 ) -> dict[str, str]:
     lock = dict(operating_lock or {})
-    if bool(lock.get("active")):
+    if PortfolioRiskOverlayService._safe_bool(lock.get("active")):
         reason = str(lock.get("reason", "operating_lock_active"))
         return {
             "deployment_go_no_go": "NO_GO",
@@ -273,7 +273,7 @@ class ScannerService:
     @staticmethod
     def _apply_operator_status(rows: list[dict[str, object]]) -> list[dict[str, object]]:
         for row in rows:
-            if bool(row.get("accepted")):
+            if PortfolioRiskOverlayService._safe_bool(row.get("accepted")):
                 row["operator_status"] = "accepted"
             elif row.get("block_reason"):
                 row["operator_status"] = "blocked"
@@ -404,6 +404,6 @@ class ScannerService:
             today_trade_count=today_trade_count,
             outcome_inputs_by_symbol=outcome_inputs_by_symbol,
         )
-        accepted = [row for row in assessed if bool(row.get("accepted"))]
+        accepted = [row for row in assessed if PortfolioRiskOverlayService._safe_bool(row.get("accepted"))]
         accepted.sort(key=lambda row: float(row.get("final_rank_score", 0.0) or 0.0), reverse=True)
         return accepted[:limit]

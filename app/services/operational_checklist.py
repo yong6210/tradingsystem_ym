@@ -10,6 +10,8 @@ from app.core.config import Settings, get_settings
 from app.db.models import AlertSubscription
 from app.db.repositories import AlertRepository
 from app.services.deployment_contracts import validation_alert_contract, validation_report_contract
+from app.services.notification_dispatcher import NotificationDispatcher
+from app.services.report_io import atomic_write_text
 from app.services.session_guidance import SessionGuidanceService
 
 
@@ -91,8 +93,8 @@ class OperationalChecklistService:
                 candidate = {
                     "channel": channel,
                     "tested_at": triggered_ts.isoformat(),
-                    "delivered": bool(row.get("delivered")),
-                    "skipped": bool(row.get("skipped")),
+                    "delivered": NotificationDispatcher._safe_bool(row.get("delivered")),
+                    "skipped": NotificationDispatcher._safe_bool(row.get("skipped")),
                     "reason": str(row.get("reason", "unknown")),
                     "attempts": int(row.get("attempts", 0) or 0),
                     "latency_ms": float(row.get("latency_ms", 0.0) or 0.0),
@@ -371,7 +373,7 @@ class OperationalChecklistService:
                 evidence={"report_status": report_status, "validation_alert": alert},
             )
 
-        if not bool(alert.get("emitted")) and str(alert.get("reason")) == "cooldown_active":
+        if not NotificationDispatcher._safe_bool(alert.get("emitted")) and str(alert.get("reason")) == "cooldown_active":
             return self._item(
                 item_id="validation_alert_delivery",
                 title="Validation Alert Delivery",
@@ -394,8 +396,8 @@ class OperationalChecklistService:
             )
 
         delivery = dict(alert.get("delivery") or {})
-        delivered = bool(delivery.get("delivered"))
-        skipped = bool(delivery.get("skipped"))
+        delivered = NotificationDispatcher._safe_bool(delivery.get("delivered"))
+        skipped = NotificationDispatcher._safe_bool(delivery.get("skipped"))
         if delivered:
             item_status = "PASS"
             summary = "validation alert delivered"
@@ -531,9 +533,9 @@ class OperationalChecklistService:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, int(lookback_hours)))
         if triggered_ts < cutoff:
             return {}
-        delivered = bool(latest_validation_alert.get("delivered"))
-        skipped = bool(latest_validation_alert.get("skipped"))
-        failed = bool(latest_validation_alert.get("failed"))
+        delivered = NotificationDispatcher._safe_bool(latest_validation_alert.get("delivered"))
+        skipped = NotificationDispatcher._safe_bool(latest_validation_alert.get("skipped"))
+        failed = NotificationDispatcher._safe_bool(latest_validation_alert.get("failed"))
         if not delivered or skipped or failed:
             return {}
         channel = str(
@@ -590,9 +592,9 @@ class OperationalChecklistService:
                     continue
                 missing.append(channel)
                 continue
-            if bool(row.get("delivered")):
+            if NotificationDispatcher._safe_bool(row.get("delivered")):
                 continue
-            if bool(row.get("skipped")):
+            if NotificationDispatcher._safe_bool(row.get("skipped")):
                 reason = str(row.get("reason", "unknown"))
                 if reason.endswith("_not_configured") or "no_routes" in reason:
                     failed.append(f"{channel}:{reason}")
@@ -694,7 +696,7 @@ class OperationalChecklistService:
     def _risk_gate_item(self, *, strategy_metrics: dict[str, Any]) -> dict[str, Any]:
         risk_state = str(strategy_metrics.get("risk_state", "CLOSED"))
         operating_lock = dict(strategy_metrics.get("operating_lock") or {})
-        active_lock = bool(operating_lock.get("active"))
+        active_lock = NotificationDispatcher._safe_bool(operating_lock.get("active"))
         if risk_state == "OPEN" and not active_lock:
             status = "PASS"
             blocking = False
@@ -830,7 +832,7 @@ class OperationalChecklistService:
     def _execution_degradation_advisory_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
         report = dict(validation_payload.get("validation_report") or {})
         advisory = dict(report.get("execution_degradation_advisory_summary") or {})
-        available = bool(report.get("execution_degradation_advisory_available", False))
+        available = NotificationDispatcher._safe_bool(report.get("execution_degradation_advisory_available", False))
         advisory_status = str(advisory.get("status", "healthy") or "healthy").lower()
         advisory_summary = str(advisory.get("summary", "") or "").strip()
         recommended_action = str(advisory.get("recommended_action", "") or "").strip()
@@ -955,7 +957,7 @@ class OperationalChecklistService:
             universe=universe,
             days=int(score_to_outcome_summary.get("report_window_days") or 7),
         )
-        available = bool(summary_payload.get("available", False))
+        available = NotificationDispatcher._safe_bool(summary_payload.get("available", False))
         priority_level = str(summary_payload.get("priority_level", "monitor") or "monitor").lower()
         top_action = str(summary_payload.get("top_action", "") or "").strip()
         top_reason = str(summary_payload.get("top_reason", "") or "").strip()
@@ -1011,14 +1013,17 @@ class OperationalChecklistService:
                 "next_actions": [dict(item) for item in list(summary_payload.get("next_actions") or [])[:3]],
                 "capture_context": dict(summary_payload.get("capture_context") or {}),
                 "experiment_context": dict(summary_payload.get("experiment_context") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
     def _outcome_control_trace_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
         report = dict(validation_payload.get("validation_report") or {})
         summary_payload = dict(report.get("outcome_control_trace_summary") or {})
-        available = bool(report.get("outcome_control_trace_available", False) or summary_payload.get("available", False))
+        available = (
+            NotificationDispatcher._safe_bool(report.get("outcome_control_trace_available", False))
+            or NotificationDispatcher._safe_bool(summary_payload.get("available", False))
+        )
         approval_tier = str(summary_payload.get("approval_penalty_tier", "none") or "none").lower()
         sizing_tier = str(summary_payload.get("sizing_penalty_tier", "none") or "none").lower()
         portfolio_tier = str(summary_payload.get("portfolio_bias_tier", "neutral") or "neutral").lower()
@@ -1071,7 +1076,7 @@ class OperationalChecklistService:
         report = dict(validation_payload.get("validation_report") or {})
         score_to_outcome = dict(report.get("score_to_outcome_funnel_summary") or {})
         summary_payload = dict(score_to_outcome.get("money_funnel") or {})
-        available = bool(summary_payload.get("available", False))
+        available = NotificationDispatcher._safe_bool(summary_payload.get("available", False))
         historical_expected = dict(summary_payload.get("historical_expected_r") or {})
         historical_realized = dict(summary_payload.get("historical_realized_r") or {})
         historical_gap = dict(summary_payload.get("historical_gap_r") or {})
@@ -1121,7 +1126,10 @@ class OperationalChecklistService:
     def _outcome_attribution_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
         report = dict(validation_payload.get("validation_report") or {})
         summary_payload = dict(report.get("outcome_attribution_summary") or {})
-        available = bool(report.get("outcome_attribution_available", False) or summary_payload.get("available", False))
+        available = (
+            NotificationDispatcher._safe_bool(report.get("outcome_attribution_available", False))
+            or NotificationDispatcher._safe_bool(summary_payload.get("available", False))
+        )
         strongest_drag_source = str(summary_payload.get("strongest_drag_source", "none") or "none").lower()
         closed_post_cost_delta_r = float(summary_payload.get("closed_post_cost_delta_r", 0.0) or 0.0)
         fill_capture_gap_r = float(summary_payload.get("fill_capture_gap_r", 0.0) or 0.0)
@@ -1183,12 +1191,15 @@ class OperationalChecklistService:
     def _edge_experiment_review_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
         report = dict(validation_payload.get("validation_report") or {})
         summary_payload = dict(report.get("edge_experiment_review_summary") or {})
-        available = bool(report.get("edge_experiment_review_available", False) or summary_payload.get("available", False))
+        available = (
+            NotificationDispatcher._safe_bool(report.get("edge_experiment_review_available", False))
+            or NotificationDispatcher._safe_bool(summary_payload.get("available", False))
+        )
         edge_state = str(summary_payload.get("edge_state", "insufficient_edge_measurement") or "insufficient_edge_measurement")
         true_edge_ratio = float(summary_payload.get("true_edge_ratio", 0.0) or 0.0)
         edge_decay_rate = float(summary_payload.get("edge_decay_rate", 0.0) or 0.0)
-        entry_timing_ready = bool(summary_payload.get("entry_timing_comparison_ready", False))
-        execution_style_ready = bool(summary_payload.get("execution_style_comparison_ready", False))
+        entry_timing_ready = NotificationDispatcher._safe_bool(summary_payload.get("entry_timing_comparison_ready", False))
+        execution_style_ready = NotificationDispatcher._safe_bool(summary_payload.get("execution_style_comparison_ready", False))
         summary = str(summary_payload.get("summary", "") or "").strip()
 
         if not available:
@@ -1231,7 +1242,7 @@ class OperationalChecklistService:
                 "edge_decay_rate": edge_decay_rate,
                 "edge_stability": float(summary_payload.get("edge_stability", 0.0) or 0.0),
                 "closed_trade_count": int(summary_payload.get("closed_trade_count", 0) or 0),
-                "entry_timing_available": bool(summary_payload.get("entry_timing_available", False)),
+                "entry_timing_available": NotificationDispatcher._safe_bool(summary_payload.get("entry_timing_available", False)),
                 "entry_timing_comparison_ready": entry_timing_ready,
                 "entry_timing_preferred_variant": str(
                     summary_payload.get("entry_timing_preferred_variant", "none") or "none"
@@ -1239,7 +1250,7 @@ class OperationalChecklistService:
                 "entry_timing_recommendation_reason": str(
                     summary_payload.get("entry_timing_recommendation_reason", "not_available") or "not_available"
                 ),
-                "execution_style_available": bool(summary_payload.get("execution_style_available", False)),
+                "execution_style_available": NotificationDispatcher._safe_bool(summary_payload.get("execution_style_available", False)),
                 "execution_style_comparison_ready": execution_style_ready,
                 "execution_style_preferred_variant": str(
                     summary_payload.get("execution_style_preferred_variant", "none") or "none"
@@ -1255,7 +1266,10 @@ class OperationalChecklistService:
     def _edge_evolution_rule_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
         report = dict(validation_payload.get("validation_report") or {})
         summary_payload = dict(report.get("edge_evolution_rule_summary") or {})
-        available = bool(report.get("edge_evolution_rule_available", False) or summary_payload.get("available", False))
+        available = (
+            NotificationDispatcher._safe_bool(report.get("edge_evolution_rule_available", False))
+            or NotificationDispatcher._safe_bool(summary_payload.get("available", False))
+        )
         evolution_state = str(summary_payload.get("evolution_state", "insufficient_sample") or "insufficient_sample")
         summary = str(summary_payload.get("summary", "") or "").strip()
 
@@ -1299,7 +1313,7 @@ class OperationalChecklistService:
                 "true_edge_ratio": float(summary_payload.get("true_edge_ratio", 0.0) or 0.0),
                 "edge_decay_rate": float(summary_payload.get("edge_decay_rate", 0.0) or 0.0),
                 "closed_trade_count": int(summary_payload.get("closed_trade_count", 0) or 0),
-                "kill_review_triggered": bool(summary_payload.get("kill_review_triggered", False)),
+                "kill_review_triggered": NotificationDispatcher._safe_bool(summary_payload.get("kill_review_triggered", False)),
                 "promotion_candidate_axis": str(summary_payload.get("promotion_candidate_axis", "none") or "none"),
                 "promotion_candidate_variant": str(summary_payload.get("promotion_candidate_variant", "none") or "none"),
                 "promotion_candidate_reason": str(summary_payload.get("promotion_candidate_reason", "not_available") or "not_available"),
@@ -1311,7 +1325,10 @@ class OperationalChecklistService:
     def _review_followup_ledger_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
         report = dict(validation_payload.get("validation_report") or {})
         summary_payload = dict(report.get("review_followup_ledger_summary") or {})
-        available = bool(report.get("review_followup_ledger_available", False) or summary_payload.get("available", False))
+        available = (
+            NotificationDispatcher._safe_bool(report.get("review_followup_ledger_available", False))
+            or NotificationDispatcher._safe_bool(summary_payload.get("available", False))
+        )
         last_status = str(summary_payload.get("last_status", "none") or "none")
         last_action = str(summary_payload.get("last_action", "none") or "none")
         summary = str(summary_payload.get("summary", "") or "").strip()
@@ -1363,12 +1380,15 @@ class OperationalChecklistService:
     def _rollout_recommendation_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
         report = dict(validation_payload.get("validation_report") or {})
         summary_payload = dict(report.get("rollout_recommendation_summary") or {})
-        available = bool(report.get("rollout_recommendation_available", False) or summary_payload.get("available", False))
+        available = (
+            NotificationDispatcher._safe_bool(report.get("rollout_recommendation_available", False))
+            or NotificationDispatcher._safe_bool(summary_payload.get("available", False))
+        )
         recommendation = str(summary_payload.get("recommendation", "hold") or "hold").lower()
         current_policy = dict(summary_payload.get("current_policy") or {})
         suggested_delta = dict(summary_payload.get("suggested_policy_delta") or {})
         current_mode = str(current_policy.get("max_execution_mode", "SHADOW") or "SHADOW").upper()
-        live_enabled = bool(current_policy.get("live_enabled", False))
+        live_enabled = NotificationDispatcher._safe_bool(current_policy.get("live_enabled", False))
         summary = str(summary_payload.get("summary", "") or "").strip()
 
         if not available:
@@ -1414,14 +1434,17 @@ class OperationalChecklistService:
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "current_policy": current_policy,
                 "suggested_policy_delta": suggested_delta,
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
     def _opportunity_capture_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
         report = dict(validation_payload.get("validation_report") or {})
         summary_payload = dict(report.get("opportunity_capture_summary") or {})
-        available = bool(report.get("opportunity_capture_available", False) or summary_payload.get("available", False))
+        available = (
+            NotificationDispatcher._safe_bool(report.get("opportunity_capture_available", False))
+            or NotificationDispatcher._safe_bool(summary_payload.get("available", False))
+        )
         dominant_bottleneck = dict(summary_payload.get("dominant_bottleneck") or {})
         family_focus = dict(summary_payload.get("family_focus") or {})
         capture_gap = dict(summary_payload.get("capture_gap") or {})
@@ -1475,7 +1498,10 @@ class OperationalChecklistService:
     def _capital_allocator_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
         report = dict(validation_payload.get("validation_report") or {})
         summary_payload = dict(report.get("capital_allocator_summary") or {})
-        available = bool(report.get("capital_allocator_available", False) or summary_payload.get("available", False))
+        available = (
+            NotificationDispatcher._safe_bool(report.get("capital_allocator_available", False))
+            or NotificationDispatcher._safe_bool(summary_payload.get("available", False))
+        )
         allocator_state = str(summary_payload.get("allocator_state", "neutral") or "neutral")
         family_focus = str(summary_payload.get("family_focus", "") or "")
         capital_pressure = str(summary_payload.get("capital_pressure", "neutral") or "neutral")
@@ -1514,14 +1540,17 @@ class OperationalChecklistService:
                 "family_focus": family_focus,
                 "capital_pressure": capital_pressure,
                 "family_weights": [dict(item) for item in list(summary_payload.get("family_weights") or [])[:3]],
-                "advisory_only": bool(summary_payload.get("advisory_only", False)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", False)),
             },
         )
 
     def _strategy_lifecycle_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
         report = dict(validation_payload.get("validation_report") or {})
         summary_payload = dict(report.get("strategy_lifecycle_summary") or {})
-        available = bool(report.get("strategy_lifecycle_available", False) or summary_payload.get("available", False))
+        available = (
+            NotificationDispatcher._safe_bool(report.get("strategy_lifecycle_available", False))
+            or NotificationDispatcher._safe_bool(summary_payload.get("available", False))
+        )
         state = str(summary_payload.get("state", "research") or "research").lower()
         summary = str(summary_payload.get("summary", "") or "").strip()
 
@@ -1569,7 +1598,7 @@ class OperationalChecklistService:
                 "confidence": str(summary_payload.get("confidence", "low") or "low"),
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -1621,7 +1650,7 @@ class OperationalChecklistService:
                 "confidence": str(summary_payload.get("confidence", "low") or "low"),
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -1672,7 +1701,7 @@ class OperationalChecklistService:
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "review_queue": [dict(item) for item in list(summary_payload.get("review_queue") or [])[:5]],
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -1720,7 +1749,7 @@ class OperationalChecklistService:
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "remediation_queue": [dict(item) for item in list(summary_payload.get("remediation_queue") or [])[:5]],
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -1769,14 +1798,17 @@ class OperationalChecklistService:
                 "cleared_guardrail_domains": list(summary_payload.get("cleared_guardrail_domains") or []),
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
     def _promotion_reopen_queue_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
         report = dict(validation_payload.get("validation_report") or {})
         summary_payload = dict(report.get("promotion_reopen_queue_summary") or {})
-        available = bool(report.get("promotion_reopen_queue_available", False) or summary_payload.get("available", False))
+        available = (
+            NotificationDispatcher._safe_bool(report.get("promotion_reopen_queue_available", False))
+            or NotificationDispatcher._safe_bool(summary_payload.get("available", False))
+        )
         queue_state = str(summary_payload.get("queue_state", "empty_queue") or "empty_queue").lower()
         summary = str(summary_payload.get("summary", "") or "").strip()
 
@@ -1815,7 +1847,7 @@ class OperationalChecklistService:
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "reopen_queue": [dict(item) for item in list(summary_payload.get("reopen_queue") or [])[:5]],
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -1864,7 +1896,7 @@ class OperationalChecklistService:
                 "confidence": str(summary_payload.get("confidence", "low") or "low"),
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -1912,18 +1944,21 @@ class OperationalChecklistService:
                 "target_family": str(summary_payload.get("target_family", "") or ""),
                 "target_posture": str(summary_payload.get("target_posture", "keep_current") or "keep_current"),
                 "write_scope": str(summary_payload.get("write_scope", "none") or "none"),
-                "dry_run_only": bool(summary_payload.get("dry_run_only", False)),
+                "dry_run_only": NotificationDispatcher._safe_bool(summary_payload.get("dry_run_only", False)),
                 "confidence": str(summary_payload.get("confidence", "low") or "low"),
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
     def _multi_strategy_ab_item(self, *, validation_payload: dict[str, Any]) -> dict[str, Any]:
         report = dict(validation_payload.get("validation_report") or {})
         summary_payload = dict(report.get("multi_strategy_ab_summary") or {})
-        available = bool(report.get("multi_strategy_ab_available", False) or summary_payload.get("available", False))
+        available = (
+            NotificationDispatcher._safe_bool(report.get("multi_strategy_ab_available", False))
+            or NotificationDispatcher._safe_bool(summary_payload.get("available", False))
+        )
         mode = str(summary_payload.get("mode", "A_ONLY") or "A_ONLY").upper()
         b_cluster = dict(summary_payload.get("b_cluster") or {})
         summary = str(summary_payload.get("summary", "") or "").strip()
@@ -1962,7 +1997,7 @@ class OperationalChecklistService:
                 "a_cluster": dict(summary_payload.get("a_cluster") or {}),
                 "b_cluster": b_cluster,
                 "family_mix": [dict(item) for item in list(summary_payload.get("family_mix") or [])[:3]],
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -2008,10 +2043,10 @@ class OperationalChecklistService:
                 "activation_state": activation_state,
                 "activation_bias": str(summary_payload.get("activation_bias", "stay_research") or "stay_research"),
                 "target_mode": str(summary_payload.get("target_mode", "A_ONLY") or "A_ONLY"),
-                "live_eligible": bool(summary_payload.get("live_eligible", False)),
+                "live_eligible": NotificationDispatcher._safe_bool(summary_payload.get("live_eligible", False)),
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -2076,7 +2111,7 @@ class OperationalChecklistService:
                 "weakest_axis": str(summary_payload.get("weakest_axis", "") or ""),
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -2126,7 +2161,7 @@ class OperationalChecklistService:
                 "family_mix": [dict(item) for item in list(summary_payload.get("family_mix") or [])[:3]],
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -2197,7 +2232,7 @@ class OperationalChecklistService:
                 "confidence": str(summary_payload.get("confidence", "low") or "low"),
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -2254,7 +2289,7 @@ class OperationalChecklistService:
                 "confidence": str(summary_payload.get("confidence", "low") or "low"),
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -2328,7 +2363,7 @@ class OperationalChecklistService:
                 "weakest_axis": str(summary_payload.get("weakest_axis", "") or ""),
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -2373,13 +2408,13 @@ class OperationalChecklistService:
                 "automation_bias": str(summary_payload.get("automation_bias", "observe_only") or "observe_only"),
                 "write_scope": str(summary_payload.get("write_scope", "none") or "none"),
                 "trigger_axis": str(summary_payload.get("trigger_axis", "") or ""),
-                "active_manual_override": bool(summary_payload.get("active_manual_override", False)),
+                "active_manual_override": NotificationDispatcher._safe_bool(summary_payload.get("active_manual_override", False)),
                 "manual_override_reason": str(summary_payload.get("manual_override_reason", "") or ""),
-                "arm_required": bool(summary_payload.get("arm_required", False)),
+                "arm_required": NotificationDispatcher._safe_bool(summary_payload.get("arm_required", False)),
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "trigger_reason_codes": list(summary_payload.get("trigger_reason_codes") or []),
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -2429,7 +2464,7 @@ class OperationalChecklistService:
                 "recent_transitions": list(summary_payload.get("recent_transitions") or []),
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -2477,11 +2512,11 @@ class OperationalChecklistService:
                 "target_stage": str(summary_payload.get("target_stage", "research") or "research"),
                 "recommended_action": str(summary_payload.get("recommended_action", "") or ""),
                 "shadow_experiment_id": str(summary_payload.get("shadow_experiment_id", "") or ""),
-                "watchlist_ready": bool(summary_payload.get("watchlist_ready", False)),
+                "watchlist_ready": NotificationDispatcher._safe_bool(summary_payload.get("watchlist_ready", False)),
                 "confidence": str(summary_payload.get("confidence", "low") or "low"),
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -2531,7 +2566,7 @@ class OperationalChecklistService:
                 "confidence": str(summary_payload.get("confidence", "low") or "low"),
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "source_summary": dict(summary_payload.get("source_summary") or {}),
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -2580,7 +2615,7 @@ class OperationalChecklistService:
                 "top_condition_bucket": top_bucket,
                 "confidence": confidence,
                 "condition_axes": [dict(item) for item in list(summary_payload.get("condition_axes") or [])[:3]],
-                "advisory_only": bool(summary_payload.get("advisory_only", True)),
+                "advisory_only": NotificationDispatcher._safe_bool(summary_payload.get("advisory_only", True), default=True),
             },
         )
 
@@ -2592,21 +2627,21 @@ class OperationalChecklistService:
             status = "FAIL"
             blocking = False
             summary = "PBO/DSR design payload missing"
-        elif bool(pbo_dsr_metrics.get("metrics_complete")):
+        elif NotificationDispatcher._safe_bool(pbo_dsr_metrics.get("metrics_complete")):
             status = "PASS"
             blocking = False
             summary = (
                 "PBO/DSR metrics available; "
                 f"{(pbo_dsr_metrics.get('deployment_recommendation') or {}).get('decision', 'not_ready')}"
             )
-        elif bool(artifact_store.get("artifact_store_ready")):
+        elif NotificationDispatcher._safe_bool(artifact_store.get("artifact_store_ready")):
             status = "PASS"
             blocking = False
             summary = (
                 "PBO/DSR design contract frozen; "
                 f"artifact store {artifact_store.get('implementation_status', 'unknown')}"
             )
-        elif bool(pbo_dsr.get("design_ready")):
+        elif NotificationDispatcher._safe_bool(pbo_dsr.get("design_ready")):
             status = "PASS"
             blocking = False
             summary = f"PBO/DSR design contract frozen ({pbo_dsr.get('implementation_status', 'unknown')})"
@@ -2681,7 +2716,7 @@ class OperationalChecklistService:
                 "",
             ]
         )
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(

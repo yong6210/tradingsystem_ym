@@ -23,6 +23,19 @@ _MODE_STATE_RANK = {
 }
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
+
+
 class StrategyLifecycleService:
     @staticmethod
     def _dict(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -40,7 +53,7 @@ class StrategyLifecycleService:
     @classmethod
     def _previous_state(cls, current_policy: dict[str, Any]) -> str:
         mode = cls._normalize_mode(current_policy.get("max_execution_mode"))
-        live_enabled = bool(current_policy.get("live_enabled", False))
+        live_enabled = _safe_bool(current_policy.get("live_enabled", False))
         if live_enabled and mode in {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value}:
             return "production"
         if mode == ExecutionMode.PAPER.value:

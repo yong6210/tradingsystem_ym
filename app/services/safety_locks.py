@@ -46,6 +46,19 @@ class SafetyLockService:
         except ValueError:
             return LockSeverity.WARNING
 
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
     @classmethod
     def _normalize_scope_key(cls, scope_type: LockScopeType, scope_key: str | None) -> str | None:
         if scope_type == LockScopeType.GLOBAL:
@@ -292,7 +305,7 @@ class SafetyLockService:
         blocking_matching_locks = [
             row for row in matching_locks if str(row.reason_code or "") != self.TRANSITION_EDGE_VARIANT_DISABLED_REASON
         ]
-        config_close_only = bool(self.settings.auto_trading_close_only)
+        config_close_only = self._safe_bool(self.settings.auto_trading_close_only)
         kill_switch_active = any(str(row.reason_code or "") == self.KILL_SWITCH_REASON for row in active_locks)
         close_only_active = any(str(row.reason_code or "") == self.CLOSE_ONLY_REASON for row in active_locks)
         transition_edge_variant_disabled_active = bool(transition_edge_variant_matching_locks)

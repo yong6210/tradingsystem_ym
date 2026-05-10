@@ -21,6 +21,19 @@ def _safe_mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
+
+
 class ValidationPayloadCacheService:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -64,7 +77,7 @@ class ValidationPayloadCacheService:
             return VALIDATION_PAYLOAD_CACHE_MAX_AGE_SECONDS
 
     def stale_on_database_change(self) -> bool:
-        return bool(getattr(self.settings, "validation_payload_cache_stale_on_database_change", False))
+        return _safe_bool(getattr(self.settings, "validation_payload_cache_stale_on_database_change", False))
 
     @staticmethod
     def valid_payload(symbol: str, payload: Any) -> bool:

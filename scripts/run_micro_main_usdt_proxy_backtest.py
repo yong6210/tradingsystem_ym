@@ -27,6 +27,7 @@ from app.services.micro_main_strategy_research import (
     session_impulse_retest_profile_for_symbol,
     summarize_micro_trades,
 )
+from app.services.report_io import atomic_write_text
 
 
 _INTERVAL_MS = {
@@ -428,7 +429,7 @@ def main() -> int:
                     "report_path": str(out_path),
                     "status": "running",
                 }
-                out_path.write_text(json.dumps(partial_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                atomic_write_text(out_path, json.dumps(partial_payload, ensure_ascii=False, indent=2))
 
     payload: dict[str, Any] = {
         "generated_at": generated_at.isoformat(),
@@ -443,7 +444,7 @@ def main() -> int:
     }
 
     if out_path is not None:
-        out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(out_path, json.dumps(payload, ensure_ascii=False, indent=2))
         payload["report_path"] = str(out_path)
 
     print(json.dumps(payload, ensure_ascii=False, indent=2))

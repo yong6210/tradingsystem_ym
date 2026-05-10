@@ -7,6 +7,19 @@ from app.repositories.execution import FamilyRolloutPolicyRepository
 from app.domain.execution import RolloutPolicy
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
+
+
 class RolloutPolicyBootstrap:
     _DEFAULTS: ClassVar[dict[str, RolloutPolicy]] = {
         "trend_continuation": RolloutPolicy(
@@ -108,7 +121,7 @@ class RolloutPolicyService:
     def _from_row(self, row: Any) -> RolloutPolicy:
         return RolloutPolicy(
             strategy_family=str(row.family or "legacy_zone_plan").lower(),
-            live_enabled=bool(row.live_enabled),
+            live_enabled=_safe_bool(row.live_enabled),
             max_execution_mode=self._coerce_mode(row.max_execution_mode),
             max_risk_r=float(row.max_risk_r or 0.0),
             allowed_sessions=self._normalize_sessions(row.allowed_sessions),
@@ -137,7 +150,7 @@ class RolloutPolicyService:
         normalized_family = str(family or "legacy_zone_plan").strip().lower()
         row = self.repo.upsert(
             family=normalized_family,
-            live_enabled=bool(live_enabled),
+            live_enabled=_safe_bool(live_enabled),
             max_execution_mode=self._coerce_mode(max_execution_mode).value,
             max_risk_r=float(max_risk_r),
             allowed_sessions=self._serialize_sessions(allowed_sessions),

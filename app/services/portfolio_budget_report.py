@@ -13,6 +13,7 @@ from app.db.repositories import OrderSubmissionRepository, PlanRepository
 from app.services.b_continuation_activation import BContinuationActivationService
 from app.services.edge_experiment_review import build_edge_experiment_review, summarize_edge_experiment_review
 from app.services.edge_evolution_rule import build_edge_evolution_rule, summarize_edge_evolution_rule
+from app.services.report_io import atomic_write_text
 from app.services.scanner import ScannerService, _runtime_deployment_language
 from app.services.split_review_followup_ledger import summarize_split_review_followup_ledger
 from app.services.strategy_mode import StrategyModeService
@@ -32,6 +33,21 @@ def _safe_int(value: Any, default: int = 0) -> int:
     except (TypeError, ValueError):
         return default
     return int(parsed) if isfinite(parsed) else default
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value) if isfinite(float(value)) else bool(default)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
 
 
 def _plan_regime(plan: Plan) -> str:
@@ -109,7 +125,7 @@ class PortfolioBudgetReportService:
         }:
             return False
         execution_mode = str(getattr(row, "execution_mode", "") or "").upper()
-        requested_live = bool(getattr(row, "requested_live", False))
+        requested_live = _safe_bool(getattr(row, "requested_live", False))
         return requested_live or execution_mode in {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value}
 
     def _recent_live_submission_plan_ids(self) -> set[str]:
@@ -166,14 +182,14 @@ class PortfolioBudgetReportService:
         lookup: dict[str, dict[str, Any]] = {}
         for symbol_key, review in dict(edge_experiment_summary_lookup or {}).items():
             lookup[str(symbol_key or "").upper()] = {
-                "available": bool(review.get("available", False)),
-                "advisory_only": bool(review.get("advisory_only", True)),
+                "available": _safe_bool(review.get("available", False)),
+                "advisory_only": _safe_bool(review.get("advisory_only", True), default=True),
                 "edge_state": str(review.get("edge_state") or "insufficient_edge_measurement"),
                 "true_edge_ratio": round(float(review.get("true_edge_ratio", 0.0) or 0.0), 4),
                 "entry_timing_preferred_variant": str(review.get("entry_timing_preferred_variant") or "none"),
                 "execution_style_preferred_variant": str(review.get("execution_style_preferred_variant") or "none"),
-                "entry_timing_comparison_ready": bool(review.get("entry_timing_comparison_ready", False)),
-                "execution_style_comparison_ready": bool(review.get("execution_style_comparison_ready", False)),
+                "entry_timing_comparison_ready": _safe_bool(review.get("entry_timing_comparison_ready", False)),
+                "execution_style_comparison_ready": _safe_bool(review.get("execution_style_comparison_ready", False)),
                 "summary": str(review.get("summary") or ""),
             }
         return lookup
@@ -474,7 +490,7 @@ class PortfolioBudgetReportService:
                 "capital_pressure": str(allocator.get("capital_pressure", row.get("capital_pressure", "neutral")) or "neutral"),
                 "summary": str(allocator.get("summary", "") or ""),
                 "reason_codes": list(allocator.get("reason_codes") or []),
-                "available": bool(allocator.get("available", False)),
+                "available": _safe_bool(allocator.get("available", False)),
             }
             current = family_rows.get(family)
             if current is None:
@@ -514,7 +530,7 @@ class PortfolioBudgetReportService:
             summary += "; focus family is already overallocated relative to active risk"
 
         return {
-            "available": any(bool(item.get("available", False)) for item in family_weights),
+            "available": any(_safe_bool(item.get("available", False)) for item in family_weights),
             "advisory_only": False,
             "allocator_state": allocator_state,
             "family_focus": family_focus.get("family"),
@@ -660,7 +676,7 @@ class PortfolioBudgetReportService:
                 f"regime={row['regime']}, expected={row.get('expected_summary', '')}"
             )
 
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(
@@ -698,9 +714,9 @@ class PortfolioBudgetReportService:
             apply_outcome_bias=True,
         )
 
-        accepted_candidates = [row for row in assessed if bool(row.get("accepted"))]
-        blocked_candidates = [row for row in assessed if not bool(row.get("accepted"))]
-        alpha_research_candidates = [row for row in blocked_candidates if bool(row.get("alpha_research_candidate"))]
+        accepted_candidates = [row for row in assessed if _safe_bool(row.get("accepted"))]
+        blocked_candidates = [row for row in assessed if not _safe_bool(row.get("accepted"))]
+        alpha_research_candidates = [row for row in blocked_candidates if _safe_bool(row.get("alpha_research_candidate"))]
         capital_allocator_summary = self._capital_allocator_summary(
             accepted_candidates=accepted_candidates,
             blocked_candidates=blocked_candidates,
@@ -850,9 +866,9 @@ class PortfolioBudgetReportService:
                 "daily_trade_limit": int(mode_policy.max_daily_trades),
                 "current_total_risk_r": current_total_risk_r,
                 "max_total_risk_r": float(mode_policy.max_total_risk_r),
-                "shadow_only": bool(mode_policy.shadow_only),
+                "shadow_only": _safe_bool(mode_policy.shadow_only),
             },
-            "include_planned_exposure": bool(self.settings.portfolio_overlay_include_planned_exposure),
+            "include_planned_exposure": _safe_bool(self.settings.portfolio_overlay_include_planned_exposure),
             "current_exposure": exposure_summary,
             "headroom_by_regime": headroom_by_regime,
             "current_positions": current_positions,

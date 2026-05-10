@@ -23,6 +23,7 @@ from app.services.acceptance_rejection_classifier import (
     AcceptanceRejectionResult,
 )
 from app.services.common import clamp
+from app.services.report_io import atomic_write_text
 from app.services.context_engine import ContextSnapshot
 from app.services.historical_walk_forward_proof import HistoricalWalkForwardProofService
 from app.services.historical_walk_forward_split_review import HistoricalWalkForwardSplitReviewService
@@ -432,7 +433,7 @@ def main() -> int:
         out_path = out_dir / (
             f"reaction_gate_variant_backtest_{str(args.symbol).upper()}_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
         )
-        out_path.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(out_path, json.dumps(output, ensure_ascii=False, indent=2))
         output["report_path"] = str(out_path)
 
     print(json.dumps(output, ensure_ascii=False, indent=2))

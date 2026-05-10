@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,7 +11,12 @@ from typing import Any
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 CACHE_DIR = ROOT_DIR / "reports" / "validation" / "historical_walk_forward_cache"
+
+from scripts.operation_report_io import write_json
 
 
 def _display_path(path: Path) -> str:
@@ -142,12 +148,13 @@ def main() -> int:
         "min_trades": min_trades,
         "grouping": str(args.grouping),
         "blocked_buckets": blocked_buckets,
+        "output_path": _display_path(output_path),
     }
-    output_path.write_text(json.dumps(contract, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(output_path, contract)
     print(
         json.dumps(
             {
-                "output_path": _display_path(output_path),
+                "output_path": contract["output_path"],
                 "blocked_bucket_count": len(blocked_buckets),
                 "source_cache_key": str(args.cache_key).strip(),
                 "min_trades": min_trades,

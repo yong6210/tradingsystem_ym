@@ -13,6 +13,7 @@ from app.db.models import AlertSubscription
 from app.db.repositories import AlertRepository, AlertRetryQueueRepository
 from app.services.deployment_contracts import validation_alert_contract, validation_alert_strip_summary
 from app.services.notification_dispatcher import NotificationDispatcher
+from app.services.report_io import atomic_write_text
 
 
 def _safe_mapping(value: Any) -> dict[str, Any]:
@@ -89,8 +90,8 @@ class AlertMetricsService:
 
     @staticmethod
     def _to_observation(result: dict[str, Any], *, is_leaf: bool) -> DeliveryObservation:
-        delivered = bool(result.get("delivered"))
-        skipped = bool(result.get("skipped"))
+        delivered = NotificationDispatcher._safe_bool(result.get("delivered"))
+        skipped = NotificationDispatcher._safe_bool(result.get("skipped"))
         failed = not delivered and not skipped
         latency_raw = result.get("latency_ms")
         latency_ms = float(latency_raw) if isinstance(latency_raw, (int, float)) else None
@@ -260,8 +261,8 @@ class AlertMetricsService:
                 continue
             payload = _safe_mapping(alert.payload)
             delivery = _safe_mapping(payload.get("delivery"))
-            delivered = bool(delivery.get("delivered"))
-            skipped = bool(delivery.get("skipped"))
+            delivered = NotificationDispatcher._safe_bool(delivery.get("delivered"))
+            skipped = NotificationDispatcher._safe_bool(delivery.get("skipped"))
             failed = not delivered and not skipped
             contract = validation_alert_contract(payload)
             approval_strip_summary = validation_alert_strip_summary(payload)
@@ -383,7 +384,7 @@ class AlertMetricsService:
         )
 
         lines.append("")
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(self, *, days: int, write_report: bool = True) -> dict[str, Any]:
@@ -392,7 +393,7 @@ class AlertMetricsService:
         alerts = [
             alert
             for alert in self.alert_repo.list_recent(days=lookback_days)
-            if not bool(_safe_mapping(alert.payload).get("subscription_active"))
+            if not NotificationDispatcher._safe_bool(_safe_mapping(alert.payload).get("subscription_active"))
         ]
         observations = self._flatten_deliveries(alerts)
         leaf_observations = [row for row in observations if row.is_leaf]

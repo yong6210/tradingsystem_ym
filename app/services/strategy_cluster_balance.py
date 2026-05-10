@@ -21,6 +21,21 @@ _ACTIVATION_SEVERITY = {
 
 class StrategyClusterBalanceService:
     @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
+    @staticmethod
     def _dict(payload: dict[str, Any] | None) -> dict[str, Any]:
         return dict(payload or {})
 
@@ -77,9 +92,9 @@ class StrategyClusterBalanceService:
             if not cluster:
                 continue
             state = "all"
-            if bool(row.get("accepted")):
+            if self._safe_bool(row.get("accepted")):
                 state = "accepted"
-            elif bool(row.get("alpha_research_candidate")):
+            elif self._safe_bool(row.get("alpha_research_candidate")):
                 state = "alpha_research"
             elif row.get("block_reason"):
                 state = "blocked"

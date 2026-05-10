@@ -23,5 +23,6 @@ reports/validation/*
 !reports/validation/contracts/
 reports/validation/contracts/*
 !reports/validation/contracts/micro_live_event_blackouts_major_us_macro_q2_2026_v1.json
+archives/
 
 .DS_Store

@@ -16,6 +16,19 @@ _CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 _SELECTION_RANK = {"hold": 0, "expand": 1, "research_only": 2, "reduce": 3}
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
+
+
 class RolloutRecommendationService:
     @staticmethod
     def _dict(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -215,7 +228,7 @@ class RolloutRecommendationService:
         reason_codes.append(f"sample:{maturity}")
         current_mode = cls._normalize_mode(current_policy.get("max_execution_mode"))
         reason_codes.append(f"policy:max_mode_{current_mode.lower()}")
-        if not bool(current_policy.get("live_enabled", False)):
+        if not _safe_bool(current_policy.get("live_enabled", False)):
             reason_codes.append("policy:live_disabled")
         if global_execution_status in {"watch", "manual_review"}:
             reason_codes.append(f"policy:global_execution_{global_execution_status}")
@@ -317,7 +330,7 @@ class RolloutRecommendationService:
             recommendation = "hold"
 
         current_policy = {
-            "live_enabled": bool(policy.get("live_enabled", False)),
+            "live_enabled": _safe_bool(policy.get("live_enabled", False)),
             "max_execution_mode": self._normalize_mode(policy.get("max_execution_mode")),
             "max_risk_r": float(policy.get("max_risk_r", 0.0) or 0.0),
             "allowed_sessions": list(policy.get("allowed_sessions") or []),
@@ -464,7 +477,7 @@ class RolloutRecommendationService:
         candidates.sort(
             key=lambda item: (
                 -_SELECTION_RANK.get(str(item.get("recommendation") or "hold"), 0),
-                -int(bool(dict(item.get("current_policy") or {}).get("live_enabled", False))),
+                -int(_safe_bool(dict(item.get("current_policy") or {}).get("live_enabled", False))),
                 -_MODE_RANK.get(
                     str(dict(item.get("current_policy") or {}).get("max_execution_mode") or ExecutionMode.SHADOW.value),
                     0,

@@ -4,6 +4,21 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
+
+
 @dataclass(frozen=True, slots=True)
 class FastFailurePolicy:
     max_bars: int
@@ -19,11 +34,11 @@ def _price_tolerance(value: float) -> float:
 
 def resolve_fast_failure_policy(*, plan: Any, held_bars: int) -> FastFailurePolicy | None:
     validity = dict(getattr(plan, "validity", {}) or {})
-    enabled = bool(validity.get("strategy_fast_failure_enabled", False))
+    enabled = _safe_bool(validity.get("strategy_fast_failure_enabled", False))
     max_bars = int(validity.get("strategy_fast_failure_max_bars", 0) or 0)
     stop_r = float(validity.get("strategy_fast_failure_stop_r", 0.0) or 0.0)
     policy_name = str(validity.get("strategy_fast_failure_policy") or "initial_guard_stop").strip() or "initial_guard_stop"
-    requires_sl_touch = bool(validity.get("strategy_fast_failure_requires_sl_touch", False))
+    requires_sl_touch = _safe_bool(validity.get("strategy_fast_failure_requires_sl_touch", False))
     if not enabled or max_bars <= 0 or held_bars <= 0 or held_bars > max_bars:
         return None
     if stop_r <= 0.0 or stop_r >= 1.0:

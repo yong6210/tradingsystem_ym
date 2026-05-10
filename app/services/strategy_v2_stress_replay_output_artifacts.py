@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings, get_settings
+from app.services.report_io import atomic_write_text
 
 
 class StrategyV2StressReplayOutputArtifactsService:
@@ -19,6 +20,21 @@ class StrategyV2StressReplayOutputArtifactsService:
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
+
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
 
     def _base_dir(self, *, symbol: str, version: str) -> Path:
         return Path(self.settings.validation_report_dir) / "stress_replay_worker_outputs" / symbol / version
@@ -106,7 +122,7 @@ class StrategyV2StressReplayOutputArtifactsService:
         regime_counts: dict[str, int] = {}
         for scenario in cls._SCENARIO_ORDER:
             row = dict(scenario_outputs.get(scenario) or {})
-            if not bool(row.get("available", False)):
+            if not cls._safe_bool(row.get("available", False)):
                 continue
             scenarios_with_lineage.append(scenario)
             if dict(row.get("summary") or {}):
@@ -202,7 +218,7 @@ class StrategyV2StressReplayOutputArtifactsService:
             summary = dict(row.get("summary") or {})
             delta = dict(row.get("comparison_to_approximation") or {})
             lines.append(
-                f"- {scenario}: available={bool(row.get('available', False))}, reason={row.get('reason', 'not_available')}, "
+                f"- {scenario}: available={self._safe_bool(row.get('available', False))}, reason={row.get('reason', 'not_available')}, "
                 f"trades={int(summary.get('trades', 0) or 0)}, ev={float(summary.get('ev', 0.0)):.4f}, "
                 f"p5={float(summary.get('p5_ev', 0.0)):.4f}, max_dd={float(summary.get('max_drawdown', 0.0)):.4f}, "
                 f"delta_ev={float(delta.get('ev', 0.0)):.4f}, delta_max_dd={float(delta.get('max_drawdown', 0.0)):.4f}"
@@ -222,7 +238,7 @@ class StrategyV2StressReplayOutputArtifactsService:
                 "",
             ]
         )
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(

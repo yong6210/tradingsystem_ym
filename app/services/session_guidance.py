@@ -40,6 +40,21 @@ class SessionGuidanceService:
             return default
         return int(parsed) if isfinite(parsed) else default
 
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
     def _mode_value(self, mode: StrategyMode | str | None) -> str:
         if isinstance(mode, StrategyMode):
             return mode.value
@@ -95,9 +110,9 @@ class SessionGuidanceService:
             current_session = self.operating_lock.current_session(now=current_now).to_dict()
 
         session_name = str(current_session.get("name", "inactive"))
-        session_active = bool(current_session.get("active"))
+        session_active = self._safe_bool(current_session.get("active"))
         dead_session = (not session_active) or session_name == "inactive"
-        session_lock_active = bool(lock_payload.get("active")) and str(lock_payload.get("scope")) == "session"
+        session_lock_active = self._safe_bool(lock_payload.get("active")) and str(lock_payload.get("scope")) == "session"
         preferred_sessions = ["london", "new_york", "overlap"]
 
         if dead_session:

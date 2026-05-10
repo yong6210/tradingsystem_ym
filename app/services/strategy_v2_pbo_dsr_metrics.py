@@ -10,6 +10,21 @@ from typing import Any, ClassVar
 from app.core.config import Settings, get_settings
 from app.db.models import ValidationPboDsrSnapshot, ValidationTrialFoldScore, ValidationTrialRun
 from app.db.repositories import ValidationArtifactRepository
+from app.services.report_io import atomic_write_text
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
 
 
 class StrategyV2PboDsrMetricsService:
@@ -81,7 +96,7 @@ class StrategyV2PboDsrMetricsService:
         def metric_or_floor(value: float | None) -> float:
             return float(value) if value is not None else -999999.0
 
-        selected = [row for row in trial_runs if bool(row.selected_flag)]
+        selected = [row for row in trial_runs if _safe_bool(row.selected_flag)]
         if selected:
             selected.sort(key=StrategyV2PboDsrMetricsService._selected_trial_priority)
             return selected[0]
@@ -105,7 +120,7 @@ class StrategyV2PboDsrMetricsService:
         *,
         selected_trial_run_id: str | None,
     ) -> ValidationTrialFoldScore | None:
-        selected = [row for row in rows if bool(row.selected_flag)]
+        selected = [row for row in rows if _safe_bool(row.selected_flag)]
         if selected:
             selected.sort(
                 key=lambda row: (
@@ -192,7 +207,7 @@ class StrategyV2PboDsrMetricsService:
             )
             universe_size = len(ordered)
             percentile = float(selected_rank) / float(universe_size)
-            worse_half = bool(selected_rank > math.ceil(universe_size / 2.0))
+            worse_half = _safe_bool(selected_rank > math.ceil(universe_size / 2.0))
             eligible_folds += 1
             overfit_folds += int(worse_half)
             rank_percentiles.append(percentile)
@@ -387,7 +402,7 @@ class StrategyV2PboDsrMetricsService:
             "parameter_family": str(selected_trial.parameter_family),
             "parameter_values": dict(selected_trial.parameter_values or {}),
             "selection_rule": str(selected_trial.selection_rule or ""),
-            "selected_flag": bool(selected_trial.selected_flag),
+            "selected_flag": _safe_bool(selected_trial.selected_flag),
             "selection_rank": selected_trial.selection_rank,
             "in_sample_metric": selected_trial.in_sample_metric,
             "out_of_sample_metric": selected_trial.out_of_sample_metric,
@@ -523,7 +538,7 @@ class StrategyV2PboDsrMetricsService:
             reason = "selected_trial_lineage_unresolved"
 
         return {
-            "available": bool(selection_rule_counts or selected_trial_summary),
+            "available": _safe_bool(selection_rule_counts or selected_trial_summary),
             "audit_status": audit_status,
             "reason": reason,
             "lineage_mix_state": lineage_mix_state,
@@ -556,7 +571,7 @@ class StrategyV2PboDsrMetricsService:
 
         updated["baseline_decision"] = base_decision
         updated["baseline_reason"] = base_reason
-        updated["lineage_audit_applied"] = bool(metrics_complete and lineage_status == "WARN")
+        updated["lineage_audit_applied"] = _safe_bool(metrics_complete and lineage_status == "WARN")
         updated["lineage_audit_status"] = lineage_status
         updated["lineage_audit_reason"] = lineage_reason
         updated["selected_trial_writer_source"] = lineage_audit.get("selected_trial_writer_source", "unknown")
@@ -593,9 +608,9 @@ class StrategyV2PboDsrMetricsService:
         elif selected_trial and selected_trial.selection_universe_size is not None:
             selection_universe_size = int(selected_trial.selection_universe_size)
         computation_state = "not_computed"
-        if bool(pbo.get("available")) and bool(dsr.get("available")):
+        if _safe_bool(pbo.get("available")) and _safe_bool(dsr.get("available")):
             computation_state = "metrics_computed"
-        elif bool(pbo.get("available")) or bool(dsr.get("available")):
+        elif _safe_bool(pbo.get("available")) or _safe_bool(dsr.get("available")):
             computation_state = "partial_metrics_computed"
         payload = {
             "pbo_status": pbo.get("status"),
@@ -622,8 +637,8 @@ class StrategyV2PboDsrMetricsService:
             selection_universe_size=selection_universe_size,
             pbo_value=self._safe_float(pbo.get("value")),
             dsr_value=self._safe_float(dsr.get("value")),
-            pbo_available=bool(pbo.get("available")),
-            dsr_available=bool(dsr.get("available")),
+            pbo_available=_safe_bool(pbo.get("available")),
+            dsr_available=_safe_bool(dsr.get("available")),
             computation_state=computation_state,
             payload=payload,
         )
@@ -689,7 +704,7 @@ class StrategyV2PboDsrMetricsService:
                 f"- full_parameter_sweep_selection_universe_size: {selection_universe_summary.get('full_parameter_sweep_selection_universe_size')}",
                 f"- dsr_selection_universe_size: {selection_universe_summary.get('dsr_selection_universe_size')}",
                 f"- dsr_selection_universe_basis: {selection_universe_summary.get('dsr_selection_universe_basis', 'combined_artifact_universe')}",
-                f"- bias_adjustment_rechecked: {bool(selection_universe_summary.get('bias_adjustment_rechecked', False))}",
+                f"- bias_adjustment_rechecked: {_safe_bool(selection_universe_summary.get('bias_adjustment_rechecked', False))}",
                 f"- recording_status: {selection_universe_summary.get('recording_status', 'combined_only')}",
                 "",
                 "## Lineage Audit",
@@ -698,11 +713,11 @@ class StrategyV2PboDsrMetricsService:
                 f"- lineage_mix_state: {lineage_audit.get('lineage_mix_state', 'no_lineage')}",
                 f"- runtime_proxy_trial_count: {int(lineage_audit.get('runtime_proxy_trial_count', 0) or 0)}",
                 f"- true_threshold_trial_count: {int(lineage_audit.get('true_threshold_trial_count', 0) or 0)}",
-                f"- selected_trial_from_runtime_proxy: {bool(lineage_audit.get('selected_trial_from_runtime_proxy', False))}",
-                f"- selected_trial_from_true_threshold: {bool(lineage_audit.get('selected_trial_from_true_threshold', False))}",
+                f"- selected_trial_from_runtime_proxy: {_safe_bool(lineage_audit.get('selected_trial_from_runtime_proxy', False))}",
+                f"- selected_trial_from_true_threshold: {_safe_bool(lineage_audit.get('selected_trial_from_true_threshold', False))}",
                 "",
                 "## PBO",
-                f"- available: {bool(pbo.get('available', False))}",
+                f"- available: {_safe_bool(pbo.get('available', False))}",
                 f"- value: {pbo.get('value')}",
                 f"- status: {pbo.get('status', 'not_available')}",
                 f"- reason: {pbo.get('reason', 'not_available')}",
@@ -711,7 +726,7 @@ class StrategyV2PboDsrMetricsService:
                 f"- selected_rank_percentile_avg: {pbo.get('selected_rank_percentile_avg')}",
                 "",
                 "## DSR",
-                f"- available: {bool(dsr.get('available', False))}",
+                f"- available: {_safe_bool(dsr.get('available', False))}",
                 f"- value: {dsr.get('value')}",
                 f"- probability: {dsr.get('probability')}",
                 f"- status: {dsr.get('status', 'not_available')}",
@@ -745,7 +760,7 @@ class StrategyV2PboDsrMetricsService:
                 "",
             ]
         )
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(
@@ -791,19 +806,19 @@ class StrategyV2PboDsrMetricsService:
         if not fold_scores:
             blocked_by.append("validation_trial_fold_scores is empty")
             next_steps.append("write CSCV fold scores into validation_trial_fold_scores")
-        if not pbo.get("available"):
+        if not _safe_bool(pbo.get("available")):
             blocked_by.append(str(pbo.get("reason") or "pbo_unavailable"))
-        if not dsr.get("available"):
+        if not _safe_bool(dsr.get("available")):
             blocked_by.append(str(dsr.get("reason") or "dsr_unavailable"))
-        if pbo.get("available") and dsr.get("available"):
+        if _safe_bool(pbo.get("available")) and _safe_bool(dsr.get("available")):
             next_steps.append("compare computed PBO/DSR against validation protocol thresholds")
         else:
             next_steps.append("complete seeded trial/fold lineage so PBO and DSR can both compute")
         blocked_by = list(dict.fromkeys(blocked_by))
         next_steps = list(dict.fromkeys(next_steps))
 
-        metrics_complete = bool(pbo.get("available")) and bool(dsr.get("available"))
-        available = bool(pbo.get("available")) or bool(dsr.get("available"))
+        metrics_complete = _safe_bool(pbo.get("available")) and _safe_bool(dsr.get("available"))
+        available = _safe_bool(pbo.get("available")) or _safe_bool(dsr.get("available"))
         if metrics_complete:
             reason = "pbo_dsr_metrics_computed"
         elif available:
@@ -883,8 +898,8 @@ class StrategyV2PboDsrMetricsService:
             snapshot_summary = {
                 "snapshot_id": snapshot_row.snapshot_id,
                 "computation_state": snapshot_row.computation_state,
-                "pbo_available": bool(snapshot_row.pbo_available),
-                "dsr_available": bool(snapshot_row.dsr_available),
+                "pbo_available": _safe_bool(snapshot_row.pbo_available),
+                "dsr_available": _safe_bool(snapshot_row.dsr_available),
             }
 
         payload: dict[str, Any] = {

@@ -19,6 +19,20 @@ from app.db.session import SessionLocal, init_db
 from app.services.strategy_engine import StrategyEngine
 
 
+def _safe_bool(value: object, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Ensure Discord subscriptions for micro-main prop-style alerts.")
     parser.add_argument("--channel", default="discord")
@@ -55,7 +69,7 @@ def main() -> int:
                         )
                     )
                 )
-                active = any(bool((row.payload or {}).get("subscription_active")) for row in rows)
+                active = any(_safe_bool((row.payload or {}).get("subscription_active")) for row in rows)
                 if active:
                     existing.append({"symbol": symbol, "type": alert_type})
                     continue

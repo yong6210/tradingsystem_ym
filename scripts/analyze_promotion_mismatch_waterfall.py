@@ -20,6 +20,7 @@ from app.db.repositories import CandleRepository
 from app.db.session import SessionLocal, init_db
 from app.services.historical_walk_forward_proof import HistoricalWalkForwardProofService
 from app.services.historical_walk_forward_split_review import HistoricalWalkForwardSplitReviewService
+from app.services.report_io import atomic_write_text
 from scripts.run_reaction_gate_variant_backtest import VariantConfig, VariantPlanGenerator
 
 
@@ -32,6 +33,20 @@ SUBMISSION_FILLED_STATES = {"PARTIALLY_FILLED", "FILLED"}
 class RescueVariant:
     name: str
     config: VariantConfig
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
 
 
 def _parse_args() -> argparse.Namespace:
@@ -261,10 +276,10 @@ def _runtime_rows_with_flags(
         plan_id = str(row.get("plan_id") or "")
         intent = latest_intent_by_plan.get(plan_id)
         submission = latest_submission_by_plan.get(plan_id)
-        runtime_row["contract_promoted"] = bool(runtime_row["candidate_generated"])
-        runtime_row["intent_created"] = bool(intent)
-        runtime_row["submitted"] = bool(submission)
-        runtime_row["filled"] = bool(submission and str(submission.get("state") or "").upper() in SUBMISSION_FILLED_STATES)
+        runtime_row["contract_promoted"] = _safe_bool(runtime_row["candidate_generated"])
+        runtime_row["intent_created"] = _safe_bool(intent)
+        runtime_row["submitted"] = _safe_bool(submission)
+        runtime_row["filled"] = _safe_bool(submission and str(submission.get("state") or "").upper() in SUBMISSION_FILLED_STATES)
         runtime_row["closed"] = str(row.get("state") or "").upper() in PLAN_CLOSED_STATES
         runtime_row["policy_reason"] = str((intent or {}).get("decision_reason_code") or "")
         out.append(runtime_row)
@@ -274,15 +289,15 @@ def _runtime_rows_with_flags(
 def _compute_waterfall(*, replay_rows: list[dict[str, Any]], runtime_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     replay_closed_count = len(replay_rows)
     stages = [
-        ("raw_sweep_detected", lambda _: True, lambda row: bool(row.get("raw_sweep_detected"))),
-        ("reaction_validated", lambda _: True, lambda row: bool(row.get("reaction_validated"))),
-        ("strategy_family_matched", lambda _: True, lambda row: bool(row.get("strategy_family_matched"))),
-        ("candidate_generated", lambda _: True, lambda row: bool(row.get("candidate_generated"))),
-        ("contract_promoted", lambda _: True, lambda row: bool(row.get("contract_promoted"))),
-        ("intent_created", None, lambda row: bool(row.get("contract_promoted")) and bool(row.get("intent_created"))),
-        ("submitted", None, lambda row: bool(row.get("contract_promoted")) and bool(row.get("submitted"))),
-        ("filled", None, lambda row: bool(row.get("contract_promoted")) and bool(row.get("filled"))),
-        ("closed", lambda _: True, lambda row: bool(row.get("contract_promoted")) and bool(row.get("closed"))),
+        ("raw_sweep_detected", lambda _: True, lambda row: _safe_bool(row.get("raw_sweep_detected"))),
+        ("reaction_validated", lambda _: True, lambda row: _safe_bool(row.get("reaction_validated"))),
+        ("strategy_family_matched", lambda _: True, lambda row: _safe_bool(row.get("strategy_family_matched"))),
+        ("candidate_generated", lambda _: True, lambda row: _safe_bool(row.get("candidate_generated"))),
+        ("contract_promoted", lambda _: True, lambda row: _safe_bool(row.get("contract_promoted"))),
+        ("intent_created", None, lambda row: _safe_bool(row.get("contract_promoted")) and _safe_bool(row.get("intent_created"))),
+        ("submitted", None, lambda row: _safe_bool(row.get("contract_promoted")) and _safe_bool(row.get("submitted"))),
+        ("filled", None, lambda row: _safe_bool(row.get("contract_promoted")) and _safe_bool(row.get("filled"))),
+        ("closed", lambda _: True, lambda row: _safe_bool(row.get("contract_promoted")) and _safe_bool(row.get("closed"))),
     ]
     out: list[dict[str, Any]] = []
     for stage_name, replay_predicate, runtime_predicate in stages:
@@ -636,7 +651,7 @@ def main() -> int:
         out_path = out_dir / (
             f"promotion_mismatch_waterfall_{args.symbol.upper()}_{args.family.lower()}_{args.entry_model.upper()}_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
         )
-        out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(out_path, json.dumps(payload, ensure_ascii=False, indent=2))
         payload["report_path"] = str(out_path)
 
     print(json.dumps(payload, ensure_ascii=False, indent=2))

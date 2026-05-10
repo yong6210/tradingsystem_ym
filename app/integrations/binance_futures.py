@@ -108,7 +108,9 @@ class BinanceFuturesClient:
         self.api_secret = api_secret if api_secret is not None else settings.binance_api_secret
         self.recv_window = self._safe_int(recv_window if recv_window is not None else settings.binance_trade_recv_window, 5000)
         self.live_trade_enabled = (
-            bool(live_trade_enabled) if live_trade_enabled is not None else bool(settings.binance_trade_live_enabled)
+            self._safe_bool(live_trade_enabled)
+            if live_trade_enabled is not None
+            else self._safe_bool(settings.binance_trade_live_enabled)
         )
         self._symbol_trading_rules_cache: dict[str, BinanceSymbolTradingRules] = {}
 
@@ -226,6 +228,21 @@ class BinanceFuturesClient:
         except (TypeError, ValueError):
             return int(default)
         return int(parsed) if isfinite(parsed) else int(default)
+
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value) if isfinite(float(value)) else bool(default)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
 
     @staticmethod
     def _safe_dict(value: Any) -> dict[str, Any]:
@@ -567,7 +584,7 @@ class BinanceFuturesClient:
                 "side": str(order.get("S") or ""),
                 "order_type": str(order.get("o") or ""),
                 "time_in_force": str(order.get("f") or ""),
-                "reduce_only": bool(order.get("R")),
+                "reduce_only": BinanceFuturesClient._safe_bool(order.get("R")),
                 "position_side": BinanceFuturesClient._normalize_position_side(order.get("ps")),
                 "last_fill_qty": BinanceFuturesClient._safe_float(order.get("l")),
                 "last_fill_price": BinanceFuturesClient._safe_float(order.get("L")),
@@ -592,7 +609,7 @@ class BinanceFuturesClient:
                 "side": str(data.get("S") or ""),
                 "order_type": str(data.get("o") or ""),
                 "time_in_force": str(data.get("f") or ""),
-                "reduce_only": bool(data.get("R")),
+                "reduce_only": BinanceFuturesClient._safe_bool(data.get("R")),
                 "position_side": BinanceFuturesClient._normalize_position_side(data.get("ps")),
                 "last_fill_qty": BinanceFuturesClient._safe_float(data.get("l")),
                 "last_fill_price": BinanceFuturesClient._safe_float(data.get("L")),
@@ -823,7 +840,7 @@ class BinanceFuturesClient:
                     l=low,
                     c=c,
                     v=max(self._safe_float(k.get("v")), 0.0),
-                    is_final=bool(k.get("x", False)),
+                    is_final=self._safe_bool(k.get("x", False)),
                 )
 
     async def stream_force_orders(

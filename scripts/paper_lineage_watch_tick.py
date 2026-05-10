@@ -11,9 +11,13 @@ from typing import Any
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 WATCH_SCRIPT = ROOT_DIR / "scripts" / "watch_paper_candidate_drill.py"
 EXIT_SCRIPT = ROOT_DIR / "scripts" / "run_paper_exit_monitor.py"
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "reports" / "operations" / "paper_candidate_watch"
+
+from scripts.operation_report_io import atomic_write_text
 
 
 def _resolve_root_path(raw_path: str | Path) -> Path:
@@ -112,8 +116,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
 def _build_cmd(args: argparse.Namespace) -> list[str]:

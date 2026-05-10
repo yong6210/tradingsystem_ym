@@ -16,9 +16,24 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.core.config import get_settings
 from app.services.notification_dispatcher import NotificationDispatcher
+from scripts.operation_report_io import atomic_write_text
 
 
 BRIEF_SCRIPT = ROOT_DIR / "scripts" / "generate_operator_session_brief.py"
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
 
 
 def _resolve_root_path(raw_path: str | Path) -> Path:
@@ -92,8 +107,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
 def _run_brief(args: argparse.Namespace) -> dict[str, Any]:
@@ -301,7 +315,7 @@ def _alert_state(brief: dict[str, Any]) -> dict[str, Any]:
         "execution_target_followup_command": str(execution_target.get("followup_command") or ""),
         "top_family_bottleneck": str(funnel.get("top_family_bottleneck") or ""),
         "top_session_bottleneck": str(funnel.get("top_session_bottleneck") or ""),
-        "ui_all_present": bool(sections.get("all_present")),
+        "ui_all_present": _safe_bool(sections.get("all_present")),
         "brief_report_path": str(brief.get("report_path") or ""),
         "snapshot_report_path": str(snapshot.get("report_path") or ""),
     }
@@ -582,7 +596,7 @@ def main() -> int:
         payload={"message": message},
     )
     result["delivery"] = delivery
-    result["notified"] = bool(delivery.get("delivered"))
+    result["notified"] = _safe_bool(delivery.get("delivered"))
     _write_json(state_file, current)
     _write_json(latest_run_file, result)
     print(json.dumps(result, ensure_ascii=False, indent=2))

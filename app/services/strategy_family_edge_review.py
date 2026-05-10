@@ -10,6 +10,7 @@ from app.core.config import Settings, get_settings
 from app.core.enums import PlanState
 from app.db.models import Plan
 from app.db.repositories import ExecutionFillRepository, PlanRepository
+from app.services.report_io import atomic_write_text
 from app.services.strategy_v2_stress_validation import StrategyV2StressValidationService
 from app.services.strategy_v2_validation import ClosedTradeRecord, StrategyV2ValidationService
 
@@ -446,7 +447,7 @@ class StrategyFamilyEdgeReviewService:
         lines.extend(["", "## Next Actions"])
         for step in payload.get("next_actions") or []:
             lines.append(f"- {step}")
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate_from_plans(

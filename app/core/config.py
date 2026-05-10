@@ -344,6 +344,17 @@ class Settings(BaseSettings):
     auto_trading_allowed_families: str = ""
     auto_trading_close_only: bool = False
     auto_trading_require_validation_go: bool = True
+    auto_trading_replay_validation_bridge_enabled: bool = True
+    auto_trading_replay_validation_bridge_backtest_dir: str = "reports/validation/micro_main_usdt_proxy_backtests"
+    auto_trading_replay_validation_bridge_portfolio_dir: str = "reports/validation/micro_main_risk_sweeps"
+    auto_trading_replay_validation_bridge_max_age_days: float = 14.0
+    auto_trading_replay_validation_bridge_min_days: int = 1000
+    auto_trading_replay_validation_bridge_min_trades: int = 80
+    auto_trading_replay_validation_bridge_min_ev_r: float = 0.10
+    auto_trading_replay_validation_bridge_min_win_rate: float = 0.40
+    auto_trading_replay_validation_bridge_min_score: float = 70.0
+    auto_trading_replay_validation_bridge_min_years: int = 3
+    auto_trading_replay_validation_bridge_max_portfolio_mdd_pct: float = 25.0
     auto_trading_notional_per_r: float = 25.0
     auto_trading_live_sizing_mode: str = "NOTIONAL_PER_R"
     auto_trading_live_account_equity_usdt: float = 0.0
@@ -429,6 +440,8 @@ class Settings(BaseSettings):
         "parameter_snapshot_dir",
         "alert_metrics_report_dir",
         "portfolio_budget_report_dir",
+        "auto_trading_replay_validation_bridge_backtest_dir",
+        "auto_trading_replay_validation_bridge_portfolio_dir",
     )
     @classmethod
     def normalize_root_relative_path(cls, value: str) -> str:

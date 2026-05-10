@@ -4,6 +4,21 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
+
+
 @dataclass(frozen=True, slots=True)
 class TransitionVariantReadiness:
     symbol: str
@@ -29,9 +44,9 @@ def evaluate_transition_variant_live_readiness(
     shadow = dict((dashboard.get("active_contract") or {}).get("transition_edge_variant_shadow") or {})
     live_lane = dict(variant.get("live_lane") or {})
 
-    enabled = bool(variant.get("enabled", False))
-    shadow_only = bool(variant.get("shadow_only", True))
-    killed = bool(variant.get("killed", False))
+    enabled = _safe_bool(variant.get("enabled", False))
+    shadow_only = _safe_bool(variant.get("shadow_only", True), default=True)
+    killed = _safe_bool(variant.get("killed", False))
     shadow_pass_count = int(shadow.get("shadow_pass_count", 0) or 0)
     shadow_evaluated_count = int(shadow.get("shadow_evaluated_count", 0) or 0)
     low_conf_delta = int(shadow.get("low_confluence_block_delta", 0) or 0)

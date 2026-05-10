@@ -78,6 +78,19 @@ class PlanGenerator:
             return default
         return int(parsed) if isfinite(parsed) else default
 
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
     def _fast_failure_validity(
         self,
         *,
@@ -92,7 +105,7 @@ class PlanGenerator:
             return {}
         if str(entry_model.value if isinstance(entry_model, EntryModel) else entry_model).strip().upper() != EntryModel.LIMIT.value:
             return {}
-        if not bool(self.settings.btc_sweep_reversal_limit_fast_failure_enabled):
+        if not self._safe_bool(self.settings.btc_sweep_reversal_limit_fast_failure_enabled):
             return {}
         allowed_sessions = {
             item.strip().lower()
@@ -104,7 +117,7 @@ class PlanGenerator:
             return {}
         max_bars = max(self._safe_int(self.settings.btc_sweep_reversal_limit_fast_failure_max_bars, default=18), 0)
         stop_r = self._safe_float(self.settings.btc_sweep_reversal_limit_fast_failure_stop_r, default=0.00000001)
-        requires_sl_touch = bool(self.settings.btc_sweep_reversal_limit_fast_failure_requires_sl_touch)
+        requires_sl_touch = self._safe_bool(self.settings.btc_sweep_reversal_limit_fast_failure_requires_sl_touch)
         if max_bars <= 0 or stop_r <= 0.0 or stop_r >= 1.0:
             return {}
         return {
@@ -299,9 +312,9 @@ class PlanGenerator:
         active_weights = dict(base_weights)
         if (
             importance_calibration
-            and self.settings.feature_calibration_enabled
-            and self.settings.feature_calibration_apply_runtime
-            and bool(importance_calibration.get("available"))
+            and self._safe_bool(self.settings.feature_calibration_enabled)
+            and self._safe_bool(self.settings.feature_calibration_apply_runtime)
+            and self._safe_bool(importance_calibration.get("available"))
         ):
             regime_row = dict((importance_calibration.get("by_regime") or {}).get(profile.name, {}))
             calibrated = regime_row.get("feature_weights_active")
@@ -327,7 +340,7 @@ class PlanGenerator:
         zone_type: str,
         importance_calibration: dict[str, dict] | None = None,
     ) -> float:
-        if not importance_calibration or not bool(importance_calibration.get("available")):
+        if not importance_calibration or not self._safe_bool(importance_calibration.get("available")):
             return 1.0
         row = dict((importance_calibration.get("zone_type_multipliers") or {}).get(zone_type, {}))
         multiplier = row.get("active_multiplier")
@@ -557,7 +570,7 @@ class PlanGenerator:
         outside_close_count: Any,
         dwell_time_bars: Any,
     ) -> str:
-        if retest_hold is True:
+        if PlanGenerator._safe_bool(retest_hold):
             return "held"
         if retest_hold is None:
             return "not_available"
@@ -569,9 +582,9 @@ class PlanGenerator:
 
     @staticmethod
     def _reaction_efficiency_state(inefficiency_created: Any) -> str:
-        if inefficiency_created is True:
+        if PlanGenerator._safe_bool(inefficiency_created):
             return "inefficiency_created"
-        if inefficiency_created is False:
+        if inefficiency_created is False or str(inefficiency_created).strip().lower() in {"0", "false", "no", "n", "off"}:
             return "no_inefficiency"
         return "not_available"
 
@@ -674,7 +687,7 @@ class PlanGenerator:
         base_recommended_risk_r: float,
         expected_ev_r: float,
     ) -> dict[str, Any] | None:
-        if not bool(self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_enabled):
+        if not self._safe_bool(self.settings.btc_sweep_reversal_limit_runtime_signal_shadow_tilt_enabled):
             return None
         if str(symbol or "").strip().upper() != "BTCUSDC":
             return None
@@ -1014,7 +1027,7 @@ class PlanGenerator:
         zone_type_multiplier_active: float,
         profile: RegimeProfile,
     ) -> dict[str, Any] | None:
-        if not bool(self.settings.transition_edge_variant_enabled):
+        if not self._safe_bool(self.settings.transition_edge_variant_enabled):
             return None
         if profile.name != "transition":
             return None
@@ -1129,7 +1142,7 @@ class PlanGenerator:
         if near_lp:
             return None
 
-        reaction_missing = (not bool(getattr(reaction, "available", False))) or str(getattr(reaction, "classification", "")) == "not_applicable"
+        reaction_missing = (not self._safe_bool(getattr(reaction, "available", False))) or str(getattr(reaction, "classification", "")) == "not_applicable"
         if not reaction_missing:
             return None
 
@@ -1570,8 +1583,8 @@ class PlanGenerator:
             if str(key).startswith("rescue_reason:")
         }
         transition_edge_variant_shadow_summary = {
-            "available": bool(self.settings.transition_edge_variant_enabled),
-            "shadow_only": bool(self.settings.transition_edge_variant_shadow_only),
+            "available": self._safe_bool(self.settings.transition_edge_variant_enabled),
+            "shadow_only": self._safe_bool(self.settings.transition_edge_variant_shadow_only),
             "variant": "exp_6_fvg_relaxed_plus_transition_override",
             "evaluated": int(transition_edge_variant_evaluated_count),
             "pass": shadow_pass_count,
@@ -1863,7 +1876,7 @@ class PlanGenerator:
                     profile=zone_profile,
                 )
                 if transition_edge_variant is not None:
-                    transition_edge_variant_shadow = bool(self.settings.transition_edge_variant_shadow_only)
+                    transition_edge_variant_shadow = self._safe_bool(self.settings.transition_edge_variant_shadow_only)
                     if not transition_edge_variant_shadow:
                         zone_profile = transition_edge_variant["profile"]
                         confluence_score = float(transition_edge_variant["confluence_score"])
@@ -2074,7 +2087,7 @@ class PlanGenerator:
                 location_reference=location_reference,
             )
             thesis_cluster_id = self.thesis.thesis_cluster_id(thesis_fingerprint)
-            confirm_only = bool(strategy_family.confirm_only) or (
+            confirm_only = self._safe_bool(strategy_family.confirm_only) or (
                 not strategy_family.available and decision.model == EntryModel.CONFIRM
             )
             strategy_sizing = self.sizing.evaluate(
@@ -2140,11 +2153,11 @@ class PlanGenerator:
                 "strategy_scorecard_raw_components": dict((strategy_family.scorecard or {}).get("raw_components", {})),
                 "strategy_scorecard_trendline_bonus": float((strategy_family.scorecard or {}).get("buckets", {}).get("trendline_bonus", 0.0)),
                 "strategy_family_clean_case": bool(strategy_family.clean_case),
-                "strategy_family_confirm_only": bool(strategy_family.confirm_only),
+                "strategy_family_confirm_only": self._safe_bool(strategy_family.confirm_only),
                 "strategy_family_time_stop_min_bars": int(strategy_family.time_stop_min_bars),
                 "strategy_family_time_stop_max_bars": int(strategy_family.time_stop_max_bars),
                 "strategy_mode": mode_policy.mode.value,
-                "mode_shadow_only": bool(mode_policy.shadow_only),
+                "mode_shadow_only": self._safe_bool(mode_policy.shadow_only),
                 "mode_daily_trade_limit": int(mode_policy.max_daily_trades),
                 "mode_total_risk_cap_r": float(mode_policy.max_total_risk_r),
                 "mode_rejected_reason": mode_reason,
@@ -2167,11 +2180,11 @@ class PlanGenerator:
                 "feature_weights_base": feature_weights_base,
                 "feature_weights_active": feature_weights_active,
                 "zone_type_multiplier_active": zone_type_multiplier_active,
-                "feature_calibration_available": bool(
+                "feature_calibration_available": self._safe_bool(
                     importance_calibration
-                    and self.settings.feature_calibration_enabled
-                    and self.settings.feature_calibration_apply_runtime
-                    and importance_calibration.get("available")
+                    and self._safe_bool(self.settings.feature_calibration_enabled)
+                    and self._safe_bool(self.settings.feature_calibration_apply_runtime)
+                    and self._safe_bool(importance_calibration.get("available"))
                 ),
                 "feature_calibration_samples": int((importance_calibration or {}).get("matched_samples", 0)),
                 "reliability_factor": round(reliability, 3),
@@ -2206,8 +2219,8 @@ class PlanGenerator:
                 "session_score_bias": round(session_score_bias, 4),
                 "session_probability_adjustment": round(session_probability_adjustment, 4),
                 "plan_validity_minutes": validity_minutes,
-                "transition_edge_variant_enabled": bool(self.settings.transition_edge_variant_enabled),
-                "transition_edge_variant_shadow_only": bool(self.settings.transition_edge_variant_shadow_only),
+                "transition_edge_variant_enabled": self._safe_bool(self.settings.transition_edge_variant_enabled),
+                "transition_edge_variant_shadow_only": self._safe_bool(self.settings.transition_edge_variant_shadow_only),
                 "transition_edge_variant_applied": bool(transition_edge_variant is not None and not transition_edge_variant_shadow),
                 "transition_edge_variant_shadow_evaluated": bool(transition_edge_variant is not None),
             }

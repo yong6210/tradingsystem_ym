@@ -16,6 +16,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 from scripts import run_runtime_signoff_review
+from scripts.operation_report_io import atomic_write_text
 from app.core import operator_surface_contracts as osc
 
 DEFAULT_STAGE_FILE = ROOT_DIR / "reports/operations/stage_monitor/current_stage.json"
@@ -161,8 +162,7 @@ def _request_json(
 
 
 def _write_stage_file(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n")
 
 
 def _parse_ts(value: Any) -> datetime | None:
@@ -194,6 +194,21 @@ def _active_close_only(dashboard: dict[str, Any]) -> bool:
     if not isinstance(locks, list):
         return False
     return any(str(item.get("reason_code") or "") == "close_only_active" for item in locks if isinstance(item, dict))
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return bool(default)
 
 
 def _surface_strip_summary(payload: dict[str, Any] | None, *, surface_type: str = "generic") -> dict[str, str]:
@@ -399,8 +414,8 @@ def _edge_experiment_summary(
     edge_proof_posture = dict(source.get("edge_proof_posture") or {})
     daily_edge_kpis = dict(source.get("daily_edge_kpis") or {})
     return {
-        "available": bool(source.get("available", True)),
-        "advisory_only": bool(source.get("advisory_only", True)),
+        "available": _safe_bool(source.get("available", True), default=True),
+        "advisory_only": _safe_bool(source.get("advisory_only", True), default=True),
         "edge_state": str(source.get("edge_state") or "insufficient_edge_measurement"),
         "summary": str(source.get("summary") or ""),
         "true_edge_ratio": round(_float(source.get("true_edge_ratio")), 4),
@@ -451,8 +466,8 @@ def _edge_evolution_summary(
     if not source:
         return None
     return {
-        "available": bool(source.get("available", True)),
-        "advisory_only": bool(source.get("advisory_only", True)),
+        "available": _safe_bool(source.get("available", True), default=True),
+        "advisory_only": _safe_bool(source.get("advisory_only", True), default=True),
         "evolution_state": str(source.get("evolution_state") or "insufficient_sample"),
         "recommended_action": str(source.get("recommended_action") or "keep_current_baseline"),
         "allocation_bias": str(source.get("allocation_bias") or "hold_current_baseline"),
@@ -471,7 +486,7 @@ def _review_followup_summary(
     if not source:
         return None
     return {
-        "available": bool(source.get("available", False)),
+        "available": _safe_bool(source.get("available", False)),
         "last_status": str(source.get("last_status") or "none"),
         "last_action": str(source.get("last_action") or "none"),
         "recent_entry_count": int(source.get("recent_entry_count", 0) or 0),
@@ -578,7 +593,7 @@ def _lineage_closed_fill_health_line(summary: dict[str, Any] | None) -> str:
         return "lineage_closed_fill_health: unavailable"
     return (
         f"lineage_closed_fill_health: status={item.get('status', 'unknown')} | "
-        f"healthy={bool(item.get('healthy', False))} | "
+        f"healthy={_safe_bool(item.get('healthy', False))} | "
         f"closes={int(item.get('closed_trade_count', 0) or 0)}"
     )
 
@@ -1170,7 +1185,7 @@ def _active_lineage_sample_focus_line(sample: dict[str, Any] | None) -> str:
 def _active_lineage_sample_health_line(item: dict[str, Any] | None) -> str:
     sample = dict(item or {})
     return (
-        f"active_lineage_sample_health: active={bool(sample.get('active', False))} | "
+        f"active_lineage_sample_health: active={_safe_bool(sample.get('active', False))} | "
         f"hours_open={float(sample.get('hours_open', 0.0) or 0.0):.2f} | "
         f"threshold_hours={int(sample.get('threshold_hours', 0) or 0)} | "
         f"status={sample.get('status') or 'none'}"
@@ -1190,7 +1205,7 @@ def _risk_gate_summary(checklist: dict[str, Any] | None) -> dict[str, Any]:
         last_trade = dict(daily_stats.get("last_trade") or {})
         return {
             "status": str(row.get("status") or "NOT_AVAILABLE"),
-            "blocking": bool(row.get("blocking", False)),
+            "blocking": _safe_bool(row.get("blocking", False)),
             "summary": str(row.get("summary") or ""),
             "risk_state": str(evidence.get("risk_state") or "UNKNOWN"),
             "risk_reason": str(evidence.get("risk_reason") or "unknown"),
@@ -1249,7 +1264,7 @@ def _risk_gate_unlock_summary(item: dict[str, Any] | None) -> dict[str, Any]:
 def _risk_gate_unlock_summary_line(item: dict[str, Any] | None) -> str:
     summary = dict(item or {})
     line = (
-        f"risk_gate_unlock: active={bool(summary.get('active', False))} | "
+        f"risk_gate_unlock: active={_safe_bool(summary.get('active', False))} | "
         f"status={summary.get('status') or 'not_available'} | "
         f"unlock_at={summary.get('unlock_at') or 'n/a'}"
     )
@@ -1289,7 +1304,7 @@ def _post_unlock_review_summary(
         and lineage_gate_ready
         and edge_sample_gate_ready
     )
-    active = bool(unlock_summary.get("active", False)) or review_window_open
+    active = _safe_bool(unlock_summary.get("active", False)) or review_window_open
     if review_window_open:
         next_review_step = "review_validation_and_checklist_before_runtime_reopen"
     elif risk_state != "OPEN" or risk_status != "PASS":
@@ -1344,8 +1359,8 @@ def _post_unlock_review_summary(
 def _post_unlock_review_summary_line(item: dict[str, Any] | None) -> str:
     summary = dict(item or {})
     return (
-        f"post_unlock_review: active={bool(summary.get('active', False))} | "
-        f"review_window_open={bool(summary.get('review_window_open', False))} | "
+        f"post_unlock_review: active={_safe_bool(summary.get('active', False))} | "
+        f"review_window_open={_safe_bool(summary.get('review_window_open', False))} | "
         f"current_stage={summary.get('current_stage') or 'unknown'} | "
         f"checklist={summary.get('current_checklist_status') or 'UNKNOWN'} | "
         f"validation={summary.get('current_validation_playbook_go_no_go') or summary.get('current_validation_approve_value') or 'n/a'} | "
@@ -1365,7 +1380,7 @@ def _post_unlock_review_commands_line(item: dict[str, Any] | None) -> str:
 
 def _default_post_unlock_bundle_result(review_summary: dict[str, Any] | None) -> dict[str, Any]:
     summary = dict(review_summary or {})
-    review_window_open = bool(summary.get("review_window_open", False))
+    review_window_open = _safe_bool(summary.get("review_window_open", False))
     status = (
         osc.RUNTIME_REOPEN_STATUS_REVIEW_WINDOW_OPEN_PENDING_BUNDLE
         if review_window_open
@@ -1377,7 +1392,7 @@ def _default_post_unlock_bundle_result(review_summary: dict[str, Any] | None) ->
         else "post-unlock bundle review is waiting for the review window to open"
     )
     return {
-        "active": bool(summary.get("active", False)),
+        "active": _safe_bool(summary.get("active", False)),
         "executed": False,
         "status": status,
         "summary": summary_text,
@@ -1388,8 +1403,8 @@ def _default_post_unlock_bundle_result(review_summary: dict[str, Any] | None) ->
 def _post_unlock_bundle_result_line(item: dict[str, Any] | None) -> str:
     summary = dict(item or {})
     return (
-        f"post_unlock_bundle: active={bool(summary.get('active', False))} | "
-        f"executed={bool(summary.get('executed', False))} | "
+        f"post_unlock_bundle: active={_safe_bool(summary.get('active', False))} | "
+        f"executed={_safe_bool(summary.get('executed', False))} | "
         f"status={summary.get('status') or 'not_available'}"
     )
 
@@ -1404,7 +1419,7 @@ def _runtime_reopen_status(
     review = dict(review_summary or {})
     bundle = dict(bundle_result or {})
     risk_closed = str(risk_summary.get("risk_state") or "").upper() == "CLOSED"
-    review_window_open = bool(review.get("review_window_open", False))
+    review_window_open = _safe_bool(review.get("review_window_open", False))
     bundle_status = str(bundle.get("status") or "").upper()
 
     if risk_closed:
@@ -1433,7 +1448,7 @@ def _runtime_reopen_status_line(item: dict[str, Any] | None) -> str:
     summary = dict(item or {})
     return (
         f"runtime_reopen_status: status={summary.get('status') or 'not_available'} | "
-        f"ready={bool(summary.get('ready', False))}"
+        f"ready={_safe_bool(summary.get('ready', False))}"
     )
 
 
@@ -1863,11 +1878,11 @@ def _runtime_self_heal_summary_line(item: dict[str, Any] | None) -> str:
     if not summary:
         return "runtime_self_heal: not_available"
     return (
-        f"runtime_self_heal: active={bool(summary.get('active', False))}"
+        f"runtime_self_heal: active={_safe_bool(summary.get('active', False))}"
         f" | stale_cleanup={int(summary.get('stale_cleanup_events', 0) or 0)}"
-        f" | latest_reentry_ignored={bool(summary.get('latest_reentry_block_ignored', False))}"
+        f" | latest_reentry_ignored={_safe_bool(summary.get('latest_reentry_block_ignored', False))}"
         f" | latest_duplicate_ignored={int(summary.get('latest_duplicate_intents_ignored', 0) or 0)}"
-        f" | last_submit_ready_self_heal={bool(summary.get('latest_submit_ready_self_heal_applied', False))}"
+        f" | last_submit_ready_self_heal={_safe_bool(summary.get('latest_submit_ready_self_heal_applied', False))}"
         + (f" | summary={summary.get('summary')}" if summary.get("summary") else "")
     )
 
@@ -2247,7 +2262,7 @@ def _runtime_mitigation_wait_summary_line(item: dict[str, Any] | None) -> str:
     summary = dict(item or {})
     allowed_sessions = ",".join(str(item) for item in list(summary.get("allowed_sessions") or []) if str(item).strip())
     guard_text = ""
-    if bool(summary.get("watch_guard_active", False)):
+    if _safe_bool(summary.get("watch_guard_active", False)):
         families = ",".join(str(item) for item in list(summary.get("watch_guard_families") or []) if str(item).strip())
         guard_scope = families or str(summary.get("watch_guard_family") or "none")
         guard_text = f" | guard={summary.get('watch_guard_reason_code') or 'active'}:{guard_scope}"
@@ -2530,7 +2545,7 @@ def _enrich_risk_gate_unlock_summary(
     edge_sample_gate_ready: bool,
 ) -> dict[str, Any]:
     summary = dict(unlock_summary or {})
-    if not bool(summary.get("active", False)):
+    if not _safe_bool(summary.get("active", False)):
         return summary
 
     checklist_payload = dict(checklist or {})
@@ -2575,7 +2590,7 @@ def _stage_from_payload(
     close_only_active = _active_close_only(dashboard)
 
     if (
-        dashboard.get("new_entries_allowed") is False
+        not _safe_bool(dashboard.get("new_entries_allowed"), default=True)
         or close_only_active
         or playbook_go_no_go == "NO_GO"
         or str(checklist.get("overall_status") or "").upper() == "FAIL"
@@ -2612,7 +2627,7 @@ def _stage_message_fields(
     checklist_status = str(checklist.get("overall_status") or "").upper()
 
     blockers: list[str] = []
-    if dashboard.get("new_entries_allowed") is False:
+    if not _safe_bool(dashboard.get("new_entries_allowed"), default=True):
         blockers.append("runtime_no_go")
     if close_only_active:
         blockers.append("close_only_active")
@@ -2830,10 +2845,10 @@ def _build_stage_payload(
         edge_experiment_review=edge_experiment_review,
         lineage_sample_summary=lineage_sample_summary,
     )
-    payload["lineage_gate_ready"] = bool(payload["readiness_gates"]["lineage_gate_ready"])
-    payload["candidate_gate_ready"] = bool(payload["readiness_gates"]["candidate_gate_ready"])
-    payload["edge_sample_gate_ready"] = bool(payload["readiness_gates"]["edge_sample_gate_ready"])
-    payload["all_readiness_gates_ready"] = bool(payload["readiness_gates"]["all_ready"])
+    payload["lineage_gate_ready"] = _safe_bool(payload["readiness_gates"]["lineage_gate_ready"])
+    payload["candidate_gate_ready"] = _safe_bool(payload["readiness_gates"]["candidate_gate_ready"])
+    payload["edge_sample_gate_ready"] = _safe_bool(payload["readiness_gates"]["edge_sample_gate_ready"])
+    payload["all_readiness_gates_ready"] = _safe_bool(payload["readiness_gates"]["all_ready"])
     payload["risk_gate_unlock_summary"] = _enrich_risk_gate_unlock_summary(
         payload.get("risk_gate_unlock_summary"),
         checklist=checklist,

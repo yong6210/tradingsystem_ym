@@ -34,6 +34,21 @@ class ExecutionDegradationAdvisoryService:
             return default
         return parsed if isfinite(parsed) else default
 
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
     def _slippage_thresholds(self) -> dict[str, float]:
         manual = self._safe_float(self.settings.auto_trading_max_slippage_bps, default=12.0)
         watch = max(6.0, round(manual * 0.7, 4))
@@ -310,7 +325,7 @@ class ExecutionDegradationAdvisoryService:
             )
 
         stress_recommendation = dict(stress_payload.get("deployment_recommendation") or {})
-        stress_pass = bool(stress_recommendation.get("stress_pass", False))
+        stress_pass = self._safe_bool(stress_recommendation.get("stress_pass", False))
         stress_reason = str(stress_recommendation.get("reason", "") or "")
         perf_cost = dict(performance_payload.get("cost") or {})
         stressed_cost_ev = float(perf_cost.get("stressed_cost_ev", 0.0) or 0.0)

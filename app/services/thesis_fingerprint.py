@@ -61,6 +61,20 @@ class ThesisFingerprintService:
             return default
         return int(parsed) if isfinite(parsed) else default
 
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "y", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+                return False
+        return True if value else False
+
     def build(
         self,
         *,
@@ -117,7 +131,7 @@ class ThesisFingerprintService:
             strategy_family=str(validity.get("strategy_family", "legacy_zone_plan")),
             reaction_classification=str(validity.get("reaction_classification", "mixed")),
             zone_type=str(validity.get("zone_type", "")),
-            near_lp=bool(validity.get("near_lp", False)),
+            near_lp=self._safe_bool(validity.get("near_lp", False)),
             at=plan.valid_from,
         )
 
@@ -144,7 +158,7 @@ class ThesisFingerprintService:
             strategy_family=str(row.get("strategy_family") or validity.get("strategy_family", "legacy_zone_plan")),
             reaction_classification=str(validity.get("reaction_classification", "mixed")),
             zone_type=str(validity.get("zone_type", row.get("zone_type", ""))),
-            near_lp=bool(validity.get("near_lp", False)),
+            near_lp=self._safe_bool(validity.get("near_lp", False)),
             at=at or row.get("valid_from"),
         )
 

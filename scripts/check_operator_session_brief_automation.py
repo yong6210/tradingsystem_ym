@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,9 +15,13 @@ from typing import Any
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 REPORT_DIR = ROOT_DIR / "reports" / "operations" / "operator_session_briefs"
 START_LABEL = "com.yumin.trading.operator-brief-shift-start"
 END_LABEL = "com.yumin.trading.operator-brief-shift-end"
+
+from scripts.operation_report_io import atomic_write_text
 
 
 @dataclass
@@ -265,7 +270,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append("```json")
     lines.append(json.dumps(payload, ensure_ascii=False, indent=2))
     lines.append("```")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def main() -> int:

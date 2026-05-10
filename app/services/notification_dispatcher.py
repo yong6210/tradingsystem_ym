@@ -73,6 +73,21 @@ class NotificationDispatcher:
             return default
         return int(parsed) if isfinite(parsed) else default
 
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value) if isfinite(float(value)) else bool(default)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
     @classmethod
     def reset_circuit_state(cls) -> None:
         with cls._circuit_lock:
@@ -173,7 +188,7 @@ class NotificationDispatcher:
             )
             for route in routes
         ]
-        delivered_count = sum(1 for item in results if bool(item.get("delivered")))
+        delivered_count = sum(1 for item in results if self._safe_bool(item.get("delivered")))
         if delivered_count == len(results):
             reason = "system_delivered_all"
             skipped = False
@@ -183,7 +198,7 @@ class NotificationDispatcher:
             skipped = False
             delivered = True
         else:
-            skipped = all(bool(item.get("skipped")) for item in results)
+            skipped = all(self._safe_bool(item.get("skipped")) for item in results)
             reason = "system_all_skipped" if skipped else "system_delivery_failed"
             delivered = False
 
@@ -485,7 +500,7 @@ class NotificationDispatcher:
     @classmethod
     def _discord_skip_reason(cls, *, alert_type: str, payload: dict[str, Any]) -> str:
         normalized_type = str(alert_type or "").strip().lower()
-        if bool(payload.get("force_send")) or bool(payload.get("force_alert")):
+        if cls._safe_bool(payload.get("force_send")) or cls._safe_bool(payload.get("force_alert")):
             return ""
         if normalized_type in {"test"}:
             return ""

@@ -45,7 +45,18 @@ class ExecutionPlanningService:
 
     @staticmethod
     def _bool(value: Any) -> bool:
-        return bool(value)
+        if value is None:
+            return False
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value) if isfinite(float(value)) else False
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return False
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -674,7 +685,7 @@ class ExecutionPlanningService:
             int((self._utc(plan.valid_until) - datetime.now(timezone.utc)).total_seconds()),
         )
         transition_edge_variant_payload = dict(validity.get("transition_edge_variant") or candidate.get("transition_edge_variant") or {})
-        transition_edge_variant_applied = bool(
+        transition_edge_variant_applied = self._bool(
             validity.get("transition_edge_variant_applied")
             or candidate.get("transition_edge_variant_applied")
         )
@@ -757,7 +768,7 @@ class ExecutionPlanningService:
         candidate: dict[str, Any],
     ) -> bool:
         validity = dict(plan.validity or {})
-        return bool(
+        return ExecutionPlanningService._bool(
             executable_plan.get("transition_edge_variant_applied")
             or candidate.get("transition_edge_variant_applied")
             or validity.get("transition_edge_variant_applied")
@@ -877,7 +888,7 @@ class ExecutionPlanningService:
             executable_plan=executable_plan,
             candidate=candidate,
         )
-        transition_edge_variant_disabled_active = bool(safety.get("transition_edge_variant_disabled_active", False))
+        transition_edge_variant_disabled_active = self._bool(safety.get("transition_edge_variant_disabled_active", False))
         transition_edge_variant_sampling_selected: bool | None = None
         transition_edge_variant_sampling_fraction: float | None = None
         transition_edge_variant_sampling_ratio = 0.0
@@ -1062,7 +1073,7 @@ class ExecutionPlanningService:
                 state == ApprovalState.APPROVED_AUTO
                 and not paper_lineage_sampling_mode
                 and applied_penalty
-                and bool(applied_penalty.get("available"))
+                and self._bool(applied_penalty.get("available"))
                 and str(applied_penalty.get("penalty_tier") or "") == "downgrade_to_manual"
             ):
                 final_state = ApprovalState.APPROVED_MANUAL
@@ -1076,10 +1087,10 @@ class ExecutionPlanningService:
                     {
                         "code": str(item.get("code") or ""),
                         "message": str(item.get("message") or ""),
-                        "blocking": bool(item.get("blocking")),
+                        "blocking": self._bool(item.get("blocking")),
                     }
                 )
-            if applied_penalty and bool(applied_penalty.get("available")):
+            if applied_penalty and self._bool(applied_penalty.get("available")):
                 for code in list(applied_penalty.get("reason_codes") or []):
                     approval_reasons.append(
                         self._outcome_penalty_reason(
@@ -1127,7 +1138,7 @@ class ExecutionPlanningService:
                     else None
                 ),
                 "top_candidate": bool(candidate),
-                "auto_trading_enabled": bool(self.settings.auto_trading_enabled),
+                "auto_trading_enabled": self._bool(self.settings.auto_trading_enabled),
                 "rollout_policy": rollout_policy.to_dict(),
                 "safety_state": safety,
                 "live_cluster_guard": cluster_guard or None,
@@ -1143,9 +1154,9 @@ class ExecutionPlanningService:
             )
         if self._utc(plan.valid_until) <= now:
             return result(ApprovalState.BLOCKED, "stale_plan_expired", "Plan validity already expired.")
-        if self.settings.auto_trading_close_only:
+        if self._bool(self.settings.auto_trading_close_only):
             return result(ApprovalState.BLOCKED, "close_only_mode", "Close-only mode is active; no new entries are allowed.")
-        if not bool(safety.get("new_entry_allowed", True)):
+        if not self._bool(safety.get("new_entry_allowed", True)):
             return result(
                 ApprovalState.BLOCKED,
                 str(safety.get("blocking_reason_code") or "safety_lock_active"),
@@ -1155,7 +1166,7 @@ class ExecutionPlanningService:
             return result(ApprovalState.BLOCKED, "no_runtime_candidate", "No runtime-assessed candidate exists for this plan.")
         if deployment_go_no_go == "NO_GO":
             return result(ApprovalState.BLOCKED, deployment_code or "runtime_no_go", deployment_message)
-        if bool(operating_lock.get("active")) or risk_state == "CLOSED":
+        if self._bool(operating_lock.get("active")) or risk_state == "CLOSED":
             return result(ApprovalState.BLOCKED, "runtime_gate_closed", deployment_message or "Runtime gate is closed.")
         if not override_applied and (
             candidate.get("thesis_rejected_reason") == "duplicate_active_thesis" or block_reason == "thesis_duplicate_blocked"
@@ -1404,7 +1415,7 @@ class ExecutionPlanningService:
                     "micro_live_daily_entry_cap_reached",
                     f"Today's new entry count {daily_new_entry_count} reached the MICRO_LIVE daily cap.",
                 )
-            if bool(symbol_priority_guard.get("blocked")):
+            if self._bool(symbol_priority_guard.get("blocked")):
                 preferred_symbol = str(symbol_priority_guard.get("preferred_symbol") or "")
                 preferred_created_at = str(symbol_priority_guard.get("preferred_created_at") or "")
                 preferred_suffix = f" (latest submit_ready at {preferred_created_at})" if preferred_created_at else ""
@@ -1497,7 +1508,7 @@ class ExecutionPlanningService:
                 "manual_review_required",
                 deployment_message or "Manual review is required before submit.",
             )
-        if not self.settings.auto_trading_enabled:
+        if not self._bool(self.settings.auto_trading_enabled):
             return result(
                 ApprovalState.APPROVED_SHADOW,
                 "auto_trading_disabled",
@@ -1510,20 +1521,20 @@ class ExecutionPlanningService:
                 "Current rollout stage is shadow-only for this family.",
             )
         if family == "session_impulse_retest" and requested_mode in {ExecutionMode.MICRO_LIVE, ExecutionMode.LIVE}:
-            if not bool(getattr(self.settings, "session_impulse_retest_enabled", False)):
+            if not self._bool(getattr(self.settings, "session_impulse_retest_enabled", False)):
                 return result(
                     ApprovalState.APPROVED_SHADOW,
                     "session_impulse_retest_family_disabled",
                     "session_impulse_retest is currently disabled.",
                 )
-            if bool(getattr(self.settings, "session_impulse_retest_shadow_only", False)):
+            if self._bool(getattr(self.settings, "session_impulse_retest_shadow_only", False)):
                 return result(
                     ApprovalState.APPROVED_SHADOW,
                     "session_impulse_retest_shadow_only",
                     "session_impulse_retest is currently configured as shadow-only.",
                 )
             rollout_readiness = dict(safety.get("session_impulse_retest_rollout_readiness") or {})
-            if rollout_readiness and not bool(rollout_readiness.get("ready_for_partial", False)):
+            if rollout_readiness and not self._bool(rollout_readiness.get("ready_for_partial", False)):
                 blockers = [str(item or "") for item in list(rollout_readiness.get("blockers") or []) if str(item or "").strip()]
                 blocker_text = ", ".join(blockers) if blockers else "not_ready"
                 return result(
@@ -1591,7 +1602,7 @@ class ExecutionPlanningService:
         if (
             paper_lineage_sampling_mode
             and outcome_approval_penalty
-            and bool(outcome_approval_penalty.get("available"))
+            and self._bool(outcome_approval_penalty.get("available"))
             and str(outcome_approval_penalty.get("penalty_tier") or "") == "downgrade_to_manual"
         ):
             extra_reasons.append(

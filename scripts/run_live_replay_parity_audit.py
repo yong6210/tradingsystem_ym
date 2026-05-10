@@ -20,6 +20,7 @@ from app.core.config import get_settings
 from app.db.models import OrderIntent
 from app.db.session import SessionLocal, init_db
 from app.services.live_order_lifecycle import LiveOrderLifecycleReporter
+from scripts.operation_report_io import atomic_write_text, parse_report_generated_at
 
 
 _ACTIVE_CONTRACT_REPLAY_BASELINE_FILE = "strategy_proof_contract_live_subset.json"
@@ -527,7 +528,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default),
         "```",
     ]
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def main() -> int:
@@ -549,7 +550,7 @@ def main() -> int:
             min_flow_ratio=float(args.min_flow_ratio),
         )
     if not args.no_write_report:
-        generated = datetime.fromisoformat(str(payload["generated_at"]).replace("Z", "+00:00"))
+        generated = parse_report_generated_at(payload.get("generated_at"))
         report_symbol = str(payload.get("symbol") or payload.get("scope") or "UNKNOWN").upper()
         report_path = ROOT_DIR / args.report_dir / f"live_replay_parity_{report_symbol}_{generated.strftime('%Y%m%dT%H%M%SZ')}.md"
         _write_report(report_path, payload)

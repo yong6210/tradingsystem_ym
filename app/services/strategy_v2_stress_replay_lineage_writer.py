@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings, get_settings
+from app.services.report_io import atomic_write_text
 from app.services.strategy_v2_stress_replay_lineage import StrategyV2StressReplayLineageService
 
 
@@ -39,12 +40,27 @@ class StrategyV2StressReplayLineageWriterService:
         except (TypeError, ValueError):
             return 0
 
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
     def _scenario_trade_rows(self, *, scenario: str, trade_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if scenario == "shock_concentration":
             return [row for row in trade_rows if str(row.get("regime", "range")).lower() == "shock"]
         if scenario == "latency_plus_1_bar":
-            return [row for row in trade_rows if bool(row.get("latency_bar_exists", False))]
-        return [row for row in trade_rows if bool(row.get("full_fill_path", False))]
+            return [row for row in trade_rows if self._safe_bool(row.get("latency_bar_exists", False))]
+        return [row for row in trade_rows if self._safe_bool(row.get("full_fill_path", False))]
 
     @staticmethod
     def _chunk(rows: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
@@ -113,8 +129,8 @@ class StrategyV2StressReplayLineageWriterService:
         for scenario in self._SCENARIO_ORDER:
             contract_row = dict(scenario_contract.get(scenario) or {})
             scenario_rows = self._scenario_trade_rows(scenario=scenario, trade_rows=trade_rows)
-            ready = bool(contract_row.get("ready", False))
-            prototype_ready = bool(contract_row.get("prototype_ready", False))
+            ready = self._safe_bool(contract_row.get("ready", False))
+            prototype_ready = self._safe_bool(contract_row.get("prototype_ready", False))
             executable = ready or prototype_ready
             summary: dict[str, Any] = {
                 "ready": ready,
@@ -142,7 +158,7 @@ class StrategyV2StressReplayLineageWriterService:
                     generated_at=now.isoformat(),
                 )
                 file_path = batch_dir / f"{scenario}_batch_{batch_index:02d}.json"
-                file_path.write_text(json.dumps(batch_payload, ensure_ascii=True, indent=2), encoding="utf-8")
+                atomic_write_text(file_path, json.dumps(batch_payload, ensure_ascii=True, indent=2))
                 written_batches.append(
                     {
                         "batch_id": f"{symbol}:{version}:{scenario}:{batch_index:02d}",
@@ -188,7 +204,7 @@ class StrategyV2StressReplayLineageWriterService:
         for scenario in self._SCENARIO_ORDER:
             row = dict((payload.get("scenario_batches") or {}).get(scenario) or {})
             lines.append(
-                f"- {scenario}: ready={bool(row.get('ready', False))}, prototype_ready={bool(row.get('prototype_ready', False))}, "
+                f"- {scenario}: ready={self._safe_bool(row.get('ready', False))}, prototype_ready={self._safe_bool(row.get('prototype_ready', False))}, "
                 f"candidate_trades={int(row.get('candidate_trades', 0) or 0)}, "
                 f"batches={len(row.get('batches', []))}, gating_reason={row.get('gating_reason', 'not_available')}"
             )
@@ -207,7 +223,7 @@ class StrategyV2StressReplayLineageWriterService:
                 "",
             ]
         )
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(
@@ -227,8 +243,10 @@ class StrategyV2StressReplayLineageWriterService:
         scenario_contract = dict(runner_payload.get("scenario_contract") or {})
         runner_contract = dict(runner_payload.get("runner_contract") or {})
         lineage_contract = dict(lineage_payload.get("lineage_contract") or {})
-        available = bool(lineage_payload.get("available", False)) and bool(runner_payload.get("available", False))
-        runtime_job_ready = bool(runner_payload.get("runtime_job_ready", False))
+        available = self._safe_bool(lineage_payload.get("available", False)) and self._safe_bool(
+            runner_payload.get("available", False)
+        )
+        runtime_job_ready = self._safe_bool(runner_payload.get("runtime_job_ready", False))
         blocked_by = list(dict.fromkeys([*(lineage_payload.get("blocked_by") or []), *(runner_payload.get("blocked_by") or [])]))
         next_steps = list(dict.fromkeys([*(lineage_payload.get("next_steps") or []), *(runner_payload.get("next_steps") or [])]))
 

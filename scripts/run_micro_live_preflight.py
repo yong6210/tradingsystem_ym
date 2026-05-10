@@ -18,6 +18,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.core.config import get_settings
 from app.core import operator_surface_contracts as osc
+from scripts.operation_report_io import atomic_write_text
 
 _REQUEST_RETRY_ATTEMPTS = 3
 _REQUEST_RETRY_BASE_DELAY_SECONDS = 0.5
@@ -201,6 +202,19 @@ def _int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return int(default)
+
+
+def _bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return True if value else False
 
 
 def _surface_strip_summary(payload: dict[str, Any] | None, *, surface_type: str = "generic") -> dict[str, str]:
@@ -659,9 +673,9 @@ def _micro_live_config_drift_checks(*, check_binance_rules: bool = False) -> lis
     checks.append(
         {
             "name": "binance_live_order_switch",
-            "status": _status((not live_mode) or bool(getattr(settings, "binance_trade_live_enabled", False))),
+            "status": _status((not live_mode) or _bool(getattr(settings, "binance_trade_live_enabled", False))),
             "severity": "blocking",
-            "message": f"binance_trade_live_enabled={bool(getattr(settings, 'binance_trade_live_enabled', False))}",
+            "message": f"binance_trade_live_enabled={_bool(getattr(settings, 'binance_trade_live_enabled', False))}",
         }
     )
     missing_global = sorted(live_symbols - global_symbols) if global_symbols else []
@@ -736,8 +750,8 @@ def _micro_live_config_drift_checks(*, check_binance_rules: bool = False) -> lis
     )
 
     if "session_impulse_retest" in live_families:
-        sir_enabled = bool(getattr(settings, "session_impulse_retest_enabled", False))
-        sir_shadow_only = bool(getattr(settings, "session_impulse_retest_shadow_only", True))
+        sir_enabled = _bool(getattr(settings, "session_impulse_retest_enabled", False))
+        sir_shadow_only = _bool(getattr(settings, "session_impulse_retest_shadow_only", True), default=True)
         sir_symbols = _csv_set(getattr(settings, "session_impulse_retest_allowed_symbols", ""))
         missing_sir_live_symbols = sorted(live_symbols - sir_symbols) if sir_symbols else []
         tracked_only_symbols = sorted(sir_symbols - live_symbols)
@@ -778,13 +792,13 @@ def _micro_live_config_drift_checks(*, check_binance_rules: bool = False) -> lis
         {
             "name": "live_liquidity_gate",
             "status": _status(
-                bool(getattr(settings, "auto_trading_live_liquidity_gate_enabled", False))
-                and bool(getattr(settings, "auto_trading_live_liquidity_gate_fail_closed", True))
+                _bool(getattr(settings, "auto_trading_live_liquidity_gate_enabled", False))
+                and _bool(getattr(settings, "auto_trading_live_liquidity_gate_fail_closed", True))
             ),
             "severity": "blocking",
             "message": (
-                f"enabled={bool(getattr(settings, 'auto_trading_live_liquidity_gate_enabled', False))} "
-                f"fail_closed={bool(getattr(settings, 'auto_trading_live_liquidity_gate_fail_closed', True))}"
+                f"enabled={_bool(getattr(settings, 'auto_trading_live_liquidity_gate_enabled', False))} "
+                f"fail_closed={_bool(getattr(settings, 'auto_trading_live_liquidity_gate_fail_closed', True))}"
             ),
         }
     )
@@ -816,7 +830,7 @@ def _live_routable_candidate(candidate: dict[str, Any], *, dashboard_payload: di
         ),
         None,
     )
-    if not policy or not bool(policy.get("live_enabled")):
+    if not policy or not _bool(policy.get("live_enabled")):
         return False
     execution_mode = str(dashboard_payload.get("execution_mode") or "MICRO_LIVE").strip().upper()
     if execution_mode == "MICRO_LIVE":
@@ -898,8 +912,8 @@ def _edge_experiment_summary(
     edge_proof_posture = dict(source.get("edge_proof_posture") or {})
     daily_edge_kpis = dict(source.get("daily_edge_kpis") or {})
     return {
-        "available": bool(source.get("available", True)),
-        "advisory_only": bool(source.get("advisory_only", True)),
+        "available": _bool(source.get("available", True), default=True),
+        "advisory_only": _bool(source.get("advisory_only", True), default=True),
         "edge_state": str(source.get("edge_state") or "insufficient_edge_measurement"),
         "summary": str(source.get("summary") or ""),
         "true_edge_ratio": round(_float(source.get("true_edge_ratio")), 4),
@@ -987,13 +1001,13 @@ def _edge_evolution_summary(
     if not source:
         return None
     return {
-        "available": bool(source.get("available", True)),
-        "advisory_only": bool(source.get("advisory_only", True)),
+        "available": _bool(source.get("available", True), default=True),
+        "advisory_only": _bool(source.get("advisory_only", True), default=True),
         "evolution_state": str(source.get("evolution_state") or "insufficient_sample"),
         "recommended_action": str(source.get("recommended_action") or "keep_current_baseline"),
         "allocation_bias": str(source.get("allocation_bias") or "hold_current_baseline"),
         "summary": str(source.get("summary") or ""),
-        "kill_review_triggered": bool(source.get("kill_review_triggered", False)),
+        "kill_review_triggered": _bool(source.get("kill_review_triggered", False)),
         "promotion_candidate_axis": str(source.get("promotion_candidate_axis") or "none"),
         "promotion_candidate_variant": str(source.get("promotion_candidate_variant") or "none"),
     }
@@ -1023,7 +1037,7 @@ def _review_followup_summary(
     if not source:
         return None
     return {
-        "available": bool(source.get("available", False)),
+        "available": _bool(source.get("available", False)),
         "last_status": str(source.get("last_status") or "none"),
         "last_generated_status": str(source.get("last_generated_status") or source.get("last_status") or "none"),
         "last_decision_status": str(source.get("last_decision_status") or "none"),
@@ -1336,7 +1350,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append("```json")
     lines.append(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     lines.append("```")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def main() -> int:
@@ -1475,14 +1489,14 @@ def main() -> int:
     checks.append(
         {
             "name": "auto_trading_enabled",
-            "status": _status(bool(dashboard.get("auto_trading_enabled", False))),
+            "status": _status(_bool(dashboard.get("auto_trading_enabled", False))),
             "message": f"execution_mode={dashboard.get('execution_mode', 'unknown')}",
         }
     )
     checks.append(
         {
             "name": "new_entries_allowed",
-            "status": _status(bool(dashboard.get("new_entries_allowed", False))),
+            "status": _status(_bool(dashboard.get("new_entries_allowed", False))),
             "message": (
                 f"approve={dashboard_strip.get('approve_value', '')} | "
                 f"align={dashboard_strip.get('align_value', '')} | "
@@ -1519,15 +1533,15 @@ def main() -> int:
         {
             "name": "safety_state",
             "status": _status(
-                not bool(safety.get("kill_switch_active", False))
-                and not bool(safety.get("close_only_active", False))
-                and not bool(safety.get("config_close_only_active", False))
+                not _bool(safety.get("kill_switch_active", False))
+                and not _bool(safety.get("close_only_active", False))
+                and not _bool(safety.get("config_close_only_active", False))
             ),
             "message": f"kill={safety.get('kill_switch_active', False)} close_only={safety.get('close_only_active', False)} config_close_only={safety.get('config_close_only_active', False)}",
         }
     )
     reconcile_summary = reconcile if isinstance(reconcile, dict) else {}
-    reconcile_healthy = bool(reconcile_summary.get("healthy", not bool(reconcile_summary.get("mismatches", []))))
+    reconcile_healthy = _bool(reconcile_summary.get("healthy", not _bool(reconcile_summary.get("mismatches", []))))
     checks.append(
         {
             "name": "reconciliation",
@@ -1539,8 +1553,8 @@ def main() -> int:
     checks.append(
         {
             "name": "alert_channel",
-            "status": _status(bool(latest_validation_alert) or bool((alerts.get("overall") or {}).get("total", 0))),
-            "message": f"latest_validation_alert={bool(latest_validation_alert)}",
+            "status": _status(_bool(latest_validation_alert) or _bool((alerts.get("overall") or {}).get("total", 0))),
+            "message": f"latest_validation_alert={_bool(latest_validation_alert)}",
         }
     )
     config_drift_checks = _micro_live_config_drift_checks(check_binance_rules=bool(getattr(args, "check_binance_rules", False)))

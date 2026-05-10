@@ -16,7 +16,22 @@ from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
 from app.services.live_order_lifecycle import LiveOrderLifecycleReporter
 from app.services.notification_dispatcher import NotificationDispatcher
+from scripts.operation_report_io import atomic_write_text, parse_report_generated_at
 from scripts.run_micro_live_runtime_guard import _blocked_intent_diagnostics
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,10 +84,7 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    tmp_path.write_text(content, encoding="utf-8")
-    tmp_path.replace(path)
+    atomic_write_text(path, content)
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -231,7 +243,7 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
     if atomic:
         _atomic_write_text(path, content)
     else:
-        path.write_text(content, encoding="utf-8")
+        _atomic_write_text(path, content)
 
 
 def _write_latest_aliases(*, report_dir: Path, payload: dict[str, Any]) -> dict[str, str]:
@@ -246,24 +258,25 @@ def _write_latest_aliases(*, report_dir: Path, payload: dict[str, Any]) -> dict[
 
 
 def _notification_delivered(result: dict[str, Any]) -> bool:
-    return bool(dict(result or {}).get("delivered"))
+    return _safe_bool(dict(result or {}).get("delivered"))
 
 
 def main() -> int:
     args = parse_args()
     payload = build_payload(days=max(1, int(args.days)), limit=max(1, int(args.limit)), min_intents=max(1, int(args.min_intents)))
     if not args.no_write_report:
-        generated = datetime.fromisoformat(str(payload["generated_at"]).replace("Z", "+00:00"))
+        generated = parse_report_generated_at(payload.get("generated_at"))
         report_dir = ROOT_DIR / args.report_dir
         report_path = report_dir / f"micro_live_no_order_watchdog_{generated.strftime('%Y%m%dT%H%M%SZ')}.md"
         payload["report_path"] = _display_path(report_path)
         payload["latest_report_path"] = _display_path(report_dir / "latest.md")
         payload["latest_json_path"] = _display_path(report_dir / "latest.json")
-        _write_report(report_path, payload)
+        _write_report(report_path, payload, atomic=True)
         payload.update(_write_latest_aliases(report_dir=report_dir, payload=payload))
 
     evaluation = dict(payload.get("evaluation") or {})
-    if bool(args.notify) and bool(evaluation.get("alert")):
+    alert_active = _safe_bool(evaluation.get("alert"))
+    if bool(args.notify) and alert_active:
         state_file = _resolve_root_path(str(args.state_file))
         dedupe_key = f"{evaluation.get('reason')}:{_top_reasons_text(dict(evaluation.get('top_block_reasons') or {}), limit=4)}"
         now = datetime.now(UTC)
@@ -299,7 +312,7 @@ def main() -> int:
             payload["notification"] = {"skipped": True, "reason": "cooldown_active"}
 
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
-    return 1 if bool(evaluation.get("alert")) and not bool(args.no_fail_exit) else 0
+    return 1 if alert_active and not bool(args.no_fail_exit) else 0
 
 
 if __name__ == "__main__":

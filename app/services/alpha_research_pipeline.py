@@ -8,6 +8,7 @@ from typing import Any
 
 from app.core.config import Settings, get_settings
 from app.services.edge_experiment_review import build_edge_experiment_review, summarize_edge_experiment_review
+from app.services.report_io import atomic_write_text
 
 _SOFTENING_RESEARCH_REASONS = {
     "risk_budget_below_min",
@@ -17,6 +18,20 @@ _EXIT_SHADOW_REVIEW_ACTIONS = {
     "run_shadow_exit_review",
     "run_shadow_exit_timing_review",
 }
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return True if value else False
 
 
 class AlphaResearchPipelineService:
@@ -67,7 +82,7 @@ class AlphaResearchPipelineService:
             return source
 
         recommended_action = str(source.get("recommended_action") or "")
-        deferred = recommended_action in _EXIT_SHADOW_REVIEW_ACTIONS and not bool(
+        deferred = recommended_action in _EXIT_SHADOW_REVIEW_ACTIONS and not _safe_bool(
             sequence.get("exit_optimization_allowed", False)
         )
         source.update(
@@ -75,7 +90,7 @@ class AlphaResearchPipelineService:
                 "experiment_sequence_state": str(sequence.get("state") or "unknown"),
                 "current_priority_experiment": str(sequence.get("current_priority_experiment") or "unknown"),
                 "current_priority_action": str(sequence.get("current_priority_action") or "unknown"),
-                "exit_optimization_allowed": bool(sequence.get("exit_optimization_allowed", False)),
+                "exit_optimization_allowed": _safe_bool(sequence.get("exit_optimization_allowed", False)),
                 "deferred_by_experiment_sequence": deferred,
                 "sequencing_reason": str(sequence.get("summary") or ""),
             }
@@ -885,7 +900,7 @@ class AlphaResearchPipelineService:
         strength_rank = {"high": 2, "medium": 1, "low": 0}
         suspects.sort(
             key=lambda row: (
-                bool(row.get("execution_drag_conflict")),
+                _safe_bool(row.get("execution_drag_conflict")),
                 -int(strength_rank.get(str(row.get("alignment_strength") or "low"), 0)),
                 -int(row.get("matched_candidates", 0) or 0),
                 -float(row.get("avg_expected_ev_r", 0.0) or 0.0),
@@ -973,7 +988,7 @@ class AlphaResearchPipelineService:
                 ),
                 {},
             )
-            conflict = bool(suspect.get("execution_drag_conflict", False))
+            conflict = _safe_bool(suspect.get("execution_drag_conflict", False))
             alignment_strength = str(suspect.get("alignment_strength") or "low")
             priority = "p2"
             if not conflict and alignment_strength == "high":
@@ -1007,7 +1022,7 @@ class AlphaResearchPipelineService:
         review_items.sort(
             key=lambda row: (
                 str(row.get("review_priority") or "p9"),
-                bool(row.get("execution_drag_conflict", False)),
+                _safe_bool(row.get("execution_drag_conflict", False)),
                 -int(confidence_rank.get(str(row.get("confidence") or "low"), 0)),
                 str(row.get("bucket") or ""),
             )
@@ -1045,7 +1060,7 @@ class AlphaResearchPipelineService:
                 {},
             )
             confidence = str(suspect.get("confidence") or "low")
-            conflict = bool(suspect.get("execution_drag_conflict", False))
+            conflict = _safe_bool(suspect.get("execution_drag_conflict", False))
             not_ready_reason = None
             if conflict:
                 not_ready_reason = "execution_drag_conflict"
@@ -1128,7 +1143,7 @@ class AlphaResearchPipelineService:
             f"- max_expected_ev_at_size_r: {float(summary.get('max_expected_ev_at_size_r', 0.0)):.4f}",
             "",
             "## Research Focus Alignment",
-            f"- available: {bool(research_focus_alignment.get('available', False))}",
+            f"- available: {_safe_bool(research_focus_alignment.get('available', False))}",
             f"- analysis_symbol: {research_focus_alignment.get('analysis_symbol')}",
             f"- aligned_candidate_count: {int(research_focus_alignment.get('aligned_candidate_count', 0))}",
             f"- top_focus: {research_focus_alignment.get('top_focus')}",
@@ -1141,22 +1156,22 @@ class AlphaResearchPipelineService:
             f"- shadow_experiment_type: {recommended_action_summary.get('shadow_experiment_type')}",
             f"- confidence: {recommended_action_summary.get('confidence')}",
             f"- sample_note: {recommended_action_summary.get('sample_note')}",
-            f"- deferred_by_experiment_sequence: {bool(recommended_action_summary.get('deferred_by_experiment_sequence', False))}",
+            f"- deferred_by_experiment_sequence: {_safe_bool(recommended_action_summary.get('deferred_by_experiment_sequence', False))}",
             f"- current_priority_experiment: {recommended_action_summary.get('current_priority_experiment')}",
             f"- current_priority_action: {recommended_action_summary.get('current_priority_action')}",
             f"- sequencing_reason: {recommended_action_summary.get('sequencing_reason')}",
             "",
             "## Experiment Sequence",
             f"- state: {experiment_sequence.get('state')}",
-            f"- entry_timing_locked: {bool(experiment_sequence.get('entry_timing_locked', False))}",
-            f"- execution_style_locked: {bool(experiment_sequence.get('execution_style_locked', False))}",
-            f"- exit_optimization_allowed: {bool(experiment_sequence.get('exit_optimization_allowed', False))}",
+            f"- entry_timing_locked: {_safe_bool(experiment_sequence.get('entry_timing_locked', False))}",
+            f"- execution_style_locked: {_safe_bool(experiment_sequence.get('execution_style_locked', False))}",
+            f"- exit_optimization_allowed: {_safe_bool(experiment_sequence.get('exit_optimization_allowed', False))}",
             f"- current_priority_experiment: {experiment_sequence.get('current_priority_experiment')}",
             f"- current_priority_action: {experiment_sequence.get('current_priority_action')}",
             f"- summary: {experiment_sequence.get('summary')}",
             "",
             "## Evidence Summary",
-            f"- available: {bool(evidence_summary.get('available', False))}",
+            f"- available: {_safe_bool(evidence_summary.get('available', False))}",
             f"- analysis_symbol: {evidence_summary.get('analysis_symbol')}",
             f"- coverage_note: {evidence_summary.get('coverage_note')}",
             f"- near_miss_top_reason: {reason_summary.get('top_reason')}",
@@ -1188,11 +1203,11 @@ class AlphaResearchPipelineService:
                 f"- {row.get('axis')}:{row.get('bucket')}: reason={row.get('reason')}, "
                 f"matched_candidates={int(row.get('matched_candidates', 0) or 0)}, "
                 f"alignment_strength={row.get('alignment_strength')}, "
-                f"execution_drag_conflict={bool(row.get('execution_drag_conflict', False))}, "
+                f"execution_drag_conflict={_safe_bool(row.get('execution_drag_conflict', False))}, "
                 f"confidence={row.get('confidence')}"
             )
         lines.extend(["", "## Softening Candidate Review"])
-        lines.append(f"- available: {bool(softening_review.get('available', False))}")
+        lines.append(f"- available: {_safe_bool(softening_review.get('available', False))}")
         top_review = dict(softening_review.get("top_candidate") or {})
         lines.append(
             f"- top_candidate: {top_review.get('axis')}:{top_review.get('bucket')} "
@@ -1203,11 +1218,11 @@ class AlphaResearchPipelineService:
             lines.append(
                 f"- {row.get('review_priority')} {row.get('axis')}:{row.get('bucket')}: "
                 f"reason={row.get('reason')}, action={row.get('recommended_research_action')}, "
-                f"execution_drag_conflict={bool(row.get('execution_drag_conflict', False))}, "
+                f"execution_drag_conflict={_safe_bool(row.get('execution_drag_conflict', False))}, "
                 f"confidence={row.get('confidence')}"
             )
         lines.extend(["", "## Promotion Watchlist"])
-        lines.append(f"- available: {bool(promotion_watchlist.get('available', False))}")
+        lines.append(f"- available: {_safe_bool(promotion_watchlist.get('available', False))}")
         lines.append(f"- watchlist_count: {int(promotion_watchlist.get('watchlist_count', 0) or 0)}")
         for row in promotion_watchlist.get("watch_items") or []:
             lines.append(
@@ -1247,7 +1262,7 @@ class AlphaResearchPipelineService:
             lines.append(f"- {step}")
         lines.append("")
 
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(
@@ -1386,7 +1401,7 @@ class AlphaResearchPipelineService:
             )
         )
 
-        available = bool(rows)
+        available = _safe_bool(rows)
         summary = {
             "alpha_research_candidate_count": len(rows),
             "focus_symbol_candidate_count": len(focus_rows),

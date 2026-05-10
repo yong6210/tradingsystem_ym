@@ -48,6 +48,21 @@ class PositionSizingService:
             return default
         return int(parsed) if isfinite(parsed) else default
 
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value) if isfinite(float(value)) else bool(default)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
     def evaluate(self, payload: PositionSizingInput) -> dict[str, Any]:
         grade = str(payload.strategy_grade or "B").upper()
         family = str(payload.strategy_family or "legacy_zone_plan").lower()
@@ -59,7 +74,7 @@ class PositionSizingService:
         regime_factor, regime_reason = self._regime_factor(regime=regime, transition_state=transition_state)
         reaction_factor, reaction_reason = self._reaction_factor(
             reaction_classification=reaction,
-            confirm_only=bool(payload.confirm_only),
+            confirm_only=self._safe_bool(payload.confirm_only),
         )
         active_thesis_clusters = self._safe_int(payload.active_thesis_clusters)
         thesis_factor, thesis_reason = self._thesis_factor(active_thesis_clusters)
@@ -86,7 +101,7 @@ class PositionSizingService:
             "active_thesis_clusters": active_thesis_clusters,
             "transition_state": transition_state,
             "reaction_classification": reaction,
-            "confirm_only": bool(payload.confirm_only),
+            "confirm_only": self._safe_bool(payload.confirm_only),
             "entry_model": str(payload.entry_model),
             "factors": {
                 "grade_risk": round(grade_risk, 4),
@@ -115,7 +130,7 @@ class PositionSizingService:
                 strategy_grade=validity.get("strategy_grade") or row.get("strategy_grade"),
                 regime=str(row.get("regime") or validity.get("regime", "range")),
                 reaction_classification=str(validity.get("reaction_classification", "not_applicable")),
-                confirm_only=bool(validity.get("strategy_family_confirm_only", False)),
+                confirm_only=self._safe_bool(validity.get("strategy_family_confirm_only", False)),
                 entry_model=str(row.get("entry_model") or validity.get("entry_model", EntryModel.CONFIRM.value)),
                 active_thesis_clusters=active_thesis_clusters,
                 transition_state=str(validity.get("transition_state", "none")),

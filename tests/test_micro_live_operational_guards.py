@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import plistlib
 import sys
 from datetime import UTC, datetime, timedelta
 
 from app.core.config import get_settings
 from scripts import install_micro_live_ops_launchd
 from scripts import build_micro_live_event_blackouts
+from scripts import build_micro_live_plan_blocklist
+from scripts import build_micro_live_strategy_time_contract
+from scripts import operation_report_io
 from scripts import run_binance_rule_drift_snapshot
 from scripts import run_live_reconciliation_watchdog
 from scripts import run_live_replay_parity_audit
 from scripts import run_replay_validation_bridge
 from scripts import run_micro_live_boot_check
+from scripts import run_micro_live_failure_drill
 from scripts import run_micro_live_no_order_watchdog
 from scripts import run_micro_live_ops_heartbeat
 from scripts import run_micro_live_runtime_guard
@@ -52,6 +57,58 @@ def test_no_order_watchdog_alerts_when_live_intents_have_no_submission() -> None
     assert "validation_do_not_deploy=2" in result["message"]
     assert "validation_do_not_deploy->inspect_validation_report_approval_surface" in result["message"]
     assert result["blocked_intent_diagnostics"][0]["recent_samples"][0]["intent_id"] == "intent_1"
+
+
+def test_micro_live_failure_drill_scenarios_catch_expected_failures() -> None:
+    payload = run_micro_live_failure_drill.build_payload()
+    results = {row["name"]: row for row in payload["results"]}
+
+    assert payload["overall_status"] == "PASS"
+    assert payload["failed_count"] == 0
+    assert set(results) == set(run_micro_live_failure_drill.SCENARIOS)
+    assert results["ops_missing_report"]["observed"]["reason"] == "missing_report"
+    assert results["ops_malformed_report"]["observed"]["reason"] == "content_status_missing"
+    assert results["ops_stale_report"]["observed"]["reason"] == "stale_report"
+    assert results["macro_short_horizon"]["observed"]["status_detail"] == "macro_blackout_horizon_below_minimum"
+    assert results["alert_delivery_failure_contract"]["observed"]["heartbeat_failed_delivery"] is False
+    assert results["reconciliation_stale_submission_without_ledger"]["observed"]["issue_type"] == "missing_live_ledger_for_open_submission"
+    assert results["no_order_submit_ready_gap"]["observed"]["reason"] == "submit_ready_intents_without_submission"
+    assert results["runtime_audit_hard_failure_contract"]["observed"]["overall_status"] == "FAIL"
+
+
+def test_micro_live_failure_drill_main_writes_latest_aliases(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setattr(
+        run_micro_live_failure_drill,
+        "build_payload",
+        lambda **_kwargs: {
+            "generated_at": "2026-05-10T00:00:00Z",
+            "overall_status": "PASS",
+            "scenario_count": 1,
+            "failed_count": 0,
+            "passed_count": 1,
+            "results": [{"name": "ops_missing_report", "ok": True, "observed": {}, "expected": {}}],
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_micro_live_failure_drill.py",
+            "--report-dir",
+            str(tmp_path),
+            "--no-fail-exit",
+        ],
+    )
+
+    assert run_micro_live_failure_drill.main() == 0
+    output = json.loads(capsys.readouterr().out)
+
+    assert (tmp_path / "micro_live_failure_drill_20260510T000000Z.md").exists()
+    assert (tmp_path / "latest.md").exists()
+    assert (tmp_path / "latest.json").exists()
+    assert output["latest_report_path"].endswith("latest.md")
+    latest_payload = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
+    assert latest_payload["overall_status"] == "PASS"
 
 
 def test_no_order_watchdog_notification_message_is_concise() -> None:
@@ -374,6 +431,130 @@ def test_event_blackout_fallback_respects_configured_pre_window(tmp_path) -> Non
     )
 
     assert events[0]["event_ts_utc"] == datetime(2026, 5, 12, 12, 30, tzinfo=UTC)
+
+
+def test_event_blackout_builder_main_writes_output_contract_atomically(monkeypatch, tmp_path, capsys) -> None:
+    output_path = tmp_path / "blackouts.json"
+    monkeypatch.setattr(
+        build_micro_live_event_blackouts,
+        "build_contract",
+        lambda **_kwargs: {
+            "schema_version": "micro_live_event_blackout_v1",
+            "generated_at": "2026-05-10T00:00:00Z",
+            "overall_status": "PASS",
+            "source_errors": [],
+            "source_warnings": [],
+            "windows": [],
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "build_micro_live_event_blackouts.py",
+            "--years",
+            "2026",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert build_micro_live_event_blackouts.main() == 0
+    output = json.loads(capsys.readouterr().out)
+    saved = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert output["output_path"] == str(output_path)
+    assert saved["output_path"] == str(output_path)
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_plan_blocklist_builder_main_writes_output_contract_atomically(monkeypatch, tmp_path, capsys) -> None:
+    cache_key = "unit_cache"
+    cache_dir = tmp_path / "reports" / "validation" / "historical_walk_forward_cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / f"{cache_key}.json").write_text(
+        json.dumps(
+            {
+                "trade_rows": [
+                    {"plan_id": "drop_me", "final_exit_realized_r": -1.0},
+                    {"plan_id": "keep_me", "final_exit_realized_r": 1.0},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "contracts" / "plan_blocklist.json"
+    monkeypatch.setattr(build_micro_live_plan_blocklist, "ROOT_DIR", tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "build_micro_live_plan_blocklist.py",
+            "--cache-key",
+            cache_key,
+            "--output",
+            str(output_path),
+            "--max-realized-r",
+            "0",
+        ],
+    )
+
+    assert build_micro_live_plan_blocklist.main() == 0
+    output = json.loads(capsys.readouterr().out)
+    saved = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert output["blocked_plan_count"] == 1
+    assert saved["blocked_plan_ids"] == ["drop_me"]
+    assert saved["output_path"] == "contracts/plan_blocklist.json"
+    assert not list(output_path.parent.glob(".*.tmp"))
+
+
+def test_strategy_time_contract_builder_main_writes_output_contract_atomically(monkeypatch, tmp_path, capsys) -> None:
+    cache_key = "unit_time_cache"
+    cache_dir = tmp_path / "reports" / "validation" / "historical_walk_forward_cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / f"{cache_key}.json").write_text(
+        json.dumps(
+            {
+                "trade_rows": [
+                    {
+                        "symbol": "BTCUSDC",
+                        "strategy_family": "session_impulse_retest",
+                        "entry_model": "LIMIT",
+                        "direction": "LONG",
+                        "generated_ts": "2026-05-10T12:00:00Z",
+                        "final_exit_realized_r": -1.0,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "contracts" / "time_contract.json"
+    monkeypatch.setattr(build_micro_live_strategy_time_contract, "ROOT_DIR", tmp_path)
+    monkeypatch.setattr(build_micro_live_strategy_time_contract, "CACHE_DIR", cache_dir)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "build_micro_live_strategy_time_contract.py",
+            "--cache-key",
+            cache_key,
+            "--output",
+            str(output_path),
+            "--min-trades",
+            "1",
+        ],
+    )
+
+    assert build_micro_live_strategy_time_contract.main() == 0
+    output = json.loads(capsys.readouterr().out)
+    saved = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert output["blocked_bucket_count"] == 1
+    assert saved["blocked_buckets"][0]["hour_utc"] == 12
+    assert saved["output_path"] == "contracts/time_contract.json"
+    assert not list(output_path.parent.glob(".*.tmp"))
 
 
 def test_binance_rule_drift_snapshot_detects_field_changes() -> None:
@@ -907,7 +1088,128 @@ def test_launchd_generator_includes_remaining_operational_guards(tmp_path) -> No
     assert "com.test.micro.ops-heartbeat" in labels
     assert "com.test.micro.replay-validation-bridge" in labels
     assert "com.test.micro.session-impulse-retest-runtime-audit" in labels
+    assert "com.test.micro.failure-drill" in labels
     assert any((tmp_path / f"{label}.plist").exists() for label in labels)
+
+
+def test_launchd_generator_replaces_plists_atomically(tmp_path) -> None:
+    job = install_micro_live_ops_launchd.LaunchdJob(
+        name="atomic_check",
+        label="com.test.micro.atomic-check",
+        args=["/usr/bin/python3", "-V"],
+        start_interval=60,
+    )
+    target = tmp_path / f"{job.label}.plist"
+    target.write_text("old", encoding="utf-8")
+
+    rows = install_micro_live_ops_launchd.write_plists(
+        output_dir=tmp_path,
+        jobs=[job],
+        working_dir=tmp_path,
+        env_file="",
+    )
+
+    assert rows == [{"name": job.name, "label": job.label, "path": str(target)}]
+    with target.open("rb") as handle:
+        payload = plistlib.load(handle)
+    assert payload["Label"] == job.label
+    assert payload["ProgramArguments"] == ["/usr/bin/python3", "-V"]
+    assert not list(tmp_path.glob("*.tmp"))
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_launchd_installer_copies_plists_atomically(tmp_path) -> None:
+    source = tmp_path / "source.plist"
+    target = tmp_path / "target.plist"
+    source.write_text("new", encoding="utf-8")
+    target.write_text("old", encoding="utf-8")
+
+    install_micro_live_ops_launchd._copy_file_atomic(source, target)
+
+    assert target.read_text(encoding="utf-8") == "new"
+    assert not list(tmp_path.glob("*.tmp"))
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_launchd_generator_refreshes_configured_macro_blackout_contract(monkeypatch, tmp_path) -> None:
+    configured = tmp_path / "live_blackouts.json"
+    monkeypatch.setenv("AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH", str(configured))
+    get_settings.cache_clear()
+
+    jobs = install_micro_live_ops_launchd.build_jobs(label_prefix="com.test.micro", python_bin="/usr/bin/python3")
+    macro_job = next(job for job in jobs if job.name == "macro_calendar_blackouts")
+
+    output_arg = macro_job.args[macro_job.args.index("--output") + 1]
+    assert output_arg == str(configured)
+
+
+def test_launchd_generator_uses_env_file_macro_blackout_contract(monkeypatch, tmp_path) -> None:
+    env_configured = tmp_path / "env_live_blackouts.json"
+    shell_configured = tmp_path / "shell_live_blackouts.json"
+    env_file = tmp_path / "ops.env"
+    env_file.write_text(f'export AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH="{env_configured}"\n', encoding="utf-8")
+    monkeypatch.setenv("AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH", str(shell_configured))
+    get_settings.cache_clear()
+
+    jobs = install_micro_live_ops_launchd.build_jobs(
+        label_prefix="com.test.micro",
+        python_bin="/usr/bin/python3",
+        env_file=str(env_file),
+    )
+    macro_job = next(job for job in jobs if job.name == "macro_calendar_blackouts")
+
+    output_arg = macro_job.args[macro_job.args.index("--output") + 1]
+    assert output_arg == str(env_configured)
+
+
+def test_launchd_generator_returns_failure_when_load_fails(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["install_micro_live_ops_launchd.py", "--install", "--load", "--output-dir", str(tmp_path)],
+    )
+    monkeypatch.setattr(
+        install_micro_live_ops_launchd,
+        "build_jobs",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        install_micro_live_ops_launchd,
+        "write_plists",
+        lambda **_kwargs: [{"name": "runtime_guard", "label": "com.test.micro.runtime-guard", "path": str(tmp_path / "job.plist")}],
+    )
+    monkeypatch.setattr(
+        install_micro_live_ops_launchd,
+        "install_plists",
+        lambda **_kwargs: [{"action": "load", "returncode": 5, "stderr": "bootstrap failed"}],
+    )
+
+    assert install_micro_live_ops_launchd.main() == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["overall_status"] == "FAIL"
+
+
+def test_launchd_generator_keeps_unload_failure_as_warning(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["install_micro_live_ops_launchd.py", "--install", "--unload", "--output-dir", str(tmp_path)],
+    )
+    monkeypatch.setattr(install_micro_live_ops_launchd, "build_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(
+        install_micro_live_ops_launchd,
+        "write_plists",
+        lambda **_kwargs: [{"name": "runtime_guard", "label": "com.test.micro.runtime-guard", "path": str(tmp_path / "job.plist")}],
+    )
+    monkeypatch.setattr(
+        install_micro_live_ops_launchd,
+        "install_plists",
+        lambda **_kwargs: [{"action": "unload", "returncode": 5, "stderr": "not loaded"}],
+    )
+
+    assert install_micro_live_ops_launchd.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["overall_status"] == "WARN"
 
 
 def test_boot_check_fails_when_reconciliation_watchdog_alerts(monkeypatch) -> None:
@@ -927,6 +1229,11 @@ def test_boot_check_fails_when_reconciliation_watchdog_alerts(monkeypatch) -> No
         "run_canary",
         lambda **_kwargs: {"overall_status": "PASS", "symbol": "BTCUSDC", "no_live_order_sent": True},
     )
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_micro_live_failure_drill,
+        "build_payload",
+        lambda **_kwargs: {"overall_status": "PASS", "scenario_count": 8, "failed_count": 0},
+    )
 
     payload = run_micro_live_boot_check.build_payload(
         days=1,
@@ -938,6 +1245,42 @@ def test_boot_check_fails_when_reconciliation_watchdog_alerts(monkeypatch) -> No
 
     assert payload["overall_status"] == "FAIL"
     assert payload["blocking_failure_count"] == 1
+
+
+def test_boot_check_fails_when_failure_contract_drill_fails(monkeypatch) -> None:
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_micro_live_runtime_guard,
+        "build_payload",
+        lambda **_kwargs: {"overall_status": "PASS", "blocking_failures": []},
+    )
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_live_reconciliation_watchdog,
+        "build_payload",
+        lambda **_kwargs: {"overall_status": "OK", "evaluation": {"alert": False, "message": "ok"}},
+    )
+    monkeypatch.setattr(run_micro_live_boot_check.run_live_reconciliation_watchdog, "_default_stale_minutes", lambda _value: 3)
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_micro_live_synthetic_canary,
+        "run_canary",
+        lambda **_kwargs: {"overall_status": "PASS", "symbol": "BTCUSDC", "no_live_order_sent": True},
+    )
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_micro_live_failure_drill,
+        "build_payload",
+        lambda **_kwargs: {"overall_status": "FAIL", "scenario_count": 8, "failed_count": 1},
+    )
+
+    payload = run_micro_live_boot_check.build_payload(
+        days=1,
+        limit=10,
+        symbol="BTCUSDC",
+        check_binance_rules=False,
+        canary_network=False,
+    )
+
+    assert payload["overall_status"] == "FAIL"
+    assert payload["blocking_failure_count"] == 1
+    assert payload["components"][-1]["name"] == "failure_contract_drill"
 
 
 def test_boot_check_main_writes_latest_aliases(monkeypatch, tmp_path, capsys) -> None:
@@ -1195,6 +1538,25 @@ def test_ops_heartbeat_atomic_write_replaces_existing_file(tmp_path) -> None:
 
     assert target.read_text(encoding="utf-8") == '{"ok":true}'
     assert not list(tmp_path.glob("*.tmp"))
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_report_atomic_writers_use_unique_tmp_cleanup(tmp_path) -> None:
+    writers = [
+        operation_report_io.atomic_write_text,
+        run_micro_live_ops_heartbeat._atomic_write_text,
+        run_micro_live_no_order_watchdog._atomic_write_text,
+        run_replay_validation_bridge._atomic_write_text,
+    ]
+    for index, writer in enumerate(writers):
+        target = tmp_path / f"latest_{index}.json"
+        target.write_text("old", encoding="utf-8")
+
+        writer(target, '{"ok":true}')
+
+        assert target.read_text(encoding="utf-8") == '{"ok":true}'
+    assert not list(tmp_path.glob("*.tmp"))
+    assert not list(tmp_path.glob(".*.tmp"))
 
 
 def test_ops_heartbeat_warns_on_fresh_report_warning_status(monkeypatch, tmp_path) -> None:

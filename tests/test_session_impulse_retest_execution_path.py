@@ -138,6 +138,50 @@ def _metrics() -> dict:
     }
 
 
+def _write_bridge_pass_reports(root: Path) -> None:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    backtest_dir = root / "backtests"
+    portfolio_dir = root / "risk_sweeps"
+    backtest_dir.mkdir(parents=True, exist_ok=True)
+    portfolio_dir.mkdir(parents=True, exist_ok=True)
+    (backtest_dir / "micro_main_usdt_proxy_backtest_20260510T114636Z.json").write_text(
+        json.dumps(
+            {
+                "generated_at": generated_at,
+                "days": 1095,
+                "results": {
+                    "BTCUSDT": {
+                        "proxy_symbol": "BTCUSDT",
+                        "canonical_symbol": "BTCUSDC",
+                        "summary": {
+                            "closed": 141,
+                            "ev_r": 0.5307,
+                            "total_r": 74.8267,
+                            "win_rate": 0.6454,
+                            "decision": "PASS",
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (portfolio_dir / "micro_main_usdt_proxy_yearly_portfolio_replay_20260510T113926Z.json").write_text(
+        json.dumps(
+            {
+                "generated_at": generated_at,
+                "symbols": {"BTCUSDC": {"year_1": {}, "year_2": {}, "year_3": {}}},
+                "horizons": {
+                    "year_1": {"1.0%": {"accepted_trades": 1437, "return_pct": 743.83, "max_drawdown_pct": 6.90}},
+                    "year_2": {"1.0%": {"accepted_trades": 1597, "return_pct": 941.94, "max_drawdown_pct": 10.93}},
+                    "year_3": {"1.0%": {"accepted_trades": 1363, "return_pct": 740.05, "max_drawdown_pct": 6.16}},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _patch_runtime(engine: StrategyEngine, *, candidate_row: dict) -> None:
     engine._execution_candidate_rows = lambda symbol: (None, [candidate_row], {})  # type: ignore[assignment]
     engine.metrics = lambda symbol, version: _metrics()  # type: ignore[assignment]
@@ -966,6 +1010,47 @@ def test_auto_route_symbol_submits_sweep_reversal_live_contract_plan() -> None:
         assert payload["intents_created"] == 1
         assert payload["submit_calls"] == 1
         assert payload["results"][0]["strategy_family"] == "sweep_reversal"
+        assert payload["results"][0]["submission"]["adapter"] == "binance"
+        assert payload["results"][0]["submission"]["requested_live"] is True
+
+
+def test_auto_route_symbol_uses_replay_validation_bridge_for_missing_session_sample(tmp_path: Path) -> None:
+    init_db()
+    _write_bridge_pass_reports(tmp_path)
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        _patch_live_contract(engine, allowed_symbols=["BTCUSDC"])
+        engine.settings.auto_trading_replay_validation_bridge_backtest_dir = str(tmp_path / "backtests")
+        engine.settings.auto_trading_replay_validation_bridge_portfolio_dir = str(tmp_path / "risk_sweeps")
+        engine.settings.auto_trading_replay_validation_bridge_max_age_days = 30.0
+        plan = _micro_plan(symbol="BTCUSDC", plan_id="sir_BTCUSDC_replay_bridge_test")
+        db.add(plan)
+        db.commit()
+
+        _patch_runtime(engine, candidate_row=_candidate_for(plan))
+        engine.metrics = lambda symbol, version: {  # type: ignore[assignment]
+            "grade": "F",
+            "recommendation": "do-not-deploy",
+            "sample_size": 0,
+            "risk_state": "OPEN",
+            "risk_reason": "normal",
+            "operating_lock": {},
+        }
+        engine.execution_coordinator.live_submitter = lambda **kwargs: {  # type: ignore[assignment]
+            "status": "NEW",
+            "order_id": "live_btc_replay_bridge_001",
+            "client_order_id": kwargs["client_order_id"],
+            "side": kwargs["side"],
+            "order_type": kwargs["order_type"],
+            "reduce_only": kwargs["reduce_only"],
+        }
+
+        payload = engine.auto_route_symbol(symbol="BTCUSDC")
+
+        assert payload["reason"] == "submitted"
+        assert payload["intents_created"] == 1
+        assert payload["submit_calls"] == 1
+        assert payload["results"][0]["strategy_family"] == "session_impulse_retest"
         assert payload["results"][0]["submission"]["adapter"] == "binance"
         assert payload["results"][0]["submission"]["requested_live"] is True
 

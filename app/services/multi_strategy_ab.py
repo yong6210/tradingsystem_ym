@@ -9,6 +9,21 @@ _LIVE_MODES = {"A_ONLY", "A_PLUS_B"}
 
 class MultiStrategyABExpansionService:
     @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
+    @staticmethod
     def _dict(payload: dict[str, Any] | None) -> dict[str, Any]:
         return dict(payload or {})
 
@@ -131,8 +146,8 @@ class MultiStrategyABExpansionService:
             return None
 
         mode = self._normalize_mode(item.get("strategy_mode") or dict(item.get("validity") or {}).get("strategy_mode"))
-        mode_shadow_only = bool(item.get("mode_shadow_only", False))
-        alpha_research_candidate = bool(item.get("alpha_research_candidate", False))
+        mode_shadow_only = self._safe_bool(item.get("mode_shadow_only", False))
+        alpha_research_candidate = self._safe_bool(item.get("alpha_research_candidate", False))
         family_guardrails = self._family_guardrails(
             family=raw_family,
             score_to_outcome_funnel=score_to_outcome_funnel,
@@ -199,7 +214,7 @@ class MultiStrategyABExpansionService:
             "cluster": cluster,
             "raw_family": raw_family,
             "mode": mode,
-            "live_eligible": bool(live_eligible),
+            "live_eligible": self._safe_bool(live_eligible),
             "guarded": bool(guarded),
             "guardrail_reasons": self._dedupe(reason_codes[2:] if len(reason_codes) > 2 else []),
             "summary": summary,
@@ -253,9 +268,9 @@ class MultiStrategyABExpansionService:
             if not cluster:
                 continue
             state = "all"
-            if bool(row.get("accepted")):
+            if self._safe_bool(row.get("accepted")):
                 state = "accepted"
-            elif bool(row.get("alpha_research_candidate")):
+            elif self._safe_bool(row.get("alpha_research_candidate")):
                 state = "alpha_research"
             elif row.get("block_reason"):
                 state = "blocked"
@@ -352,7 +367,7 @@ class MultiStrategyABExpansionService:
                 "A reversal remains the current production anchor; B continuation is visible as compare-only guarded flow "
                 "while range rotation stays research-only sidecar."
             )
-        elif bool(b_cluster.get("live_eligible", False)):
+        elif self._safe_bool(b_cluster.get("live_eligible", False)):
             summary = (
                 "A reversal remains the current production anchor and B continuation is available as a guarded first-wave "
                 "secondary family; range rotation remains research-only sidecar."

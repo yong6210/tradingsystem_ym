@@ -4,6 +4,11 @@ from app.core.config import get_settings
 from app.services.notification_dispatcher import NotificationDispatcher
 
 
+def test_dispatcher_safe_bool_treats_string_nullish_values_as_false() -> None:
+    assert NotificationDispatcher._safe_bool("none", default=True) is False
+    assert NotificationDispatcher._safe_bool("null", default=True) is False
+
+
 def test_dispatcher_system_skips_when_no_route_configured(monkeypatch) -> None:
     NotificationDispatcher.reset_circuit_state()
     settings = get_settings()

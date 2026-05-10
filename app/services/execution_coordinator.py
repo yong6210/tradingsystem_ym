@@ -208,7 +208,7 @@ class ExecutionCoordinator:
     def _intent_is_transition_edge_variant(intent: OrderIntent) -> bool:
         payload = ExecutionCoordinator._safe_dict(intent.payload)
         executable_plan = ExecutionCoordinator._safe_dict(payload.get("executable_plan"))
-        if bool(executable_plan.get("transition_edge_variant_applied")):
+        if ExecutionCoordinator._safe_bool(executable_plan.get("transition_edge_variant_applied")):
             return True
         return bool(ExecutionCoordinator._safe_dict(executable_plan.get("transition_edge_variant")))
 
@@ -249,7 +249,7 @@ class ExecutionCoordinator:
             execution_mode=intent.execution_mode,
             side="BUY" if str(plan.direction).lower() == "long" else "SELL",
             order_type="LIMIT" if str(plan.entry_model).upper() == "LIMIT" else "MARKET",
-            requested_live=bool(requested_live),
+            requested_live=self._safe_bool(requested_live),
             attachments={"session_guidance": session_guidance},
             raw={
                 "rejected": True,
@@ -346,8 +346,23 @@ class ExecutionCoordinator:
         parsed = cls._maybe_float(value)
         return int(default) if parsed is None else int(parsed)
 
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value) if isfinite(float(value)) else bool(default)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
+
     def _partial_submit_enabled(self) -> bool:
-        return bool(getattr(self.settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", False))
+        return self._safe_bool(getattr(self.settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", False))
 
     def _lane_tracker(self):
         return get_execution_lane_tracker(
@@ -503,7 +518,7 @@ class ExecutionCoordinator:
         price: float | None,
         reference_price: float,
     ) -> dict[str, Any]:
-        if not bool(getattr(self.settings, "auto_trading_live_liquidity_gate_enabled", False)):
+        if not self._safe_bool(getattr(self.settings, "auto_trading_live_liquidity_gate_enabled", False)):
             return {"enabled": False, "decision": "PASS", "reason_codes": []}
 
         thresholds = {
@@ -532,7 +547,7 @@ class ExecutionCoordinator:
                 self._float_or(getattr(self.settings, "auto_trading_live_liquidity_gate_max_market_slippage_bps", 0.0)),
             ),
         }
-        fail_closed = bool(getattr(self.settings, "auto_trading_live_liquidity_gate_fail_closed", True))
+        fail_closed = self._safe_bool(getattr(self.settings, "auto_trading_live_liquidity_gate_fail_closed", True), default=True)
         order_notional = max(float(quantity or 0.0), 0.0) * max(float(price or reference_price or 0.0), 0.0)
 
         if self.live_liquidity_loader is None:
@@ -741,9 +756,10 @@ class ExecutionCoordinator:
             "client_order_id": str(live_result.get("client_order_id") or client_order_id),
             "exchange_order_id": exchange_order_id,
             "submit_status": status,
+            "partial": status == "PARTIALLY_FILLED",
             "side": str(live_result.get("side") or ""),
             "order_type": str(live_result.get("order_type") or ""),
-            "reduce_only": bool(live_result.get("reduce_only")),
+            "reduce_only": self._safe_bool(live_result.get("reduce_only")),
             "notes": {"submit_path": "execution_coordinator_live_submit"},
         }
         return fill_id, float(fill_price), float(executed_qty), fill_payload
@@ -894,6 +910,7 @@ class ExecutionCoordinator:
         live: bool = False,
         paper_scenario: str | None = None,
     ) -> tuple[OrderSubmission, list[dict[str, Any]], bool]:
+        live = self._safe_bool(live)
         existing = self.submission_repo.latest_for_intent(intent_id)
         if existing is not None:
             existing_raw = self._safe_dict(existing.raw)
@@ -926,7 +943,9 @@ class ExecutionCoordinator:
 
         requested_mode = ExecutionPlanningService.coerce_execution_mode(intent.execution_mode)
         client_order_id = self._client_order_id(intent.intent_id)
-        paper_lineage_override = bool(self._safe_dict(intent.approval_snapshot).get("paper_lineage_override_applied"))
+        paper_lineage_override = self._safe_bool(
+            self._safe_dict(intent.approval_snapshot).get("paper_lineage_override_applied")
+        )
         approval_bundle = self._safe_dict(
             self.approval_loader(
                 plan.plan_id,
@@ -968,7 +987,7 @@ class ExecutionCoordinator:
                 requested_live=live,
             )
             return row, [], False
-        if bool(self.settings.auto_trading_close_only) or bool((approval.get("operating_lock") or {}).get("active")):
+        if self._safe_bool(self.settings.auto_trading_close_only) or self._safe_bool((approval.get("operating_lock") or {}).get("active")):
             row = self._rejection_submission(
                 intent=intent,
                 plan=plan,
@@ -1072,7 +1091,7 @@ class ExecutionCoordinator:
                 requested_live=live,
             )
             return row, [], False
-        if not bool(self.settings.binance_trade_live_enabled):
+        if not self._safe_bool(self.settings.binance_trade_live_enabled):
             row = self._rejection_submission(
                 intent=intent,
                 plan=plan,
@@ -1150,7 +1169,8 @@ class ExecutionCoordinator:
             price=normalized_live_price if live_order_type == "LIMIT" else None,
             reference_price=liquidity_reference_price,
         )
-        if bool(liquidity_gate.get("enabled")):
+        liquidity_gate_enabled = self._safe_bool(liquidity_gate.get("enabled"))
+        if liquidity_gate_enabled:
             live_sizing = {
                 **self._safe_dict(live_sizing),
                 "liquidity_gate_decision": str(liquidity_gate.get("decision") or ""),
@@ -1208,6 +1228,54 @@ class ExecutionCoordinator:
         else:
             live_tranche = {}
 
+        claim_submitted_at = datetime.now(timezone.utc)
+        row = OrderSubmission(
+            submission_id=f"sub_{uuid4().hex[:20]}",
+            intent_id=intent.intent_id,
+            plan_id=plan.plan_id,
+            symbol=plan.symbol,
+            client_order_id=client_order_id,
+            exchange_order_id=None,
+            state=OrderLifecycleState.SUBMITTED.value,
+            submit_status="LIVE_SUBMITTING",
+            message="Live submit claimed locally before exchange call.",
+            adapter="binance",
+            execution_mode=effective_mode.value,
+            side=live_side,
+            order_type=live_order_type,
+            reduce_only=False,
+            requested_live=True,
+            attachments={
+                "live_submit_claimed": True,
+                "session_guidance": self._safe_dict(intent.session_guidance),
+                "live_order_sizing": live_sizing,
+                **({"live_tranche": live_tranche} if live_tranche else {}),
+                **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
+            },
+            raw={
+                "live_submit_claimed": True,
+                "live_order_sizing": live_sizing,
+                **({"live_tranche": live_tranche} if live_tranche else {}),
+                **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
+                "intent_snapshot": {"session_guidance": self._safe_dict(intent.session_guidance)},
+            },
+            submitted_at=claim_submitted_at,
+        )
+        self.submission_repo.add(row)
+        claim_session = getattr(self.submission_repo, "db", None)
+        try:
+            if claim_session is not None:
+                claim_session.commit()
+        except Exception as exc:
+            if claim_session is not None:
+                claim_session.rollback()
+            existing_after_claim = self.submission_repo.latest_for_intent(intent.intent_id)
+            if existing_after_claim is not None:
+                existing_raw = self._safe_dict(existing_after_claim.raw)
+                fill_results = existing_raw.get("fill_results")
+                return existing_after_claim, list(fill_results) if isinstance(fill_results, list) else [], True
+            raise RuntimeError(f"live_submit_claim_failed:{exc.__class__.__name__}:{exc}") from exc
+
         try:
             live_result_raw = self.live_submitter(
                 symbol=plan.symbol,
@@ -1227,52 +1295,38 @@ class ExecutionCoordinator:
             live_result = dict(live_result_raw)
         except Exception as exc:
             session = getattr(self.submission_repo, "db", None)
-            if session is not None and not bool(getattr(session, "is_active", True)):
+            if session is not None and not self._safe_bool(getattr(session, "is_active", True), default=True):
                 session.rollback()
             live_submit_error = {
                 "type": exc.__class__.__name__,
                 "message": str(exc),
             }
-            row = OrderSubmission(
-                submission_id=f"sub_{uuid4().hex[:20]}",
-                intent_id=intent.intent_id,
-                plan_id=plan.plan_id,
-                symbol=plan.symbol,
-                client_order_id=client_order_id,
-                exchange_order_id=None,
-                state=OrderLifecycleState.SUBMITTED.value,
-                submit_status="LIVE_SUBMIT_ERROR",
-                message=(
-                    "Live submitter raised before exchange acknowledgement; reconcile the exchange "
-                    f"before retrying: {live_submit_error['message']}"
-                ),
-                adapter="binance",
-                execution_mode=effective_mode.value,
-                side=live_side,
-                order_type=live_order_type,
-                reduce_only=False,
-                requested_live=True,
-                attachments={
-                    "requires_reconciliation": True,
-                    "reentry_blocked_until_reconciled": True,
-                    "session_guidance": self._safe_dict(intent.session_guidance),
-                    "live_order_sizing": live_sizing,
-                    **({"live_tranche": live_tranche} if live_tranche else {}),
-                    **({"live_liquidity_gate": liquidity_gate} if bool(liquidity_gate.get("enabled")) else {}),
-                    "live_submit_error": live_submit_error,
-                },
-                raw={
-                    "unknown_exchange_state": True,
-                    "requires_reconciliation": True,
-                    "live_order_sizing": live_sizing,
-                    **({"live_tranche": live_tranche} if live_tranche else {}),
-                    **({"live_liquidity_gate": liquidity_gate} if bool(liquidity_gate.get("enabled")) else {}),
-                    "live_submit_error": live_submit_error,
-                    "intent_snapshot": {"session_guidance": self._safe_dict(intent.session_guidance)},
-                },
-                submitted_at=datetime.now(timezone.utc),
+            row.state = OrderLifecycleState.SUBMITTED.value
+            row.submit_status = "LIVE_SUBMIT_ERROR"
+            row.message = (
+                "Live submitter raised after local claim; reconcile the exchange "
+                f"before retrying: {live_submit_error['message']}"
             )
-            self.submission_repo.add(row)
+            row.attachments = {
+                **self._safe_dict(row.attachments),
+                "requires_reconciliation": True,
+                "reentry_blocked_until_reconciled": True,
+                "session_guidance": self._safe_dict(intent.session_guidance),
+                "live_order_sizing": live_sizing,
+                **({"live_tranche": live_tranche} if live_tranche else {}),
+                **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
+                "live_submit_error": live_submit_error,
+            }
+            row.raw = {
+                **self._safe_dict(row.raw),
+                "unknown_exchange_state": True,
+                "requires_reconciliation": True,
+                "live_order_sizing": live_sizing,
+                **({"live_tranche": live_tranche} if live_tranche else {}),
+                **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
+                "live_submit_error": live_submit_error,
+                "intent_snapshot": {"session_guidance": self._safe_dict(intent.session_guidance)},
+            }
             return row, [], False
         status = str(live_result.get("status") or "NEW").upper()
         state = self._terminal_state(status)
@@ -1282,41 +1336,35 @@ class ExecutionCoordinator:
             OrderLifecycleState.FILLED,
         } else None
         cancelled_at = datetime.now(timezone.utc) if state == OrderLifecycleState.CANCELLED else None
-        row = OrderSubmission(
-            submission_id=f"sub_{uuid4().hex[:20]}",
-            intent_id=intent.intent_id,
-            plan_id=plan.plan_id,
-            symbol=plan.symbol,
-            client_order_id=str(live_result.get("client_order_id") or client_order_id),
-            exchange_order_id=str(live_result.get("order_id")) if live_result.get("order_id") is not None else None,
-            state=state.value,
-            submit_status=status,
-            message="Live submit forwarded to Binance adapter.",
-            adapter="binance",
-            execution_mode=effective_mode.value,
-            side=str(live_result.get("side") or ""),
-            order_type=str(live_result.get("order_type") or ""),
-            reduce_only=bool(live_result.get("reduce_only")),
-            requested_live=True,
-            attachments={
-                "status": "pending_attach",
-                "live_order_sizing": live_sizing,
-                **({"live_tranche": live_tranche} if live_tranche else {}),
-                **({"live_liquidity_gate": liquidity_gate} if bool(liquidity_gate.get("enabled")) else {}),
-                "session_guidance": self._safe_dict(intent.session_guidance),
-            },
-            raw={
-                **live_result,
-                "live_order_sizing": live_sizing,
-                **({"live_tranche": live_tranche} if live_tranche else {}),
-                **({"live_liquidity_gate": liquidity_gate} if bool(liquidity_gate.get("enabled")) else {}),
-                "intent_snapshot": {"session_guidance": self._safe_dict(intent.session_guidance)},
-            },
-            submitted_at=datetime.now(timezone.utc),
-            acknowledged_at=acknowledged_at,
-            cancelled_at=cancelled_at,
-        )
-        self.submission_repo.add(row)
+        row.client_order_id = str(live_result.get("client_order_id") or client_order_id)
+        row.exchange_order_id = str(live_result.get("order_id")) if live_result.get("order_id") is not None else None
+        row.state = state.value
+        row.submit_status = status
+        row.message = "Live submit forwarded to Binance adapter."
+        row.adapter = "binance"
+        row.execution_mode = effective_mode.value
+        row.side = str(live_result.get("side") or "")
+        row.order_type = str(live_result.get("order_type") or "")
+        row.reduce_only = self._safe_bool(live_result.get("reduce_only"))
+        row.requested_live = True
+        row.attachments = {
+            **self._safe_dict(row.attachments),
+            "status": "pending_attach",
+            "live_order_sizing": live_sizing,
+            **({"live_tranche": live_tranche} if live_tranche else {}),
+            **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
+            "session_guidance": self._safe_dict(intent.session_guidance),
+        }
+        row.raw = {
+            **self._safe_dict(row.raw),
+            **live_result,
+            "live_order_sizing": live_sizing,
+            **({"live_tranche": live_tranche} if live_tranche else {}),
+            **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
+            "intent_snapshot": {"session_guidance": self._safe_dict(intent.session_guidance)},
+        }
+        row.acknowledged_at = acknowledged_at
+        row.cancelled_at = cancelled_at
         live_fill = self._live_submit_fill_payload(
             intent=intent,
             plan=plan,

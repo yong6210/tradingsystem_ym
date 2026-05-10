@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import Settings, get_settings
+from app.services.report_io import atomic_write_text
 from app.services.strategy_v2_validation import ClosedTradeRecord, StrategyV2ValidationService
 
 
@@ -198,7 +199,7 @@ class StrategyV2LockValidationService:
             "- Transition lock removes trades; shock lock clamps realized R by the current shock regime factor.",
             "",
         ]
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(self, *, symbol: str, version: str, plans: list[Any], write_report: bool = True) -> dict[str, Any]:

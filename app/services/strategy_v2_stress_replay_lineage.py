@@ -8,6 +8,7 @@ from typing import Any
 
 from app.core.config import Settings, get_settings
 from app.core.enums import ExecutionFillStage
+from app.services.report_io import atomic_write_text
 from app.services.strategy_v2_validation import ClosedTradeRecord, StrategyV2ValidationService
 
 
@@ -350,7 +351,7 @@ class StrategyV2StressReplayLineageService:
                 "",
             ]
         )
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def generate(

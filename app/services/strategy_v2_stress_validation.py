@@ -8,6 +8,7 @@ from typing import Any
 
 from app.core.config import Settings, get_settings
 from app.core.enums import EntryModel, ExecutionFillStage
+from app.services.report_io import atomic_write_text
 from app.services.strategy_v2_validation import ClosedTradeRecord, StrategyV2ValidationService
 
 
@@ -67,6 +68,21 @@ class StrategyV2StressValidationService:
         except (TypeError, ValueError):
             return default
         return parsed if isfinite(parsed) else default
+
+    @staticmethod
+    def _safe_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+        return bool(default)
 
     @staticmethod
     def _risk_abs(plan: Any) -> float:
@@ -363,9 +379,11 @@ class StrategyV2StressValidationService:
         statuses = {name: cls._scenario_status(metrics=metrics) for name, metrics in scenario_metrics.items()}
         all_rows = {
             "stressed_cost": {
-                "status": "PASS" if bool(base_recommendation.get("stress_pass", False)) else "WARN",
+                "status": "PASS" if cls._safe_bool(base_recommendation.get("stress_pass", False)) else "WARN",
                 "reason": str(base_recommendation.get("reason", "not_available")),
-                "catastrophic_loss_detected": bool(base_recommendation.get("catastrophic_loss_detected", False)),
+                "catastrophic_loss_detected": cls._safe_bool(
+                    base_recommendation.get("catastrophic_loss_detected", False)
+                ),
                 "metrics": {},
             }
         }
@@ -382,10 +400,10 @@ class StrategyV2StressValidationService:
         scenario_items = [(name, row) for name, row in all_rows.items() if name != "stressed_cost"]
         worst_scenario = max(scenario_items, key=sort_key)[0] if scenario_items else "stressed_cost"
 
-        catastrophic = bool(base_recommendation.get("catastrophic_loss_detected", False)) or any(
-            bool(row.get("catastrophic_loss_detected", False)) for row in statuses.values()
+        catastrophic = cls._safe_bool(base_recommendation.get("catastrophic_loss_detected", False)) or any(
+            cls._safe_bool(row.get("catastrophic_loss_detected", False)) for row in statuses.values()
         )
-        warn_exists = (not bool(base_recommendation.get("stress_pass", False))) or any(
+        warn_exists = (not cls._safe_bool(base_recommendation.get("stress_pass", False))) or any(
             str(row.get("status")) != "PASS" for row in statuses.values()
         )
         if catastrophic:
@@ -501,7 +519,7 @@ class StrategyV2StressValidationService:
             approximation_metrics = dict(scenario_metrics.get(scenario_name) or {})
             replay_row = dict(replay_outputs.get(scenario_name) or {})
             replay_summary = dict(replay_row.get("summary") or {})
-            replay_available = bool(replay_row.get("available", False)) and bool(replay_summary)
+            replay_available = self._safe_bool(replay_row.get("available", False)) and bool(replay_summary)
             source = "replay_output" if replay_available else "approximation"
             metrics = replay_summary if replay_available else approximation_metrics
             status = self._scenario_status(metrics=metrics)
@@ -558,13 +576,13 @@ class StrategyV2StressValidationService:
             if str((effective_statuses.get(name) or {}).get("divergence_status", "PASS")) != "PASS"
         ]
         worst_divergence_scenario = max(divergence_items, key=divergence_sort_key)[0] if divergence_items else None
-        catastrophic = bool(base_recommendation.get("catastrophic_loss_detected", False)) or any(
-            bool(row.get("catastrophic_loss_detected", False)) for row in effective_statuses.values()
+        catastrophic = self._safe_bool(base_recommendation.get("catastrophic_loss_detected", False)) or any(
+            self._safe_bool(row.get("catastrophic_loss_detected", False)) for row in effective_statuses.values()
         )
         degraded_scenarios = [
             name for name in scenario_names if str((effective_statuses.get(name) or {}).get("status", "PASS")) != "PASS"
         ]
-        warn_exists = (not bool(base_recommendation.get("stress_pass", False))) or bool(degraded_scenarios)
+        warn_exists = (not self._safe_bool(base_recommendation.get("stress_pass", False))) or bool(degraded_scenarios)
         if catastrophic:
             reason = f"scenario_catastrophic_drawdown:{worst_scenario}"
             stress_pass = False
@@ -647,9 +665,9 @@ class StrategyV2StressValidationService:
             f"- recommendation_reason: {recommendation.get('reason', 'not_available')}",
             f"- worst_scenario: {recommendation.get('worst_scenario', 'stressed_cost')}",
             f"- worst_scenario_source: {recommendation.get('worst_scenario_source', 'stressed_cost')}",
-            f"- replay_gate_applied: {bool(recommendation.get('replay_gate_applied', False))}",
+            f"- replay_gate_applied: {self._safe_bool(recommendation.get('replay_gate_applied', False))}",
             f"- replay_gate_reason: {recommendation.get('replay_gate_reason', 'approximation_only')}",
-            f"- divergence_gate_applied: {bool(recommendation.get('divergence_gate_applied', False))}",
+            f"- divergence_gate_applied: {self._safe_bool(recommendation.get('divergence_gate_applied', False))}",
             f"- divergence_problem_scenarios: {recommendation.get('divergence_problem_scenarios', [])}",
             f"- worst_divergence_scenario: {recommendation.get('worst_divergence_scenario')}",
             "",
@@ -701,7 +719,7 @@ class StrategyV2StressValidationService:
             )
             if replay_row:
                 lines.append(
-                    f"  replay_output: available={bool(replay_row.get('available', False))}, "
+                    f"  replay_output: available={self._safe_bool(replay_row.get('available', False))}, "
                     f"reason={replay_row.get('reason', 'not_available')}, "
                     f"replay_ev={float(replay_summary.get('ev', 0.0)):.4f}, "
                     f"replay_max_dd={float(replay_summary.get('max_drawdown', 0.0)):.4f}, "
@@ -718,8 +736,8 @@ class StrategyV2StressValidationService:
                 f"- latency_source_counts: {payload.get('latency_source_counts', {})}",
                 "",
                 "## Replay Output Artifacts",
-                f"- available: {bool(replay_output_artifacts.get('available', False))}",
-                f"- comparison_ready: {bool(replay_output_artifacts.get('comparison_ready', False))}",
+                f"- available: {self._safe_bool(replay_output_artifacts.get('available', False))}",
+                f"- comparison_ready: {self._safe_bool(replay_output_artifacts.get('comparison_ready', False))}",
                 f"- reason: {replay_output_artifacts.get('reason', 'not_available')}",
                 f"- summary_counts: {replay_output_artifacts.get('summary_counts', {})}",
                 "",
@@ -728,9 +746,9 @@ class StrategyV2StressValidationService:
             f"- catastrophic_loss_detected: {recommendation.get('catastrophic_loss_detected', False)}",
             f"- worst_scenario: {recommendation.get('worst_scenario', 'stressed_cost')}",
             f"- worst_scenario_source: {recommendation.get('worst_scenario_source', 'stressed_cost')}",
-            f"- replay_gate_applied: {bool(recommendation.get('replay_gate_applied', False))}",
+            f"- replay_gate_applied: {self._safe_bool(recommendation.get('replay_gate_applied', False))}",
             f"- replay_gate_reason: {recommendation.get('replay_gate_reason', 'approximation_only')}",
-            f"- divergence_gate_applied: {bool(recommendation.get('divergence_gate_applied', False))}",
+            f"- divergence_gate_applied: {self._safe_bool(recommendation.get('divergence_gate_applied', False))}",
             f"- divergence_problem_scenarios: {recommendation.get('divergence_problem_scenarios', [])}",
             f"- worst_divergence_scenario: {recommendation.get('worst_divergence_scenario')}",
             f"- stressed_drawdown_limit_r: {recommendation.get('stressed_drawdown_limit_r', self._CATASTROPHIC_DRAWDOWN_R):.2f}",
@@ -745,7 +763,7 @@ class StrategyV2StressValidationService:
             "",
             ]
         )
-        file_path.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(file_path, "\n".join(lines))
         return str(file_path)
 
     def _attach_replay_output_artifacts(
@@ -757,8 +775,8 @@ class StrategyV2StressValidationService:
         out = dict(payload)
         replay_payload = dict(stress_replay_output_artifacts or {})
         out["replay_output_artifacts"] = {
-            "available": bool(replay_payload.get("available", False)),
-            "comparison_ready": bool(replay_payload.get("comparison_ready", False)),
+            "available": self._safe_bool(replay_payload.get("available", False)),
+            "comparison_ready": self._safe_bool(replay_payload.get("comparison_ready", False)),
             "reason": replay_payload.get("reason", "not_available"),
             "summary_counts": dict(replay_payload.get("summary_counts") or {}),
             "lineage_summary": dict(replay_payload.get("lineage_summary") or {}),

@@ -15,6 +15,7 @@ if str(ROOT_DIR) not in sys.path:
 from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
 from app.services.strategy_engine import StrategyEngine
+from scripts.operation_report_io import atomic_write_text
 
 
 def parse_args() -> argparse.Namespace:
@@ -98,7 +99,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default),
         "```",
     ]
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def _parse_unlock_at(value: str | None) -> datetime | None:

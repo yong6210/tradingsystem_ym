@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -146,6 +147,22 @@ def test_health_ready_is_ready_when_worker_heartbeats_are_fresh(monkeypatch, tmp
     assert snapshot.checks["worker_ws"] is True
 
 
+def test_worker_heartbeat_replaces_existing_file_atomically(tmp_path) -> None:
+    settings = get_settings().model_copy(update={"runtime_worker_heartbeat_dir": str(tmp_path)})
+    target = tmp_path / "loop.json"
+    target.write_text("old", encoding="utf-8")
+
+    path = write_worker_heartbeat("loop", settings=settings, status="ok", details={"phase": "test"})
+
+    assert path == str(target)
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["role"] == "loop"
+    assert payload["status"] == "ok"
+    assert payload["details"] == {"phase": "test"}
+    assert not list(tmp_path.glob("*.tmp"))
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
 def test_health_worker_heartbeat_error_status_is_degraded(tmp_path) -> None:
     service = HealthCheckService()
     service.settings.runtime_worker_heartbeat_dir = str(tmp_path)
@@ -156,6 +173,32 @@ def test_health_worker_heartbeat_error_status_is_degraded(tmp_path) -> None:
     ok, detail = service._check_runtime_worker("loop")
     assert ok is False
     assert detail == "heartbeat_status:error"
+
+
+def test_health_worker_treats_naive_heartbeat_ts_as_utc(tmp_path) -> None:
+    service = HealthCheckService()
+    service.settings.runtime_worker_heartbeat_dir = str(tmp_path)
+    service.settings.ready_require_runtime_workers = True
+    service.settings.runtime_worker_loop_heartbeat_max_age_seconds = 120
+    naive_utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+    settings = get_settings().model_copy(update={"runtime_worker_heartbeat_dir": str(tmp_path)})
+    write_worker_heartbeat("loop", settings=settings, status="ok", pid=os.getpid(), at=naive_utc_now)
+
+    ok, detail = service._check_runtime_worker("loop")
+
+    assert ok is True
+    assert detail.startswith("ok:")
+
+
+def test_health_worker_corrupt_heartbeat_is_invalid_not_missing(tmp_path) -> None:
+    service = HealthCheckService()
+    service.settings.runtime_worker_heartbeat_dir = str(tmp_path)
+    service.settings.ready_require_runtime_workers = True
+    (tmp_path / "loop.json").write_text("{not-json", encoding="utf-8")
+
+    ok, detail = service._check_runtime_worker("loop")
+    assert ok is False
+    assert detail == "heartbeat_status:invalid"
 
 
 def test_health_worker_dead_pid_heartbeat_is_degraded(tmp_path) -> None:
