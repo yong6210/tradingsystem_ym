@@ -7,8 +7,12 @@ def _text(value: Any) -> str:
     return str(value or "")
 
 
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
 def _approval_strip_summary(summary: Mapping[str, Any] | None) -> dict[str, str]:
-    summary_dict = dict(summary or {})
+    summary_dict = _mapping(summary)
     return {
         "primary_reason": _text(summary_dict.get("primary_reason")),
         "approve_value": _text(summary_dict.get("approve_value")),
@@ -22,7 +26,7 @@ def _approval_strip_summary(summary: Mapping[str, Any] | None) -> dict[str, str]
 
 
 def approval_summary_passthrough(summary: Mapping[str, Any] | None) -> dict[str, str]:
-    summary_dict = dict(summary or {})
+    summary_dict = _mapping(summary)
     return {
         "deployment_go_no_go": _text(summary_dict.get("playbook_go_no_go")),
         "deployment_code": _text(summary_dict.get("playbook_code")),
@@ -39,8 +43,8 @@ def approval_summary_passthrough(summary: Mapping[str, Any] | None) -> dict[str,
 
 
 def validation_report_contract(payload: Mapping[str, Any] | None) -> dict[str, str]:
-    payload_dict = dict(payload or {})
-    report = dict(payload_dict.get("validation_report") or {})
+    payload_dict = _mapping(payload)
+    report = _mapping(payload_dict.get("validation_report"))
     summary_contract = approval_summary_passthrough(report.get("deployment_approval_summary"))
     return {
         key: _text(payload_dict.get(key) or summary_contract.get(key))
@@ -61,7 +65,7 @@ def validation_report_contract(payload: Mapping[str, Any] | None) -> dict[str, s
 
 
 def validation_alert_contract(payload: Mapping[str, Any] | None) -> dict[str, str]:
-    payload_dict = dict(payload or {})
+    payload_dict = _mapping(payload)
     return {
         "deployment_go_no_go": _text(
             payload_dict.get("deployment_go_no_go")
@@ -95,7 +99,7 @@ def validation_alert_contract(payload: Mapping[str, Any] | None) -> dict[str, st
 
 
 def validation_alert_strip_summary(payload: Mapping[str, Any] | None) -> dict[str, str]:
-    payload_dict = dict(payload or {})
+    payload_dict = _mapping(payload)
     existing = _approval_strip_summary(payload_dict.get("approval_strip_summary"))
     if any(existing.values()):
         return {

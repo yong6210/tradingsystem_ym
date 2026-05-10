@@ -246,3 +246,68 @@ def test_alert_metrics_tolerates_malformed_slo_settings() -> None:
     assert slo["target_success_rate"] == 0.995
     assert slo["warn_p95_latency_ms"] == 5000.0
     assert budget["status"] == "PASS"
+
+
+def test_latest_validation_alert_summary_tolerates_malformed_payloads() -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    payload = AlertMetricsService._latest_validation_alert_summary(
+        [
+            AlertSubscription(
+                alert_id="val_warn_malformed",
+                plan_id=None,
+                symbol="BTCUSDC",
+                channel="discord",
+                type="validation_warn",
+                payload=["broken"],
+                triggered_ts=now,
+            )
+        ]
+    )
+
+    assert payload["available"] is True
+    assert payload["alert_id"] == "val_warn_malformed"
+    assert payload["approval_strip_summary"]["approve_value"] == "n/a"
+    assert payload["delivery_channel"] == "discord"
+    assert payload["failed"] is True
+
+
+def test_alert_metrics_generate_tolerates_malformed_subscription_payloads() -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    class _Repo:
+        def list_recent(self, *, days: int = 30, limit: int = 5000):  # noqa: ARG002
+            return [
+                AlertSubscription(
+                    alert_id="alert_malformed_payload",
+                    plan_id=None,
+                    symbol="BTCUSDC",
+                    channel="discord",
+                    type="validation_warn",
+                    payload=["broken"],
+                    triggered_ts=now,
+                ),
+                AlertSubscription(
+                    alert_id="alert_delivery_ok",
+                    plan_id=None,
+                    symbol="BTCUSDC",
+                    channel="discord",
+                    type="validation_warn",
+                    payload={
+                        "delivery": {
+                            "channel": "discord",
+                            "delivered": True,
+                            "skipped": False,
+                            "reason": "delivered",
+                            "attempts": 1,
+                        }
+                    },
+                    triggered_ts=now,
+                ),
+            ][:limit]
+
+    payload = AlertMetricsService(alert_repo=_Repo(), retry_repo=None).generate(days=1, write_report=False)
+
+    assert payload["alerts_total"] == 2
+    assert payload["alerts_with_delivery"] == 1
+    assert payload["overall"]["delivered"] == 1
+    assert payload["latest_validation_alert"]["available"] is True

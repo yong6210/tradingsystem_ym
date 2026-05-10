@@ -10,12 +10,18 @@ __pycache__/
 
 # Runtime SQLite/database artifacts.
 *.db
+*.db-journal
 *.db-shm
 *.db-wal
 *.sqlite
 *.sqlite3
 *.sqlite-shm
 *.sqlite-wal
-reports/
+reports/*
+!reports/validation/
+reports/validation/*
+!reports/validation/contracts/
+reports/validation/contracts/*
+!reports/validation/contracts/micro_live_event_blackouts_major_us_macro_q2_2026_v1.json
 
 .DS_Store

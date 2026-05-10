@@ -170,6 +170,8 @@ class Settings(BaseSettings):
 
     # Validation report output.
     validation_report_dir: str = "reports/validation"
+    validation_payload_cache_max_age_seconds: float = 900.0
+    validation_payload_cache_stale_on_database_change: bool = False
     operations_checklist_report_dir: str = "reports/operations"
     kill_condition_automation_live_enabled: bool = False
     kill_condition_automation_arm_token: str = ""
@@ -370,6 +372,7 @@ class Settings(BaseSettings):
     auto_trading_micro_live_allowed_entry_models: str = "LIMIT"
     auto_trading_micro_live_symbol_family_entry_direction_blocked_hours_utc: str = ""
     auto_trading_micro_live_event_blackout_path: str = ""
+    auto_trading_micro_live_event_blackout_min_horizon_days: int = 45
     auto_trading_micro_live_strategy_time_contract_path: str = ""
     auto_trading_micro_live_plan_blocklist_path: str = ""
     auto_trading_micro_live_max_concurrent_positions: int = 2

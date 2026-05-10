@@ -135,7 +135,7 @@ class BinanceFuturesClient:
     def _try_parse_kline_row(symbol: str, interval: str, row: list[Any]) -> BinanceKline | None:
         try:
             parsed = BinanceFuturesClient._parse_kline_row(symbol, interval, row)
-        except (TypeError, ValueError, OverflowError, IndexError):
+        except (TypeError, ValueError, OverflowError, IndexError, KeyError):
             return None
         if min(parsed.o, parsed.h, parsed.l, parsed.c) <= 0.0:
             return None
@@ -143,6 +143,7 @@ class BinanceFuturesClient:
 
     @staticmethod
     def _parse_funding_rate_row(symbol: str, row: dict[str, Any]) -> BinanceFundingRate:
+        row = BinanceFuturesClient._safe_dict(row)
         ts_ms = BinanceFuturesClient._safe_int(row.get("fundingTime") or row.get("time"))
         mark_price = None
         if row.get("markPrice") not in {None, ""}:
@@ -157,6 +158,7 @@ class BinanceFuturesClient:
 
     @staticmethod
     def _parse_open_interest_hist_row(symbol: str, period: str, row: dict[str, Any]) -> BinanceOpenInterestStat:
+        row = BinanceFuturesClient._safe_dict(row)
         ts_ms = BinanceFuturesClient._safe_int(row.get("timestamp") or row.get("time"))
         open_interest_value = None
         if row.get("sumOpenInterestValue") not in {None, ""}:
@@ -321,6 +323,7 @@ class BinanceFuturesClient:
 
     @staticmethod
     def _parse_symbol_trading_rules_row(row: dict[str, Any]) -> BinanceSymbolTradingRules:
+        row = BinanceFuturesClient._safe_dict(row)
         filters = {
             str(item.get("filterType") or "").upper(): item
             for item in list(row.get("filters") or [])
@@ -398,6 +401,8 @@ class BinanceFuturesClient:
         }
         path = "/fapi/v1/order" if live else "/fapi/v1/order/test"
         payload = self._signed_request("POST", path, params)
+        if payload and not isinstance(payload, Mapping):
+            raise RuntimeError(f"binance_order_response_malformed:{type(payload).__name__}")
         if not live and not payload:
             return {
                 "symbol": symbol.upper(),
@@ -455,14 +460,14 @@ class BinanceFuturesClient:
         )
 
     def create_user_stream_listen_key(self) -> dict[str, Any]:
-        payload = self._keyed_request("POST", "/fapi/v1/listenKey")
+        payload = self._safe_dict(self._keyed_request("POST", "/fapi/v1/listenKey"))
         return {
             "listen_key": str(payload.get("listenKey") or ""),
             "raw": payload,
         }
 
     def keepalive_user_stream_listen_key(self, listen_key: str) -> dict[str, Any]:
-        payload = self._keyed_request("PUT", "/fapi/v1/listenKey", {"listenKey": listen_key})
+        payload = self._safe_dict(self._keyed_request("PUT", "/fapi/v1/listenKey", {"listenKey": listen_key}))
         returned = str(payload.get("listenKey") or listen_key)
         return {
             "listen_key": returned,
@@ -470,7 +475,7 @@ class BinanceFuturesClient:
         }
 
     def close_user_stream_listen_key(self, listen_key: str) -> dict[str, Any]:
-        payload = self._keyed_request("DELETE", "/fapi/v1/listenKey", {"listenKey": listen_key})
+        payload = self._safe_dict(self._keyed_request("DELETE", "/fapi/v1/listenKey", {"listenKey": listen_key}))
         return {
             "listen_key": listen_key,
             "closed": True,
@@ -484,7 +489,7 @@ class BinanceFuturesClient:
             {"symbol": symbol.upper() if symbol else None},
         )
         if isinstance(payload, list):
-            return payload
+            return [row for row in (self._safe_dict(item) for item in payload) if row]
         return []
 
     @staticmethod
@@ -494,6 +499,7 @@ class BinanceFuturesClient:
 
     @staticmethod
     def normalize_position_risk_row(row: dict[str, Any]) -> dict[str, Any]:
+        row = BinanceFuturesClient._safe_dict(row)
         update_ms = BinanceFuturesClient._safe_int(row.get("updateTime"), default=BinanceFuturesClient._timestamp_ms())
         return {
             "position_key": f"{str(row.get('symbol') or '').upper()}:{BinanceFuturesClient._normalize_position_side(row.get('positionSide'))}",
@@ -515,6 +521,7 @@ class BinanceFuturesClient:
 
     @staticmethod
     def normalize_account_update_position(row: dict[str, Any], *, event_ts_ms: int) -> dict[str, Any]:
+        row = BinanceFuturesClient._safe_dict(row)
         symbol = str(row.get("s") or row.get("symbol") or "").upper()
         position_side = BinanceFuturesClient._normalize_position_side(row.get("ps") or row.get("positionSide"))
         return {
@@ -645,7 +652,8 @@ class BinanceFuturesClient:
             payload = response.json()
 
         rows = []
-        for row in payload:
+        payload_rows = payload if isinstance(payload, list) else []
+        for row in payload_rows:
             parsed = self._try_parse_kline_row(symbol.upper(), interval, row)
             if parsed is not None:
                 rows.append(parsed)
@@ -662,7 +670,7 @@ class BinanceFuturesClient:
             )
             response.raise_for_status()
             payload = response.json()
-        return dict(payload)
+        return self._safe_dict(payload)
 
     def fetch_funding_rates(
         self,
@@ -684,7 +692,8 @@ class BinanceFuturesClient:
             response = client.get("/fapi/v1/fundingRate", params=params)
             response.raise_for_status()
             payload = response.json()
-        return [self._parse_funding_rate_row(symbol.upper(), row) for row in payload]
+        rows = payload if isinstance(payload, list) else []
+        return [self._parse_funding_rate_row(symbol.upper(), row) for row in rows if isinstance(row, Mapping)]
 
     def fetch_open_interest_hist(
         self,
@@ -708,7 +717,8 @@ class BinanceFuturesClient:
             response = client.get("/futures/data/openInterestHist", params=params)
             response.raise_for_status()
             payload = response.json()
-        return [self._parse_open_interest_hist_row(symbol.upper(), period, row) for row in payload]
+        rows = payload if isinstance(payload, list) else []
+        return [self._parse_open_interest_hist_row(symbol.upper(), period, row) for row in rows if isinstance(row, Mapping)]
 
     def fetch_premium_index_klines(
         self,
@@ -732,7 +742,8 @@ class BinanceFuturesClient:
             response = client.get("/fapi/v1/premiumIndexKlines", params=params)
             response.raise_for_status()
             payload = response.json()
-        return [self._parse_basis_kline_row(symbol.upper(), interval, row) for row in payload]
+        rows = payload if isinstance(payload, list) else []
+        return [self._parse_basis_kline_row(symbol.upper(), interval, row) for row in rows if isinstance(row, list)]
 
     def ping(self) -> bool:
         with httpx.Client(base_url=self.rest_base_url, timeout=self.timeout_seconds) as client:
@@ -747,11 +758,15 @@ class BinanceFuturesClient:
             rows = response.json()
 
         candidates: list[tuple[str, float]] = []
-        for row in rows:
-            symbol = str(row.get("symbol", ""))
+        ticker_rows = rows if isinstance(rows, list) else []
+        for row in ticker_rows:
+            row_payload = self._safe_dict(row)
+            if not row_payload:
+                continue
+            symbol = str(row_payload.get("symbol", ""))
             if not symbol.endswith("USDC"):
                 continue
-            quote_vol = self._safe_float(row.get("quoteVolume"))
+            quote_vol = self._safe_float(row_payload.get("quoteVolume"))
             candidates.append((symbol, quote_vol))
 
         candidates.sort(key=lambda x: x[1], reverse=True)
@@ -778,8 +793,11 @@ class BinanceFuturesClient:
         ) as ws:
             while True:
                 raw = await asyncio.wait_for(ws.recv(), timeout=self.ws_receive_timeout_seconds)
-                data = json.loads(raw)
-                k = data.get("data", {}).get("k", {})
+                try:
+                    data = self._safe_dict(json.loads(raw))
+                except json.JSONDecodeError:
+                    continue
+                k = self._safe_dict(self._safe_dict(data.get("data")).get("k"))
                 symbol = str(k.get("s", ""))
                 if not symbol:
                     continue
@@ -832,7 +850,11 @@ class BinanceFuturesClient:
                         raw = await asyncio.wait_for(ws.recv(), timeout=float(timeout_seconds))
                 except TimeoutError:
                     break
-                event = self._parse_force_order_event(json.loads(raw))
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                event = self._parse_force_order_event(payload)
                 if event is None or not event.symbol:
                     continue
                 processed += 1
@@ -874,6 +896,10 @@ class BinanceFuturesClient:
                         raw = await asyncio.wait_for(ws.recv(), timeout=float(timeout_seconds))
                 except TimeoutError:
                     break
-                normalized = self.normalize_user_stream_message(json.loads(raw))
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                normalized = self.normalize_user_stream_message(payload)
                 processed += 1
                 yield normalized

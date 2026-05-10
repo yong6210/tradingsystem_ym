@@ -1,7 +1,116 @@
 # Self-Check 로그 (Living)
 
-현재 기준선: Iteration #126
+현재 기준선: 2026-05-10 MICRO_LIVE content-aware ops heartbeat guard
 참고: 각 Iteration의 테스트 수치/리포트 경로는 해당 시점 기록이며, 최신 운영 기준은 "현재 기준선"을 따른다.
+
+## 2026-05-10 MICRO_LIVE Content-Aware Ops Heartbeat Guard
+### 무엇을 발견했는가
+- ops heartbeat가 리포트 freshness만 보면, 최신 no-order/replay/boot report 안에 `ALERT/WATCH/FAIL`이 있어도 스케줄은 정상처럼 보일 수 있었다.
+- 이 구조는 “파일은 생성됐지만 내용은 문제”인 상태를 놓칠 수 있다.
+
+### 무엇을 수정했는가
+- `run_micro_live_ops_heartbeat.py`가 최신 markdown/json report의 `overall_status`, `status`, `evaluation.status`를 읽도록 보강했다.
+- hard failure와 watch를 분리해 `FAIL`과 `WATCH`를 구분한다.
+- 리포트 job 기본 패턴을 실제 report 파일로 좁혀 `state.json` 같은 상태 파일이 최신 리포트를 가리지 않게 했다.
+- 상태를 읽어야 하는 report에서 status가 없으면 `content_status_missing` failure로 처리한다.
+- macro blackout 계약은 `windows`를 직접 읽어 future horizon이 최소 기준 이상인지 heartbeat에서 확인하게 했다.
+- macro blackout 감사는 glob 최신 파일보다 `.env`의 `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH`를 우선해 live approval과 같은 계약을 본다.
+- macro blackout 파일 mtime이 stale이어도 horizon이 충분하면 hard failure가 아니라 `WATCH`로 분리한다.
+- heartbeat 알림 메시지는 hard failure와 watch를 `긴급/주의`로 나눠 보여준다.
+- 같은 heartbeat issue 조합은 state-file cooldown으로 반복 발송을 억제하고, issue 조합이 바뀌면 즉시 다시 보낸다.
+- cooldown state는 알림 전송이 `delivered=True`로 확인된 경우에만 기록해, 실패한 알림 시도가 다음 알림을 막지 않게 했다.
+- heartbeat는 timestamp 리포트와 함께 `latest.md/latest.json` 고정 alias도 써서 운영자가 최신 파일을 찾지 않아도 되게 했다.
+- heartbeat latest alias와 cooldown state는 atomic replace로 써서 중간 실패 시 partial file이 남지 않게 했다.
+- 현재 WATCH 원인인 no-order watchdog과 replay validation bridge도 `latest.md/latest.json` alias를 쓰도록 맞췄다.
+- no-order watchdog도 알림 전송 성공이 확인된 경우에만 cooldown state를 기록하게 했다.
+- 현재 실제 heartbeat는 hard failure 0개, watch 2개다. watch 원인은 `no_order_watchdog=ALERT`, `replay_validation_bridge=WATCH`다.
+
+### 왜 그렇게 판단했는가
+- 운영자가 봐야 하는 것은 “스케줄이 돌았나”와 “그 결과가 안전한가” 둘 다다.
+- freshness-only PASS는 주문 미진입, replay bridge 혼합 증거, Binance rule drift 같은 상태를 숨길 수 있으므로 content-aware heartbeat가 더 안전하다.
+
+## 2026-05-10 MICRO_LIVE Replay Bridge Confidence/Slice Guard
+### 무엇을 발견했는가
+- replay validation bridge가 평균 EV와 전체 집계만 보면, 특정 방향/패밀리/엔트리모델 슬라이스가 약한데도 통과 후보처럼 보일 수 있었다.
+- 평균 EV가 양수여도 표본 변동성을 고려한 하한이 음수면 라이브 검토 후보로 보기 어렵다.
+
+### 무엇을 수정했는가
+- `run_replay_validation_bridge.py`에 `ev_r_lower_95`와 `win_rate_lower_95`를 추가했다.
+- 기본 bridge 기준에 `min_ev_lower_r=0.0`을 추가해 EV 95% 하한이 음수인 심볼을 차단한다.
+- `direction`, `strategy_family`, `entry_model`별 material slice 진단을 추가했다.
+- 전체 집계가 통과해도 material slice가 약하면 `ELIGIBLE_FOR_MANUAL_BRIDGE_REVIEW_WITH_SLICE_WARNINGS`로 낮추고, live approval은 그대로 변경하지 않는다.
+
+### 왜 그렇게 판단했는가
+- replay-backed sampling을 검토하려면 “평균적으로 좋다”보다 “불리한 하위구간이 어디인지 알고 들어간다”가 더 중요하다.
+- 현재 11개 live/core 심볼 기준 bridge 결과는 `BCHUSDC`, `BTCUSDC`만 clean manual-review 후보이고, `ADAUSDC`, `AVAXUSDC`는 slice warning 후보이며, 나머지는 아직 bridge floor 미달이다.
+
+## 2026-05-10 MICRO_LIVE Validation Root-Cause/Flow Diagnosis Guard
+### 무엇을 발견했는가
+- `validation_do_not_deploy`가 보여도 표본 부족, EV/승률 문제, 점수 floor, risk gate, runtime candidate block 중 무엇이 핵심 원인인지 즉시 구분하기 어려웠다.
+- 포트폴리오 live-vs-replay parity는 집계 비율만으로는 `신호가 없었는지 / intent는 있었는데 승인에서 막혔는지 / 제출 루프에서 끊겼는지`를 심볼별로 빠르게 분리하기 어려웠다.
+- Discord no-order 알림이 운영자가 바로 읽기에는 verbose했다.
+
+### 무엇을 수정했는가
+- approval snapshot의 `validation_block_detail`에 `primary_cause`와 `root_causes`를 추가했다.
+- 기존 DB에 남아 있는 legacy blocked intent도 lifecycle report에서 root-cause detail을 보정해 보여준다.
+- `run_live_replay_parity_audit.py`가 심볼별 `flow_diagnosis.stage`를 산출하고, 전체 live universe에서는 stage/reason counts를 집계한다.
+- replay cadence는 충분하지만 모든 intent가 approval에서 막힌 심볼은 `PASS` 대신 `WATCH`로 표시한다.
+- `run_replay_validation_bridge.py`를 추가해 replay cache가 보수적 bridge 기준을 넘는지 audit-only로 산출한다. live approval은 변경하지 않는다.
+- no-order Discord 메시지를 `intent/제출/원인/상세/다음` 중심으로 축약했다.
+
+### 왜 그렇게 판단했는가
+- 지금 주문 미진입 상태는 submit 버그만 찾는 방식으로는 부족하다. signal/plan 생성, approval, intent submission, exchange reject/error를 분리해야 다음 조치가 정확하다.
+- 현재 로컬 3일 로그 기준 live intent 11건은 모두 제출 전 승인에서 차단됐고, 주요 원인은 `validation_sample_missing` 9건과 `rollout_session_not_allowed` 2건이다.
+
+## 2026-05-10 MICRO_LIVE Worker Boot/Parity/Heartbeat Guard
+### 무엇을 발견했는가
+- boot check는 있었지만 `run_worker.py` 시작 경로에 강제되지 않아, 운영자가 수동으로 빼먹을 수 있었다.
+- 단일 심볼 parity만으로는 11개 live universe 전체에서 어떤 심볼이 flow 미달인지 한 번에 보기 어려웠다.
+- launchd plist는 생성됐지만 스케줄이 실제로 리포트를 계속 만드는지 감시하는 heartbeat가 없었다.
+- `validation_do_not_deploy`는 주문 차단의 핵심 사유였지만, 최근 blocked intent에서 grade/risk/deployment context를 바로 읽기 어려웠다.
+
+### 무엇을 수정했는가
+- `run_worker.py`가 `MICRO_LIVE`/`LIVE` 모드에서 시작 전 `run_micro_live_boot_check.py`를 강제 실행하고, 실패 시 live routing을 시작하지 않도록 했다.
+- `run_live_replay_parity_audit.py --all-live-symbols`를 추가해 11개 live symbol 전체의 replay 기대 빈도 대비 live intent 빈도를 집계한다.
+- `run_micro_live_ops_heartbeat.py`를 추가해 runtime guard, no-order watchdog, reconciliation watchdog, synthetic canary, boot check, Binance rule drift, macro blackout report freshness를 확인한다.
+- no-order/runtime guard의 blocked intent diagnostics에 `validation_do_not_deploy` 상세 context를 붙였다.
+- launchd generator에 `ops-heartbeat` job을 추가했다.
+
+### 왜 그렇게 판단했는가
+- live worker 시작 전 실패를 막는 것은 사후 알림보다 강한 가드다.
+- 포트폴리오 합산 빈도가 괜찮아도 개별 심볼이 장기간 0 flow면 운영상 점검 대상이므로 개별 ALERT를 전체 ALERT로 끌어올린다.
+
+## 2026-05-10 MICRO_LIVE Operational Guard Closure
+### 무엇을 발견했는가
+- no-order watchdog은 intent->submission 공백은 잡지만, submission->Binance ledger/user-stream/reconciliation 공백은 별도 감시가 필요했다.
+- live-vs-replay parity audit가 local API에 먼저 의존해, 웹 서버가 내려간 상태에서는 baseline을 못 읽는 운영 취약점이 있었다.
+- 반복 점검은 문서화돼 있었지만 macOS에서 같은 guard를 주기적으로 실행하는 표준 plist 생성 경로가 없었다.
+
+### 무엇을 수정했는가
+- `run_live_reconciliation_watchdog.py`를 추가해 stale live submission, ledger terminal mismatch, open ledger/position user-stream stale, fresh critical reconciliation event를 감지한다.
+- `run_micro_live_boot_check.py`를 추가해 worker 시작 전 runtime guard, reconciliation watchdog, synthetic canary를 한 번에 확인한다.
+- `install_micro_live_ops_launchd.py`를 추가해 runtime guard, no-order watchdog, reconciliation watchdog, synthetic canary, boot check, rule drift, macro calendar refresh plist를 생성한다.
+- `run_live_replay_parity_audit.py`가 parity에 필요한 active-contract cadence와 replay baseline을 local DB/파일에서 먼저 계산하고, 실패할 때만 local API로 fallback하도록 바꿨다.
+- macro blackout fallback contract 복원 로직이 고정 15분 pre-window를 가정하지 않고 현재 `--pre-minutes` 값을 반영하도록 수정했다.
+
+### 왜 그렇게 판단했는가
+- "주문이 안 들어간다" 문제는 signal 부재, approval block, submission 미생성, exchange ledger 미정착, user-stream stale을 분리해야 원인과 조치가 정확해진다.
+- launchd는 live authority가 아니라 감시 자동화다. 실제 주문 제출 여부는 기존 approval/safety/execution gate가 계속 결정한다.
+
+## 2026-05-10 MICRO_LIVE Runtime Guard Documentation Sync
+### 무엇을 발견했는가
+- README는 최신 MICRO_LIVE 운영 스크립트를 일부 담고 있었지만, go-live checklist와 operating runbook이 같은 실행 순서를 공유하지 않았다.
+- go-live checklist 안에서 현재 live 계약이 `BTCUSDC` only와 `BTCUSDC/ETHUSDC` live 계약으로 동시에 적혀 있었다.
+- `.env` 예시가 없어 현재 canary allowlist, sizing, liquidity gate, blackout path를 안전하게 재현하기 어려웠다.
+
+### 무엇을 수정했는가
+- README, go-live checklist, operating runbook을 `BTCUSDC + sweep_reversal + LIMIT` live 계약으로 맞추고 `ETHUSDC`는 advisory/proof comparison으로 고정했다.
+- runtime guard, live order lifecycle report, no-order watchdog, synthetic canary, macro blackout builder를 운영 순서에 연결했다.
+- `.env.example`을 추가해 실제 live submit은 꺼둔 채 현재 canary 계약과 fail-closed liquidity gate 값을 문서화했다.
+
+### 왜 그렇게 판단했는가
+- live 제출 직전 문서는 전략 설명보다 재현 가능한 guard 순서와 설정 경계가 더 중요하다.
+- `no trade` 상태를 signal 부재, approval block, submit skip, order failure, fill 없음으로 분리해야 운영자가 gate를 잘못 완화하지 않는다.
 
 ## 2026-03-09 Iteration #126
 ### 무엇을 발견했는가
@@ -2724,6 +2833,56 @@
 
 ### 최신 검증 스냅샷
 - 타깃 회귀: `./.venv/bin/pytest -q tests/test_execution_operator_dashboard.py tests/test_api_smoke.py -q`
+
+## 2026-05-10 Iteration #135
+### 무엇을 발견했는가
+- `session_impulse_retest` runtime audit row는 이미 있었지만, WS stream이 활성화되어 sync/manual route를 의도적으로 억제하는 경로는 audit row가 빠질 수 있었다.
+- `run_session_impulse_retest_runtime_audit_report.py`는 raw JSON 출력만 제공해 운영 heartbeat나 고정 `latest.md/latest.json` 경로에서 바로 읽기 어려웠다.
+
+### 무엇을 수정했는가
+- WS stream active suppression 경로도 `phase=auto_route`, `status=ws_stream_active_route_suppressed`로 DB audit row를 남기게 했다.
+- `run_session_impulse_retest_runtime_audit_report.py`를 운영 리포트화해 summary, `overall_status`, timestamp report, `latest.md/latest.json`을 생성하게 했다.
+- ops heartbeat와 launchd generator에 `session_impulse_retest_runtime_audit` job을 추가했다.
+- README, operating runbook, near-100 hardening plan에 새 audit 리포트 경로와 해석 기준을 반영했다.
+
+### 왜 그렇게 판단했는가
+- 주문이 안 들어간 원인을 확정하려면 intent/submission 이후뿐 아니라 runtime refresh/auto_route 직전에서 끊긴 케이스도 DB에 남아야 한다.
+- WS가 라우팅 주체라서 중복 라우팅을 억제한 것은 정상 동작이지만, 기록이 없으면 “버그로 안 들어간 것”과 구분하기 어렵다.
+
+### 최신 검증 스냅샷
+- 정적 검증:
+  - `./.venv/bin/python -m py_compile app/services/strategy_engine.py scripts/run_session_impulse_retest_runtime_audit_report.py scripts/run_micro_live_ops_heartbeat.py scripts/install_micro_live_ops_launchd.py`
+- 테스트 실행 결과:
+  - `./.venv/bin/pytest -q tests/test_session_impulse_retest_execution_path.py tests/test_micro_live_operational_guards.py -q`
+  - 통과
+- 운영 리포트 재생성:
+  - `./.venv/bin/python scripts/run_session_impulse_retest_runtime_audit_report.py --hours 3 --limit 50 --no-fail-exit`
+  - 결과: `PASS`, audit_count `50`, hard route failure `0`
+  - `./.venv/bin/python scripts/run_micro_live_ops_heartbeat.py --no-fail-exit`
+  - 결과: `WATCH`, hard failure `0`, warning `2` (`no_order_watchdog=ALERT`, `replay_validation_bridge=WATCH`)
+
+## 2026-05-10 Iteration #134
+### 무엇을 발견했는가
+- 운영 가드는 많이 갖춰졌지만, “완성도 100%에 가까움”의 기준이 한 문서로 고정돼 있지 않았다.
+- 일부 운영 리포트는 timestamp 파일만 남겨 수동 확인/heartbeat 이후 operator read path가 흔들릴 수 있었다.
+- reconciliation watchdog은 알림 전송 실패도 cooldown state로 기록할 수 있어, 실패한 알림이 다음 알림을 막는 silent gap이 될 수 있었다.
+
+### 무엇을 수정했는가
+- `docs/MICRO_LIVE_NEAR_100_HARDENING_PLAN.md`를 추가해 near-100의 의미, 단계, NO-GO 원칙, 현재 우선순위를 고정했다.
+- runtime guard, boot check, reconciliation watchdog, synthetic canary가 `latest.md/latest.json` alias를 atomic write로 남기게 했다.
+- Binance rule drift snapshot의 timestamp/latest JSON 쓰기를 atomic write로 바꿨다.
+- reconciliation watchdog cooldown state는 notification delivery가 확인된 경우에만 기록하도록 바꿨다.
+
+### 왜 그렇게 판단했는가
+- 지금 완성도를 올리는 핵심은 필터를 무작정 푸는 것이 아니라, 장애와 주문 미제출 상태가 silent success로 숨지 않게 만드는 것이다.
+- 운영자는 raw log보다 먼저 고정 경로 report와 heartbeat를 봐야 하므로 latest alias가 모든 주요 guard에 필요하다.
+
+### 최신 검증 스냅샷
+- 정적 검증:
+  - `./.venv/bin/python -m py_compile scripts/operation_report_io.py scripts/run_micro_live_runtime_guard.py scripts/run_micro_live_boot_check.py scripts/run_live_reconciliation_watchdog.py scripts/run_micro_live_synthetic_canary.py scripts/run_binance_rule_drift_snapshot.py`
+- 테스트 실행 결과:
+  - `./.venv/bin/pytest -q tests/test_micro_live_operational_guards.py -q`
+  - `44 passed`
 
 ## 2026-03-09 Iteration #130
 ### 무엇을 발견했는가

@@ -22,11 +22,18 @@ class RuntimeValidationOrchestrator:
     def __init__(self, engine: Any):
         self.engine = engine
 
-    def recompute_learning(self, symbol: str, *, persist_runtime_validation_artifacts: bool = True) -> dict:
+    def recompute_learning(
+        self,
+        symbol: str,
+        *,
+        persist_runtime_validation_artifacts: bool = True,
+        use_read_only_cache: bool = True,
+    ) -> dict:
         return _run_engine_recompute_learning(
             self.engine,
             symbol,
             persist_runtime_validation_artifacts=persist_runtime_validation_artifacts,
+            use_read_only_cache=use_read_only_cache,
         )
 
 
@@ -45,8 +52,9 @@ def _run_engine_recompute_learning(
     symbol: str,
     *,
     persist_runtime_validation_artifacts: bool = True,
+    use_read_only_cache: bool = True,
 ) -> dict:
-    if not persist_runtime_validation_artifacts:
+    if not persist_runtime_validation_artifacts and use_read_only_cache:
         cached_payload = self._load_cached_validation_payload(symbol)
         if cached_payload is not None:
             return cached_payload

@@ -3,10 +3,17 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
+
+import pytest
+
+from app.api.routes import _validation_report_cache_miss_payload
+from app.api.routes import validation_report as validation_report_route
+from app.schemas.api import ValidationReportOut
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -139,6 +146,155 @@ def _dashboard_payload() -> dict:
     }
 
 
+def test_micro_live_config_drift_checks_flag_missing_direction_contract_symbol(monkeypatch, tmp_path) -> None:
+    settings = run_micro_live_preflight.get_settings()
+    heartbeat_dir = tmp_path / "heartbeats"
+    heartbeat_dir.mkdir()
+    (heartbeat_dir / "ws.json").write_text(
+        json.dumps({"details": {"symbols": ["BTCUSDC", "ETHUSDC"]}}),
+        encoding="utf-8",
+    )
+    blackout_path = tmp_path / "blackouts.json"
+    blackout_path.write_text(
+        json.dumps({"windows": [{"label": "global_test", "start_utc": "2026-01-01T00:00:00Z", "end_utc": "2026-01-01T01:00:00Z"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "runtime_worker_heartbeat_dir", str(heartbeat_dir))
+    monkeypatch.setattr(settings, "auto_trading_execution_mode", "MICRO_LIVE")
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_allowed_symbols", "BTCUSDC,ETHUSDC")
+    monkeypatch.setattr(settings, "auto_trading_allowed_families", "sweep_reversal")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", "BTCUSDC,ETHUSDC")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_entry_models", "LIMIT")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_direction_contract", "BTCUSDC:LONG|SHORT")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_event_blackout_path", str(blackout_path))
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_fail_closed", True)
+
+    checks = run_micro_live_preflight._micro_live_config_drift_checks()
+    by_name = {item["name"]: item for item in checks}
+
+    assert by_name["live_direction_contract_coverage"]["status"] == "FAIL"
+    assert "missing=ETHUSDC" in by_name["live_direction_contract_coverage"]["message"]
+    assert by_name["ws_universe_contains_live_symbols"]["status"] == "PASS"
+
+
+def test_micro_live_config_drift_checks_warn_on_tracked_only_session_symbols(monkeypatch, tmp_path) -> None:
+    settings = run_micro_live_preflight.get_settings()
+    heartbeat_dir = tmp_path / "heartbeats"
+    heartbeat_dir.mkdir()
+    (heartbeat_dir / "ws.json").write_text(
+        json.dumps({"details": {"symbols": ["BTCUSDC", "ETHUSDC", "SUIUSDC"]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "runtime_worker_heartbeat_dir", str(heartbeat_dir))
+    monkeypatch.setattr(settings, "auto_trading_execution_mode", "MICRO_LIVE")
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_allowed_symbols", "BTCUSDC,ETHUSDC")
+    monkeypatch.setattr(settings, "auto_trading_allowed_families", "session_impulse_retest")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", "BTCUSDC,ETHUSDC")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "session_impulse_retest")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_entry_models", "LIMIT,CONFIRM")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_direction_contract", "BTCUSDC:LONG|SHORT,ETHUSDC:LONG|SHORT")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_event_blackout_path", "")
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_fail_closed", True)
+    monkeypatch.setattr(settings, "session_impulse_retest_enabled", True)
+    monkeypatch.setattr(settings, "session_impulse_retest_shadow_only", False)
+    monkeypatch.setattr(settings, "session_impulse_retest_allowed_symbols", "BTCUSDC,ETHUSDC,SUIUSDC")
+
+    checks = run_micro_live_preflight._micro_live_config_drift_checks()
+    sir_check = {item["name"]: item for item in checks}["session_impulse_retest_live_alignment"]
+
+    assert sir_check["status"] == "PASS"
+    assert "tracked_only=SUIUSDC" in sir_check["message"]
+
+
+def test_event_blackout_coverage_check_blocks_missing_live_symbols(tmp_path) -> None:
+    blackout_path = tmp_path / "blackouts.json"
+    blackout_path.write_text(
+        json.dumps(
+            {
+                "windows": [
+                    {
+                        "label": "cpi",
+                        "start_utc": "2026-01-01T00:00:00Z",
+                        "end_utc": "2026-01-01T01:00:00Z",
+                        "symbols": ["BTCUSDC"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    check = run_micro_live_preflight._event_blackout_coverage_check(
+        raw_path=str(blackout_path),
+        live_symbols={"BTCUSDC", "ETHUSDC"},
+    )
+
+    assert check["status"] == "FAIL"
+    assert check["severity"] == "blocking"
+    assert "missing=ETHUSDC" in check["message"]
+
+
+def test_event_blackout_freshness_check_blocks_expired_contract(tmp_path) -> None:
+    blackout_path = tmp_path / "blackouts.json"
+    blackout_path.write_text(
+        json.dumps(
+            {
+                "windows": [
+                    {
+                        "label": "old_cpi",
+                        "start_utc": "2026-01-01T00:00:00Z",
+                        "end_utc": "2026-01-01T01:00:00Z",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    check = run_micro_live_preflight._event_blackout_freshness_check(
+        raw_path=str(blackout_path),
+        now=datetime(2026, 5, 10, tzinfo=UTC),
+        min_horizon_days=45,
+    )
+
+    assert check["status"] == "FAIL"
+    assert check["severity"] == "blocking"
+    assert "expired" in check["message"]
+
+
+def test_event_blackout_freshness_check_requires_forward_horizon(tmp_path) -> None:
+    blackout_path = tmp_path / "blackouts.json"
+    blackout_path.write_text(
+        json.dumps(
+            {
+                "windows": [
+                    {
+                        "label": "near_cpi",
+                        "start_utc": "2026-05-12T12:15:00Z",
+                        "end_utc": "2026-05-12T13:00:00Z",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    check = run_micro_live_preflight._event_blackout_freshness_check(
+        raw_path=str(blackout_path),
+        now=datetime(2026, 5, 10, tzinfo=UTC),
+        min_horizon_days=45,
+    )
+
+    assert check["status"] == "FAIL"
+    assert "horizon_days=2.5" in check["message"]
+    assert "min_required=45" in check["message"]
+
+
 def _validation_payload(*, approve_value: str = "approval usable") -> dict:
     return {
         "deployment_go_no_go": "GO" if approve_value == "approval usable" else "NO_GO",
@@ -240,6 +396,14 @@ def _alerts_payload() -> dict:
     }
 
 
+def _patch_config_drift_pass(monkeypatch) -> None:
+    monkeypatch.setattr(
+        run_micro_live_preflight,
+        "_micro_live_config_drift_checks",
+        lambda **_kwargs: [{"name": "config_drift", "status": "PASS", "severity": "blocking", "message": "ok"}],
+    )
+
+
 def test_request_json_retries_after_timeout(monkeypatch) -> None:
     calls = {"count": 0}
 
@@ -318,6 +482,7 @@ def test_surface_strip_summary_prefers_nested_validation_strip() -> None:
 
 
 def test_main_emits_approval_surfaces_and_ready_status(monkeypatch, capsys) -> None:
+    _patch_config_drift_pass(monkeypatch)
     monkeypatch.setattr(
         run_micro_live_preflight,
         "parse_args",
@@ -390,6 +555,7 @@ def test_main_emits_approval_surfaces_and_ready_status(monkeypatch, capsys) -> N
 
 
 def test_main_keeps_preflight_ready_when_no_candidate_is_live(monkeypatch, capsys) -> None:
+    _patch_config_drift_pass(monkeypatch)
     monkeypatch.setattr(
         run_micro_live_preflight,
         "parse_args",
@@ -437,6 +603,7 @@ def test_main_keeps_preflight_ready_when_no_candidate_is_live(monkeypatch, capsy
 
 
 def test_main_blocks_preflight_on_manual_review_approval_surface(monkeypatch, capsys) -> None:
+    _patch_config_drift_pass(monkeypatch)
     monkeypatch.setattr(
         run_micro_live_preflight,
         "parse_args",
@@ -463,7 +630,7 @@ def test_main_blocks_preflight_on_manual_review_approval_surface(monkeypatch, ca
         if path == "/validation/report":
             return _validation_payload(approve_value="manual review first")
         if path == "/operations/checklist":
-            return _checklist_payload()
+            return _checklist_payload(approve_value="manual review first")
         if path == "/alerts/metrics":
             return _alerts_payload()
         if path == "/scanner/top":
@@ -476,12 +643,93 @@ def test_main_blocks_preflight_on_manual_review_approval_surface(monkeypatch, ca
     payload = json.loads(capsys.readouterr().out)
 
     assert payload["overall_status"] == "NOT_READY"
+    assert payload["failed_root_causes"] == ["validation_manual_review"]
+    assert payload["failed_root_cause_count"] == 1
+    assert payload["failed_root_cause_details"][0]["check_names"] == [
+        "validation_language",
+        "checklist_language",
+    ]
+    assert payload["failed_root_cause_details"][0]["approve_value"] == "manual review first"
+    assert "1 unique root cause" in payload["summary_line"]
     validation_check = next(item for item in payload["checks"] if item["name"] == "validation_language")
     assert validation_check["status"] == "FAIL"
     assert "approve=manual review first" in validation_check["message"]
 
 
+def test_failed_root_cause_groups_non_manual_approval_surface_failures() -> None:
+    details = run_micro_live_preflight._failed_root_cause_details(
+        [
+            {
+                "name": "validation_language",
+                "status": "FAIL",
+                "message": (
+                    "approve=validation no_go | align=playbook_drift | "
+                    "act=review_runtime_execution_drag_before_expansion | reason=validation summary"
+                ),
+            },
+            {
+                "name": "checklist_language",
+                "status": "FAIL",
+                "message": (
+                    "approve=validation no_go | align=aligned | "
+                    "act=clear_blocking_operational_items_before_rollout | reason=checklist summary"
+                ),
+            },
+        ]
+    )
+
+    assert len(details) == 1
+    assert details[0]["root_cause"] == "validation_approval_surface_validation_no_go"
+    assert details[0]["check_names"] == ["validation_language", "checklist_language"]
+    assert details[0]["approve_value"] == "validation no_go"
+
+
+def test_write_report_includes_failed_root_cause_section(tmp_path) -> None:
+    report_path = tmp_path / "preflight.md"
+    payload = {
+        "generated_at": "2026-05-10T00:00:00+00:00",
+        "symbol": "BTCUSDC",
+        "universe": "usdc_perp_top30",
+        "overall_status": "NOT_READY",
+        "summary_line": "2 blocking preflight check(s) remain across 1 unique root cause(s).",
+        "failed_root_cause_count": 1,
+        "failed_root_cause_details": [
+            {
+                "root_cause": "validation_manual_review",
+                "check_names": ["validation_language", "checklist_language"],
+                "approve_value": "manual review first",
+                "act_value": "hold_rollout_and_review_alignment_details",
+                "reason": "MANUAL REVIEW: alignment warning remains.",
+            }
+        ],
+        "checks": [
+            {
+                "status": "FAIL",
+                "name": "validation_language",
+                "message": "approve=manual review first | act=hold_rollout_and_review_alignment_details",
+            }
+        ],
+        "surface_timings": [],
+        "approval_surfaces": [],
+        "edge_experiment_review": {},
+        "edge_evolution_rule": {},
+        "review_followup_ledger": {},
+        "experiment_review_targets": {},
+        "representative_candidates": {},
+        "candidate": {},
+        "next_steps": [],
+    }
+
+    run_micro_live_preflight._write_report(report_path, payload)
+    raw = report_path.read_text(encoding="utf-8")
+
+    assert "## Failed Root Causes" in raw
+    assert "validation_manual_review" in raw
+    assert "checks=validation_language, checklist_language" in raw
+
+
 def test_main_ignores_non_routable_scanner_candidate(monkeypatch, capsys) -> None:
+    _patch_config_drift_pass(monkeypatch)
     monkeypatch.setattr(
         run_micro_live_preflight,
         "get_settings",
@@ -548,6 +796,7 @@ def test_main_ignores_non_routable_scanner_candidate(monkeypatch, capsys) -> Non
 
 
 def test_main_does_not_select_scanner_candidate_when_policy_is_shadow_only(monkeypatch, capsys) -> None:
+    _patch_config_drift_pass(monkeypatch)
     monkeypatch.setattr(
         run_micro_live_preflight,
         "get_settings",
@@ -611,6 +860,7 @@ def test_main_does_not_select_scanner_candidate_when_policy_is_shadow_only(monke
 
 
 def test_main_does_not_select_scanner_candidate_outside_symbol_allowlist(monkeypatch, capsys) -> None:
+    _patch_config_drift_pass(monkeypatch)
     monkeypatch.setattr(
         run_micro_live_preflight,
         "get_settings",
@@ -671,6 +921,7 @@ def test_main_does_not_select_scanner_candidate_outside_symbol_allowlist(monkeyp
 
 
 def test_main_uses_read_only_queries_for_reconcile_validation_and_checklist(monkeypatch, capsys) -> None:
+    _patch_config_drift_pass(monkeypatch)
     monkeypatch.setattr(
         run_micro_live_preflight,
         "parse_args",
@@ -710,11 +961,36 @@ def test_main_uses_read_only_queries_for_reconcile_validation_and_checklist(monk
     monkeypatch.setattr(run_micro_live_preflight, "_request_json", _request_json)
 
     assert run_micro_live_preflight.main() == 0
-    _ = json.loads(capsys.readouterr().out)
+    payload = json.loads(capsys.readouterr().out)
 
     assert calls["/execution/reconcile"]["query"] == {"apply_lock": "false", "auto_resolve": "false"}
-    assert calls["/validation/report"]["query"] == {"symbol": "BTCUSDC", "refresh": "false"}
+    assert calls["/execution/operator-dashboard"]["query"] == {
+        "symbol": "BTCUSDC",
+        "universe": "usdc_perp_top30",
+        "days": 7,
+        "portfolio_limit": 5,
+        "intent_limit": 5,
+        "reconcile_limit": 5,
+        "fast": "true",
+    }
+    assert calls["/validation/report"]["query"] == {
+        "symbol": "BTCUSDC",
+        "refresh": "false",
+        "cache_fallback": "true",
+    }
     assert calls["/operations/checklist"]["query"] == {"symbol": "BTCUSDC", "write_report": "false"}
+    assert calls["/scanner/top"]["query"] == {"universe": "usdc_perp_top30", "limit": 10, "fast": "true"}
+    assert [row["path"] for row in payload["surface_timings"]] == [
+        "/health/ready",
+        "/execution/operator-dashboard",
+        "/execution/safety-state",
+        "/execution/reconcile",
+        "/validation/report",
+        "/operations/checklist",
+        "/alerts/metrics",
+        "/scanner/top",
+    ]
+    assert {row["status"] for row in payload["surface_timings"]} == {"PASS"}
 
 
 def test_request_json_refreshes_validation_report_when_read_only_cache_is_missing(monkeypatch) -> None:
@@ -748,3 +1024,96 @@ def test_request_json_refreshes_validation_report_when_read_only_cache_is_missin
         {"symbol": ["BTCUSDC"], "refresh": ["false"]},
         {"symbol": ["BTCUSDC"], "refresh": ["true"]},
     ]
+
+
+def test_request_json_reports_endpoint_on_timeout(monkeypatch) -> None:
+    def fake_urlopen(request, timeout):  # noqa: ANN001, ARG001
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(run_micro_live_preflight, "urlopen", fake_urlopen)
+    monkeypatch.setattr(run_micro_live_preflight, "_REQUEST_RETRY_ATTEMPTS", 1)
+    monkeypatch.setattr(run_micro_live_preflight, "_REQUEST_TIMEOUT_SECONDS", 2.0)
+
+    with pytest.raises(RuntimeError, match=r"GET /scanner/top timed out after 2s"):
+        run_micro_live_preflight._request_json(
+            "http://127.0.0.1:8000",
+            "GET",
+            "/scanner/top",
+            query={"universe": "usdc_perp_top30", "limit": 10},
+        )
+
+
+def test_validation_cache_fallback_is_valid_not_ready_payload() -> None:
+    payload = _validation_report_cache_miss_payload("btcusdc")
+    parsed = ValidationReportOut(**payload)
+    strip = run_micro_live_preflight._surface_strip_summary(
+        parsed.model_dump(mode="json"),
+        surface_type="validation",
+    )
+
+    assert parsed.symbol == "BTCUSDC"
+    assert strip["act_value"] == "refresh_validation_report"
+    assert run_micro_live_preflight._surface_allows_preflight(strip) is False
+
+
+def test_validation_cache_fallback_prefers_stale_conservative_payload() -> None:
+    class _Engine:
+        def _load_cached_validation_payload(self, symbol: str) -> None:  # noqa: ARG002
+            return None
+
+        def _load_stale_conservative_validation_payload(self, symbol: str) -> dict:
+            return {
+                "symbol": symbol,
+                "updated_zones": 0,
+                "metrics": {},
+                "walk_forward": {},
+                "monte_carlo": {},
+                "validation_report": {
+                    "approval_strip_summary": {
+                        "approve_value": "manual review first",
+                        "align_value": "playbook_drift",
+                        "act_value": "hold_rollout_and_review_alignment_details",
+                    }
+                },
+            }
+
+    parsed = validation_report_route(
+        symbol="BTCUSDC",
+        refresh=False,
+        cache_fallback=True,
+        engine=_Engine(),
+    )
+
+    assert parsed.symbol == "BTCUSDC"
+    assert parsed.validation_report["approval_strip_summary"]["approve_value"] == "manual review first"
+    assert parsed.validation_report["approval_strip_summary"]["act_value"] == "hold_rollout_and_review_alignment_details"
+
+
+def test_validation_report_refresh_bypasses_read_only_cache() -> None:
+    class _Engine:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] = {}
+
+        def recompute_learning(self, symbol: str, **kwargs) -> dict:
+            self.kwargs = kwargs
+            return {
+                "symbol": symbol,
+                "updated_zones": 0,
+                "metrics": {},
+                "walk_forward": {},
+                "monte_carlo": {},
+                "validation_report": {
+                    "approval_strip_summary": {
+                        "approve_value": "manual review first",
+                        "align_value": "playbook_drift",
+                        "act_value": "hold_rollout_and_review_alignment_details",
+                    }
+                },
+            }
+
+    engine = _Engine()
+    parsed = validation_report_route(symbol="BTCUSDC", refresh=True, engine=engine)
+
+    assert parsed.symbol == "BTCUSDC"
+    assert engine.kwargs["persist_runtime_validation_artifacts"] is False
+    assert engine.kwargs["use_read_only_cache"] is False

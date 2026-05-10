@@ -73,6 +73,22 @@ def test_validation_report_contract_prefers_top_level_then_falls_back_to_nested_
     assert nested_only["playbook_action"] == "review_nested"
 
 
+def test_validation_report_contract_ignores_malformed_nested_summary() -> None:
+    contract = validation_report_contract(
+        {
+            "validation_report": {
+                "deployment_approval_summary": ["broken"],
+            },
+            "playbook_go_no_go": "MANUAL_REVIEW",
+            "playbook_action": "hold_rollout_and_review_alignment_details",
+        }
+    )
+
+    assert contract["playbook_go_no_go"] == "MANUAL_REVIEW"
+    assert contract["playbook_action"] == "hold_rollout_and_review_alignment_details"
+    assert contract["deployment_go_no_go"] == ""
+
+
 def test_validation_alert_contract_accepts_plain_playbook_fields() -> None:
     contract = validation_alert_contract(
         {
@@ -111,6 +127,20 @@ def test_validation_alert_strip_summary_derives_operator_vocabulary() -> None:
     assert summary["act_value"] == "review_alignment_before_rollout"
     assert summary["act_priority_level"] == "watch"
     assert summary["primary_reason"].startswith("winner=true_threshold;")
+
+
+def test_validation_alert_strip_summary_ignores_malformed_existing_strip() -> None:
+    summary = validation_alert_strip_summary(
+        {
+            "approval_strip_summary": ["broken"],
+            "deployment_go_no_go": "GO",
+            "approval_playbook_go_no_go": "GO",
+            "approval_playbook_action": "proceed_with_configured_rollout",
+        }
+    )
+
+    assert summary["approve_value"] == "approval usable"
+    assert summary["act_value"] == "proceed_with_configured_rollout"
 
 
 def test_alert_contract_defaults_fills_manual_review_when_contract_is_missing() -> None:

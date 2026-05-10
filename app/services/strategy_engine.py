@@ -160,7 +160,7 @@ from app.services.validation_payload_cache import (
     READ_ONLY_RECOMPUTE_CACHE,
     ValidationPayloadCacheService,
 )
-from app.services.validation_report import ValidationReportService
+from app.services.validation_report import ValidationReportService, validation_report_cache_miss_payload
 from app.services.health_check import HealthCheckService
 from app.services.zone_engine import ZoneEngine
 
@@ -461,6 +461,9 @@ class StrategyEngine:
 
     def _load_cached_validation_payload(self, symbol: str) -> dict[str, Any] | None:
         return self.validation_payload_cache.load(symbol)
+
+    def _load_stale_conservative_validation_payload(self, symbol: str) -> dict[str, Any] | None:
+        return self.validation_payload_cache.load_stale_conservative(symbol)
 
     def _store_cached_validation_payload(self, symbol: str, payload: dict[str, Any]) -> None:
         self.validation_payload_cache.store(symbol, payload)
@@ -1054,7 +1057,7 @@ class StrategyEngine:
                 continue
             if valid_from < start_of_day:
                 continue
-            validity = dict(getattr(row, "validity", {}) or {})
+            validity = _safe_dict(getattr(row, "validity", None))
             row_mode = str(validity.get("execution_mode") or "").upper()
             plan_id = str(getattr(row, "plan_id", "") or "")
             if plan_id in counted_plan_ids:
@@ -1085,7 +1088,7 @@ class StrategyEngine:
 
         filtered_rows = []
         for row in rows:
-            validity = dict(getattr(row, "validity", {}) or {})
+            validity = _safe_dict(getattr(row, "validity", None))
             row_mode = str(validity.get("execution_mode") or "").upper()
             if row_mode in allowed_live_modes or str(getattr(row, "plan_id", "") or "") in recent_live_submission_plan_ids:
                 filtered_rows.append(row)
@@ -1102,9 +1105,9 @@ class StrategyEngine:
     def _submission_live_tranche_payload(submission: Any | None) -> dict[str, Any]:
         if submission is None:
             return {}
-        attachments = dict(getattr(submission, "attachments", {}) or {})
-        raw = dict(getattr(submission, "raw", {}) or {})
-        return dict(attachments.get("live_tranche") or raw.get("live_tranche") or {})
+        attachments = _safe_dict(getattr(submission, "attachments", None))
+        raw = _safe_dict(getattr(submission, "raw", None))
+        return _safe_dict(attachments.get("live_tranche") or raw.get("live_tranche"))
 
     def _plan_allows_live_tranche_continuation(self, plan: Plan) -> bool:
         if not bool(getattr(self.settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", False)):
@@ -1137,7 +1140,7 @@ class StrategyEngine:
         return remaining_notional >= min_tranche_notional and tranche_index < max_tranches
 
     def _is_same_live_tranche_thesis(self, *, plan: Plan, executable_plan: dict[str, Any], exposure: Plan) -> bool:
-        requested_fingerprint = dict(executable_plan.get("thesis_fingerprint") or {})
+        requested_fingerprint = _safe_dict(executable_plan.get("thesis_fingerprint"))
         if not requested_fingerprint:
             requested_fingerprint = self.thesis.build_from_plan(plan)
         return self.thesis.same_thesis(requested_fingerprint, self.thesis.build_from_plan(exposure))
@@ -1226,10 +1229,11 @@ class StrategyEngine:
         if requested_mode not in {ExecutionMode.MICRO_LIVE, ExecutionMode.LIVE}:
             return None
 
-        family = str(executable_plan.get("strategy_family") or (plan.validity or {}).get("strategy_family") or "legacy_zone_plan").lower()
+        plan_validity = _safe_dict(getattr(plan, "validity", None))
+        family = str(executable_plan.get("strategy_family") or plan_validity.get("strategy_family") or "legacy_zone_plan").lower()
         requested_direction = str(
             executable_plan.get("direction")
-            or (plan.validity or {}).get("direction")
+            or plan_validity.get("direction")
             or getattr(plan, "direction", "")
             or ""
         ).lower()
@@ -1252,7 +1256,7 @@ class StrategyEngine:
                     continue
                 if self._is_same_live_tranche_thesis(plan=plan, executable_plan=executable_plan, exposure=row) and self._plan_allows_live_tranche_continuation(row):
                     continue
-                validity = dict(getattr(row, "validity", {}) or {})
+                validity = _safe_dict(getattr(row, "validity", None))
                 row_family = str(validity.get("strategy_family") or "legacy_zone_plan").lower()
                 if row_family != family:
                     continue
@@ -1276,7 +1280,7 @@ class StrategyEngine:
                     continue
                 if self._is_same_live_tranche_thesis(plan=plan, executable_plan=executable_plan, exposure=row) and self._plan_allows_live_tranche_continuation(row):
                     continue
-                validity = dict(getattr(row, "validity", {}) or {})
+                validity = _safe_dict(getattr(row, "validity", None))
                 row_family = str(validity.get("strategy_family") or "legacy_zone_plan").lower()
                 if row_family != family:
                     continue
@@ -1311,7 +1315,7 @@ class StrategyEngine:
             for row in recent_closed_rows:
                 if str(getattr(row, "plan_id", "") or "") == str(plan.plan_id or ""):
                     continue
-                validity = dict(getattr(row, "validity", {}) or {})
+                validity = _safe_dict(getattr(row, "validity", None))
                 row_family = str(validity.get("strategy_family") or "legacy_zone_plan").lower()
                 if row_family != family:
                     continue
@@ -1388,7 +1392,7 @@ class StrategyEngine:
 
         family = str(
             executable_plan.get("strategy_family")
-            or (plan.validity or {}).get("strategy_family")
+            or _safe_dict(getattr(plan, "validity", None)).get("strategy_family")
             or "legacy_zone_plan"
         ).lower()
         if not family:
@@ -1453,7 +1457,7 @@ class StrategyEngine:
                 continue
             if str(getattr(row, "decision_reason_code", "") or "") != "submit_ready":
                 continue
-            payload = dict(getattr(row, "payload", {}) or {})
+            payload = _safe_dict(getattr(row, "payload", None))
             row_entry_model = str(payload.get("entry_model") or payload.get("entry_type") or "").strip().upper()
             if row_entry_model != "LIMIT":
                 continue
@@ -1963,16 +1967,16 @@ class StrategyEngine:
             symbol = str(getattr(row, "symbol", "") or "").upper()
             if live_symbols and symbol not in live_symbols:
                 continue
-            validity = dict(getattr(row, "validity", {}) or {})
+            validity = _safe_dict(getattr(row, "validity", None))
             strategy_family = str(validity.get("strategy_family") or "").strip().lower()
             if live_families and strategy_family not in live_families:
                 continue
-            strategy_sizing = dict(validity.get("strategy_sizing") or {})
-            recommended_risk_r = float(
+            strategy_sizing = _safe_dict(validity.get("strategy_sizing"))
+            recommended_risk_r = self._maybe_float(
                 validity.get("recommended_risk_r")
                 or strategy_sizing.get("final_risk_r")
                 or 0.0
-            )
+            ) or 0.0
             if recommended_risk_r <= 0.0:
                 continue
             filtered.append(row)
@@ -2217,7 +2221,7 @@ class StrategyEngine:
                 "symbol": getattr(row, "symbol", symbol),
                 "direction": getattr(row, "direction", ""),
                 "entry_model": getattr(row, "entry_model", ""),
-                "validity": dict(getattr(row, "validity", {}) or {}),
+                "validity": _safe_dict(getattr(row, "validity", None)),
             }
             entry_model = self._row_entry_model(payload)
             if entry_models and entry_model not in entry_models:
@@ -2231,7 +2235,7 @@ class StrategyEngine:
                 continue
 
             runtime_rejected_same_entry_model_plans_same_window += 1
-            validity = dict(getattr(row, "validity", {}) or {})
+            validity = _safe_dict(getattr(row, "validity", None))
             reason = str(validity.get("strategy_family_reason") or "unknown")
             reaction = str(validity.get("reaction_classification") or "unknown")
             family = str(validity.get("strategy_family") or "unknown")
@@ -3127,13 +3131,28 @@ class StrategyEngine:
         *,
         symbols: list[str],
         risk_state: RiskGateState,
+        limit: int | None = None,
     ) -> list[str]:
         rows = self.scanner.candidate_rows(
             symbols=symbols,
             risk_state=risk_state,
             plans_per_symbol=1,
         )
-        return sorted({str(row.get("symbol") or "").upper() for row in rows if row.get("symbol")})
+        if limit is None:
+            return sorted({str(row.get("symbol") or "").upper() for row in rows if row.get("symbol")})
+        if int(limit) <= 0:
+            return []
+        selected: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            symbol = str(row.get("symbol") or "").upper()
+            if not symbol or symbol in seen:
+                continue
+            selected.append(symbol)
+            seen.add(symbol)
+            if len(selected) >= max(1, int(limit)):
+                break
+        return selected
 
     def _approval_outcome_inputs(
         self,
@@ -3170,7 +3189,7 @@ class StrategyEngine:
         )
         context, candidate_rows, _ = self._execution_candidate_rows(symbol=plan.symbol)
         candidate_row = next((row for row in candidate_rows if row.get("plan_id") == plan.plan_id), None)
-        family = str((plan.validity or {}).get("strategy_family") or "legacy_zone_plan").lower()
+        family = str(_safe_dict(getattr(plan, "validity", None)).get("strategy_family") or "legacy_zone_plan").lower()
         operating_lock = dict((candidate_row or {}).get("operating_lock") or {})
         session_name = ExecutionPlanningService._session_name(candidate_row or {}, operating_lock)
         exposure_rows = self._current_exposure_rows()
@@ -3272,9 +3291,10 @@ class StrategyEngine:
 
     @staticmethod
     def _order_intent_to_dict(row) -> dict[str, Any]:
-        approval = dict(row.approval_snapshot or {})
-        payload = dict(row.payload or {})
-        self_heal_summary = dict(payload.get("self_heal_summary") or dict(payload.get("intent_snapshot") or {}).get("self_heal_summary") or {})
+        approval = _safe_dict(row.approval_snapshot)
+        payload = _safe_dict(row.payload)
+        intent_snapshot = _safe_dict(payload.get("intent_snapshot"))
+        self_heal_summary = _safe_dict(payload.get("self_heal_summary") or intent_snapshot.get("self_heal_summary"))
         return {
             "intent_id": row.intent_id,
             "plan_id": row.plan_id,
@@ -3299,10 +3319,10 @@ class StrategyEngine:
             "paper_lineage_override_source": approval.get("paper_lineage_override_source", ""),
             "self_heal_summary": self_heal_summary,
             "source_of_truth_hint": "execution_approval_snapshot",
-            "thesis_fingerprint": dict(row.thesis_fingerprint or {}),
-            "dedupe_result": dict(row.dedupe_result or {}),
-            "session_guidance": dict(row.session_guidance or {}),
-            "quality_snapshot": dict(row.quality_snapshot or {}),
+            "thesis_fingerprint": _safe_dict(row.thesis_fingerprint),
+            "dedupe_result": _safe_dict(row.dedupe_result),
+            "session_guidance": _safe_dict(row.session_guidance),
+            "quality_snapshot": _safe_dict(row.quality_snapshot),
             "approval": approval,
             "created_at": row.created_at,
         }
@@ -3321,7 +3341,7 @@ class StrategyEngine:
             "exchange_order_id": row.exchange_order_id,
             "adapter": row.adapter,
             "requested_live": bool(row.requested_live),
-            "attachments": dict(row.attachments or {}),
+            "attachments": _safe_dict(row.attachments),
             "fill_results": fill_results,
             "submitted_at": row.submitted_at,
             "acknowledged_at": row.acknowledged_at,
@@ -3383,7 +3403,7 @@ class StrategyEngine:
         cooldown_seconds = max(0, self._maybe_int(self.settings.auto_trading_intent_recheck_cooldown_seconds) or 0)
         if cooldown_seconds <= 0:
             return None
-        payload = dict(getattr(latest_intent, "payload", {}) or {})
+        payload = _safe_dict(getattr(latest_intent, "payload", None))
         latest_requested_mode = str(payload.get("requested_execution_mode") or getattr(latest_intent, "execution_mode", "") or "")
         if latest_requested_mode != requested_mode.value:
             return None
@@ -3442,7 +3462,7 @@ class StrategyEngine:
             status=str(status or "").lower(),
             plan_id=str(plan_id or "").strip() or None,
             decision_code=str(decision_code or "").strip() or None,
-            payload=self._session_impulse_retest_runtime_audit_json_safe(dict(payload or {})),
+            payload=self._session_impulse_retest_runtime_audit_json_safe(_safe_dict(payload)),
             observed_ts=normalized_observed_ts,
         )
         self.session_impulse_retest_runtime_audit_repo.add(row)
@@ -3502,23 +3522,165 @@ class StrategyEngine:
                     else ""
                 ),
                 "payload": self._session_impulse_retest_runtime_audit_json_safe(
-                    dict(getattr(row, "payload", {}) or {})
+                    _safe_dict(getattr(row, "payload", None))
                 ),
             }
             for row in rows
         ]
 
-    def _auto_route_session_impulse_retest_plan(
+    def _auto_route_live_routable_symbols(self, requested_mode: ExecutionMode | None) -> set[str]:
+        if requested_mode == ExecutionMode.MICRO_LIVE:
+            return set(self._csv_items(self.settings.auto_trading_micro_live_allowed_symbols, case="upper"))
+        if requested_mode == ExecutionMode.LIVE:
+            return set(self._csv_items(self.settings.auto_trading_allowed_symbols, case="upper"))
+        return set()
+
+    def _auto_route_live_routable_families(self, requested_mode: ExecutionMode | None) -> set[str]:
+        if requested_mode == ExecutionMode.MICRO_LIVE:
+            return set(
+                self._csv_items(getattr(self.settings, "auto_trading_micro_live_allowed_families", ""), case="lower")
+            )
+        if requested_mode == ExecutionMode.LIVE:
+            return set(self._csv_items(self.settings.auto_trading_allowed_families, case="lower"))
+        return set()
+
+    def _auto_route_live_entry_models(self, requested_mode: ExecutionMode | None) -> set[str]:
+        if requested_mode in {ExecutionMode.MICRO_LIVE, ExecutionMode.LIVE}:
+            return set(
+                self._csv_items(getattr(self.settings, "auto_trading_micro_live_allowed_entry_models", ""), case="upper")
+            )
+        return set()
+
+    @staticmethod
+    def _plan_strategy_family(plan: Plan) -> str:
+        return str(_safe_dict(getattr(plan, "validity", None)).get("strategy_family") or "legacy_zone_plan").lower()
+
+    def _auto_route_live_families_considered(self, requested_mode: ExecutionMode | None) -> list[str]:
+        return sorted(self._auto_route_live_routable_families(requested_mode))
+
+    def _plan_live_auto_route_rejection(
         self,
         *,
         symbol: str,
         plan: Plan,
         requested_mode: ExecutionMode,
         now: datetime,
-    ) -> dict[str, Any]:
+    ) -> str | None:
+        normalized_symbol = str(symbol or "").upper().strip()
+        if str(getattr(plan, "symbol", "") or "").upper().strip() != normalized_symbol:
+            return "symbol_mismatch"
+        if str(getattr(plan, "state", "") or "") not in {PlanState.PLANNED.value, PlanState.ARMED.value}:
+            return "stale_plan_state"
+        valid_until = getattr(plan, "valid_until", None)
+        if not isinstance(valid_until, datetime) or self._to_utc(valid_until) <= now:
+            return "stale_plan_expired"
+
+        routable_symbols = self._auto_route_live_routable_symbols(requested_mode)
+        if not routable_symbols or normalized_symbol not in routable_symbols:
+            return "symbol_not_live_enabled_for_auto_route"
+
+        family = self._plan_strategy_family(plan)
+        routable_families = self._auto_route_live_routable_families(requested_mode)
+        if not routable_families or family not in routable_families:
+            return "family_not_live_enabled_for_auto_route"
+
+        if family == _AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY:
+            if not self._session_impulse_retest_symbol_tracked(normalized_symbol):
+                return "symbol_not_enabled_for_session_impulse_retest"
+            live_auto_route_allowed, live_auto_route_reason = self._session_impulse_retest_live_auto_route_allowed()
+            if not live_auto_route_allowed:
+                return live_auto_route_reason
+
+        allowed_entry_models = self._auto_route_live_entry_models(requested_mode)
+        entry_model = str(getattr(plan, "entry_model", "") or "").upper().strip()
+        if allowed_entry_models and entry_model not in allowed_entry_models:
+            return "entry_model_not_live_enabled_for_auto_route"
+
+        return None
+
+    def _auto_route_live_candidate_plans(
+        self,
+        *,
+        symbol: str,
+        requested_mode: ExecutionMode,
+        plan_ids: list[str] | None,
+        now: datetime,
+    ) -> tuple[list[Plan], dict[str, int], list[str]]:
+        normalized_symbol = str(symbol or "").upper().strip()
+        normalized_plan_ids = [str(plan_id or "").strip() for plan_id in list(plan_ids or []) if str(plan_id or "").strip()]
+        candidates: list[Plan] = []
+        rejected_counts: dict[str, int] = {}
+        inspected_plan_ids: set[str] = set()
+        max_candidates = self._max_candidate_plans_per_symbol()
+
+        def _record_rejection(reason: str) -> None:
+            rejected_counts[reason] = int(rejected_counts.get(reason, 0) or 0) + 1
+
+        def _consider(plan: Plan | None) -> None:
+            if plan is None:
+                _record_rejection("plan_not_found")
+                return
+            plan_id = str(getattr(plan, "plan_id", "") or "")
+            if plan_id in inspected_plan_ids:
+                return
+            inspected_plan_ids.add(plan_id)
+            rejection = self._plan_live_auto_route_rejection(
+                symbol=normalized_symbol,
+                plan=plan,
+                requested_mode=requested_mode,
+                now=now,
+            )
+            if rejection is not None:
+                _record_rejection(rejection)
+                return
+            candidates.append(plan)
+
+        for plan_id in normalized_plan_ids:
+            _consider(self.plan_repo.get(plan_id))
+
+        active_plans = self.plan_repo.list_active_for_symbol(
+            symbol=normalized_symbol,
+            timeframe="5m",
+            states=[PlanState.PLANNED.value, PlanState.ARMED.value],
+            limit=max(20, max_candidates * 4),
+        )
+        for plan in active_plans:
+            if len(candidates) >= max_candidates:
+                break
+            _consider(plan)
+
+        return candidates[:max_candidates], rejected_counts, normalized_plan_ids
+
+    def _auto_route_no_candidate_reason(
+        self,
+        *,
+        plan_ids: list[str],
+        rejected_counts: dict[str, int],
+    ) -> str:
+        for reason in (
+            "family_disabled",
+            "family_shadow_only",
+            "symbol_not_live_enabled_for_auto_route",
+            "symbol_not_enabled_for_session_impulse_retest",
+        ):
+            if int(rejected_counts.get(reason, 0) or 0) > 0:
+                return reason
+        if plan_ids:
+            return "no_matching_live_route_plan_ids"
+        return "no_live_route_candidate_plan"
+
+    def _auto_route_attempt_live_plan(
+        self,
+        *,
+        symbol: str,
+        plan: Plan,
+        requested_mode: ExecutionMode,
+        now: datetime,
+    ) -> tuple[dict[str, Any], int, int]:
         result_item: dict[str, Any] = {
             "plan_id": str(plan.plan_id),
-            "strategy_family": _AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY,
+            "strategy_family": self._plan_strategy_family(plan),
+            "entry_model": str(getattr(plan, "entry_model", "") or ""),
             "status": "intent_attempted",
         }
         recent_intent = self._auto_route_recent_intent_cooldown(
@@ -3527,27 +3689,9 @@ class StrategyEngine:
             now=now,
         )
         if recent_intent is not None:
-            return self._finalize_session_impulse_retest_auto_route_audit(
-                symbol=symbol,
-                observed_ts=now,
-                response={
-                    "symbol": symbol,
-                    "enabled": True,
-                    "requested_mode": requested_mode.value,
-                    "reason": "recent_intent_cooldown_active",
-                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
-                    "plans_considered": 1,
-                    "intents_created": 0,
-                    "submit_calls": 0,
-                    "results": [
-                        {
-                            **result_item,
-                            "status": "skipped_recent_intent",
-                            "recent_intent": recent_intent,
-                        }
-                    ],
-                },
-            )
+            result_item["status"] = "skipped_recent_intent"
+            result_item["recent_intent"] = recent_intent
+            return result_item, 0, 0
 
         try:
             intent = self.create_order_intent(
@@ -3556,27 +3700,9 @@ class StrategyEngine:
             )
         except Exception as exc:
             self.db.rollback()
-            return self._finalize_session_impulse_retest_auto_route_audit(
-                symbol=symbol,
-                observed_ts=now,
-                response={
-                    "symbol": symbol,
-                    "enabled": True,
-                    "requested_mode": requested_mode.value,
-                    "reason": "intent_creation_failed",
-                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
-                    "plans_considered": 1,
-                    "intents_created": 0,
-                    "submit_calls": 0,
-                    "results": [
-                        {
-                            **result_item,
-                            "status": "intent_error",
-                            "error": str(exc),
-                        }
-                    ],
-                },
-            )
+            result_item["status"] = "intent_error"
+            result_item["error"] = str(exc)
+            return result_item, 0, 0
 
         result_item["intent"] = {
             "intent_id": str(intent.get("intent_id") or ""),
@@ -3611,226 +3737,190 @@ class StrategyEngine:
         else:
             result_item["status"] = "intent_blocked"
 
-        return self._finalize_session_impulse_retest_auto_route_audit(
+        return result_item, intents_created, submit_calls
+
+    @staticmethod
+    def _auto_route_reason_from_results(results: list[dict[str, Any]]) -> str:
+        statuses = [str(result.get("status") or "") for result in results]
+        if "submitted" in statuses:
+            return "submitted"
+        if "submit_error" in statuses:
+            return "submit_error"
+        if "intent_error" in statuses:
+            return "intent_creation_failed"
+        if "intent_blocked" in statuses:
+            return "intent_blocked"
+        if statuses and all(status == "skipped_recent_intent" for status in statuses):
+            return "recent_intent_cooldown_active"
+        return "no_live_route_candidate_plan"
+
+    def _finalize_auto_route_audit(
+        self,
+        *,
+        symbol: str,
+        response: dict[str, Any],
+        observed_ts: datetime,
+    ) -> dict[str, Any]:
+        if self._session_impulse_retest_symbol_tracked(symbol):
+            return self._finalize_session_impulse_retest_auto_route_audit(
+                symbol=symbol,
+                response=response,
+                observed_ts=observed_ts,
+            )
+        self.db.commit()
+        return response
+
+    def _auto_route_session_impulse_retest_plan(
+        self,
+        *,
+        symbol: str,
+        plan: Plan,
+        requested_mode: ExecutionMode,
+        now: datetime,
+    ) -> dict[str, Any]:
+        result, intents_created, submit_calls = self._auto_route_attempt_live_plan(
+            symbol=symbol,
+            plan=plan,
+            requested_mode=requested_mode,
+            now=now,
+        )
+        return self._finalize_auto_route_audit(
             symbol=symbol,
             observed_ts=now,
             response={
                 "symbol": symbol,
                 "enabled": True,
                 "requested_mode": requested_mode.value,
-                "reason": result_item["status"],
-                "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                "reason": self._auto_route_reason_from_results([result]),
+                "families_considered": self._auto_route_live_families_considered(requested_mode),
                 "plans_considered": 1,
                 "intents_created": intents_created,
                 "submit_calls": submit_calls,
-                "results": [result_item],
+                "results": [result],
             },
         )
 
-    def auto_route_session_impulse_retest_plans(self, *, symbol: str, plan_ids: list[str]) -> dict[str, Any]:
-        normalized_symbol = str(symbol or "").upper()
-        if not self._session_impulse_retest_symbol_tracked(normalized_symbol):
-            return {
-                "symbol": normalized_symbol,
-                "enabled": False,
-                "reason": "symbol_not_enabled_for_session_impulse_retest",
-                "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
-                "plans_considered": 0,
-                "intents_created": 0,
-                "submit_calls": 0,
-                "results": [],
-            }
-        live_auto_route_allowed, live_auto_route_reason = self._session_impulse_retest_live_auto_route_allowed()
-        if not live_auto_route_allowed:
-            return self._finalize_session_impulse_retest_auto_route_audit(
-                symbol=normalized_symbol,
-                observed_ts=datetime.now(timezone.utc),
-                response={
-                    "symbol": normalized_symbol,
-                    "enabled": False,
-                    "reason": live_auto_route_reason,
-                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
-                    "plans_considered": 0,
-                    "intents_created": 0,
-                    "submit_calls": 0,
-                    "results": [],
-                },
-            )
+    def auto_route_live_plans(self, *, symbol: str, plan_ids: list[str] | None = None) -> dict[str, Any]:
+        normalized_symbol = str(symbol or "").upper().strip()
+        now = datetime.now(timezone.utc)
         requested_mode = self._auto_route_requested_mode()
+        families_considered = self._auto_route_live_families_considered(requested_mode)
         if requested_mode is None:
-            return self._finalize_session_impulse_retest_auto_route_audit(
+            return self._finalize_auto_route_audit(
                 symbol=normalized_symbol,
-                observed_ts=datetime.now(timezone.utc),
+                observed_ts=now,
                 response={
                     "symbol": normalized_symbol,
                     "enabled": False,
                     "reason": "auto_trading_disabled_or_shadow_mode",
-                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                    "families_considered": families_considered,
                     "plans_considered": 0,
                     "intents_created": 0,
                     "submit_calls": 0,
                     "results": [],
                 },
             )
-        if not self._session_impulse_retest_symbol_live_routable(
-            symbol=normalized_symbol,
-            requested_mode=requested_mode,
-        ):
-            return self._finalize_session_impulse_retest_auto_route_audit(
+
+        families_considered = self._auto_route_live_families_considered(requested_mode)
+        routable_symbols = self._auto_route_live_routable_symbols(requested_mode)
+        if not routable_symbols or normalized_symbol not in routable_symbols:
+            return self._finalize_auto_route_audit(
                 symbol=normalized_symbol,
-                observed_ts=datetime.now(timezone.utc),
+                observed_ts=now,
                 response={
                     "symbol": normalized_symbol,
                     "enabled": False,
                     "requested_mode": requested_mode.value,
                     "reason": "symbol_not_live_enabled_for_auto_route",
-                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                    "families_considered": families_considered,
                     "plans_considered": 0,
                     "intents_created": 0,
                     "submit_calls": 0,
                     "results": [],
                 },
             )
-        now = datetime.now(timezone.utc)
-        normalized_plan_ids = [str(plan_id or "").strip() for plan_id in plan_ids if str(plan_id or "").strip()]
-        matching_plans: list[Plan] = []
-        for plan_id in normalized_plan_ids:
-            plan = self.plan_repo.get(plan_id)
-            if plan is None:
-                continue
-            if str(plan.symbol or "").upper() != normalized_symbol:
-                continue
-            if str(plan.state or "") not in {PlanState.PLANNED.value, PlanState.ARMED.value}:
-                continue
-            if self._to_utc(getattr(plan, "valid_until", now)) <= now:
-                continue
-            if str((getattr(plan, "validity", {}) or {}).get("strategy_family") or "").lower() != _AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY:
-                continue
-            matching_plans.append(plan)
-        if not matching_plans:
-            return self._finalize_session_impulse_retest_auto_route_audit(
+        if not families_considered:
+            return self._finalize_auto_route_audit(
+                symbol=normalized_symbol,
+                observed_ts=now,
+                response={
+                    "symbol": normalized_symbol,
+                    "enabled": False,
+                    "requested_mode": requested_mode.value,
+                    "reason": "live_route_contract_empty",
+                    "families_considered": families_considered,
+                    "plans_considered": 0,
+                    "intents_created": 0,
+                    "submit_calls": 0,
+                    "results": [],
+                },
+            )
+
+        candidates, rejected_counts, normalized_plan_ids = self._auto_route_live_candidate_plans(
+            symbol=normalized_symbol,
+            requested_mode=requested_mode,
+            plan_ids=plan_ids,
+            now=now,
+        )
+        if not candidates:
+            return self._finalize_auto_route_audit(
                 symbol=normalized_symbol,
                 observed_ts=now,
                 response={
                     "symbol": normalized_symbol,
                     "enabled": True,
                     "requested_mode": requested_mode.value,
-                    "reason": "no_matching_session_impulse_retest_plan_ids",
-                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                    "reason": self._auto_route_no_candidate_reason(
+                        plan_ids=normalized_plan_ids,
+                        rejected_counts=rejected_counts,
+                    ),
+                    "families_considered": families_considered,
                     "plans_considered": 0,
                     "intents_created": 0,
                     "submit_calls": 0,
+                    "rejected_plan_counts": rejected_counts,
                     "results": [],
                 },
             )
-        return self._auto_route_session_impulse_retest_plan(
+
+        results: list[dict[str, Any]] = []
+        intents_created = 0
+        submit_calls = 0
+        for plan in candidates:
+            result, plan_intents_created, plan_submit_calls = self._auto_route_attempt_live_plan(
+                symbol=normalized_symbol,
+                plan=plan,
+                requested_mode=requested_mode,
+                now=now,
+            )
+            results.append(result)
+            intents_created += plan_intents_created
+            submit_calls += plan_submit_calls
+            if str(result.get("status") or "") in {"submitted", "submit_error", "intent_error"}:
+                break
+
+        return self._finalize_auto_route_audit(
             symbol=normalized_symbol,
-            plan=matching_plans[0],
-            requested_mode=requested_mode,
-            now=now,
+            observed_ts=now,
+            response={
+                "symbol": normalized_symbol,
+                "enabled": True,
+                "requested_mode": requested_mode.value,
+                "reason": self._auto_route_reason_from_results(results),
+                "families_considered": families_considered,
+                "plans_considered": len(candidates),
+                "intents_created": intents_created,
+                "submit_calls": submit_calls,
+                "rejected_plan_counts": rejected_counts,
+                "results": results,
+            },
         )
+
+    def auto_route_session_impulse_retest_plans(self, *, symbol: str, plan_ids: list[str]) -> dict[str, Any]:
+        return self.auto_route_live_plans(symbol=symbol, plan_ids=plan_ids)
 
     def auto_route_symbol(self, *, symbol: str) -> dict[str, Any]:
-        normalized_symbol = str(symbol or "").upper()
-        if not self._session_impulse_retest_symbol_tracked(normalized_symbol):
-            return {
-                "symbol": normalized_symbol,
-                "enabled": False,
-                "reason": "symbol_not_enabled_for_session_impulse_retest",
-                "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
-                "plans_considered": 0,
-                "intents_created": 0,
-                "submit_calls": 0,
-                "results": [],
-            }
-        live_auto_route_allowed, live_auto_route_reason = self._session_impulse_retest_live_auto_route_allowed()
-        if not live_auto_route_allowed:
-            return self._finalize_session_impulse_retest_auto_route_audit(
-                symbol=normalized_symbol,
-                observed_ts=datetime.now(timezone.utc),
-                response={
-                    "symbol": normalized_symbol,
-                    "enabled": False,
-                    "reason": live_auto_route_reason,
-                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
-                    "plans_considered": 0,
-                    "intents_created": 0,
-                    "submit_calls": 0,
-                    "results": [],
-                },
-            )
-        requested_mode = self._auto_route_requested_mode()
-        if requested_mode is None:
-            return self._finalize_session_impulse_retest_auto_route_audit(
-                symbol=normalized_symbol,
-                observed_ts=datetime.now(timezone.utc),
-                response={
-                    "symbol": normalized_symbol,
-                    "enabled": False,
-                    "reason": "auto_trading_disabled_or_shadow_mode",
-                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
-                    "plans_considered": 0,
-                    "intents_created": 0,
-                    "submit_calls": 0,
-                    "results": [],
-                },
-            )
-        if not self._session_impulse_retest_symbol_live_routable(
-            symbol=normalized_symbol,
-            requested_mode=requested_mode,
-        ):
-            return self._finalize_session_impulse_retest_auto_route_audit(
-                symbol=normalized_symbol,
-                observed_ts=datetime.now(timezone.utc),
-                response={
-                    "symbol": normalized_symbol,
-                    "enabled": False,
-                    "requested_mode": requested_mode.value,
-                    "reason": "symbol_not_live_enabled_for_auto_route",
-                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
-                    "plans_considered": 0,
-                    "intents_created": 0,
-                    "submit_calls": 0,
-                    "results": [],
-                },
-            )
-
-        active_plans = self.plan_repo.list_active_for_symbol(
-            symbol=normalized_symbol,
-            timeframe="5m",
-            states=[PlanState.PLANNED.value, PlanState.ARMED.value],
-            limit=max(20, self._max_candidate_plans_per_symbol() * 4),
-        )
-        session_plans = [
-            plan
-            for plan in active_plans
-            if str((plan.validity or {}).get("strategy_family") or "").lower()
-            == _AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY
-        ]
-        if not session_plans:
-            return self._finalize_session_impulse_retest_auto_route_audit(
-                symbol=normalized_symbol,
-                observed_ts=datetime.now(timezone.utc),
-                response={
-                    "symbol": normalized_symbol,
-                    "enabled": True,
-                    "requested_mode": requested_mode.value,
-                    "reason": "no_session_impulse_retest_plan",
-                    "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
-                    "plans_considered": 0,
-                    "intents_created": 0,
-                    "submit_calls": 0,
-                    "results": [],
-                },
-            )
-
-        now = datetime.now(timezone.utc)
-        return self._auto_route_session_impulse_retest_plan(
-            symbol=normalized_symbol,
-            plan=session_plans[0],
-            requested_mode=requested_mode,
-            now=now,
-        )
+        return self.auto_route_live_plans(symbol=symbol)
 
     @staticmethod
     def _paper_exit_price_tolerance(value: float) -> float:
@@ -3992,44 +4082,51 @@ class StrategyEngine:
         if existing is not None:
             return existing
 
-        payload = dict(getattr(intent, "payload", {}) or {})
-        executable_plan = dict(payload.get("executable_plan") or {})
+        payload = _safe_dict(getattr(intent, "payload", None))
+        executable_plan = _safe_dict(payload.get("executable_plan"))
         if not executable_plan:
             return None
 
-        raw = dict(getattr(submission, "raw", {}) or {})
-        fill_results = list(raw.get("fill_results") or [])
-        tp_targets = list(executable_plan.get("tp_targets") or [])
+        raw = _safe_dict(getattr(submission, "raw", None))
+        raw_fill_results = raw.get("fill_results")
+        fill_results = list(raw_fill_results) if isinstance(raw_fill_results, list) else []
+        raw_tp_targets = executable_plan.get("tp_targets")
+        tp_targets = list(raw_tp_targets) if isinstance(raw_tp_targets, list) else []
         tp_by_label = {
-            str(item.get("label") or "").upper(): dict(item or {})
+            str(item.get("label") or "").upper(): _safe_dict(item)
             for item in tp_targets
-            if isinstance(item, dict)
+            if isinstance(item, Mapping)
         }
 
         entry_price = executable_plan.get("entry_limit_price")
         if entry_price in {None, ""}:
             entry_price = executable_plan.get("entry_trigger_price")
         if entry_price in {None, ""} and fill_results:
-            entry_price = fill_results[0].get("price")
+            entry_price = _safe_dict(fill_results[0]).get("price")
         stop_price = executable_plan.get("stop_price")
         if entry_price in {None, ""} or stop_price in {None, ""}:
             return None
 
-        entry_price = float(entry_price)
-        stop_price = float(stop_price)
+        entry_price_parsed = self._maybe_float(entry_price)
+        stop_price_parsed = self._maybe_float(stop_price)
+        if entry_price_parsed is None or stop_price_parsed is None:
+            return None
+        entry_price = entry_price_parsed
+        stop_price = stop_price_parsed
         risk_distance = max(abs(entry_price - stop_price), 1e-9)
         direction = str(executable_plan.get("direction") or "long").lower()
 
         def _target_price(label: str, default_rr: float) -> float:
-            target = dict(tp_by_label.get(label) or {})
+            target = _safe_dict(tp_by_label.get(label))
             price = target.get("price")
-            if price not in {None, ""}:
-                return float(price)
+            parsed_price = self._maybe_float(price)
+            if parsed_price is not None:
+                return parsed_price
             sign = 1.0 if direction == "long" else -1.0
             return float(entry_price + sign * risk_distance * default_rr)
 
         def _target_fraction(label: str, default_fraction: float) -> float:
-            target = dict(tp_by_label.get(label) or {})
+            target = _safe_dict(tp_by_label.get(label))
             fraction = target.get("size_fraction")
             try:
                 return float(fraction if fraction not in {None, ""} else default_fraction)
@@ -4055,15 +4152,15 @@ class StrategyEngine:
         if valid_until is None:
             valid_until = valid_from
 
-        setup_score = float(executable_plan.get("setup_score", 0.0) or 0.0)
-        expected_summary = dict(executable_plan.get("expected_summary") or {})
-        context_snapshot = dict(executable_plan.get("context_snapshot") or {})
+        setup_score = self._maybe_float(executable_plan.get("setup_score")) or 0.0
+        expected_summary = _safe_dict(executable_plan.get("expected_summary"))
+        context_snapshot = _safe_dict(executable_plan.get("context_snapshot"))
         strategy_family = str(
             executable_plan.get("strategy_family")
             or getattr(intent, "strategy_family", "")
             or "legacy_zone_plan"
         )
-        latest_fill_stage = str((fill_results[-1] or {}).get("stage") or "").upper() if fill_results else ""
+        latest_fill_stage = str(_safe_dict(fill_results[-1]).get("stage") or "").upper() if fill_results else ""
         if latest_fill_stage == ExecutionFillStage.CLOSED.value:
             plan_state = PlanState.CLOSED.value
         elif latest_fill_stage == ExecutionFillStage.PARTIAL_EXIT.value:
@@ -4165,7 +4262,7 @@ class StrategyEngine:
         )
         candidate_plans: list[Any] = []
         for plan in plans:
-            validity = dict(getattr(plan, "validity", {}) or {})
+            validity = _safe_dict(getattr(plan, "validity", None))
             family = str(validity.get("strategy_family") or "").strip().lower()
             if target_families and family not in target_families:
                 continue
@@ -4189,8 +4286,8 @@ class StrategyEngine:
             close_fill = latest_closed_fill_by_plan_id.get(str(getattr(plan, "plan_id", "") or ""))
             if close_fill is None:
                 continue
-            validity = dict(getattr(plan, "validity", {}) or {})
-            payload = dict(getattr(close_fill, "payload", {}) or {})
+            validity = _safe_dict(getattr(plan, "validity", None))
+            payload = _safe_dict(getattr(close_fill, "payload", None))
             changed = False
 
             fill_ts = getattr(close_fill, "fill_ts", None)
@@ -4204,7 +4301,7 @@ class StrategyEngine:
             held_bars = self._maybe_int(payload.get("held_bars"))
             classification_before = payload.get("classification_before_exit")
             classification_after = payload.get("classification_after_exit")
-            trigger_detail = dict(payload.get("trigger_detail") or {})
+            trigger_detail = _safe_dict(payload.get("trigger_detail"))
 
             if validity.get("final_exit_ts") in {None, ""} and exit_ts:
                 validity["final_exit_ts"] = exit_ts
@@ -4227,7 +4324,7 @@ class StrategyEngine:
             if validity.get("final_exit_classification_after") in {None, ""} and classification_after not in {None, ""}:
                 validity["final_exit_classification_after"] = classification_after
                 changed = True
-            if not dict(validity.get("final_exit_trigger_detail") or {}) and trigger_detail:
+            if not _safe_dict(validity.get("final_exit_trigger_detail")) and trigger_detail:
                 validity["final_exit_trigger_detail"] = trigger_detail
                 changed = True
             if validity.get("last_exit_ts") in {None, ""} and exit_ts:
@@ -4278,7 +4375,11 @@ class StrategyEngine:
             if plan is None or str(plan.timeframe or "") != "5m":
                 continue
             family = str(
-                (getattr(intent, "strategy_family", "") or (plan.validity or {}).get("strategy_family") or "legacy_zone_plan")
+                (
+                    getattr(intent, "strategy_family", "")
+                    or _safe_dict(getattr(plan, "validity", None)).get("strategy_family")
+                    or "legacy_zone_plan"
+                )
             ).lower()
             if normalized_families and family not in normalized_families:
                 continue
@@ -4419,7 +4520,7 @@ class StrategyEngine:
             candle_close = float(candle.c)
             candle_ts_text = fill_ts.isoformat() if hasattr(fill_ts, "isoformat") else str(fill_ts)
             held_bars = self._paper_exit_held_bars(plan=plan, fill_ts=fill_ts, previous_fills=previous_fills)
-            max_allowed_bars = int((plan.validity or {}).get("strategy_family_time_stop_max_bars", 0) or 0)
+            max_allowed_bars = self._maybe_int(_safe_dict(getattr(plan, "validity", None)).get("strategy_family_time_stop_max_bars")) or 0
             summary["entry_states_seen"] += 1
             actions_for_plan: list[dict[str, Any]] = []
             if latest_fill_ts is not None:
@@ -4629,11 +4730,12 @@ class StrategyEngine:
         existing_fills = self.fill_repo.list_for_plans(plan_ids=[str(getattr(plan, "plan_id", "") or "")], symbol=plan.symbol)
         if existing_fills:
             return None
-        raw = dict(getattr(submission, "raw", {}) or {})
-        fill_results = list(raw.get("fill_results") or [])
+        raw = _safe_dict(getattr(submission, "raw", None))
+        raw_fill_results = raw.get("fill_results")
+        fill_results = list(raw_fill_results) if isinstance(raw_fill_results, list) else []
         entry_result = None
         for item in fill_results:
-            row = dict(item or {})
+            row = _safe_dict(item)
             if not bool(row.get("accepted")):
                 continue
             if str(row.get("stage") or "") == ExecutionFillStage.ENTRY.value:
@@ -4759,12 +4861,14 @@ class StrategyEngine:
         intent_limit: int = 10,
         reconcile_limit: int = 10,
         days: int = 7,
+        fast: bool = False,
     ) -> dict[str, Any]:
         safety_state = self._safety_state_payload(symbol=symbol)
         portfolio_summary = self.portfolio_budget_report(
             universe=universe,
             limit=portfolio_limit,
             write_report=False,
+            outcome_symbol_limit=0 if bool(fast) else max(1, int(portfolio_limit)),
         )
         alert_summary = self.alert_metrics_report(days=days, write_report=False)
         execution_quality_summary = None
@@ -5635,7 +5739,7 @@ class StrategyEngine:
         for fill in self.fill_repo.list_for_plans(plan_ids=[plan.plan_id], symbol=plan.symbol):
             if str(getattr(fill, "stage", "")) != stage.value:
                 continue
-            payload = dict(getattr(fill, "payload", {}) or {})
+            payload = _safe_dict(getattr(fill, "payload", None))
             if str(payload.get("source") or "") != "binance_submit_response":
                 continue
             if str(payload.get("exchange_order_id") or "") != str(order_id):
@@ -5674,7 +5778,7 @@ class StrategyEngine:
             submit_status=status or next_state.value,
             message=message,
             raw={
-                **dict(submission.raw or {}),
+                **_safe_dict(submission.raw),
                 "binance_user_stream_status": status,
                 "binance_execution_type": str(normalized.get("execution_type") or ""),
                 "binance_event_ts": event_ts.isoformat(),
@@ -6374,6 +6478,7 @@ class StrategyEngine:
         near_atr_multiple = self._maybe_float(self.settings.signal_alert_near_atr_multiple) or 0.35
         near_threshold = max(float(atr_reference) * near_atr_multiple, 1e-6)
         for plan in plans:
+            validity = _safe_dict(getattr(plan, "validity", None))
             entry_price = float(plan.entry_price)
             distance_abs = abs(float(current_price) - entry_price)
             distance_bps = (distance_abs / max(entry_price, 1e-9)) * 10_000.0
@@ -6396,10 +6501,10 @@ class StrategyEngine:
                 "distance_abs": round(distance_abs, 6),
                 "distance_bps": round(distance_bps, 4),
                 "distance_atr": round(distance_atr, 4),
-                "expected_summary": str((plan.validity or {}).get("expected_summary") or ""),
-                "strategy_family": str((plan.validity or {}).get("strategy_family") or "legacy_zone_plan"),
-                "strategy_grade": (plan.validity or {}).get("strategy_grade"),
-                "time_stop_bars": int((plan.validity or {}).get("strategy_family_time_stop_max_bars", 0) or 0),
+                "expected_summary": str(validity.get("expected_summary") or ""),
+                "strategy_family": str(validity.get("strategy_family") or "legacy_zone_plan"),
+                "strategy_grade": validity.get("strategy_grade"),
+                "time_stop_bars": self._maybe_int(validity.get("strategy_family_time_stop_max_bars")) or 0,
             }
             if touched:
                 touch_result = self._emit_subscription_alerts(
@@ -6451,7 +6556,7 @@ class StrategyEngine:
         fee: float,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        validity = dict(plan.validity or {})
+        validity = _safe_dict(getattr(plan, "validity", None))
         base_payload = {
             "symbol": plan.symbol,
             "plan_id": plan.plan_id,
@@ -6469,7 +6574,7 @@ class StrategyEngine:
             "tp3": float(plan.tp3),
             "valid_from": getattr(plan, "valid_from", None).isoformat() if getattr(plan, "valid_from", None) else None,
             "valid_until": getattr(plan, "valid_until", None).isoformat() if getattr(plan, "valid_until", None) else None,
-            "time_stop_bars": int(validity.get("strategy_family_time_stop_max_bars", 0) or 0),
+            "time_stop_bars": self._maybe_int(validity.get("strategy_family_time_stop_max_bars")) or 0,
             "exit_reason": payload.get("exit_reason"),
             "realized_r": payload.get("realized_r"),
             "expected_summary": str(validity.get("expected_summary") or ""),
@@ -6551,14 +6656,14 @@ class StrategyEngine:
         )
         synthetic_plans: list[Any] = []
         for plan in plans:
-            validity = dict(getattr(plan, "validity", {}) or {})
+            validity = _safe_dict(getattr(plan, "validity", None))
             family = str(validity.get("strategy_family") or "").strip()
             plan_id = str(getattr(plan, "plan_id", "") or "")
             close_fill = close_fill_by_plan_id.get(plan_id)
             if family not in family_set or str(getattr(plan, "strategy_version", "")) != version or close_fill is None:
                 continue
             validity.setdefault("lineage_source_symbol", str(getattr(plan, "symbol", "") or ""))
-            payload = dict(getattr(close_fill, "payload", {}) or {})
+            payload = _safe_dict(getattr(close_fill, "payload", None))
             fill_ts = getattr(close_fill, "fill_ts", None)
             if not validity.get("final_exit_ts"):
                 validity["final_exit_ts"] = str(payload.get("exit_ts") or (fill_ts.isoformat() if fill_ts is not None else ""))
@@ -7222,10 +7327,17 @@ class StrategyEngine:
 
         return response
 
-    def recompute_learning(self, symbol: str, *, persist_runtime_validation_artifacts: bool = True) -> dict:
+    def recompute_learning(
+        self,
+        symbol: str,
+        *,
+        persist_runtime_validation_artifacts: bool = True,
+        use_read_only_cache: bool = True,
+    ) -> dict:
         return RuntimeValidationOrchestrator(self).recompute_learning(
             symbol,
             persist_runtime_validation_artifacts=persist_runtime_validation_artifacts,
+            use_read_only_cache=use_read_only_cache,
         )
 
     def feature_importance(
@@ -7562,7 +7674,7 @@ class StrategyEngine:
 
         self.db.flush()
         fill = self.fill_repo.get(fill_id)
-        fill_payload = dict((fill.payload if fill is not None else {}) or {})
+        fill_payload = _safe_dict(fill.payload if fill is not None else None)
         response = asdict(result)
         response["exit_reason"] = fill_payload.get("exit_reason") or result.exit_reason
         plan = self.plan_repo.get(result.plan_id) if result.plan_id else None
@@ -7626,13 +7738,13 @@ class StrategyEngine:
                     state=next_state.value,
                     submit_status=next_state.value,
                     message="Execution fill linked to submission lifecycle.",
-                    raw={**dict(submission.raw or {}), "last_fill_id": fill_id},
+                    raw={**_safe_dict(submission.raw), "last_fill_id": fill_id},
                 )
 
         self.db.commit()
         return response
 
-    def scanner_top(self, universe: str, limit: int) -> list[dict]:
+    def scanner_top(self, universe: str, limit: int, *, fast: bool = False) -> list[dict]:
         symbols = self.market_data.default_universe(universe)
         if not symbols and universe == self.settings.universe_name:
             symbols = self.market_data.refresh_universe(limit=30)
@@ -7644,7 +7756,11 @@ class StrategyEngine:
         if symbols:
             _, gate_state, gate_reason, operating_lock = self._gate_context_for_symbol(symbol=symbols[0])
         outcome_inputs_by_symbol = self._outcome_inputs_for_symbols(
-            symbols=self._runtime_candidate_symbols(symbols=symbols, risk_state=gate_state)
+            symbols=self._runtime_candidate_symbols(
+                symbols=symbols,
+                risk_state=gate_state,
+                limit=0 if bool(fast) else limit,
+            )
         )
         return self.scanner.top_opportunities(
             # Overlay fields are added inside scanner service, but keep the same engine-facing contract here.
@@ -7658,7 +7774,14 @@ class StrategyEngine:
             outcome_inputs_by_symbol=outcome_inputs_by_symbol,
         )
 
-    def portfolio_budget_report(self, *, universe: str, limit: int, write_report: bool = True) -> dict:
+    def portfolio_budget_report(
+        self,
+        *,
+        universe: str,
+        limit: int,
+        write_report: bool = True,
+        outcome_symbol_limit: int | None = None,
+    ) -> dict:
         symbols = self.market_data.default_universe(universe)
         if not symbols and universe == self.settings.universe_name:
             symbols = self.market_data.refresh_universe(limit=30)
@@ -7669,7 +7792,11 @@ class StrategyEngine:
         if symbols:
             _, gate_state, gate_reason, operating_lock = self._gate_context_for_symbol(symbol=symbols[0])
         outcome_inputs_by_symbol = self._outcome_inputs_for_symbols(
-            symbols=self._runtime_candidate_symbols(symbols=symbols, risk_state=gate_state)
+            symbols=self._runtime_candidate_symbols(
+                symbols=symbols,
+                risk_state=gate_state,
+                limit=outcome_symbol_limit,
+            )
         )
 
         return self.portfolio_budget_report_service.generate(
@@ -8021,12 +8148,17 @@ class StrategyEngine:
                 "enabled": False,
                 "requested_mode": requested_mode.value if requested_mode is not None else "",
                 "reason": "ws_stream_active_route_suppressed",
-                "families_considered": [_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY],
+                "families_considered": self._auto_route_live_families_considered(requested_mode),
                 "plans_considered": len(plan_ids),
                 "intents_created": 0,
                 "submit_calls": 0,
                 "results": [],
             }
+            self._finalize_auto_route_audit(
+                symbol=normalized_symbol,
+                observed_ts=datetime.now(timezone.utc),
+                response=auto_route,
+            )
         else:
             auto_route = (
                 self.auto_route_session_impulse_retest_plans(symbol=symbol, plan_ids=plan_ids)
@@ -8104,24 +8236,22 @@ class StrategyEngine:
         if not write_report:
             validation_payload = self._load_cached_validation_payload(symbol)
         if validation_payload is None:
-            previous_suppress_cache = bool(getattr(self, "_suppress_read_only_validation_payload_store", False))
             if not write_report:
-                self._suppress_read_only_validation_payload_store = True
-            try:
+                validation_payload = (
+                    self._load_stale_conservative_validation_payload(symbol)
+                    or validation_report_cache_miss_payload(symbol)
+                )
+            else:
                 validation_payload = self.recompute_learning(symbol, persist_runtime_validation_artifacts=False)
-            finally:
-                if not write_report:
-                    if previous_suppress_cache:
-                        self._suppress_read_only_validation_payload_store = True
-                    else:
-                        try:
-                            delattr(self, "_suppress_read_only_validation_payload_store")
-                        except AttributeError:
-                            pass
         alert_metrics = self.alert_metrics_report(days=days, write_report=False)
         outbox_status = self.outbox_status()
         strategy_metrics = self.metrics(symbol=symbol, version=self.settings.strategy_version)
-        portfolio_budget = self.portfolio_budget_report(universe=universe, limit=limit, write_report=False)
+        portfolio_budget = self.portfolio_budget_report(
+            universe=universe,
+            limit=limit,
+            write_report=False,
+            outcome_symbol_limit=0 if not write_report else None,
+        )
         execution_quality = validation_payload.get("execution_quality") or self.execution_quality_report(
             symbol=symbol,
             days=days,

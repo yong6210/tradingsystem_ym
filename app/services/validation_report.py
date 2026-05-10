@@ -19,6 +19,49 @@ from app.services.outcome_funnel_operating_kpis import build_outcome_funnel_oper
 from app.services.split_review_followup_ledger import summarize_split_review_followup_ledger
 
 
+def validation_report_cache_miss_payload(symbol: str) -> dict[str, Any]:
+    symbol_value = str(symbol or "").upper()
+    message = "Cached validation payload is not available; run validation/report refresh outside preflight."
+    approval_strip = {
+        "approve_value": "validation unavailable",
+        "approve_reason": message,
+        "align_value": "validation unavailable",
+        "align_reason": message,
+        "act_value": "refresh_validation_report",
+        "act_reason": message,
+        "act_priority_level": "blocking",
+        "primary_reason": message,
+    }
+    return {
+        "symbol": symbol_value,
+        "updated_zones": 0,
+        "metrics": {},
+        "walk_forward": {},
+        "monte_carlo": {},
+        "validation_report": {
+            "status": "CACHE_MISSING",
+            "approval_strip_summary": approval_strip,
+            "summary": message,
+        },
+        "deployment_go_no_go": "NO_GO",
+        "deployment_code": "validation_cache_missing",
+        "deployment_message": message,
+        "approval_topline_status": "NO_GO",
+        "approval_topline_code": "validation_cache_missing",
+        "approval_topline_message": message,
+        "approval_topline_summary_line": message,
+        "playbook_go_no_go": "NO_GO",
+        "playbook_code": "refresh_validation_report",
+        "playbook_action": "refresh_validation_report",
+        "playbook_message": message,
+        "execution_quality": {
+            "available": False,
+            "status": "CACHE_MISSING",
+            "summary": message,
+        },
+    }
+
+
 class ValidationReportService:
     def __init__(self):
         self.settings = get_settings()
@@ -247,13 +290,19 @@ class ValidationReportService:
                 if part
             ) or "validation approval alignment unavailable"
 
-        act_value = str(priority.get("top_action") or playbook_action or "continue_runtime_monitoring")
-        act_reason = str(
-            priority.get("top_reason")
-            or playbook_message
-            or topline_message
-            or "validation operator action unavailable"
-        )
+        priority_action = str(priority.get("top_action") or "")
+        priority_reason = str(priority.get("top_reason") or "")
+        if playbook_go_no_go == "MANUAL_REVIEW" and playbook_action:
+            act_value = playbook_action
+            act_reason = playbook_message or topline_message or priority_reason or "manual validation review required"
+        else:
+            act_value = str(priority_action or playbook_action or "continue_runtime_monitoring")
+            act_reason = str(
+                priority_reason
+                or playbook_message
+                or topline_message
+                or "validation operator action unavailable"
+            )
         next_actions = [dict(item) for item in list(priority.get("next_actions") or [])[:3]]
         if next_actions:
             act_reason = f"{act_reason} | " + " | ".join(

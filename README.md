@@ -1,7 +1,7 @@
 # Trading Engine v1
 
 Verification-first trading engine that separates chart context, runtime candidate ranking, deployment approval, and live execution truth.
-The current live strategy is an `A_ONLY`, verification-first reversal engine that validates HTF location, liquidity sweep, and post-sweep reaction before execution.
+The current live posture is verification-first: runtime candidates can be surfaced across the configured MICRO_LIVE families, but live order authority still comes from validation, operations checklist, safety, and liquidity gates.
 
 Primary audience: operators first, contributors second.
 
@@ -85,6 +85,7 @@ Interpretation guide for `session_impulse_retest` audits:
   - `intent_blocked`: intent existed but approval/submit policy blocked execution
   - `recent_intent_cooldown_active`: family cooldown suppressed duplicate intent creation
   - `no_session_impulse_retest_plan`: no active family plan existed at route time
+  - `ws_stream_active_route_suppressed`: sync/manual route was intentionally suppressed because the WS worker is already responsible for routing
   - `intent_creation_failed` / `submit_error`: runtime failure in downstream order path
 
 Current debugging principle:
@@ -104,42 +105,29 @@ Current debugging principle:
 
 Final rollout approval still comes from `POST /validation/report` plus `POST /operations/checklist`.
 
-## Current Best Strategy
+## Current Live Contract
 
-The current best operating strategy is:
+The current `MICRO_LIVE` configuration has moved beyond the old one-contract wording. Treat the live surface as two layers:
 
-- Symbol: `BTCUSDC`
-- Strategy family: `sweep_reversal`
-- Entry model: `LIMIT`
-- Direction: `LONG|SHORT` depending on the setup; do not hard-code one direction
-- Sessions: primarily `london`, `new_york`; major macro blackout windows can temporarily suppress otherwise valid entries
-- Operating stance: `A_ONLY`
-- Live scope: this is now the only active `MICRO_LIVE` canary contract; everything else remains paper, proof, or research-only
+- active runtime canary: `session_impulse_retest` on the 11 live/core symbols listed above
+- benchmark/legacy execution lens: `BTCUSDC + sweep_reversal + LIMIT`
+- allowed live families: `session_impulse_retest`, `sweep_reversal`
+- allowed live entry models: `LIMIT`, `CONFIRM`
+- major macro blackout windows can temporarily suppress otherwise valid entries
 
-This is the best current live contract because it is the strongest practical subset after separating:
+The older `BTCUSDC + sweep_reversal + LIMIT` contract remains the cleanest benchmark lens for historical comparison and fill-quality accounting. It is no longer the only configured `MICRO_LIVE` scope, so do not use that paragraph as a live allowlist.
 
-- large-sample BTC/ETH raw strategy proof
-- current live execution contract
-- advisory historical walk-forward proofs
+Current operating rules:
 
-Recent large-sample historical walk-forward evidence shows:
-
-- `BTCUSDC + sweep_reversal + LIMIT` is stronger than the broader BTC/ETH live subset
-- `BTCUSDC short-only` is numerically stronger than `BTCUSDC long|short`, but it is not adopted as the live contract because it turns the system into a direction bet and throws away valid long setups
-- `ETHUSDC` remains useful as advisory/proof comparison, but not as the primary live contract
-- `trend_continuation` remains a proof lane, not the current live strategy
-- `CONFIRM` remains weaker than `LIMIT` and is not part of the live contract
-
-Operationally, this means:
-
-- if the setup is a valid BTC sweep-reversal long, take the long
-- if the setup is a valid BTC sweep-reversal short, take the short
-- do not force `short-only`
-- do not widen live trading back to ETH or `trend_continuation` until proof improves
+- live orders still require validation plus operations checklist approval
+- `session_impulse_retest` live/core symbols must stay aligned across `.env`, worker WS universe, direction contracts, macro blackout coverage, and liquidity gates
+- shadow/secondary `session_impulse_retest` symbols are tracked for observation unless explicitly promoted
+- `BTCUSDC + sweep_reversal + LIMIT` remains the narrowest comparison lens when diagnosing historical edge and execution quality
+- do not broaden live scope beyond the configured allowlists without validation evidence and an updated operations checklist
 
 ## Current Operating Status
 
-As of `2026-04-20`, the system has moved from contract-selection mode into `MICRO_LIVE` canary mode for one narrow contract.
+As of `2026-05-10`, the system is in `MICRO_LIVE` canary mode with the 11-symbol `session_impulse_retest` live/core runtime plus the older BTC sweep-reversal benchmark lens. The current runtime is healthy, but recent live intents are still blocked before exchange submission unless validation/session gates approve them.
 
 Current runtime status from the live operator surface is:
 
@@ -157,7 +145,7 @@ There are now two execution lenses and they must not be mixed:
   - fill rate `10.34%`
   - terminal exit ratio `1.00`
   - time failure ratio `0.6667`
-- active contract lens (`BTCUSDC + sweep_reversal + LIMIT` only):
+- benchmark contract lens (`BTCUSDC + sweep_reversal + LIMIT` only):
   - `plan_fill_rate = 0.6667` (`filled matured plans / matured plans`)
   - `matured_plans=3`, `filled_matured_plans=2`, `unfilled_matured_plans=1`
   - `terminal_exit_ratio = 1.00`, `operational_forced_exit_ratio = 0.5000`
@@ -1087,6 +1075,8 @@ pip install -e '.[dev]'
 uvicorn app.main:app --reload
 ```
 
+For a safe local/runtime configuration baseline, copy [.env.example](/Users/yumin/Documents/trading/.env.example) to `.env` and fill only the secrets and live toggles you intentionally need. The example keeps actual Binance live submit disabled by default while documenting the current MICRO_LIVE allowlist shape and the BTC sweep-reversal benchmark lens.
+
 Run the baseline test suite:
 
 ```bash
@@ -1108,15 +1098,131 @@ pip install -e '.[integration]'
 
 ## Ops Commands
 
+Near-100 hardening plan:
+
+- [docs/MICRO_LIVE_NEAR_100_HARDENING_PLAN.md](/Users/yumin/Documents/trading/docs/MICRO_LIVE_NEAR_100_HARDENING_PLAN.md)
+
 MICRO_LIVE preflight:
 
 ```bash
-./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --days 7
+./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --days 7 --request-timeout 20
 ```
 
-The current canary assumes `.env` is already narrowed to `BTCUSDC + sweep_reversal + LIMIT`, uses `RISK_PCT` sizing with the small `200 USDT / 0.5% / 85% / 6x` profile, and that the exchange-side BTC contract is already set to `isolated 6x`.
-The preflight output now includes `approval_surfaces`, `edge_experiment_review`, `edge_evolution_rule`, `review_followup_ledger`, and representative accepted/blocked candidate split focus, so dashboard, validation, checklist, the current entry/execution hypothesis, the current allocation/promotion posture, and the latest packet carryover state can be read together before final live sign-off.
+The current MICRO_LIVE setup must keep `.env` allowlists, direction contracts, strategy-family allowlists, entry-model allowlists, worker WS universe, event-blackout coverage, and fail-closed liquidity gates aligned before live orders are allowed.
+The preflight output now includes `approval_surfaces`, `edge_experiment_review`, `edge_evolution_rule`, `review_followup_ledger`, `config_drift_checks`, and representative accepted/blocked candidate split focus, so dashboard, validation, checklist, runtime config drift, the current entry/execution hypothesis, the current allocation/promotion posture, and the latest packet carryover state can be read together before final live sign-off.
+Use `--check-binance-rules` when you want the same run to fetch Binance `exchangeInfo` and verify current live symbol quantity/tick rules.
 When split review targets are available, the preflight `next_steps` now also prints a ready-to-run `scripts/run_split_review_followup.py` command for the current symbol.
+
+Macro blackout contract refresh, when the configured horizon is stale or missing:
+
+```bash
+./.venv/bin/python scripts/build_micro_live_event_blackouts.py \
+  --years 2026,2027 \
+  --output reports/validation/contracts/micro_live_event_blackouts_major_us_macro_auto.json
+```
+
+If `--symbols`, `--families`, and `--entry-models` are omitted, the builder uses the current MICRO_LIVE settings. It parses the official Fed FOMC page, then tries the official BLS CPI/Employment Situation pages and BLS calendar ICS. If BLS blocks automated access, it can recover missing windows from the currently configured fallback contract and reports `PASS_WITH_WARNINGS` instead of overwriting silently.
+After generating a refreshed contract, point `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH` at that output before rerunning preflight/runtime guard.
+
+Fast runtime guard without the slower local API surfaces:
+
+```bash
+./.venv/bin/python scripts/run_micro_live_runtime_guard.py --days 30
+```
+
+This guard fails on blocking config drift, expired/too-short macro blackout horizon, live allowlist/worker-universe mismatch, or missing fail-closed liquidity protection, and also summarizes whether recent live intents were blocked before submission.
+
+Live order lifecycle report:
+
+```bash
+./.venv/bin/python scripts/run_live_order_lifecycle_report.py --days 30
+```
+
+This report joins intent, submission, fill, and Binance ledger rows so "no trade" can be separated into no signal, approval blocked, submit skipped, submitted without fill, rejected/error, open after entry, or closed.
+
+Dry-run the MICRO_LIVE submit path through sizing and liquidity checks without placing an order:
+
+```bash
+./.venv/bin/python scripts/run_micro_live_synthetic_canary.py --no-network
+```
+
+No-order watchdog for periods where live intents accumulate but no live order is submitted:
+
+```bash
+./.venv/bin/python scripts/run_micro_live_no_order_watchdog.py --days 3 --no-fail-exit
+```
+
+Add `--notify` to send a concise Discord/system alert when the watchdog detects live intents without live submissions. Cooldown is state-file based, so repeated identical alerts are suppressed by default.
+The watchdog also writes `latest.md` and `latest.json` beside timestamped reports, and it only records notification cooldown after confirmed delivery.
+
+Live reconciliation watchdog for stale submissions, ledger mismatches, user-stream gaps, or fresh critical reconciliation events:
+
+```bash
+./.venv/bin/python scripts/run_live_reconciliation_watchdog.py --days 3 --no-fail-exit
+```
+
+Add `--notify` for concise Discord/system alerts. This is the check that catches "submitted locally, but exchange/user-stream state did not settle" before it becomes a silent execution gap.
+
+Boot check before starting or restarting the live worker:
+
+```bash
+./.venv/bin/python scripts/run_micro_live_boot_check.py --days 3 --limit 200 --no-fail-exit
+```
+
+This composes runtime guard, reconciliation watchdog, and the synthetic submit canary. It never sends a live order.
+When `AUTO_TRADING_EXECUTION_MODE` is `MICRO_LIVE` or `LIVE`, [scripts/run_worker.py](/Users/yumin/Documents/trading/scripts/run_worker.py) now runs this boot check before starting. Use `--skip-boot-check` only for an explicit emergency/debug bypass.
+
+Binance trading-rule drift snapshot:
+
+```bash
+./.venv/bin/python scripts/run_binance_rule_drift_snapshot.py
+```
+
+This snapshots each live symbol's `quantity_step`, `min_quantity`, `tick_size`, precision, status, and contract type from Binance `exchangeInfo`, then compares against the latest saved snapshot.
+
+Live-vs-replay parity audit:
+
+```bash
+./.venv/bin/python scripts/run_live_replay_parity_audit.py --symbol BTCUSDC --days 30 --no-fail-exit
+./.venv/bin/python scripts/run_live_replay_parity_audit.py --all-live-symbols --days 3 --no-fail-exit
+```
+
+This compares live active-contract cadence against the operator-dashboard replay flow baseline and attaches recent live intent/submission block reasons. It now computes the active-contract cadence and replay baseline directly from local DB/files first, then falls back to the local API, so the audit is not dependent on the web server being up. `--all-live-symbols` aggregates the 11-symbol live universe and marks the portfolio `ALERT` if any individual symbol is below the replay flow threshold. Each symbol also gets a `flow_diagnosis.stage`, such as `signal_or_plan_generation_gap`, `approval_gate_blocked`, `intent_to_submission_gap`, or `exchange_submission_rejected_or_error`. A symbol can be `WATCH` even when replay cadence is sufficient if all recent intents are blocked before order submission.
+
+When an intent is blocked by `validation_do_not_deploy`, the approval snapshot and lifecycle reports include `validation_block_detail.primary_cause` plus `root_causes`, so the operator can distinguish missing validation sample, non-positive expectancy, zero/missing win rate, score floor failure, risk-gate closure, and runtime candidate blocks without reading raw logs.
+
+Replay validation bridge audit:
+
+```bash
+./.venv/bin/python scripts/run_replay_validation_bridge.py --all-live-symbols --no-fail-exit
+```
+
+This is audit-only and does not change live approval. It checks whether the current replay cache clears conservative bridge floors before any manual review of replay-backed MICRO_LIVE sampling. The bridge now requires both headline expectancy and a non-negative `ev_r_lower_95`, and it adds material slice diagnostics for `direction`, `strategy_family`, and `entry_model`. `ELIGIBLE_FOR_MANUAL_BRIDGE_REVIEW_WITH_SLICE_WARNINGS` is not a clean approval; it means the aggregate passed but at least one material slice needs manual review first. The default action remains to keep the validation gate closed unless an operator explicitly reviews the bridge output.
+The bridge writes `latest.md` and `latest.json` beside timestamped reports for stable operator reads.
+
+Session impulse retest runtime audit:
+
+```bash
+./.venv/bin/python scripts/run_session_impulse_retest_runtime_audit_report.py --hours 3 --no-fail-exit
+```
+
+This summarizes DB-backed `session_impulse_retest` refresh/auto-route audit rows, including signal generation, no fresh candidate, policy-disabled route, WS-route suppression, intent creation failure, submit error, and submitted states. It writes `latest.md` and `latest.json` beside timestamped reports so no-order investigations can start from a stable path.
+
+Scheduled guard heartbeat:
+
+```bash
+./.venv/bin/python scripts/run_micro_live_ops_heartbeat.py --no-fail-exit
+```
+
+This checks whether runtime guard, no-order watchdog, reconciliation watchdog, synthetic canary, boot check, replay validation bridge, session impulse retest runtime audit, Binance rule drift, and macro blackout reports are still being produced on time. It also reads the latest report content where possible, so a fresh `ALERT`, `WATCH`, `DRIFT`, or `FAIL` report is surfaced instead of being hidden behind a freshness-only `PASS`. Report jobs look for report files directly, not state files, and a checked report with no readable status is treated as a failure. Macro blackout contracts are checked for future event horizon directly from their `windows`, not just for file presence; heartbeat uses the configured `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH` before falling back to glob discovery, so it audits the same contract live approval uses. Stale blackout contract mtime is a `WATCH` when the horizon is still sufficient, while short/expired horizon remains a hard failure. Notifications separate `FAIL` items from `WATCH` items so urgent fixes are not mixed with review-only warnings, and repeated identical issue sets are cooldown-suppressed by default. Cooldown state is written only after confirmed delivery, so failed alert attempts do not suppress the next run. The script also writes `latest.md` and `latest.json` aliases beside timestamped reports for stable operator/dashboard reads, using atomic replace to avoid partial latest/state files.
+
+Generate optional macOS launchd plists for the operating guards:
+
+```bash
+./.venv/bin/python scripts/install_micro_live_ops_launchd.py
+```
+
+By default this only writes plists under `reports/operations/launchd`. Use `--install --load` only when you want macOS to actually run runtime guard, no-order watchdog, reconciliation watchdog, synthetic canary, boot check, ops heartbeat, replay validation bridge, session impulse retest runtime audit, rule drift, and macro calendar refresh on schedule.
 
 Split review followup packet:
 

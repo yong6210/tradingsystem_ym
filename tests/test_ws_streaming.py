@@ -51,6 +51,7 @@ def test_stream_binance_klines_ingests_and_refreshes() -> None:
         assert payload["processed_messages"] == 3
         assert payload["committed_candles"] == 3
         assert payload["ingest_errors"] == 0
+        assert payload["last_ingest_success_at"]
         assert len(candles) >= 3
         assert refresh_calls
 

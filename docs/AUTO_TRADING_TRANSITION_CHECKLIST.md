@@ -1,7 +1,7 @@
 # Trading Engine v1 자동매매 전환 상세 체크리스트 (Living)
 
-최종 갱신: 2026-03-25
-현재 기준선: Iteration #133 (quality softening priority + family/regime/session bottleneck visibility)
+최종 갱신: 2026-05-10
+현재 기준선: 2026-05-10 MICRO_LIVE runtime guard and lifecycle observability sync
 
 ## 운영 규칙
 - 이 문서는 자동매매 전환과 Pine-Server contract 정렬의 active backlog source-of-truth다.
@@ -315,6 +315,13 @@
 - 완료 기준: `./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --days 7` 한 번으로 live 전환 전 preflight 상태를 결정할 수 있다.
 - 완료 기준: split review target이 잡힌 경우 `./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --days 7 --action auto`로 바로 review packet을 만들 수 있다.
 - 검증: `py_compile`, `--help`, `--no-write-report`, markdown report write 경로를 실제로 확인한다.
+
+- [x] MICRO_LIVE runtime guard / lifecycle / no-order watchdog 문서 연결
+- 목적: `preflight`가 느린 API surface를 묶는 동안, live 직전 설정 drift와 실제 order lifecycle 이상은 별도 빠른 경로로 확인한다.
+- 구현 방식: `scripts/run_micro_live_runtime_guard.py`, `scripts/run_live_order_lifecycle_report.py`, `scripts/run_micro_live_no_order_watchdog.py`, `scripts/run_micro_live_synthetic_canary.py`, `scripts/build_micro_live_event_blackouts.py`를 README, go-live checklist, operating runbook의 실제 운영 순서에 연결한다.
+- 구현 방식: live 계약 문구는 `BTCUSDC + sweep_reversal + LIMIT`, `BTCUSDC:LONG|SHORT`, `ETHUSDC advisory/proof only`, `trend_continuation proof lane only`로 통일한다.
+- 완료 기준: operator가 문서만 보고도 `preflight -> runtime guard -> synthetic canary -> signoff -> intent -> submit` 순서를 재현할 수 있고, `no trade` 상태를 signal 없음/approval block/submit skip/order failure/fill 없음/open/closed로 분리해 볼 수 있다.
+- 검증: README/go-live checklist/runbook에서 새 helper 명령이 검색되고, ETH-inclusive wording이 현재 live 계약으로 남아 있지 않아야 한다.
 
 - [x] split review followup ledger contract + closed-loop 강화
 - 목적: split review packet 이력을 운영 surface에서 같은 의미로 읽고, 같은 packet 재생성을 억제하면서, 새 close가 쌓인 뒤에는 이전 review 방향이 실제로 확인됐는지 다시 규칙에 반영한다.

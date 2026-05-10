@@ -53,6 +53,7 @@ def test_try_parse_kline_row_skips_malformed_rows() -> None:
     assert BinanceFuturesClient._try_parse_kline_row("BTCUSDC", "5m", malformed_row) is None
     assert BinanceFuturesClient._try_parse_kline_row("BTCUSDC", "5m", [float("inf"), "100", "101", "99", "100", "1", 1700000299999]) is None
     assert BinanceFuturesClient._try_parse_kline_row("BTCUSDC", "5m", [1700000000000, "0", "0", "0", "0", "1", 1700000299999]) is None
+    assert BinanceFuturesClient._try_parse_kline_row("BTCUSDC", "5m", {"bad": "row"}) is None
 
 
 def test_market_stat_parsers_tolerate_malformed_numeric_fields() -> None:
@@ -84,6 +85,35 @@ def test_market_stat_parsers_tolerate_malformed_numeric_fields() -> None:
     assert basis.basis_open == 0.0
     assert basis.basis_close == 0.0
     assert position["update_ts"].timestamp() > 0
+
+
+def test_fetch_position_risk_filters_malformed_rows(monkeypatch) -> None:
+    def fake_signed_request(self, method: str, path: str, params: dict[str, object]) -> list[object]:
+        return [
+            ["bad-row"],
+            {
+                "symbol": "BTCUSDC",
+                "positionSide": "LONG",
+                "positionAmt": "0.01",
+                "updateTime": 1700000000000,
+            },
+        ]
+
+    monkeypatch.setattr(BinanceFuturesClient, "_signed_request", fake_signed_request)
+
+    rows = BinanceFuturesClient(api_key="key", api_secret="secret", live_trade_enabled=True).fetch_position_risk("btcusdc")
+    empty = BinanceFuturesClient.normalize_position_risk_row(["bad-row"])
+
+    assert rows == [
+        {
+            "symbol": "BTCUSDC",
+            "positionSide": "LONG",
+            "positionAmt": "0.01",
+            "updateTime": 1700000000000,
+        }
+    ]
+    assert empty["symbol"] == ""
+    assert empty["position_amt"] == 0.0
 
 
 def test_submit_order_uses_test_endpoint_and_echoes_payload(monkeypatch) -> None:
@@ -129,6 +159,27 @@ def test_submit_order_uses_test_endpoint_and_echoes_payload(monkeypatch) -> None
     }
     assert payload["status"] == "TEST_ACCEPTED"
     assert payload["clientOrderId"] == "test-order-1"
+
+
+def test_submit_order_rejects_malformed_exchange_response(monkeypatch) -> None:
+    def fake_signed_request(self, method: str, path: str, params: dict[str, object]) -> list[str]:
+        return ["bad-response"]
+
+    monkeypatch.setattr(BinanceFuturesClient, "_signed_request", fake_signed_request)
+    client = BinanceFuturesClient(
+        api_key="key",
+        api_secret="secret",
+        live_trade_enabled=True,
+    )
+
+    with pytest.raises(RuntimeError, match="binance_order_response_malformed:list"):
+        client.submit_order(
+            symbol="BTCUSDC",
+            side="BUY",
+            order_type="MARKET",
+            quantity=0.01,
+            live=True,
+        )
 
 
 def test_submit_order_live_disabled_raises() -> None:

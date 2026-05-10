@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,6 +13,10 @@ from app.db.models import AlertSubscription
 from app.db.repositories import AlertRepository, AlertRetryQueueRepository
 from app.services.deployment_contracts import validation_alert_contract, validation_alert_strip_summary
 from app.services.notification_dispatcher import NotificationDispatcher
+
+
+def _safe_mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
 @dataclass(slots=True)
@@ -104,7 +109,7 @@ class AlertMetricsService:
     def _flatten_deliveries(self, alerts: list[AlertSubscription]) -> list[DeliveryObservation]:
         observations: list[DeliveryObservation] = []
         for alert in alerts:
-            payload = alert.payload or {}
+            payload = _safe_mapping(alert.payload)
             delivery = payload.get("delivery")
             if not isinstance(delivery, dict):
                 continue
@@ -253,8 +258,8 @@ class AlertMetricsService:
         for alert in alerts:
             if str(alert.type) not in {"validation_warn", "validation_fail"}:
                 continue
-            payload = dict(alert.payload or {})
-            delivery = dict(payload.get("delivery") or {})
+            payload = _safe_mapping(alert.payload)
+            delivery = _safe_mapping(payload.get("delivery"))
             delivered = bool(delivery.get("delivered"))
             skipped = bool(delivery.get("skipped"))
             failed = not delivered and not skipped
@@ -353,8 +358,8 @@ class AlertMetricsService:
             ]
         )
 
-        latest_validation_alert = dict(payload.get("latest_validation_alert") or {})
-        latest_alert_strip = dict(latest_validation_alert.get("approval_strip_summary") or {})
+        latest_validation_alert = _safe_mapping(payload.get("latest_validation_alert"))
+        latest_alert_strip = _safe_mapping(latest_validation_alert.get("approval_strip_summary"))
         lines.extend(
             [
                 "",
@@ -387,7 +392,7 @@ class AlertMetricsService:
         alerts = [
             alert
             for alert in self.alert_repo.list_recent(days=lookback_days)
-            if not bool((alert.payload or {}).get("subscription_active"))
+            if not bool(_safe_mapping(alert.payload).get("subscription_active"))
         ]
         observations = self._flatten_deliveries(alerts)
         leaf_observations = [row for row in observations if row.is_leaf]
@@ -458,7 +463,7 @@ class AlertMetricsService:
             "generated_at": now.isoformat(),
             "days": lookback_days,
             "alerts_total": len(alerts),
-            "alerts_with_delivery": sum(1 for alert in alerts if isinstance((alert.payload or {}).get("delivery"), dict)),
+            "alerts_with_delivery": sum(1 for alert in alerts if isinstance(_safe_mapping(alert.payload).get("delivery"), dict)),
             "overall": overall_stats,
             "channel_metrics": channel_metrics,
             "circuit_state": NotificationDispatcher.circuit_snapshot(),

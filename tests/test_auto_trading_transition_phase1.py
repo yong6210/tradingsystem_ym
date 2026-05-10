@@ -291,6 +291,53 @@ def test_micro_live_approval_tolerates_malformed_numeric_settings() -> None:
     assert service._session_impulse_retest_sampling_decision(plan=plan, executable_plan=executable_plan)[2] == 0.3
 
 
+def test_validation_do_not_deploy_detail_classifies_missing_sample_root_cause() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_allowed_symbols="BTCUSDC",
+        auto_trading_allowed_families="trend_continuation",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
+        auto_trading_micro_live_allowed_families="trend_continuation",
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(plan_id="validation_detail_missing_sample")
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={
+            "grade": "F",
+            "recommendation": "do-not-deploy",
+            "risk_state": "OPEN",
+            "risk_reason": "normal",
+            "sample_size": 0,
+            "win_rate": 0.0,
+            "ev": 0.0,
+            "total_score": 28.33,
+        },
+        requested_execution_mode=ExecutionMode.MICRO_LIVE,
+        safety_state={"new_entry_allowed": True},
+    )
+
+    detail = payload["validation_block_detail"]
+    root_codes = [item["code"] for item in detail["root_causes"]]
+    assert payload["approval_state"] == ApprovalState.BLOCKED.value
+    assert detail["primary_cause"] == "validation_sample_missing"
+    assert "validation_expectancy_non_positive" in root_codes
+    assert detail["metrics"]["total_score"] == 28.33
+
+
 @pytest.mark.parametrize(
     ("settings", "plan", "candidate", "metrics", "expected_state", "expected_code"),
     [

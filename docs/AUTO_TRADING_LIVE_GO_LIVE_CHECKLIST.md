@@ -1,6 +1,6 @@
 # Auto Trading Live Go-Live 체크리스트
 
-최종 갱신: 2026-04-17
+최종 갱신: 2026-05-10
 
 ## 1. 범위
 - 이 문서는 `SHADOW -> PAPER -> MICRO_LIVE -> LIVE` 전환 전 점검 항목을 고정한다.
@@ -16,6 +16,7 @@
   - safety/lock 상태: `GET /execution/safety-state`
 
 ## 3. 환경 점검
+- [ ] `.env`가 [.env.example](/Users/yumin/Documents/trading/.env.example)의 보수적 기준선을 따른다. 실제 주문은 `BINANCE_TRADE_LIVE_ENABLED=true`, `AUTO_TRADING_ENABLED=true`, 승인/intent/submit 조건이 모두 맞을 때만 열린다.
 - [ ] `BINANCE_API_KEY`, `BINANCE_API_SECRET` 설정 완료
 - [ ] `BINANCE_TRADE_LIVE_ENABLED` 의도한 값으로 설정 완료
 - [ ] `pip install -e '.[integration]'`로 user-stream 의존성 설치 완료
@@ -72,8 +73,10 @@ PAPER exit criteria:
 - [ ] `runtime_operator_signoff_summary.status == ready_for_manual_micro_live_signoff`
 - [ ] `runtime_operator_signoff_summary.contract_scope == limit_only`
 - [ ] 후보가 `auto_trading_micro_live_allowed_symbols`, `auto_trading_micro_live_allowed_families`, `auto_trading_micro_live_allowed_sessions` 계약 안에 있음
+- [ ] `.env`의 MICRO_LIVE 계약이 `BTCUSDC + sweep_reversal + LIMIT`, `BTCUSDC:LONG|SHORT`, `1` concurrent position, daily cap disabled(`0`), `RISK_PCT` sizing과 일치함
+- [ ] `AUTO_TRADING_LIVE_LIQUIDITY_GATE_ENABLED=true`와 `AUTO_TRADING_LIVE_LIQUIDITY_GATE_FAIL_CLOSED=true`
 - [ ] `runtime_self_heal_summary`에 반복 stale cleanup / stale unblock 이상 징후가 없음
-- [ ] 운영 순서를 `preflight -> signoff review -> order-intents(MICRO_LIVE) -> submit(live=true)`로만 따른다
+- [ ] 운영 순서를 `preflight -> runtime guard -> synthetic canary -> signoff review -> order-intents(MICRO_LIVE) -> submit(live=true)`로만 따른다
 - [ ] `live_eligible_post_patch_closed_trade_count >= 15`
 - [ ] `live_eligible_post_patch_sample_summary.replay_max_drawdown_r < 4.5`
 - [ ] `live_eligible_post_patch_sample_summary.replay_p5_r >= -1.05`
@@ -93,6 +96,17 @@ PAPER exit criteria:
 - [ ] `run_paper_candidate_drill.py` 기준 `family_cluster_guard_summary.active_families`가 비어 있음
 - [ ] same-window alt reversal cluster가 PAPER lineage 표본을 다시 악화시키지 않도록 family guard가 clear 상태임
 - [ ] major macro blackout (`FOMC`, `CPI`, `NFP`) 일정이 현재 분기 기준으로 반영돼 있고, blackout 동안 신규 `MICRO_LIVE` 진입이 막히는 구조를 이해함
+- [ ] blackout horizon이 부족하면 `scripts/build_micro_live_event_blackouts.py`로 계약 파일을 재생성하고 `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH`를 새 출력 파일에 맞춘 뒤 preflight/runtime guard를 다시 통과함
+- [ ] `scripts/run_micro_live_runtime_guard.py --days 30`가 blocking failure 없이 통과함
+- [ ] `scripts/run_micro_live_synthetic_canary.py --no-network`가 sizing/liquidity submit dry-run 경로를 통과함
+- [ ] `scripts/run_live_order_lifecycle_report.py --days 30`에서 rejected/error 또는 submitted-without-entry-fill 이상을 검토함
+- [ ] live intent가 있는데 제출이 없는 구간은 `scripts/run_micro_live_no_order_watchdog.py --days 3 --no-fail-exit`로 별도 확인하고, `validation_block_detail.primary_cause`가 sample/EV/win-rate/score/risk/session 중 무엇인지 분리함
+- [ ] stale live submission, ledger mismatch, user-stream stale은 `scripts/run_live_reconciliation_watchdog.py --days 3 --no-fail-exit`로 별도 확인함
+- [ ] worker 재시작 전에는 `scripts/run_micro_live_boot_check.py --days 3 --limit 200 --no-fail-exit`를 통과시킴
+- [ ] `AUTO_TRADING_EXECUTION_MODE=MICRO_LIVE/LIVE`에서 `run_worker.py`가 boot check 실패 시 시작하지 않는 구조를 유지함
+- [ ] `scripts/run_live_replay_parity_audit.py --all-live-symbols --days 3 --no-fail-exit`에서 개별 심볼 ALERT/WATCH와 `flow_diagnosis.stage`, `order_flow_status`를 확인함
+- [ ] `scripts/run_replay_validation_bridge.py --all-live-symbols --no-fail-exit`로 replay-backed validation bridge 후보를 audit-only로 확인함. `ev_r_lower_95`와 material slice warnings를 같이 확인하며, slice warning은 clean pass로 보지 않음. 이 결과만으로 live gate를 자동 개방하지 않음
+- [ ] `scripts/run_micro_live_ops_heartbeat.py --no-fail-exit`가 scheduled guard report freshness와 최신 리포트 내부 상태 확인을 통과함. hard failure는 즉시 조치하고, `WATCH`는 no-order/replay bridge 등 운영상 확인이 필요한 상태로 분리함
 
 MICRO_LIVE exit criteria:
 - [ ] fee/slippage 포함 후 기대치 유지
@@ -145,13 +159,19 @@ curl -s "http://127.0.0.1:8000/alerts/metrics?days=7&write_report=false" | jq
 자동 점검 스크립트:
 ```bash
 ./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --days 7
+./.venv/bin/python scripts/run_micro_live_runtime_guard.py --days 30
+./.venv/bin/python scripts/run_micro_live_synthetic_canary.py --no-network
+./.venv/bin/python scripts/run_live_order_lifecycle_report.py --days 30
+./.venv/bin/python scripts/run_micro_live_no_order_watchdog.py --days 3 --no-fail-exit
+./.venv/bin/python scripts/run_live_reconciliation_watchdog.py --days 3 --no-fail-exit
+./.venv/bin/python scripts/run_micro_live_boot_check.py --days 3 --limit 200 --no-fail-exit
 ```
 
 ## 10. 운영 원칙
 - live 전환은 기능 완성 여부가 아니라 `reconciliation / safety / operator visibility`가 충분한지로 판단한다.
 - `MICRO_LIVE`는 검증 단계다. 수익 극대화 모드가 아니다.
 - `legacy` 전체 replay와 full `post-patch` cohort는 계속 advisory truth로 유지한다. 실제 live go/no-go는 `live_eligible_post_patch_sample_summary`를 따로 본다.
-- 현재 live 계약은 `BTCUSDC/ETHUSDC + sweep_reversal + LIMIT`다. `CONFIRM` / `SWEEP_CONFIRM`은 paper 또는 research로만 유지한다.
+- 현재 live 계약은 `BTCUSDC + sweep_reversal + LIMIT`다. `ETHUSDC`는 advisory/proof 비교용으로만 남기고, `CONFIRM` / `SWEEP_CONFIRM`은 paper 또는 research로만 유지한다.
 - raw BTC strategy proof 기준 현재 우선순위는 `BTCUSDC sweep_reversal LIMIT`이다. `ETHUSDC`는 advisory/proof 비교용으로만 남기고, `CONFIRM`은 운영 계약에서 제외한다.
 - `trend_continuation + LIMIT`는 live 계약이 아니라 `trend proof lane`이다. proof가 쌓이기 전에는 실거래 판단 근거로 과신하지 않는다.
 - `MICRO_LIVE`는 `limit_only post-patch 15+`, `maxDD < 4.5R`, `p5 >= -1.05`, `stop_loss_share < 45%`, `worst_loss_streak < 5`일 때만 검토한다.

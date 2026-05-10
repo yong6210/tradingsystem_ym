@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from types import SimpleNamespace
 
-from app.core.enums import PlanState
+from app.core.enums import PlanState, RiskGateState
 from app.db.models import Plan
 from app.db.session import SessionLocal, init_db
 from app.services import strategy_engine as strategy_engine_module
@@ -73,6 +73,33 @@ def test_sync_universe_from_binance_with_mocked_market_data() -> None:
         assert payload["failed"] == 0
         assert len(payload["results"]) == 2
         assert all(item["status"] == "ok" for item in payload["results"])
+
+
+def test_runtime_candidate_symbols_can_limit_ranked_outcome_inputs() -> None:
+    engine = object.__new__(StrategyEngine)
+    engine.scanner = SimpleNamespace(
+        candidate_rows=lambda **_kwargs: [
+            {"symbol": "ETHUSDC", "final_rank_score": 95.0},
+            {"symbol": "BTCUSDC", "final_rank_score": 90.0},
+            {"symbol": "ETHUSDC", "final_rank_score": 80.0},
+            {"symbol": "SOLUSDC", "final_rank_score": 70.0},
+        ]
+    )
+
+    assert engine._runtime_candidate_symbols(
+        symbols=["BTCUSDC", "ETHUSDC", "SOLUSDC"],
+        risk_state=RiskGateState.OPEN,
+        limit=2,
+    ) == ["ETHUSDC", "BTCUSDC"]
+    assert engine._runtime_candidate_symbols(
+        symbols=["BTCUSDC", "ETHUSDC", "SOLUSDC"],
+        risk_state=RiskGateState.OPEN,
+    ) == ["BTCUSDC", "ETHUSDC", "SOLUSDC"]
+    assert engine._runtime_candidate_symbols(
+        symbols=["BTCUSDC", "ETHUSDC", "SOLUSDC"],
+        risk_state=RiskGateState.OPEN,
+        limit=0,
+    ) == []
 
 
 def test_sync_universe_from_binance_parallel_respects_concurrency_limit() -> None:
@@ -209,23 +236,20 @@ def test_operating_lock_snapshot_ignores_paper_only_closed_plans() -> None:
         assert captured["plan_ids"] == ["live_plan"]
 
 
-def test_operational_checklist_uses_read_only_validation_runtime() -> None:
+def test_operational_checklist_uses_read_only_validation_fallback_on_cache_miss() -> None:
     init_db()
     strategy_engine_module._READ_ONLY_RECOMPUTE_CACHE.clear()
     with SessionLocal() as db:
         engine = StrategyEngine(db)
         captured: dict[str, object] = {}
 
-        def _fake_recompute_learning(symbol: str, *, persist_runtime_validation_artifacts: bool = True) -> dict:
-            captured["symbol"] = symbol
-            captured["persist_runtime_validation_artifacts"] = persist_runtime_validation_artifacts
-            return {"execution_quality": {"status": "ok"}}
-
-        engine.recompute_learning = _fake_recompute_learning  # type: ignore[assignment]
+        engine._load_cached_validation_payload = lambda symbol: None  # type: ignore[assignment]
+        engine._load_stale_conservative_validation_payload = lambda symbol: None  # type: ignore[assignment]
+        engine.recompute_learning = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected recompute"))  # type: ignore[assignment]
         engine.alert_metrics_report = lambda **kwargs: {}  # type: ignore[assignment]
         engine.outbox_status = lambda: {}  # type: ignore[assignment]
         engine.metrics = lambda **kwargs: {}  # type: ignore[assignment]
-        engine.portfolio_budget_report = lambda **kwargs: {}  # type: ignore[assignment]
+        engine.portfolio_budget_report = lambda **kwargs: captured.setdefault("portfolio_kwargs", kwargs) or {}  # type: ignore[assignment]
         engine.operational_checklist_service.generate = lambda **kwargs: kwargs  # type: ignore[assignment]
 
         payload = engine.operational_checklist(
@@ -236,9 +260,48 @@ def test_operational_checklist_uses_read_only_validation_runtime() -> None:
             write_report=False,
         )
 
-        assert captured["symbol"] == "BTCUSDC"
-        assert captured["persist_runtime_validation_artifacts"] is False
-        assert payload["validation_payload"]["execution_quality"]["status"] == "ok"
+        assert payload["validation_payload"]["validation_report"]["status"] == "CACHE_MISSING"
+        assert payload["execution_quality"]["status"] == "CACHE_MISSING"
+        assert dict(captured["portfolio_kwargs"])["outcome_symbol_limit"] == 0
+
+
+def test_operational_checklist_prefers_stale_conservative_validation_payload() -> None:
+    init_db()
+    strategy_engine_module._READ_ONLY_RECOMPUTE_CACHE.clear()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        captured: dict[str, object] = {}
+        stale_payload = {
+            "symbol": "BTCUSDC",
+            "validation_report": {
+                "approval_strip_summary": {
+                    "approve_value": "manual review first",
+                    "act_value": "hold_rollout_and_review_alignment_details",
+                }
+            },
+            "execution_quality": {"status": "STALE_CONSERVATIVE"},
+        }
+
+        engine._load_cached_validation_payload = lambda symbol: None  # type: ignore[assignment]
+        engine._load_stale_conservative_validation_payload = lambda symbol: stale_payload  # type: ignore[assignment]
+        engine.recompute_learning = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected recompute"))  # type: ignore[assignment]
+        engine.alert_metrics_report = lambda **kwargs: {}  # type: ignore[assignment]
+        engine.outbox_status = lambda: {}  # type: ignore[assignment]
+        engine.metrics = lambda **kwargs: {}  # type: ignore[assignment]
+        engine.portfolio_budget_report = lambda **kwargs: {}  # type: ignore[assignment]
+        engine.operational_checklist_service.generate = lambda **kwargs: captured.update(kwargs) or kwargs  # type: ignore[assignment]
+
+        payload = engine.operational_checklist(
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            limit=20,
+            days=30,
+            write_report=False,
+        )
+
+        assert payload["validation_payload"] == stale_payload
+        assert payload["execution_quality"]["status"] == "STALE_CONSERVATIVE"
+        assert captured["validation_payload"] == stale_payload
 
 
 def test_recompute_learning_read_only_runtime_keeps_global_lineage_persistence_disabled() -> None:
@@ -251,6 +314,7 @@ def test_recompute_learning_read_only_runtime_keeps_global_lineage_persistence_d
         engine = StrategyEngine(db)
         captured: dict[str, object] = {}
 
+        engine._load_cached_validation_payload = lambda symbol: None  # type: ignore[assignment]
         engine.outcome_repo.list_recent = lambda symbol, days=180: []  # type: ignore[assignment]
         engine.zone_repo.list_all = lambda symbol, timeframe="15m": []  # type: ignore[assignment]
         engine.metrics_repo.upsert = lambda **kwargs: None  # type: ignore[assignment]

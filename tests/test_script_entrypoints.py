@@ -14,6 +14,7 @@ import scripts.analyze_replay_runtime_input_diff as replay_input_diff
 import scripts.benchmark_timescale_load_retention as benchmark_load_retention
 import scripts.benchmark_timescale_retention as benchmark_retention
 import scripts.build_micro_live_plan_blocklist as build_blocklist
+import scripts.build_micro_live_event_blackouts as build_event_blackouts
 import scripts.build_micro_live_strategy_time_contract as build_time_contract
 import scripts.check_operator_session_brief_automation as brief_automation
 import scripts.check_operator_session_brief_delivery_preflight as delivery_preflight
@@ -24,12 +25,23 @@ import scripts.notify_operator_session_brief as notify_operator_session_brief
 import scripts.notify_stage_change as notify_stage_change
 import scripts.ops_stage_board as ops_stage_board
 import scripts.paper_lineage_watch_tick as paper_lineage_watch_tick
+import scripts.install_micro_live_ops_launchd as install_micro_live_ops_launchd
 import scripts.run_micro_main_data_backfill as micro_data_backfill
 import scripts.run_micro_main_futures_csv_backtest as futures_csv_backtest
 import scripts.run_worker as run_worker
 import scripts.run_execution_incident_drill as incident_drill
 import scripts.run_reaction_gate_variant_backtest as reaction_variant_backtest
+import scripts.run_binance_rule_drift_snapshot as binance_rule_drift
+import scripts.run_live_reconciliation_watchdog as live_reconciliation_watchdog
+import scripts.run_live_replay_parity_audit as live_replay_parity
+import scripts.run_replay_validation_bridge as replay_validation_bridge
 import scripts.run_micro_live_preflight as micro_live_preflight
+import scripts.run_micro_live_boot_check as micro_live_boot_check
+import scripts.run_micro_live_no_order_watchdog as micro_live_no_order_watchdog
+import scripts.run_micro_live_ops_heartbeat as micro_live_ops_heartbeat
+import scripts.run_micro_live_runtime_guard as micro_live_runtime_guard
+import scripts.run_micro_live_synthetic_canary as micro_live_synthetic_canary
+import scripts.run_live_order_lifecycle_report as live_order_lifecycle_report
 import scripts.run_paper_candidate_drill as paper_candidate_drill
 import scripts.run_post_live_pruning_review as post_live_pruning
 import scripts.run_post_unlock_review as post_unlock
@@ -48,6 +60,14 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 def test_runtime_scripts_support_direct_help_from_other_cwd(tmp_path: Path) -> None:
     for script in (
         ROOT_DIR / "scripts" / "run_micro_live_preflight.py",
+        ROOT_DIR / "scripts" / "run_micro_live_no_order_watchdog.py",
+        ROOT_DIR / "scripts" / "run_micro_live_runtime_guard.py",
+        ROOT_DIR / "scripts" / "run_micro_live_synthetic_canary.py",
+        ROOT_DIR / "scripts" / "run_live_reconciliation_watchdog.py",
+        ROOT_DIR / "scripts" / "run_replay_validation_bridge.py",
+        ROOT_DIR / "scripts" / "run_micro_live_boot_check.py",
+        ROOT_DIR / "scripts" / "run_micro_live_ops_heartbeat.py",
+        ROOT_DIR / "scripts" / "install_micro_live_ops_launchd.py",
         ROOT_DIR / "scripts" / "run_runtime_signoff_review.py",
     ):
         completed = subprocess.run(
@@ -66,13 +86,25 @@ def test_script_display_paths_allow_absolute_outputs_outside_repo(tmp_path: Path
     outside_path = tmp_path / "outside" / "report.md"
     for module in (
         build_blocklist,
+        build_event_blackouts,
         build_time_contract,
+        binance_rule_drift,
         brief_automation,
         delivery_preflight,
         divergence_snapshot,
         session_brief,
         incident_drill,
+        install_micro_live_ops_launchd,
+        live_order_lifecycle_report,
+        live_reconciliation_watchdog,
+        live_replay_parity,
+        replay_validation_bridge,
+        micro_live_boot_check,
+        micro_live_no_order_watchdog,
+        micro_live_ops_heartbeat,
         micro_live_preflight,
+        micro_live_runtime_guard,
+        micro_live_synthetic_canary,
         paper_candidate_drill,
         post_live_pruning,
         post_unlock,
@@ -133,6 +165,14 @@ def test_worker_safe_int_tolerates_malformed_heartbeat_stats() -> None:
     assert run_worker._safe_int("bad") == 0
     assert run_worker._safe_int(None) == 0
     assert run_worker._safe_int("3") == 3
+
+
+def test_worker_boot_check_is_required_only_for_live_modes(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = run_worker.get_settings()
+    monkeypatch.setattr(settings, "auto_trading_execution_mode", "MICRO_LIVE")
+    assert run_worker._live_mode_requires_boot_check() is True
+    monkeypatch.setattr(settings, "auto_trading_execution_mode", "SHADOW")
+    assert run_worker._live_mode_requires_boot_check() is False
 
 
 def test_worker_completed_heartbeat_preserves_stream_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -214,5 +254,13 @@ def test_worker_completed_heartbeat_preserves_stream_diagnostics(monkeypatch: py
         "last_refresh_error": "",
         "last_auto_route_error": "",
         "last_progress_callback_error": "RuntimeError: boom",
+        "last_ingest_success_at": "",
+        "last_ingest_error_at": "",
+        "last_refresh_success_at": "",
+        "last_refresh_error_at": "",
+        "last_auto_route_success_at": "",
+        "last_auto_route_error_at": "",
+        "last_progress_callback_success_at": "",
+        "last_progress_callback_error_at": "",
         "last_stream_error": "ConnectionClosed: test",
     }

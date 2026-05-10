@@ -931,6 +931,128 @@ class ExecutionPlanningService:
         effective_block_reason = "" if override_block_applied else block_reason
         effective_block_reason_message = "" if override_block_applied else block_reason_message
 
+        def validation_block_detail() -> dict[str, Any]:
+            reason_codes = [
+                str(item or "")
+                for item in list(metrics.get("reason_codes") or metrics.get("reasons") or [])
+                if str(item or "").strip()
+            ]
+            min_sample = self._safe_int(getattr(self.settings, "min_zone_sample_for_full_confidence", 30), default=30)
+            sample_size = max(
+                self._safe_int(metrics.get("sample_size")),
+                self._safe_int(metrics.get("trade_count")),
+                self._safe_int(metrics.get("closed_trades")),
+            )
+            win_rate = self._safe_float(metrics.get("win_rate"))
+            expectancy_r = self._safe_float(metrics.get("expectancy_r"), default=self._safe_float(metrics.get("ev"), default=self._safe_float(metrics.get("ev_r"))))
+            total_score = self._safe_float(metrics.get("total_score"))
+
+            root_causes: list[dict[str, Any]] = []
+            seen_root_codes: set[str] = set()
+
+            def add_root_cause(code: str, message: str, evidence: dict[str, Any] | None = None) -> None:
+                if code in seen_root_codes:
+                    return
+                seen_root_codes.add(code)
+                item: dict[str, Any] = {"code": code, "message": message}
+                if evidence:
+                    item["evidence"] = evidence
+                root_causes.append(item)
+
+            if sample_size <= 0:
+                add_root_cause(
+                    "validation_sample_missing",
+                    "No closed validation sample is available for this symbol/contract.",
+                    {"sample_size": sample_size, "required_sample": min_sample},
+                )
+            elif sample_size < max(1, min_sample):
+                add_root_cause(
+                    "validation_sample_below_confidence_floor",
+                    "Validation sample is below the configured confidence floor.",
+                    {"sample_size": sample_size, "required_sample": min_sample},
+                )
+            if expectancy_r <= 0.0:
+                add_root_cause(
+                    "validation_expectancy_non_positive",
+                    "Validation expectancy is not positive after costs.",
+                    {"expectancy_r": expectancy_r},
+                )
+            if win_rate <= 0.0:
+                add_root_cause(
+                    "validation_win_rate_missing_or_zero",
+                    "Validation win rate is missing or zero.",
+                    {"win_rate": win_rate},
+                )
+            if metrics_grade == "F" or total_score < 45.0:
+                add_root_cause(
+                    "validation_score_below_deploy_floor",
+                    "Validation score is below the do-not-deploy floor.",
+                    {"grade": metrics_grade, "total_score": total_score, "deploy_floor": 45.0},
+                )
+            if risk_state != "OPEN":
+                add_root_cause(
+                    "risk_gate_not_open",
+                    "Runtime risk gate is not open.",
+                    {"risk_state": risk_state, "risk_reason": risk_reason},
+                )
+            if deployment_go_no_go != "GO":
+                add_root_cause(
+                    "runtime_deployment_gate_not_go",
+                    "Runtime deployment gate is not GO.",
+                    {"deployment_go_no_go": deployment_go_no_go, "deployment_code": deployment_code},
+                )
+            if block_reason:
+                add_root_cause(
+                    "runtime_candidate_blocked",
+                    "Runtime candidate has a blocking reason.",
+                    {"block_reason": block_reason},
+                )
+            if not root_causes:
+                add_root_cause(
+                    "validation_recommendation_do_not_deploy",
+                    "Validation recommendation is do-not-deploy.",
+                    {"recommendation": metrics_recommendation},
+                )
+
+            primary_cause = str(root_causes[0].get("code") or "validation_do_not_deploy")
+            detail = {
+                "recommendation": metrics_recommendation,
+                "grade": metrics_grade,
+                "risk_state": risk_state,
+                "risk_reason": risk_reason,
+                "deployment_code": deployment_code,
+                "deployment_message": deployment_message,
+                "candidate_block_reason": block_reason,
+                "candidate_block_reason_message": block_reason_message if block_reason else "",
+                "reason_codes": reason_codes[:8],
+                "primary_cause": primary_cause,
+                "root_causes": root_causes[:8],
+            }
+            numeric_fields = (
+                "win_rate",
+                "expectancy_r",
+                "ev",
+                "ev_r",
+                "sample_size",
+                "trade_count",
+                "closed_trades",
+                "total_score",
+                "p1r",
+                "p2r",
+                "p3r",
+                "max_drawdown",
+                "max_drawdown_pct",
+                "profit_factor",
+            )
+            metrics_numeric = {
+                key: metrics.get(key)
+                for key in numeric_fields
+                if metrics.get(key) not in {None, ""}
+            }
+            if metrics_numeric:
+                detail["metrics"] = metrics_numeric
+            return detail
+
         def result(state: ApprovalState, reason_code: str, reason: str, extra_reasons: list[dict[str, Any]] | None = None) -> dict[str, Any]:
             final_state = state
             final_reason_code = reason_code
@@ -984,6 +1106,7 @@ class ExecutionPlanningService:
                 "expires_at": self._utc(plan.valid_until),
                 "validation_grade": metrics_grade,
                 "validation_recommendation": metrics_recommendation,
+                "validation_block_detail": validation_block_detail() if final_reason_code == "validation_do_not_deploy" else None,
                 "risk_state": risk_state,
                 "risk_reason": risk_reason,
                 "operating_lock": operating_lock,

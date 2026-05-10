@@ -203,6 +203,48 @@ def test_ingest_binance_user_stream_malformed_fill_numbers_do_not_crash() -> Non
         assert refreshed.state == PlanState.ARMED.value
 
 
+def test_ingest_binance_user_stream_tolerates_malformed_payload_shapes() -> None:
+    init_db()
+    symbol = f"BUS{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 7}USDC"
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+
+        unknown = engine.ingest_binance_user_stream_event(payload="not-a-dict")
+        assert unknown["accepted"] is False
+        assert unknown["kind"] == "unknown"
+
+        account = engine.ingest_binance_user_stream_event(
+            payload={
+                "kind": "account_update",
+                "event_type": "ACCOUNT_UPDATE",
+                "positions": [
+                    ["bad-position"],
+                    {
+                        "position_key": f"{symbol}:LONG",
+                        "symbol": symbol,
+                        "position_side": "LONG",
+                        "position_amt": 0.01,
+                        "entry_price": 100.0,
+                        "break_even_price": 100.0,
+                        "mark_price": 101.0,
+                        "liquidation_price": 50.0,
+                        "unrealized_pnl": 0.1,
+                        "notional": 1.01,
+                        "leverage": 5,
+                        "margin_type": "isolated",
+                        "isolated_wallet": 10.0,
+                        "update_ts": datetime.now(timezone.utc),
+                        "raw": {"source": "test"},
+                    },
+                ],
+            }
+        )
+
+        assert account["accepted"] is True
+        assert account["position_sync"]["synced"] == 1
+        assert account["position_sync"]["positions"][0]["position_key"] == f"{symbol}:LONG"
+
+
 def test_ingest_binance_user_stream_reduce_only_trade_can_close_plan() -> None:
     init_db()
     symbol = f"BUS{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 1}USDC"

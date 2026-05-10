@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from math import ceil, isfinite
 from pathlib import Path
@@ -10,6 +11,10 @@ from app.db.models import AlertSubscription
 from app.db.repositories import AlertRepository
 from app.services.deployment_contracts import validation_alert_contract, validation_report_contract
 from app.services.session_guidance import SessionGuidanceService
+
+
+def _safe_mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
 class OperationalChecklistService:
@@ -211,7 +216,8 @@ class OperationalChecklistService:
         warnings: int,
     ) -> dict[str, Any]:
         validation_contract = validation_report_contract(validation_payload)
-        validation_summary = dict((validation_payload.get("validation_report") or {}).get("approval_strip_summary") or {})
+        validation_report = _safe_mapping(validation_payload.get("validation_report"))
+        validation_summary = _safe_mapping(validation_report.get("approval_strip_summary"))
 
         playbook_go_no_go = str(deployment_language.get("playbook_go_no_go") or "")
         approve_value = "approval usable"
@@ -423,15 +429,20 @@ class OperationalChecklistService:
             evidence=self._validation_alert_evidence(report_status=report_status, alert=alert),
         )
 
-    def _alert_slo_item(self, *, alert_metrics: dict[str, Any]) -> dict[str, Any]:
+    def _alert_slo_item(self, *, alert_metrics: dict[str, Any], lookback_hours: int = 24) -> dict[str, Any]:
         configured_channels = self._configured_leaf_channels()
         channel_metrics = dict(alert_metrics.get("channel_metrics") or {})
         circuit_state = dict(alert_metrics.get("circuit_state") or {})
         overall = dict(alert_metrics.get("overall") or {})
         latest_validation_alert = dict(alert_metrics.get("latest_validation_alert") or {})
+        recent_live_delivery = self._recent_live_alert_delivery(
+            alert_metrics=alert_metrics,
+            lookback_hours=lookback_hours,
+        )
         overall_slo = dict(overall.get("slo") or {})
         overall_budget = dict(overall.get("error_budget") or {})
         failed_channels: list[str] = []
+        hard_failed_channels: list[str] = []
         warned_channels: list[str] = []
         for channel in configured_channels:
             stats = dict(channel_metrics.get(channel) or {})
@@ -441,15 +452,24 @@ class OperationalChecklistService:
             slo = dict(stats.get("slo") or {})
             budget = dict(stats.get("error_budget") or {})
             open_targets = int(dict(circuit_state.get(channel) or {}).get("open_targets", 0))
-            if str(slo.get("status")) == "FAIL" or str(budget.get("status")) == "EXHAUSTED" or open_targets > 0:
+            if open_targets > 0:
+                hard_failed_channels.append(channel)
+            elif str(slo.get("status")) == "FAIL" or str(budget.get("status")) == "EXHAUSTED":
                 failed_channels.append(channel)
             elif str(slo.get("status")) in {"WARN", "INSUFFICIENT_DATA"} or str(budget.get("status")) == "WARN":
                 warned_channels.append(channel)
 
-        if failed_channels or str(overall_budget.get("status")) == "EXHAUSTED":
+        recovered_failed_channels = [channel for channel in failed_channels if channel in recent_live_delivery]
+        blocking_failed_channels = [channel for channel in failed_channels if channel not in recent_live_delivery]
+        overall_budget_exhausted = str(overall_budget.get("status")) == "EXHAUSTED"
+        if hard_failed_channels or blocking_failed_channels or (overall_budget_exhausted and not recent_live_delivery):
             status = "FAIL"
             blocking = True
-            summary = f"alert SLO degraded on {failed_channels or ['overall']}"
+            summary = f"alert SLO degraded on {hard_failed_channels or blocking_failed_channels or ['overall']}"
+        elif failed_channels or overall_budget_exhausted:
+            status = "WARN"
+            blocking = False
+            summary = "alert SLO degraded historically, but recent live validation alert delivery succeeded"
         elif warned_channels or str(overall_slo.get("status")) in {"WARN", "INSUFFICIENT_DATA"}:
             status = "WARN"
             blocking = False
@@ -470,7 +490,11 @@ class OperationalChecklistService:
                 "configured_channels": configured_channels,
                 "overall": overall,
                 "failed_channels": failed_channels,
+                "hard_failed_channels": hard_failed_channels,
+                "blocking_failed_channels": blocking_failed_channels,
+                "recovered_failed_channels": recovered_failed_channels,
                 "warned_channels": warned_channels,
+                "recent_live_delivery": recent_live_delivery,
                 "latest_validation_alert": latest_validation_alert,
             },
         )
@@ -2681,7 +2705,7 @@ class OperationalChecklistService:
             self._health_item(ready=ready),
             self._validation_item(validation_payload=validation_payload),
             self._validation_alert_item(validation_payload=validation_payload),
-            self._alert_slo_item(alert_metrics=alert_metrics),
+            self._alert_slo_item(alert_metrics=alert_metrics, lookback_hours=alert_test_lookback_hours),
             self._alert_test_item(
                 lookback_hours=alert_test_lookback_hours,
                 alert_metrics=alert_metrics,

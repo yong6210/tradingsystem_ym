@@ -13,6 +13,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
 from app.services.runtime_worker_heartbeat import write_worker_heartbeat
 from app.services.strategy_engine import StrategyEngine
@@ -38,6 +39,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ws-max-messages", type=int, default=0, help="0 means infinite stream.")
     parser.add_argument("--ws-refresh-on-final", dest="ws_refresh_on_final", action="store_true", default=True)
     parser.add_argument("--ws-no-refresh-on-final", dest="ws_refresh_on_final", action="store_false")
+    parser.add_argument("--skip-boot-check", action="store_true", help="Bypass MICRO_LIVE/LIVE boot check before worker start.")
+    parser.add_argument("--boot-check-days", type=int, default=3)
+    parser.add_argument("--boot-check-limit", type=int, default=200)
+    parser.add_argument("--boot-check-binance-rules", action="store_true")
+    parser.add_argument("--boot-check-canary-network", action="store_true")
     parser.add_argument("--reprocess-events", action="store_true")
     parser.add_argument("--validate", action="store_true")
     return parser.parse_args()
@@ -60,6 +66,35 @@ def _worker_role(args: argparse.Namespace) -> str:
     if str(args.mode) == "loop":
         return "loop"
     return "once"
+
+
+def _live_mode_requires_boot_check() -> bool:
+    settings = get_settings()
+    return str(getattr(settings, "auto_trading_execution_mode", "") or "").strip().upper() in {"MICRO_LIVE", "LIVE"}
+
+
+def _run_boot_check(args: argparse.Namespace) -> dict:
+    from scripts import run_micro_live_boot_check
+
+    payload = run_micro_live_boot_check.build_payload(
+        days=max(1, int(args.boot_check_days)),
+        limit=max(1, int(args.boot_check_limit)),
+        symbol=str(args.symbol or ""),
+        check_binance_rules=bool(args.boot_check_binance_rules),
+        canary_network=bool(args.boot_check_canary_network),
+    )
+    if str(payload.get("overall_status") or "").upper() != "PASS":
+        write_worker_heartbeat(
+            _worker_role(args),
+            status="error",
+            details={
+                "phase": "boot_check_failed",
+                "overall_status": payload.get("overall_status"),
+                "blocking_failure_count": payload.get("blocking_failure_count"),
+                "next_actions": list(payload.get("next_actions") or []),
+            },
+        )
+    return payload
 
 
 def run_once(args: argparse.Namespace) -> dict:
@@ -154,6 +189,14 @@ def run_ws_stream(args: argparse.Namespace) -> dict:
                     "last_refresh_error": str(stats.get("last_refresh_error") or ""),
                     "last_auto_route_error": str(stats.get("last_auto_route_error") or ""),
                     "last_progress_callback_error": str(stats.get("last_progress_callback_error") or ""),
+                    "last_ingest_success_at": str(stats.get("last_ingest_success_at") or ""),
+                    "last_ingest_error_at": str(stats.get("last_ingest_error_at") or ""),
+                    "last_refresh_success_at": str(stats.get("last_refresh_success_at") or ""),
+                    "last_refresh_error_at": str(stats.get("last_refresh_error_at") or ""),
+                    "last_auto_route_success_at": str(stats.get("last_auto_route_success_at") or ""),
+                    "last_auto_route_error_at": str(stats.get("last_auto_route_error_at") or ""),
+                    "last_progress_callback_success_at": str(stats.get("last_progress_callback_success_at") or ""),
+                    "last_progress_callback_error_at": str(stats.get("last_progress_callback_error_at") or ""),
                     "last_stream_error": str(stats.get("last_stream_error") or ""),
                 },
             )
@@ -214,6 +257,14 @@ def run_ws_stream(args: argparse.Namespace) -> dict:
                 "last_refresh_error": str(payload.get("last_refresh_error") or ""),
                 "last_auto_route_error": str(payload.get("last_auto_route_error") or ""),
                 "last_progress_callback_error": str(payload.get("last_progress_callback_error") or ""),
+                "last_ingest_success_at": str(payload.get("last_ingest_success_at") or ""),
+                "last_ingest_error_at": str(payload.get("last_ingest_error_at") or ""),
+                "last_refresh_success_at": str(payload.get("last_refresh_success_at") or ""),
+                "last_refresh_error_at": str(payload.get("last_refresh_error_at") or ""),
+                "last_auto_route_success_at": str(payload.get("last_auto_route_success_at") or ""),
+                "last_auto_route_error_at": str(payload.get("last_auto_route_error_at") or ""),
+                "last_progress_callback_success_at": str(payload.get("last_progress_callback_success_at") or ""),
+                "last_progress_callback_error_at": str(payload.get("last_progress_callback_error_at") or ""),
                 "last_stream_error": str(payload.get("last_stream_error") or ""),
             },
         )
@@ -226,6 +277,17 @@ def main() -> int:
     args = parse_args()
     init_db()
     role = _worker_role(args)
+    if not bool(args.skip_boot_check) and _live_mode_requires_boot_check():
+        boot_check = _run_boot_check(args)
+        if str(boot_check.get("overall_status") or "").upper() != "PASS":
+            payload = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "worker_role": role,
+                "error": "micro_live_boot_check_failed",
+                "boot_check": boot_check,
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2, default=str), flush=True)
+            return 2
 
     if args.ws_stream:
         payload = run_ws_stream(args)

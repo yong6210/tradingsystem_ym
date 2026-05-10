@@ -1,0 +1,84 @@
+{
+  "schema_version": "micro_live_event_blackout_v1",
+  "generated_at": "2026-04-20T00:00:00Z",
+  "source_notes": [
+    "Federal Reserve calendar pages list FOMC statement release at 2:00 p.m. Eastern Time and press conference at 2:30 p.m. Eastern Time on the second day of each scheduled meeting.",
+    "BLS 2026 selected releases page lists CPI and Employment Situation at 8:30 a.m. Eastern Time.",
+    "Windows below block new MICRO_LIVE entries from 15 minutes before to 30 minutes after the scheduled release.",
+    "Coverage is intentionally aligned to the current 11-symbol MICRO_LIVE allowlist and both live families."
+  ],
+  "windows": [
+    {
+      "label": "FOMC_2026_04_29",
+      "start_utc": "2026-04-29T17:45:00Z",
+      "end_utc": "2026-04-29T18:30:00Z",
+      "symbols": ["BTCUSDC", "ETHUSDC", "SOLUSDC", "LINKUSDC", "BNBUSDC", "XRPUSDC", "ADAUSDC", "AVAXUSDC", "BCHUSDC", "LTCUSDC", "NEARUSDC"],
+      "strategy_families": ["sweep_reversal", "session_impulse_retest"],
+      "entry_models": ["LIMIT", "CONFIRM"]
+    },
+    {
+      "label": "NFP_2026_05_08",
+      "start_utc": "2026-05-08T12:15:00Z",
+      "end_utc": "2026-05-08T13:00:00Z",
+      "symbols": ["BTCUSDC", "ETHUSDC", "SOLUSDC", "LINKUSDC", "BNBUSDC", "XRPUSDC", "ADAUSDC", "AVAXUSDC", "BCHUSDC", "LTCUSDC", "NEARUSDC"],
+      "strategy_families": ["sweep_reversal", "session_impulse_retest"],
+      "entry_models": ["LIMIT", "CONFIRM"]
+    },
+    {
+      "label": "CPI_2026_05_12",
+      "start_utc": "2026-05-12T12:15:00Z",
+      "end_utc": "2026-05-12T13:00:00Z",
+      "symbols": ["BTCUSDC", "ETHUSDC", "SOLUSDC", "LINKUSDC", "BNBUSDC", "XRPUSDC", "ADAUSDC", "AVAXUSDC", "BCHUSDC", "LTCUSDC", "NEARUSDC"],
+      "strategy_families": ["sweep_reversal", "session_impulse_retest"],
+      "entry_models": ["LIMIT", "CONFIRM"]
+    },
+    {
+      "label": "NFP_2026_06_05",
+      "start_utc": "2026-06-05T12:15:00Z",
+      "end_utc": "2026-06-05T13:00:00Z",
+      "symbols": ["BTCUSDC", "ETHUSDC", "SOLUSDC", "LINKUSDC", "BNBUSDC", "XRPUSDC", "ADAUSDC", "AVAXUSDC", "BCHUSDC", "LTCUSDC", "NEARUSDC"],
+      "strategy_families": ["sweep_reversal", "session_impulse_retest"],
+      "entry_models": ["LIMIT", "CONFIRM"]
+    },
+    {
+      "label": "CPI_2026_06_10",
+      "start_utc": "2026-06-10T12:15:00Z",
+      "end_utc": "2026-06-10T13:00:00Z",
+      "symbols": ["BTCUSDC", "ETHUSDC", "SOLUSDC", "LINKUSDC", "BNBUSDC", "XRPUSDC", "ADAUSDC", "AVAXUSDC", "BCHUSDC", "LTCUSDC", "NEARUSDC"],
+      "strategy_families": ["sweep_reversal", "session_impulse_retest"],
+      "entry_models": ["LIMIT", "CONFIRM"]
+    },
+    {
+      "label": "FOMC_2026_06_17",
+      "start_utc": "2026-06-17T17:45:00Z",
+      "end_utc": "2026-06-17T18:30:00Z",
+      "symbols": ["BTCUSDC", "ETHUSDC", "SOLUSDC", "LINKUSDC", "BNBUSDC", "XRPUSDC", "ADAUSDC", "AVAXUSDC", "BCHUSDC", "LTCUSDC", "NEARUSDC"],
+      "strategy_families": ["sweep_reversal", "session_impulse_retest"],
+      "entry_models": ["LIMIT", "CONFIRM"]
+    },
+    {
+      "label": "NFP_2026_07_03",
+      "start_utc": "2026-07-03T12:15:00Z",
+      "end_utc": "2026-07-03T13:00:00Z",
+      "symbols": ["BTCUSDC", "ETHUSDC", "SOLUSDC", "LINKUSDC", "BNBUSDC", "XRPUSDC", "ADAUSDC", "AVAXUSDC", "BCHUSDC", "LTCUSDC", "NEARUSDC"],
+      "strategy_families": ["sweep_reversal", "session_impulse_retest"],
+      "entry_models": ["LIMIT", "CONFIRM"]
+    },
+    {
+      "label": "CPI_2026_07_15",
+      "start_utc": "2026-07-15T12:15:00Z",
+      "end_utc": "2026-07-15T13:00:00Z",
+      "symbols": ["BTCUSDC", "ETHUSDC", "SOLUSDC", "LINKUSDC", "BNBUSDC", "XRPUSDC", "ADAUSDC", "AVAXUSDC", "BCHUSDC", "LTCUSDC", "NEARUSDC"],
+      "strategy_families": ["sweep_reversal", "session_impulse_retest"],
+      "entry_models": ["LIMIT", "CONFIRM"]
+    },
+    {
+      "label": "FOMC_2026_07_29",
+      "start_utc": "2026-07-29T17:45:00Z",
+      "end_utc": "2026-07-29T18:30:00Z",
+      "symbols": ["BTCUSDC", "ETHUSDC", "SOLUSDC", "LINKUSDC", "BNBUSDC", "XRPUSDC", "ADAUSDC", "AVAXUSDC", "BCHUSDC", "LTCUSDC", "NEARUSDC"],
+      "strategy_families": ["sweep_reversal", "session_impulse_retest"],
+      "entry_models": ["LIMIT", "CONFIRM"]
+    }
+  ]
+}

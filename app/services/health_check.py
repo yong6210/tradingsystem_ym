@@ -57,6 +57,27 @@ class HealthCheckService:
             return None
         return int(parsed) if isfinite(parsed) else None
 
+    @staticmethod
+    def _parse_optional_datetime(value: Any) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    @classmethod
+    def _error_recovered(cls, details: dict[str, Any], *, error_at_key: str, success_at_key: str) -> bool:
+        error_at = cls._parse_optional_datetime(details.get(error_at_key))
+        success_at = cls._parse_optional_datetime(details.get(success_at_key))
+        return error_at is not None and success_at is not None and success_at >= error_at
+
+    @staticmethod
+    def _legacy_sqlite_lock_recovered(details: dict[str, Any], *, error_key: str, processed_messages: int) -> bool:
+        last_error = str(details.get(error_key) or "").lower()
+        return processed_messages > 0 and "database is locked" in last_error
+
     def _check_binance_rest(self) -> tuple[bool, str]:
         client = BinanceFuturesClient(timeout_seconds=self._safe_float(self.settings.ready_http_timeout_seconds, default=2.0))
         try:
@@ -191,16 +212,40 @@ class HealthCheckService:
                 return False, "heartbeat_ws_stats_invalid"
             if ingest_errors > 0:
                 last_error = str(details_payload.get("last_ingest_error") or "").strip()
-                return False, f"heartbeat_ws_ingest_errors:{ingest_errors}:{last_error or 'unknown'}"
+                if not self._error_recovered(
+                    details_payload,
+                    error_at_key="last_ingest_error_at",
+                    success_at_key="last_ingest_success_at",
+                ) and not self._legacy_sqlite_lock_recovered(
+                    details_payload,
+                    error_key="last_ingest_error",
+                    processed_messages=processed_messages,
+                ):
+                    return False, f"heartbeat_ws_ingest_errors:{ingest_errors}:{last_error or 'unknown'}"
             if refresh_errors > 0:
                 last_error = str(details_payload.get("last_refresh_error") or "").strip()
-                return False, f"heartbeat_ws_refresh_errors:{refresh_errors}:{last_error or 'unknown'}"
+                if not self._error_recovered(
+                    details_payload,
+                    error_at_key="last_refresh_error_at",
+                    success_at_key="last_refresh_success_at",
+                ):
+                    return False, f"heartbeat_ws_refresh_errors:{refresh_errors}:{last_error or 'unknown'}"
             if auto_route_errors > 0:
                 last_error = str(details_payload.get("last_auto_route_error") or "").strip()
-                return False, f"heartbeat_ws_auto_route_errors:{auto_route_errors}:{last_error or 'unknown'}"
+                if not self._error_recovered(
+                    details_payload,
+                    error_at_key="last_auto_route_error_at",
+                    success_at_key="last_auto_route_success_at",
+                ):
+                    return False, f"heartbeat_ws_auto_route_errors:{auto_route_errors}:{last_error or 'unknown'}"
             if progress_callback_errors > 0:
                 last_error = str(details_payload.get("last_progress_callback_error") or "").strip()
-                return False, f"heartbeat_ws_progress_callback_errors:{progress_callback_errors}:{last_error or 'unknown'}"
+                if not self._error_recovered(
+                    details_payload,
+                    error_at_key="last_progress_callback_error_at",
+                    success_at_key="last_progress_callback_success_at",
+                ):
+                    return False, f"heartbeat_ws_progress_callback_errors:{progress_callback_errors}:{last_error or 'unknown'}"
             started_at_raw = str(details_payload.get("started_at") or "").strip()
             if processed_messages <= 0 and not started_at_raw and no_message_max_age > 0:
                 return False, "heartbeat_ws_started_at_missing"

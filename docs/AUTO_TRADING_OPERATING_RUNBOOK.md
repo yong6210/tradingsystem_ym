@@ -465,6 +465,65 @@ curl -s "http://127.0.0.1:8000/plans/top?symbol=BTCUSDC&tf=5m&limit=5&refresh=tr
 
 이 tick은 `NO_ELIGIBLE_CANDIDATE`를 정상 idle 상태로 처리하고, launchd에서 15분 간격으로 universe-wide `sweep_reversal` lineage 표본 축적만 담당한다.
 
+### 5.5. MICRO_LIVE runtime readiness helpers
+`MICRO_LIVE` 직전에는 dashboard/checklist만 보지 말고, 설정 drift와 live order lifecycle도 별도로 확인한다.
+
+완성도 하드닝 기준은 [MICRO_LIVE Near-100 Hardening Plan](/Users/yumin/Documents/trading/docs/MICRO_LIVE_NEAR_100_HARDENING_PLAN.md)을 따른다. 여기서 `100%에 가까움`은 무손실이 아니라 fail-closed, auditability, stable latest report, alert delivery confirmation, replay/live 증거 분리를 뜻한다.
+
+```bash
+./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --days 7
+./.venv/bin/python scripts/run_micro_live_runtime_guard.py --days 30
+./.venv/bin/python scripts/run_micro_live_synthetic_canary.py --no-network
+./.venv/bin/python scripts/run_live_order_lifecycle_report.py --days 30
+./.venv/bin/python scripts/run_micro_live_no_order_watchdog.py --days 3 --no-fail-exit
+./.venv/bin/python scripts/run_live_reconciliation_watchdog.py --days 3 --no-fail-exit
+./.venv/bin/python scripts/run_micro_live_boot_check.py --days 3 --limit 200 --no-fail-exit
+./.venv/bin/python scripts/run_live_replay_parity_audit.py --all-live-symbols --days 3 --no-fail-exit
+./.venv/bin/python scripts/run_replay_validation_bridge.py --all-live-symbols --no-fail-exit
+./.venv/bin/python scripts/run_session_impulse_retest_runtime_audit_report.py --hours 3 --no-fail-exit
+./.venv/bin/python scripts/run_micro_live_ops_heartbeat.py --no-fail-exit
+```
+
+용도:
+- `run_micro_live_preflight.py`: API surface, validation, checklist, scanner, alert 상태를 한 번에 읽는다.
+- `run_micro_live_runtime_guard.py`: `.env` allowlist, worker universe, macro blackout horizon, fail-closed liquidity gate, recent live intent funnel을 빠르게 확인한다.
+- `run_micro_live_synthetic_canary.py`: 실제 주문 없이 stop-distance sizing과 liquidity gate submit 경로를 dry-run한다.
+- `run_live_order_lifecycle_report.py`: intent, submission, fill, Binance ledger를 연결해 `no signal / approval blocked / submit skipped / submitted without fill / rejected-error / open / closed`를 분리한다.
+- `run_micro_live_no_order_watchdog.py`: live intent가 쌓였는데 live submission이 없는 구간을 감지한다. 알림은 `intent/제출/원인/상세/다음`만 짧게 보낸다. 알림을 보낼 때만 `--notify`를 붙인다. timestamp 리포트와 함께 `latest.md/latest.json`을 쓰고, 알림 cooldown state는 실제 전송 성공 후에만 기록한다.
+- `run_live_reconciliation_watchdog.py`: stale open submission, ledger terminal mismatch, user-stream stale, fresh critical reconciliation event를 감지한다. 알림을 보낼 때만 `--notify`를 붙인다.
+- `run_micro_live_boot_check.py`: worker 시작 전 runtime guard, reconciliation watchdog, synthetic canary를 한 번에 묶어 확인한다. 실제 주문은 보내지 않는다.
+- `run_live_replay_parity_audit.py --all-live-symbols`: 11개 live symbol 전체의 replay 기대 빈도 대비 live intent 빈도를 한 번에 보고, 심볼별 `flow_diagnosis.stage`로 signal/plan 생성 공백, approval 차단, intent->submission 공백, exchange reject/error를 분리한다. 후보 빈도는 충분하지만 모든 intent가 승인 차단이면 `PASS`가 아니라 `WATCH`로 본다.
+- `run_replay_validation_bridge.py --all-live-symbols`: replay cache가 보수적 bridge 기준을 넘는지 audit-only로 확인한다. 평균 EV뿐 아니라 `ev_r_lower_95`가 음수가 아닌지 보고, `direction/strategy_family/entry_model`별 material slice가 약하면 `ELIGIBLE_FOR_MANUAL_BRIDGE_REVIEW_WITH_SLICE_WARNINGS`로 낮춘다. timestamp 리포트와 함께 `latest.md/latest.json`도 쓴다. 이 스크립트는 live approval을 변경하지 않는다.
+- `run_session_impulse_retest_runtime_audit_report.py`: DB에 남은 `session_impulse_retest` refresh/auto_route audit row를 요약한다. `signal_generated`, `no_fresh_candidates`, `intent_blocked`, `submitted`, `ws_stream_active_route_suppressed`, `intent_creation_failed`, `submit_error`를 한 리포트에서 본다. timestamp 리포트와 함께 `latest.md/latest.json`도 쓴다.
+- `run_micro_live_ops_heartbeat.py`: launchd/수동 스케줄이 실제로 최신 리포트를 계속 만들고 있는지 확인한다. 가능한 리포트는 내부 `overall_status/status/evaluation.status`까지 읽어서, 최신 파일이어도 `ALERT/WATCH/DRIFT/FAIL`이면 heartbeat에 노출한다. 리포트 job은 `state.json` 같은 상태 파일이 아니라 실제 report 파일을 보고, 읽어야 하는 status가 없으면 failure로 처리한다. macro blackout 계약은 파일 존재만 보지 않고 `windows`의 future horizon도 직접 검증한다. 이때 glob 최신 파일보다 `.env`의 `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH`를 우선해 live approval이 실제로 쓰는 계약을 감사한다. blackout 파일 mtime이 오래됐지만 horizon이 충분하면 `WATCH`, horizon 부족/만료는 hard failure로 본다. 알림 메시지는 `긴급(FAIL)`과 `주의(WATCH)`를 분리해 보여주고, 같은 issue 조합은 cooldown으로 반복 발송을 억제한다. 단, cooldown state는 실제 전송 성공이 확인된 뒤에만 기록한다. timestamp 리포트와 함께 `latest.md/latest.json`도 써서 운영 화면이나 수동 확인은 고정 경로를 볼 수 있고, latest/state 쓰기는 atomic replace로 처리한다.
+
+`AUTO_TRADING_EXECUTION_MODE`가 `MICRO_LIVE` 또는 `LIVE`이면 `run_worker.py`는 시작 전에 boot check를 먼저 실행한다. 실패하면 worker는 live routing을 시작하지 않는다. `--skip-boot-check`는 운영자가 의도적으로 우회할 때만 사용한다.
+
+`validation_do_not_deploy`가 주문을 막으면 `validation_block_detail.primary_cause/root_causes`를 먼저 본다. 대표 원인은 `validation_sample_missing`, `validation_expectancy_non_positive`, `validation_win_rate_missing_or_zero`, `validation_score_below_deploy_floor`, `risk_gate_not_open`, `runtime_candidate_blocked`다.
+
+blackout horizon이 runtime guard에서 막히면 먼저 계약 파일을 갱신한다.
+
+```bash
+./.venv/bin/python scripts/build_micro_live_event_blackouts.py \
+  --years 2026,2027 \
+  --symbols BTCUSDC \
+  --families sweep_reversal \
+  --entry-models LIMIT \
+  --output reports/validation/contracts/micro_live_event_blackouts_major_us_macro_auto.json
+```
+
+새 파일을 만들었으면 `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH`를 해당 출력 경로로 맞춘 뒤 다시 guard를 돌린다.
+
+이 스크립트들은 live authority가 아니다. 실패하면 제출을 멈추고 설정/계약/게이트를 맞춘 뒤 다시 `preflight -> runtime guard -> synthetic canary` 순서로 확인한다.
+
+macOS에서 반복 점검을 자동화하려면 먼저 plist만 생성한다.
+
+```bash
+./.venv/bin/python scripts/install_micro_live_ops_launchd.py
+```
+
+실제 등록은 운영자가 확인한 뒤 `--install --load`를 붙인다. 이 스케줄은 runtime guard, no-order watchdog, reconciliation watchdog, synthetic canary, boot check, ops heartbeat, replay validation bridge, session impulse retest runtime audit, Binance rule drift, macro calendar refresh를 분리 실행한다.
+
 ## 6. 실행 절차
 ### 6.1. 실행용 preview
 ```bash
@@ -524,7 +583,7 @@ curl -s -X POST "http://127.0.0.1:8000/execution/submit" \
 - 현재 canary pacing rule은 `1 daily new entry`가 아니라 `1 concurrent position`이다. 즉 포지션이 열려 있으면 추가 진입을 막고, 포지션이 닫히면 다음 신호를 approval / safety / reconciliation 기준으로 다시 평가한다.
 - `AUTO_TRADING_MICRO_LIVE_MAX_DAILY_NEW_ENTRIES=0`은 일일 신규 진입 상한을 끈 상태를 의미한다. 이때도 무제한 추격 진입이 아니라 `current_exposure_count`, safety locks, reconciliation, family cluster guard, event blackout, symbol priority guard가 다음 진입을 다시 심사한다.
 - 현재 canary는 major U.S. macro blackout (`FOMC`, `CPI`, `NFP`) 동안 신규 `MICRO_LIVE` 진입을 막는다. 운영자는 blackout 자체를 news 해석기로 읽지 말고, replay blind spot을 줄이는 execution-risk 가드로 이해해야 한다.
-- `MICRO_LIVE_ONLY`가 열렸을 때 운영 순서는 고정한다. `run_micro_live_preflight.py` 재확인 -> `run_runtime_signoff_review.py` 재확인 -> `APPROVED_*` + `LIMIT` plan으로 `POST /execution/order-intents` (`execution_mode=MICRO_LIVE`) -> `POST /execution/submit` (`live=true`) 순서만 허용한다.
+- `MICRO_LIVE_ONLY`가 열렸을 때 운영 순서는 고정한다. `run_micro_live_preflight.py` 재확인 -> `run_micro_live_runtime_guard.py` 재확인 -> `run_micro_live_synthetic_canary.py` dry-run -> `run_runtime_signoff_review.py` 재확인 -> `APPROVED_*` + `LIMIT` plan으로 `POST /execution/order-intents` (`execution_mode=MICRO_LIVE`) -> `POST /execution/submit` (`live=true`) 순서만 허용한다.
 - 이 단계에서 live 제출 후보는 `runtime_operator_signoff_summary.contract_scope == limit_only` 계약을 따라야 한다. `CONFIRM`/`SWEEP_CONFIRM`은 여전히 PAPER/RESEARCH 전용으로 남긴다.
 - `FULL LIVE` 확대는 별도 gate다. `runtime_effective_action == conditional_full_live_signoff` 또는 `proceed_to_operator_signoff`, `runtime_allowed_reopen_scope == MICRO_LIVE_OR_LIVE`, `runtime_operator_signoff_summary.status == ready_for_manual_full_live_signoff` 또는 `ready_for_operator_signoff`를 확인하고, `live_eligible_post_patch_closed_trade_count >= 30`, `live_eligible_post_patch_sample_summary.replay_p5_r >= -1.05`, `live_eligible_post_patch_sample_summary.stop_loss_share < 0.40`, `live_eligible_post_patch_sample_summary.worst_loss_streak < 5`, `live_execution_post_patch_closed_trade_count >= 5`까지 충족될 때만 검토한다.
 

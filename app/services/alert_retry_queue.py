@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from math import isfinite
 import random
 from datetime import datetime, timedelta, timezone
@@ -9,6 +10,10 @@ from app.core.config import Settings, get_settings
 from app.db.models import AlertRetryTask, AlertSubscription
 from app.db.repositories import AlertRepository, AlertRetryQueueRepository
 from app.services.notification_dispatcher import NotificationDispatcher
+
+
+def _safe_mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
 class AlertRetryQueueService:
@@ -75,7 +80,7 @@ class AlertRetryQueueService:
                 symbol=symbol,
                 type=alert_type,
                 target=target,
-                payload=dict(payload or {}),
+                payload=_safe_mapping(payload),
                 status="queued",
                 attempts=0,
                 max_attempts=max(1, self._safe_int(self.settings.alert_retry_queue_max_attempts, default=4)),
@@ -99,11 +104,12 @@ class AlertRetryQueueService:
 
         for row in rows:
             self.repo.increment_attempt(row)
+            row_payload = _safe_mapping(row.payload)
             delivery = self.dispatcher.dispatch(
                 channel=row.channel,
                 alert_type=row.type,
                 symbol=row.symbol,
-                payload=dict(row.payload or {}),
+                payload=row_payload,
             )
             self.alert_repo.add(
                 AlertSubscription(
@@ -113,7 +119,7 @@ class AlertRetryQueueService:
                     channel=row.channel,
                     type=row.type,
                     payload={
-                        **dict(row.payload or {}),
+                        **row_payload,
                         "retry_queue": {
                             "task_id": row.task_id,
                             "attempt": row.attempts,

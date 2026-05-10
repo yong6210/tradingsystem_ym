@@ -235,6 +235,7 @@ def execution_operator_dashboard(
     intent_limit: int = Query(default=10, ge=1, le=50),
     reconcile_limit: int = Query(default=10, ge=1, le=50),
     days: int = Query(default=7, ge=1, le=365),
+    fast: bool = Query(default=False),
     engine: StrategyEngine = Depends(get_engine),
 ) -> ExecutionOperatorDashboardResponse:
     result = engine.execution_operator_dashboard(
@@ -244,5 +245,6 @@ def execution_operator_dashboard(
         intent_limit=intent_limit,
         reconcile_limit=reconcile_limit,
         days=days,
+        fast=fast,
     )
     return ExecutionOperatorDashboardResponse(**result)

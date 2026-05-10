@@ -289,6 +289,57 @@ def test_health_ws_heartbeat_with_ingest_errors_is_degraded(tmp_path) -> None:
     assert detail.startswith("heartbeat_ws_ingest_errors:1:")
 
 
+def test_health_ws_heartbeat_recovers_after_later_ingest_success(tmp_path) -> None:
+    service = HealthCheckService()
+    service.settings.runtime_worker_heartbeat_dir = str(tmp_path)
+    service.settings.ready_require_runtime_workers = True
+    settings = get_settings().model_copy(update={"runtime_worker_heartbeat_dir": str(tmp_path)})
+    now = datetime.now(timezone.utc)
+    write_worker_heartbeat(
+        "ws",
+        settings=settings,
+        status="ok",
+        pid=os.getpid(),
+        details={
+            "phase": "streaming",
+            "started_at": now.isoformat(),
+            "processed_messages": 11,
+            "ingest_errors": 1,
+            "last_ingest_error": "OperationalError:database is locked",
+            "last_ingest_error_at": (now - timedelta(seconds=10)).isoformat(),
+            "last_ingest_success_at": now.isoformat(),
+        },
+    )
+
+    ok, detail = service._check_runtime_worker("ws")
+    assert ok is True
+    assert "processed=11" in detail
+
+
+def test_health_ws_legacy_sqlite_lock_error_recovers_when_stream_progresses(tmp_path) -> None:
+    service = HealthCheckService()
+    service.settings.runtime_worker_heartbeat_dir = str(tmp_path)
+    service.settings.ready_require_runtime_workers = True
+    settings = get_settings().model_copy(update={"runtime_worker_heartbeat_dir": str(tmp_path)})
+    write_worker_heartbeat(
+        "ws",
+        settings=settings,
+        status="ok",
+        pid=os.getpid(),
+        details={
+            "phase": "streaming",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "processed_messages": 10,
+            "ingest_errors": 1,
+            "last_ingest_error": "OperationalError: database is locked",
+        },
+    )
+
+    ok, detail = service._check_runtime_worker("ws")
+    assert ok is True
+    assert "processed=10" in detail
+
+
 def test_health_ws_heartbeat_with_refresh_errors_is_degraded(tmp_path) -> None:
     service = HealthCheckService()
     service.settings.runtime_worker_heartbeat_dir = str(tmp_path)

@@ -5,6 +5,28 @@ from pathlib import Path
 from app.services.validation_report import ValidationReportService
 
 
+def test_validation_approval_strip_manual_review_prefers_playbook_hold_action() -> None:
+    strip = ValidationReportService._approval_strip_summary(
+        deployment_approval_template={
+            "playbook_go_no_go": "MANUAL_REVIEW",
+            "playbook_action": "hold_rollout_and_review_alignment_details",
+            "playbook_message": "MANUAL REVIEW: alignment warning remains.",
+            "template_status": "REVIEW",
+            "template_reason": "true_threshold_winner_with_replay_fail_worst_scenario",
+        },
+        operator_action_priority_summary={
+            "top_action": "continue_candidate_review_under_portfolio_caps",
+            "top_reason": "runtime gate is open",
+            "priority_level": "urgent",
+        },
+    )
+
+    assert strip is not None
+    assert strip["approve_value"] == "manual review first"
+    assert strip["act_value"] == "hold_rollout_and_review_alignment_details"
+    assert strip["act_reason"] == "MANUAL REVIEW: alignment warning remains."
+
+
 def _empty_review_followup_ledger(*args, **kwargs) -> dict:
     return {
         "available": False,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
@@ -60,6 +62,7 @@ from app.services.health_check import HealthCheckService
 from app.services.position_sizing import PositionSizingService
 from app.services.strategy_mode import StrategyModeService
 from app.services.strategy_engine import StrategyEngine
+from app.services.validation_report import validation_report_cache_miss_payload
 from app.services.tradingview_pine_script import load_tradingview_pine_script
 
 router = APIRouter()
@@ -225,9 +228,10 @@ def get_top_plans(
 def scanner_top(
     universe: str = Query(default="usdc_perp_top30"),
     limit: int = Query(default=20, ge=1, le=100),
+    fast: bool = Query(default=False),
     engine: StrategyEngine = Depends(get_engine),
 ) -> list[ScannerItemOut]:
-    rows = engine.scanner_top(universe=universe, limit=limit)
+    rows = engine.scanner_top(universe=universe, limit=limit, fast=fast)
     return [ScannerItemOut(**row) for row in rows]
 
 
@@ -603,18 +607,32 @@ def validation_stress_replay_prototype_worker(
 def validation_report(
     symbol: str,
     refresh: bool = True,
+    cache_fallback: bool = False,
     engine: StrategyEngine = Depends(get_engine),
 ) -> ValidationReportOut:
     if refresh:
-        payload = engine.recompute_learning(symbol, persist_runtime_validation_artifacts=False)
+        payload = engine.recompute_learning(
+            symbol,
+            persist_runtime_validation_artifacts=False,
+            use_read_only_cache=False,
+        )
     else:
         payload = engine._load_cached_validation_payload(symbol)
         if payload is None:
+            if cache_fallback:
+                payload = engine._load_stale_conservative_validation_payload(symbol)
+                if payload is None:
+                    payload = _validation_report_cache_miss_payload(symbol)
+                return ValidationReportOut(**payload)
             raise HTTPException(
                 status_code=404,
                 detail="cached validation payload is not available yet; call with refresh=true first",
             )
     return ValidationReportOut(**payload)
+
+
+def _validation_report_cache_miss_payload(symbol: str) -> dict[str, Any]:
+    return validation_report_cache_miss_payload(symbol)
 
 
 @router.post("/internal/demo/bootstrap")

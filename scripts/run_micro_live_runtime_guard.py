@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from app.db.session import SessionLocal, init_db
+from app.services.live_order_lifecycle import LiveOrderLifecycleReporter
+from scripts.operation_report_io import atomic_write_text, display_path, write_latest_aliases
+from scripts.run_micro_live_preflight import _micro_live_config_drift_checks
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run fast MICRO_LIVE runtime guard checks without calling the local API preflight surfaces."
+    )
+    parser.add_argument("--days", type=int, default=30)
+    parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--check-binance-rules", action="store_true")
+    parser.add_argument("--report-dir", default="reports/operations/micro_live_runtime_guard")
+    parser.add_argument("--no-write-report", action="store_true")
+    parser.add_argument("--no-fail-exit", action="store_true", help="Always return exit code 0 after printing the report.")
+    return parser.parse_args()
+
+
+def _json_default(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _display_path(path: Path) -> str:
+    return display_path(path, ROOT_DIR)
+
+
+def _blocking_failures(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        dict(item)
+        for item in checks
+        if str(item.get("severity") or "").lower() == "blocking" and str(item.get("status") or "").upper() != "PASS"
+    ]
+
+
+_BLOCK_REASON_ACTIONS = {
+    "validation_do_not_deploy": "inspect_validation_report_approval_surface",
+    "rollout_session_not_allowed": "inspect_session_time_contract_or_wait_for_allowed_window",
+    "symbol_not_live_enabled": "align_live_symbol_allowlists_before_enabling",
+    "strategy_family_not_live_enabled": "align_live_family_allowlists_before_enabling",
+    "entry_model_not_live_enabled": "align_live_entry_model_allowlist_before_enabling",
+    "adjusted_score_non_positive": "inspect_scoring_and_risk_gate_inputs",
+    "live_liquidity_gate_blocked": "inspect_orderbook_liquidity_gate_snapshot",
+    "safety_lock_active": "inspect_execution_safety_state",
+}
+
+
+def _blocked_intent_diagnostics(lifecycle: dict[str, Any]) -> list[dict[str, Any]]:
+    live_intents = dict((dict(lifecycle.get("summary") or {}).get("live_intents")) or {})
+    top_reasons = dict(live_intents.get("top_block_reasons") or {})
+    samples = [dict(item) for item in list(live_intents.get("recent_blocked_intents") or []) if isinstance(item, dict)]
+    diagnostics: list[dict[str, Any]] = []
+    for reason, count in top_reasons.items():
+        reason_text = str(reason or "none")
+        diagnostics.append(
+            {
+                "reason": reason_text,
+                "count": int(count or 0),
+                "action": _BLOCK_REASON_ACTIONS.get(reason_text, "inspect_recent_blocked_intent_samples"),
+                "recent_samples": [
+                    sample
+                    for sample in samples
+                    if str(sample.get("decision_reason_code") or "none") == reason_text
+                ][:3],
+                "detail": next(
+                    (
+                        dict(sample.get("block_detail") or {})
+                        for sample in samples
+                        if str(sample.get("decision_reason_code") or "none") == reason_text
+                        and isinstance(sample.get("block_detail"), dict)
+                        and sample.get("block_detail")
+                    ),
+                    {},
+                ),
+            }
+        )
+    return diagnostics
+
+
+def _recommendations(*, blocking_failures: list[dict[str, Any]], lifecycle: dict[str, Any]) -> list[str]:
+    recommendations: list[str] = []
+    if blocking_failures:
+        names = ",".join(str(item.get("name") or "unknown") for item in blocking_failures[:8])
+        recommendations.append(f"fix_blocking_runtime_checks:{names}")
+
+    live_intents = dict((dict(lifecycle.get("summary") or {}).get("live_intents")) or {})
+    total_intents = int(live_intents.get("total") or 0)
+    submit_ready = int(live_intents.get("submit_ready") or 0)
+    blocked = int(live_intents.get("blocked") or 0)
+    if total_intents > 0 and submit_ready == 0 and blocked >= total_intents:
+        top_reasons = dict(live_intents.get("top_block_reasons") or {})
+        reason_text = ",".join(f"{key}={value}" for key, value in list(top_reasons.items())[:4])
+        recommendations.append(f"all_recent_live_intents_blocked:{reason_text or 'unknown'}")
+        for item in _blocked_intent_diagnostics(lifecycle)[:3]:
+            recommendations.append(f"{item['action']}:{item['reason']}={item['count']}")
+
+    summary = dict(lifecycle.get("summary") or {})
+    if int(summary.get("rejected_or_error_count") or 0) > 0:
+        recommendations.append("inspect_rejected_or_error_order_submissions")
+    if int(summary.get("submitted_without_entry_fill_count") or 0) > 0:
+        recommendations.append("inspect_submitted_orders_without_entry_fills")
+    return recommendations
+
+
+def _operational_status(*, blocking_failures: list[dict[str, Any]], lifecycle: dict[str, Any]) -> str:
+    if blocking_failures:
+        return "FAIL"
+    live_intents = dict((dict(lifecycle.get("summary") or {}).get("live_intents")) or {})
+    total_intents = int(live_intents.get("total") or 0)
+    submit_ready = int(live_intents.get("submit_ready") or 0)
+    blocked = int(live_intents.get("blocked") or 0)
+    if total_intents > 0 and submit_ready == 0 and blocked >= total_intents:
+        return "WATCH"
+    summary = dict(lifecycle.get("summary") or {})
+    if int(summary.get("rejected_or_error_count") or 0) > 0:
+        return "WATCH"
+    return "PASS"
+
+
+def build_payload(*, days: int, limit: int, check_binance_rules: bool) -> dict[str, Any]:
+    checks = _micro_live_config_drift_checks(check_binance_rules=check_binance_rules)
+    failures = _blocking_failures(checks)
+    init_db()
+    with SessionLocal() as db:
+        lifecycle = LiveOrderLifecycleReporter(db).generate(days=days, live_only=True, limit=limit)
+    blocked_diagnostics = _blocked_intent_diagnostics(lifecycle)
+    recommendations = _recommendations(blocking_failures=failures, lifecycle=lifecycle)
+    return {
+        "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "overall_status": "FAIL" if failures else "PASS",
+        "operational_status": _operational_status(blocking_failures=failures, lifecycle=lifecycle),
+        "blocking_failures": failures,
+        "checks": checks,
+        "lifecycle": lifecycle,
+        "blocked_intent_diagnostics": blocked_diagnostics,
+        "recommendations": recommendations,
+    }
+
+
+def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lifecycle_summary = dict((dict(payload.get("lifecycle") or {}).get("summary")) or {})
+    live_intents = dict(lifecycle_summary.get("live_intents") or {})
+    lines = [
+        "# MICRO_LIVE Runtime Guard",
+        "",
+        f"- generated_at: {payload.get('generated_at')}",
+        f"- overall_status: {payload.get('overall_status')}",
+        f"- operational_status: {payload.get('operational_status')}",
+        f"- blocking_failures: {len(payload.get('blocking_failures') or [])}",
+        "",
+        "## Config Drift",
+        "",
+    ]
+    for check in payload.get("checks") or []:
+        lines.append(
+            f"- {check.get('name')}: {check.get('status')} {check.get('severity')} | {check.get('message')}"
+        )
+    lines.extend(
+        [
+            "",
+            "## Live Order Funnel",
+            "",
+            f"- submissions: {lifecycle_summary.get('submission_count', 0)}",
+            f"- entry_fills: {lifecycle_summary.get('entry_fill_count', 0)}",
+            f"- rejected_or_error: {lifecycle_summary.get('rejected_or_error_count', 0)}",
+            f"- intents: {live_intents.get('total', 0)}",
+            f"- submit_ready: {live_intents.get('submit_ready', 0)}",
+            f"- blocked: {live_intents.get('blocked', 0)}",
+        ]
+    )
+    top_reasons = dict(live_intents.get("top_block_reasons") or {})
+    if top_reasons:
+        lines.append("- top_reasons: " + ", ".join(f"{key}={value}" for key, value in list(top_reasons.items())[:8]))
+    diagnostics = list(payload.get("blocked_intent_diagnostics") or [])
+    if diagnostics:
+        lines.extend(["", "## Blocked Intent Diagnostics", ""])
+        for item in diagnostics[:8]:
+            detail = dict(item.get("detail") or {})
+            detail_text = ""
+            if detail:
+                metrics = dict(detail.get("metrics") or {})
+                metric_bits = []
+                if "sample_size" in metrics:
+                    metric_bits.append(f"sample={metrics.get('sample_size')}")
+                if "ev" in metrics or "expectancy_r" in metrics:
+                    metric_bits.append(f"ev={metrics.get('expectancy_r', metrics.get('ev'))}")
+                metric_text = f" {' '.join(metric_bits)}" if metric_bits else ""
+                detail_text = (
+                    f" | cause={detail.get('primary_cause', '') or 'unknown'} grade={detail.get('grade', '')} "
+                    f"risk={detail.get('risk_state', '')}/{detail.get('risk_reason', '')} "
+                    f"deployment={detail.get('deployment_code', '')}{metric_text}"
+                )
+            lines.append(f"- {item.get('reason')}: {item.get('count')} | action={item.get('action')}{detail_text}")
+    lines.extend(["", "## Recommendations", ""])
+    recommendations = list(payload.get("recommendations") or [])
+    if recommendations:
+        lines.extend(f"- {item}" for item in recommendations)
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Raw Payload", "", "```json"])
+    lines.append(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
+    lines.append("```")
+    content = "\n".join(lines)
+    if atomic:
+        atomic_write_text(path, content)
+    else:
+        path.write_text(content, encoding="utf-8")
+
+
+def main() -> int:
+    args = parse_args()
+    payload = build_payload(
+        days=max(1, int(args.days)),
+        limit=max(1, int(args.limit)),
+        check_binance_rules=bool(args.check_binance_rules),
+    )
+    if not args.no_write_report:
+        generated = datetime.fromisoformat(str(payload["generated_at"]).replace("Z", "+00:00"))
+        report_dir = ROOT_DIR / args.report_dir
+        report_path = report_dir / f"micro_live_runtime_guard_{generated.strftime('%Y%m%dT%H%M%SZ')}.md"
+        payload["report_path"] = _display_path(report_path)
+        payload["latest_report_path"] = _display_path(report_dir / "latest.md")
+        payload["latest_json_path"] = _display_path(report_dir / "latest.json")
+        _write_report(report_path, payload)
+        payload.update(
+            write_latest_aliases(
+                report_dir=report_dir,
+                payload=payload,
+                write_markdown_report=_write_report,
+                root_dir=ROOT_DIR,
+                json_default=_json_default,
+            )
+        )
+    print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
+    if payload["overall_status"] == "FAIL" and not bool(args.no_fail_exit):
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

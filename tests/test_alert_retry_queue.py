@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from sqlalchemy import delete
+from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.db.models import AlertRetryTask, AlertSubscription
@@ -170,3 +173,65 @@ def test_retry_queue_dead_letters_and_manual_requeue(monkeypatch) -> None:
         settings.alert_retry_queue_max_attempts = old_queue_attempts
         settings.alert_retry_queue_backoff_seconds = old_queue_backoff
         settings.alert_retry_queue_jitter_seconds = old_queue_jitter
+
+
+def test_retry_processor_tolerates_malformed_task_payload(monkeypatch) -> None:
+    init_db()
+    NotificationDispatcher.reset_circuit_state()
+    settings = get_settings()
+    old_url = settings.alert_discord_webhook_url
+
+    class _Response:
+        status_code = 204
+
+    class _Client:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001
+            return False
+
+        def post(self, url, json=None, headers=None):  # noqa: ANN001
+            assert str((json or {}).get("content") or "").startswith("[테스트] BTCUSDC")
+            return _Response()
+
+    try:
+        settings.alert_discord_webhook_url = "https://discord.example/retry-malformed"
+        monkeypatch.setattr("app.services.notification_dispatcher.httpx.Client", _Client)
+
+        with SessionLocal() as db:
+            db.execute(delete(AlertSubscription))
+            db.execute(delete(AlertRetryTask))
+            db.add(
+                AlertRetryTask(
+                    task_id="alert_retry_malformed_payload",
+                    source_alert_id="source_malformed",
+                    dedupe_key="source_malformed:discord:discord:webhook",
+                    channel="discord",
+                    symbol="BTCUSDC",
+                    type="test",
+                    target="discord:webhook",
+                    payload=["broken"],
+                    status="queued",
+                    attempts=0,
+                    max_attempts=2,
+                    next_retry_ts=datetime.now(timezone.utc),
+                )
+            )
+            db.commit()
+
+            engine = StrategyEngine(db)
+            processed = engine.process_alert_retry_queue(limit=10)
+
+            assert processed["delivered"] == 1
+            retry_alert = db.scalar(
+                select(AlertSubscription).where(AlertSubscription.alert_id.like("alert_retry_alert_retry_malformed_payload%"))
+            )
+            assert retry_alert is not None
+            assert retry_alert.payload["retry_queue"]["source_alert_id"] == "source_malformed"
+            assert retry_alert.payload["delivery"]["delivered"] is True
+    finally:
+        settings.alert_discord_webhook_url = old_url

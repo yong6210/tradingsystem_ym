@@ -1401,6 +1401,34 @@ def test_operational_checklist_downgrades_missing_alert_test_when_recent_validat
     assert payload["approval_strip_summary"]["approve_value"] == "manual review first"
 
 
+def test_operational_checklist_approval_strip_ignores_malformed_validation_strip() -> None:
+    strip = OperationalChecklistService._approval_strip_summary(
+        validation_payload={
+            "playbook_go_no_go": "MANUAL_REVIEW",
+            "playbook_action": "hold_rollout_and_review_alignment_details",
+            "validation_report": {
+                "approval_strip_summary": ["broken"],
+                "deployment_approval_summary": "broken",
+            },
+        },
+        deployment_language={
+            "deployment_go_no_go": "MANUAL_REVIEW",
+            "deployment_message": "MANUAL_REVIEW: hold rollout.",
+            "playbook_go_no_go": "MANUAL_REVIEW",
+            "playbook_action": "hold_rollout_and_review_alignment_details",
+            "playbook_message": "MANUAL_REVIEW: hold rollout.",
+        },
+        overall_status="FAIL",
+        blocking_failures=0,
+        manual_actions=1,
+        warnings=0,
+    )
+
+    assert strip["approve_value"] == "manual review first"
+    assert strip["align_value"] == "aligned"
+    assert strip["act_value"] == "hold_rollout_and_review_alignment_details"
+
+
 def test_operational_checklist_marks_dead_session_as_warn_non_blocking() -> None:
     now = datetime.now(timezone.utc).replace(microsecond=0)
     settings = Settings(alert_discord_webhook_url="https://discord.example/webhook")
@@ -1597,6 +1625,39 @@ def test_operational_checklist_surfaces_validation_alert_deployment_evidence() -
         slo_item["evidence"]["latest_validation_alert"]["approval_playbook_code"]
         == "no_go_proxy_selected_trial_against_replay_backed_worst_scenario"
     )
+
+
+def test_alert_slo_is_warn_when_recent_live_validation_alert_delivered() -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    settings = Settings(alert_discord_webhook_url="https://discord.example/webhook")
+    service = OperationalChecklistService(alert_repo=_AlertRepoStub([]), settings=settings)
+
+    item = service._alert_slo_item(
+        alert_metrics={
+            "overall": {"slo": {"status": "WARN"}, "error_budget": {"status": "EXHAUSTED"}},
+            "channel_metrics": {
+                "discord": {"slo": {"status": "WARN"}, "error_budget": {"status": "EXHAUSTED"}}
+            },
+            "circuit_state": {"discord": {"open_targets": 0}},
+            "latest_validation_alert": {
+                "available": True,
+                "alert_id": "val_warn_recent",
+                "channel": "discord",
+                "delivery_channel": "discord",
+                "triggered_ts": now.isoformat(),
+                "status": "WARN",
+                "delivered": True,
+                "skipped": False,
+                "failed": False,
+            },
+        },
+        lookback_hours=24,
+    )
+
+    assert item["status"] == "WARN"
+    assert item["blocking"] is False
+    assert item["evidence"]["recovered_failed_channels"] == ["discord"]
+    assert item["evidence"]["blocking_failed_channels"] == []
 
 
 def test_operational_checklist_uses_validation_top_level_deployment_contract() -> None:

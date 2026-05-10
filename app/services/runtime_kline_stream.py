@@ -92,9 +92,11 @@ class RuntimeKlineStreamService:
                 return
             try:
                 progress_callback(dict(stats))
+                stats["last_progress_callback_success_at"] = datetime.now(timezone.utc).isoformat()
             except Exception as exc:
                 stats["progress_callback_errors"] = int(stats.get("progress_callback_errors", 0) or 0) + 1
                 stats["last_progress_callback_error"] = f"{exc.__class__.__name__}:{exc}"
+                stats["last_progress_callback_error_at"] = datetime.now(timezone.utc).isoformat()
 
         async def _stream_one_interval(interval: str) -> None:
             nonlocal stop
@@ -122,6 +124,7 @@ class RuntimeKlineStreamService:
                             self.market_data.ingest_candle(payload)
                             self.db.commit()
                             stats["committed_candles"] += 1
+                            stats["last_ingest_success_at"] = datetime.now(timezone.utc).isoformat()
                         except DataQualityError as exc:
                             self.db.rollback()
                             if str(exc) == "reverse timestamp detected":
@@ -129,12 +132,14 @@ class RuntimeKlineStreamService:
                             else:
                                 stats["ingest_errors"] += 1
                                 stats["last_ingest_error"] = f"{exc.__class__.__name__}:{exc}"
+                                stats["last_ingest_error_at"] = datetime.now(timezone.utc).isoformat()
                             _emit_progress()
                             continue
                         except Exception as exc:
                             self.db.rollback()
                             stats["ingest_errors"] += 1
                             stats["last_ingest_error"] = f"{exc.__class__.__name__}:{exc}"
+                            stats["last_ingest_error_at"] = datetime.now(timezone.utc).isoformat()
                             _emit_progress()
                             continue
 
@@ -156,11 +161,13 @@ class RuntimeKlineStreamService:
                                     refresh_payload = self.refresh_symbol(kline.symbol)
                                     stats["refresh_calls"] += 1
                                     stats["last_refresh_error"] = ""
+                                    stats["last_refresh_success_at"] = datetime.now(timezone.utc).isoformat()
                                     refresh_ok = True
                                 except Exception as exc:
                                     self.db.rollback()
                                     stats["refresh_errors"] += 1
                                     stats["last_refresh_error"] = f"{exc.__class__.__name__}:{exc}"
+                                    stats["last_refresh_error_at"] = datetime.now(timezone.utc).isoformat()
 
                                 if refresh_ok:
                                     try:
@@ -177,10 +184,12 @@ class RuntimeKlineStreamService:
                                         stats["auto_route_submit_calls"] += int(route_payload.get("submit_calls", 0) or 0)
                                         stats["auto_route_intents_created"] += int(route_payload.get("intents_created", 0) or 0)
                                         stats["last_auto_route_error"] = ""
+                                        stats["last_auto_route_success_at"] = datetime.now(timezone.utc).isoformat()
                                     except Exception as exc:
                                         self.db.rollback()
                                         stats["auto_route_errors"] += 1
                                         stats["last_auto_route_error"] = f"{exc.__class__.__name__}:{exc}"
+                                        stats["last_auto_route_error_at"] = datetime.now(timezone.utc).isoformat()
                                 refresh_guard[refresh_key] = now
 
                         _emit_progress()

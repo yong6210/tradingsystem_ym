@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +14,7 @@ from app.domain.execution import RolloutPolicy
 from app.services.order_intents import OrderIntentService
 from app.services.runtime_worker_heartbeat import write_worker_heartbeat
 from app.services.strategy_engine import StrategyEngine
+from scripts import run_session_impulse_retest_runtime_audit_report
 
 
 def _micro_plan(*, symbol: str, plan_id: str) -> Plan:
@@ -61,6 +64,30 @@ def _micro_plan(*, symbol: str, plan_id: str) -> Plan:
         valid_until=now + timedelta(minutes=12),
         strategy_version="v2",
     )
+
+
+def _sweep_plan(*, symbol: str, plan_id: str) -> Plan:
+    plan = _micro_plan(symbol=symbol, plan_id=plan_id)
+    validity = dict(plan.validity or {})
+    validity.update(
+        {
+            "strategy_family": "sweep_reversal",
+            "strategy_grade": "A",
+            "strategy_family_score": 86.0,
+            "recommended_risk_r": 0.4,
+            "expected_summary": "sweep_reversal benchmark",
+            "thesis_fingerprint": {
+                "symbol": symbol,
+                "direction": "long",
+                "family": "sweep_reversal",
+            },
+            "thesis_cluster_id": f"cluster:{symbol}:sweep_reversal:long",
+        }
+    )
+    plan.entry_model = "LIMIT"
+    plan.entry_condition = "sweep_reversal_limit"
+    plan.validity = validity
+    return plan
 
 
 def _exposure_plan(
@@ -913,6 +940,66 @@ def test_session_impulse_retest_auto_route_creates_and_submits_live_intent() -> 
         assert submitted_calls == [("intent_auto_route_btc", True)]
 
 
+def test_auto_route_symbol_submits_sweep_reversal_live_contract_plan() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        _patch_live_contract(engine, allowed_symbols=["BTCUSDC"])
+        plan = _sweep_plan(symbol="BTCUSDC", plan_id="sweep_BTCUSDC_auto_route_test")
+        db.add(plan)
+        db.commit()
+
+        _patch_runtime(engine, candidate_row=_candidate_for(plan))
+        engine.execution_coordinator.live_submitter = lambda **kwargs: {  # type: ignore[assignment]
+            "status": "NEW",
+            "order_id": "live_btc_sweep_001",
+            "client_order_id": kwargs["client_order_id"],
+            "side": kwargs["side"],
+            "order_type": kwargs["order_type"],
+            "reduce_only": kwargs["reduce_only"],
+        }
+
+        payload = engine.auto_route_symbol(symbol="BTCUSDC")
+
+        assert payload["reason"] == "submitted"
+        assert payload["requested_mode"] == ExecutionMode.MICRO_LIVE.value
+        assert payload["intents_created"] == 1
+        assert payload["submit_calls"] == 1
+        assert payload["results"][0]["strategy_family"] == "sweep_reversal"
+        assert payload["results"][0]["submission"]["adapter"] == "binance"
+        assert payload["results"][0]["submission"]["requested_live"] is True
+
+
+def test_auto_route_symbol_keeps_validation_gate_for_sweep_reversal() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        _patch_live_contract(engine, allowed_symbols=["BTCUSDC"])
+        plan = _sweep_plan(symbol="BTCUSDC", plan_id="sweep_BTCUSDC_validation_gate_test")
+        db.add(plan)
+        db.commit()
+
+        _patch_runtime(engine, candidate_row=_candidate_for(plan))
+        engine.metrics = lambda symbol, version: {  # type: ignore[assignment]
+            "grade": "F",
+            "recommendation": "do-not-deploy",
+            "risk_state": "OPEN",
+            "risk_reason": "normal",
+            "operating_lock": {},
+        }
+        engine.execution_coordinator.live_submitter = lambda **kwargs: (_ for _ in ()).throw(  # type: ignore[assignment]
+            AssertionError("validation-blocked sweep plan should not submit")
+        )
+
+        payload = engine.auto_route_symbol(symbol="BTCUSDC")
+
+        assert payload["reason"] == "intent_blocked"
+        assert payload["intents_created"] == 1
+        assert payload["submit_calls"] == 0
+        assert payload["results"][0]["strategy_family"] == "sweep_reversal"
+        assert payload["results"][0]["intent"]["decision_reason_code"] == "validation_do_not_deploy"
+
+
 def test_session_impulse_retest_active_thesis_clusters_ignore_zero_risk_and_non_live_rows() -> None:
     init_db()
     with SessionLocal() as db:
@@ -1379,6 +1466,7 @@ def test_sync_universe_suppresses_auto_route_when_ws_stream_is_active(tmp_path) 
     with SessionLocal() as db:
         engine = StrategyEngine(db)
         _patch_live_contract(engine, allowed_symbols=["NEARUSDC"])
+        engine.settings.session_impulse_retest_allowed_symbols = "NEARUSDC"
         engine.settings.runtime_worker_heartbeat_dir = str(tmp_path)
         write_worker_heartbeat(
             "ws",
@@ -1415,6 +1503,15 @@ def test_sync_universe_suppresses_auto_route_when_ws_stream_is_active(tmp_path) 
         assert payload["auto_route"]["plans_considered"] == 1
         assert payload["auto_route"]["intents_created"] == 0
         assert payload["auto_route"]["submit_calls"] == 0
+        audits = engine.session_impulse_retest_runtime_audits_recent(
+            hours=1,
+            symbol="NEARUSDC",
+            phase="auto_route",
+            limit=5,
+        )
+        assert audits
+        assert audits[0]["status"] == "ws_stream_active_route_suppressed"
+        assert audits[0]["payload"]["plans_considered"] == 1
 
 
 def test_session_impulse_retest_direct_plan_route_creates_and_submits_live_intent() -> None:
@@ -2067,12 +2164,13 @@ def test_session_impulse_retest_non_tracked_symbol_does_not_write_runtime_audit(
     init_db()
     with SessionLocal() as db:
         engine = StrategyEngine(db)
+        _patch_live_contract(engine, allowed_symbols=["BTCUSDC"])
         engine.settings.session_impulse_retest_allowed_symbols = "BTCUSDC,ETHUSDC"
         symbol = "WLFIUSDC"
 
         route_payload = engine.auto_route_symbol(symbol=symbol)
 
-        assert route_payload["reason"] == "symbol_not_enabled_for_session_impulse_retest"
+        assert route_payload["reason"] == "symbol_not_live_enabled_for_auto_route"
         audits = engine.session_impulse_retest_runtime_audits_recent(
             hours=1,
             symbol=symbol,
@@ -2155,6 +2253,79 @@ def test_session_impulse_retest_auto_route_rolls_back_before_intent_error_audit(
         assert audits[0]["status"] == "intent_creation_failed"
         assert audits[0]["plan_id"] == plan.plan_id
         assert "intent db error" in audits[0]["payload"]["results"][0]["error"]
+
+
+def test_session_impulse_retest_runtime_audit_report_marks_hard_status_fail() -> None:
+    summary = run_session_impulse_retest_runtime_audit_report._status_summary(
+        [
+            {
+                "symbol": "BTCUSDC",
+                "phase": "auto_route",
+                "status": "submit_error",
+                "decision_code": "submit_ready",
+            }
+        ]
+    )
+
+    assert summary["overall_status"] == "FAIL"
+    assert summary["reason"] == "runtime_audit_has_hard_route_failures"
+    assert summary["hard_status_counts"] == {"submit_error": 1}
+
+
+def test_session_impulse_retest_runtime_audit_report_main_writes_latest_aliases(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        run_session_impulse_retest_runtime_audit_report,
+        "build_payload",
+        lambda **_kwargs: {
+            "generated_at": "2026-05-10T00:00:00Z",
+            "hours": 3,
+            "symbol": "",
+            "phase_filter": "",
+            "status_filter": "",
+            "overall_status": "PASS",
+            "reason": "runtime_audit_recent_and_no_hard_route_failures",
+            "audit_count": 1,
+            "phase_counts": {"auto_route": 1},
+            "status_counts": {"submitted": 1},
+            "decision_code_counts": {"submit_ready": 1},
+            "hard_status_counts": {},
+            "watch_status_counts": {},
+            "recent_audits": [
+                {
+                    "symbol": "BTCUSDC",
+                    "phase": "auto_route",
+                    "status": "submitted",
+                    "plan_id": "sir_BTCUSDC_test",
+                    "decision_code": "submit_ready",
+                    "observed_ts": "2026-05-10T00:00:00Z",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_session_impulse_retest_runtime_audit_report.py",
+            "--report-dir",
+            str(tmp_path),
+            "--no-fail-exit",
+        ],
+    )
+
+    run_session_impulse_retest_runtime_audit_report.main()
+    output = json.loads(capsys.readouterr().out)
+
+    assert (tmp_path / "session_impulse_retest_runtime_audit_20260510T000000Z.md").exists()
+    assert (tmp_path / "latest.md").exists()
+    assert (tmp_path / "latest.json").exists()
+    assert output["latest_report_path"].endswith("latest.md")
+    latest_payload = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
+    assert latest_payload["overall_status"] == "PASS"
 
 
 def test_session_impulse_retest_refresh_audit_status_stays_no_fresh_without_sir_plan(monkeypatch) -> None:

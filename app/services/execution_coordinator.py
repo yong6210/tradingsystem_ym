@@ -896,7 +896,9 @@ class ExecutionCoordinator:
     ) -> tuple[OrderSubmission, list[dict[str, Any]], bool]:
         existing = self.submission_repo.latest_for_intent(intent_id)
         if existing is not None:
-            return existing, list((existing.raw or {}).get("fill_results") or []), True
+            existing_raw = self._safe_dict(existing.raw)
+            fill_results = existing_raw.get("fill_results")
+            return existing, list(fill_results) if isinstance(fill_results, list) else [], True
 
         intent = self.intent_repo.get(intent_id)
         if intent is None:

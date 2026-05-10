@@ -21,7 +21,8 @@ from app.core import operator_surface_contracts as osc
 
 _REQUEST_RETRY_ATTEMPTS = 3
 _REQUEST_RETRY_BASE_DELAY_SECONDS = 0.5
-_REQUEST_TIMEOUT_SECONDS = 90
+_REQUEST_TIMEOUT_SECONDS = 20.0
+_RECENT_SURFACE_TIMINGS: list[dict[str, Any]] = []
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +33,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--candidate-limit", type=int, default=10)
     parser.add_argument("--report-dir", default="reports/operations/micro_live_preflight")
+    parser.add_argument(
+        "--request-timeout",
+        type=float,
+        default=_REQUEST_TIMEOUT_SECONDS,
+        help="Per-request timeout in seconds for each local API surface.",
+    )
+    parser.add_argument("--quiet", action="store_true", help="Suppress per-surface progress messages on stderr.")
+    parser.add_argument(
+        "--check-binance-rules",
+        action="store_true",
+        help="Fetch Binance exchangeInfo for current MICRO_LIVE symbols and verify quantity/tick rules.",
+    )
     parser.add_argument("--no-write-report", action="store_true")
     return parser.parse_args()
 
@@ -105,12 +118,65 @@ def _request_json(
                 continue
             raise last_error from exc
         except TimeoutError as exc:
-            last_error = RuntimeError(f"{method.upper()} {path} timed out after {_REQUEST_TIMEOUT_SECONDS}s")
+            last_error = RuntimeError(f"{method.upper()} {path} timed out after {_REQUEST_TIMEOUT_SECONDS:g}s")
             if attempt < _REQUEST_RETRY_ATTEMPTS:
                 time.sleep(_REQUEST_RETRY_BASE_DELAY_SECONDS * attempt)
                 continue
             raise last_error from exc
     raise last_error or RuntimeError(f"{method.upper()} {path} failed without an exception payload")
+
+
+def _request_surface(
+    *,
+    args: argparse.Namespace,
+    label: str,
+    method: str,
+    path: str,
+    query: dict[str, Any] | None = None,
+    body: dict[str, Any] | None = None,
+) -> dict[str, Any] | list[Any]:
+    if not bool(getattr(args, "quiet", False)):
+        print(f"[preflight] fetching {label}: {method.upper()} {path}", file=sys.stderr, flush=True)
+    started = time.monotonic()
+    try:
+        payload = _request_json(args.base_url, method, path, query=query, body=body)
+    except Exception as exc:
+        elapsed = time.monotonic() - started
+        _record_surface_timing(args, label=label, method=method, path=path, elapsed=elapsed, status="REQUEST_ERROR", error=exc)
+        if not bool(getattr(args, "quiet", False)):
+            print(f"[preflight] failed {label} after {elapsed:.1f}s: {exc}", file=sys.stderr, flush=True)
+        raise
+    elapsed = time.monotonic() - started
+    _record_surface_timing(args, label=label, method=method, path=path, elapsed=elapsed, status="PASS")
+    if not bool(getattr(args, "quiet", False)):
+        print(f"[preflight] fetched {label} in {elapsed:.1f}s", file=sys.stderr, flush=True)
+    return payload
+
+
+def _record_surface_timing(
+    args: argparse.Namespace,
+    *,
+    label: str,
+    method: str,
+    path: str,
+    elapsed: float,
+    status: str,
+    error: Exception | None = None,
+) -> None:
+    row: dict[str, Any] = {
+        "label": label,
+        "method": method.upper(),
+        "path": path,
+        "status": status,
+        "elapsed_ms": round(max(0.0, float(elapsed)) * 1000.0, 1),
+    }
+    if error is not None:
+        row["error"] = str(error)
+    timings = getattr(args, "surface_timings", None)
+    if isinstance(timings, list):
+        timings.append(row)
+    else:
+        _RECENT_SURFACE_TIMINGS.append(row)
 
 
 def _truthy_ready(payload: dict[str, Any]) -> bool:
@@ -128,6 +194,13 @@ def _float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def _surface_strip_summary(payload: dict[str, Any] | None, *, surface_type: str = "generic") -> dict[str, str]:
@@ -211,6 +284,87 @@ def _surface_allows_preflight(summary: dict[str, str]) -> bool:
     return approve_value in {"approval usable", "approved", "go"}
 
 
+def _root_cause_token(value: str) -> str:
+    chars: list[str] = []
+    previous_sep = False
+    for char in str(value or "").strip().lower():
+        if char.isalnum():
+            chars.append(char)
+            previous_sep = False
+        elif not previous_sep:
+            chars.append("_")
+            previous_sep = True
+    return "".join(chars).strip("_")
+
+
+def _preflight_root_cause(item: dict[str, str]) -> str:
+    name = str(item.get("name") or "")
+    message = str(item.get("message") or "").lower()
+    if name in {"validation_language", "checklist_language"}:
+        approve_value = _message_part(message, "approve")
+        if approve_value == "manual review first":
+            return "validation_manual_review"
+        if "refresh_validation_report" in message or approve_value == "validation unavailable":
+            return "validation_cache_refresh"
+        if approve_value:
+            return f"validation_approval_surface_{_root_cause_token(approve_value)}"
+    return name or "unknown"
+
+
+def _message_part(message: str, key: str) -> str:
+    prefix = f"{key}="
+    for part in str(message or "").split("|"):
+        normalized = part.strip()
+        if normalized.startswith(prefix):
+            return normalized[len(prefix) :].strip()
+    return ""
+
+
+def _failed_root_cause_details(failed: list[dict[str, str]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for item in failed:
+        root_cause = _preflight_root_cause(item)
+        row = grouped.setdefault(
+            root_cause,
+            {
+                "root_cause": root_cause,
+                "check_names": [],
+                "messages": [],
+                "primary_message": "",
+                "approve_value": "",
+                "act_value": "",
+                "reason": "",
+            },
+        )
+        name = str(item.get("name") or "")
+        message = str(item.get("message") or "")
+        if name:
+            row["check_names"].append(name)
+        if message:
+            row["messages"].append(message)
+            row["primary_message"] = row["primary_message"] or message
+            row["approve_value"] = row["approve_value"] or _message_part(message, "approve")
+            row["act_value"] = row["act_value"] or _message_part(message, "act")
+            row["reason"] = row["reason"] or _message_part(message, "reason")
+    details = [grouped[key] for key in sorted(grouped)]
+    for row in details:
+        row["check_names"] = _dedupe_text(row["check_names"])
+        row["messages"] = _dedupe_text(row["messages"])
+    return details
+
+
+def _dedupe_text(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in items:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(text)
+    return deduped
+
+
 _EXECUTION_MODE_RANK = {
     "SHADOW": 0,
     "PAPER": 1,
@@ -222,6 +376,421 @@ _EXECUTION_MODE_RANK = {
 def _csv_set(value: Any, *, lower: bool = False) -> set[str]:
     items = {str(item or "").strip() for item in str(value or "").split(",") if str(item or "").strip()}
     return {item.lower() for item in items} if lower else {item.upper() for item in items}
+
+
+def _csv_list(value: Any, *, lower: bool = False) -> list[str]:
+    items = [str(item or "").strip() for item in str(value or "").split(",") if str(item or "").strip()]
+    normalized = [item.lower() for item in items] if lower else [item.upper() for item in items]
+    return list(dict.fromkeys(normalized))
+
+
+def _parse_direction_contract(value: Any) -> dict[str, set[str]]:
+    contract: dict[str, set[str]] = {}
+    for raw_item in str(value or "").split(","):
+        item = raw_item.strip()
+        if not item or ":" not in item:
+            continue
+        symbol, directions = item.split(":", 1)
+        normalized_symbol = symbol.strip().upper()
+        if not normalized_symbol:
+            continue
+        allowed = {
+            direction.strip().upper()
+            for direction in directions.replace("/", "|").split("|")
+            if direction.strip()
+        }
+        if allowed:
+            contract[normalized_symbol] = allowed
+    return contract
+
+
+def _resolve_root_path(raw_path: Any) -> Path:
+    path = Path(str(raw_path or "")).expanduser()
+    return path if path.is_absolute() else ROOT_DIR / path
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _parse_utc_ts(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _ws_heartbeat_symbols(settings: Any) -> list[str]:
+    heartbeat_path = Path(str(getattr(settings, "runtime_worker_heartbeat_dir", "") or "")) / "ws.json"
+    payload = _read_json_file(heartbeat_path)
+    details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    symbols = details.get("symbols") if isinstance(details, dict) else []
+    return _csv_list(",".join(str(item) for item in symbols)) if isinstance(symbols, list) else []
+
+
+def _contract_file_check(*, name: str, raw_path: Any, required: bool) -> dict[str, Any]:
+    path_text = str(raw_path or "").strip()
+    if not path_text:
+        return {
+            "name": name,
+            "status": "FAIL" if required else "PASS",
+            "severity": "blocking" if required else "warning",
+            "message": "contract path is not configured" if required else "contract path is optional and not configured",
+        }
+    path = _resolve_root_path(path_text)
+    if not path.exists():
+        return {
+            "name": name,
+            "status": "FAIL",
+            "severity": "blocking",
+            "message": f"contract path does not exist: {_display_path(path)}",
+        }
+    payload = _read_json_file(path)
+    if not payload:
+        return {
+            "name": name,
+            "status": "FAIL",
+            "severity": "blocking",
+            "message": f"contract file is missing or invalid JSON: {_display_path(path)}",
+        }
+    return {
+        "name": name,
+        "status": "PASS",
+        "severity": "blocking",
+        "message": f"contract file loaded: {_display_path(path)}",
+    }
+
+
+def _event_blackout_coverage_check(*, raw_path: Any, live_symbols: set[str]) -> dict[str, Any]:
+    path_text = str(raw_path or "").strip()
+    if not path_text:
+        return {
+            "name": "macro_blackout_live_coverage",
+            "status": "PASS",
+            "severity": "warning",
+            "message": "macro blackout contract is not configured; event-time entry risk remains operator-managed",
+        }
+    path = _resolve_root_path(path_text)
+    payload = _read_json_file(path)
+    windows = payload.get("windows") if isinstance(payload, dict) else []
+    if not isinstance(windows, list) or not windows:
+        return {
+            "name": "macro_blackout_live_coverage",
+            "status": "FAIL",
+            "severity": "blocking",
+            "message": "macro blackout contract has no windows",
+        }
+    explicitly_covered: set[str] = set()
+    has_global_window = False
+    for row in windows:
+        if not isinstance(row, dict):
+            continue
+        raw_symbols = row.get("symbols") or []
+        if isinstance(raw_symbols, str):
+            symbols = _csv_set(raw_symbols)
+        else:
+            symbols = _csv_set(",".join(str(item) for item in list(raw_symbols)))
+        if not symbols:
+            has_global_window = True
+            continue
+        explicitly_covered.update(symbols)
+    if has_global_window or not live_symbols:
+        return {
+            "name": "macro_blackout_live_coverage",
+            "status": "PASS",
+            "severity": "blocking",
+            "message": "macro blackout has at least one global window",
+        }
+    missing = sorted(live_symbols - explicitly_covered)
+    if missing:
+        return {
+            "name": "macro_blackout_live_coverage",
+            "status": "FAIL",
+            "severity": "blocking",
+            "message": f"blackout windows do not explicitly cover all live symbols; missing={','.join(missing[:12])}",
+        }
+    return {
+        "name": "macro_blackout_live_coverage",
+        "status": "PASS",
+        "severity": "blocking",
+        "message": "macro blackout explicitly covers all current live symbols",
+    }
+
+
+def _event_blackout_freshness_check(*, raw_path: Any, now: datetime, min_horizon_days: int) -> dict[str, Any]:
+    path_text = str(raw_path or "").strip()
+    if not path_text:
+        return {
+            "name": "macro_blackout_horizon",
+            "status": "PASS",
+            "severity": "warning",
+            "message": "macro blackout contract is not configured; horizon cannot be monitored",
+        }
+    payload = _read_json_file(_resolve_root_path(path_text))
+    windows = payload.get("windows") if isinstance(payload, dict) else []
+    if not isinstance(windows, list) or not windows:
+        return {
+            "name": "macro_blackout_horizon",
+            "status": "FAIL",
+            "severity": "blocking",
+            "message": "macro blackout contract has no dated windows to monitor",
+        }
+
+    normalized_now = now.astimezone(UTC) if now.tzinfo is not None else now.replace(tzinfo=UTC)
+    dated_windows: list[tuple[datetime, datetime, str]] = []
+    invalid_count = 0
+    for item in windows:
+        row = dict(item or {}) if isinstance(item, dict) else {}
+        start_utc = _parse_utc_ts(row.get("start_utc"))
+        end_utc = _parse_utc_ts(row.get("end_utc"))
+        if start_utc is None or end_utc is None or end_utc <= start_utc:
+            invalid_count += 1
+            continue
+        dated_windows.append((start_utc, end_utc, str(row.get("label") or "unnamed")))
+
+    if not dated_windows:
+        return {
+            "name": "macro_blackout_horizon",
+            "status": "FAIL",
+            "severity": "blocking",
+            "message": f"macro blackout contract has no valid windows; invalid_windows={invalid_count}",
+        }
+
+    future_windows = sorted((row for row in dated_windows if row[1] > normalized_now), key=lambda row: row[0])
+    if not future_windows:
+        last_end = max(row[1] for row in dated_windows)
+        return {
+            "name": "macro_blackout_horizon",
+            "status": "FAIL",
+            "severity": "blocking",
+            "message": f"macro blackout contract is expired; last_end={last_end.isoformat().replace('+00:00', 'Z')}",
+        }
+
+    max_end = max(row[1] for row in future_windows)
+    horizon_days = max((max_end - normalized_now).total_seconds(), 0.0) / 86400.0
+    next_start, next_end, next_label = future_windows[0]
+    threshold = max(1, int(min_horizon_days))
+    status = _status(horizon_days >= threshold)
+    return {
+        "name": "macro_blackout_horizon",
+        "status": status,
+        "severity": "blocking",
+        "message": (
+            f"horizon_days={horizon_days:.1f}; min_required={threshold}; upcoming_windows={len(future_windows)}; "
+            f"next={next_label} {next_start.isoformat().replace('+00:00', 'Z')}->{next_end.isoformat().replace('+00:00', 'Z')}; "
+            f"invalid_windows={invalid_count}"
+        ),
+    }
+
+
+def _binance_rule_checks(symbols: set[str]) -> list[dict[str, Any]]:
+    if not symbols:
+        return []
+    try:
+        from app.integrations.binance_futures import BinanceFuturesClient
+    except Exception as exc:
+        return [
+            {
+                "name": "binance_symbol_trading_rules",
+                "status": "FAIL",
+                "severity": "blocking",
+                "message": f"failed to import Binance client: {exc}",
+            }
+        ]
+    client = BinanceFuturesClient()
+    failures: list[str] = []
+    checked: list[str] = []
+    for symbol in sorted(symbols):
+        try:
+            rules = client.fetch_symbol_trading_rules(symbol)
+        except Exception as exc:
+            failures.append(f"{symbol}:{exc}")
+            continue
+        checked.append(symbol)
+        if float(rules.quantity_step or 0.0) <= 0.0 or float(rules.min_quantity or 0.0) <= 0.0:
+            failures.append(f"{symbol}:invalid_qty_rules")
+        if rules.tick_size is not None and float(rules.tick_size or 0.0) <= 0.0:
+            failures.append(f"{symbol}:invalid_tick_size")
+    return [
+        {
+            "name": "binance_symbol_trading_rules",
+            "status": "FAIL" if failures else "PASS",
+            "severity": "blocking",
+            "message": (
+                f"failures={';'.join(failures[:8])}; checked={','.join(checked[:12])}"
+                if failures
+                else f"exchangeInfo trading rules loaded for {len(checked)} live symbol(s)"
+            ),
+        }
+    ]
+
+
+def _micro_live_config_drift_checks(*, check_binance_rules: bool = False) -> list[dict[str, Any]]:
+    settings = get_settings()
+    mode = str(getattr(settings, "auto_trading_execution_mode", "") or "").strip().upper()
+    live_mode = mode in {"MICRO_LIVE", "LIVE"}
+    global_symbols = _csv_set(getattr(settings, "auto_trading_allowed_symbols", ""))
+    global_families = _csv_set(getattr(settings, "auto_trading_allowed_families", ""), lower=True)
+    live_symbols = _csv_set(getattr(settings, "auto_trading_micro_live_allowed_symbols", ""))
+    live_families = _csv_set(getattr(settings, "auto_trading_micro_live_allowed_families", ""), lower=True)
+    live_entry_models = _csv_set(getattr(settings, "auto_trading_micro_live_allowed_entry_models", ""))
+    direction_contract = _parse_direction_contract(getattr(settings, "auto_trading_micro_live_direction_contract", ""))
+    ws_symbols = set(_ws_heartbeat_symbols(settings))
+    checks: list[dict[str, Any]] = []
+
+    checks.append(
+        {
+            "name": "config_execution_mode",
+            "status": _status(live_mode),
+            "severity": "blocking",
+            "message": f"auto_trading_execution_mode={mode or 'unset'}",
+        }
+    )
+    checks.append(
+        {
+            "name": "binance_live_order_switch",
+            "status": _status((not live_mode) or bool(getattr(settings, "binance_trade_live_enabled", False))),
+            "severity": "blocking",
+            "message": f"binance_trade_live_enabled={bool(getattr(settings, 'binance_trade_live_enabled', False))}",
+        }
+    )
+    missing_global = sorted(live_symbols - global_symbols) if global_symbols else []
+    checks.append(
+        {
+            "name": "live_symbol_allowlist_alignment",
+            "status": _status(bool(live_symbols) and not missing_global),
+            "severity": "blocking",
+            "message": (
+                f"live_symbols={','.join(sorted(live_symbols))}; "
+                f"missing_from_global={','.join(missing_global) if missing_global else 'none'}"
+            ),
+        }
+    )
+    missing_families = sorted(live_families - global_families) if global_families else []
+    checks.append(
+        {
+            "name": "live_family_allowlist_alignment",
+            "status": _status(bool(live_families) and not missing_families),
+            "severity": "blocking",
+            "message": (
+                f"live_families={','.join(sorted(live_families))}; "
+                f"missing_from_global={','.join(missing_families) if missing_families else 'none'}"
+            ),
+        }
+    )
+    if direction_contract:
+        missing_direction_symbols = sorted(symbol for symbol in live_symbols if symbol not in direction_contract)
+        malformed_direction_symbols = sorted(
+            symbol for symbol, directions in direction_contract.items() if symbol in live_symbols and not directions.intersection({"LONG", "SHORT"})
+        )
+    else:
+        missing_direction_symbols = []
+        malformed_direction_symbols = []
+    checks.append(
+        {
+            "name": "live_direction_contract_coverage",
+            "status": _status(not direction_contract or (not missing_direction_symbols and not malformed_direction_symbols)),
+            "severity": "blocking",
+            "message": (
+                f"contract_symbols={len(direction_contract)}; "
+                f"missing={','.join(missing_direction_symbols) if missing_direction_symbols else 'none'}; "
+                f"malformed={','.join(malformed_direction_symbols) if malformed_direction_symbols else 'none'}"
+            ),
+        }
+    )
+    checks.append(
+        {
+            "name": "live_entry_model_allowlist",
+            "status": _status(bool(live_entry_models)),
+            "severity": "blocking",
+            "message": f"allowed_entry_models={','.join(sorted(live_entry_models)) if live_entry_models else 'none'}",
+        }
+    )
+
+    if live_mode and ws_symbols:
+        missing_ws_symbols = sorted(live_symbols - ws_symbols)
+        ws_status = _status(not missing_ws_symbols)
+        ws_message = f"ws_symbols={len(ws_symbols)}; missing_live_symbols={','.join(missing_ws_symbols) if missing_ws_symbols else 'none'}"
+        ws_severity = "blocking"
+    else:
+        ws_status = "PASS"
+        ws_message = "ws heartbeat symbols unavailable; health_ready remains the primary worker liveness check"
+        ws_severity = "warning"
+    checks.append(
+        {
+            "name": "ws_universe_contains_live_symbols",
+            "status": ws_status,
+            "severity": ws_severity,
+            "message": ws_message,
+        }
+    )
+
+    if "session_impulse_retest" in live_families:
+        sir_enabled = bool(getattr(settings, "session_impulse_retest_enabled", False))
+        sir_shadow_only = bool(getattr(settings, "session_impulse_retest_shadow_only", True))
+        sir_symbols = _csv_set(getattr(settings, "session_impulse_retest_allowed_symbols", ""))
+        missing_sir_live_symbols = sorted(live_symbols - sir_symbols) if sir_symbols else []
+        tracked_only_symbols = sorted(sir_symbols - live_symbols)
+        checks.append(
+            {
+                "name": "session_impulse_retest_live_alignment",
+                "status": _status(sir_enabled and not sir_shadow_only and not missing_sir_live_symbols),
+                "severity": "blocking",
+                "message": (
+                    f"enabled={sir_enabled} shadow_only={sir_shadow_only} "
+                    f"missing_live_symbols={','.join(missing_sir_live_symbols) if missing_sir_live_symbols else 'none'} "
+                    f"tracked_only={','.join(tracked_only_symbols[:12]) if tracked_only_symbols else 'none'}"
+                ),
+            }
+        )
+
+    checks.append(
+        _contract_file_check(
+            name="macro_blackout_contract",
+            raw_path=getattr(settings, "auto_trading_micro_live_event_blackout_path", ""),
+            required=False,
+        )
+    )
+    checks.append(
+        _event_blackout_coverage_check(
+            raw_path=getattr(settings, "auto_trading_micro_live_event_blackout_path", ""),
+            live_symbols=live_symbols,
+        )
+    )
+    checks.append(
+        _event_blackout_freshness_check(
+            raw_path=getattr(settings, "auto_trading_micro_live_event_blackout_path", ""),
+            now=_now(),
+            min_horizon_days=_int(getattr(settings, "auto_trading_micro_live_event_blackout_min_horizon_days", 45), default=45),
+        )
+    )
+    checks.append(
+        {
+            "name": "live_liquidity_gate",
+            "status": _status(
+                bool(getattr(settings, "auto_trading_live_liquidity_gate_enabled", False))
+                and bool(getattr(settings, "auto_trading_live_liquidity_gate_fail_closed", True))
+            ),
+            "severity": "blocking",
+            "message": (
+                f"enabled={bool(getattr(settings, 'auto_trading_live_liquidity_gate_enabled', False))} "
+                f"fail_closed={bool(getattr(settings, 'auto_trading_live_liquidity_gate_fail_closed', True))}"
+            ),
+        }
+    )
+    if check_binance_rules:
+        checks.extend(_binance_rule_checks(live_symbols))
+    return checks
 
 
 def _live_routable_candidate(candidate: dict[str, Any], *, dashboard_payload: dict[str, Any]) -> bool:
@@ -678,11 +1247,39 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append("")
     lines.append(f"- result: {payload['overall_status']}")
     lines.append(f"- summary: {payload['summary_line']}")
+    if payload.get("failed_root_cause_details"):
+        lines.append(f"- failed_root_cause_count: {payload.get('failed_root_cause_count', 0)}")
+    lines.append("")
+    lines.append("## Failed Root Causes")
+    lines.append("")
+    root_causes = list(payload.get("failed_root_cause_details") or [])
+    if root_causes:
+        for item in root_causes:
+            checks = ", ".join(str(name) for name in list(item.get("check_names") or []))
+            lines.append(
+                f"- {item.get('root_cause')}: checks={checks or 'none'} | "
+                f"approve={item.get('approve_value') or 'n/a'} | "
+                f"act={item.get('act_value') or 'n/a'}"
+            )
+            if item.get("reason"):
+                lines.append(f"  reason={item.get('reason')}")
+    else:
+        lines.append("- none")
     lines.append("")
     lines.append("## Checks")
     lines.append("")
     for item in payload["checks"]:
         lines.append(f"- [{item['status']}] {item['name']}: {item['message']}")
+    lines.append("")
+    lines.append("## API Surface Timings")
+    lines.append("")
+    for item in payload.get("surface_timings") or []:
+        detail = f"- {item.get('label')}: {item.get('status')} {item.get('elapsed_ms')}ms | {item.get('method')} {item.get('path')}"
+        if item.get("error"):
+            detail = f"{detail} | error={item.get('error')}"
+        lines.append(detail)
+    if not payload.get("surface_timings"):
+        lines.append("- none")
     lines.append("")
     lines.append("## Approval Surfaces")
     lines.append("")
@@ -743,52 +1340,77 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
 
 
 def main() -> int:
+    global _REQUEST_TIMEOUT_SECONDS
     args = parse_args()
+    _REQUEST_TIMEOUT_SECONDS = max(1.0, float(getattr(args, "request_timeout", _REQUEST_TIMEOUT_SECONDS)))
+    _RECENT_SURFACE_TIMINGS.clear()
+    args.surface_timings = _RECENT_SURFACE_TIMINGS
     generated_at = _now()
+    dashboard_limit = min(max(1, int(args.candidate_limit)), 5)
 
-    ready = _request_json(args.base_url, "GET", "/health/ready")
-    dashboard = _request_json(
-        args.base_url,
-        "GET",
-        "/execution/operator-dashboard",
-        query={"symbol": args.symbol, "universe": args.universe, "days": args.days},
+    ready = _request_surface(
+        args=args,
+        label="readiness",
+        method="GET",
+        path="/health/ready",
     )
-    safety = _request_json(
-        args.base_url,
-        "GET",
-        "/execution/safety-state",
+    dashboard = _request_surface(
+        args=args,
+        label="operator dashboard",
+        method="GET",
+        path="/execution/operator-dashboard",
+        query={
+            "symbol": args.symbol,
+            "universe": args.universe,
+            "days": args.days,
+            "portfolio_limit": dashboard_limit,
+            "intent_limit": dashboard_limit,
+            "reconcile_limit": dashboard_limit,
+            "fast": "true",
+        },
+    )
+    safety = _request_surface(
+        args=args,
+        label="safety state",
+        method="GET",
+        path="/execution/safety-state",
         query={"symbol": args.symbol},
     )
-    reconcile = _request_json(
-        args.base_url,
-        "POST",
-        "/execution/reconcile",
+    reconcile = _request_surface(
+        args=args,
+        label="execution reconcile",
+        method="POST",
+        path="/execution/reconcile",
         query={"apply_lock": "false", "auto_resolve": "false"},
         body={"symbol": args.symbol},
     )
-    validation = _request_json(
-        args.base_url,
-        "POST",
-        "/validation/report",
-        query={"symbol": args.symbol, "refresh": "false"},
+    validation = _request_surface(
+        args=args,
+        label="validation report",
+        method="POST",
+        path="/validation/report",
+        query={"symbol": args.symbol, "refresh": "false", "cache_fallback": "true"},
     )
-    checklist = _request_json(
-        args.base_url,
-        "POST",
-        "/operations/checklist",
+    checklist = _request_surface(
+        args=args,
+        label="operations checklist",
+        method="POST",
+        path="/operations/checklist",
         query={"symbol": args.symbol, "write_report": "false"},
     )
-    alerts = _request_json(
-        args.base_url,
-        "GET",
-        "/alerts/metrics",
+    alerts = _request_surface(
+        args=args,
+        label="alert metrics",
+        method="GET",
+        path="/alerts/metrics",
         query={"days": args.days, "write_report": "false"},
     )
-    scanner = _request_json(
-        args.base_url,
-        "GET",
-        "/scanner/top",
-        query={"universe": args.universe, "limit": args.candidate_limit},
+    scanner = _request_surface(
+        args=args,
+        label="scanner top",
+        method="GET",
+        path="/scanner/top",
+        query={"universe": args.universe, "limit": args.candidate_limit, "fast": "true"},
     )
 
     candidate: dict[str, Any] | None = None
@@ -921,6 +1543,8 @@ def main() -> int:
             "message": f"latest_validation_alert={bool(latest_validation_alert)}",
         }
     )
+    config_drift_checks = _micro_live_config_drift_checks(check_binance_rules=bool(getattr(args, "check_binance_rules", False)))
+    checks.extend(config_drift_checks)
     checks.append(
         _candidate_availability_check(
             candidate=candidate,
@@ -930,9 +1554,15 @@ def main() -> int:
     )
 
     failed = [item for item in checks if item["status"] != "PASS"]
+    failed_root_cause_details = _failed_root_cause_details(failed)
+    failed_root_causes = [str(item.get("root_cause") or "") for item in failed_root_cause_details]
     overall_status = osc.MICRO_LIVE_PREFLIGHT_STATUS_READY if not failed else osc.MICRO_LIVE_PREFLIGHT_STATUS_NOT_READY
     if failed:
-        next_steps = [item["message"] for item in failed]
+        next_steps = [
+            str(item.get("primary_message") or "")
+            for item in failed_root_cause_details
+            if str(item.get("primary_message") or "")
+        ]
     elif candidate:
         next_steps = ["Proceed to the live go-live checklist and final operator sign-off."]
     else:
@@ -953,8 +1583,15 @@ def main() -> int:
     ]
     if targeted_reviews:
         next_steps.append("Advisory only: run split review packet(s) with " + "; ".join(targeted_reviews) + ".")
+    next_steps = _dedupe_text(next_steps)
     if failed:
-        summary_line = f"{len(failed)} blocking preflight check(s) remain."
+        if len(failed_root_causes) < len(failed):
+            summary_line = (
+                f"{len(failed)} blocking preflight check(s) remain across "
+                f"{len(failed_root_causes)} unique root cause(s)."
+            )
+        else:
+            summary_line = f"{len(failed)} blocking preflight check(s) remain."
     elif candidate:
         summary_line = "All preflight checks passed; MICRO_LIVE can proceed to final operator sign-off."
     else:
@@ -966,6 +1603,10 @@ def main() -> int:
         "universe": args.universe,
         "overall_status": overall_status,
         "summary_line": summary_line,
+        "failed_root_causes": failed_root_causes,
+        "failed_root_cause_count": len(failed_root_causes),
+        "failed_root_cause_details": failed_root_cause_details,
+        "surface_timings": list(_RECENT_SURFACE_TIMINGS),
         "checks": checks,
         "candidate": candidate or {},
         "ignored_non_routable_candidate_count": ignored_non_routable_candidates,
@@ -1011,6 +1652,7 @@ def main() -> int:
             "latest_validation_alert": latest_validation_alert,
             "overall": (alerts.get("overall") or {}) if isinstance(alerts, dict) else {},
         },
+        "config_drift_checks": config_drift_checks,
         "next_steps": next_steps,
     }
 
@@ -1025,4 +1667,19 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except RuntimeError as exc:
+        print(
+            json.dumps(
+                {
+                    "overall_status": osc.MICRO_LIVE_PREFLIGHT_STATUS_ERROR,
+                    "error": str(exc),
+                    "surface_timings": list(_RECENT_SURFACE_TIMINGS),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            file=sys.stderr,
+        )
+        raise SystemExit(2) from None
