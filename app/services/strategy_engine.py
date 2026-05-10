@@ -26,7 +26,13 @@ from app.core.events import (
     ZONE_CREATED,
 )
 from app.core.enums import ExecutionFillStage, ExecutionMode, ExitReason, OrderLifecycleState, PlanState, RiskGateState, SubmitDecision
-from app.db.models import AlertSubscription, ExecutionFill, Plan, Zone, ZoneOutcome
+from app.db.models import (
+    AlertSubscription,
+    ExecutionFill,
+    Plan,
+    Zone,
+    ZoneOutcome,
+)
 from app.db.session import SessionLocal
 from app.db.repositories import (
     AlertRepository,
@@ -75,6 +81,7 @@ from app.services.family_execution_degradation_advisory import FamilyExecutionDe
 from app.services.forward_stress_regime_validation import ForwardStressRegimeValidationService
 from app.services.kill_condition_automation import KillConditionAutomationService
 from app.services.lane_tracker import get_execution_lane_tracker
+from app.services.live_candidate_promotion_readiness_runtime import build_live_candidate_promotion_readiness_from_db
 from app.services.mode_advisory import ModeAdvisoryService
 from app.services.multi_strategy_ab import MultiStrategyABExpansionService
 from app.services.outcome_bucket_granularity import OutcomeBucketGranularityService
@@ -4913,6 +4920,23 @@ class StrategyEngine:
         fast: bool = False,
     ) -> dict[str, Any]:
         safety_state = self._safety_state_payload(symbol=symbol)
+        try:
+            live_candidate_promotion_readiness_summary = build_live_candidate_promotion_readiness_from_db(
+                self.db,
+                hours=24,
+                limit=max(8, int(intent_limit)),
+                symbol=symbol,
+            )
+        except Exception as exc:
+            live_candidate_promotion_readiness_summary = {
+                "available": False,
+                "advisory_only": True,
+                "authority": "compare_only_no_live_authority_change",
+                "headline_state": "WATCH",
+                "headline_reason": "live_candidate_readiness_unavailable",
+                "headline_action": f"Inspect readiness aggregation error before using this dashboard field: {exc}",
+                "error": str(exc),
+            }
         portfolio_summary = self.portfolio_budget_report(
             universe=universe,
             limit=portfolio_limit,
@@ -5322,6 +5346,9 @@ class StrategyEngine:
                 symbol=symbol,
                 shadow_summary=shadow_summary,
             )
+        payload_signal_funnel = dict(payload.get("signal_funnel") or {})
+        payload_signal_funnel["live_candidate_promotion_readiness"] = live_candidate_promotion_readiness_summary
+        payload["signal_funnel"] = payload_signal_funnel
         payload["session_impulse_retest_universe_policy"] = build_micro_main_rollout_contract_snapshot(
             enabled=self._safe_bool(self.settings.session_impulse_retest_enabled),
             shadow_only=self._safe_bool(self.settings.session_impulse_retest_shadow_only),

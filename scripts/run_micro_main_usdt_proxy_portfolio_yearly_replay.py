@@ -21,6 +21,7 @@ from app.core.config import get_settings
 from app.db.models import Candle
 from app.integrations.binance_futures import BinanceFuturesClient
 from app.services.micro_main_strategy_research import MicroTrade, SessionImpulseRetestResearch
+from app.services.report_io import atomic_write_text
 from scripts.run_micro_main_usdt_proxy_backtest import (
     canonical_symbol_for_proxy,
     _fetch_1m_klines,
@@ -330,8 +331,8 @@ def main() -> int:
         out_dir = Path(settings.validation_report_dir) / "micro_main_risk_sweeps"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"micro_main_usdt_proxy_yearly_portfolio_replay_{generated_at.strftime('%Y%m%dT%H%M%SZ')}.json"
-        out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         payload["report_path"] = str(out_path)
+        atomic_write_text(out_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0

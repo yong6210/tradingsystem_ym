@@ -415,3 +415,7 @@ if runtime_cutoff is not None:
         print("- none")
 PY
 )
+
+echo
+echo "== live candidate promotion readiness =="
+(cd "$PYTHON_ROOT" && PYTHONPATH="$PYTHON_ROOT" "$PYTHON_BIN" "$PYTHON_ROOT/scripts/run_live_candidate_promotion_readiness.py" --hours 24 --limit 12 --no-write-report --compact)

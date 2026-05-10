@@ -57,6 +57,9 @@ def test_micro_main_signal_filter_profile_merges_symbol_override() -> None:
     profile = engine._signal_filter_profile()
     assert profile["min_reclaim_body_atr"] == 0.30
     assert profile["min_trend_strength"] == 0.25
+    assert profile["max_retest_wait_minutes"] == 3.0
+    assert profile["late_retest_high_risk_atr"] == 1.0
+    assert profile["late_retest_high_risk_max_wait_minutes"] == 2.0
 
 
 def test_micro_main_relaxed_profile_merges_default_and_symbol_override() -> None:
@@ -73,6 +76,36 @@ def test_micro_main_relaxed_profile_merges_default_and_symbol_override() -> None
     assert profile["min_reclaim_body_atr"] == 0.28
     assert profile["min_trend_strength"] == 0.20
     assert profile["min_volume_factor"] == 0.80
+
+    eth_engine = SessionImpulseRetestResearch(
+        symbol="ETHUSDC",
+        candles_1m=candles_1m,
+        candles_5m=candles_5m,
+        profile_name="relaxed_v1",
+    )
+    assert eth_engine._signal_filter_profile()["min_volume_factor"] == 0.90
+
+
+def test_micro_main_late_retest_risk_filter_blocks_stale_high_risk_retest() -> None:
+    profile = {
+        "late_retest_high_risk_atr": 1.0,
+        "late_retest_high_risk_max_wait_minutes": 2.0,
+    }
+    assert SessionImpulseRetestResearch._passes_late_retest_risk_filter(
+        profile,
+        risk_atr=0.99,
+        retest_wait_minutes=3,
+    )
+    assert SessionImpulseRetestResearch._passes_late_retest_risk_filter(
+        profile,
+        risk_atr=1.0,
+        retest_wait_minutes=2,
+    )
+    assert not SessionImpulseRetestResearch._passes_late_retest_risk_filter(
+        profile,
+        risk_atr=1.0,
+        retest_wait_minutes=3,
+    )
 
 
 def test_micro_main_runtime_profile_mapping_is_hybrid() -> None:

@@ -29,6 +29,7 @@ class UsdtProxyReplayValidationBridge:
 
     def __init__(self, settings: Any):
         self.settings = settings
+        self._json_cache: dict[Path, tuple[int, int, dict[str, Any]]] = {}
 
     def apply_to_metrics(
         self,
@@ -297,11 +298,24 @@ class UsdtProxyReplayValidationBridge:
 
     def _load_json(self, path: Path) -> dict[str, Any] | None:
         try:
+            stat = path.stat()
+        except OSError:
+            return None
+        cache_key = path.resolve()
+        cached = self._json_cache.get(cache_key)
+        if cached is not None:
+            cached_mtime_ns, cached_size, cached_payload = cached
+            if cached_mtime_ns == stat.st_mtime_ns and cached_size == stat.st_size:
+                return cached_payload
+        try:
             with path.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
         except (OSError, json.JSONDecodeError):
             return None
-        return payload if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return None
+        self._json_cache[cache_key] = (stat.st_mtime_ns, stat.st_size, payload)
+        return payload
 
     def _is_stale(self, payload: dict[str, Any], path: Path) -> bool:
         max_age_days = self._safe_float(getattr(self.settings, "auto_trading_replay_validation_bridge_max_age_days", 14.0), default=14.0)

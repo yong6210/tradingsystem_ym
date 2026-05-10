@@ -81,6 +81,10 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--days", type=int, default=1825)
     parser.add_argument("--write-report", action="store_true")
+    parser.add_argument("--include-trades", action="store_true")
+    parser.add_argument("--write-loss-analysis", action="store_true")
+    parser.add_argument("--loss-analysis-min-bucket-trades", type=int, default=12)
+    parser.add_argument("--loss-analysis-min-negative-years", type=int, default=2)
     return parser.parse_args()
 
 
@@ -307,6 +311,239 @@ def _resample_to_5m(candles_1m: list[MiniCandle]) -> list[MiniCandle]:
     return rows
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _round(value: Any, digits: int = 4) -> float:
+    return round(_safe_float(value), digits)
+
+
+def _bucket(value: Any, cuts: tuple[tuple[float, str], ...], default: str) -> str:
+    parsed = _safe_float(value, default=float("nan"))
+    if parsed != parsed:
+        return default
+    for threshold, label in cuts:
+        if parsed < threshold:
+            return label
+    return default
+
+
+def _trade_to_row(*, trade: Any, proxy_symbol: str, canonical_symbol: str, profile_name: str) -> dict[str, Any]:
+    diagnostics = dict(getattr(trade, "diagnostics", {}) or {})
+    entry_ts = trade.entry_ts.astimezone(UTC)
+    signal_ts = trade.signal_ts.astimezone(UTC)
+    risk_abs = abs(float(trade.entry_price) - float(trade.stop_price))
+    row = {
+        "family": str(trade.family),
+        "symbol": canonical_symbol,
+        "proxy_symbol": proxy_symbol,
+        "profile_name": profile_name,
+        "direction": str(trade.direction),
+        "signal_ts": signal_ts.isoformat(),
+        "entry_ts": entry_ts.isoformat(),
+        "exit_ts": trade.exit_ts.astimezone(UTC).isoformat(),
+        "signal_hour_utc": _safe_int(diagnostics.get("setup_hour_utc"), signal_ts.hour),
+        "entry_hour_utc": _safe_int(diagnostics.get("entry_hour_utc"), entry_ts.hour),
+        "entry_weekday_utc": _safe_int(diagnostics.get("entry_weekday_utc"), entry_ts.weekday()),
+        "entry_year": entry_ts.year,
+        "entry_price": _round(trade.entry_price),
+        "exit_price": _round(trade.exit_price),
+        "stop_price": _round(trade.stop_price),
+        "target_price": _round(trade.target_price),
+        "stop_distance_pct": _round(risk_abs / max(abs(float(trade.entry_price)), 1e-12), 6),
+        "r_value": _round(trade.r_value),
+        "gross_r": _round(trade.gross_r),
+        "cost_r": _round(trade.cost_r),
+        "hold_minutes": int(trade.hold_minutes),
+        "exit_reason": str(trade.exit_reason),
+        "regime_hint": str(trade.regime_hint),
+        "risk_atr_bucket": _bucket(
+            diagnostics.get("risk_atr"),
+            ((0.40, "risk_atr_lt_0.40"), (0.70, "risk_atr_0.40_0.70"), (1.00, "risk_atr_0.70_1.00")),
+            "risk_atr_ge_1.00",
+        ),
+        "volume_factor_bucket": _bucket(
+            diagnostics.get("volume_factor"),
+            ((0.90, "volume_lt_0.90"), (1.10, "volume_0.90_1.10"), (1.40, "volume_1.10_1.40")),
+            "volume_ge_1.40",
+        ),
+        "retest_wait_bucket": _bucket(
+            diagnostics.get("retest_wait_minutes"),
+            ((3.0, "retest_0_2m"), (6.0, "retest_3_5m"), (11.0, "retest_6_10m")),
+            "retest_gt_10m",
+        ),
+        "diagnostics": {
+            key: _round(value, 6) if isinstance(value, float) else value
+            for key, value in sorted(diagnostics.items())
+        },
+    }
+    return row
+
+
+def _stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    closed = len(rows)
+    if closed <= 0:
+        return {
+            "closed": 0,
+            "total_r": 0.0,
+            "ev_r": 0.0,
+            "win_rate": 0.0,
+            "loss_rate": 0.0,
+            "loss_count": 0,
+            "loss_r": 0.0,
+            "avg_loss_r": 0.0,
+            "avg_win_r": 0.0,
+        }
+    r_values = [_safe_float(row.get("r_value")) for row in rows]
+    wins = [value for value in r_values if value > 0.0]
+    losses = [value for value in r_values if value <= 0.0]
+    return {
+        "closed": closed,
+        "total_r": round(sum(r_values), 4),
+        "ev_r": round(sum(r_values) / closed, 4),
+        "win_rate": round(len(wins) / closed, 4),
+        "loss_rate": round(len(losses) / closed, 4),
+        "loss_count": len(losses),
+        "loss_r": round(sum(losses), 4),
+        "avg_loss_r": round(sum(losses) / len(losses), 4) if losses else 0.0,
+        "avg_win_r": round(sum(wins) / len(wins), 4) if wins else 0.0,
+    }
+
+
+def _group_rows(rows: list[dict[str, Any]], key: str) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        value = str(row.get(key) or "unknown")
+        grouped.setdefault(value, []).append(row)
+    return grouped
+
+
+def _compound_group_rows(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        value = "|".join(str(row.get(key) or "unknown") for key in keys)
+        grouped.setdefault(value, []).append(row)
+    return grouped
+
+
+def _ranked_group_stats(grouped: dict[str, list[dict[str, Any]]], *, limit: int = 12) -> list[dict[str, Any]]:
+    ranked: list[dict[str, Any]] = []
+    for key, group_rows in grouped.items():
+        item = {"bucket": key, **_stats(group_rows)}
+        ranked.append(item)
+    ranked.sort(key=lambda item: (_safe_float(item.get("loss_r")), -_safe_int(item.get("loss_count"))))
+    return ranked[:limit]
+
+
+def _recommended_symbol_hour_blocks(
+    rows: list[dict[str, Any]],
+    *,
+    min_bucket_trades: int,
+    min_negative_years: int,
+) -> list[dict[str, Any]]:
+    by_symbol = _group_rows(rows, "symbol")
+    grouped = _compound_group_rows(rows, ("symbol", "profile_name", "signal_hour_utc"))
+    candidates: list[dict[str, Any]] = []
+    for key, bucket_rows in grouped.items():
+        if len(bucket_rows) < max(int(min_bucket_trades), 1):
+            continue
+        symbol, profile_name, hour_text = key.split("|", 2)
+        symbol_rows = by_symbol.get(symbol, [])
+        kept_rows = [row for row in symbol_rows if row not in bucket_rows]
+        if len(kept_rows) < max(40, int(len(symbol_rows) * 0.50)):
+            continue
+        before = _stats(symbol_rows)
+        bucket = _stats(bucket_rows)
+        after = _stats(kept_rows)
+        if _safe_float(bucket.get("total_r")) >= -1.0 or _safe_float(bucket.get("ev_r")) >= -0.05:
+            continue
+        if _safe_float(bucket.get("loss_rate")) < 0.55:
+            continue
+        by_year = _group_rows(bucket_rows, "entry_year")
+        year_rows = [{"year": year, **_stats(year_bucket)} for year, year_bucket in sorted(by_year.items())]
+        years_with_trades = len(year_rows)
+        negative_years = sum(1 for item in year_rows if _safe_float(item.get("total_r")) < 0.0)
+        required_negative_years = min(max(int(min_negative_years), 1), max(years_with_trades, 1))
+        if negative_years < required_negative_years:
+            continue
+        total_r_delta = _safe_float(after.get("total_r")) - _safe_float(before.get("total_r"))
+        ev_delta = _safe_float(after.get("ev_r")) - _safe_float(before.get("ev_r"))
+        if total_r_delta <= 0.0 and ev_delta <= 0.0:
+            continue
+        candidates.append(
+            {
+                "action": "block_symbol_signal_hour",
+                "symbol": symbol,
+                "profile_name": profile_name,
+                "signal_hour_utc": _safe_int(hour_text),
+                "bucket": bucket,
+                "symbol_before": before,
+                "symbol_after": after,
+                "delta": {
+                    "total_r": round(total_r_delta, 4),
+                    "ev_r": round(ev_delta, 4),
+                    "removed_trade_share": round(len(bucket_rows) / max(len(symbol_rows), 1), 4),
+                },
+                "year_consistency": {
+                    "years_with_trades": years_with_trades,
+                    "negative_years": negative_years,
+                    "required_negative_years": required_negative_years,
+                    "years": year_rows,
+                },
+            }
+        )
+    candidates.sort(
+        key=lambda item: (
+            -_safe_float(dict(item.get("delta") or {}).get("total_r")),
+            -_safe_float(dict(item.get("delta") or {}).get("ev_r")),
+        )
+    )
+    return candidates
+
+
+def _build_loss_analysis(
+    rows: list[dict[str, Any]],
+    *,
+    min_bucket_trades: int,
+    min_negative_years: int,
+) -> dict[str, Any]:
+    losing_rows = [row for row in rows if _safe_float(row.get("r_value")) <= 0.0]
+    return {
+        "schema_version": "micro_main_loss_analysis_v1",
+        "summary": _stats(rows),
+        "loss_summary": _stats(losing_rows),
+        "top_loss_buckets": {
+            "by_symbol": _ranked_group_stats(_group_rows(rows, "symbol")),
+            "by_exit_reason": _ranked_group_stats(_group_rows(rows, "exit_reason")),
+            "by_direction": _ranked_group_stats(_group_rows(rows, "direction")),
+            "by_signal_hour_utc": _ranked_group_stats(_group_rows(rows, "signal_hour_utc")),
+            "by_entry_weekday_utc": _ranked_group_stats(_group_rows(rows, "entry_weekday_utc")),
+            "by_symbol_signal_hour": _ranked_group_stats(_compound_group_rows(rows, ("symbol", "signal_hour_utc")), limit=20),
+            "by_risk_atr_bucket": _ranked_group_stats(_group_rows(rows, "risk_atr_bucket")),
+            "by_volume_factor_bucket": _ranked_group_stats(_group_rows(rows, "volume_factor_bucket")),
+            "by_retest_wait_bucket": _ranked_group_stats(_group_rows(rows, "retest_wait_bucket")),
+        },
+        "recommended_filters": {
+            "symbol_signal_hour_blocks": _recommended_symbol_hour_blocks(
+                rows,
+                min_bucket_trades=min_bucket_trades,
+                min_negative_years=min_negative_years,
+            )
+        },
+    }
+
+
 def _run_symbol(
     monthly_client: httpx.Client,
     rest_client: httpx.Client,
@@ -314,6 +551,7 @@ def _run_symbol(
     proxy_symbol: str,
     canonical_symbol: str,
     lookback_days: int,
+    include_trades: bool = False,
 ) -> dict[str, Any]:
     end_ts = datetime.now(UTC).replace(second=0, microsecond=0)
     start_ts = end_ts - timedelta(days=max(int(lookback_days), 1))
@@ -360,6 +598,17 @@ def _run_symbol(
         },
         "summary": summary,
     }
+    if include_trades:
+        profile_name = session_impulse_retest_profile_for_symbol(canonical_symbol)
+        payload["trades"] = [
+            _trade_to_row(
+                trade=trade,
+                proxy_symbol=proxy_symbol,
+                canonical_symbol=canonical_symbol,
+                profile_name=profile_name,
+            )
+            for trade in trades
+        ]
     del candles_1m
     del candles_5m
     del trades
@@ -397,6 +646,7 @@ def main() -> int:
                 proxy_symbol=proxy_symbol,
                 canonical_symbol=canonical_symbol,
                 lookback_days=int(args.days),
+                include_trades=bool(args.include_trades or args.write_loss_analysis),
             )
             results[proxy_symbol] = result
             summary = dict(result.get("summary") or {})
@@ -426,6 +676,17 @@ def main() -> int:
                         "total_r": round(aggregate_total_r, 4),
                         "ev_r": round(aggregate_total_r / max(aggregate_closed, 1), 4),
                     },
+                    "loss_analysis": _build_loss_analysis(
+                        [
+                            row
+                            for item in results.values()
+                            for row in list(dict(item or {}).get("trades") or [])
+                        ],
+                        min_bucket_trades=int(args.loss_analysis_min_bucket_trades),
+                        min_negative_years=int(args.loss_analysis_min_negative_years),
+                    )
+                    if args.write_loss_analysis
+                    else None,
                     "report_path": str(out_path),
                     "status": "running",
                 }
@@ -442,10 +703,21 @@ def main() -> int:
             "ev_r": round(aggregate_total_r / max(aggregate_closed, 1), 4),
         },
     }
+    if args.write_loss_analysis:
+        trade_rows = [
+            row
+            for item in results.values()
+            for row in list(dict(item or {}).get("trades") or [])
+        ]
+        payload["loss_analysis"] = _build_loss_analysis(
+            trade_rows,
+            min_bucket_trades=int(args.loss_analysis_min_bucket_trades),
+            min_negative_years=int(args.loss_analysis_min_negative_years),
+        )
 
     if out_path is not None:
-        atomic_write_text(out_path, json.dumps(payload, ensure_ascii=False, indent=2))
         payload["report_path"] = str(out_path)
+        atomic_write_text(out_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0

@@ -302,6 +302,15 @@ LaunchAgent 재설치:
 
 이 설치 스크립트는 `com.yumin.trading.runtime-stack`을 설치하고, `com.yumin.trading.api`, `com.yumin.trading.stage-monitor`, `com.yumin.trading.paper-lineage-watch`의 사용자 LaunchAgent plist를 `~/Library/LaunchAgents.disabled/...`로 옮긴다.
 
+Live 후보 승격 상태 확인:
+
+```bash
+./scripts/run_live_candidate_promotion_readiness.py --compact --no-write-report
+./scripts/run_live_candidate_promotion_readiness.py --symbol ADAUSDC --compact --no-write-report
+```
+
+이 리포트는 기존 런타임 audit과 order intent blocker만 읽어 `GATE_BLOCKED`, `SHADOW_SIGNAL_ONLY`, `SUBMIT_READY_GAP`, `NO_FRESH_LIVE_CANDIDATE` 같은 compare-only 상태로 압축한다. `--symbol`을 주면 해당 심볼의 승격 상태만 분리해서 보고, 후보별 `latest_evidence_at`으로 차단 근거의 최신성을 확인한다. live allowlist, sizing, approval, 주문 제출 권한은 바꾸지 않는다.
+
 ### 4.2. 운영 요약
 ```bash
 curl -s "http://127.0.0.1:8000/execution/operator-dashboard?universe=usdc_perp_top30&portfolio_limit=10&intent_limit=10&reconcile_limit=10&days=7" | jq

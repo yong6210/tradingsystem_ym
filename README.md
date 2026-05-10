@@ -19,7 +19,7 @@ If you only remember one rule: chart and scanner views explain what the engine s
 
 ## Session Impulse Retest Runtime Status
 
-As of `2026-05-07`, the active runtime work for the newer `session_impulse_retest` family is centered on **runtime correctness and observability**, not on broadening the live contract.
+As of `2026-05-11`, the active runtime work for the newer `session_impulse_retest` family is centered on **runtime correctness, observability, and loss-attribution hardening**, not on broadening the live contract.
 
 Current `session_impulse_retest` universe:
 
@@ -44,6 +44,9 @@ Current `session_impulse_retest` universe:
 Important operating rules for this family:
 
 - `session_impulse_retest` runtime audits are now **recorded only for tracked symbols** in the family allowlist.
+- `session_impulse_retest` only accepts a 1m retest entry within 3 minutes of the 5m setup bar. The 2026-05-10 3-year loss attribution showed retests after 3 minutes were consistently negative across years, so late retests are no longer eligible for live or replay entries.
+- If stop distance is already high (`risk_atr >= 1.0`), the 1m retest must arrive within 2 minutes. The 2026-05-10 loss replay showed high-risk retests that only appeared on minute 3 had negative contribution.
+- `ETHUSDC` uses the relaxed profile but requires `min_volume_factor=0.90`; ETH low-volume relaxed entries were the clearest remaining symbol-specific loss bucket.
 - `/health/ready` now checks:
   - API dependencies
   - disk free space for the runtime database path
@@ -77,14 +80,28 @@ Primary runtime scripts:
 - runtime scripts default to `PYDANTIC_DISABLE_PLUGINS=1` and `PYTHONDONTWRITEBYTECODE=1` to avoid slow startup scans and dirty tracked pycache files.
 - recent family runtime audits:
   - [/Users/yumin/Documents/trading/scripts/run_session_impulse_retest_runtime_audit_report.py](/Users/yumin/Documents/trading/scripts/run_session_impulse_retest_runtime_audit_report.py)
+- live candidate promotion readiness:
+  - [/Users/yumin/Documents/trading/scripts/run_live_candidate_promotion_readiness.py](/Users/yumin/Documents/trading/scripts/run_live_candidate_promotion_readiness.py)
+  - compresses existing runtime audits and order-intent blockers into compare-only states such as `GATE_BLOCKED`, `SHADOW_SIGNAL_ONLY`, and `SUBMIT_READY_GAP`; it supports `--symbol ADAUSDC`, prints latest evidence timestamps, and never expands live authority
 
 Recommended checks:
 
 ```bash
 cd /Users/yumin/Documents/trading
 bash scripts/check_runtime_stack.sh
+PYTHONPATH="$PWD" .venv/bin/python scripts/run_live_candidate_promotion_readiness.py --compact --no-write-report
+PYTHONPATH="$PWD" .venv/bin/python scripts/run_live_candidate_promotion_readiness.py --symbol ADAUSDC --compact --no-write-report
 PYTHONPATH="$PWD" .venv/bin/python scripts/run_session_impulse_retest_runtime_audit_report.py --hours 24 --limit 50
+PYTHONPATH="$PWD" .venv/bin/python scripts/run_micro_main_usdt_proxy_backtest.py --days 1095 --write-report --write-loss-analysis
 ```
+
+Latest 3-year USDT proxy validation after the 2026-05-10 loss-attribution hardening:
+
+- strategy replay: `4399` closed trades, `+2815.8915R`, EV `+0.6401R`, win rate `65.67%`
+- yearly portfolio replay with `1%` risk, `10x` cap, max `2` concurrent positions:
+  - year 1: `+787.14%`, max drawdown `4.82%`
+  - year 2: `+976.36%`, max drawdown `10.93%`
+  - year 3: `+815.18%`, max drawdown `4.48%`
 
 Interpretation guide for `session_impulse_retest` audits:
 

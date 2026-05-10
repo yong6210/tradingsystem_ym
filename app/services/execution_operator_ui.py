@@ -1747,6 +1747,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const autoExecution = funnel.auto_promotion_rollout_execution || {};
       const history = funnel.promotion_lifecycle_history || {};
       const researchLoop = funnel.research_promotion_operating_loop || {};
+      const liveReadiness = funnel.live_candidate_promotion_readiness || {};
       const family = governance?.family
         || clearance?.family
         || decisionBrief?.family
@@ -1779,8 +1780,10 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             ${badge('Remediation', remediationQueue?.top_remediation_action || 'n/a')}
             ${badge('Clearance', clearance?.clearance_state || 'n/a')}
             ${badge('Auto Exec', autoExecution?.execution_stage || 'n/a')}
+            ${badge('Live Candidate', liveReadiness?.headline_state || 'n/a')}
           </div>
           <div class="summary-grid">
+            ${renderSummaryBox('Live Candidate Readiness', liveReadiness?.headline_state || 'n/a', `${liveReadiness?.headline_reason || 'n/a'} | ${liveReadiness?.headline_action || 'readiness unavailable'}`)}
             ${renderSummaryBox('Promotion Governance', governance?.state || 'n/a', governance?.summary || governance?.promotion_bias || 'promotion governance unavailable')}
             ${renderSummaryBox('Promotion Review Queue', reviewQueue?.queue_state || 'n/a', reviewQueue?.top_review_action || 'review queue unavailable')}
             ${renderSummaryBox('Promotion Remediation Queue', remediationQueue?.queue_state || 'n/a', remediationQueue?.top_remediation_action || 'remediation queue unavailable')}

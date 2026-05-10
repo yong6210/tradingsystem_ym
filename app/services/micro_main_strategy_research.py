@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from statistics import median
 from typing import Any, ClassVar, Literal
@@ -67,6 +67,7 @@ class MicroSignal:
     target_price: float
     max_hold_minutes: int
     regime_hint: str
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +88,7 @@ class MicroTrade:
     hold_minutes: int
     exit_reason: str
     regime_hint: str
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 class SessionImpulseRetestResearch:
@@ -114,6 +116,9 @@ class SessionImpulseRetestResearch:
             "max_reclaim_close_short": 0.44,
             "min_volume_factor": 0.95,
             "entry_retest_buffer_atr": 0.04,
+            "max_retest_wait_minutes": 3.0,
+            "late_retest_high_risk_atr": 1.0,
+            "late_retest_high_risk_max_wait_minutes": 2.0,
             "stop_buffer_atr": 0.12,
             "min_risk_atr": 0.25,
             "max_risk_atr": 1.25,
@@ -138,6 +143,9 @@ class SessionImpulseRetestResearch:
             "max_reclaim_close_short": 0.47,
             "min_volume_factor": 0.80,
             "entry_retest_buffer_atr": 0.06,
+            "max_retest_wait_minutes": 3.0,
+            "late_retest_high_risk_atr": 1.0,
+            "late_retest_high_risk_max_wait_minutes": 2.0,
             "stop_buffer_atr": 0.13,
             "min_risk_atr": 0.22,
             "max_risk_atr": 1.35,
@@ -154,6 +162,9 @@ class SessionImpulseRetestResearch:
             },
         },
         "relaxed_v1": {
+            "ETHUSDC": {
+                "min_volume_factor": 0.90,
+            },
             "BTCUSDC": {
                 "min_reclaim_body_atr": 0.28,
             },
@@ -195,6 +206,19 @@ class SessionImpulseRetestResearch:
             int(hour)
             for hour in (_PROFILE_SYMBOL_BLOCKED_SIGNAL_HOURS.get(self.profile_name) or {}).get(self.symbol, ())
         )
+
+    @staticmethod
+    def _passes_late_retest_risk_filter(
+        profile: dict[str, float],
+        *,
+        risk_atr: float,
+        retest_wait_minutes: float,
+    ) -> bool:
+        high_risk_atr = float(profile.get("late_retest_high_risk_atr", 0.0) or 0.0)
+        high_risk_max_wait = float(profile.get("late_retest_high_risk_max_wait_minutes", 0.0) or 0.0)
+        if high_risk_atr <= 0.0 or high_risk_max_wait <= 0.0:
+            return True
+        return not (float(risk_atr) >= high_risk_atr and float(retest_wait_minutes) > high_risk_max_wait)
 
     @staticmethod
     def _normalize_ts(value: datetime) -> datetime:
@@ -286,9 +310,11 @@ class SessionImpulseRetestResearch:
         reclaim_level: float,
         atr_5m: float,
         retest_buffer_atr: float,
+        max_retest_wait_minutes: float,
     ) -> tuple[datetime, float] | None:
         start_ts = self.ts_5m[setup_idx_5m]
-        end_ts = start_ts + timedelta(minutes=15)
+        max_wait = max(int(max_retest_wait_minutes), 0)
+        end_ts = start_ts + timedelta(minutes=max_wait + 1)
         start_idx = self._index_1m_by_ts.get(start_ts)
         if start_idx is None:
             return None
@@ -348,6 +374,17 @@ class SessionImpulseRetestResearch:
         drive_high = self._rolling_high_5m(orb_end, idx)
         drive_low = self._rolling_low_5m(orb_end, idx)
         vwap = self.session_vwap_5m[idx]
+        volume_factor = float(self.volumes_5m[idx] / max(volume_med, 1e-9))
+        base_diagnostics: dict[str, Any] = {
+            "setup_hour_utc": self.ts_5m[idx].hour,
+            "setup_weekday_utc": self.ts_5m[idx].weekday(),
+            "offset_bars": offset,
+            "orb_width_atr": float(orb_width / atr),
+            "trend_strength_atr": float(trend_strength),
+            "volume_factor": volume_factor,
+            "reclaim_body_atr": float(self._body_size_5m(idx) / atr),
+            "reclaim_close_position": float(self._close_position_in_bar_5m(idx)),
+        }
 
         breakout_long = any(
             self.closes_5m[probe] > orb_high + float(profile["breakout_buffer_atr"]) * max(self.atr_5m[probe], 1e-9)
@@ -374,13 +411,31 @@ class SessionImpulseRetestResearch:
                 reclaim_level=long_reclaim,
                 atr_5m=atr,
                 retest_buffer_atr=float(profile["entry_retest_buffer_atr"]),
+                max_retest_wait_minutes=float(profile["max_retest_wait_minutes"]),
             )
             if entry is not None:
                 entry_ts, entry_price = entry
                 stop = min(self.lows_5m[idx], long_reclaim) - float(profile["stop_buffer_atr"]) * atr
                 risk_abs = entry_price - stop
                 min_risk_abs = max(float(profile["min_risk_atr"]) * atr, entry_price * float(profile["min_risk_pct"]))
-                if min_risk_abs <= risk_abs <= float(profile["max_risk_atr"]) * atr:
+                risk_atr = float(risk_abs / atr)
+                retest_wait_minutes = max(int((entry_ts - self.ts_5m[idx]).total_seconds() // 60), 0)
+                if (
+                    min_risk_abs <= risk_abs <= float(profile["max_risk_atr"]) * atr
+                    and self._passes_late_retest_risk_filter(
+                        profile,
+                        risk_atr=risk_atr,
+                        retest_wait_minutes=retest_wait_minutes,
+                    )
+                ):
+                    diagnostics = {
+                        **base_diagnostics,
+                        "drive_extension_atr": float((drive_high - orb_high) / atr),
+                        "reclaim_overshoot_atr": float((long_reclaim - self.lows_5m[idx]) / atr),
+                        "retest_wait_minutes": retest_wait_minutes,
+                        "risk_atr": risk_atr,
+                        "risk_pct": float(risk_abs / max(entry_price, 1e-9)),
+                    }
                     return MicroSignal(
                         family="session_impulse_retest",
                         direction="long",
@@ -392,6 +447,7 @@ class SessionImpulseRetestResearch:
                         target_price=entry_price + 2.0 * risk_abs,
                         max_hold_minutes=self._MAX_HOLD_MINUTES,
                         regime_hint="session_open",
+                        diagnostics=diagnostics,
                     )
 
         breakout_short = any(
@@ -419,13 +475,31 @@ class SessionImpulseRetestResearch:
                 reclaim_level=short_reclaim,
                 atr_5m=atr,
                 retest_buffer_atr=float(profile["entry_retest_buffer_atr"]),
+                max_retest_wait_minutes=float(profile["max_retest_wait_minutes"]),
             )
             if entry is not None:
                 entry_ts, entry_price = entry
                 stop = max(self.highs_5m[idx], short_reclaim) + float(profile["stop_buffer_atr"]) * atr
                 risk_abs = stop - entry_price
                 min_risk_abs = max(float(profile["min_risk_atr"]) * atr, entry_price * float(profile["min_risk_pct"]))
-                if min_risk_abs <= risk_abs <= float(profile["max_risk_atr"]) * atr:
+                risk_atr = float(risk_abs / atr)
+                retest_wait_minutes = max(int((entry_ts - self.ts_5m[idx]).total_seconds() // 60), 0)
+                if (
+                    min_risk_abs <= risk_abs <= float(profile["max_risk_atr"]) * atr
+                    and self._passes_late_retest_risk_filter(
+                        profile,
+                        risk_atr=risk_atr,
+                        retest_wait_minutes=retest_wait_minutes,
+                    )
+                ):
+                    diagnostics = {
+                        **base_diagnostics,
+                        "drive_extension_atr": float((orb_low - drive_low) / atr),
+                        "reclaim_overshoot_atr": float((self.highs_5m[idx] - short_reclaim) / atr),
+                        "retest_wait_minutes": retest_wait_minutes,
+                        "risk_atr": risk_atr,
+                        "risk_pct": float(risk_abs / max(entry_price, 1e-9)),
+                    }
                     return MicroSignal(
                         family="session_impulse_retest",
                         direction="short",
@@ -437,6 +511,7 @@ class SessionImpulseRetestResearch:
                         target_price=entry_price - 2.0 * risk_abs,
                         max_hold_minutes=self._MAX_HOLD_MINUTES,
                         regime_hint="session_open",
+                        diagnostics=diagnostics,
                     )
         return None
 
@@ -518,6 +593,12 @@ class SessionImpulseRetestResearch:
             hold_minutes=hold_minutes,
             exit_reason=exit_reason,
             regime_hint=signal.regime_hint,
+            diagnostics={
+                **dict(signal.diagnostics),
+                "entry_hour_utc": signal.entry_ts.hour,
+                "entry_weekday_utc": signal.entry_ts.weekday(),
+                "hold_minutes": hold_minutes,
+            },
         )
 
     def backtest(self) -> list[MicroTrade]:
