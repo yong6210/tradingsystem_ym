@@ -4920,23 +4920,56 @@ class StrategyEngine:
         fast: bool = False,
     ) -> dict[str, Any]:
         safety_state = self._safety_state_payload(symbol=symbol)
+        readiness_limit = max(8, int(intent_limit))
+
+        def readiness_error_payload(exc: Exception, *, filter_symbol: str | None, scope: str) -> dict[str, Any]:
+            return {
+                "available": False,
+                "advisory_only": True,
+                "authority": "compare_only_no_live_authority_change",
+                "filter_symbol": str(filter_symbol or "").strip().upper() or None,
+                "scope": scope,
+                "headline_state": "WATCH",
+                "headline_reason": "live_candidate_readiness_unavailable",
+                "headline_action": f"Inspect readiness aggregation error before using this dashboard field: {exc}",
+                "promotion_decision": "observe_runtime",
+                "error": str(exc),
+            }
+
         try:
             live_candidate_promotion_readiness_summary = build_live_candidate_promotion_readiness_from_db(
                 self.db,
                 hours=24,
-                limit=max(8, int(intent_limit)),
+                limit=readiness_limit,
                 symbol=symbol,
             )
+            live_candidate_promotion_readiness_summary["scope"] = (
+                "selected_symbol" if str(symbol or "").strip() else "global_all_symbols"
+            )
         except Exception as exc:
-            live_candidate_promotion_readiness_summary = {
-                "available": False,
-                "advisory_only": True,
-                "authority": "compare_only_no_live_authority_change",
-                "headline_state": "WATCH",
-                "headline_reason": "live_candidate_readiness_unavailable",
-                "headline_action": f"Inspect readiness aggregation error before using this dashboard field: {exc}",
-                "error": str(exc),
-            }
+            live_candidate_promotion_readiness_summary = readiness_error_payload(
+                exc,
+                filter_symbol=symbol,
+                scope="selected_symbol" if str(symbol or "").strip() else "global_all_symbols",
+            )
+        if str(symbol or "").strip():
+            try:
+                live_candidate_promotion_readiness_global_summary = build_live_candidate_promotion_readiness_from_db(
+                    self.db,
+                    hours=24,
+                    limit=readiness_limit,
+                    symbol=None,
+                )
+                live_candidate_promotion_readiness_global_summary["scope"] = "global_all_symbols"
+            except Exception as exc:
+                live_candidate_promotion_readiness_global_summary = readiness_error_payload(
+                    exc,
+                    filter_symbol=None,
+                    scope="global_all_symbols",
+                )
+        else:
+            live_candidate_promotion_readiness_global_summary = dict(live_candidate_promotion_readiness_summary)
+            live_candidate_promotion_readiness_global_summary["scope"] = "global_all_symbols"
         portfolio_summary = self.portfolio_budget_report(
             universe=universe,
             limit=portfolio_limit,
@@ -5348,6 +5381,9 @@ class StrategyEngine:
             )
         payload_signal_funnel = dict(payload.get("signal_funnel") or {})
         payload_signal_funnel["live_candidate_promotion_readiness"] = live_candidate_promotion_readiness_summary
+        payload_signal_funnel["live_candidate_promotion_readiness_global"] = (
+            live_candidate_promotion_readiness_global_summary
+        )
         payload["signal_funnel"] = payload_signal_funnel
         payload["session_impulse_retest_universe_policy"] = build_micro_main_rollout_contract_snapshot(
             enabled=self._safe_bool(self.settings.session_impulse_retest_enabled),

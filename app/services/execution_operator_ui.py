@@ -842,13 +842,21 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       `;
     }
 
-    function renderLiveCandidateReadiness(liveReadiness) {
+    function renderLiveCandidateReadiness(liveReadiness, globalReadiness = {}) {
       const payload = liveReadiness || {};
+      const globalPayload = globalReadiness && Object.keys(globalReadiness).length ? globalReadiness : payload;
       const reviewItems = Array.isArray(payload.operator_review_items) ? payload.operator_review_items : [];
+      const globalReviewItems = Array.isArray(globalPayload.operator_review_items) ? globalPayload.operator_review_items : [];
       const flags = payload.attention_flags || {};
       const headlineSymbols = Array.isArray(payload.headline_candidate_symbols)
         ? payload.headline_candidate_symbols.join(', ')
         : 'n/a';
+      const globalHeadlineSymbols = Array.isArray(globalPayload.headline_candidate_symbols)
+        ? globalPayload.headline_candidate_symbols.join(', ')
+        : 'n/a';
+      const selectedScope = payload.filter_symbol ? `selected=${payload.filter_symbol}` : 'selected=ALL';
+      const globalScope = globalPayload.filter_symbol ? `global=${globalPayload.filter_symbol}` : 'global=ALL';
+      const hasSeparateGlobal = Boolean(payload.filter_symbol) && globalPayload !== payload;
       const flagSummary = [
         `submit_gap=${boolLabel(flags.has_submit_ready_gap)}`,
         `gate_block=${boolLabel(flags.has_gate_block)}`,
@@ -862,12 +870,21 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           <div class="section-note">Live Candidate Review</div>
           <div class="desk-strip">
             ${badge('Decision', payload.promotion_decision || 'n/a')}
+            ${badge('Global Decision', globalPayload.promotion_decision || 'n/a')}
             ${badge('Headline Freshness', payload.headline_evidence_freshness || 'n/a')}
             ${badge('Authority', payload.authority || 'n/a')}
           </div>
           <div class="kv">
+            <div class="k">Scope</div>
+            <div class="v">${esc(`${selectedScope} | ${globalScope}`)}</div>
+          </div>
+          <div class="kv">
             <div class="k">Headline Evidence</div>
             <div class="v">${esc(payload.headline_evidence_at || 'n/a')} | symbols=${esc(headlineSymbols)}</div>
+          </div>
+          <div class="kv">
+            <div class="k">Global Headline</div>
+            <div class="v">${esc(globalPayload.headline_state || 'n/a')} / ${esc(globalPayload.headline_reason || 'n/a')} | ${esc(globalPayload.headline_evidence_at || 'n/a')} | symbols=${esc(globalHeadlineSymbols)}</div>
           </div>
           <div class="kv">
             <div class="k">Latest Evidence</div>
@@ -890,6 +907,22 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             ],
             '현재 우선 review 대상 live candidate가 없습니다.'
           )}
+          ${hasSeparateGlobal ? `
+            <div class="section-note">Global Live Candidate Review</div>
+            ${renderTable(
+              globalReviewItems,
+              [
+                { label: 'Symbol', key: 'symbol' },
+                { label: 'Family', key: 'strategy_family' },
+                { label: 'Attention', key: 'attention' },
+                { label: 'State', key: 'promotion_state' },
+                { label: 'Blocker', key: 'primary_blocker' },
+                { label: 'Freshness', key: 'evidence_freshness' },
+                { label: 'Next Action', key: 'next_action' },
+              ],
+              '전역 우선 review 대상 live candidate가 없습니다.'
+            )}
+          ` : ''}
         </div>
       `;
     }
@@ -1800,6 +1833,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const history = funnel.promotion_lifecycle_history || {};
       const researchLoop = funnel.research_promotion_operating_loop || {};
       const liveReadiness = funnel.live_candidate_promotion_readiness || {};
+      const liveReadinessGlobal = funnel.live_candidate_promotion_readiness_global || {};
       const family = governance?.family
         || clearance?.family
         || decisionBrief?.family
@@ -1846,7 +1880,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             ${renderSummaryBox('Research Promotion Loop', researchLoop?.loop_state || 'n/a', researchLoop?.recommended_action || researchLoop?.summary || 'research loop unavailable')}
             ${renderSummaryBox('Promotion Lifecycle History', history?.history_state || 'n/a', history?.latest_event_type || history?.summary || 'lifecycle history unavailable')}
           </div>
-          ${renderLiveCandidateReadiness(liveReadiness)}
+          ${renderLiveCandidateReadiness(liveReadiness, liveReadinessGlobal)}
           <div class="grid two" style="margin-top:12px;">
             <div class="hint-card">
               <div class="title">남은 Guardrail Domain</div>
@@ -3750,13 +3784,39 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       `;
     }
 
-    async function fetchJson(url, options) {
-      const response = await fetch(url, options);
-      const text = await response.text();
-      let data = null;
-      try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
-      if (!response.ok) throw new Error(`${response.status} ${url} ${JSON.stringify(data)}`);
-      return data;
+    async function fetchJson(url, options = {}) {
+      const { timeoutMs, ...fetchOptions } = options || {};
+      let timeoutId = null;
+      let controller = null;
+      if (timeoutMs && window.AbortController) {
+        controller = new AbortController();
+        timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+        fetchOptions.signal = controller.signal;
+      }
+      try {
+        const response = await fetch(url, fetchOptions);
+        const text = await response.text();
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+        if (!response.ok) throw new Error(`${response.status} ${url} ${JSON.stringify(data)}`);
+        return data;
+      } finally {
+        if (timeoutId) window.clearTimeout(timeoutId);
+      }
+    }
+
+    async function fetchOptionalJson(label, url, options = {}, fallback = {}) {
+      try {
+        return await fetchJson(url, options);
+      } catch (error) {
+        if (Array.isArray(fallback)) return [];
+        return {
+          ...fallback,
+          source_unavailable: true,
+          source_label: label,
+          source_error: error.message,
+        };
+      }
     }
 
     async function refresh() {
@@ -3766,14 +3826,35 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       $('status').textContent = '운영 화면 데이터를 불러오는 중...';
       const dashboardUrl = `/execution/operator-dashboard?symbol=${encodeURIComponent(symbol)}&universe=${encodeURIComponent(universe)}&portfolio_limit=10&intent_limit=10&reconcile_limit=10&days=${days}&fast=true`;
       const plansUrl = `/plans/top?symbol=${encodeURIComponent(symbol)}&tf=5m&limit=5&refresh=true`;
-      const scannerUrl = `/scanner/top?universe=${encodeURIComponent(universe)}&limit=50`;
+      const scannerUrl = `/scanner/top?universe=${encodeURIComponent(universe)}&limit=50&fast=true`;
       try {
         const [dashboard, checklist, validation, plans, scannerRows] = await Promise.all([
-          fetchJson(dashboardUrl),
-          fetchJson(`/operations/checklist?symbol=${encodeURIComponent(symbol)}`, { method: 'POST' }),
-          fetchJson(`/validation/report?symbol=${encodeURIComponent(symbol)}`, { method: 'POST' }),
-          fetchJson(plansUrl),
-          fetchJson(scannerUrl),
+          fetchJson(dashboardUrl, { timeoutMs: 20000 }),
+          fetchOptionalJson(
+            'operations_checklist',
+            `/operations/checklist?symbol=${encodeURIComponent(symbol)}`,
+            { method: 'POST', timeoutMs: 8000 },
+            {
+              checks: [],
+              deployment_go_no_go: 'UNKNOWN',
+              overall_status: 'UNAVAILABLE',
+              deployment_message: 'operations checklist unavailable within operator-ui timeout',
+              playbook_message: 'Use the checklist endpoint directly for the full report.',
+            }
+          ),
+          fetchOptionalJson(
+            'validation_report',
+            `/validation/report?symbol=${encodeURIComponent(symbol)}`,
+            { method: 'POST', timeoutMs: 8000 },
+            {
+              deployment_go_no_go: 'UNKNOWN',
+              validation_report: {},
+              deployment_message: 'validation report unavailable within operator-ui timeout',
+              playbook_message: 'Use the validation endpoint directly for the full report.',
+            }
+          ),
+          fetchOptionalJson('plans_top', plansUrl, { timeoutMs: 10000 }, []),
+          fetchOptionalJson('scanner_top', scannerUrl, { timeoutMs: 8000 }, []),
         ]);
         const plan = firstPlan(plans);
         const candidate = pickCandidate(scannerRows, symbol);

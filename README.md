@@ -82,7 +82,10 @@ Primary runtime scripts:
   - [/Users/yumin/Documents/trading/scripts/run_session_impulse_retest_runtime_audit_report.py](/Users/yumin/Documents/trading/scripts/run_session_impulse_retest_runtime_audit_report.py)
 - live candidate promotion readiness:
   - [/Users/yumin/Documents/trading/scripts/run_live_candidate_promotion_readiness.py](/Users/yumin/Documents/trading/scripts/run_live_candidate_promotion_readiness.py)
+  - contract: [LIVE_CANDIDATE_READINESS_CONTRACT.md](/Users/yumin/Documents/trading/docs/LIVE_CANDIDATE_READINESS_CONTRACT.md)
   - compresses existing runtime audits and order-intent blockers into compare-only states such as `GATE_BLOCKED`, `SHADOW_SIGNAL_ONLY`, and `SUBMIT_READY_GAP`; it supports `--symbol ADAUSDC`, prints latest evidence timestamps plus `fresh`/`recent`/`stale`/`old` freshness labels, separates headline evidence from overall latest evidence, adds `promotion_decision` / `attention_flags` / `operator_review_items`, and never expands live authority
+- `/execution/operator-ui` reads the dashboard through `fast=true` and renders live candidate readiness even when heavier validation/checklist/scanner surfaces are temporarily slow; slow optional surfaces show `source_unavailable` fallback text instead of blocking the whole page.
+- When a symbol is selected, `/execution/operator-ui` shows both selected-symbol readiness and `live_candidate_promotion_readiness_global` so a local `WAIT` state cannot hide a global `BLOCKED` promotion gate.
 
 Recommended checks:
 

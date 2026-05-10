@@ -178,6 +178,9 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "align_value" in execution_dashboard_payload["approval_strip_summary"]
     assert "act_value" in execution_dashboard_payload["approval_strip_summary"]
     assert "signal_funnel" in execution_dashboard_payload
+    assert "live_candidate_promotion_readiness" in execution_dashboard_payload["signal_funnel"]
+    assert "live_candidate_promotion_readiness_global" in execution_dashboard_payload["signal_funnel"]
+    assert execution_dashboard_payload["signal_funnel"]["live_candidate_promotion_readiness_global"]["scope"] == "global_all_symbols"
     assert "family_pass_rates" in execution_dashboard_payload["signal_funnel"]
     assert "regime_pass_rates" in execution_dashboard_payload["signal_funnel"]
     assert "session_pass_rates" in execution_dashboard_payload["signal_funnel"]
@@ -291,6 +294,8 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "Promotion Operating Stack" in execution_operator_ui.text
     assert "승격 review, remediation, clearance, reopen, semi-auto execution, history, research followthrough를 한 번에 읽습니다." in execution_operator_ui.text
     assert "Live Candidate Review" in execution_operator_ui.text
+    assert "Global Live Candidate Review" in execution_operator_ui.text
+    assert "Global Headline" in execution_operator_ui.text
     assert "Headline Freshness" in execution_operator_ui.text
     assert "Headline Evidence" in execution_operator_ui.text
     assert "Attention Flags" in execution_operator_ui.text
@@ -407,6 +412,7 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "promotion_lifecycle_history" in execution_operator_ui.text
     assert "research_promotion_operating_loop" in execution_operator_ui.text
     assert "live_candidate_promotion_readiness" in execution_operator_ui.text
+    assert "live_candidate_promotion_readiness_global" in execution_operator_ui.text
     assert "promotion_decision" in execution_operator_ui.text
     assert "operator_review_items" in execution_operator_ui.text
     assert "attention_flags" in execution_operator_ui.text
@@ -426,6 +432,9 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "session_liquidity_reference" in execution_operator_ui.text
     assert "file://" in execution_operator_ui.text
     assert "fast=true" in execution_operator_ui.text
+    assert "fetchOptionalJson" in execution_operator_ui.text
+    assert "source_unavailable" in execution_operator_ui.text
+    assert "operator-ui timeout" in execution_operator_ui.text
     assert "/execution/operator-dashboard" in execution_operator_ui.text
     assert "/operations/checklist" in execution_operator_ui.text
     assert "/validation/report" in execution_operator_ui.text

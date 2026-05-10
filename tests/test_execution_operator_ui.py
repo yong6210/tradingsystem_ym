@@ -49,6 +49,8 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "Promotion Operating Stack" in html
     assert "승격 review, remediation, clearance, reopen, semi-auto execution, history, research followthrough를 한 번에 읽습니다." in html
     assert "Live Candidate Review" in html
+    assert "Global Live Candidate Review" in html
+    assert "Global Headline" in html
     assert "Decision" in html
     assert "Headline Freshness" in html
     assert "Headline Evidence" in html
@@ -186,6 +188,7 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "promotion_lifecycle_history" in html
     assert "research_promotion_operating_loop" in html
     assert "live_candidate_promotion_readiness" in html
+    assert "live_candidate_promotion_readiness_global" in html
     assert "promotion_decision" in html
     assert "operator_review_items" in html
     assert "attention_flags" in html
@@ -236,4 +239,7 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "session_liquidity_reference" in html
     assert "file://" in html
     assert "fast=true" in html
+    assert "fetchOptionalJson" in html
+    assert "source_unavailable" in html
+    assert "operator-ui timeout" in html
     assert "/execution/quality" in html

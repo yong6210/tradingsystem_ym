@@ -309,7 +309,13 @@ Live 후보 승격 상태 확인:
 ./scripts/run_live_candidate_promotion_readiness.py --symbol ADAUSDC --compact --no-write-report
 ```
 
+해석 계약은 [LIVE_CANDIDATE_READINESS_CONTRACT.md](/Users/yumin/Documents/trading/docs/LIVE_CANDIDATE_READINESS_CONTRACT.md)를 따른다.
+
 이 리포트는 기존 런타임 audit과 order intent blocker만 읽어 `GATE_BLOCKED`, `SHADOW_SIGNAL_ONLY`, `SUBMIT_READY_GAP`, `NO_FRESH_LIVE_CANDIDATE` 같은 compare-only 상태로 압축한다. `--symbol`을 주면 해당 심볼의 승격 상태만 분리해서 보고, 후보별 `latest_evidence_at`, `age_seconds`, `fresh`/`recent`/`stale`/`old` 라벨로 차단 근거의 최신성을 확인한다. 전역 `latest_evidence_at`과 headline을 만든 후보만의 `headline_evidence_at`은 분리해서 읽는다. `promotion_decision`, `attention_flags`, `operator_review_items`는 먼저 볼 blocker와 심볼을 지정하는 운영 힌트일 뿐이고, live allowlist, sizing, approval, 주문 제출 권한은 바꾸지 않는다.
+
+`/execution/operator-ui`는 이 live 후보 섹션을 dashboard `fast=true` 경로에서 먼저 렌더한다. validation/checklist/scanner 같은 무거운 보조 surface가 느리면 해당 섹션만 `source_unavailable` fallback으로 표시하고, live candidate readiness 전체 화면을 loading 상태로 묶지 않는다.
+
+심볼을 선택한 화면에서는 선택 심볼 readiness와 전역 `live_candidate_promotion_readiness_global`을 같이 읽는다. 예를 들어 `BTCUSDC`가 `WAIT`여도 전역 headline이 `BLOCKED / validation_do_not_deploy`이면 승격 판단은 전역 차단을 우선한다.
 
 ### 4.2. 운영 요약
 ```bash

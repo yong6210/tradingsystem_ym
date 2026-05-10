@@ -67,13 +67,15 @@ shift-end handoff message dry-run:
 14. `Deferred Research / Promotion Stack`
 15. `A/B Strategy Posture`
 16. `Promotion Operating Stack`
-17. `Promotion Case Inspector`
-18. `Alpha Research Inspector`
-19. `Data Freshness / Source Inspector`
-20. `Portfolio Candidate Drilldown`
-21. `Portfolio Candidate Inspector`
-22. `Checklist Evidence Drilldown`
-23. `Report Navigation`
+17. `Live Candidate Review`
+18. `Global Live Candidate Review`
+19. `Promotion Case Inspector`
+20. `Alpha Research Inspector`
+21. `Data Freshness / Source Inspector`
+22. `Portfolio Candidate Drilldown`
+23. `Portfolio Candidate Inspector`
+24. `Checklist Evidence Drilldown`
+25. `Report Navigation`
 
 ## 4. 첫 번째 판단
 - `5-Second Operator Kernel`에서 `money funnel -> outcome attribution -> outcome control -> rollout` 순서를 먼저 읽는다.
@@ -89,6 +91,7 @@ shift-end handoff message dry-run:
 - `dashboard`만 `GO`고 `validation / checklist`가 `NO_GO`면 신규 진입 허용으로 읽지 않는다.
 - `Top Operator Action`은 reading priority다. 승인 명령이 아니다.
 - `Mode / Deployment Inspector`에서 `new_entries_allowed=false`면 아래 기회 카드보다 gate reason을 우선 본다.
+- `Live Candidate Review`는 선택 심볼 상태이고 `Global Live Candidate Review`는 전역 승격 상태다. 선택 심볼이 `WAIT`여도 global이 `BLOCKED`면 live 승격 판단은 global block을 우선한다.
 
 ## 5. 수동 점검 항목
 ### 5.1 배포 정합성
@@ -120,10 +123,15 @@ shift-end handoff message dry-run:
 - `Approval Alignment Inspector`
 - `Data Freshness / Source Inspector`
 - `Portfolio Candidate Inspector`
+- `Live Candidate Review`
+- `Global Live Candidate Review`
 
 합격 기준:
 - 위 패널이 모두 홈 화면에서 제목으로 바로 보인다.
 - `Kill Condition Inspector`에는 최소 `Stop Review Verdict`, `Current Lock State`, `Kill Condition Next Move`가 같이 보여야 한다.
+- `Live Candidate Review`에는 `Decision`, `Global Decision`, `Global Headline`이 보여야 한다.
+- `Global Live Candidate Review`에는 전역 `operator_review_items`가 표로 보여야 한다.
+- 자세한 해석은 [LIVE_CANDIDATE_READINESS_CONTRACT.md](/Users/yumin/Documents/trading/docs/LIVE_CANDIDATE_READINESS_CONTRACT.md)를 따른다.
 
 ### 5.3 근거 문서 이동
 - `Report Navigation`
