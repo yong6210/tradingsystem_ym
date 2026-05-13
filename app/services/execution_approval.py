@@ -1534,8 +1534,8 @@ class ExecutionPlanningService:
                     "session_impulse_retest is currently configured as shadow-only.",
                 )
             rollout_readiness = dict(safety.get("session_impulse_retest_rollout_readiness") or {})
-            if rollout_readiness and not self._bool(rollout_readiness.get("ready_for_partial", False)):
-                blockers = [str(item or "") for item in list(rollout_readiness.get("blockers") or []) if str(item or "").strip()]
+            blockers = [str(item or "") for item in list(rollout_readiness.get("blockers") or []) if str(item or "").strip()]
+            if rollout_readiness and blockers:
                 blocker_text = ", ".join(blockers) if blockers else "not_ready"
                 return result(
                     ApprovalState.APPROVED_SHADOW,

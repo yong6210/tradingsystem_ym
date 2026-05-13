@@ -51,7 +51,7 @@ class RolloutPolicyBootstrap:
             live_enabled=True,
             max_execution_mode=ExecutionMode.MICRO_LIVE,
             max_risk_r=0.6,
-            allowed_sessions=("london", "new_york"),
+            allowed_sessions=("dead_session", "london", "new_york"),
             min_quality_score=78.0,
         ),
     }

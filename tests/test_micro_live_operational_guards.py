@@ -811,6 +811,28 @@ def test_replay_validation_bridge_blocks_weak_replay_evidence() -> None:
     assert "ev_below_bridge_floor" in decision["blockers"]
 
 
+def test_replay_validation_bridge_audit_stresses_sweep_structure_failure() -> None:
+    metrics = run_replay_validation_bridge._evidence_metrics(
+        [
+            {
+                "strategy_family": "sweep_reversal",
+                "final_exit_realized_r": -0.0,
+                "final_exit_reason": "structure_failure",
+            },
+            {
+                "strategy_family": "sweep_reversal",
+                "final_exit_realized_r": 1.2,
+                "final_exit_reason": "target_tp2",
+            },
+        ]
+    )
+
+    assert metrics["ev_r"] == 0.1
+    assert metrics["stop_loss_share"] == 0.5
+    assert metrics["structure_failure_share"] == 0.5
+    assert metrics["structure_failure_stress_r"] == -1.0
+
+
 def test_replay_validation_bridge_main_writes_latest_aliases(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(
         run_replay_validation_bridge,
@@ -853,35 +875,39 @@ def test_replay_validation_bridge_main_writes_latest_aliases(monkeypatch, tmp_pa
 def test_replay_validation_bridge_warns_when_material_slice_is_weak() -> None:
     payload = {
         "trade_rows": [
-            {
-                "symbol": "BTCUSDC",
-                "direction": "long",
-                "strategy_family": "session_impulse_retest",
-                "entry_model": "LIMIT",
-                "final_exit_realized_r": 1.0,
-            },
-            {
-                "symbol": "BTCUSDC",
-                "direction": "long",
-                "strategy_family": "session_impulse_retest",
-                "entry_model": "LIMIT",
-                "final_exit_realized_r": 1.0,
-            },
-            {
-                "symbol": "BTCUSDC",
-                "direction": "short",
-                "strategy_family": "session_impulse_retest",
-                "entry_model": "LIMIT",
-                "final_exit_realized_r": -1.0,
-                "final_exit_reason": "stop_loss",
-            },
-            {
-                "symbol": "BTCUSDC",
-                "direction": "short",
-                "strategy_family": "session_impulse_retest",
-                "entry_model": "LIMIT",
-                "final_exit_realized_r": 1.0,
-            },
+                {
+                    "symbol": "BTCUSDC",
+                    "direction": "long",
+                    "strategy_family": "session_impulse_retest",
+                    "entry_model": "LIMIT",
+                    "generated_ts": "2026-05-10T08:00:00+00:00",
+                    "final_exit_realized_r": 1.0,
+                },
+                {
+                    "symbol": "BTCUSDC",
+                    "direction": "long",
+                    "strategy_family": "session_impulse_retest",
+                    "entry_model": "LIMIT",
+                    "generated_ts": "2026-05-10T08:05:00+00:00",
+                    "final_exit_realized_r": 1.0,
+                },
+                {
+                    "symbol": "BTCUSDC",
+                    "direction": "short",
+                    "strategy_family": "session_impulse_retest",
+                    "entry_model": "LIMIT",
+                    "generated_ts": "2026-05-10T08:10:00+00:00",
+                    "final_exit_realized_r": -1.0,
+                    "final_exit_reason": "stop_loss",
+                },
+                {
+                    "symbol": "BTCUSDC",
+                    "direction": "short",
+                    "strategy_family": "session_impulse_retest",
+                    "entry_model": "LIMIT",
+                    "generated_ts": "2026-05-10T08:15:00+00:00",
+                    "final_exit_realized_r": 1.0,
+                },
         ]
     }
 

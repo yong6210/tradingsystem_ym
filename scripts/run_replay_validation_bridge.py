@@ -15,6 +15,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import get_settings
+from app.services.historical_walk_forward_split_review import HistoricalWalkForwardSplitReviewService
 from scripts.operation_report_io import parse_report_generated_at
 from scripts.run_live_replay_parity_audit import _active_contract_filters_from_settings, _as_utc, _safe_float
 
@@ -43,14 +44,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbol", default="")
     parser.add_argument("--all-live-symbols", action="store_true")
     parser.add_argument("--cache-file", default=DEFAULT_REPLAY_CACHE)
-    parser.add_argument("--min-sample", type=int, default=80)
-    parser.add_argument("--min-ev-r", type=float, default=0.10)
+    parser.add_argument("--min-sample", type=int, default=120)
+    parser.add_argument("--min-ev-r", type=float, default=0.20)
     parser.add_argument("--min-ev-lower-r", type=float, default=0.0)
-    parser.add_argument("--min-win-rate", type=float, default=0.40)
-    parser.add_argument("--min-p1r", type=float, default=0.30)
+    parser.add_argument("--min-win-rate", type=float, default=0.48)
+    parser.add_argument("--min-p1r", type=float, default=0.0)
     parser.add_argument("--min-slice-sample", type=int, default=30)
-    parser.add_argument("--max-stop-loss-share", type=float, default=0.60)
-    parser.add_argument("--max-drawdown-r", type=float, default=25.0)
+    parser.add_argument("--max-stop-loss-share", type=float, default=0.45)
+    parser.add_argument("--max-drawdown-r", type=float, default=4.5)
     parser.add_argument("--report-dir", default="reports/operations/replay_validation_bridge")
     parser.add_argument("--no-write-report", action="store_true")
     parser.add_argument("--no-fail-exit", action="store_true")
@@ -108,11 +109,31 @@ def _atomic_write_text(path: Path, content: str) -> None:
             pass
 
 
+def _structure_failure_stress_r() -> float:
+    value = getattr(
+        get_settings(),
+        "auto_trading_replay_validation_bridge_sweep_reversal_structure_failure_stress_r",
+        -1.0,
+    )
+    return _safe_float(value, default=-1.0)
+
+
+def _is_stressed_structure_failure(row: dict[str, Any], realized_r: float) -> bool:
+    family = str(row.get("strategy_family") or "").strip().lower()
+    reason = str(row.get("final_exit_reason") or "").strip().lower()
+    if family != "sweep_reversal" or reason != "structure_failure":
+        return False
+    return realized_r <= 0.0
+
+
 def _realized_r(row: dict[str, Any]) -> float:
     value = row.get("final_exit_realized_r")
     if value in {None, ""}:
         value = row.get("replayed_realized_r")
-    return _safe_float(value)
+    realized_r = _safe_float(value)
+    if _is_stressed_structure_failure(row, realized_r):
+        return _structure_failure_stress_r()
+    return realized_r
 
 
 def _filtered_replay_rows(payload: dict[str, Any], filters: dict[str, Any]) -> list[dict[str, Any]]:
@@ -122,15 +143,36 @@ def _filtered_replay_rows(payload: dict[str, Any], filters: dict[str, Any]) -> l
     }
     entry_models = {str(item or "").strip().upper() for item in list(filters.get("entry_models") or []) if str(item or "").strip()}
     directions = {str(item or "").strip().upper() for item in list(filters.get("directions") or []) if str(item or "").strip()}
-    return [
-        dict(row)
-        for row in list(payload.get("trade_rows") or [])
-        if isinstance(row, dict)
-        and (not filter_symbol or str(row.get("symbol") or "").strip().upper() == filter_symbol)
-        and (not strategy_families or str(row.get("strategy_family") or "").strip().lower() in strategy_families)
-        and (not entry_models or str(row.get("entry_model") or "").strip().upper() in entry_models)
-        and (not directions or str(row.get("direction") or "").strip().upper() in directions)
-    ]
+    sessions = {str(item or "").strip().lower() for item in list(filters.get("sessions") or []) if str(item or "").strip()}
+    family_sessions = {
+        str(key or "").strip().lower(): {str(item or "").strip().lower() for item in list(value or []) if str(item).strip()}
+        for key, value in dict(filters.get("family_sessions") or {}).items()
+    }
+    split_review = HistoricalWalkForwardSplitReviewService(settings=get_settings())
+    rows: list[dict[str, Any]] = []
+    for raw_row in list(payload.get("trade_rows") or []):
+        if not isinstance(raw_row, dict):
+            continue
+        row = dict(raw_row)
+        family = str(row.get("strategy_family") or "").strip().lower()
+        generated_ts = _as_utc(row.get("generated_ts")) or _as_utc(row.get("closed_ts"))
+        generated_session = split_review._session_bucket(generated_ts)
+        row["generated_session"] = generated_session
+        if filter_symbol and str(row.get("symbol") or "").strip().upper() != filter_symbol:
+            continue
+        if strategy_families and family not in strategy_families:
+            continue
+        if entry_models and str(row.get("entry_model") or "").strip().upper() not in entry_models:
+            continue
+        if directions and str(row.get("direction") or "").strip().upper() not in directions:
+            continue
+        if sessions and generated_session not in sessions:
+            continue
+        allowed_family_sessions = family_sessions.get(family) or set()
+        if allowed_family_sessions and generated_session not in allowed_family_sessions:
+            continue
+        rows.append(row)
+    return rows
 
 
 def _max_drawdown_r(values: list[float]) -> float:
@@ -182,10 +224,19 @@ def _evidence_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "p2r": 0.0,
             "p3r": 0.0,
             "stop_loss_share": 0.0,
+            "structure_failure_share": 0.0,
+            "structure_failure_count": 0,
+            "structure_failure_stress_r": _structure_failure_stress_r(),
             "max_drawdown_r": 0.0,
         }
     wins = [value for value in values if value > 0.0]
     losses = [abs(value) for value in values if value <= 0.0]
+    structure_failures = [
+        row
+        for row in rows
+        if str(row.get("strategy_family") or "").strip().lower() == "sweep_reversal"
+        and str(row.get("final_exit_reason") or "").strip().lower() == "structure_failure"
+    ]
     stop_losses = [
         row
         for row, value in zip(rows, values, strict=False)
@@ -203,6 +254,9 @@ def _evidence_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "p2r": round(sum(1 for value in values if value >= 2.0) / count, 4),
         "p3r": round(sum(1 for value in values if value >= 3.0) / count, 4),
         "stop_loss_share": round(len(stop_losses) / count, 4),
+        "structure_failure_share": round(len(structure_failures) / count, 4),
+        "structure_failure_count": len(structure_failures),
+        "structure_failure_stress_r": _structure_failure_stress_r(),
         "max_drawdown_r": _max_drawdown_r(values),
     }
 
@@ -376,7 +430,9 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
             f"- {row.get('symbol')}: {decision.get('status')} | reason={decision.get('reason')} | "
             f"sample={metrics.get('sample_size')} ev={metrics.get('ev_r')} ev_l95={metrics.get('ev_r_lower_95')} "
             f"win={metrics.get('win_rate')} win_l95={metrics.get('win_rate_lower_95')} "
-            f"p1r={metrics.get('p1r')} dd={metrics.get('max_drawdown_r')} warnings={len(warnings)}"
+            f"p1r={metrics.get('p1r')} stop={metrics.get('stop_loss_share')} "
+            f"structure_failure={metrics.get('structure_failure_share')} dd={metrics.get('max_drawdown_r')} "
+            f"warnings={len(warnings)}"
         )
     lines.extend(["", "```json", json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default), "```"])
     content = "\n".join(lines)

@@ -182,6 +182,40 @@ def _write_bridge_pass_reports(root: Path) -> None:
     )
 
 
+def _write_sweep_walk_forward_bridge_cache(root: Path) -> Path:
+    cache_path = root / "historical_walk_forward_cache" / "strategy_proof_contract_live_subset.json"
+    generated_at = datetime.now(timezone.utc).isoformat()
+    base_ts = datetime(2024, 1, 8, 8, 0, tzinfo=timezone.utc)
+    rows = []
+    for index in range(140):
+        realized_r = 1.2 if index % 3 != 0 else -0.25
+        rows.append(
+            {
+                "symbol": "BTCUSDC",
+                "direction": "LONG" if index % 2 == 0 else "SHORT",
+                "strategy_family": "sweep_reversal",
+                "entry_model": "LIMIT",
+                "generated_ts": (base_ts + timedelta(days=index % 20)).isoformat(),
+                "closed_ts": (base_ts + timedelta(days=index % 20, hours=1)).isoformat(),
+                "final_exit_realized_r": realized_r,
+                "final_exit_reason": "target_tp2" if realized_r > 0.0 else "structure_failure",
+            }
+        )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps(
+            {
+                "generated_at": generated_at,
+                "simulation_start_ts": "2024-01-01T00:00:00+00:00",
+                "simulation_end_ts": "2026-05-01T00:00:00+00:00",
+                "trade_rows": rows,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return cache_path
+
+
 def _patch_runtime(engine: StrategyEngine, *, candidate_row: dict) -> None:
     engine._execution_candidate_rows = lambda symbol: (None, [candidate_row], {})  # type: ignore[assignment]
     engine.metrics = lambda symbol, version: _metrics()  # type: ignore[assignment]
@@ -730,6 +764,27 @@ def test_session_impulse_retest_secondary_symbol_stays_shadow_even_if_allowliste
         assert approval["playbook_code"] == "session_impulse_retest_rollout_not_ready"
 
 
+def test_session_impulse_retest_live_readiness_without_blockers_can_approve() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        _patch_live_contract(engine, allowed_symbols=["BTCUSDC"])
+        plan = _micro_plan(symbol="BTCUSDC", plan_id="sir_BTCUSDC_live_readiness_no_blockers")
+        db.add(plan)
+        db.commit()
+
+        _patch_runtime(engine, candidate_row=_candidate_for(plan))
+        engine._session_impulse_retest_rollout_readiness = lambda **kwargs: {  # type: ignore[assignment]
+            "ready_for_partial": False,
+            "status": "partial_or_live_running",
+            "blockers": [],
+        }
+
+        approval = engine.approve_execution_plan(plan_id=plan.plan_id)
+        assert approval["approval_state"] == ApprovalState.APPROVED_AUTO.value
+        assert approval["allowed_execution_mode"] == ExecutionMode.MICRO_LIVE.value
+
+
 def test_session_impulse_retest_live_filled_submit_ingests_immediate_entry_fill() -> None:
     init_db()
     with SessionLocal() as db:
@@ -1060,6 +1115,7 @@ def test_auto_route_symbol_keeps_validation_gate_for_sweep_reversal() -> None:
     with SessionLocal() as db:
         engine = StrategyEngine(db)
         _patch_live_contract(engine, allowed_symbols=["BTCUSDC"])
+        engine.settings.auto_trading_replay_validation_bridge_sweep_reversal_enabled = False
         plan = _sweep_plan(symbol="BTCUSDC", plan_id="sweep_BTCUSDC_validation_gate_test")
         db.add(plan)
         db.commit()
@@ -1083,6 +1139,45 @@ def test_auto_route_symbol_keeps_validation_gate_for_sweep_reversal() -> None:
         assert payload["submit_calls"] == 0
         assert payload["results"][0]["strategy_family"] == "sweep_reversal"
         assert payload["results"][0]["intent"]["decision_reason_code"] == "validation_do_not_deploy"
+
+
+def test_auto_route_symbol_uses_walk_forward_bridge_for_sweep_reversal_limit(tmp_path: Path) -> None:
+    init_db()
+    cache_path = _write_sweep_walk_forward_bridge_cache(tmp_path)
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        _patch_live_contract(engine, allowed_symbols=["BTCUSDC"])
+        engine.settings.auto_trading_replay_validation_bridge_sweep_reversal_cache_file = str(cache_path)
+        plan = _sweep_plan(symbol="BTCUSDC", plan_id="sweep_BTCUSDC_walk_forward_bridge_test")
+        db.add(plan)
+        db.commit()
+
+        _patch_runtime(engine, candidate_row=_candidate_for(plan))
+        engine.metrics = lambda symbol, version: {  # type: ignore[assignment]
+            "grade": "F",
+            "recommendation": "do-not-deploy",
+            "sample_size": 0,
+            "risk_state": "OPEN",
+            "risk_reason": "normal",
+            "operating_lock": {},
+        }
+        engine.execution_coordinator.live_submitter = lambda **kwargs: {  # type: ignore[assignment]
+            "status": "NEW",
+            "order_id": "live_btc_sweep_bridge_001",
+            "client_order_id": kwargs["client_order_id"],
+            "side": kwargs["side"],
+            "order_type": kwargs["order_type"],
+            "reduce_only": kwargs["reduce_only"],
+        }
+
+        payload = engine.auto_route_symbol(symbol="BTCUSDC")
+
+        assert payload["reason"] == "submitted"
+        assert payload["intents_created"] == 1
+        assert payload["submit_calls"] == 1
+        assert payload["results"][0]["strategy_family"] == "sweep_reversal"
+        assert payload["results"][0]["submission"]["adapter"] == "binance"
+        assert payload["results"][0]["submission"]["requested_live"] is True
 
 
 def test_session_impulse_retest_active_thesis_clusters_ignore_zero_risk_and_non_live_rows() -> None:

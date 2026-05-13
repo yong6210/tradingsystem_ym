@@ -14,12 +14,22 @@ if str(ROOT_DIR) not in sys.path:
 from app.core.config import get_settings
 from app.db.repositories import CandleRepository
 from app.db.session import SessionLocal, init_db
+from app.services.family_rollout import RolloutPolicyBootstrap
 from app.services.historical_walk_forward_proof import HistoricalWalkForwardProofService
 from app.services.historical_walk_forward_split_review import HistoricalWalkForwardSplitReviewService
 
 
 def _csv_items(raw: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in str(raw or "").split(",") if item.strip())
+
+
+def _rollout_allowed_sessions(families: tuple[str, ...]) -> tuple[str, ...]:
+    rollout = RolloutPolicyBootstrap()
+    sessions: set[str] = set()
+    for family in families:
+        policy = rollout.get(family)
+        sessions.update(str(item or "").strip().lower() for item in list(policy.allowed_sessions or []) if str(item).strip())
+    return tuple(sorted(sessions))
 
 
 def _preset_config(name: str) -> dict[str, Any]:
@@ -44,6 +54,7 @@ def _preset_config(name: str) -> dict[str, Any]:
         for item in str(getattr(settings, "auto_trading_micro_live_allowed_sessions", "") or "").split(",")
         if item.strip()
     )
+    contract_sessions = live_sessions or _rollout_allowed_sessions(live_families)
     blocked_session_direction_hours_utc = str(
         getattr(settings, "auto_trading_micro_live_session_direction_blocked_hours_utc", "") or ""
     )
@@ -86,7 +97,7 @@ def _preset_config(name: str) -> dict[str, Any]:
             "independent_signal_mode": True,
             "max_candidates_per_bar": 1,
             "source_mode": "raw_candle_heuristic",
-            "allowed_sessions": live_sessions,
+            "allowed_sessions": contract_sessions,
             "blocked_session_direction_hours_utc": "",
             "blocked_symbol_family_entry_direction_hours_utc": "",
             "blocked_strategy_time_contract_path": "",
@@ -103,7 +114,7 @@ def _preset_config(name: str) -> dict[str, Any]:
             "independent_signal_mode": True,
             "max_candidates_per_bar": 1,
             "source_mode": "raw_candle_heuristic",
-            "allowed_sessions": live_sessions,
+            "allowed_sessions": contract_sessions,
             "blocked_session_direction_hours_utc": blocked_session_direction_hours_utc,
             "blocked_symbol_family_entry_direction_hours_utc": blocked_symbol_family_entry_direction_hours_utc,
             "blocked_strategy_time_contract_path": blocked_strategy_time_contract_path,

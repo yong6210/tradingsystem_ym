@@ -60,6 +60,37 @@ def _write_pass_reports(tmp_path: Path) -> None:
     )
 
 
+def _write_sweep_walk_forward_cache(tmp_path: Path) -> Path:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    rows = []
+    base_ts = datetime(2024, 1, 8, 8, 0, tzinfo=timezone.utc)
+    for index in range(140):
+        realized_r = 1.2 if index % 3 != 0 else -0.25
+        rows.append(
+            {
+                "symbol": "BTCUSDC",
+                "direction": "LONG" if index % 2 == 0 else "SHORT",
+                "strategy_family": "sweep_reversal",
+                "entry_model": "LIMIT",
+                "generated_ts": (base_ts.replace(day=((index % 20) + 1))).isoformat(),
+                "closed_ts": (base_ts.replace(day=((index % 20) + 1), hour=9)).isoformat(),
+                "final_exit_realized_r": realized_r,
+                "final_exit_reason": "target_tp2" if realized_r > 0 else "structure_failure",
+            }
+        )
+    cache_path = tmp_path / "historical_walk_forward_cache" / "strategy_proof_contract_live_subset.json"
+    _write_json(
+        cache_path,
+        {
+            "generated_at": generated_at,
+            "simulation_start_ts": "2024-01-01T00:00:00+00:00",
+            "simulation_end_ts": "2026-05-01T00:00:00+00:00",
+            "trade_rows": rows,
+        },
+    )
+    return cache_path
+
+
 def test_replay_validation_bridge_promotes_missing_runtime_sample(tmp_path: Path) -> None:
     _write_pass_reports(tmp_path)
     bridge = UsdtProxyReplayValidationBridge(_settings(tmp_path))
@@ -109,3 +140,116 @@ def test_replay_validation_bridge_does_not_override_existing_live_sample(tmp_pat
     assert metrics["validation_bridge"]["applied"] is False
     assert metrics["validation_bridge"]["reason_code"] == "runtime_validation_sample_available"
 
+
+def test_replay_validation_bridge_promotes_sweep_reversal_limit_active_contract(tmp_path: Path) -> None:
+    cache_path = _write_sweep_walk_forward_cache(tmp_path)
+    settings = _settings(tmp_path)
+    settings.auto_trading_replay_validation_bridge_sweep_reversal_cache_file = str(cache_path)
+    settings.auto_trading_micro_live_allowed_sessions = "london,new_york"
+    settings.auto_trading_micro_live_direction_contract = "BTCUSDC:LONG|SHORT"
+    bridge = UsdtProxyReplayValidationBridge(settings)
+
+    metrics = bridge.apply_to_metrics(
+        {
+            "grade": "F",
+            "recommendation": "do-not-deploy",
+            "sample_size": 0,
+            "risk_state": "OPEN",
+            "risk_reason": "normal",
+        },
+        symbol="BTCUSDC",
+        family="sweep_reversal",
+        requested_mode=ExecutionMode.MICRO_LIVE.value,
+        entry_model="LIMIT",
+    )
+
+    assert metrics["recommendation"] in {"paper-and-limited-live", "deploy-small-capital"}
+    assert metrics["sample_size"] == 140
+    assert metrics["validation_source"] == "historical_walk_forward_sweep_reversal_bridge"
+    assert metrics["validation_bridge"]["source"] == "historical_walk_forward_sweep_reversal_bridge"
+    assert metrics["validation_bridge"]["applied"] is True
+    assert "historical_walk_forward_sweep_reversal_bridge_approval_usable" in metrics["reason_codes"]
+
+
+def test_replay_validation_bridge_stresses_sweep_reversal_structure_failure(tmp_path: Path) -> None:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    base_ts = datetime(2024, 1, 8, 8, 0, tzinfo=timezone.utc)
+    rows = []
+    for index in range(141):
+        structure_failure = index < 64
+        rows.append(
+            {
+                "symbol": "BTCUSDC",
+                "direction": "LONG",
+                "strategy_family": "sweep_reversal",
+                "entry_model": "LIMIT",
+                "generated_ts": (base_ts.replace(day=((index % 20) + 1))).isoformat(),
+                "closed_ts": (base_ts.replace(day=((index % 20) + 1), hour=9)).isoformat(),
+                "final_exit_realized_r": -0.0 if structure_failure else 1.2,
+                "final_exit_reason": "structure_failure" if structure_failure else "target_tp2",
+                "final_exit_trigger_detail": {
+                    "policy": "btc_sweep_reversal_limit_initial_guard_stop",
+                }
+                if structure_failure
+                else {},
+            }
+        )
+    cache_path = tmp_path / "historical_walk_forward_cache" / "strategy_proof_contract_live_subset.json"
+    _write_json(
+        cache_path,
+        {
+            "generated_at": generated_at,
+            "simulation_start_ts": "2024-01-01T00:00:00+00:00",
+            "simulation_end_ts": "2026-05-01T00:00:00+00:00",
+            "trade_rows": rows,
+        },
+    )
+    settings = _settings(tmp_path)
+    settings.auto_trading_replay_validation_bridge_sweep_reversal_cache_file = str(cache_path)
+    settings.auto_trading_micro_live_allowed_sessions = "london,new_york"
+    bridge = UsdtProxyReplayValidationBridge(settings)
+
+    metrics = bridge.apply_to_metrics(
+        {
+            "grade": "F",
+            "recommendation": "do-not-deploy",
+            "sample_size": 0,
+            "risk_state": "OPEN",
+            "risk_reason": "normal",
+        },
+        symbol="BTCUSDC",
+        family="sweep_reversal",
+        requested_mode=ExecutionMode.MICRO_LIVE.value,
+        entry_model="LIMIT",
+    )
+
+    bridge_payload = metrics["validation_bridge"]
+    assert bridge_payload["applied"] is False
+    assert bridge_payload["metrics"]["structure_failure_stress_r"] == -1.0
+    assert bridge_payload["metrics"]["structure_failure_share"] == 0.4539
+    assert "historical_walk_forward_stop_loss_share_above_cap" in bridge_payload["reason_codes"]
+
+
+def test_replay_validation_bridge_does_not_promote_sweep_reversal_confirm(tmp_path: Path) -> None:
+    cache_path = _write_sweep_walk_forward_cache(tmp_path)
+    settings = _settings(tmp_path)
+    settings.auto_trading_replay_validation_bridge_sweep_reversal_cache_file = str(cache_path)
+    bridge = UsdtProxyReplayValidationBridge(settings)
+
+    metrics = bridge.apply_to_metrics(
+        {
+            "grade": "F",
+            "recommendation": "do-not-deploy",
+            "sample_size": 0,
+            "risk_state": "OPEN",
+            "risk_reason": "normal",
+        },
+        symbol="BTCUSDC",
+        family="sweep_reversal",
+        requested_mode=ExecutionMode.MICRO_LIVE.value,
+        entry_model="CONFIRM",
+    )
+
+    assert metrics["recommendation"] == "do-not-deploy"
+    assert metrics["validation_bridge"]["applied"] is False
+    assert metrics["validation_bridge"]["reason_code"] == "replay_validation_entry_model_not_bridgeable"

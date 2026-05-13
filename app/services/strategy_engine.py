@@ -3253,6 +3253,7 @@ class StrategyEngine:
             symbol=plan.symbol,
             family=family,
             requested_mode=requested_mode.value,
+            entry_model=str(executable_plan.get("entry_model") or getattr(plan, "entry_model", "") or ""),
         )
         safety_state = self.safety_locks.safety_state(
             symbol=plan.symbol,

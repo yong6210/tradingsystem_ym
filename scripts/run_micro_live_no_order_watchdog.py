@@ -16,6 +16,7 @@ from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
 from app.services.live_order_lifecycle import LiveOrderLifecycleReporter
 from app.services.notification_dispatcher import NotificationDispatcher
+from app.services.runtime_worker_heartbeat import read_worker_heartbeat
 from scripts.operation_report_io import atomic_write_text, parse_report_generated_at
 from scripts.run_micro_live_runtime_guard import _blocked_intent_diagnostics
 
@@ -73,6 +74,29 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return int(default)
+
+
+def _csv_set(value: Any) -> set[str]:
+    return {item.strip() for item in str(value or "").split(",") if item.strip()}
+
+
+def _parse_utc_ts(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _ws_runtime_started_at() -> datetime | None:
+    payload = read_worker_heartbeat("ws")
+    details = dict(payload.get("details") or {}) if isinstance(payload, dict) else {}
+    return _parse_utc_ts(details.get("started_at"))
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -209,12 +233,25 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
 
 def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
     init_db()
+    settings = get_settings()
+    family_filter = _csv_set(getattr(settings, "auto_trading_micro_live_allowed_families", ""))
+    if not family_filter:
+        family_filter = _csv_set(getattr(settings, "auto_trading_allowed_families", ""))
+    runtime_started_at = _ws_runtime_started_at()
     with SessionLocal() as db:
-        lifecycle = LiveOrderLifecycleReporter(db).generate(days=days, live_only=True, limit=limit)
+        lifecycle = LiveOrderLifecycleReporter(db).generate(
+            days=days,
+            live_only=True,
+            limit=limit,
+            start_at=runtime_started_at,
+            strategy_families=sorted(family_filter),
+        )
     evaluation = evaluate_no_order_watchdog(lifecycle=lifecycle, min_intents=min_intents)
     return {
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "window_days": max(1, int(days)),
+        "runtime_started_at": runtime_started_at.isoformat() if runtime_started_at else None,
+        "family_filter": sorted(family_filter),
         "min_intents": max(1, int(min_intents)),
         "evaluation": evaluation,
         "lifecycle_summary": dict(lifecycle.get("summary") or {}),

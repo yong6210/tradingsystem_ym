@@ -19,6 +19,8 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.db.models import OrderIntent
 from app.db.session import SessionLocal, init_db
+from app.services.family_rollout import RolloutPolicyBootstrap
+from app.services.historical_walk_forward_split_review import HistoricalWalkForwardSplitReviewService
 from app.services.live_order_lifecycle import LiveOrderLifecycleReporter
 from scripts.operation_report_io import atomic_write_text, parse_report_generated_at
 
@@ -104,16 +106,110 @@ def _direction_contract(raw: Any) -> dict[str, list[str]]:
     return contract
 
 
+def _rollout_family_sessions(families: list[str] | set[str]) -> dict[str, list[str]]:
+    rollout = RolloutPolicyBootstrap()
+    out: dict[str, list[str]] = {}
+    normalized_families = {str(item or "").strip().lower() for item in families if str(item or "").strip()}
+    for family in sorted(normalized_families):
+        policy = rollout.get(family)
+        sessions = sorted({str(item or "").strip().lower() for item in list(policy.allowed_sessions or []) if str(item).strip()})
+        if sessions:
+            out[family] = sessions
+    return out
+
+
 def _active_contract_filters_from_settings(symbol: str) -> dict[str, Any]:
     settings = get_settings()
     normalized_symbol = str(symbol or "").strip().upper()
+    families = sorted(_csv_set(getattr(settings, "auto_trading_micro_live_allowed_families", ""), lower=True))
+    configured_sessions = sorted(_csv_set(getattr(settings, "auto_trading_micro_live_allowed_sessions", ""), lower=True))
+    family_sessions = _rollout_family_sessions(families)
+    effective_sessions = configured_sessions or sorted({session for sessions in family_sessions.values() for session in sessions})
     return {
         "symbol": normalized_symbol,
         "execution_mode": "MICRO_LIVE",
-        "strategy_families": sorted(_csv_set(getattr(settings, "auto_trading_micro_live_allowed_families", ""), lower=True)),
+        "strategy_families": families,
         "entry_models": sorted(_csv_set(getattr(settings, "auto_trading_micro_live_allowed_entry_models", ""))),
         "directions": list(_direction_contract(getattr(settings, "auto_trading_micro_live_direction_contract", "")).get(normalized_symbol) or []),
+        "sessions": effective_sessions,
+        "family_sessions": family_sessions,
+        "session_filter_source": (
+            "micro_live_settings"
+            if configured_sessions
+            else "family_rollout_policy"
+            if effective_sessions
+            else "none"
+        ),
     }
+
+
+def _json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
+    return {}
+
+
+def _intent_executable_plan(row: OrderIntent) -> dict[str, Any]:
+    payload = _json_dict(getattr(row, "payload", None))
+    executable = payload.get("executable_plan")
+    return dict(executable) if isinstance(executable, dict) else {}
+
+
+def _intent_session_name(row: OrderIntent) -> str:
+    session_payload = _json_dict(getattr(row, "session_guidance", None))
+    current_session = session_payload.get("current_session")
+    if isinstance(current_session, dict) and str(current_session.get("name") or "").strip():
+        return str(current_session.get("name") or "").strip().lower()
+
+    approval = _json_dict(getattr(row, "approval_snapshot", None))
+    for key in ("session_guidance", "operating_lock", "safety_state"):
+        payload = approval.get(key)
+        if not isinstance(payload, dict):
+            continue
+        current = payload.get("current_session")
+        if isinstance(current, dict) and str(current.get("name") or "").strip():
+            return str(current.get("name") or "").strip().lower()
+        if str(payload.get("session_name") or "").strip():
+            return str(payload.get("session_name") or "").strip().lower()
+    return ""
+
+
+def _intent_matches_active_contract(row: OrderIntent, filters: dict[str, Any]) -> bool:
+    family = str(getattr(row, "strategy_family", "") or "").strip().lower()
+    families = {str(item or "").strip().lower() for item in list(filters.get("strategy_families") or []) if str(item).strip()}
+    if families and family not in families:
+        return False
+
+    executable = _intent_executable_plan(row)
+    entry_model = str(executable.get("entry_model") or "").strip().upper()
+    entry_models = {str(item or "").strip().upper() for item in list(filters.get("entry_models") or []) if str(item).strip()}
+    if entry_models and entry_model and entry_model not in entry_models:
+        return False
+
+    direction = str(executable.get("direction") or "").strip().upper()
+    directions = {str(item or "").strip().upper() for item in list(filters.get("directions") or []) if str(item).strip()}
+    if directions and direction and direction not in directions:
+        return False
+
+    session_name = _intent_session_name(row)
+    sessions = {str(item or "").strip().lower() for item in list(filters.get("sessions") or []) if str(item).strip()}
+    if sessions and session_name and session_name not in sessions:
+        return False
+
+    family_sessions = {
+        str(key or "").strip().lower(): {str(item or "").strip().lower() for item in list(value or []) if str(item).strip()}
+        for key, value in dict(filters.get("family_sessions") or {}).items()
+    }
+    allowed_family_sessions = family_sessions.get(family) or set()
+    if allowed_family_sessions and session_name and session_name not in allowed_family_sessions:
+        return False
+    return True
 
 
 def _flow_cadence_from_db(*, symbol: str, filters: dict[str, Any], days: int) -> dict[str, Any]:
@@ -134,6 +230,7 @@ def _flow_cadence_from_db(*, symbol: str, filters: dict[str, Any], days: int) ->
     init_db()
     with SessionLocal() as db:
         rows = list(db.scalars(stmt))
+    rows = [row for row in rows if _intent_matches_active_contract(row, filters)]
     last_created_at = max((_as_utc(row.created_at) for row in rows), default=None)
     return {
         "cadence_window_days": normalized_days,
@@ -186,20 +283,50 @@ def _local_replay_flow_baseline(*, filters: dict[str, Any], cadence_window: dict
     strategy_families = {str(item or "").strip().lower() for item in list(filters.get("strategy_families") or []) if str(item or "").strip()}
     entry_models = {str(item or "").strip().upper() for item in list(filters.get("entry_models") or []) if str(item or "").strip()}
     directions = {str(item or "").strip().upper() for item in list(filters.get("directions") or []) if str(item or "").strip()}
-    replay_rows = [
-        dict(row)
-        for row in list(payload.get("trade_rows") or [])
-        if isinstance(row, dict)
-        and (not filter_symbol or str(row.get("symbol") or "").strip().upper() == filter_symbol)
-        and (not strategy_families or str(row.get("strategy_family") or "").strip().lower() in strategy_families)
-        and (not entry_models or str(row.get("entry_model") or "").strip().upper() in entry_models)
-        and (not directions or str(row.get("direction") or "").strip().upper() in directions)
-    ]
+    sessions = {str(item or "").strip().lower() for item in list(filters.get("sessions") or []) if str(item or "").strip()}
+    family_sessions = {
+        str(key or "").strip().lower(): {str(item or "").strip().lower() for item in list(value or []) if str(item).strip()}
+        for key, value in dict(filters.get("family_sessions") or {}).items()
+    }
+    split_review = HistoricalWalkForwardSplitReviewService(settings=settings)
+
+    replay_rows: list[dict[str, Any]] = []
+    for raw_row in list(payload.get("trade_rows") or []):
+        if not isinstance(raw_row, dict):
+            continue
+        row = dict(raw_row)
+        family = str(row.get("strategy_family") or "").strip().lower()
+        generated_ts = _as_utc(row.get("generated_ts")) or _as_utc(row.get("closed_ts"))
+        generated_session = split_review._session_bucket(generated_ts)
+        row["generated_session"] = generated_session
+        if filter_symbol and str(row.get("symbol") or "").strip().upper() != filter_symbol:
+            continue
+        if strategy_families and family not in strategy_families:
+            continue
+        if entry_models and str(row.get("entry_model") or "").strip().upper() not in entry_models:
+            continue
+        if directions and str(row.get("direction") or "").strip().upper() not in directions:
+            continue
+        if sessions and generated_session not in sessions:
+            continue
+        allowed_family_sessions = family_sessions.get(family) or set()
+        if allowed_family_sessions and generated_session not in allowed_family_sessions:
+            continue
+        replay_rows.append(row)
     expected_per_week = round(len(replay_rows) / replay_window_weeks, 4) if replay_window_weeks > 0 else 0.0
     observed = _safe_float(cadence_window.get("current_window_active_contract_intents_per_week"))
     return {
         "available": True,
         "source_path": str(cache_path),
+        "contract_filters": {
+            "symbol": filter_symbol,
+            "strategy_families": sorted(strategy_families),
+            "entry_models": sorted(entry_models),
+            "directions": sorted(directions),
+            "sessions": sorted(sessions),
+            "family_sessions": {key: sorted(value) for key, value in sorted(family_sessions.items())},
+            "session_filter_source": str(filters.get("session_filter_source") or ""),
+        },
         "replay_window_days": round(replay_window_days, 4),
         "expected_active_contract_candidates_per_week_from_replay": expected_per_week,
         "expected_closed_per_week_from_replay": expected_per_week,

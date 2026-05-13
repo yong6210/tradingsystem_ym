@@ -114,6 +114,14 @@ class LiveOrderLifecycleReporter:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
 
+    @staticmethod
+    def _normalize_families(value: list[str] | tuple[str, ...] | set[str] | None) -> set[str]:
+        return {
+            str(item or "").strip()
+            for item in list(value or [])
+            if str(item or "").strip()
+        }
+
     @classmethod
     def _blocked_intent_detail(cls, row: OrderIntent) -> dict[str, Any]:
         approval = cls._safe_dict(row.approval_snapshot)
@@ -217,12 +225,16 @@ class LiveOrderLifecycleReporter:
         cutoff: datetime,
         symbol: str | None,
         live_only: bool,
+        strategy_families: list[str] | tuple[str, ...] | set[str] | None = None,
     ) -> dict[str, Any]:
         stmt = select(OrderIntent).where(OrderIntent.created_at >= cutoff)
         if symbol:
             stmt = stmt.where(OrderIntent.symbol == symbol.upper())
         if live_only:
             stmt = stmt.where(OrderIntent.execution_mode.in_(("MICRO_LIVE", "LIVE")))
+        family_filter = self._normalize_families(strategy_families)
+        if family_filter:
+            stmt = stmt.where(OrderIntent.strategy_family.in_(sorted(family_filter)))
         intents = list(self.db.scalars(stmt))
         reason_counts = Counter(str(row.decision_reason_code or "") or "none" for row in intents)
         mode_counts = Counter(str(row.execution_mode or "") or "unknown" for row in intents)
@@ -240,6 +252,7 @@ class LiveOrderLifecycleReporter:
             "by_mode": dict(sorted(mode_counts.items())),
             "by_approval": dict(sorted(approval_counts.items())),
             "by_decision": dict(sorted(decision_counts.items())),
+            "family_filter": sorted(family_filter),
             "top_block_reasons": dict(reason_counts.most_common(10)),
             "recent_blocked_intents": [
                 {
@@ -266,9 +279,11 @@ class LiveOrderLifecycleReporter:
         live_only: bool = True,
         limit: int = 100,
         generated_at: datetime | None = None,
+        start_at: datetime | None = None,
+        strategy_families: list[str] | tuple[str, ...] | set[str] | None = None,
     ) -> dict[str, Any]:
         now = generated_at or datetime.now(timezone.utc)
-        cutoff = now - timedelta(days=max(1, int(days)))
+        cutoff = self._sort_ts(start_at) if start_at is not None else now - timedelta(days=max(1, int(days)))
         stmt = select(OrderSubmission).where(OrderSubmission.submitted_at >= cutoff)
         if symbol:
             stmt = stmt.where(OrderSubmission.symbol == symbol.upper())
@@ -278,12 +293,19 @@ class LiveOrderLifecycleReporter:
         submissions = list(self.db.scalars(stmt))
 
         intent_ids = [row.intent_id for row in submissions]
-        plan_ids = [row.plan_id for row in submissions]
-        client_order_ids = [row.client_order_id for row in submissions]
         intents = {
             row.intent_id: row
             for row in self.db.scalars(select(OrderIntent).where(OrderIntent.intent_id.in_(intent_ids))).all()
         } if intent_ids else {}
+        family_filter = self._normalize_families(strategy_families)
+        if family_filter:
+            submissions = [
+                row
+                for row in submissions
+                if str(getattr(intents.get(row.intent_id), "strategy_family", "") or "") in family_filter
+            ]
+        plan_ids = [row.plan_id for row in submissions]
+        client_order_ids = [row.client_order_id for row in submissions]
         plans = {
             row.plan_id: row
             for row in self.db.scalars(select(Plan).where(Plan.plan_id.in_(plan_ids))).all()
@@ -410,7 +432,12 @@ class LiveOrderLifecycleReporter:
                 "avg_realized_r": round(sum(realized_values) / len(realized_values), 4) if realized_values else None,
                 "by_lifecycle_status": dict(sorted(status_counts.items())),
                 "by_symbol": dict(symbol_counts.most_common()),
-                "live_intents": self._intent_counts(cutoff=cutoff, symbol=symbol, live_only=self._safe_bool(live_only)),
+                "live_intents": self._intent_counts(
+                    cutoff=cutoff,
+                    symbol=symbol,
+                    live_only=self._safe_bool(live_only),
+                    strategy_families=family_filter,
+                ),
             },
             "rows": rows,
         }

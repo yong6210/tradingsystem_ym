@@ -3117,3 +3117,199 @@
   - `./.venv/bin/pytest -q tests/test_micro_live_operational_guards.py::test_launchd_generator_replaces_plists_atomically tests/test_micro_live_operational_guards.py::test_launchd_installer_copies_plists_atomically tests/test_micro_live_operational_guards.py::test_report_atomic_writers_use_unique_tmp_cleanup -q`
   - `./.venv/bin/pytest -q tests/test_micro_live_operational_guards.py -q`
   - `./.venv/bin/pytest -q` (`968 passed, 1 skipped`)
+
+## 2026-05-13 Iteration #135
+### 무엇을 발견했는가
+- 확인 시점 기준 최근 3일 MICRO_LIVE intent는 850건 이상 생성됐지만 `SUBMIT_READY`는 0건, live order submission도 0건이었다. 주문 경로 장애가 아니라 승인 게이트에서 전부 막힌 상태다.
+- 주요 차단 사유는 `adjusted_score_non_positive`, `thesis_active_cap_reached`, `no_runtime_candidate`, `validation_do_not_deploy`, `rollout_session_not_allowed`였다.
+- 백테스트/리플레이 빈도와 live 주문 빈도를 비교할 때 같은 계약을 보고 있지 않았다. `AUTO_TRADING_MICRO_LIVE_ALLOWED_SESSIONS`는 비어 있지만 실제 승인 정책은 family rollout의 `london,new_york` 세션을 적용한다.
+- `micro_live_contract` split review는 세션 필터를 적용해 요약할 수 있었지만, parity audit가 읽는 active-contract replay cache는 필터 전 원본 rows를 기준으로 삼을 수 있었다.
+
+### 무엇을 수정했는가
+- `scripts/run_live_replay_parity_audit.py`가 active-contract replay baseline을 계산할 때 entry model, direction, family rollout session을 함께 반영하도록 보강했다.
+- `scripts/run_historical_walk_forward_split_review.py --preset micro_live_contract`는 `.env`의 MICRO_LIVE 세션 allowlist가 비어 있으면 family rollout policy의 세션을 기본 계약 필터로 사용하게 했다.
+- 라이브 승인 조건, validation gate, 주문 제출 로직은 완화하지 않았다. 이번 수정은 “왜 주문이 안 나갔는지”와 “백테스트 빈도와 무엇이 다른지”를 같은 기준으로 보이게 하는 진단/문서화 수정이다.
+
+### 왜 그렇게 판단했는가
+- 지금 문제는 scanner가 죽은 것이 아니라 `chart/replay candidate -> live approval -> order submission` 사이의 기준선 불일치다.
+- 검증을 끄는 방식으로 첫 주문을 만들면 self-deception 방어가 무너진다. 대신 backtest 기준선, rollout 세션, live 승인 게이트가 같은 계약을 말하도록 맞추는 것이 먼저다.
+
+### 최신 검증 스냅샷
+- 정적 검증:
+  - `./.venv/bin/python -m py_compile scripts/run_live_replay_parity_audit.py scripts/run_historical_walk_forward_split_review.py`
+- 운영 리포트 확인:
+  - `scripts/run_live_replay_parity_audit.py --all-live-symbols --days 3 --no-fail-exit --no-write-report`
+  - `scripts/run_historical_walk_forward_split_review.py --preset micro_live_contract --entry-models LIMIT --allowed-sessions london,new_york --no-write-report`
+
+## 2026-05-13 Iteration #136
+### 무엇을 발견했는가
+- `sweep_reversal`은 최근 intent의 대부분을 차지하지만, replay evidence bridge 대상이 아니어서 live validation sample `0/30` 상태에서는 `validation_do_not_deploy`를 벗어날 수 없었다.
+- `CONFIRM`은 walk-forward에서 손실/stop 비중이 높아 live 계약에 남겨두면 백테스트 빈도는 늘지만 품질 기준이 흐려진다.
+- 세션/entry model을 live 계약과 맞춰 다시 본 결과, replay bridge audit에서 `BTCUSDC + sweep_reversal + LIMIT + london/new_york`만 bridge review 기준을 통과했고 나머지 심볼은 표본 부족, stop-loss 비중, drawdown, lower-bound EV 문제로 제외됐다.
+
+### 무엇을 수정했는가
+- `sweep_reversal`도 replay validation bridge에 연결했다. 단, `LIMIT` entry model, live rollout session, direction contract, fresh historical walk-forward cache, 최소 표본/EV/win-rate/EV lower bound/stop-loss share/drawdown floor를 모두 통과해야만 runtime validation sample missing을 보완한다.
+- `StrategyEngine`이 replay bridge에 `entry_model`을 전달하게 해서 `CONFIRM` 후보가 sweep replay bridge로 승인되는 경로를 막았다.
+- `scripts/run_replay_validation_bridge.py`도 parity audit와 같은 세션 필터를 쓰도록 수정했다.
+- `.env`와 runtime `.env`의 MICRO_LIVE 계약을 `LIMIT` 및 `london,new_york` 세션으로 정렬했다.
+
+### 왜 그렇게 판단했는가
+- 검증 게이트를 끄면 주문은 나가겠지만, 우리가 유지하려던 self-deception 방어가 사라진다.
+- 대신 `sweep_reversal`의 backtest evidence를 live approval 안으로 가져오되, 현재 증거가 가장 강한 BTC/LIMIT/session-aligned 계약에만 통로를 열었다.
+- 다른 심볼은 이번 기준에서 자동 개방하지 않는 것이 맞다. 특히 stop-loss share가 높은 심볼은 빈도보다 실행 품질 리스크가 더 크다.
+
+### 최신 검증 스냅샷
+- 정적 검증:
+  - `./.venv/bin/python -m py_compile app/core/config.py app/services/replay_validation_bridge.py app/services/strategy_engine.py scripts/run_replay_validation_bridge.py scripts/run_live_replay_parity_audit.py scripts/run_historical_walk_forward_split_review.py`
+- 테스트 실행 결과:
+  - `./.venv/bin/pytest -q tests/test_replay_validation_bridge.py tests/test_session_impulse_retest_execution_path.py::test_auto_route_symbol_keeps_validation_gate_for_sweep_reversal tests/test_session_impulse_retest_execution_path.py::test_auto_route_symbol_uses_walk_forward_bridge_for_sweep_reversal_limit tests/test_script_entrypoints.py -q`
+  - `./.venv/bin/pytest -q tests/test_micro_live_operational_guards.py::test_replay_validation_bridge_marks_strong_replay_evidence_as_manual_review_only tests/test_micro_live_operational_guards.py::test_replay_validation_bridge_blocks_weak_replay_evidence tests/test_micro_live_operational_guards.py::test_replay_validation_bridge_warns_when_material_slice_is_weak tests/test_micro_live_operational_guards.py::test_live_replay_parity_portfolio_aggregates_live_symbols -q`
+- 운영 리포트 확인:
+  - `scripts/run_replay_validation_bridge.py --all-live-symbols --no-fail-exit --no-write-report` -> `WATCH`, `BTCUSDC`만 `ELIGIBLE_FOR_MANUAL_BRIDGE_REVIEW`, 나머지 10개는 `NOT_ELIGIBLE`
+
+## 2026-05-14 Iteration #137
+### 무엇을 발견했는가
+- Iteration #136의 `BTCUSDC` 단독 bridge 통과 판단은 과하게 낙관적이었다.
+- 원인은 `btc_sweep_reversal_limit_fast_failure`가 초기 stop touch 이후 `structure_failure`를 거의 0R 근처로 기록하는 백테스트 처리였다. 이 덕분에 BTC/LIMIT/london+new_york 표본은 raw 기준으로 `stop_loss_share=0%`, `max_drawdown=0.0705R`, `profit_factor`가 비정상적으로 크게 보였다.
+- 같은 표본에서 `structure_failure`를 보수적으로 `-1R`로 스트레스 처리하면 BTC는 여전히 EV는 양수지만 `max_drawdown=12.3R`가 되어 runtime bridge cap `4.5R`를 넘는다.
+- 감사 스크립트 기본 floor도 runtime bridge보다 느슨했다. 이 때문에 운영 리포트는 `ELIGIBLE_FOR_MANUAL_BRIDGE_REVIEW`를 보여줄 수 있었지만, 실제 runtime bridge는 더 엄격한 drawdown cap에서 막히는 불일치가 있었다.
+
+### 무엇을 수정했는가
+- `sweep_reversal` replay bridge는 `structure_failure`가 live에서 거의 무손실로 재현된다는 증거가 쌓이기 전까지 `auto_trading_replay_validation_bridge_sweep_reversal_structure_failure_stress_r=-1.0`으로 평가한다.
+- `scripts/run_replay_validation_bridge.py`도 같은 `structure_failure` 스트레스 계산을 적용하고, 기본 bridge floor를 runtime sweep bridge 기준에 맞췄다: sample `120`, EV `0.20R`, win-rate `48%`, stop-loss share `45%`, max drawdown `4.5R`.
+- metrics에 `structure_failure_share`, `structure_failure_count`, `structure_failure_stress_r`를 남겨 fast-failure 착시 여부를 리포트에서 바로 볼 수 있게 했다.
+
+### 왜 그렇게 판단했는가
+- 라이브 체결 로그가 fast-failure를 실제로 거의 0R로 탈출시킨다는 증거를 아직 제공하지 않는다.
+- 검증 브리지는 주문을 열어주는 마지막 방어선이므로, 백테스트 내부의 optimistic exit assumption을 그대로 승인 truth로 쓰면 안 된다.
+- 따라서 지금은 “주문이 나가게 만들기”보다 “backtest와 live approval이 같은 위험 가정으로 말하게 만들기”가 맞다.
+
+### 최신 검증 스냅샷
+- 정적 검증:
+  - `./.venv/bin/python -m py_compile app/core/config.py app/services/replay_validation_bridge.py scripts/run_replay_validation_bridge.py`
+- 테스트 실행 결과:
+  - `./.venv/bin/python -m pytest tests/test_replay_validation_bridge.py tests/test_micro_live_operational_guards.py::test_replay_validation_bridge_audit_stresses_sweep_structure_failure tests/test_micro_live_operational_guards.py::test_replay_validation_bridge_marks_strong_replay_evidence_as_manual_review_only tests/test_micro_live_operational_guards.py::test_replay_validation_bridge_blocks_weak_replay_evidence tests/test_session_impulse_retest_execution_path.py::test_auto_route_symbol_uses_walk_forward_bridge_for_sweep_reversal_limit -q`
+  - `./.venv/bin/python -m pytest tests/test_micro_live_operational_guards.py::test_replay_validation_bridge_audit_stresses_sweep_structure_failure tests/test_micro_live_operational_guards.py::test_replay_validation_bridge_main_writes_latest_aliases -q`
+- 운영 리포트 확인:
+  - `./.venv/bin/python scripts/run_replay_validation_bridge.py --all-live-symbols --no-fail-exit` -> `ALERT`, `NOT_ELIGIBLE=11`, `no_symbol_clears_replay_validation_bridge_floor`
+  - BTC snapshot: sample `1475`, EV `0.3741R`, win `58.10%`, structure_failure_share `64.95%`, maxDD `12.3R`, blocker `drawdown_above_bridge_cap`
+
+## 2026-05-14 Iteration #138
+### 무엇을 발견했는가
+- 사용자가 기준으로 삼은 기존 11개 코인 PASS 백테스트는 `sweep_reversal`이 아니라 `session_impulse_retest + CONFIRM` 계약이었다.
+- 최근 수정 과정에서 live 계약이 `LIMIT` 및 `sweep_reversal` 검증 브리지 쪽으로 기울어, 기존 최고 전략 계약과 live 주문 경로가 서로 다른 전략을 보고 있었다.
+- `session_impulse_retest` 백테스트를 다시 확인하면 11개 MICRO_LIVE 심볼은 모두 replay validation bridge를 통과한다. 예: BTC `134 trades / EV 0.5847R / win 66.42%`, SOL `679 / EV 0.6768R / win 65.68%`, NEAR `296 / EV 0.7444R / win 67.23%`.
+- `session_impulse_retest` readiness 로직은 live가 이미 켜진 상태에서도 `ready_for_partial=false`만 보고 `session_impulse_retest_rollout_not_ready`를 낼 수 있었다. 실제로는 blockers가 없으면 live running 상태를 막으면 안 된다.
+
+### 무엇을 수정했는가
+- `.env` 및 runtime `.env`의 live 계약을 `session_impulse_retest` 단독, `CONFIRM` entry model, `dead_session,london,new_york` 세션 버킷으로 정렬했다.
+- runtime DB의 `family_rollout_policy`에서 `session_impulse_retest`는 MICRO_LIVE로 유지하고 `dead_session,london,new_york`를 허용했다.
+- runtime DB의 `sweep_reversal`은 PAPER로 내려 live 주문 경로에서 분리했다. sweep은 별도 검증 전까지 research/shadow 취급한다.
+- `ExecutionApprovalService`는 `session_impulse_retest` readiness에서 실제 blockers가 있을 때만 shadow로 막도록 수정했다. `ready_for_partial=false` 자체는 live running 상태의 차단 사유가 아니다.
+- `RolloutPolicyBootstrap`의 `session_impulse_retest` 기본 세션도 `dead_session,london,new_york`로 맞췄다.
+
+### 왜 그렇게 판단했는가
+- 기준은 “백테스트 성과표”가 아니라 그 성과를 만든 최고 전략 계약이다.
+- 따라서 live를 임의로 느슨하게 만드는 것이 아니라, live와 검증을 `session_impulse_retest + CONFIRM` 계약으로 다시 일치시키는 것이 맞다.
+- `sweep_reversal`은 다른 계약이므로 같은 주문 경로에 섞으면 원인 분석이 흐려진다.
+
+### 최신 검증 스냅샷
+- 정적 검증:
+  - `./.venv/bin/python -m py_compile app/services/execution_approval.py app/services/family_rollout.py app/core/config.py app/services/replay_validation_bridge.py app/services/strategy_engine.py`
+- 테스트 실행 결과:
+  - `./.venv/bin/python -m pytest tests/test_session_impulse_retest_execution_path.py::test_session_impulse_retest_live_readiness_without_blockers_can_approve tests/test_session_impulse_retest_execution_path.py::test_session_impulse_retest_secondary_symbol_stays_shadow_even_if_allowlisted tests/test_session_impulse_retest_execution_path.py::test_session_impulse_retest_sol_micro_live_can_approve_and_submit tests/test_replay_validation_bridge.py::test_replay_validation_bridge_promotes_missing_runtime_sample -q`
+- 런타임 확인:
+  - `/health/ready` -> ready
+  - runtime settings: `AUTO_TRADING_ALLOWED_FAMILIES=session_impulse_retest`, `AUTO_TRADING_MICRO_LIVE_ALLOWED_ENTRY_MODELS=CONFIRM`, `AUTO_TRADING_MICRO_LIVE_ALLOWED_SESSIONS=dead_session,london,new_york`
+  - runtime rollout DB: `session_impulse_retest=MICRO_LIVE`, `sweep_reversal=PAPER`
+  - `session_impulse_retest` replay bridge: 11개 live 심볼 모두 `deploy-small-capital`
+  - `run_micro_live_preflight.py --symbol BTCUSDC --no-write-report`: 계약/health/safety/reconciliation/live alignment은 PASS, 남은 항목은 checklist `MANUAL_REVIEW` 1건
+
+## 2026-05-14 Iteration #139
+### 무엇을 발견했는가
+- 현재 계약 기준은 `session_impulse_retest + CONFIRM + 11개 live 심볼 + dead_session/london/new_york`다.
+- 이 계약의 장기 proxy backtest는 `1095 days / 4399 trades / EV 0.6401R / win 65.67% / 4.02 trades/day`다.
+- 같은 계약을 최근 런타임 DB 캔들로 다시 재생하면 최근 72시간에는 기대 후보가 10개 있었다. 하지만 최근 12시간에는 0개, 최근 24시간에는 ADA 1개뿐이었고 그 1개는 런타임 재시작 이전 이벤트였다.
+- 최근 72시간의 `session_impulse_retest` intent는 전부 실제 주문 제출 전에 막혔다. 원인은 두 가지였다:
+  - `rollout_session_not_allowed`: `dead_session`이 live rollout 세션에 없어서 01:00~01:30 UTC 후보가 차단됐다.
+  - `session_impulse_retest_rollout_not_ready`: live-enabled 상태인데도 `ready_for_partial=false`를 shadow-only처럼 해석해 런던/뉴욕 후보가 차단됐다.
+- 재시작 이후 WS worker는 정상이며 auto-route도 계속 호출되고 있다. 다만 재시작 이후에는 아직 새 `session_impulse_retest` 후보가 생성되지 않아 `auto_route_submit_calls=0` 상태다.
+
+### 무엇을 수정했는가
+- `dead_session`을 MICRO_LIVE 계약과 family rollout policy 양쪽에 명시했다.
+- `session_impulse_retest` readiness는 실제 blocker가 있을 때만 live 제출을 막도록 수정했다.
+- `sweep_reversal`은 PAPER로 내려 현재 주문 경로에서 분리했다.
+
+### 왜 그렇게 판단했는가
+- “조건이 됐는데도 주문이 안 들어갔는지”는 최근 72시간 기준으로 보면 맞다. 후보는 있었고, live 계약/승격 해석이 백테스트 계약과 달라 주문 제출 전에 막혔다.
+- “지금도 같은 문제가 남아 있는지”는 별도 판단이다. 현재 설정에서는 위 두 차단 원인이 제거됐고, 이후 새 후보가 아직 없어서 주문 제출이 발생하지 않은 상태다.
+- 따라서 다음 검증 지점은 새 `session_impulse_retest` 후보가 생성되는 순간 `APPROVED_AUTO -> SUBMIT`으로 이어지는지 확인하는 것이다.
+
+### 최신 검증 스냅샷
+- 운영 상태:
+  - `/health/ready` -> ready
+  - WS heartbeat: `auto_route_calls > 0`, `auto_route_errors=0`, `auto_route_submit_calls=0`
+- 최근 계약 재생:
+  - `6h=0`, `12h=0`, `24h=1`, `72h=10`
+  - 최근 72시간 기대 후보: ADA 2, AVAX 1, BTC 1, LINK 3, NEAR 1, SOL 1, XRP 1
+- 최근 72시간 차단 요약:
+  - `rollout_session_not_allowed`: AVAX, ADA, XRP, LINK, ADA
+  - `session_impulse_retest_rollout_not_ready`: LINK, NEAR, BTC, LINK, SOL
+
+## 2026-05-14 Iteration #140
+### 무엇을 발견했는가
+- 현재 최고 전략 계약 그대로 최근 72시간을 재생하면 기대 주문은 10건이다.
+- 결과는 6승 4패, 총 `+4.491165R`, 평균 `+0.449117R`, 승률 `60.0%`다.
+- `.env`의 현재 live sizing은 `AUTO_TRADING_LIVE_ACCOUNT_EQUITY_USDT=200`, `AUTO_TRADING_LIVE_RISK_PER_TRADE_PCT=0.01`이므로 단순 환산 수익률은 `+4.491165%`, 복리 순차 환산은 `+4.486477%`다. 금액으로는 약 `+8.98 USDT`다.
+- 차단 원인별 기회 손익:
+  - `rollout_session_not_allowed`: 5건, `+2.975022R`, 약 `+2.97%`
+  - `session_impulse_retest_rollout_not_ready`: 5건, `+1.516143R`, 약 `+1.47%~1.52%`
+
+### 무엇을 수정했는가
+- `scripts/run_session_impulse_retest_opportunity_report.py`를 추가했다.
+  - 최근 N시간의 `session_impulse_retest` 기대 후보를 현재 runtime DB 캔들로 재생한다.
+  - 각 후보가 실제 runtime에서 plan/intention/submission까지 갔는지 추적한다.
+  - 차단 사유별 건수와 차단 사유별 missed R/PnL을 요약한다.
+  - 설정된 live risk pct와 account equity로 단순/복리 수익률 및 USDT PnL을 같이 계산한다.
+- `scripts/check_runtime_stack.sh`에는 기본 자동 실행이 아니라 `RUN_SIR_OPPORTUNITY_REPORT=1`일 때만 72시간 opportunity summary가 붙도록 했다.
+
+### 왜 그렇게 판단했는가
+- 기존 miss detector는 “후보가 runtime에서 누락됐는지”는 잘 보여주지만, 사용자가 바로 알고 싶은 “그래서 몇 건이었고, 그 기회 손익은 얼마였는지”를 한 번에 보여주지 못했다.
+- 이번 리포트는 백테스트 조건, runtime observation, 주문 intent, submission, 차단 사유, missed R을 한 truth source로 묶는다.
+
+### 최신 검증 스냅샷
+- 정적 검증:
+  - `./.venv/bin/python -m py_compile scripts/run_session_impulse_retest_opportunity_report.py`
+  - `bash -n scripts/check_runtime_stack.sh`
+  - `git diff --check -- scripts/run_session_impulse_retest_opportunity_report.py scripts/check_runtime_stack.sh docs/SELF_CHECK_LOG.md`
+- 운영 리포트 확인:
+  - `RUNTIME_WORKER_HEARTBEAT_DIR="$HOME/Library/Application Support/trading/heartbeats" DATABASE_URL="sqlite:///$HOME/Library/Application Support/trading/data/trading.db" "$HOME/Library/Application Support/trading/runtime_venv/bin/python" scripts/run_session_impulse_retest_opportunity_report.py --lookback-hours 72 --write-report --summary-only`
+  - report: `reports/validation/micro_main_opportunity_reports/session_impulse_retest_opportunity_report_20260513T171236Z.json`
+
+## 2026-05-14 Iteration #141
+### 무엇을 발견했는가
+- 마지막 구조 점검에서 runtime guard, reconciliation watchdog, synthetic canary는 모두 PASS/OK였다.
+- 다만 no-order watchdog는 최근 3일 전체 MICRO_LIVE intent를 기준으로 삼아, 이미 live 경로에서 분리한 과거 `sweep_reversal` 차단 기록까지 현재 주문 없음 경고에 섞고 있었다.
+- 이 상태는 실제 차단 원인 분석을 망치지는 않지만, 현재 계약이 정상인데도 과거 계약 노이즈로 WARN을 계속 낼 수 있다.
+
+### 무엇을 수정했는가
+- `LiveOrderLifecycleReporter.generate()`에 `start_at`과 `strategy_families` 필터를 추가했다.
+- `run_micro_live_no_order_watchdog.py`는 현재 WS runtime `started_at` 이후, 현재 MICRO_LIVE family allowlist 기준으로만 no-order 경고를 평가한다.
+- 새 opportunity report 스크립트도 CLI entrypoint 테스트와 핵심 수익률 계산 테스트에 묶었다.
+
+### 왜 그렇게 판단했는가
+- 현재 주문 경로의 truth source는 `session_impulse_retest + CONFIRM`이다.
+- 과거 `sweep_reversal` MICRO_LIVE 실험 기록은 보존해야 하지만, 현재 no-order 알림의 판단 근거로 쓰면 운영자가 잘못된 문제를 쫓게 된다.
+- 따라서 historical lifecycle report는 그대로 두되, no-order watchdog만 current-runtime/current-contract 관점으로 좁히는 것이 맞다.
+
+### 최신 검증 스냅샷
+- 정적 검증:
+  - `./.venv/bin/python -m py_compile app/services/live_order_lifecycle.py scripts/run_micro_live_no_order_watchdog.py scripts/run_micro_live_runtime_guard.py scripts/run_micro_live_boot_check.py scripts/run_session_impulse_retest_opportunity_report.py`
+  - `git diff --check -- app/services/live_order_lifecycle.py scripts/run_micro_live_no_order_watchdog.py tests/test_live_order_lifecycle.py tests/test_script_entrypoints.py docs/SELF_CHECK_LOG.md`
+- 테스트 실행 결과:
+  - `./.venv/bin/pytest -q tests/test_live_order_lifecycle.py tests/test_micro_live_operational_guards.py::test_no_order_watchdog_alerts_when_live_intents_have_no_submission tests/test_micro_live_operational_guards.py::test_no_order_watchdog_main_writes_latest_aliases tests/test_script_entrypoints.py::test_runtime_scripts_support_direct_help_from_other_cwd tests/test_script_entrypoints.py::test_session_impulse_retest_opportunity_report_performance_uses_configured_risk -q`
+- 운영 확인:
+  - `run_micro_live_runtime_guard.py --days 3 --limit 200 --no-fail-exit --no-write-report` -> `overall_status=PASS`, `operational_status=PASS`
+  - `run_live_reconciliation_watchdog.py --days 3 --no-fail-exit --no-write-report` -> `OK`, `no_reconciliation_gap_detected`
+  - `run_micro_live_synthetic_canary.py --no-network --no-fail-exit --no-write-report` -> `PASS`
+  - `run_micro_live_no_order_watchdog.py --days 3 --no-fail-exit --no-write-report` -> `OK`, current runtime/current family 기준 live intent `0`

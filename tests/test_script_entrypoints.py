@@ -36,6 +36,7 @@ import scripts.run_binance_rule_drift_snapshot as binance_rule_drift
 import scripts.run_live_reconciliation_watchdog as live_reconciliation_watchdog
 import scripts.run_live_replay_parity_audit as live_replay_parity
 import scripts.run_replay_validation_bridge as replay_validation_bridge
+import scripts.run_session_impulse_retest_opportunity_report as sir_opportunity_report
 import scripts.run_micro_live_preflight as micro_live_preflight
 import scripts.run_micro_live_boot_check as micro_live_boot_check
 import scripts.run_micro_live_no_order_watchdog as micro_live_no_order_watchdog
@@ -66,6 +67,7 @@ def test_runtime_scripts_support_direct_help_from_other_cwd(tmp_path: Path) -> N
         ROOT_DIR / "scripts" / "run_micro_live_synthetic_canary.py",
         ROOT_DIR / "scripts" / "run_live_reconciliation_watchdog.py",
         ROOT_DIR / "scripts" / "run_replay_validation_bridge.py",
+        ROOT_DIR / "scripts" / "run_session_impulse_retest_opportunity_report.py",
         ROOT_DIR / "scripts" / "run_micro_live_boot_check.py",
         ROOT_DIR / "scripts" / "run_micro_live_ops_heartbeat.py",
         ROOT_DIR / "scripts" / "install_micro_live_ops_launchd.py",
@@ -173,6 +175,20 @@ def test_worker_safe_int_tolerates_malformed_heartbeat_stats() -> None:
     assert run_worker._safe_int("bad") == 0
     assert run_worker._safe_int(None) == 0
     assert run_worker._safe_int("3") == 3
+
+
+def test_session_impulse_retest_opportunity_report_performance_uses_configured_risk() -> None:
+    rows = [{"r_value": 1.0}, {"r_value": -0.5}, {"r_value": 2.0}]
+
+    payload = sir_opportunity_report._performance(rows, risk_pct=0.01, account_equity=200.0)
+
+    assert payload["trade_count"] == 3
+    assert payload["wins"] == 2
+    assert payload["losses"] == 1
+    assert payload["total_r"] == 2.5
+    assert payload["simple_return_pct"] == 2.5
+    assert payload["simple_pnl_usdt"] == 5.0
+    assert payload["compounded_return_pct"] == 2.5049
 
 
 def test_worker_boot_check_is_required_only_for_live_modes(monkeypatch: pytest.MonkeyPatch) -> None:

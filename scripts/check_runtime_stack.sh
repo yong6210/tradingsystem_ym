@@ -100,6 +100,12 @@ echo
 echo "== miss detector (6h) =="
 (cd "$PYTHON_ROOT" && CHECK_HEARTBEAT_DIR="$HEARTBEAT_DIR" PYTHONPATH="$PYTHON_ROOT" "$PYTHON_BIN" "$PYTHON_ROOT/scripts/run_session_impulse_retest_miss_detector.py" --lookback-hours 6)
 
+if [[ "${RUN_SIR_OPPORTUNITY_REPORT:-0}" == "1" ]]; then
+  echo
+  echo "== opportunity report (72h) =="
+  (cd "$ROOT_DIR" && DATABASE_URL="sqlite:///$RUNTIME_DB" RUNTIME_WORKER_HEARTBEAT_DIR="$HEARTBEAT_DIR" PYTHONPATH="$ROOT_DIR" "$PYTHON_BIN" "$ROOT_DIR/scripts/run_session_impulse_retest_opportunity_report.py" --lookback-hours 72 --summary-only)
+fi
+
 echo
 echo "== execution summary (24h) =="
 (cd "$PYTHON_ROOT" && CHECK_HEARTBEAT_DIR="$HEARTBEAT_DIR" PYTHONPATH="$PYTHON_ROOT" "$PYTHON_BIN" - <<'PY'

@@ -355,6 +355,19 @@ class Settings(BaseSettings):
     auto_trading_replay_validation_bridge_min_score: float = 70.0
     auto_trading_replay_validation_bridge_min_years: int = 3
     auto_trading_replay_validation_bridge_max_portfolio_mdd_pct: float = 25.0
+    auto_trading_replay_validation_bridge_sweep_reversal_enabled: bool = True
+    auto_trading_replay_validation_bridge_sweep_reversal_cache_file: str = (
+        "reports/validation/historical_walk_forward_cache/strategy_proof_contract_live_subset.json"
+    )
+    auto_trading_replay_validation_bridge_sweep_reversal_entry_models: str = "LIMIT"
+    auto_trading_replay_validation_bridge_sweep_reversal_min_days: int = 700
+    auto_trading_replay_validation_bridge_sweep_reversal_min_trades: int = 120
+    auto_trading_replay_validation_bridge_sweep_reversal_min_ev_r: float = 0.20
+    auto_trading_replay_validation_bridge_sweep_reversal_min_ev_lower_r: float = 0.0
+    auto_trading_replay_validation_bridge_sweep_reversal_min_win_rate: float = 0.48
+    auto_trading_replay_validation_bridge_sweep_reversal_max_stop_loss_share: float = 0.45
+    auto_trading_replay_validation_bridge_sweep_reversal_max_drawdown_r: float = 4.5
+    auto_trading_replay_validation_bridge_sweep_reversal_structure_failure_stress_r: float = -1.0
     auto_trading_notional_per_r: float = 25.0
     auto_trading_live_sizing_mode: str = "NOTIONAL_PER_R"
     auto_trading_live_account_equity_usdt: float = 0.0

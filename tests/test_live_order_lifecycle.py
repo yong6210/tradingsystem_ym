@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -195,3 +196,63 @@ def test_live_order_lifecycle_report_links_intent_submission_fill_and_ledger() -
     assert row["lifecycle_status"] == "closed"
     assert row["binance_ledger_status"] == "FILLED"
     assert row["binance_test_order"] is False
+
+
+def test_live_order_lifecycle_filters_intents_by_family_and_start_at() -> None:
+    now = datetime.now(timezone.utc)
+    suffix = uuid4().hex
+    with SessionLocal() as db:
+        db.add_all(
+            [
+                OrderIntent(
+                    intent_id=f"intent_lifecycle_filter_sweep_{suffix}",
+                    plan_id=f"plan_lifecycle_filter_sweep_{suffix}",
+                    symbol="BTCUSDC",
+                    strategy_family="sweep_reversal",
+                    execution_mode="MICRO_LIVE",
+                    approval_state="BLOCKED",
+                    submit_decision="SKIP_BLOCKED",
+                    decision_reason_code="validation_do_not_deploy",
+                    decision_reason_message="old family",
+                    created_at=now - timedelta(minutes=5),
+                ),
+                OrderIntent(
+                    intent_id=f"intent_lifecycle_filter_sir_{suffix}",
+                    plan_id=f"plan_lifecycle_filter_sir_{suffix}",
+                    symbol="BTCUSDC",
+                    strategy_family="session_impulse_retest",
+                    execution_mode="MICRO_LIVE",
+                    approval_state="BLOCKED",
+                    submit_decision="SKIP_BLOCKED",
+                    decision_reason_code="candidate_waiting",
+                    decision_reason_message="current family",
+                    created_at=now - timedelta(minutes=4),
+                ),
+                OrderIntent(
+                    intent_id=f"intent_lifecycle_filter_old_{suffix}",
+                    plan_id=f"plan_lifecycle_filter_old_{suffix}",
+                    symbol="BTCUSDC",
+                    strategy_family="session_impulse_retest",
+                    execution_mode="MICRO_LIVE",
+                    approval_state="BLOCKED",
+                    submit_decision="SKIP_BLOCKED",
+                    decision_reason_code="old_runtime",
+                    decision_reason_message="before runtime",
+                    created_at=now - timedelta(days=2),
+                ),
+            ]
+        )
+        db.flush()
+
+        payload = LiveOrderLifecycleReporter(db).generate(
+            days=3,
+            live_only=True,
+            generated_at=now,
+            start_at=now - timedelta(hours=1),
+            strategy_families=["session_impulse_retest"],
+        )
+
+    live_intents = payload["summary"]["live_intents"]
+    assert live_intents["family_filter"] == ["session_impulse_retest"]
+    assert live_intents["total"] == 1
+    assert live_intents["top_block_reasons"] == {"candidate_waiting": 1}
