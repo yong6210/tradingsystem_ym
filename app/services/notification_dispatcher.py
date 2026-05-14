@@ -581,7 +581,7 @@ class NotificationDispatcher:
     @classmethod
     def _format_discord_trade_signal(cls, *, alert_type: str, symbol: str, payload: dict[str, Any]) -> str:
         title_by_type = {
-            "confirm": "진입 확인 신호",
+            "confirm": "조건 확인 신호(주문 아님)",
             "entry": "진입 발생",
             "tp": "목표가 도달",
             "closed": "거래 종료",
@@ -607,6 +607,8 @@ class NotificationDispatcher:
             lines.append(f"기대값: {cls._short_text(expected, max_chars=100)}")
         if plan_id:
             lines.append(f"플랜: {plan_id}")
+        if alert_type == "confirm":
+            lines.append("주문: 제출 아님 | 실제 주문은 LIVE_ORDER_CANDIDATE/진입 발생 기준")
         return "\n".join(lines)
 
     @classmethod
@@ -655,13 +657,39 @@ class NotificationDispatcher:
         headline = cls._short_text(summary_lines[0] if summary_lines else alert_type, max_chars=140)
         report_path = payload.get("report_path")
 
-        lines = [f"[운영] {symbol} 확인 필요"]
+        title = f"[운영] {symbol} 확인 필요"
+        if str(alert_type or "").strip().lower() == "entry_surface_alert":
+            live_count = cls._entry_surface_live_order_count(message)
+            if live_count <= 0:
+                title = f"[모니터링] {symbol} 주문 후보 없음"
+            else:
+                title = f"[중요] {symbol} 라이브 주문 후보 확인"
+
+        lines = [title]
         lines.append(f"요약: {headline}")
         if len(summary_lines) > 1:
             lines.append(f"추가: {cls._short_text(summary_lines[1], max_chars=120)}")
         if report_path:
             lines.append(f"리포트: {report_path}")
         return "\n".join(lines)
+
+    @classmethod
+    def _entry_surface_live_order_count(cls, message: str) -> int:
+        for raw_line in str(message or "").splitlines():
+            line = raw_line.strip()
+            marker = "live_order_candidates="
+            if marker not in line:
+                continue
+            suffix = line.split(marker, 1)[1]
+            digits = []
+            for char in suffix:
+                if char.isdigit():
+                    digits.append(char)
+                    continue
+                break
+            if digits:
+                return int("".join(digits))
+        return 0
 
     @classmethod
     def _format_discord_test(cls, *, symbol: str, payload: dict[str, Any]) -> str:

@@ -785,6 +785,33 @@ def test_session_impulse_retest_live_readiness_without_blockers_can_approve() ->
         assert approval["allowed_execution_mode"] == ExecutionMode.MICRO_LIVE.value
 
 
+def test_session_impulse_retest_live_bootstrap_advisory_sample_gap_can_submit() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        _patch_live_contract(engine, allowed_symbols=["BTCUSDC"])
+        plan = _micro_plan(symbol="BTCUSDC", plan_id="sir_BTCUSDC_live_bootstrap_advisory")
+        db.add(plan)
+        db.commit()
+
+        _patch_runtime(engine, candidate_row=_candidate_for(plan))
+        engine._session_impulse_retest_rollout_readiness = lambda **kwargs: {  # type: ignore[assignment]
+            "ready_for_partial": False,
+            "status": "live_bootstrap_collecting",
+            "blockers": [],
+            "advisory_blockers": ["no_recent_closed_sample"],
+        }
+
+        approval = engine.approve_execution_plan(plan_id=plan.plan_id)
+        assert approval["approval_state"] == ApprovalState.APPROVED_AUTO.value
+        assert approval["playbook_code"] == "micro_live_rollout_enabled"
+
+        intent = engine.create_order_intent(plan_id=plan.plan_id, execution_mode=ExecutionMode.MICRO_LIVE)
+        assert intent["approval_state"] == ApprovalState.APPROVED_AUTO.value
+        assert intent["submit_decision"] == SubmitDecision.SUBMIT.value
+        assert intent["decision_reason_code"] == "submit_ready"
+
+
 def test_session_impulse_retest_live_filled_submit_ingests_immediate_entry_fill() -> None:
     init_db()
     with SessionLocal() as db:

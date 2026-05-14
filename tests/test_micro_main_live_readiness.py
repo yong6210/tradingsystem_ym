@@ -41,7 +41,7 @@ def test_micro_main_live_readiness_respects_core_rollout_window() -> None:
         core_live_slots=2,
         secondary_live_enabled=False,
     )
-    assert readiness.status == "shadow_collecting"
+    assert readiness.status == "outside_current_core_live_window"
     assert readiness.ready_for_partial is False
     assert "outside_current_core_live_window" in readiness.blockers
 
@@ -91,7 +91,7 @@ def test_micro_main_live_readiness_secondary_symbol_stays_shadow_only_even_when_
     assert "secondary_rollout_disabled" in readiness.blockers
 
 
-def test_micro_main_live_readiness_core_symbol_without_recent_sample_is_not_reported_as_live_running() -> None:
+def test_micro_main_live_readiness_core_symbol_without_recent_sample_bootstraps_live_canary() -> None:
     readiness = evaluate_micro_main_live_readiness(
         symbol="BTCUSDC",
         shadow_summary={
@@ -108,5 +108,8 @@ def test_micro_main_live_readiness_core_symbol_without_recent_sample_is_not_repo
         core_live_slots=11,
         secondary_live_enabled=False,
     )
-    assert readiness.status == "waiting_fresh_setup"
+    assert readiness.status == "live_bootstrap_collecting"
     assert readiness.ready_for_partial is False
+    assert readiness.blockers == ()
+    assert "no_recent_closed_sample" in readiness.advisory_blockers
+    assert "shadow_decision_not_pass" not in readiness.advisory_blockers

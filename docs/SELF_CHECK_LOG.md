@@ -1,7 +1,25 @@
 # Self-Check 로그 (Living)
 
-현재 기준선: 2026-05-10 MICRO_LIVE failure contract + live submit claim + partial-fill lifecycle guard + atomic report stack + boolean parser guard
+현재 기준선: 2026-05-15 SIR canary bootstrap deadlock fix + MICRO_LIVE failure contract + live submit claim + partial-fill lifecycle guard + atomic report stack + boolean parser guard
 참고: 각 Iteration의 테스트 수치/리포트 경로는 해당 시점 기록이며, 최신 운영 기준은 "현재 기준선"을 따른다.
+
+## 2026-05-15 SIR Canary Bootstrap Deadlock Fix
+### 무엇을 발견했는가
+- `session_impulse_retest`는 장기 USDT proxy backtest와 yearly portfolio replay로 선별된 live/core universe를 쓰고 있었다.
+- 그런데 live-enabled 상태에서도 최근 약 15시간 shadow 요약의 `recent_closed=0`, `decision=REJECT`, `ev_r=0`, `total_r=0`이 `session_impulse_retest_rollout_not_ready` hard blocker로 들어가 실제 주문 제출을 막을 수 있었다.
+- 이 구조는 canary가 시작되지 않으면 live/최근 종료 표본이 생기지 않고, 표본이 없어서 canary가 시작되지 않는 bootstrap deadlock을 만든다.
+
+### 무엇을 수정했는가
+- `evaluate_micro_main_live_readiness`에서 short-window shadow evidence blocker를 `shadow_only=true`일 때만 hard blocker로 쓰게 했다.
+- `shadow_only=false`인 live-enabled canary에서는 `shadow_not_available`, `no_recent_closed_sample`, short-window shadow EV/total/decision scarcity를 `advisory_blockers`로 남기고 live submit을 막지 않는다.
+- 하드 차단은 family disabled, universe 밖, secondary rollout disabled, current core rollout window 밖처럼 live 계약 자체를 어기는 경우에 유지한다.
+- zero-sample 상태에서는 `decision=REJECT`, `ev_r=0`, `total_r=0`을 별도 negative evidence로 중복 해석하지 않고 `no_recent_closed_sample` 관측값으로만 남긴다.
+- 같은 패턴의 운영 오해를 막기 위해 `transition_edge_variant_live_readiness`도 live-enabled 상태에서는 shadow pass 부족/평가 부족을 `advisory_blockers`로 분리했다.
+
+### 운영상 의미
+- 검증을 없앤 것이 아니라, live authority를 원래 의도한 장기 replay-validation bridge와 live/core allowlist로 되돌렸다.
+- 짧은 shadow 창은 live-enabled canary를 막는 truth source가 아니라, canary가 돌아가는 동안 drift/품질을 보는 관측값이다.
+- 주문이 실제로 나가려면 여전히 runtime GO, session contract, safety locks, liquidity gate, duplicate/reentry guard, exchange submit guard를 모두 통과해야 한다.
 
 ## 2026-05-10 MICRO_LIVE Failure Contract Drill Guard
 ### 무엇을 발견했는가

@@ -185,6 +185,56 @@ def test_dispatcher_discord_suppresses_low_importance_signal(monkeypatch) -> Non
         settings.alert_discord_webhook_url = old_url
 
 
+def test_dispatcher_entry_surface_context_only_title_is_monitoring() -> None:
+    message = NotificationDispatcher._format_discord_message(
+        alert_type="entry_surface_alert",
+        symbol="USDC_PERP_TOP30",
+        payload={
+            "message": (
+                "Trading entry surface alert: live_order_candidates=0, review_candidates=2\n"
+                "scope: USDC_PERP_TOP30 | order_truth=live_candidate_promotion_readiness\n"
+                "counts: LIVE_ORDER_CANDIDATE=0, CONTEXT_REVIEW_SETUP=2"
+            )
+        },
+    )
+
+    assert message.startswith("[모니터링] USDC_PERP_TOP30 주문 후보 없음")
+    assert "확인 필요" not in message
+
+
+def test_dispatcher_entry_surface_live_candidate_title_requires_attention() -> None:
+    message = NotificationDispatcher._format_discord_message(
+        alert_type="entry_surface_alert",
+        symbol="USDC_PERP_TOP30",
+        payload={
+            "message": (
+                "Trading entry surface alert: live_order_candidates=1, review_candidates=0\n"
+                "scope: USDC_PERP_TOP30 | order_truth=live_candidate_promotion_readiness\n"
+                "counts: LIVE_ORDER_CANDIDATE=1, CONTEXT_REVIEW_SETUP=0"
+            )
+        },
+    )
+
+    assert message.startswith("[중요] USDC_PERP_TOP30 라이브 주문 후보 확인")
+
+
+def test_dispatcher_confirm_signal_is_labeled_as_non_order_signal() -> None:
+    message = NotificationDispatcher._format_discord_message(
+        alert_type="confirm",
+        symbol="BTCUSDC",
+        payload={
+            "direction": "long",
+            "plan_id": "plan_confirm",
+            "event_price": 100.0,
+            "entry_price": 100.1,
+        },
+    )
+
+    assert message.startswith("[중요] BTCUSDC 조건 확인 신호(주문 아님)")
+    assert "주문: 제출 아님" in message
+    assert "진입 확인 신호" not in message
+
+
 def test_dispatcher_system_fanout_delivers_to_configured_routes(monkeypatch) -> None:
     NotificationDispatcher.reset_circuit_state()
     settings = get_settings()

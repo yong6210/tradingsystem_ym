@@ -28,6 +28,7 @@ class TransitionVariantReadiness:
     status: str
     ready_for_partial: bool
     blockers: tuple[str, ...]
+    advisory_blockers: tuple[str, ...]
     shadow_metrics: dict[str, Any]
     live_lane: dict[str, Any]
 
@@ -54,20 +55,27 @@ def evaluate_transition_variant_live_readiness(
     expected_ev_proxy = float(shadow.get("expected_ev_r_proxy", 0.0) or 0.0)
 
     blockers: list[str] = []
+    shadow_evidence_blockers: list[str] = []
     if not enabled:
         blockers.append("variant_disabled")
     if killed:
         blockers.append("variant_killed")
     if shadow_evaluated_count <= 0:
-        blockers.append("no_shadow_evaluations")
+        shadow_evidence_blockers.append("no_shadow_evaluations")
     if shadow_pass_count < 2:
-        blockers.append("shadow_pass_count_below_minimum")
+        shadow_evidence_blockers.append("shadow_pass_count_below_minimum")
     if low_conf_delta >= 0:
-        blockers.append("low_confluence_not_reduced")
+        shadow_evidence_blockers.append("low_confluence_not_reduced")
     if candidate_delta <= 0:
-        blockers.append("candidate_delta_not_positive")
+        shadow_evidence_blockers.append("candidate_delta_not_positive")
     if expected_ev_proxy <= 0.0:
-        blockers.append("expected_ev_proxy_not_positive")
+        shadow_evidence_blockers.append("expected_ev_proxy_not_positive")
+
+    advisory_blockers: list[str] = []
+    if shadow_only:
+        blockers.extend(shadow_evidence_blockers)
+    else:
+        advisory_blockers.extend(shadow_evidence_blockers)
 
     ready_for_partial = not blockers and shadow_only
 
@@ -81,6 +89,8 @@ def evaluate_transition_variant_live_readiness(
         status = "waiting_shadow_signal"
     elif shadow_only:
         status = "shadow_collecting"
+    elif advisory_blockers:
+        status = "live_observing_shadow_evidence"
     else:
         status = "partial_or_live_running"
 
@@ -92,6 +102,7 @@ def evaluate_transition_variant_live_readiness(
         status=status,
         ready_for_partial=ready_for_partial,
         blockers=tuple(blockers),
+        advisory_blockers=tuple(advisory_blockers),
         shadow_metrics={
             "shadow_evaluated_count": shadow_evaluated_count,
             "shadow_pass_count": shadow_pass_count,
@@ -100,6 +111,7 @@ def evaluate_transition_variant_live_readiness(
             "low_confluence_block_delta": low_conf_delta,
             "expected_ev_r_proxy": expected_ev_proxy,
             "reason_mix": dict(shadow.get("shadow_rescue_reason_mix") or {}),
+            "shadow_evidence_policy": "hard_gate_in_shadow_only_advisory_in_live_enabled",
         },
         live_lane=live_lane,
     )
@@ -114,6 +126,7 @@ def readiness_to_dict(payload: TransitionVariantReadiness) -> dict[str, Any]:
         "status": payload.status,
         "ready_for_partial": payload.ready_for_partial,
         "blockers": list(payload.blockers),
+        "advisory_blockers": list(payload.advisory_blockers),
         "shadow_metrics": dict(payload.shadow_metrics),
         "live_lane": dict(payload.live_lane),
     }
