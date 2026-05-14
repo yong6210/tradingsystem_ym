@@ -3290,26 +3290,680 @@
 ### 무엇을 발견했는가
 - 마지막 구조 점검에서 runtime guard, reconciliation watchdog, synthetic canary는 모두 PASS/OK였다.
 - 다만 no-order watchdog는 최근 3일 전체 MICRO_LIVE intent를 기준으로 삼아, 이미 live 경로에서 분리한 과거 `sweep_reversal` 차단 기록까지 현재 주문 없음 경고에 섞고 있었다.
+- 추가 확인에서 runtime guard도 lifecycle summary 자체는 최근 3일 전체 live intent를 읽을 수 있어, PASS 상태여도 과거 `sweep_reversal` 차단 intent가 현재 live funnel처럼 보일 수 있었다.
 - 이 상태는 실제 차단 원인 분석을 망치지는 않지만, 현재 계약이 정상인데도 과거 계약 노이즈로 WARN을 계속 낼 수 있다.
 
 ### 무엇을 수정했는가
 - `LiveOrderLifecycleReporter.generate()`에 `start_at`과 `strategy_families` 필터를 추가했다.
 - `run_micro_live_no_order_watchdog.py`는 현재 WS runtime `started_at` 이후, 현재 MICRO_LIVE family allowlist 기준으로만 no-order 경고를 평가한다.
+- `run_micro_live_runtime_guard.py`도 같은 기준으로 lifecycle/live intent funnel을 좁혔다.
 - 새 opportunity report 스크립트도 CLI entrypoint 테스트와 핵심 수익률 계산 테스트에 묶었다.
 
 ### 왜 그렇게 판단했는가
 - 현재 주문 경로의 truth source는 `session_impulse_retest + CONFIRM`이다.
 - 과거 `sweep_reversal` MICRO_LIVE 실험 기록은 보존해야 하지만, 현재 no-order 알림의 판단 근거로 쓰면 운영자가 잘못된 문제를 쫓게 된다.
-- 따라서 historical lifecycle report는 그대로 두되, no-order watchdog만 current-runtime/current-contract 관점으로 좁히는 것이 맞다.
+- 따라서 historical lifecycle report는 그대로 두되, no-order watchdog과 runtime guard의 운영 판단만 current-runtime/current-contract 관점으로 좁히는 것이 맞다.
 
 ### 최신 검증 스냅샷
 - 정적 검증:
   - `./.venv/bin/python -m py_compile app/services/live_order_lifecycle.py scripts/run_micro_live_no_order_watchdog.py scripts/run_micro_live_runtime_guard.py scripts/run_micro_live_boot_check.py scripts/run_session_impulse_retest_opportunity_report.py`
+  - `./.venv/bin/python -m py_compile scripts/run_micro_live_runtime_guard.py app/services/live_order_lifecycle.py scripts/run_micro_live_no_order_watchdog.py`
   - `git diff --check -- app/services/live_order_lifecycle.py scripts/run_micro_live_no_order_watchdog.py tests/test_live_order_lifecycle.py tests/test_script_entrypoints.py docs/SELF_CHECK_LOG.md`
 - 테스트 실행 결과:
   - `./.venv/bin/pytest -q tests/test_live_order_lifecycle.py tests/test_micro_live_operational_guards.py::test_no_order_watchdog_alerts_when_live_intents_have_no_submission tests/test_micro_live_operational_guards.py::test_no_order_watchdog_main_writes_latest_aliases tests/test_script_entrypoints.py::test_runtime_scripts_support_direct_help_from_other_cwd tests/test_script_entrypoints.py::test_session_impulse_retest_opportunity_report_performance_uses_configured_risk -q`
+  - `./.venv/bin/pytest -q tests/test_micro_live_runtime_guard.py tests/test_live_order_lifecycle.py tests/test_micro_live_operational_guards.py::test_runtime_guard_main_writes_latest_aliases tests/test_micro_live_operational_guards.py::test_no_order_watchdog_main_writes_latest_aliases -q`
 - 운영 확인:
-  - `run_micro_live_runtime_guard.py --days 3 --limit 200 --no-fail-exit --no-write-report` -> `overall_status=PASS`, `operational_status=PASS`
+  - `run_micro_live_runtime_guard.py --days 3 --limit 200 --no-fail-exit --no-write-report` -> `overall_status=PASS`, `operational_status=PASS`, current runtime/current family 기준 live intent `0`
   - `run_live_reconciliation_watchdog.py --days 3 --no-fail-exit --no-write-report` -> `OK`, `no_reconciliation_gap_detected`
   - `run_micro_live_synthetic_canary.py --no-network --no-fail-exit --no-write-report` -> `PASS`
   - `run_micro_live_no_order_watchdog.py --days 3 --no-fail-exit --no-write-report` -> `OK`, current runtime/current family 기준 live intent `0`
+
+## 2026-05-14 Iteration #142
+### 무엇을 발견했는가
+- `run_replay_validation_bridge.py` 운영 리포트가 현재 `session_impulse_retest` live approval이 쓰는 USDT proxy bridge를 보지 않고, `sweep_reversal` historical walk-forward cache만 보고 있었다.
+- 그래서 실제 런타임 bridge는 11개 심볼 모두 usable인데도 운영 리포트는 현재 SIR 계약을 `sample_size=0`, `ALERT`로 표시할 수 있었다.
+- macro blackout 계약 파일도 오래됐고, live에서 분리한 `sweep_reversal/LIMIT`까지 포함한 Q2 중심 계약으로 남아 있었다.
+
+### 무엇을 수정했는가
+- `run_replay_validation_bridge.py`는 현재 MICRO_LIVE family가 `session_impulse_retest`이면 `UsdtProxyReplayValidationBridge.evaluate()`를 직접 사용해 런타임 approval과 같은 evidence를 보고한다.
+- `sweep_reversal`은 기존 historical walk-forward cache 평가 경로를 유지해, future research/shadow 분석과 SIR live bridge가 섞이지 않게 했다.
+- macro blackout 계약을 현재 11개 live 심볼, `session_impulse_retest`, `CONFIRM` 기준으로 갱신했다. FOMC는 공식 Fed calendar에서 갱신했고, BLS CPI/NFP는 403으로 막혀 기존 계약 9개 window를 fallback으로 유지했다.
+- stale 운영 latest 리포트를 갱신해 ops heartbeat가 현재 상태판을 읽도록 했다.
+
+### 왜 그렇게 판단했는가
+- 현재 주문 승인 truth는 `session_impulse_retest + CONFIRM + USDT proxy replay bridge`다.
+- 운영 리포트가 다른 cache를 truth로 삼으면 주문은 정상이어도 운영자는 “검증이 0표본이라 막혔다”고 오해할 수 있다.
+- blackout도 실제 live 계약과 같은 family/entry model만 막아야 한다. 이미 PAPER로 내린 `sweep_reversal`까지 live blackout truth에 남겨두면 상태 설명이 다시 흐려진다.
+
+### 최신 검증 스냅샷
+- 정적 검증:
+  - `./.venv/bin/python -m py_compile scripts/run_replay_validation_bridge.py`
+  - `git diff --check -- scripts/run_replay_validation_bridge.py tests/test_micro_live_operational_guards.py`
+- 테스트 실행 결과:
+  - `./.venv/bin/pytest -q tests/test_micro_live_operational_guards.py::test_replay_validation_bridge_build_payload_uses_runtime_bridge_for_session_impulse tests/test_micro_live_operational_guards.py::test_replay_validation_bridge_warns_when_material_slice_is_weak tests/test_micro_live_operational_guards.py::test_replay_validation_bridge_main_writes_latest_aliases tests/test_replay_validation_bridge.py::test_replay_validation_bridge_promotes_missing_runtime_sample -q`
+- 운영 확인:
+  - `run_replay_validation_bridge.py --all-live-symbols --no-fail-exit` -> `PASS`, `ELIGIBLE_FOR_RUNTIME_VALIDATION_BRIDGE=11`
+  - `build_micro_live_event_blackouts.py --output reports/validation/contracts/micro_live_event_blackouts_major_us_macro_q2_2026_v1.json --fallback-input ...` -> `PASS_WITH_WARNINGS`, `windows=22`, `families=session_impulse_retest`, `entry_models=CONFIRM`
+  - `run_micro_live_ops_heartbeat.py --no-fail-exit --no-write-report` -> `PASS`
+  - `/health/ready` -> `ready`, db/binance/event_backend/worker/market data checks all true
+
+## 2026-05-14 Iteration #143
+### 무엇을 발견했는가
+- 워크스페이스 기준 운영 리포트는 PASS였지만, 실제 launchd/runtime worker가 사용하는 `runtime_src` 기준으로는 일부 변경이 아직 배포되지 않았다.
+- 차이가 있던 파일은 `app/services/live_order_lifecycle.py`, `run_micro_live_no_order_watchdog.py`, `run_micro_live_runtime_guard.py`, `run_replay_validation_bridge.py`, `run_session_impulse_retest_opportunity_report.py`, `check_runtime_stack.sh`, macro blackout 계약 파일이었다.
+- 이 때문에 runtime_src에서 ops heartbeat를 돌리면 운영 리포트 latest가 없거나 오래된 파일을 읽어 FAIL/WATCH가 나왔다. 워크스페이스에서만 PASS를 본 것은 운영 truth를 완전히 확인한 것이 아니었다.
+
+### 무엇을 수정했는가
+- 위 파일들을 `runtime_src`에 동기화했다.
+- `runtime_src` 기준으로 runtime guard, no-order watchdog, reconciliation watchdog, synthetic canary, boot check, replay validation bridge, SIR runtime audit, failure drill, Binance rule drift 리포트를 다시 생성했다.
+- macro blackout 계약도 runtime reports symlink 대상에 반영했다.
+
+### 왜 그렇게 판단했는가
+- 실제 자동매매 프로세스는 `/Users/yumin/Library/Application Support/trading/runtime_src`에서 실행된다.
+- 따라서 최종 운영 판정은 repo working tree가 아니라 runtime_src + runtime reports 기준으로 확인해야 한다.
+- `micro_live_event_blackouts()`는 승인 시 파일을 다시 읽으므로 blackout 계약 동기화는 런타임 재시작 없이 다음 승인 평가부터 반영된다.
+
+### 최신 검증 스냅샷
+- runtime sync:
+  - `app/services/live_order_lifecycle.py`, `run_micro_live_no_order_watchdog.py`, `run_micro_live_runtime_guard.py`, `run_replay_validation_bridge.py`, `run_session_impulse_retest_opportunity_report.py`, `check_runtime_stack.sh`, macro blackout 계약 파일 -> workspace/runtime_src `synced`
+- runtime 정적 검증:
+  - `runtime_venv/bin/python -m py_compile app/services/live_order_lifecycle.py scripts/run_micro_live_no_order_watchdog.py scripts/run_micro_live_runtime_guard.py scripts/run_replay_validation_bridge.py scripts/run_session_impulse_retest_opportunity_report.py`
+- runtime 운영 확인:
+  - `run_micro_live_ops_heartbeat.py --no-fail-exit --no-write-report` from `runtime_src` -> `PASS`
+  - `run_micro_live_runtime_guard.py --days 3 --limit 200 --no-fail-exit` from `runtime_src` -> `PASS/PASS`, current runtime/current family 기준 live intent `0`
+  - `run_micro_live_no_order_watchdog.py --days 3 --limit 200 --no-fail-exit` from `runtime_src` -> `OK`, `no_recent_live_intents`
+  - `run_replay_validation_bridge.py --all-live-symbols --no-fail-exit` from `runtime_src` -> `PASS`, `ELIGIBLE_FOR_RUNTIME_VALIDATION_BRIDGE=11`
+  - `/health/ready` -> `ready`
+
+## 2026-05-14 Iteration #144
+### 무엇을 발견했는가
+- `check_runtime_stack.sh`와 API `/execution/operator-dashboard`의 live candidate promotion readiness가 최근 24시간 전체 intent를 섞어 보여줄 수 있었다.
+- 실제 현재 runtime 이후 SIR intent는 0건인데, dashboard global readiness에는 재시작 전 `session_impulse_retest` 차단 2건이나 과거 sweep 계열 intent가 headline/top reasons에 남을 수 있었다.
+- live route diagnosis도 live allowlist 밖 shadow SIR signal을 `WATCH`로 먼저 보여줘, 현재 live 11개 심볼에 fresh candidate가 없다는 정상 상태와 구분이 흐렸다.
+
+### 무엇을 수정했는가
+- `live_candidate_promotion_readiness_runtime`은 DB intent/submission 집계에서 `session_impulse_retest`만 보도록 좁혔다.
+- `run_live_candidate_promotion_readiness.py`에 `--since-ws-start`와 `--heartbeat-dir`를 추가했다.
+- `check_runtime_stack.sh`는 execution summary와 promotion readiness를 현재 WS runtime 시작 이후/current family 기준으로 표시한다.
+- live allowlist 밖 SIR shadow signal은 hard warning이 아니라 `WAIT/no_fresh_live_signal`의 부가 정보로 표시하게 했다.
+- `StrategyEngine.execution_operator_dashboard()`도 readiness window를 현재 WS runtime `started_at` 이후로 맞췄고, runtime stack을 재시작해 API 프로세스까지 새 코드를 로드했다.
+
+### 왜 그렇게 판단했는가
+- 현재 주문 경로 판단은 “현재 runtime 이후의 `session_impulse_retest + CONFIRM`”이어야 한다.
+- 24시간 전체 intent를 그대로 보여주면 이미 live 경로에서 분리한 실험 기록이 현재 차단처럼 보인다.
+- shadow-only symbol signal은 확장 후보 관측값이지 현재 11개 live 심볼 주문 실패가 아니다.
+
+### 최신 검증 스냅샷
+- 정적/테스트:
+  - `./.venv/bin/python -m py_compile app/services/strategy_engine.py app/services/live_candidate_promotion_readiness_runtime.py scripts/run_live_candidate_promotion_readiness.py`
+  - `bash -n scripts/check_runtime_stack.sh`
+  - `./.venv/bin/pytest -q tests/test_live_candidate_promotion_readiness.py tests/test_api_smoke.py::test_health_and_bootstrap_flow tests/test_script_entrypoints.py::test_runtime_scripts_support_direct_help_from_other_cwd -q`
+- runtime 재시작:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=0 ./scripts/restart_runtime_stack_tmp.sh` -> `/health/ready` ready
+- runtime 운영 확인:
+  - WS `started_at=2026-05-13T18:07:56.386490+00:00`, `auto_route_errors=0`
+  - dashboard selected/global readiness 모두 `filter_strategy_families=['session_impulse_retest']`, `window_start=2026-05-13T18:07:56.386490Z`, `top_intent_reasons={}`
+  - runtime guard -> `PASS/PASS`, current runtime/current family 기준 live intent `0`
+  - no-order watchdog -> `OK`, `no_recent_live_intents`
+  - miss detector 6h -> expected `0`, miss `0`
+  - ops heartbeat -> `PASS`
+  - `check_runtime_stack.sh` -> execution summary current runtime/current family 기준 intents `none`, live route diagnosis `WAIT/no_fresh_live_signal`
+
+## 2026-05-14 Iteration #145
+### 무엇을 발견했는가
+- micro-live 운영 감시 스크립트와 리포트는 정리되어 있었지만, 사용자 LaunchAgents에는 `com.trading.micro-live.*` 스케줄 작업이 설치되어 있지 않았다.
+- 이 상태에서는 수동으로 리포트를 생성한 직후에는 ops heartbeat가 PASS가 될 수 있지만, 시간이 지나면 최신 운영 리포트가 갱신되지 않아 stale 상태가 된다.
+- 이는 주문 경로 차단 원인은 아니지만, 운영자가 “실제 감시가 계속 돌고 있다”고 오해할 수 있는 배포 공백이었다.
+
+### 무엇을 수정했는가
+- `runtime_src` 기준으로 `install_micro_live_ops_launchd.py --install --unload --load`를 실행해 micro-live 운영 감시 LaunchAgents 11개를 설치하고 로드했다.
+- 설치 작업은 runtime python, runtime working directory, runtime `.env`를 사용하도록 구성했다.
+- 설치/로드된 작업:
+  - `com.trading.micro-live.runtime-guard`
+  - `com.trading.micro-live.no-order-watchdog`
+  - `com.trading.micro-live.reconciliation-watchdog`
+  - `com.trading.micro-live.synthetic-canary`
+  - `com.trading.micro-live.boot-check`
+  - `com.trading.micro-live.ops-heartbeat`
+  - `com.trading.micro-live.binance-rule-drift`
+  - `com.trading.micro-live.replay-validation-bridge`
+  - `com.trading.micro-live.session-impulse-retest-runtime-audit`
+  - `com.trading.micro-live.failure-drill`
+  - `com.trading.micro-live.macro-calendar-blackouts`
+
+### 왜 그렇게 판단했는가
+- 현재 자동매매 운영 truth는 runtime worker뿐 아니라 runtime guard, no-order watchdog, replay bridge, reconciliation watchdog 같은 주기 감시 리포트까지 포함한다.
+- 수동 실행 PASS만으로는 “앞으로도 계속 감시된다”는 보장이 없으므로, launchd 스케줄 로드 여부까지 최종 운영 조건에 포함해야 한다.
+- 작업 설치는 전략 조건이나 주문 승인 로직을 바꾸지 않고, 운영 감시가 지속적으로 갱신되게 만드는 배포 보완이다.
+
+### 최신 검증 스냅샷
+- launchd 설치:
+  - `install_micro_live_ops_launchd.py --install --unload --load` -> `overall_status=PASS`, `job_count=11`, 모든 load returncode `0`
+- launchd 로드 확인:
+  - `launchctl list | rg 'com\.trading\.micro-live'` -> 11개 작업 로드 확인
+  - `~/Library/LaunchAgents/com.trading.micro-live.runtime-guard.plist` -> `WorkingDirectory=/Users/yumin/Library/Application Support/trading/runtime_src`, runtime `.env` source, runtime venv python 사용
+  - `~/Library/LaunchAgents/com.trading.micro-live.no-order-watchdog.plist` -> 같은 runtime source/env/python 구성 확인
+- runtime 운영 확인:
+  - `run_micro_live_ops_heartbeat.py --no-fail-exit --no-write-report` from `runtime_src` -> `PASS`
+  - `run_micro_live_runtime_guard.py --days 3 --limit 200 --no-fail-exit --no-write-report` from `runtime_src` -> `PASS/PASS`, `runtime_started_at=2026-05-13T18:07:56.386490+00:00`, `family_filter=['session_impulse_retest']`, live intent `0`
+
+## 2026-05-14 Iteration #146
+### 무엇을 발견했는가
+- Iteration #145에서 launchd 작업은 설치됐지만, plist가 `RunAtLoad=false`라 재로드 직후 첫 실행 전 stale 공백이 생길 수 있었다.
+- `RunAtLoad=true`로 바꿔 재로드 검증을 하자 모든 작업이 exit code `127`로 실패했다.
+- 원인은 launchd 명령이 runtime `.env`를 쉘에서 `source`한 것이다. `.env`에는 `LONG|SHORT` direction contract와 공백이 포함된 파일 경로가 있어 쉘 source 방식으로는 안전하게 파싱되지 않는다.
+
+### 무엇을 수정했는가
+- `install_micro_live_ops_launchd.py`의 generated plist를 `RunAtLoad=true`로 바꿨다.
+- launchd `ProgramArguments`에서는 더 이상 `.env`를 shell source하지 않는다.
+- Python 설정은 `app.core.config.Settings`가 `ROOT_DIR/.env`를 직접 읽는 구조이므로, launchd는 절대경로 python/script와 `WorkingDirectory`만 제공하게 했다.
+- 기존 127 실패 로그는 launchd logs archive로 옮긴 뒤, 수정된 plist 11개를 runtime_src 기준으로 재설치/로드했다.
+
+### 왜 그렇게 판단했는가
+- 운영 감시는 재부팅/재로드 직후에도 즉시 한 번 돌아야 한다. 그렇지 않으면 stale 리포트 공백이 생긴다.
+- `.env`를 쉘 문법으로 강제 해석하면 전략 direction contract와 runtime path가 깨질 수 있다.
+- 앱 자체의 pydantic settings loader가 `.env`를 읽는 것이 단일 truth source이므로, launchd shell wrapper는 제거하는 편이 맞다.
+
+### 최신 검증 스냅샷
+- 테스트:
+  - `./.venv/bin/python -m py_compile scripts/install_micro_live_ops_launchd.py`
+  - `./.venv/bin/pytest -q tests/test_micro_live_operational_guards.py::test_launchd_generator_replaces_plists_atomically tests/test_micro_live_operational_guards.py::test_launchd_generator_does_not_shell_source_env_file tests/test_micro_live_operational_guards.py::test_launchd_generator_uses_env_file_macro_blackout_contract -q`
+- launchd 재설치/로드:
+  - `install_micro_live_ops_launchd.py --install --unload --load` from `runtime_src` -> `overall_status=PASS`, `job_count=11`, 모든 load returncode `0`
+  - installed plist 11개 모두 `RunAtLoad=true`
+  - `launchctl list | rg 'com\.trading\.micro-live'` -> 11개 작업 모두 last exit code `0`
+  - 새 `reports/operations/launchd/logs/*.err.log` -> empty
+- runtime 운영 확인:
+  - RunAtLoad 직후 runtime guard, no-order watchdog, reconciliation watchdog, synthetic canary, boot check, Binance rule drift, replay validation bridge, SIR runtime audit, failure drill, ops heartbeat 리포트가 모두 갱신됨
+  - `run_micro_live_ops_heartbeat.py --no-fail-exit --no-write-report` from `runtime_src` -> `PASS`, warning/failure/hard failure `0`
+
+## 2026-05-14 Iteration #147
+### 무엇을 발견했는가
+- RunAtLoad 검증 중 macro blackout 자동 갱신이 현재 출력 파일을 fallback input으로 다시 읽는 것을 확인했다.
+- 이때 FOMC는 공식 Fed source에서 이미 수집됐는데도 fallback 카운트에는 과거 FOMC fallback row까지 섞일 수 있었다.
+- 실제 blackout window 자체는 dedupe되어 유지됐지만, `fallback_window_count`와 source attribution이 불필요하게 흔들릴 수 있었다.
+
+### 무엇을 수정했는가
+- `build_micro_live_event_blackouts.py`의 fallback recovery가 공식 source에서 누락된 코드만 가져오도록 좁혔다.
+- 테스트 fallback fixture에 FOMC row를 추가해, FOMC가 공식 source에서 잡힌 경우 fallback count에 포함되지 않게 고정했다.
+- workspace와 runtime_src의 macro blackout 계약을 새 빌더 기준으로 다시 생성/동기화했다.
+
+### 왜 그렇게 판단했는가
+- blackout 계약은 주문 차단 truth source이므로, 실제 차단 window뿐 아니라 운영자가 읽는 fallback attribution도 안정적이어야 한다.
+- BLS fetch가 403으로 막히는 현재 조건에서는 CPI/NFP만 fallback으로 보완해야 하며, 공식 Fed source에서 확인한 FOMC까지 fallback으로 세면 운영 리포트가 과장된다.
+
+### 최신 검증 스냅샷
+- 테스트:
+  - `./.venv/bin/python -m py_compile scripts/build_micro_live_event_blackouts.py scripts/install_micro_live_ops_launchd.py`
+  - `./.venv/bin/pytest -q tests/test_micro_live_operational_guards.py::test_event_blackout_builder_uses_fallback_when_bls_sources_block tests/test_micro_live_operational_guards.py::test_event_blackout_fallback_respects_configured_pre_window tests/test_micro_live_operational_guards.py::test_launchd_generator_does_not_shell_source_env_file -q`
+- contract regeneration:
+  - `build_micro_live_event_blackouts.py --years 2026,2027 --output reports/validation/contracts/micro_live_event_blackouts_major_us_macro_q2_2026_v1.json` -> `PASS_WITH_WARNINGS`, BLS 403 warnings only
+  - window count `22`, fallback count `6`, coverage remains current `session_impulse_retest + CONFIRM + 11 live symbols`
+  - workspace/runtime_src contract file -> `synced`
+
+## 2026-05-14 Iteration #148
+### 무엇을 발견했는가
+- `/execution/operator-dashboard`를 직접 호출하면 8초 timeout 동안 응답이 없을 수 있었다.
+- 운영 UI는 이미 `fast=true`를 붙여 호출하지만, 서버의 `execution_operator_dashboard(..., fast=True)` 경로가 alpha research, promotion governance, lifecycle queue 같은 무거운 분석 계층을 거의 그대로 계산하고 있었다.
+- 이 문제는 주문 제출 경로를 막지는 않지만, 운영자가 대시보드에서 현재 live 상태를 확인할 때 화면이 늦거나 멈춘 것처럼 보일 수 있다.
+
+### 무엇을 수정했는가
+- `fast=True` dashboard 경로는 안전 상태, portfolio snapshot, recent intent/reconciliation, execution friction, active contract, live candidate promotion readiness만 생성하고 즉시 반환하게 했다.
+- 무거운 alpha/research/promotion 계층은 full dashboard 경로에 남겨두고 fast 경로에서는 건너뛴다.
+- fast 경로에서도 current WS runtime `started_at` 기준 readiness와 `session_impulse_retest` universe policy는 유지되도록 공통 attach helper를 추가했다.
+- runtime_src에 반영하고 runtime stack을 재시작했다.
+
+### 왜 그렇게 판단했는가
+- 운영 UI의 1차 목적은 “지금 live 주문 경로가 막혔는지, fresh candidate가 있는지”를 빠르게 보는 것이다.
+- full research dashboard는 별도 분석용으로 유지하되, UI poll/상태판 경로는 몇 초 안에 응답해야 운영 판단을 방해하지 않는다.
+- fast 경로를 줄여도 주문 승인/제출 로직은 건드리지 않는다.
+
+### 최신 검증 스냅샷
+- 테스트:
+  - `./.venv/bin/python -m py_compile app/services/strategy_engine.py scripts/build_micro_live_event_blackouts.py scripts/install_micro_live_ops_launchd.py`
+  - `./.venv/bin/pytest -q tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_fast_skips_heavy_research_layers tests/test_api_smoke.py::test_health_and_bootstrap_flow -q`
+- runtime 배포:
+  - `app/services/strategy_engine.py` workspace/runtime_src -> `synced`
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=0 ./scripts/restart_runtime_stack_tmp.sh` -> `/health/ready` ready
+- API 확인:
+  - `/execution/operator-dashboard?...&fast=true` -> HTTP `200`, `2.30s`, readiness 포함
+  - selected BTC readiness -> `WAIT/no_promotable_live_candidate`
+  - global readiness -> live target fresh candidate 없음, 일부 shadow-only candidate는 watch-only
+- current runtime 운영 확인:
+  - WS `runtime_started_at=2026-05-13T18:26:52.453243+00:00`
+  - runtime guard -> `PASS/PASS`, current runtime/current family live intent `0`
+  - no-order watchdog -> `OK`, `no_recent_live_intents`
+  - replay validation bridge -> `PASS`, `ELIGIBLE_FOR_RUNTIME_VALIDATION_BRIDGE=11`
+  - miss detector 6h -> expected `0`, observed `0`, miss `0`
+
+## 2026-05-14 Iteration #149
+### 무엇을 발견했는가
+- runtime stack과 launchd 운영 작업은 `runtime_src/.env`를 사용하고 있었고, 여기에는 운영 DB와 worker heartbeat 경로가 들어 있었다.
+- 반면 workspace `.env`에는 `DATABASE_URL`과 `RUNTIME_WORKER_HEARTBEAT_DIR`가 빠져 있어, workspace에서 수동 점검 스크립트를 직접 실행하면 기본 DB/기본 heartbeat 경로를 볼 수 있었다.
+- 이 차이는 실제 주문 실행을 막지는 않지만, 수동 점검 결과에서 `runtime_started_at=null` 또는 과거 intent가 섞여 보이게 만들어 운영 판단을 헷갈리게 할 수 있다.
+
+### 무엇을 수정했는가
+- workspace `.env`에 운영 DB 경로와 운영 heartbeat 경로를 추가해, 수동 점검도 runtime stack과 같은 truth source를 보게 맞췄다.
+- runtime guard, no-order watchdog, miss detector를 workspace에서 다시 실행해 current WS runtime 기준으로 정상 집계되는지 확인했다.
+
+### 왜 그렇게 판단했는가
+- 현재 주문 미발생 원인을 볼 때 가장 중요한 기준은 “최근 24시간 전체”가 아니라 “현재 살아 있는 WS runtime 시작 이후”다.
+- 수동 점검과 launchd 점검이 서로 다른 DB/heartbeat를 보면, 이미 해결된 과거 shadow-only/blocked intent가 현재 문제처럼 보일 수 있다.
+- 따라서 수동 점검 경로도 운영 runtime과 같은 DB 및 heartbeat를 보게 맞추는 것이 오해를 줄이는 데 필요했다.
+
+### 최신 검증 스냅샷
+- workspace settings 확인:
+  - `database_path=/Users/yumin/Library/Application Support/trading/data/trading.db`
+  - `heartbeat_dir=/Users/yumin/Library/Application Support/trading/heartbeats`
+  - `ws_started_at=2026-05-13T18:26:52.453243+00:00`
+- runtime guard from workspace:
+  - `overall_status=PASS`, `operational_status=PASS`
+  - `runtime_started_at=2026-05-13T18:26:52.453243+00:00`
+  - current runtime/current family live intent `0`, submit-ready `0`, live submission `0`
+- no-order watchdog from workspace:
+  - `status=OK`, `reason=no_recent_live_intents`
+  - current runtime live intent `0`, requested live order `0`
+- miss detector from workspace:
+  - `effective_window_start=2026-05-13T18:26:52.453243+00:00`
+  - expected `1`, skipped before runtime start `1`, runtime observed `0`, miss `0`
+
+## 2026-05-14 Iteration #150
+### 무엇을 발견했는가
+- no-order watchdog은 실제로 current runtime live intent가 `0`인 정상 대기 상태에서도 `actions=validation gate와 rollout session gate를 먼저 확인`이라고 표시했다.
+- 이 문장은 주문 차단 사유가 없는 상황에서도 검증/세션 gate가 문제인 것처럼 읽힐 수 있었다.
+- 주문 실행 경로 자체에는 영향이 없지만, 운영자가 “왜 주문이 안 들어갔는지”를 해석할 때 불필요한 오해를 만들 수 있다.
+
+### 무엇을 수정했는가
+- no-order watchdog에서 blocked diagnostics가 없고 live intent도 없으면 다음 행동을 `fresh live 후보 대기; 현재 차단 사유 없음`으로 표시하게 했다.
+- submit-ready gap, rejected/error, blocked intent는 각각 별도 next action 문구를 쓰도록 분리했다.
+- workspace와 runtime_src의 `run_micro_live_no_order_watchdog.py`를 동기화했다.
+
+### 왜 그렇게 판단했는가
+- 현재 상태는 “주문이 gate에 막힘”이 아니라 “현재 runtime 기준 live 후보가 아직 없음”이다.
+- 운영 리포트 문구는 실제 상태를 그대로 말해야 하며, fallback 문구가 과거 문제 원인을 암시하면 안 된다.
+- 주문 승인/제출 로직은 건드리지 않고, 관측/문서화 계층의 해석 문구만 보정했다.
+
+### 최신 검증 스냅샷
+- 테스트:
+  - `./.venv/bin/python -m py_compile scripts/run_micro_live_no_order_watchdog.py`
+  - `./.venv/bin/pytest -q tests/test_micro_live_operational_guards.py::test_no_order_watchdog_no_recent_intents_message_waits_for_candidate tests/test_micro_live_operational_guards.py::test_no_order_watchdog_alerts_when_live_intents_have_no_submission tests/test_micro_live_operational_guards.py::test_no_order_watchdog_notification_message_is_concise -q`
+- runtime_src 확인:
+  - runtime `run_micro_live_no_order_watchdog.py` py_compile PASS
+  - workspace/runtime_src no-order watchdog script -> `synced`
+  - runtime no-order watchdog -> `status=OK`, `reason=no_recent_live_intents`, `actions=fresh live 후보 대기; 현재 차단 사유 없음`
+
+## 2026-05-14 Iteration #151
+### 무엇을 발견했는가
+- `check_runtime_stack.sh`의 제목은 `current runtime/current family`였지만, 그 아래에 24h reference audit count가 먼저 출력됐다.
+- 이 때문에 과거 `intent_blocked` audit count가 현재 runtime blocker처럼 보일 수 있었다.
+- 또한 workspace git object storage에 stray garbage object가 있어 `git count-objects` stderr 경고가 운영 스택 경고처럼 보일 수 있었다.
+
+### 무엇을 수정했는가
+- execution summary에서 current WS start 이후 audit를 먼저 `session_impulse_retest_audits_since_ws_start_current`로 출력하게 했다.
+- 24h audit count는 `session_impulse_retest_audits_24h_reference_not_current_blockers`로 명시해 현재 차단 사유와 분리했다.
+- `git count-objects` stderr는 숨겨 runtime 점검 출력에 git 저장소 노이즈가 섞이지 않게 했다. git object 자체는 trading runtime과 무관하므로 삭제하지 않았다.
+- workspace와 runtime_src의 `check_runtime_stack.sh`를 동기화했다.
+
+### 왜 그렇게 판단했는가
+- 현재 주문 상태를 판단할 때 기준은 current WS runtime 이후의 live route 상태다.
+- 과거 audit count는 참고용으로는 유용하지만, 현재 주문 미발생 원인처럼 보이면 운영 판단을 흐린다.
+- git 저장소 정리 문제는 별도 관리 대상이며, 주문 실행/시장 데이터/DB/worker 상태와 섞어 읽으면 안 된다.
+
+### 최신 검증 스냅샷
+- `bash -n scripts/check_runtime_stack.sh` PASS
+- `bash -n runtime_src/scripts/check_runtime_stack.sh` PASS
+- workspace/runtime_src `check_runtime_stack.sh` -> `synced`
+- `check_runtime_stack.sh` execution summary:
+  - current runtime intent `none`
+  - current audit: `no_live_route_candidate_plan`, `ws_stream_active_route_suppressed`, `no_fresh_candidates`, shadow-only `symbol_not_live_enabled_for_auto_route`
+  - 24h historical audit is now explicitly `reference_not_current_blockers`
+  - live route diagnosis remains `WAIT/no_fresh_live_signal`
+
+## 2026-05-14 Iteration #152
+### 무엇을 발견했는가
+- selected symbol readiness는 `WAIT/no_promotable_live_candidate`였지만, global readiness는 shadow-only symbols 신호 때문에 `WATCH/shadow_signal_only`가 headline이 될 수 있었다.
+- 이 경우 실제 live 11개는 모두 fresh live candidate가 없는 상태인데도, 대시보드 headline만 보면 shadow-only 관측이 live 주문 문제처럼 보일 수 있었다.
+- 재시작 직후처럼 shadow-only 신호가 없을 때도 global headline candidate symbols가 live 11개가 아니라 tracked universe 전체 14개로 보일 수 있었다.
+
+### 무엇을 수정했는가
+- runtime live candidate readiness의 headline scope를 current MICRO_LIVE allowlist 기준으로 보정했다.
+- live 11개가 fresh candidate 없음이면 headline은 `WAIT/no_promotable_live_candidate`로 유지하고, `SUI/AAVE/HBAR` 같은 shadow-only 신호는 `shadow_only_auxiliary`로 분리한다.
+- compact readiness report에도 `shadow_only_auxiliary`를 출력하게 했다.
+- workspace와 runtime_src의 readiness runtime/service script를 동기화하고 runtime stack을 재시작했다.
+
+### 왜 그렇게 판단했는가
+- 주문 가능 여부의 1차 truth는 current live allowlist 11개다.
+- secondary/tracked-only symbols의 shadow signal은 promotion queue 관측값이지, 현재 주문 미발생의 live blocker가 아니다.
+- 따라서 global readiness headline은 live routable symbols 기준이어야 하고, shadow-only symbols는 보조 관측으로 분리되어야 한다.
+
+### 최신 검증 스냅샷
+- 테스트:
+  - `./.venv/bin/python -m py_compile app/services/live_candidate_promotion_readiness_runtime.py scripts/run_live_candidate_promotion_readiness.py`
+  - `./.venv/bin/pytest -q tests/test_live_candidate_promotion_readiness.py::test_runtime_readiness_keeps_shadow_only_as_auxiliary_when_live_symbols_are_waiting tests/test_live_candidate_promotion_readiness.py::test_runtime_readiness_wait_headline_uses_live_symbols_only tests/test_live_candidate_promotion_readiness.py::test_readiness_separates_shadow_signal_from_live_candidate -q`
+- runtime 배포:
+  - workspace/runtime_src readiness runtime script -> `synced`
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=0 ./scripts/restart_runtime_stack_tmp.sh` -> `/health/ready` ready
+- API 확인:
+  - global readiness headline -> `WAIT/no_promotable_live_candidate`
+  - `headline_scope=live_routable_symbols`
+  - `headline_candidate_count=11`
+  - headline symbols = `ADA,AVAX,BCH,BNB,BTC,ETH,LINK,LTC,NEAR,SOL,XRP`
+  - `shadow_only_auxiliary.symbols=['AAVEUSDC','HBARUSDC','SUIUSDC']`
+- current runtime 운영 확인:
+  - runtime guard -> `PASS/PASS`
+  - current runtime live intent `0`, submit-ready `0`, live submission `0`
+
+## 2026-05-14 Iteration #154
+### 무엇을 발견했는가
+- readiness API/CLI는 live 11개와 auxiliary 3개를 분리했지만, `execution_operator_ui`의 Live Candidate Review 화면은 새 scope/state count 필드를 직접 보여주지 않았다.
+- 이 상태에서는 API payload를 열어보면 정확해도, 실제 운영 화면에서는 `candidate_count=14`와 shadow-only symbols가 live 주문 차단처럼 다시 읽힐 여지가 있었다.
+
+### 무엇을 수정했는가
+- 운영 UI의 Live Candidate Review에 다음 값을 명시적으로 표시하게 했다.
+  - `Global Scope Counts`: `headline_scope`와 `candidate_scope_counts`
+  - `Live State Counts`: live routable symbols 상태 집계
+  - `Auxiliary State Counts`: auxiliary display 상태 집계
+  - `Auxiliary Shadow Symbols`: `shadow_only_auxiliary.symbols`
+- UI 테스트에 위 label과 payload key가 빠지지 않도록 assertion을 추가했다.
+- workspace 변경을 `runtime_src`에 동기화하고 runtime stack을 재시작했다.
+
+### 왜 그렇게 판단했는가
+- 주문 가능 여부는 live 11개 기준이고, auxiliary 3개는 관측/승격 대기 queue다.
+- 이 분리는 백엔드 payload만 맞아서는 부족하다. 실제 operator가 보는 화면에서도 같은 truth separation이 보여야 한다.
+- 주문 승인/제출 조건은 바꾸지 않고, 사람이 오해할 수 있는 표시 계층만 보강했다.
+
+### 최신 검증 스냅샷
+- 테스트:
+  - `./.venv/bin/python -m py_compile app/services/execution_operator_ui.py`
+  - `./.venv/bin/pytest -q tests/test_execution_operator_ui.py -q`
+  - `git diff --check -- app/services/execution_operator_ui.py tests/test_execution_operator_ui.py`
+- runtime 배포:
+  - workspace/runtime_src `execution_operator_ui.py` -> `synced`
+  - runtime `execution_operator_ui.py` py_compile PASS
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=0 ./scripts/restart_runtime_stack_tmp.sh` -> `/health/ready` ready
+- API/UI 확인:
+  - `/execution/operator-ui` contains `Global Scope Counts`, `Auxiliary State Counts`, `candidate_scope_counts`, `shadow_only_auxiliary`
+  - global readiness -> `WAIT/no_promotable_live_candidate`
+  - `headline_scope=live_routable_symbols`
+  - `candidate_scope_counts={'total': 14, 'live_routable': 11, 'auxiliary': 3}`
+  - `live_state_counts={'NO_FRESH_LIVE_CANDIDATE': 11}`
+  - latest auxiliary snapshot -> `AUXILIARY_SHADOW_SIGNAL_ONLY=3`
+- current runtime 운영 확인:
+  - runtime guard -> `PASS/PASS`
+  - runtime_started_at `2026-05-13T18:57:19.849828+00:00`
+  - current runtime/current family live intent `0`, submit-ready `0`, live submission `0`
+
+## 2026-05-14 Iteration #155
+### 무엇을 발견했는가
+- dashboard의 `portfolio_summary.accepted_candidate_count`가 `2`로 보였다.
+- 하지만 실제 accepted rows는 `SUIUSDC/legacy_zone_plan`, `NEARUSDC/legacy_zone_plan`이었고, 현재 MICRO_LIVE 주문 경로인 `session_impulse_retest + CONFIRM` 후보가 아니었다.
+- 이 숫자는 portfolio/scanner context 후보로는 맞지만, 운영 화면에서는 “주문 후보 2개가 있는데 왜 주문이 안 들어갔나”로 오해될 수 있었다.
+
+### 무엇을 수정했는가
+- dashboard payload에 `portfolio_summary.live_route_context`와 `signal_funnel.portfolio_live_route_context`를 추가했다.
+- 이 context는 portfolio accepted 후보를 현재 live route 계약 기준으로 다시 분해한다.
+  - `live_routable_accepted_candidate_count`
+  - `context_only_accepted_candidate_count`
+  - `accepted_candidate_route_statuses`
+  - active live route family/symbol scope
+- 운영 UI의 Top Opportunity와 Portfolio Candidate Drilldown에 `Live Route Context`를 표시하게 했다.
+- UI/대시보드 테스트에 해당 context가 빠지지 않도록 assertion을 추가했다.
+
+### 왜 그렇게 판단했는가
+- `portfolio_summary`는 후보 탐색/예산 관점이고, 실제 주문 가능 여부의 truth는 `live_candidate_promotion_readiness`다.
+- 따라서 portfolio accepted 후보를 삭제하거나 주문 로직에 억지로 연결하지 않고, 현재 live route 주문 후보인지 여부만 명시적으로 분리하는 것이 맞다.
+- 이 변경은 주문 승인/제출 조건을 바꾸지 않고, 운영자가 숫자를 잘못 해석할 여지만 줄인다.
+
+### 최신 검증 스냅샷
+- 테스트:
+  - `./.venv/bin/python -m py_compile app/services/strategy_engine.py app/services/execution_operator_ui.py`
+  - `./.venv/bin/pytest -q tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_fast_skips_heavy_research_layers tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_marks_non_route_portfolio_candidates_context_only tests/test_execution_operator_ui.py -q`
+  - `git diff --check -- app/services/strategy_engine.py app/services/execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_execution_operator_ui.py`
+- runtime 배포:
+  - workspace/runtime_src `strategy_engine.py`, `execution_operator_ui.py` -> `synced`
+  - runtime py_compile PASS
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=0 ./scripts/restart_runtime_stack_tmp.sh` -> `/health/ready` ready
+- API/UI 확인:
+  - portfolio accepted candidates -> `2`
+  - live route accepted candidates -> `0`
+  - context-only accepted candidates -> `2`
+  - context-only symbols -> `SUIUSDC`, `NEARUSDC`
+  - current live route family -> `session_impulse_retest`
+  - current live route headline -> `WAIT/no_promotable_live_candidate`
+  - `/execution/operator-ui` contains `Live Route Context`
+- current runtime 운영 확인:
+  - runtime guard -> `PASS/PASS`
+  - no-order watchdog -> `OK/no_recent_live_intents`
+  - current runtime/current family live intent `0`, requested live order `0`, submission `0`
+
+## 2026-05-14 Iteration #156
+### 무엇을 발견했는가
+- Iteration #155 이후 portfolio accepted 후보는 context-only로 분리됐지만, 상단 Approval Strip은 여전히 `approval usable`, 서버 승인 `GO`를 먼저 보여줬다.
+- 이 `GO`는 “runtime gate가 열려 있다”는 뜻이지 “현재 live route 주문 후보가 있다”는 뜻이 아니다.
+- 하지만 운영 화면에서는 `GO`가 주문 가능 상태처럼 먼저 읽힐 수 있어, no-order 원인 설명과 다시 충돌할 수 있었다.
+
+### 무엇을 수정했는가
+- dashboard payload에 `order_route_summary`를 추가했다.
+  - `signal_funnel.order_route_summary`
+  - `portfolio_summary.order_route_summary`
+  - `approval_strip_summary.order_route_approve_value`
+- live route accepted 후보가 0이면 `order_route_approve_value=waiting_for_live_candidate`로 표시한다.
+- portfolio live route context는 현재 allowed entry model까지 확인하도록 좁혔다.
+  - current live route family: `session_impulse_retest`
+  - current live route entry model: `CONFIRM`
+- 운영 UI의 Approval Strip에 `Order Route Truth`를 추가하고, live route 후보가 없으면 상단 문구를 `신규 진입 게이트는 열려 있지만 현재 live route 주문 후보는 없습니다.`로 표시하게 했다.
+
+### 왜 그렇게 판단했는가
+- 안전 게이트가 열려 있는 것과 실제 주문 가능한 후보가 존재하는 것은 다른 truth source다.
+- 전자는 `deployment_go_no_go=GO`, 후자는 `live_candidate_promotion_readiness`와 `order_route_summary`가 말해야 한다.
+- 주문 조건은 바꾸지 않고, `GO` 문구가 주문 가능 신호처럼 과대해석되는 것만 줄였다.
+
+### 최신 검증 스냅샷
+- 테스트:
+  - `./.venv/bin/python -m py_compile app/services/strategy_engine.py app/services/execution_operator_ui.py`
+  - `./.venv/bin/pytest -q tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_fast_skips_heavy_research_layers tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_marks_non_route_portfolio_candidates_context_only tests/test_execution_operator_ui.py -q`
+  - `git diff --check -- app/services/strategy_engine.py app/services/execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_execution_operator_ui.py`
+- runtime 배포:
+  - workspace/runtime_src `strategy_engine.py`, `execution_operator_ui.py` -> `synced`
+  - runtime py_compile PASS
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=0 ./scripts/restart_runtime_stack_tmp.sh` -> `/health/ready` ready
+- API/UI 확인:
+  - top-level `deployment_go_no_go=GO`
+  - `approval_strip_summary.order_route_approve_value=waiting_for_live_candidate`
+  - `signal_funnel.order_route_summary.approve_value=waiting_for_live_candidate`
+  - live route accepted candidates -> `0`
+  - context-only accepted candidates -> `2`
+  - current live route family/entry model -> `session_impulse_retest / CONFIRM`
+  - current live route headline -> `WAIT/no_promotable_live_candidate`
+  - `/execution/operator-ui` contains `Order Route Truth`
+- current runtime 운영 확인:
+  - no-order watchdog -> `OK/no_recent_live_intents`
+  - current runtime/current family live intent `0`, requested live order `0`, submission `0`
+
+## 2026-05-14 Iteration #158
+### 무엇을 발견했는가
+- `live_route_context`가 symbol/family/entry model은 비교했지만, MICRO_LIVE 계약의 direction/session 축은 아직 표시하지 않았다.
+- 실제 승인 계층은 session allowlist와 direction contract도 본다.
+- 따라서 나중에 symbol/family/entry model이 맞는 portfolio 후보가 생겨도, direction/session이 맞지 않으면 live-route 후보처럼 보일 수 있었다.
+
+### 무엇을 수정했는가
+- `portfolio_summary.live_route_context`가 다음 계약 축까지 비교하게 했다.
+  - `active_sessions`
+  - `active_direction_contract`
+  - candidate `direction`
+  - candidate `session_name`
+- route status reason에 다음 사유를 추가했다.
+  - `direction_not_live_route`
+  - `direction_missing_for_live_route`
+  - `session_not_live_route`
+  - `session_missing_for_live_route`
+- dashboard candidate row 요약에서 이미 보존한 `entry_model/direction/session_guidance/validity`를 live route 판정에 사용한다.
+- 운영 UI의 `candidateLiveRouteStatus()`도 direction/session까지 비교한다.
+
+### 왜 그렇게 판단했는가
+- 주문 가능 여부는 “전략 family만 맞음”이 아니라 현재 MICRO_LIVE 계약 전체와 맞아야 한다.
+- direction/session은 실제 approval gate에서 차단될 수 있는 축이므로, operator context에서도 같은 축을 보여줘야 한다.
+- 이 변경도 주문 로직이 아니라 관측/해석 계층 보강이다.
+
+### 최신 검증 스냅샷
+- 테스트:
+  - `./.venv/bin/python -m py_compile app/services/strategy_engine.py app/services/execution_operator_ui.py app/services/execution_operator_dashboard.py`
+  - `./.venv/bin/pytest -q tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_fast_skips_heavy_research_layers tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_marks_non_route_portfolio_candidates_context_only tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_keeps_route_match_waiting_until_readiness_allows tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_route_context_checks_direction_and_session tests/test_execution_operator_ui.py -q`
+  - `git diff --check -- app/services/strategy_engine.py app/services/execution_operator_ui.py app/services/execution_operator_dashboard.py tests/test_execution_operator_dashboard.py tests/test_execution_operator_ui.py`
+- runtime 배포:
+  - workspace/runtime_src `strategy_engine.py`, `execution_operator_ui.py`, `execution_operator_dashboard.py` -> `synced`
+  - runtime py_compile PASS
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=0 ./scripts/restart_runtime_stack_tmp.sh` -> `/health/ready` ready
+- API/UI 확인:
+  - `signal_funnel.order_route_summary.approve_value=waiting_for_live_candidate`
+  - active sessions -> `dead_session,london,new_york`
+  - active direction contract -> live 11 symbols all `LONG|SHORT`
+  - current accepted sample -> `TIAUSDC legacy_zone_plan LIMIT SHORT`, `AAVEUSDC legacy_zone_plan SWEEP_CONFIRM SHORT`
+  - route status -> `context_only`
+  - route reasons -> `symbol_not_live_routable`, `strategy_family_not_live_route`, `entry_model_not_live_route`
+- current runtime 운영 확인:
+  - no-order watchdog -> `OK/no_recent_live_intents`
+  - current runtime/current family live intent `0`, requested live order `0`, submission `0`
+
+## 2026-05-14 Iteration #157
+### 무엇을 발견했는가
+- Iteration #156의 `order_route_summary`는 `portfolio accepted 후보가 current live route와 매칭되면 available`로 해석될 여지가 있었다.
+- 하지만 portfolio row가 symbol/family/entry model과 맞더라도, 실제 주문 truth는 `live_candidate_promotion_readiness`다.
+- 또한 dashboard용 portfolio candidate 압축 과정에서 `entry_model`, `entry_type`, `direction`, `validity`가 빠져 live route context가 entry model까지 엄밀히 판단하기 어려웠다.
+
+### 무엇을 수정했는가
+- `order_route_summary`의 판단을 portfolio match가 아니라 readiness headline/attention flag 기준으로 보수화했다.
+  - live submission 있음 -> `live_submission_observed`
+  - submit-ready gap -> `investigate_submit_ready_gap`
+  - readiness blocked -> `blocked_by_live_candidate_readiness`
+  - shadow-only -> `shadow_only_not_live_route`
+  - wait/no fresh -> `waiting_for_live_candidate`
+- portfolio candidate row 요약에 `entry_model`, `entry_type`, `direction`, `validity`를 보존하게 했다.
+- UI의 `candidateLiveRouteStatus()`도 current live route entry model까지 비교하게 했다.
+- route match가 있어도 readiness가 `WAIT/no_promotable_live_candidate`이면 `waiting_for_live_candidate`로 남는 테스트를 추가했다.
+
+### 왜 그렇게 판단했는가
+- 실제 fresh 후보가 생기면 runtime은 intent/submission 상태로 말해야 한다.
+- 따라서 대시보드가 portfolio match만 보고 `available`에 가까운 표현을 쓰면 또 주문 가능 상태처럼 오해될 수 있다.
+- order truth는 끝까지 `live_candidate_promotion_readiness`이며, portfolio match는 context 정보로만 둔다.
+
+### 최신 검증 스냅샷
+- 테스트:
+  - `./.venv/bin/python -m py_compile app/services/strategy_engine.py app/services/execution_operator_ui.py app/services/execution_operator_dashboard.py`
+  - `./.venv/bin/pytest -q tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_fast_skips_heavy_research_layers tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_marks_non_route_portfolio_candidates_context_only tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_keeps_route_match_waiting_until_readiness_allows tests/test_execution_operator_ui.py -q`
+  - `git diff --check -- app/services/strategy_engine.py app/services/execution_operator_ui.py app/services/execution_operator_dashboard.py tests/test_execution_operator_dashboard.py tests/test_execution_operator_ui.py`
+- runtime 배포:
+  - workspace/runtime_src `strategy_engine.py`, `execution_operator_ui.py`, `execution_operator_dashboard.py` -> `synced`
+  - runtime py_compile PASS
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=0 ./scripts/restart_runtime_stack_tmp.sh` -> `/health/ready` ready
+- API/UI 확인:
+  - `signal_funnel.order_route_summary.approve_value=waiting_for_live_candidate`
+  - `approval_strip_summary.order_route_approve_value=waiting_for_live_candidate`
+  - accepted sample -> `TIAUSDC legacy_zone_plan LIMIT`, `SUIUSDC legacy_zone_plan SWEEP_CONFIRM`
+  - current live route -> `session_impulse_retest / CONFIRM`
+  - live route accepted candidates -> `0`
+  - context-only accepted candidates -> `2`
+  - current live route headline -> `WAIT/no_promotable_live_candidate`
+- current runtime 운영 확인:
+  - no-order watchdog -> `OK/no_recent_live_intents`
+  - current runtime/current family live intent `0`, requested live order `0`, submission `0`
+
+## 2026-05-14 Iteration #153
+### 무엇을 발견했는가
+- Iteration #152 이후 headline은 live 11개 기준으로 맞았지만, `candidate_count=14`와 `state_counts`가 전체 tracked universe 기준이라 여전히 “왜 live 11개인데 14개인가”라는 오해가 남을 수 있었다.
+- auxiliary symbols가 fresh signal이 없을 때 `NO_FRESH_LIVE_CANDIDATE`로 보이는 것도 live 후보처럼 읽힐 여지가 있었다.
+
+### 무엇을 수정했는가
+- readiness payload에 `candidate_scope_counts`를 추가했다.
+  - `total=14`
+  - `live_routable=11`
+  - `auxiliary=3`
+- live/auxiliary 상태를 `live_state_counts`, `auxiliary_state_counts`로 분리했다.
+- auxiliary display 전용 상태를 추가해 `AUXILIARY_SHADOW_SIGNAL_ONLY`, `AUXILIARY_TRACKED_NO_FRESH_SIGNAL`처럼 live 후보 상태와 구분되게 했다.
+- compact readiness report에도 scope/state 분리 값을 출력하게 했다.
+
+### 왜 그렇게 판단했는가
+- 주문 가능성 판단은 live 11개 기준이어야 하고, tracked-only 3개는 관측/승격 대기 queue로 읽혀야 한다.
+- 전체 universe count는 유용하지만, live order blocker처럼 보이면 안 된다.
+- 따라서 숫자 자체를 숨기기보다 scope를 명시해서 운영자가 현재 live 상태와 auxiliary 관측을 동시에 읽게 하는 편이 낫다.
+
+### 최신 검증 스냅샷
+- 테스트:
+  - `./.venv/bin/python -m py_compile app/services/live_candidate_promotion_readiness_runtime.py scripts/run_live_candidate_promotion_readiness.py`
+  - `./.venv/bin/pytest -q tests/test_live_candidate_promotion_readiness.py::test_runtime_readiness_keeps_shadow_only_as_auxiliary_when_live_symbols_are_waiting tests/test_live_candidate_promotion_readiness.py::test_runtime_readiness_wait_headline_uses_live_symbols_only tests/test_live_candidate_promotion_readiness.py::test_readiness_separates_shadow_signal_from_live_candidate -q`
+- runtime 배포:
+  - workspace/runtime_src readiness files -> `synced`
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=0 ./scripts/restart_runtime_stack_tmp.sh` -> `/health/ready` ready
+- API 확인:
+  - global readiness -> `WAIT/no_promotable_live_candidate`
+  - `headline_scope=live_routable_symbols`
+  - `headline_candidate_count=11`
+  - `candidate_scope_counts={'total': 14, 'live_routable': 11, 'auxiliary': 3}`
+  - `live_state_counts={'NO_FRESH_LIVE_CANDIDATE': 11}`
+  - `auxiliary_display_state_counts={'AUXILIARY_SHADOW_SIGNAL_ONLY': 3}`
+- current runtime 운영 확인:
+  - runtime guard -> `PASS/PASS`
+  - current runtime live intent `0`, submit-ready `0`, live submission `0`
+
+## 2026-05-14 Iteration #159
+### 무엇을 발견했는가
+- active contract의 핵심 주문 조건은 symbol/family/entry model/direction/session인데, 일부 운영 요약은 session allowlist를 필터로 끝까지 전달하지 않았다.
+- 실제 live route context는 `dead_session,london,new_york` 세션 계약을 보지만, active contract execution quality, score-to-outcome funnel, replay flow baseline, recent intent filter는 세션을 명시적으로 좁히지 않아 라이브 주문 경로보다 넓은 기준선으로 읽힐 수 있었다.
+
+### 무엇을 수정했는가
+- active contract filters에 `sessions`를 추가했다.
+- active contract execution quality와 score-to-outcome funnel 호출에 session filters를 전달하게 했다.
+- replay baseline과 same-window replay hit 계산도 `generated_session/session_name/session` 기준으로 session allowlist를 적용하게 했다.
+- recent intent active-contract filter가 intent의 `session_guidance.current_session.name`, `session_name`, `state`, plan validity session fields를 읽어 세션까지 비교하게 했다.
+- operator dashboard intent row에 `session_guidance`를 보존해, recent intent contract filter가 실제 주문 세션을 잃지 않게 했다.
+
+### 왜 그렇게 판단했는가
+- 사용자가 보는 “백테스트/리플레이 기준”과 “실제 주문 가능 기준”은 최대한 같은 계약을 봐야 한다.
+- 세션 조건이 리포트에서 빠지면 주문 경로는 좁은데 기준선은 넓게 보여, 또 “왜 백테스트보다 주문이 적지?”라는 오해가 생긴다.
+- 이번 변경은 진입 조건을 완화하거나 전략을 바꾸는 것이 아니라, 운영 truth/source-of-truth가 현재 MICRO_LIVE 계약을 더 정확히 표시하게 하는 정합성 보강이다.
+
+### 최신 검증 스냅샷
+- 테스트:
+  - `./.venv/bin/python -m py_compile app/services/strategy_engine.py app/services/execution_operator_dashboard.py app/services/execution_quality.py app/services/score_to_outcome_funnel.py app/services/execution_operator_ui.py`
+  - `./.venv/bin/pytest -q tests/test_strategy_engine_ops.py::test_active_contract_summary_filters_portfolio_budget_to_contract_lane tests/test_strategy_engine_ops.py::test_active_contract_filters_include_direction_contract_and_apply_it tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_intent_row_and_contract_filter_respect_direction tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_route_context_checks_direction_and_session tests/test_score_to_outcome_funnel.py::test_generate_filters_to_active_contract`
+  - `./.venv/bin/pytest -q tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_fast_skips_heavy_research_layers tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_marks_non_route_portfolio_candidates_context_only tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_keeps_route_match_waiting_until_readiness_allows tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_route_context_checks_direction_and_session tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_intent_row_and_contract_filter_respect_direction tests/test_execution_operator_ui.py -q`
+  - `./.venv/bin/pytest -q tests/test_execution_quality.py::test_execution_quality_report_filters_to_active_contract`
+  - `git diff --check`
+- runtime 배포:
+  - workspace/runtime_src `strategy_engine.py`, `execution_operator_dashboard.py`, `execution_quality.py`, `score_to_outcome_funnel.py` -> `synced`
+  - runtime py_compile PASS
+
+## 2026-05-14 Iteration #160
+### 무엇을 발견했는가
+- Iteration #159에서 세션까지 맞추자 BTC active-contract replay baseline이 `0/week`로 표시됐다.
+- 확인 결과 세션 필터 문제가 아니라, active-contract baseline 파일 `strategy_proof_contract_live_subset.json` 자체가 현재 live family인 `session_impulse_retest + CONFIRM` 행을 갖고 있지 않았다.
+- 즉 현재 라이브 전략은 SIR인데, 일부 active contract replay 기준선은 과거 sweep-reversal historical cache를 보고 있어 “현재 전략의 백테스트 빈도”로 해석하면 안 되는 상태였다.
+
+### 무엇을 수정했는가
+- `active_contract_replay_baseline.py`를 추가해 SIR active contract의 replay 기준선을 `micro_main_usdt_proxy_backtest_*.json`에서 읽게 했다.
+- dashboard `replay_flow_baseline`은 family가 `session_impulse_retest`, entry model이 `CONFIRM`이면 USDT proxy backtest의 해당 symbol/direction/session 행으로 expected candidates/week를 계산한다.
+- `promotion_shadow_counter.replay_contract_hits_same_window`도 SIR인 경우 같은 USDT proxy rows의 최근 window count를 사용한다.
+- sweep-reversal 계열은 기존 historical walk-forward cache 경로를 유지한다.
+
+### 왜 그렇게 판단했는가
+- 현재 주문 경로가 SIR인데 replay baseline만 sweep cache를 보면, baseline이 0이거나 엉뚱한 빈도로 보여 운영 판단을 왜곡한다.
+- 라이브와 백테스트를 맞춘다는 의미는 조건을 억지로 완화하는 것이 아니라, 비교 기준선도 현재 라이브 전략/진입모델/방향/세션과 같은 데이터 출처를 보게 하는 것이다.
+
+### 최신 검증 스냅샷
+- 테스트:
+  - `./.venv/bin/python -m py_compile app/services/active_contract_replay_baseline.py app/services/strategy_engine.py app/services/execution_operator_dashboard.py app/services/execution_quality.py app/services/score_to_outcome_funnel.py`
+  - `./.venv/bin/pytest -q tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_uses_usdt_proxy_for_sir_active_contract_replay_baseline tests/test_strategy_engine_ops.py::test_active_contract_replay_hits_uses_usdt_proxy_for_session_impulse_retest tests/test_strategy_engine_ops.py::test_active_contract_summary_filters_portfolio_budget_to_contract_lane tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_intent_row_and_contract_filter_respect_direction tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_route_context_checks_direction_and_session`
+  - `./.venv/bin/pytest -q tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_fast_skips_heavy_research_layers tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_marks_non_route_portfolio_candidates_context_only tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_keeps_route_match_waiting_until_readiness_allows tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_route_context_checks_direction_and_session tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_intent_row_and_contract_filter_respect_direction tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_uses_usdt_proxy_for_sir_active_contract_replay_baseline tests/test_execution_operator_ui.py -q`
+  - `./.venv/bin/pytest -q tests/test_strategy_engine_ops.py::test_active_contract_summary_filters_portfolio_budget_to_contract_lane tests/test_strategy_engine_ops.py::test_active_contract_filters_include_direction_contract_and_apply_it tests/test_strategy_engine_ops.py::test_active_contract_replay_hits_uses_usdt_proxy_for_session_impulse_retest tests/test_score_to_outcome_funnel.py::test_generate_filters_to_active_contract tests/test_score_to_outcome_funnel.py::test_historical_session_uses_submission_guidance_from_attachments tests/test_execution_quality.py::test_execution_quality_report_filters_to_active_contract`
+  - `git diff --check`
+- runtime 배포:
+  - workspace/runtime_src `active_contract_replay_baseline.py`, `strategy_engine.py`, `execution_operator_dashboard.py`, `execution_quality.py`, `score_to_outcome_funnel.py` -> `synced`
+  - runtime py_compile PASS
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=0 ./scripts/restart_runtime_stack_tmp.sh` -> `/health/ready` ready
+- API/운영 확인:
+  - BTC active contract replay baseline source -> `micro_main_usdt_proxy_backtest_20260510T153136Z.json`
+  - BTC SIR/CONFIRM replay trade count -> `134`
+  - BTC expected active-contract candidates/week from replay -> `0.8566`
+  - `order_route_summary.approve_value=waiting_for_live_candidate`
+  - runtime guard -> `PASS/PASS`
+  - no-order watchdog -> `OK/no_recent_live_intents`

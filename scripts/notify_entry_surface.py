@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
+import os
+import re
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from http.client import RemoteDisconnected
 from pathlib import Path
 import socket
@@ -25,11 +29,16 @@ from scripts.operation_report_io import atomic_write_text
 
 
 ACTIONABLE_ENTRY = "ACTIONABLE_ENTRY"
+LIVE_ORDER_CANDIDATE = "LIVE_ORDER_CANDIDATE"
+CONTEXT_REVIEW_SETUP = "CONTEXT_REVIEW_SETUP"
 BLOCKED_SETUP = "BLOCKED_SETUP"
 RESEARCH_ONLY_SETUP = "RESEARCH_ONLY_SETUP"
-_REQUEST_RETRY_ATTEMPTS = 5
+ALERT_STATUSES = (LIVE_ORDER_CANDIDATE, CONTEXT_REVIEW_SETUP, BLOCKED_SETUP, RESEARCH_ONLY_SETUP)
+_REQUEST_RETRY_ATTEMPTS = 2
 _REQUEST_RETRY_BASE_DELAY_SECONDS = 1.0
-_REQUEST_TIMEOUT_SECONDS = 90
+_REQUEST_TIMEOUT_SECONDS = 60
+_DEFAULT_REPEAT_SUPPRESSION_MINUTES = 360
+_REROUTE_SUFFIX_RE = re.compile(r"_r[0-9a-f]{4,}$", re.IGNORECASE)
 
 
 def _safe_bool(value: Any, default: bool = False) -> bool:
@@ -51,6 +60,32 @@ def _resolve_root_path(raw_path: str | Path) -> Path:
     return path if path.is_absolute() else ROOT_DIR / path
 
 
+def _default_lock_file(state_file: Path) -> Path:
+    return state_file.with_name(f"{state_file.name}.lock")
+
+
+def _try_acquire_lock(path: Path) -> int | None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
+    return fd
+
+
+def _release_lock(fd: int | None) -> None:
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -70,6 +105,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-file", default="")
     parser.add_argument("--webhook-url", default="")
+    parser.add_argument("--lock-file", default="")
+    parser.add_argument(
+        "--min-repeat-minutes",
+        type=int,
+        default=_DEFAULT_REPEAT_SUPPRESSION_MINUTES,
+        help=(
+            "Suppress a recently notified stable surface state for this many minutes, even if the previous "
+            "run observed a different transient state."
+        ),
+    )
     parser.add_argument("--force-send", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -172,6 +217,180 @@ def _filter_rows(rows: Any, *, symbol: str) -> list[dict[str, Any]]:
     if not isinstance(rows, list):
         return []
     return [dict(row) for row in rows if isinstance(row, dict) and _matches_symbol(row, symbol)]
+
+
+def _csv_items(raw: Any, *, case: str = "asis") -> list[str]:
+    items: list[str] = []
+    for value in str(raw or "").split(","):
+        item = str(value or "").strip()
+        if not item:
+            continue
+        if case == "upper":
+            item = item.upper()
+        elif case == "lower":
+            item = item.lower()
+        if item not in items:
+            items.append(item)
+    return items
+
+
+def _parse_direction_contract(raw: Any) -> dict[str, list[str]]:
+    mapping: dict[str, list[str]] = {}
+    for item in str(raw or "").split(","):
+        token = str(item or "").strip()
+        if not token or ":" not in token:
+            continue
+        symbol, raw_directions = token.split(":", 1)
+        normalized_symbol = str(symbol or "").strip().upper()
+        if not normalized_symbol:
+            continue
+        directions: list[str] = []
+        for direction in str(raw_directions or "").replace("/", "|").split("|"):
+            normalized_direction = str(direction or "").strip().upper()
+            if normalized_direction and normalized_direction not in directions:
+                directions.append(normalized_direction)
+        if directions:
+            mapping[normalized_symbol] = directions
+    return mapping
+
+
+def _live_route_contract_from_settings(settings: Any) -> dict[str, Any]:
+    execution_mode = str(getattr(settings, "auto_trading_execution_mode", "") or "").strip().upper()
+    if execution_mode == "MICRO_LIVE":
+        return {
+            "authority": "live_candidate_promotion_readiness_is_order_truth",
+            "execution_mode": execution_mode,
+            "symbols": _csv_items(getattr(settings, "auto_trading_micro_live_allowed_symbols", ""), case="upper"),
+            "strategy_families": _csv_items(
+                getattr(settings, "auto_trading_micro_live_allowed_families", ""),
+                case="lower",
+            ),
+            "entry_models": _csv_items(getattr(settings, "auto_trading_micro_live_allowed_entry_models", ""), case="upper"),
+            "sessions": _csv_items(getattr(settings, "auto_trading_micro_live_allowed_sessions", ""), case="lower"),
+            "direction_contract": _parse_direction_contract(
+                getattr(settings, "auto_trading_micro_live_direction_contract", "")
+            ),
+        }
+    if execution_mode == "LIVE":
+        return {
+            "authority": "live_candidate_promotion_readiness_is_order_truth",
+            "execution_mode": execution_mode,
+            "symbols": _csv_items(getattr(settings, "auto_trading_allowed_symbols", ""), case="upper"),
+            "strategy_families": _csv_items(getattr(settings, "auto_trading_allowed_families", ""), case="lower"),
+            "entry_models": _csv_items(getattr(settings, "auto_trading_micro_live_allowed_entry_models", ""), case="upper"),
+            "sessions": [],
+            "direction_contract": {},
+        }
+    return {
+        "authority": "live_candidate_promotion_readiness_is_order_truth",
+        "execution_mode": execution_mode or "UNKNOWN",
+        "symbols": [],
+        "strategy_families": [],
+        "entry_models": [],
+        "sessions": [],
+        "direction_contract": {},
+    }
+
+
+def _row_entry_model(row: dict[str, Any]) -> str:
+    payload = dict(row or {})
+    validity = dict(payload.get("validity") or {})
+    return str(payload.get("entry_model") or validity.get("entry_model") or "").strip().upper()
+
+
+def _row_direction(row: dict[str, Any]) -> str:
+    payload = dict(row or {})
+    validity = dict(payload.get("validity") or {})
+    return str(payload.get("direction") or validity.get("direction") or "").strip().upper()
+
+
+def _row_session_name(row: dict[str, Any]) -> str:
+    payload = dict(row or {})
+    operating_lock = dict(payload.get("operating_lock") or {})
+    current_session = dict(operating_lock.get("current_session") or {})
+    if str(current_session.get("name") or "").strip():
+        return str(current_session.get("name") or "").strip().lower()
+    session_guidance = dict(payload.get("session_guidance") or {})
+    guidance_session = dict(session_guidance.get("current_session") or {})
+    if str(guidance_session.get("name") or "").strip():
+        return str(guidance_session.get("name") or "").strip().lower()
+    if str(session_guidance.get("session_name") or "").strip():
+        return str(session_guidance.get("session_name") or "").strip().lower()
+    if str(session_guidance.get("state") or "").strip():
+        return str(session_guidance.get("state") or "").strip().lower()
+    validity = dict(payload.get("validity") or {})
+    for key in (
+        "session_guidance_session_name",
+        "session_guidance_state",
+        "generated_session",
+        "session_name",
+        "session",
+    ):
+        if str(validity.get(key) or "").strip():
+            return str(validity.get(key) or "").strip().lower()
+    for key in ("generated_session", "session_name", "session"):
+        if str(payload.get(key) or "").strip():
+            return str(payload.get(key) or "").strip().lower()
+    return ""
+
+
+def _live_route_status(row: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+    symbol = str(row.get("symbol") or "").strip().upper()
+    family = _candidate_family(row).strip().lower()
+    entry_model = _row_entry_model(row)
+    direction = _row_direction(row)
+    session_name = _row_session_name(row)
+    live_symbols = {str(item or "").strip().upper() for item in list(contract.get("symbols") or [])}
+    live_families = {str(item or "").strip().lower() for item in list(contract.get("strategy_families") or [])}
+    live_entry_models = {str(item or "").strip().upper() for item in list(contract.get("entry_models") or [])}
+    live_sessions = {str(item or "").strip().lower() for item in list(contract.get("sessions") or [])}
+    direction_contract = dict(contract.get("direction_contract") or {})
+    allowed_directions = {
+        str(item or "").strip().upper() for item in list(direction_contract.get(symbol) or []) if str(item or "").strip()
+    }
+
+    symbol_live = bool(symbol and symbol in live_symbols)
+    family_live = bool(family and family in live_families)
+    entry_model_live = not live_entry_models or bool(entry_model and entry_model in live_entry_models)
+    direction_live = not allowed_directions or bool(direction and direction in allowed_directions)
+    session_live = not live_sessions or bool(session_name and session_name in live_sessions)
+
+    reasons: list[str] = []
+    if str(contract.get("execution_mode") or "").upper() not in {"MICRO_LIVE", "LIVE"}:
+        reasons.append("execution_mode_not_live")
+    if not symbol_live:
+        reasons.append("symbol_not_live_routable")
+    if not family_live:
+        reasons.append("strategy_family_not_live_route")
+    if not entry_model_live:
+        reasons.append("entry_model_not_live_route")
+    if not direction_live:
+        reasons.append("direction_missing_for_live_route" if not direction else "direction_not_live_route")
+    if not session_live:
+        reasons.append("session_missing_for_live_route" if not session_name else "session_not_live_route")
+
+    live_routable = not reasons
+    return {
+        "authority": str(contract.get("authority") or "live_candidate_promotion_readiness_is_order_truth"),
+        "execution_mode": str(contract.get("execution_mode") or ""),
+        "status": "live_route_candidate" if live_routable else "context_only",
+        "live_routable": live_routable,
+        "reasons": reasons,
+        "symbol": symbol,
+        "strategy_family": family,
+        "entry_model": entry_model,
+        "direction": direction,
+        "session_name": session_name,
+        "allowed_directions": sorted(allowed_directions),
+    }
+
+
+def _attach_live_route_status(row: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(row)
+    route = _live_route_status(enriched, contract)
+    enriched["entry_surface_route"] = route
+    enriched["live_routable"] = bool(route.get("live_routable"))
+    return enriched
 
 
 def _blocked_topline_reason(payload: dict[str, Any]) -> tuple[str, str]:
@@ -326,18 +545,33 @@ def build_entry_snapshot(
     *,
     symbol: str = "",
     max_per_status: int = 3,
+    live_route_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    accepted_rows = _filter_rows(payload.get("accepted_candidates"), symbol=symbol)
-    blocked_rows = _filter_rows(payload.get("blocked_candidates"), symbol=symbol)
-    research_rows = _filter_rows(payload.get("alpha_research_candidates"), symbol=symbol)
+    contract = dict(live_route_contract or _live_route_contract_from_settings(get_settings()))
+    accepted_rows = [
+        _attach_live_route_status(row, contract) for row in _filter_rows(payload.get("accepted_candidates"), symbol=symbol)
+    ]
+    blocked_rows = [
+        _attach_live_route_status(row, contract) for row in _filter_rows(payload.get("blocked_candidates"), symbol=symbol)
+    ]
+    research_rows = [
+        _attach_live_route_status(row, contract)
+        for row in _filter_rows(payload.get("alpha_research_candidates"), symbol=symbol)
+    ]
 
     research_plan_ids = {str(row.get("plan_id") or "") for row in research_rows}
     blocked_non_research = [row for row in blocked_rows if str(row.get("plan_id") or "") not in research_plan_ids]
 
     deployment_state = str(payload.get("deployment_go_no_go") or "MANUAL_REVIEW").upper()
-    actionable_rows: list[dict[str, Any]] = []
+    live_order_rows: list[dict[str, Any]] = []
+    context_review_rows: list[dict[str, Any]] = []
     if deployment_state == "GO":
-        actionable_rows = accepted_rows
+        for row in accepted_rows:
+            route = dict(row.get("entry_surface_route") or {})
+            if _safe_bool(route.get("live_routable")):
+                live_order_rows.append(row)
+            else:
+                context_review_rows.append(row)
     else:
         reason_code, reason_message = _blocked_topline_reason(payload)
         for row in accepted_rows:
@@ -346,13 +580,23 @@ def build_entry_snapshot(
             shadow["block_reason_message"] = shadow.get("block_reason_message") or reason_message
             blocked_non_research.append(shadow)
 
-    actionable_rows = sorted(actionable_rows, key=_sort_actionable_key, reverse=True)[: max(0, int(max_per_status))]
+    live_order_rows = sorted(live_order_rows, key=_sort_actionable_key, reverse=True)[: max(0, int(max_per_status))]
+    context_review_rows = sorted(context_review_rows, key=_sort_actionable_key, reverse=True)[: max(0, int(max_per_status))]
     blocked_non_research = sorted(blocked_non_research, key=_sort_blocked_key, reverse=True)[: max(0, int(max_per_status))]
     research_rows = sorted(research_rows, key=_sort_research_key, reverse=True)[: max(0, int(max_per_status))]
 
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "scope": _candidate_scope(payload, symbol),
+        "live_route_contract": {
+            "authority": str(contract.get("authority") or "live_candidate_promotion_readiness_is_order_truth"),
+            "execution_mode": str(contract.get("execution_mode") or ""),
+            "symbols": list(contract.get("symbols") or []),
+            "strategy_families": list(contract.get("strategy_families") or []),
+            "entry_models": list(contract.get("entry_models") or []),
+            "sessions": list(contract.get("sessions") or []),
+            "direction_contract": dict(contract.get("direction_contract") or {}),
+        },
         "deployment_go_no_go": deployment_state,
         "deployment_code": str(payload.get("deployment_code") or ""),
         "deployment_message": str(payload.get("deployment_message") or ""),
@@ -363,12 +607,14 @@ def build_entry_snapshot(
         "edge_evolution_rule": _edge_evolution_summary(payload),
         "review_followup_ledger": _review_followup_summary(payload),
         "counts": {
-            ACTIONABLE_ENTRY: len(actionable_rows),
+            LIVE_ORDER_CANDIDATE: len(live_order_rows),
+            CONTEXT_REVIEW_SETUP: len(context_review_rows),
             BLOCKED_SETUP: len(blocked_non_research),
             RESEARCH_ONLY_SETUP: len(research_rows),
         },
         "sections": {
-            ACTIONABLE_ENTRY: actionable_rows,
+            LIVE_ORDER_CANDIDATE: live_order_rows,
+            CONTEXT_REVIEW_SETUP: context_review_rows,
             BLOCKED_SETUP: blocked_non_research,
             RESEARCH_ONLY_SETUP: research_rows,
         },
@@ -381,8 +627,26 @@ def build_alert_state(snapshot: dict[str, Any]) -> dict[str, Any]:
     edge_experiment = dict(snapshot.get("edge_experiment_review") or {})
     edge_evolution = dict(snapshot.get("edge_evolution_rule") or {})
     review_followup = dict(snapshot.get("review_followup_ledger") or {})
+    live_contract = dict(snapshot.get("live_route_contract") or {})
     return {
         "scope": str(snapshot.get("scope") or ""),
+        "live_route_contract": {
+            "execution_mode": str(live_contract.get("execution_mode") or ""),
+            "symbols": sorted(str(item or "").strip().upper() for item in list(live_contract.get("symbols") or [])),
+            "strategy_families": sorted(
+                str(item or "").strip().lower() for item in list(live_contract.get("strategy_families") or [])
+            ),
+            "entry_models": sorted(
+                str(item or "").strip().upper() for item in list(live_contract.get("entry_models") or [])
+            ),
+            "sessions": sorted(str(item or "").strip().lower() for item in list(live_contract.get("sessions") or [])),
+            "direction_contract": {
+                str(symbol or "").strip().upper(): sorted(
+                    str(direction or "").strip().upper() for direction in list(directions or [])
+                )
+                for symbol, directions in dict(live_contract.get("direction_contract") or {}).items()
+            },
+        },
         "deployment_go_no_go": str(snapshot.get("deployment_go_no_go") or ""),
         "deployment_code": str(snapshot.get("deployment_code") or ""),
         "playbook_go_no_go": str(snapshot.get("playbook_go_no_go") or ""),
@@ -410,33 +674,39 @@ def build_alert_state(snapshot: dict[str, Any]) -> dict[str, Any]:
         "review_followup_entries": int(review_followup.get("recent_entry_count", 0) or 0),
         "review_followup_command": str(review_followup.get("last_followup_command") or ""),
         "counts": {
-            ACTIONABLE_ENTRY: int((snapshot.get("counts") or {}).get(ACTIONABLE_ENTRY, 0) or 0),
-            BLOCKED_SETUP: int((snapshot.get("counts") or {}).get(BLOCKED_SETUP, 0) or 0),
-            RESEARCH_ONLY_SETUP: int((snapshot.get("counts") or {}).get(RESEARCH_ONLY_SETUP, 0) or 0),
+            status: int((snapshot.get("counts") or {}).get(status, 0) or 0) for status in ALERT_STATUSES
         },
         "sections": {
-            ACTIONABLE_ENTRY: [_row_alert_identity(ACTIONABLE_ENTRY, row) for row in sections.get(ACTIONABLE_ENTRY) or []],
-            BLOCKED_SETUP: [_row_alert_identity(BLOCKED_SETUP, row) for row in sections.get(BLOCKED_SETUP) or []],
-            RESEARCH_ONLY_SETUP: [
-                _row_alert_identity(RESEARCH_ONLY_SETUP, row) for row in sections.get(RESEARCH_ONLY_SETUP) or []
-            ],
+            status: [_row_alert_identity(status, row) for row in sections.get(status) or []] for status in ALERT_STATUSES
         },
     }
+
+
+def _stable_plan_id(raw_plan_id: Any) -> str:
+    return _REROUTE_SUFFIX_RE.sub("", str(raw_plan_id or "").strip())
 
 
 def _row_alert_identity(status: str, row: dict[str, Any]) -> dict[str, Any]:
     edge_focus = dict(row.get("edge_experiment_focus") or {})
+    route = dict(row.get("entry_surface_route") or {})
+    route_reasons = [str(reason or "") for reason in list(route.get("reasons") or []) if str(reason or "")]
     payload = {
         "symbol": str(row.get("symbol") or ""),
-        "plan_id": str(row.get("plan_id") or ""),
+        "stable_plan_id": _stable_plan_id(row.get("plan_id")),
         "direction": str(row.get("direction") or "").lower(),
         "entry_model": str(row.get("entry_model") or "").upper(),
         "family": _candidate_family(row),
+        "route_status": str(route.get("status") or ""),
+        "live_routable": bool(route.get("live_routable")),
+        "route_reasons": route_reasons,
+        "session_name": str(route.get("session_name") or ""),
         "edge_state": str(edge_focus.get("edge_state") or ""),
         "entry_timing_focus": str(edge_focus.get("entry_timing_preferred_variant") or ""),
         "execution_style_focus": str(edge_focus.get("execution_style_preferred_variant") or ""),
     }
-    if status == BLOCKED_SETUP:
+    if status == CONTEXT_REVIEW_SETUP:
+        payload["reason_code"] = ",".join(route_reasons) or "outside_live_route"
+    elif status == BLOCKED_SETUP:
         payload["reason_code"] = str(row.get("block_reason") or "")
     elif status == RESEARCH_ONLY_SETUP:
         payload["reason_code"] = str(row.get("alpha_research_reason") or row.get("block_reason") or "")
@@ -452,6 +722,69 @@ def _extract_alert_state(payload: dict[str, Any] | None) -> dict[str, Any] | Non
     return payload
 
 
+def _alert_state_signature(alert_state: dict[str, Any]) -> str:
+    raw = json.dumps(alert_state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _extract_alert_state_history(payload: dict[str, Any] | None) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        return {}
+    raw_history = payload.get("alert_state_history")
+    if not isinstance(raw_history, dict):
+        return {}
+    history: dict[str, str] = {}
+    for key, value in raw_history.items():
+        signature = str(key or "").strip()
+        timestamp = str(value or "").strip()
+        if signature and timestamp:
+            history[signature] = timestamp
+    return history
+
+
+def _parse_utc_timestamp(raw: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(raw or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _recent_history_match(
+    history: dict[str, str],
+    *,
+    signature: str,
+    now: datetime,
+    min_repeat_minutes: int,
+) -> tuple[bool, str]:
+    if min_repeat_minutes <= 0:
+        return (False, "")
+    last_raw = str(history.get(signature) or "")
+    last_seen = _parse_utc_timestamp(last_raw)
+    if last_seen is None:
+        return (False, "")
+    return (now - last_seen < timedelta(minutes=min_repeat_minutes), last_seen.isoformat())
+
+
+def _updated_alert_state_history(
+    history: dict[str, str],
+    *,
+    signature: str,
+    now: datetime,
+    max_items: int = 64,
+) -> dict[str, str]:
+    updated = dict(history)
+    updated[signature] = now.isoformat()
+    sortable: list[tuple[datetime, str, str]] = []
+    for key, value in updated.items():
+        parsed = _parse_utc_timestamp(value) or datetime.min.replace(tzinfo=UTC)
+        sortable.append((parsed, key, value))
+    sortable.sort(reverse=True)
+    return {key: value for _, key, value in sortable[:max_items]}
+
+
 def _format_candidate_line(status: str, row: dict[str, Any]) -> str:
     symbol = str(row.get("symbol") or "UNKNOWN")
     direction = str(row.get("direction") or "").lower() or "unknown"
@@ -459,8 +792,18 @@ def _format_candidate_line(status: str, row: dict[str, Any]) -> str:
     family = _candidate_family(row)
     risk_r = float(row.get("recommended_risk_r", 0.0) or 0.0)
     expected_summary = str(row.get("expected_summary") or "").strip()
+    route = dict(row.get("entry_surface_route") or {})
+    live_routable = _safe_bool(route.get("live_routable"))
+    route_reasons = [str(reason or "") for reason in list(route.get("reasons") or []) if str(reason or "")]
 
-    parts = [f"{symbol} {direction} {entry_model}", f"family={family}", f"risk={risk_r:.2f}R"]
+    parts = [
+        f"{symbol} {direction} {entry_model}",
+        f"family={family}",
+        f"live_routable={'true' if live_routable else 'false'}",
+    ]
+    if route_reasons:
+        parts.append(f"route_reasons={','.join(route_reasons)}")
+    parts.append(f"risk={risk_r:.2f}R")
     if expected_summary:
         parts.append(expected_summary)
 
@@ -493,6 +836,16 @@ def _format_candidate_line(status: str, row: dict[str, Any]) -> str:
     return "- " + " | ".join(parts)
 
 
+def _section_title(status: str) -> str:
+    labels = {
+        LIVE_ORDER_CANDIDATE: "[주문 후보] LIVE_ORDER_CANDIDATE",
+        CONTEXT_REVIEW_SETUP: "[검토 후보] CONTEXT_REVIEW_SETUP",
+        BLOCKED_SETUP: "[차단 후보] BLOCKED_SETUP",
+        RESEARCH_ONLY_SETUP: "[연구 후보] RESEARCH_ONLY_SETUP",
+    }
+    return labels.get(status, status)
+
+
 def _format_contract_trace(snapshot: dict[str, Any]) -> str:
     approval_strip = dict(snapshot.get("approval_strip") or {})
     return (
@@ -501,6 +854,27 @@ def _format_contract_trace(snapshot: dict[str, Any]) -> str:
         f"| act={approval_strip.get('act_value')} "
         f"| runtime={snapshot.get('deployment_go_no_go')}/{snapshot.get('deployment_code')} "
         f"| playbook={snapshot.get('playbook_go_no_go')}"
+    )
+
+
+def _format_live_route_trace(snapshot: dict[str, Any]) -> str:
+    counts = dict(snapshot.get("counts") or {})
+    contract = dict(snapshot.get("live_route_contract") or {})
+    symbols = list(contract.get("symbols") or [])
+    families = list(contract.get("strategy_families") or [])
+    entry_models = list(contract.get("entry_models") or [])
+    sessions = list(contract.get("sessions") or [])
+    direction_contract = dict(contract.get("direction_contract") or {})
+    return (
+        "order_route_truth: authority=live_candidate_promotion_readiness "
+        f"| live_order_candidates={int(counts.get(LIVE_ORDER_CANDIDATE, 0) or 0)} "
+        f"| review_only_candidates={int(counts.get(CONTEXT_REVIEW_SETUP, 0) or 0)} "
+        f"| mode={contract.get('execution_mode') or 'UNKNOWN'} "
+        f"| symbols={','.join(str(item) for item in symbols) or 'none'} "
+        f"| families={','.join(str(item) for item in families) or 'none'} "
+        f"| entry_models={','.join(str(item) for item in entry_models) or 'any'} "
+        f"| sessions={','.join(str(item) for item in sessions) or 'any'} "
+        f"| direction_contract_symbols={len(direction_contract)}"
     )
 
 
@@ -557,9 +931,14 @@ def render_message(snapshot: dict[str, Any]) -> str:
     counts = dict(snapshot.get("counts") or {})
     sections = dict(snapshot.get("sections") or {})
     approval_strip = dict(snapshot.get("approval_strip") or {})
+    live_count = int(counts.get(LIVE_ORDER_CANDIDATE, 0) or 0)
+    review_count = int(counts.get(CONTEXT_REVIEW_SETUP, 0) or 0)
     lines = [
-        "Trading entry surface alert",
-        f"scope: {snapshot.get('scope')}",
+        (
+            "Trading entry surface alert: "
+            f"live_order_candidates={live_count}, review_candidates={review_count}"
+        ),
+        f"scope: {snapshot.get('scope')} | order_truth=live_candidate_promotion_readiness",
         (
             f"approval_strip: approve={approval_strip.get('approve_value')} "
             f"| align={approval_strip.get('align_value')} "
@@ -568,20 +947,22 @@ def render_message(snapshot: dict[str, Any]) -> str:
         ),
         f"reason: {approval_strip.get('primary_reason') or snapshot.get('deployment_message')}",
         _format_contract_trace(snapshot),
+        _format_live_route_trace(snapshot),
         _format_edge_experiment_trace(snapshot),
         _format_edge_evolution_trace(snapshot),
         _format_review_followup_trace(snapshot),
         (
-            f"counts: {ACTIONABLE_ENTRY}={counts.get(ACTIONABLE_ENTRY, 0)}, "
+            f"counts: {LIVE_ORDER_CANDIDATE}={counts.get(LIVE_ORDER_CANDIDATE, 0)}, "
+            f"{CONTEXT_REVIEW_SETUP}={counts.get(CONTEXT_REVIEW_SETUP, 0)}, "
             f"{BLOCKED_SETUP}={counts.get(BLOCKED_SETUP, 0)}, "
             f"{RESEARCH_ONLY_SETUP}={counts.get(RESEARCH_ONLY_SETUP, 0)}"
         ),
     ]
 
-    for status in (ACTIONABLE_ENTRY, BLOCKED_SETUP, RESEARCH_ONLY_SETUP):
+    for status in ALERT_STATUSES:
         rows = sections.get(status) or []
         lines.append("")
-        lines.append(f"{status}")
+        lines.append(_section_title(status))
         if not rows:
             lines.append("- none")
             continue
@@ -591,30 +972,77 @@ def render_message(snapshot: dict[str, Any]) -> str:
 
 def _has_alertable_rows(snapshot: dict[str, Any]) -> bool:
     counts = dict(snapshot.get("counts") or {})
-    return any(int(counts.get(status, 0) or 0) > 0 for status in (ACTIONABLE_ENTRY, BLOCKED_SETUP, RESEARCH_ONLY_SETUP))
+    return any(int(counts.get(status, 0) or 0) > 0 for status in ALERT_STATUSES)
 
 
 def main() -> int:
     args = parse_args()
+    now = datetime.now(UTC)
     state_file = _resolve_root_path(args.state_file).resolve()
     output_file_raw = str(getattr(args, "output_file", "") or "").strip()
     output_file = _resolve_root_path(output_file_raw).resolve() if output_file_raw else None
-    payload = _request_json(
-        args.base_url,
-        "GET",
-        "/portfolio/budget",
+    lock_file_raw = str(getattr(args, "lock_file", "") or "").strip()
+    lock_file = _resolve_root_path(lock_file_raw).resolve() if lock_file_raw else _default_lock_file(state_file)
+    lock_fd = _try_acquire_lock(lock_file)
+    if lock_fd is None:
+        _emit_result(
+            None,
+            {
+                "base_url": args.base_url,
+                "universe": args.universe,
+                "symbol": str(args.symbol or "").strip() or None,
+                "channel": args.channel,
+                "state_file": str(state_file),
+                "lock_file": str(lock_file),
+                "dry_run": bool(args.dry_run),
+                "force_send": bool(args.force_send),
+                "notified": False,
+                "state_written": False,
+                "dedupe_suppressed": True,
+                "reason": "entry_surface_tick_already_running",
+            },
+        )
+        return 0
+    try:
+        payload = _request_json(
+            args.base_url,
+            "GET",
+            "/portfolio/budget",
         query={
             "universe": args.universe,
             "limit": args.limit,
             "write_report": "false",
+            "fast": "true",
         },
     )
+    except RuntimeError as exc:
+        _emit_result(
+            output_file,
+            {
+                "base_url": args.base_url,
+                "universe": args.universe,
+                "symbol": str(args.symbol or "").strip() or None,
+                "channel": args.channel,
+                "state_file": str(state_file),
+                "lock_file": str(lock_file),
+                "dry_run": bool(args.dry_run),
+                "force_send": bool(args.force_send),
+                "notified": False,
+                "state_written": False,
+                "dedupe_suppressed": False,
+                "reason": "source_request_failed",
+                "error": str(exc),
+            },
+        )
+        _release_lock(lock_fd)
+        return 0
     snapshot = build_entry_snapshot(
         payload,
         symbol=str(args.symbol or "").strip(),
         max_per_status=max(0, int(args.max_per_status)),
     )
     alert_state = build_alert_state(snapshot)
+    alert_state_signature = _alert_state_signature(alert_state)
     state_warning = ""
     try:
         previous_payload = _read_json(state_file)
@@ -622,6 +1050,11 @@ def main() -> int:
         previous_payload = None
         state_warning = str(exc)
     previous_state = _extract_alert_state(previous_payload)
+    alert_state_history = _extract_alert_state_history(previous_payload)
+    min_repeat_minutes = max(
+        0,
+        int(getattr(args, "min_repeat_minutes", _DEFAULT_REPEAT_SUPPRESSION_MINUTES) or 0),
+    )
 
     result: dict[str, Any] = {
         "base_url": args.base_url,
@@ -629,10 +1062,13 @@ def main() -> int:
         "symbol": str(args.symbol or "").strip() or None,
         "channel": args.channel,
         "state_file": str(state_file),
+        "lock_file": str(lock_file),
         "dry_run": bool(args.dry_run),
         "force_send": bool(args.force_send),
+        "min_repeat_minutes": min_repeat_minutes,
         "snapshot": snapshot,
         "alert_state": alert_state,
+        "alert_state_signature": alert_state_signature,
         "notified": False,
         "state_written": False,
         "dedupe_suppressed": False,
@@ -648,17 +1084,35 @@ def main() -> int:
                 {
                     "updated_at": datetime.now(UTC).isoformat(),
                     "alert_state": alert_state,
+                    "alert_state_signature": alert_state_signature,
+                    "alert_state_history": alert_state_history,
                     "reason": "no_alertable_rows",
                 },
             )
             result["state_written"] = True
         _emit_result(output_file, result)
+        _release_lock(lock_fd)
         return 0
 
     if previous_state == alert_state and not args.force_send:
         result["reason"] = "unchanged_surface_state"
         result["dedupe_suppressed"] = True
         _emit_result(output_file, result)
+        _release_lock(lock_fd)
+        return 0
+
+    recently_seen, last_notified_at = _recent_history_match(
+        alert_state_history,
+        signature=alert_state_signature,
+        now=now,
+        min_repeat_minutes=min_repeat_minutes,
+    )
+    if recently_seen and not args.force_send:
+        result["reason"] = "recent_surface_state_repeat"
+        result["dedupe_suppressed"] = True
+        result["last_notified_at"] = last_notified_at
+        _emit_result(output_file, result)
+        _release_lock(lock_fd)
         return 0
 
     message = render_message(snapshot)
@@ -667,6 +1121,7 @@ def main() -> int:
     if args.dry_run:
         result["reason"] = "dry_run"
         _emit_result(output_file, result)
+        _release_lock(lock_fd)
         return 0
 
     settings = get_settings()
@@ -683,11 +1138,18 @@ def main() -> int:
     result["notified"] = _safe_bool(delivery.get("delivered"))
     result["delivery"] = delivery
     if _safe_bool(delivery.get("delivered")):
+        updated_history = _updated_alert_state_history(
+            alert_state_history,
+            signature=alert_state_signature,
+            now=now,
+        )
         _write_json(
             state_file,
             {
-                "updated_at": datetime.now(UTC).isoformat(),
+                "updated_at": now.isoformat(),
                 "alert_state": alert_state,
+                "alert_state_signature": alert_state_signature,
+                "alert_state_history": updated_history,
                 "delivery": {
                     "channel": delivery.get("channel"),
                     "reason": delivery.get("reason"),
@@ -697,6 +1159,7 @@ def main() -> int:
         )
         result["state_written"] = True
     _emit_result(output_file, result)
+    _release_lock(lock_fd)
     return 0
 
 

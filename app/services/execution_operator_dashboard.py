@@ -12,6 +12,7 @@ from app.db.repositories import (
     OrderIntentRepository,
     OrderSubmissionRepository,
 )
+from app.services.active_contract_replay_baseline import usdt_proxy_rows_for_active_contract
 from app.services.edge_experiment_review import build_edge_experiment_review, summarize_edge_experiment_review
 from app.services.edge_evolution_rule import build_edge_evolution_rule, summarize_edge_evolution_rule
 from app.services.outcome_control_trace import (
@@ -222,6 +223,38 @@ class ExecutionOperatorDashboardService:
         return counts, rows
 
     @staticmethod
+    def _row_session_name(row: dict[str, Any]) -> str:
+        payload = dict(row or {})
+        operating_lock = dict(payload.get("operating_lock") or {})
+        current_session = dict(operating_lock.get("current_session") or {})
+        if str(current_session.get("name") or "").strip():
+            return str(current_session.get("name") or "").strip().lower()
+        session_guidance = dict(payload.get("session_guidance") or {})
+        guidance_session = dict(session_guidance.get("current_session") or {})
+        if str(guidance_session.get("name") or "").strip():
+            return str(guidance_session.get("name") or "").strip().lower()
+        if str(session_guidance.get("session_name") or "").strip():
+            return str(session_guidance.get("session_name") or "").strip().lower()
+        if str(session_guidance.get("state") or "").strip():
+            return str(session_guidance.get("state") or "").strip().lower()
+        validity = dict(payload.get("validity") or {})
+        for key in (
+            "session_guidance_session_name",
+            "session_guidance_state",
+            "generated_session",
+            "session_name",
+            "session",
+        ):
+            value = str(validity.get(key) or "").strip()
+            if value:
+                return value.lower()
+        for key in ("generated_session", "session_name", "session"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value.lower()
+        return ""
+
+    @staticmethod
     def _row_matches_contract_filters(row: dict[str, Any], filters: dict[str, Any] | None) -> bool:
         payload = dict(row or {})
         filter_payload = dict(filters or {})
@@ -242,6 +275,11 @@ class ExecutionOperatorDashboardService:
             for item in list(filter_payload.get("directions") or [])
             if str(item or "").strip()
         }
+        sessions = {
+            str(item or "").strip().lower()
+            for item in list(filter_payload.get("sessions") or [])
+            if str(item or "").strip()
+        }
         row_symbol = str(payload.get("symbol") or "").strip().upper()
         row_execution_mode = str(payload.get("execution_mode") or "").strip().upper()
         family = str(payload.get("strategy_family") or dict(payload.get("validity") or {}).get("strategy_family") or "").lower()
@@ -256,6 +294,8 @@ class ExecutionOperatorDashboardService:
         if entry_models and entry_model not in entry_models:
             return False
         if directions and direction not in directions:
+            return False
+        if sessions and ExecutionOperatorDashboardService._row_session_name(payload) not in sessions:
             return False
         return True
 
@@ -766,6 +806,7 @@ class ExecutionOperatorDashboardService:
             "playbook_action": approval_snapshot.get("playbook_action", ""),
             "outcome_approval_penalty": dict(approval_snapshot.get("outcome_approval_penalty") or {}),
             "thesis_cluster_id": payload.get("thesis_cluster_id", ""),
+            "session_guidance": dict(getattr(row, "session_guidance", {}) or payload.get("session_guidance") or {}),
             "created_at": row.created_at,
         }
 
@@ -931,6 +972,10 @@ class ExecutionOperatorDashboardService:
             "symbol": item.get("symbol", ""),
             "plan_id": item.get("plan_id", ""),
             "strategy_family": item.get("strategy_family", ""),
+            "entry_model": item.get("entry_model", ""),
+            "entry_type": item.get("entry_type", ""),
+            "direction": item.get("direction", ""),
+            "validity": dict(item.get("validity") or {}),
             "strategy_cluster": item.get("strategy_cluster"),
             "strategy_cluster_status": item.get("strategy_cluster_status"),
             "multi_strategy_overlay": dict(item.get("multi_strategy_overlay") or {}),
@@ -1175,6 +1220,39 @@ class ExecutionOperatorDashboardService:
         }
 
     def _active_contract_replay_flow_baseline(self, *, filters: dict[str, Any], cadence_window: dict[str, Any]) -> dict[str, Any] | None:
+        usdt_proxy = usdt_proxy_rows_for_active_contract(self.settings, filters)
+        if usdt_proxy is not None:
+            replay_window_days = max(float(usdt_proxy.get("days") or 0.0), 1.0)
+            replay_window_weeks = replay_window_days / 7.0
+            replay_rows = list(usdt_proxy.get("rows") or [])
+            expected_active_contract_candidates_per_week = (
+                round(len(replay_rows) / replay_window_weeks, 4)
+                if replay_window_weeks > 0
+                else 0.0
+            )
+            expected_closed_per_week_from_replay = expected_active_contract_candidates_per_week
+            observed_current_window_intents_per_week = float(
+                cadence_window.get("current_window_active_contract_intents_per_week") or 0.0
+            )
+            live_vs_replay_flow_ratio = (
+                round(observed_current_window_intents_per_week / expected_active_contract_candidates_per_week, 4)
+                if expected_active_contract_candidates_per_week > 0
+                else None
+            )
+            return {
+                "available": True,
+                "source": "micro_main_usdt_proxy_backtest",
+                "source_path": str(usdt_proxy.get("source_path") or ""),
+                "generated_at": str(usdt_proxy.get("generated_at") or ""),
+                "replay_window_days": round(replay_window_days, 4),
+                "replay_trade_count": len(replay_rows),
+                "expected_active_contract_candidates_per_week_from_replay": expected_active_contract_candidates_per_week,
+                "expected_closed_per_week_from_replay": expected_closed_per_week_from_replay,
+                "observed_current_window_active_contract_intents_per_week_live": observed_current_window_intents_per_week,
+                "live_vs_replay_flow_ratio": live_vs_replay_flow_ratio,
+                "comparison_only": True,
+            }
+
         cache_path = Path(self.settings.validation_report_dir) / "historical_walk_forward_cache" / _ACTIVE_CONTRACT_REPLAY_BASELINE_FILE
         if not cache_path.exists():
             return None
@@ -1213,6 +1291,11 @@ class ExecutionOperatorDashboardService:
             for item in list(filters.get("directions") or [])
             if str(item or "").strip()
         }
+        sessions = {
+            str(item or "").strip().lower()
+            for item in list(filters.get("sessions") or [])
+            if str(item or "").strip()
+        }
 
         replay_rows = [
             dict(row)
@@ -1230,6 +1313,10 @@ class ExecutionOperatorDashboardService:
                 and (
                     not directions
                     or str(row.get("direction") or "").strip().upper() in directions
+                )
+                and (
+                    not sessions
+                    or self._row_session_name(dict(row)) in sessions
                 )
             )
         ]

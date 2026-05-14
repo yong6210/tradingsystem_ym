@@ -28,6 +28,7 @@ CHANNEL_SLUG="${OPERATOR_BRIEF_CHANNEL:-system}"
 CHANNEL_SLUG="${CHANNEL_SLUG//-/_}"
 LATEST_RUN_PATH="${OPERATOR_BRIEF_LATEST_RUN_FILE:-$BRIEF_DIR/latest_operator_session_brief_${MODE_SLUG}.json}"
 STATE_PATH="${OPERATOR_BRIEF_STATE_FILE:-$BRIEF_DIR/last_alert_state_${MODE_SLUG}_${CHANNEL_SLUG}.json}"
+LOCK_PATH="${OPERATOR_BRIEF_LOCK_FILE:-$BRIEF_DIR/operator_session_brief_${MODE_SLUG}.lock}"
 
 NOTIFY_ARGS=(
   --symbol "${OPERATOR_BRIEF_SYMBOL:-BTCUSDC}"
@@ -39,6 +40,9 @@ NOTIFY_ARGS=(
   --channel "${OPERATOR_BRIEF_CHANNEL:-system}"
   --brief-mode "$BRIEF_MODE"
   --state-file "$STATE_PATH"
+  --latest-run-file "$LATEST_RUN_PATH"
+  --lock-file "$LOCK_PATH"
+  --run-timeout-seconds "${OPERATOR_BRIEF_RUN_TIMEOUT_SECONDS:-90}"
 )
 
 if [[ -n "${OPERATOR_BRIEF_DISCORD_WEBHOOK_URL:-}" ]]; then
@@ -51,5 +55,4 @@ if [[ "${OPERATOR_BRIEF_DRY_RUN:-0}" == "1" ]]; then
   NOTIFY_ARGS+=(--dry-run)
 fi
 
-"$PYTHON_BIN" "$ROOT_DIR/scripts/notify_operator_session_brief.py" "${NOTIFY_ARGS[@]}" \
-  > "$LATEST_RUN_PATH"
+"$PYTHON_BIN" "$ROOT_DIR/scripts/notify_operator_session_brief.py" "${NOTIFY_ARGS[@]}"

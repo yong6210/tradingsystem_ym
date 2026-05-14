@@ -240,9 +240,15 @@ def portfolio_budget(
     universe: str = Query(default="usdc_perp_top30"),
     limit: int = Query(default=20, ge=1, le=100),
     write_report: bool = Query(default=True),
+    fast: bool = Query(default=False),
     engine: StrategyEngine = Depends(get_engine),
 ) -> PortfolioBudgetReportOut:
-    payload = engine.portfolio_budget_report(universe=universe, limit=limit, write_report=write_report)
+    payload = engine.portfolio_budget_report(
+        universe=universe,
+        limit=limit,
+        write_report=write_report,
+        outcome_symbol_limit=0 if fast else None,
+    )
     return PortfolioBudgetReportOut(**payload)
 
 

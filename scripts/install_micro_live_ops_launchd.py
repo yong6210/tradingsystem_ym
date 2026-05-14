@@ -201,27 +201,9 @@ def build_jobs(*, label_prefix: str, python_bin: str, env_file: str = "") -> lis
 
 
 def _program_arguments(*, args: list[str], working_dir: Path, env_file: str) -> list[str]:
-    env_path = str(env_file or "").strip()
-    if not env_path:
-        return args
-    resolved = _resolve_root_path(env_path)
-    command = " ".join(
-        [
-            "cd",
-            shlex.quote(str(working_dir)),
-            "&&",
-            "set -a",
-            "&&",
-            "source",
-            shlex.quote(str(resolved)),
-            "&&",
-            "set +a",
-            "&&",
-            "exec",
-            *(shlex.quote(str(item)) for item in args),
-        ]
-    )
-    return ["/bin/zsh", "-lc", command]
+    # Settings loads ROOT_DIR/.env through pydantic; shell-sourcing it would
+    # misparse unquoted values such as LONG|SHORT direction contracts.
+    return list(args)
 
 
 def plist_payload(*, job: LaunchdJob, working_dir: Path, env_file: str) -> dict[str, Any]:
@@ -230,7 +212,7 @@ def plist_payload(*, job: LaunchdJob, working_dir: Path, env_file: str) -> dict[
         "Label": job.label,
         "ProgramArguments": _program_arguments(args=job.args, working_dir=working_dir, env_file=env_file),
         "WorkingDirectory": str(working_dir),
-        "RunAtLoad": False,
+        "RunAtLoad": True,
         "StandardOutPath": str(logs_dir / f"{job.name}.out.log"),
         "StandardErrorPath": str(logs_dir / f"{job.name}.err.log"),
     }

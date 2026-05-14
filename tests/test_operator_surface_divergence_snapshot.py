@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import importlib.util
+from types import SimpleNamespace
 from pathlib import Path
 
 
@@ -190,7 +192,149 @@ def test_write_report_uses_surface_strip_lines(tmp_path: Path) -> None:
     assert "- live_validation: state=watch_edge | entry_timing=early_limit | execution_style=passive_limit | validation=sample_building/do_not_claim_edge_yet | closed=6/100 | remaining_to_goal=94 | regime=single_regime_observed | true_edge=0.8200 | decay=-0.0300" in report
     assert "- edge_evolution: state=reduce_candidate | action=reduce_baseline_allocation_review | bias=reduce_baseline | promotion=entry_timing/early_limit" in report
     assert "- review_followup_ledger: status=READY | action=reduce_baseline_allocation_review | entries=3 | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review" in report
-    assert "- entry_timing_review_target: action=run_entry_timing_split_review | target=ETHUSDC | variant=early_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review" in report
-    assert "- execution_style_review_target: action=run_execution_style_split_review | target=ETHUSDC | variant=passive_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_execution_style_split_review" in report
-    assert "- representative_accepted_candidate: ETHUSDC | family=sweep_reversal | edge=watch_edge | split=early_limit/passive_limit | status=ACTIONABLE_ENTRY" in report
+    assert "- entry_timing_review_target: action=run_entry_timing_split_review | target=ETHUSDC | variant=early_limit | status=CONTEXT_REVIEW_SETUP | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review" in report
+    assert "- execution_style_review_target: action=run_execution_style_split_review | target=ETHUSDC | variant=passive_limit | status=CONTEXT_REVIEW_SETUP | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_execution_style_split_review" in report
+    assert "- representative_accepted_candidate: ETHUSDC | family=sweep_reversal | edge=watch_edge | split=early_limit/passive_limit | status=CONTEXT_REVIEW_SETUP" in report
     assert "- representative_blocked_candidate: BTCUSDC | family=trend_continuation | edge=fragile_edge | split=reaction_confirmed/market | status=BLOCKED_SETUP | reason=portfolio_cap" in report
+
+
+def test_main_uses_cached_fast_surfaces_for_session_brief(monkeypatch, capsys) -> None:
+    calls: list[tuple[str, str, dict]] = []
+
+    class _Response:
+        def __init__(self, payload=None, *, text: str = "", status_code: int = 200):  # noqa: ANN001
+            self._payload = payload or {}
+            self.text = text
+            self.status_code = status_code
+
+        def json(self):  # noqa: ANN201
+            return self._payload
+
+    dashboard = {
+        "execution_mode": "MICRO_LIVE",
+        "new_entries_allowed": False,
+        "deployment_go_no_go": "GO",
+        "playbook_action": "continue_runtime_monitoring",
+        "approval_strip_summary": {
+            "approve_value": "approval usable",
+            "align_value": "aligned",
+            "act_value": "continue_runtime_monitoring",
+            "act_priority_level": "monitor",
+        },
+        "signal_funnel": {
+            "operator_action_priority": {
+                "top_action": "continue_runtime_monitoring",
+                "priority_level": "monitor",
+                "next_actions": [],
+            },
+            "alpha_research_recommended_action": {},
+            "alpha_research_top_shadow_experiment": {},
+            "hard_block_summary": {},
+            "rollout_block_summary": {},
+            "score_to_outcome_funnel": {"money_funnel": {}},
+            "outcome_attribution": {},
+            "edge_experiment_review": {},
+            "edge_evolution_rule": {},
+            "review_followup_ledger": {},
+            "outcome_control_trace": {},
+            "rollout_recommendation": {},
+            "family_bottlenecks": [],
+            "regime_bottlenecks": [],
+            "session_bottlenecks": [],
+        },
+        "portfolio_summary": {"accepted_candidates": [], "blocked_candidates": []},
+        "recent_intents": [],
+        "open_orders": [],
+        "open_positions": [],
+    }
+    validation = {
+        "deployment_go_no_go": "GO",
+        "deployment_code": "cached",
+        "deployment_message": "cached validation",
+        "playbook_action": "continue_runtime_monitoring",
+        "approval_topline_status": "GO",
+        "validation_report": {
+            "approval_strip_summary": {
+                "approve_value": "approval usable",
+                "align_value": "aligned",
+                "act_value": "continue_runtime_monitoring",
+                "act_priority_level": "monitor",
+            }
+        },
+    }
+    checklist = {
+        "deployment_go_no_go": "GO",
+        "deployment_code": "cached",
+        "deployment_message": "cached checklist",
+        "playbook_action": "continue_runtime_monitoring",
+        "overall_status": "GO",
+        "blocking_failures": 0,
+        "manual_actions": 0,
+        "warnings": 0,
+        "approval_strip_summary": {
+            "approve_value": "approval usable",
+            "align_value": "aligned",
+            "act_value": "continue_runtime_monitoring",
+            "act_priority_level": "monitor",
+        },
+    }
+
+    class _Client:
+        def __init__(self, app):  # noqa: ANN001
+            self.app = app
+
+        def __enter__(self):  # noqa: ANN201
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get(self, path, params=None):  # noqa: ANN001, ANN201
+            calls.append(("GET", path, dict(params or {})))
+            if path == "/execution/operator-dashboard":
+                return _Response(dashboard)
+            if path == "/execution/operator-ui":
+                return _Response(text="\n".join(snapshot_script.EXPECTED_OPERATOR_UI_SECTIONS))
+            raise AssertionError(f"unexpected GET {path}")
+
+        def post(self, path, params=None):  # noqa: ANN001, ANN201
+            calls.append(("POST", path, dict(params or {})))
+            if path == "/validation/report":
+                return _Response(validation)
+            if path == "/operations/checklist":
+                return _Response(checklist)
+            raise AssertionError(f"unexpected POST {path}")
+
+    monkeypatch.setattr(snapshot_script, "TestClient", _Client)
+    monkeypatch.setattr(
+        snapshot_script,
+        "parse_args",
+        lambda: SimpleNamespace(
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            days=7,
+            portfolio_limit=5,
+            intent_limit=5,
+            reconcile_limit=5,
+            full_dashboard=False,
+            report_dir="reports/operations/operator_surface_divergence",
+            no_write_report=True,
+        ),
+    )
+
+    assert snapshot_script.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["symbol"] == "BTCUSDC"
+
+    dashboard_call = next(params for method, path, params in calls if method == "GET" and path == "/execution/operator-dashboard")
+    validation_call = next(params for method, path, params in calls if method == "POST" and path == "/validation/report")
+    checklist_call = next(params for method, path, params in calls if method == "POST" and path == "/operations/checklist")
+    assert dashboard_call["fast"] is True
+    assert validation_call == {"symbol": "BTCUSDC", "refresh": "false", "cache_fallback": "true"}
+    assert checklist_call == {
+        "symbol": "BTCUSDC",
+        "universe": "usdc_perp_top30",
+        "limit": 5,
+        "days": 7,
+        "write_report": "false",
+    }

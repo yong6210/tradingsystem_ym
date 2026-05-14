@@ -59,7 +59,7 @@ echo "== workspace storage =="
 du -sh .git trading.db trading.db-wal trading.db-shm 2>/dev/null || true
 du -sh "$RUNTIME_DB" "$RUNTIME_DB-wal" "$RUNTIME_DB-shm" 2>/dev/null || true
 if git rev-parse --git-dir >/dev/null 2>&1; then
-  git count-objects -vH || true
+  git count-objects -vH 2>/dev/null || true
 fi
 if command -v lsof >/dev/null 2>&1; then
   echo "-- sqlite holders --"
@@ -107,7 +107,7 @@ if [[ "${RUN_SIR_OPPORTUNITY_REPORT:-0}" == "1" ]]; then
 fi
 
 echo
-echo "== execution summary (24h) =="
+echo "== execution summary (current runtime/current family) =="
 (cd "$PYTHON_ROOT" && CHECK_HEARTBEAT_DIR="$HEARTBEAT_DIR" PYTHONPATH="$PYTHON_ROOT" "$PYTHON_BIN" - <<'PY'
 import json
 import os
@@ -272,8 +272,17 @@ def _diagnose_live_route(
             status="symbol_not_live_enabled_for_auto_route",
         )
         suffix = f"; symbols={symbols}" if symbols else ""
+        if (
+            auto_route_statuses.get("no_live_route_candidate_plan", 0) > 0
+            or refresh_statuses.get("no_fresh_candidates", 0) > 0
+        ):
+            return (
+                "WAIT",
+                "no_fresh_live_signal",
+                f"runtime is healthy; no fresh routable live signal. Shadow-only SIR signals also observed outside the live allowlist{suffix}",
+            )
         return (
-            "WATCH",
+            "OBSERVE",
             "non_live_symbol_signal_only",
             f"signal existed only outside the current live allowlist{suffix}; add only after validation, otherwise this is expected shadow observation",
         )
@@ -301,6 +310,8 @@ def _diagnose_live_route(
 
 cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
 runtime_cutoff = _ws_started_at()
+summary_cutoff = runtime_cutoff or cutoff
+summary_family = "session_impulse_retest"
 ws_stats = _ws_stats()
 with SessionLocal() as db:
     intent_rows = db.execute(
@@ -311,7 +322,7 @@ with SessionLocal() as db:
             OrderIntent.decision_reason_code,
             func.count(),
         )
-        .where(OrderIntent.created_at >= cutoff)
+        .where(OrderIntent.created_at >= summary_cutoff, OrderIntent.strategy_family == summary_family)
         .group_by(
             OrderIntent.execution_mode,
             OrderIntent.approval_state,
@@ -321,12 +332,20 @@ with SessionLocal() as db:
         .order_by(func.count().desc())
     ).all()
     submission_total = db.scalar(
-        select(func.count()).select_from(OrderSubmission).where(OrderSubmission.submitted_at >= cutoff)
+        select(func.count())
+        .select_from(OrderSubmission)
+        .join(OrderIntent, OrderIntent.intent_id == OrderSubmission.intent_id)
+        .where(OrderSubmission.submitted_at >= summary_cutoff, OrderIntent.strategy_family == summary_family)
     ) or 0
     live_submission_total = db.scalar(
         select(func.count())
         .select_from(OrderSubmission)
-        .where(OrderSubmission.submitted_at >= cutoff, OrderSubmission.requested_live.is_(True))
+        .join(OrderIntent, OrderIntent.intent_id == OrderSubmission.intent_id)
+        .where(
+            OrderSubmission.submitted_at >= summary_cutoff,
+            OrderSubmission.requested_live.is_(True),
+            OrderIntent.strategy_family == summary_family,
+        )
     ) or 0
     audit_rows = db.execute(
         select(
@@ -367,20 +386,27 @@ with SessionLocal() as db:
             .order_by(func.count().desc(), SessionImpulseRetestRuntimeAudit.symbol.asc())
         ).all()
 
+print(f"window_start={summary_cutoff.isoformat()} strategy_family={summary_family}")
 print(f"submissions_total={int(submission_total)} requested_live={int(live_submission_total)}")
 print("intents:")
-for mode, approval_state, submit_decision, reason, count in intent_rows:
-    print(f"- {count}: mode={mode} approval={approval_state} decision={submit_decision} reason={reason}")
-print("session_impulse_retest_audits:")
-for phase, status, count in audit_rows:
-    print(f"- {count}: phase={phase} status={status}")
+if intent_rows:
+    for mode, approval_state, submit_decision, reason, count in intent_rows:
+        print(f"- {count}: mode={mode} approval={approval_state} decision={submit_decision} reason={reason}")
+else:
+    print("- none")
 if runtime_cutoff is not None:
-    print(f"session_impulse_retest_audits_since_ws_start ({runtime_cutoff.isoformat()}):")
+    print(f"session_impulse_retest_audits_since_ws_start_current ({runtime_cutoff.isoformat()}):")
     if runtime_audit_rows:
         for phase, status, count in runtime_audit_rows:
             print(f"- {count}: phase={phase} status={status}")
     else:
         print("- none")
+print("session_impulse_retest_audits_24h_reference_not_current_blockers:")
+if audit_rows:
+    for phase, status, count in audit_rows:
+        print(f"- {count}: phase={phase} status={status}")
+else:
+    print("- none")
 route_status, route_reason, route_detail = _diagnose_live_route(
     live_submission_total=int(live_submission_total),
     runtime_audit_rows=runtime_audit_rows,
@@ -424,4 +450,4 @@ PY
 
 echo
 echo "== live candidate promotion readiness =="
-(cd "$PYTHON_ROOT" && PYTHONPATH="$PYTHON_ROOT" "$PYTHON_BIN" "$PYTHON_ROOT/scripts/run_live_candidate_promotion_readiness.py" --hours 24 --limit 12 --no-write-report --compact)
+(cd "$PYTHON_ROOT" && PYTHONPATH="$PYTHON_ROOT" "$PYTHON_BIN" "$PYTHON_ROOT/scripts/run_live_candidate_promotion_readiness.py" --hours 24 --limit 12 --since-ws-start --heartbeat-dir "$HEARTBEAT_DIR" --no-write-report --compact)

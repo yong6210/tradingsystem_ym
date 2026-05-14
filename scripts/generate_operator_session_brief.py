@@ -158,6 +158,13 @@ def _surface_summary_line(label: str, surface: dict[str, Any], *, surface_type: 
     return line
 
 
+def _display_candidate_status(status: Any) -> str:
+    raw_status = str(status or "").strip()
+    if raw_status == "ACTIONABLE_ENTRY":
+        return "CONTEXT_REVIEW_SETUP"
+    return raw_status
+
+
 def _representative_candidate_line(label: str, candidate: dict[str, Any] | None) -> str:
     item = dict(candidate or {})
     if not item:
@@ -169,7 +176,7 @@ def _representative_candidate_line(label: str, candidate: dict[str, Any] | None)
         f"split={(item.get('entry_timing_focus') or 'none')}/{(item.get('execution_style_focus') or 'none')}"
     )
     if item.get("status"):
-        line = f"{line} / status={item.get('status')}"
+        line = f"{line} / status={_display_candidate_status(item.get('status'))}"
     if item.get("block_reason"):
         line = f"{line} / reason={item.get('block_reason')}"
     return line
@@ -183,7 +190,7 @@ def _experiment_review_target_line(label: str, target: dict[str, Any] | None) ->
         f"- {label}: action={item.get('action') or 'unknown'} / "
         f"target={item.get('symbol') or 'unknown'} / "
         f"variant={item.get('preferred_variant') or 'none'} / "
-        f"status={item.get('status') or 'unknown'} / "
+        f"status={_display_candidate_status(item.get('status')) or 'unknown'} / "
         f"family={item.get('strategy_family') or 'unknown'}"
     )
     if item.get("block_reason"):

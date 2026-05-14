@@ -60,6 +60,7 @@ from app.services.backtest import BacktestService
 from app.services.alert_metrics import AlertMetricsService
 from app.services.alert_retry_queue import AlertRetryQueueService
 from app.services.alpha_research_pipeline import AlphaResearchPipelineService
+from app.services.active_contract_replay_baseline import count_recent_rows, usdt_proxy_rows_for_active_contract
 from app.services.a_strategy_post_cost_edge_validation import AStrategyPostCostEdgeValidationService
 from app.services.auto_promotion_rollout_execution import AutoPromotionRolloutExecutionService
 from app.services.b_continuation_activation import BContinuationActivationService
@@ -1659,6 +1660,10 @@ class StrategyEngine:
             case="upper",
         )
         directions = list(self._micro_live_direction_contract().get(active_symbol) or [])
+        sessions = self._csv_items(
+            getattr(self.settings, "auto_trading_micro_live_allowed_sessions", ""),
+            case="lower",
+        )
         if not strategy_families and not entry_models:
             return None
 
@@ -1668,6 +1673,7 @@ class StrategyEngine:
             "strategy_families": strategy_families,
             "entry_models": entry_models,
             "directions": directions,
+            "sessions": sessions,
         }
 
     def _active_contract_summary(
@@ -1688,6 +1694,7 @@ class StrategyEngine:
         strategy_families = list(filters.get("strategy_families") or [])
         entry_models = list(filters.get("entry_models") or [])
         directions = list(filters.get("directions") or [])
+        sessions = list(filters.get("sessions") or [])
         execution_quality_summary = self.execution_quality_report(
             symbol=symbol,
             days=days,
@@ -1695,6 +1702,7 @@ class StrategyEngine:
             strategy_families=strategy_families,
             entry_models=entry_models,
             directions=directions,
+            sessions=sessions,
         )
         score_to_outcome_funnel_summary = self.score_to_outcome_funnel.generate(
             symbol=symbol,
@@ -1704,6 +1712,7 @@ class StrategyEngine:
             strategy_families=strategy_families,
             entry_models=entry_models,
             directions=directions,
+            sessions=sessions,
         )
         opportunity_capture_summary = self._opportunity_capture_summary(
             score_to_outcome_funnel_summary=score_to_outcome_funnel_summary,
@@ -2381,6 +2390,10 @@ class StrategyEngine:
         filters: dict[str, Any],
         days: int,
     ) -> int:
+        usdt_proxy = usdt_proxy_rows_for_active_contract(self.settings, filters)
+        if usdt_proxy is not None:
+            return count_recent_rows(list(usdt_proxy.get("rows") or []), days=days)
+
         cache_path = (
             Path(self.settings.validation_report_dir)
             / "historical_walk_forward_cache"
@@ -2425,6 +2438,11 @@ class StrategyEngine:
             for item in list(filters.get("directions") or [])
             if str(item or "").strip()
         }
+        sessions = {
+            str(item or "").strip().lower()
+            for item in list(filters.get("sessions") or [])
+            if str(item or "").strip()
+        }
 
         hits = 0
         for row in rows:
@@ -2443,6 +2461,7 @@ class StrategyEngine:
             family_value = str(row.get("strategy_family") or "").strip().lower()
             entry_model_value = str(row.get("entry_model") or "").strip().upper()
             direction_value = str(row.get("direction") or "").strip().upper()
+            session_value = self._row_session_name(dict(row))
             if filter_symbol and symbol_value != filter_symbol:
                 continue
             if strategy_families and family_value not in strategy_families:
@@ -2450,6 +2469,8 @@ class StrategyEngine:
             if entry_models and entry_model_value not in entry_models:
                 continue
             if directions and direction_value not in directions:
+                continue
+            if sessions and session_value not in sessions:
                 continue
             hits += 1
         return hits
@@ -2472,12 +2493,43 @@ class StrategyEngine:
         validity = dict(payload.get("validity") or {})
         return str(payload.get("direction") or validity.get("direction") or "").upper()
 
+    @staticmethod
+    def _row_session_name(row: dict[str, Any]) -> str:
+        payload = dict(row or {})
+        operating_lock = dict(payload.get("operating_lock") or {})
+        current_session = dict(operating_lock.get("current_session") or {})
+        if str(current_session.get("name") or "").strip():
+            return str(current_session.get("name") or "").strip().lower()
+        session_guidance = dict(payload.get("session_guidance") or {})
+        guidance_session = dict(session_guidance.get("current_session") or {})
+        if str(guidance_session.get("name") or "").strip():
+            return str(guidance_session.get("name") or "").strip().lower()
+        if str(session_guidance.get("session_name") or "").strip():
+            return str(session_guidance.get("session_name") or "").strip().lower()
+        if str(session_guidance.get("state") or "").strip():
+            return str(session_guidance.get("state") or "").strip().lower()
+        validity = dict(payload.get("validity") or {})
+        for key in (
+            "session_guidance_session_name",
+            "session_guidance_state",
+            "generated_session",
+            "session_name",
+            "session",
+        ):
+            if str(validity.get(key) or "").strip():
+                return str(validity.get(key) or "").strip().lower()
+        for key in ("generated_session", "session_name", "session"):
+            if str(payload.get(key) or "").strip():
+                return str(payload.get(key) or "").strip().lower()
+        return ""
+
     @classmethod
     def _row_matches_contract_filters(cls, row: dict[str, Any], filters: dict[str, Any]) -> bool:
         symbol_filter = str(filters.get("symbol") or "").upper()
         strategy_families = {str(item or "").strip().lower() for item in list(filters.get("strategy_families") or [])}
         entry_models = {str(item or "").strip().upper() for item in list(filters.get("entry_models") or [])}
         directions = {str(item or "").strip().upper() for item in list(filters.get("directions") or [])}
+        sessions = {str(item or "").strip().lower() for item in list(filters.get("sessions") or [])}
         row_symbol = str(dict(row or {}).get("symbol") or "").upper()
         if symbol_filter and row_symbol and row_symbol != symbol_filter:
             return False
@@ -2486,6 +2538,8 @@ class StrategyEngine:
         if entry_models and cls._row_entry_model(row) not in entry_models:
             return False
         if directions and cls._row_direction(row) not in directions:
+            return False
+        if sessions and cls._row_session_name(row) not in sessions:
             return False
         return True
 
@@ -4922,6 +4976,7 @@ class StrategyEngine:
     ) -> dict[str, Any]:
         safety_state = self._safety_state_payload(symbol=symbol)
         readiness_limit = max(8, int(intent_limit))
+        readiness_start_at = self._session_impulse_retest_runtime_started_at()
 
         def readiness_error_payload(exc: Exception, *, filter_symbol: str | None, scope: str) -> dict[str, Any]:
             return {
@@ -4943,6 +4998,7 @@ class StrategyEngine:
                 hours=24,
                 limit=readiness_limit,
                 symbol=symbol,
+                start_at=readiness_start_at,
             )
             live_candidate_promotion_readiness_summary["scope"] = (
                 "selected_symbol" if str(symbol or "").strip() else "global_all_symbols"
@@ -4960,6 +5016,7 @@ class StrategyEngine:
                     hours=24,
                     limit=readiness_limit,
                     symbol=None,
+                    start_at=readiness_start_at,
                 )
                 live_candidate_promotion_readiness_global_summary["scope"] = "global_all_symbols"
             except Exception as exc:
@@ -4971,6 +5028,222 @@ class StrategyEngine:
         else:
             live_candidate_promotion_readiness_global_summary = dict(live_candidate_promotion_readiness_summary)
             live_candidate_promotion_readiness_global_summary["scope"] = "global_all_symbols"
+
+        def portfolio_live_route_context(portfolio_payload: dict[str, Any] | None) -> dict[str, Any]:
+            portfolio = dict(portfolio_payload or {})
+            global_readiness = dict(live_candidate_promotion_readiness_global_summary or {})
+            accepted_rows = [dict(row) for row in list(portfolio.get("accepted_candidates") or [])]
+            raw_accepted_count = portfolio.get("accepted_candidate_count")
+            try:
+                accepted_count = int(raw_accepted_count)
+            except (TypeError, ValueError):
+                accepted_count = len(accepted_rows)
+            live_symbols = [
+                str(item or "").strip().upper()
+                for item in list(global_readiness.get("live_routable_symbols") or [])
+                if str(item or "").strip()
+            ]
+            active_families = [
+                str(item or "").strip().lower()
+                for item in list(global_readiness.get("filter_strategy_families") or [])
+                if str(item or "").strip()
+            ]
+            active_entry_models = self._csv_items(
+                getattr(self.settings, "auto_trading_micro_live_allowed_entry_models", ""),
+                case="upper",
+            )
+            active_sessions = self._csv_items(
+                getattr(self.settings, "auto_trading_micro_live_allowed_sessions", ""),
+                case="lower",
+            )
+            direction_contract = self._micro_live_direction_contract()
+            live_symbol_set = set(live_symbols)
+            active_family_set = set(active_families)
+            active_entry_model_set = set(active_entry_models)
+            active_session_set = set(active_sessions)
+            live_route_rows: list[dict[str, Any]] = []
+            context_only_rows: list[dict[str, Any]] = []
+            route_statuses: list[dict[str, Any]] = []
+
+            for row in accepted_rows:
+                symbol_value = str(row.get("symbol") or "").strip().upper()
+                family_value = self._row_strategy_family(row)
+                entry_model_value = self._row_entry_model(row)
+                direction_value = self._row_direction(row)
+                session_value = self._row_session_name(row)
+                allowed_directions = set(direction_contract.get(symbol_value) or [])
+                symbol_live = bool(symbol_value and symbol_value in live_symbol_set)
+                family_live = bool(family_value and family_value in active_family_set)
+                entry_model_live = not active_entry_model_set or bool(entry_model_value in active_entry_model_set)
+                direction_live = not allowed_directions or bool(direction_value and direction_value in allowed_directions)
+                session_live = not active_session_set or bool(session_value and session_value in active_session_set)
+                reasons: list[str] = []
+                if not symbol_live:
+                    reasons.append("symbol_not_live_routable")
+                if not family_live:
+                    reasons.append("strategy_family_not_live_route")
+                if not entry_model_live:
+                    reasons.append("entry_model_not_live_route")
+                if not direction_live:
+                    reasons.append("direction_missing_for_live_route" if not direction_value else "direction_not_live_route")
+                if not session_live:
+                    reasons.append("session_missing_for_live_route" if not session_value else "session_not_live_route")
+                route_status = {
+                    "symbol": symbol_value,
+                    "strategy_family": family_value or str(row.get("strategy_family") or ""),
+                    "entry_model": entry_model_value or str(row.get("entry_model") or ""),
+                    "direction": direction_value or str(row.get("direction") or ""),
+                    "session_name": session_value,
+                    "allowed_directions": sorted(allowed_directions),
+                    "status": (
+                        "live_route_candidate"
+                        if symbol_live and family_live and entry_model_live and direction_live and session_live
+                        else "context_only"
+                    ),
+                    "reasons": reasons,
+                }
+                route_statuses.append(route_status)
+                if symbol_live and family_live and entry_model_live and direction_live and session_live:
+                    live_route_rows.append(row)
+                else:
+                    context_only_rows.append(row)
+            live_route_count = len(live_route_rows)
+            context_only_count = max(accepted_count - live_route_count, 0)
+            if accepted_count and live_route_count == 0:
+                message = (
+                    "Portfolio accepted candidates are context-only for the current live route; "
+                    "order truth remains live_candidate_promotion_readiness."
+                )
+            elif context_only_count:
+                message = (
+                    "Some portfolio accepted candidates are outside the current live route; "
+                    "read live_candidate_promotion_readiness before treating them as order candidates."
+                )
+            else:
+                message = "Portfolio accepted candidates align with the current live route contract."
+            return {
+                "authority": "live_candidate_promotion_readiness_is_order_truth",
+                "portfolio_candidates_are_context_only": bool(accepted_count and live_route_count == 0),
+                "accepted_candidate_count": accepted_count,
+                "live_routable_accepted_candidate_count": live_route_count,
+                "context_only_accepted_candidate_count": context_only_count,
+                "context_only_accepted_symbols": [
+                    symbol
+                    for symbol in dict.fromkeys(
+                        str(row.get("symbol") or "").strip().upper()
+                        for row in context_only_rows
+                        if str(row.get("symbol") or "").strip()
+                    )
+                ],
+                "live_routable_accepted_symbols": [
+                    symbol
+                    for symbol in dict.fromkeys(
+                        str(row.get("symbol") or "").strip().upper()
+                        for row in live_route_rows
+                        if str(row.get("symbol") or "").strip()
+                    )
+                ],
+                "accepted_candidate_route_statuses": route_statuses,
+                "active_strategy_families": active_families,
+                "active_entry_models": active_entry_models,
+                "active_sessions": active_sessions,
+                "active_direction_contract": {
+                    symbol: list(directions)
+                    for symbol, directions in sorted(direction_contract.items())
+                    if symbol in live_symbol_set
+                },
+                "live_routable_symbols": live_symbols,
+                "live_candidate_headline_state": global_readiness.get("headline_state", ""),
+                "live_candidate_headline_reason": global_readiness.get("headline_reason", ""),
+                "live_candidate_headline_scope": global_readiness.get("headline_scope", ""),
+                "message": message,
+            }
+
+        def attach_runtime_dashboard_extensions(payload: dict[str, Any]) -> dict[str, Any]:
+            payload_signal_funnel = dict(payload.get("signal_funnel") or {})
+            payload_signal_funnel["live_candidate_promotion_readiness"] = live_candidate_promotion_readiness_summary
+            payload_signal_funnel["live_candidate_promotion_readiness_global"] = (
+                live_candidate_promotion_readiness_global_summary
+            )
+            payload_portfolio = dict(payload.get("portfolio_summary") or {})
+            live_route_context = portfolio_live_route_context(payload_portfolio)
+            global_readiness = dict(live_candidate_promotion_readiness_global_summary or {})
+            readiness_flags = dict(global_readiness.get("attention_flags") or {})
+            headline_state = str(global_readiness.get("headline_state") or "")
+            headline_reason = str(global_readiness.get("headline_reason") or "")
+            if self._safe_bool(readiness_flags.get("has_live_submission")):
+                route_value = "live_submission_observed"
+                route_reason = "Live submission exists; monitor lifecycle, fills, and reconciliation."
+            elif self._safe_bool(readiness_flags.get("has_submit_ready_gap")) or headline_state == "FAIL":
+                route_value = "investigate_submit_ready_gap"
+                route_reason = str(
+                    global_readiness.get("headline_action")
+                    or "Submit-ready intent exists without a live submission; inspect routing/submission."
+                )
+            elif headline_state == "BLOCKED":
+                route_value = "blocked_by_live_candidate_readiness"
+                route_reason = str(
+                    global_readiness.get("headline_action")
+                    or global_readiness.get("headline_reason")
+                    or "Live candidate readiness is blocked."
+                )
+            elif headline_state == "WATCH" and headline_reason == "shadow_signal_only":
+                route_value = "shadow_only_not_live_route"
+                route_reason = "Only shadow/auxiliary signal is present; do not treat it as a live order route."
+            elif headline_state == "WAIT" or int(live_route_context.get("live_routable_accepted_candidate_count") or 0) <= 0:
+                route_value = "waiting_for_live_candidate"
+                route_reason = str(
+                    global_readiness.get("headline_action")
+                    or live_route_context.get("message")
+                    or "Current live route has no fresh live-eligible candidate."
+                )
+            else:
+                route_value = "observe_live_candidate_readiness"
+                route_reason = str(
+                    global_readiness.get("headline_action")
+                    or "Observe live candidate readiness before treating portfolio candidates as order candidates."
+                )
+            order_route_summary = {
+                "authority": "live_candidate_promotion_readiness_is_order_truth",
+                "approve_value": route_value,
+                "approve_reason": route_reason,
+                "live_candidate_headline_state": live_route_context.get("live_candidate_headline_state", ""),
+                "live_candidate_headline_reason": live_route_context.get("live_candidate_headline_reason", ""),
+                "live_candidate_headline_scope": live_route_context.get("live_candidate_headline_scope", ""),
+                "live_routable_accepted_candidate_count": live_route_context.get(
+                    "live_routable_accepted_candidate_count",
+                    0,
+                ),
+                "context_only_accepted_candidate_count": live_route_context.get(
+                    "context_only_accepted_candidate_count",
+                    0,
+                ),
+            }
+            payload_portfolio["live_route_context"] = live_route_context
+            payload_portfolio["order_route_summary"] = order_route_summary
+            payload_signal_funnel["portfolio_live_route_context"] = live_route_context
+            payload_signal_funnel["order_route_summary"] = order_route_summary
+            payload_approval_strip = dict(payload.get("approval_strip_summary") or {})
+            payload_approval_strip["order_route_approve_value"] = order_route_summary["approve_value"]
+            payload_approval_strip["order_route_approve_reason"] = order_route_summary["approve_reason"]
+            payload_approval_strip["order_route_authority"] = order_route_summary["authority"]
+            payload["approval_strip_summary"] = payload_approval_strip
+            payload["portfolio_summary"] = payload_portfolio
+            payload["signal_funnel"] = payload_signal_funnel
+            payload["session_impulse_retest_universe_policy"] = build_micro_main_rollout_contract_snapshot(
+                enabled=self._safe_bool(self.settings.session_impulse_retest_enabled),
+                shadow_only=self._safe_bool(self.settings.session_impulse_retest_shadow_only),
+                partial_activation_ratio=self._maybe_float(
+                    self.settings.session_impulse_retest_partial_activation_ratio
+                )
+                or 0.0,
+                core_live_slots=self._maybe_int(self.settings.session_impulse_retest_core_live_slots) or 0,
+                secondary_live_enabled=self._safe_bool(
+                    self.settings.session_impulse_retest_secondary_live_enabled
+                ),
+            )
+            return payload
+
         portfolio_summary = self.portfolio_budget_report(
             universe=universe,
             limit=portfolio_limit,
@@ -5002,6 +5275,21 @@ class StrategyEngine:
             recent_reconciliation_summary=recent_reconciliation_summary,
             strategy_v2_stress_validation=None,
         )
+        if bool(fast):
+            payload = self.execution_operator_dashboard_service.generate(
+                symbol=symbol,
+                days=days,
+                intent_limit=intent_limit,
+                reconcile_limit=reconcile_limit,
+                safety_state=safety_state,
+                portfolio_summary=portfolio_summary,
+                alert_summary=alert_summary,
+                execution_quality_summary=execution_quality_summary,
+                active_contract_summary=active_contract_summary,
+                execution_friction_measurement_summary=execution_friction_measurement_summary,
+            )
+            return attach_runtime_dashboard_extensions(payload)
+
         strategy_metrics_summary = self.metrics(symbol=symbol, version=self.settings.strategy_version) if symbol else None
         analysis_symbol = self._alpha_research_analysis_symbol(
             portfolio_budget=portfolio_summary,
@@ -5380,20 +5668,7 @@ class StrategyEngine:
                 symbol=symbol,
                 shadow_summary=shadow_summary,
             )
-        payload_signal_funnel = dict(payload.get("signal_funnel") or {})
-        payload_signal_funnel["live_candidate_promotion_readiness"] = live_candidate_promotion_readiness_summary
-        payload_signal_funnel["live_candidate_promotion_readiness_global"] = (
-            live_candidate_promotion_readiness_global_summary
-        )
-        payload["signal_funnel"] = payload_signal_funnel
-        payload["session_impulse_retest_universe_policy"] = build_micro_main_rollout_contract_snapshot(
-            enabled=self._safe_bool(self.settings.session_impulse_retest_enabled),
-            shadow_only=self._safe_bool(self.settings.session_impulse_retest_shadow_only),
-            partial_activation_ratio=self._maybe_float(self.settings.session_impulse_retest_partial_activation_ratio) or 0.0,
-            core_live_slots=self._maybe_int(self.settings.session_impulse_retest_core_live_slots) or 0,
-            secondary_live_enabled=self._safe_bool(self.settings.session_impulse_retest_secondary_live_enabled),
-        )
-        return payload
+        return attach_runtime_dashboard_extensions(payload)
 
     def set_kill_switch(
         self,
@@ -8489,6 +8764,7 @@ class StrategyEngine:
         strategy_families: list[str] | None = None,
         entry_models: list[str] | None = None,
         directions: list[str] | None = None,
+        sessions: list[str] | None = None,
     ) -> dict:
         return self.execution_quality.generate(
             symbol=symbol,
@@ -8497,6 +8773,7 @@ class StrategyEngine:
             strategy_families=strategy_families,
             entry_models=entry_models,
             directions=directions,
+            sessions=sessions,
         )
 
     def pbo_dsr_artifact_store_report(

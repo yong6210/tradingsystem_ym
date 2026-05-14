@@ -59,6 +59,31 @@ def test_no_order_watchdog_alerts_when_live_intents_have_no_submission() -> None
     assert result["blocked_intent_diagnostics"][0]["recent_samples"][0]["intent_id"] == "intent_1"
 
 
+def test_no_order_watchdog_no_recent_intents_message_waits_for_candidate() -> None:
+    lifecycle = {
+        "summary": {
+            "submission_count": 0,
+            "requested_live_count": 0,
+            "rejected_or_error_count": 0,
+            "live_intents": {
+                "total": 0,
+                "submit_ready": 0,
+                "blocked": 0,
+                "top_block_reasons": {},
+                "recent_blocked_intents": [],
+            },
+        }
+    }
+
+    result = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(lifecycle=lifecycle, min_intents=1)
+
+    assert result["alert"] is False
+    assert result["reason"] == "no_recent_live_intents"
+    assert result["next_action_text"] == "fresh live 후보 대기; 현재 차단 사유 없음"
+    assert "validation gate" not in result["message"]
+    assert "rollout session" not in result["message"]
+
+
 def test_micro_live_failure_drill_scenarios_catch_expected_failures() -> None:
     payload = run_micro_live_failure_drill.build_payload()
     results = {row["name"]: row for row in payload["results"]}
@@ -377,7 +402,8 @@ def test_event_blackout_builder_uses_fallback_when_bls_sources_block(monkeypatch
 {
   "windows": [
     {"label": "CPI_2026_05_12", "start_utc": "2026-05-12T12:15:00Z", "end_utc": "2026-05-12T13:00:00Z"},
-    {"label": "NFP_2026_06_05", "start_utc": "2026-06-05T12:15:00Z", "end_utc": "2026-06-05T13:00:00Z"}
+    {"label": "NFP_2026_06_05", "start_utc": "2026-06-05T12:15:00Z", "end_utc": "2026-06-05T13:00:00Z"},
+    {"label": "FOMC_2026_06_17", "start_utc": "2026-06-17T17:45:00Z", "end_utc": "2026-06-17T18:30:00Z"}
   ]
 }
 """,
@@ -872,6 +898,71 @@ def test_replay_validation_bridge_main_writes_latest_aliases(monkeypatch, tmp_pa
     assert latest_payload["overall_status"] == "PASS"
 
 
+def test_replay_validation_bridge_build_payload_uses_runtime_bridge_for_session_impulse(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(run_replay_validation_bridge, "_live_symbols_from_settings", lambda: ["BTCUSDC"])
+    monkeypatch.setattr(
+        run_replay_validation_bridge,
+        "_active_contract_filters_from_settings",
+        lambda symbol: {
+            "symbol": symbol,
+            "execution_mode": "MICRO_LIVE",
+            "strategy_families": ["session_impulse_retest"],
+            "entry_models": ["CONFIRM"],
+            "directions": ["LONG", "SHORT"],
+            "sessions": ["dead_session", "london", "new_york"],
+            "family_sessions": {"session_impulse_retest": ["dead_session", "london", "new_york"]},
+            "session_filter_source": "micro_live_settings",
+        },
+    )
+
+    class FakeBridge:
+        def __init__(self, _settings):
+            pass
+
+        def evaluate(self, *, symbol: str, family: str, entry_model: str = ""):
+            assert symbol == "BTCUSDC"
+            assert family == "session_impulse_retest"
+            assert entry_model == "CONFIRM"
+            return run_replay_validation_bridge.ReplayValidationEvidence(
+                approval_usable=True,
+                reason_code="replay_validation_bridge_approval_usable",
+                message="ok",
+                metrics={
+                    "closed_trades": 141,
+                    "ev_r": 0.5307,
+                    "win_rate": 0.6454,
+                    "total_score": 78.2,
+                    "grade": "B",
+                    "recommendation": "paper-and-limited-live",
+                },
+                source={"bridge_source": "usdt_proxy_replay_bridge"},
+                reason_codes=("replay_validation_bridge_approval_usable",),
+                failures=(),
+            )
+
+    monkeypatch.setattr(run_replay_validation_bridge, "UsdtProxyReplayValidationBridge", FakeBridge)
+
+    payload = run_replay_validation_bridge.build_payload(
+        symbol="",
+        all_live_symbols=True,
+        cache_file=str(tmp_path / "missing.json"),
+        thresholds={
+            "min_sample": 120,
+            "min_ev_r": 0.20,
+            "min_ev_lower_r": 0.0,
+            "min_win_rate": 0.48,
+            "min_p1r": 0.0,
+            "min_slice_sample": 30,
+            "max_stop_loss_share": 0.45,
+            "max_drawdown_r": 4.5,
+        },
+    )
+
+    assert payload["overall_status"] == "PASS"
+    assert payload["decision_counts"] == {"ELIGIBLE_FOR_RUNTIME_VALIDATION_BRIDGE": 1}
+    assert payload["rows"][0]["replay_metrics"]["sample_size"] == 141
+
+
 def test_replay_validation_bridge_warns_when_material_slice_is_weak() -> None:
     payload = {
         "trade_rows": [
@@ -914,6 +1005,14 @@ def test_replay_validation_bridge_warns_when_material_slice_is_weak() -> None:
     row = run_replay_validation_bridge._row_payload(
         payload=payload,
         symbol="BTCUSDC",
+        filters={
+            "symbol": "BTCUSDC",
+            "strategy_families": ["session_impulse_retest"],
+            "entry_models": ["LIMIT"],
+            "directions": ["LONG", "SHORT"],
+            "sessions": ["london"],
+            "family_sessions": {"session_impulse_retest": ["london"]},
+        },
         thresholds={
             "min_sample": 4,
             "min_ev_r": 0.10,
@@ -1140,8 +1239,32 @@ def test_launchd_generator_replaces_plists_atomically(tmp_path) -> None:
         payload = plistlib.load(handle)
     assert payload["Label"] == job.label
     assert payload["ProgramArguments"] == ["/usr/bin/python3", "-V"]
+    assert payload["RunAtLoad"] is True
     assert not list(tmp_path.glob("*.tmp"))
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_launchd_generator_does_not_shell_source_env_file(tmp_path) -> None:
+    env_file = tmp_path / "ops.env"
+    env_file.write_text("AUTO_TRADING_MICRO_LIVE_DIRECTION_CONTRACT=BTCUSDC:LONG|SHORT\n", encoding="utf-8")
+    job = install_micro_live_ops_launchd.LaunchdJob(
+        name="env_check",
+        label="com.test.micro.env-check",
+        args=["/usr/bin/python3", "-V"],
+        start_interval=60,
+    )
+
+    rows = install_micro_live_ops_launchd.write_plists(
+        output_dir=tmp_path,
+        jobs=[job],
+        working_dir=tmp_path,
+        env_file=str(env_file),
+    )
+
+    with (tmp_path / f"{rows[0]['label']}.plist").open("rb") as handle:
+        payload = plistlib.load(handle)
+    assert payload["ProgramArguments"] == ["/usr/bin/python3", "-V"]
+    assert payload["WorkingDirectory"] == str(tmp_path)
 
 
 def test_launchd_installer_copies_plists_atomically(tmp_path) -> None:

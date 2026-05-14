@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -187,10 +188,31 @@ def _budget_payload(*, deployment_go_no_go: str = "GO") -> dict:
     }
 
 
-def test_build_entry_snapshot_maps_rows_to_three_statuses():
-    snapshot = notify_entry_surface.build_entry_snapshot(_budget_payload(), max_per_status=3)
+def _live_contract() -> dict:
+    return {
+        "authority": "live_candidate_promotion_readiness_is_order_truth",
+        "execution_mode": "MICRO_LIVE",
+        "symbols": ["BTCUSDC", "ETHUSDC", "SOLUSDC"],
+        "strategy_families": ["trend_continuation", "sweep_reversal", "range_rotation"],
+        "entry_models": ["CONFIRM", "LIMIT"],
+        "sessions": [],
+        "direction_contract": {
+            "BTCUSDC": ["LONG", "SHORT"],
+            "ETHUSDC": ["LONG", "SHORT"],
+            "SOLUSDC": ["LONG", "SHORT"],
+        },
+    }
 
-    assert snapshot["counts"][notify_entry_surface.ACTIONABLE_ENTRY] == 1
+
+def test_build_entry_snapshot_maps_rows_to_three_statuses():
+    snapshot = notify_entry_surface.build_entry_snapshot(
+        _budget_payload(),
+        max_per_status=3,
+        live_route_contract=_live_contract(),
+    )
+
+    assert snapshot["counts"][notify_entry_surface.LIVE_ORDER_CANDIDATE] == 1
+    assert snapshot["counts"][notify_entry_surface.CONTEXT_REVIEW_SETUP] == 0
     assert snapshot["counts"][notify_entry_surface.BLOCKED_SETUP] == 1
     assert snapshot["counts"][notify_entry_surface.RESEARCH_ONLY_SETUP] == 1
     assert snapshot["approval_strip"]["approve_value"] == "approval usable"
@@ -199,8 +221,8 @@ def test_build_entry_snapshot_maps_rows_to_three_statuses():
     assert snapshot["edge_evolution_rule"]["evolution_state"] == "reduce_candidate"
     assert snapshot["review_followup_ledger"]["last_status"] == "READY"
     assert snapshot["review_followup_ledger"]["last_decision_status"] == "ACKED"
-    assert snapshot["sections"][notify_entry_surface.ACTIONABLE_ENTRY][0]["edge_experiment_focus"]["edge_state"] == "watch_edge"
-    assert snapshot["sections"][notify_entry_surface.ACTIONABLE_ENTRY][0]["symbol"] == "BTCUSDC"
+    assert snapshot["sections"][notify_entry_surface.LIVE_ORDER_CANDIDATE][0]["edge_experiment_focus"]["edge_state"] == "watch_edge"
+    assert snapshot["sections"][notify_entry_surface.LIVE_ORDER_CANDIDATE][0]["symbol"] == "BTCUSDC"
     assert snapshot["sections"][notify_entry_surface.BLOCKED_SETUP][0]["symbol"] == "ETHUSDC"
     assert snapshot["sections"][notify_entry_surface.RESEARCH_ONLY_SETUP][0]["symbol"] == "SOLUSDC"
 
@@ -219,9 +241,11 @@ def test_build_entry_snapshot_demotes_accepted_rows_when_topline_is_not_go():
     snapshot = notify_entry_surface.build_entry_snapshot(
         _budget_payload(deployment_go_no_go="MANUAL_REVIEW"),
         max_per_status=3,
+        live_route_contract=_live_contract(),
     )
 
-    assert snapshot["counts"][notify_entry_surface.ACTIONABLE_ENTRY] == 0
+    assert snapshot["counts"][notify_entry_surface.LIVE_ORDER_CANDIDATE] == 0
+    assert snapshot["counts"][notify_entry_surface.CONTEXT_REVIEW_SETUP] == 0
     assert snapshot["counts"][notify_entry_surface.BLOCKED_SETUP] == 2
     blocked_symbols = {row["symbol"] for row in snapshot["sections"][notify_entry_surface.BLOCKED_SETUP]}
     assert blocked_symbols == {"BTCUSDC", "ETHUSDC"}
@@ -232,11 +256,16 @@ def test_build_entry_snapshot_demotes_accepted_rows_when_topline_is_not_go():
 
 
 def test_render_message_includes_all_sections_and_reasons():
-    snapshot = notify_entry_surface.build_entry_snapshot(_budget_payload(), max_per_status=3)
+    snapshot = notify_entry_surface.build_entry_snapshot(
+        _budget_payload(),
+        max_per_status=3,
+        live_route_contract=_live_contract(),
+    )
 
     message = notify_entry_surface.render_message(snapshot)
 
-    assert "Trading entry surface alert" in message
+    assert "Trading entry surface alert: live_order_candidates=1, review_candidates=0" in message
+    assert "scope: USDC_PERP_TOP30 | order_truth=live_candidate_promotion_readiness" in message
     assert (
         "approval_strip: approve=approval usable | align=aligned | "
         "act=continue_candidate_review_under_portfolio_caps | priority=monitor"
@@ -245,6 +274,7 @@ def test_render_message_includes_all_sections_and_reasons():
         "contract_trace: approve=approval usable | align=aligned | "
         "act=continue_candidate_review_under_portfolio_caps | runtime=GO/go_runtime_gate_open | playbook=GO"
     ) in message
+    assert "order_route_truth: authority=live_candidate_promotion_readiness | live_order_candidates=1" in message
     assert (
         "live_validation: state=watch_edge | entry_timing=early_limit | execution_style=passive_limit | "
         "validation=sample_building/do_not_claim_edge_yet | closed=5/100 | remaining_to_goal=95 | "
@@ -262,24 +292,69 @@ def test_render_message_includes_all_sections_and_reasons():
     ) in message
     assert "edge=watch_edge | split=early_limit/passive_limit" in message
     assert "edge=fragile_edge | split=reaction_confirmed/market" in message
-    assert notify_entry_surface.ACTIONABLE_ENTRY in message
+    assert "[주문 후보] LIVE_ORDER_CANDIDATE" in message
+    assert "[검토 후보] CONTEXT_REVIEW_SETUP" in message
     assert notify_entry_surface.BLOCKED_SETUP in message
     assert notify_entry_surface.RESEARCH_ONLY_SETUP in message
     assert "family=trend_continuation" in message
+    assert "live_routable=true" in message
     assert "reason=Blocked: portfolio risk budget score is below the minimum threshold." in message
     assert "softened_risk=0.10R" in message
 
 
 def test_build_alert_state_ignores_generated_at_and_keeps_judgment_signature():
-    first = notify_entry_surface.build_entry_snapshot(_budget_payload(), max_per_status=3)
+    first = notify_entry_surface.build_entry_snapshot(
+        _budget_payload(),
+        max_per_status=3,
+        live_route_contract=_live_contract(),
+    )
     second = dict(first)
     second["generated_at"] = "2099-01-01T00:00:00+00:00"
 
     assert notify_entry_surface.build_alert_state(first) == notify_entry_surface.build_alert_state(second)
 
 
+def test_context_only_candidates_are_labeled_as_review_not_order_candidates():
+    payload = _budget_payload()
+    contract = _live_contract()
+    contract["strategy_families"] = ["session_impulse_retest"]
+
+    snapshot = notify_entry_surface.build_entry_snapshot(payload, max_per_status=3, live_route_contract=contract)
+    message = notify_entry_surface.render_message(snapshot)
+
+    assert snapshot["counts"][notify_entry_surface.LIVE_ORDER_CANDIDATE] == 0
+    assert snapshot["counts"][notify_entry_surface.CONTEXT_REVIEW_SETUP] == 1
+    review = snapshot["sections"][notify_entry_surface.CONTEXT_REVIEW_SETUP][0]
+    assert review["live_routable"] is False
+    assert "strategy_family_not_live_route" in review["entry_surface_route"]["reasons"]
+    assert "[검토 후보] CONTEXT_REVIEW_SETUP" in message
+    assert "live_routable=false" in message
+    assert "route_reasons=strategy_family_not_live_route" in message
+
+
+def test_alert_state_uses_stable_plan_id_for_reroute_suffixes():
+    first_payload = _budget_payload()
+    second_payload = _budget_payload()
+    first_payload["accepted_candidates"][0]["plan_id"] = "plan_actionable_rabc123"
+    second_payload["accepted_candidates"][0]["plan_id"] = "plan_actionable_rdef456"
+
+    first = notify_entry_surface.build_entry_snapshot(
+        first_payload,
+        max_per_status=3,
+        live_route_contract=_live_contract(),
+    )
+    second = notify_entry_surface.build_entry_snapshot(
+        second_payload,
+        max_per_status=3,
+        live_route_contract=_live_contract(),
+    )
+
+    assert notify_entry_surface.build_alert_state(first) == notify_entry_surface.build_alert_state(second)
+
+
 def test_main_dry_run_prints_snapshot_without_dispatch(monkeypatch, capsys):
     monkeypatch.setattr(notify_entry_surface, "_request_json", lambda *args, **kwargs: _budget_payload())
+    monkeypatch.setattr(notify_entry_surface, "_live_route_contract_from_settings", lambda settings: _live_contract())
     monkeypatch.setattr(
         notify_entry_surface,
         "parse_args",
@@ -292,6 +367,7 @@ def test_main_dry_run_prints_snapshot_without_dispatch(monkeypatch, capsys):
             channel="discord",
             state_file=str(ROOT_DIR / "reports/operations/entry_surface/test_dry_run_state.json"),
             webhook_url="",
+            min_repeat_minutes=360,
             force_send=False,
             dry_run=True,
         ),
@@ -305,12 +381,16 @@ def test_main_dry_run_prints_snapshot_without_dispatch(monkeypatch, capsys):
     assert payload["channel"] == "discord"
     assert "message" in payload
     assert payload["state_written"] is False
-    assert payload["snapshot"]["counts"][notify_entry_surface.ACTIONABLE_ENTRY] == 1
+    assert payload["snapshot"]["counts"][notify_entry_surface.LIVE_ORDER_CANDIDATE] == 1
 
 
 def test_main_suppresses_when_alert_state_is_unchanged(monkeypatch, tmp_path, capsys):
     state_file = tmp_path / "last_alert_state.json"
-    snapshot = notify_entry_surface.build_entry_snapshot(_budget_payload(), max_per_status=3)
+    snapshot = notify_entry_surface.build_entry_snapshot(
+        _budget_payload(),
+        max_per_status=3,
+        live_route_contract=_live_contract(),
+    )
     state_file.write_text(
         json.dumps(
             {
@@ -322,6 +402,7 @@ def test_main_suppresses_when_alert_state_is_unchanged(monkeypatch, tmp_path, ca
         encoding="utf-8",
     )
     monkeypatch.setattr(notify_entry_surface, "_request_json", lambda *args, **kwargs: _budget_payload())
+    monkeypatch.setattr(notify_entry_surface, "_live_route_contract_from_settings", lambda settings: _live_contract())
     monkeypatch.setattr(
         notify_entry_surface,
         "parse_args",
@@ -334,6 +415,7 @@ def test_main_suppresses_when_alert_state_is_unchanged(monkeypatch, tmp_path, ca
             channel="discord",
             state_file=str(state_file),
             webhook_url="",
+            min_repeat_minutes=360,
             force_send=False,
             dry_run=False,
         ),
@@ -357,6 +439,7 @@ def test_main_suppresses_when_alert_state_is_unchanged(monkeypatch, tmp_path, ca
 def test_main_writes_state_after_successful_delivery(monkeypatch, tmp_path, capsys):
     state_file = tmp_path / "last_alert_state.json"
     monkeypatch.setattr(notify_entry_surface, "_request_json", lambda *args, **kwargs: _budget_payload())
+    monkeypatch.setattr(notify_entry_surface, "_live_route_contract_from_settings", lambda settings: _live_contract())
     monkeypatch.setattr(
         notify_entry_surface,
         "parse_args",
@@ -369,6 +452,7 @@ def test_main_writes_state_after_successful_delivery(monkeypatch, tmp_path, caps
             channel="discord",
             state_file=str(state_file),
             webhook_url="",
+            min_repeat_minutes=360,
             force_send=False,
             dry_run=False,
         ),
@@ -397,13 +481,33 @@ def test_main_writes_state_after_successful_delivery(monkeypatch, tmp_path, caps
     assert exit_code == 0
     assert payload["notified"] is True
     assert payload["state_written"] is True
-    assert stored["alert_state"]["counts"][notify_entry_surface.ACTIONABLE_ENTRY] == 1
+    assert stored["alert_state"]["counts"][notify_entry_surface.LIVE_ORDER_CANDIDATE] == 1
+    assert stored["alert_state_signature"]
+    assert stored["alert_state_history"][stored["alert_state_signature"]]
 
 
-def test_main_recovers_from_invalid_state_file(monkeypatch, tmp_path, capsys):
+def test_main_suppresses_recent_stable_state_from_history(monkeypatch, tmp_path, capsys):
     state_file = tmp_path / "last_alert_state.json"
-    state_file.write_text("{invalid json", encoding="utf-8")
+    snapshot = notify_entry_surface.build_entry_snapshot(
+        _budget_payload(),
+        max_per_status=3,
+        live_route_contract=_live_contract(),
+    )
+    alert_state = notify_entry_surface.build_alert_state(snapshot)
+    signature = notify_entry_surface._alert_state_signature(alert_state)
+    state_file.write_text(
+        json.dumps(
+            {
+                "updated_at": datetime.now(UTC).isoformat(),
+                "alert_state": {"previous": "different"},
+                "alert_state_history": {signature: datetime.now(UTC).isoformat()},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(notify_entry_surface, "_request_json", lambda *args, **kwargs: _budget_payload())
+    monkeypatch.setattr(notify_entry_surface, "_live_route_contract_from_settings", lambda settings: _live_contract())
     monkeypatch.setattr(
         notify_entry_surface,
         "parse_args",
@@ -416,6 +520,86 @@ def test_main_recovers_from_invalid_state_file(monkeypatch, tmp_path, capsys):
             channel="discord",
             state_file=str(state_file),
             webhook_url="",
+            min_repeat_minutes=360,
+            force_send=False,
+            dry_run=False,
+        ),
+    )
+
+    class _Dispatcher:
+        def __init__(self, settings):  # noqa: ARG002
+            raise AssertionError("dispatcher should not be constructed for recent repeat states")
+
+    monkeypatch.setattr(notify_entry_surface, "NotificationDispatcher", _Dispatcher)
+
+    exit_code = notify_entry_surface.main()
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["reason"] == "recent_surface_state_repeat"
+    assert payload["dedupe_suppressed"] is True
+    assert payload["notified"] is False
+
+
+def test_main_emits_request_failure_without_dispatch(monkeypatch, tmp_path, capsys):
+    state_file = tmp_path / "last_alert_state.json"
+
+    def _raise_request_failure(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("GET /portfolio/budget failed: timed out")
+
+    monkeypatch.setattr(notify_entry_surface, "_request_json", _raise_request_failure)
+    monkeypatch.setattr(
+        notify_entry_surface,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            universe="usdc_perp_top30",
+            limit=20,
+            symbol="",
+            max_per_status=3,
+            channel="discord",
+            state_file=str(state_file),
+            webhook_url="",
+            lock_file="",
+            min_repeat_minutes=360,
+            force_send=False,
+            dry_run=False,
+        ),
+    )
+
+    class _Dispatcher:
+        def __init__(self, settings):  # noqa: ARG002
+            raise AssertionError("dispatcher should not be constructed when source request fails")
+
+    monkeypatch.setattr(notify_entry_surface, "NotificationDispatcher", _Dispatcher)
+
+    exit_code = notify_entry_surface.main()
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["reason"] == "source_request_failed"
+    assert payload["notified"] is False
+    assert "timed out" in payload["error"]
+
+
+def test_main_recovers_from_invalid_state_file(monkeypatch, tmp_path, capsys):
+    state_file = tmp_path / "last_alert_state.json"
+    state_file.write_text("{invalid json", encoding="utf-8")
+    monkeypatch.setattr(notify_entry_surface, "_request_json", lambda *args, **kwargs: _budget_payload())
+    monkeypatch.setattr(notify_entry_surface, "_live_route_contract_from_settings", lambda settings: _live_contract())
+    monkeypatch.setattr(
+        notify_entry_surface,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            universe="usdc_perp_top30",
+            limit=20,
+            symbol="",
+            max_per_status=3,
+            channel="discord",
+            state_file=str(state_file),
+            webhook_url="",
+            min_repeat_minutes=360,
             force_send=False,
             dry_run=False,
         ),
@@ -445,4 +629,4 @@ def test_main_recovers_from_invalid_state_file(monkeypatch, tmp_path, capsys):
     assert payload["notified"] is True
     assert payload["state_written"] is True
     assert "state_warning" in payload
-    assert stored["alert_state"]["counts"][notify_entry_surface.ACTIONABLE_ENTRY] == 1
+    assert stored["alert_state"]["counts"][notify_entry_surface.LIVE_ORDER_CANDIDATE] == 1

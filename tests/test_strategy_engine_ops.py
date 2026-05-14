@@ -1342,6 +1342,7 @@ def test_active_contract_filters_include_direction_contract_and_apply_it() -> No
         auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="sweep_reversal",
         auto_trading_micro_live_allowed_entry_models="LIMIT",
+        auto_trading_micro_live_allowed_sessions="london,new_york",
         auto_trading_micro_live_direction_contract="BTCUSDC:LONG",
     )
 
@@ -1349,12 +1350,14 @@ def test_active_contract_filters_include_direction_contract_and_apply_it() -> No
 
     assert filters is not None
     assert filters["directions"] == ["LONG"]
+    assert filters["sessions"] == ["london", "new_york"]
     assert engine._row_matches_contract_filters(
         {
             "symbol": "BTCUSDC",
             "strategy_family": "sweep_reversal",
             "entry_model": "LIMIT",
             "direction": "LONG",
+            "session_guidance": {"current_session": {"name": "london"}},
         },
         filters,
     )
@@ -1364,6 +1367,71 @@ def test_active_contract_filters_include_direction_contract_and_apply_it() -> No
             "strategy_family": "sweep_reversal",
             "entry_model": "LIMIT",
             "direction": "SHORT",
+            "session_guidance": {"current_session": {"name": "london"}},
         },
         filters,
     )
+    assert not engine._row_matches_contract_filters(
+        {
+            "symbol": "BTCUSDC",
+            "strategy_family": "sweep_reversal",
+            "entry_model": "LIMIT",
+            "direction": "LONG",
+            "session_guidance": {"current_session": {"name": "inactive"}},
+        },
+        filters,
+    )
+
+
+def test_active_contract_replay_hits_uses_usdt_proxy_for_session_impulse_retest(tmp_path) -> None:
+    backtest_dir = tmp_path / "reports" / "validation" / "micro_main_usdt_proxy_backtests"
+    backtest_dir.mkdir(parents=True)
+    (backtest_dir / "micro_main_usdt_proxy_backtest_20260510T000000Z.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-05-10T00:00:00Z",
+                "days": 14,
+                "results": {
+                    "BTCUSDT": {
+                        "proxy_symbol": "BTCUSDT",
+                        "canonical_symbol": "BTCUSDC",
+                        "summary": {"closed": 2},
+                        "trades": [
+                            {
+                                "family": "session_impulse_retest",
+                                "direction": "long",
+                                "entry_ts": "2026-05-01T07:30:00+00:00",
+                            },
+                            {
+                                "family": "session_impulse_retest",
+                                "direction": "long",
+                                "entry_ts": "2026-05-02T13:30:00+00:00",
+                            },
+                        ],
+                    }
+                },
+            }
+        )
+    )
+    engine = object.__new__(StrategyEngine)
+    engine.settings = SimpleNamespace(
+        auto_trading_replay_validation_bridge_backtest_dir=str(backtest_dir),
+        validation_report_dir=str(tmp_path / "reports" / "validation"),
+        trading_session_london_start_hour_utc=7,
+        trading_session_london_end_hour_utc=12,
+        trading_session_new_york_start_hour_utc=13,
+        trading_session_new_york_end_hour_utc=18,
+    )
+
+    hits = engine._active_contract_replay_hits_same_window(
+        filters={
+            "symbol": "BTCUSDC",
+            "strategy_families": ["session_impulse_retest"],
+            "entry_models": ["CONFIRM"],
+            "directions": ["LONG"],
+            "sessions": ["new_york"],
+        },
+        days=1,
+    )
+
+    assert hits == 1

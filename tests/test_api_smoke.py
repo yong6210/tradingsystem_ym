@@ -528,6 +528,12 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "accepted_candidates" in portfolio_payload
     assert "blocked_candidates" in portfolio_payload
     assert "alpha_research_count" in portfolio_payload
+
+    fast_portfolio_budget = client.get("/portfolio/budget?universe=usdc_perp_top30&limit=5&write_report=false&fast=true")
+    assert fast_portfolio_budget.status_code == 200
+    fast_portfolio_payload = fast_portfolio_budget.json()
+    assert fast_portfolio_payload["universe"] == "usdc_perp_top30"
+    assert "accepted_candidates" in fast_portfolio_payload
     assert "alpha_research_candidates" in portfolio_payload
     assert "multi_strategy_ab_summary" in portfolio_payload
     assert "strategy_cluster_balance_summary" in portfolio_payload

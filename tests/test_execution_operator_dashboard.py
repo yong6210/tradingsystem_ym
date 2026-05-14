@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -20,6 +21,7 @@ from app.services.execution.rollout import RolloutPolicyService
 from app.services.execution.safety import SafetyLockService
 from app.services.execution_operator_dashboard import ExecutionOperatorDashboardService
 from app.services.lane_tracker import reset_execution_lane_tracker
+from app.services.strategy_engine import StrategyEngine
 from app.repositories.execution import (
     FamilyRolloutPolicyRepository,
     SafetyLockRepository,
@@ -98,6 +100,273 @@ def _seed_rollout_and_lock(symbol: str) -> None:
             metadata={"updated_by": "test_operator_dashboard"},
         )
         db.commit()
+
+
+def test_execution_operator_dashboard_fast_skips_heavy_research_layers(monkeypatch) -> None:
+    init_db()
+    _apply_defaults(monkeypatch)
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        monkeypatch.setattr(
+            engine,
+            "portfolio_budget_report",
+            lambda **_kwargs: {
+                "universe": "usdc_perp_top30",
+                "accepted_candidates": [],
+                "blocked_candidates": [],
+                "accepted_candidate_count": 0,
+                "blocked_candidate_count": 0,
+            },
+        )
+        monkeypatch.setattr(engine, "alert_metrics_report", lambda **_kwargs: {})
+        monkeypatch.setattr(engine, "_recent_reconciliation_summary", lambda **_kwargs: {})
+        monkeypatch.setattr(
+            engine,
+            "_execution_friction_measurement_summary",
+            lambda **_kwargs: {"status": "fast_core_only"},
+        )
+
+        def fail_heavy_layer(*_args, **_kwargs):
+            raise AssertionError("fast dashboard must not run heavy research layers")
+
+        monkeypatch.setattr(engine, "_alpha_research_analysis_symbol", fail_heavy_layer)
+        monkeypatch.setattr(engine.alpha_research_pipeline, "generate", fail_heavy_layer)
+
+        payload = engine.execution_operator_dashboard(
+            symbol=None,
+            universe="usdc_perp_top30",
+            portfolio_limit=5,
+            intent_limit=5,
+            reconcile_limit=5,
+            days=7,
+            fast=True,
+        )
+
+    funnel = payload["signal_funnel"]
+    assert funnel["execution_friction_measurement"]["status"] == "fast_core_only"
+    assert funnel["live_candidate_promotion_readiness"]["scope"] == "global_all_symbols"
+    assert funnel["live_candidate_promotion_readiness_global"]["scope"] == "global_all_symbols"
+    assert funnel["portfolio_live_route_context"]["accepted_candidate_count"] == 0
+    assert funnel["order_route_summary"]["approve_value"] == "waiting_for_live_candidate"
+
+
+def test_execution_operator_dashboard_marks_non_route_portfolio_candidates_context_only(monkeypatch) -> None:
+    init_db()
+    _apply_defaults(monkeypatch)
+
+    def fake_readiness(*_args, symbol: str | None = None, **_kwargs) -> dict[str, object]:
+        return {
+            "available": True,
+            "headline_state": "WAIT",
+            "headline_reason": "no_promotable_live_candidate",
+            "headline_scope": "live_routable_symbols",
+            "headline_candidate_count": 11 if symbol is None else 1,
+            "headline_candidate_symbols": ["BTCUSDC"] if symbol else ["BTCUSDC", "NEARUSDC"],
+            "filter_symbol": symbol,
+            "filter_strategy_families": ["session_impulse_retest"],
+            "live_routable_symbols": ["BTCUSDC", "NEARUSDC"],
+            "candidate_scope_counts": {"total": 14, "live_routable": 11, "auxiliary": 3},
+            "live_state_counts": {"NO_FRESH_LIVE_CANDIDATE": 11},
+            "auxiliary_display_state_counts": {"AUXILIARY_SHADOW_SIGNAL_ONLY": 3},
+            "shadow_only_auxiliary": {"available": True, "symbols": ["SUIUSDC"]},
+        }
+
+    monkeypatch.setattr(
+        "app.services.strategy_engine.build_live_candidate_promotion_readiness_from_db",
+        fake_readiness,
+    )
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        monkeypatch.setattr(
+            engine,
+            "portfolio_budget_report",
+            lambda **_kwargs: {
+                "universe": "usdc_perp_top30",
+                "accepted_candidates": [
+                    {"symbol": "SUIUSDC", "strategy_family": "legacy_zone_plan"},
+                    {"symbol": "NEARUSDC", "strategy_family": "legacy_zone_plan"},
+                ],
+                "blocked_candidates": [],
+                "accepted_candidate_count": 2,
+                "blocked_candidate_count": 0,
+            },
+        )
+        monkeypatch.setattr(engine, "alert_metrics_report", lambda **_kwargs: {})
+        monkeypatch.setattr(engine, "_recent_reconciliation_summary", lambda **_kwargs: {})
+        monkeypatch.setattr(engine, "_execution_friction_measurement_summary", lambda **_kwargs: {})
+
+        payload = engine.execution_operator_dashboard(
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            portfolio_limit=5,
+            intent_limit=5,
+            reconcile_limit=5,
+            days=7,
+            fast=True,
+        )
+
+    context = payload["portfolio_summary"]["live_route_context"]
+    assert context == payload["signal_funnel"]["portfolio_live_route_context"]
+    assert context["authority"] == "live_candidate_promotion_readiness_is_order_truth"
+    assert context["accepted_candidate_count"] == 2
+    assert context["live_routable_accepted_candidate_count"] == 0
+    assert context["context_only_accepted_candidate_count"] == 2
+    assert context["portfolio_candidates_are_context_only"] is True
+    assert context["context_only_accepted_symbols"] == ["SUIUSDC", "NEARUSDC"]
+    assert context["active_strategy_families"] == ["session_impulse_retest"]
+    assert context["live_candidate_headline_reason"] == "no_promotable_live_candidate"
+    assert context["accepted_candidate_route_statuses"][0]["status"] == "context_only"
+    assert "strategy_family_not_live_route" in context["accepted_candidate_route_statuses"][0]["reasons"]
+    assert payload["signal_funnel"]["order_route_summary"]["approve_value"] == "waiting_for_live_candidate"
+    assert payload["portfolio_summary"]["order_route_summary"]["approve_value"] == "waiting_for_live_candidate"
+    assert payload["approval_strip_summary"]["order_route_approve_value"] == "waiting_for_live_candidate"
+
+
+def test_execution_operator_dashboard_keeps_route_match_waiting_until_readiness_allows(monkeypatch) -> None:
+    init_db()
+    _apply_defaults(monkeypatch)
+    monkeypatch.setattr(get_settings(), "auto_trading_micro_live_allowed_entry_models", "CONFIRM")
+    monkeypatch.setattr(get_settings(), "auto_trading_micro_live_allowed_sessions", "london,new_york")
+    monkeypatch.setattr(get_settings(), "auto_trading_micro_live_direction_contract", "BTCUSDC:LONG")
+
+    def fake_wait_readiness(*_args, symbol: str | None = None, **_kwargs) -> dict[str, object]:
+        return {
+            "available": True,
+            "headline_state": "WAIT",
+            "headline_reason": "no_promotable_live_candidate",
+            "headline_action": "Current live symbols have no fresh live-eligible candidate.",
+            "headline_scope": "live_routable_symbols",
+            "headline_candidate_count": 1,
+            "headline_candidate_symbols": ["BTCUSDC"],
+            "filter_symbol": symbol,
+            "filter_strategy_families": ["session_impulse_retest"],
+            "live_routable_symbols": ["BTCUSDC"],
+            "attention_flags": {
+                "has_live_submission": False,
+                "has_submit_ready_gap": False,
+            },
+        }
+
+    monkeypatch.setattr(
+        "app.services.strategy_engine.build_live_candidate_promotion_readiness_from_db",
+        fake_wait_readiness,
+    )
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        monkeypatch.setattr(
+            engine,
+            "portfolio_budget_report",
+            lambda **_kwargs: {
+                "universe": "usdc_perp_top30",
+                "accepted_candidates": [
+                    {
+                        "symbol": "BTCUSDC",
+                        "strategy_family": "session_impulse_retest",
+                        "entry_model": "CONFIRM",
+                        "direction": "LONG",
+                        "session_guidance": {"session_name": "london"},
+                    }
+                ],
+                "blocked_candidates": [],
+                "accepted_candidate_count": 1,
+                "blocked_candidate_count": 0,
+            },
+        )
+        monkeypatch.setattr(engine, "alert_metrics_report", lambda **_kwargs: {})
+        monkeypatch.setattr(engine, "_recent_reconciliation_summary", lambda **_kwargs: {})
+        monkeypatch.setattr(engine, "_execution_friction_measurement_summary", lambda **_kwargs: {})
+
+        payload = engine.execution_operator_dashboard(
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            portfolio_limit=5,
+            intent_limit=5,
+            reconcile_limit=5,
+            days=7,
+            fast=True,
+        )
+
+    context = payload["portfolio_summary"]["live_route_context"]
+    assert context["live_routable_accepted_candidate_count"] == 1
+    assert context["accepted_candidate_route_statuses"][0]["status"] == "live_route_candidate"
+    assert context["accepted_candidate_route_statuses"][0]["direction"] == "LONG"
+    assert context["accepted_candidate_route_statuses"][0]["session_name"] == "london"
+    assert payload["signal_funnel"]["order_route_summary"]["approve_value"] == "waiting_for_live_candidate"
+    assert payload["approval_strip_summary"]["order_route_approve_value"] == "waiting_for_live_candidate"
+
+
+def test_execution_operator_dashboard_route_context_checks_direction_and_session(monkeypatch) -> None:
+    init_db()
+    _apply_defaults(monkeypatch)
+    monkeypatch.setattr(get_settings(), "auto_trading_micro_live_allowed_entry_models", "CONFIRM")
+    monkeypatch.setattr(get_settings(), "auto_trading_micro_live_allowed_sessions", "london")
+    monkeypatch.setattr(get_settings(), "auto_trading_micro_live_direction_contract", "BTCUSDC:LONG")
+
+    def fake_wait_readiness(*_args, symbol: str | None = None, **_kwargs) -> dict[str, object]:
+        return {
+            "available": True,
+            "headline_state": "WAIT",
+            "headline_reason": "no_promotable_live_candidate",
+            "headline_action": "Current live symbols have no fresh live-eligible candidate.",
+            "headline_scope": "live_routable_symbols",
+            "filter_symbol": symbol,
+            "filter_strategy_families": ["session_impulse_retest"],
+            "live_routable_symbols": ["BTCUSDC"],
+            "attention_flags": {
+                "has_live_submission": False,
+                "has_submit_ready_gap": False,
+            },
+        }
+
+    monkeypatch.setattr(
+        "app.services.strategy_engine.build_live_candidate_promotion_readiness_from_db",
+        fake_wait_readiness,
+    )
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        monkeypatch.setattr(
+            engine,
+            "portfolio_budget_report",
+            lambda **_kwargs: {
+                "universe": "usdc_perp_top30",
+                "accepted_candidates": [
+                    {
+                        "symbol": "BTCUSDC",
+                        "strategy_family": "session_impulse_retest",
+                        "entry_model": "CONFIRM",
+                        "direction": "SHORT",
+                        "session_guidance": {"session_name": "inactive"},
+                    }
+                ],
+                "blocked_candidates": [],
+                "accepted_candidate_count": 1,
+                "blocked_candidate_count": 0,
+            },
+        )
+        monkeypatch.setattr(engine, "alert_metrics_report", lambda **_kwargs: {})
+        monkeypatch.setattr(engine, "_recent_reconciliation_summary", lambda **_kwargs: {})
+        monkeypatch.setattr(engine, "_execution_friction_measurement_summary", lambda **_kwargs: {})
+
+        payload = engine.execution_operator_dashboard(
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            portfolio_limit=5,
+            intent_limit=5,
+            reconcile_limit=5,
+            days=7,
+            fast=True,
+        )
+
+    route_status = payload["portfolio_summary"]["live_route_context"]["accepted_candidate_route_statuses"][0]
+    assert route_status["status"] == "context_only"
+    assert route_status["direction"] == "SHORT"
+    assert route_status["session_name"] == "inactive"
+    assert "direction_not_live_route" in route_status["reasons"]
+    assert "session_not_live_route" in route_status["reasons"]
+    assert payload["portfolio_summary"]["live_route_context"]["live_routable_accepted_candidate_count"] == 0
 
 
 def test_execution_operator_dashboard_formats_active_contract_summary() -> None:
@@ -306,6 +575,72 @@ def test_execution_operator_dashboard_formats_active_contract_summary() -> None:
     assert payload["score_to_outcome_funnel"]["filters"]["strategy_families"] == ["sweep_reversal"]
     assert payload["score_to_outcome_funnel"]["submitted_to_fill_rate_denominator"] == "submitted_plans"
     assert payload["opportunity_capture"]["available"] is True
+
+
+def test_execution_operator_dashboard_uses_usdt_proxy_for_sir_active_contract_replay_baseline(tmp_path) -> None:
+    backtest_dir = tmp_path / "reports" / "validation" / "micro_main_usdt_proxy_backtests"
+    backtest_dir.mkdir(parents=True)
+    (backtest_dir / "micro_main_usdt_proxy_backtest_20260510T000000Z.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-05-10T00:00:00Z",
+                "days": 14,
+                "results": {
+                    "BTCUSDT": {
+                        "proxy_symbol": "BTCUSDT",
+                        "canonical_symbol": "BTCUSDC",
+                        "summary": {"closed": 3, "ev_r": 0.5},
+                        "trades": [
+                            {
+                                "family": "session_impulse_retest",
+                                "direction": "long",
+                                "entry_ts": "2026-05-01T07:30:00+00:00",
+                                "r_value": 1.0,
+                            },
+                            {
+                                "family": "session_impulse_retest",
+                                "direction": "long",
+                                "entry_ts": "2026-05-02T13:30:00+00:00",
+                                "r_value": 1.0,
+                            },
+                            {
+                                "family": "session_impulse_retest",
+                                "direction": "short",
+                                "entry_ts": "2026-05-03T20:30:00+00:00",
+                                "r_value": -1.0,
+                            },
+                        ],
+                    }
+                },
+            }
+        )
+    )
+    service = object.__new__(ExecutionOperatorDashboardService)
+    service.settings = SimpleNamespace(
+        auto_trading_replay_validation_bridge_backtest_dir=str(backtest_dir),
+        validation_report_dir=str(tmp_path / "reports" / "validation"),
+        trading_session_london_start_hour_utc=7,
+        trading_session_london_end_hour_utc=12,
+        trading_session_new_york_start_hour_utc=13,
+        trading_session_new_york_end_hour_utc=18,
+    )
+
+    payload = service._active_contract_replay_flow_baseline(
+        filters={
+            "symbol": "BTCUSDC",
+            "strategy_families": ["session_impulse_retest"],
+            "entry_models": ["CONFIRM"],
+            "directions": ["LONG"],
+            "sessions": ["london", "new_york"],
+        },
+        cadence_window={"current_window_active_contract_intents_per_week": 0.5},
+    )
+
+    assert payload is not None
+    assert payload["source"] == "micro_main_usdt_proxy_backtest"
+    assert payload["replay_trade_count"] == 2
+    assert payload["expected_active_contract_candidates_per_week_from_replay"] == 1.0
+    assert payload["live_vs_replay_flow_ratio"] == 0.5
 
 
 def test_execution_operator_dashboard_aggregates_runtime_state(monkeypatch) -> None:
@@ -2285,6 +2620,7 @@ def test_execution_operator_dashboard_intent_row_and_contract_filter_respect_dir
                 "direction": "SHORT",
             }
         },
+        session_guidance={"current_session": {"name": "new_york"}},
         created_at=datetime.now(timezone.utc),
     )
 
@@ -2299,6 +2635,7 @@ def test_execution_operator_dashboard_intent_row_and_contract_filter_respect_dir
             "strategy_families": ["sweep_reversal"],
             "entry_models": ["LIMIT"],
             "directions": ["LONG"],
+            "sessions": ["new_york"],
         },
     )
     assert ExecutionOperatorDashboardService._row_matches_contract_filters(
@@ -2309,5 +2646,17 @@ def test_execution_operator_dashboard_intent_row_and_contract_filter_respect_dir
             "strategy_families": ["sweep_reversal"],
             "entry_models": ["LIMIT"],
             "directions": ["SHORT"],
+            "sessions": ["new_york"],
+        },
+    )
+    assert not ExecutionOperatorDashboardService._row_matches_contract_filters(
+        intent_row,
+        {
+            "symbol": "BTCUSDC",
+            "execution_mode": "MICRO_LIVE",
+            "strategy_families": ["sweep_reversal"],
+            "entry_models": ["LIMIT"],
+            "directions": ["SHORT"],
+            "sessions": ["london"],
         },
     )

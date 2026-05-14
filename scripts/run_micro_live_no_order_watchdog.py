@@ -121,9 +121,14 @@ def _top_reasons_text(top_reasons: dict[str, Any], *, limit: int = 4) -> str:
     return ", ".join(f"{key}={value}" for key, value in list(top_reasons.items())[:limit])
 
 
-def _diagnostic_actions_text(diagnostics: list[dict[str, Any]], *, limit: int = 4) -> str:
+def _diagnostic_actions_text(
+    diagnostics: list[dict[str, Any]],
+    *,
+    limit: int = 4,
+    fallback: str = "fresh live 후보 대기; 현재 차단 사유 없음",
+) -> str:
     if not diagnostics:
-        return "validation gate와 rollout session gate를 먼저 확인"
+        return fallback
     return ", ".join(f"{item.get('reason')}->{item.get('action')}" for item in diagnostics[:limit])
 
 
@@ -174,10 +179,21 @@ def evaluate_no_order_watchdog(*, lifecycle: dict[str, Any], min_intents: int) -
         severity = "FAIL"
         reason = "live_submission_rejected_or_error"
 
+    if diagnostics:
+        next_action_text = _diagnostic_actions_text(diagnostics)
+    elif reason == "submit_ready_intents_without_submission":
+        next_action_text = "submit-ready intent가 live submission으로 이어졌는지 즉시 확인"
+    elif reason == "live_submission_rejected_or_error":
+        next_action_text = "rejected/error live submission 상세와 exchange adapter 응답 확인"
+    elif reason == "live_intents_without_live_order_submission":
+        next_action_text = "blocked intent reason payload 확인"
+    else:
+        next_action_text = "fresh live 후보 대기; 현재 차단 사유 없음"
+
     message = (
         f"최근 live intent {intent_count}건, live 주문 제출 {requested_live_count}건. "
         f"submit_ready={submit_ready}, blocked={blocked}, reasons={_top_reasons_text(top_reasons)}, "
-        f"actions={_diagnostic_actions_text(diagnostics)}"
+        f"actions={next_action_text}"
     )
     return {
         "alert": alert,
@@ -194,6 +210,7 @@ def evaluate_no_order_watchdog(*, lifecycle: dict[str, Any], min_intents: int) -
         "top_block_reasons": top_reasons,
         "blocked_intent_diagnostics": diagnostics,
         "first_block_detail_text": _diagnostic_detail_text(diagnostics),
+        "next_action_text": next_action_text,
     }
 
 
@@ -217,6 +234,10 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
     evaluation = dict(payload.get("evaluation") or {})
     detail_text = str(evaluation.get("first_block_detail_text") or "")
     top_reasons = _top_reasons_text(dict(evaluation.get("top_block_reasons") or {}), limit=3)
+    next_action_text = str(evaluation.get("next_action_text") or "").strip() or _diagnostic_actions_text(
+        list(evaluation.get("blocked_intent_diagnostics") or []),
+        limit=2,
+    )
     return "\n".join(
         [
             "MICRO_LIVE 주문 없음",
@@ -226,7 +247,7 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
             ),
             f"원인: {top_reasons}",
             f"상세: {detail_text or '없음'}",
-            f"다음: {_diagnostic_actions_text(list(evaluation.get('blocked_intent_diagnostics') or []), limit=2)}",
+            f"다음: {next_action_text}",
         ]
     )
 
@@ -270,7 +291,7 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         f"- reason: {evaluation.get('reason')}",
         f"- message: {evaluation.get('message')}",
         f"- first_block_detail: {evaluation.get('first_block_detail_text') or 'none'}",
-        f"- actions: {_diagnostic_actions_text(list(evaluation.get('blocked_intent_diagnostics') or []))}",
+        f"- actions: {evaluation.get('next_action_text') or _diagnostic_actions_text(list(evaluation.get('blocked_intent_diagnostics') or []))}",
         "",
         "```json",
         json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default),

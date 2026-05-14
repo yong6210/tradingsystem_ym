@@ -12,8 +12,10 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
 from app.services.live_order_lifecycle import LiveOrderLifecycleReporter
+from app.services.runtime_worker_heartbeat import read_worker_heartbeat
 from scripts.operation_report_io import atomic_write_text, display_path, parse_report_generated_at, write_latest_aliases
 from scripts.run_micro_live_preflight import _micro_live_config_drift_checks
 
@@ -39,6 +41,29 @@ def _json_default(value: Any) -> str:
 
 def _display_path(path: Path) -> str:
     return display_path(path, ROOT_DIR)
+
+
+def _csv_set(value: Any) -> set[str]:
+    return {item.strip() for item in str(value or "").split(",") if item.strip()}
+
+
+def _parse_utc_ts(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _ws_runtime_started_at() -> datetime | None:
+    payload = read_worker_heartbeat("ws")
+    details = dict(payload.get("details") or {}) if isinstance(payload, dict) else {}
+    return _parse_utc_ts(details.get("started_at"))
 
 
 def _blocking_failures(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -134,15 +159,28 @@ def _operational_status(*, blocking_failures: list[dict[str, Any]], lifecycle: d
 
 
 def build_payload(*, days: int, limit: int, check_binance_rules: bool) -> dict[str, Any]:
+    settings = get_settings()
+    family_filter = _csv_set(getattr(settings, "auto_trading_micro_live_allowed_families", ""))
+    if not family_filter:
+        family_filter = _csv_set(getattr(settings, "auto_trading_allowed_families", ""))
+    runtime_started_at = _ws_runtime_started_at()
     checks = _micro_live_config_drift_checks(check_binance_rules=check_binance_rules)
     failures = _blocking_failures(checks)
     init_db()
     with SessionLocal() as db:
-        lifecycle = LiveOrderLifecycleReporter(db).generate(days=days, live_only=True, limit=limit)
+        lifecycle = LiveOrderLifecycleReporter(db).generate(
+            days=days,
+            live_only=True,
+            limit=limit,
+            start_at=runtime_started_at,
+            strategy_families=sorted(family_filter),
+        )
     blocked_diagnostics = _blocked_intent_diagnostics(lifecycle)
     recommendations = _recommendations(blocking_failures=failures, lifecycle=lifecycle)
     return {
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "runtime_started_at": runtime_started_at.isoformat() if runtime_started_at else None,
+        "family_filter": sorted(family_filter),
         "overall_status": "FAIL" if failures else "PASS",
         "operational_status": _operational_status(blocking_failures=failures, lifecycle=lifecycle),
         "blocking_failures": failures,
@@ -161,6 +199,8 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         "# MICRO_LIVE Runtime Guard",
         "",
         f"- generated_at: {payload.get('generated_at')}",
+        f"- runtime_started_at: {payload.get('runtime_started_at') or 'none'}",
+        f"- family_filter: {','.join(payload.get('family_filter') or []) or 'none'}",
         f"- overall_status: {payload.get('overall_status')}",
         f"- operational_status: {payload.get('operational_status')}",
         f"- blocking_failures: {len(payload.get('blocking_failures') or [])}",

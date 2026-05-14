@@ -47,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--portfolio-limit", type=int, default=5)
     parser.add_argument("--intent-limit", type=int, default=5)
     parser.add_argument("--reconcile-limit", type=int, default=5)
+    parser.add_argument("--full-dashboard", action="store_true")
     parser.add_argument("--report-dir", default="reports/operations/operator_surface_divergence")
     parser.add_argument("--no-write-report", action="store_true")
     return parser.parse_args()
@@ -174,6 +175,13 @@ def _edge_experiment_snapshot_line(funnel: dict[str, Any]) -> str:
     )
 
 
+def _display_candidate_status(status: Any) -> str:
+    raw_status = str(status or "").strip()
+    if raw_status == "ACTIONABLE_ENTRY":
+        return "CONTEXT_REVIEW_SETUP"
+    return raw_status
+
+
 def _representative_candidate_snapshot(row: dict[str, Any] | None, *, status: str) -> dict[str, Any] | None:
     item = dict(row or {})
     if not item:
@@ -205,7 +213,7 @@ def _representative_candidate_line(label: str, candidate: dict[str, Any] | None)
         f"split={(item.get('entry_timing_focus') or 'none')}/{(item.get('execution_style_focus') or 'none')}",
     ]
     if item.get("status"):
-        parts.append(f"status={item.get('status')}")
+        parts.append(f"status={_display_candidate_status(item.get('status'))}")
     if item.get("block_reason"):
         parts.append(f"reason={item.get('block_reason')}")
     return f"- {label}: {item.get('symbol') or 'unknown'} | " + " | ".join(parts)
@@ -262,7 +270,7 @@ def _experiment_review_target_line(label: str, target: dict[str, Any] | None) ->
         f"action={item.get('action') or 'unknown'}",
         f"target={item.get('symbol') or 'unknown'}",
         f"variant={item.get('preferred_variant') or 'none'}",
-        f"status={item.get('status') or 'unknown'}",
+        f"status={_display_candidate_status(item.get('status')) or 'unknown'}",
         f"family={item.get('strategy_family') or 'unknown'}",
     ]
     if item.get("block_reason"):
@@ -573,18 +581,31 @@ def main() -> int:
                     "intent_limit": args.intent_limit,
                     "reconcile_limit": args.reconcile_limit,
                     "days": args.days,
+                    "fast": not bool(args.full_dashboard),
                 },
             ),
             "GET",
             "/execution/operator-dashboard",
         )
         validation = _required_json(
-            client.post("/validation/report", params={"symbol": args.symbol}),
+            client.post(
+                "/validation/report",
+                params={"symbol": args.symbol, "refresh": "false", "cache_fallback": "true"},
+            ),
             "POST",
             "/validation/report",
         )
         checklist = _required_json(
-            client.post("/operations/checklist", params={"symbol": args.symbol}),
+            client.post(
+                "/operations/checklist",
+                params={
+                    "symbol": args.symbol,
+                    "universe": args.universe,
+                    "limit": args.portfolio_limit,
+                    "days": args.days,
+                    "write_report": "false",
+                },
+            ),
             "POST",
             "/operations/checklist",
         )
@@ -674,7 +695,7 @@ def main() -> int:
     )
     representative_accepted_candidate = _representative_candidate_snapshot(
         accepted_candidate_rows[0] if accepted_candidate_rows else None,
-        status="ACTIONABLE_ENTRY",
+        status="CONTEXT_REVIEW_SETUP",
     )
     representative_blocked_candidate = _representative_candidate_snapshot(
         blocked_candidate_rows[0] if blocked_candidate_rows else None,

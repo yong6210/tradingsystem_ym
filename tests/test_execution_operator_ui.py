@@ -51,6 +51,20 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "Live Candidate Review" in html
     assert "Global Live Candidate Review" in html
     assert "Global Headline" in html
+    assert "Global Scope Counts" in html
+    assert "Live State Counts" in html
+    assert "Auxiliary State Counts" in html
+    assert "Auxiliary Shadow Symbols" in html
+    assert "Live Route Context" in html
+    assert "Order Route Truth" in html
+    assert "portfolio_live_route_context" in html
+    assert "order_route_summary" in html
+    assert "live_routable_accepted_candidate_count" in html
+    assert "context_only_accepted_candidate_count" in html
+    assert "candidate_scope_counts" in html
+    assert "live_state_counts" in html
+    assert "auxiliary_display_state_counts" in html
+    assert "shadow_only_auxiliary.symbols" in html
     assert "Decision" in html
     assert "Headline Freshness" in html
     assert "Headline Evidence" in html

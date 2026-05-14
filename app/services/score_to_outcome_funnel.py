@@ -44,7 +44,35 @@ class ScoreToOutcomeFunnelService:
 
     @staticmethod
     def _runtime_session_state(row: dict[str, Any]) -> str:
-        return str(((row.get("session_guidance") or {}).get("state")) or "unknown")
+        payload = dict(row or {})
+        operating_lock = dict(payload.get("operating_lock") or {})
+        current_session = dict(operating_lock.get("current_session") or {})
+        if str(current_session.get("name") or "").strip():
+            return str(current_session.get("name") or "").strip().lower()
+        session_guidance = dict(payload.get("session_guidance") or {})
+        guidance_session = dict(session_guidance.get("current_session") or {})
+        if str(guidance_session.get("name") or "").strip():
+            return str(guidance_session.get("name") or "").strip().lower()
+        if str(session_guidance.get("session_name") or "").strip():
+            return str(session_guidance.get("session_name") or "").strip().lower()
+        if str(session_guidance.get("state") or "").strip():
+            return str(session_guidance.get("state") or "").strip().lower()
+        validity = dict(payload.get("validity") or {})
+        for key in (
+            "session_guidance_session_name",
+            "session_guidance_state",
+            "generated_session",
+            "session_name",
+            "session",
+        ):
+            value = str(validity.get(key) or "").strip()
+            if value:
+                return value.lower()
+        for key in ("generated_session", "session_name", "session"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value.lower()
+        return "unknown"
 
     @staticmethod
     def _submission_session_state(submission: OrderSubmission | None) -> str:
@@ -57,7 +85,8 @@ class ScoreToOutcomeFunnelService:
             dict(raw.get("session_guidance") or {}),
             dict((raw.get("intent_snapshot") or {}).get("session_guidance") or {}),
         ):
-            state = str(payload.get("state") or payload.get("session_name") or "").strip()
+            current_session = dict(payload.get("current_session") or {})
+            state = str(current_session.get("name") or payload.get("session_name") or payload.get("state") or "").strip()
             if state:
                 return state
         return ""
@@ -79,6 +108,21 @@ class ScoreToOutcomeFunnelService:
     @staticmethod
     def _direction_from_plan(plan: Plan | None) -> str:
         return str(getattr(plan, "direction", "") or "unknown").upper()
+
+    @staticmethod
+    def _session_from_plan(plan: Plan | None) -> str:
+        validity = dict(getattr(plan, "validity", {}) or {})
+        for key in (
+            "session_guidance_session_name",
+            "session_guidance_state",
+            "generated_session",
+            "session_name",
+            "session",
+        ):
+            value = str(validity.get(key) or "").strip()
+            if value:
+                return value.lower()
+        return "unknown"
 
     @staticmethod
     def _normalized_string_set(
@@ -125,6 +169,7 @@ class ScoreToOutcomeFunnelService:
         strategy_families: set[str],
         entry_models: set[str],
         directions: set[str],
+        sessions: set[str],
     ) -> bool:
         if plan is None:
             return False
@@ -133,6 +178,8 @@ class ScoreToOutcomeFunnelService:
         if entry_models and cls._entry_model_from_plan(plan) not in entry_models:
             return False
         if directions and cls._direction_from_plan(plan) not in directions:
+            return False
+        if sessions and cls._session_from_plan(plan) not in sessions:
             return False
         return True
 
@@ -144,12 +191,15 @@ class ScoreToOutcomeFunnelService:
         strategy_families: set[str],
         entry_models: set[str],
         directions: set[str],
+        sessions: set[str],
     ) -> bool:
         if strategy_families and cls._runtime_family_from_row(row) not in strategy_families:
             return False
         if entry_models and cls._entry_model_from_row(row) not in entry_models:
             return False
         if directions and cls._direction_from_row(row) not in directions:
+            return False
+        if sessions and cls._runtime_session_state(row) not in sessions:
             return False
         return True
 
@@ -788,12 +838,14 @@ class ScoreToOutcomeFunnelService:
         strategy_families: Collection[str] | None = None,
         entry_models: Collection[str] | None = None,
         directions: Collection[str] | None = None,
+        sessions: Collection[str] | None = None,
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         report_window_days = max(1, int(days))
         family_filters = self._normalized_string_set(strategy_families, case="lower")
         entry_model_filters = self._normalized_string_set(entry_models, case="upper")
         direction_filters = self._normalized_string_set(directions, case="upper")
+        session_filters = self._normalized_string_set(sessions, case="lower")
         plans = [
             plan
             for plan in self.plan_repo.list_recent(symbol=symbol, days=report_window_days)
@@ -803,6 +855,7 @@ class ScoreToOutcomeFunnelService:
                 strategy_families=family_filters,
                 entry_models=entry_model_filters,
                 directions=direction_filters,
+                sessions=session_filters,
             )
         ]
         plan_lookup = {str(plan.plan_id): plan for plan in plans}
@@ -836,6 +889,7 @@ class ScoreToOutcomeFunnelService:
                 strategy_families=family_filters,
                 entry_models=entry_model_filters,
                 directions=direction_filters,
+                sessions=session_filters,
             )
         ]
         blocked_rows = [
@@ -846,6 +900,7 @@ class ScoreToOutcomeFunnelService:
                 strategy_families=family_filters,
                 entry_models=entry_model_filters,
                 directions=direction_filters,
+                sessions=session_filters,
             )
         ]
 
@@ -979,8 +1034,9 @@ class ScoreToOutcomeFunnelService:
                 "strategy_families": sorted(family_filters),
                 "entry_models": sorted(entry_model_filters),
                 "directions": sorted(direction_filters),
+                "sessions": sorted(session_filters),
             }
-            if family_filters or entry_model_filters or direction_filters
+            if family_filters or entry_model_filters or direction_filters or session_filters
             else None,
             "coverage_note": coverage_note,
             "snapshot_selection": self._selection_snapshot(filtered_portfolio_budget),

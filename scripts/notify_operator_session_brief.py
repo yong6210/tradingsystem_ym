@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import subprocess
@@ -63,6 +64,33 @@ def _default_latest_run_file(*, brief_mode: str) -> Path:
     return ROOT_DIR / "reports" / "operations" / "operator_session_briefs" / f"latest_operator_session_brief_{mode_slug}.json"
 
 
+def _default_lock_file(*, brief_mode: str) -> Path:
+    mode_slug = brief_mode.replace("-", "_")
+    return ROOT_DIR / "reports" / "operations" / "operator_session_briefs" / f"operator_session_brief_{mode_slug}.lock"
+
+
+def _try_acquire_lock(path: Path) -> int | None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
+    return fd
+
+
+def _release_lock(fd: int | None) -> None:
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate or read the latest operator session brief and send a concise handoff message when state changes."
@@ -80,6 +108,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--latest-run-file",
         default=_env_default("OPERATOR_BRIEF_LATEST_RUN_FILE", ""),
+    )
+    parser.add_argument("--lock-file", default=_env_default("OPERATOR_BRIEF_LOCK_FILE", ""))
+    parser.add_argument(
+        "--run-timeout-seconds",
+        type=int,
+        default=int(_env_default("OPERATOR_BRIEF_RUN_TIMEOUT_SECONDS", "90")),
     )
     parser.add_argument("--channel", choices=["discord", "system"], default=_env_default("OPERATOR_BRIEF_CHANNEL", "system"))
     parser.add_argument("--brief-mode", choices=["shift-start", "shift-end"], default=_env_default("OPERATOR_BRIEF_MODE", "shift-start"))
@@ -111,6 +145,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _run_brief(args: argparse.Namespace) -> dict[str, Any]:
+    timeout_seconds = max(1, int(getattr(args, "run_timeout_seconds", 90) or 90))
     command = [
         sys.executable,
         str(BRIEF_SCRIPT),
@@ -127,11 +162,28 @@ def _run_brief(args: argparse.Namespace) -> dict[str, Any]:
         "--reconcile-limit",
         str(args.reconcile_limit),
     ]
-    completed = subprocess.run(command, capture_output=True, text=True, cwd=str(ROOT_DIR), check=False)
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT_DIR),
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stderr = str(exc.stderr or "").strip()
+        stdout = str(exc.stdout or "").strip()
+        detail = stderr or stdout
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(f"brief script timed out after {timeout_seconds}s{suffix}") from exc
     if completed.returncode != 0:
         stderr = completed.stderr.strip() or completed.stdout.strip()
         raise RuntimeError(f"brief script failed: {stderr}")
-    payload = json.loads(completed.stdout)
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"brief script returned invalid JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise RuntimeError("brief payload must be an object")
     return payload
@@ -174,6 +226,13 @@ def _surface_summary_line(label: str, summary: dict[str, str]) -> str:
     )
 
 
+def _display_candidate_status(status: Any) -> str:
+    raw_status = str(status or "").strip()
+    if raw_status == "ACTIONABLE_ENTRY":
+        return "CONTEXT_REVIEW_SETUP"
+    return raw_status
+
+
 def _candidate_handoff_line(label: str, candidate: dict[str, Any] | None) -> str:
     item = dict(candidate or {})
     if not item:
@@ -185,7 +244,7 @@ def _candidate_handoff_line(label: str, candidate: dict[str, Any] | None) -> str
         f"| split={(item.get('entry_timing_focus') or 'none')}/{(item.get('execution_style_focus') or 'none')}"
     )
     if item.get("status"):
-        line = f"{line} | status={item.get('status')}"
+        line = f"{line} | status={_display_candidate_status(item.get('status'))}"
     if item.get("block_reason"):
         line = f"{line} | reason={item.get('block_reason')}"
     return line
@@ -199,7 +258,7 @@ def _review_target_line(label: str, target: dict[str, Any] | None) -> str:
         f"- {label}: action={item.get('action') or 'unknown'} "
         f"| target={item.get('symbol') or 'unknown'} "
         f"| variant={item.get('preferred_variant') or 'none'} "
-        f"| status={item.get('status') or 'unknown'} "
+        f"| status={_display_candidate_status(item.get('status')) or 'unknown'} "
         f"| family={item.get('strategy_family') or 'unknown'}"
     )
     if item.get("block_reason"):
@@ -536,71 +595,120 @@ def main() -> int:
         if str(args.latest_run_file).strip()
         else _default_latest_run_file(brief_mode=args.brief_mode)
     )
-    brief = _run_brief(args)
-    current = _alert_state(brief)
-    current["channel"] = args.channel
-    current["brief_mode"] = args.brief_mode
-    previous = _read_json(state_file)
-    changed = _changed(previous, current)
-
-    result: dict[str, Any] = {
-        "state_file": str(state_file),
-        "channel": args.channel,
-        "brief_mode": args.brief_mode,
-        "brief_report_path": brief.get("report_path"),
-        "snapshot_report_path": (brief.get("snapshot") or {}).get("report_path"),
-        "current": current,
-        "previous": previous,
-        "changed": changed,
-        "allow_live_send": bool(args.allow_live_send),
-        "force_send": bool(args.force_send),
-        "dry_run": bool(args.dry_run),
-        "notified": False,
-    }
-
-    message = _render_message(brief, brief_mode=args.brief_mode)
-    result["message"] = message
-
-    if not changed and not args.force_send:
-        _write_json(state_file, current)
-        _write_json(latest_run_file, result)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.dry_run:
-        _write_json(state_file, current)
-        _write_json(latest_run_file, result)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
-
-    if not args.allow_live_send:
-        result["delivery"] = {
+    lock_file = (
+        _resolve_root_path(getattr(args, "lock_file", "")).resolve()
+        if str(getattr(args, "lock_file", "")).strip()
+        else _default_lock_file(brief_mode=args.brief_mode)
+    )
+    lock_fd = _try_acquire_lock(lock_file)
+    if lock_fd is None:
+        result = {
+            "state_file": str(state_file),
+            "latest_run_file": str(latest_run_file),
+            "lock_file": str(lock_file),
             "channel": args.channel,
-            "delivered": False,
-            "skipped": True,
-            "reason": "live_send_not_allowed",
+            "brief_mode": args.brief_mode,
+            "changed": False,
+            "allow_live_send": bool(args.allow_live_send),
+            "force_send": bool(args.force_send),
+            "dry_run": bool(args.dry_run),
+            "notified": False,
+            "reason": "operator_session_brief_already_running",
         }
         _write_json(latest_run_file, result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
-    settings = get_settings()
-    if args.webhook_url.strip():
-        settings.alert_discord_webhook_url = args.webhook_url.strip()
+    try:
+        try:
+            brief = _run_brief(args)
+        except RuntimeError as exc:
+            result = {
+                "state_file": str(state_file),
+                "latest_run_file": str(latest_run_file),
+                "lock_file": str(lock_file),
+                "channel": args.channel,
+                "brief_mode": args.brief_mode,
+                "changed": False,
+                "allow_live_send": bool(args.allow_live_send),
+                "force_send": bool(args.force_send),
+                "dry_run": bool(args.dry_run),
+                "notified": False,
+                "reason": "brief_generation_failed",
+                "error": str(exc),
+            }
+            _write_json(latest_run_file, result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
 
-    dispatcher = NotificationDispatcher(settings)
-    delivery = dispatcher.dispatch(
-        channel=args.channel,
-        alert_type=f"operator_session_brief_{args.brief_mode.replace('-', '_')}",
-        symbol=str(brief.get("symbol") or args.symbol).upper(),
-        payload={"message": message},
-    )
-    result["delivery"] = delivery
-    result["notified"] = _safe_bool(delivery.get("delivered"))
-    _write_json(state_file, current)
-    _write_json(latest_run_file, result)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0
+        current = _alert_state(brief)
+        current["channel"] = args.channel
+        current["brief_mode"] = args.brief_mode
+        previous = _read_json(state_file)
+        changed = _changed(previous, current)
+
+        result: dict[str, Any] = {
+            "state_file": str(state_file),
+            "latest_run_file": str(latest_run_file),
+            "lock_file": str(lock_file),
+            "channel": args.channel,
+            "brief_mode": args.brief_mode,
+            "brief_report_path": brief.get("report_path"),
+            "snapshot_report_path": (brief.get("snapshot") or {}).get("report_path"),
+            "current": current,
+            "previous": previous,
+            "changed": changed,
+            "allow_live_send": bool(args.allow_live_send),
+            "force_send": bool(args.force_send),
+            "dry_run": bool(args.dry_run),
+            "notified": False,
+        }
+
+        message = _render_message(brief, brief_mode=args.brief_mode)
+        result["message"] = message
+
+        if not changed and not args.force_send:
+            _write_json(state_file, current)
+            _write_json(latest_run_file, result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.dry_run:
+            _write_json(state_file, current)
+            _write_json(latest_run_file, result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+
+        if not args.allow_live_send:
+            result["delivery"] = {
+                "channel": args.channel,
+                "delivered": False,
+                "skipped": True,
+                "reason": "live_send_not_allowed",
+            }
+            _write_json(latest_run_file, result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+
+        settings = get_settings()
+        if args.webhook_url.strip():
+            settings.alert_discord_webhook_url = args.webhook_url.strip()
+
+        dispatcher = NotificationDispatcher(settings)
+        delivery = dispatcher.dispatch(
+            channel=args.channel,
+            alert_type=f"operator_session_brief_{args.brief_mode.replace('-', '_')}",
+            symbol=str(brief.get("symbol") or args.symbol).upper(),
+            payload={"message": message},
+        )
+        result["delivery"] = delivery
+        result["notified"] = _safe_bool(delivery.get("delivered"))
+        _write_json(state_file, current)
+        _write_json(latest_run_file, result)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    finally:
+        _release_lock(lock_fd)
 
 
 if __name__ == "__main__":

@@ -161,6 +161,8 @@ def test_main_blocks_live_send_without_allow_flag(monkeypatch, tmp_path: Path, c
         reconcile_limit=5,
         state_file=str(state_file),
         latest_run_file=str(latest_run_file),
+        lock_file=str(tmp_path / "brief.lock"),
+        run_timeout_seconds=90,
         channel="system",
         brief_mode="shift-start",
         webhook_url="",
@@ -201,9 +203,9 @@ def test_main_blocks_live_send_without_allow_flag(monkeypatch, tmp_path: Path, c
     assert "- validation/funnel: action=run_shadow_exit_timing_review | validation_state=watch_edge | live_validation=sample_building/do_not_claim_edge_yet | closed=6/100 | remaining_to_goal=94 | regime=single_regime_observed | entry_timing=early_limit | execution_style=passive_limit | true_edge=0.8200 | decay=-0.0300 | edge_evolution=reduce_candidate:reduce_baseline_allocation_review:reduce_baseline | review_ledger=READY:reduce_baseline_allocation_review:3 | family_bottleneck=legacy_zone_plan | session_bottleneck=preferred_live_window" in payload["message"]
     assert "live_validation=sample_building/do_not_claim_edge_yet | closed=6/100 | remaining_to_goal=94 | regime=single_regime_observed | entry_timing=early_limit | execution_style=passive_limit | true_edge=0.8200 | decay=-0.0300" in payload["message"]
     assert "- review_followup_ledger: status=READY | action=reduce_baseline_allocation_review | entries=3 | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review" in payload["message"]
-    assert "- entry_timing_review_target: action=run_entry_timing_split_review | target=ETHUSDC | variant=early_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review" in payload["message"]
-    assert "- execution_style_review_target: action=run_execution_style_split_review | target=ETHUSDC | variant=passive_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_execution_style_split_review" in payload["message"]
-    assert "- accepted_candidate_focus: symbol=ETHUSDC | family=sweep_reversal | edge=watch_edge | split=early_limit/passive_limit | status=ACTIONABLE_ENTRY" in payload["message"]
+    assert "- entry_timing_review_target: action=run_entry_timing_split_review | target=ETHUSDC | variant=early_limit | status=CONTEXT_REVIEW_SETUP | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review" in payload["message"]
+    assert "- execution_style_review_target: action=run_execution_style_split_review | target=ETHUSDC | variant=passive_limit | status=CONTEXT_REVIEW_SETUP | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_execution_style_split_review" in payload["message"]
+    assert "- accepted_candidate_focus: symbol=ETHUSDC | family=sweep_reversal | edge=watch_edge | split=early_limit/passive_limit | status=CONTEXT_REVIEW_SETUP" in payload["message"]
     assert "- blocked_candidate_focus: symbol=BTCUSDC | family=trend_continuation | edge=fragile_edge | split=reaction_confirmed/market | status=BLOCKED_SETUP | reason=portfolio_cap" in payload["message"]
     assert payload["current"]["kernel_verdict"] == "manual_review"
     assert payload["current"]["money_leak_r"] == 0.33
@@ -253,6 +255,8 @@ def test_main_dispatches_when_allow_live_send(monkeypatch, tmp_path: Path, capsy
         reconcile_limit=5,
         state_file=str(state_file),
         latest_run_file=str(latest_run_file),
+        lock_file=str(tmp_path / "brief.lock"),
+        run_timeout_seconds=90,
         channel="discord",
         brief_mode="shift-end",
         webhook_url="https://discord.example/webhook",
@@ -303,11 +307,101 @@ def test_main_dispatches_when_allow_live_send(monkeypatch, tmp_path: Path, capsy
     assert "- final_top_action: continue_candidate_review_under_portfolio_caps | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review" in payload["message"]
     assert "- carryover_focus: validation=run_shadow_exit_timing_review | validation_state=watch_edge | live_validation=sample_building/do_not_claim_edge_yet | closed=6/100 | remaining_to_goal=94 | regime=single_regime_observed | entry_timing=early_limit | execution_style=passive_limit | true_edge=0.8200 | decay=-0.0300 | edge_evolution=reduce_candidate:reduce_baseline_allocation_review:reduce_baseline | review_ledger=READY:reduce_baseline_allocation_review:3 | family_bottleneck=legacy_zone_plan | session_bottleneck=preferred_live_window" in payload["message"]
     assert "- carryover_review_followup_ledger: status=READY | action=reduce_baseline_allocation_review | entries=3 | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review" in payload["message"]
-    assert "- carryover_entry_timing_review_target: action=run_entry_timing_split_review | target=ETHUSDC | variant=early_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review" in payload["message"]
-    assert "- carryover_execution_style_review_target: action=run_execution_style_split_review | target=ETHUSDC | variant=passive_limit | status=ACTIONABLE_ENTRY | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_execution_style_split_review" in payload["message"]
-    assert "- carryover_accepted_candidate: symbol=ETHUSDC | family=sweep_reversal | edge=watch_edge | split=early_limit/passive_limit | status=ACTIONABLE_ENTRY" in payload["message"]
+    assert "- carryover_entry_timing_review_target: action=run_entry_timing_split_review | target=ETHUSDC | variant=early_limit | status=CONTEXT_REVIEW_SETUP | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review" in payload["message"]
+    assert "- carryover_execution_style_review_target: action=run_execution_style_split_review | target=ETHUSDC | variant=passive_limit | status=CONTEXT_REVIEW_SETUP | family=sweep_reversal | focus=accepted_candidate_focus | cmd=./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 7 --action run_execution_style_split_review" in payload["message"]
+    assert "- carryover_accepted_candidate: symbol=ETHUSDC | family=sweep_reversal | edge=watch_edge | split=early_limit/passive_limit | status=CONTEXT_REVIEW_SETUP" in payload["message"]
     assert "- carryover_blocked_candidate: symbol=BTCUSDC | family=trend_continuation | edge=fragile_edge | split=reaction_confirmed/market | status=BLOCKED_SETUP | reason=portfolio_cap" in payload["message"]
     assert dispatch_calls[0]["channel"] == "discord"
     assert dispatch_calls[0]["symbol"] == "BTCUSDC"
     assert state_file in writes
     assert latest_run_file in writes
+
+
+def test_main_skips_when_operator_session_brief_lock_is_held(monkeypatch, tmp_path: Path, capsys) -> None:
+    state_file = tmp_path / "state.json"
+    latest_run_file = tmp_path / "latest.json"
+    lock_file = tmp_path / "brief.lock"
+    lock_fd = notify_operator_session_brief._try_acquire_lock(lock_file)
+    assert lock_fd is not None
+    args = Namespace(
+        symbol="BTCUSDC",
+        universe="usdc_perp_top30",
+        days=7,
+        portfolio_limit=5,
+        intent_limit=5,
+        reconcile_limit=5,
+        state_file=str(state_file),
+        latest_run_file=str(latest_run_file),
+        lock_file=str(lock_file),
+        run_timeout_seconds=90,
+        channel="system",
+        brief_mode="shift-start",
+        webhook_url="",
+        allow_live_send=False,
+        force_send=False,
+        dry_run=False,
+    )
+
+    monkeypatch.setattr(notify_operator_session_brief, "parse_args", lambda: args)
+    monkeypatch.setattr(
+        notify_operator_session_brief,
+        "_run_brief",
+        lambda _args: (_ for _ in ()).throw(AssertionError("brief should not run while locked")),
+    )
+
+    try:
+        assert notify_operator_session_brief.main() == 0
+    finally:
+        notify_operator_session_brief._release_lock(lock_fd)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reason"] == "operator_session_brief_already_running"
+    assert payload["notified"] is False
+    assert payload["changed"] is False
+    assert payload["lock_file"] == str(lock_file)
+    assert latest_run_file.exists()
+    assert not state_file.exists()
+
+
+def test_main_records_brief_generation_failure_without_dispatch(monkeypatch, tmp_path: Path, capsys) -> None:
+    state_file = tmp_path / "state.json"
+    latest_run_file = tmp_path / "latest.json"
+    args = Namespace(
+        symbol="BTCUSDC",
+        universe="usdc_perp_top30",
+        days=7,
+        portfolio_limit=5,
+        intent_limit=5,
+        reconcile_limit=5,
+        state_file=str(state_file),
+        latest_run_file=str(latest_run_file),
+        lock_file=str(tmp_path / "brief.lock"),
+        run_timeout_seconds=90,
+        channel="system",
+        brief_mode="shift-start",
+        webhook_url="",
+        allow_live_send=True,
+        force_send=True,
+        dry_run=False,
+    )
+
+    monkeypatch.setattr(notify_operator_session_brief, "parse_args", lambda: args)
+    monkeypatch.setattr(
+        notify_operator_session_brief,
+        "_run_brief",
+        lambda _args: (_ for _ in ()).throw(RuntimeError("brief script timed out after 90s")),
+    )
+
+    class _Dispatcher:
+        def __init__(self, settings):  # noqa: ANN001
+            raise AssertionError("dispatcher should not be created when brief generation fails")
+
+    monkeypatch.setattr(notify_operator_session_brief, "NotificationDispatcher", _Dispatcher)
+
+    assert notify_operator_session_brief.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reason"] == "brief_generation_failed"
+    assert payload["error"] == "brief script timed out after 90s"
+    assert payload["notified"] is False
+    assert latest_run_file.exists()
+    assert not state_file.exists()

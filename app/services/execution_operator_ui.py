@@ -857,6 +857,24 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const selectedScope = payload.filter_symbol ? `selected=${payload.filter_symbol}` : 'selected=ALL';
       const globalScope = globalPayload.filter_symbol ? `global=${globalPayload.filter_symbol}` : 'global=ALL';
       const hasSeparateGlobal = Boolean(payload.filter_symbol) && globalPayload !== payload;
+      const countSummary = (obj) => {
+        const entries = Object.entries(obj || {}).filter(([, value]) => value !== null && value !== undefined);
+        if (!entries.length) return 'n/a';
+        return entries.map(([key, value]) => `${key}=${value}`).join(' | ');
+      };
+      const headlineScope = globalPayload.headline_scope || payload.headline_scope || 'n/a';
+      const globalScopeCounts = countSummary(globalPayload.candidate_scope_counts || payload.candidate_scope_counts);
+      const liveStateCounts = countSummary(globalPayload.live_state_counts || payload.live_state_counts);
+      const auxiliaryStateCounts = countSummary(
+        globalPayload.auxiliary_display_state_counts
+          || globalPayload.auxiliary_state_counts
+          || payload.auxiliary_display_state_counts
+          || payload.auxiliary_state_counts
+      );
+      const shadowOnlyAuxiliary = globalPayload.shadow_only_auxiliary || payload.shadow_only_auxiliary || {};
+      const shadowOnlyAuxiliarySymbols = Array.isArray(shadowOnlyAuxiliary.symbols)
+        ? shadowOnlyAuxiliary.symbols.join(', ')
+        : 'n/a';
       const flagSummary = [
         `submit_gap=${boolLabel(flags.has_submit_ready_gap)}`,
         `gate_block=${boolLabel(flags.has_gate_block)}`,
@@ -877,6 +895,22 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           <div class="kv">
             <div class="k">Scope</div>
             <div class="v">${esc(`${selectedScope} | ${globalScope}`)}</div>
+          </div>
+          <div class="kv">
+            <div class="k">Global Scope Counts</div>
+            <div class="v">${esc(`headline_scope=${headlineScope} | candidate_scope_counts: ${globalScopeCounts}`)}</div>
+          </div>
+          <div class="kv">
+            <div class="k">Live State Counts</div>
+            <div class="v">${esc(`live_state_counts: ${liveStateCounts}`)}</div>
+          </div>
+          <div class="kv">
+            <div class="k">Auxiliary State Counts</div>
+            <div class="v">${esc(`auxiliary_display_state_counts: ${auxiliaryStateCounts}`)}</div>
+          </div>
+          <div class="kv">
+            <div class="k">Auxiliary Shadow Symbols</div>
+            <div class="v">${esc(`shadow_only_auxiliary.symbols=${shadowOnlyAuxiliarySymbols}`)}</div>
           </div>
           <div class="kv">
             <div class="k">Headline Evidence</div>
@@ -1306,9 +1340,11 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const modeAdvisory = signalFunnel.mode_advisory || {};
       const familyTop = modeAdvisory.family_top || {};
       const strip = deriveApprovalStripState(dashboard, checklist, validation, candidate);
+      const routeWaiting = strip.orderRouteValue === 'waiting_for_live_candidate';
       const decisionBadges = [
         badge('Kernel Verdict', strip.kernel.kernelVerdict),
         badge('1 Approve', strip.approveValue),
+        badge('Order Route', strip.orderRouteValue || 'n/a'),
         badge('2 Align', strip.alignValue),
         badge('3 Act', strip.operatorActionPriority?.priority_level || 'monitor'),
         badge('신규 진입', strip.entriesAllowed ? '가능' : '불가'),
@@ -1326,10 +1362,11 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             </div>
           </div>
           <div class="desk-strip">${decisionBadges}</div>
-          <div class="strong-line">${esc(strip.entriesAllowed ? '현재 신규 진입은 열려 있지만 approval strip을 먼저 통과해야 합니다.' : '현재 신규 진입은 approval strip에서 차단되어 있습니다.')}</div>
+          <div class="strong-line">${esc(routeWaiting ? '신규 진입 게이트는 열려 있지만 현재 live route 주문 후보는 없습니다.' : (strip.entriesAllowed ? '현재 신규 진입은 열려 있지만 approval strip을 먼저 통과해야 합니다.' : '현재 신규 진입은 approval strip에서 차단되어 있습니다.'))}</div>
           <div class="meta">${esc(strip.primaryReason)}</div>
           <div class="summary-grid" style="margin-top:12px;">
             ${renderSummaryBox('1. Approve', strip.approveValue, strip.approveReason)}
+            ${renderSummaryBox('Order Route Truth', strip.orderRouteValue || 'n/a', strip.orderRouteReason || 'order route summary unavailable')}
             ${renderSummaryBox('2. Align', strip.alignValue, strip.alignReason)}
             ${renderSummaryBox('3. Act / Top Operator Action', strip.actValue, strip.actReason)}
             ${renderSummaryBox('Execution 상태', degradation?.status || 'n/a', degradation?.summary || 'execution advisory unavailable')}
@@ -1523,7 +1560,57 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       });
     }
 
-    function renderTopOpportunity(candidate, symbol) {
+    function portfolioLiveRouteContext(dashboard) {
+      return dashboard?.portfolio_summary?.live_route_context
+        || dashboard?.signal_funnel?.portfolio_live_route_context
+        || {};
+    }
+
+    function candidateLiveRouteStatus(row, dashboard) {
+      if (!row) return 'n/a';
+      const context = portfolioLiveRouteContext(dashboard);
+      const symbol = String(row?.symbol || '').toUpperCase();
+      const family = String(row?.strategy_family || '').toLowerCase();
+      const statuses = Array.isArray(context?.accepted_candidate_route_statuses)
+        ? context.accepted_candidate_route_statuses
+        : [];
+      const matched = statuses.find((item) => (
+        String(item?.symbol || '').toUpperCase() === symbol
+        && String(item?.strategy_family || '').toLowerCase() === family
+      ));
+      if (matched) {
+        if (matched.status === 'live_route_candidate') return 'live route';
+        const reasons = Array.isArray(matched.reasons) ? matched.reasons.join(',') : 'outside_live_route';
+        return `context-only: ${reasons}`;
+      }
+      const liveSymbols = new Set((Array.isArray(context?.live_routable_symbols) ? context.live_routable_symbols : []).map((item) => String(item || '').toUpperCase()));
+      const liveFamilies = new Set((Array.isArray(context?.active_strategy_families) ? context.active_strategy_families : []).map((item) => String(item || '').toLowerCase()));
+      const liveEntryModels = new Set((Array.isArray(context?.active_entry_models) ? context.active_entry_models : []).map((item) => String(item || '').toUpperCase()));
+      const entryModel = String(row?.entry_model || row?.validity?.entry_model || '').toUpperCase();
+      const entryModelLive = !liveEntryModels.size || (entryModel && liveEntryModels.has(entryModel));
+      const direction = String(row?.direction || row?.validity?.direction || '').toUpperCase();
+      const directionContract = context?.active_direction_contract || {};
+      const allowedDirections = new Set((Array.isArray(directionContract?.[symbol]) ? directionContract[symbol] : []).map((item) => String(item || '').toUpperCase()));
+      const directionLive = !allowedDirections.size || (direction && allowedDirections.has(direction));
+      const liveSessions = new Set((Array.isArray(context?.active_sessions) ? context.active_sessions : []).map((item) => String(item || '').toLowerCase()));
+      const rowSessionGuidance = row?.session_guidance || {};
+      const rowValidity = row?.validity || {};
+      const sessionName = String(
+        row?.session_name
+          || row?.session
+          || rowSessionGuidance?.session_name
+          || rowSessionGuidance?.state
+          || rowValidity?.session_guidance_session_name
+          || rowValidity?.session_guidance_state
+          || ''
+      ).toLowerCase();
+      const sessionLive = !liveSessions.size || (sessionName && liveSessions.has(sessionName));
+      if (symbol && family && liveSymbols.has(symbol) && liveFamilies.has(family) && entryModelLive && directionLive && sessionLive) return 'live route';
+      if (symbol || family) return 'context-only';
+      return 'n/a';
+    }
+
+    function renderTopOpportunity(candidate, symbol, dashboard) {
       if (!candidate) {
         $('top-opportunity').innerHTML = `<div class="empty">${esc(symbol)} 기준으로 바로 볼 accepted 후보가 없습니다.</div>`;
         return;
@@ -1540,11 +1627,13 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       const source = candidate.symbol === symbol
         ? '현재 심볼 기준 상위 후보'
         : `현재 심볼 후보 없음, 전체 상위 후보=${candidate.symbol}`;
+      const liveRouteLabel = candidateLiveRouteStatus(candidate, dashboard);
       $('top-opportunity').innerHTML = `
-        <div>${badge('심볼', candidate.symbol)} ${badge('상태', candidate.deployment_go_no_go || candidate.operator_status || 'n/a')} ${badge('Family', candidate.strategy_family || 'n/a')} ${badge('Cluster', candidateCluster)}</div>
+        <div>${badge('심볼', candidate.symbol)} ${badge('상태', candidate.deployment_go_no_go || candidate.operator_status || 'n/a')} ${badge('Live Route', liveRouteLabel)} ${badge('Family', candidate.strategy_family || 'n/a')} ${badge('Cluster', candidateCluster)}</div>
         <div class="kv"><div class="k">방향 / 모델</div><div class="v">${esc(`${fmtMaybe(candidate.direction)} / ${fmtMaybe(candidate.entry_model)}`)}</div></div>
         <div class="kv"><div class="k">추정 승률 / EV</div><div class="v">${esc(`${fmtPercent(candidate.expected_win_prob)} / ${fmtR(candidate.expected_ev_r)}`)}</div></div>
         <div class="kv"><div class="k">권장 리스크</div><div class="v">${esc(fmtR(candidate.recommended_risk_r))}</div></div>
+        <div class="kv"><div class="k">Live Route Context</div><div class="v">${esc(liveRouteLabel)}</div></div>
         ${shadowTilt ? `<div class="kv"><div class="k">Shadow Tilt</div><div class="v">${esc(formatShadowTiltValue(shadowTilt))}</div></div>` : ''}
         <div class="kv"><div class="k">A/B posture</div><div class="v">${esc(`${candidateClusterStatus} / ${candidateABSummary}`)}</div></div>
         <div class="kv"><div class="k">왜 지금</div><div class="v">${esc(fmtMaybe(candidate.why_now || candidate.expected_summary))}</div></div>
@@ -1627,6 +1716,18 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           kernel.kernelReason,
         ].filter(Boolean).join(' | ');
       }
+      const orderRoute = dashboard?.signal_funnel?.order_route_summary
+        || dashboard?.portfolio_summary?.order_route_summary
+        || {};
+      const orderRouteValue = orderRoute?.approve_value || 'n/a';
+      const orderRouteReason = orderRoute?.approve_reason || portfolioLiveRouteContext(dashboard)?.message || '';
+      if (orderRouteValue === 'waiting_for_live_candidate') {
+        approveValue = 'waiting for live candidate';
+        approveReason = [
+          orderRouteReason,
+          `headline=${orderRoute?.live_candidate_headline_state || 'n/a'}/${orderRoute?.live_candidate_headline_reason || 'n/a'}`,
+        ].filter(Boolean).join(' | ');
+      }
       const alignReason = [
         alignment.message,
         alignment.detail,
@@ -1648,6 +1749,8 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         primaryReason,
         approveValue,
         approveReason,
+        orderRouteValue,
+        orderRouteReason,
         alignValue: alignment.alignmentState,
         alignReason,
         actValue: operatorActionPriority?.top_action || 'continue_runtime_monitoring',
@@ -2829,6 +2932,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
 
     function renderPortfolioCandidateDrilldown(dashboard) {
       const portfolio = dashboard?.portfolio_summary || {};
+      const liveRoute = portfolioLiveRouteContext(dashboard);
       const rows = portfolioCandidateRows(portfolio);
       $('portfolio-candidate-drilldown').innerHTML = `
         <div class="panel">
@@ -2840,6 +2944,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           </div>
           <div class="summary-grid">
             ${renderSummaryBox('Accepted Candidates', String(portfolio?.accepted_candidate_count ?? 0), portfolio?.playbook_action || 'portfolio accepted summary unavailable')}
+            ${renderSummaryBox('Live Route Context', `${liveRoute?.live_routable_accepted_candidate_count ?? 0} live-route / ${liveRoute?.context_only_accepted_candidate_count ?? 0} context-only`, liveRoute?.message || 'live route context unavailable')}
             ${renderSummaryBox('Blocked Candidates', String(portfolio?.blocked_candidate_count ?? 0), portfolio?.deployment_message || 'portfolio blocked summary unavailable')}
             ${renderSummaryBox('Capital Allocator', portfolio?.capital_allocator_summary?.allocator_state || 'n/a', portfolio?.capital_allocator_summary?.capital_pressure || 'capital allocator summary unavailable')}
             ${renderSummaryBox('Cluster Balance', portfolio?.strategy_cluster_balance_summary?.balance_state || 'n/a', portfolio?.strategy_cluster_balance_summary?.balance_bias || 'cluster balance summary unavailable')}
@@ -2850,6 +2955,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
               { label: 'Bucket', key: 'bucket' },
               { label: 'Symbol', key: 'symbol' },
               { label: 'Family', key: 'strategy_family' },
+              { label: 'Live Route', render: (row) => candidateLiveRouteStatus(row, dashboard) },
               { label: 'Cluster', render: (row) => row.strategy_cluster || row.multi_strategy_overlay?.cluster || 'n/a' },
               { label: 'Risk', render: (row) => `${fmtR(row.recommended_risk_r)} / ${fmtR(row.allocated_risk_r)}` },
               { label: 'Outcome Bias', render: (row) => row.outcome_bias?.tier || 'n/a' },
@@ -3860,7 +3966,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         const candidate = pickCandidate(scannerRows, symbol);
         renderOperatorKernel(dashboard, checklist, validation);
         renderDecisionSummary(dashboard, checklist, validation, candidate);
-        renderTopOpportunity(candidate, symbol);
+        renderTopOpportunity(candidate, symbol, dashboard);
         renderTopBlocker(dashboard);
         renderCurrentOperatingState(dashboard, checklist, validation, candidate);
         renderDeferredHomeStackControl(dashboard, checklist, validation);

@@ -15,6 +15,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import get_settings
+from app.services.replay_validation_bridge import ReplayValidationEvidence, UsdtProxyReplayValidationBridge
 from app.services.historical_walk_forward_split_review import HistoricalWalkForwardSplitReviewService
 from scripts.operation_report_io import parse_report_generated_at
 from scripts.run_live_replay_parity_audit import _active_contract_filters_from_settings, _as_utc, _safe_float
@@ -323,8 +324,14 @@ def _slice_diagnostics(rows: list[dict[str, Any]], thresholds: dict[str, Any]) -
     return slice_rows
 
 
-def _row_payload(*, payload: dict[str, Any], symbol: str, thresholds: dict[str, Any]) -> dict[str, Any]:
-    filters = _active_contract_filters_from_settings(symbol)
+def _row_payload(
+    *,
+    payload: dict[str, Any],
+    symbol: str,
+    thresholds: dict[str, Any],
+    filters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    filters = dict(filters or _active_contract_filters_from_settings(symbol))
     rows = _filtered_replay_rows(payload, filters)
     metrics = _evidence_metrics(rows)
     decision = _bridge_decision(metrics, thresholds)
@@ -356,6 +363,116 @@ def _row_payload(*, payload: dict[str, Any], symbol: str, thresholds: dict[str, 
     }
 
 
+def _runtime_bridge_metrics(evidence: ReplayValidationEvidence) -> dict[str, Any]:
+    metrics = dict(evidence.metrics or {})
+    sample_size = max(
+        int(_safe_float(metrics.get("sample_size"))),
+        int(_safe_float(metrics.get("trade_count"))),
+        int(_safe_float(metrics.get("closed_trades"))),
+    )
+    ev_r = _safe_float(metrics.get("ev_r"), default=_safe_float(metrics.get("expectancy_r"), default=_safe_float(metrics.get("ev"))))
+    return {
+        "sample_size": sample_size,
+        "closed_trades": int(_safe_float(metrics.get("closed_trades"), default=sample_size)),
+        "win_rate": round(_safe_float(metrics.get("win_rate")), 4),
+        "win_rate_lower_95": round(_safe_float(metrics.get("win_rate_lower_95")), 4),
+        "avg_win_r": round(_safe_float(metrics.get("avg_win_r")), 4),
+        "avg_loss_r": round(_safe_float(metrics.get("avg_loss_r")), 4),
+        "ev_r": round(ev_r, 4),
+        "ev_r_lower_95": round(_safe_float(metrics.get("ev_r_lower_95")), 4),
+        "p1r": round(_safe_float(metrics.get("p1r")), 4),
+        "p2r": round(_safe_float(metrics.get("p2r")), 4),
+        "p3r": round(_safe_float(metrics.get("p3r")), 4),
+        "stop_loss_share": round(_safe_float(metrics.get("stop_loss_share")), 4),
+        "structure_failure_share": round(_safe_float(metrics.get("structure_failure_share")), 4),
+        "structure_failure_count": int(_safe_float(metrics.get("structure_failure_count"))),
+        "structure_failure_stress_r": metrics.get("structure_failure_stress_r"),
+        "max_drawdown_r": round(_safe_float(metrics.get("max_drawdown_r")), 4),
+        "max_portfolio_drawdown_pct": round(_safe_float(metrics.get("max_portfolio_drawdown_pct")), 4),
+        "portfolio_years": int(_safe_float(metrics.get("portfolio_years"))),
+        "min_portfolio_return_pct": round(_safe_float(metrics.get("min_portfolio_return_pct")), 4),
+        "total_score": round(_safe_float(metrics.get("total_score")), 2),
+        "grade": str(metrics.get("grade") or ""),
+        "recommendation": str(metrics.get("recommendation") or ""),
+    }
+
+
+def _runtime_bridge_row_payload(*, symbol: str, family: str, filters: dict[str, Any]) -> dict[str, Any]:
+    entry_models = [str(item or "").strip().upper() for item in list(filters.get("entry_models") or []) if str(item).strip()]
+    entry_model = entry_models[0] if entry_models else ""
+    evidence = UsdtProxyReplayValidationBridge(get_settings()).evaluate(
+        symbol=symbol,
+        family=family,
+        entry_model=entry_model,
+    )
+    decision = {
+        "status": "ELIGIBLE_FOR_RUNTIME_VALIDATION_BRIDGE" if evidence.approval_usable else "NOT_ELIGIBLE",
+        "reason": evidence.reason_code,
+        "blockers": [] if evidence.approval_usable else list(evidence.reason_codes),
+        "operator_action": (
+            "runtime_validation_bridge_available_keep_validation_gate_enabled"
+            if evidence.approval_usable
+            else "keep_validation_gate_closed_and_collect_live_or_paper_closed_samples"
+        ),
+    }
+    family_filters = dict(filters)
+    family_filters["strategy_families"] = [family]
+    family_filters["family_sessions"] = {
+        family: list(dict(filters.get("family_sessions") or {}).get(family) or [])
+    }
+    return {
+        "symbol": symbol.upper(),
+        "filters": family_filters,
+        "replay_metrics": _runtime_bridge_metrics(evidence),
+        "slice_diagnostics": [],
+        "bridge_decision": decision,
+        "runtime_bridge": {
+            "source": str(evidence.source.get("bridge_source") or "usdt_proxy_replay_bridge"),
+            "approval_usable": evidence.approval_usable,
+            "message": evidence.message,
+            "source_reports": evidence.source,
+            "reason_codes": list(evidence.reason_codes),
+            "failures": list(evidence.failures),
+        },
+    }
+
+
+def _family_filters(filters: dict[str, Any], family: str) -> dict[str, Any]:
+    scoped = dict(filters)
+    scoped["strategy_families"] = [family]
+    scoped["family_sessions"] = {
+        family: list(dict(filters.get("family_sessions") or {}).get(family) or [])
+    }
+    return scoped
+
+
+def _row_payloads_for_symbol(*, payload: dict[str, Any], symbol: str, thresholds: dict[str, Any]) -> list[dict[str, Any]]:
+    filters = _active_contract_filters_from_settings(symbol)
+    families = [
+        str(item or "").strip().lower()
+        for item in list(filters.get("strategy_families") or [])
+        if str(item or "").strip()
+    ]
+    if not families:
+        return [_row_payload(payload=payload, symbol=symbol, thresholds=thresholds, filters=filters)]
+
+    rows: list[dict[str, Any]] = []
+    for family in families:
+        scoped_filters = _family_filters(filters, family)
+        if family == "session_impulse_retest":
+            rows.append(_runtime_bridge_row_payload(symbol=symbol, family=family, filters=scoped_filters))
+        else:
+            rows.append(
+                _row_payload(
+                    payload=payload,
+                    symbol=symbol,
+                    thresholds=thresholds,
+                    filters=scoped_filters,
+                )
+            )
+    return rows
+
+
 def build_payload(*, symbol: str, all_live_symbols: bool, cache_file: str, thresholds: dict[str, Any]) -> dict[str, Any]:
     cache_path = _resolve_root_path(cache_file or DEFAULT_REPLAY_CACHE)
     replay_payload = _load_replay_payload(cache_path)
@@ -363,7 +480,11 @@ def build_payload(*, symbol: str, all_live_symbols: bool, cache_file: str, thres
         symbols = _live_symbols_from_settings()
     else:
         symbols = [str(symbol).strip().upper()]
-    rows = [_row_payload(payload=replay_payload, symbol=item, thresholds=thresholds) for item in symbols]
+    rows = [
+        row
+        for item in symbols
+        for row in _row_payloads_for_symbol(payload=replay_payload, symbol=item, thresholds=thresholds)
+    ]
     decision_counts: dict[str, int] = {}
     blocker_counts: dict[str, int] = {}
     for row in rows:
@@ -374,7 +495,7 @@ def build_payload(*, symbol: str, all_live_symbols: bool, cache_file: str, thres
             key = str(blocker or "")
             blocker_counts[key] = blocker_counts.get(key, 0) + 1
     not_eligible_count = int(decision_counts.get("NOT_ELIGIBLE", 0))
-    eligible_count = sum(count for status, count in decision_counts.items() if status.startswith("ELIGIBLE_FOR_MANUAL_BRIDGE_REVIEW"))
+    eligible_count = sum(count for status, count in decision_counts.items() if status.startswith("ELIGIBLE_FOR"))
     warning_count = int(decision_counts.get("ELIGIBLE_FOR_MANUAL_BRIDGE_REVIEW_WITH_SLICE_WARNINGS", 0))
     if not rows:
         overall_status = "INSUFFICIENT_BASELINE"

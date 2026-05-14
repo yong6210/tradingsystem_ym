@@ -412,6 +412,21 @@ class ExecutionQualityService:
     def _direction(plan: Plan) -> str:
         return str(getattr(plan, "direction", "") or "").upper()
 
+    @staticmethod
+    def _session_name(plan: Plan) -> str:
+        validity = dict(getattr(plan, "validity", {}) or {})
+        for key in (
+            "session_guidance_session_name",
+            "session_guidance_state",
+            "generated_session",
+            "session_name",
+            "session",
+        ):
+            value = str(validity.get(key) or "").strip()
+            if value:
+                return value.lower()
+        return ""
+
     @classmethod
     def _plan_matches_filters(
         cls,
@@ -420,12 +435,15 @@ class ExecutionQualityService:
         strategy_families: set[str],
         entry_models: set[str],
         directions: set[str],
+        sessions: set[str],
     ) -> bool:
         if strategy_families and cls._strategy_family(plan).lower() not in strategy_families:
             return False
         if entry_models and cls._model_value(plan.entry_model) not in entry_models:
             return False
         if directions and cls._direction(plan) not in directions:
+            return False
+        if sessions and cls._session_name(plan) not in sessions:
             return False
         return True
 
@@ -913,12 +931,14 @@ class ExecutionQualityService:
         strategy_families: Collection[str] | None = None,
         entry_models: Collection[str] | None = None,
         directions: Collection[str] | None = None,
+        sessions: Collection[str] | None = None,
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc).replace(microsecond=0)
         lookback_days = max(1, int(days))
         family_filters = self._normalized_string_set(strategy_families, case="lower")
         entry_model_filters = self._normalized_string_set(entry_models, case="upper")
         direction_filters = self._normalized_string_set(directions, case="upper")
+        session_filters = self._normalized_string_set(sessions, case="lower")
         plans = [
             plan
             for plan in self.plan_repo.list_recent(symbol=symbol, timeframe="5m", days=lookback_days)
@@ -927,6 +947,7 @@ class ExecutionQualityService:
                 strategy_families=family_filters,
                 entry_models=entry_model_filters,
                 directions=direction_filters,
+                sessions=session_filters,
             )
         ]
 
@@ -1005,8 +1026,9 @@ class ExecutionQualityService:
                 "strategy_families": sorted(family_filters),
                 "entry_models": sorted(entry_model_filters),
                 "directions": sorted(direction_filters),
+                "sessions": sorted(session_filters),
             }
-            if family_filters or entry_model_filters or direction_filters
+            if family_filters or entry_model_filters or direction_filters or session_filters
             else None,
             "comparison_axis": "strategy_version",
             "versions_compared": len(by_strategy_version),

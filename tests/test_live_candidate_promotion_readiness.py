@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.services.live_candidate_promotion_readiness import LiveCandidatePromotionReadinessService
+from app.services.live_candidate_promotion_readiness_runtime import _apply_live_headline_scope
 
 
 def test_readiness_marks_validation_block_without_live_authority_change() -> None:
@@ -122,6 +123,88 @@ def test_readiness_separates_shadow_signal_from_live_candidate() -> None:
     assert payload["headline_reason"] == "shadow_signal_only"
     assert payload["candidates"][0]["promotion_state"] == "SHADOW_SIGNAL_ONLY"
     assert "Keep shadow-only" in payload["candidates"][0]["next_action"]
+
+
+def test_runtime_readiness_keeps_shadow_only_as_auxiliary_when_live_symbols_are_waiting() -> None:
+    payload = LiveCandidatePromotionReadinessService().build(
+        hours=24,
+        now="2026-05-10T03:10:00Z",
+        audit_rows=[
+            {
+                "symbol": "BTCUSDC",
+                "strategy_family": "session_impulse_retest",
+                "phase": "auto_route",
+                "status": "no_live_route_candidate_plan",
+                "count": 2,
+                "latest_observed_ts": "2026-05-10T03:00:00Z",
+            },
+            {
+                "symbol": "SUIUSDC",
+                "strategy_family": "session_impulse_retest",
+                "phase": "auto_route",
+                "status": "symbol_not_live_enabled_for_auto_route",
+                "count": 1,
+                "latest_observed_ts": "2026-05-10T03:05:00Z",
+            },
+        ],
+        intent_rows=[],
+        submission_rows=[],
+    )
+
+    scoped = _apply_live_headline_scope(payload, live_symbols={"BTCUSDC"})
+
+    assert scoped["headline_state"] == "WAIT"
+    assert scoped["headline_reason"] == "no_promotable_live_candidate"
+    assert scoped["headline_scope"] == "live_routable_symbols"
+    assert scoped["headline_candidate_symbols"] == ["BTCUSDC"]
+    assert scoped["headline_candidate_state_counts"] == {"NO_FRESH_LIVE_CANDIDATE": 1}
+    assert scoped["candidate_scope_counts"] == {"total": 2, "live_routable": 1, "auxiliary": 1}
+    assert scoped["live_state_counts"] == {"NO_FRESH_LIVE_CANDIDATE": 1}
+    assert scoped["auxiliary_state_counts"] == {"SHADOW_SIGNAL_ONLY": 1}
+    assert scoped["auxiliary_display_state_counts"] == {"AUXILIARY_SHADOW_SIGNAL_ONLY": 1}
+    assert scoped["shadow_only_auxiliary"]["symbols"] == ["SUIUSDC"]
+    assert scoped["attention_flags"]["has_auxiliary_shadow_only_signal"] is True
+    assert scoped["operator_review_items"][0]["symbol"] == "BTCUSDC"
+
+
+def test_runtime_readiness_wait_headline_uses_live_symbols_only() -> None:
+    payload = LiveCandidatePromotionReadinessService().build(
+        hours=24,
+        now="2026-05-10T03:10:00Z",
+        audit_rows=[
+            {
+                "symbol": "BTCUSDC",
+                "strategy_family": "session_impulse_retest",
+                "phase": "auto_route",
+                "status": "no_live_route_candidate_plan",
+                "count": 2,
+                "latest_observed_ts": "2026-05-10T03:00:00Z",
+            },
+            {
+                "symbol": "SUIUSDC",
+                "strategy_family": "session_impulse_retest",
+                "phase": "auto_route",
+                "status": "no_live_route_candidate_plan",
+                "count": 1,
+                "latest_observed_ts": "2026-05-10T03:05:00Z",
+            },
+        ],
+        intent_rows=[],
+        submission_rows=[],
+    )
+
+    scoped = _apply_live_headline_scope(payload, live_symbols={"BTCUSDC"})
+
+    assert scoped["headline_state"] == "WAIT"
+    assert scoped["headline_scope"] == "live_routable_symbols"
+    assert scoped["headline_candidate_count"] == 1
+    assert scoped["headline_candidate_symbols"] == ["BTCUSDC"]
+    assert scoped["candidate_scope_counts"] == {"total": 2, "live_routable": 1, "auxiliary": 1}
+    assert scoped["live_state_counts"] == {"NO_FRESH_LIVE_CANDIDATE": 1}
+    assert scoped["auxiliary_state_counts"] == {"NO_FRESH_LIVE_CANDIDATE": 1}
+    assert scoped["auxiliary_display_state_counts"] == {"AUXILIARY_TRACKED_NO_FRESH_SIGNAL": 1}
+    assert scoped["shadow_only_auxiliary"]["available"] is False
+    assert scoped["headline_action"] == "Current live symbols have no fresh live-eligible candidate."
 
 
 def test_readiness_headline_prefers_actual_gate_blocker_over_wait_reasons() -> None:

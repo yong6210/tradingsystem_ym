@@ -8,6 +8,7 @@ It now also carries `edge_evolution` focus from the funnel snapshot: `evolution_
 It now also carries representative accepted and blocked candidate focus from `portfolio_summary`, so the handoff preserves row-level `edge_experiment_focus` instead of only the top-level funnel hint.
 It now also carries `entry_timing_review_target` and `execution_style_review_target`, so the handoff can say which `split review action -> candidate row` pairing should be reviewed next.
 Those target lines now also include the ready-to-run `scripts/run_split_review_followup.py` command, so shift handoff can move straight from review target to review packet generation.
+Candidate and review-target handoff lines render legacy `ACTIONABLE_ENTRY` source rows as `CONTEXT_REVIEW_SETUP`. Session brief candidates are review context only; they are not live order candidates. Treat live ordering truth as the entry surface `LIVE_ORDER_CANDIDATE` count and the runtime promotion route contract.
 The brief now also carries `top_action_followup_command`, so if `operator_action_priority.top_action` is an edge-evolution review such as `reduce_baseline_allocation_review`, the handoff still exposes one runnable packet command instead of only the row-level split targets.
 It now also carries `review_followup_ledger.last_status`, `last_action`, `recent_entry_count`, and `last_followup_command`, so the handoff shows whether the latest review packet actually resolved a runnable target or stalled at `NO_TARGET`.
 The markdown brief now uses the same `approve -> align -> act` wording again inside `Surface Alignment`, so `dashboard`, `validation`, and `checklist` detail lines do not fall back to raw `deployment_go_no_go / playbook_action` phrasing.
@@ -15,6 +16,7 @@ The notifier detail lines now follow the same rule, so `dashboard`, `validation`
 Use the wrapper below so channel, brief mode, state file, and latest run artifact stay in one place.
 
 The wrapper prefers `/Users/yumin/Documents/trading/.venv/bin/python` and falls back to `python3` if the virtualenv binary is not present.
+The notifier uses a non-overlap lock and a generation timeout. If a previous brief is still running, the next tick writes `reason=operator_session_brief_already_running` and exits without sending. If snapshot generation times out or fails, the latest artifact records `reason=brief_generation_failed` and the notifier does not dispatch.
 
 ## Wrapper
 
@@ -48,6 +50,12 @@ bash /Users/yumin/Documents/trading/scripts/run_operator_session_brief_tick.sh
   - default: mode/channel별 `last_alert_state_<mode>_<channel>.json`
 - `OPERATOR_BRIEF_LATEST_RUN_FILE`
   - optional override for the latest wrapper artifact
+- `OPERATOR_BRIEF_LOCK_FILE`
+  - optional override for the non-overlap lock file
+  - default: mode별 `operator_session_brief_<mode>.lock`
+- `OPERATOR_BRIEF_RUN_TIMEOUT_SECONDS`
+  - default: `90`
+  - maximum time allowed for `generate_operator_session_brief.py` before the notifier records a clean failure artifact
 - `OPERATOR_BRIEF_DISCORD_WEBHOOK_URL`
   - optional Discord webhook override
 - `OPERATOR_BRIEF_DRY_RUN=1`
@@ -66,6 +74,9 @@ bash /Users/yumin/Documents/trading/scripts/run_operator_session_brief_tick.sh
 - dedupe state:
   - `/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/last_alert_state_shift_start_system.json`
   - `/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/last_alert_state_shift_end_system.json`
+- non-overlap locks:
+  - `/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/operator_session_brief_shift_start.lock`
+  - `/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/operator_session_brief_shift_end.lock`
 - generated markdown brief:
   - `/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/`
 - supporting divergence snapshot:

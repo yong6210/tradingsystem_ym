@@ -287,7 +287,13 @@ def _window(event: dict[str, Any], *, symbols: list[str], families: list[str], e
     }
 
 
-def _events_from_fallback_contract(raw_path: str, *, years: set[int], pre_minutes: int) -> list[dict[str, Any]]:
+def _events_from_fallback_contract(
+    raw_path: str,
+    *,
+    years: set[int],
+    pre_minutes: int,
+    needed_codes: set[str] | None = None,
+) -> list[dict[str, Any]]:
     if not raw_path:
         return []
     path = _resolve_root_path(raw_path)
@@ -302,6 +308,8 @@ def _events_from_fallback_contract(raw_path: str, *, years: set[int], pre_minute
         label = str(item.get("label") or "")
         code = label.split("_", 1)[0].upper()
         if code not in {"FOMC", "CPI", "NFP"}:
+            continue
+        if needed_codes is not None and code not in needed_codes:
             continue
         raw_event_ts = str(item.get("event_ts_utc") or "")
         raw_start = str(item.get("start_utc") or "")
@@ -377,8 +385,14 @@ def build_contract(
 
     present_codes = {str(event.get("code") or "").upper() for event in events}
     fallback_events: list[dict[str, Any]] = []
-    if fallback_input and {"FOMC", "CPI", "NFP"} - present_codes:
-        fallback_events = _events_from_fallback_contract(fallback_input, years=years, pre_minutes=pre_minutes)
+    missing_before_fallback = {"FOMC", "CPI", "NFP"} - present_codes
+    if fallback_input and missing_before_fallback:
+        fallback_events = _events_from_fallback_contract(
+            fallback_input,
+            years=years,
+            pre_minutes=pre_minutes,
+            needed_codes=missing_before_fallback,
+        )
         events.extend(fallback_events)
 
     events = _dedupe_events(events)
