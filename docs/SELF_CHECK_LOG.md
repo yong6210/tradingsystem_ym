@@ -15,6 +15,8 @@
 - 하드 차단은 family disabled, universe 밖, secondary rollout disabled, current core rollout window 밖처럼 live 계약 자체를 어기는 경우에 유지한다.
 - zero-sample 상태에서는 `decision=REJECT`, `ev_r=0`, `total_r=0`을 별도 negative evidence로 중복 해석하지 않고 `no_recent_closed_sample` 관측값으로만 남긴다.
 - 같은 패턴의 운영 오해를 막기 위해 `transition_edge_variant_live_readiness`도 live-enabled 상태에서는 shadow pass 부족/평가 부족을 `advisory_blockers`로 분리했다.
+- 최근 1주일 로그 재검토에서 SIR 후보가 readiness blocker를 통과하더라도 `outcome_approval_penalty=downgrade_to_manual`이 실제 SIR/live execution 표본 0개 상태에서 다시 manual gate로 작동할 수 있음을 확인했다.
+- `ExecutionPlanningService`는 `session_impulse_retest` live bootstrap에서 execution degradation manual-review가 material execution sample 없이 나온 경우 자동 제출을 막지 않고 reason-only advisory로 남기게 했다. 단, SIR에 실제 matured/fill/closed execution sample이 생긴 뒤의 manual-review degradation은 계속 `APPROVED_MANUAL`로 낮춘다.
 
 ### 운영상 의미
 - 검증을 없앤 것이 아니라, live authority를 원래 의도한 장기 replay-validation bridge와 live/core allowlist로 되돌렸다.

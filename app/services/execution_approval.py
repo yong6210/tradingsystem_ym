@@ -578,6 +578,11 @@ class ExecutionPlanningService:
         session_funnel = self._find_decomposition_bucket(score_to_outcome, axis="session", bucket=session_name)
 
         degradation_status = str(execution_degradation.get("status") or "healthy").lower()
+        degradation_sample = dict(execution_degradation.get("sample_context") or {})
+        material_degradation_sample = any(
+            self._safe_int(degradation_sample.get(key), default=0) > 0
+            for key in ("plans_matured", "fill_events_total", "closed_plans")
+        )
         mode_rows = [row for row in [family_mode, regime_mode, session_mode] if row]
         adverse_mode_rows = [
             row
@@ -633,7 +638,16 @@ class ExecutionPlanningService:
 
         status = "watch"
         penalty_tier = "reason_only"
-        if degradation_status == "manual_review" or (post_cost_reason and adverse_mode_rows):
+        bootstrap_degradation_advisory_only = (
+            family == "session_impulse_retest"
+            and degradation_status == "manual_review"
+            and not material_degradation_sample
+            and not post_cost_reason
+            and not adverse_mode_rows
+        )
+        if (degradation_status == "manual_review" and not bootstrap_degradation_advisory_only) or (
+            post_cost_reason and adverse_mode_rows
+        ):
             status = "manual_review"
             penalty_tier = "downgrade_to_manual"
 
@@ -663,6 +677,11 @@ class ExecutionPlanningService:
                     )
                 ),
                 "post_cost_closed": int(post_cost_closed),
+                "execution_degradation_policy": (
+                    "advisory_until_material_sir_live_execution_sample"
+                    if bootstrap_degradation_advisory_only
+                    else "standard"
+                ),
             },
         }
 
