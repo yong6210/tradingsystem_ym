@@ -110,6 +110,7 @@ from app.services.metrics import summarize_outcomes
 from app.services.micro_main_strategy_research import (
     SessionImpulseRetestResearch,
     build_session_impulse_retest_shadow_summary,
+    evaluate_session_impulse_retest_shadow_filters,
     session_impulse_retest_profile_for_symbol,
 )
 from app.services.micro_main_live_readiness import (
@@ -2049,6 +2050,8 @@ class StrategyEngine:
         signal = runtime.latest_signal(freshness_minutes=20)
         if signal is None:
             return None
+        signal_diagnostics = dict(signal.diagnostics or {})
+        shadow_filter = evaluate_session_impulse_retest_shadow_filters(diagnostics=signal_diagnostics)
 
         last_ts = runtime._normalize_ts(candles_1m[-1].ts)
         valid_from = signal.entry_ts
@@ -2170,7 +2173,12 @@ class StrategyEngine:
                 "target_price": round(float(signal.target_price), 8),
                 "max_hold_minutes": int(signal.max_hold_minutes),
                 "regime_hint": signal.regime_hint,
+                "diagnostics": {
+                    key: round(value, 6) if isinstance(value, float) else value
+                    for key, value in sorted(signal_diagnostics.items())
+                },
             },
+            "session_impulse_retest_shadow_filter": shadow_filter,
             "strategy_family_time_stop_max_bars": max(int(signal.max_hold_minutes // 5), 1),
             "thesis_fingerprint": thesis_fingerprint,
             "thesis_cluster_id": thesis_cluster_id,

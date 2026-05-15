@@ -379,6 +379,8 @@ class ApprovalReason(ORMModel):
     message: str
     source: str = "execution_approval"
     blocking: bool = False
+    submit_blocking: bool = False
+    blocking_scope: str = "none"
 
 
 class RolloutPolicyOut(ORMModel):

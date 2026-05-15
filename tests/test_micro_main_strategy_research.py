@@ -5,6 +5,7 @@ from app.services.micro_main_strategy_research import (
     SessionImpulseRetestResearch,
     build_session_impulse_retest_shadow_summary,
     decision_for_micro_summary,
+    evaluate_session_impulse_retest_shadow_filters,
     session_impulse_retest_profile_for_symbol,
     summarize_micro_trades,
 )
@@ -185,3 +186,15 @@ def test_micro_main_shadow_summary_respects_symbol_contract() -> None:
 
 def test_micro_main_decision_returns_watch_for_positive_but_thin_sample() -> None:
     assert decision_for_micro_summary({"closed": 35, "ev_r": 0.31, "total_r": 10.85}) == "WATCH"
+
+
+def test_session_impulse_retest_shadow_filter_is_compare_only() -> None:
+    blocked = evaluate_session_impulse_retest_shadow_filters(diagnostics={"reclaim_body_atr": 0.24})
+    assert blocked["mode"] == "compare_only"
+    assert blocked["blocking_live"] is False
+    assert blocked["decision"] == "would_block"
+    assert blocked["filters"][0]["passed"] is False
+
+    passed = evaluate_session_impulse_retest_shadow_filters(diagnostics={"reclaim_body_atr": 0.31})
+    assert passed["decision"] == "would_pass"
+    assert passed["filters"][0]["passed"] is True

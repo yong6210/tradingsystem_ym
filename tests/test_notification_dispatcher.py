@@ -236,6 +236,25 @@ def test_dispatcher_entry_surface_blocked_live_candidate_title_requires_review()
     assert "주문 후보 없음" not in message
 
 
+def test_dispatcher_entry_surface_context_only_blocked_title_stays_monitoring() -> None:
+    message = NotificationDispatcher._format_discord_message(
+        alert_type="entry_surface_alert",
+        symbol="USDC_PERP_TOP30",
+        payload={
+            "message": (
+                "Trading entry surface alert: live_order_candidates=0, review_candidates=2, "
+                "blocked_live_candidates=0, blocked_context_only=3\n"
+                "scope: USDC_PERP_TOP30 | order_truth=live_candidate_promotion_readiness\n"
+                "counts: LIVE_ORDER_CANDIDATE=0, CONTEXT_REVIEW_SETUP=2, BLOCKED_SETUP=3 "
+                "| blocked_breakdown=live:0,context_only:3"
+            )
+        },
+    )
+
+    assert message.startswith("[모니터링] USDC_PERP_TOP30 주문 후보 없음")
+    assert "라이브 주문 후보 차단" not in message
+
+
 def test_dispatcher_entry_surface_alert_without_entry_counts_uses_operational_title() -> None:
     message = NotificationDispatcher._format_discord_message(
         alert_type="entry_surface_alert",
@@ -335,6 +354,7 @@ def test_dispatcher_partial_exit_and_sl_are_trade_alerts_not_suppressed() -> Non
             },
         )
         assert message.startswith(f"[중요] BTCUSDC {title}")
+        assert "가격: 99.5" in message
         assert "플랜: plan_exit" in message
 
 

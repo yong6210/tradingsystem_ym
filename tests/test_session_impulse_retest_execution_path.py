@@ -762,6 +762,9 @@ def test_session_impulse_retest_secondary_symbol_stays_shadow_even_if_allowliste
         approval = engine.approve_execution_plan(plan_id=plan.plan_id)
         assert approval["approval_state"] == ApprovalState.APPROVED_SHADOW.value
         assert approval["playbook_code"] == "session_impulse_retest_rollout_not_ready"
+        assert approval["approval_reasons"][0]["blocking"] is False
+        assert approval["approval_reasons"][0]["submit_blocking"] is True
+        assert approval["approval_reasons"][0]["blocking_scope"] == "submit"
 
 
 def test_session_impulse_retest_live_readiness_without_blockers_can_approve() -> None:
@@ -783,6 +786,8 @@ def test_session_impulse_retest_live_readiness_without_blockers_can_approve() ->
         approval = engine.approve_execution_plan(plan_id=plan.plan_id)
         assert approval["approval_state"] == ApprovalState.APPROVED_AUTO.value
         assert approval["allowed_execution_mode"] == ExecutionMode.MICRO_LIVE.value
+        assert approval["approval_reasons"][0]["submit_blocking"] is False
+        assert approval["approval_reasons"][0]["blocking_scope"] == "none"
 
 
 def test_session_impulse_retest_live_bootstrap_advisory_sample_gap_can_submit() -> None:
@@ -2539,6 +2544,50 @@ def test_session_impulse_retest_runtime_audit_report_main_writes_latest_aliases(
     assert output["latest_report_path"].endswith("latest.md")
     latest_payload = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
     assert latest_payload["overall_status"] == "PASS"
+
+
+def test_session_impulse_retest_runtime_audit_report_quiet_writes_without_stdout(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        run_session_impulse_retest_runtime_audit_report,
+        "build_payload",
+        lambda **_kwargs: {
+            "generated_at": "2026-05-10T00:00:00Z",
+            "hours": 3,
+            "symbol": "",
+            "phase_filter": "",
+            "status_filter": "",
+            "overall_status": "PASS",
+            "reason": "runtime_audit_recent_and_no_hard_route_failures",
+            "audit_count": 0,
+            "phase_counts": {},
+            "status_counts": {},
+            "decision_code_counts": {},
+            "hard_status_counts": {},
+            "watch_status_counts": {},
+            "recent_audits": [],
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_session_impulse_retest_runtime_audit_report.py",
+            "--report-dir",
+            str(tmp_path),
+            "--no-fail-exit",
+            "--quiet",
+        ],
+    )
+
+    run_session_impulse_retest_runtime_audit_report.main()
+
+    assert capsys.readouterr().out == ""
+    assert (tmp_path / "session_impulse_retest_runtime_audit_20260510T000000Z.md").exists()
+    assert json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))["overall_status"] == "PASS"
 
 
 def test_session_impulse_retest_refresh_audit_status_stays_no_fresh_without_sir_plan(monkeypatch) -> None:

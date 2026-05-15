@@ -85,6 +85,72 @@ def test_no_order_watchdog_no_recent_intents_message_waits_for_candidate() -> No
     assert "rollout session" not in result["message"]
 
 
+def test_no_order_watchdog_augments_no_intents_with_sir_candidate_context() -> None:
+    evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
+        lifecycle={
+            "summary": {
+                "submission_count": 0,
+                "requested_live_count": 0,
+                "rejected_or_error_count": 0,
+                "live_intents": {"total": 0, "submit_ready": 0, "blocked": 0, "top_block_reasons": {}},
+            }
+        },
+        min_intents=1,
+    )
+
+    enriched = run_micro_live_no_order_watchdog._augment_no_order_evaluation(
+        evaluation,
+        candidate_context={
+            "source": "session_impulse_retest_runtime_audit",
+            "scope": "runtime_since_ws_start",
+            "audit_count": 12,
+            "no_candidate_status_counts": {"no_live_route_candidate_plan": 7},
+            "watch_status_counts": {"symbol_not_live_enabled_for_auto_route": 2},
+            "non_blocking_status_counts": {"ws_stream_active_route_suppressed": 5},
+            "order_blocking_status_counts": {},
+        },
+    )
+
+    assert enriched["candidate_generation_status"] == "no_live_route_candidate"
+    assert enriched["next_action_text"] == "SIR fresh 후보 대기: no_live_route_candidate_plan=7"
+    assert enriched["candidate_generation_context"]["audit_count"] == 12
+    assert "actions=SIR fresh 후보 대기: no_live_route_candidate_plan=7" in enriched["message"]
+    assert "actions=fresh live 후보 대기" not in enriched["message"]
+    assert "SIR=no_live_route_candidate" in enriched["message"]
+    assert "watch=symbol_not_live_enabled_for_auto_route=2" in enriched["message"]
+
+
+def test_no_order_watchdog_augments_watch_only_sir_candidate_context() -> None:
+    evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
+        lifecycle={
+            "summary": {
+                "submission_count": 0,
+                "requested_live_count": 0,
+                "rejected_or_error_count": 0,
+                "live_intents": {"total": 0, "submit_ready": 0, "blocked": 0, "top_block_reasons": {}},
+            }
+        },
+        min_intents=1,
+    )
+
+    enriched = run_micro_live_no_order_watchdog._augment_no_order_evaluation(
+        evaluation,
+        candidate_context={
+            "source": "session_impulse_retest_runtime_audit",
+            "scope": "runtime_since_ws_start",
+            "audit_count": 4,
+            "no_candidate_status_counts": {},
+            "watch_status_counts": {"symbol_not_live_enabled_for_auto_route": 4},
+            "non_blocking_status_counts": {},
+            "order_blocking_status_counts": {},
+        },
+    )
+
+    assert enriched["candidate_generation_status"] == "watch_candidate_context"
+    assert enriched["next_action_text"] == "SIR 후보 생성 watch 확인: symbol_not_live_enabled_for_auto_route=4"
+    assert "watch=symbol_not_live_enabled_for_auto_route=4" in enriched["message"]
+
+
 def test_micro_live_failure_drill_scenarios_catch_expected_failures() -> None:
     payload = run_micro_live_failure_drill.build_payload()
     results = {row["name"]: row for row in payload["results"]}
@@ -178,12 +244,21 @@ def test_no_order_watchdog_message_separates_runtime_scope_from_lookback_context
                 "top_block_reasons": {},
                 "first_block_detail_text": "",
                 "next_action_text": "fresh live 후보 대기; 현재 차단 사유 없음",
+                "candidate_generation_context": {
+                    "audit_count": 8,
+                    "no_candidate_status_counts": {"no_live_route_candidate_plan": 3},
+                    "watch_status_counts": {"symbol_not_live_enabled_for_auto_route": 1},
+                    "non_blocking_status_counts": {"ws_stream_active_route_suppressed": 5},
+                    "order_blocking_status_counts": {},
+                },
             },
         }
     )
 
     assert "런타임 재시작 이후: intent 0건 / 제출 0건" in message
     assert "참고: 최근 3일 전체 intent 14건 / 제출 2건" in message
+    assert "후보: SIR audit 8건 / no_candidate=no_live_route_candidate_plan=3" in message
+    assert "watch=symbol_not_live_enabled_for_auto_route=1" in message
     assert "최근 3일: intent 0건" not in message
 
 
@@ -1680,6 +1755,17 @@ def test_launchd_generator_includes_remaining_operational_guards(tmp_path) -> No
     assert "com.test.micro.live-replay-parity" in labels
     assert "com.test.micro.session-impulse-retest-runtime-audit" in labels
     assert "com.test.micro.failure-drill" in labels
+    quiet_job_names = {
+        "runtime_guard",
+        "no_order_watchdog",
+        "reconciliation_watchdog",
+        "boot_check",
+        "ops_heartbeat",
+        "session_impulse_retest_runtime_audit",
+    }
+    for job in jobs:
+        if job.name in quiet_job_names:
+            assert "--quiet" in job.args
     live_replay_job = next(job for job in jobs if job.name == "live_replay_parity")
     assert "run_live_replay_parity_audit.py" in live_replay_job.args[1]
     assert "--all-live-symbols" in live_replay_job.args
@@ -2247,6 +2333,102 @@ def test_ops_heartbeat_defaults_include_live_replay_parity() -> None:
     assert config["pattern"] == "reports/operations/live_replay_parity/*.md"
     assert config["pass_statuses"] == {"PASS"}
     assert config["watch_statuses"] == {"WATCH"}
+
+
+def test_ops_heartbeat_defaults_include_entry_surface() -> None:
+    config = run_micro_live_ops_heartbeat._DEFAULT_JOBS["entry_surface"]
+
+    assert config["pattern"] == "reports/operations/entry_surface/latest_entry_alert_run.json"
+    assert config["content_type"] == "entry_surface_run"
+    assert config["pass_statuses"] == {"PASS"}
+
+
+def test_ops_heartbeat_checks_entry_surface_latest_payload(monkeypatch, tmp_path) -> None:
+    report = tmp_path / "latest_entry_alert_run.json"
+    report.write_text(
+        json.dumps(
+            {
+                "reason": "no_live_order_candidates_context_only_route_mismatch",
+                "legacy_reason": "no_alertable_rows",
+                "notified": False,
+                "live_order_candidates": 0,
+                "blocked_live_order_candidates": 0,
+                "operator_action_summary": {
+                    "state": "context_only_outside_live_route",
+                    "next_action": "wait_for_live_route_candidate_or_change_live_contract_intentionally",
+                    "message": "surface 활동은 있지만 현재 live route 밖이라 주문을 기대하지 않는 상태",
+                    "top_route_mismatch_reason": "strategy_family_not_live_route:22",
+                },
+                "snapshot": {"counts": {"LIVE_ORDER_CANDIDATE": 0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        run_micro_live_ops_heartbeat,
+        "_DEFAULT_JOBS",
+        {
+            "entry_surface": {
+                "pattern": str(report),
+                "max_age_minutes": 15,
+                "content_type": "entry_surface_run",
+                "pass_statuses": {"PASS"},
+                "watch_statuses": {"WATCH"},
+            }
+        },
+    )
+
+    now = datetime.fromtimestamp(report.stat().st_mtime, tz=UTC)
+    result = run_micro_live_ops_heartbeat.evaluate_ops_heartbeat(now=now)
+
+    assert result["status"] == "PASS"
+    assert result["jobs"][0]["report_status"] == "PASS"
+    assert result["jobs"][0]["report_reason"] == "no_live_order_candidates_context_only_route_mismatch"
+    assert result["jobs"][0]["entry_surface_operator_action_state"] == "context_only_outside_live_route"
+    assert result["jobs"][0]["entry_surface_operator_next_action"] == (
+        "wait_for_live_route_candidate_or_change_live_contract_intentionally"
+    )
+    assert result["jobs"][0]["entry_surface_operator_route_reason"] == "strategy_family_not_live_route:22"
+    assert result["jobs"][0]["status_detail"] == (
+        "no_live_order_candidates_context_only_route_mismatch | operator_action=context_only_outside_live_route | "
+        "next=wait_for_live_route_candidate_or_change_live_contract_intentionally | "
+        "route_reason=strategy_family_not_live_route:22"
+    )
+
+
+def test_ops_heartbeat_fails_on_entry_surface_source_request_failure(monkeypatch, tmp_path) -> None:
+    report = tmp_path / "latest_entry_alert_run.json"
+    report.write_text(
+        json.dumps(
+            {
+                "reason": "source_request_failed",
+                "error": "GET /portfolio/budget failed: timed out",
+                "notified": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        run_micro_live_ops_heartbeat,
+        "_DEFAULT_JOBS",
+        {
+            "entry_surface": {
+                "pattern": str(report),
+                "max_age_minutes": 15,
+                "content_type": "entry_surface_run",
+                "pass_statuses": {"PASS"},
+                "watch_statuses": {"WATCH"},
+            }
+        },
+    )
+
+    now = datetime.fromtimestamp(report.stat().st_mtime, tz=UTC)
+    result = run_micro_live_ops_heartbeat.evaluate_ops_heartbeat(now=now)
+
+    assert result["status"] == "FAIL"
+    assert result["hard_failures"][0]["name"] == "entry_surface"
+    assert result["hard_failures"][0]["status_detail"] == "entry_surface_source_request_failed"
+    assert result["hard_failures"][0]["report_reason"] == "entry_surface_source_request_failed"
 
 
 def test_ops_heartbeat_warns_on_live_replay_parity_watch(monkeypatch, tmp_path) -> None:

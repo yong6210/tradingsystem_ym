@@ -221,10 +221,52 @@ def test_build_entry_snapshot_maps_rows_to_three_statuses():
     assert snapshot["edge_evolution_rule"]["evolution_state"] == "reduce_candidate"
     assert snapshot["review_followup_ledger"]["last_status"] == "READY"
     assert snapshot["review_followup_ledger"]["last_decision_status"] == "ACKED"
+    assert snapshot["route_mismatch_summary"]["context_only_total"] == 0
+    assert snapshot["operator_action_summary"]["state"] == "live_order_candidate_present"
+    assert snapshot["operator_action_summary"]["next_action"] == "review_live_order_candidate_intent_submission"
     assert snapshot["sections"][notify_entry_surface.LIVE_ORDER_CANDIDATE][0]["edge_experiment_focus"]["edge_state"] == "watch_edge"
     assert snapshot["sections"][notify_entry_surface.LIVE_ORDER_CANDIDATE][0]["symbol"] == "BTCUSDC"
     assert snapshot["sections"][notify_entry_surface.BLOCKED_SETUP][0]["symbol"] == "ETHUSDC"
     assert snapshot["sections"][notify_entry_surface.RESEARCH_ONLY_SETUP][0]["symbol"] == "SOLUSDC"
+
+
+def test_entry_snapshot_counts_source_rows_not_display_cap():
+    payload = _budget_payload()
+    base = payload["accepted_candidates"][0]
+    payload["accepted_candidates"] = [
+        {
+            **json.loads(json.dumps(base)),
+            "plan_id": f"plan_context_{index}",
+            "adjusted_rank_score": 100 - index,
+        }
+        for index in range(5)
+    ]
+    payload["blocked_candidates"] = []
+    payload["alpha_research_candidates"] = []
+    contract = _live_contract()
+    contract["strategy_families"] = ["session_impulse_retest"]
+
+    snapshot = notify_entry_surface.build_entry_snapshot(payload, max_per_status=2, live_route_contract=contract)
+    fields = notify_entry_surface._result_count_fields(snapshot)
+    message = notify_entry_surface.render_message(snapshot)
+
+    assert snapshot["counts"][notify_entry_surface.CONTEXT_REVIEW_SETUP] == 5
+    assert snapshot["source_counts"][notify_entry_surface.CONTEXT_REVIEW_SETUP] == 5
+    assert snapshot["display_counts"][notify_entry_surface.CONTEXT_REVIEW_SETUP] == 2
+    assert snapshot["truncated_counts"][notify_entry_surface.CONTEXT_REVIEW_SETUP] == 3
+    assert len(snapshot["sections"][notify_entry_surface.CONTEXT_REVIEW_SETUP]) == 2
+    assert snapshot["route_mismatch_summary"]["context_only_total"] == 5
+    assert snapshot["operator_action_summary"]["state"] == "context_only_outside_live_route"
+    assert snapshot["operator_action_summary"]["top_route_mismatch_reason"] == "strategy_family_not_live_route:5"
+    assert fields["context_review_setups"] == 5
+    assert fields["operator_action_summary"]["state"] == "context_only_outside_live_route"
+    assert fields["display_counts"][notify_entry_surface.CONTEXT_REVIEW_SETUP] == 2
+    assert fields["truncated_entry_counts"][notify_entry_surface.CONTEXT_REVIEW_SETUP] == 3
+    assert "review_candidates=5" in message
+    assert "operator_action: state=context_only_outside_live_route" in message
+    assert "CONTEXT_REVIEW_SETUP:2" in message
+    assert "truncated=LIVE_ORDER_CANDIDATE:0,CONTEXT_REVIEW_SETUP:3" in message
+    assert "[검토 후보] CONTEXT_REVIEW_SETUP (showing=2/5)" in message
 
 
 def test_emit_result_writes_output_file(tmp_path, capsys):
@@ -235,6 +277,61 @@ def test_emit_result_writes_output_file(tmp_path, capsys):
 
     assert json.loads(output_path.read_text(encoding="utf-8")) == payload
     assert json.loads(capsys.readouterr().out) == payload
+
+
+def test_emit_result_quiet_writes_output_without_stdout(tmp_path, capsys):
+    payload = {"status": "ok", "count": 1}
+    output_path = tmp_path / "entry_surface_result.json"
+
+    notify_entry_surface._emit_result(output_path, payload, quiet=True)
+
+    assert json.loads(output_path.read_text(encoding="utf-8")) == payload
+    assert capsys.readouterr().out == ""
+
+
+def test_main_lock_contention_writes_latest_output_file(monkeypatch, tmp_path, capsys):
+    state_file = tmp_path / "last_alert_state.json"
+    output_file = tmp_path / "latest_entry_alert_run.json"
+    lock_file = tmp_path / "last_alert_state.json.lock"
+    held_lock = notify_entry_surface._try_acquire_lock(lock_file)
+    assert held_lock is not None
+    monkeypatch.setattr(
+        notify_entry_surface,
+        "_request_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("source should not be requested")),
+    )
+    monkeypatch.setattr(
+        notify_entry_surface,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            universe="usdc_perp_top30",
+            limit=20,
+            symbol="",
+            max_per_status=3,
+            channel="discord",
+            state_file=str(state_file),
+            output_file=str(output_file),
+            webhook_url="",
+            lock_file=str(lock_file),
+            min_repeat_minutes=360,
+            force_send=False,
+            dry_run=False,
+            quiet=True,
+        ),
+    )
+
+    try:
+        exit_code = notify_entry_surface.main()
+    finally:
+        notify_entry_surface._release_lock(held_lock)
+
+    payload = json.loads(output_file.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert capsys.readouterr().out == ""
+    assert payload["reason"] == "entry_surface_tick_already_running"
+    assert payload["lock_file"] == str(lock_file.resolve())
+    assert payload["notified"] is False
 
 
 def test_build_entry_snapshot_demotes_accepted_rows_when_topline_is_not_go():
@@ -283,6 +380,11 @@ def test_render_message_includes_all_sections_and_reasons():
     assert (
         "edge_evolution: state=reduce_candidate | action=reduce_baseline_allocation_review | "
         "bias=reduce_baseline | promotion=entry_timing/early_limit"
+    ) in message
+    assert "route_mismatch: context_only=0 | reasons=none | families=none | entry_models=none | symbols=none" in message
+    assert (
+        "operator_action: state=live_order_candidate_present | priority=important "
+        "| next=review_live_order_candidate_intent_submission"
     ) in message
     assert (
         "review_followup_ledger: generated=READY | decision=ACKED | effective=ACKED | "
@@ -356,9 +458,34 @@ def test_context_only_surface_is_not_discord_alertable():
     contract = _live_contract()
     contract["strategy_families"] = ["session_impulse_retest"]
     snapshot = notify_entry_surface.build_entry_snapshot(payload, max_per_status=3, live_route_contract=contract)
+    fields = notify_entry_surface._result_count_fields(snapshot)
+    message = notify_entry_surface.render_message(snapshot)
 
     assert snapshot["counts"][notify_entry_surface.LIVE_ORDER_CANDIDATE] == 0
     assert notify_entry_surface._has_alertable_rows(snapshot) is False
+    assert notify_entry_surface._blocked_live_candidate_count(snapshot) == 0
+    assert snapshot["route_mismatch_summary"]["context_only_total"] == 2
+    assert snapshot["route_mismatch_summary"]["by_reason"] == {"strategy_family_not_live_route": 2}
+    assert snapshot["route_mismatch_summary"]["by_entry_model"] == {"CONFIRM": 1, "LIMIT": 1}
+    assert fields["blocked_live_order_candidates"] == 0
+    assert fields["blocked_context_only_setups"] == snapshot["counts"][notify_entry_surface.BLOCKED_SETUP]
+    assert fields["route_mismatch_summary"]["context_only_total"] == 2
+    assert fields["operator_action_summary"]["state"] == "context_only_outside_live_route"
+    assert fields["operator_action_summary"]["next_action"] == (
+        "wait_for_live_route_candidate_or_change_live_contract_intentionally"
+    )
+    assert fields["blocked_setup_breakdown"] == {
+        "live_routable": 0,
+        "context_only": snapshot["counts"][notify_entry_surface.BLOCKED_SETUP],
+    }
+    assert "blocked_context_only=" in message
+    assert "blocked_breakdown=live:0,context_only:" in message
+    assert "route_mismatch: context_only=2 | reasons=strategy_family_not_live_route:2" in message
+    assert (
+        "operator_action: state=context_only_outside_live_route | priority=monitor "
+        "| next=wait_for_live_route_candidate_or_change_live_contract_intentionally "
+        "| reason=strategy_family_not_live_route:2"
+    ) in message
 
 
 def test_live_routable_blocked_surface_remains_discord_alertable():
@@ -416,8 +543,15 @@ def test_render_message_exposes_blocked_live_candidate_count():
     fields = notify_entry_surface._result_count_fields(snapshot)
 
     assert "live_order_candidates=0, review_candidates=0, blocked_live_candidates=1" in message
+    assert "blocked_context_only=0" in message
     assert "blocked_live_candidates=1" in message
+    assert "blocked_breakdown=live:1,context_only:0" in message
+    assert "[차단 후보] BLOCKED_SETUP (live=1, context_only=0)" in message
     assert fields["blocked_live_order_candidates"] == 1
+    assert fields["blocked_context_only_setups"] == 0
+    assert fields["blocked_setup_breakdown"] == {"live_routable": 1, "context_only": 0}
+    assert fields["operator_action_summary"]["state"] == "live_order_candidate_blocked"
+    assert fields["operator_action_summary"]["next_action"] == "inspect_validation_portfolio_risk_blockers"
 
 
 def test_alert_state_uses_stable_plan_id_for_reroute_suffixes():
@@ -475,6 +609,51 @@ def test_main_dry_run_prints_snapshot_without_dispatch(monkeypatch, capsys):
     assert payload["blocked_setups"] == 1
     assert payload["research_only_setups"] == 1
     assert payload["entry_counts"][notify_entry_surface.LIVE_ORDER_CANDIDATE] == 1
+    assert payload["route_mismatch_summary"]["context_only_total"] == 0
+
+
+def test_main_no_alertable_rows_still_emits_rendered_message(monkeypatch, tmp_path, capsys):
+    contract = _live_contract()
+    contract["strategy_families"] = ["session_impulse_retest"]
+    state_file = tmp_path / "last_alert_state.json"
+    monkeypatch.setattr(notify_entry_surface, "_request_json", lambda *args, **kwargs: _budget_payload())
+    monkeypatch.setattr(notify_entry_surface, "_live_route_contract_from_settings", lambda settings: contract)
+    monkeypatch.setattr(
+        notify_entry_surface,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            universe="usdc_perp_top30",
+            limit=20,
+            symbol="",
+            max_per_status=3,
+            channel="discord",
+            state_file=str(state_file),
+            webhook_url="",
+            min_repeat_minutes=360,
+            force_send=False,
+            dry_run=False,
+        ),
+    )
+
+    class _Dispatcher:
+        def __init__(self, settings):  # noqa: ARG002
+            raise AssertionError("dispatcher should not be constructed when there are no alertable rows")
+
+    monkeypatch.setattr(notify_entry_surface, "NotificationDispatcher", _Dispatcher)
+
+    exit_code = notify_entry_surface.main()
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["reason"] == "no_live_order_candidates_context_only_route_mismatch"
+    assert payload["legacy_reason"] == "no_alertable_rows"
+    assert payload["notified"] is False
+    assert payload["state_written"] is True
+    assert payload["live_order_candidates"] == 0
+    assert payload["operator_action_summary"]["state"] == "context_only_outside_live_route"
+    assert "operator_action: state=context_only_outside_live_route" in payload["message"]
+    assert "Trading entry surface alert: live_order_candidates=0" in payload["message"]
 
 
 def test_main_suppresses_when_alert_state_is_unchanged(monkeypatch, tmp_path, capsys):

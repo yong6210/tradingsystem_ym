@@ -122,6 +122,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--force-send", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--quiet", action="store_true", help="Write output artifacts without printing JSON to stdout.")
     return parser.parse_args()
 
 
@@ -141,10 +142,11 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
-def _emit_result(path: Path | None, payload: dict[str, Any]) -> None:
+def _emit_result(path: Path | None, payload: dict[str, Any], *, quiet: bool = False) -> None:
     if path is not None:
         _write_json(path, payload)
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if not quiet:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def _ensure_http_url(url: str) -> None:
@@ -379,6 +381,118 @@ def _sort_research_key(row: dict[str, Any]) -> tuple[float, float, float, str]:
     )
 
 
+def _sorted_counts(values: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for raw in values:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _route_mismatch_summary(sections: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    context_rows: list[dict[str, Any]] = []
+    covered_statuses = (CONTEXT_REVIEW_SETUP, BLOCKED_SETUP)
+    for status in covered_statuses:
+        for row in list(sections.get(status) or []):
+            route = dict(row.get("entry_surface_route") or {})
+            if _safe_bool(route.get("live_routable")) or _safe_bool(row.get("live_routable")):
+                continue
+            context_rows.append(row)
+
+    reasons: list[str] = []
+    families: list[str] = []
+    entry_models: list[str] = []
+    symbols: list[str] = []
+    status_counts: list[str] = []
+    missing_reason_count = 0
+    for row in context_rows:
+        route = dict(row.get("entry_surface_route") or {})
+        route_reasons = [
+            str(reason or "").strip()
+            for reason in list(route.get("reasons") or [])
+            if str(reason or "").strip()
+        ]
+        if route_reasons:
+            reasons.extend(route_reasons)
+        else:
+            missing_reason_count += 1
+        family = str(route.get("strategy_family") or _candidate_family(row) or "unknown").strip().lower()
+        entry_model = str(route.get("entry_model") or row.get("entry_model") or "unknown").strip().upper()
+        symbol = str(route.get("symbol") or row.get("symbol") or "UNKNOWN").strip().upper()
+        families.append(family or "unknown")
+        entry_models.append(entry_model or "UNKNOWN")
+        symbols.append(symbol or "UNKNOWN")
+        status_counts.append(str(route.get("status") or "context_only").strip() or "context_only")
+
+    return {
+        "covered_statuses": list(covered_statuses),
+        "context_only_total": len(context_rows),
+        "missing_reason_count": missing_reason_count,
+        "by_reason": _sorted_counts(reasons),
+        "by_strategy_family": _sorted_counts(families),
+        "by_entry_model": _sorted_counts(entry_models),
+        "by_symbol": _sorted_counts(symbols),
+        "by_route_status": _sorted_counts(status_counts),
+    }
+
+
+def _top_count_item(raw_counts: Any) -> str:
+    counts = dict(raw_counts or {}) if isinstance(raw_counts, dict) else {}
+    for key, value in counts.items():
+        return f"{key}:{int(value or 0)}"
+    return "none"
+
+
+def _entry_surface_operator_action(snapshot: dict[str, Any]) -> dict[str, Any]:
+    counts = dict(snapshot.get("counts") or {})
+    route_summary = dict(snapshot.get("route_mismatch_summary") or {})
+    blocked_breakdown = _blocked_route_breakdown(snapshot)
+    live_count = int(counts.get(LIVE_ORDER_CANDIDATE, 0) or 0)
+    blocked_live_count = int(blocked_breakdown.get("live_routable", 0) or 0)
+    blocked_context_count = int(blocked_breakdown.get("context_only", 0) or 0)
+    context_review_count = int(counts.get(CONTEXT_REVIEW_SETUP, 0) or 0)
+    context_only_total = int(route_summary.get("context_only_total", 0) or 0)
+
+    if live_count > 0:
+        state = "live_order_candidate_present"
+        priority = "important"
+        next_action = "review_live_order_candidate_intent_submission"
+        message = "LIVE_ORDER_CANDIDATE가 있어 intent/submission/fill 경로를 확인할 상태"
+    elif blocked_live_count > 0:
+        state = "live_order_candidate_blocked"
+        priority = "watch"
+        next_action = "inspect_validation_portfolio_risk_blockers"
+        message = "live route에 맞는 후보가 있었지만 validation/portfolio/risk에서 주문 전 차단된 상태"
+    elif context_only_total > 0 or context_review_count > 0 or blocked_context_count > 0:
+        state = "context_only_outside_live_route"
+        priority = "monitor"
+        next_action = "wait_for_live_route_candidate_or_change_live_contract_intentionally"
+        message = "surface 활동은 있지만 현재 live route 밖이라 주문을 기대하지 않는 상태"
+    else:
+        state = "no_surface_candidates"
+        priority = "monitor"
+        next_action = "wait_for_fresh_live_candidate"
+        message = "현재 surface에 주문/검토/차단 후보가 없어 fresh 후보를 기다리는 상태"
+
+    return {
+        "state": state,
+        "priority": priority,
+        "next_action": next_action,
+        "message": message,
+        "live_order_candidates": live_count,
+        "blocked_live_order_candidates": blocked_live_count,
+        "blocked_context_only_setups": blocked_context_count,
+        "context_review_setups": context_review_count,
+        "route_mismatch_total": context_only_total,
+        "top_route_mismatch_reason": _top_count_item(route_summary.get("by_reason")),
+        "top_route_mismatch_family": _top_count_item(route_summary.get("by_strategy_family")),
+        "top_route_mismatch_entry_model": _top_count_item(route_summary.get("by_entry_model")),
+        "top_route_mismatch_symbol": _top_count_item(route_summary.get("by_symbol")),
+    }
+
+
 def build_entry_snapshot(
     payload: dict[str, Any],
     *,
@@ -399,32 +513,45 @@ def build_entry_snapshot(
     ]
 
     research_plan_ids = {str(row.get("plan_id") or "") for row in research_rows}
-    blocked_non_research = [row for row in blocked_rows if str(row.get("plan_id") or "") not in research_plan_ids]
+    blocked_non_research_all = [row for row in blocked_rows if str(row.get("plan_id") or "") not in research_plan_ids]
 
     deployment_state = str(payload.get("deployment_go_no_go") or "MANUAL_REVIEW").upper()
-    live_order_rows: list[dict[str, Any]] = []
-    context_review_rows: list[dict[str, Any]] = []
+    live_order_rows_all: list[dict[str, Any]] = []
+    context_review_rows_all: list[dict[str, Any]] = []
     if deployment_state == "GO":
         for row in accepted_rows:
             route = dict(row.get("entry_surface_route") or {})
             if _safe_bool(route.get("live_routable")):
-                live_order_rows.append(row)
+                live_order_rows_all.append(row)
             else:
-                context_review_rows.append(row)
+                context_review_rows_all.append(row)
     else:
         reason_code, reason_message = _blocked_topline_reason(payload)
         for row in accepted_rows:
             shadow = dict(row)
             shadow["block_reason"] = shadow.get("block_reason") or reason_code
             shadow["block_reason_message"] = shadow.get("block_reason_message") or reason_message
-            blocked_non_research.append(shadow)
+            blocked_non_research_all.append(shadow)
 
-    live_order_rows = sorted(live_order_rows, key=_sort_actionable_key, reverse=True)[: max(0, int(max_per_status))]
-    context_review_rows = sorted(context_review_rows, key=_sort_actionable_key, reverse=True)[: max(0, int(max_per_status))]
-    blocked_non_research = sorted(blocked_non_research, key=_sort_blocked_key, reverse=True)[: max(0, int(max_per_status))]
-    research_rows = sorted(research_rows, key=_sort_research_key, reverse=True)[: max(0, int(max_per_status))]
+    live_order_rows_all = sorted(live_order_rows_all, key=_sort_actionable_key, reverse=True)
+    context_review_rows_all = sorted(context_review_rows_all, key=_sort_actionable_key, reverse=True)
+    blocked_non_research_all = sorted(blocked_non_research_all, key=_sort_blocked_key, reverse=True)
+    research_rows_all = sorted(research_rows, key=_sort_research_key, reverse=True)
+    source_sections = {
+        LIVE_ORDER_CANDIDATE: live_order_rows_all,
+        CONTEXT_REVIEW_SETUP: context_review_rows_all,
+        BLOCKED_SETUP: blocked_non_research_all,
+        RESEARCH_ONLY_SETUP: research_rows_all,
+    }
+    max_rows = max(0, int(max_per_status))
+    sections = {status: rows[:max_rows] for status, rows in source_sections.items()}
+    counts = {status: len(rows) for status, rows in source_sections.items()}
+    display_counts = {status: len(rows) for status, rows in sections.items()}
+    truncated_counts = {
+        status: max(0, counts.get(status, 0) - display_counts.get(status, 0)) for status in SURFACE_STATUSES
+    }
 
-    return {
+    snapshot = {
         "generated_at": datetime.now(UTC).isoformat(),
         "scope": _candidate_scope(payload, symbol),
         "live_route_contract": {
@@ -445,19 +572,17 @@ def build_entry_snapshot(
         "edge_experiment_review": _edge_experiment_summary(payload),
         "edge_evolution_rule": _edge_evolution_summary(payload),
         "review_followup_ledger": _review_followup_summary(payload),
-        "counts": {
-            LIVE_ORDER_CANDIDATE: len(live_order_rows),
-            CONTEXT_REVIEW_SETUP: len(context_review_rows),
-            BLOCKED_SETUP: len(blocked_non_research),
-            RESEARCH_ONLY_SETUP: len(research_rows),
-        },
-        "sections": {
-            LIVE_ORDER_CANDIDATE: live_order_rows,
-            CONTEXT_REVIEW_SETUP: context_review_rows,
-            BLOCKED_SETUP: blocked_non_research,
-            RESEARCH_ONLY_SETUP: research_rows,
-        },
+        "counts": counts,
+        "source_counts": counts,
+        "display_counts": display_counts,
+        "truncated_counts": truncated_counts,
+        "section_limit": max_rows,
+        "blocked_setup_breakdown": _blocked_route_breakdown_from_rows(blocked_non_research_all),
+        "route_mismatch_summary": _route_mismatch_summary(source_sections),
+        "sections": sections,
     }
+    snapshot["operator_action_summary"] = _entry_surface_operator_action(snapshot)
+    return snapshot
 
 
 def build_alert_state(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -718,6 +843,42 @@ def _format_live_route_trace(snapshot: dict[str, Any]) -> str:
     )
 
 
+def _format_count_map(raw_counts: Any, *, limit: int = 4) -> str:
+    counts = dict(raw_counts or {}) if isinstance(raw_counts, dict) else {}
+    parts: list[str] = []
+    for index, (key, value) in enumerate(counts.items()):
+        if index >= max(0, int(limit)):
+            break
+        parts.append(f"{key}:{int(value or 0)}")
+    return ",".join(parts) if parts else "none"
+
+
+def _format_route_mismatch_trace(snapshot: dict[str, Any]) -> str:
+    summary = dict(snapshot.get("route_mismatch_summary") or {})
+    return (
+        "route_mismatch: "
+        f"context_only={int(summary.get('context_only_total', 0) or 0)} "
+        f"| reasons={_format_count_map(summary.get('by_reason'))} "
+        f"| families={_format_count_map(summary.get('by_strategy_family'))} "
+        f"| entry_models={_format_count_map(summary.get('by_entry_model'))} "
+        f"| symbols={_format_count_map(summary.get('by_symbol'))}"
+    )
+
+
+def _format_operator_action_trace(snapshot: dict[str, Any]) -> str:
+    action = dict(snapshot.get("operator_action_summary") or _entry_surface_operator_action(snapshot))
+    return (
+        "operator_action: "
+        f"state={action.get('state') or 'unknown'} "
+        f"| priority={action.get('priority') or 'monitor'} "
+        f"| next={action.get('next_action') or 'wait_for_fresh_live_candidate'} "
+        f"| reason={action.get('top_route_mismatch_reason') or 'none'} "
+        f"| family={action.get('top_route_mismatch_family') or 'none'} "
+        f"| entry_model={action.get('top_route_mismatch_entry_model') or 'none'} "
+        f"| symbol={action.get('top_route_mismatch_symbol') or 'none'}"
+    )
+
+
 def _format_edge_experiment_trace(snapshot: dict[str, Any]) -> str:
     edge_experiment = dict(snapshot.get("edge_experiment_review") or {})
     if not edge_experiment:
@@ -769,16 +930,21 @@ def _format_review_followup_trace(snapshot: dict[str, Any]) -> str:
 
 def render_message(snapshot: dict[str, Any]) -> str:
     counts = dict(snapshot.get("counts") or {})
+    display_counts = dict(snapshot.get("display_counts") or counts)
+    truncated_counts = dict(snapshot.get("truncated_counts") or {})
     sections = dict(snapshot.get("sections") or {})
     approval_strip = dict(snapshot.get("approval_strip") or {})
     live_count = int(counts.get(LIVE_ORDER_CANDIDATE, 0) or 0)
     review_count = int(counts.get(CONTEXT_REVIEW_SETUP, 0) or 0)
-    blocked_live_count = _blocked_live_candidate_count(snapshot)
+    blocked_breakdown = _blocked_route_breakdown(snapshot)
+    blocked_live_count = int(blocked_breakdown.get("live_routable", 0) or 0)
+    blocked_context_count = int(blocked_breakdown.get("context_only", 0) or 0)
     lines = [
         (
             "Trading entry surface alert: "
             f"live_order_candidates={live_count}, review_candidates={review_count}, "
-            f"blocked_live_candidates={blocked_live_count}"
+            f"blocked_live_candidates={blocked_live_count}, "
+            f"blocked_context_only={blocked_context_count}"
         ),
         f"scope: {snapshot.get('scope')} | order_truth=live_candidate_promotion_readiness",
         (
@@ -790,6 +956,8 @@ def render_message(snapshot: dict[str, Any]) -> str:
         f"reason: {approval_strip.get('primary_reason') or snapshot.get('deployment_message')}",
         _format_contract_trace(snapshot),
         _format_live_route_trace(snapshot),
+        _format_route_mismatch_trace(snapshot),
+        _format_operator_action_trace(snapshot),
         _format_edge_experiment_trace(snapshot),
         _format_edge_evolution_trace(snapshot),
         _format_review_followup_trace(snapshot),
@@ -797,14 +965,30 @@ def render_message(snapshot: dict[str, Any]) -> str:
             f"counts: {LIVE_ORDER_CANDIDATE}={counts.get(LIVE_ORDER_CANDIDATE, 0)}, "
             f"{CONTEXT_REVIEW_SETUP}={counts.get(CONTEXT_REVIEW_SETUP, 0)}, "
             f"{BLOCKED_SETUP}={counts.get(BLOCKED_SETUP, 0)}, "
-            f"{RESEARCH_ONLY_SETUP}={counts.get(RESEARCH_ONLY_SETUP, 0)}"
+            f"{RESEARCH_ONLY_SETUP}={counts.get(RESEARCH_ONLY_SETUP, 0)} "
+            f"| displayed={LIVE_ORDER_CANDIDATE}:{display_counts.get(LIVE_ORDER_CANDIDATE, 0)},"
+            f"{CONTEXT_REVIEW_SETUP}:{display_counts.get(CONTEXT_REVIEW_SETUP, 0)},"
+            f"{BLOCKED_SETUP}:{display_counts.get(BLOCKED_SETUP, 0)},"
+            f"{RESEARCH_ONLY_SETUP}:{display_counts.get(RESEARCH_ONLY_SETUP, 0)} "
+            f"| truncated={LIVE_ORDER_CANDIDATE}:{truncated_counts.get(LIVE_ORDER_CANDIDATE, 0)},"
+            f"{CONTEXT_REVIEW_SETUP}:{truncated_counts.get(CONTEXT_REVIEW_SETUP, 0)},"
+            f"{BLOCKED_SETUP}:{truncated_counts.get(BLOCKED_SETUP, 0)},"
+            f"{RESEARCH_ONLY_SETUP}:{truncated_counts.get(RESEARCH_ONLY_SETUP, 0)} "
+            f"| blocked_breakdown=live:{blocked_live_count},context_only:{blocked_context_count}"
         ),
     ]
 
     for status in SURFACE_STATUSES:
         rows = sections.get(status) or []
         lines.append("")
-        lines.append(_section_title(status))
+        section_title = _section_title(status)
+        total_count = int(counts.get(status, 0) or 0)
+        display_count = int(display_counts.get(status, len(rows)) or 0)
+        if total_count > display_count:
+            section_title = f"{section_title} (showing={display_count}/{total_count})"
+        if status == BLOCKED_SETUP:
+            section_title = f"{section_title} (live={blocked_live_count}, context_only={blocked_context_count})"
+        lines.append(section_title)
         if not rows:
             lines.append("- none")
             continue
@@ -819,23 +1003,54 @@ def _has_alertable_rows(snapshot: dict[str, Any]) -> bool:
     return _blocked_live_candidate_count(snapshot) > 0
 
 
+def _no_alertable_reason(snapshot: dict[str, Any]) -> str:
+    action = dict(snapshot.get("operator_action_summary") or _entry_surface_operator_action(snapshot))
+    state = str(action.get("state") or "").strip()
+    if state == "context_only_outside_live_route":
+        return "no_live_order_candidates_context_only_route_mismatch"
+    if state == "no_surface_candidates":
+        return "no_surface_candidates"
+    return "no_alertable_rows"
+
+
 def _blocked_live_candidate_count(snapshot: dict[str, Any]) -> int:
-    sections = dict(snapshot.get("sections") or {})
-    count = 0
-    for row in sections.get(BLOCKED_SETUP) or []:
+    return int(_blocked_route_breakdown(snapshot).get("live_routable", 0) or 0)
+
+
+def _blocked_route_breakdown_from_rows(rows: list[dict[str, Any]]) -> dict[str, int]:
+    live_routable = 0
+    context_only = 0
+    for row in rows:
         route = dict(row.get("entry_surface_route") or {})
         if _safe_bool(route.get("live_routable")) or _safe_bool(row.get("live_routable")):
-            count += 1
-    return count
+            live_routable += 1
+        else:
+            context_only += 1
+    return {"live_routable": live_routable, "context_only": context_only}
+
+
+def _blocked_route_breakdown(snapshot: dict[str, Any]) -> dict[str, int]:
+    existing = snapshot.get("blocked_setup_breakdown")
+    if isinstance(existing, dict):
+        return {
+            "live_routable": int(existing.get("live_routable", 0) or 0),
+            "context_only": int(existing.get("context_only", 0) or 0),
+        }
+    sections = dict(snapshot.get("sections") or {})
+    return _blocked_route_breakdown_from_rows([dict(row) for row in list(sections.get(BLOCKED_SETUP) or [])])
 
 
 def _result_count_fields(snapshot: dict[str, Any]) -> dict[str, Any]:
     counts = dict(snapshot.get("counts") or {})
+    display_counts = dict(snapshot.get("display_counts") or counts)
+    truncated_counts = dict(snapshot.get("truncated_counts") or {})
     live_order_candidates = int(counts.get(LIVE_ORDER_CANDIDATE, 0) or 0)
     context_review_setups = int(counts.get(CONTEXT_REVIEW_SETUP, 0) or 0)
     blocked_setups = int(counts.get(BLOCKED_SETUP, 0) or 0)
     research_only_setups = int(counts.get(RESEARCH_ONLY_SETUP, 0) or 0)
-    blocked_live_order_candidates = _blocked_live_candidate_count(snapshot)
+    blocked_breakdown = _blocked_route_breakdown(snapshot)
+    blocked_live_order_candidates = int(blocked_breakdown.get("live_routable", 0) or 0)
+    blocked_context_only_setups = int(blocked_breakdown.get("context_only", 0) or 0)
     return {
         "entry_counts": {
             LIVE_ORDER_CANDIDATE: live_order_candidates,
@@ -843,8 +1058,36 @@ def _result_count_fields(snapshot: dict[str, Any]) -> dict[str, Any]:
             BLOCKED_SETUP: blocked_setups,
             RESEARCH_ONLY_SETUP: research_only_setups,
         },
+        "source_counts": {
+            LIVE_ORDER_CANDIDATE: live_order_candidates,
+            CONTEXT_REVIEW_SETUP: context_review_setups,
+            BLOCKED_SETUP: blocked_setups,
+            RESEARCH_ONLY_SETUP: research_only_setups,
+        },
+        "display_counts": {
+            LIVE_ORDER_CANDIDATE: int(display_counts.get(LIVE_ORDER_CANDIDATE, 0) or 0),
+            CONTEXT_REVIEW_SETUP: int(display_counts.get(CONTEXT_REVIEW_SETUP, 0) or 0),
+            BLOCKED_SETUP: int(display_counts.get(BLOCKED_SETUP, 0) or 0),
+            RESEARCH_ONLY_SETUP: int(display_counts.get(RESEARCH_ONLY_SETUP, 0) or 0),
+        },
+        "truncated_entry_counts": {
+            LIVE_ORDER_CANDIDATE: int(truncated_counts.get(LIVE_ORDER_CANDIDATE, 0) or 0),
+            CONTEXT_REVIEW_SETUP: int(truncated_counts.get(CONTEXT_REVIEW_SETUP, 0) or 0),
+            BLOCKED_SETUP: int(truncated_counts.get(BLOCKED_SETUP, 0) or 0),
+            RESEARCH_ONLY_SETUP: int(truncated_counts.get(RESEARCH_ONLY_SETUP, 0) or 0),
+        },
+        "section_limit": int(snapshot.get("section_limit", 0) or 0),
+        "blocked_setup_breakdown": {
+            "live_routable": blocked_live_order_candidates,
+            "context_only": blocked_context_only_setups,
+        },
+        "route_mismatch_summary": dict(snapshot.get("route_mismatch_summary") or {}),
+        "operator_action_summary": dict(
+            snapshot.get("operator_action_summary") or _entry_surface_operator_action(snapshot)
+        ),
         "live_order_candidates": live_order_candidates,
         "blocked_live_order_candidates": blocked_live_order_candidates,
+        "blocked_context_only_setups": blocked_context_only_setups,
         "context_review_setups": context_review_setups,
         "blocked_setups": blocked_setups,
         "research_only_setups": research_only_setups,
@@ -854,6 +1097,7 @@ def _result_count_fields(snapshot: dict[str, Any]) -> dict[str, Any]:
 def main() -> int:
     args = parse_args()
     now = datetime.now(UTC)
+    quiet = bool(getattr(args, "quiet", False))
     state_file = _resolve_root_path(args.state_file).resolve()
     output_file_raw = str(getattr(args, "output_file", "") or "").strip()
     output_file = _resolve_root_path(output_file_raw).resolve() if output_file_raw else None
@@ -862,7 +1106,7 @@ def main() -> int:
     lock_fd = _try_acquire_lock(lock_file)
     if lock_fd is None:
         _emit_result(
-            None,
+            output_file,
             {
                 "base_url": args.base_url,
                 "universe": args.universe,
@@ -877,6 +1121,7 @@ def main() -> int:
                 "dedupe_suppressed": True,
                 "reason": "entry_surface_tick_already_running",
             },
+            quiet=quiet,
         )
         return 0
     try:
@@ -909,6 +1154,7 @@ def main() -> int:
                 "reason": "source_request_failed",
                 "error": str(exc),
             },
+            quiet=quiet,
         )
         _release_lock(lock_fd)
         return 0
@@ -950,11 +1196,14 @@ def main() -> int:
         "dedupe_suppressed": False,
         **_result_count_fields(snapshot),
     }
+    message = render_message(snapshot)
+    result["message"] = message
     if state_warning:
         result["state_warning"] = state_warning
 
     if not _has_alertable_rows(snapshot):
-        result["reason"] = "no_alertable_rows"
+        result["reason"] = _no_alertable_reason(snapshot)
+        result["legacy_reason"] = "no_alertable_rows"
         if not args.dry_run:
             _write_json(
                 state_file,
@@ -963,18 +1212,19 @@ def main() -> int:
                     "alert_state": alert_state,
                     "alert_state_signature": alert_state_signature,
                     "alert_state_history": alert_state_history,
-                    "reason": "no_alertable_rows",
+                    "reason": result["reason"],
+                    "legacy_reason": "no_alertable_rows",
                 },
             )
             result["state_written"] = True
-        _emit_result(output_file, result)
+        _emit_result(output_file, result, quiet=quiet)
         _release_lock(lock_fd)
         return 0
 
     if previous_state == alert_state and not args.force_send:
         result["reason"] = "unchanged_surface_state"
         result["dedupe_suppressed"] = True
-        _emit_result(output_file, result)
+        _emit_result(output_file, result, quiet=quiet)
         _release_lock(lock_fd)
         return 0
 
@@ -988,16 +1238,13 @@ def main() -> int:
         result["reason"] = "recent_surface_state_repeat"
         result["dedupe_suppressed"] = True
         result["last_notified_at"] = last_notified_at
-        _emit_result(output_file, result)
+        _emit_result(output_file, result, quiet=quiet)
         _release_lock(lock_fd)
         return 0
 
-    message = render_message(snapshot)
-    result["message"] = message
-
     if args.dry_run:
         result["reason"] = "dry_run"
-        _emit_result(output_file, result)
+        _emit_result(output_file, result, quiet=quiet)
         _release_lock(lock_fd)
         return 0
 
@@ -1035,7 +1282,7 @@ def main() -> int:
             },
         )
         result["state_written"] = True
-    _emit_result(output_file, result)
+    _emit_result(output_file, result, quiet=quiet)
     _release_lock(lock_fd)
     return 0
 

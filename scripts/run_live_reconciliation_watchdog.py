@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state-file", default="reports/operations/live_reconciliation_watchdog/state.json")
     parser.add_argument("--no-write-report", action="store_true")
     parser.add_argument("--no-fail-exit", action="store_true")
+    parser.add_argument("--quiet", action="store_true", help="Do not print the JSON payload to stdout.")
     return parser.parse_args()
 
 
@@ -546,7 +547,8 @@ def main() -> int:
         else:
             payload["notification"] = {"skipped": True, "reason": "cooldown_active"}
 
-    print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
+    if not bool(args.quiet):
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     return 1 if alert_active and not bool(args.no_fail_exit) else 0
 
 

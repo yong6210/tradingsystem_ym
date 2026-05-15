@@ -9,12 +9,14 @@
   <dict>
     <key>ENTRY_SURFACE_BASE_URL</key>
     <string>http://127.0.0.1:8000</string>
+    <key>ENTRY_SURFACE_QUIET</key>
+    <string>1</string>
   </dict>
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/yumin/Documents/trading/.venv/bin/python</string>
-    <string>/Users/yumin/Documents/trading/scripts/notify_entry_surface.py</string>
+    <string>/Users/yumin/Library/Application Support/trading/runtime_venv/bin/python</string>
+    <string>/Users/yumin/Library/Application Support/trading/runtime_src/scripts/notify_entry_surface.py</string>
     <string>--base-url</string>
     <string>http://127.0.0.1:8000</string>
     <string>--universe</string>
@@ -26,13 +28,18 @@
     <string>--channel</string>
     <string>discord</string>
     <string>--state-file</string>
-    <string>/Users/yumin/Documents/trading/reports/operations/entry_surface/last_alert_state.json</string>
+    <string>/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/entry_surface/last_alert_state.json</string>
+    <string>--lock-file</string>
+    <string>/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/entry_surface/last_alert_state.json.lock</string>
     <string>--output-file</string>
-    <string>/Users/yumin/Documents/trading/reports/operations/entry_surface/latest_entry_alert_run.json</string>
+    <string>/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/entry_surface/latest_entry_alert_run.json</string>
+    <string>--min-repeat-minutes</string>
+    <string>360</string>
+    <string>--quiet</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/yumin/Documents/trading</string>
+  <string>/Users/yumin/Library/Application Support/trading/runtime_src</string>
 
   <key>StartInterval</key>
   <integer>300</integer>
@@ -41,9 +48,9 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/yumin/Documents/trading/reports/operations/entry_surface/launchd.out.log</string>
+  <string>/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/entry_surface/launchd.out.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/yumin/Documents/trading/reports/operations/entry_surface/launchd.err.log</string>
+  <string>/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/entry_surface/launchd.err.log</string>
 </dict>
 </plist>

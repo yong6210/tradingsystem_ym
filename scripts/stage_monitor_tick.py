@@ -2249,9 +2249,22 @@ def _run_stage_board(args: argparse.Namespace) -> dict[str, object]:
         payload = _load_stage_board_fallback(stage_file, latest_board_file, state_file)
         if not payload:
             raise
-        payload["generated_at"] = datetime.now(timezone.utc).isoformat()
+        current = datetime.now(timezone.utc)
+        source_generated_at = str(
+            payload.get("stage_board_fallback_source_generated_at") or payload.get("generated_at") or ""
+        )
+        source_ts = _parse_ts(source_generated_at)
+        source_age_seconds = None
+        if source_ts is not None:
+            source_age_seconds = round(max((current - source_ts).total_seconds(), 0.0), 3)
+        payload["generated_at"] = current.isoformat()
         payload["stage_board_fallback_used"] = True
         payload["stage_board_error"] = str(exc)
+        payload["stage_board_fallback_source_generated_at"] = source_generated_at
+        payload["stage_board_fallback_source_age_seconds"] = source_age_seconds
+        payload["stage_board_fallback_source_stale"] = (
+            source_age_seconds is not None and source_age_seconds > _STAGE_BOARD_REQUEST_TIMEOUT_SECONDS
+        )
         ops_stage_board._write_stage_file(stage_file, payload)
         output = json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n"
         _write_text(latest_board_file, output)

@@ -11,9 +11,9 @@
 
 Discord dispatch is narrower than the saved report. The tick still writes the full surface to `latest_entry_alert_run.json`, but it only sends Discord when a live order candidate exists or when a live-routable candidate is blocked. Context-only/review-only changes are report-only so they are not mistaken for entry confirmation.
 
-The alert headline starts with `live_order_candidates`, `review_candidates`, and `blocked_live_candidates` so the Discord preview is explicit. The Discord title follows the same split: live candidates become `[중요] ... 라이브 주문 후보 확인`, live-routable blocked candidates become `[주의] ... 라이브 주문 후보 차단`, and zero live/blocked candidates stay `[모니터링] ... 주문 후보 없음`. The second line always carries `order_truth=live_candidate_promotion_readiness`. The `approval_strip: approve -> align -> act` line still mirrors `/portfolio/budget`, the `contract_trace` line repeats the same `approve / align / act` contract before appending raw runtime/playbook fields for debugging, and `order_route_truth` shows the active live route contract used by the alert. The `edge_experiment` line carries the current split-test focus (`edge_state`, preferred entry timing, preferred execution style), and an `edge_evolution` line carries the current allocation/promotion posture (`evolution_state`, `recommended_action`, `allocation_bias`, `promotion_candidate_*`).
+The alert headline starts with `live_order_candidates`, `review_candidates`, `blocked_live_candidates`, and `blocked_context_only` so the Discord preview is explicit. The Discord title follows the same split: live candidates become `[중요] ... 라이브 주문 후보 확인`, live-routable blocked candidates become `[주의] ... 라이브 주문 후보 차단`, and zero live/blocked candidates stay `[모니터링] ... 주문 후보 없음`. The second line always carries `order_truth=live_candidate_promotion_readiness`. The `approval_strip: approve -> align -> act` line still mirrors `/portfolio/budget`, the `contract_trace` line repeats the same `approve / align / act` contract before appending raw runtime/playbook fields for debugging, and `order_route_truth` shows the active live route contract used by the alert. `route_mismatch` explains why visible surface rows are outside the live route, and `operator_action` compresses that into the operator state and next action. The `edge_experiment` line carries the current split-test focus (`edge_state`, preferred entry timing, preferred execution style), and an `edge_evolution` line carries the current allocation/promotion posture (`evolution_state`, `recommended_action`, `allocation_bias`, `promotion_candidate_*`).
 
-The JSON result also exposes the same counts at the top level as `entry_counts`, `live_order_candidates`, `blocked_live_order_candidates`, `context_review_setups`, `blocked_setups`, and `research_only_setups`. `snapshot.counts` remains the full source of truth, but operators and health checks should not need to open the nested snapshot just to verify whether an alert was suppressed because live candidates were zero.
+The JSON result also exposes the same counts at the top level as `entry_counts`, `source_counts`, `display_counts`, `truncated_entry_counts`, `live_order_candidates`, `blocked_live_order_candidates`, `blocked_context_only_setups`, `blocked_setup_breakdown`, `route_mismatch_summary`, `operator_action_summary`, `context_review_setups`, `blocked_setups`, and `research_only_setups`. `snapshot.counts` / `source_counts` are the full source counts before `--max-per-status` truncation. `display_counts` is the number of rows rendered in `snapshot.sections`, and `truncated_entry_counts` shows how many rows were omitted from the compact display. The rendered `message` is saved even when `reason=no_alertable_rows` and Discord is not dispatched. Operators and health checks should not need to open the nested snapshot just to verify whether an alert was suppressed because live candidates were zero.
 
 Read the alert as a compressed surface, not as the full experiment policy. The current runtime still enforces:
 
@@ -40,12 +40,19 @@ Candidate rows still append row-level `edge=` and `split=` hints when the portfo
 
 The alert's own dedupe state file is separate from `review_followup_ledger`; the state file suppresses repeated notifications, while the ledger records split/evolution packet history across surfaces. Dedupe intentionally uses a stable candidate identity: random reroute suffixes like `_r7a1fcc` are stripped from `plan_id`, and recently notified stable states are suppressed for `ENTRY_SURFACE_MIN_REPEAT_MINUTES` minutes by default.
 
-The tick also uses a non-overlap lock. If a previous `/portfolio/budget` request is still running, the next tick exits with `reason=entry_surface_tick_already_running` instead of starting a second request. Source request failures such as `/portfolio/budget` timeouts are written as `reason=source_request_failed` in the latest run payload and do not dispatch Discord.
+The tick also uses a non-overlap lock. If a previous `/portfolio/budget` request is still running, the next tick writes `reason=entry_surface_tick_already_running` to the latest run payload and exits instead of starting a second request. Source request failures such as `/portfolio/budget` timeouts are written as `reason=source_request_failed` in the latest run payload and do not dispatch Discord.
 
 Operational reading rules:
 
 - Treat `LIVE_ORDER_CANDIDATE=0` as "no live order candidate", even if `CONTEXT_REVIEW_SETUP` is non-zero.
 - Treat `blocked_live_order_candidates>0` as "there was a live-routable candidate, but it was blocked before submission." It is not an entry fill and not a submitted order, but it is more important than context-only review.
+- Treat `blocked_context_only_setups>0` as blocked portfolio context outside the current live route. It explains scanner activity, but it is not an order-submit failure.
+- Use `route_mismatch_summary` to see why rows are context-only. For example, `strategy_family_not_live_route` means the candidate family is outside the current live contract; `entry_model_not_live_route` means the entry model is not enabled for live submit.
+- Use `operator_action_summary.state` as the first reading priority:
+  - `live_order_candidate_present`: a live order candidate exists; inspect intent/submission/fill.
+  - `live_order_candidate_blocked`: a live-routable candidate was blocked before submission; inspect validation/portfolio/risk blockers.
+  - `context_only_outside_live_route`: scanner/portfolio activity is outside the live route; do not expect an order unless the live contract is intentionally changed.
+  - `no_surface_candidates`: there is no current surface candidate; wait for fresh candidate generation.
 - Treat `CONTEXT_REVIEW_SETUP` as validation/review context only. It can explain why the portfolio scanner is active, but it is not proof that an order should be submitted.
 - If the alert shows a preferred `entry_timing` and `execution_style` at the same time, do not open both experiments in parallel. Check `operator_action_priority.experiment_execution_policy` on dashboard or validation and execute only the active split.
 - If the preferred branch looks better but the validation surface still says `sample_maturity_state=pre_directional`, `directional_only`, or `review_ready`, keep collecting closes before treating it as a rollout conclusion.
@@ -92,13 +99,26 @@ bash /Users/yumin/Documents/trading/scripts/run_entry_surface_tick.sh
   - render the message and latest artifact without sending Discord
 - `ENTRY_SURFACE_FORCE_SEND=1`
   - bypass dedupe suppression for one run
+- `ENTRY_SURFACE_QUIET=1`
+  - write the latest run artifact without printing the full JSON payload to stdout; use this for launchd/cron
 
 ## Artifacts
+
+Manual wrapper runs in the workspace by default:
 
 - latest run payload:
   - `/Users/yumin/Documents/trading/reports/operations/entry_surface/latest_entry_alert_run.json`
 - dedupe state:
   - `/Users/yumin/Documents/trading/reports/operations/entry_surface/last_alert_state.json`
+
+The installed launchd agent runs from the runtime copy to avoid macOS Documents wrapper permission issues:
+
+- latest run payload:
+  - `/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/entry_surface/latest_entry_alert_run.json`
+- dedupe state:
+  - `/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/entry_surface/last_alert_state.json`
+
+The MICRO_LIVE ops heartbeat also watches the installed runtime latest payload. A stale file, `source_request_failed`, or a missing snapshot is treated as an operating failure; `entry_surface_tick_already_running` is treated as WATCH. For healthy runs, heartbeat keeps `report_reason=no_alertable_rows` but expands `status_detail` with `operator_action_summary.state`, `next_action`, and the top route mismatch reason. So the entry alert schedule itself cannot silently fail while the general heartbeat still looks clean, and a PASS heartbeat can still show whether the surface is simply outside the live route.
 
 ## Quick Checks
 

@@ -5300,3 +5300,632 @@
   - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_api_smoke.py tests/test_portfolio_budget_report.py tests/test_notification_dispatcher.py tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_script_entrypoints.py tests/test_auto_trading_transition_phase1.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_main_live_readiness.py tests/test_transition_variant_live_readiness.py tests/test_replay_validation_bridge.py tests/test_live_order_lifecycle.py tests/test_execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_strategy_engine_ops.py tests/test_score_to_outcome_funnel.py tests/test_execution_quality.py tests/test_portfolio_overlay.py tests/test_plan_generator.py tests/test_historical_walk_forward_proof.py tests/test_stage_monitor_tick.py tests/test_micro_live_operational_guards.py tests/test_signal_alerts.py -q`
   - `428 passed`
 - `git diff --check`
+
+## 2026-05-15 Iteration #200
+### 결함 수정: `partial_exit`/`sl` execution alert가 낮은 중요도로 suppress될 수 있던 문제
+- `StrategyEngine._emit_fill_stage_alerts()`는 부분청산을 `partial_exit`, 손절 종료를 `sl` alert type으로 발행한다.
+- 그런데 `NotificationDispatcher`의 Discord 중요 알림 목록과 trade formatter 목록에는 `partial_exit`, `sl`이 빠져 있었다.
+- 결과적으로 subscription이 있어도 Discord skip reason이 `discord_low_importance_alert_suppressed`가 되거나, trade alert가 아니라 운영 알림처럼 보일 수 있었다.
+- 수정:
+  - Discord important types에 `partial_exit`, `sl`을 추가했다.
+  - trade signal formatter 대상에 `partial_exit`, `sl`을 추가했다.
+  - 제목을 각각 `부분 청산 발생`, `손절 발생`으로 분리했다.
+  - fill-stage 회귀 테스트를 추가해 `PARTIAL_EXIT -> partial_exit`, `CLOSED/stop_loss -> sl`이 execution fill truth로 발행되는지 확인한다.
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: ready
+  - runtime_src의 `notification_dispatcher.py`와 `strategy_engine.py`가 workspace와 동일한지 diff로 확인했다.
+  - runtime title probe:
+    - `partial_exit skip=''`, `[중요] BTCUSDC 부분 청산 발생`
+    - `sl skip=''`, `[중요] BTCUSDC 손절 발생`
+  - runtime ops heartbeat: `PASS`, hard `0`, warning `0`
+
+### 검증
+- `PYTHONPATH="$PWD" ./.venv/bin/python -m py_compile app/services/notification_dispatcher.py app/services/strategy_engine.py`
+- `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_notification_dispatcher.py::test_dispatcher_partial_exit_and_sl_are_trade_alerts_not_suppressed tests/test_signal_alerts.py::test_ingest_execution_fill_emits_partial_exit_and_stop_loss_alerts tests/test_signal_alerts.py::test_ingest_execution_fill_emits_entry_tp_and_closed_alerts -q`
+- 결과: `3 passed`
+- broader:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_signal_alerts.py tests/test_notification_dispatcher.py tests/test_session_impulse_retest_execution_path.py -q`
+  - `105 passed`
+- full regression:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_api_smoke.py tests/test_portfolio_budget_report.py tests/test_notification_dispatcher.py tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_script_entrypoints.py tests/test_auto_trading_transition_phase1.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_main_live_readiness.py tests/test_transition_variant_live_readiness.py tests/test_replay_validation_bridge.py tests/test_live_order_lifecycle.py tests/test_execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_strategy_engine_ops.py tests/test_score_to_outcome_funnel.py tests/test_execution_quality.py tests/test_portfolio_overlay.py tests/test_plan_generator.py tests/test_historical_walk_forward_proof.py tests/test_stage_monitor_tick.py tests/test_micro_live_operational_guards.py tests/test_signal_alerts.py -q`
+  - `430 passed`
+- `git diff --check`
+
+## 2026-05-15 Iteration #201
+### 추가 개선: execution fill 알림 가격이 실제 체결가를 누락할 수 있던 문제
+- `partial_exit`/`sl`을 중요 알림으로 올리는 경로는 복구됐지만, Discord trade formatter의 가격 선택 순서가 `event_price/price/entry_price`였다.
+- fill-stage alert payload는 실제 체결가를 `fill_price`에 담으므로, `event_price/price`가 없는 execution fill 알림은 `가격:` 라인이 없거나 진입가로 fallback될 수 있었다.
+- 수정:
+  - Discord trade formatter 가격 fallback을 `event_price/price/fill_price/entry_price`로 변경했다.
+  - `partial_exit`/`sl` 회귀 테스트에서 `fill_price=99.5`가 `가격: 99.5`로 표시되는지 확인한다.
+  - runbook에 execution fill truth 알림의 가격 표시는 `fill_price`를 포함해야 한다고 문서화했다.
+
+### 검증
+- `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_notification_dispatcher.py::test_dispatcher_partial_exit_and_sl_are_trade_alerts_not_suppressed tests/test_signal_alerts.py::test_ingest_execution_fill_emits_partial_exit_and_stop_loss_alerts -q`
+- 결과: `2 passed`
+- broader:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_notification_dispatcher.py tests/test_signal_alerts.py tests/test_micro_live_operational_guards.py tests/test_entry_surface_scripts.py -q`
+  - `119 passed`
+- full regression:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_api_smoke.py tests/test_portfolio_budget_report.py tests/test_notification_dispatcher.py tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_script_entrypoints.py tests/test_auto_trading_transition_phase1.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_main_live_readiness.py tests/test_transition_variant_live_readiness.py tests/test_replay_validation_bridge.py tests/test_live_order_lifecycle.py tests/test_execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_strategy_engine_ops.py tests/test_score_to_outcome_funnel.py tests/test_execution_quality.py tests/test_portfolio_overlay.py tests/test_plan_generator.py tests/test_historical_walk_forward_proof.py tests/test_stage_monitor_tick.py tests/test_micro_live_operational_guards.py tests/test_signal_alerts.py -q`
+  - `430 passed`
+- `PYTHONPATH="$PWD" ./.venv/bin/python -m py_compile app/services/notification_dispatcher.py app/services/strategy_engine.py scripts/notify_entry_surface.py scripts/run_micro_live_no_order_watchdog.py scripts/run_live_reconciliation_watchdog.py scripts/run_micro_live_ops_heartbeat.py`
+- `git diff --check`
+
+## 2026-05-15 Iteration #202
+### 운영 truth 위치 재확인: workspace stale report와 runtime_src scheduled report 분리
+- workspace에서 `run_micro_live_ops_heartbeat.py --no-write-report`를 실행하면 workspace의 `reports/operations/...`를 읽는다.
+- 직전 workspace 리포트 일부가 stale이라 heartbeat가 `FAIL`로 보였지만, launchd plist는 runtime 배포본인 `~/Library/Application Support/trading/runtime_src`에서 실행되도록 설치되어 있었다.
+- runtime_src의 실제 launchd logs와 latest reports를 확인했다.
+  - runtime_src `micro_live_ops_heartbeat/latest.json`: `PASS`, hard `0`, warning `0`
+  - runtime_src `micro_live_runtime_guard/latest.md`: fresh
+  - runtime_src `live_reconciliation_watchdog/latest.md`: fresh
+  - runtime_src `micro_live_no_order_watchdog/latest.md`: fresh
+  - runtime_src `micro_live_boot_check/latest.md`: fresh
+  - runtime_src `session_impulse_retest_runtime_audit/latest.md`: fresh
+- workspace 리포트도 수동으로 갱신해 같은 결론을 확인했다.
+  - runtime guard: `PASS/PASS`
+  - reconciliation watchdog: `OK/no_reconciliation_gap_detected`
+  - no-order watchdog: `OK/no_recent_live_intents`, runtime live intent `0`, submit-ready `0`, blocked `0`
+  - session impulse retest runtime audit: `PASS`, hard route failures `0`
+  - boot check: `PASS`, blocking failures `0`
+  - ops heartbeat: `PASS`, hard `0`, warning `0`
+- entry surface launchd는 runtime_src가 아니라 workspace의 `notify_entry_surface.py`와 `reports/operations/entry_surface/latest_entry_alert_run.json`을 사용한다.
+  - latest entry surface: `notified=false`, `reason=no_alertable_rows`, `LIVE_ORDER_CANDIDATE=0`, `blocked_live_order_candidates=0`
+- runbook에 운영 launchd truth 위치를 명시했다.
+
+## 2026-05-15 Iteration #203
+### 운영 개선: launchd scheduled guard stdout 로그 폭증 방지
+- runtime_src launchd 로그를 확인했을 때 `session_impulse_retest_runtime_audit.out.log`가 10MB 이상으로 가장 크게 증가하고 있었다.
+- 원인은 주기 실행 guard들이 `latest.md/latest.json`을 쓰면서도 매번 전체 JSON payload를 stdout에 출력하는 구조였다.
+- 수정:
+  - 아래 scheduled guard scripts에 `--quiet` 옵션을 추가했다. 수동 실행은 기존처럼 stdout JSON을 출력하고, `--quiet`일 때만 stdout 출력을 생략한다.
+    - `run_micro_live_runtime_guard.py`
+    - `run_micro_live_boot_check.py`
+    - `run_micro_live_no_order_watchdog.py`
+    - `run_live_reconciliation_watchdog.py`
+    - `run_micro_live_ops_heartbeat.py`
+    - `run_session_impulse_retest_runtime_audit_report.py`
+  - `install_micro_live_ops_launchd.py`가 자주 도는 scheduled guard에 `--quiet`를 붙여 plist를 생성하게 했다.
+  - 회귀 테스트로 launchd generator의 quiet args 포함 여부와 runtime audit quiet 모드가 stdout 없이 `latest.md/latest.json`을 쓰는지 확인했다.
+
+### 검증
+- `PYTHONPATH="$PWD" ./.venv/bin/python -m py_compile scripts/run_micro_live_runtime_guard.py scripts/run_micro_live_boot_check.py scripts/run_micro_live_no_order_watchdog.py scripts/run_live_reconciliation_watchdog.py scripts/run_micro_live_ops_heartbeat.py scripts/run_session_impulse_retest_runtime_audit_report.py scripts/install_micro_live_ops_launchd.py`
+- `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_micro_live_operational_guards.py::test_launchd_generator_includes_remaining_operational_guards tests/test_session_impulse_retest_execution_path.py::test_session_impulse_retest_runtime_audit_report_quiet_writes_without_stdout -q`
+- 결과: `2 passed`
+- quiet smoke:
+  - `PYTHONPATH="$PWD" ./.venv/bin/python scripts/run_session_impulse_retest_runtime_audit_report.py --hours 3 --limit 5 --no-fail-exit --quiet --report-dir reports/operations/session_impulse_retest_runtime_audit_quiet_probe`
+  - 결과: `exit=0`, stdout 없음, `latest.md/latest.json` 생성
+- broader:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_micro_live_operational_guards.py tests/test_session_impulse_retest_execution_path.py tests/test_notification_dispatcher.py tests/test_entry_surface_scripts.py -q`
+  - `190 passed`
+- full regression:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_api_smoke.py tests/test_portfolio_budget_report.py tests/test_notification_dispatcher.py tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_script_entrypoints.py tests/test_auto_trading_transition_phase1.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_main_live_readiness.py tests/test_transition_variant_live_readiness.py tests/test_replay_validation_bridge.py tests/test_live_order_lifecycle.py tests/test_execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_strategy_engine_ops.py tests/test_score_to_outcome_funnel.py tests/test_execution_quality.py tests/test_portfolio_overlay.py tests/test_plan_generator.py tests/test_historical_walk_forward_proof.py tests/test_stage_monitor_tick.py tests/test_micro_live_operational_guards.py tests/test_signal_alerts.py -q`
+  - `431 passed`
+- `git diff --check`
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: ready
+  - runtime_src에서 `install_micro_live_ops_launchd.py --install --unload --load` 실행
+  - 결과: `overall_status=PASS`, 12개 launchd job unload/load 모두 returncode `0`
+  - 설치된 plist 확인:
+    - `com.trading.micro-live.session-impulse-retest-runtime-audit`: `--quiet`
+    - `com.trading.micro-live.ops-heartbeat`: `--quiet`
+    - `runtime-guard`, `no-order-watchdog`, `reconciliation-watchdog`, `boot-check`, `ops-heartbeat`, `session-impulse-retest-runtime-audit` 모두 `--quiet`
+  - `launchctl list`: 12개 `com.trading.micro-live.*` job 로드 확인
+  - runtime_src `micro_live_ops_heartbeat/latest.json`: `PASS`, hard `0`, warning `0`
+  - runtime_src latest reports fresh:
+    - `micro_live_runtime_guard/latest.md`
+    - `live_reconciliation_watchdog/latest.md`
+    - `micro_live_boot_check/latest.md`
+    - `micro_live_ops_heartbeat/latest.md`
+    - `session_impulse_retest_runtime_audit/latest.md`
+  - 기존 stdout 로그 파일 크기는 그대로 남지만, 새 scheduled guard 실행은 `--quiet` 때문에 추가 JSON dump를 남기지 않는다.
+  - quiet smoke 재확인:
+    - `runtime_guard stdout_bytes=0`
+    - `no_order stdout_bytes=0`
+    - `reconciliation stdout_bytes=0`
+    - `boot_check stdout_bytes=0`
+    - `ops_heartbeat stdout_bytes=0`
+    - `sir_audit stdout_bytes=0`
+    - `latest_json_count=6`
+
+## 2026-05-15 Iteration #204
+### 운영 개선: entry surface launchd stdout 폭증 방지 및 설치 경로 정리
+- entry surface launchd의 stdout log가 23MB까지 증가해 있었다.
+- `notify_entry_surface.py`는 `latest_entry_alert_run.json`을 쓰면서도 매번 전체 JSON을 stdout에 출력하고 있었다.
+- 수정:
+  - `notify_entry_surface.py`에 `--quiet` 옵션을 추가했다.
+  - `run_entry_surface_tick.sh`는 `ENTRY_SURFACE_QUIET=1`이면 `--quiet`를 넘긴다.
+  - entry surface launchd plist는 `--quiet`, `--lock-file`, `--output-file`, `--min-repeat-minutes`를 명시한다.
+  - 처음에는 wrapper 실행으로 바꿨지만 launchd에서 macOS Documents 권한 문제로 `/bin/bash ... Operation not permitted`가 발생했다.
+  - 따라서 설치 plist는 직접 Python 호출로 되돌리고, quiet/lock/output 계약만 명시하는 방식으로 고정했다.
+  - `docs/ENTRY_ALERT_AUTOMATION.md`와 runbook에 quiet 운영 방식을 문서화했다.
+
+### 검증
+- `PYTHONPATH="$PWD" ./.venv/bin/python -m py_compile scripts/notify_entry_surface.py`
+- `bash -n scripts/run_entry_surface_tick.sh`
+- `plutil -lint launchd/com.yumin.trading.entry-surface.plist`
+- `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_entry_surface_scripts.py::test_emit_result_quiet_writes_output_without_stdout tests/test_entry_surface_scripts.py::test_main_emits_request_failure_without_dispatch tests/test_entry_surface_scripts.py::test_main_writes_state_after_successful_delivery -q`
+- 결과: `3 passed`
+- quiet smoke:
+  - `ENTRY_SURFACE_DRY_RUN=1 ENTRY_SURFACE_QUIET=1 ... /bin/bash scripts/run_entry_surface_tick.sh`
+  - 결과: `exit=0`, `stdout_bytes=0`, latest output `reason=no_alertable_rows`, `live_order_candidates=0`, `blocked_live_order_candidates=0`
+- broader:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_entry_surface_scripts.py tests/test_notification_dispatcher.py tests/test_micro_live_operational_guards.py tests/test_session_impulse_retest_execution_path.py -q`
+  - `191 passed`
+- installed launchd:
+  - 첫 시도는 workspace bash wrapper를 사용했지만 launchd에서 `/bin/bash ... Operation not permitted`가 발생했다.
+  - 두 번째 시도는 workspace Python 직접 호출이었고 latest는 갱신됐지만 `launchctl list` last exit code가 `78/EX_CONFIG`로 남았다.
+  - 최종 설치는 runtime_src Python/script/report 경로로 통일했다.
+  - `~/Library/LaunchAgents/com.yumin.trading.entry-surface.plist` 재설치/로드
+  - installed ProgramArguments includes runtime_src `notify_entry_surface.py`, `--quiet`, `--lock-file`, `--output-file`
+  - installed WorkingDirectory/StandardOutPath/StandardErrorPath are under `~/Library/Application Support/trading/runtime_src`
+  - runtime_src code and installed plist are synced with workspace source.
+  - kickstart 후 종료 상태:
+    - `launchctl list`: `com.yumin.trading.entry-surface` status `0`
+    - runtime_src entry surface stdout/stderr logs: `0` bytes
+    - runtime_src latest entry surface: `notified=false`, `reason=no_alertable_rows`, `live_order_candidates=0`, `blocked_live_order_candidates=0`
+- full regression:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_api_smoke.py tests/test_portfolio_budget_report.py tests/test_notification_dispatcher.py tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_script_entrypoints.py tests/test_auto_trading_transition_phase1.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_main_live_readiness.py tests/test_transition_variant_live_readiness.py tests/test_replay_validation_bridge.py tests/test_live_order_lifecycle.py tests/test_execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_strategy_engine_ops.py tests/test_score_to_outcome_funnel.py tests/test_execution_quality.py tests/test_portfolio_overlay.py tests/test_plan_generator.py tests/test_historical_walk_forward_proof.py tests/test_stage_monitor_tick.py tests/test_micro_live_operational_guards.py tests/test_signal_alerts.py -q`
+  - `432 passed`
+- `git diff --check`
+
+## 2026-05-15 Iteration #205
+### 운영 개선: entry surface schedule도 ops heartbeat truth에 포함
+- entry surface launchd는 별도 agent라서 `latest_entry_alert_run.json`이 stale 되거나 `/portfolio/budget` 요청 실패가 남아도, 기존 MICRO_LIVE ops heartbeat만 보면 다른 guard들이 PASS인 상태로 보일 수 있었다.
+- 수정:
+  - `run_micro_live_ops_heartbeat.py` 기본 job에 `entry_surface`를 추가했다.
+  - 감시 대상은 runtime/workspace 기준 `reports/operations/entry_surface/latest_entry_alert_run.json`이다.
+  - `source_request_failed`, snapshot missing, stale file은 hard failure로 올린다.
+  - `entry_surface_tick_already_running`은 이전 tick이 아직 돈다는 뜻이라 WATCH로 올린다.
+  - delivery가 neither delivered nor skipped이면 WATCH로 올린다.
+  - 정상적인 `no_alertable_rows`는 PASS로 남기되, `status_detail/report_reason`에 원인을 보존한다.
+  - `docs/ENTRY_ALERT_AUTOMATION.md`와 runbook에 entry surface가 ops heartbeat 감시 대상이라는 점을 문서화했다.
+
+### 검증
+- targeted:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_micro_live_operational_guards.py::test_ops_heartbeat_defaults_include_entry_surface tests/test_micro_live_operational_guards.py::test_ops_heartbeat_checks_entry_surface_latest_payload tests/test_micro_live_operational_guards.py::test_ops_heartbeat_fails_on_entry_surface_source_request_failure -q`
+  - `3 passed`
+- broader:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_micro_live_operational_guards.py tests/test_entry_surface_scripts.py tests/test_notification_dispatcher.py -q`
+  - `116 passed`
+- full regression:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_api_smoke.py tests/test_portfolio_budget_report.py tests/test_notification_dispatcher.py tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_script_entrypoints.py tests/test_auto_trading_transition_phase1.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_main_live_readiness.py tests/test_transition_variant_live_readiness.py tests/test_replay_validation_bridge.py tests/test_live_order_lifecycle.py tests/test_execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_strategy_engine_ops.py tests/test_score_to_outcome_funnel.py tests/test_execution_quality.py tests/test_portfolio_overlay.py tests/test_plan_generator.py tests/test_historical_walk_forward_proof.py tests/test_stage_monitor_tick.py tests/test_micro_live_operational_guards.py tests/test_signal_alerts.py -q`
+  - `435 passed`
+- `PYTHONPATH="$PWD" ./.venv/bin/python -m py_compile scripts/run_micro_live_ops_heartbeat.py scripts/notify_entry_surface.py app/services/notification_dispatcher.py`
+- `git diff --check`
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: ready
+  - runtime_src의 `run_micro_live_ops_heartbeat.py`가 workspace와 동일한지 diff로 확인했다.
+  - `launchctl list`: `com.yumin.trading.entry-surface`, `com.trading.micro-live.ops-heartbeat` 모두 status `0`
+  - entry surface kickstart 후 runtime latest:
+    - `notified=false`
+    - `reason=no_alertable_rows`
+    - `LIVE_ORDER_CANDIDATE=0`
+    - `BLOCKED_SETUP=3`
+    - `CONTEXT_REVIEW_SETUP=2`
+    - `blocked_live_order_candidates=0`
+  - runtime entry surface stdout/stderr logs: `0` bytes
+  - runtime ops heartbeat:
+    - `overall_status=PASS`
+    - hard `0`, warning `0`
+    - `entry_surface.status=PASS`
+    - `entry_surface.status_detail=no_alertable_rows`
+  - ops heartbeat launchd kickstart 후 `latest.json`도 같은 결과로 갱신됨
+  - runtime ops heartbeat stdout/stderr logs: `0` bytes
+
+## 2026-05-15 Iteration #206
+### 운영 개선: `BLOCKED_SETUP`을 live-blocked와 context-only blocked로 분해
+- 현재 runtime entry surface는 `BLOCKED_SETUP=3`이지만, 각 row의 `entry_surface_route.status`는 `context_only`였다.
+- 이 상태는 portfolio surface의 blocked context가 있다는 뜻이지, live-route 주문 후보가 submit 전에 막혔다는 뜻은 아니다.
+- 기존 payload에도 `blocked_live_order_candidates=0`은 있었지만, `BLOCKED_SETUP=3`만 보면 주문 차단처럼 오해할 수 있었다.
+- 수정:
+  - entry surface headline에 `blocked_context_only`를 추가했다.
+  - message counts line에 `blocked_breakdown=live:N,context_only:M`을 추가했다.
+  - `BLOCKED_SETUP` 섹션 제목도 `(live=N, context_only=M)`를 같이 보여준다.
+  - result top-level에 `blocked_context_only_setups`와 `blocked_setup_breakdown`을 추가했다.
+  - alertable 조건은 유지했다: `LIVE_ORDER_CANDIDATE>0` 또는 `blocked_live_order_candidates>0`일 때만 Discord alert 대상이다.
+  - `docs/ENTRY_ALERT_AUTOMATION.md`와 runbook에 `BLOCKED_SETUP` 전체와 live-blocked 주문 후보를 분리해서 읽어야 한다고 문서화했다.
+
+### 검증
+- targeted:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_entry_surface_scripts.py::test_context_only_surface_is_not_discord_alertable tests/test_entry_surface_scripts.py::test_render_message_exposes_blocked_live_candidate_count tests/test_entry_surface_scripts.py::test_render_message_includes_all_sections_and_reasons -q`
+  - `3 passed`
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_notification_dispatcher.py::test_dispatcher_entry_surface_context_only_blocked_title_stays_monitoring tests/test_notification_dispatcher.py::test_dispatcher_entry_surface_blocked_live_candidate_title_requires_review -q`
+  - `2 passed`
+- broader:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_entry_surface_scripts.py tests/test_notification_dispatcher.py tests/test_micro_live_operational_guards.py -q`
+  - `116 passed`
+- full regression:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_api_smoke.py tests/test_portfolio_budget_report.py tests/test_notification_dispatcher.py tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_script_entrypoints.py tests/test_auto_trading_transition_phase1.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_main_live_readiness.py tests/test_transition_variant_live_readiness.py tests/test_replay_validation_bridge.py tests/test_live_order_lifecycle.py tests/test_execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_strategy_engine_ops.py tests/test_score_to_outcome_funnel.py tests/test_execution_quality.py tests/test_portfolio_overlay.py tests/test_plan_generator.py tests/test_historical_walk_forward_proof.py tests/test_stage_monitor_tick.py tests/test_micro_live_operational_guards.py tests/test_signal_alerts.py -q`
+  - `436 passed`
+- `git diff --check`
+- workspace dry-run:
+  - `reason=no_alertable_rows`
+  - `LIVE_ORDER_CANDIDATE=0`
+  - `blocked_live_order_candidates=0`
+  - `blocked_context_only_setups=3`
+  - `blocked_setup_breakdown={context_only: 3, live_routable: 0}`
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: ready
+  - runtime_src의 `notify_entry_surface.py`가 workspace와 동일한지 diff로 확인했다.
+  - entry surface launchd kickstart 후 runtime latest:
+    - `reason=no_alertable_rows`
+    - `notified=false`
+    - `LIVE_ORDER_CANDIDATE=0`
+    - `blocked_live_order_candidates=0`
+    - `blocked_context_only_setups=3`
+    - `blocked_setup_breakdown={context_only: 3, live_routable: 0}`
+  - runtime entry surface stdout/stderr logs: `0` bytes
+  - runtime ops heartbeat:
+    - `overall_status=PASS`
+    - hard `0`, warning `0`
+    - `entry_surface.status_detail=no_alertable_rows`
+
+## 2026-05-15 Iteration #208
+### 운영 개선: no-order watchdog에 SIR 후보 생성 context 추가
+- `run_micro_live_no_order_watchdog.py`는 live intent/submission gap을 잘 보여주지만, live intent가 0이면 `fresh live 후보 대기`로 끝났다.
+- 이 경우 사용자는 "시작하지 않으면 실전 종료 표본이 계속 0 아닌가?"라는 모순을 다시 확인해야 했다.
+- 수정:
+  - no-order watchdog payload에 `candidate_generation_context`를 추가했다.
+  - current family filter에 `session_impulse_retest`가 있으면 DB의 SIR runtime audit을 같은 runtime scope로 집계한다.
+  - `no_candidate_status_counts`, `non_blocking_status_counts`, `order_blocking_status_counts`, `watch_status_counts`, `hard_status_counts`를 함께 남긴다.
+  - live intent가 0일 때 `next_action_text`를 SIR audit 기준으로 구체화한다.
+    - 예: `SIR fresh 후보 대기: no_live_route_candidate_plan=11`
+  - watchdog Discord message에도 `후보: SIR audit ... / no_candidate=... / non_blocking=... / order_blocking=...` 라인을 추가했다.
+  - message 안의 `actions=`도 새 `next_action_text`와 일관되도록 갱신했다.
+  - runbook에 no-order watchdog이 SIR 후보 생성 context를 함께 보여준다고 문서화했다.
+
+### 검증
+- targeted:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_micro_live_operational_guards.py::test_no_order_watchdog_augments_no_intents_with_sir_candidate_context tests/test_micro_live_operational_guards.py::test_no_order_watchdog_message_separates_runtime_scope_from_lookback_context -q`
+  - `2 passed`
+- broader:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_micro_live_operational_guards.py tests/test_entry_surface_scripts.py tests/test_notification_dispatcher.py -q`
+  - `118 passed`
+- full regression:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_api_smoke.py tests/test_portfolio_budget_report.py tests/test_notification_dispatcher.py tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_script_entrypoints.py tests/test_auto_trading_transition_phase1.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_main_live_readiness.py tests/test_transition_variant_live_readiness.py tests/test_replay_validation_bridge.py tests/test_live_order_lifecycle.py tests/test_execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_strategy_engine_ops.py tests/test_score_to_outcome_funnel.py tests/test_execution_quality.py tests/test_portfolio_overlay.py tests/test_plan_generator.py tests/test_historical_walk_forward_proof.py tests/test_stage_monitor_tick.py tests/test_micro_live_operational_guards.py tests/test_signal_alerts.py -q`
+  - `437 passed`
+- `git diff --check`
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: ready
+  - runtime_src의 `run_micro_live_no_order_watchdog.py`가 workspace와 동일한지 diff로 확인했다.
+  - runtime no-order watchdog direct run:
+    - `status=OK`
+    - `reason=no_recent_live_intents`
+    - `next=SIR fresh 후보 대기: no_live_route_candidate_plan=11`
+    - `candidate_generation_status=no_live_route_candidate`
+    - `audit_count=27`
+    - `order_blocking_status_counts={}`
+    - `no_candidate_status_counts={no_live_route_candidate_plan: 11}`
+    - `non_blocking_status_counts={ws_stream_active_route_suppressed: 14}`
+  - no-order watchdog launchd kickstart 후 latest:
+    - `status=OK`
+    - `reason=no_recent_live_intents`
+    - `next=SIR fresh 후보 대기: no_live_route_candidate_plan=11`
+    - `candidate_generation_status=no_live_route_candidate`
+    - `audit_count=35`
+    - `order_blocking_status_counts={}`
+  - runtime ops heartbeat:
+    - `overall_status=PASS`
+    - hard `0`, warning `0`
+    - `no_order_watchdog.report_reason=no_recent_live_intents`
+    - `entry_surface.report_reason=no_alertable_rows`
+  - no-order/ops-heartbeat stdout/stderr logs: `0` bytes
+
+## 2026-05-15 Iteration #209
+### 운영 개선: no-order SIR 후보 context에 WATCH 상태도 노출
+- Iteration #208에서 no-order watchdog에 SIR 후보 생성 context를 붙였지만, `symbol_not_live_enabled_for_auto_route` 같은 WATCH 상태는 payload에는 있어도 message 요약에는 나오지 않았다.
+- 현재 runtime에서도 `watch_status_counts={symbol_not_live_enabled_for_auto_route: N}`가 발생하고 있었다.
+- 이 상태는 주문 차단은 아니지만, 왜 auto-route audit이 쌓이면서 intent가 0인지 이해하는 데 필요하다.
+- 수정:
+  - `watch_status_counts`를 no-order watchdog message의 `후보:` 라인에 추가했다.
+  - evaluation message에도 `watch=...`를 추가했다.
+  - no-candidate가 없고 watch만 있는 경우 `candidate_generation_status=watch_candidate_context`, `next_action_text=SIR 후보 생성 watch 확인: ...`로 표시한다.
+
+### 검증
+- targeted:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_micro_live_operational_guards.py::test_no_order_watchdog_augments_no_intents_with_sir_candidate_context tests/test_micro_live_operational_guards.py::test_no_order_watchdog_augments_watch_only_sir_candidate_context tests/test_micro_live_operational_guards.py::test_no_order_watchdog_message_separates_runtime_scope_from_lookback_context -q`
+  - `3 passed`
+- broader:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_micro_live_operational_guards.py tests/test_entry_surface_scripts.py tests/test_notification_dispatcher.py -q`
+  - `119 passed`
+- full regression:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_api_smoke.py tests/test_portfolio_budget_report.py tests/test_notification_dispatcher.py tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_script_entrypoints.py tests/test_auto_trading_transition_phase1.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_main_live_readiness.py tests/test_transition_variant_live_readiness.py tests/test_replay_validation_bridge.py tests/test_live_order_lifecycle.py tests/test_execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_strategy_engine_ops.py tests/test_score_to_outcome_funnel.py tests/test_execution_quality.py tests/test_portfolio_overlay.py tests/test_plan_generator.py tests/test_historical_walk_forward_proof.py tests/test_stage_monitor_tick.py tests/test_micro_live_operational_guards.py tests/test_signal_alerts.py -q`
+  - `438 passed`
+- `git diff --check`
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: ready
+  - runtime no-order watchdog launchd latest:
+    - `status=OK`
+    - `reason=no_recent_live_intents`
+    - `next=SIR fresh 후보 대기: no_live_route_candidate_plan=9`
+    - `candidate_generation_status=no_live_route_candidate`
+    - `watch={symbol_not_live_enabled_for_auto_route: 2}`
+    - message includes `watch=symbol_not_live_enabled_for_auto_route=2`
+    - `order_blocking=none`
+  - runtime ops heartbeat:
+    - `overall_status=PASS`
+    - hard `0`, warning `0`
+    - `no_order_watchdog.report_reason=no_recent_live_intents`
+  - no-order/ops-heartbeat stdout/stderr logs: `0` bytes
+
+## 2026-05-15 Iteration #214
+### 결함 수정: entry surface lock contention이 latest output에 기록되지 않던 문제
+- entry surface는 non-overlap lock을 써서 이전 `/portfolio/budget` tick이 아직 실행 중이면 다음 tick을 시작하지 않는다.
+- 문서와 ops heartbeat 계약상 이 경우 `reason=entry_surface_tick_already_running`이 latest run payload에 남아야 한다.
+- 하지만 lock 획득 실패 branch가 `_emit_result(None, ...)`를 호출하고 있어서, launchd quiet 모드에서는 stdout도 latest output도 남지 않을 수 있었다.
+- 수정:
+  - lock contention branch도 `output_file`로 `_emit_result`를 호출한다.
+  - quiet mode에서는 stdout 없이 `latest_entry_alert_run.json`에 `entry_surface_tick_already_running`을 기록한다.
+  - source request는 lock 획득 후에만 실행되는 기존 계약을 유지한다.
+
+### 검증
+- targeted:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_entry_surface_scripts.py::test_main_lock_contention_writes_latest_output_file tests/test_micro_live_operational_guards.py::test_ops_heartbeat_checks_entry_surface_latest_payload -q`
+  - `2 passed`
+- broader:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_entry_surface_scripts.py tests/test_notification_dispatcher.py tests/test_micro_live_operational_guards.py -q`
+  - `122 passed`
+- full regression:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_api_smoke.py tests/test_portfolio_budget_report.py tests/test_notification_dispatcher.py tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_script_entrypoints.py tests/test_auto_trading_transition_phase1.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_main_live_readiness.py tests/test_transition_variant_live_readiness.py tests/test_replay_validation_bridge.py tests/test_live_order_lifecycle.py tests/test_execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_strategy_engine_ops.py tests/test_score_to_outcome_funnel.py tests/test_execution_quality.py tests/test_portfolio_overlay.py tests/test_plan_generator.py tests/test_historical_walk_forward_proof.py tests/test_stage_monitor_tick.py tests/test_micro_live_operational_guards.py tests/test_signal_alerts.py -q`
+  - `441 passed`
+- `git diff --check`
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: ready
+  - runtime_src의 `notify_entry_surface.py`가 workspace와 동일한지 diff로 확인했다.
+  - entry surface launchd kickstart 후 runtime latest:
+    - `reason=no_alertable_rows`
+    - `notified=false`
+    - `state_written=true`
+    - `message` present
+    - `live_order_candidates=0`
+    - `blocked_live_order_candidates=0`
+    - `operator_action_summary.state=context_only_outside_live_route`
+  - runtime ops heartbeat:
+    - `overall_status=PASS`
+    - hard `0`, warning `0`
+    - `entry_surface.status_detail=no_alertable_rows | operator_action=context_only_outside_live_route | next=wait_for_live_route_candidate_or_change_live_contract_intentionally | route_reason=strategy_family_not_live_route:22`
+  - entry surface/ops heartbeat stdout/stderr logs: `0` bytes
+
+## 2026-05-15 Iteration #213
+### 운영 개선: no-alert entry surface result에도 rendered message 보존
+- entry surface는 Discord 전송이 필요한 경우에만 `message`를 result에 붙이고 있었다.
+- 그래서 `reason=no_alertable_rows`인 정상 대기 상태에서는 latest JSON 안에 counts/operator action은 있지만, 실제 Discord와 같은 human-readable 요약은 없었다.
+- 수정:
+  - `notify_entry_surface.py`가 snapshot 생성 직후 항상 `render_message(snapshot)`를 result에 저장한다.
+  - `no_alertable_rows`, `unchanged_surface_state`, `recent_surface_state_repeat`, `dry_run`, 실제 dispatch 모두 같은 message 형식을 공유한다.
+  - Discord dispatch 여부는 기존 `_has_alertable_rows`와 dedupe 결과를 그대로 따른다.
+  - docs에 no-alert saved result도 rendered `message`를 가진다는 점을 추가했다.
+
+### 검증
+- targeted:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_entry_surface_scripts.py::test_main_no_alertable_rows_still_emits_rendered_message tests/test_entry_surface_scripts.py::test_main_dry_run_prints_snapshot_without_dispatch tests/test_entry_surface_scripts.py::test_context_only_surface_is_not_discord_alertable -q`
+  - `3 passed`
+- broader:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_entry_surface_scripts.py tests/test_notification_dispatcher.py tests/test_micro_live_operational_guards.py -q`
+  - `121 passed`
+- full regression:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_api_smoke.py tests/test_portfolio_budget_report.py tests/test_notification_dispatcher.py tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_script_entrypoints.py tests/test_auto_trading_transition_phase1.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_main_live_readiness.py tests/test_transition_variant_live_readiness.py tests/test_replay_validation_bridge.py tests/test_live_order_lifecycle.py tests/test_execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_strategy_engine_ops.py tests/test_score_to_outcome_funnel.py tests/test_execution_quality.py tests/test_portfolio_overlay.py tests/test_plan_generator.py tests/test_historical_walk_forward_proof.py tests/test_stage_monitor_tick.py tests/test_micro_live_operational_guards.py tests/test_signal_alerts.py -q`
+  - `440 passed`
+- `git diff --check`
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: ready
+  - runtime_src의 `notify_entry_surface.py`가 workspace와 동일한지 diff로 확인했다.
+  - entry surface launchd kickstart 후 runtime latest:
+    - `reason=no_alertable_rows`
+    - `notified=false`
+    - `message` present
+    - message headline: `Trading entry surface alert: live_order_candidates=0, review_candidates=2, blocked_live_candidates=0, blocked_context_only=20`
+    - message operator line: `operator_action: state=context_only_outside_live_route | priority=monitor | next=wait_for_live_route_candidate_or_change_live_contract_intentionally | reason=strategy_family_not_live_route:22`
+  - runtime ops heartbeat:
+    - `overall_status=PASS`
+    - hard `0`, warning `0`
+    - `entry_surface.status_detail=no_alertable_rows | operator_action=context_only_outside_live_route | next=wait_for_live_route_candidate_or_change_live_contract_intentionally | route_reason=strategy_family_not_live_route:22`
+  - entry surface/ops heartbeat stdout/stderr logs: `0` bytes
+
+## 2026-05-15 Iteration #212
+### 운영 개선: heartbeat가 entry surface operator action까지 표시
+- Iteration #211에서 entry surface 자체에는 `operator_action_summary`가 생겼지만, ops heartbeat만 보면 정상 케이스가 여전히 `status_detail=no_alertable_rows`로 축약됐다.
+- 이러면 runtime이 PASS여도 "정말 후보가 없는지, route 밖 context-only인지"를 다시 latest entry surface JSON까지 열어야 했다.
+- 수정:
+  - `run_micro_live_ops_heartbeat.py`의 entry surface content check가 `operator_action_summary`를 읽는다.
+  - healthy run에서는 `report_reason=no_alertable_rows`를 보존하면서 `status_detail`에 `operator_action=<state>`, `next=<next_action>`, `route_reason=<top_route_mismatch_reason>`을 붙인다.
+  - heartbeat job row에도 `entry_surface_operator_action_state`, `entry_surface_operator_next_action`, `entry_surface_operator_route_reason`을 보존한다.
+  - docs에 heartbeat에서 entry surface operator action을 읽는 법을 추가했다.
+
+### 검증
+- targeted:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_micro_live_operational_guards.py::test_ops_heartbeat_checks_entry_surface_latest_payload tests/test_micro_live_operational_guards.py::test_ops_heartbeat_fails_on_entry_surface_source_request_failure -q`
+  - `2 passed`
+- broader:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_micro_live_operational_guards.py tests/test_entry_surface_scripts.py tests/test_notification_dispatcher.py -q`
+  - `120 passed`
+- full regression:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_api_smoke.py tests/test_portfolio_budget_report.py tests/test_notification_dispatcher.py tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_script_entrypoints.py tests/test_auto_trading_transition_phase1.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_main_live_readiness.py tests/test_transition_variant_live_readiness.py tests/test_replay_validation_bridge.py tests/test_live_order_lifecycle.py tests/test_execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_strategy_engine_ops.py tests/test_score_to_outcome_funnel.py tests/test_execution_quality.py tests/test_portfolio_overlay.py tests/test_plan_generator.py tests/test_historical_walk_forward_proof.py tests/test_stage_monitor_tick.py tests/test_micro_live_operational_guards.py tests/test_signal_alerts.py -q`
+  - `439 passed`
+- `git diff --check`
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: ready
+  - runtime_src의 `run_micro_live_ops_heartbeat.py`가 workspace와 동일한지 diff로 확인했다.
+  - entry surface + ops heartbeat launchd kickstart 후 runtime latest:
+    - `overall_status=PASS`
+    - hard `0`, warning `0`
+    - `entry_surface.report_reason=no_alertable_rows`
+    - `entry_surface.status_detail=no_alertable_rows | operator_action=context_only_outside_live_route | next=wait_for_live_route_candidate_or_change_live_contract_intentionally | route_reason=strategy_family_not_live_route:22`
+    - `entry_surface.entry_surface_operator_action_state=context_only_outside_live_route`
+  - runtime entry surface latest:
+    - `live_order_candidates=0`
+    - `blocked_live_order_candidates=0`
+    - `blocked_context_only_setups=20`
+    - `operator_action_summary.state=context_only_outside_live_route`
+  - entry surface/ops heartbeat stdout/stderr logs: `0` bytes
+
+## 2026-05-15 Iteration #211
+### 운영 개선: entry surface에 operator action summary 추가
+- Iteration #210에서 entry surface의 source count와 route mismatch 집계를 정확히 만들었지만, operator가 먼저 어떤 상태로 읽어야 하는지는 아직 메시지와 JSON에 명시되지 않았다.
+- 특히 `route_mismatch_summary.context_only_total>0`이고 `LIVE_ORDER_CANDIDATE=0`인 경우, "후보는 많은데 왜 주문이 안 들어가나"로 다시 오해할 수 있었다.
+- 수정:
+  - `operator_action_summary`를 entry surface snapshot/result top-level에 추가했다.
+  - 상태는 `live_order_candidate_present`, `live_order_candidate_blocked`, `context_only_outside_live_route`, `no_surface_candidates` 중 하나로 정규화한다.
+  - live 후보가 있으면 intent/submission/fill 확인, live-routable blocked 후보가 있으면 validation/portfolio/risk blocker 확인, context-only뿐이면 live route 후보 대기 또는 의도적 live contract 변경으로 안내한다.
+  - message에 `operator_action: state=... | priority=... | next=... | reason=... | family=... | entry_model=... | symbol=...` 라인을 추가했다.
+  - docs에 `operator_action_summary` 읽는 법을 추가했다.
+
+### 검증
+- targeted:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_entry_surface_scripts.py::test_build_entry_snapshot_maps_rows_to_three_statuses tests/test_entry_surface_scripts.py::test_entry_snapshot_counts_source_rows_not_display_cap tests/test_entry_surface_scripts.py::test_render_message_includes_all_sections_and_reasons tests/test_entry_surface_scripts.py::test_context_only_surface_is_not_discord_alertable tests/test_entry_surface_scripts.py::test_render_message_exposes_blocked_live_candidate_count -q`
+  - `5 passed`
+- broader:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_entry_surface_scripts.py tests/test_notification_dispatcher.py tests/test_micro_live_operational_guards.py -q`
+  - `120 passed`
+- full regression:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_api_smoke.py tests/test_portfolio_budget_report.py tests/test_notification_dispatcher.py tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_script_entrypoints.py tests/test_auto_trading_transition_phase1.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_main_live_readiness.py tests/test_transition_variant_live_readiness.py tests/test_replay_validation_bridge.py tests/test_live_order_lifecycle.py tests/test_execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_strategy_engine_ops.py tests/test_score_to_outcome_funnel.py tests/test_execution_quality.py tests/test_portfolio_overlay.py tests/test_plan_generator.py tests/test_historical_walk_forward_proof.py tests/test_stage_monitor_tick.py tests/test_micro_live_operational_guards.py tests/test_signal_alerts.py -q`
+  - `439 passed`
+- `git diff --check`
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: ready
+  - runtime_src의 `notify_entry_surface.py`가 workspace와 동일한지 diff로 확인했다.
+  - entry surface launchd kickstart 후 runtime latest:
+    - `reason=no_alertable_rows`
+    - `notified=false`
+    - `live_order_candidates=0`
+    - `blocked_live_order_candidates=0`
+    - `context_review_setups=2`
+    - `blocked_setups=20`
+    - `blocked_context_only_setups=20`
+    - `route_mismatch_summary.context_only_total=22`
+    - `operator_action_summary.state=context_only_outside_live_route`
+    - `operator_action_summary.next_action=wait_for_live_route_candidate_or_change_live_contract_intentionally`
+    - `operator_action_summary.top_route_mismatch_reason=strategy_family_not_live_route:22`
+    - `operator_action_summary.top_route_mismatch_family=legacy_zone_plan:19`
+    - `operator_action_summary.top_route_mismatch_entry_model=SWEEP_CONFIRM:11`
+  - runtime ops heartbeat:
+    - `overall_status=PASS`
+    - hard `0`, warning `0`
+    - `entry_surface.report_reason=no_alertable_rows`
+  - entry surface/ops heartbeat stdout/stderr logs: `0` bytes
+
+## 2026-05-15 Iteration #210
+### 결함 수정: entry surface counts가 표시 cap 기준으로 과소 집계되던 문제
+- `notify_entry_surface.py`는 `--max-per-status`로 각 section의 표시 row 수를 제한한다.
+- 그런데 기존 `snapshot.counts`와 top-level `entry_counts/blocked_setups/context_review_setups`가 제한 후 row 수를 세고 있었다.
+- 문서에는 `snapshot.counts`가 full source truth라고 되어 있었기 때문에, 실제 후보가 20개여도 operator surface에는 `BLOCKED_SETUP=3`처럼 보일 수 있었다.
+- 수정:
+  - source row 전체를 먼저 분류/정렬하고, `counts/source_counts`는 전체 source row 수로 둔다.
+  - `sections`는 compact display로 유지한다.
+  - `display_counts`는 실제 표시된 row 수를 담는다.
+  - `truncated_counts/truncated_entry_counts`는 compact display에서 생략된 row 수를 담는다.
+  - `route_mismatch_summary`와 `blocked_setup_breakdown`도 display cap 이후가 아니라 source 전체 기준으로 계산한다.
+  - entry surface message의 counts line에 `displayed=...`, `truncated=...`를 추가했다.
+  - section title에 `showing=X/Y`를 붙여 표시 row가 전체가 아닐 때 바로 알 수 있게 했다.
+  - docs에 `counts/source_counts`와 `display_counts/truncated_entry_counts`의 차이를 문서화했다.
+
+### 검증
+- targeted:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_entry_surface_scripts.py::test_entry_snapshot_counts_source_rows_not_display_cap tests/test_entry_surface_scripts.py::test_context_only_surface_is_not_discord_alertable tests/test_entry_surface_scripts.py::test_render_message_includes_all_sections_and_reasons -q`
+  - `3 passed`
+- broader:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_entry_surface_scripts.py tests/test_notification_dispatcher.py tests/test_micro_live_operational_guards.py -q`
+  - `120 passed`
+- full regression:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_api_smoke.py tests/test_portfolio_budget_report.py tests/test_notification_dispatcher.py tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_script_entrypoints.py tests/test_auto_trading_transition_phase1.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_main_live_readiness.py tests/test_transition_variant_live_readiness.py tests/test_replay_validation_bridge.py tests/test_live_order_lifecycle.py tests/test_execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_strategy_engine_ops.py tests/test_score_to_outcome_funnel.py tests/test_execution_quality.py tests/test_portfolio_overlay.py tests/test_plan_generator.py tests/test_historical_walk_forward_proof.py tests/test_stage_monitor_tick.py tests/test_micro_live_operational_guards.py tests/test_signal_alerts.py -q`
+  - `439 passed`
+- `git diff --check`
+- workspace dry-run:
+  - `reason=no_alertable_rows`
+  - `live_order_candidates=0`
+  - `blocked_live_order_candidates=0`
+  - `context_review_setups=2`
+  - `blocked_setups=20`
+  - `display_counts.BLOCKED_SETUP=3`
+  - `truncated_entry_counts.BLOCKED_SETUP=17`
+  - `route_mismatch_summary.context_only_total=22`
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: ready
+  - runtime_src의 `notify_entry_surface.py`가 workspace와 동일한지 diff로 확인했다.
+  - entry surface launchd kickstart 후 runtime latest:
+    - `reason=no_alertable_rows`
+    - `notified=false`
+    - `live_order_candidates=0`
+    - `blocked_live_order_candidates=0`
+    - `context_review_setups=2`
+    - `blocked_setups=20`
+    - `blocked_context_only_setups=20`
+    - `display_counts.BLOCKED_SETUP=3`
+    - `truncated_entry_counts.BLOCKED_SETUP=17`
+    - `route_mismatch_summary.context_only_total=22`
+    - `route_mismatch_summary.by_strategy_family={legacy_zone_plan: 19, sweep_reversal: 3}`
+  - runtime entry surface stdout/stderr logs: `0` bytes
+  - runtime ops heartbeat direct check:
+    - `overall_status=PASS`
+    - hard `0`, warning `0`
+    - `entry_surface.report_reason=no_alertable_rows`
+  - ops heartbeat launchd kickstart 후 latest도 `PASS`, hard `0`, warning `0`
+  - runtime 후보별 route 확인:
+    - `BLOCKED_SETUP NEARUSDC LONG SWEEP_CONFIRM legacy_zone_plan -> context_only(strategy_family_not_live_route, entry_model_not_live_route)`
+    - `BLOCKED_SETUP SUIUSDC LONG SWEEP_CONFIRM legacy_zone_plan -> context_only(symbol_not_live_routable, strategy_family_not_live_route, entry_model_not_live_route)`
+    - `BLOCKED_SETUP DOGEUSDC LONG SWEEP_CONFIRM legacy_zone_plan -> context_only(symbol_not_live_routable, strategy_family_not_live_route, entry_model_not_live_route)`
+    - `CONTEXT_REVIEW_SETUP NEARUSDC LONG CONFIRM legacy_zone_plan -> context_only(strategy_family_not_live_route)`
+    - `CONTEXT_REVIEW_SETUP DOGEUSDC LONG SWEEP_CONFIRM legacy_zone_plan -> context_only(symbol_not_live_routable, strategy_family_not_live_route, entry_model_not_live_route)`
+
+## 2026-05-15 Iteration #207
+### 운영 개선: live 후보 0의 route mismatch 원인을 entry surface artifact에 직접 요약
+- 현재 주문 계약은 `session_impulse_retest + CONFIRM + 11개 MICRO_LIVE 심볼 + dead_session/london/new_york`다.
+- runtime entry surface에는 `legacy_zone_plan` 후보가 계속 보였고, 일부는 `SWEEP_CONFIRM` 또는 live 심볼 밖이었다.
+- 기존에는 row를 하나씩 열어야 `strategy_family_not_live_route`, `entry_model_not_live_route`, `symbol_not_live_routable`를 알 수 있었다.
+- 수정:
+  - `route_mismatch_summary`를 entry surface snapshot/result top-level에 추가했다.
+  - `CONTEXT_REVIEW_SETUP`과 `BLOCKED_SETUP` 중 live-routable이 아닌 row를 reason/family/entry_model/symbol/status별로 집계한다.
+  - entry surface message에 `route_mismatch: context_only=N | reasons=... | families=... | entry_models=... | symbols=...` 라인을 추가했다.
+  - `.env.example`의 “Current MICRO_LIVE shape”도 실제 runtime 계약에 맞춰 `session_impulse_retest`, `CONFIRM`, `dead_session,london,new_york`로 정렬했다.
+  - docs에 `route_mismatch_summary` 읽는 법을 추가했다.
+
+### 검증
+- targeted:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_entry_surface_scripts.py::test_build_entry_snapshot_maps_rows_to_three_statuses tests/test_entry_surface_scripts.py::test_render_message_includes_all_sections_and_reasons tests/test_entry_surface_scripts.py::test_context_only_surface_is_not_discord_alertable tests/test_entry_surface_scripts.py::test_main_dry_run_prints_snapshot_without_dispatch -q`
+  - `4 passed`
+- broader:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_entry_surface_scripts.py tests/test_notification_dispatcher.py tests/test_micro_live_operational_guards.py -q`
+  - `117 passed`
+- full regression:
+  - `PYTHONPATH="$PWD" ./.venv/bin/pytest tests/test_api_smoke.py tests/test_portfolio_budget_report.py tests/test_notification_dispatcher.py tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_script_entrypoints.py tests/test_auto_trading_transition_phase1.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_main_live_readiness.py tests/test_transition_variant_live_readiness.py tests/test_replay_validation_bridge.py tests/test_live_order_lifecycle.py tests/test_execution_operator_ui.py tests/test_execution_operator_dashboard.py tests/test_strategy_engine_ops.py tests/test_score_to_outcome_funnel.py tests/test_execution_quality.py tests/test_portfolio_overlay.py tests/test_plan_generator.py tests/test_historical_walk_forward_proof.py tests/test_stage_monitor_tick.py tests/test_micro_live_operational_guards.py tests/test_signal_alerts.py -q`
+  - `436 passed`
+- workspace dry-run:
+  - `reason=no_alertable_rows`
+  - `live_order_candidates=0`
+  - `blocked_live_order_candidates=0`
+  - `blocked_context_only_setups=3`
+  - `route_mismatch_summary.context_only_total=5`
+  - `by_strategy_family={legacy_zone_plan: 5}`
+  - `by_reason={strategy_family_not_live_route: 5, entry_model_not_live_route: 3, symbol_not_live_routable: 3}`
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: ready
+  - runtime_src의 `notify_entry_surface.py`가 workspace와 동일한지 diff로 확인했다.
+  - entry surface launchd kickstart 후 runtime latest:
+    - `reason=no_alertable_rows`
+    - `notified=false`
+    - `live_order_candidates=0`
+    - `blocked_live_order_candidates=0`
+    - `blocked_context_only_setups=3`
+    - `route_mismatch_summary.context_only_total=5`
+    - `by_strategy_family={legacy_zone_plan: 5}`
+    - `by_entry_model={CONFIRM: 2, SWEEP_CONFIRM: 3}`
+    - `by_symbol={DOGEUSDC: 1, NEARUSDC: 2, SUIUSDC: 2}`
+  - runtime entry surface stdout/stderr logs: `0` bytes
+  - runtime ops heartbeat:
+    - `overall_status=PASS`
+    - hard `0`, warning `0`
+    - `entry_surface.status_detail=no_alertable_rows`

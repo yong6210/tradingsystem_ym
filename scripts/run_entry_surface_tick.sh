@@ -49,5 +49,8 @@ fi
 if [[ "${ENTRY_SURFACE_DRY_RUN:-0}" == "1" ]]; then
   NOTIFY_ARGS+=(--dry-run)
 fi
+if [[ "${ENTRY_SURFACE_QUIET:-0}" == "1" ]]; then
+  NOTIFY_ARGS+=(--quiet)
+fi
 
 "$PYTHON_BIN" "$ROOT_DIR/scripts/notify_entry_surface.py" "${NOTIFY_ARGS[@]}"

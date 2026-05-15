@@ -678,6 +678,42 @@ def decision_for_micro_summary(summary: dict[str, Any]) -> str:
     return "WATCH"
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def evaluate_session_impulse_retest_shadow_filters(*, diagnostics: dict[str, Any] | None) -> dict[str, Any]:
+    diagnostics = dict(diagnostics or {})
+    reclaim_body_atr = _safe_float(diagnostics.get("reclaim_body_atr"), default=float("nan"))
+    threshold = 0.30
+    available = reclaim_body_atr == reclaim_body_atr
+    passed = bool(available and reclaim_body_atr >= threshold)
+    return {
+        "schema_version": "session_impulse_retest_shadow_filter_v1",
+        "mode": "compare_only",
+        "blocking_live": False,
+        "decision": "would_pass" if passed else "would_block" if available else "unknown",
+        "recommended_action": "record_shadow_only_do_not_block_live",
+        "filters": [
+            {
+                "name": "reclaim_body_atr_min_0_30",
+                "metric": "reclaim_body_atr",
+                "threshold": threshold,
+                "value": round(reclaim_body_atr, 6) if available else None,
+                "passed": passed,
+                "reason": "reclaim_body_atr_meets_shadow_floor"
+                if passed
+                else "reclaim_body_atr_below_shadow_floor"
+                if available
+                else "reclaim_body_atr_unavailable",
+            }
+        ],
+    }
+
+
 def session_impulse_retest_profile_for_symbol(symbol: str) -> str:
     normalized_symbol = str(symbol or "").upper()
     return str(_SESSION_IMPULSE_RETEST_PROFILE_BY_SYMBOL.get(normalized_symbol, "baseline"))

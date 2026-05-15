@@ -71,6 +71,13 @@ _DEFAULT_JOBS: dict[str, Any] = {
         "pass_statuses": {"PASS"},
         "watch_statuses": {"WATCH"},
     },
+    "entry_surface": {
+        "pattern": "reports/operations/entry_surface/latest_entry_alert_run.json",
+        "max_age_minutes": 15,
+        "content_type": "entry_surface_run",
+        "pass_statuses": {"PASS"},
+        "watch_statuses": {"WATCH"},
+    },
     "failure_drill": {
         "pattern": "reports/operations/micro_live_failure_drill/*.md",
         "max_age_minutes": 1800,
@@ -111,6 +118,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state-file", default="reports/operations/micro_live_ops_heartbeat/state.json")
     parser.add_argument("--no-write-report", action="store_true")
     parser.add_argument("--no-fail-exit", action="store_true")
+    parser.add_argument("--quiet", action="store_true", help="Do not print the JSON payload to stdout.")
     return parser.parse_args()
 
 
@@ -297,6 +305,81 @@ def _macro_blackout_contract_status(*, payload: dict[str, Any], now: datetime, m
     }
 
 
+def _entry_surface_run_status(*, payload: dict[str, Any]) -> dict[str, Any]:
+    reason = str(payload.get("reason") or "").strip()
+    if reason == "source_request_failed":
+        return {
+            "overall_status": "FAIL",
+            "reason": "entry_surface_source_request_failed",
+            "status_detail": "entry_surface_source_request_failed",
+            "message": str(payload.get("error") or reason),
+        }
+    if reason == "entry_surface_tick_already_running":
+        return {
+            "overall_status": "WATCH",
+            "reason": "entry_surface_previous_tick_still_running",
+            "status_detail": "entry_surface_previous_tick_still_running",
+            "message": reason,
+        }
+    delivery = dict(payload.get("delivery") or {}) if isinstance(payload.get("delivery"), dict) else {}
+    if delivery and not _safe_bool(delivery.get("delivered")) and not _safe_bool(delivery.get("skipped")):
+        return {
+            "overall_status": "WATCH",
+            "reason": "entry_surface_delivery_not_confirmed",
+            "status_detail": "entry_surface_delivery_not_confirmed",
+            "message": str(delivery.get("reason") or "delivery_not_confirmed"),
+        }
+    if not isinstance(payload.get("snapshot"), dict):
+        return {
+            "overall_status": "FAIL",
+            "reason": "entry_surface_snapshot_missing",
+            "status_detail": "entry_surface_snapshot_missing",
+            "message": reason or "entry_surface_snapshot_missing",
+        }
+    operator_action = _entry_surface_operator_action(payload)
+    status_detail = _entry_surface_status_detail(reason or "entry_surface_run_ok", operator_action)
+    message = str(operator_action.get("message") or "").strip() or reason or "entry_surface_run_ok"
+    return {
+        "overall_status": "PASS",
+        "reason": reason or "entry_surface_run_ok",
+        "status_detail": status_detail,
+        "message": message,
+        "entry_surface_operator_action_state": str(operator_action.get("state") or ""),
+        "entry_surface_operator_next_action": str(operator_action.get("next_action") or ""),
+        "entry_surface_operator_route_reason": str(operator_action.get("top_route_mismatch_reason") or ""),
+    }
+
+
+def _entry_surface_operator_action(payload: dict[str, Any]) -> dict[str, str]:
+    raw = payload.get("operator_action_summary")
+    if not isinstance(raw, dict):
+        snapshot = dict(payload.get("snapshot") or {})
+        raw = snapshot.get("operator_action_summary")
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        "state": str(raw.get("state") or "").strip(),
+        "next_action": str(raw.get("next_action") or "").strip(),
+        "message": str(raw.get("message") or "").strip(),
+        "top_route_mismatch_reason": str(raw.get("top_route_mismatch_reason") or "").strip(),
+    }
+
+
+def _entry_surface_status_detail(base_reason: str, operator_action: dict[str, str]) -> str:
+    base = str(base_reason or "entry_surface_run_ok").strip() or "entry_surface_run_ok"
+    state = str(operator_action.get("state") or "").strip()
+    if not state:
+        return base
+    parts = [base, f"operator_action={state}"]
+    next_action = str(operator_action.get("next_action") or "").strip()
+    if next_action:
+        parts.append(f"next={next_action}")
+    route_reason = str(operator_action.get("top_route_mismatch_reason") or "").strip()
+    if route_reason and route_reason != "none":
+        parts.append(f"route_reason={route_reason}")
+    return " | ".join(parts)
+
+
 def _report_status(payload: dict[str, Any]) -> str:
     for container in (payload, dict(payload.get("evaluation") or {})):
         for key in ("overall_status", "status"):
@@ -370,6 +453,9 @@ def evaluate_ops_heartbeat(*, now: datetime | None = None, jobs: dict[str, Any] 
                 min_horizon_days=int(min_horizon_raw or 45),
             )
             report_payload = {**report_payload, **status_payload}
+        elif str(config.get("content_type") or "") == "entry_surface_run":
+            status_payload = _entry_surface_run_status(payload=report_payload)
+            report_payload = {**report_payload, **status_payload}
         report_status = _report_status(report_payload)
         report_reason = _report_reason(report_payload)
         content = _content_status_row(
@@ -402,6 +488,9 @@ def evaluate_ops_heartbeat(*, now: datetime | None = None, jobs: dict[str, Any] 
                 "report_status": report_status,
                 "report_reason": report_reason,
                 "status_detail": status_payload.get("status_detail", "") or report_reason,
+                "entry_surface_operator_action_state": status_payload.get("entry_surface_operator_action_state"),
+                "entry_surface_operator_next_action": status_payload.get("entry_surface_operator_next_action"),
+                "entry_surface_operator_route_reason": status_payload.get("entry_surface_operator_route_reason"),
                 "horizon_days": status_payload.get("horizon_days"),
                 "upcoming_windows": status_payload.get("upcoming_windows"),
                 "invalid_windows": status_payload.get("invalid_windows"),
@@ -602,7 +691,8 @@ def main() -> int:
                 }
         else:
             payload["notification"] = {"skipped": True, "reason": "cooldown_active", "dedupe_key": dedupe_key}
-    print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
+    if not bool(args.quiet):
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     return 1 if payload["overall_status"] == "FAIL" and not bool(args.no_fail_exit) else 0
 
 

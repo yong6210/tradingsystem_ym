@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,8 +18,21 @@ from app.db.session import SessionLocal, init_db
 from app.services.live_order_lifecycle import LiveOrderLifecycleReporter
 from app.services.notification_dispatcher import NotificationDispatcher
 from app.services.runtime_worker_heartbeat import read_worker_heartbeat
+from app.services.strategy_engine import StrategyEngine
 from scripts.operation_report_io import atomic_write_text, parse_report_generated_at
 from scripts.run_micro_live_runtime_guard import _blocked_intent_diagnostics
+
+
+_SIR_HARD_STATUSES = {"intent_creation_failed", "submit_error"}
+_SIR_WATCH_STATUSES = {
+    "auto_trading_disabled_or_shadow_mode",
+    "family_disabled",
+    "family_shadow_only",
+    "symbol_not_live_enabled_for_auto_route",
+}
+_SIR_ORDER_BLOCKING_STATUSES = {"intent_blocked", "intent_creation_failed", "submit_error"}
+_SIR_NON_BLOCKING_STATUSES = {"recent_intent_cooldown_active", "ws_stream_active_route_suppressed"}
+_SIR_NO_CANDIDATE_STATUSES = {"no_fresh_candidates", "no_live_route_candidate_plan"}
 
 
 def _safe_bool(value: Any, default: bool = False) -> bool:
@@ -48,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state-file", default="reports/operations/micro_live_no_order_watchdog/state.json")
     parser.add_argument("--no-write-report", action="store_true")
     parser.add_argument("--no-fail-exit", action="store_true")
+    parser.add_argument("--quiet", action="store_true", help="Do not print the JSON payload to stdout.")
     return parser.parse_args()
 
 
@@ -162,6 +177,139 @@ def _watchdog_scope_label(*, runtime_started_at: datetime | None, days: int) -> 
     return f"최근 {max(1, int(days))}일"
 
 
+def _rows_since(rows: list[dict[str, Any]], start_at: datetime | None) -> list[dict[str, Any]]:
+    if start_at is None:
+        return list(rows)
+    return [
+        row
+        for row in rows
+        if (observed_at := _parse_utc_ts(row.get("observed_ts"))) is not None
+        and observed_at >= start_at
+    ]
+
+
+def _counter_dict(counter: Counter[str]) -> dict[str, int]:
+    return dict(counter.most_common())
+
+
+def _counts_summary_text(counts: dict[str, Any], *, limit: int = 3) -> str:
+    if not counts:
+        return "none"
+    return ", ".join(f"{key}={value}" for key, value in list(counts.items())[: max(1, int(limit))])
+
+
+def _session_impulse_retest_candidate_context(
+    *,
+    db: Any,
+    hours: int,
+    limit: int,
+    runtime_started_at: datetime | None,
+) -> dict[str, Any]:
+    engine = StrategyEngine(db)
+    lookback_rows = list(
+        engine.session_impulse_retest_runtime_audits_recent(
+            hours=max(1, int(hours)),
+            phase="auto_route",
+            limit=max(1, int(limit)),
+        )
+        or []
+    )
+    rows = _rows_since(lookback_rows, runtime_started_at)
+    status_counts = Counter(str(row.get("status") or "unknown") for row in rows)
+    hard = Counter({key: value for key, value in status_counts.items() if key in _SIR_HARD_STATUSES or key.endswith("_error")})
+    watch = Counter({key: value for key, value in status_counts.items() if key in _SIR_WATCH_STATUSES})
+    no_candidate: Counter[str] = Counter()
+    non_blocking: Counter[str] = Counter()
+    order_blocking: Counter[str] = Counter()
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        payload = dict(row.get("payload") or {}) if isinstance(row.get("payload"), dict) else {}
+        blocking_live_route = payload.get("blocking_live_route")
+        if status in _SIR_NO_CANDIDATE_STATUSES:
+            no_candidate[status] += 1
+        if status in _SIR_NON_BLOCKING_STATUSES or blocking_live_route is False:
+            non_blocking[status] += 1
+        if status in _SIR_ORDER_BLOCKING_STATUSES or blocking_live_route is True:
+            order_blocking[status] += 1
+    return {
+        "source": "session_impulse_retest_runtime_audit",
+        "scope": "runtime_since_ws_start" if runtime_started_at is not None else "lookback_window",
+        "hours": max(1, int(hours)),
+        "audit_count": len(rows),
+        "status_counts": _counter_dict(status_counts),
+        "hard_status_counts": _counter_dict(hard),
+        "watch_status_counts": _counter_dict(watch),
+        "order_blocking_status_counts": _counter_dict(order_blocking),
+        "non_blocking_status_counts": _counter_dict(non_blocking),
+        "no_candidate_status_counts": _counter_dict(no_candidate),
+        "lookback_audit_count": len(lookback_rows),
+    }
+
+
+def _disabled_sir_candidate_context() -> dict[str, Any]:
+    return {
+        "source": "session_impulse_retest_runtime_audit",
+        "scope": "disabled_by_family_filter",
+        "audit_count": 0,
+        "status_counts": {},
+        "hard_status_counts": {},
+        "watch_status_counts": {},
+        "order_blocking_status_counts": {},
+        "non_blocking_status_counts": {},
+        "no_candidate_status_counts": {},
+    }
+
+
+def _augment_no_order_evaluation(
+    evaluation: dict[str, Any],
+    *,
+    candidate_context: dict[str, Any],
+) -> dict[str, Any]:
+    enriched = dict(evaluation)
+    context = dict(candidate_context or {})
+    if context:
+        enriched["candidate_generation_context"] = context
+    if str(enriched.get("reason") or "") != "no_recent_live_intents":
+        return enriched
+    order_blocking = dict(context.get("order_blocking_status_counts") or {})
+    no_candidate = dict(context.get("no_candidate_status_counts") or {})
+    non_blocking = dict(context.get("non_blocking_status_counts") or {})
+    watch = dict(context.get("watch_status_counts") or {})
+    if order_blocking:
+        enriched["candidate_generation_status"] = "order_blocking_audit_present"
+        enriched["next_action_text"] = f"SIR runtime audit order_blocking 확인: {_counts_summary_text(order_blocking)}"
+    elif no_candidate:
+        enriched["candidate_generation_status"] = "no_live_route_candidate"
+        enriched["next_action_text"] = f"SIR fresh 후보 대기: {_counts_summary_text(no_candidate)}"
+    elif watch:
+        enriched["candidate_generation_status"] = "watch_candidate_context"
+        enriched["next_action_text"] = f"SIR 후보 생성 watch 확인: {_counts_summary_text(watch)}"
+    elif non_blocking:
+        enriched["candidate_generation_status"] = "non_blocking_route_context"
+        enriched["next_action_text"] = f"SIR route context 확인: {_counts_summary_text(non_blocking)}"
+    elif _safe_int(context.get("audit_count")) == 0:
+        enriched["candidate_generation_status"] = "no_recent_sir_runtime_audits"
+        enriched["next_action_text"] = "SIR runtime audit 최신성 확인; 최근 auto-route audit 없음"
+    else:
+        enriched["candidate_generation_status"] = "sir_runtime_audit_clean"
+    previous_next_action = str(evaluation.get("next_action_text") or "")
+    current_message = str(enriched.get("message") or "")
+    if previous_next_action and current_message:
+        current_message = current_message.replace(
+            f"actions={previous_next_action}",
+            f"actions={enriched.get('next_action_text')}",
+        )
+    enriched["message"] = (
+        f"{current_message or enriched.get('message')} "
+        f"SIR={enriched.get('candidate_generation_status')} "
+        f"no_candidate={_counts_summary_text(no_candidate, limit=2)} "
+        f"watch={_counts_summary_text(watch, limit=2)} "
+        f"non_blocking={_counts_summary_text(non_blocking, limit=2)} "
+        f"order_blocking={_counts_summary_text(order_blocking, limit=2)}"
+    )
+    return enriched
+
+
 def evaluate_no_order_watchdog(*, lifecycle: dict[str, Any], min_intents: int) -> dict[str, Any]:
     summary = dict(lifecycle.get("summary") or {})
     live_intents = dict(summary.get("live_intents") or {})
@@ -261,6 +409,16 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
         lookback_summary = dict(payload.get("lookback_lifecycle_summary") or {})
         lookback_intents, lookback_submissions = _summary_intent_submission_counts(lookback_summary)
         lines.append(f"참고: 최근 {payload.get('window_days')}일 전체 intent {lookback_intents}건 / 제출 {lookback_submissions}건")
+    candidate_context = dict(evaluation.get("candidate_generation_context") or payload.get("candidate_generation_context") or {})
+    if candidate_context:
+        lines.append(
+            "후보: "
+            f"SIR audit {candidate_context.get('audit_count', 0)}건 / "
+            f"no_candidate={_counts_summary_text(dict(candidate_context.get('no_candidate_status_counts') or {}), limit=2)} / "
+            f"watch={_counts_summary_text(dict(candidate_context.get('watch_status_counts') or {}), limit=2)} / "
+            f"non_blocking={_counts_summary_text(dict(candidate_context.get('non_blocking_status_counts') or {}), limit=2)} / "
+            f"order_blocking={_counts_summary_text(dict(candidate_context.get('order_blocking_status_counts') or {}), limit=2)}"
+        )
     lines.extend(
         [
             f"원인: {top_reasons}",
@@ -295,7 +453,18 @@ def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
             start_at=runtime_started_at,
             strategy_families=sorted(family_filter),
         ) if runtime_started_at is not None else lookback_lifecycle
+        candidate_context = (
+            _session_impulse_retest_candidate_context(
+                db=db,
+                hours=max(1, int(days)) * 24,
+                limit=max(1, int(limit)),
+                runtime_started_at=runtime_started_at,
+            )
+            if "session_impulse_retest" in family_filter
+            else _disabled_sir_candidate_context()
+        )
     evaluation = evaluate_no_order_watchdog(lifecycle=lifecycle, min_intents=min_intents)
+    evaluation = _augment_no_order_evaluation(evaluation, candidate_context=candidate_context)
     watchdog_scope = "runtime_since_ws_start" if runtime_started_at is not None else "lookback_window"
     return {
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -307,6 +476,7 @@ def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
         "family_filter": sorted(family_filter),
         "min_intents": max(1, int(min_intents)),
         "evaluation": evaluation,
+        "candidate_generation_context": candidate_context,
         "lifecycle_summary": dict(lifecycle.get("summary") or {}),
         "runtime_lifecycle_summary": dict(lifecycle.get("summary") or {}),
         "lookback_lifecycle_summary": dict(lookback_lifecycle.get("summary") or {}),
@@ -407,7 +577,8 @@ def main() -> int:
         else:
             payload["notification"] = {"skipped": True, "reason": "cooldown_active"}
 
-    print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
+    if not bool(args.quiet):
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     return 1 if alert_active and not bool(args.no_fail_exit) else 0
 
 

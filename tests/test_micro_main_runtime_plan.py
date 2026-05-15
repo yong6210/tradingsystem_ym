@@ -48,6 +48,7 @@ def test_session_impulse_retest_runtime_plan_builds_when_signal_is_fresh(monkeyp
         target_price=122.0,
         max_hold_minutes=25,
         regime_hint="trend",
+        diagnostics={"reclaim_body_atr": 0.24, "volume_factor": 1.2},
     )
 
     monkeypatch.setattr(
@@ -73,6 +74,11 @@ def test_session_impulse_retest_runtime_plan_builds_when_signal_is_fresh(monkeyp
         assert plan.validity["strategy_grade"] == "A"
         assert plan.validity["recommended_risk_r"] > 0
         assert plan.validity["thesis_cluster_id"]
+        shadow_filter = plan.validity["session_impulse_retest_shadow_filter"]
+        assert shadow_filter["mode"] == "compare_only"
+        assert shadow_filter["blocking_live"] is False
+        assert shadow_filter["decision"] == "would_block"
+        assert plan.validity["session_impulse_retest_signal"]["diagnostics"]["reclaim_body_atr"] == 0.24
 
 
 def test_session_impulse_retest_runtime_plan_applies_saturday_risk_haircut(monkeypatch) -> None:

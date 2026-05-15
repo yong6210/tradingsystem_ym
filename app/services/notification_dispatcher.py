@@ -599,7 +599,7 @@ class NotificationDispatcher:
         title = title_by_type.get(alert_type, "거래 신호")
         direction = str(payload.get("direction") or "").upper()
         plan_id = str(payload.get("plan_id") or "").strip()
-        price = payload.get("event_price") or payload.get("price") or payload.get("entry_price")
+        price = payload.get("event_price") or payload.get("price") or payload.get("fill_price") or payload.get("entry_price")
         expected = payload.get("expected_summary")
 
         lines = [f"[중요] {symbol} {title}"]

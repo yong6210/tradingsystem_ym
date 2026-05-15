@@ -1117,13 +1117,25 @@ class ExecutionPlanningService:
                 final_reason = str(applied_penalty.get("summary") or reason)
 
             playbook = self._playbook_contract(final_state, reason_code=final_reason_code, reason=final_reason)
-            approval_reasons = [{"code": reason_code, "message": reason, "blocking": state == ApprovalState.BLOCKED}]
+            primary_submit_blocking = final_state != ApprovalState.APPROVED_AUTO
+            approval_reasons = [
+                {
+                    "code": reason_code,
+                    "message": reason,
+                    "blocking": final_state == ApprovalState.BLOCKED,
+                    "submit_blocking": primary_submit_blocking,
+                    "blocking_scope": "submit" if primary_submit_blocking else "none",
+                }
+            ]
             for item in extra_reasons or []:
+                item_submit_blocking = self._bool(item.get("submit_blocking"))
                 approval_reasons.append(
                     {
                         "code": str(item.get("code") or ""),
                         "message": str(item.get("message") or ""),
                         "blocking": self._bool(item.get("blocking")),
+                        "submit_blocking": item_submit_blocking,
+                        "blocking_scope": str(item.get("blocking_scope") or ("submit" if item_submit_blocking else "none")),
                     }
                 )
             if applied_penalty and self._bool(applied_penalty.get("available")):

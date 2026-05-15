@@ -86,6 +86,8 @@ class ApprovalReason(ORMModel):
     code: str
     message: str
     blocking: bool = False
+    submit_blocking: bool = False
+    blocking_scope: str = "none"
 
 
 class RolloutPolicySnapshot(ORMModel):

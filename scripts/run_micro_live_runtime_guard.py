@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-dir", default="reports/operations/micro_live_runtime_guard")
     parser.add_argument("--no-write-report", action="store_true")
     parser.add_argument("--no-fail-exit", action="store_true", help="Always return exit code 0 after printing the report.")
+    parser.add_argument("--quiet", action="store_true", help="Do not print the JSON payload to stdout.")
     return parser.parse_args()
 
 
@@ -288,7 +289,8 @@ def main() -> int:
                 json_default=_json_default,
             )
         )
-    print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
+    if not bool(args.quiet):
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     if payload["overall_status"] == "FAIL" and not bool(args.no_fail_exit):
         return 1
     return 0
