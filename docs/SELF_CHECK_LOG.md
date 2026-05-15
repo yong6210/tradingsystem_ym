@@ -5656,6 +5656,28 @@
     - `no_order_watchdog.report_reason=no_recent_live_intents`
   - no-order/ops-heartbeat stdout/stderr logs: `0` bytes
 
+## 2026-05-15 Iteration #215
+### 운영 수정: workspace/runtime_src entry surface 배포 drift 해소
+- 추가 점검 중 workspace의 `notify_entry_surface.py`와 runtime_src의 `notify_entry_surface.py`가 달라진 상태를 발견했다.
+- workspace는 `reason=no_live_order_candidates_context_only_route_mismatch`와 `legacy_reason=no_alertable_rows` 계약을 갖고 있었지만, runtime_src는 직전 버전이라 launchd latest가 계속 `reason=no_alertable_rows`를 쓰고 있었다.
+- 조치:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`로 runtime_src를 다시 갱신했다.
+  - workspace/runtime_src `notify_entry_surface.py` diff가 비었는지 확인했다.
+  - entry surface와 ops heartbeat launchd를 kickstart했다.
+- 결과:
+  - runtime entry surface latest:
+    - `reason=no_live_order_candidates_context_only_route_mismatch`
+    - `legacy_reason=no_alertable_rows`
+    - `live_order_candidates=0`
+    - `blocked_live_order_candidates=0`
+    - `operator_action_summary.state=context_only_outside_live_route`
+  - runtime ops heartbeat:
+    - `overall_status=PASS`
+    - hard `0`, warning `0`
+    - `entry_surface.report_reason=no_live_order_candidates_context_only_route_mismatch`
+    - `entry_surface.status_detail=no_live_order_candidates_context_only_route_mismatch | operator_action=context_only_outside_live_route | next=wait_for_live_route_candidate_or_change_live_contract_intentionally | route_reason=strategy_family_not_live_route:22`
+  - entry surface/ops heartbeat stdout/stderr logs: `0` bytes
+
 ## 2026-05-15 Iteration #214
 ### 결함 수정: entry surface lock contention이 latest output에 기록되지 않던 문제
 - entry surface는 non-overlap lock을 써서 이전 `/portfolio/budget` tick이 아직 실행 중이면 다음 tick을 시작하지 않는다.
