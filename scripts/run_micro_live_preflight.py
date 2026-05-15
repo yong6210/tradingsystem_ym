@@ -18,6 +18,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.core.config import get_settings
 from app.core import operator_surface_contracts as osc
+from app.services.micro_main_universe_policy import build_micro_main_universe_policy_snapshot
 from scripts.operation_report_io import atomic_write_text
 
 _REQUEST_RETRY_ATTEMPTS = 3
@@ -398,6 +399,45 @@ def _csv_list(value: Any, *, lower: bool = False) -> list[str]:
     return list(dict.fromkeys(normalized))
 
 
+def _sir_live_rollout_window_check(
+    *,
+    live_symbols: set[str],
+    core_live_slots: int,
+    secondary_live_enabled: bool,
+) -> dict[str, Any]:
+    policy = build_micro_main_universe_policy_snapshot()
+    entries = {
+        str(item.get("symbol") or "").upper(): dict(item)
+        for item in list(policy.get("entries") or [])
+        if str(item.get("symbol") or "").strip()
+    }
+    missing_universe = sorted(symbol for symbol in live_symbols if symbol not in entries)
+    outside_core_window: list[str] = []
+    secondary_disabled: list[str] = []
+    for symbol in sorted(live_symbols):
+        entry = entries.get(symbol)
+        if not entry:
+            continue
+        tier = str(entry.get("tier") or "").strip().lower()
+        priority = _int(entry.get("rollout_priority"), default=0)
+        if tier == "core" and core_live_slots > 0 and priority > core_live_slots:
+            outside_core_window.append(f"{symbol}:p{priority}")
+        if tier == "secondary" and not secondary_live_enabled:
+            secondary_disabled.append(f"{symbol}:p{priority}")
+
+    return {
+        "name": "session_impulse_retest_live_rollout_window",
+        "status": _status(not missing_universe and not outside_core_window and not secondary_disabled),
+        "severity": "warning",
+        "message": (
+            f"core_live_slots={core_live_slots}; secondary_live_enabled={secondary_live_enabled}; "
+            f"outside_core_window={','.join(outside_core_window) if outside_core_window else 'none'}; "
+            f"secondary_disabled={','.join(secondary_disabled) if secondary_disabled else 'none'}; "
+            f"missing_universe={','.join(missing_universe) if missing_universe else 'none'}"
+        ),
+    }
+
+
 def _parse_direction_contract(value: Any) -> dict[str, set[str]]:
     contract: dict[str, set[str]] = {}
     for raw_item in str(value or "").split(","):
@@ -766,6 +806,13 @@ def _micro_live_config_drift_checks(*, check_binance_rules: bool = False) -> lis
                     f"tracked_only={','.join(tracked_only_symbols[:12]) if tracked_only_symbols else 'none'}"
                 ),
             }
+        )
+        checks.append(
+            _sir_live_rollout_window_check(
+                live_symbols=live_symbols,
+                core_live_slots=_int(getattr(settings, "session_impulse_retest_core_live_slots", 0), default=0),
+                secondary_live_enabled=_bool(getattr(settings, "session_impulse_retest_secondary_live_enabled", False)),
+            )
         )
 
     checks.append(

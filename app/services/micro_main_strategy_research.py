@@ -33,7 +33,6 @@ _SESSION_IMPULSE_RETEST_PROFILE_BY_SYMBOL: dict[str, str] = {
     "LTCUSDC": "baseline",
     "NEARUSDC": "baseline",
     "AAVEUSDC": "baseline",
-    "XLMUSDC": "baseline",
     "HBARUSDC": "baseline",
     "ETHUSDC": "relaxed_v1",
     "SOLUSDC": "relaxed_v1",

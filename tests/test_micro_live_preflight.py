@@ -211,6 +211,43 @@ def test_micro_live_config_drift_checks_warn_on_tracked_only_session_symbols(mon
     assert "tracked_only=SUIUSDC" in sir_check["message"]
 
 
+def test_micro_live_config_drift_checks_warn_when_live_symbol_is_outside_sir_core_window(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    settings = run_micro_live_preflight.get_settings()
+    heartbeat_dir = tmp_path / "heartbeats"
+    heartbeat_dir.mkdir()
+    (heartbeat_dir / "ws.json").write_text(
+        json.dumps({"details": {"symbols": ["BTCUSDC", "NEARUSDC"]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "runtime_worker_heartbeat_dir", str(heartbeat_dir))
+    monkeypatch.setattr(settings, "auto_trading_execution_mode", "MICRO_LIVE")
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_allowed_symbols", "BTCUSDC,NEARUSDC")
+    monkeypatch.setattr(settings, "auto_trading_allowed_families", "session_impulse_retest")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", "BTCUSDC,NEARUSDC")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "session_impulse_retest")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_entry_models", "CONFIRM")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_direction_contract", "BTCUSDC:LONG|SHORT,NEARUSDC:LONG|SHORT")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_event_blackout_path", "")
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_fail_closed", True)
+    monkeypatch.setattr(settings, "session_impulse_retest_enabled", True)
+    monkeypatch.setattr(settings, "session_impulse_retest_shadow_only", False)
+    monkeypatch.setattr(settings, "session_impulse_retest_allowed_symbols", "BTCUSDC,NEARUSDC")
+    monkeypatch.setattr(settings, "session_impulse_retest_core_live_slots", 11)
+    monkeypatch.setattr(settings, "session_impulse_retest_secondary_live_enabled", False)
+
+    checks = run_micro_live_preflight._micro_live_config_drift_checks()
+    window_check = {item["name"]: item for item in checks}["session_impulse_retest_live_rollout_window"]
+
+    assert window_check["status"] == "FAIL"
+    assert window_check["severity"] == "warning"
+    assert "outside_core_window=NEARUSDC:p12" in window_check["message"]
+
+
 def test_event_blackout_coverage_check_blocks_missing_live_symbols(tmp_path) -> None:
     blackout_path = tmp_path / "blackouts.json"
     blackout_path.write_text(

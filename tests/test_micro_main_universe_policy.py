@@ -23,7 +23,6 @@ def test_micro_main_universe_policy_snapshot_shapes_core_and_secondary_lists() -
     assert snapshot["secondary_symbols"] == [
         "SUIUSDC",
         "AAVEUSDC",
-        "XLMUSDC",
         "HBARUSDC",
     ]
     assert snapshot["partial_activation_priority"][0] == "BTCUSDC"
@@ -36,14 +35,12 @@ def test_micro_main_universe_entry_returns_expected_risk_multiplier() -> None:
     xrp = micro_main_universe_entry("XRPUSDC")
     avax = micro_main_universe_entry("AVAXUSDC")
     sui = micro_main_universe_entry("SUIUSDC")
-    xlm = micro_main_universe_entry("XLMUSDC")
     hbar = micro_main_universe_entry("HBARUSDC")
     assert btc is not None
     assert link is not None
     assert xrp is not None
     assert avax is not None
     assert sui is not None
-    assert xlm is not None
     assert hbar is not None
     assert btc["risk_multiplier"] == 0.9
     assert link["tier"] == "core"
@@ -53,7 +50,5 @@ def test_micro_main_universe_entry_returns_expected_risk_multiplier() -> None:
     assert avax["risk_multiplier"] == 0.35
     assert sui["tier"] == "secondary"
     assert sui["risk_multiplier"] == 0.45
-    assert xlm["tier"] == "secondary"
-    assert xlm["risk_multiplier"] == 0.45
     assert hbar["tier"] == "secondary"
     assert hbar["risk_multiplier"] == 0.45

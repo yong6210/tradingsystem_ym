@@ -748,8 +748,8 @@ def test_session_impulse_retest_secondary_symbol_stays_shadow_even_if_allowliste
     init_db()
     with SessionLocal() as db:
         engine = StrategyEngine(db)
-        _patch_live_contract(engine, allowed_symbols=["BTCUSDC", "XLMUSDC"])
-        plan = _micro_plan(symbol="XLMUSDC", plan_id="sir_XLMUSDC_L_test")
+        _patch_live_contract(engine, allowed_symbols=["BTCUSDC", "HBARUSDC"])
+        plan = _micro_plan(symbol="HBARUSDC", plan_id="sir_HBARUSDC_L_test")
         db.add(plan)
         db.commit()
 
