@@ -5566,6 +5566,33 @@
     - hard `0`, warning `0`
     - `entry_surface.status_detail=no_alertable_rows`
 
+## 2026-05-16 Iteration #208
+### 운영 개선: no-order 진단에 백테스트 조건 재생값을 같이 붙임
+- 판단:
+  - 사용자의 지적대로, 주문 빈도/수익률을 백테스트와 비교하려면 live 전략 계약은 백테스트를 만든 조건과 같아야 한다.
+  - 현재 live 전략 계약은 `session_impulse_retest + CONFIRM + 11개 MICRO_LIVE 심볼 + dead_session/london/new_york + partial_activation_ratio=1.00`로 맞아 있다.
+  - 단, exchange submit 전의 운영 안전장치(검증 GO, close-only, liquidity, exchange rule, position cap, event blackout)는 백테스트 전략 조건이 아니라 실전 안전장치이므로 끄지 않는다. 대신 이 장치가 백테스트 기대 주문을 막으면 리포트에서 명시적으로 보여야 한다.
+- 최근 runtime 확인:
+  - runtime ops heartbeat: `PASS`, hard `0`, warning `0`.
+  - runtime no-order watchdog: `status=OK`, `reason=no_recent_live_intents`.
+  - runtime 재시작 이후 SIR 백테스트 조건 재생 기대 주문: `0`건.
+  - 최근 72시간 lookback 기준 기대 주문: `2`건, `+1.235292R`; 둘 다 현재 runtime 재시작 이전의 차단 이력이다.
+  - 따라서 현재는 “조건이 됐는데 또 막히는 상태”가 아니라 “재시작 이후 아직 SIR fresh 후보가 없는 상태”다.
+- 수정:
+  - `run_micro_live_no_order_watchdog.py`가 `session_impulse_retest_opportunity_report` 요약을 함께 포함한다.
+  - no-order 상태에서도 `SIR_opportunity=active_expected=N,lookback_expected=M`을 남긴다.
+  - runtime 재시작 이후 백테스트 조건 기대 후보가 있는데 live intent가 0이면 `sir_backtest_opportunity_without_live_intent` WARN으로 올린다.
+  - runtime_src에도 동일 스크립트를 반영했다.
+
+### 검증
+- `./.venv/bin/python -m py_compile scripts/run_micro_live_no_order_watchdog.py tests/test_micro_live_operational_guards.py`
+- `./.venv/bin/python -m pytest tests/test_micro_live_operational_guards.py::test_no_order_watchdog_augments_no_intents_with_sir_candidate_context tests/test_micro_live_operational_guards.py::test_no_order_watchdog_alerts_when_backtest_opportunity_has_no_live_intent tests/test_micro_live_operational_guards.py::test_no_order_watchdog_message_separates_runtime_scope_from_lookback_context tests/test_micro_live_operational_guards.py::test_no_order_watchdog_message_includes_backtest_opportunity_context -q` -> `4 passed`
+- `git diff --check -- scripts/run_micro_live_no_order_watchdog.py tests/test_micro_live_operational_guards.py`
+- runtime:
+  - `runtime_src/scripts/run_micro_live_no_order_watchdog.py --days 3 --no-fail-exit --quiet`
+  - `runtime_src/scripts/run_micro_live_ops_heartbeat.py --no-fail-exit --quiet`
+  - latest heartbeat `overall_status=PASS`, failure `0`, warning `0`.
+
 ## 2026-05-15 Iteration #208
 ### 운영 개선: no-order watchdog에 SIR 후보 생성 context 추가
 - `run_micro_live_no_order_watchdog.py`는 live intent/submission gap을 잘 보여주지만, live intent가 0이면 `fresh live 후보 대기`로 끝났다.

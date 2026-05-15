@@ -120,6 +120,50 @@ def test_no_order_watchdog_augments_no_intents_with_sir_candidate_context() -> N
     assert "watch=symbol_not_live_enabled_for_auto_route=2" in enriched["message"]
 
 
+def test_no_order_watchdog_alerts_when_backtest_opportunity_has_no_live_intent() -> None:
+    evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
+        lifecycle={
+            "summary": {
+                "submission_count": 0,
+                "requested_live_count": 0,
+                "rejected_or_error_count": 0,
+                "live_intents": {"total": 0, "submit_ready": 0, "blocked": 0, "top_block_reasons": {}},
+            }
+        },
+        min_intents=1,
+    )
+
+    enriched = run_micro_live_no_order_watchdog._augment_no_order_evaluation(
+        evaluation,
+        candidate_context={
+            "source": "session_impulse_retest_runtime_audit",
+            "scope": "runtime_since_ws_start",
+            "audit_count": 5,
+            "no_candidate_status_counts": {},
+            "watch_status_counts": {},
+            "non_blocking_status_counts": {},
+            "order_blocking_status_counts": {},
+        },
+        opportunity_context={
+            "source": "session_impulse_retest_opportunity_report",
+            "status": "ok",
+            "summary": {
+                "expected_order_count": 2,
+                "potential_performance": {"total_r": 1.25},
+            },
+            "lookback_summary": {
+                "expected_order_count": 3,
+                "potential_performance": {"total_r": 0.75},
+            },
+        },
+    )
+
+    assert enriched["alert"] is True
+    assert enriched["reason"] == "sir_backtest_opportunity_without_live_intent"
+    assert enriched["candidate_generation_status"] == "backtest_expected_opportunities_missing_live_intents"
+    assert "SIR_opportunity=active_expected=2,lookback_expected=3" in enriched["message"]
+
+
 def test_no_order_watchdog_augments_watch_only_sir_candidate_context() -> None:
     evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
         lifecycle={
@@ -260,6 +304,36 @@ def test_no_order_watchdog_message_separates_runtime_scope_from_lookback_context
     assert "후보: SIR audit 8건 / no_candidate=no_live_route_candidate_plan=3" in message
     assert "watch=symbol_not_live_enabled_for_auto_route=1" in message
     assert "최근 3일: intent 0건" not in message
+
+
+def test_no_order_watchdog_message_includes_backtest_opportunity_context() -> None:
+    message = run_micro_live_no_order_watchdog._watchdog_message(
+        {
+            "window_days": 3,
+            "watchdog_scope": "runtime_since_ws_start",
+            "watchdog_scope_label": "런타임 재시작 이후",
+            "lookback_lifecycle_summary": {"requested_live_count": 0, "live_intents": {"total": 0}},
+            "evaluation": {
+                "intent_count": 0,
+                "requested_live_count": 0,
+                "top_block_reasons": {},
+                "first_block_detail_text": "",
+                "next_action_text": "SIR 백테스트 조건 후보 2건 재생됨: runtime plan/intent 누락 확인",
+                "session_impulse_retest_opportunity_context": {
+                    "summary": {
+                        "expected_order_count": 2,
+                        "potential_performance": {"total_r": 1.25},
+                    },
+                    "lookback_summary": {
+                        "expected_order_count": 3,
+                        "potential_performance": {"total_r": 0.75},
+                    },
+                },
+            },
+        }
+    )
+
+    assert "백테스트조건: runtime_expected=2건/1.25R, lookback_expected=3건/0.75R" in message
 
 
 def test_no_order_watchdog_main_writes_latest_aliases(monkeypatch, tmp_path, capsys) -> None:

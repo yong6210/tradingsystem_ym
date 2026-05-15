@@ -260,16 +260,62 @@ def _disabled_sir_candidate_context() -> dict[str, Any]:
     }
 
 
+def _session_impulse_retest_opportunity_context(*, hours: int) -> dict[str, Any]:
+    try:
+        from scripts.run_session_impulse_retest_opportunity_report import build_report
+
+        report = build_report(lookback_hours=max(1, int(hours)))
+    except Exception as exc:  # pragma: no cover - defensive runtime diagnostics
+        return {
+            "source": "session_impulse_retest_opportunity_report",
+            "status": "error",
+            "error": str(exc),
+        }
+    return {
+        "source": "session_impulse_retest_opportunity_report",
+        "status": "ok",
+        "generated_at": report.get("generated_at"),
+        "lookback_hours": report.get("lookback_hours"),
+        "opportunity_scope": report.get("opportunity_scope"),
+        "runtime_started_at": report.get("runtime_started_at"),
+        "contract": dict(report.get("contract") or {}),
+        "summary": dict(report.get("summary") or {}),
+        "lookback_summary": dict(report.get("lookback_summary") or {}),
+    }
+
+
 def _augment_no_order_evaluation(
     evaluation: dict[str, Any],
     *,
     candidate_context: dict[str, Any],
+    opportunity_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     enriched = dict(evaluation)
     context = dict(candidate_context or {})
     if context:
         enriched["candidate_generation_context"] = context
+    opportunity = dict(opportunity_context or {})
+    if opportunity:
+        enriched["session_impulse_retest_opportunity_context"] = opportunity
     if str(enriched.get("reason") or "") != "no_recent_live_intents":
+        return enriched
+    active_opportunity_summary = dict(opportunity.get("summary") or {})
+    lookback_opportunity_summary = dict(opportunity.get("lookback_summary") or {})
+    active_expected_orders = _safe_int(active_opportunity_summary.get("expected_order_count"))
+    lookback_expected_orders = _safe_int(lookback_opportunity_summary.get("expected_order_count"))
+    if active_expected_orders > 0:
+        enriched["alert"] = True
+        enriched["status"] = "ALERT"
+        enriched["severity"] = "WARN"
+        enriched["reason"] = "sir_backtest_opportunity_without_live_intent"
+        enriched["candidate_generation_status"] = "backtest_expected_opportunities_missing_live_intents"
+        enriched["next_action_text"] = (
+            f"SIR 백테스트 조건 후보 {active_expected_orders}건 재생됨: runtime plan/intent 누락 확인"
+        )
+        enriched["message"] = (
+            f"{enriched.get('message')} "
+            f"SIR_opportunity=active_expected={active_expected_orders},lookback_expected={lookback_expected_orders}"
+        )
         return enriched
     order_blocking = dict(context.get("order_blocking_status_counts") or {})
     no_candidate = dict(context.get("no_candidate_status_counts") or {})
@@ -305,7 +351,8 @@ def _augment_no_order_evaluation(
         f"no_candidate={_counts_summary_text(no_candidate, limit=2)} "
         f"watch={_counts_summary_text(watch, limit=2)} "
         f"non_blocking={_counts_summary_text(non_blocking, limit=2)} "
-        f"order_blocking={_counts_summary_text(order_blocking, limit=2)}"
+        f"order_blocking={_counts_summary_text(order_blocking, limit=2)} "
+        f"SIR_opportunity=active_expected={active_expected_orders},lookback_expected={lookback_expected_orders}"
     )
     return enriched
 
@@ -419,6 +466,19 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
             f"non_blocking={_counts_summary_text(dict(candidate_context.get('non_blocking_status_counts') or {}), limit=2)} / "
             f"order_blocking={_counts_summary_text(dict(candidate_context.get('order_blocking_status_counts') or {}), limit=2)}"
         )
+    opportunity_context = dict(evaluation.get("session_impulse_retest_opportunity_context") or {})
+    if opportunity_context:
+        active_summary = dict(opportunity_context.get("summary") or {})
+        lookback_summary = dict(opportunity_context.get("lookback_summary") or {})
+        active_perf = dict(active_summary.get("potential_performance") or {})
+        lookback_perf = dict(lookback_summary.get("potential_performance") or {})
+        lines.append(
+            "백테스트조건: "
+            f"runtime_expected={active_summary.get('expected_order_count', 0)}건/"
+            f"{active_perf.get('total_r', 0)}R, "
+            f"lookback_expected={lookback_summary.get('expected_order_count', 0)}건/"
+            f"{lookback_perf.get('total_r', 0)}R"
+        )
     lines.extend(
         [
             f"원인: {top_reasons}",
@@ -463,8 +523,17 @@ def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
             if "session_impulse_retest" in family_filter
             else _disabled_sir_candidate_context()
         )
+        opportunity_context = (
+            _session_impulse_retest_opportunity_context(hours=max(1, int(days)) * 24)
+            if "session_impulse_retest" in family_filter
+            else {}
+        )
     evaluation = evaluate_no_order_watchdog(lifecycle=lifecycle, min_intents=min_intents)
-    evaluation = _augment_no_order_evaluation(evaluation, candidate_context=candidate_context)
+    evaluation = _augment_no_order_evaluation(
+        evaluation,
+        candidate_context=candidate_context,
+        opportunity_context=opportunity_context,
+    )
     watchdog_scope = "runtime_since_ws_start" if runtime_started_at is not None else "lookback_window"
     return {
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -477,6 +546,7 @@ def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
         "min_intents": max(1, int(min_intents)),
         "evaluation": evaluation,
         "candidate_generation_context": candidate_context,
+        "session_impulse_retest_opportunity_context": opportunity_context,
         "lifecycle_summary": dict(lifecycle.get("summary") or {}),
         "runtime_lifecycle_summary": dict(lifecycle.get("summary") or {}),
         "lookback_lifecycle_summary": dict(lookback_lifecycle.get("summary") or {}),
