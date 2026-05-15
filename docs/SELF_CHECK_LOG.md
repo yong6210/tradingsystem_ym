@@ -5593,6 +5593,36 @@
   - `runtime_src/scripts/run_micro_live_ops_heartbeat.py --no-fail-exit --quiet`
   - latest heartbeat `overall_status=PASS`, failure `0`, warning `0`.
 
+## 2026-05-16 Iteration #209
+### 추가 빈틈 점검: SIR core slot 계산과 runtime guard warning 숨김
+- 발견:
+  - `NEARUSDC`는 현재 MICRO_LIVE allowlist에 포함되어 있고 universe policy에서도 `core`다.
+  - 하지만 SIR rollout window check/readiness는 `core_live_slots=11`을 전체 `rollout_priority`와 비교하고 있었다.
+  - universe priority에는 live가 아닌 secondary `SUIUSDC`가 중간에 있어 `NEARUSDC`가 raw priority `12`로 계산됐고, `outside_current_core_live_window` warning/blocker 후보가 될 수 있었다.
+  - 즉 “11개 core live 심볼”이라는 계약과 “전체 priority 11번까지”라는 계산이 달랐다.
+  - runtime guard는 이 warning check를 내부 `FAIL`로 갖고도 top-level `PASS`로 표시해, top-level만 보면 놓칠 수 있었다.
+- 수정:
+  - `evaluate_micro_main_live_readiness(...)`는 core slot을 raw priority가 아니라 core 심볼끼리의 순위(`core_live_rank`)로 계산한다.
+  - preflight/runtime guard의 `session_impulse_retest_live_rollout_window`도 같은 core-rank 기준으로 바꿨다.
+  - runtime guard는 warning severity check 실패도 top-level `WATCH`와 `warning_failures`로 드러내게 했다.
+  - `.env.example`을 실제 runtime 계약과 맞춰 `SESSION_IMPULSE_RETEST_CORE_LIVE_SLOTS=11`, `SESSION_IMPULSE_RETEST_SATURDAY_RISK_MULTIPLIER=0.75`, tracked symbol list를 정렬했다.
+  - runtime_src에 수정 파일을 반영하고 runtime stack을 재시작했다.
+- runtime 확인:
+  - `/health/ready`: ready.
+  - runtime guard: `overall_status=PASS`, `operational_status=PASS`, `blocking_failures=[]`, `warning_failures=[]`.
+  - `session_impulse_retest_live_rollout_window`: `PASS`, `outside_core_window=none`.
+  - `NEARUSDC` readiness: `status=live_bootstrap_collecting`, `blockers=[]`, `core_live_rank=11`.
+  - runtime no-order watchdog: `status=OK`, `reason=no_recent_live_intents`, `active_expected=0`, `lookback_expected=2`.
+  - runtime ops heartbeat: `PASS`, failure `0`, warning `0`.
+- 남은 의도적 표기:
+  - `live_replay_parity.latest.json`의 `lookback_evaluation_summary.status=WATCH`는 현재 runtime headline이 아니라 재시작 전 lookback 이력이다. active headline은 `runtime_since_ws_start` 기준이라 `PASS`가 맞다.
+  - `failure_drill` 내부의 `FAIL/ALERT`는 실패 시나리오가 감지되는지 확인하는 drill의 expected/observed payload라 정상이다.
+
+### 검증
+- `./.venv/bin/python -m pytest tests/test_micro_main_live_readiness.py tests/test_micro_live_preflight.py::test_micro_live_config_drift_checks_warn_when_live_symbol_is_outside_sir_core_window tests/test_micro_live_runtime_guard.py -q` -> `8 passed`
+- `./.venv/bin/python -m pytest tests/test_session_impulse_retest_execution_path.py::test_session_impulse_retest_live_readiness_without_blockers_can_approve tests/test_session_impulse_retest_execution_path.py::test_session_impulse_retest_live_bootstrap_advisory_sample_gap_can_submit tests/test_session_impulse_retest_execution_path.py::test_session_impulse_retest_secondary_symbol_stays_shadow_even_if_allowlisted -q` -> `3 passed`
+- `./.venv/bin/python -m pytest tests/test_micro_main_live_readiness.py tests/test_micro_live_preflight.py tests/test_micro_live_runtime_guard.py tests/test_micro_live_operational_guards.py -q` -> `110 passed`
+
 ## 2026-05-15 Iteration #208
 ### 운영 개선: no-order watchdog에 SIR 후보 생성 context 추가
 - `run_micro_live_no_order_watchdog.py`는 live intent/submission gap을 잘 보여주지만, live intent가 0이면 `fresh live 후보 대기`로 끝났다.
@@ -5978,3 +6008,50 @@
     - `overall_status=PASS`
     - hard `0`, warning `0`
     - `entry_surface.status_detail=no_alertable_rows`
+
+## 2026-05-15 Iteration #210
+### 검증: MICRO_LIVE 안전장치 작동성과 백테스트 수익률 drag 수치화
+- 추가:
+  - `scripts/run_micro_live_safety_drag_audit.py`
+  - `tests/test_micro_live_safety_drag_audit.py`
+- 목적:
+  - 기존 `session_impulse_retest` USDT proxy 백테스트 trade list에 현재 `.env` MICRO_LIVE 계약과 재현 가능한 safety gate를 순서대로 적용한다.
+  - live 계약 필터와 운영 안전장치가 백테스트 진입 수/총 R/EV를 얼마나 줄이는지 분리한다.
+- 기준 리포트:
+  - `reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_20260515T175711Z.json`
+- 산출 리포트:
+  - `reports/validation/micro_live_safety_drag_audits/micro_live_safety_drag_audit_20260515T180801Z.md`
+- 결과:
+  - baseline: `closed=4399`, `total_r=2826.3175`, `ev_r=0.6425`
+  - contract filters only: `closed=4399`, `total_r=2826.3175`, `ev_r=0.6425`
+  - replayable safety gates: `closed=3261`, `total_r=2036.5773`, `ev_r=0.6245`
+  - replayable safety gates + Saturday risk multiplier: `closed=3261`, `total_r=1980.8518`, `ev_r=0.6074`
+  - safety drag: `closed -1138` (`-25.8695%`), `total_r -789.7402` (`-27.9424%`), `ev_r -0.0180`
+  - risk-multiplier까지 포함한 drag: `total_r -845.4657` (`-29.9140%`), `ev_r -0.0351`
+  - 차단 reason: `live_family_cluster_window_cap_reached=1059`, `live_family_loss_cooldown_active=79`
+- waterfall:
+  - position cap only: `closed -269`, `total_r -206.0708`
+  - + daily cap: 추가 drag 없음 (`AUTO_TRADING_MICRO_LIVE_MAX_DAILY_NEW_ENTRIES=0`)
+  - + family cluster window: 추가 `closed -812`, `total_r -543.7666`
+  - + same-direction exposure: 추가 drag 없음, 현재 family cluster가 더 엄격함
+  - + loss cooldown: 추가 `closed -57`, `total_r -39.9028`
+- 현재 runtime 확인:
+  - `/health/ready`: `ready`
+  - `/execution/safety-state?symbol=BTCUSDC`: `new_entry_allowed=true`, kill/close-only 모두 false
+  - `run_replay_validation_bridge.py --all-live-symbols`: `overall_status=PASS`, 11개 live symbol 모두 `ELIGIBLE_FOR_RUNTIME_VALIDATION_BRIDGE`
+  - `run_micro_live_synthetic_canary.py --symbol BTCUSDC --entry-model CONFIRM`: `overall_status=PASS`, `no_live_order_sent=true`, liquidity gate `PASS`
+  - `run_micro_live_preflight.py`: safety/config/blackout/liquidity checks는 PASS지만 cached validation payload 부재로 `validation_language/checklist_language=FAIL`, overall `NOT_READY`
+- 주의:
+  - liquidity depth/spread/slippage drag는 과거 orderbook snapshot이 백테스트 artifact에 없어서 historical drag로 정확히 계산하지 않았다.
+  - 현재 snapshot canary는 통과했지만, liquidity gate drag는 live 제출 시점의 snapshot으로 계속 축적해야 한다.
+
+### 검증 명령
+- `./.venv/bin/python scripts/run_micro_live_safety_drag_audit.py --backtest-report reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_20260515T175711Z.json --include-samples`
+- `./.venv/bin/python scripts/run_micro_live_synthetic_canary.py --symbol BTCUSDC --entry-model CONFIRM --direction long --stop-bps 50 --no-fail-exit`
+- `./.venv/bin/python scripts/run_replay_validation_bridge.py --all-live-symbols --no-write-report --no-fail-exit`
+- `./.venv/bin/pytest tests/test_micro_live_safety_drag_audit.py tests/test_session_impulse_retest_execution_path.py::test_session_impulse_retest_live_readiness_without_blockers_can_approve tests/test_session_impulse_retest_execution_path.py::test_session_impulse_retest_live_bootstrap_advisory_sample_gap_can_submit tests/test_session_impulse_retest_execution_path.py::test_session_impulse_retest_secondary_symbol_stays_shadow_even_if_allowlisted tests/test_session_impulse_retest_execution_path.py::test_live_cluster_guard_ignores_missing_opened_ts_for_recent_window tests/test_session_impulse_retest_execution_path.py::test_live_cluster_guard_ignores_malformed_loss_exit_ts tests/test_session_impulse_retest_execution_path.py::test_live_cluster_guard_tolerates_malformed_window_settings tests/test_micro_live_preflight.py::test_micro_live_config_drift_checks_flag_missing_direction_contract_symbol tests/test_micro_live_preflight.py::test_event_blackout_coverage_check_blocks_missing_live_symbols tests/test_micro_live_preflight.py::test_event_blackout_freshness_check_blocks_expired_contract tests/test_micro_live_operational_guards.py::test_synthetic_canary_passes_with_no_network_and_valid_settings`
+  - `13 passed`
+- legacy `LIMIT` liquidity tests:
+  - current `.env`는 `AUTO_TRADING_MICRO_LIVE_ALLOWED_ENTRY_MODELS=CONFIRM`라서 기존 `LIMIT` fixture는 그대로 돌리면 contract mismatch로 실패한다.
+  - 기계적 liquidity/sizing 회귀 확인은 `AUTO_TRADING_MICRO_LIVE_ALLOWED_ENTRY_MODELS=LIMIT,CONFIRM` override로 실행했다.
+  - `6 passed`
