@@ -113,3 +113,26 @@ def test_micro_main_live_readiness_core_symbol_without_recent_sample_bootstraps_
     assert readiness.blockers == ()
     assert "no_recent_closed_sample" in readiness.advisory_blockers
     assert "shadow_decision_not_pass" not in readiness.advisory_blockers
+
+
+def test_micro_main_live_readiness_core_slots_count_core_symbols_only() -> None:
+    readiness = evaluate_micro_main_live_readiness(
+        symbol="NEARUSDC",
+        shadow_summary={
+            "available": True,
+            "decision": "REJECT",
+            "recent_closed": 0,
+            "ev_r": 0.0,
+            "total_r": 0.0,
+        },
+        universe_policy=build_micro_main_universe_policy_snapshot(),
+        enabled=True,
+        shadow_only=False,
+        partial_ratio=1.0,
+        core_live_slots=11,
+        secondary_live_enabled=False,
+    )
+
+    assert readiness.status == "live_bootstrap_collecting"
+    assert readiness.blockers == ()
+    assert readiness.shadow_metrics["core_live_rank"] == 11

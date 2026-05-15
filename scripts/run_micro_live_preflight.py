@@ -411,6 +411,19 @@ def _sir_live_rollout_window_check(
         for item in list(policy.get("entries") or [])
         if str(item.get("symbol") or "").strip()
     }
+    core_rank = {
+        str(item.get("symbol") or "").upper(): index + 1
+        for index, item in enumerate(
+            sorted(
+                [
+                    dict(item)
+                    for item in list(policy.get("entries") or [])
+                    if str(dict(item).get("tier") or "").strip().lower() == "core"
+                ],
+                key=lambda row: _int(row.get("rollout_priority"), default=0),
+            )
+        )
+    }
     missing_universe = sorted(symbol for symbol in live_symbols if symbol not in entries)
     outside_core_window: list[str] = []
     secondary_disabled: list[str] = []
@@ -420,8 +433,9 @@ def _sir_live_rollout_window_check(
             continue
         tier = str(entry.get("tier") or "").strip().lower()
         priority = _int(entry.get("rollout_priority"), default=0)
-        if tier == "core" and core_live_slots > 0 and priority > core_live_slots:
-            outside_core_window.append(f"{symbol}:p{priority}")
+        symbol_core_rank = _int(core_rank.get(symbol), default=0)
+        if tier == "core" and core_live_slots > 0 and symbol_core_rank > core_live_slots:
+            outside_core_window.append(f"{symbol}:core{symbol_core_rank}/p{priority}")
         if tier == "secondary" and not secondary_live_enabled:
             secondary_disabled.append(f"{symbol}:p{priority}")
 

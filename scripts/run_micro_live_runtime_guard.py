@@ -75,6 +75,14 @@ def _blocking_failures(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _warning_failures(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        dict(item)
+        for item in checks
+        if str(item.get("severity") or "").lower() != "blocking" and str(item.get("status") or "").upper() != "PASS"
+    ]
+
+
 _BLOCK_REASON_ACTIONS = {
     "validation_do_not_deploy": "inspect_validation_report_approval_surface",
     "rollout_session_not_allowed": "inspect_session_time_contract_or_wait_for_allowed_window",
@@ -144,9 +152,16 @@ def _recommendations(*, blocking_failures: list[dict[str, Any]], lifecycle: dict
     return recommendations
 
 
-def _operational_status(*, blocking_failures: list[dict[str, Any]], lifecycle: dict[str, Any]) -> str:
+def _operational_status(
+    *,
+    blocking_failures: list[dict[str, Any]],
+    lifecycle: dict[str, Any],
+    warning_failures: list[dict[str, Any]] | None = None,
+) -> str:
     if blocking_failures:
         return "FAIL"
+    if warning_failures:
+        return "WATCH"
     live_intents = dict((dict(lifecycle.get("summary") or {}).get("live_intents")) or {})
     total_intents = int(live_intents.get("total") or 0)
     submit_ready = int(live_intents.get("submit_ready") or 0)
@@ -167,6 +182,7 @@ def build_payload(*, days: int, limit: int, check_binance_rules: bool) -> dict[s
     runtime_started_at = _ws_runtime_started_at()
     checks = _micro_live_config_drift_checks(check_binance_rules=check_binance_rules)
     failures = _blocking_failures(checks)
+    warnings = _warning_failures(checks)
     init_db()
     with SessionLocal() as db:
         lifecycle = LiveOrderLifecycleReporter(db).generate(
@@ -182,9 +198,14 @@ def build_payload(*, days: int, limit: int, check_binance_rules: bool) -> dict[s
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "runtime_started_at": runtime_started_at.isoformat() if runtime_started_at else None,
         "family_filter": sorted(family_filter),
-        "overall_status": "FAIL" if failures else "PASS",
-        "operational_status": _operational_status(blocking_failures=failures, lifecycle=lifecycle),
+        "overall_status": "FAIL" if failures else ("WATCH" if warnings else "PASS"),
+        "operational_status": _operational_status(
+            blocking_failures=failures,
+            warning_failures=warnings,
+            lifecycle=lifecycle,
+        ),
         "blocking_failures": failures,
+        "warning_failures": warnings,
         "checks": checks,
         "lifecycle": lifecycle,
         "blocked_intent_diagnostics": blocked_diagnostics,
@@ -205,6 +226,7 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         f"- overall_status: {payload.get('overall_status')}",
         f"- operational_status: {payload.get('operational_status')}",
         f"- blocking_failures: {len(payload.get('blocking_failures') or [])}",
+        f"- warning_failures: {len(payload.get('warning_failures') or [])}",
         "",
         "## Config Drift",
         "",

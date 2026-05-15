@@ -237,7 +237,7 @@ def test_micro_live_config_drift_checks_warn_when_live_symbol_is_outside_sir_cor
     monkeypatch.setattr(settings, "session_impulse_retest_enabled", True)
     monkeypatch.setattr(settings, "session_impulse_retest_shadow_only", False)
     monkeypatch.setattr(settings, "session_impulse_retest_allowed_symbols", "BTCUSDC,NEARUSDC")
-    monkeypatch.setattr(settings, "session_impulse_retest_core_live_slots", 11)
+    monkeypatch.setattr(settings, "session_impulse_retest_core_live_slots", 10)
     monkeypatch.setattr(settings, "session_impulse_retest_secondary_live_enabled", False)
 
     checks = run_micro_live_preflight._micro_live_config_drift_checks()
@@ -245,7 +245,7 @@ def test_micro_live_config_drift_checks_warn_when_live_symbol_is_outside_sir_cor
 
     assert window_check["status"] == "FAIL"
     assert window_check["severity"] == "warning"
-    assert "outside_core_window=NEARUSDC:p12" in window_check["message"]
+    assert "outside_core_window=NEARUSDC:core11/p12" in window_check["message"]
 
 
 def test_event_blackout_coverage_check_blocks_missing_live_symbols(tmp_path) -> None:

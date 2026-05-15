@@ -10,6 +10,7 @@ def test_runtime_guard_reports_blocking_failures_and_blocked_live_intents() -> N
         {"name": "optional_note", "status": "FAIL", "severity": "warning", "message": "warn"},
     ]
     failures = run_micro_live_runtime_guard._blocking_failures(checks)
+    warnings = run_micro_live_runtime_guard._warning_failures(checks)
     lifecycle = {
         "summary": {
             "submission_count": 0,
@@ -39,6 +40,7 @@ def test_runtime_guard_reports_blocking_failures_and_blocked_live_intents() -> N
     )
 
     assert [item["name"] for item in failures] == ["macro_blackout_horizon"]
+    assert [item["name"] for item in warnings] == ["optional_note"]
     assert recommendations == [
         "fix_blocking_runtime_checks:macro_blackout_horizon",
         "all_recent_live_intents_blocked:validation_do_not_deploy=3",
@@ -62,4 +64,9 @@ def test_runtime_guard_reports_blocking_failures_and_blocked_live_intents() -> N
         }
     ]
     assert run_micro_live_runtime_guard._operational_status(blocking_failures=[], lifecycle=lifecycle) == "WATCH"
+    assert run_micro_live_runtime_guard._operational_status(
+        blocking_failures=[],
+        warning_failures=warnings,
+        lifecycle={"summary": {"live_intents": {"total": 0, "submit_ready": 0, "blocked": 0}}},
+    ) == "WATCH"
     assert run_micro_live_runtime_guard._operational_status(blocking_failures=failures, lifecycle=lifecycle) == "FAIL"

@@ -34,6 +34,22 @@ class MicroMainLiveReadiness:
     shadow_metrics: dict[str, Any]
 
 
+def _core_live_rank(*, entries: list[Any], symbol: str) -> int:
+    core_entries = [
+        item
+        for item in entries
+        if str(dict(item).get("tier") or "").strip().lower() == "core"
+    ]
+    ordered_core_symbols = [
+        str(dict(item).get("symbol") or "").upper()
+        for item in sorted(core_entries, key=lambda row: int(dict(row).get("rollout_priority", 0) or 0))
+    ]
+    try:
+        return ordered_core_symbols.index(str(symbol or "").upper()) + 1
+    except ValueError:
+        return 0
+
+
 def evaluate_micro_main_live_readiness(
     *,
     symbol: str,
@@ -53,6 +69,7 @@ def evaluate_micro_main_live_readiness(
 
     tier = str((entry or {}).get("tier") or "unassigned")
     rollout_priority = int((entry or {}).get("rollout_priority", 0) or 0)
+    core_live_rank = _core_live_rank(entries=entries, symbol=normalized_symbol) if tier == "core" else 0
     risk_multiplier = float((entry or {}).get("risk_multiplier", 0.0) or 0.0)
 
     enabled = _safe_bool(enabled)
@@ -84,7 +101,7 @@ def evaluate_micro_main_live_readiness(
             shadow_evidence_blockers.append("recent_shadow_total_not_positive")
     if tier == "secondary" and not secondary_live_enabled:
         blockers.append("secondary_rollout_disabled")
-    if tier == "core" and core_live_slots > 0 and rollout_priority > core_live_slots:
+    if tier == "core" and core_live_slots > 0 and core_live_rank > core_live_slots:
         blockers.append("outside_current_core_live_window")
 
     advisory_blockers: list[str] = []
@@ -101,7 +118,7 @@ def evaluate_micro_main_live_readiness(
         status = "not_in_universe"
     elif tier == "secondary" and not secondary_live_enabled:
         status = "secondary_shadow_only"
-    elif tier == "core" and core_live_slots > 0 and rollout_priority > core_live_slots:
+    elif tier == "core" and core_live_slots > 0 and core_live_rank > core_live_slots:
         status = "outside_current_core_live_window"
     elif shadow_only:
         if not available:
@@ -140,6 +157,7 @@ def evaluate_micro_main_live_readiness(
             "latest_trade": dict(shadow.get("latest_trade") or {}) or None,
             "partial_activation_ratio": round(float(partial_ratio), 4),
             "core_live_slots": int(core_live_slots),
+            "core_live_rank": int(core_live_rank),
             "secondary_live_enabled": secondary_live_enabled,
             "shadow_evidence_policy": "hard_gate_in_shadow_only_advisory_in_live_enabled",
         },
