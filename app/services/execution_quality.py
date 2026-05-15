@@ -12,6 +12,7 @@ from app.core.enums import EntryModel, ExecutionFillStage, ExitReason, PlanState
 from app.db.models import ExecutionFill, Plan, ZoneOutcome
 from app.db.repositories import CandleRepository, ExecutionFillRepository, OutcomeRepository, PlanRepository
 from app.services.exit_engine import FORCED_EXIT_REASONS, TARGET_EXIT_REASONS
+from app.services.live_route_contract import row_session_name
 from app.services.report_io import atomic_write_text
 
 
@@ -415,17 +416,7 @@ class ExecutionQualityService:
     @staticmethod
     def _session_name(plan: Plan) -> str:
         validity = dict(getattr(plan, "validity", {}) or {})
-        for key in (
-            "session_guidance_session_name",
-            "session_guidance_state",
-            "generated_session",
-            "session_name",
-            "session",
-        ):
-            value = str(validity.get(key) or "").strip()
-            if value:
-                return value.lower()
-        return ""
+        return row_session_name({"validity": validity})
 
     @classmethod
     def _plan_matches_filters(

@@ -1612,7 +1612,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
 
     function renderTopOpportunity(candidate, symbol, dashboard) {
       if (!candidate) {
-        $('top-opportunity').innerHTML = `<div class="empty">${esc(symbol)} 기준으로 바로 볼 accepted 후보가 없습니다.</div>`;
+        $('top-opportunity').innerHTML = `<div class="empty">${esc(symbol)} 기준으로 바로 볼 portfolio accepted context 후보가 없습니다.</div>`;
         return;
       }
       const shadowTilt = extractRuntimeSignalShadowTilt(candidate);
@@ -2443,7 +2443,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             ${badge('Rollout Block', String(rollout?.blocked ?? 0))}
             ${badge('Money Leak', fmtR(submittedToFilledGap))}
             ${badge('Drag Source', dragSource)}
-            ${badge('Runtime/Accepted', `${fmtMaybe(funnel?.runtime_candidates ?? 0)} / ${fmtMaybe(funnel?.accepted_candidates ?? 0)}`)}
+            ${badge('Runtime / Portfolio Context', `${fmtMaybe(funnel?.runtime_candidates ?? 0)} / ${fmtMaybe(funnel?.accepted_candidates ?? 0)}`)}
           </div>
           <div class="summary-grid">
             ${renderSummaryBox('Hard Gate Summary', String(hard?.blocked ?? 0), hard?.top_reason || currentGateReason)}
@@ -2939,11 +2939,11 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           <div class="section-header">
             <div>
               <h2>Portfolio Candidate Drilldown</h2>
-              <div class="meta">accepted / blocked 후보를 raw JSON 없이 읽기 위해, cluster, allocated risk, outcome bias, edge focus, capital allocator, A/B posture를 같은 표로 보여줍니다.</div>
+              <div class="meta">portfolio accepted / blocked 후보를 표시합니다. accepted는 주문 후보가 아니며 Live Route 열이 실제 live route 후보 여부를 구분합니다.</div>
             </div>
           </div>
           <div class="summary-grid">
-            ${renderSummaryBox('Accepted Candidates', String(portfolio?.accepted_candidate_count ?? 0), portfolio?.playbook_action || 'portfolio accepted summary unavailable')}
+            ${renderSummaryBox('Portfolio Accepted (Context)', String(portfolio?.accepted_candidate_count ?? 0), portfolio?.playbook_action || 'portfolio accepted summary unavailable')}
             ${renderSummaryBox('Live Route Context', `${liveRoute?.live_routable_accepted_candidate_count ?? 0} live-route / ${liveRoute?.context_only_accepted_candidate_count ?? 0} context-only`, liveRoute?.message || 'live route context unavailable')}
             ${renderSummaryBox('Blocked Candidates', String(portfolio?.blocked_candidate_count ?? 0), portfolio?.deployment_message || 'portfolio blocked summary unavailable')}
             ${renderSummaryBox('Capital Allocator', portfolio?.capital_allocator_summary?.allocator_state || 'n/a', portfolio?.capital_allocator_summary?.capital_pressure || 'capital allocator summary unavailable')}
@@ -2970,7 +2970,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
       `;
     }
 
-    function candidateInspectorCard(label, row, emptyText) {
+    function candidateInspectorCard(label, row, emptyText, dashboard) {
       if (!row) {
         return `
           <div class="panel">
@@ -2994,6 +2994,11 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         || row?.session_liquidity_reference?.state
         || 'n/a';
       const edgeFocus = candidateEdgeFocus(row);
+      const liveRouteLabel = candidateLiveRouteStatus(row, dashboard);
+      const entrySurfaceRoute = row?.entry_surface_route || {};
+      const routeReasons = Array.isArray(entrySurfaceRoute?.reasons) && entrySurfaceRoute.reasons.length
+        ? entrySurfaceRoute.reasons.join(',')
+        : (entrySurfaceRoute?.status || 'route reasons unavailable');
       return `
         <div class="panel">
           <h2>${esc(label)}</h2>
@@ -3001,9 +3006,11 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             ${badge('Symbol', row.symbol || 'n/a')}
             ${badge('Family', row.strategy_family || 'n/a')}
             ${badge('Cluster', row.strategy_cluster || row.multi_strategy_overlay?.cluster || 'n/a')}
+            ${badge('Live Route', liveRouteLabel)}
             ${badge('Bucket', row.block_reason ? 'blocked' : 'accepted')}
           </div>
           <div class="summary-grid">
+            ${renderSummaryBox('Order Route', liveRouteLabel, routeReasons)}
             ${renderSummaryBox('Risk', `${fmtR(row.recommended_risk_r)} / ${fmtR(row.allocated_risk_r)}`, `recommended / allocated | ${sizingReason}`)}
             ${renderSummaryBox('Shadow Tilt', formatShadowTiltValue(shadowTilt), formatShadowTiltMeta(shadowTilt))}
             ${renderSummaryBox('Outcome Bias', row.outcome_bias?.tier || 'n/a', row.outcome_bias?.summary || `score=${fmtMaybe(row.outcome_bias?.score_delta)}`)}
@@ -3030,12 +3037,12 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           <div class="section-header">
             <div>
               <h2>Portfolio Candidate Inspector</h2>
-              <div class="meta">대표 accepted row 1개와 blocked row 1개를 카드로 다시 압축해, risk, allocator, A/B posture, edge focus, session, reaction evidence를 바로 읽습니다.</div>
+              <div class="meta">대표 portfolio accepted row 1개와 blocked row 1개를 카드로 다시 압축해, live route, risk, allocator, A/B posture, edge focus, session, reaction evidence를 바로 읽습니다.</div>
             </div>
           </div>
           <div class="grid two">
-            ${candidateInspectorCard('Representative Accepted Candidate', accepted, '대표 accepted candidate가 없습니다.')}
-            ${candidateInspectorCard('Representative Blocked Candidate', blocked, '대표 blocked candidate가 없습니다.')}
+            ${candidateInspectorCard('Representative Portfolio Accepted Candidate', accepted, '대표 portfolio accepted candidate가 없습니다.', dashboard)}
+            ${candidateInspectorCard('Representative Blocked Candidate', blocked, '대표 blocked candidate가 없습니다.', dashboard)}
           </div>
         </div>
       `;

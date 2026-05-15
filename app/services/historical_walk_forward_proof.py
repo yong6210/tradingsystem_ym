@@ -16,6 +16,7 @@ from app.db.models import Candle, Plan, Zone
 from app.db.repositories import CandleRepository
 from app.services.context_engine import ContextEngine
 from app.services.fast_failure_guard import fast_failure_hit, fast_failure_trigger_detail, resolve_fast_failure_policy
+from app.services.live_route_contract import row_session_name
 from app.services.plan_generator import PlanGenerator, RankedPlan
 from app.services.report_io import atomic_write_text
 from app.services.session_guidance import SessionGuidanceService
@@ -1121,9 +1122,8 @@ class HistoricalWalkForwardProofService:
             for item in str(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_allowed_sessions", "") or "").split(",")
             if item.strip()
         }
-        session_name = str(
-            (self.session_guidance.snapshot(now=generated_ts).get("current_session") or {}).get("name") or "inactive"
-        ).strip().lower() or "inactive"
+        session_guidance = self.session_guidance.snapshot(now=generated_ts)
+        session_name = row_session_name({"session_guidance": session_guidance}) or "inactive"
         if allowed_sessions and session_name not in allowed_sessions:
             return {}
         max_bars = max(self._safe_int(getattr(self.settings, "btc_sweep_reversal_limit_fast_failure_max_bars", 0), 18), 0)

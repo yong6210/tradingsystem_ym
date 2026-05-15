@@ -957,3 +957,34 @@ def test_execution_quality_compares_versions_and_detects_rejected_entries() -> N
         assert payload["by_strategy_version"]["v2"]["fills_matched"] == 0
         assert payload["by_strategy_version"]["v2"]["unfilled_reason_details"]["expired_after_touch_confirmation"] == 1
         assert {row["version"] for row in payload["version_comparison"]} == {"v1", "v2"}
+
+
+def test_execution_quality_session_name_maps_dead_session_state() -> None:
+    plan = Plan(
+        plan_id="execution_quality_dead_session_case",
+        zone_id="execution_quality_dead_session_zone",
+        symbol="BTCUSDC",
+        timeframe="5m",
+        direction="long",
+        entry_model="CONFIRM",
+        sl=99.0,
+        tp1=101.0,
+        tp2=102.0,
+        tp3=103.0,
+        split={"tp1": 0.6, "tp2": 0.25, "runner": 0.15},
+        rr_min=1.0,
+        rr_base=2.0,
+        rr_opt=3.0,
+        ev=0.2,
+        cost_est=0.04,
+        confidence=0.7,
+        valid_from=datetime.now(timezone.utc),
+        valid_until=datetime.now(timezone.utc) + timedelta(hours=1),
+        strategy_version="v1",
+        validity={
+            "session_guidance_state": "dead_session",
+            "session_guidance_session_name": "inactive",
+        },
+    )
+
+    assert ExecutionQualityService._session_name(plan) == "dead_session"

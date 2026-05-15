@@ -9,6 +9,8 @@ export PYDANTIC_DISABLE_PLUGINS="${PYDANTIC_DISABLE_PLUGINS:-1}"
 export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 
 LOG_DIR="/tmp"
+LOG_ROTATE_MAX_BYTES="${TRADING_LOG_ROTATE_MAX_BYTES:-104857600}"
+LOG_ROTATE_KEEP="${TRADING_LOG_ROTATE_KEEP:-5}"
 PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 SPAWN_SCRIPT="$ROOT_DIR/scripts/spawn_detached_process.py"
 WORKER_SCRIPT="$ROOT_DIR/scripts/run_worker.py"
@@ -22,6 +24,44 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "missing python runtime: $PYTHON_BIN" >&2
   exit 1
 fi
+
+file_size_bytes() {
+  local path="$1"
+  if stat -f%z "$path" >/dev/null 2>&1; then
+    stat -f%z "$path"
+    return 0
+  fi
+  if stat -c%s "$path" >/dev/null 2>&1; then
+    stat -c%s "$path"
+    return 0
+  fi
+  wc -c <"$path" | tr -d ' '
+}
+
+rotate_log_if_large() {
+  local path="$1"
+  local max_bytes="${LOG_ROTATE_MAX_BYTES:-0}"
+  local keep="${LOG_ROTATE_KEEP:-5}"
+  local size idx
+  [[ -f "$path" ]] || return 0
+  [[ "$max_bytes" =~ ^[0-9]+$ ]] || max_bytes=0
+  [[ "$keep" =~ ^[0-9]+$ ]] || keep=5
+  [[ "$max_bytes" -gt 0 ]] || return 0
+  size="$(file_size_bytes "$path" 2>/dev/null || echo 0)"
+  [[ "$size" =~ ^[0-9]+$ ]] || size=0
+  [[ "$size" -ge "$max_bytes" ]] || return 0
+  if [[ "$keep" -le 0 ]]; then
+    : >"$path"
+    return 0
+  fi
+  rm -f "$path.$keep"
+  for ((idx=keep - 1; idx>=1; idx--)); do
+    if [[ -e "$path.$idx" ]]; then
+      mv "$path.$idx" "$path.$((idx + 1))"
+    fi
+  done
+  mv "$path" "$path.1"
+}
 
 if [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
   LAUNCHD_DOMAIN="gui/$(id -u)"
@@ -59,6 +99,11 @@ if command -v lsof >/dev/null 2>&1; then
   fi
 fi
 rm -f "$HEARTBEAT_DIR/loop.json" "$HEARTBEAT_DIR/ws.json"
+
+mkdir -p "$LOG_DIR"
+for log_name in trading_api.log trading_worker_loop.log trading_worker_ws.log; do
+  rotate_log_if_large "$LOG_DIR/$log_name"
+done
 
 {
   echo

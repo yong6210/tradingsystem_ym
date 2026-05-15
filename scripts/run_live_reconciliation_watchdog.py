@@ -528,7 +528,7 @@ def main() -> int:
         ):
             delivery = NotificationDispatcher(get_settings()).dispatch(
                 channel=str(args.channel),
-                alert_type="entry_surface_alert",
+                alert_type="live_reconciliation_watchdog",
                 symbol="MICRO_LIVE",
                 payload={
                     "status": "WARN",

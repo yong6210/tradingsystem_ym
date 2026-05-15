@@ -24,6 +24,19 @@ stage_monitor_tick = _load_module(
 )
 
 
+def _patch_actionable_live_contract(monkeypatch):
+    class _Settings:
+        auto_trading_micro_live_allowed_symbols = "BTCUSDC,ETHUSDC,TIAUSDC"
+        auto_trading_micro_live_allowed_families = "sweep_reversal"
+        auto_trading_micro_live_allowed_sessions = "dead_session,london,new_york"
+        auto_trading_micro_live_allowed_entry_models = "LIMIT"
+        auto_trading_micro_live_direction_contract = (
+            "BTCUSDC:LONG|SHORT,ETHUSDC:LONG|SHORT,TIAUSDC:LONG|SHORT"
+        )
+
+    monkeypatch.setattr(stage_monitor_tick, "get_settings", lambda: _Settings())
+
+
 def test_main_prints_notifier_payload(monkeypatch, capsys, tmp_path):
     args = stage_monitor_tick.argparse.Namespace(
         base_url="http://127.0.0.1:8000",
@@ -1115,7 +1128,8 @@ def test_apply_runtime_operator_signoff_summary_marks_manual_micro_live_ready():
     assert summary["contract_scope"] == "limit_only"
 
 
-def test_apply_runtime_actionable_live_candidate_summary_marks_recent_intent_outside_family() -> None:
+def test_apply_runtime_actionable_live_candidate_summary_marks_recent_intent_outside_family(monkeypatch) -> None:
+    _patch_actionable_live_contract(monkeypatch)
     current = {
         "runtime_operator_signoff_summary": {
             "status": "ready_for_manual_micro_live_signoff",
@@ -1176,7 +1190,8 @@ def test_apply_runtime_actionable_live_candidate_summary_marks_recent_intent_out
     assert "is approved but was created by the PAPER drill" in summary["summary"]
 
 
-def test_apply_runtime_actionable_live_candidate_summary_prefers_recent_contract_match() -> None:
+def test_apply_runtime_actionable_live_candidate_summary_prefers_recent_contract_match(monkeypatch) -> None:
+    _patch_actionable_live_contract(monkeypatch)
     current = {
         "runtime_operator_signoff_summary": {
             "status": "ready_for_manual_micro_live_signoff",
@@ -1225,7 +1240,8 @@ def test_apply_runtime_actionable_live_candidate_summary_prefers_recent_contract
     assert "STOP_MARKET" not in summary["summary"]
 
 
-def test_apply_runtime_actionable_live_candidate_summary_marks_recent_contract_match_not_submit_ready() -> None:
+def test_apply_runtime_actionable_live_candidate_summary_marks_recent_contract_match_not_submit_ready(monkeypatch) -> None:
+    _patch_actionable_live_contract(monkeypatch)
     current = {
         "runtime_operator_signoff_summary": {
             "status": "ready_for_manual_micro_live_signoff",
@@ -1466,6 +1482,32 @@ def test_apply_runtime_mitigation_wait_summary_surfaces_outside_allowed_session(
     assert summary["current_session"] == "inactive"
     assert summary["allowed_sessions"] == ["london", "new_york"]
     assert summary["next_trigger"] == "allowed_rollout_session_opens"
+
+
+def test_runtime_mitigation_session_context_maps_inactive_to_dead_session(monkeypatch):
+    class _Session:
+        def to_dict(self):
+            return {"name": "inactive", "active": False}
+
+    class _OperatingLock:
+        def current_session(self, *, now):
+            return _Session()
+
+    class _Policy:
+        allowed_sessions = ("dead_session", "london", "new_york")
+
+    class _Rollout:
+        def get(self, family):
+            return _Policy()
+
+    monkeypatch.setattr(stage_monitor_tick, "OperatingLockService", lambda: _OperatingLock())
+    monkeypatch.setattr(stage_monitor_tick, "RolloutPolicyBootstrap", lambda: _Rollout())
+
+    result = stage_monitor_tick._runtime_mitigation_session_context(family="session_impulse_retest")
+
+    assert result["current_session"] == "dead_session"
+    assert result["session_active"] is False
+    assert result["allowed_sessions"] == ["dead_session", "london", "new_york"]
 
 
 def test_apply_runtime_mitigation_wait_summary_prefers_fresh_watcher_candidate(monkeypatch):

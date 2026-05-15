@@ -513,6 +513,8 @@ class PortfolioBudgetCandidateOut(ORMModel):
     thesis_rejected_reason: str | None = None
     thesis_active_cluster_count: int = 0
     edge_experiment_focus: dict[str, Any] | None = None
+    entry_surface_route: dict[str, Any] | None = None
+    live_routable: bool | None = None
 
 
 class PortfolioBudgetReportOut(ORMModel):
@@ -527,6 +529,10 @@ class PortfolioBudgetReportOut(ORMModel):
     playbook_action: str
     playbook_message: str
     approval_strip_summary: dict[str, Any] | None = None
+    live_route_contract: dict[str, Any] | None = None
+    portfolio_live_route_context: dict[str, Any] | None = None
+    order_route_summary: dict[str, Any] | None = None
+    order_route_truth: dict[str, Any] | None = None
     edge_experiment_review: dict[str, Any] | None = None
     edge_evolution_rule: dict[str, Any] | None = None
     review_followup_ledger: dict[str, Any] | None = None

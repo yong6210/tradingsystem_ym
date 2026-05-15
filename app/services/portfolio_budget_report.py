@@ -13,6 +13,11 @@ from app.db.repositories import OrderSubmissionRepository, PlanRepository
 from app.services.b_continuation_activation import BContinuationActivationService
 from app.services.edge_experiment_review import build_edge_experiment_review, summarize_edge_experiment_review
 from app.services.edge_evolution_rule import build_edge_evolution_rule, summarize_edge_evolution_rule
+from app.services.live_route_contract import (
+    attach_live_route_status,
+    live_route_contract_from_settings,
+    portfolio_live_route_context,
+)
 from app.services.report_io import atomic_write_text
 from app.services.scanner import ScannerService, _runtime_deployment_language
 from app.services.split_review_followup_ledger import summarize_split_review_followup_ledger
@@ -365,6 +370,20 @@ class PortfolioBudgetReportService:
         self.settings = settings or get_settings()
         self.mode = StrategyModeService(self.settings)
 
+    def _live_route_contract_from_settings(self) -> dict[str, Any]:
+        return live_route_contract_from_settings(self.settings)
+
+    def _attach_live_route_status(self, row: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+        return attach_live_route_status(row, contract)
+
+    def _portfolio_live_route_context(
+        self,
+        *,
+        accepted_candidates: list[dict[str, Any]],
+        contract: dict[str, Any],
+    ) -> dict[str, Any]:
+        return portfolio_live_route_context(accepted_candidates=accepted_candidates, contract=contract)
+
     def _current_positions(self, exposure_plans: list[Plan]) -> tuple[list[dict[str, Any]], dict[str, Any], list[Plan]]:
         existing_exposures = exposure_plans
         exposure_metrics = self.overlay.exposure_metrics(existing_exposures)
@@ -579,6 +598,8 @@ class PortfolioBudgetReportService:
             f"- include_planned_exposure: {payload['include_planned_exposure']}",
             f"- mode_policy: {payload['mode_policy']}",
             f"- mode_stats: {payload['mode_stats']}",
+            f"- order_route_truth: {payload.get('order_route_summary') or {}}",
+            f"- portfolio_live_route_context: {payload.get('portfolio_live_route_context') or {}}",
             "",
             "## Current Exposure",
             f"- total: {payload['current_exposure']['total']}",
@@ -605,7 +626,15 @@ class PortfolioBudgetReportService:
                 "",
                 "## Candidate Summary",
                 f"- candidates_considered: {payload['candidates_considered']}",
-                f"- accepted_count: {payload['accepted_count']}",
+                f"- portfolio_accepted_context_count: {payload['accepted_count']}",
+                (
+                    f"- live_route_accepted_count: "
+                    f"{(payload.get('portfolio_live_route_context') or {}).get('live_routable_accepted_candidate_count', 0)}"
+                ),
+                (
+                    f"- context_only_accepted_count: "
+                    f"{(payload.get('portfolio_live_route_context') or {}).get('context_only_accepted_candidate_count', 0)}"
+                ),
                 f"- blocked_count: {payload['blocked_count']}",
                 f"- alpha_research_count: {payload.get('alpha_research_count', 0)}",
                 f"- blocked_reason_counts: {payload['blocked_reason_counts']}",
@@ -630,13 +659,17 @@ class PortfolioBudgetReportService:
                 f"- capital_pressure: {(payload.get('capital_allocator_summary') or {}).get('capital_pressure', 'neutral')}",
                 f"- family_weights: {(payload.get('capital_allocator_summary') or {}).get('family_weights', [])}",
                 "",
-                "## Accepted Candidates",
+                "## Portfolio Accepted Candidates (Context)",
             ]
         )
         for row in payload["accepted_candidates"]:
+            route = row.get("entry_surface_route") or {}
+            route_reasons = list(route.get("reasons") or [])
             lines.append(
                 f"- {row['symbol']} {row['direction']} {row['entry_model']}: adjusted={row['adjusted_rank_score']:.4f}, "
                 f"family={row.get('strategy_family', '')}, cluster={row.get('strategy_cluster', '')}, "
+                f"live_routable={bool(row.get('live_routable', False))}, route_status={route.get('status', 'unknown')}, "
+                f"route_reasons={route_reasons}, "
                 f"cluster_status={row.get('strategy_cluster_status', '')}, "
                 f"outcome_bias={float(row.get('outcome_bias_score', 0.0) or 0.0):.4f}, "
                 f"allocator_weight={float(row.get('allocation_weight', 1.0) or 1.0):.4f}, "
@@ -815,6 +848,31 @@ class PortfolioBudgetReportService:
             alpha_research_candidates,
             edge_experiment_lookup=edge_experiment_lookup,
         )
+        live_route_contract = self._live_route_contract_from_settings()
+        accepted_candidates = [
+            self._attach_live_route_status(row, live_route_contract) for row in accepted_candidates
+        ]
+        blocked_candidates = [
+            self._attach_live_route_status(row, live_route_contract) for row in blocked_candidates
+        ]
+        alpha_research_candidates = [
+            self._attach_live_route_status(row, live_route_contract) for row in alpha_research_candidates
+        ]
+        portfolio_live_route_context = self._portfolio_live_route_context(
+            accepted_candidates=accepted_candidates,
+            contract=live_route_contract,
+        )
+        order_route_summary = {
+            "authority": "live_candidate_promotion_readiness_is_order_truth",
+            "approve_value": portfolio_live_route_context["approve_value"],
+            "approve_reason": portfolio_live_route_context["approve_reason"],
+            "live_routable_accepted_candidate_count": portfolio_live_route_context[
+                "live_routable_accepted_candidate_count"
+            ],
+            "context_only_accepted_candidate_count": portfolio_live_route_context[
+                "context_only_accepted_candidate_count"
+            ],
+        }
 
         blocked_reason_counts = Counter(str(row.get("block_reason", "unknown")) for row in blocked_candidates)
         deployment_language = _runtime_deployment_language(
@@ -827,6 +885,11 @@ class PortfolioBudgetReportService:
             deployment_language=deployment_language,
             playbook=playbook,
         )
+        if approval_strip_summary is not None:
+            approval_strip_summary = dict(approval_strip_summary)
+            approval_strip_summary["order_route_approve_value"] = order_route_summary["approve_value"]
+            approval_strip_summary["order_route_approve_reason"] = order_route_summary["approve_reason"]
+            approval_strip_summary["order_route_authority"] = order_route_summary["authority"]
         edge_experiment_review = self._edge_experiment_review(
             accepted_candidates=accepted_candidates,
             blocked_candidates=blocked_candidates,
@@ -853,6 +916,10 @@ class PortfolioBudgetReportService:
             "playbook_action": playbook["playbook_action"],
             "playbook_message": playbook["playbook_message"],
             "approval_strip_summary": approval_strip_summary,
+            "live_route_contract": live_route_contract,
+            "portfolio_live_route_context": portfolio_live_route_context,
+            "order_route_summary": order_route_summary,
+            "order_route_truth": order_route_summary,
             "edge_experiment_review": edge_experiment_review,
             "edge_evolution_rule": edge_evolution_rule,
             "review_followup_ledger": review_followup_ledger,

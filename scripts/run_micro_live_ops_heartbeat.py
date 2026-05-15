@@ -59,6 +59,12 @@ _DEFAULT_JOBS: dict[str, Any] = {
         "pass_statuses": {"PASS"},
         "watch_statuses": {"WATCH", "ALERT"},
     },
+    "live_replay_parity": {
+        "pattern": "reports/operations/live_replay_parity/*.md",
+        "max_age_minutes": 130,
+        "pass_statuses": {"PASS"},
+        "watch_statuses": {"WATCH"},
+    },
     "session_impulse_retest_runtime_audit": {
         "pattern": "reports/operations/session_impulse_retest_runtime_audit/*.md",
         "max_age_minutes": 75,
@@ -300,6 +306,16 @@ def _report_status(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _report_reason(payload: dict[str, Any]) -> str:
+    evaluation = dict(payload.get("evaluation") or {})
+    for container in (evaluation, payload):
+        for key in ("reason", "status_detail", "message"):
+            value = str(container.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
 def _content_status_row(*, report_status: str, pass_statuses: set[str], watch_statuses: set[str]) -> dict[str, str]:
     if not pass_statuses:
         return {"content_status": "UNKNOWN", "content_reason": "content_status_not_checked"}
@@ -355,6 +371,7 @@ def evaluate_ops_heartbeat(*, now: datetime | None = None, jobs: dict[str, Any] 
             )
             report_payload = {**report_payload, **status_payload}
         report_status = _report_status(report_payload)
+        report_reason = _report_reason(report_payload)
         content = _content_status_row(
             report_status=report_status,
             pass_statuses=set(config.get("pass_statuses") or set()),
@@ -383,7 +400,8 @@ def evaluate_ops_heartbeat(*, now: datetime | None = None, jobs: dict[str, Any] 
                 "max_age_minutes": max_age_minutes,
                 "freshness_status": freshness_status,
                 "report_status": report_status,
-                "status_detail": status_payload.get("status_detail", ""),
+                "report_reason": report_reason,
+                "status_detail": status_payload.get("status_detail", "") or report_reason,
                 "horizon_days": status_payload.get("horizon_days"),
                 "upcoming_windows": status_payload.get("upcoming_windows"),
                 "invalid_windows": status_payload.get("invalid_windows"),
@@ -487,13 +505,16 @@ def _message(payload: dict[str, Any]) -> str:
     evaluation = dict(payload.get("evaluation") or {})
     hard_failures = list(evaluation.get("hard_failures") or [])
     warnings = list(evaluation.get("warnings") or [])
+    next_action = "다음: FAIL은 즉시 조치, WATCH는 해당 리포트 원인 확인"
+    if warnings and not hard_failures:
+        next_action = "다음: WATCH는 자동 관찰; 반복/악화 시 해당 리포트 확인"
     return "\n".join(
         [
             "MICRO_LIVE 운영 점검",
             f"상태: {payload.get('overall_status')} / fail={evaluation.get('hard_failure_count')} watch={evaluation.get('warning_count')}",
             f"긴급: {_issue_summary([dict(item) for item in hard_failures], limit=3)}",
             f"주의: {_issue_summary([dict(item) for item in warnings], limit=3)}",
-            "다음: FAIL은 즉시 조치, WATCH는 해당 리포트 원인 확인",
+            next_action,
         ]
     )
 
@@ -561,7 +582,7 @@ def main() -> int:
         ):
             delivery = NotificationDispatcher(get_settings()).dispatch(
                 channel=str(args.channel),
-                alert_type="entry_surface_alert",
+                alert_type="micro_live_ops_heartbeat",
                 symbol="MICRO_LIVE",
                 payload={
                     "status": "WARN",

@@ -4,6 +4,7 @@ import json
 import plistlib
 import sys
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 from app.core.config import get_settings
 from scripts import install_micro_live_ops_launchd
@@ -161,6 +162,31 @@ def test_no_order_watchdog_notification_message_is_concise() -> None:
     assert "상세: cause=validation_sample_missing, grade=F" in message
 
 
+def test_no_order_watchdog_message_separates_runtime_scope_from_lookback_context() -> None:
+    message = run_micro_live_no_order_watchdog._watchdog_message(
+        {
+            "window_days": 3,
+            "watchdog_scope": "runtime_since_ws_start",
+            "watchdog_scope_label": "런타임 재시작 이후",
+            "lookback_lifecycle_summary": {
+                "requested_live_count": 2,
+                "live_intents": {"total": 14},
+            },
+            "evaluation": {
+                "intent_count": 0,
+                "requested_live_count": 0,
+                "top_block_reasons": {},
+                "first_block_detail_text": "",
+                "next_action_text": "fresh live 후보 대기; 현재 차단 사유 없음",
+            },
+        }
+    )
+
+    assert "런타임 재시작 이후: intent 0건 / 제출 0건" in message
+    assert "참고: 최근 3일 전체 intent 14건 / 제출 2건" in message
+    assert "최근 3일: intent 0건" not in message
+
+
 def test_no_order_watchdog_main_writes_latest_aliases(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(
         run_micro_live_no_order_watchdog,
@@ -197,12 +223,14 @@ def test_no_order_watchdog_main_writes_latest_aliases(monkeypatch, tmp_path, cap
 
 def test_no_order_watchdog_main_does_not_record_cooldown_when_delivery_fails(monkeypatch, tmp_path, capsys) -> None:
     state_file = tmp_path / "state.json"
+    dispatch_calls: list[dict] = []
 
     class FakeDispatcher:
         def __init__(self, _settings) -> None:
             pass
 
         def dispatch(self, **_kwargs):
+            dispatch_calls.append(dict(_kwargs))
             return {"delivered": False, "skipped": True, "reason": "discord_not_configured"}
 
     monkeypatch.setattr(
@@ -243,6 +271,7 @@ def test_no_order_watchdog_main_does_not_record_cooldown_when_delivery_fails(mon
     assert run_micro_live_no_order_watchdog.main() == 0
     output = json.loads(capsys.readouterr().out)
     assert output["notification"]["reason"] == "discord_not_configured"
+    assert dispatch_calls[0]["alert_type"] == "micro_live_no_order_watchdog"
     assert output["notification_state"]["reason"] == "delivery_not_confirmed"
     assert not state_file.exists()
 
@@ -715,6 +744,65 @@ def test_live_replay_parity_uses_local_db_dashboard_before_api(monkeypatch) -> N
     assert payload["overall_status"] == "PASS"
 
 
+def test_live_replay_parity_uses_usdt_proxy_baseline_for_session_impulse_retest(monkeypatch, tmp_path) -> None:
+    backtest_dir = tmp_path / "reports" / "validation" / "micro_main_usdt_proxy_backtests"
+    backtest_dir.mkdir(parents=True)
+    (backtest_dir / "micro_main_usdt_proxy_backtest_20260510T000000Z.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-05-10T00:00:00Z",
+                "days": 14,
+                "results": {
+                    "BTCUSDT": {
+                        "proxy_symbol": "BTCUSDT",
+                        "canonical_symbol": "BTCUSDC",
+                        "trades": [
+                            {
+                                "family": "session_impulse_retest",
+                                "direction": "long",
+                                "entry_ts": "2026-05-01T07:30:00+00:00",
+                            },
+                            {
+                                "family": "session_impulse_retest",
+                                "direction": "short",
+                                "entry_ts": "2026-05-02T13:30:00+00:00",
+                            },
+                        ],
+                    }
+                },
+            }
+        )
+    )
+    settings = SimpleNamespace(
+        auto_trading_replay_validation_bridge_backtest_dir=str(backtest_dir),
+        validation_report_dir=str(tmp_path / "reports" / "validation"),
+        trading_session_london_start_hour_utc=7,
+        trading_session_london_end_hour_utc=12,
+        trading_session_new_york_start_hour_utc=13,
+        trading_session_new_york_end_hour_utc=18,
+    )
+    monkeypatch.setattr(run_live_replay_parity_audit, "get_settings", lambda: settings)
+
+    payload = run_live_replay_parity_audit._local_replay_flow_baseline(
+        filters={
+            "symbol": "BTCUSDC",
+            "strategy_families": ["session_impulse_retest"],
+            "entry_models": ["CONFIRM"],
+            "directions": ["LONG", "SHORT"],
+            "sessions": ["london", "new_york"],
+            "family_sessions": {"session_impulse_retest": ["london", "new_york"]},
+            "session_filter_source": "micro_live_settings",
+        },
+        cadence_window={"current_window_active_contract_intents_per_week": 0.5},
+    )
+
+    assert payload is not None
+    assert payload["source"] == "micro_main_usdt_proxy_backtest"
+    assert payload["matched_replay_rows"] == 2
+    assert payload["expected_active_contract_candidates_per_week_from_replay"] == 1.0
+    assert payload["live_vs_replay_flow_ratio"] == 0.5
+
+
 def test_live_replay_parity_classifies_approval_gate_blocked_flow() -> None:
     dashboard = {
         "active_contract": {
@@ -750,6 +838,88 @@ def test_live_replay_parity_classifies_approval_gate_blocked_flow() -> None:
     assert result["flow_diagnosis"]["primary_reason"] == "validation_do_not_deploy"
 
 
+def test_live_replay_parity_marks_thin_symbol_window_as_watch() -> None:
+    dashboard = {
+        "active_contract": {
+            "flow_cadence": {
+                "cadence_window_days": 3,
+                "current_window_active_contract_intents_per_week": 0.0,
+            },
+            "replay_flow_baseline": {
+                "expected_active_contract_candidates_per_week_from_replay": 4.0,
+                "observed_current_window_active_contract_intents_per_week_live": 0.0,
+            },
+        }
+    }
+    lifecycle = {
+        "summary": {
+            "submission_count": 0,
+            "requested_live_count": 0,
+            "rejected_or_error_count": 0,
+            "entry_fill_count": 0,
+            "live_intents": {
+                "total": 0,
+                "submit_ready": 0,
+                "blocked": 0,
+                "top_block_reasons": {},
+            },
+        }
+    }
+
+    result = run_live_replay_parity_audit.evaluate_parity(
+        dashboard=dashboard,
+        lifecycle=lifecycle,
+        min_flow_ratio=0.25,
+    )
+
+    assert result["status"] == "WATCH"
+    assert result["reason"] == "symbol_live_flow_thin_window_below_replay_baseline"
+    assert result["expected_window_candidates"] == 1.7143
+    assert result["thin_symbol_window"] is True
+    assert result["flow_diagnosis"]["stage"] == "signal_or_plan_generation_gap"
+
+
+def test_live_replay_parity_runtime_short_window_without_flow_is_pass() -> None:
+    dashboard = {
+        "active_contract": {
+            "flow_cadence": {
+                "cadence_window_days": 0.01,
+                "cadence_window_basis": "runtime_since_ws_start_active_contract_intents_local_db",
+                "current_window_active_contract_intents_per_week": 0.0,
+            },
+            "replay_flow_baseline": {
+                "expected_active_contract_candidates_per_week_from_replay": 4.0,
+                "observed_current_window_active_contract_intents_per_week_live": 0.0,
+            },
+        }
+    }
+    lifecycle = {
+        "summary": {
+            "submission_count": 0,
+            "requested_live_count": 0,
+            "rejected_or_error_count": 0,
+            "entry_fill_count": 0,
+            "live_intents": {
+                "total": 0,
+                "submit_ready": 0,
+                "blocked": 0,
+                "top_block_reasons": {},
+            },
+        }
+    }
+
+    result = run_live_replay_parity_audit.evaluate_parity(
+        dashboard=dashboard,
+        lifecycle=lifecycle,
+        min_flow_ratio=0.25,
+    )
+
+    assert result["status"] == "PASS"
+    assert result["reason"] == "runtime_window_below_live_replay_parity_evidence_floor"
+    assert result["runtime_window_below_evidence_floor"] is True
+    assert result["runtime_no_actionable_flow"] is True
+
+
 def test_live_replay_parity_marks_sufficient_intent_flow_but_blocked_orders_as_watch() -> None:
     dashboard = {
         "active_contract": {
@@ -783,6 +953,61 @@ def test_live_replay_parity_marks_sufficient_intent_flow_but_blocked_orders_as_w
     assert result["status"] == "WATCH"
     assert result["reason"] == "validation_do_not_deploy"
     assert result["order_flow_status"] == "WATCH"
+
+
+def test_live_replay_parity_lifecycle_uses_active_contract_family_filter(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    dashboard = {
+        "active_contract": {
+            "filters": {"strategy_families": ["session_impulse_retest"]},
+            "replay_flow_baseline": {
+                "expected_active_contract_candidates_per_week_from_replay": 1.0,
+                "observed_current_window_active_contract_intents_per_week_live": 1.0,
+            },
+        }
+    }
+
+    class _Session:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _Reporter:
+        def __init__(self, db):
+            self.db = db
+
+        def generate(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "summary": {
+                    "submission_count": 0,
+                    "live_intents": {
+                        "total": 0,
+                        "submit_ready": 0,
+                        "blocked": 0,
+                        "top_block_reasons": {},
+                    },
+                }
+            }
+
+    monkeypatch.setattr(run_live_replay_parity_audit, "_build_dashboard_from_db", lambda **_kwargs: dashboard)
+    monkeypatch.setattr(run_live_replay_parity_audit, "init_db", lambda: None)
+    monkeypatch.setattr(run_live_replay_parity_audit, "SessionLocal", lambda: _Session())
+    monkeypatch.setattr(run_live_replay_parity_audit, "LiveOrderLifecycleReporter", _Reporter)
+
+    payload = run_live_replay_parity_audit.build_payload(
+        base_url="http://127.0.0.1:9",
+        symbol="BTCUSDC",
+        universe="usdc_perp_top30",
+        days=3,
+        dashboard_json="",
+        min_flow_ratio=0.25,
+    )
+
+    assert payload["overall_status"] == "PASS"
+    assert captured["strategy_families"] == ["session_impulse_retest"]
 
 
 def test_replay_validation_bridge_marks_strong_replay_evidence_as_manual_review_only() -> None:
@@ -1067,6 +1292,243 @@ def test_live_replay_parity_portfolio_aggregates_live_symbols(monkeypatch) -> No
     assert payload["evaluation"]["flow_stage_counts"] == {"approval_gate_blocked": 2}
 
 
+def test_live_replay_parity_portfolio_labels_thin_window_watch_reason(monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", "BTCUSDC,ETHUSDC")
+
+    def fake_payload(**kwargs):
+        symbol = kwargs["symbol"]
+        if symbol == "BTCUSDC":
+            return {
+                "symbol": symbol,
+                "overall_status": "WATCH",
+                "evaluation": {
+                    "status": "WATCH",
+                    "expected_per_week": 4.0,
+                    "observed_per_week": 0.0,
+                    "top_block_reasons": {},
+                    "flow_diagnosis": {
+                        "stage": "signal_or_plan_generation_gap",
+                        "primary_reason": "no_recent_live_intents_against_replay_baseline",
+                    },
+                },
+            }
+        return {
+            "symbol": symbol,
+            "overall_status": "PASS",
+            "evaluation": {
+                "status": "PASS",
+                "expected_per_week": 4.0,
+                "observed_per_week": 4.0,
+                "top_block_reasons": {},
+                "flow_diagnosis": {
+                    "stage": "flow_within_baseline",
+                    "primary_reason": "live_flow_within_replay_baseline",
+                },
+            },
+        }
+
+    monkeypatch.setattr(run_live_replay_parity_audit, "build_payload", fake_payload)
+
+    payload = run_live_replay_parity_audit.build_portfolio_payload(
+        base_url="http://127.0.0.1:9",
+        universe="usdc_perp_top30",
+        days=3,
+        min_flow_ratio=0.25,
+    )
+
+    assert payload["overall_status"] == "WATCH"
+    assert payload["evaluation"]["reason"] == "portfolio_symbol_live_flow_watch_thin_window"
+    assert payload["evaluation"]["alert_symbol_count"] == 0
+    assert payload["evaluation"]["watch_symbol_count"] == 1
+    assert payload["evaluation"]["flow_shortfall_watch_count"] == 1
+    assert payload["evaluation"]["order_gate_watch_count"] == 0
+
+
+def test_live_replay_parity_portfolio_labels_mixed_watch_reason(monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", "BTCUSDC,ETHUSDC")
+
+    def fake_payload(**kwargs):
+        symbol = kwargs["symbol"]
+        stage = "signal_or_plan_generation_gap" if symbol == "BTCUSDC" else "approval_gate_blocked"
+        reason = (
+            "no_recent_live_intents_against_replay_baseline"
+            if symbol == "BTCUSDC"
+            else "validation_do_not_deploy"
+        )
+        return {
+            "symbol": symbol,
+            "overall_status": "WATCH",
+            "evaluation": {
+                "status": "WATCH",
+                "expected_per_week": 4.0,
+                "observed_per_week": 0.0,
+                "top_block_reasons": {"validation_do_not_deploy": 1} if symbol == "ETHUSDC" else {},
+                "flow_diagnosis": {
+                    "stage": stage,
+                    "primary_reason": reason,
+                },
+            },
+        }
+
+    monkeypatch.setattr(run_live_replay_parity_audit, "build_payload", fake_payload)
+
+    payload = run_live_replay_parity_audit.build_portfolio_payload(
+        base_url="http://127.0.0.1:9",
+        universe="usdc_perp_top30",
+        days=3,
+        min_flow_ratio=0.25,
+    )
+
+    assert payload["overall_status"] == "WATCH"
+    assert payload["evaluation"]["reason"] == "portfolio_symbol_live_flow_and_order_gate_watch"
+    assert payload["evaluation"]["flow_shortfall_watch_count"] == 1
+    assert payload["evaluation"]["order_gate_watch_count"] == 1
+
+
+def test_live_replay_parity_portfolio_runtime_scope_keeps_lookback_context(monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", "BTCUSDC,ETHUSDC")
+    start_at = datetime(2026, 5, 15, 5, 0, tzinfo=UTC)
+
+    def fake_payload(**kwargs):
+        symbol = kwargs["symbol"]
+        if kwargs.get("start_at") is None:
+            return {
+                "symbol": symbol,
+                "overall_status": "WATCH",
+                "evaluation": {
+                    "status": "WATCH",
+                    "expected_per_week": 4.0,
+                    "observed_per_week": 0.0,
+                    "expected_window_candidates": 1.7,
+                    "top_block_reasons": {},
+                    "flow_diagnosis": {
+                        "stage": "signal_or_plan_generation_gap",
+                        "primary_reason": "no_recent_live_intents_against_replay_baseline",
+                    },
+                },
+            }
+        return {
+            "symbol": symbol,
+            "overall_status": "PASS",
+            "evaluation": {
+                "status": "PASS",
+                "reason": "runtime_window_below_live_replay_parity_evidence_floor",
+                "expected_per_week": 4.0,
+                "observed_per_week": 0.0,
+                "expected_window_candidates": 0.1,
+                "runtime_no_actionable_flow": True,
+                "top_block_reasons": {},
+                "flow_diagnosis": {
+                    "stage": "signal_or_plan_generation_gap",
+                    "primary_reason": "no_recent_live_intents_against_replay_baseline",
+                },
+            },
+        }
+
+    monkeypatch.setattr(run_live_replay_parity_audit, "build_payload", fake_payload)
+
+    payload = run_live_replay_parity_audit.build_portfolio_payload(
+        base_url="http://127.0.0.1:9",
+        universe="usdc_perp_top30",
+        days=3,
+        min_flow_ratio=0.25,
+        start_at=start_at,
+    )
+
+    assert payload["overall_status"] == "PASS"
+    assert payload["parity_scope"] == "runtime_since_ws_start"
+    assert payload["evaluation"]["reason"] == "portfolio_runtime_window_below_live_replay_parity_evidence_floor"
+    assert payload["evaluation"]["runtime_below_evidence_floor_symbol_count"] == 2
+    assert payload["lookback_evaluation_summary"]["status"] == "WATCH"
+
+
+def test_live_replay_parity_portfolio_report_uses_portfolio_summary(tmp_path) -> None:
+    report_path = tmp_path / "portfolio.md"
+    payload = {
+        "generated_at": "2026-05-15T00:00:00Z",
+        "scope": "all_live_symbols",
+        "overall_status": "WATCH",
+        "evaluation": {
+            "reason": "portfolio_symbol_live_flow_and_order_gate_watch",
+            "expected_per_week": 10.0,
+            "observed_per_week": 8.0,
+            "live_vs_replay_flow_ratio": 0.8,
+            "symbol_count": 2,
+            "alert_symbol_count": 0,
+            "watch_symbol_count": 2,
+            "flow_shortfall_watch_count": 1,
+            "order_gate_watch_count": 1,
+            "flow_stage_counts": {"signal_or_plan_generation_gap": 1, "approval_gate_blocked": 1},
+            "flow_primary_reason_counts": {
+                "no_recent_live_intents_against_replay_baseline": 1,
+                "validation_do_not_deploy": 1,
+            },
+        },
+        "rows": [],
+    }
+
+    run_live_replay_parity_audit._write_report(report_path, payload)
+
+    content = report_path.read_text(encoding="utf-8")
+    assert "- scope: all_live_symbols" in content
+    assert "- flow_shortfall_watch_count: 1" in content
+    assert "- order_gate_watch_count: 1" in content
+    assert "- dashboard_source:" not in content
+    assert "- order_flow_status:" not in content
+
+
+def test_live_replay_parity_main_writes_latest_aliases(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setattr(
+        run_live_replay_parity_audit,
+        "build_portfolio_payload",
+        lambda **_kwargs: {
+            "generated_at": "2026-05-10T00:00:00Z",
+            "scope": "all_live_symbols",
+            "overall_status": "PASS",
+            "evaluation": {
+                "status": "PASS",
+                "reason": "portfolio_live_flow_within_replay_baseline",
+                "expected_per_week": 10.0,
+                "observed_per_week": 10.0,
+                "live_vs_replay_flow_ratio": 1.0,
+                "symbol_count": 1,
+                "alert_symbol_count": 0,
+                "watch_symbol_count": 0,
+                "flow_shortfall_watch_count": 0,
+                "order_gate_watch_count": 0,
+                "flow_stage_counts": {"flow_within_baseline": 1},
+                "flow_primary_reason_counts": {"live_flow_within_replay_baseline": 1},
+            },
+            "rows": [],
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_live_replay_parity_audit.py",
+            "--all-live-symbols",
+            "--report-dir",
+            str(tmp_path),
+            "--no-fail-exit",
+        ],
+    )
+
+    assert run_live_replay_parity_audit.main() == 0
+    output = json.loads(capsys.readouterr().out)
+
+    assert (tmp_path / "live_replay_parity_ALL_LIVE_SYMBOLS_20260510T000000Z.md").exists()
+    assert (tmp_path / "latest.md").exists()
+    assert (tmp_path / "latest.json").exists()
+    assert output["latest_report_path"].endswith("latest.md")
+    latest_payload = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
+    assert latest_payload["overall_status"] == "PASS"
+    assert latest_payload["latest_json_path"].endswith("latest.json")
+
+
 def test_reconciliation_watchdog_flags_stale_live_submission_without_ledger() -> None:
     now = datetime(2026, 5, 10, 12, tzinfo=UTC)
 
@@ -1143,12 +1605,14 @@ def test_reconciliation_watchdog_main_does_not_record_cooldown_when_delivery_fai
     capsys,
 ) -> None:
     state_file = tmp_path / "state.json"
+    dispatch_calls: list[dict] = []
 
     class FakeDispatcher:
         def __init__(self, _settings) -> None:
             pass
 
         def dispatch(self, **_kwargs):
+            dispatch_calls.append(dict(_kwargs))
             return {"delivered": False, "skipped": True, "reason": "discord_not_configured"}
 
     monkeypatch.setattr(
@@ -1194,6 +1658,7 @@ def test_reconciliation_watchdog_main_does_not_record_cooldown_when_delivery_fai
     assert run_live_reconciliation_watchdog.main() == 0
     output = json.loads(capsys.readouterr().out)
     assert output["notification"]["reason"] == "discord_not_configured"
+    assert dispatch_calls[0]["alert_type"] == "live_reconciliation_watchdog"
     assert output["notification_state"]["reason"] == "delivery_not_confirmed"
     assert not state_file.exists()
 
@@ -1212,8 +1677,12 @@ def test_launchd_generator_includes_remaining_operational_guards(tmp_path) -> No
     assert "com.test.micro.boot-check" in labels
     assert "com.test.micro.ops-heartbeat" in labels
     assert "com.test.micro.replay-validation-bridge" in labels
+    assert "com.test.micro.live-replay-parity" in labels
     assert "com.test.micro.session-impulse-retest-runtime-audit" in labels
     assert "com.test.micro.failure-drill" in labels
+    live_replay_job = next(job for job in jobs if job.name == "live_replay_parity")
+    assert "run_live_replay_parity_audit.py" in live_replay_job.args[1]
+    assert "--all-live-symbols" in live_replay_job.args
     assert any((tmp_path / f"{label}.plist").exists() for label in labels)
 
 
@@ -1514,6 +1983,32 @@ def test_ops_heartbeat_message_separates_failures_and_warnings() -> None:
     assert "다음: FAIL은 즉시 조치" in message
 
 
+def test_ops_heartbeat_message_watch_only_is_monitoring_action() -> None:
+    message = run_micro_live_ops_heartbeat._message(
+        {
+            "overall_status": "WATCH",
+            "evaluation": {
+                "hard_failure_count": 0,
+                "warning_count": 1,
+                "hard_failures": [],
+                "warnings": [
+                    {
+                        "name": "live_replay_parity",
+                        "status": "WATCH",
+                        "report_status": "WATCH",
+                        "reason": "content_status_watch",
+                        "status_detail": "portfolio_symbol_live_flow_and_order_gate_watch",
+                    }
+                ],
+            },
+        }
+    )
+
+    assert "긴급: 없음" in message
+    assert "주의: live_replay_parity=WATCH/WATCH content_status_watch portfolio_symbol_live_flow_and_order_gate_watch" in message
+    assert "다음: WATCH는 자동 관찰; 반복/악화 시 해당 리포트 확인" in message
+
+
 def test_ops_heartbeat_cooldown_blocks_repeated_same_issue(tmp_path) -> None:
     payload = {
         "overall_status": "WATCH",
@@ -1579,12 +2074,14 @@ def test_ops_heartbeat_notification_state_requires_confirmed_delivery() -> None:
 
 def test_ops_heartbeat_main_does_not_record_cooldown_when_delivery_fails(monkeypatch, tmp_path, capsys) -> None:
     state_file = tmp_path / "heartbeat_state.json"
+    dispatch_calls: list[dict] = []
 
     class FakeDispatcher:
         def __init__(self, _settings) -> None:
             pass
 
         def dispatch(self, **_kwargs):
+            dispatch_calls.append(dict(_kwargs))
             return {"delivered": False, "skipped": True, "reason": "system_no_routes_configured"}
 
     monkeypatch.setattr(
@@ -1636,6 +2133,7 @@ def test_ops_heartbeat_main_does_not_record_cooldown_when_delivery_fails(monkeyp
     assert run_micro_live_ops_heartbeat.main() == 0
     output = json.loads(capsys.readouterr().out)
     assert output["notification"]["reason"] == "system_no_routes_configured"
+    assert dispatch_calls[0]["alert_type"] == "micro_live_ops_heartbeat"
     assert output["notification_state"]["reason"] == "delivery_not_confirmed"
     assert not state_file.exists()
 
@@ -1741,6 +2239,58 @@ def test_ops_heartbeat_warns_on_fresh_report_warning_status(monkeypatch, tmp_pat
     assert result["status"] == "WATCH"
     assert result["warning_count"] == 1
     assert result["warnings"][0]["reason"] == "content_status_alert"
+
+
+def test_ops_heartbeat_defaults_include_live_replay_parity() -> None:
+    config = run_micro_live_ops_heartbeat._DEFAULT_JOBS["live_replay_parity"]
+
+    assert config["pattern"] == "reports/operations/live_replay_parity/*.md"
+    assert config["pass_statuses"] == {"PASS"}
+    assert config["watch_statuses"] == {"WATCH"}
+
+
+def test_ops_heartbeat_warns_on_live_replay_parity_watch(monkeypatch, tmp_path) -> None:
+    report = tmp_path / "live_replay_parity.md"
+    report.write_text(
+        "\n".join(
+            [
+                "# report",
+                "",
+                "```json",
+                '{"overall_status":"WATCH","evaluation":{"reason":"portfolio_symbol_live_flow_and_order_gate_watch"}}',
+                "```",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        run_micro_live_ops_heartbeat,
+        "_DEFAULT_JOBS",
+        {
+            "live_replay_parity": {
+                "pattern": str(tmp_path / "*.md"),
+                "max_age_minutes": 130,
+                "pass_statuses": {"PASS"},
+                "watch_statuses": {"WATCH"},
+            }
+        },
+    )
+
+    now = datetime.fromtimestamp(report.stat().st_mtime, tz=UTC)
+    result = run_micro_live_ops_heartbeat.evaluate_ops_heartbeat(now=now)
+
+    assert result["status"] == "WATCH"
+    assert result["warning_count"] == 1
+    assert result["warnings"][0]["name"] == "live_replay_parity"
+    assert result["warnings"][0]["reason"] == "content_status_watch"
+    assert result["warnings"][0]["report_reason"] == "portfolio_symbol_live_flow_and_order_gate_watch"
+    assert result["warnings"][0]["status_detail"] == "portfolio_symbol_live_flow_and_order_gate_watch"
+    assert "portfolio_symbol_live_flow_and_order_gate_watch" in run_micro_live_ops_heartbeat._message(
+        {
+            "overall_status": result["status"],
+            "evaluation": result,
+        }
+    )
 
 
 def test_ops_heartbeat_fails_on_fresh_report_unaccepted_status(monkeypatch, tmp_path) -> None:

@@ -10,6 +10,7 @@ from app.core.config import Settings, get_settings
 from app.db.models import Plan
 from app.services.candidate_expectations import block_reason_message
 from app.services.common import clamp
+from app.services.live_route_contract import row_session_name
 from app.services.position_sizing import PositionSizingService
 from app.services.session_guidance import SessionGuidanceService
 from app.services.strategy_mode import StrategyModeService
@@ -486,8 +487,7 @@ class PortfolioRiskOverlayService:
 
     @staticmethod
     def _session_name_from_row(row: dict[str, Any]) -> str:
-        session_guidance = dict(row.get("session_guidance") or {})
-        return str(session_guidance.get("session_name") or session_guidance.get("state") or "unknown")
+        return row_session_name(row) or "unknown"
 
     @classmethod
     def _capital_allocator_maturity(cls, closed: int) -> str:
@@ -872,7 +872,7 @@ class PortfolioRiskOverlayService:
 
         family = str(row.get("strategy_family") or dict(row.get("validity") or {}).get("strategy_family") or "unknown")
         regime = str(row.get("regime") or dict(row.get("validity") or {}).get("regime") or "unknown")
-        session_name = str(((row.get("session_guidance") or {}).get("session_name") or (row.get("session_guidance") or {}).get("state") or "unknown"))
+        session_name = self._session_name_from_row(row)
 
         family_advisory = self._find_family_outcome_row(inputs.get("family_execution_degradation_advisory_summary"), family)
         family_mode = self._find_mode_bucket(inputs.get("mode_advisory_summary"), axis="family", bucket=family)
@@ -1049,7 +1049,7 @@ class PortfolioRiskOverlayService:
                     outcome_bias = self._build_outcome_bias(
                         row=row,
                         outcome_inputs_by_symbol=outcome_inputs_by_symbol,
-                        session_name=str(session_guidance.get("session_name") or session_guidance.get("state") or "unknown"),
+                        session_name=self._session_name_from_row(row),
                     )
                     row["outcome_bias_score"] = float(outcome_bias.get("score_delta", 0.0) or 0.0)
                     row["outcome_bias"] = outcome_bias
@@ -1092,7 +1092,7 @@ class PortfolioRiskOverlayService:
         self._reset_cache()
 
         if apply_outcome_bias:
-            session_name = str(session_guidance.get("session_name") or session_guidance.get("state") or "unknown")
+            session_name = row_session_name({"session_guidance": session_guidance}) or "unknown"
             candidates = sorted(
                 rows,
                 key=lambda item: self._outcome_bias_sort_score(
@@ -1232,7 +1232,7 @@ class PortfolioRiskOverlayService:
                 outcome_bias = self._build_outcome_bias(
                     row=row,
                     outcome_inputs_by_symbol=outcome_inputs_by_symbol,
-                    session_name=str(session_guidance.get("session_name") or session_guidance.get("state") or "unknown"),
+                    session_name=self._session_name_from_row(row),
                 )
                 row["outcome_bias_score"] = float(outcome_bias.get("score_delta", 0.0) or 0.0)
                 row["outcome_bias"] = outcome_bias

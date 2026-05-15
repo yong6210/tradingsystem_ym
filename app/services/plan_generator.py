@@ -14,6 +14,7 @@ from app.services.acceptance_rejection_classifier import AcceptanceRejectionResu
 from app.services.common import clamp
 from app.services.context_engine import ContextSnapshot
 from app.services.execution_router import EntryDecision, EntryModelRouter
+from app.services.live_route_contract import row_session_name
 from app.services.position_sizing import PositionSizingInput, PositionSizingService
 from app.services.session_guidance import SessionGuidanceService
 from app.services.strategy_family_router import StrategyFamilyDecision, StrategyFamilyRouter
@@ -1814,7 +1815,7 @@ class PlanGenerator:
         mode_policy = self.strategy_mode.policy()
         session_guidance = self.session_guidance.snapshot(strategy_mode=mode_policy.mode, now=now)
         session_state = str(session_guidance.get("state", "unknown"))
-        session_name = str((session_guidance.get("current_session") or {}).get("name") or "inactive").strip().lower() or "inactive"
+        session_name = row_session_name({"session_guidance": session_guidance}) or "inactive"
         if session_state == "preferred_live_window":
             session_score_bias = self._safe_float(self.settings.scalp_session_boost_score, default=4.0)
             session_probability_adjustment = 0.012

@@ -104,7 +104,7 @@ PAPER exit criteria:
 - [ ] stale live submission, ledger mismatch, user-stream stale은 `scripts/run_live_reconciliation_watchdog.py --days 3 --no-fail-exit`로 별도 확인함
 - [ ] worker 재시작 전에는 `scripts/run_micro_live_boot_check.py --days 3 --limit 200 --no-fail-exit`를 통과시킴
 - [ ] `AUTO_TRADING_EXECUTION_MODE=MICRO_LIVE/LIVE`에서 `run_worker.py`가 boot check 실패 시 시작하지 않는 구조를 유지함
-- [ ] `scripts/run_live_replay_parity_audit.py --all-live-symbols --days 3 --no-fail-exit`에서 개별 심볼 ALERT/WATCH와 `flow_diagnosis.stage`, `order_flow_status`를 확인함
+- [ ] `scripts/run_live_replay_parity_audit.py --all-live-symbols --days 3 --no-fail-exit`에서 active `parity_scope`가 현재 runtime인지 확인하고, 개별 심볼 ALERT/WATCH와 `flow_diagnosis.stage`, `order_flow_status`, `lookback_evaluation_summary`를 분리해 확인함
 - [ ] `scripts/run_replay_validation_bridge.py --all-live-symbols --no-fail-exit`로 replay-backed validation bridge 후보를 audit-only로 확인함. `ev_r_lower_95`와 material slice warnings를 같이 확인하며, slice warning은 clean pass로 보지 않음. 이 결과만으로 live gate를 자동 개방하지 않음
 - [ ] `scripts/run_micro_live_ops_heartbeat.py --no-fail-exit`가 scheduled guard report freshness와 최신 리포트 내부 상태 확인을 통과함. hard failure는 즉시 조치하고, `WATCH`는 no-order/replay bridge 등 운영상 확인이 필요한 상태로 분리함
 - [ ] `scripts/run_micro_live_failure_drill.py --no-fail-exit`가 failure-contract drill을 통과하고, heartbeat의 `failure_drill` job도 `PASS`로 표시됨

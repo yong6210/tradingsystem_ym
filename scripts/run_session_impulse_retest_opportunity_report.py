@@ -94,7 +94,14 @@ def _sort_ts(row: Any, *attrs: str) -> datetime:
     return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
-def _status_for(*, observed: bool, intents: list[Any], submissions: list[Any]) -> tuple[str, str]:
+def _status_for(
+    *,
+    observed: bool,
+    intents: list[Any],
+    submissions: list[Any],
+    before_runtime_start: bool = False,
+    observation_reason: str = "",
+) -> tuple[str, str]:
     if submissions:
         latest = submissions[0]
         return "submitted", str(getattr(latest, "submit_status", "") or getattr(latest, "state", "") or "")
@@ -105,9 +112,14 @@ def _status_for(*, observed: bool, intents: list[Any], submissions: list[Any]) -
         if decision == "SUBMIT":
             return "submit_ready_without_submission", reason
         return "blocked_or_skipped", reason
+    normalized_observation_reason = str(observation_reason or "").strip() or "runtime_plan_not_seen"
+    if before_runtime_start:
+        if observed:
+            return "pre_runtime_backfill_without_intent", "before_runtime_start"
+        return "pre_runtime_unobservable", f"before_runtime_start_{normalized_observation_reason}"
     if observed:
         return "observed_without_intent", "missing_intent"
-    return "not_observed", "runtime_plan_not_seen"
+    return "not_observed", normalized_observation_reason
 
 
 def _performance(rows: list[dict[str, Any]], *, risk_pct: float, account_equity: float) -> dict[str, Any]:
@@ -132,6 +144,36 @@ def _performance(rows: list[dict[str, Any]], *, risk_pct: float, account_equity:
         "account_equity_usdt": round(account_equity, 6),
         "simple_pnl_usdt": round(account_equity * simple_return_pct / 100.0, 6) if account_equity > 0 else None,
         "compounded_pnl_usdt": round(account_equity * compounded_return_pct / 100.0, 6) if account_equity > 0 else None,
+    }
+
+
+def _summary_for_opportunities(
+    rows: list[dict[str, Any]],
+    *,
+    risk_pct: float,
+    account_equity: float,
+) -> dict[str, Any]:
+    status_counts = Counter(str(row["runtime_status"]) for row in rows)
+    reason_counts = Counter(str(row["runtime_reason"]) for row in rows)
+    symbol_counts = Counter(str(row["symbol"]) for row in rows)
+    session_counts = Counter(str(row["session"]) for row in rows)
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row["runtime_reason"])].append(row)
+    return {
+        "expected_order_count": len(rows),
+        "status_counts": dict(sorted(status_counts.items())),
+        "reason_counts": dict(sorted(reason_counts.items())),
+        "symbol_counts": dict(sorted(symbol_counts.items())),
+        "session_counts": dict(sorted(session_counts.items())),
+        "before_current_runtime_start_count": sum(
+            1 for row in rows if bool(row.get("before_current_runtime_start"))
+        ),
+        "potential_performance": _performance(rows, risk_pct=risk_pct, account_equity=account_equity),
+        "performance_by_runtime_reason": {
+            reason: _performance(grouped_rows, risk_pct=risk_pct, account_equity=account_equity)
+            for reason, grouped_rows in grouped.items()
+        },
     }
 
 
@@ -184,7 +226,16 @@ def build_report(*, lookback_hours: int, symbols: list[str] | None = None) -> di
                     submissions.extend(engine.submission_repo.list_for_plan(lookup_plan_id, limit=20))
                 intents.sort(key=lambda row: _sort_ts(row, "created_at"), reverse=True)
                 submissions.sort(key=lambda row: _sort_ts(row, "submitted_at", "created_at"), reverse=True)
-                status, reason = _status_for(observed=observed, intents=intents, submissions=submissions)
+                before_current_runtime_start = bool(
+                    runtime_started_at is not None and entry_ts < runtime_started_at
+                )
+                status, reason = _status_for(
+                    observed=observed,
+                    intents=intents,
+                    submissions=submissions,
+                    before_runtime_start=before_current_runtime_start,
+                    observation_reason=str(observation.get("reason") or ""),
+                )
                 opportunities.append(
                     {
                         "symbol": symbol,
@@ -210,28 +261,21 @@ def build_report(*, lookback_hours: int, symbols: list[str] | None = None) -> di
                         "latest_submission": _row_payload(submissions[0] if submissions else None),
                         "runtime_status": status,
                         "runtime_reason": reason,
-                        "before_current_runtime_start": bool(
-                            runtime_started_at is not None and entry_ts < runtime_started_at
-                        ),
+                        "before_current_runtime_start": before_current_runtime_start,
                     }
                 )
 
     opportunities.sort(key=lambda row: str(row.get("entry_ts") or ""))
-    status_counts = Counter(str(row["runtime_status"]) for row in opportunities)
-    reason_counts = Counter(str(row["runtime_reason"]) for row in opportunities)
-    symbol_counts = Counter(str(row["symbol"]) for row in opportunities)
-    session_counts = Counter(str(row["session"]) for row in opportunities)
-    reason_performance: dict[str, dict[str, Any]] = {}
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in opportunities:
-        grouped[str(row["runtime_reason"])].append(row)
-    for reason, rows in grouped.items():
-        reason_performance[reason] = _performance(rows, risk_pct=risk_pct, account_equity=account_equity)
+    runtime_scope = runtime_started_at is not None
+    active_opportunities = [
+        row for row in opportunities if not bool(row.get("before_current_runtime_start"))
+    ] if runtime_scope else list(opportunities)
 
     payload = {
-        "schema_version": "session_impulse_retest_opportunity_report_v1",
+        "schema_version": "session_impulse_retest_opportunity_report_v2",
         "generated_at": now.isoformat(),
         "lookback_hours": max(1, int(lookback_hours)),
+        "opportunity_scope": "runtime_since_ws_start" if runtime_scope else "lookback_window",
         "window_start": cutoff.isoformat(),
         "window_end": now.isoformat(),
         "runtime_started_at": runtime_started_at.isoformat() if runtime_started_at else None,
@@ -244,19 +288,18 @@ def build_report(*, lookback_hours: int, symbols: list[str] | None = None) -> di
             "risk_per_trade_pct": round(risk_pct * 100.0, 6),
             "account_equity_usdt": round(account_equity, 6),
         },
-        "summary": {
-            "expected_order_count": len(opportunities),
-            "status_counts": dict(sorted(status_counts.items())),
-            "reason_counts": dict(sorted(reason_counts.items())),
-            "symbol_counts": dict(sorted(symbol_counts.items())),
-            "session_counts": dict(sorted(session_counts.items())),
-            "before_current_runtime_start_count": sum(
-                1 for row in opportunities if bool(row.get("before_current_runtime_start"))
-            ),
-            "potential_performance": _performance(opportunities, risk_pct=risk_pct, account_equity=account_equity),
-            "performance_by_runtime_reason": reason_performance,
-        },
-        "opportunities": opportunities,
+        "summary": _summary_for_opportunities(
+            active_opportunities,
+            risk_pct=risk_pct,
+            account_equity=account_equity,
+        ),
+        "lookback_summary": _summary_for_opportunities(
+            opportunities,
+            risk_pct=risk_pct,
+            account_equity=account_equity,
+        ) if runtime_scope else {},
+        "opportunities": active_opportunities,
+        "lookback_opportunities": opportunities if runtime_scope else [],
         "report_path": None,
     }
     return payload
@@ -272,7 +315,27 @@ def main() -> int:
         payload["report_path"] = str(path)
         atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     if args.summary_only:
-        print(json.dumps({key: payload[key] for key in ("generated_at", "lookback_hours", "contract", "summary", "report_path")}, ensure_ascii=False, indent=2, default=str))
+        print(
+            json.dumps(
+                {
+                    key: payload[key]
+                    for key in (
+                        "schema_version",
+                        "generated_at",
+                        "lookback_hours",
+                        "opportunity_scope",
+                        "runtime_started_at",
+                        "contract",
+                        "summary",
+                        "lookback_summary",
+                        "report_path",
+                    )
+                },
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        )
     else:
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     return 0

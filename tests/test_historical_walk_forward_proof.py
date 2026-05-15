@@ -1207,3 +1207,47 @@ def test_historical_walk_forward_tolerates_malformed_numeric_settings(tmp_path) 
     assert fingerprint["btc_sweep_reversal_limit_fast_failure_max_bars"] == 18
     assert fingerprint["btc_sweep_reversal_limit_fast_failure_stop_r"] == 0.00000001
     assert payload["eligible_bar_count"] == 0
+
+
+def test_historical_walk_forward_fast_failure_maps_dead_session_guidance() -> None:
+    settings = SimpleNamespace(
+        strategy_version="test",
+        validation_report_dir="reports/test",
+        auto_trading_historical_walk_forward_cache_hours=24.0,
+        auto_trading_historical_walk_forward_warmup_5m_bars=3,
+        auto_trading_historical_walk_forward_min_15m_bars=2,
+        auto_trading_historical_walk_forward_max_5m_window_bars=12,
+        auto_trading_historical_walk_forward_max_15m_window_bars=6,
+        thesis_time_bucket_minutes=30,
+        btc_sweep_reversal_limit_fast_failure_enabled=True,
+        btc_sweep_reversal_limit_fast_failure_allowed_sessions="dead_session",
+        btc_sweep_reversal_limit_fast_failure_max_bars=18,
+        btc_sweep_reversal_limit_fast_failure_stop_r=0.00000001,
+        btc_sweep_reversal_limit_fast_failure_requires_sl_touch=True,
+    )
+    service = HistoricalWalkForwardProofService(
+        candle_repo=None,
+        settings=settings,
+        context_engine=_DummyContextEngine(),
+        zone_engine=_DummyZoneEngine(),
+        plan_generator=_DummyPlanGenerator(trigger_ts=datetime(2026, 1, 1, tzinfo=timezone.utc)),
+    )
+
+    class _Guidance:
+        def snapshot(self, *, now):
+            return {
+                "state": "dead_session",
+                "dead_session": True,
+                "current_session": {"name": "inactive", "active": False},
+            }
+
+    service.session_guidance = _Guidance()
+
+    validity = service._raw_candle_fast_failure_validity(
+        symbol="BTCUSDC",
+        family="sweep_reversal",
+        entry_model="LIMIT",
+        generated_ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    assert validity["strategy_fast_failure_session_name"] == "dead_session"

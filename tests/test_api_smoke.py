@@ -369,11 +369,12 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "Source Flow" in execution_operator_ui.text
     assert "Freshness Note" in execution_operator_ui.text
     assert "Portfolio Candidate Drilldown" in execution_operator_ui.text
-    assert "accepted / blocked 후보를 raw JSON 없이 읽기 위해, cluster, allocated risk, outcome bias, edge focus, capital allocator, A/B posture를 같은 표로 보여줍니다." in execution_operator_ui.text
+    assert "portfolio accepted / blocked 후보를 표시합니다. accepted는 주문 후보가 아니며 Live Route 열이 실제 live route 후보 여부를 구분합니다." in execution_operator_ui.text
     assert "Portfolio Candidate Inspector" in execution_operator_ui.text
-    assert "대표 accepted row 1개와 blocked row 1개를 카드로 다시 압축해, risk, allocator, A/B posture, edge focus, session, reaction evidence를 바로 읽습니다." in execution_operator_ui.text
-    assert "Representative Accepted Candidate" in execution_operator_ui.text
+    assert "대표 portfolio accepted row 1개와 blocked row 1개를 카드로 다시 압축해, live route, risk, allocator, A/B posture, edge focus, session, reaction evidence를 바로 읽습니다." in execution_operator_ui.text
+    assert "Representative Portfolio Accepted Candidate" in execution_operator_ui.text
     assert "Representative Blocked Candidate" in execution_operator_ui.text
+    assert "Order Route" in execution_operator_ui.text
     assert "Why This Row Matters" in execution_operator_ui.text
     assert "Edge Focus" in execution_operator_ui.text
     assert "Checklist Evidence Drilldown" in execution_operator_ui.text
@@ -516,6 +517,11 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "approve_value" in portfolio_payload["approval_strip_summary"]
     assert "align_value" in portfolio_payload["approval_strip_summary"]
     assert "act_value" in portfolio_payload["approval_strip_summary"]
+    assert "order_route_approve_value" in portfolio_payload["approval_strip_summary"]
+    assert "live_route_contract" in portfolio_payload
+    assert "portfolio_live_route_context" in portfolio_payload
+    assert "order_route_summary" in portfolio_payload
+    assert portfolio_payload["order_route_summary"]["authority"] == "live_candidate_promotion_readiness_is_order_truth"
     assert "edge_experiment_review" in portfolio_payload
     assert "edge_evolution_rule" in portfolio_payload
     assert "review_followup_ledger" in portfolio_payload
@@ -572,6 +578,8 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
         assert "allocated_risk_r" in portfolio_payload["accepted_candidates"][0]
         assert "capital_pressure" in portfolio_payload["accepted_candidates"][0]
         assert "expected_summary" in portfolio_payload["accepted_candidates"][0]
+        assert "entry_surface_route" in portfolio_payload["accepted_candidates"][0]
+        assert "live_routable" in portfolio_payload["accepted_candidates"][0]
     if portfolio_payload["blocked_candidates"]:
         assert "strategy_family" in portfolio_payload["blocked_candidates"][0]
         assert "strategy_cluster" in portfolio_payload["blocked_candidates"][0]

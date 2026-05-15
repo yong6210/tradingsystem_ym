@@ -465,13 +465,28 @@ class ExecutionPlanningService:
             {"label": "TP3", "price": cls._safe_float(plan.tp3), "size_fraction": cls._safe_float(split.get("runner"))},
         ]
 
-    @staticmethod
-    def _session_name(candidate: dict[str, Any], operating_lock: dict[str, Any]) -> str:
-        current_session = dict(operating_lock or {}).get("current_session") or {}
-        if current_session.get("name"):
-            return str(current_session["name"]).lower()
+    @classmethod
+    def _session_name(cls, candidate: dict[str, Any], operating_lock: dict[str, Any]) -> str:
         session_guidance = dict(candidate.get("session_guidance") or {})
-        return str(session_guidance.get("session_name") or session_guidance.get("state") or "unknown").lower()
+        guidance_state = str(session_guidance.get("state") or "").strip().lower()
+        if guidance_state == "dead_session" or cls._bool(session_guidance.get("dead_session")):
+            return "dead_session"
+
+        current_session = dict(operating_lock or {}).get("current_session") or {}
+        guidance_current_session = dict(session_guidance.get("current_session") or {})
+        for value in (
+            current_session.get("name"),
+            guidance_current_session.get("name"),
+            session_guidance.get("session_name"),
+            guidance_state,
+        ):
+            session_name = str(value or "").strip().lower()
+            if not session_name:
+                continue
+            if session_name == "inactive":
+                return "dead_session"
+            return session_name
+        return "unknown"
 
     @staticmethod
     def _rollout_reason(allowed_mode: ExecutionMode) -> tuple[str, str]:
@@ -926,6 +941,8 @@ class ExecutionPlanningService:
         recommended_risk_r = self._safe_float(executable_plan.get("recommended_risk_r", 0.0))
         setup_grade = str(executable_plan.get("setup_grade") or "").upper()
         session_name = self._session_name(candidate, operating_lock)
+        if session_name:
+            safety["session_name"] = session_name
         requested_mode_exceeds_cap = _MODE_RANK[requested_mode] > _MODE_RANK[rollout_policy.max_execution_mode]
         override_applied = False
         override_block_applied = False

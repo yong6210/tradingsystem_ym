@@ -41,7 +41,7 @@
 - 알림 cooldown state는 전송 성공이 확인된 경우에만 기록한다.
 
 완료 기준:
-- `runtime_guard`, `no_order_watchdog`, `reconciliation_watchdog`, `synthetic_canary`, `boot_check`, `ops_heartbeat`, `replay_validation_bridge`, `failure_drill`, `binance_rule_drift`가 고정 경로로 읽힌다.
+- `runtime_guard`, `no_order_watchdog`, `reconciliation_watchdog`, `synthetic_canary`, `boot_check`, `ops_heartbeat`, `live_replay_parity`, `replay_validation_bridge`, `failure_drill`, `binance_rule_drift`가 고정 경로로 읽힌다.
 - stale/malformed/missing report는 `PASS`로 숨지 않는다.
 
 ### Phase 2. 주문 경로 증명

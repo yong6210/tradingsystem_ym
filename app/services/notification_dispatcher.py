@@ -517,12 +517,17 @@ class NotificationDispatcher:
             "session_impulse_retest_miss",
             "entry",
             "confirm",
+            "partial_exit",
             "tp",
+            "sl",
             "closed",
             "stop",
             "exit",
             "fill",
             "entry_surface_alert",
+            "micro_live_no_order_watchdog",
+            "live_reconciliation_watchdog",
+            "micro_live_ops_heartbeat",
             "stage_monitor_alert",
         }
         if normalized_type in important_types:
@@ -550,7 +555,7 @@ class NotificationDispatcher:
     @classmethod
     def _format_discord_message(cls, *, alert_type: str, symbol: str, payload: dict[str, Any]) -> str:
         normalized_type = str(alert_type or "").strip().lower()
-        if normalized_type in {"entry", "confirm", "tp", "closed", "stop", "exit", "fill"}:
+        if normalized_type in {"entry", "confirm", "partial_exit", "tp", "sl", "closed", "stop", "exit", "fill"}:
             return cls._format_discord_trade_signal(alert_type=normalized_type, symbol=symbol, payload=payload)
         if normalized_type == "session_impulse_retest_miss":
             return cls._format_discord_session_miss(symbol=symbol, payload=payload)
@@ -583,7 +588,9 @@ class NotificationDispatcher:
         title_by_type = {
             "confirm": "조건 확인 신호(주문 아님)",
             "entry": "진입 발생",
+            "partial_exit": "부분 청산 발생",
             "tp": "목표가 도달",
+            "sl": "손절 발생",
             "closed": "거래 종료",
             "stop": "손절/무효화",
             "exit": "청산 신호",
@@ -607,7 +614,7 @@ class NotificationDispatcher:
             lines.append(f"기대값: {cls._short_text(expected, max_chars=100)}")
         if plan_id:
             lines.append(f"플랜: {plan_id}")
-        if alert_type == "confirm":
+        if alert_type == "confirm" or cls._safe_bool(payload.get("order_submission_expected"), default=True) is False:
             lines.append("주문: 제출 아님 | 실제 주문은 LIVE_ORDER_CANDIDATE/진입 발생 기준")
         return "\n".join(lines)
 
@@ -658,26 +665,76 @@ class NotificationDispatcher:
         report_path = payload.get("report_path")
 
         title = f"[운영] {symbol} 확인 필요"
-        if str(alert_type or "").strip().lower() == "entry_surface_alert":
+        if str(alert_type or "").strip().lower() == "entry_surface_alert" and "live_order_candidates=" in message:
             live_count = cls._entry_surface_live_order_count(message)
-            if live_count <= 0:
-                title = f"[모니터링] {symbol} 주문 후보 없음"
-            else:
+            blocked_live_count = cls._entry_surface_count(message, "blocked_live_candidates=")
+            if live_count > 0:
                 title = f"[중요] {symbol} 라이브 주문 후보 확인"
+            elif blocked_live_count > 0:
+                title = f"[주의] {symbol} 라이브 주문 후보 차단"
+            else:
+                title = f"[모니터링] {symbol} 주문 후보 없음"
+        elif cls._is_watch_only_ops_heartbeat(summary_lines):
+            title = f"[모니터링] {symbol} 운영 관찰"
 
         lines = [title]
         lines.append(f"요약: {headline}")
-        if len(summary_lines) > 1:
-            lines.append(f"추가: {cls._short_text(summary_lines[1], max_chars=120)}")
+        detail_lines = cls._operational_discord_detail_lines(summary_lines)
+        labels = ("추가", "상세", "조치")
+        for label, detail in zip(labels, detail_lines, strict=False):
+            lines.append(f"{label}: {cls._short_text(detail, max_chars=160)}")
         if report_path:
             lines.append(f"리포트: {report_path}")
         return "\n".join(lines)
 
     @classmethod
+    def _operational_discord_detail_lines(cls, summary_lines: list[str]) -> list[str]:
+        if len(summary_lines) <= 1:
+            return []
+        status_lines: list[str] = []
+        issue_lines: list[str] = []
+        action_lines: list[str] = []
+        for line in summary_lines[1:]:
+            text = str(line or "").strip()
+            if not text:
+                continue
+            if text.startswith("상태:"):
+                status_lines.append(text)
+                continue
+            if text.startswith(("긴급:", "주의:")):
+                if text.rstrip().endswith("없음"):
+                    continue
+                issue_lines.append(text)
+                continue
+            if text.startswith("다음:"):
+                action_lines.append(text)
+        selected = status_lines[:1] + issue_lines[:2]
+        if action_lines and len(selected) < 3:
+            selected.extend(action_lines[: 3 - len(selected)])
+        if selected:
+            return selected[:3]
+        return summary_lines[1:4]
+
+    @classmethod
+    def _is_watch_only_ops_heartbeat(cls, summary_lines: list[str]) -> bool:
+        if not summary_lines:
+            return False
+        if "운영 점검" not in str(summary_lines[0]):
+            return False
+        for line in summary_lines[1:]:
+            text = " ".join(str(line or "").strip().split()).lower()
+            if text.startswith("상태:"):
+                return "watch" in text and "fail=0" in text
+        return False
+
+    @classmethod
     def _entry_surface_live_order_count(cls, message: str) -> int:
+        return cls._entry_surface_count(message, "live_order_candidates=")
+
+    @classmethod
+    def _entry_surface_count(cls, message: str, marker: str) -> int:
         for raw_line in str(message or "").splitlines():
             line = raw_line.strip()
-            marker = "live_order_candidates="
             if marker not in line:
                 continue
             suffix = line.split(marker, 1)[1]

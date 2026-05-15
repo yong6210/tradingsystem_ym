@@ -28,6 +28,38 @@ def test_historical_session_uses_submission_guidance_from_attachments() -> None:
     assert state == "new_york"
 
 
+def test_historical_session_maps_dead_session_attachment_before_inactive_name() -> None:
+    service = _service()
+    submission = SimpleNamespace(
+        attachments={
+            "session_guidance": {
+                "state": "dead_session",
+                "dead_session": True,
+                "current_session": {"name": "inactive"},
+            }
+        },
+        raw={},
+        submitted_at=datetime(2026, 3, 27, 4, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 3, 27, 4, 0, tzinfo=timezone.utc),
+    )
+
+    state = service._historical_session(plan=None, submission=submission, closed_record=None)
+
+    assert state == "dead_session"
+
+
+def test_runtime_session_maps_dead_session_guidance_before_inactive_name() -> None:
+    row = {
+        "session_guidance": {
+            "state": "dead_session",
+            "dead_session": True,
+            "current_session": {"name": "inactive"},
+        }
+    }
+
+    assert ScoreToOutcomeFunnelService._runtime_session_state(row) == "dead_session"
+
+
 def test_historical_session_falls_back_to_submission_timestamp_without_guidance() -> None:
     service = _service()
     submission = SimpleNamespace(

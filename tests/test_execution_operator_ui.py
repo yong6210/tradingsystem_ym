@@ -167,11 +167,12 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "Source Flow" in html
     assert "Freshness Note" in html
     assert "Portfolio Candidate Drilldown" in html
-    assert "accepted / blocked 후보를 raw JSON 없이 읽기 위해, cluster, allocated risk, outcome bias, edge focus, capital allocator, A/B posture를 같은 표로 보여줍니다." in html
+    assert "portfolio accepted / blocked 후보를 표시합니다. accepted는 주문 후보가 아니며 Live Route 열이 실제 live route 후보 여부를 구분합니다." in html
     assert "Portfolio Candidate Inspector" in html
-    assert "대표 accepted row 1개와 blocked row 1개를 카드로 다시 압축해, risk, allocator, A/B posture, edge focus, session, reaction evidence를 바로 읽습니다." in html
-    assert "Representative Accepted Candidate" in html
+    assert "대표 portfolio accepted row 1개와 blocked row 1개를 카드로 다시 압축해, live route, risk, allocator, A/B posture, edge focus, session, reaction evidence를 바로 읽습니다." in html
+    assert "Representative Portfolio Accepted Candidate" in html
     assert "Representative Blocked Candidate" in html
+    assert "Order Route" in html
     assert "Shadow Tilt" in html
     assert "runtime_signal_shadow_tilt unavailable" in html
     assert "apply_live=false" in html

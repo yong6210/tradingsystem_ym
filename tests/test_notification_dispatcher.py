@@ -218,6 +218,89 @@ def test_dispatcher_entry_surface_live_candidate_title_requires_attention() -> N
     assert message.startswith("[중요] USDC_PERP_TOP30 라이브 주문 후보 확인")
 
 
+def test_dispatcher_entry_surface_blocked_live_candidate_title_requires_review() -> None:
+    message = NotificationDispatcher._format_discord_message(
+        alert_type="entry_surface_alert",
+        symbol="USDC_PERP_TOP30",
+        payload={
+            "message": (
+                "Trading entry surface alert: live_order_candidates=0, "
+                "review_candidates=0, blocked_live_candidates=1\n"
+                "scope: USDC_PERP_TOP30 | order_truth=live_candidate_promotion_readiness\n"
+                "counts: LIVE_ORDER_CANDIDATE=0, CONTEXT_REVIEW_SETUP=0, BLOCKED_SETUP=1"
+            )
+        },
+    )
+
+    assert message.startswith("[주의] USDC_PERP_TOP30 라이브 주문 후보 차단")
+    assert "주문 후보 없음" not in message
+
+
+def test_dispatcher_entry_surface_alert_without_entry_counts_uses_operational_title() -> None:
+    message = NotificationDispatcher._format_discord_message(
+        alert_type="entry_surface_alert",
+        symbol="MICRO_LIVE",
+        payload={
+            "message": (
+                "micro live no-order watchdog\n"
+                "최근 live intent 0건, live 주문 제출 0건. submit_ready=0"
+            )
+        },
+    )
+
+    assert message.startswith("[운영] MICRO_LIVE 확인 필요")
+    assert "주문 후보 없음" not in message
+
+
+def test_dispatcher_micro_live_no_order_watchdog_uses_operational_title() -> None:
+    message = NotificationDispatcher._format_discord_message(
+        alert_type="micro_live_no_order_watchdog",
+        symbol="MICRO_LIVE",
+        payload={
+            "message": (
+                "MICRO_LIVE 주문 없음\n"
+                "런타임 재시작 이후: intent 3건 / 제출 0건\n"
+                "원인: validation_do_not_deploy=3"
+            )
+        },
+    )
+
+    assert message.startswith("[운영] MICRO_LIVE 확인 필요")
+    assert "주문 후보 없음" not in message
+
+
+def test_dispatcher_operational_watchdog_types_are_not_low_importance_suppressed() -> None:
+    for alert_type in (
+        "micro_live_no_order_watchdog",
+        "live_reconciliation_watchdog",
+        "micro_live_ops_heartbeat",
+    ):
+        assert NotificationDispatcher._discord_skip_reason(alert_type=alert_type, payload={"message": "watch"}) == ""
+
+
+def test_dispatcher_operational_heartbeat_includes_watch_detail() -> None:
+    message = NotificationDispatcher._format_discord_message(
+        alert_type="micro_live_ops_heartbeat",
+        symbol="MICRO_LIVE",
+        payload={
+            "message": (
+                "MICRO_LIVE 운영 점검\n"
+                "상태: WATCH / fail=0 watch=1\n"
+                "긴급: 없음\n"
+                "주의: live_replay_parity=WATCH/WATCH content_status_watch "
+                "portfolio_symbol_live_flow_and_order_gate_watch\n"
+                "다음: WATCH는 자동 관찰; 반복/악화 시 해당 리포트 확인"
+            )
+        },
+    )
+
+    assert message.startswith("[모니터링] MICRO_LIVE 운영 관찰")
+    assert "상세: 주의: live_replay_parity=WATCH/WATCH" in message
+    assert "portfolio_symbol_live_flow_and_order_gate_watch" in message
+    assert "조치: 다음: WATCH는 자동 관찰" in message
+    assert "긴급: 없음" not in message
+
+
 def test_dispatcher_confirm_signal_is_labeled_as_non_order_signal() -> None:
     message = NotificationDispatcher._format_discord_message(
         alert_type="confirm",
@@ -233,6 +316,26 @@ def test_dispatcher_confirm_signal_is_labeled_as_non_order_signal() -> None:
     assert message.startswith("[중요] BTCUSDC 조건 확인 신호(주문 아님)")
     assert "주문: 제출 아님" in message
     assert "진입 확인 신호" not in message
+
+
+def test_dispatcher_partial_exit_and_sl_are_trade_alerts_not_suppressed() -> None:
+    for alert_type, title in (
+        ("partial_exit", "부분 청산 발생"),
+        ("sl", "손절 발생"),
+    ):
+        assert NotificationDispatcher._discord_skip_reason(alert_type=alert_type, payload={}) == ""
+        message = NotificationDispatcher._format_discord_message(
+            alert_type=alert_type,
+            symbol="BTCUSDC",
+            payload={
+                "direction": "long",
+                "plan_id": "plan_exit",
+                "fill_price": 99.5,
+                "realized_r": -1.0,
+            },
+        )
+        assert message.startswith(f"[중요] BTCUSDC {title}")
+        assert "플랜: plan_exit" in message
 
 
 def test_dispatcher_system_fanout_delivers_to_configured_routes(monkeypatch) -> None:

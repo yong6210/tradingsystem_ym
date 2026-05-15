@@ -95,6 +95,10 @@ def test_pre_entry_touch_and_confirm_alerts_emit_from_subscriptions(monkeypatch)
         assert [row["alert_type"] for row in calls] == ["touch", "confirm"]
         assert "entry touched:" in calls[0]["payload"]["message"]
         assert "confirm window open:" in calls[1]["payload"]["message"]
+        assert calls[0]["payload"]["order_submission_expected"] is False
+        assert calls[0]["payload"]["order_truth"] == "pre_entry_signal_only"
+        assert calls[1]["payload"]["order_submission_expected"] is False
+        assert calls[1]["payload"]["order_truth"] == "pre_entry_signal_only"
 
         emitted = list(
             db.scalars(
@@ -107,6 +111,7 @@ def test_pre_entry_touch_and_confirm_alerts_emit_from_subscriptions(monkeypatch)
         )
         assert sum(1 for row in emitted if (row.payload or {}).get("subscription_active")) == 2
         assert sum(1 for row in emitted if (row.payload or {}).get("subscription_alert")) == 2
+        assert sum(1 for row in emitted if (row.payload or {}).get("order_submission_expected") is False) == 2
 
 
 def test_signal_alert_channel_dedupe_and_cooldown(monkeypatch) -> None:
@@ -353,6 +358,65 @@ def test_duplicate_fill_does_not_reemit_fill_stage_alerts(monkeypatch) -> None:
         assert [row["alert_type"] for row in calls] == ["closed", "tp"]
 
 
+def test_ingest_execution_fill_emits_partial_exit_and_stop_loss_alerts(monkeypatch) -> None:
+    init_db()
+    symbol = f"SIGEXIT{int(datetime.now(timezone.utc).timestamp() * 1_000_000)}USDC"
+    plan_id = f"{symbol}_p1"
+
+    with SessionLocal() as db:
+        _seed_plan(db, symbol=symbol, plan_id=plan_id)
+        engine = StrategyEngine(db)
+        engine.subscribe_alert(symbol=symbol, channel="discord", alert_type="partial_exit", plan_id=plan_id, payload={})
+        engine.subscribe_alert(symbol=symbol, channel="discord", alert_type="sl", plan_id=plan_id, payload={})
+
+        calls: list[dict] = []
+
+        def _fake_dispatch(*, channel: str, alert_type: str, symbol: str, payload: dict) -> dict:
+            calls.append({"channel": channel, "alert_type": alert_type, "symbol": symbol, "payload": dict(payload)})
+            return {
+                "channel": channel,
+                "delivered": True,
+                "skipped": False,
+                "reason": "delivered",
+                "status_code": 204,
+                "target": f"{channel}:unit-test",
+                "latency_ms": 1.2,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+
+        monkeypatch.setattr(engine.notification_dispatcher, "dispatch", _fake_dispatch)
+
+        partial = engine.ingest_execution_fill(
+            fill_id=f"{plan_id}_partial",
+            plan_id=plan_id,
+            symbol=symbol,
+            stage=ExecutionFillStage.PARTIAL_EXIT,
+            fill_ts=datetime.now(timezone.utc),
+            price=101.0,
+            qty=0.4,
+            fee=0.01,
+            payload={"exit_reason": "manual_partial", "realized_r": 0.35},
+        )
+        stopped = engine.ingest_execution_fill(
+            fill_id=f"{plan_id}_stop",
+            plan_id=plan_id,
+            symbol=symbol,
+            stage=ExecutionFillStage.CLOSED,
+            fill_ts=datetime.now(timezone.utc) + timedelta(minutes=15),
+            price=98.8,
+            qty=0.6,
+            fee=0.01,
+            payload={"exit_reason": "stop_loss", "realized_r": -1.0},
+        )
+
+        assert partial["accepted"] is True
+        assert stopped["accepted"] is True
+        assert [row["alert_type"] for row in calls] == ["partial_exit", "sl"]
+        assert all(row["payload"]["order_truth"] == "execution_fill_truth" for row in calls)
+        assert "partial exit:" in calls[0]["payload"]["message"]
+        assert "stop exit:" in calls[1]["payload"]["message"]
+
+
 def test_tv_webhook_fanouts_confirm_subscription(monkeypatch) -> None:
     init_db()
     symbol = f"SIGTV{int(datetime.now(timezone.utc).timestamp() * 1_000_000)}USDC"
@@ -397,3 +461,5 @@ def test_tv_webhook_fanouts_confirm_subscription(monkeypatch) -> None:
         assert len(calls) == 1
         assert calls[0]["alert_type"] == "confirm"
         assert "tv webhook confirm:" in calls[0]["payload"]["message"]
+        assert calls[0]["payload"]["order_submission_expected"] is False
+        assert calls[0]["payload"]["order_truth"] == "pre_entry_signal_only"

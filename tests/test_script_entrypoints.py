@@ -5,6 +5,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,6 +38,7 @@ import scripts.run_live_reconciliation_watchdog as live_reconciliation_watchdog
 import scripts.run_live_replay_parity_audit as live_replay_parity
 import scripts.run_replay_validation_bridge as replay_validation_bridge
 import scripts.run_session_impulse_retest_opportunity_report as sir_opportunity_report
+import scripts.run_session_impulse_retest_runtime_audit_report as sir_runtime_audit_report
 import scripts.run_micro_live_preflight as micro_live_preflight
 import scripts.run_micro_live_boot_check as micro_live_boot_check
 import scripts.run_micro_live_no_order_watchdog as micro_live_no_order_watchdog
@@ -189,6 +191,180 @@ def test_session_impulse_retest_opportunity_report_performance_uses_configured_r
     assert payload["simple_return_pct"] == 2.5
     assert payload["simple_pnl_usdt"] == 5.0
     assert payload["compounded_return_pct"] == 2.5049
+
+
+def test_session_impulse_retest_opportunity_report_status_separates_pre_runtime_backfill() -> None:
+    assert sir_opportunity_report._status_for(
+        observed=True,
+        intents=[],
+        submissions=[],
+        before_runtime_start=True,
+    ) == ("pre_runtime_backfill_without_intent", "before_runtime_start")
+    assert sir_opportunity_report._status_for(
+        observed=False,
+        intents=[],
+        submissions=[],
+        before_runtime_start=True,
+        observation_reason="insufficient_candles",
+    ) == ("pre_runtime_unobservable", "before_runtime_start_insufficient_candles")
+    assert sir_opportunity_report._status_for(
+        observed=False,
+        intents=[],
+        submissions=[],
+        before_runtime_start=False,
+        observation_reason="runtime_plan_not_observed",
+    ) == ("not_observed", "runtime_plan_not_observed")
+
+
+def test_session_impulse_retest_opportunity_report_status_keeps_live_intent_truth_first() -> None:
+    intent = SimpleNamespace(submit_decision="SKIP_BLOCKED", decision_reason_code="rollout_session_not_allowed")
+    submission = SimpleNamespace(submit_status="FILLED", state="FILLED")
+
+    assert sir_opportunity_report._status_for(
+        observed=True,
+        intents=[intent],
+        submissions=[],
+        before_runtime_start=True,
+    ) == ("blocked_or_skipped", "rollout_session_not_allowed")
+    assert sir_opportunity_report._status_for(
+        observed=True,
+        intents=[intent],
+        submissions=[submission],
+        before_runtime_start=True,
+    ) == ("submitted", "FILLED")
+
+
+def test_session_impulse_retest_opportunity_summary_can_exclude_pre_runtime_rows() -> None:
+    rows = [
+        {
+            "symbol": "BTCUSDC",
+            "session": "new_york",
+            "runtime_status": "blocked_or_skipped",
+            "runtime_reason": "session_impulse_retest_rollout_not_ready",
+            "r_value": 1.5,
+            "before_current_runtime_start": True,
+        },
+        {
+            "symbol": "ETHUSDC",
+            "session": "london",
+            "runtime_status": "submitted",
+            "runtime_reason": "FILLED",
+            "r_value": -0.5,
+            "before_current_runtime_start": False,
+        },
+    ]
+
+    active = sir_opportunity_report._summary_for_opportunities(
+        [row for row in rows if not row["before_current_runtime_start"]],
+        risk_pct=0.01,
+        account_equity=200.0,
+    )
+    lookback = sir_opportunity_report._summary_for_opportunities(
+        rows,
+        risk_pct=0.01,
+        account_equity=200.0,
+    )
+
+    assert active["expected_order_count"] == 1
+    assert active["before_current_runtime_start_count"] == 0
+    assert active["potential_performance"]["total_r"] == -0.5
+    assert lookback["expected_order_count"] == 2
+    assert lookback["before_current_runtime_start_count"] == 1
+
+
+def test_session_impulse_retest_runtime_audit_summary_separates_sir_from_legacy_generation() -> None:
+    compact = sir_runtime_audit_report._compact_audit(
+        {
+            "audit_id": "audit_1",
+            "symbol": "LINKUSDC",
+            "phase": "refresh",
+            "status": "no_fresh_candidates",
+            "decision_code": "normal",
+            "observed_ts": "2026-05-14T21:45:00+00:00",
+            "payload": {
+                "plans": 2,
+                "session_impulse_retest_generated_count": 0,
+                "plan_generation_diagnostics": {"generation_state": "generated"},
+            },
+        }
+    )
+
+    summary = compact["payload_summary"]
+    assert summary["generation_state"] == "no_fresh_candidates"
+    assert summary["session_impulse_retest_generation_state"] == "no_fresh_candidates"
+    assert summary["legacy_plan_generation_state"] == "generated"
+
+
+def test_session_impulse_retest_runtime_audit_summary_marks_ws_suppression_non_blocking() -> None:
+    compact = sir_runtime_audit_report._compact_audit(
+        {
+            "audit_id": "audit_2",
+            "symbol": "NEARUSDC",
+            "phase": "auto_route",
+            "status": "ws_stream_active_route_suppressed",
+            "decision_code": "",
+            "observed_ts": "2026-05-14T22:00:00+00:00",
+            "payload": {
+                "reason": "ws_stream_active_route_suppressed",
+                "reason_detail": "Sync-universe worker skipped duplicate auto-route.",
+                "route_owner": "ws_stream",
+                "suppression_scope": "sync_universe_duplicate_route_guard",
+                "blocking_live_route": False,
+                "plans_considered": 1,
+            },
+        }
+    )
+
+    summary = compact["payload_summary"]
+    assert summary["route_owner"] == "ws_stream"
+    assert summary["suppression_scope"] == "sync_universe_duplicate_route_guard"
+    assert summary["blocking_live_route"] is False
+    assert "duplicate auto-route" in summary["reason_detail"]
+
+
+def test_session_impulse_retest_runtime_audit_status_summary_splits_blocking_and_context() -> None:
+    summary = sir_runtime_audit_report._status_summary(
+        [
+            {
+                "status": "ws_stream_active_route_suppressed",
+                "payload": {"blocking_live_route": False},
+            },
+            {"status": "no_live_route_candidate_plan", "payload": {}},
+            {"status": "intent_blocked", "payload": {"blocking_live_route": True}},
+            {"status": "submit_error", "payload": {}},
+        ]
+    )
+
+    assert summary["overall_status"] == "FAIL"
+    assert summary["non_blocking_status_counts"] == {"ws_stream_active_route_suppressed": 1}
+    assert summary["no_candidate_status_counts"] == {"no_live_route_candidate_plan": 1}
+    assert summary["order_blocking_status_counts"] == {"intent_blocked": 1, "submit_error": 1}
+
+
+def test_session_impulse_retest_runtime_audit_filters_runtime_scope() -> None:
+    rows = [
+        {"observed_ts": "2026-05-10T00:00:00Z", "status": "submit_error"},
+        {"observed_ts": "2026-05-10T01:00:00Z", "status": "no_fresh_candidates"},
+        {"observed_ts": "legacy-invalid-timestamp", "status": "no_fresh_candidates"},
+    ]
+    start_at = datetime(2026, 5, 10, 0, 30, tzinfo=UTC)
+
+    filtered = sir_runtime_audit_report._rows_since(rows, start_at)
+
+    assert filtered == [{"observed_ts": "2026-05-10T01:00:00Z", "status": "no_fresh_candidates"}]
+
+
+def test_live_replay_parity_maps_dead_session_guidance_before_inactive_name() -> None:
+    row = SimpleNamespace(
+        session_guidance={
+            "state": "dead_session",
+            "dead_session": True,
+            "current_session": {"name": "inactive", "active": False},
+        },
+        approval_snapshot={},
+    )
+
+    assert live_replay_parity._intent_session_name(row) == "dead_session"
 
 
 def test_worker_boot_check_is_required_only_for_live_modes(monkeypatch: pytest.MonkeyPatch) -> None:

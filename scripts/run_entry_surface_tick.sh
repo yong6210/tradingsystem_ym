@@ -4,9 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ENTRY_DIR="$ROOT_DIR/reports/operations/entry_surface"
 PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+RUNTIME_BASE="${TRADING_RUNTIME_BASE:-$HOME/Library/Application Support/trading}"
+RUNTIME_PYTHON_BIN="$RUNTIME_BASE/runtime_venv/bin/python"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
-  if command -v python3 >/dev/null 2>&1; then
+  if [[ -x "$RUNTIME_PYTHON_BIN" ]]; then
+    PYTHON_BIN="$RUNTIME_PYTHON_BIN"
+  elif command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="$(command -v python3)"
   else
     echo "python3 is required to run notify_entry_surface.py" >&2

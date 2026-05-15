@@ -102,7 +102,7 @@ echo "== miss detector (6h) =="
 
 if [[ "${RUN_SIR_OPPORTUNITY_REPORT:-0}" == "1" ]]; then
   echo
-  echo "== opportunity report (72h) =="
+  echo "== opportunity report (72h, runtime headline + lookback context) =="
   (cd "$ROOT_DIR" && DATABASE_URL="sqlite:///$RUNTIME_DB" RUNTIME_WORKER_HEARTBEAT_DIR="$HEARTBEAT_DIR" PYTHONPATH="$ROOT_DIR" "$PYTHON_BIN" "$ROOT_DIR/scripts/run_session_impulse_retest_opportunity_report.py" --lookback-hours 72 --summary-only)
 fi
 

@@ -147,6 +147,9 @@ def test_execution_operator_dashboard_fast_skips_heavy_research_layers(monkeypat
     assert funnel["live_candidate_promotion_readiness"]["scope"] == "global_all_symbols"
     assert funnel["live_candidate_promotion_readiness_global"]["scope"] == "global_all_symbols"
     assert funnel["portfolio_live_route_context"]["accepted_candidate_count"] == 0
+    assert funnel["portfolio_live_route_context"]["message"] == (
+        "No portfolio accepted context candidates are visible; wait for a live-route candidate."
+    )
     assert funnel["order_route_summary"]["approve_value"] == "waiting_for_live_candidate"
 
 
@@ -2658,5 +2661,33 @@ def test_execution_operator_dashboard_intent_row_and_contract_filter_respect_dir
             "entry_models": ["LIMIT"],
             "directions": ["SHORT"],
             "sessions": ["london"],
+        },
+    )
+
+
+def test_execution_operator_dashboard_contract_filter_maps_dead_session_guidance() -> None:
+    row = {
+        "symbol": "BTCUSDC",
+        "execution_mode": "MICRO_LIVE",
+        "strategy_family": "session_impulse_retest",
+        "entry_model": "CONFIRM",
+        "direction": "LONG",
+        "session_guidance": {
+            "state": "dead_session",
+            "dead_session": True,
+            "current_session": {"name": "inactive"},
+        },
+    }
+
+    assert ExecutionOperatorDashboardService._row_session_name(row) == "dead_session"
+    assert ExecutionOperatorDashboardService._row_matches_contract_filters(
+        row,
+        {
+            "symbol": "BTCUSDC",
+            "execution_mode": "MICRO_LIVE",
+            "strategy_families": ["session_impulse_retest"],
+            "entry_models": ["CONFIRM"],
+            "directions": ["LONG"],
+            "sessions": ["dead_session"],
         },
     )

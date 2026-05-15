@@ -151,6 +151,17 @@ def _diagnostic_detail_text(diagnostics: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _summary_intent_submission_counts(summary: dict[str, Any]) -> tuple[int, int]:
+    live_intents = dict(summary.get("live_intents") or {})
+    return _safe_int(live_intents.get("total")), _safe_int(summary.get("requested_live_count"))
+
+
+def _watchdog_scope_label(*, runtime_started_at: datetime | None, days: int) -> str:
+    if runtime_started_at is not None:
+        return "런타임 재시작 이후"
+    return f"최근 {max(1, int(days))}일"
+
+
 def evaluate_no_order_watchdog(*, lifecycle: dict[str, Any], min_intents: int) -> dict[str, Any]:
     summary = dict(lifecycle.get("summary") or {})
     live_intents = dict(summary.get("live_intents") or {})
@@ -234,21 +245,31 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
     evaluation = dict(payload.get("evaluation") or {})
     detail_text = str(evaluation.get("first_block_detail_text") or "")
     top_reasons = _top_reasons_text(dict(evaluation.get("top_block_reasons") or {}), limit=3)
+    scope_label = str(payload.get("watchdog_scope_label") or f"최근 {payload.get('window_days')}일")
     next_action_text = str(evaluation.get("next_action_text") or "").strip() or _diagnostic_actions_text(
         list(evaluation.get("blocked_intent_diagnostics") or []),
         limit=2,
     )
-    return "\n".join(
+    lines = [
+        "MICRO_LIVE 주문 없음",
+        (
+            f"{scope_label}: intent {evaluation.get('intent_count')}건 / "
+            f"제출 {evaluation.get('requested_live_count')}건"
+        ),
+    ]
+    if str(payload.get("watchdog_scope") or "") == "runtime_since_ws_start":
+        lookback_summary = dict(payload.get("lookback_lifecycle_summary") or {})
+        lookback_intents, lookback_submissions = _summary_intent_submission_counts(lookback_summary)
+        lines.append(f"참고: 최근 {payload.get('window_days')}일 전체 intent {lookback_intents}건 / 제출 {lookback_submissions}건")
+    lines.extend(
         [
-            "MICRO_LIVE 주문 없음",
-            (
-                f"최근 {payload.get('window_days')}일: intent {evaluation.get('intent_count')}건 / "
-                f"제출 {evaluation.get('requested_live_count')}건"
-            ),
             f"원인: {top_reasons}",
             f"상세: {detail_text or '없음'}",
             f"다음: {next_action_text}",
         ]
+    )
+    return "\n".join(
+        lines
     )
 
 
@@ -260,22 +281,35 @@ def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
         family_filter = _csv_set(getattr(settings, "auto_trading_allowed_families", ""))
     runtime_started_at = _ws_runtime_started_at()
     with SessionLocal() as db:
-        lifecycle = LiveOrderLifecycleReporter(db).generate(
+        reporter = LiveOrderLifecycleReporter(db)
+        lookback_lifecycle = reporter.generate(
+            days=days,
+            live_only=True,
+            limit=limit,
+            strategy_families=sorted(family_filter),
+        )
+        lifecycle = reporter.generate(
             days=days,
             live_only=True,
             limit=limit,
             start_at=runtime_started_at,
             strategy_families=sorted(family_filter),
-        )
+        ) if runtime_started_at is not None else lookback_lifecycle
     evaluation = evaluate_no_order_watchdog(lifecycle=lifecycle, min_intents=min_intents)
+    watchdog_scope = "runtime_since_ws_start" if runtime_started_at is not None else "lookback_window"
     return {
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "window_days": max(1, int(days)),
         "runtime_started_at": runtime_started_at.isoformat() if runtime_started_at else None,
+        "watchdog_scope": watchdog_scope,
+        "watchdog_scope_label": _watchdog_scope_label(runtime_started_at=runtime_started_at, days=days),
+        "lookback_window_start": lookback_lifecycle.get("window_start"),
         "family_filter": sorted(family_filter),
         "min_intents": max(1, int(min_intents)),
         "evaluation": evaluation,
         "lifecycle_summary": dict(lifecycle.get("summary") or {}),
+        "runtime_lifecycle_summary": dict(lifecycle.get("summary") or {}),
+        "lookback_lifecycle_summary": dict(lookback_lifecycle.get("summary") or {}),
     }
 
 
@@ -289,6 +323,10 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         f"- status: {evaluation.get('status')}",
         f"- severity: {evaluation.get('severity')}",
         f"- reason: {evaluation.get('reason')}",
+        f"- watchdog_scope: {payload.get('watchdog_scope')}",
+        f"- watchdog_scope_label: {payload.get('watchdog_scope_label')}",
+        f"- runtime_started_at: {payload.get('runtime_started_at') or 'none'}",
+        f"- lookback_window_start: {payload.get('lookback_window_start') or 'none'}",
         f"- message: {evaluation.get('message')}",
         f"- first_block_detail: {evaluation.get('first_block_detail_text') or 'none'}",
         f"- actions: {evaluation.get('next_action_text') or _diagnostic_actions_text(list(evaluation.get('blocked_intent_diagnostics') or []))}",
@@ -348,7 +386,7 @@ def main() -> int:
             settings = get_settings()
             delivery = NotificationDispatcher(settings).dispatch(
                 channel=str(args.channel),
-                alert_type="entry_surface_alert",
+                alert_type="micro_live_no_order_watchdog",
                 symbol="MICRO_LIVE",
                 payload={
                     "status": "WARN",

@@ -2173,9 +2173,9 @@ def _apply_runtime_actionable_live_candidate_summary(payload: dict[str, Any]) ->
                 summary = f"latest surfaced intent {recent_label} is not approved for MICRO_LIVE yet"
                 next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_APPROVED
         if not summary and blocked:
-            summary = f"no accepted candidate is visible; nearest surfaced candidate {candidate_symbol}/{candidate_family} remains blocked"
+            summary = f"no live-route candidate is visible; nearest surfaced candidate {candidate_symbol}/{candidate_family} remains blocked"
         elif not summary:
-            summary = "no accepted candidate is currently visible on the operator surface"
+            summary = "no live-route candidate is currently visible on the operator surface"
         if blocked and state != osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_NONE_VISIBLE:
             summary = f"{summary}; nearest surfaced candidate {candidate_symbol}/{candidate_family} remains blocked"
         if state == osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_NONE_VISIBLE:

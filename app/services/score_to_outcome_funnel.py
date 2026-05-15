@@ -9,6 +9,7 @@ from app.core.config import Settings, get_settings
 from app.db.models import OrderSubmission, Plan
 from app.db.repositories import ExecutionFillRepository, OrderSubmissionRepository, OutcomeRepository, PlanRepository
 from app.services.execution_quality import ExecutionQualityService
+from app.services.live_route_contract import row_session_name
 from app.services.strategy_v2_stress_validation import StrategyV2StressValidationService
 from app.services.strategy_v2_validation import ClosedTradeRecord, StrategyV2ValidationService
 
@@ -44,35 +45,7 @@ class ScoreToOutcomeFunnelService:
 
     @staticmethod
     def _runtime_session_state(row: dict[str, Any]) -> str:
-        payload = dict(row or {})
-        operating_lock = dict(payload.get("operating_lock") or {})
-        current_session = dict(operating_lock.get("current_session") or {})
-        if str(current_session.get("name") or "").strip():
-            return str(current_session.get("name") or "").strip().lower()
-        session_guidance = dict(payload.get("session_guidance") or {})
-        guidance_session = dict(session_guidance.get("current_session") or {})
-        if str(guidance_session.get("name") or "").strip():
-            return str(guidance_session.get("name") or "").strip().lower()
-        if str(session_guidance.get("session_name") or "").strip():
-            return str(session_guidance.get("session_name") or "").strip().lower()
-        if str(session_guidance.get("state") or "").strip():
-            return str(session_guidance.get("state") or "").strip().lower()
-        validity = dict(payload.get("validity") or {})
-        for key in (
-            "session_guidance_session_name",
-            "session_guidance_state",
-            "generated_session",
-            "session_name",
-            "session",
-        ):
-            value = str(validity.get(key) or "").strip()
-            if value:
-                return value.lower()
-        for key in ("generated_session", "session_name", "session"):
-            value = str(payload.get(key) or "").strip()
-            if value:
-                return value.lower()
-        return "unknown"
+        return row_session_name(row) or "unknown"
 
     @staticmethod
     def _submission_session_state(submission: OrderSubmission | None) -> str:
@@ -85,8 +58,7 @@ class ScoreToOutcomeFunnelService:
             dict(raw.get("session_guidance") or {}),
             dict((raw.get("intent_snapshot") or {}).get("session_guidance") or {}),
         ):
-            current_session = dict(payload.get("current_session") or {})
-            state = str(current_session.get("name") or payload.get("session_name") or payload.get("state") or "").strip()
+            state = row_session_name({"session_guidance": payload})
             if state:
                 return state
         return ""
@@ -112,17 +84,7 @@ class ScoreToOutcomeFunnelService:
     @staticmethod
     def _session_from_plan(plan: Plan | None) -> str:
         validity = dict(getattr(plan, "validity", {}) or {})
-        for key in (
-            "session_guidance_session_name",
-            "session_guidance_state",
-            "generated_session",
-            "session_name",
-            "session",
-        ):
-            value = str(validity.get(key) or "").strip()
-            if value:
-                return value.lower()
-        return "unknown"
+        return row_session_name({"validity": validity}) or "unknown"
 
     @staticmethod
     def _normalized_string_set(

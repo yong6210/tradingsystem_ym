@@ -47,7 +47,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbol", default="", help="Optional symbol filter, for example ADAUSDC.")
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--limit", type=int, default=20)
-    parser.add_argument("--since-ws-start", action="store_true", help="Start the window at the current ws worker started_at heartbeat.")
+    parser.add_argument("--since-ws-start", action="store_true", help="Compatibility flag; current runtime scope is the default when ws started_at is available.")
+    parser.add_argument("--lookback-only", action="store_true", help="Ignore ws started_at and use the full --hours lookback as the active readiness window.")
     parser.add_argument("--heartbeat-dir", default=os.environ.get("RUNTIME_WORKER_HEARTBEAT_DIR") or os.environ.get("TRADING_HEARTBEAT_DIR") or "")
     parser.add_argument("--report-dir", default="reports/operations/live_candidate_promotion_readiness")
     parser.add_argument("--no-write-report", action="store_true")
@@ -89,6 +90,26 @@ def _ws_started_at(heartbeat_dir: str) -> datetime | None:
     return _parse_utc_ts(details.get("started_at"))
 
 
+def _readiness_summary(readiness: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(readiness or {})
+    return {
+        "headline_state": payload.get("headline_state"),
+        "headline_reason": payload.get("headline_reason"),
+        "promotion_decision": payload.get("promotion_decision"),
+        "headline_candidate_symbols": payload.get("headline_candidate_symbols") or [],
+        "candidate_count": payload.get("candidate_count"),
+        "state_counts": payload.get("state_counts") or {},
+        "top_blockers": payload.get("top_blockers") or {},
+        "headline_top_blockers": payload.get("headline_top_blockers") or {},
+        "top_all_blockers": payload.get("top_all_blockers") or payload.get("top_blockers") or {},
+        "top_live_blockers": payload.get("top_live_blockers") or {},
+        "top_auxiliary_blockers": payload.get("top_auxiliary_blockers") or {},
+        "top_intent_reasons": payload.get("top_intent_reasons") or {},
+        "latest_evidence_at": payload.get("latest_evidence_at") or "",
+        "latest_evidence_freshness": payload.get("latest_evidence_freshness") or "",
+    }
+
+
 def build_payload(
     *,
     hours: int,
@@ -98,13 +119,27 @@ def build_payload(
 ) -> dict[str, Any]:
     init_db()
     with SessionLocal() as db:
-        return build_live_candidate_promotion_readiness_payload(
+        payload = build_live_candidate_promotion_readiness_payload(
             db,
             hours=max(1, int(hours)),
             limit=max(1, int(limit)),
             symbol=symbol,
             start_at=start_at,
         )
+        payload["readiness_scope"] = "runtime_since_ws_start" if start_at is not None else "lookback_window"
+        payload["runtime_started_at"] = start_at.isoformat().replace("+00:00", "Z") if start_at is not None else None
+        if start_at is not None:
+            lookback_payload = build_live_candidate_promotion_readiness_payload(
+                db,
+                hours=max(1, int(hours)),
+                limit=max(1, int(limit)),
+                symbol=symbol,
+                start_at=None,
+            )
+            payload["lookback_readiness_summary"] = _readiness_summary(dict(lookback_payload.get("readiness") or {}))
+        else:
+            payload["lookback_readiness_summary"] = {}
+        return payload
 
 
 def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) -> None:
@@ -114,6 +149,8 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         "",
         f"- generated_at: {payload.get('generated_at')}",
         f"- symbol: {payload.get('symbol') or 'ALL'}",
+        f"- readiness_scope: {payload.get('readiness_scope')}",
+        f"- runtime_started_at: {payload.get('runtime_started_at') or 'none'}",
         f"- authority: {readiness.get('authority')}",
         f"- headline_state: {readiness.get('headline_state')}",
         f"- headline_reason: {readiness.get('headline_reason')}",
@@ -135,9 +172,13 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         f"- evidence_freshness_counts: {readiness.get('evidence_freshness_counts')}",
         f"- attention_flags: {readiness.get('attention_flags')}",
         f"- shadow_only_auxiliary: {readiness.get('shadow_only_auxiliary') or {}}",
-        f"- top_blockers: {readiness.get('top_blockers')}",
+        f"- headline_top_blockers: {readiness.get('headline_top_blockers') or readiness.get('top_live_blockers') or readiness.get('top_blockers')}",
+        f"- top_all_blockers: {readiness.get('top_all_blockers') or readiness.get('top_blockers')}",
+        f"- top_live_blockers: {readiness.get('top_live_blockers') or {}}",
+        f"- top_auxiliary_blockers: {readiness.get('top_auxiliary_blockers') or {}}",
         f"- top_intent_reasons: {readiness.get('top_intent_reasons')}",
         f"- top_audit_statuses: {readiness.get('top_audit_statuses')}",
+        f"- lookback_readiness_summary: {payload.get('lookback_readiness_summary') or {}}",
         "",
         "## Operator Review Items",
         "",
@@ -184,6 +225,8 @@ def _compact_text(payload: dict[str, Any]) -> str:
         "live_candidate_promotion_readiness:",
         f"- symbol={payload.get('symbol') or 'ALL'}",
         f"- strategy_families={payload.get('strategy_families')}",
+        f"- readiness_scope={payload.get('readiness_scope') or 'lookback_window'}",
+        f"- runtime_started_at={payload.get('runtime_started_at') or 'none'}",
         f"- window_start={payload.get('window_start') or 'hours_window'}",
         f"- state={readiness.get('headline_state')} reason={readiness.get('headline_reason')}",
         f"- promotion_decision={readiness.get('promotion_decision')}",
@@ -203,9 +246,19 @@ def _compact_text(payload: dict[str, Any]) -> str:
         f"- evidence_freshness_counts={readiness.get('evidence_freshness_counts')}",
         f"- attention_flags={readiness.get('attention_flags')}",
         f"- shadow_only_auxiliary={readiness.get('shadow_only_auxiliary') or {}}",
-        f"- top_blockers={readiness.get('top_blockers')}",
+        f"- headline_top_blockers={readiness.get('headline_top_blockers') or readiness.get('top_live_blockers') or readiness.get('top_blockers')}",
+        f"- top_all_blockers={readiness.get('top_all_blockers') or readiness.get('top_blockers')}",
+        f"- top_live_blockers={readiness.get('top_live_blockers') or {}}",
+        f"- top_auxiliary_blockers={readiness.get('top_auxiliary_blockers') or {}}",
         f"- top_intent_reasons={readiness.get('top_intent_reasons')}",
     ]
+    lookback = dict(payload.get("lookback_readiness_summary") or {})
+    if lookback:
+        lines.append(
+            "- lookback_context="
+            f"state={lookback.get('headline_state')} reason={lookback.get('headline_reason')} "
+            f"candidates={lookback.get('candidate_count')} top_intent_reasons={lookback.get('top_intent_reasons')}"
+        )
     for item in list(readiness.get("operator_review_items") or [])[:5]:
         lines.append(
             "- review "
@@ -228,7 +281,7 @@ def _compact_text(payload: dict[str, Any]) -> str:
 
 def main() -> None:
     args = parse_args()
-    start_at = _ws_started_at(str(args.heartbeat_dir or "")) if bool(args.since_ws_start) else None
+    start_at = None if bool(args.lookback_only) else _ws_started_at(str(args.heartbeat_dir or ""))
     payload = build_payload(
         hours=max(1, int(args.hours)),
         limit=max(1, int(args.limit)),

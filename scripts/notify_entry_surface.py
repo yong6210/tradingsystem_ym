@@ -24,6 +24,10 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import get_settings
+from app.services.live_route_contract import (
+    attach_live_route_status,
+    live_route_contract_from_settings,
+)
 from app.services.notification_dispatcher import NotificationDispatcher
 from scripts.operation_report_io import atomic_write_text
 
@@ -33,7 +37,8 @@ LIVE_ORDER_CANDIDATE = "LIVE_ORDER_CANDIDATE"
 CONTEXT_REVIEW_SETUP = "CONTEXT_REVIEW_SETUP"
 BLOCKED_SETUP = "BLOCKED_SETUP"
 RESEARCH_ONLY_SETUP = "RESEARCH_ONLY_SETUP"
-ALERT_STATUSES = (LIVE_ORDER_CANDIDATE, CONTEXT_REVIEW_SETUP, BLOCKED_SETUP, RESEARCH_ONLY_SETUP)
+SURFACE_STATUSES = (LIVE_ORDER_CANDIDATE, CONTEXT_REVIEW_SETUP, BLOCKED_SETUP, RESEARCH_ONLY_SETUP)
+ALERT_STATUSES = SURFACE_STATUSES
 _REQUEST_RETRY_ATTEMPTS = 2
 _REQUEST_RETRY_BASE_DELAY_SECONDS = 1.0
 _REQUEST_TIMEOUT_SECONDS = 60
@@ -219,178 +224,12 @@ def _filter_rows(rows: Any, *, symbol: str) -> list[dict[str, Any]]:
     return [dict(row) for row in rows if isinstance(row, dict) and _matches_symbol(row, symbol)]
 
 
-def _csv_items(raw: Any, *, case: str = "asis") -> list[str]:
-    items: list[str] = []
-    for value in str(raw or "").split(","):
-        item = str(value or "").strip()
-        if not item:
-            continue
-        if case == "upper":
-            item = item.upper()
-        elif case == "lower":
-            item = item.lower()
-        if item not in items:
-            items.append(item)
-    return items
-
-
-def _parse_direction_contract(raw: Any) -> dict[str, list[str]]:
-    mapping: dict[str, list[str]] = {}
-    for item in str(raw or "").split(","):
-        token = str(item or "").strip()
-        if not token or ":" not in token:
-            continue
-        symbol, raw_directions = token.split(":", 1)
-        normalized_symbol = str(symbol or "").strip().upper()
-        if not normalized_symbol:
-            continue
-        directions: list[str] = []
-        for direction in str(raw_directions or "").replace("/", "|").split("|"):
-            normalized_direction = str(direction or "").strip().upper()
-            if normalized_direction and normalized_direction not in directions:
-                directions.append(normalized_direction)
-        if directions:
-            mapping[normalized_symbol] = directions
-    return mapping
-
-
 def _live_route_contract_from_settings(settings: Any) -> dict[str, Any]:
-    execution_mode = str(getattr(settings, "auto_trading_execution_mode", "") or "").strip().upper()
-    if execution_mode == "MICRO_LIVE":
-        return {
-            "authority": "live_candidate_promotion_readiness_is_order_truth",
-            "execution_mode": execution_mode,
-            "symbols": _csv_items(getattr(settings, "auto_trading_micro_live_allowed_symbols", ""), case="upper"),
-            "strategy_families": _csv_items(
-                getattr(settings, "auto_trading_micro_live_allowed_families", ""),
-                case="lower",
-            ),
-            "entry_models": _csv_items(getattr(settings, "auto_trading_micro_live_allowed_entry_models", ""), case="upper"),
-            "sessions": _csv_items(getattr(settings, "auto_trading_micro_live_allowed_sessions", ""), case="lower"),
-            "direction_contract": _parse_direction_contract(
-                getattr(settings, "auto_trading_micro_live_direction_contract", "")
-            ),
-        }
-    if execution_mode == "LIVE":
-        return {
-            "authority": "live_candidate_promotion_readiness_is_order_truth",
-            "execution_mode": execution_mode,
-            "symbols": _csv_items(getattr(settings, "auto_trading_allowed_symbols", ""), case="upper"),
-            "strategy_families": _csv_items(getattr(settings, "auto_trading_allowed_families", ""), case="lower"),
-            "entry_models": _csv_items(getattr(settings, "auto_trading_micro_live_allowed_entry_models", ""), case="upper"),
-            "sessions": [],
-            "direction_contract": {},
-        }
-    return {
-        "authority": "live_candidate_promotion_readiness_is_order_truth",
-        "execution_mode": execution_mode or "UNKNOWN",
-        "symbols": [],
-        "strategy_families": [],
-        "entry_models": [],
-        "sessions": [],
-        "direction_contract": {},
-    }
-
-
-def _row_entry_model(row: dict[str, Any]) -> str:
-    payload = dict(row or {})
-    validity = dict(payload.get("validity") or {})
-    return str(payload.get("entry_model") or validity.get("entry_model") or "").strip().upper()
-
-
-def _row_direction(row: dict[str, Any]) -> str:
-    payload = dict(row or {})
-    validity = dict(payload.get("validity") or {})
-    return str(payload.get("direction") or validity.get("direction") or "").strip().upper()
-
-
-def _row_session_name(row: dict[str, Any]) -> str:
-    payload = dict(row or {})
-    operating_lock = dict(payload.get("operating_lock") or {})
-    current_session = dict(operating_lock.get("current_session") or {})
-    if str(current_session.get("name") or "").strip():
-        return str(current_session.get("name") or "").strip().lower()
-    session_guidance = dict(payload.get("session_guidance") or {})
-    guidance_session = dict(session_guidance.get("current_session") or {})
-    if str(guidance_session.get("name") or "").strip():
-        return str(guidance_session.get("name") or "").strip().lower()
-    if str(session_guidance.get("session_name") or "").strip():
-        return str(session_guidance.get("session_name") or "").strip().lower()
-    if str(session_guidance.get("state") or "").strip():
-        return str(session_guidance.get("state") or "").strip().lower()
-    validity = dict(payload.get("validity") or {})
-    for key in (
-        "session_guidance_session_name",
-        "session_guidance_state",
-        "generated_session",
-        "session_name",
-        "session",
-    ):
-        if str(validity.get(key) or "").strip():
-            return str(validity.get(key) or "").strip().lower()
-    for key in ("generated_session", "session_name", "session"):
-        if str(payload.get(key) or "").strip():
-            return str(payload.get(key) or "").strip().lower()
-    return ""
-
-
-def _live_route_status(row: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
-    symbol = str(row.get("symbol") or "").strip().upper()
-    family = _candidate_family(row).strip().lower()
-    entry_model = _row_entry_model(row)
-    direction = _row_direction(row)
-    session_name = _row_session_name(row)
-    live_symbols = {str(item or "").strip().upper() for item in list(contract.get("symbols") or [])}
-    live_families = {str(item or "").strip().lower() for item in list(contract.get("strategy_families") or [])}
-    live_entry_models = {str(item or "").strip().upper() for item in list(contract.get("entry_models") or [])}
-    live_sessions = {str(item or "").strip().lower() for item in list(contract.get("sessions") or [])}
-    direction_contract = dict(contract.get("direction_contract") or {})
-    allowed_directions = {
-        str(item or "").strip().upper() for item in list(direction_contract.get(symbol) or []) if str(item or "").strip()
-    }
-
-    symbol_live = bool(symbol and symbol in live_symbols)
-    family_live = bool(family and family in live_families)
-    entry_model_live = not live_entry_models or bool(entry_model and entry_model in live_entry_models)
-    direction_live = not allowed_directions or bool(direction and direction in allowed_directions)
-    session_live = not live_sessions or bool(session_name and session_name in live_sessions)
-
-    reasons: list[str] = []
-    if str(contract.get("execution_mode") or "").upper() not in {"MICRO_LIVE", "LIVE"}:
-        reasons.append("execution_mode_not_live")
-    if not symbol_live:
-        reasons.append("symbol_not_live_routable")
-    if not family_live:
-        reasons.append("strategy_family_not_live_route")
-    if not entry_model_live:
-        reasons.append("entry_model_not_live_route")
-    if not direction_live:
-        reasons.append("direction_missing_for_live_route" if not direction else "direction_not_live_route")
-    if not session_live:
-        reasons.append("session_missing_for_live_route" if not session_name else "session_not_live_route")
-
-    live_routable = not reasons
-    return {
-        "authority": str(contract.get("authority") or "live_candidate_promotion_readiness_is_order_truth"),
-        "execution_mode": str(contract.get("execution_mode") or ""),
-        "status": "live_route_candidate" if live_routable else "context_only",
-        "live_routable": live_routable,
-        "reasons": reasons,
-        "symbol": symbol,
-        "strategy_family": family,
-        "entry_model": entry_model,
-        "direction": direction,
-        "session_name": session_name,
-        "allowed_directions": sorted(allowed_directions),
-    }
+    return live_route_contract_from_settings(settings)
 
 
 def _attach_live_route_status(row: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
-    enriched = dict(row)
-    route = _live_route_status(enriched, contract)
-    enriched["entry_surface_route"] = route
-    enriched["live_routable"] = bool(route.get("live_routable"))
-    return enriched
+    return attach_live_route_status(row, contract)
 
 
 def _blocked_topline_reason(payload: dict[str, Any]) -> tuple[str, str]:
@@ -868,6 +707,7 @@ def _format_live_route_trace(snapshot: dict[str, Any]) -> str:
     return (
         "order_route_truth: authority=live_candidate_promotion_readiness "
         f"| live_order_candidates={int(counts.get(LIVE_ORDER_CANDIDATE, 0) or 0)} "
+        f"| blocked_live_candidates={_blocked_live_candidate_count(snapshot)} "
         f"| review_only_candidates={int(counts.get(CONTEXT_REVIEW_SETUP, 0) or 0)} "
         f"| mode={contract.get('execution_mode') or 'UNKNOWN'} "
         f"| symbols={','.join(str(item) for item in symbols) or 'none'} "
@@ -933,10 +773,12 @@ def render_message(snapshot: dict[str, Any]) -> str:
     approval_strip = dict(snapshot.get("approval_strip") or {})
     live_count = int(counts.get(LIVE_ORDER_CANDIDATE, 0) or 0)
     review_count = int(counts.get(CONTEXT_REVIEW_SETUP, 0) or 0)
+    blocked_live_count = _blocked_live_candidate_count(snapshot)
     lines = [
         (
             "Trading entry surface alert: "
-            f"live_order_candidates={live_count}, review_candidates={review_count}"
+            f"live_order_candidates={live_count}, review_candidates={review_count}, "
+            f"blocked_live_candidates={blocked_live_count}"
         ),
         f"scope: {snapshot.get('scope')} | order_truth=live_candidate_promotion_readiness",
         (
@@ -959,7 +801,7 @@ def render_message(snapshot: dict[str, Any]) -> str:
         ),
     ]
 
-    for status in ALERT_STATUSES:
+    for status in SURFACE_STATUSES:
         rows = sections.get(status) or []
         lines.append("")
         lines.append(_section_title(status))
@@ -972,7 +814,41 @@ def render_message(snapshot: dict[str, Any]) -> str:
 
 def _has_alertable_rows(snapshot: dict[str, Any]) -> bool:
     counts = dict(snapshot.get("counts") or {})
-    return any(int(counts.get(status, 0) or 0) > 0 for status in ALERT_STATUSES)
+    if int(counts.get(LIVE_ORDER_CANDIDATE, 0) or 0) > 0:
+        return True
+    return _blocked_live_candidate_count(snapshot) > 0
+
+
+def _blocked_live_candidate_count(snapshot: dict[str, Any]) -> int:
+    sections = dict(snapshot.get("sections") or {})
+    count = 0
+    for row in sections.get(BLOCKED_SETUP) or []:
+        route = dict(row.get("entry_surface_route") or {})
+        if _safe_bool(route.get("live_routable")) or _safe_bool(row.get("live_routable")):
+            count += 1
+    return count
+
+
+def _result_count_fields(snapshot: dict[str, Any]) -> dict[str, Any]:
+    counts = dict(snapshot.get("counts") or {})
+    live_order_candidates = int(counts.get(LIVE_ORDER_CANDIDATE, 0) or 0)
+    context_review_setups = int(counts.get(CONTEXT_REVIEW_SETUP, 0) or 0)
+    blocked_setups = int(counts.get(BLOCKED_SETUP, 0) or 0)
+    research_only_setups = int(counts.get(RESEARCH_ONLY_SETUP, 0) or 0)
+    blocked_live_order_candidates = _blocked_live_candidate_count(snapshot)
+    return {
+        "entry_counts": {
+            LIVE_ORDER_CANDIDATE: live_order_candidates,
+            CONTEXT_REVIEW_SETUP: context_review_setups,
+            BLOCKED_SETUP: blocked_setups,
+            RESEARCH_ONLY_SETUP: research_only_setups,
+        },
+        "live_order_candidates": live_order_candidates,
+        "blocked_live_order_candidates": blocked_live_order_candidates,
+        "context_review_setups": context_review_setups,
+        "blocked_setups": blocked_setups,
+        "research_only_setups": research_only_setups,
+    }
 
 
 def main() -> int:
@@ -1072,6 +948,7 @@ def main() -> int:
         "notified": False,
         "state_written": False,
         "dedupe_suppressed": False,
+        **_result_count_fields(snapshot),
     }
     if state_warning:
         result["state_warning"] = state_warning

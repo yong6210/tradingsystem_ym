@@ -1383,6 +1383,45 @@ def test_active_contract_filters_include_direction_contract_and_apply_it() -> No
     )
 
 
+def test_active_contract_filters_map_dead_session_guidance() -> None:
+    engine = object.__new__(StrategyEngine)
+    engine.settings = SimpleNamespace(
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
+        auto_trading_micro_live_allowed_families="session_impulse_retest",
+        auto_trading_micro_live_allowed_entry_models="CONFIRM",
+        auto_trading_micro_live_allowed_sessions="dead_session,london,new_york",
+        auto_trading_micro_live_direction_contract="BTCUSDC:LONG",
+    )
+
+    filters = engine._active_contract_filters(symbol="BTCUSDC")
+
+    assert filters is not None
+    assert engine._row_session_name(
+        {
+            "session_guidance": {
+                "state": "dead_session",
+                "dead_session": True,
+                "current_session": {"name": "inactive"},
+            }
+        }
+    ) == "dead_session"
+    assert engine._row_matches_contract_filters(
+        {
+            "symbol": "BTCUSDC",
+            "strategy_family": "session_impulse_retest",
+            "entry_model": "CONFIRM",
+            "direction": "LONG",
+            "session_guidance": {
+                "state": "dead_session",
+                "dead_session": True,
+                "current_session": {"name": "inactive"},
+            },
+        },
+        filters,
+    )
+
+
 def test_active_contract_replay_hits_uses_usdt_proxy_for_session_impulse_retest(tmp_path) -> None:
     backtest_dir = tmp_path / "reports" / "validation" / "micro_main_usdt_proxy_backtests"
     backtest_dir.mkdir(parents=True)

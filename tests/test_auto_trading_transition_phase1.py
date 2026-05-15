@@ -122,6 +122,21 @@ class _MicroLiveRolloutProvider:
         )
 
 
+class _DeadSessionMicroLiveRolloutProvider:
+    def __init__(self, allowed_sessions: tuple[str, ...] = ("dead_session", "london", "new_york")) -> None:
+        self._allowed_sessions = allowed_sessions
+
+    def get(self, strategy_family: str | None) -> RolloutPolicy:
+        return RolloutPolicy(
+            strategy_family=str(strategy_family or "legacy_zone_plan").lower(),
+            live_enabled=True,
+            max_execution_mode=ExecutionMode.MICRO_LIVE,
+            max_risk_r=2.0,
+            allowed_sessions=self._allowed_sessions,
+            min_quality_score=0.0,
+        )
+
+
 def test_why_now_mapping_and_fallback() -> None:
     assert why_now_message("sweep_reversal_limit") == "extreme location + rejection + clean limit"
     assert why_now_message("custom_reason_code") == "custom reason code"
@@ -753,6 +768,141 @@ def test_approval_service_downgrades_sir_when_execution_degradation_has_material
     assert payload["approval_state"] == ApprovalState.APPROVED_MANUAL.value
     assert payload["playbook_go_no_go"] == "MANUAL_REVIEW"
     assert payload["outcome_approval_penalty"]["penalty_tier"] == "downgrade_to_manual"
+
+
+def test_approval_service_maps_inactive_dead_session_to_rollout_bucket() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
+        auto_trading_micro_live_allowed_families="session_impulse_retest",
+        auto_trading_micro_live_allowed_entry_models="CONFIRM",
+        auto_trading_micro_live_allowed_sessions="dead_session,london,new_york",
+        session_impulse_retest_enabled=True,
+        session_impulse_retest_shadow_only=False,
+        session_impulse_retest_partial_activation_ratio=1.0,
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_DeadSessionMicroLiveRolloutProvider())
+    plan = _plan(
+        plan_id="sir_dead_session_approval_case",
+        entry_model="CONFIRM",
+        validity={
+            "strategy_family": "session_impulse_retest",
+            "strategy_grade": "A",
+            "strategy_family_score": 90.0,
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "recommended_risk_r": 0.4,
+            "regime": "trend",
+        },
+    )
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {
+            "state": "dead_session",
+            "current_session": {"name": "inactive", "active": False},
+            "dead_session": True,
+        },
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={
+            "grade": "A",
+            "recommendation": "deploy-small-capital",
+            "risk_state": "OPEN",
+            "risk_reason": "normal",
+            "operating_lock": {"current_session": {"name": "inactive", "active": False}},
+        },
+        requested_execution_mode=ExecutionMode.MICRO_LIVE,
+        safety_state={
+            "new_entry_allowed": True,
+            "session_impulse_retest_rollout_readiness": {
+                "status": "live_bootstrap_collecting",
+                "blockers": [],
+                "advisory_blockers": ["no_recent_closed_sample"],
+            },
+        },
+    )
+
+    assert payload["approval_state"] == ApprovalState.APPROVED_AUTO.value
+    assert payload["safety_state"]["session_name"] == "dead_session"
+    assert payload["playbook_go_no_go"] == "GO"
+
+
+def test_approval_service_blocks_dead_session_when_rollout_contract_excludes_it() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
+        auto_trading_micro_live_allowed_families="session_impulse_retest",
+        auto_trading_micro_live_allowed_entry_models="CONFIRM",
+        auto_trading_micro_live_allowed_sessions="london,new_york",
+        session_impulse_retest_enabled=True,
+        session_impulse_retest_shadow_only=False,
+        session_impulse_retest_partial_activation_ratio=1.0,
+    )
+    service = ExecutionPlanningService(
+        settings=settings,
+        rollout_provider=_DeadSessionMicroLiveRolloutProvider(allowed_sessions=("london", "new_york")),
+    )
+    plan = _plan(
+        plan_id="sir_dead_session_rollout_block_case",
+        entry_model="CONFIRM",
+        validity={
+            "strategy_family": "session_impulse_retest",
+            "strategy_grade": "A",
+            "strategy_family_score": 90.0,
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "recommended_risk_r": 0.4,
+            "regime": "trend",
+        },
+    )
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {
+            "state": "dead_session",
+            "current_session": {"name": "inactive", "active": False},
+            "dead_session": True,
+        },
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={
+            "grade": "A",
+            "recommendation": "deploy-small-capital",
+            "risk_state": "OPEN",
+            "risk_reason": "normal",
+            "operating_lock": {"current_session": {"name": "inactive", "active": False}},
+        },
+        requested_execution_mode=ExecutionMode.MICRO_LIVE,
+        safety_state={
+            "new_entry_allowed": True,
+            "session_impulse_retest_rollout_readiness": {
+                "status": "live_bootstrap_collecting",
+                "blockers": [],
+                "advisory_blockers": ["no_recent_closed_sample"],
+            },
+        },
+    )
+
+    assert payload["approval_state"] == ApprovalState.BLOCKED.value
+    assert payload["approval_reasons"][0]["code"] == "rollout_session_not_allowed"
+    assert "dead_session" in payload["approval_reasons"][0]["message"]
 
 
 def test_approval_service_paper_lineage_override_bypasses_paper_sampling_gates_only() -> None:

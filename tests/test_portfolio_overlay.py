@@ -22,6 +22,22 @@ class _CandleRepoStub:
         return rows
 
 
+def test_portfolio_overlay_session_name_maps_dead_session_before_inactive_name() -> None:
+    assert (
+        PortfolioRiskOverlayService._session_name_from_row(
+            {
+                "session_guidance": {
+                    "state": "dead_session",
+                    "dead_session": True,
+                    "session_name": "inactive",
+                    "current_session": {"name": "inactive"},
+                }
+            }
+        )
+        == "dead_session"
+    )
+
+
 def _with_overlay_settings() -> dict[str, float | int | bool]:
     return {
         "portfolio_overlay_enabled": True,

@@ -1707,6 +1707,9 @@ def test_sync_universe_suppresses_auto_route_when_ws_stream_is_active(tmp_path) 
 
         assert payload["auto_route"]["enabled"] is False
         assert payload["auto_route"]["reason"] == "ws_stream_active_route_suppressed"
+        assert payload["auto_route"]["route_owner"] == "ws_stream"
+        assert payload["auto_route"]["suppression_scope"] == "sync_universe_duplicate_route_guard"
+        assert payload["auto_route"]["blocking_live_route"] is False
         assert payload["auto_route"]["plans_considered"] == 1
         assert payload["auto_route"]["intents_created"] == 0
         assert payload["auto_route"]["submit_calls"] == 0
@@ -1719,6 +1722,9 @@ def test_sync_universe_suppresses_auto_route_when_ws_stream_is_active(tmp_path) 
         assert audits
         assert audits[0]["status"] == "ws_stream_active_route_suppressed"
         assert audits[0]["payload"]["plans_considered"] == 1
+        assert audits[0]["payload"]["route_owner"] == "ws_stream"
+        assert audits[0]["payload"]["suppression_scope"] == "sync_universe_duplicate_route_guard"
+        assert audits[0]["payload"]["blocking_live_route"] is False
 
 
 def test_session_impulse_retest_direct_plan_route_creates_and_submits_live_intent() -> None:

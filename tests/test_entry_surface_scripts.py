@@ -332,6 +332,94 @@ def test_context_only_candidates_are_labeled_as_review_not_order_candidates():
     assert "route_reasons=strategy_family_not_live_route" in message
 
 
+def test_dead_session_guidance_maps_inactive_current_session_to_live_route_bucket():
+    payload = _budget_payload()
+    payload["accepted_candidates"][0]["session_guidance"] = {
+        "state": "dead_session",
+        "dead_session": True,
+        "current_session": {"name": "inactive"},
+    }
+    contract = _live_contract()
+    contract["sessions"] = ["dead_session"]
+
+    snapshot = notify_entry_surface.build_entry_snapshot(payload, max_per_status=3, live_route_contract=contract)
+
+    assert snapshot["counts"][notify_entry_surface.LIVE_ORDER_CANDIDATE] == 1
+    row = snapshot["sections"][notify_entry_surface.LIVE_ORDER_CANDIDATE][0]
+    assert row["entry_surface_route"]["session_name"] == "dead_session"
+    assert "session_not_live_route" not in row["entry_surface_route"]["reasons"]
+    assert row["live_routable"] is True
+
+
+def test_context_only_surface_is_not_discord_alertable():
+    payload = _budget_payload()
+    contract = _live_contract()
+    contract["strategy_families"] = ["session_impulse_retest"]
+    snapshot = notify_entry_surface.build_entry_snapshot(payload, max_per_status=3, live_route_contract=contract)
+
+    assert snapshot["counts"][notify_entry_surface.LIVE_ORDER_CANDIDATE] == 0
+    assert notify_entry_surface._has_alertable_rows(snapshot) is False
+
+
+def test_live_routable_blocked_surface_remains_discord_alertable():
+    snapshot = {
+        "counts": {
+            notify_entry_surface.LIVE_ORDER_CANDIDATE: 0,
+            notify_entry_surface.CONTEXT_REVIEW_SETUP: 0,
+            notify_entry_surface.BLOCKED_SETUP: 1,
+            notify_entry_surface.RESEARCH_ONLY_SETUP: 0,
+        },
+        "sections": {
+            notify_entry_surface.BLOCKED_SETUP: [
+                {"entry_surface_route": {"live_routable": True}, "live_routable": True}
+            ],
+        },
+    }
+
+    assert notify_entry_surface._has_alertable_rows(snapshot) is True
+    assert notify_entry_surface._blocked_live_candidate_count(snapshot) == 1
+
+
+def test_render_message_exposes_blocked_live_candidate_count():
+    snapshot = {
+        "scope": "USDC_PERP_TOP30",
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "playbook_go_no_go": "GO",
+        "approval_strip": {},
+        "live_route_contract": {},
+        "counts": {
+            notify_entry_surface.LIVE_ORDER_CANDIDATE: 0,
+            notify_entry_surface.CONTEXT_REVIEW_SETUP: 0,
+            notify_entry_surface.BLOCKED_SETUP: 1,
+            notify_entry_surface.RESEARCH_ONLY_SETUP: 0,
+        },
+        "sections": {
+            notify_entry_surface.LIVE_ORDER_CANDIDATE: [],
+            notify_entry_surface.CONTEXT_REVIEW_SETUP: [],
+            notify_entry_surface.BLOCKED_SETUP: [
+                {
+                    "symbol": "BTCUSDC",
+                    "direction": "long",
+                    "entry_model": "CONFIRM",
+                    "strategy_family": "session_impulse_retest",
+                    "recommended_risk_r": 0.01,
+                    "entry_surface_route": {"live_routable": True},
+                    "block_reason": "portfolio_cap",
+                }
+            ],
+            notify_entry_surface.RESEARCH_ONLY_SETUP: [],
+        },
+    }
+
+    message = notify_entry_surface.render_message(snapshot)
+    fields = notify_entry_surface._result_count_fields(snapshot)
+
+    assert "live_order_candidates=0, review_candidates=0, blocked_live_candidates=1" in message
+    assert "blocked_live_candidates=1" in message
+    assert fields["blocked_live_order_candidates"] == 1
+
+
 def test_alert_state_uses_stable_plan_id_for_reroute_suffixes():
     first_payload = _budget_payload()
     second_payload = _budget_payload()
@@ -382,6 +470,11 @@ def test_main_dry_run_prints_snapshot_without_dispatch(monkeypatch, capsys):
     assert "message" in payload
     assert payload["state_written"] is False
     assert payload["snapshot"]["counts"][notify_entry_surface.LIVE_ORDER_CANDIDATE] == 1
+    assert payload["live_order_candidates"] == 1
+    assert payload["context_review_setups"] == 0
+    assert payload["blocked_setups"] == 1
+    assert payload["research_only_setups"] == 1
+    assert payload["entry_counts"][notify_entry_surface.LIVE_ORDER_CANDIDATE] == 1
 
 
 def test_main_suppresses_when_alert_state_is_unchanged(monkeypatch, tmp_path, capsys):
@@ -434,6 +527,7 @@ def test_main_suppresses_when_alert_state_is_unchanged(monkeypatch, tmp_path, ca
     assert payload["reason"] == "unchanged_surface_state"
     assert payload["dedupe_suppressed"] is True
     assert payload["notified"] is False
+    assert payload["live_order_candidates"] == 1
 
 
 def test_main_writes_state_after_successful_delivery(monkeypatch, tmp_path, capsys):

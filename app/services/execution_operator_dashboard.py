@@ -15,6 +15,7 @@ from app.db.repositories import (
 from app.services.active_contract_replay_baseline import usdt_proxy_rows_for_active_contract
 from app.services.edge_experiment_review import build_edge_experiment_review, summarize_edge_experiment_review
 from app.services.edge_evolution_rule import build_edge_evolution_rule, summarize_edge_evolution_rule
+from app.services.live_route_contract import row_session_name
 from app.services.outcome_control_trace import (
     build_outcome_control_trace,
     runtime_outcome_control_trace,
@@ -224,35 +225,7 @@ class ExecutionOperatorDashboardService:
 
     @staticmethod
     def _row_session_name(row: dict[str, Any]) -> str:
-        payload = dict(row or {})
-        operating_lock = dict(payload.get("operating_lock") or {})
-        current_session = dict(operating_lock.get("current_session") or {})
-        if str(current_session.get("name") or "").strip():
-            return str(current_session.get("name") or "").strip().lower()
-        session_guidance = dict(payload.get("session_guidance") or {})
-        guidance_session = dict(session_guidance.get("current_session") or {})
-        if str(guidance_session.get("name") or "").strip():
-            return str(guidance_session.get("name") or "").strip().lower()
-        if str(session_guidance.get("session_name") or "").strip():
-            return str(session_guidance.get("session_name") or "").strip().lower()
-        if str(session_guidance.get("state") or "").strip():
-            return str(session_guidance.get("state") or "").strip().lower()
-        validity = dict(payload.get("validity") or {})
-        for key in (
-            "session_guidance_session_name",
-            "session_guidance_state",
-            "generated_session",
-            "session_name",
-            "session",
-        ):
-            value = str(validity.get(key) or "").strip()
-            if value:
-                return value.lower()
-        for key in ("generated_session", "session_name", "session"):
-            value = str(payload.get(key) or "").strip()
-            if value:
-                return value.lower()
-        return ""
+        return row_session_name(row)
 
     @staticmethod
     def _row_matches_contract_filters(row: dict[str, Any], filters: dict[str, Any] | None) -> bool:

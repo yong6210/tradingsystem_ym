@@ -167,6 +167,19 @@ def build_jobs(*, label_prefix: str, python_bin: str, env_file: str = "") -> lis
             start_calendar_interval={"Hour": 3, "Minute": 25},
         ),
         LaunchdJob(
+            name="live_replay_parity",
+            label=f"{prefix}.live-replay-parity",
+            args=[
+                py,
+                _script("run_live_replay_parity_audit.py"),
+                "--all-live-symbols",
+                "--days",
+                "3",
+                "--no-fail-exit",
+            ],
+            start_interval=60 * 60,
+        ),
+        LaunchdJob(
             name="session_impulse_retest_runtime_audit",
             label=f"{prefix}.session-impulse-retest-runtime-audit",
             args=[

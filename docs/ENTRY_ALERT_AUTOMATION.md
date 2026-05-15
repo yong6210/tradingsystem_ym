@@ -9,7 +9,11 @@
 
 `LIVE_ORDER_CANDIDATE` is the only section that should be read as a live-order candidate. It means the row matches the current live route contract: symbol, strategy family, entry model, direction, and session. `CONTEXT_REVIEW_SETUP` means the portfolio surface has an accepted candidate, but that candidate is outside the current live route and must not be treated as an automatic order trigger.
 
-The alert headline starts with `live_order_candidates` and `review_candidates` so the Discord preview is explicit. The second line always carries `order_truth=live_candidate_promotion_readiness`. The `approval_strip: approve -> align -> act` line still mirrors `/portfolio/budget`, the `contract_trace` line repeats the same `approve / align / act` contract before appending raw runtime/playbook fields for debugging, and `order_route_truth` shows the active live route contract used by the alert. The `edge_experiment` line carries the current split-test focus (`edge_state`, preferred entry timing, preferred execution style), and an `edge_evolution` line carries the current allocation/promotion posture (`evolution_state`, `recommended_action`, `allocation_bias`, `promotion_candidate_*`).
+Discord dispatch is narrower than the saved report. The tick still writes the full surface to `latest_entry_alert_run.json`, but it only sends Discord when a live order candidate exists or when a live-routable candidate is blocked. Context-only/review-only changes are report-only so they are not mistaken for entry confirmation.
+
+The alert headline starts with `live_order_candidates`, `review_candidates`, and `blocked_live_candidates` so the Discord preview is explicit. The Discord title follows the same split: live candidates become `[중요] ... 라이브 주문 후보 확인`, live-routable blocked candidates become `[주의] ... 라이브 주문 후보 차단`, and zero live/blocked candidates stay `[모니터링] ... 주문 후보 없음`. The second line always carries `order_truth=live_candidate_promotion_readiness`. The `approval_strip: approve -> align -> act` line still mirrors `/portfolio/budget`, the `contract_trace` line repeats the same `approve / align / act` contract before appending raw runtime/playbook fields for debugging, and `order_route_truth` shows the active live route contract used by the alert. The `edge_experiment` line carries the current split-test focus (`edge_state`, preferred entry timing, preferred execution style), and an `edge_evolution` line carries the current allocation/promotion posture (`evolution_state`, `recommended_action`, `allocation_bias`, `promotion_candidate_*`).
+
+The JSON result also exposes the same counts at the top level as `entry_counts`, `live_order_candidates`, `blocked_live_order_candidates`, `context_review_setups`, `blocked_setups`, and `research_only_setups`. `snapshot.counts` remains the full source of truth, but operators and health checks should not need to open the nested snapshot just to verify whether an alert was suppressed because live candidates were zero.
 
 Read the alert as a compressed surface, not as the full experiment policy. The current runtime still enforces:
 
@@ -41,13 +45,14 @@ The tick also uses a non-overlap lock. If a previous `/portfolio/budget` request
 Operational reading rules:
 
 - Treat `LIVE_ORDER_CANDIDATE=0` as "no live order candidate", even if `CONTEXT_REVIEW_SETUP` is non-zero.
+- Treat `blocked_live_order_candidates>0` as "there was a live-routable candidate, but it was blocked before submission." It is not an entry fill and not a submitted order, but it is more important than context-only review.
 - Treat `CONTEXT_REVIEW_SETUP` as validation/review context only. It can explain why the portfolio scanner is active, but it is not proof that an order should be submitted.
 - If the alert shows a preferred `entry_timing` and `execution_style` at the same time, do not open both experiments in parallel. Check `operator_action_priority.experiment_execution_policy` on dashboard or validation and execute only the active split.
 - If the preferred branch looks better but the validation surface still says `sample_maturity_state=pre_directional`, `directional_only`, or `review_ready`, keep collecting closes before treating it as a rollout conclusion.
 - If validation shows `regime_dependency_state=regime_dependent` or `edge_evolution_rule.regime_guard_state=promotion_blocked_by_regime_dependency`, treat the alert as regime-specific context only, not as a universal promotion signal.
 
 Use the wrapper below so runtime defaults, state file path, and the latest run artifact stay in one place.
-The wrapper prefers `/Users/yumin/Documents/trading/.venv/bin/python` and falls back to `python3` if the virtualenv binary is not present.
+The wrapper prefers `/Users/yumin/Documents/trading/.venv/bin/python`. If the script is run from a runtime source copy without `.venv`, it falls back to `$TRADING_RUNTIME_BASE/runtime_venv/bin/python`, then to `python3`.
 
 ## Wrapper
 

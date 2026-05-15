@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from app.services.live_candidate_promotion_readiness import LiveCandidatePromotionReadinessService
 from app.services.live_candidate_promotion_readiness_runtime import _apply_live_headline_scope
+from scripts import run_live_candidate_promotion_readiness
 
 
 def test_readiness_marks_validation_block_without_live_authority_change() -> None:
@@ -39,6 +42,72 @@ def test_readiness_marks_validation_block_without_live_authority_change() -> Non
     assert "Keep live blocked" in payload["candidates"][0]["next_action"]
     assert payload["operator_review_items"][0]["attention"] == "validation_report_required"
     assert payload["operator_review_items"][0]["symbol"] == "ADAUSDC"
+
+
+def test_readiness_script_runtime_scope_keeps_lookback_context(monkeypatch) -> None:
+    calls: list[datetime | None] = []
+
+    class FakeSession:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001
+            return False
+
+    def fake_build_payload(_db, *, hours, limit, symbol, start_at):  # noqa: ANN001
+        calls.append(start_at)
+        if start_at is not None:
+            return {
+                "generated_at": "2026-05-10T00:00:00Z",
+                "symbol": symbol,
+                "strategy_families": ["session_impulse_retest"],
+                "window_start": "2026-05-10T00:00:00Z",
+                "readiness": {
+                    "headline_state": "WAIT",
+                    "headline_reason": "no_promotable_live_candidate",
+                    "promotion_decision": "wait_for_fresh_promotable_candidate",
+                    "candidate_count": 1,
+                    "top_intent_reasons": {},
+                },
+            }
+        return {
+            "generated_at": "2026-05-10T00:00:00Z",
+            "symbol": symbol,
+            "strategy_families": ["session_impulse_retest"],
+            "window_start": None,
+            "readiness": {
+                "headline_state": "BLOCKED",
+                "headline_reason": "session_impulse_retest_rollout_not_ready",
+                "promotion_decision": "do_not_promote_gate_blocked",
+                "candidate_count": 2,
+                "top_intent_reasons": {"session_impulse_retest_rollout_not_ready": 2},
+            },
+        }
+
+    monkeypatch.setattr(run_live_candidate_promotion_readiness, "init_db", lambda: None)
+    monkeypatch.setattr(run_live_candidate_promotion_readiness, "SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(
+        run_live_candidate_promotion_readiness,
+        "build_live_candidate_promotion_readiness_payload",
+        fake_build_payload,
+    )
+
+    start_at = datetime(2026, 5, 10, 1, tzinfo=UTC)
+    payload = run_live_candidate_promotion_readiness.build_payload(
+        hours=24,
+        limit=20,
+        symbol="BTCUSDC",
+        start_at=start_at,
+    )
+
+    assert calls == [start_at, None]
+    assert payload["readiness_scope"] == "runtime_since_ws_start"
+    assert payload["runtime_started_at"] == "2026-05-10T01:00:00Z"
+    assert payload["readiness"]["headline_reason"] == "no_promotable_live_candidate"
+    assert payload["lookback_readiness_summary"]["headline_reason"] == "session_impulse_retest_rollout_not_ready"
+    assert payload["lookback_readiness_summary"]["top_intent_reasons"] == {
+        "session_impulse_retest_rollout_not_ready": 2
+    }
 
 
 def test_readiness_keeps_secondary_blockers_visible() -> None:
@@ -162,6 +231,13 @@ def test_runtime_readiness_keeps_shadow_only_as_auxiliary_when_live_symbols_are_
     assert scoped["live_state_counts"] == {"NO_FRESH_LIVE_CANDIDATE": 1}
     assert scoped["auxiliary_state_counts"] == {"SHADOW_SIGNAL_ONLY": 1}
     assert scoped["auxiliary_display_state_counts"] == {"AUXILIARY_SHADOW_SIGNAL_ONLY": 1}
+    assert scoped["top_live_blockers"] == {"no_fresh_live_candidate": 1}
+    assert scoped["top_auxiliary_blockers"] == {"symbol_not_live_enabled_for_auto_route": 1}
+    assert scoped["headline_top_blockers"] == {"no_fresh_live_candidate": 1}
+    assert scoped["top_all_blockers"] == {
+        "no_fresh_live_candidate": 1,
+        "symbol_not_live_enabled_for_auto_route": 1,
+    }
     assert scoped["shadow_only_auxiliary"]["symbols"] == ["SUIUSDC"]
     assert scoped["attention_flags"]["has_auxiliary_shadow_only_signal"] is True
     assert scoped["operator_review_items"][0]["symbol"] == "BTCUSDC"
@@ -203,6 +279,10 @@ def test_runtime_readiness_wait_headline_uses_live_symbols_only() -> None:
     assert scoped["live_state_counts"] == {"NO_FRESH_LIVE_CANDIDATE": 1}
     assert scoped["auxiliary_state_counts"] == {"NO_FRESH_LIVE_CANDIDATE": 1}
     assert scoped["auxiliary_display_state_counts"] == {"AUXILIARY_TRACKED_NO_FRESH_SIGNAL": 1}
+    assert scoped["top_live_blockers"] == {"no_fresh_live_candidate": 1}
+    assert scoped["top_auxiliary_blockers"] == {"no_fresh_live_candidate": 1}
+    assert scoped["headline_top_blockers"] == {"no_fresh_live_candidate": 1}
+    assert scoped["top_all_blockers"] == {"no_fresh_live_candidate": 2}
     assert scoped["shadow_only_auxiliary"]["available"] is False
     assert scoped["headline_action"] == "Current live symbols have no fresh live-eligible candidate."
 

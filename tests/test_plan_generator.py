@@ -499,5 +499,9 @@ def test_plan_generator_applies_dead_session_penalty() -> None:
     dead_validity = dict(ranked_dead[0].plan.validity or {})
     assert live_validity["session_guidance_state"] == "preferred_live_window"
     assert dead_validity["session_guidance_state"] == "dead_session"
+    assert live_validity["session_guidance_session_name"] == "london"
+    assert dead_validity["session_guidance_session_name"] == "dead_session"
+    if "strategy_fast_failure_session_name" in dead_validity:
+        assert dead_validity["strategy_fast_failure_session_name"] == "dead_session"
     assert live_validity["expected_win_prob"] > dead_validity["expected_win_prob"]
     assert live_validity["session_score_bias"] > dead_validity["session_score_bias"]

@@ -344,9 +344,13 @@ def _runtime_mitigation_session_context(*, family: str | None) -> dict[str, Any]
     session = OperatingLockService().current_session(now=datetime.now(timezone.utc)).to_dict()
     policy = RolloutPolicyBootstrap().get(family)
     allowed_sessions = [str(item).strip().lower() for item in list(policy.allowed_sessions or []) if str(item).strip()]
+    session_active = ops_stage_board._safe_bool(session.get("active", False))
+    current_session = str(session.get("name") or "inactive").lower()
+    if (not session_active) or current_session == "inactive":
+        current_session = "dead_session"
     return {
-        "current_session": str(session.get("name") or "inactive").lower(),
-        "session_active": ops_stage_board._safe_bool(session.get("active", False)),
+        "current_session": current_session,
+        "session_active": session_active,
         "allowed_sessions": allowed_sessions,
     }
 
@@ -1414,9 +1418,9 @@ def _apply_runtime_actionable_live_candidate_summary(current: dict[str, Any]) ->
                 summary = f"latest surfaced intent {recent_label} is not approved for MICRO_LIVE yet"
                 next_trigger = osc.ACTIONABLE_LIVE_CANDIDATE_TRIGGER_APPROVED
         if not summary and blocked:
-            summary = f"no accepted candidate is visible; nearest surfaced candidate {candidate_symbol}/{candidate_family} remains blocked"
+            summary = f"no live-route candidate is visible; nearest surfaced candidate {candidate_symbol}/{candidate_family} remains blocked"
         elif not summary:
-            summary = "no accepted candidate is currently visible on the operator surface"
+            summary = "no live-route candidate is currently visible on the operator surface"
         if blocked and state != osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_NONE_VISIBLE:
             summary = f"{summary}; nearest surfaced candidate {candidate_symbol}/{candidate_family} remains blocked"
         if state == osc.ACTIONABLE_LIVE_CANDIDATE_STATUS_NONE_VISIBLE:
@@ -2081,7 +2085,7 @@ def _apply_runtime_mitigation_wait_summary(current: dict[str, Any]) -> dict[str,
                 "candidate_family": str(accepted_focus.get("strategy_family") or ""),
                 "candidate_status": str(accepted_focus.get("status") or ""),
                 "candidate_reason": str(accepted_focus.get("block_reason") or ""),
-                "summary": "accepted candidate exists but no entry timing review target is active yet",
+                "summary": "portfolio accepted context candidate exists, but no entry timing review target is active yet",
             }
         )
         snapshot["runtime_mitigation_wait_summary"] = result

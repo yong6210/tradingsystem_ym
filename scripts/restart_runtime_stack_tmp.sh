@@ -17,6 +17,8 @@ REPORTS_DIR="${TRADING_RUNTIME_REPORTS_DIR:-$RUNTIME_BASE/reports}"
 ARCHIVES_DIR="${TRADING_RUNTIME_ARCHIVES_DIR:-$RUNTIME_BASE/archives}"
 LOG_DIR="${TRADING_LOG_DIR:-$RUNTIME_BASE/logs}"
 HEARTBEAT_DIR="${TRADING_HEARTBEAT_DIR:-$RUNTIME_BASE/heartbeats}"
+LOG_ROTATE_MAX_BYTES="${TRADING_LOG_ROTATE_MAX_BYTES:-104857600}"
+LOG_ROTATE_KEEP="${TRADING_LOG_ROTATE_KEEP:-5}"
 API_HOST="${API_HOST:-127.0.0.1}"
 API_PORT="${API_PORT:-8000}"
 LAUNCHD_API_LABEL="${LAUNCHD_API_LABEL:-com.yumin.trading.api}"
@@ -47,6 +49,44 @@ copy_tree() {
     return 0
   fi
   cp -R "$src" "$dst"
+}
+
+file_size_bytes() {
+  local path="$1"
+  if stat -f%z "$path" >/dev/null 2>&1; then
+    stat -f%z "$path"
+    return 0
+  fi
+  if stat -c%s "$path" >/dev/null 2>&1; then
+    stat -c%s "$path"
+    return 0
+  fi
+  wc -c <"$path" | tr -d ' '
+}
+
+rotate_log_if_large() {
+  local path="$1"
+  local max_bytes="${LOG_ROTATE_MAX_BYTES:-0}"
+  local keep="${LOG_ROTATE_KEEP:-5}"
+  local size idx
+  [[ -f "$path" ]] || return 0
+  [[ "$max_bytes" =~ ^[0-9]+$ ]] || max_bytes=0
+  [[ "$keep" =~ ^[0-9]+$ ]] || keep=5
+  [[ "$max_bytes" -gt 0 ]] || return 0
+  size="$(file_size_bytes "$path" 2>/dev/null || echo 0)"
+  [[ "$size" =~ ^[0-9]+$ ]] || size=0
+  [[ "$size" -ge "$max_bytes" ]] || return 0
+  if [[ "$keep" -le 0 ]]; then
+    : >"$path"
+    return 0
+  fi
+  rm -f "$path.$keep"
+  for ((idx=keep - 1; idx>=1; idx--)); do
+    if [[ -e "$path.$idx" ]]; then
+      mv "$path.$idx" "$path.$((idx + 1))"
+    fi
+  done
+  mv "$path" "$path.1"
 }
 
 refresh_tmp_source() {
@@ -156,6 +196,11 @@ if command -v lsof >/dev/null 2>&1; then
     exit 1
   fi
 fi
+
+mkdir -p "$LOG_DIR"
+for log_name in trading_api.log trading_worker_loop.log trading_worker_ws.log; do
+  rotate_log_if_large "$LOG_DIR/$log_name"
+done
 
 rm -f "$HEARTBEAT_DIR/loop.json" "$HEARTBEAT_DIR/ws.json"
 

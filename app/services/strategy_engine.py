@@ -83,6 +83,14 @@ from app.services.forward_stress_regime_validation import ForwardStressRegimeVal
 from app.services.kill_condition_automation import KillConditionAutomationService
 from app.services.lane_tracker import get_execution_lane_tracker
 from app.services.live_candidate_promotion_readiness_runtime import build_live_candidate_promotion_readiness_from_db
+from app.services.live_route_contract import (
+    live_route_contract_from_readiness,
+    portfolio_live_route_context as build_portfolio_live_route_context,
+    row_direction,
+    row_entry_model,
+    row_session_name,
+    row_strategy_family,
+)
 from app.services.mode_advisory import ModeAdvisoryService
 from app.services.multi_strategy_ab import MultiStrategyABExpansionService
 from app.services.outcome_bucket_granularity import OutcomeBucketGranularityService
@@ -981,13 +989,15 @@ class StrategyEngine:
         return losses
 
     def _operating_lock_snapshot(self, *, now: datetime | None = None) -> OperatingLockSnapshot:
+        current = self._to_utc(now or datetime.now(timezone.utc))
         plans = self.plan_repo.list_recent_global(
             timeframe="5m",
             days=3,
             states=[PlanState.CLOSED.value],
             limit=2000,
+            now=current,
         )
-        submissions = self.submission_repo.list_recent(days=3, limit=10000)
+        submissions = self.submission_repo.list_recent(days=3, limit=10000, now=current)
         counted_plan_ids: set[str] = set()
         seen_plan_ids: set[str] = set()
         for row in submissions:
@@ -998,7 +1008,7 @@ class StrategyEngine:
             if self._submission_counts_as_live_contract(row):
                 counted_plan_ids.add(plan_id)
         filtered_plans = [plan for plan in plans if str(plan.plan_id) in counted_plan_ids]
-        return self.operating_lock.evaluate(plans=filtered_plans, now=now)
+        return self.operating_lock.evaluate(plans=filtered_plans, now=current)
 
     @staticmethod
     def _submission_counts_as_live_contract(row: Any) -> bool:
@@ -2477,51 +2487,19 @@ class StrategyEngine:
 
     @staticmethod
     def _row_strategy_family(row: dict[str, Any]) -> str:
-        payload = dict(row or {})
-        validity = dict(payload.get("validity") or {})
-        return str(payload.get("strategy_family") or validity.get("strategy_family") or "").lower()
+        return row_strategy_family(row)
 
     @staticmethod
     def _row_entry_model(row: dict[str, Any]) -> str:
-        payload = dict(row or {})
-        validity = dict(payload.get("validity") or {})
-        return str(payload.get("entry_model") or validity.get("entry_model") or "").upper()
+        return row_entry_model(row)
 
     @staticmethod
     def _row_direction(row: dict[str, Any]) -> str:
-        payload = dict(row or {})
-        validity = dict(payload.get("validity") or {})
-        return str(payload.get("direction") or validity.get("direction") or "").upper()
+        return row_direction(row)
 
     @staticmethod
     def _row_session_name(row: dict[str, Any]) -> str:
-        payload = dict(row or {})
-        operating_lock = dict(payload.get("operating_lock") or {})
-        current_session = dict(operating_lock.get("current_session") or {})
-        if str(current_session.get("name") or "").strip():
-            return str(current_session.get("name") or "").strip().lower()
-        session_guidance = dict(payload.get("session_guidance") or {})
-        guidance_session = dict(session_guidance.get("current_session") or {})
-        if str(guidance_session.get("name") or "").strip():
-            return str(guidance_session.get("name") or "").strip().lower()
-        if str(session_guidance.get("session_name") or "").strip():
-            return str(session_guidance.get("session_name") or "").strip().lower()
-        if str(session_guidance.get("state") or "").strip():
-            return str(session_guidance.get("state") or "").strip().lower()
-        validity = dict(payload.get("validity") or {})
-        for key in (
-            "session_guidance_session_name",
-            "session_guidance_state",
-            "generated_session",
-            "session_name",
-            "session",
-        ):
-            if str(validity.get(key) or "").strip():
-                return str(validity.get(key) or "").strip().lower()
-        for key in ("generated_session", "session_name", "session"):
-            if str(payload.get(key) or "").strip():
-                return str(payload.get(key) or "").strip().lower()
-        return ""
+        return row_session_name(row)
 
     @classmethod
     def _row_matches_contract_filters(cls, row: dict[str, Any], filters: dict[str, Any]) -> bool:
@@ -5038,126 +5016,13 @@ class StrategyEngine:
                 accepted_count = int(raw_accepted_count)
             except (TypeError, ValueError):
                 accepted_count = len(accepted_rows)
-            live_symbols = [
-                str(item or "").strip().upper()
-                for item in list(global_readiness.get("live_routable_symbols") or [])
-                if str(item or "").strip()
-            ]
-            active_families = [
-                str(item or "").strip().lower()
-                for item in list(global_readiness.get("filter_strategy_families") or [])
-                if str(item or "").strip()
-            ]
-            active_entry_models = self._csv_items(
-                getattr(self.settings, "auto_trading_micro_live_allowed_entry_models", ""),
-                case="upper",
+            return build_portfolio_live_route_context(
+                accepted_candidates=accepted_rows,
+                contract=live_route_contract_from_readiness(self.settings, global_readiness),
+                accepted_count=accepted_count,
+                readiness=global_readiness,
+                filter_direction_contract_to_live_symbols=True,
             )
-            active_sessions = self._csv_items(
-                getattr(self.settings, "auto_trading_micro_live_allowed_sessions", ""),
-                case="lower",
-            )
-            direction_contract = self._micro_live_direction_contract()
-            live_symbol_set = set(live_symbols)
-            active_family_set = set(active_families)
-            active_entry_model_set = set(active_entry_models)
-            active_session_set = set(active_sessions)
-            live_route_rows: list[dict[str, Any]] = []
-            context_only_rows: list[dict[str, Any]] = []
-            route_statuses: list[dict[str, Any]] = []
-
-            for row in accepted_rows:
-                symbol_value = str(row.get("symbol") or "").strip().upper()
-                family_value = self._row_strategy_family(row)
-                entry_model_value = self._row_entry_model(row)
-                direction_value = self._row_direction(row)
-                session_value = self._row_session_name(row)
-                allowed_directions = set(direction_contract.get(symbol_value) or [])
-                symbol_live = bool(symbol_value and symbol_value in live_symbol_set)
-                family_live = bool(family_value and family_value in active_family_set)
-                entry_model_live = not active_entry_model_set or bool(entry_model_value in active_entry_model_set)
-                direction_live = not allowed_directions or bool(direction_value and direction_value in allowed_directions)
-                session_live = not active_session_set or bool(session_value and session_value in active_session_set)
-                reasons: list[str] = []
-                if not symbol_live:
-                    reasons.append("symbol_not_live_routable")
-                if not family_live:
-                    reasons.append("strategy_family_not_live_route")
-                if not entry_model_live:
-                    reasons.append("entry_model_not_live_route")
-                if not direction_live:
-                    reasons.append("direction_missing_for_live_route" if not direction_value else "direction_not_live_route")
-                if not session_live:
-                    reasons.append("session_missing_for_live_route" if not session_value else "session_not_live_route")
-                route_status = {
-                    "symbol": symbol_value,
-                    "strategy_family": family_value or str(row.get("strategy_family") or ""),
-                    "entry_model": entry_model_value or str(row.get("entry_model") or ""),
-                    "direction": direction_value or str(row.get("direction") or ""),
-                    "session_name": session_value,
-                    "allowed_directions": sorted(allowed_directions),
-                    "status": (
-                        "live_route_candidate"
-                        if symbol_live and family_live and entry_model_live and direction_live and session_live
-                        else "context_only"
-                    ),
-                    "reasons": reasons,
-                }
-                route_statuses.append(route_status)
-                if symbol_live and family_live and entry_model_live and direction_live and session_live:
-                    live_route_rows.append(row)
-                else:
-                    context_only_rows.append(row)
-            live_route_count = len(live_route_rows)
-            context_only_count = max(accepted_count - live_route_count, 0)
-            if accepted_count and live_route_count == 0:
-                message = (
-                    "Portfolio accepted candidates are context-only for the current live route; "
-                    "order truth remains live_candidate_promotion_readiness."
-                )
-            elif context_only_count:
-                message = (
-                    "Some portfolio accepted candidates are outside the current live route; "
-                    "read live_candidate_promotion_readiness before treating them as order candidates."
-                )
-            else:
-                message = "Portfolio accepted candidates align with the current live route contract."
-            return {
-                "authority": "live_candidate_promotion_readiness_is_order_truth",
-                "portfolio_candidates_are_context_only": bool(accepted_count and live_route_count == 0),
-                "accepted_candidate_count": accepted_count,
-                "live_routable_accepted_candidate_count": live_route_count,
-                "context_only_accepted_candidate_count": context_only_count,
-                "context_only_accepted_symbols": [
-                    symbol
-                    for symbol in dict.fromkeys(
-                        str(row.get("symbol") or "").strip().upper()
-                        for row in context_only_rows
-                        if str(row.get("symbol") or "").strip()
-                    )
-                ],
-                "live_routable_accepted_symbols": [
-                    symbol
-                    for symbol in dict.fromkeys(
-                        str(row.get("symbol") or "").strip().upper()
-                        for row in live_route_rows
-                        if str(row.get("symbol") or "").strip()
-                    )
-                ],
-                "accepted_candidate_route_statuses": route_statuses,
-                "active_strategy_families": active_families,
-                "active_entry_models": active_entry_models,
-                "active_sessions": active_sessions,
-                "active_direction_contract": {
-                    symbol: list(directions)
-                    for symbol, directions in sorted(direction_contract.items())
-                    if symbol in live_symbol_set
-                },
-                "live_routable_symbols": live_symbols,
-                "live_candidate_headline_state": global_readiness.get("headline_state", ""),
-                "live_candidate_headline_reason": global_readiness.get("headline_reason", ""),
-                "live_candidate_headline_scope": global_readiness.get("headline_scope", ""),
-                "message": message,
-            }
 
         def attach_runtime_dashboard_extensions(payload: dict[str, Any]) -> dict[str, Any]:
             payload_signal_funnel = dict(payload.get("signal_funnel") or {})
@@ -6829,12 +6694,23 @@ class StrategyEngine:
                 cooldown += 1
                 continue
 
+            pre_entry_signal = alert_type in {"near", "touch", "confirm"}
+            execution_truth_signal = alert_type in {"entry", "partial_exit", "tp", "sl", "stop", "closed", "exit", "fill"}
             base_payload = {
                 **dict(payload or {}),
                 "message": str(payload.get("message") or self._signal_message(alert_type=alert_type, payload=payload)),
                 "subscription_alert": True,
                 "subscription_source_alert_id": subscription.alert_id,
                 "event_ts": event_ts.isoformat(),
+                "order_submission_expected": False if pre_entry_signal else None,
+                "order_truth": "pre_entry_signal_only" if pre_entry_signal else (
+                    "execution_fill_truth" if execution_truth_signal else "subscription_alert"
+                ),
+                "order_truth_message": (
+                    "Signal-only alert; it does not submit an order. Live order truth is LIVE_ORDER_CANDIDATE, order intent, submission, or fill."
+                    if pre_entry_signal
+                    else ""
+                ),
             }
             delivery = self.notification_dispatcher.dispatch(
                 channel=subscription.channel,
@@ -7691,6 +7567,7 @@ class StrategyEngine:
             "zones": len(zones),
             "active_zone_count": len(active_zones),
             "plans": len(ranked_plans),
+            "legacy_plan_generation_state": str(plan_generation_diagnostics.get("generation_state") or ""),
             "session_impulse_retest_generated_count": len(micro_runtime_plans),
             "session_impulse_retest_plan_ids": [str(plan.plan_id) for plan in micro_runtime_plans],
             "active_signal_plan_count": len(active_signal_plans),
@@ -7726,6 +7603,7 @@ class StrategyEngine:
         decision_code = str(response.get("gate_reason") or "").strip()
         if refresh_status == "family_disabled":
             decision_code = "family_disabled"
+        response["session_impulse_retest_generation_state"] = refresh_status
         refresh_plan_ids = list(response.get("session_impulse_retest_plan_ids") or [])
         self.db.commit()
         audit_error = self._commit_session_impulse_retest_runtime_audit(
@@ -8567,6 +8445,13 @@ class StrategyEngine:
                 "enabled": False,
                 "requested_mode": requested_mode.value if requested_mode is not None else "",
                 "reason": "ws_stream_active_route_suppressed",
+                "reason_detail": (
+                    "Sync-universe worker skipped duplicate auto-route because the websocket "
+                    "stream currently owns live routing."
+                ),
+                "route_owner": "ws_stream",
+                "suppression_scope": "sync_universe_duplicate_route_guard",
+                "blocking_live_route": False,
                 "families_considered": self._auto_route_live_families_considered(requested_mode),
                 "plans_considered": len(plan_ids),
                 "intents_created": 0,
