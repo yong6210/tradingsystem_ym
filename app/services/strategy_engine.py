@@ -656,6 +656,58 @@ class StrategyEngine:
         except OSError:
             return None
 
+    @staticmethod
+    def _session_impulse_retest_intent_evidence_summary(
+        *,
+        plan_id: str,
+        intents: list[Any],
+        submissions: list[Any],
+    ) -> dict[str, Any]:
+        submit_decision_counts: dict[str, int] = {}
+        decision_reason_counts: dict[str, int] = {}
+        non_submit_reason_counts: dict[str, int] = {}
+        latest_intent: dict[str, Any] = {}
+        latest_created_at: datetime | None = None
+        submit_ready_intent_count = 0
+        non_submit_intent_count = 0
+
+        for row in list(intents or []):
+            decision = str(getattr(row, "submit_decision", "") or "unknown")
+            reason = str(getattr(row, "decision_reason_code", "") or "none")
+            submit_decision_counts[decision] = submit_decision_counts.get(decision, 0) + 1
+            decision_reason_counts[reason] = decision_reason_counts.get(reason, 0) + 1
+            if decision == SubmitDecision.SUBMIT.value:
+                submit_ready_intent_count += 1
+            else:
+                non_submit_intent_count += 1
+                non_submit_reason_counts[reason] = non_submit_reason_counts.get(reason, 0) + 1
+
+            created_at = getattr(row, "created_at", None)
+            created_dt = created_at if isinstance(created_at, datetime) else None
+            if latest_created_at is None or (created_dt is not None and created_dt > latest_created_at):
+                latest_created_at = created_dt
+                latest_intent = {
+                    "intent_id": str(getattr(row, "intent_id", "") or ""),
+                    "submit_decision": decision,
+                    "decision_reason_code": reason,
+                    "approval_state": str(getattr(row, "approval_state", "") or ""),
+                    "created_at": created_dt.isoformat() if created_dt is not None else str(created_at or ""),
+                }
+
+        requested_live_submission_count = sum(1 for row in list(submissions or []) if bool(getattr(row, "requested_live", False)))
+        return {
+            "plan_id": plan_id,
+            "intent_count": len(list(intents or [])),
+            "submission_count": len(list(submissions or [])),
+            "requested_live_submission_count": requested_live_submission_count,
+            "submit_ready_intent_count": submit_ready_intent_count,
+            "non_submit_intent_count": non_submit_intent_count,
+            "submit_decision_counts": submit_decision_counts,
+            "decision_reason_counts": decision_reason_counts,
+            "non_submit_reason_counts": non_submit_reason_counts,
+            "latest_intent": latest_intent,
+        }
+
     def _session_impulse_retest_runtime_started_at(self) -> datetime | None:
         payload = read_worker_heartbeat("ws", settings=self.settings)
         if not payload:
@@ -758,6 +810,56 @@ class StrategyEngine:
         before_current_runtime_start_count = 0
         observed_before_current_runtime_start_count = 0
         skipped_before_runtime_start_count = 0
+        observed_submit_ready_intent_count = 0
+        observed_non_submit_intent_count = 0
+        observed_submission_count = 0
+        observed_non_submit_reason_counts: dict[str, int] = {}
+        observed_submit_decision_counts: dict[str, int] = {}
+        observed_non_submit_samples: list[dict[str, Any]] = []
+
+        def record_intent_evidence(
+            *,
+            plan_id: str,
+            intents: list[Any],
+            submissions: list[Any],
+            symbol: str,
+            entry_ts: datetime,
+        ) -> dict[str, int]:
+            nonlocal observed_submit_ready_intent_count
+            nonlocal observed_non_submit_intent_count
+            nonlocal observed_submission_count
+            summary = self._session_impulse_retest_intent_evidence_summary(
+                plan_id=plan_id,
+                intents=intents,
+                submissions=submissions,
+            )
+            submit_ready_delta = int(summary.get("submit_ready_intent_count") or 0)
+            non_submit_delta = int(summary.get("non_submit_intent_count") or 0)
+            submission_delta = int(summary.get("submission_count") or 0)
+            observed_submit_ready_intent_count += submit_ready_delta
+            observed_non_submit_intent_count += non_submit_delta
+            observed_submission_count += submission_delta
+            for decision, count in dict(summary.get("submit_decision_counts") or {}).items():
+                observed_submit_decision_counts[decision] = observed_submit_decision_counts.get(decision, 0) + int(count)
+            for reason, count in dict(summary.get("non_submit_reason_counts") or {}).items():
+                observed_non_submit_reason_counts[reason] = observed_non_submit_reason_counts.get(reason, 0) + int(count)
+            if non_submit_delta > 0 and submission_delta <= 0:
+                observed_non_submit_samples.append(
+                    {
+                        "symbol": symbol,
+                        "plan_id": plan_id,
+                        "entry_ts": entry_ts.isoformat(),
+                        "latest_intent": dict(summary.get("latest_intent") or {}),
+                        "submit_decision_counts": dict(summary.get("submit_decision_counts") or {}),
+                        "decision_reason_counts": dict(summary.get("decision_reason_counts") or {}),
+                        "non_submit_reason_counts": dict(summary.get("non_submit_reason_counts") or {}),
+                    }
+                )
+            return {
+                "submit_ready": submit_ready_delta,
+                "non_submit": non_submit_delta,
+                "submissions": submission_delta,
+            }
 
         for symbol in target_symbols:
             replay_trades = self._session_impulse_retest_recent_replay_trades(
@@ -772,6 +874,9 @@ class StrategyEngine:
                 "before_current_runtime_start": 0,
                 "observed_before_current_runtime_start": 0,
                 "skipped_before_runtime_start": 0,
+                "observed_submit_ready_intents": 0,
+                "observed_non_submit_intents": 0,
+                "observed_submissions": 0,
             }
             expected_trade_count += len(replay_trades)
             for trade in replay_trades:
@@ -792,6 +897,16 @@ class StrategyEngine:
                         observed_before_current_runtime_start_count += 1
                         symbol_summary["runtime_observed_trades"] += 1
                         symbol_summary["observed_before_current_runtime_start"] += 1
+                        evidence_delta = record_intent_evidence(
+                            plan_id=expected_plan_id,
+                            intents=intents,
+                            submissions=submissions,
+                            symbol=symbol,
+                            entry_ts=entry_ts,
+                        )
+                        symbol_summary["observed_submit_ready_intents"] += evidence_delta["submit_ready"]
+                        symbol_summary["observed_non_submit_intents"] += evidence_delta["non_submit"]
+                        symbol_summary["observed_submissions"] += evidence_delta["submissions"]
                         continue
                     skipped_before_runtime_start_count += 1
                     symbol_summary["skipped_before_runtime_start"] += 1
@@ -808,6 +923,16 @@ class StrategyEngine:
                     if intents or submissions:
                         runtime_observed_count += 1
                         symbol_summary["runtime_observed_trades"] += 1
+                        evidence_delta = record_intent_evidence(
+                            plan_id=plan_id,
+                            intents=intents,
+                            submissions=submissions,
+                            symbol=symbol,
+                            entry_ts=entry_ts,
+                        )
+                        symbol_summary["observed_submit_ready_intents"] += evidence_delta["submit_ready"]
+                        symbol_summary["observed_non_submit_intents"] += evidence_delta["non_submit"]
+                        symbol_summary["observed_submissions"] += evidence_delta["submissions"]
                         continue
                     misses.append(
                         {
@@ -830,6 +955,16 @@ class StrategyEngine:
                 runtime_observed_count += 1
                 symbol_summary["runtime_observed_trades"] += 1
                 if intents:
+                    evidence_delta = record_intent_evidence(
+                        plan_id=plan_id,
+                        intents=intents,
+                        submissions=submissions,
+                        symbol=symbol,
+                        entry_ts=entry_ts,
+                    )
+                    symbol_summary["observed_submit_ready_intents"] += evidence_delta["submit_ready"]
+                    symbol_summary["observed_non_submit_intents"] += evidence_delta["non_submit"]
+                    symbol_summary["observed_submissions"] += evidence_delta["submissions"]
                     continue
                 misses.append(
                     {
@@ -875,6 +1010,12 @@ class StrategyEngine:
             "before_current_runtime_start_count": before_current_runtime_start_count,
             "observed_before_current_runtime_start_count": observed_before_current_runtime_start_count,
             "skipped_before_runtime_start_count": skipped_before_runtime_start_count,
+            "observed_submit_ready_intent_count": observed_submit_ready_intent_count,
+            "observed_non_submit_intent_count": observed_non_submit_intent_count,
+            "observed_submission_count": observed_submission_count,
+            "observed_submit_decision_counts": observed_submit_decision_counts,
+            "observed_non_submit_reason_counts": observed_non_submit_reason_counts,
+            "observed_non_submit_samples": observed_non_submit_samples[:10],
             "miss_count": len(misses),
             "misses": misses,
             "by_symbol": by_symbol,

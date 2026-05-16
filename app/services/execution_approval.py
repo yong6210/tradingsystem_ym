@@ -658,7 +658,6 @@ class ExecutionPlanningService:
             and degradation_status == "manual_review"
             and not material_degradation_sample
             and not post_cost_reason
-            and not adverse_mode_rows
         )
         if (degradation_status == "manual_review" and not bootstrap_degradation_advisory_only) or (
             post_cost_reason and adverse_mode_rows

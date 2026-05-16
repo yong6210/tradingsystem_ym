@@ -1718,14 +1718,23 @@ def main() -> int:
             ),
         }
     )
+    checklist_allows = _checklist_allows_preflight(checklist_strip)
+    checklist_surface_allows = _surface_allows_preflight(checklist_strip)
+    if checklist_allows and not checklist_surface_allows:
+        checklist_classification = "advisory_only_checklist_warning_not_order_blocking"
+    elif checklist_allows:
+        checklist_classification = "approval_usable"
+    else:
+        checklist_classification = "blocking_or_manual_item"
     checks.append(
         {
             "name": "checklist_language",
-            "status": _status(_checklist_allows_preflight(checklist_strip)),
+            "status": _status(checklist_allows),
             "message": (
                 f"approve={checklist_strip.get('approve_value', '')} | "
                 f"align={checklist_strip.get('align_value', '')} | "
                 f"act={checklist_strip.get('act_value', '')} | "
+                f"classification={checklist_classification} | "
                 f"reason={checklist_strip.get('approve_reason', '') or checklist_strip.get('act_reason', '')}"
             ),
         }

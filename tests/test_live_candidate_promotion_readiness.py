@@ -110,10 +110,15 @@ def test_readiness_script_runtime_scope_keeps_lookback_context(monkeypatch) -> N
     assert payload["status_detail"] == "live_candidate_promotion_readiness_no_promotable_live_candidate"
     assert payload["promotion_decision"] == "wait_for_fresh_promotable_candidate"
     assert payload["readiness"]["headline_reason"] == "no_promotable_live_candidate"
+    assert payload["lookback_context_scope"] == "historical_reference_not_current_runtime"
+    assert "current headline/status" in payload["lookback_context_note"]
     assert payload["lookback_readiness_summary"]["headline_reason"] == "session_impulse_retest_rollout_not_ready"
     assert payload["lookback_readiness_summary"]["top_intent_reasons"] == {
         "session_impulse_retest_rollout_not_ready": 2
     }
+    compact = run_live_candidate_promotion_readiness._compact_text(payload)
+    assert "historical_lookback_context=reference_not_current" in compact
+    assert "lookback_context=state=BLOCKED" not in compact
 
 
 def test_readiness_script_status_fields_map_headline_states() -> None:

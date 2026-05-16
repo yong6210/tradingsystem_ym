@@ -240,6 +240,12 @@ class LiveOrderLifecycleReporter:
         mode_counts = Counter(str(row.execution_mode or "") or "unknown" for row in intents)
         approval_counts = Counter(str(row.approval_state or "") or "unknown" for row in intents)
         decision_counts = Counter(str(row.submit_decision or "") or "unknown" for row in intents)
+        plan_counts = Counter(str(row.plan_id or "") or "none" for row in intents)
+        duplicate_plan_counts = {
+            plan_id: count
+            for plan_id, count in plan_counts.most_common(10)
+            if count > 1
+        }
         recent_blocked = sorted(
             (row for row in intents if str(row.approval_state or "") == "BLOCKED" or str(row.submit_decision or "").startswith("SKIP")),
             key=lambda row: self._sort_ts(row.created_at),
@@ -247,6 +253,9 @@ class LiveOrderLifecycleReporter:
         )[:10]
         return {
             "total": len(intents),
+            "distinct_plan_count": len(plan_counts),
+            "duplicate_plan_intent_count": sum(count - 1 for count in plan_counts.values() if count > 1),
+            "top_duplicate_plan_ids": duplicate_plan_counts,
             "submit_ready": sum(1 for row in intents if str(row.submit_decision) == "SUBMIT"),
             "blocked": sum(1 for row in intents if str(row.approval_state) == "BLOCKED"),
             "by_mode": dict(sorted(mode_counts.items())),

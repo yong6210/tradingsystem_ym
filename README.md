@@ -35,11 +35,17 @@ Current `session_impulse_retest` universe:
   - `BCHUSDC`
   - `LTCUSDC`
   - `NEARUSDC`
+  - `1000PEPEUSDC`
+  - `ARBUSDC`
+  - `1000SHIBUSDC`
+  - `FILUSDC`
+  - `DOGEUSDC`
 - shadow/secondary:
   - `SUIUSDC`
   - `AAVEUSDC`
-  - `XLMUSDC`
   - `HBARUSDC`
+  - `ZECUSDC`
+  - `UNIUSDC`
 
 Important operating rules for this family:
 
@@ -199,7 +205,7 @@ This project has already gone through several operating-contract revisions. The 
   - `BTCUSDC only`
   - `BTCUSDC SHORT only`
 - `BTCUSDC SHORT only` looked numerically stronger, but we explicitly rejected it as the live contract because it hard-coded a directional bet and threw away valid long setups.
-- Earlier decision at that stage: keep `BTCUSDC LONG|SHORT`, but treat `short-bias` as advisory evidence rather than a hard operating rule. This has since been superseded by the current `session_impulse_retest + CONFIRM` 11-symbol route.
+- Earlier decision at that stage: keep `BTCUSDC LONG|SHORT`, but treat `short-bias` as advisory evidence rather than a hard operating rule. This has since been superseded by the current `session_impulse_retest + CONFIRM` 16-symbol route.
 
 7. Reliability and observability work
 - We fixed repeated stage snapshot regressions where empty runtime summaries overwrote valid ones.
@@ -335,7 +341,7 @@ These are the concrete problems still left to solve.
 
 Until those problems are resolved, the rule is:
 
-- live route: `session_impulse_retest + CONFIRM + 11 core USDC symbols`
+- live route: `session_impulse_retest + CONFIRM + 16 USDC perpetual symbols`
 - execution mode: `MICRO_LIVE` canary
 - direction: `LONG|SHORT` based on the setup, not a hard-coded directional bias
 - sizing: stop-distance `RISK_PCT` sizing with a small canary account assumption
@@ -1097,7 +1103,7 @@ Live-vs-replay parity audit:
 ./.venv/bin/python scripts/run_live_replay_parity_audit.py --all-live-symbols --days 3 --no-fail-exit
 ```
 
-This compares live active-contract cadence against the operator-dashboard replay flow baseline and attaches recent live intent/submission block reasons. It computes the active-contract cadence and replay baseline directly from local DB/files first, then falls back to the local API, so the audit is not dependent on the web server being up. `--all-live-symbols` aggregates the 11-symbol live universe. When a WS worker `started_at` heartbeat exists, the active parity window defaults to `runtime_since_ws_start`; the full `--days` window remains in `lookback_evaluation_summary`. Use `--lookback-only` when you intentionally want the historical window as the headline. A runtime window with fewer than two expected replay candidates and no live intent/submission is treated as candidate wait, not a current flow warning. Portfolio `ALERT` is reserved for aggregate flow shortfall or material per-symbol shortfall; short non-runtime per-symbol windows with fewer than two expected replay candidates are `WATCH` unless an intent-to-submission or exchange reject/error problem is present. Portfolio `WATCH` reasons separate thin live flow (`portfolio_symbol_live_flow_watch_thin_window`) from order-gate waiting (`portfolio_symbol_order_flow_blocked_or_waiting`) and mixed cases (`portfolio_symbol_live_flow_and_order_gate_watch`). Each symbol also gets a `flow_diagnosis.stage`, such as `signal_or_plan_generation_gap`, `approval_gate_blocked`, `intent_to_submission_gap`, or `exchange_submission_rejected_or_error`. A symbol can be `WATCH` even when replay cadence is sufficient if all recent intents are blocked before order submission. The audit writes timestamped reports plus `latest.md` and `latest.json` for stable operator reads.
+This compares live active-contract cadence against the operator-dashboard replay flow baseline and attaches recent live intent/submission block reasons. It computes the active-contract cadence and replay baseline directly from local DB/files first, then falls back to the local API, so the audit is not dependent on the web server being up. `--all-live-symbols` aggregates the current 16-symbol live universe. When a WS worker `started_at` heartbeat exists, the active parity window defaults to `runtime_since_ws_start`; the full `--days` window remains in `lookback_evaluation_summary`. Use `--lookback-only` when you intentionally want the historical window as the headline. A runtime window with fewer than two expected replay candidates and no live intent/submission is treated as candidate wait, not a current flow warning. Portfolio `ALERT` is reserved for aggregate flow shortfall or material per-symbol shortfall; short non-runtime per-symbol windows with fewer than two expected replay candidates are `WATCH` unless an intent-to-submission or exchange reject/error problem is present. Portfolio `WATCH` reasons separate thin live flow (`portfolio_symbol_live_flow_watch_thin_window`) from order-gate waiting (`portfolio_symbol_order_flow_blocked_or_waiting`) and mixed cases (`portfolio_symbol_live_flow_and_order_gate_watch`). Each symbol also gets a `flow_diagnosis.stage`, such as `signal_or_plan_generation_gap`, `approval_gate_blocked`, `intent_to_submission_gap`, or `exchange_submission_rejected_or_error`. A symbol can be `WATCH` even when replay cadence is sufficient if all recent intents are blocked before order submission. The audit writes timestamped reports plus `latest.md` and `latest.json` for stable operator reads.
 
 When an intent is blocked by `validation_do_not_deploy`, the approval snapshot and lifecycle reports include `validation_block_detail.primary_cause` plus `root_causes`, so the operator can distinguish missing validation sample, non-positive expectancy, zero/missing win rate, score floor failure, risk-gate closure, and runtime candidate blocks without reading raw logs.
 

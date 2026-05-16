@@ -154,8 +154,33 @@ def _resolve_root_path(raw_path: str) -> Path:
     return path if path.is_absolute() else ROOT_DIR / path
 
 
+def _report_root_dir() -> Path:
+    configured = (
+        os.environ.get("TRADING_OPS_HEARTBEAT_REPORT_ROOT")
+        or os.environ.get("TRADING_OPERATIONS_REPORT_ROOT")
+        or ""
+    )
+    if configured.strip():
+        return Path(configured).expanduser()
+    runtime_root = Path(
+        os.environ.get("TRADING_TMP_RUNTIME_ROOT")
+        or str(Path.home() / "Library/Application Support/trading/runtime_src")
+    ).expanduser()
+    try:
+        if runtime_root.resolve() != ROOT_DIR.resolve() and (runtime_root / "reports").is_dir():
+            return runtime_root
+    except OSError:
+        pass
+    return ROOT_DIR
+
+
+def _resolve_report_path(raw_path: str) -> Path:
+    path = Path(str(raw_path or "")).expanduser()
+    return path if path.is_absolute() else _report_root_dir() / path
+
+
 def _latest_match(pattern: str) -> Path | None:
-    resolved = _resolve_root_path(pattern)
+    resolved = _resolve_report_path(pattern)
     matches = [Path(path) for path in glob.glob(str(resolved))]
     files = [path for path in matches if path.is_file() and not path.name.startswith(".")]
     if not files:
@@ -246,7 +271,7 @@ def _configured_path_from_setting(setting_name: str) -> Path | None:
     raw_path = str(getattr(get_settings(), setting_name, "") or "").strip()
     if not raw_path:
         return None
-    return _resolve_root_path(raw_path)
+    return _resolve_report_path(raw_path)
 
 
 def _parse_utc_ts(value: Any) -> datetime | None:
@@ -481,6 +506,7 @@ def _advisory_status_row(payload: dict[str, Any]) -> dict[str, str]:
 def evaluate_ops_heartbeat(*, now: datetime | None = None, jobs: dict[str, Any] | None = None) -> dict[str, Any]:
     current = (now or datetime.now(UTC)).astimezone(UTC)
     runtime_started_at = _runtime_started_at_from_heartbeat()
+    report_root = _report_root_dir()
     rows: list[dict[str, Any]] = []
     for name, raw_config in (jobs or _DEFAULT_JOBS).items():
         config = _coerce_job_config(raw_config)
@@ -593,6 +619,7 @@ def evaluate_ops_heartbeat(*, now: datetime | None = None, jobs: dict[str, Any] 
     status = "FAIL" if hard_failures else "WATCH" if warnings else "PASS"
     return {
         "status": status,
+        "report_root": _display_path(report_root),
         "issue_count": len(issues),
         "advisory_count": len(advisories),
         "failure_count": len(hard_failures),

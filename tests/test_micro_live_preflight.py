@@ -893,6 +893,7 @@ def test_main_allows_checklist_advisory_manual_review_when_validation_is_go(monk
     checklist_check = next(item for item in payload["checks"] if item["name"] == "checklist_language")
     assert checklist_check["status"] == "PASS"
     assert "approve=manual review first" in checklist_check["message"]
+    assert "classification=advisory_only_checklist_warning_not_order_blocking" in checklist_check["message"]
 
 
 def test_failed_root_cause_groups_non_manual_approval_surface_failures() -> None:

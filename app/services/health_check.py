@@ -277,9 +277,10 @@ class HealthCheckService:
         return True, f"ok:{int(age_seconds)}s"
 
     def _market_data_probe_symbols(self) -> list[str]:
+        micro_live_symbols = str(getattr(self.settings, "auto_trading_micro_live_allowed_symbols", "") or "")
+        strategy_symbols = str(getattr(self.settings, "session_impulse_retest_allowed_symbols", "") or "")
         raw_groups = [
-            str(getattr(self.settings, "auto_trading_micro_live_allowed_symbols", "") or ""),
-            str(getattr(self.settings, "session_impulse_retest_allowed_symbols", "") or ""),
+            micro_live_symbols or strategy_symbols,
             str(getattr(self.settings, "ready_market_data_probe_symbol", "") or "BTCUSDC"),
         ]
         symbols: list[str] = []
@@ -291,7 +292,7 @@ class HealthCheckService:
                     continue
                 seen.add(symbol)
                 symbols.append(symbol)
-        return symbols[:12] or ["BTCUSDC"]
+        return symbols or ["BTCUSDC"]
 
     def _check_market_data_freshness(self, timeframe: str) -> tuple[bool, str]:
         normalized_tf = str(timeframe or "").strip().lower()

@@ -85,6 +85,34 @@ def test_no_order_watchdog_no_recent_intents_message_waits_for_candidate() -> No
     assert "rollout session" not in result["message"]
 
 
+def test_no_order_watchdog_reports_distinct_plan_count_for_repeated_intents() -> None:
+    result = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
+        lifecycle={
+            "summary": {
+                "submission_count": 0,
+                "requested_live_count": 0,
+                "rejected_or_error_count": 0,
+                "live_intents": {
+                    "total": 3,
+                    "distinct_plan_count": 2,
+                    "duplicate_plan_intent_count": 1,
+                    "top_duplicate_plan_ids": {"sir_BTCUSDC_L_20260514T1416": 2},
+                    "submit_ready": 0,
+                    "blocked": 0,
+                    "top_block_reasons": {"session_impulse_retest_rollout_not_ready": 3},
+                },
+            }
+        },
+        min_intents=1,
+    )
+
+    assert result["reason"] == "live_intents_without_live_order_submission"
+    assert result["distinct_plan_count"] == 2
+    assert result["duplicate_plan_intent_count"] == 1
+    assert result["top_duplicate_plan_ids"] == {"sir_BTCUSDC_L_20260514T1416": 2}
+    assert "distinct_plans=2, duplicate_intents=1" in result["message"]
+
+
 def test_no_order_watchdog_augments_no_intents_with_sir_candidate_context() -> None:
     evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
         lifecycle={
@@ -147,6 +175,7 @@ def test_no_order_watchdog_alerts_when_backtest_opportunity_has_no_live_intent()
         opportunity_context={
             "source": "session_impulse_retest_opportunity_report",
             "status": "ok",
+            "lookback_hours": 72,
             "summary": {
                 "expected_order_count": 2,
                 "potential_performance": {"total_r": 1.25},
@@ -161,7 +190,7 @@ def test_no_order_watchdog_alerts_when_backtest_opportunity_has_no_live_intent()
     assert enriched["alert"] is True
     assert enriched["reason"] == "sir_backtest_opportunity_without_live_intent"
     assert enriched["candidate_generation_status"] == "backtest_expected_opportunities_missing_live_intents"
-    assert "SIR_opportunity=active_expected=2,lookback_expected=3" in enriched["message"]
+    assert "SIR_opportunity=lookback_hours=72,active_expected=2,lookback_expected=3" in enriched["message"]
 
 
 def test_no_order_watchdog_records_pre_restart_opportunities_as_advisory() -> None:
@@ -414,6 +443,7 @@ def test_no_order_watchdog_message_includes_backtest_opportunity_context() -> No
                 "first_block_detail_text": "",
                 "next_action_text": "SIR 백테스트 조건 후보 2건 재생됨: runtime plan/intent 누락 확인",
                 "session_impulse_retest_opportunity_context": {
+                    "lookback_hours": 72,
                     "summary": {
                         "expected_order_count": 2,
                         "potential_performance": {"total_r": 1.25},
@@ -427,7 +457,7 @@ def test_no_order_watchdog_message_includes_backtest_opportunity_context() -> No
         }
     )
 
-    assert "백테스트조건: runtime_expected=2건/1.25R, lookback_expected=3건/0.75R" in message
+    assert "백테스트조건(최근 3일): runtime_expected=2건/1.25R, lookback_expected=3건/0.75R" in message
 
 
 def test_no_order_watchdog_message_includes_pre_restart_opportunity_context() -> None:
@@ -444,6 +474,7 @@ def test_no_order_watchdog_message_includes_pre_restart_opportunity_context() ->
                 "first_block_detail_text": "",
                 "next_action_text": "재시작 전 SIR 후보 확인",
                 "session_impulse_retest_opportunity_context": {
+                    "lookback_hours": 168,
                     "summary": {
                         "expected_order_count": 0,
                         "potential_performance": {"total_r": 0},
@@ -459,9 +490,40 @@ def test_no_order_watchdog_message_includes_pre_restart_opportunity_context() ->
         }
     )
 
-    assert "백테스트조건: runtime_expected=0건/0R, lookback_expected=12건/6.61R" in message
+    assert "백테스트조건(최근 7일): runtime_expected=0건/0R, lookback_expected=12건/6.61R" in message
     assert "pre_restart=12건" in message
     assert "reasons=rollout_session_not_allowed=5" in message
+
+
+def test_no_order_watchdog_message_includes_runtime_age_and_distinct_plan_context() -> None:
+    message = run_micro_live_no_order_watchdog._watchdog_message(
+        {
+            "window_days": 3,
+            "watchdog_scope": "runtime_since_ws_start",
+            "watchdog_scope_label": "런타임 재시작 이후",
+            "runtime_age_minutes": 4.25,
+            "lookback_lifecycle_summary": {
+                "requested_live_count": 0,
+                "live_intents": {
+                    "total": 3,
+                    "distinct_plan_count": 2,
+                    "duplicate_plan_intent_count": 1,
+                },
+            },
+            "evaluation": {
+                "intent_count": 0,
+                "distinct_plan_count": 0,
+                "duplicate_plan_intent_count": 0,
+                "requested_live_count": 0,
+                "top_block_reasons": {},
+                "first_block_detail_text": "",
+                "next_action_text": "fresh live 후보 대기; 현재 차단 사유 없음",
+            },
+        }
+    )
+
+    assert "런타임: 재시작 후 4.2분 경과" in message
+    assert "참고: 최근 3일 전체 intent 3건(계획 2개, 중복 1건) / 제출 0건" in message
 
 
 def test_no_order_watchdog_main_writes_latest_aliases(monkeypatch, tmp_path, capsys) -> None:
@@ -1332,6 +1394,11 @@ def test_live_replay_parity_runtime_short_window_without_flow_is_pass() -> None:
     assert result["reason"] == "runtime_window_below_live_replay_parity_evidence_floor"
     assert result["runtime_window_below_evidence_floor"] is True
     assert result["runtime_no_actionable_flow"] is True
+    assert result["flow_diagnosis"]["stage"] == "runtime_evidence_floor_wait"
+    assert result["flow_diagnosis"]["primary_reason"] == "runtime_window_below_evidence_floor_no_current_flow"
+    assert result["flow_diagnosis"]["original_stage"] == "signal_or_plan_generation_gap"
+    assert result["flow_diagnosis"]["actionable"] is False
+    assert result["flow_diagnosis"]["recommended_action"] == "추가 조치 없음; 현재 runtime의 다음 fresh 후보를 대기"
 
 
 def test_live_replay_parity_marks_sufficient_intent_flow_but_blocked_orders_as_watch() -> None:
@@ -2480,6 +2547,48 @@ def test_ops_heartbeat_flags_missing_reports(monkeypatch, tmp_path) -> None:
 
     assert result["status"] == "FAIL"
     assert result["failures"][0]["reason"] == "missing_report"
+
+
+def test_ops_heartbeat_prefers_runtime_report_root_for_relative_patterns(monkeypatch, tmp_path) -> None:
+    workspace_root = tmp_path / "workspace"
+    runtime_root = tmp_path / "runtime_src"
+    report_dir = runtime_root / "reports/operations/micro_live_runtime_guard"
+    report_dir.mkdir(parents=True)
+    report = report_dir / "micro_live_runtime_guard_20260510T000000Z.md"
+    report.write_text(
+        "\n".join(
+            [
+                "# Runtime Guard",
+                "",
+                "```json",
+                json.dumps({"generated_at": "2026-05-10T00:00:00Z", "overall_status": "PASS"}),
+                "```",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    workspace_root.mkdir()
+    monkeypatch.setattr(run_micro_live_ops_heartbeat, "ROOT_DIR", workspace_root)
+    monkeypatch.setenv("TRADING_TMP_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setattr(run_micro_live_ops_heartbeat, "_runtime_started_at_from_heartbeat", lambda: None)
+    monkeypatch.setattr(
+        run_micro_live_ops_heartbeat,
+        "_DEFAULT_JOBS",
+        {
+            "runtime_guard": {
+                "pattern": "reports/operations/micro_live_runtime_guard/*.md",
+                "max_age_minutes": 15,
+                "pass_statuses": {"PASS"},
+            }
+        },
+    )
+
+    now = datetime.fromtimestamp(report.stat().st_mtime, tz=UTC)
+    result = run_micro_live_ops_heartbeat.evaluate_ops_heartbeat(now=now)
+
+    assert result["status"] == "PASS"
+    assert result["report_root"] == str(runtime_root)
+    assert result["jobs"][0]["latest_path"] == str(report)
 
 
 def test_ops_heartbeat_message_separates_failures_and_warnings() -> None:

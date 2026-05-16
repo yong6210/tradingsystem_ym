@@ -160,8 +160,14 @@ def build_payload(
                 start_at=None,
             )
             payload["lookback_readiness_summary"] = _readiness_summary(dict(lookback_payload.get("readiness") or {}))
+            payload["lookback_context_scope"] = "historical_reference_not_current_runtime"
+            payload["lookback_context_note"] = (
+                "Reference-only lookback; current headline/status comes from runtime_since_ws_start."
+            )
         else:
             payload["lookback_readiness_summary"] = {}
+            payload["lookback_context_scope"] = ""
+            payload["lookback_context_note"] = ""
         payload.update(_status_fields(dict(payload.get("readiness") or {})))
         return payload
 
@@ -204,6 +210,8 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         f"- top_auxiliary_blockers: {readiness.get('top_auxiliary_blockers') or {}}",
         f"- top_intent_reasons: {readiness.get('top_intent_reasons')}",
         f"- top_audit_statuses: {readiness.get('top_audit_statuses')}",
+        f"- lookback_context_scope: {payload.get('lookback_context_scope') or 'none'}",
+        f"- lookback_context_note: {payload.get('lookback_context_note') or 'none'}",
         f"- lookback_readiness_summary: {payload.get('lookback_readiness_summary') or {}}",
         "",
         "## Operator Review Items",
@@ -281,7 +289,8 @@ def _compact_text(payload: dict[str, Any]) -> str:
     lookback = dict(payload.get("lookback_readiness_summary") or {})
     if lookback:
         lines.append(
-            "- lookback_context="
+            "- historical_lookback_context=reference_not_current "
+            f"scope={payload.get('lookback_context_scope') or 'historical_reference_not_current_runtime'} "
             f"state={lookback.get('headline_state')} reason={lookback.get('headline_reason')} "
             f"candidates={lookback.get('candidate_count')} top_intent_reasons={lookback.get('top_intent_reasons')}"
         )

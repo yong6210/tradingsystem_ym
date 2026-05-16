@@ -159,7 +159,7 @@ curl -s "http://127.0.0.1:8000/alerts/metrics?days=7&write_report=false" | jq
 ## 10. 운영 원칙
 - live 전환은 기능 완성 여부가 아니라 `reconciliation / safety / operator visibility`가 충분한지로 판단한다.
 - `MICRO_LIVE`는 검증 단계다. 수익 극대화 모드가 아니다.
-- 현재 live 계약은 `session_impulse_retest + CONFIRM + 11개 core USDC symbols`다.
+- 현재 live 계약은 `session_impulse_retest + CONFIRM + 16개 USDC perpetual symbols`다.
 - `BTCUSDC + sweep_reversal + LIMIT`는 benchmark/legacy lens이며 live allowlist로 쓰지 않는다.
 - `legacy` 전체 replay와 full `post-patch` cohort는 advisory truth로 유지한다. 실제 live go/no-go는 현재 live route와 safety/grid audit을 기준으로 분리해서 본다.
 - safety를 끈 raw top diagnostic은 “무엇을 깎고 있는지”를 보기 위한 비교값이지 운영 설정이 아니다.

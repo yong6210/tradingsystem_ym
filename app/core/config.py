@@ -12,6 +12,20 @@ from app.core.enums import StrategyMode
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SQLITE_URL_PREFIXES = ("sqlite+pysqlite:///", "sqlite:///")
+CURRENT_MICRO_LIVE_SYMBOLS = (
+    "BTCUSDC,ETHUSDC,SOLUSDC,LINKUSDC,BNBUSDC,XRPUSDC,ADAUSDC,AVAXUSDC,"
+    "BCHUSDC,LTCUSDC,NEARUSDC,1000PEPEUSDC,ARBUSDC,1000SHIBUSDC,FILUSDC,DOGEUSDC"
+)
+CURRENT_SESSION_IMPULSE_RETEST_SYMBOLS = (
+    f"{CURRENT_MICRO_LIVE_SYMBOLS},SUIUSDC,AAVEUSDC,HBARUSDC,ZECUSDC,UNIUSDC"
+)
+CURRENT_MICRO_LIVE_DIRECTION_CONTRACT = (
+    "BTCUSDC:LONG|SHORT,ETHUSDC:LONG|SHORT,SOLUSDC:LONG|SHORT,LINKUSDC:LONG|SHORT,"
+    "BNBUSDC:LONG|SHORT,XRPUSDC:LONG|SHORT,ADAUSDC:LONG|SHORT,AVAXUSDC:LONG|SHORT,"
+    "BCHUSDC:LONG|SHORT,LTCUSDC:LONG|SHORT,NEARUSDC:LONG|SHORT,"
+    "1000PEPEUSDC:LONG|SHORT,ARBUSDC:LONG|SHORT,1000SHIBUSDC:LONG|SHORT,"
+    "FILUSDC:LONG|SHORT,DOGEUSDC:LONG|SHORT"
+)
 
 
 def sqlite_database_path_from_url(database_url: str) -> Path | None:
@@ -114,11 +128,11 @@ class Settings(BaseSettings):
     transition_edge_variant_risk_multiplier: float = 0.35
     transition_edge_variant_partial_activation_ratio: float = 0.3
     transition_edge_variant_lane_tracker_window: int = 20
-    session_impulse_retest_enabled: bool = False
-    session_impulse_retest_shadow_only: bool = True
-    session_impulse_retest_allowed_symbols: str = "BTCUSDC"
-    session_impulse_retest_partial_activation_ratio: float = 0.3
-    session_impulse_retest_core_live_slots: int = 2
+    session_impulse_retest_enabled: bool = True
+    session_impulse_retest_shadow_only: bool = False
+    session_impulse_retest_allowed_symbols: str = CURRENT_SESSION_IMPULSE_RETEST_SYMBOLS
+    session_impulse_retest_partial_activation_ratio: float = 1.0
+    session_impulse_retest_core_live_slots: int = 16
     session_impulse_retest_secondary_live_enabled: bool = False
     session_impulse_retest_saturday_risk_multiplier: float = 1.0
     session_impulse_retest_miss_detector_enabled: bool = True
@@ -370,13 +384,13 @@ class Settings(BaseSettings):
     auto_trading_replay_validation_bridge_sweep_reversal_max_drawdown_r: float = 4.5
     auto_trading_replay_validation_bridge_sweep_reversal_structure_failure_stress_r: float = -1.0
     auto_trading_notional_per_r: float = 25.0
-    auto_trading_live_sizing_mode: str = "NOTIONAL_PER_R"
-    auto_trading_live_account_equity_usdt: float = 0.0
-    auto_trading_live_risk_per_trade_pct: float = 0.0
+    auto_trading_live_sizing_mode: str = "RISK_PCT"
+    auto_trading_live_account_equity_usdt: float = 200.0
+    auto_trading_live_risk_per_trade_pct: float = 0.01
     auto_trading_live_usable_margin_fraction: float = 0.85
-    auto_trading_live_leverage_cap: float = 6.0
+    auto_trading_live_leverage_cap: float = 10.0
     auto_trading_max_slippage_bps: float = 12.0
-    auto_trading_live_liquidity_gate_enabled: bool = False
+    auto_trading_live_liquidity_gate_enabled: bool = True
     auto_trading_live_liquidity_gate_fail_closed: bool = True
     auto_trading_live_liquidity_gate_orderbook_limit: int = 100
     auto_trading_live_liquidity_gate_min_depth_usdt: float = 50_000.0
@@ -388,21 +402,21 @@ class Settings(BaseSettings):
     auto_trading_live_liquidity_gate_partial_submit_enabled: bool = False
     auto_trading_live_liquidity_gate_max_tranches: int = 3
     auto_trading_live_liquidity_gate_min_tranche_notional_usdt: float = 10.0
-    auto_trading_micro_live_allowed_symbols: str = "BTCUSDC,ETHUSDC"
-    auto_trading_micro_live_symbol_priority: str = "BTCUSDC,ETHUSDC"
-    auto_trading_micro_live_direction_contract: str = "BTCUSDC:LONG|SHORT,ETHUSDC:LONG|SHORT"
+    auto_trading_micro_live_allowed_symbols: str = CURRENT_MICRO_LIVE_SYMBOLS
+    auto_trading_micro_live_symbol_priority: str = CURRENT_MICRO_LIVE_SYMBOLS
+    auto_trading_micro_live_direction_contract: str = CURRENT_MICRO_LIVE_DIRECTION_CONTRACT
     auto_trading_micro_live_session_direction_blocked_hours_utc: str = ""
     auto_trading_micro_live_priority_submit_ready_lookback_minutes: int = 180
-    auto_trading_micro_live_allowed_families: str = "sweep_reversal,trend_continuation,session_impulse_retest"
-    auto_trading_micro_live_allowed_entry_models: str = "LIMIT"
+    auto_trading_micro_live_allowed_families: str = "session_impulse_retest"
+    auto_trading_micro_live_allowed_entry_models: str = "CONFIRM"
     auto_trading_micro_live_symbol_family_entry_direction_blocked_hours_utc: str = ""
     auto_trading_micro_live_event_blackout_path: str = ""
     auto_trading_micro_live_event_blackout_min_horizon_days: int = 45
     auto_trading_micro_live_strategy_time_contract_path: str = ""
     auto_trading_micro_live_plan_blocklist_path: str = ""
-    auto_trading_micro_live_max_concurrent_positions: int = 2
-    auto_trading_micro_live_max_daily_new_entries: int = 2
-    auto_trading_micro_live_allowed_sessions: str = ""
+    auto_trading_micro_live_max_concurrent_positions: int = 3
+    auto_trading_micro_live_max_daily_new_entries: int = 0
+    auto_trading_micro_live_allowed_sessions: str = "dead_session,london,new_york"
     auto_trading_trend_proof_allowed_symbols: str = "BTCUSDC,ETHUSDC"
     auto_trading_trend_proof_regime_floor: float = 0.55
     auto_trading_trend_proof_min_abs_velocity: float = 0.38

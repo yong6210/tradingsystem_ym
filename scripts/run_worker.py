@@ -92,6 +92,10 @@ def _compact_sync_universe_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "enabled": bool(miss.get("enabled")),
         "expected_trade_count": _safe_int(miss.get("expected_trade_count")),
         "runtime_observed_count": _safe_int(miss.get("runtime_observed_count")),
+        "observed_submit_ready_intent_count": _safe_int(miss.get("observed_submit_ready_intent_count")),
+        "observed_non_submit_intent_count": _safe_int(miss.get("observed_non_submit_intent_count")),
+        "observed_submission_count": _safe_int(miss.get("observed_submission_count")),
+        "observed_non_submit_reason_counts": dict(miss.get("observed_non_submit_reason_counts") or {}),
         "miss_count": _safe_int(miss.get("miss_count")),
         "runtime_started_at": miss.get("runtime_started_at"),
     }

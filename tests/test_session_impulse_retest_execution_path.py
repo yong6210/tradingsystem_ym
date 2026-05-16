@@ -2193,7 +2193,17 @@ def test_session_impulse_retest_miss_detector_counts_pre_start_intent_evidence(t
         engine._session_impulse_retest_recent_replay_trades = lambda **kwargs: [replay_trade]  # type: ignore[assignment]
         engine._session_impulse_retest_runtime_plan_observation = fail_if_replayed  # type: ignore[assignment]
         engine.intent_repo.list_for_plan = (  # type: ignore[assignment]
-            lambda plan_id, limit=20: [SimpleNamespace(intent_id="intent_existing")] if plan_id == expected_plan_id else []
+            lambda plan_id, limit=20: [
+                SimpleNamespace(
+                    intent_id="intent_existing",
+                    submit_decision=SubmitDecision.SKIP_MANUAL_ONLY.value,
+                    decision_reason_code="outcome_penalty_manual_review",
+                    approval_state=ApprovalState.APPROVED_MANUAL.value,
+                    created_at=now - timedelta(minutes=55),
+                )
+            ]
+            if plan_id == expected_plan_id
+            else []
         )
         engine.submission_repo.list_for_plan = lambda plan_id, limit=20: []  # type: ignore[assignment]
 
@@ -2211,6 +2221,13 @@ def test_session_impulse_retest_miss_detector_counts_pre_start_intent_evidence(t
         assert payload["miss_count"] == 0
         assert payload["by_symbol"]["BTCUSDC"]["runtime_observed_trades"] == 1
         assert payload["by_symbol"]["BTCUSDC"]["observed_before_current_runtime_start"] == 1
+        assert payload["observed_submit_ready_intent_count"] == 0
+        assert payload["observed_non_submit_intent_count"] == 1
+        assert payload["observed_submission_count"] == 0
+        assert payload["observed_submit_decision_counts"] == {SubmitDecision.SKIP_MANUAL_ONLY.value: 1}
+        assert payload["observed_non_submit_reason_counts"] == {"outcome_penalty_manual_review": 1}
+        assert payload["observed_non_submit_samples"][0]["latest_intent"]["decision_reason_code"] == "outcome_penalty_manual_review"
+        assert payload["by_symbol"]["BTCUSDC"]["observed_non_submit_intents"] == 1
 
 
 def test_session_impulse_retest_miss_detector_treats_existing_intent_as_observed(tmp_path) -> None:

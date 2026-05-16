@@ -255,4 +255,6 @@ def test_live_order_lifecycle_filters_intents_by_family_and_start_at() -> None:
     live_intents = payload["summary"]["live_intents"]
     assert live_intents["family_filter"] == ["session_impulse_retest"]
     assert live_intents["total"] == 1
+    assert live_intents["distinct_plan_count"] == 1
+    assert live_intents["duplicate_plan_intent_count"] == 0
     assert live_intents["top_block_reasons"] == {"candidate_waiting": 1}

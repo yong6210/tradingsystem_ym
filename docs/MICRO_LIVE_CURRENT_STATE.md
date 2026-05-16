@@ -81,7 +81,10 @@ Interpretation:
 - No current order is not the same as an order error. The route is open, but there is no fresh live-routable `session_impulse_retest + CONFIRM` candidate at this moment.
 - If a fresh candidate appears and `submit_ready > 0` but `submissions=0`, treat that as an active intent-to-submission bug.
 - If there is no accepted live-routable candidate, the correct state is wait/monitor.
-- Auxiliary SIR signals on `SUIUSDC`, `AAVEUSDC`, and `HBARUSDC` are shadow-only and are not part of the 16-symbol baseline contract.
+- `execution_quality_low_coverage` and low live closed-sample outcome controls are advisory during SIR MICRO_LIVE bootstrap. They may add `outcome_approval_penalty.status=watch`, but they must not downgrade an otherwise valid SIR live bootstrap candidate to `SKIP_MANUAL_ONLY` until a material live execution sample exists.
+- For SIR replay/runtime parity, read `runtime_observed_count` together with `observed_submit_ready_intent_count`, `observed_non_submit_intent_count`, and `observed_non_submit_reason_counts`. An observed plan with only non-submit intents explains why no order was sent; it is not the same as a fresh submit-ready gap.
+- For no-order reports, read `runtime_age_minutes` before judging a 3-day window. Current-runtime scope resets on WS restart. Also compare `live_intents.total` with `distinct_plan_count`, because repeated blocked/shadow checks for the same plan are not separate backtest opportunities.
+- Auxiliary SIR signals on `SUIUSDC`, `AAVEUSDC`, `HBARUSDC`, `ZECUSDC`, and `UNIUSDC` are shadow-only and are not part of the 16-symbol baseline contract.
 - The selected expansion did not make the live route 31 symbols because only 5 of the selected expansion names currently have tradable Binance USDC perpetuals in this route: `1000PEPEUSDC`, `ARBUSDC`, `1000SHIBUSDC`, `FILUSDC`, and `DOGEUSDC`.
 - The selected names that are USDT-only require a separate USDT live-route change before they can be traded live by this system.
 

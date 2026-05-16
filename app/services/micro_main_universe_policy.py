@@ -202,6 +202,24 @@ _ENTRIES: tuple[MicroMainUniverseEntry, ...] = (
         benchmark_win_rate=0.678,
         rationale="Top-30 trust/liquidity candidate with strong retained 3y proxy edge; add it as a shadow-first candidate pending runtime evidence.",
     ),
+    MicroMainUniverseEntry(
+        symbol="ZECUSDC",
+        tier="secondary",
+        rollout_priority=20,
+        risk_multiplier=0.35,
+        benchmark_ev_r=0.8316,
+        benchmark_win_rate=0.7054,
+        rationale="Top-50 USDC-tradable expansion candidate with strong 5y proxy EV; keep shadow-first because it is new to the live route.",
+    ),
+    MicroMainUniverseEntry(
+        symbol="UNIUSDC",
+        tier="secondary",
+        rollout_priority=21,
+        risk_multiplier=0.40,
+        benchmark_ev_r=0.7570,
+        benchmark_win_rate=0.6795,
+        rationale="Top-50 USDC-tradable expansion candidate with mature 5y proxy history; keep shadow-first pending live-route evidence.",
+    ),
 )
 
 _ENTRY_MAP = {entry.symbol: entry for entry in _ENTRIES}

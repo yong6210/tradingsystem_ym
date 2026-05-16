@@ -541,6 +541,29 @@ def test_health_market_data_freshness_uses_live_symbol_quorum(monkeypatch) -> No
     assert "stale=BTCUSDC" in detail
 
 
+def test_health_market_data_probe_symbols_cover_current_micro_live_contract() -> None:
+    service = HealthCheckService()
+    live_symbols = (
+        "BTCUSDC,ETHUSDC,SOLUSDC,LINKUSDC,BNBUSDC,XRPUSDC,ADAUSDC,AVAXUSDC,"
+        "BCHUSDC,LTCUSDC,NEARUSDC,1000PEPEUSDC,ARBUSDC,1000SHIBUSDC,FILUSDC,DOGEUSDC"
+    )
+    service.settings = SimpleNamespace(
+        auto_trading_micro_live_allowed_symbols=live_symbols,
+        session_impulse_retest_allowed_symbols=f"{live_symbols},SUIUSDC,AAVEUSDC,HBARUSDC,ZECUSDC,UNIUSDC",
+        ready_market_data_probe_symbol="BTCUSDC",
+    )
+
+    symbols = service._market_data_probe_symbols()
+
+    assert len(symbols) == 16
+    assert symbols[-1] == "DOGEUSDC"
+    assert "SUIUSDC" not in symbols
+    assert "AAVEUSDC" not in symbols
+    assert "HBARUSDC" not in symbols
+    assert "ZECUSDC" not in symbols
+    assert "UNIUSDC" not in symbols
+
+
 def test_health_market_data_freshness_fails_when_live_symbol_quorum_is_stale(monkeypatch) -> None:
     service = HealthCheckService()
     now = datetime.now(timezone.utc)

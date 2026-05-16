@@ -573,6 +573,20 @@ def _flow_diagnosis(
     }
 
 
+def _runtime_evidence_floor_wait_flow(flow: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(flow or {})
+    payload["original_stage"] = payload.get("stage")
+    payload["original_primary_reason"] = payload.get("primary_reason")
+    payload["stage"] = "runtime_evidence_floor_wait"
+    payload["primary_reason"] = "runtime_window_below_evidence_floor_no_current_flow"
+    payload["recommended_action"] = "추가 조치 없음; 현재 runtime의 다음 fresh 후보를 대기"
+    payload["summary"] = (
+        "현재 runtime 창의 replay 기대 후보가 판단 기준보다 적어 flow shortfall로 보지 않고 fresh 후보 대기로 봅니다."
+    )
+    payload["actionable"] = False
+    return payload
+
+
 def evaluate_parity(*, dashboard: dict[str, Any], lifecycle: dict[str, Any], min_flow_ratio: float) -> dict[str, Any]:
     active_contract = dict(dashboard.get("active_contract") or {})
     cadence = dict(active_contract.get("flow_cadence") or {})
@@ -609,6 +623,9 @@ def evaluate_parity(*, dashboard: dict[str, Any], lifecycle: dict[str, Any], min
         and _safe_int(summary.get("requested_live_count")) <= 0
         and _safe_int(summary.get("rejected_or_error_count")) <= 0
     )
+    if runtime_no_actionable_flow:
+        flow = _runtime_evidence_floor_wait_flow(flow)
+        flow_stage = str(flow.get("stage") or "")
 
     if expected <= 0.0:
         status = "INSUFFICIENT_BASELINE"

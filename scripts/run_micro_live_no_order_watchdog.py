@@ -166,9 +166,50 @@ def _diagnostic_detail_text(diagnostics: list[dict[str, Any]]) -> str:
     return ""
 
 
-def _summary_intent_submission_counts(summary: dict[str, Any]) -> tuple[int, int]:
+def _summary_intent_plan_counts(summary: dict[str, Any]) -> tuple[int, int, int, int]:
     live_intents = dict(summary.get("live_intents") or {})
-    return _safe_int(live_intents.get("total")), _safe_int(summary.get("requested_live_count"))
+    total = _safe_int(live_intents.get("total"))
+    distinct = _safe_int(live_intents.get("distinct_plan_count"), default=total)
+    duplicate = _safe_int(live_intents.get("duplicate_plan_intent_count"))
+    submissions = _safe_int(summary.get("requested_live_count"))
+    return total, distinct, duplicate, submissions
+
+
+def _intent_count_text(intent_count: Any, distinct_plan_count: Any = None, duplicate_intent_count: Any = None) -> str:
+    total = _safe_int(intent_count)
+    distinct = _safe_int(distinct_plan_count, default=total)
+    duplicate = _safe_int(duplicate_intent_count)
+    if duplicate > 0 and distinct != total:
+        return f"intent {total}건(계획 {distinct}개, 중복 {duplicate}건)"
+    return f"intent {total}건"
+
+
+def _runtime_age_minutes(*, generated_at: datetime, runtime_started_at: datetime | None) -> float | None:
+    if runtime_started_at is None:
+        return None
+    return round(max(0.0, (generated_at - runtime_started_at).total_seconds() / 60.0), 2)
+
+
+def _runtime_age_text(value: Any) -> str:
+    try:
+        age = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if age < 60:
+        return f"{age:.1f}분"
+    return f"{age / 60.0:.1f}시간"
+
+
+def _lookback_hours_label(value: Any, *, fallback_days: Any = None) -> str:
+    hours = _safe_int(value)
+    if hours <= 0 and fallback_days is not None:
+        days = max(1, _safe_int(fallback_days, default=1))
+        return f"최근 {days}일"
+    if hours <= 0:
+        return ""
+    if hours % 24 == 0:
+        return f"최근 {max(1, hours // 24)}일"
+    return f"최근 {hours}시간"
 
 
 def _watchdog_scope_label(*, runtime_started_at: datetime | None, days: int) -> str:
@@ -305,6 +346,8 @@ def _augment_no_order_evaluation(
     lookback_expected_orders = _safe_int(lookback_opportunity_summary.get("expected_order_count"))
     lookback_pre_restart_orders = _safe_int(lookback_opportunity_summary.get("before_current_runtime_start_count"))
     lookback_reason_counts = dict(lookback_opportunity_summary.get("reason_counts") or {})
+    lookback_hours = _safe_int(opportunity.get("lookback_hours"))
+    lookback_window_label = _lookback_hours_label(lookback_hours) or "lookback"
     if active_expected_orders > 0:
         enriched["alert"] = True
         enriched["status"] = "ALERT"
@@ -312,11 +355,12 @@ def _augment_no_order_evaluation(
         enriched["reason"] = "sir_backtest_opportunity_without_live_intent"
         enriched["candidate_generation_status"] = "backtest_expected_opportunities_missing_live_intents"
         enriched["next_action_text"] = (
-            f"SIR 백테스트 조건 후보 {active_expected_orders}건 재생됨: runtime plan/intent 누락 확인"
+            f"{lookback_window_label} SIR 백테스트 조건 후보 {active_expected_orders}건 재생됨: runtime plan/intent 누락 확인"
         )
         enriched["message"] = (
             f"{enriched.get('message')} "
-            f"SIR_opportunity=active_expected={active_expected_orders},lookback_expected={lookback_expected_orders}"
+            f"SIR_opportunity=lookback_hours={lookback_hours},"
+            f"active_expected={active_expected_orders},lookback_expected={lookback_expected_orders}"
         )
         return enriched
     order_blocking = dict(context.get("order_blocking_status_counts") or {})
@@ -332,7 +376,7 @@ def _augment_no_order_evaluation(
         enriched["historical_advisory"] = True
         enriched["candidate_generation_status"] = "pre_restart_backtest_opportunities_advisory"
         enriched["next_action_text"] = (
-            f"재시작 전 SIR 백테스트조건 후보 {lookback_pre_restart_orders}건이 주문으로 못 간 이력 기록: "
+            f"재시작 전 {lookback_window_label} SIR 백테스트조건 후보 {lookback_pre_restart_orders}건이 주문으로 못 간 이력 기록: "
             f"{reason_summary or 'reason=none'}; 현재 런타임은 다음 fresh 후보 submit_ready 여부만 확인"
         )
         previous_next_action = str(evaluation.get("next_action_text") or "")
@@ -349,7 +393,8 @@ def _augment_no_order_evaluation(
             f"watch={_counts_summary_text(watch, limit=2)} "
             f"non_blocking={_counts_summary_text(non_blocking, limit=2)} "
             f"order_blocking={_counts_summary_text(order_blocking, limit=2)} "
-            f"SIR_opportunity=active_expected={active_expected_orders},"
+            f"SIR_opportunity=lookback_hours={lookback_hours},"
+            f"active_expected={active_expected_orders},"
             f"lookback_expected={lookback_expected_orders},"
             f"pre_restart={lookback_pre_restart_orders},"
             f"lookback_reasons={reason_summary or 'none'}"
@@ -390,7 +435,8 @@ def _augment_no_order_evaluation(
         f"watch={_counts_summary_text(watch, limit=2)} "
         f"non_blocking={_counts_summary_text(non_blocking, limit=2)} "
         f"order_blocking={_counts_summary_text(order_blocking, limit=2)} "
-        f"SIR_opportunity=active_expected={active_expected_orders},lookback_expected={lookback_expected_orders}"
+        f"SIR_opportunity=lookback_hours={lookback_hours},"
+        f"active_expected={active_expected_orders},lookback_expected={lookback_expected_orders}"
     )
     return enriched
 
@@ -399,6 +445,8 @@ def evaluate_no_order_watchdog(*, lifecycle: dict[str, Any], min_intents: int) -
     summary = dict(lifecycle.get("summary") or {})
     live_intents = dict(summary.get("live_intents") or {})
     intent_count = _safe_int(live_intents.get("total"))
+    distinct_plan_count = _safe_int(live_intents.get("distinct_plan_count"), default=intent_count)
+    duplicate_plan_intent_count = _safe_int(live_intents.get("duplicate_plan_intent_count"))
     submit_ready = _safe_int(live_intents.get("submit_ready"))
     blocked = _safe_int(live_intents.get("blocked"))
     submission_count = _safe_int(summary.get("submission_count"))
@@ -434,10 +482,15 @@ def evaluate_no_order_watchdog(*, lifecycle: dict[str, Any], min_intents: int) -
     else:
         next_action_text = "fresh live 후보 대기; 현재 차단 사유 없음"
 
+    duplicate_text = (
+        f", distinct_plans={distinct_plan_count}, duplicate_intents={duplicate_plan_intent_count}"
+        if duplicate_plan_intent_count > 0
+        else ""
+    )
     message = (
         f"최근 live intent {intent_count}건, live 주문 제출 {requested_live_count}건. "
         f"submit_ready={submit_ready}, blocked={blocked}, reasons={_top_reasons_text(top_reasons)}, "
-        f"actions={next_action_text}"
+        f"actions={next_action_text}{duplicate_text}"
     )
     return {
         "alert": alert,
@@ -446,6 +499,9 @@ def evaluate_no_order_watchdog(*, lifecycle: dict[str, Any], min_intents: int) -
         "reason": reason,
         "message": message,
         "intent_count": intent_count,
+        "distinct_plan_count": distinct_plan_count,
+        "duplicate_plan_intent_count": duplicate_plan_intent_count,
+        "top_duplicate_plan_ids": dict(live_intents.get("top_duplicate_plan_ids") or {}),
         "submit_ready": submit_ready,
         "blocked": blocked,
         "submission_count": submission_count,
@@ -486,14 +542,22 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
     lines = [
         "MICRO_LIVE 주문 없음",
         (
-            f"{scope_label}: intent {evaluation.get('intent_count')}건 / "
+            f"{scope_label}: "
+            f"{_intent_count_text(evaluation.get('intent_count'), evaluation.get('distinct_plan_count'), evaluation.get('duplicate_plan_intent_count'))} / "
             f"제출 {evaluation.get('requested_live_count')}건"
         ),
     ]
     if str(payload.get("watchdog_scope") or "") == "runtime_since_ws_start":
+        runtime_age = _runtime_age_text(payload.get("runtime_age_minutes"))
+        if runtime_age:
+            lines.append(f"런타임: 재시작 후 {runtime_age} 경과")
         lookback_summary = dict(payload.get("lookback_lifecycle_summary") or {})
-        lookback_intents, lookback_submissions = _summary_intent_submission_counts(lookback_summary)
-        lines.append(f"참고: 최근 {payload.get('window_days')}일 전체 intent {lookback_intents}건 / 제출 {lookback_submissions}건")
+        lookback_intents, lookback_distinct_plans, lookback_duplicate_intents, lookback_submissions = _summary_intent_plan_counts(lookback_summary)
+        lines.append(
+            f"참고: 최근 {payload.get('window_days')}일 전체 "
+            f"{_intent_count_text(lookback_intents, lookback_distinct_plans, lookback_duplicate_intents)} / "
+            f"제출 {lookback_submissions}건"
+        )
     candidate_context = dict(evaluation.get("candidate_generation_context") or payload.get("candidate_generation_context") or {})
     if candidate_context:
         lines.append(
@@ -506,6 +570,10 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
         )
     opportunity_context = dict(evaluation.get("session_impulse_retest_opportunity_context") or {})
     if opportunity_context:
+        lookback_label = _lookback_hours_label(
+            opportunity_context.get("lookback_hours"),
+            fallback_days=payload.get("window_days"),
+        )
         active_summary = dict(opportunity_context.get("summary") or {})
         lookback_summary = dict(opportunity_context.get("lookback_summary") or {})
         active_perf = dict(active_summary.get("potential_performance") or {})
@@ -523,7 +591,7 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
             else ""
         )
         lines.append(
-            "백테스트조건: "
+            f"백테스트조건({lookback_label}): "
             f"runtime_expected={active_summary.get('expected_order_count', 0)}건/"
             f"{active_perf.get('total_r', 0)}R, "
             f"lookback_expected={lookback_summary.get('expected_order_count', 0)}건/"
@@ -587,10 +655,19 @@ def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
         opportunity_context=opportunity_context,
     )
     watchdog_scope = "runtime_since_ws_start" if runtime_started_at is not None else "lookback_window"
+    generated_at = datetime.now(UTC)
+    runtime_age = _runtime_age_minutes(generated_at=generated_at, runtime_started_at=runtime_started_at)
+    runtime_sampling_note = (
+        "current runtime scope resets on WS worker restart; use lookback summaries for pre-restart order context"
+        if runtime_started_at is not None
+        else "lookback window scope"
+    )
     return {
-        "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
         "window_days": max(1, int(days)),
         "runtime_started_at": runtime_started_at.isoformat() if runtime_started_at else None,
+        "runtime_age_minutes": runtime_age,
+        "runtime_sampling_note": runtime_sampling_note,
         "watchdog_scope": watchdog_scope,
         "watchdog_scope_label": _watchdog_scope_label(runtime_started_at=runtime_started_at, days=days),
         "lookback_window_start": lookback_lifecycle.get("window_start"),
@@ -618,6 +695,8 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         f"- watchdog_scope: {payload.get('watchdog_scope')}",
         f"- watchdog_scope_label: {payload.get('watchdog_scope_label')}",
         f"- runtime_started_at: {payload.get('runtime_started_at') or 'none'}",
+        f"- runtime_age_minutes: {payload.get('runtime_age_minutes') if payload.get('runtime_age_minutes') is not None else 'none'}",
+        f"- runtime_sampling_note: {payload.get('runtime_sampling_note') or 'none'}",
         f"- lookback_window_start: {payload.get('lookback_window_start') or 'none'}",
         f"- message: {evaluation.get('message')}",
         f"- first_block_detail: {evaluation.get('first_block_detail_text') or 'none'}",

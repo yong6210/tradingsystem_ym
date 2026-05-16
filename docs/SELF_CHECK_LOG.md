@@ -1,6 +1,6 @@
 # Self-Check 로그 (Living)
 
-현재 기준선: 2026-05-16 MICRO_LIVE current-state docs + grid-search tuned pacing + SIR canary bootstrap deadlock fix + MICRO_LIVE failure contract + live submit claim + partial-fill lifecycle guard + atomic report stack + boolean parser guard
+현재 기준선: 2026-05-16 MICRO_LIVE current-state docs + 16-symbol SIR/CONFIRM MICRO_LIVE route + grid-search tuned pacing + SIR canary bootstrap deadlock fix + MICRO_LIVE failure contract + live submit claim + partial-fill lifecycle guard + atomic report stack + boolean parser guard
 참고: 각 Iteration의 테스트 수치/리포트 경로는 해당 시점 기록이며, 최신 운영 기준은 "현재 기준선"을 따른다.
 
 ## 2026-05-15 SIR Canary Bootstrap Deadlock Fix
@@ -7324,3 +7324,310 @@
     - `5 passed`
   - `./.venv/bin/python scripts/run_micro_main_trait_policy_search.py --search-name trait_policy_top50 --checkpoint-path reports/validation/micro_main_raw_profile_model_searches/trait_policy_top50_checkpoint.json --max-new-symbols 1 --brief-log`
     - `{"status": "paused", ...}`
+
+## 2026-05-17 Iteration #252
+### 추가 감사: SIR bootstrap outcome penalty가 첫 live 표본 수집을 막는 자기잠금
+- 발견:
+  - runtime guard/boot check는 모두 `PASS`였다.
+    - `micro_live_backtest_contract_alignment=PASS`
+    - `live_symbol_allowlist_alignment=PASS`
+    - `live_direction_contract_coverage=PASS`
+    - `ws_universe_contains_live_symbols=PASS`
+    - `macro_blackout_live_coverage=PASS`
+  - current runtime 시작 이후에는 fresh SIR 후보가 없어서 `submissions_total=0`이 정상 대기 상태였다.
+  - 최근 24시간 DB에는 2026-05-16 14:20-14:25 UTC `ADAUSDC/session_impulse_retest/CONFIRM` 후보가 있었다.
+  - 해당 후보는 validation `GO`, setup grade `A`, risk `OPEN`, session `new_york`, live route OK였지만 `outcome_penalty_manual_review`로 `SKIP_MANUAL_ONLY`가 되었다.
+  - 원인:
+    - `execution_degradation_advisory.status=manual_review`가 low live coverage에서 온 상태였다.
+    - 기존 예외는 SIR bootstrap에서 material execution sample이 없으면 manual downgrade를 막도록 되어 있었지만, `mode_advisory:session:watch`가 같이 붙으면 예외가 꺼졌다.
+    - 결과적으로 “실전 종료 표본이 아직 없음”을 근거로 첫 live 표본 수집 자체가 막히는 자기잠금이 남아 있었다.
+- 수정:
+  - `app/services/execution_approval.py`
+    - SIR live bootstrap에서 material execution sample이 없고 post-cost 약화 근거가 없으면, `mode_advisory` watch가 붙어도 outcome penalty를 `reason_only/watch`로 유지한다.
+    - 실제 weak post-cost bucket이나 material live execution sample이 생긴 뒤의 manual downgrade는 유지한다.
+  - `tests/test_auto_trading_transition_phase1.py`
+    - `mode_advisory:session:watch`가 같이 붙은 SIR bootstrap 후보도 `APPROVED_AUTO`로 남는 회귀 테스트를 추가했다.
+  - `docs/MICRO_LIVE_CURRENT_STATE.md`
+    - low coverage/outcome controls는 SIR bootstrap 동안 advisory이며, material sample 전에는 첫 live 표본 수집을 막지 않는다고 명시했다.
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_auto_trading_transition_phase1.py::test_approval_service_keeps_sir_live_bootstrap_degradation_advisory_without_execution_sample tests/test_auto_trading_transition_phase1.py::test_approval_service_keeps_sir_bootstrap_mode_watch_advisory_submit_eligible tests/test_auto_trading_transition_phase1.py::test_approval_service_downgrades_sir_when_execution_degradation_has_material_sample -q`
+    - `3 passed`
+  - `./.venv/bin/python -m pytest tests/test_micro_live_operational_guards.py tests/test_session_impulse_retest_execution_path.py -q`
+    - `175 passed`
+  - runtime source sync/restart 후 `./scripts/check_runtime_stack.sh`
+    - `/health/ready`: `ready`
+    - WS symbols `16`, `auto_route_calls=16`, `auto_route_errors=0`, `auto_route_submit_calls=0`
+    - current-runtime live intents/submissions `0`
+    - live route diagnosis `WAIT/no_fresh_live_signal`
+  - `./.venv/bin/python scripts/run_micro_live_boot_check.py --days 3 --limit 200 --no-fail-exit`
+    - `overall_status=PASS`
+
+## 2026-05-17 Iteration #254
+### 추가 감사: live readiness 출력의 과거 차단 사유가 현재 차단처럼 보이는 문제
+- 발견:
+  - `run_live_candidate_promotion_readiness.py --compact`는 현재 runtime headline을 `WAIT/no_promotable_live_candidate`로 표시하면서, 같은 화면 아래에 재시작 전 lookback blocker를 `lookback_context=state=BLOCKED ...`로 붙였다.
+  - 이 값은 현재 주문 차단 사유가 아니라 과거 24시간 참고값인데, 운영자가 보면 현재도 `BLOCKED`로 막힌 것처럼 오해할 수 있었다.
+- 수정:
+  - `scripts/run_live_candidate_promotion_readiness.py`
+    - runtime-scope 실행 시 `lookback_context_scope=historical_reference_not_current_runtime`와 `lookback_context_note`를 payload/report에 추가했다.
+    - compact 출력은 `lookback_context=...` 대신 `historical_lookback_context=reference_not_current ...`로 표시한다.
+  - `tests/test_live_candidate_promotion_readiness.py`
+    - 현재 headline/status와 과거 lookback 참고값이 출력에서 분리되는 회귀 테스트를 추가했다.
+  - `docs/AUTO_TRADING_OPERATING_RUNBOOK.md`
+    - 과거 lookback의 `BLOCKED`는 현재 주문 차단 사유가 아니라고 명시했다.
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_live_candidate_promotion_readiness.py tests/test_micro_live_current_state_docs.py -q`
+    - `21 passed`
+  - `./.venv/bin/python -m py_compile scripts/run_live_candidate_promotion_readiness.py`
+    - passed
+  - `git diff --check`
+    - passed
+  - runtime source sync/restart 후 `./scripts/check_runtime_stack.sh`
+    - `/health/ready`: `ready`
+    - WS symbols `16`, `auto_route_calls=26`, `auto_route_errors=0`, `auto_route_submit_calls=0`
+    - current runtime execution summary: intents/submissions `0`
+    - live route diagnosis: `WAIT/no_fresh_live_signal`
+    - live candidate promotion readiness: `readiness_scope=runtime_since_ws_start`, `state=WAIT`, `reason=no_promotable_live_candidate`
+    - 과거 blocker는 `historical_lookback_context=reference_not_current scope=historical_reference_not_current_runtime state=BLOCKED reason=outcome_penalty_manual_review ...`로만 표시된다.
+
+## 2026-05-17 Iteration #255
+### 추가 감사: workspace 수동 ops heartbeat가 stale workspace report를 읽는 문제
+- 발견:
+  - 실제 runtime report는 `/Users/yumin/Library/Application Support/trading/runtime_src/reports`에 최신으로 생성되고 있었다.
+  - 그런데 workspace에서 `scripts/run_micro_live_ops_heartbeat.py --no-write-report`를 직접 실행하면 workspace `reports/operations/...`의 오래된 파일을 읽어 `FAIL/stale_report`처럼 보일 수 있었다.
+  - 실제 runtime_src 기준 ops heartbeat는 `PASS`였기 때문에 주문 차단 문제는 아니지만, 수동 점검 시 “현재 운영 장애”로 오해할 수 있는 관측성 빈틈이었다.
+- 수정:
+  - `scripts/run_micro_live_ops_heartbeat.py`
+    - 상대 report pattern은 기본적으로 durable runtime의 `runtime_src/reports`를 읽도록 했다.
+    - payload에 `evaluation.report_root`를 추가해 어떤 report root를 감사했는지 표시한다.
+    - 특정 루트를 직접 감사해야 할 때는 `TRADING_OPS_HEARTBEAT_REPORT_ROOT` 또는 `TRADING_OPERATIONS_REPORT_ROOT`로 override할 수 있다.
+  - `tests/test_micro_live_operational_guards.py`
+    - workspace에서 상대 pattern을 사용해도 runtime report root를 우선하는 회귀 테스트를 추가했다.
+  - `docs/AUTO_TRADING_OPERATING_RUNBOOK.md`
+    - ops heartbeat의 기본 report root와 override 방법을 문서화했다.
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_micro_live_operational_guards.py::test_ops_heartbeat_flags_missing_reports tests/test_micro_live_operational_guards.py::test_ops_heartbeat_prefers_runtime_report_root_for_relative_patterns tests/test_micro_live_operational_guards.py::test_ops_heartbeat_warns_on_fresh_report_warning_status tests/test_micro_live_operational_guards.py::test_ops_heartbeat_warns_when_runtime_scoped_report_predates_current_ws_start tests/test_micro_live_operational_guards.py::test_ops_heartbeat_allows_runtime_scoped_report_after_current_ws_start tests/test_live_candidate_promotion_readiness.py tests/test_micro_live_current_state_docs.py -q`
+    - `26 passed`
+  - `./.venv/bin/python -m py_compile scripts/run_micro_live_ops_heartbeat.py scripts/run_live_candidate_promotion_readiness.py`
+    - passed
+  - `git diff --check`
+    - passed
+  - workspace 직접 실행:
+    - `./.venv/bin/python scripts/run_micro_live_ops_heartbeat.py --no-fail-exit --no-write-report`
+    - `overall_status=PASS`, `report_root=/Users/yumin/Library/Application Support/trading/runtime_src`, `issue_count=0`, `warning_count=0`, `hard_failure_count=0`
+  - runtime source sync/restart 후:
+    - `./scripts/check_runtime_stack.sh`: `/health/ready=ready`, WS symbols `16`, `auto_route_errors=0`, `live_route_diagnosis=WAIT/no_fresh_live_signal`
+    - workspace ops heartbeat 직접 실행도 `PASS`, `report_root=/Users/yumin/Library/Application Support/trading/runtime_src`
+
+## 2026-05-17 Iteration #256
+### 추가 감사: live/replay parity 내부 flow action이 PASS headline과 충돌하는 문제
+- 발견:
+  - 현재 runtime headline은 `PASS/portfolio_runtime_window_below_live_replay_parity_evidence_floor`라서 fresh 후보 대기 상태였다.
+  - 하지만 심볼별 `flow_diagnosis`는 여전히 `stage=signal_or_plan_generation_gap`, `recommended_action=scanner/plan 생성... 확인`으로 남아 있었다.
+  - 이 때문에 포트폴리오 요약의 `flow_shortfall_watch_count`도 16처럼 표시되어, headline은 PASS인데 내부 숫자와 액션은 장애처럼 보이는 모순이 있었다.
+- 수정:
+  - `scripts/run_live_replay_parity_audit.py`
+    - runtime-scope에서 replay 기대 후보가 evidence floor 미만이고 live intent/submission/reject가 모두 0이면 `flow_diagnosis.stage=runtime_evidence_floor_wait`로 재분류한다.
+    - `primary_reason=runtime_window_below_evidence_floor_no_current_flow`, `actionable=false`, `recommended_action=추가 조치 없음; 현재 runtime의 다음 fresh 후보를 대기`로 맞췄다.
+    - 원래 stage/reason은 `original_stage`, `original_primary_reason`에 보존한다.
+  - `tests/test_micro_live_operational_guards.py`
+    - 짧은 runtime window에서 flow diagnosis가 order/actionable gap으로 남지 않는 회귀 테스트를 추가했다.
+  - `docs/AUTO_TRADING_OPERATING_RUNBOOK.md`
+    - `runtime_evidence_floor_wait`의 의미와 조치 없음 해석을 문서화했다.
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_micro_live_operational_guards.py::test_live_replay_parity_runtime_short_window_without_flow_is_pass tests/test_micro_live_operational_guards.py::test_live_replay_parity_marks_thin_symbol_window_as_watch tests/test_micro_live_operational_guards.py::test_live_replay_parity_portfolio_runtime_scope_keeps_lookback_context tests/test_micro_live_operational_guards.py::test_ops_heartbeat_prefers_runtime_report_root_for_relative_patterns tests/test_live_candidate_promotion_readiness.py tests/test_micro_live_current_state_docs.py -q`
+    - `25 passed`
+  - `./.venv/bin/python -m py_compile scripts/run_live_replay_parity_audit.py scripts/run_micro_live_ops_heartbeat.py scripts/run_live_candidate_promotion_readiness.py`
+    - passed
+  - `git diff --check`
+    - passed
+  - `./.venv/bin/python scripts/run_live_replay_parity_audit.py --all-live-symbols --days 3 --since-ws-start --no-fail-exit --no-write-report`
+    - `overall_status=PASS`
+    - `reason=portfolio_runtime_window_below_live_replay_parity_evidence_floor`
+    - `flow_stage_counts={'runtime_evidence_floor_wait': 16}`
+    - `flow_shortfall_watch_count=0`
+    - `order_gate_watch_count=0`
+    - 심볼별 action은 `추가 조치 없음; 현재 runtime의 다음 fresh 후보를 대기`
+    - `runtime_guard=PASS`
+    - `synthetic_submit_canary=PASS`, `no_live_order_sent=True`
+    - reconciliation/failure drill PASS
+
+## 2026-05-17 Iteration #253
+### 추가 감사: miss detector가 non-submit intent를 정상 관측으로 숨기는 문제
+- 발견:
+  - `run_session_impulse_retest_miss_detector.py`는 예상 plan에 `order_intents`가 있으면 `runtime_observed_count`에 포함했지만, 그 intent가 `SUBMIT`인지 `SKIP_MANUAL_ONLY`/`SKIP_SHADOW_ONLY`/`SKIP_BLOCKED`인지는 top-level에 드러내지 않았다.
+  - 그래서 “후보는 감지됐지만 주문 가능 intent가 아니었다”와 “후보가 정상 submit-ready였다”가 모두 `observed`로 보이는 관측성 빈틈이 남았다.
+- 수정:
+  - `app/services/strategy_engine.py`
+    - miss detector payload에 `observed_submit_ready_intent_count`, `observed_non_submit_intent_count`, `observed_submission_count`, `observed_submit_decision_counts`, `observed_non_submit_reason_counts`, `observed_non_submit_samples`를 추가했다.
+    - symbol summary에도 `observed_submit_ready_intents`, `observed_non_submit_intents`, `observed_submissions`를 추가했다.
+  - `scripts/run_worker.py`
+    - compact heartbeat/log payload에도 같은 핵심 non-submit 요약을 포함했다.
+  - `docs/AUTO_TRADING_OPERATING_RUNBOOK.md`, `docs/MICRO_LIVE_CURRENT_STATE.md`
+    - `runtime_observed_count`는 submit-ready와 별도로 읽어야 한다고 명시했다.
+- 결과:
+  - 72h SIR replay/runtime parity:
+    - `expected_trade_count=2`
+    - `runtime_observed_count=2`
+    - `observed_submit_ready_intent_count=0`
+    - `observed_non_submit_intent_count=3`
+    - reasons: `outcome_penalty_manual_review=1`, `session_impulse_retest_rollout_not_ready=2`
+  - 168h SIR replay/runtime parity:
+    - `expected_trade_count=17`
+    - `runtime_observed_count=12`
+    - `skipped_before_runtime_start_count=5`
+    - `observed_submit_ready_intent_count=0`
+    - `observed_non_submit_intent_count=17`
+    - reasons: `rollout_session_not_allowed=7`, `session_impulse_retest_rollout_not_ready=9`, `outcome_penalty_manual_review=1`
+  - 해석:
+    - 최근 1주일의 “백테스트 조건상 후보”는 대부분 현재 runtime 시작 전/이전 설정 아래에서 발생했다.
+    - 주문 제출 누락이라기보다는 과거 rollout/session/outcome gate에 의해 submit-ready까지 가지 못한 케이스였다.
+    - 현재 코드에서는 `outcome_penalty_manual_review` 자기잠금은 수정됐고, current runtime은 fresh candidate 대기 상태다.
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_session_impulse_retest_execution_path.py::test_session_impulse_retest_miss_detector_counts_pre_start_intent_evidence tests/test_session_impulse_retest_execution_path.py::test_session_impulse_retest_miss_detector_treats_existing_intent_as_observed -q`
+    - `2 passed`
+  - `./.venv/bin/python -m pytest tests/test_session_impulse_retest_execution_path.py tests/test_script_entrypoints.py tests/test_micro_live_current_state_docs.py -q`
+    - `100 passed`
+  - runtime source sync/restart 후 `./scripts/check_runtime_stack.sh`
+    - `/health/ready`: `ready`
+    - WS symbols `16`, `auto_route_calls=46`, `auto_route_errors=0`, `auto_route_submit_calls=0`
+    - current-runtime live diagnosis `WAIT/no_fresh_live_signal`
+    - current-runtime intents/submissions `0`
+    - 6h miss detector: `expected_trade_count=1`, `runtime_observed_count=1`, `observed_submit_ready_intent_count=0`, `observed_non_submit_intent_count=1`, reason `outcome_penalty_manual_review=1`
+  - `./.venv/bin/python scripts/run_micro_live_boot_check.py --days 3 --limit 200 --no-fail-exit`
+    - `overall_status=PASS`
+
+## 2026-05-17 Iteration #257
+### 추가 감사: 재시작으로 짧아진 현재 창과 반복 intent가 no-order 해석을 흐리는 문제
+- 발견:
+  - 최근 코드 반영 과정에서 runtime stack을 여러 번 재시작했고, no-order headline의 active scope는 현재 WS worker `started_at` 이후로 계속 짧아졌다.
+  - 이 상태에서 `runtime_since_ws_start`만 보면 “현재는 정상 대기”가 맞지만, 사용자가 보는 `--days 3` 의미와 섞이면 며칠 동안의 주문 흐름을 본 것처럼 오해할 수 있었다.
+  - 최근 3일 lookback에는 BTC SIR plan 하나가 cooldown 뒤 두 번 `SKIP_SHADOW_ONLY` intent로 기록된 사례가 있었다. 제출은 안 됐고 live-ready 중복 주문은 아니었지만, `intent total`만 보면 백테스트 기회 수보다 많아 보이는 착시가 생겼다.
+- 수정:
+  - `scripts/run_micro_live_no_order_watchdog.py`
+    - payload/report에 `runtime_age_minutes`와 `runtime_sampling_note`를 추가했다.
+    - 알림 메시지에 `런타임: 재시작 후 ... 경과` 라인을 추가했다.
+    - live intent 총건수와 별개로 `distinct_plan_count`, `duplicate_plan_intent_count`를 표시한다.
+  - `app/services/live_order_lifecycle.py`
+    - `summary.live_intents`에 `distinct_plan_count`, `duplicate_plan_intent_count`, `top_duplicate_plan_ids`를 추가했다.
+  - `docs/MICRO_LIVE_CURRENT_STATE.md`, `docs/AUTO_TRADING_OPERATING_RUNBOOK.md`
+    - current runtime scope는 재시작 때 리셋되며, 반복 intent는 별도 백테스트 기대 주문으로 세지 말라고 문서화했다.
+- 추가 발견:
+  - post-restart no-order quick refresh는 lock 시간을 줄이려고 기본 1일 lookback으로 latest를 다시 쓴다.
+  - 수동 `--days 3` 점검은 2건을 보는데 post-restart latest/ops heartbeat는 1일 기준 1건만 보일 수 있어, 기간 차이가 숫자 차이처럼 보일 수 있었다.
+- 추가 수정:
+  - no-order message의 백테스트 조건 라벨을 `백테스트조건(최근 N일/시간)`으로 바꿨다.
+  - evaluation message에도 `SIR_opportunity=lookback_hours=...`를 추가했다.
+  - pre-restart advisory action도 `재시작 전 최근 N일 SIR ...`로 기간을 직접 표시한다.
+- 해석:
+  - 이 수정은 주문을 새로 열게 만드는 전략 변경이 아니다.
+  - 현재 “주문 없음”의 의미를 더 정확히 보이게 하는 관측성 보강이다.
+  - fresh 후보가 나온 뒤 `submit_ready > 0`인데 submission이 없으면 여전히 active bug로 올라온다.
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_micro_live_operational_guards.py tests/test_live_order_lifecycle.py tests/test_live_candidate_promotion_readiness.py tests/test_micro_live_current_state_docs.py -q`
+    - `125 passed`
+  - `./.venv/bin/python -m py_compile scripts/run_micro_live_no_order_watchdog.py app/services/live_order_lifecycle.py`
+    - passed
+  - `git diff --check`
+    - passed
+  - runtime source sync/restart 후:
+    - `/health/ready`: `ready`
+    - WS `auto_route_calls=16`, `auto_route_errors=0`, `auto_route_submit_calls=0`
+    - live route diagnosis: `WAIT/no_fresh_live_signal`
+    - current-runtime live intents/submissions: `0/0`
+    - no-order message now includes `런타임: 재시작 후 ... 경과`
+    - 3-day lookback message separates `intent 3건(계획 2개, 중복 1건)`
+    - ops heartbeat: `PASS`, `issue_count=0`, `warning_count=0`, `hard_failure_count=0`
+
+## 2026-05-17 Iteration #258
+### 추가 감사: 11-symbol 시절 문구가 현재 16-symbol runtime truth와 섞이는 문서 drift
+- 발견:
+  - runtime guard 기준 실제 현재 계약은 `session_impulse_retest + CONFIRM + 16개 MICRO_LIVE 심볼`이다.
+  - `micro_live_backtest_contract_alignment=PASS`, `expected_symbols=16`, `ws_symbols=16`, `core_live_slots=16`으로 확인됐다.
+  - 하지만 README, runbook, go-live checklist 일부 current 운영 문구가 아직 예전 11개 core 심볼 시절 표현을 담고 있었다.
+  - 이 상태는 주문 차단 버그는 아니지만, 사람이 entry surface/readiness에서 16개 심볼을 보면서 “왜 문서와 다르지?”라고 오해할 수 있는 운영 리스크다.
+- 수정:
+  - `README.md`
+    - 현재 live route와 parity audit 설명을 16-symbol MICRO_LIVE route 기준으로 갱신했다.
+  - `docs/AUTO_TRADING_OPERATING_RUNBOOK.md`
+    - `route_mismatch_summary`, MICRO_LIVE 기본 계약, live/replay parity, 운영 원칙의 current route 표현을 16개 심볼 기준으로 정리했다.
+  - `docs/AUTO_TRADING_LIVE_GO_LIVE_CHECKLIST.md`
+    - 현재 live 계약을 16개 USDC perpetual symbols로 갱신했다.
+  - `docs/SELF_CHECK_LOG.md`
+    - 최상단 현재 기준선에 16-symbol route를 명시했다.
+- 해석:
+  - 과거 Iteration 안의 11개 수치는 당시 의사결정 기록으로 남긴다.
+  - 최신 운영 판단은 `MICRO_LIVE_CURRENT_STATE.md`, runtime guard, 그리고 이 문서의 현재 기준선을 우선한다.
+
+## 2026-05-17 Iteration #259
+### 추가 감사: preflight READY와 checklist manual-review 문구가 같이 보여 생기는 운영 해석 모호성
+- 발견:
+  - live preflight는 `overall_status=READY_FOR_MICRO_LIVE`로 정상 통과했다.
+  - 동시에 `checklist_language` message는 `approve=manual review first`, `align=deployment_drift`를 표시했다.
+  - 기존 로직은 validation이 `GO`이고 checklist의 `blocking_failures=0`, `manual_actions=0`, `act=proceed_with_configured_rollout`이면 이것을 hard block이 아닌 advisory warning으로 올바르게 처리했다.
+  - 다만 출력만 보면 “준비 완료”와 “수동 검토 우선”이 충돌하는 것처럼 보여 사용자가 주문 차단으로 오해할 수 있었다.
+- 수정:
+  - `scripts/run_micro_live_preflight.py`
+    - checklist가 advisory warning 때문에 `manual review first`를 표시하지만 주문 차단은 아닌 경우, check message에 `classification=advisory_only_checklist_warning_not_order_blocking`을 추가했다.
+  - `tests/test_micro_live_preflight.py`
+    - 해당 분류가 출력되는지 회귀 테스트를 추가했다.
+  - `docs/AUTO_TRADING_OPERATING_RUNBOOK.md`
+    - preflight checklist advisory 해석 기준에 classification 문구를 문서화했다.
+- 해석:
+  - 이 수정은 승인 조건을 완화하지 않는다.
+  - 사람과 알림 surface가 같은 상태를 더 명확히 읽게 하는 관측성/문구 보강이다.
+
+## 2026-05-17 Iteration #260
+### 추가 감사: 코드 설정 기본값이 현재 MICRO_LIVE 계약보다 오래된 문제
+- 발견:
+  - 실제 런타임 `.env`와 `.env.example`은 `session_impulse_retest + CONFIRM + 16개 MICRO_LIVE 심볼`로 맞아 있었다.
+  - 하지만 `app/core/config.py`의 기본값은 아직 `BTCUSDC,ETHUSDC`, `LIMIT`, `sweep_reversal/trend_continuation/session_impulse_retest`, `max_daily_new_entries=2` 같은 예전 canary 형태를 담고 있었다.
+  - 평상시에는 `.env`가 덮어써서 주문 차단 원인은 아니지만, 설정 파일이 누락된 테스트/새 설치/운영 복구 상황에서 현재 계약과 다른 기본값으로 돌아갈 수 있는 drift 위험이다.
+- 수정:
+  - `app/core/config.py`
+    - MICRO_LIVE 기본 symbol/priority/direction contract를 현재 16개 심볼 기준으로 변경했다.
+    - MICRO_LIVE 기본 family를 `session_impulse_retest`, entry model을 `CONFIRM`, session을 `dead_session,london,new_york`로 변경했다.
+    - 기본 pacing을 현재 tuned 값에 맞춰 `max_concurrent_positions=3`, `max_daily_new_entries=0`으로 변경했다.
+    - 기본 live sizing/liquidity gate도 현재 canary posture와 맞게 `RISK_PCT`, 1% risk, 200 USDT account assumption, leverage cap 10, liquidity gate enabled로 맞췄다.
+  - `tests/test_auto_trading_transition_phase1.py`
+    - 설정 기본값이 현재 MICRO_LIVE route에서 벗어나지 않도록 회귀 assertion을 추가했다.
+- 해석:
+  - 실제 런타임 `.env` 값은 이미 맞아 있었기 때문에 주문 경로를 새로 여는 변경은 아니다.
+  - 설정 누락 시 예전 `sweep_reversal/LIMIT` canary로 조용히 되돌아가는 위험을 줄인 구조적 정리다.
+
+## 2026-05-17 Iteration #261
+### 추가 감사: SIR 자체 기본값과 health ready probe 범위가 현재 live 계약보다 좁은 문제
+- 발견:
+  - Iteration #260에서 MICRO_LIVE route 기본값은 현재 계약으로 맞췄지만, `session_impulse_retest_*` 기본값은 아직 `enabled=false`, `shadow_only=true`, `allowed_symbols=BTCUSDC`, `core_live_slots=2`에 가까운 예전 값으로 남아 있었다.
+  - 실제 runtime `.env`가 덮어써 현재 주문 차단 원인은 아니지만, 설정 파일이 빠지는 복구/새 설치 상황에서는 SIR이 조용히 꺼지거나 BTC 단일 shadow에 가까운 상태가 될 수 있었다.
+  - `/health/ready` market-data probe도 첫 12개 심볼만 검사해서 현재 16개 MICRO_LIVE route와 숫자가 다르게 보였다.
+- 수정:
+  - `app/core/config.py`
+    - `CURRENT_SESSION_IMPULSE_RETEST_SYMBOLS`를 추가하고 SIR 기본값을 현재 운영값(`enabled=true`, `shadow_only=false`, 21개 SIR 관측 심볼, `partial_activation_ratio=1.0`, `core_live_slots=16`)으로 맞췄다.
+  - `app/services/health_check.py`
+    - market-data readiness probe를 12개로 자르지 않고 현재 MICRO_LIVE allowed symbols 전체를 보도록 변경했다.
+    - MICRO_LIVE 심볼이 비어 있을 때만 SIR symbol list를 fallback으로 사용한다.
+  - `tests/test_auto_trading_transition_phase1.py`, `tests/test_health_readiness.py`
+    - SIR 기본값과 16-symbol health probe 범위가 다시 줄어들지 않도록 회귀 테스트를 추가했다.
+- 해석:
+  - 이번 수정도 현재 즉시 주문을 만드는 전략 완화가 아니다.
+  - 다만 “실제 운영값은 16개인데 ready는 12개만 본다”, “MICRO_LIVE 기본값은 맞는데 SIR 기본값은 예전이다” 같은 남은 drift를 제거했다.
+
+## 2026-05-17 Iteration #262
+### 추가 감사: rollout policy와 SIR secondary 문서/기본값 drift 정리
+- 발견:
+  - 실제 live route allowlist는 `session_impulse_retest`만 주문 권한을 갖고 있었지만, persisted runtime rollout policy에는 과거 `sweep_reversal`이 `live_enabled=true`, `max_execution_mode=MICRO_LIVE`처럼 남아 있었다.
+  - family allowlist가 `sweep_reversal` 주문을 막고 있어 직접 주문 차단/오주문 원인은 아니었지만, 운영 대시보드에서 “sweep도 live인가?”라고 읽힐 수 있는 모순이었다.
+  - SIR universe policy와 `.env`는 secondary/tracked-only를 `SUIUSDC,AAVEUSDC,HBARUSDC,ZECUSDC,UNIUSDC`로 보는데, 코드 기본값은 `SUIUSDC,AAVEUSDC,HBARUSDC`까지만 포함했고 README에는 오래된 `XLMUSDC`가 남아 있었다.
+- 수정:
+  - runtime API로 `sweep_reversal` rollout policy를 `live_enabled=false`, `max_execution_mode=PAPER`, `max_risk_r=0.0`로 정리했다.
+  - `app/core/config.py`
+    - `CURRENT_SESSION_IMPULSE_RETEST_SYMBOLS` 기본값에 `ZECUSDC`, `UNIUSDC`를 추가해 `.env`/universe policy와 맞췄다.
+  - `README.md`
+    - current SIR live/core 16개 목록에 `1000PEPEUSDC,ARBUSDC,1000SHIBUSDC,FILUSDC,DOGEUSDC`를 추가하고, secondary 목록을 `SUIUSDC,AAVEUSDC,HBARUSDC,ZECUSDC,UNIUSDC`로 정리했다.
+  - `tests/test_auto_trading_transition_phase1.py`, `tests/test_health_readiness.py`
+    - SIR fallback 기본값과 health probe 범위가 current live/secondary 계약에서 다시 벗어나지 않도록 assertion을 보강했다.
+- 해석:
+  - 현재 live 주문 authority는 계속 `session_impulse_retest + CONFIRM + 16개 core MICRO_LIVE 심볼`이다.
+  - `ZECUSDC`, `UNIUSDC`는 secondary/tracked-only이며 주문 대상이 아니다.
+  - 이 수정은 주문 조건 완화가 아니라 운영 surface와 fallback 기본값의 오해를 제거한 것이다.

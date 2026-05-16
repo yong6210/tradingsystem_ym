@@ -268,6 +268,8 @@ def test_micro_live_approval_tolerates_malformed_numeric_settings() -> None:
         auto_trading_allowed_families="trend_continuation",
         auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="trend_continuation",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
+        auto_trading_micro_live_allowed_sessions="",
     )
     settings.auto_trading_micro_live_max_concurrent_positions = "bad-position-cap"
     settings.auto_trading_micro_live_max_daily_new_entries = "bad-daily-cap"
@@ -362,6 +364,7 @@ def test_validation_do_not_deploy_detail_classifies_missing_sample_root_cause() 
                 auto_trading_enabled=True,
                 auto_trading_execution_mode="MICRO_LIVE",
                 auto_trading_micro_live_allowed_families="",
+                auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
             ),
             _plan(
                 plan_id="manual_review_case",
@@ -390,6 +393,7 @@ def test_validation_do_not_deploy_detail_classifies_missing_sample_root_cause() 
                 auto_trading_enabled=True,
                 auto_trading_execution_mode="MICRO_LIVE",
                 auto_trading_micro_live_allowed_families="",
+                auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
             ),
             _plan(plan_id="research_shadow_case", validity={"strategy_mode": "RESEARCH", "strategy_family": "range_rotation"}),
                 {
@@ -410,6 +414,7 @@ def test_validation_do_not_deploy_detail_classifies_missing_sample_root_cause() 
                 auto_trading_execution_mode="MICRO_LIVE",
                 auto_trading_allowed_symbols="ETHUSDC",
                 auto_trading_micro_live_allowed_families="",
+                auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
             ),
             _plan(plan_id="allowlist_case"),
                 {
@@ -429,6 +434,7 @@ def test_validation_do_not_deploy_detail_classifies_missing_sample_root_cause() 
                 auto_trading_enabled=True,
                 auto_trading_execution_mode="MICRO_LIVE",
                 auto_trading_micro_live_allowed_families="",
+                auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
             ),
             _plan(
                 plan_id="stale_case",
@@ -452,6 +458,7 @@ def test_validation_do_not_deploy_detail_classifies_missing_sample_root_cause() 
                 auto_trading_enabled=True,
                 auto_trading_execution_mode="MICRO_LIVE",
                 auto_trading_micro_live_allowed_families="",
+                auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
             ),
             _plan(plan_id="no_go_case"),
                 {
@@ -481,7 +488,7 @@ def test_approval_service_covers_manual_shadow_allowlist_stale_and_no_go(
     expected_state: ApprovalState,
     expected_code: str,
 ) -> None:
-    service = ExecutionPlanningService(settings=settings)
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
     executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
 
     payload = service.approve(
@@ -502,6 +509,18 @@ def test_auto_trading_settings_defaults_and_preview_approval_api_paths() -> None
     assert settings.auto_trading_execution_mode == "SHADOW"
     assert settings.auto_trading_allowed_symbols == ""
     assert settings.auto_trading_allowed_families == ""
+    assert settings.auto_trading_micro_live_allowed_families == "session_impulse_retest"
+    assert settings.auto_trading_micro_live_allowed_entry_models == "CONFIRM"
+    assert settings.auto_trading_micro_live_max_concurrent_positions == 3
+    assert settings.auto_trading_micro_live_max_daily_new_entries == 0
+    assert settings.session_impulse_retest_enabled is True
+    assert settings.session_impulse_retest_shadow_only is False
+    assert settings.session_impulse_retest_core_live_slots == 16
+    assert settings.session_impulse_retest_partial_activation_ratio == 1.0
+    assert "DOGEUSDC" in settings.session_impulse_retest_allowed_symbols
+    assert "HBARUSDC" in settings.session_impulse_retest_allowed_symbols
+    assert "ZECUSDC" in settings.session_impulse_retest_allowed_symbols
+    assert "UNIUSDC" in settings.session_impulse_retest_allowed_symbols
 
     now = datetime.now(timezone.utc).replace(microsecond=0)
     test_symbol = f"REPOTEST{int(now.timestamp())}USDC"
@@ -705,6 +724,89 @@ def test_approval_service_keeps_sir_live_bootstrap_degradation_advisory_without_
         == "advisory_until_material_sir_live_execution_sample"
     )
     assert "execution_degradation:manual_review" in payload["outcome_approval_penalty"]["reason_codes"]
+
+
+def test_approval_service_keeps_sir_bootstrap_mode_watch_advisory_submit_eligible() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
+        auto_trading_micro_live_allowed_families="session_impulse_retest",
+        auto_trading_micro_live_allowed_entry_models="CONFIRM",
+        auto_trading_micro_live_allowed_sessions="london,new_york",
+        session_impulse_retest_enabled=True,
+        session_impulse_retest_shadow_only=False,
+        session_impulse_retest_partial_activation_ratio=1.0,
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(
+        plan_id="sir_bootstrap_mode_watch_advisory_case",
+        entry_model="CONFIRM",
+        validity={
+            "strategy_family": "session_impulse_retest",
+            "strategy_grade": "A",
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "recommended_risk_r": 0.4,
+            "regime": "trend",
+        },
+    )
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+        requested_execution_mode=ExecutionMode.MICRO_LIVE,
+        safety_state={
+            "new_entry_allowed": True,
+            "session_impulse_retest_rollout_readiness": {
+                "status": "live_bootstrap_collecting",
+                "blockers": [],
+                "advisory_blockers": ["no_recent_closed_sample"],
+            },
+        },
+        outcome_inputs={
+            "execution_degradation_advisory_summary": {
+                "status": "manual_review",
+                "reason_codes": ["execution_quality_low_coverage"],
+                "sample_context": {"plans_matured": 0, "fill_events_total": 0, "closed_plans": 0},
+            },
+            "score_to_outcome_funnel_summary": {
+                "historical_execution_outcomes": {"baseline_cost_profitable_rate_from_closed": 0.0},
+                "decomposition": {"family": [], "regime": [], "session": []},
+            },
+            "mode_advisory_summary": {
+                "family": [],
+                "regime": [],
+                "session": [
+                    {
+                        "bucket": "london",
+                        "advisory_state": "watch",
+                        "confidence": "medium",
+                        "sample_note": "usable evidence, but still limited",
+                    }
+                ],
+            },
+        },
+    )
+
+    assert payload["approval_state"] == ApprovalState.APPROVED_AUTO.value
+    assert payload["outcome_approval_penalty"]["status"] == "watch"
+    assert payload["outcome_approval_penalty"]["penalty_tier"] == "reason_only"
+    assert (
+        payload["outcome_approval_penalty"]["source_summary"]["execution_degradation_policy"]
+        == "advisory_until_material_sir_live_execution_sample"
+    )
+    assert "mode_advisory:session:watch" in payload["outcome_approval_penalty"]["reason_codes"]
 
 
 def test_approval_service_downgrades_sir_when_execution_degradation_has_material_sample() -> None:
@@ -1020,6 +1122,7 @@ def test_approval_service_blocks_micro_live_on_same_window_family_cluster() -> N
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
         auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
     )
     service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
     plan = _plan(plan_id="micro_live_cluster_guard_case")
@@ -1059,6 +1162,7 @@ def test_approval_service_blocks_micro_live_when_entry_is_not_limit() -> None:
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
         auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT",
     )
     service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
     plan = _plan(plan_id="micro_live_limit_only_case", entry_model="CONFIRM")
@@ -1117,6 +1221,7 @@ def test_approval_service_blocks_micro_live_on_recent_family_loss_cooldown() -> 
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
         auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
     )
     service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
     plan = _plan(plan_id="micro_live_loss_cooldown_case")
@@ -1158,6 +1263,7 @@ def test_approval_service_blocks_micro_live_on_same_direction_family_exposure_ca
         auto_trading_allowed_symbols="SOLUSDC",
         auto_trading_micro_live_allowed_symbols="SOLUSDC",
         auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
         auto_trading_live_max_same_family_direction_exposures=1,
     )
     service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
@@ -1202,6 +1308,7 @@ def test_approval_service_holds_out_transition_variant_by_stable_partial_gate() 
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
         auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
         transition_edge_variant_partial_activation_ratio=0.0,
     )
     service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
@@ -1248,6 +1355,7 @@ def test_approval_service_allows_transition_variant_when_partial_gate_selects_sa
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
         auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
         transition_edge_variant_partial_activation_ratio=1.0,
     )
     service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
@@ -1327,6 +1435,7 @@ def test_approval_service_blocks_micro_live_on_session_direction_hour_contract()
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
         auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
         auto_trading_micro_live_session_direction_blocked_hours_utc=f"BTCUSDC:new_york:LONG:{current_hour_utc}",
     )
     service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
@@ -1359,6 +1468,7 @@ def test_approval_service_allows_micro_live_outside_session_direction_hour_contr
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
         auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
         auto_trading_micro_live_session_direction_blocked_hours_utc=f"BTCUSDC:new_york:LONG:{blocked_hour_utc}",
     )
     service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
@@ -1388,6 +1498,7 @@ def test_approval_service_ignores_micro_live_daily_entry_cap_when_disabled() -> 
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
         auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
         auto_trading_micro_live_max_daily_new_entries=0,
     )
     service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
@@ -1701,6 +1812,7 @@ def test_approval_service_blocks_micro_live_on_plan_blocklist(tmp_path: Path) ->
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
         auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
         auto_trading_micro_live_plan_blocklist_path=str(blocklist_path),
     )
     service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
@@ -1750,6 +1862,7 @@ def test_approval_service_blocks_micro_live_on_event_blackout_window(tmp_path: P
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
         auto_trading_micro_live_allowed_families="",
+        auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
         auto_trading_micro_live_event_blackout_path=str(blackout_path),
     )
     service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())

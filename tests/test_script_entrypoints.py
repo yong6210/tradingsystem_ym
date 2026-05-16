@@ -223,6 +223,10 @@ def test_worker_loop_log_compaction_omits_full_universe_results() -> None:
                         "enabled": True,
                         "expected_trade_count": 1,
                         "runtime_observed_count": 1,
+                        "observed_submit_ready_intent_count": 0,
+                        "observed_non_submit_intent_count": 1,
+                        "observed_submission_count": 0,
+                        "observed_non_submit_reason_counts": {"outcome_penalty_manual_review": 1},
                         "miss_count": 0,
                         "runtime_started_at": "2026-05-16T03:40:50Z",
                     },
@@ -245,6 +249,9 @@ def test_worker_loop_log_compaction_omits_full_universe_results() -> None:
         "ws_stream_active_route_suppressed": 1,
     }
     assert sync["session_impulse_retest_miss_detector"]["miss_count"] == 0
+    assert sync["session_impulse_retest_miss_detector"]["observed_non_submit_reason_counts"] == {
+        "outcome_penalty_manual_review": 1
+    }
 
 
 def test_session_impulse_retest_opportunity_report_performance_uses_configured_risk() -> None:
@@ -514,6 +521,7 @@ def test_worker_completed_heartbeat_preserves_stream_diagnostics(monkeypatch: py
         "auto_route_submit_calls": 1,
         "reconnects": 0,
         "ingest_errors": 0,
+        "skipped_non_final_candles": 0,
         "skipped_reverse_timestamp": 4,
         "refresh_errors": 5,
         "auto_route_errors": 6,

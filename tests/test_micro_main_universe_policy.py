@@ -29,9 +29,11 @@ def test_micro_main_universe_policy_snapshot_shapes_core_and_secondary_lists() -
         "SUIUSDC",
         "AAVEUSDC",
         "HBARUSDC",
+        "ZECUSDC",
+        "UNIUSDC",
     ]
     assert snapshot["partial_activation_priority"][0] == "BTCUSDC"
-    assert snapshot["partial_activation_priority"][-1] == "HBARUSDC"
+    assert snapshot["partial_activation_priority"][-1] == "UNIUSDC"
 
 
 def test_micro_main_universe_entry_returns_expected_risk_multiplier() -> None:
@@ -41,6 +43,8 @@ def test_micro_main_universe_entry_returns_expected_risk_multiplier() -> None:
     avax = micro_main_universe_entry("AVAXUSDC")
     sui = micro_main_universe_entry("SUIUSDC")
     hbar = micro_main_universe_entry("HBARUSDC")
+    zec = micro_main_universe_entry("ZECUSDC")
+    uni = micro_main_universe_entry("UNIUSDC")
     pepe = micro_main_universe_entry("1000PEPEUSDC")
     doge = micro_main_universe_entry("DOGEUSDC")
     assert btc is not None
@@ -49,6 +53,8 @@ def test_micro_main_universe_entry_returns_expected_risk_multiplier() -> None:
     assert avax is not None
     assert sui is not None
     assert hbar is not None
+    assert zec is not None
+    assert uni is not None
     assert pepe is not None
     assert doge is not None
     assert btc["risk_multiplier"] == 0.9
@@ -61,6 +67,10 @@ def test_micro_main_universe_entry_returns_expected_risk_multiplier() -> None:
     assert sui["risk_multiplier"] == 0.45
     assert hbar["tier"] == "secondary"
     assert hbar["risk_multiplier"] == 0.45
+    assert zec["tier"] == "secondary"
+    assert zec["risk_multiplier"] == 0.35
+    assert uni["tier"] == "secondary"
+    assert uni["risk_multiplier"] == 0.4
     assert pepe["tier"] == "core"
     assert pepe["risk_multiplier"] == 0.35
     assert doge["tier"] == "core"
