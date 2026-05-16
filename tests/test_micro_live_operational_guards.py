@@ -227,10 +227,11 @@ def test_no_order_watchdog_records_pre_restart_opportunities_as_advisory() -> No
             "lookback_summary": {
                 "expected_order_count": 12,
                 "before_current_runtime_start_count": 12,
+                "status_counts": {
+                    "pre_runtime_backfill_without_intent": 12,
+                },
                 "reason_counts": {
-                    "session_impulse_retest_rollout_not_ready": 6,
-                    "rollout_session_not_allowed": 5,
-                    "validation_do_not_deploy": 1,
+                    "before_runtime_start": 12,
                 },
                 "potential_performance": {"total_r": 6.61},
             },
@@ -244,7 +245,74 @@ def test_no_order_watchdog_records_pre_restart_opportunities_as_advisory() -> No
     assert enriched["historical_advisory"] is True
     assert enriched["candidate_generation_status"] == "pre_restart_backtest_opportunities_advisory"
     assert "pre_restart=12" in enriched["message"]
-    assert "session_impulse_retest_rollout_not_ready=6" in enriched["message"]
+    assert "before_runtime_start=12" in enriched["message"]
+
+
+def test_no_order_watchdog_alerts_on_pre_restart_blocked_opportunities() -> None:
+    evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
+        lifecycle={
+            "summary": {
+                "submission_count": 0,
+                "requested_live_count": 0,
+                "rejected_or_error_count": 0,
+                "live_intents": {"total": 0, "submit_ready": 0, "blocked": 0, "top_block_reasons": {}},
+            }
+        },
+        min_intents=1,
+    )
+
+    enriched = run_micro_live_no_order_watchdog._augment_no_order_evaluation(
+        evaluation,
+        candidate_context={
+            "source": "session_impulse_retest_runtime_audit",
+            "scope": "runtime_since_ws_start",
+            "audit_count": 20,
+            "no_candidate_status_counts": {"no_live_route_candidate_plan": 8},
+            "watch_status_counts": {},
+            "non_blocking_status_counts": {"ws_stream_active_route_suppressed": 12},
+            "order_blocking_status_counts": {},
+        },
+        opportunity_context={
+            "source": "session_impulse_retest_opportunity_report",
+            "status": "ok",
+            "summary": {
+                "expected_order_count": 0,
+                "potential_performance": {"total_r": 0},
+            },
+            "lookback_summary": {
+                "expected_order_count": 61,
+                "before_current_runtime_start_count": 61,
+                "status_counts": {
+                    "blocked_or_skipped": 17,
+                    "pre_runtime_backfill_without_intent": 43,
+                    "pre_runtime_unobservable": 1,
+                },
+                "reason_counts": {
+                    "before_runtime_start": 43,
+                    "before_runtime_start_insufficient_candles": 1,
+                    "session_impulse_retest_rollout_not_ready": 6,
+                    "rollout_session_not_allowed": 6,
+                    "validation_do_not_deploy": 4,
+                    "outcome_penalty_manual_review": 1,
+                },
+            },
+        },
+    )
+
+    assert enriched["alert"] is True
+    assert enriched["status"] == "ALERT"
+    assert enriched["severity"] == "WARN"
+    assert enriched["reason"] == "sir_pre_restart_blocked_opportunities"
+    assert enriched["candidate_generation_status"] == "pre_restart_blocked_opportunities"
+    assert enriched["historical_blocked_opportunity_count"] == 17
+    assert enriched["historical_blocked_reason_counts"] == {
+        "session_impulse_retest_rollout_not_ready": 6,
+        "rollout_session_not_allowed": 6,
+        "validation_do_not_deploy": 4,
+        "outcome_penalty_manual_review": 1,
+    }
+    assert "blocked_or_skipped=17" in enriched["message"]
+    assert "validation_do_not_deploy=4" in enriched["message"]
 
 
 def test_no_order_watchdog_prioritizes_current_order_blocking_over_pre_restart_context() -> None:

@@ -7,6 +7,8 @@
 - source-of-truth를 `차트`가 아니라 `서버 runtime contract`로 고정한다.
 
 ## 2. Source Of Truth
+- 현재 전체 런타임 스냅샷: [CURRENT_SYSTEM_STATE.md](/Users/yumin/Documents/trading/docs/CURRENT_SYSTEM_STATE.md)
+- 현재 MICRO_LIVE route/pacing 계약: [MICRO_LIVE_CURRENT_STATE.md](/Users/yumin/Documents/trading/docs/MICRO_LIVE_CURRENT_STATE.md)
 - 차트/TradingView: mirror, not authority
 - runtime 판단: `GET /execution/operator-dashboard`
 - 브라우저 운영 화면: `GET /execution/operator-ui`

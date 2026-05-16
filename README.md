@@ -355,15 +355,17 @@ Until those problems are resolved, the rule is:
 
 See `Quick Start` below for copy-paste startup requests.
 
-1. `GET /health/ready`
+1. `docs/CURRENT_SYSTEM_STATE.md`
+   Read the current whole-system snapshot first when taking over the runtime, then use `docs/MICRO_LIVE_CURRENT_STATE.md` for the live-route contract.
+2. `GET /health/ready`
    Check database, exchange connectivity, and event backend readiness before looking at trading surfaces.
-2. `GET /execution/operator-dashboard`
+3. `GET /execution/operator-dashboard`
    See runtime funnel, safety state, recent intents, orders, positions, reconciliation, and portfolio summary in one payload.
-3. `GET /portfolio/budget`
+4. `GET /portfolio/budget`
    Review exposure headroom, blocked reasons, accepted candidates, and alpha research backlog.
-4. `POST /validation/report`
+5. `POST /validation/report`
    Generate the deployment approval summary, validation stack, and research outputs for a symbol.
-5. `POST /operations/checklist`
+6. `POST /operations/checklist`
    Convert validation plus runtime evidence into operator-facing go/no-go and playbook language.
 
 ## Authority Map
@@ -937,6 +939,7 @@ Read surfaces are separated from execution mutations, operational controls, and 
 
 Start with `docs/PLAN.md` for the project map, then `docs/CONTEXT_NOTE.md` for operating constraints.
 
+- `docs/CURRENT_SYSTEM_STATE.md`
 - `docs/PLAN.md`
 - `docs/CONTEXT_NOTE.md`
 - `docs/CHECKLIST.md`
@@ -1016,6 +1019,7 @@ Near-100 hardening plan:
 
 Current MICRO_LIVE route and pacing:
 
+- [docs/CURRENT_SYSTEM_STATE.md](/Users/yumin/Documents/trading/docs/CURRENT_SYSTEM_STATE.md)
 - [docs/MICRO_LIVE_CURRENT_STATE.md](/Users/yumin/Documents/trading/docs/MICRO_LIVE_CURRENT_STATE.md)
 
 MICRO_LIVE preflight:

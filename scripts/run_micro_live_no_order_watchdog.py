@@ -239,6 +239,19 @@ def _counts_summary_text(counts: dict[str, Any], *, limit: int = 3) -> str:
     return ", ".join(f"{key}={value}" for key, value in list(counts.items())[: max(1, int(limit))])
 
 
+def _lookback_blocking_reason_counts(reason_counts: dict[str, Any]) -> dict[str, int]:
+    blocking: dict[str, int] = {}
+    for raw_reason, raw_count in dict(reason_counts or {}).items():
+        reason = str(raw_reason or "").strip()
+        count = _safe_int(raw_count)
+        if not reason or count <= 0:
+            continue
+        if reason == "before_runtime_start" or reason.startswith("before_runtime_start_"):
+            continue
+        blocking[reason] = count
+    return blocking
+
+
 def _session_impulse_retest_candidate_context(
     *,
     db: Any,
@@ -346,6 +359,9 @@ def _augment_no_order_evaluation(
     lookback_expected_orders = _safe_int(lookback_opportunity_summary.get("expected_order_count"))
     lookback_pre_restart_orders = _safe_int(lookback_opportunity_summary.get("before_current_runtime_start_count"))
     lookback_reason_counts = dict(lookback_opportunity_summary.get("reason_counts") or {})
+    lookback_status_counts = dict(lookback_opportunity_summary.get("status_counts") or {})
+    lookback_blocking_reasons = _lookback_blocking_reason_counts(lookback_reason_counts)
+    lookback_blocked_or_skipped = _safe_int(lookback_status_counts.get("blocked_or_skipped"))
     lookback_hours = _safe_int(opportunity.get("lookback_hours"))
     lookback_window_label = _lookback_hours_label(lookback_hours) or "lookback"
     if active_expected_orders > 0:
@@ -367,6 +383,44 @@ def _augment_no_order_evaluation(
     no_candidate = dict(context.get("no_candidate_status_counts") or {})
     non_blocking = dict(context.get("non_blocking_status_counts") or {})
     watch = dict(context.get("watch_status_counts") or {})
+    if lookback_expected_orders > 0 and lookback_pre_restart_orders > 0 and not order_blocking and (
+        lookback_blocked_or_skipped > 0 or lookback_blocking_reasons
+    ):
+        reason_summary = _counts_summary_text(lookback_blocking_reasons or lookback_reason_counts, limit=4)
+        enriched["alert"] = True
+        enriched["status"] = "ALERT"
+        enriched["severity"] = "WARN"
+        enriched["reason"] = "sir_pre_restart_blocked_opportunities"
+        enriched["historical_advisory"] = False
+        enriched["historical_blocked_opportunity_count"] = lookback_blocked_or_skipped
+        enriched["historical_blocked_reason_counts"] = lookback_blocking_reasons
+        enriched["candidate_generation_status"] = "pre_restart_blocked_opportunities"
+        enriched["next_action_text"] = (
+            f"재시작 전 {lookback_window_label} SIR 후보 중 제출 전 차단 이력 확인: "
+            f"{reason_summary or 'reason=none'}; 현재 설정으로 같은 차단이 반복되는지 확인"
+        )
+        previous_next_action = str(evaluation.get("next_action_text") or "")
+        current_message = str(enriched.get("message") or "")
+        if previous_next_action and current_message:
+            current_message = current_message.replace(
+                f"actions={previous_next_action}",
+                f"actions={enriched.get('next_action_text')}",
+            )
+        enriched["message"] = (
+            f"{current_message or enriched.get('message')} "
+            f"SIR={enriched.get('candidate_generation_status')} "
+            f"no_candidate={_counts_summary_text(no_candidate, limit=2)} "
+            f"watch={_counts_summary_text(watch, limit=2)} "
+            f"non_blocking={_counts_summary_text(non_blocking, limit=2)} "
+            f"order_blocking={_counts_summary_text(order_blocking, limit=2)} "
+            f"SIR_opportunity=lookback_hours={lookback_hours},"
+            f"active_expected={active_expected_orders},"
+            f"lookback_expected={lookback_expected_orders},"
+            f"pre_restart={lookback_pre_restart_orders},"
+            f"blocked_or_skipped={lookback_blocked_or_skipped},"
+            f"blocking_reasons={reason_summary or 'none'}"
+        )
+        return enriched
     if lookback_expected_orders > 0 and lookback_pre_restart_orders > 0 and not order_blocking:
         reason_summary = _counts_summary_text(lookback_reason_counts, limit=3)
         enriched["alert"] = False

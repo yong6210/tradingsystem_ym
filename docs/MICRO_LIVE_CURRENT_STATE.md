@@ -1,8 +1,8 @@
 # MICRO_LIVE Current State
 
-Last updated: 2026-05-17 KST
+Last updated: 2026-05-17 03:29 KST
 
-This is the concise operator source for the current live canary shape. Detailed history stays in [SELF_CHECK_LOG.md](/Users/yumin/Documents/trading/docs/SELF_CHECK_LOG.md); daily procedures stay in [AUTO_TRADING_OPERATING_RUNBOOK.md](/Users/yumin/Documents/trading/docs/AUTO_TRADING_OPERATING_RUNBOOK.md).
+This is the concise operator source for the current live canary shape. Whole-system snapshot stays in [CURRENT_SYSTEM_STATE.md](/Users/yumin/Documents/trading/docs/CURRENT_SYSTEM_STATE.md); detailed history stays in [SELF_CHECK_LOG.md](/Users/yumin/Documents/trading/docs/SELF_CHECK_LOG.md); daily procedures stay in [AUTO_TRADING_OPERATING_RUNBOOK.md](/Users/yumin/Documents/trading/docs/AUTO_TRADING_OPERATING_RUNBOOK.md).
 
 ## Live Route
 
@@ -60,26 +60,41 @@ Runtime guard must also show `micro_live_backtest_contract_alignment=PASS`. This
 
 Runtime restarts sync the regular `micro_main_usdt_proxy_backtest_*.json` baseline files from workspace reports into durable runtime reports. Runtime replay surfaces and compare-only research searches choose the latest report that matches the current MICRO_LIVE symbol contract, not simply the newest filename or copy/mtime. `unseen`, `top*`, and broader experiment reports do not replace the 16-symbol live contract baseline unless the live contract is explicitly changed.
 
-## Current No-Order Interpretation
+## Current Runtime Snapshot
 
-As of 2026-05-17 03:17 KST, the runtime is aligned to the 16-symbol MICRO_LIVE route. The system is not blocked by a symbol-list contradiction, stale validation cache, missing direction contract, WS universe mismatch, macro blackout coverage gap, stale canary report, ops heartbeat failure, or Binance trading-rule mismatch.
+As of 2026-05-17 03:29 KST, the runtime is aligned to the 16-symbol MICRO_LIVE route. The system is not blocked by a symbol-list contradiction, stale validation cache, missing direction contract, WS universe mismatch, macro blackout coverage gap, stale canary report, boot-check failure, reconciliation failure, safety lock, open exchange position, or Binance trading-rule mismatch.
 
 Latest runtime check after the 16-symbol expansion:
 
-- `/health/ready`: `ready`
-- `validation/report`: `GO`, `go_approval_template_aligned`
-- `run_micro_live_preflight.py`: `READY_FOR_MICRO_LIVE`
-- `micro_live_backtest_contract_alignment`: `PASS`, source `micro_main_usdt_proxy_backtest_20260516T160212Z.json`, expected symbols `16`
-- `live_symbol_allowlist_alignment`: `PASS`, missing from global allowlist `none`
-- `live_direction_contract_coverage`: `PASS`, contract symbols `16`, missing `none`
-- `ws_universe_contains_live_symbols`: `PASS`, WS symbols `16`, missing live symbols `none`
-- `session_impulse_retest_live_rollout_window`: `PASS`, core live slots `16`
-- `macro_blackout_live_coverage`: `PASS`
-- `binance_symbol_trading_rules`: `PASS`, rules loaded for `16` live symbols
-- `synthetic_canary`: `PASS`, `no_live_order_sent=true`, live sizing uses Binance futures available balance
-- `binance_rule_drift`: `PASS`, `drift_count=0` after refreshing the 16-symbol route baseline
-- `ops_heartbeat`: `PASS`, issue/warning/hard-failure counts `0`
-- `candidate_available`: `PASS`, no accepted scanner candidate is live-routable right now
+- `/health/ready`: `ready`; worker loop/ws ok; 1m and 5m market data fresh for `16/16` live symbols.
+- `/execution/safety-state`: `new_entries_allowed=true`, kill switch off, close-only off.
+- `/execution/operator-dashboard`: `GO`, `go_runtime_gate_open`, `order_route_approve_value=waiting_for_live_candidate`.
+- `/internal/binance/positions?open_only=true`: `count=0`.
+- `run_micro_live_runtime_guard.py`: `PASS`, blocking failures `0`.
+- `run_micro_live_boot_check.py`: `PASS`, blocking failures `0`.
+- `run_live_reconciliation_watchdog.py`: `OK`, reconciliation issues `0`.
+- `run_micro_live_synthetic_canary.py`: `PASS`, `no_live_order_sent=true`, live sizing uses Binance futures available balance.
+- `run_session_impulse_retest_runtime_audit_report.py`: `PASS`, no hard route failures.
+- `run_micro_live_no_order_watchdog.py`: `OK/INFO`, only pre-restart advisory context.
+- `run_micro_live_ops_heartbeat.py`: `WATCH`, hard failures `0`, warning `1`.
+- `run_replay_validation_bridge.py`: `WATCH`, audit-only mixed bridge evidence; live approval unchanged.
+- `micro_live_backtest_contract_alignment`: `PASS`, source `micro_main_usdt_proxy_backtest_20260516T160212Z.json`, expected symbols `16`.
+- `live_symbol_allowlist_alignment`: `PASS`, missing from global allowlist `none`.
+- `live_direction_contract_coverage`: `PASS`, contract symbols `16`, missing `none`.
+- `ws_universe_contains_live_symbols`: `PASS`, WS symbols `16`, missing live symbols `none`.
+- `session_impulse_retest_live_rollout_window`: `PASS`, core live slots `16`.
+- `macro_blackout_live_coverage`: `PASS`.
+- `binance_rule_drift`: `PASS`.
+- `candidate_available`: `PASS/WAIT`, no fresh live-routable SIR candidate is available right now.
+
+Heartbeat `WATCH` detail:
+
+- `replay_validation_bridge` is `WATCH` because bridge evidence is mixed.
+- `11` symbols are `ELIGIBLE_FOR_RUNTIME_VALIDATION_BRIDGE`.
+- `5` symbols are `NOT_ELIGIBLE` only because `replay_validation_portfolio_replay_missing`: `1000PEPEUSDC`, `1000SHIBUSDC`, `ARBUSDC`, `DOGEUSDC`, `FILUSDC`.
+- This is an audit-only warning and does not mean an attempted live order failed.
+
+## Current No-Order Interpretation
 
 Interpretation:
 

@@ -1,6 +1,8 @@
 # Trading Engine v1 맥락 노트 (Living)
 
-최종 갱신: 2026-03-09
+최종 갱신: 2026-05-17
+
+현재 전체 런타임 스냅샷은 [CURRENT_SYSTEM_STATE.md](/Users/yumin/Documents/trading/docs/CURRENT_SYSTEM_STATE.md)를 우선한다. 이 문서는 장기 운영 원칙과 불변 규칙을 보관한다.
 
 ## 1. 왜 이 작업을 하는가
 - 추격 매매 대신 사전 플랜 기반으로 의사결정 일관성을 확보하기 위해
