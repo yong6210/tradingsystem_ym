@@ -1,6 +1,6 @@
 # Self-Check 로그 (Living)
 
-현재 기준선: 2026-05-15 SIR canary bootstrap deadlock fix + MICRO_LIVE failure contract + live submit claim + partial-fill lifecycle guard + atomic report stack + boolean parser guard
+현재 기준선: 2026-05-16 MICRO_LIVE current-state docs + grid-search tuned pacing + SIR canary bootstrap deadlock fix + MICRO_LIVE failure contract + live submit claim + partial-fill lifecycle guard + atomic report stack + boolean parser guard
 참고: 각 Iteration의 테스트 수치/리포트 경로는 해당 시점 기록이며, 최신 운영 기준은 "현재 기준선"을 따른다.
 
 ## 2026-05-15 SIR Canary Bootstrap Deadlock Fix
@@ -6055,3 +6055,128 @@
   - current `.env`는 `AUTO_TRADING_MICRO_LIVE_ALLOWED_ENTRY_MODELS=CONFIRM`라서 기존 `LIMIT` fixture는 그대로 돌리면 contract mismatch로 실패한다.
   - 기계적 liquidity/sizing 회귀 확인은 `AUTO_TRADING_MICRO_LIVE_ALLOWED_ENTRY_MODELS=LIMIT,CONFIRM` override로 실행했다.
   - `6 passed`
+
+## 2026-05-16 Iteration #216
+### 1차 조정: MICRO_LIVE pacing safety drag 완화
+- 발견:
+  - 기존 안전장치 자체는 의도대로 작동했지만, `family cluster`와 `same family/direction` 계층이 백테스트 대비 진입을 과하게 줄였다.
+  - 특히 이전 safety-drag 감사에서 replayable safety gates + Saturday risk multiplier 적용 후 `closed=3261`, `total_r=1980.8518`, `ev_r=0.6074`로, baseline 대비 total-R drag가 `-29.9140%`까지 커졌다.
+- 1차 조정:
+  - `.env`, runtime `.env`, `.env.example`의 live pacing을 아래 값으로 맞췄다.
+  - `AUTO_TRADING_LIVE_FAMILY_CLUSTER_WINDOW_MINUTES=60`
+  - `AUTO_TRADING_LIVE_MAX_SAME_FAMILY_ENTRIES_PER_WINDOW=2`
+  - `AUTO_TRADING_LIVE_MAX_SAME_FAMILY_DIRECTION_EXPOSURES=2`
+  - `AUTO_TRADING_LIVE_RECENT_LOSS_COOLDOWN_MINUTES=90`
+  - `AUTO_TRADING_LIVE_RECENT_LOSS_TRIGGER_COUNT=3`
+  - `AUTO_TRADING_MICRO_LIVE_MAX_CONCURRENT_POSITIONS=2`는 이 단계에서 유지했다.
+- 조정 후 감사:
+  - 산출 리포트: `reports/validation/micro_live_safety_drag_audits/micro_live_safety_drag_audit_20260515T182254Z.md`
+  - baseline: `closed=4399`, `total_r=2826.3175`, `ev_r=0.6425`, `win_rate=0.6574`
+  - replayable safety gates: `closed=4107`, `total_r=2602.7231`, `ev_r=0.6337`, `win_rate=0.6560`
+  - replayable safety gates + Saturday risk multiplier: `closed=4107`, `total_r=2538.1372`, `ev_r=0.6180`, `win_rate=0.6560`
+  - 최종 drag: `closed -292` (`-6.6379%`), `total_r -288.1803` (`-10.1963%`), `ev_r -0.0245`
+  - 남은 차단 reason: `micro_live_position_cap_reached=268`, `live_family_loss_cooldown_active=24`
+- 1차 해석:
+  - family cluster가 백테스트 성과를 크게 깎는 주범이던 상태는 해소했다.
+  - 남은 drag 대부분은 동시 포지션 2개 제한에서 발생한다. 이 제한은 수익률을 일부 깎지만, live canary에서 계좌/동시노출을 막는 핵심 안전장치라 유지한다.
+  - 이후 Iteration #217에서 live-canary deployable 범위를 전수 탐색해 최종 tuned pacing을 다시 적용했다.
+- 런타임 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: `ready`
+  - `run_micro_live_runtime_guard.py --days 30`: `overall_status=PASS`, blocking/warning failure 없음
+  - `run_micro_live_synthetic_canary.py --symbol BTCUSDC --entry-model CONFIRM --direction long --stop-bps 50 --no-fail-exit`: `overall_status=PASS`, `no_live_order_sent=true`, liquidity gate `PASS`
+
+### 검증 명령
+- `./.venv/bin/python scripts/run_micro_live_safety_drag_audit.py --backtest-report reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_20260515T175711Z.json --include-samples`
+- `./.venv/bin/pytest tests/test_micro_live_safety_drag_audit.py tests/test_session_impulse_retest_execution_path.py::test_live_cluster_guard_ignores_missing_opened_ts_for_recent_window tests/test_session_impulse_retest_execution_path.py::test_live_cluster_guard_ignores_malformed_loss_exit_ts tests/test_session_impulse_retest_execution_path.py::test_live_cluster_guard_tolerates_malformed_window_settings`
+  - `6 passed`
+
+## 2026-05-16 Iteration #217
+### 조정: MICRO_LIVE pacing grid-search 최적 조합 적용
+- 요청:
+  - safety/pacing 조합을 백테스트로 전수 비교하고, 가장 나은 경우를 적용한다.
+- 전수 탐색 범위:
+  - 기준 백테스트: `reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_20260515T175711Z.json`
+  - 산출 리포트: `reports/validation/micro_live_safety_drag_audits/micro_live_safety_grid_search_20260515T183500Z.md`
+  - JSON: `reports/validation/micro_live_safety_drag_audits/micro_live_safety_grid_search_20260515T183500Z.json`
+  - 평가 조합: `7,683`
+  - deployable filter: `1 <= max_pos <= 3`, family cluster brake active, same-direction brake active, loss cooldown active
+  - raw top diagnostic은 safety/off 또는 unlimited exposure가 가능하므로 진단용으로만 보고 live에는 적용하지 않는다.
+- raw top diagnostic:
+  - `max_pos=0`, cluster/direction/loss cooldown off, `saturday_risk_multiplier=1.0`
+  - `closed=4399`, `total_r=2826.3175`, `ev=0.6425`
+  - 이 조합은 사실상 safety drag가 없는 baseline이라 live-canary 설정으로 보지 않는다.
+- 적용한 최고 deployable 조합:
+  - `AUTO_TRADING_MICRO_LIVE_MAX_CONCURRENT_POSITIONS=3`
+  - `AUTO_TRADING_LIVE_FAMILY_CLUSTER_WINDOW_MINUTES=30`
+  - `AUTO_TRADING_LIVE_MAX_SAME_FAMILY_ENTRIES_PER_WINDOW=3`
+  - `AUTO_TRADING_LIVE_MAX_SAME_FAMILY_DIRECTION_EXPOSURES=3`
+  - `AUTO_TRADING_LIVE_RECENT_LOSS_COOLDOWN_MINUTES=60`
+  - `AUTO_TRADING_LIVE_RECENT_LOSS_TRIGGER_COUNT=4`
+  - `SESSION_IMPULSE_RETEST_SATURDAY_RISK_MULTIPLIER=1.0`
+- 적용 후 백테스트/audit:
+  - baseline: `closed=4399`, `total_r=2826.3175`, `ev_r=0.6425`, `win_rate=0.6574`
+  - replayable safety gates: `closed=4323`, `total_r=2754.7242`, `ev_r=0.6372`, `win_rate=0.6563`
+  - 최종 drag: `closed -76` (`-1.7277%`), `total_r -71.5933` (`-2.5331%`), `ev_r -0.0053`
+  - 차단 reason: `micro_live_position_cap_reached=69`, `live_family_loss_cooldown_active=7`
+  - grid 리포트 기준 max drawdown: `12.6323R`, worst loss streak: `10`
+- 비교:
+  - 직전 조정값: `closed=4107`, `total_r=2538.1372`, total-R drag `-10.1963%`
+  - 최종 조정값: `closed=4323`, `total_r=2754.7242`, total-R drag `-2.5331%`
+  - 따라서 live safety를 완전히 끄지 않고도 백테스트 baseline과의 괴리를 크게 줄였다.
+- 런타임 반영:
+  - `.env`, runtime `.env`, `.env.example` 동기화 완료
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: `ready`
+  - `run_micro_live_runtime_guard.py --days 30`: `overall_status=PASS`, blocking/warning failure 없음
+  - `run_micro_live_synthetic_canary.py --symbol BTCUSDC --entry-model CONFIRM --direction long --stop-bps 50 --no-fail-exit`: `overall_status=PASS`, `no_live_order_sent=true`, liquidity gate `PASS`
+
+### 검증 명령
+- `./.venv/bin/python scripts/run_micro_live_safety_drag_audit.py --backtest-report reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_20260515T175711Z.json --no-write-report`
+- `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+- `./.venv/bin/python scripts/run_micro_live_runtime_guard.py --days 30 --no-write-report --no-fail-exit`
+- `curl --max-time 5 -s http://127.0.0.1:8000/health/ready`
+- `./.venv/bin/python scripts/run_micro_live_synthetic_canary.py --symbol BTCUSDC --entry-model CONFIRM --direction long --stop-bps 50 --no-fail-exit`
+- `./.venv/bin/pytest tests/test_micro_live_safety_drag_audit.py tests/test_session_impulse_retest_execution_path.py::test_live_cluster_guard_ignores_missing_opened_ts_for_recent_window tests/test_session_impulse_retest_execution_path.py::test_live_cluster_guard_ignores_malformed_loss_exit_ts tests/test_session_impulse_retest_execution_path.py::test_live_cluster_guard_tolerates_malformed_window_settings`
+  - `6 passed`
+
+## 2026-05-16 Iteration #218
+### 개선: safety grid-search 재현성 고정
+- 발견:
+  - Iteration #217의 최적 조합 산출은 임시 분석 코드로 실행돼, 이후 백테스트 파일이나 `.env`가 바뀌었을 때 같은 기준으로 재검증하기 어려웠다.
+  - 정식 스크립트로 옮기는 과정에서 같은 timestamp 후보를 `entry_ts/exit_ts/direction`으로 재정렬하면 기존 `run_micro_live_safety_drag_audit.py`의 canonical 순서와 달라져 결과가 `closed=4325`, `total_r=2766.6169`처럼 다르게 나올 수 있음을 확인했다.
+- 수정:
+  - `scripts/run_micro_live_safety_grid_search.py`를 추가했다.
+  - 같은 백테스트 trade list에 대해 `recommended`, `recommended_cap2`, `raw_top_20`을 분리해 출력한다.
+  - `deployable_filter`는 `1 <= max_pos <= 3`, family cluster brake active, same-direction brake active, loss cooldown active다.
+  - raw top은 safety off/unlimited exposure가 섞일 수 있으므로 진단용으로만 표시한다.
+  - grid-search는 safety-drag audit과 같은 입력 순서를 보존한다. 이 tie-break 순서가 position cap 결과를 바꿀 수 있어서 별도 테스트로 고정했다.
+- 재현 결과:
+  - 산출 리포트: `reports/validation/micro_live_safety_drag_audits/micro_live_safety_grid_search_20260515T183913Z.md`
+  - 평가 조합: `7,683`
+  - current/recommended: `max_pos=3`, `cluster_window=30`, `cluster_cap=3`, `direction_cap=3`, `loss_window=60`, `loss_trigger=4`, `sat=1.0`
+  - `closed=4323`, `total_r=2754.7242`, `ev=0.6372`
+  - baseline 대비 drag: `closed -76` (`-1.7277%`), `total_r -71.5933` (`-2.5331%`)
+- 검증 명령:
+  - `./.venv/bin/pytest tests/test_micro_live_safety_grid_search.py tests/test_micro_live_safety_drag_audit.py`
+  - `7 passed`
+  - `./.venv/bin/python scripts/run_micro_live_safety_grid_search.py --backtest-report reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_20260515T175711Z.json --no-write-report | jq '{current, recommended, recommended_cap2, grid: .grid}'`
+  - `./.venv/bin/python scripts/run_micro_live_safety_grid_search.py --backtest-report reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_20260515T175711Z.json`
+
+## 2026-05-16 Iteration #219
+### 문서 정리: 현재 MICRO_LIVE 기준 단일화
+- 발견:
+  - README와 go-live checklist 일부가 이전 `BTCUSDC + sweep_reversal + LIMIT`, `1 concurrent position`, `limit_only` 기준을 현재 live route처럼 표현하고 있었다.
+  - SELF_CHECK_LOG 최신 항목 순서가 `Iteration #218`이 `#217`보다 먼저 나와 추적이 불편했다.
+  - current route, tuned pacing, grid-search 결과, raw-top diagnostic 해석이 여러 문서에 흩어져 있었다.
+- 정리:
+  - `docs/MICRO_LIVE_CURRENT_STATE.md`를 추가해 현재 live route/pacing/backtest alignment/필수 확인/known limits를 한 문서로 모았다.
+  - README의 `Current Live Contract` 구간을 짧은 현재 기준 요약으로 교체하고, stale BTC 단독 canary 문구를 benchmark/legacy lens로 낮췄다.
+  - `docs/AUTO_TRADING_LIVE_GO_LIVE_CHECKLIST.md`의 MICRO_LIVE 진입 기준과 운영 원칙을 현재 `session_impulse_retest + CONFIRM + 11 core symbols` 기준으로 갱신했다.
+  - `docs/AUTO_TRADING_OPERATING_RUNBOOK.md`에 current-state 문서 링크와 grid-search helper 설명을 추가했고, `1 concurrent position` 문구를 `max 3 concurrent positions`로 보정했다.
+  - SELF_CHECK_LOG 최신 Iteration 순서를 `#216 -> #217 -> #218 -> #219`로 정리했다.
+- 현재 문서 기준:
+  - current state: `docs/MICRO_LIVE_CURRENT_STATE.md`
+  - daily operations: `docs/AUTO_TRADING_OPERATING_RUNBOOK.md`
+  - go-live checklist: `docs/AUTO_TRADING_LIVE_GO_LIVE_CHECKLIST.md`
+  - historical trace: `docs/SELF_CHECK_LOG.md`

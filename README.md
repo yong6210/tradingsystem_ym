@@ -142,153 +142,26 @@ Final rollout approval still comes from `POST /validation/report` plus `POST /op
 
 ## Current Live Contract
 
-The current `MICRO_LIVE` configuration has moved beyond the old one-contract wording. Treat the live surface as two layers:
+The canonical summary is [MICRO_LIVE Current State](/Users/yumin/Documents/trading/docs/MICRO_LIVE_CURRENT_STATE.md).
 
-- active runtime canary: `session_impulse_retest` on the 11 live/core symbols listed above
-- benchmark/legacy execution lens: `BTCUSDC + sweep_reversal + LIMIT`
-- allowed live families: `session_impulse_retest`, `sweep_reversal`
-- allowed live entry models: `LIMIT`, `CONFIRM`
-- major macro blackout windows can temporarily suppress otherwise valid entries
-
-The older `BTCUSDC + sweep_reversal + LIMIT` contract remains the cleanest benchmark lens for historical comparison and fill-quality accounting. It is no longer the only configured `MICRO_LIVE` scope, so do not use that paragraph as a live allowlist.
-
-Current operating rules:
-
-- live orders still require validation plus operations checklist approval
-- `session_impulse_retest` live/core symbols must stay aligned across `.env`, worker WS universe, direction contracts, macro blackout coverage, and liquidity gates
-- shadow/secondary `session_impulse_retest` symbols are tracked for observation unless explicitly promoted
-- `BTCUSDC + sweep_reversal + LIMIT` remains the narrowest comparison lens when diagnosing historical edge and execution quality
-- do not broaden live scope beyond the configured allowlists without validation evidence and an updated operations checklist
-
-## Current Operating Status
-
-As of `2026-05-10`, the system is in `MICRO_LIVE` canary mode with the 11-symbol `session_impulse_retest` live/core runtime plus the older BTC sweep-reversal benchmark lens. The current runtime is healthy, but recent live intents are still blocked before exchange submission unless validation/session gates approve them.
-
-Current runtime status from the live operator surface is:
+Current live route:
 
 - execution mode: `MICRO_LIVE`
-- `new_entries_allowed=true`
-- `accepted_candidate_count=0`
-- `blocked_candidate_count=10`
-- `open_order_count=0`
-- `open_position_count=0`
-- `recent_intent_count=10`
+- strategy family: `session_impulse_retest`
+- entry model: `CONFIRM`
+- live symbols: `BTCUSDC`, `ETHUSDC`, `SOLUSDC`, `LINKUSDC`, `BNBUSDC`, `XRPUSDC`, `ADAUSDC`, `AVAXUSDC`, `BCHUSDC`, `LTCUSDC`, `NEARUSDC`
+- sessions: `dead_session`, `london`, `new_york`
+- tuned pacing: `max_concurrent_positions=3`, `family_cluster_window=30m`, `max_same_family_entries=3`, `max_same_family_direction_exposures=3`, `loss_cooldown=60m/4 losses`, `saturday_risk_multiplier=1.0`
 
-There are now two execution lenses and they must not be mixed:
+The older `BTCUSDC + sweep_reversal + LIMIT` path is now a benchmark/legacy execution lens, not the current live allowlist. Do not mix benchmark counts with the live route when diagnosing order flow.
 
-- broad BTC operator lens:
-  - fill rate `10.34%`
-  - terminal exit ratio `1.00`
-  - time failure ratio `0.6667`
-- benchmark contract lens (`BTCUSDC + sweep_reversal + LIMIT` only):
-  - `plan_fill_rate = 0.6667` (`filled matured plans / matured plans`)
-  - `matured_plans=3`, `filled_matured_plans=2`, `unfilled_matured_plans=1`
-  - `terminal_exit_ratio = 1.00`, `operational_forced_exit_ratio = 0.5000`
-  - current unfilled matured reason: `not_reached_entry=1` (`expired_without_touch=1`)
-  - time failure ratio `0.5000`
+Backtest alignment for the current route:
 
-This matters because the broad lens is still useful for general runtime health, but it overstates how bad the current contract-specific fill picture is.
+- baseline: `closed=4399`, `total_r=2826.3175`, `ev_r=0.6425`
+- current safety-adjusted route: `closed=4323`, `total_r=2754.7242`, `ev=0.6372`
+- drag vs baseline: `total_r -2.5331%`
 
-The current contract-faithful funnel now reads:
-
-- `submitted=2`
-- `filled=2`
-- `closed=2`
-- `submitted_to_fill_rate = 1.00` (`filled submitted plans / submitted plans`)
-- `close_rate_from_filled=1.00`
-- active-contract recent intent summary: `broad_recent_intent_count=10`, `active_contract_recent_intent_count=0`, `non_active_contract_recent_intent_count=10`
-- active-contract flow cadence:
-  - current cadence window: `cadence_window_days=30`, `current_window_active_contract_intent_count=0`, `current_window_active_contract_intents_per_week=0.0`
-  - execution sample window: `execution_sample_window_days=30`, `execution_sample_submitted_count=2`, `execution_sample_closed_count=2`, `execution_sample_submitted_per_week=0.4667`, `execution_sample_closed_per_week=0.4667`
-  - current state: `flow_state=no_recent_active_contract_flow`, `runtime_candidates_current_snapshot=0`
-- replay flow baseline:
-  - `expected_active_contract_candidates_per_week_from_replay=35.021`
-  - `expected_closed_per_week_from_replay=30.946`
-  - `observed_current_window_active_contract_intents_per_week_live=0.0`
-  - `live_vs_replay_flow_ratio=0.0`
-- active-contract promotion shadow counter:
-  - `runtime_recent_symbol_plans_same_window=65`
-  - `runtime_recent_entry_model_plans_same_window=11`
-  - `runtime_promoted_contract_plans_same_window=3`
-  - `runtime_rejected_same_entry_model_plans_same_window=8`
-  - `runtime_rejected_reason_counts={strategy_family_not_applicable:5, trend_continuation_not_applicable:3}`
-  - `replay_contract_hits_same_window=117`
-  - `promotion_gap_count=114`
-  - `runtime_vs_replay_promotion_ratio=0.0256`
-  - `shadow_mismatch_state=runtime_below_replay_baseline`
-- current runtime generation diagnostics:
-  - `regime_profile=range`, `active_zone_count=44`, `post_hard_gate_zone_count=24`
-  - `reaction_unavailable_reason_counts={insufficient_post_sweep_bars:13, no_recent_level_sweep:11}`
-  - `legacy_router_reason_counts={trend_continuation_not_applicable:24}`
-- current active-contract selection breakdown: `runtime_candidates=0`, `accepted_candidates=0`, `blocked_candidates=0`
-- current dominant bottleneck: `selection_shortfall`, not `execution_fill_shortfall`
-- current terminal exit split: `planned_stop_loss=1`, `time_failure=1`
-- current operational forced-exit split: `time_failure=1`
-- current expired-without-touch reach diagnostics: `min_distance_to_entry_bps=2.4972`, `avg_bars_observed=14.0`, `avg_max_favorable_excursion_after_miss_bps=77.0404`, `moved_to_target_without_fill_count=1`
-
-Note:
-
-- `closed=2` refers to the current contract-faithful submitted funnel over the operator dashboard lookback window
-- `closed trades = 3/100` below refers to the broader micro-live proof accounting window used by preflight
-- `matured_plans=3` is the active-contract lookback execution sample, while `runtime_candidates=0 / accepted_candidates=0 / blocked_candidates=0` is the current active-contract candidate snapshot
-- `recent_intent_count=10` is a broad runtime/operator count, while `active_contract_recent_intent_count=0` and `submitted=2` belong to the active-contract lens
-- `current_window_active_contract_intent_count=0` belongs to the current cadence window, while `execution_sample_submitted_count=2 / execution_sample_closed_count=2` belongs to the lookback execution sample window
-- the current `shadow_relaxation_priority` should be read as compare-only guidance: if recent LIMIT promotion mismatch is dominated by `reaction not applicable`, the operator headline will rank `proof_reclaim_plus_one_bar` as the top shadow candidate, with `proof_reclaim_only` and `one_bar_only` as secondary lanes; this is not a live-policy change
-- `terminal_exit_ratio` includes planned stop loss; use `operational_forced_exit_ratio` and `operational_forced_exit_split` for operational failure diagnosis
-- these are different counters and should not be compared as if they were the same denominator
-
-The latest micro-live preflight evidence still says the live sample is thin:
-
-- `edge_state=insufficient_edge_measurement`
-- `proof=sample_building`
-- `closed trades = 3/100`
-- `remaining = 97`
-- `family_post_cost_rate = 0.6667`
-
-The practical meaning is:
-
-- strategy selection is mostly done
-- infrastructure and exchange connectivity are now ready for a real canary
-- the next bottleneck is not generic fill failure anymore, but `too little contract-faithful live flow + still-thin after-cost proof`
-
-## Current Live Canary Setup
-
-The current canary is intentionally small and conservative.
-
-- execution mode: `MICRO_LIVE`
-- contract: `BTCUSDC + sweep_reversal + LIMIT`
-- direction contract: `BTCUSDC:LONG|SHORT`
-- sizing mode: `RISK_PCT` based on `entry -> SL` distance, not raw `NOTIONAL_PER_R`
-- account assumption: `200 USDT`
-- target risk per trade: `0.5%`
-- usable margin fraction: `85%`
-- leverage cap: `6x`
-- position cap: `1` concurrent position
-- daily new-entry cap: disabled (`0`)
-
-Operationally this means:
-
-- the engine does not enforce a blunt `one trade per day` rule anymore
-- it can take the next valid signal after the current position is finished
-- the main canary throttle is now `one open position at a time`, followed by a fresh approval / safety / reconciliation check before the next entry
-
-Exchange-side assumptions for this canary:
-
-- Binance live trading is enabled
-- expected exchange configuration is `BTCUSDC isolated 6x`
-- the code sizes against a leverage cap, but it does not auto-switch exchange margin type or leverage for you
-
-Recent engineering changes that are now part of the live setup:
-
-- live quantity sizing uses stop-distance risk sizing instead of the old `NOTIONAL_PER_R` shortcut
-- runtime signal telemetry is recorded in validity / strategy sizing payloads
-- `runtime_signal_shadow_tilt` is logged across scanner, dashboard, and operator UI as observation-only guidance
-- major U.S. macro blackout windows (`FOMC`, `CPI`, `NFP`) now block new `MICRO_LIVE` entries from `15m before` to `30m after`
-
-Interpretation rule:
-
-- historical and replay samples still matter for shaping the contract
-- current `sample` messaging should now be read as `live operating validation`, not as a fresh strategy-discovery project
+Live submit still requires validation, operations checklist, kill/close-only checks, liquidity, macro blackout, exchange rules, sizing, and reconciliation approval. `Trading entry surface alert` is not by itself an order trigger.
 
 ## What We Tried So Far
 
@@ -326,7 +199,7 @@ This project has already gone through several operating-contract revisions. The 
   - `BTCUSDC only`
   - `BTCUSDC SHORT only`
 - `BTCUSDC SHORT only` looked numerically stronger, but we explicitly rejected it as the live contract because it hard-coded a directional bet and threw away valid long setups.
-- Current decision: keep `BTCUSDC LONG|SHORT`, but treat `short-bias` as advisory evidence rather than a hard operating rule.
+- Earlier decision at that stage: keep `BTCUSDC LONG|SHORT`, but treat `short-bias` as advisory evidence rather than a hard operating rule. This has since been superseded by the current `session_impulse_retest + CONFIRM` 11-symbol route.
 
 7. Reliability and observability work
 - We fixed repeated stage snapshot regressions where empty runtime summaries overwrote valid ones.
@@ -334,10 +207,10 @@ This project has already gone through several operating-contract revisions. The 
 - We added stale sample cleanup, stale duplicate/reentry unblock logic, and self-heal summaries.
 - We made stage, board, and notify surfaces show why candidates are blocked rather than hiding that under vague `not ready` language.
 
-8. Live canary execution setup
-- We switched the runtime from `PAPER` toward a real `MICRO_LIVE` canary for one contract only: `BTCUSDC + sweep_reversal + LIMIT`.
-- We replaced the old notional shortcut with stop-distance risk sizing (`RISK_PCT`) so live quantity now scales off `entry -> SL` distance.
-- We locked the canary to a small `200 USDT` operating assumption, `0.5%` target risk per trade, `85%` usable margin, `6x` leverage cap, and `1` concurrent position.
+8. Earlier live canary execution setup
+- We initially switched the runtime from `PAPER` toward a narrow `MICRO_LIVE` canary: `BTCUSDC + sweep_reversal + LIMIT`.
+- We replaced the old notional shortcut with stop-distance risk sizing (`RISK_PCT`) so live quantity scales off `entry -> SL` distance.
+- That narrow route is now a benchmark/legacy lens. The current live route and pacing are summarized in [MICRO_LIVE Current State](/Users/yumin/Documents/trading/docs/MICRO_LIVE_CURRENT_STATE.md).
 - We removed the old `1 daily new entry` throttle and now rely on `one open position at a time` plus re-approval after each close as the primary pacing rule.
 
 9. Runtime telemetry and shadow-only sizing observation
@@ -436,24 +309,24 @@ Operator interpretation rule:
 
 Current canary diagnosis:
 
-- do not read broad BTC fill weakness as active-contract fill collapse
-- the current `BTCUSDC + sweep_reversal + LIMIT` canary is primarily flow-limited and sample-limited
-- the current cadence window and execution-sample window are different counters; use the cadence window for “is anything flowing now?” and the execution sample window for “what happened to the last few contract-faithful plans?”
-- keep sizing conservative, keep one-position pacing, and review blocked-reason mix plus forced-exit cause split before changing gates, placement, or rollout policy
+- do not read benchmark/legacy BTC metrics as current SIR live-route truth
+- the current `session_impulse_retest + CONFIRM` canary is mainly constrained by route eligibility, live safety gates, liquidity, and still-thin live execution evidence
+- use the safety drag audit and grid search before changing pacing gates
+- keep sizing conservative and review blocked-reason mix plus forced-exit cause split before changing placement or rollout policy
 
 ## Open Problems
 
 These are the concrete problems still left to solve.
 
-- Continue accumulating additional `MICRO_LIVE` BTC fills and closes until the contract-faithful after-cost sample is no longer thin
+- Continue accumulating additional `MICRO_LIVE` SIR route fills and closes until the after-cost sample is no longer thin
 - Measure real stop behavior, stale-limit behavior, and reconciliation quality on actual exchange events
 - Keep separating terminal exits from operational forced exits so `planned_stop_loss` does not get misread as an operational failure
 - Keep tracking `flow_cadence` so we can tell the difference between normal strategy sparsity and an abnormally quiet live pipeline
-- Compare live active-contract cadence against replay cadence before changing gates; the next question is whether `no_recent_active_contract_flow` is normal scarcity or a live-vs-replay flow gap
+- Compare live route cadence against replay cadence before changing gates; the next question is whether quiet flow is normal scarcity or a live-vs-replay flow gap
 - Break operational forced exits down by concrete cause (`time_failure`, reconciliation/safety/manual causes) and decide whether exit quality is degrading or just sample-noisy
 - Keep collecting `expired_without_touch` reach diagnostics and post-miss follow-through (`MFE/MAE`) before changing limit placement or entry offsets
-- Determine whether after-cost results stay negative or recover once contract-faithful live closes move beyond the current very thin sample
-- Keep broad execution health and contract-faithful execution health separate; do not let pooled BTC metrics overwrite the active-contract diagnosis
+- Determine whether after-cost results stay negative or recover once live route closes move beyond the current very thin sample
+- Keep broad execution health and current-route execution health separate; do not let pooled BTC metrics overwrite the live route diagnosis
 - Keep macro blackout schedules current so event-time risk control stays deterministic
 - Decide when the canary has enough closed trades to loosen caps or claim that live operation is actually stable
 - Keep using historical replay for shaping and comparison, but do not let it overwrite live operating truth
@@ -462,17 +335,15 @@ These are the concrete problems still left to solve.
 
 Until those problems are resolved, the rule is:
 
-- live contract: `BTCUSDC + sweep_reversal + LIMIT`
+- live route: `session_impulse_retest + CONFIRM + 11 core USDC symbols`
 - execution mode: `MICRO_LIVE` canary
 - direction: `LONG|SHORT` based on the setup, not a hard-coded directional bias
 - sizing: stop-distance `RISK_PCT` sizing with a small canary account assumption
-- leverage policy: size against a `6x` cap; keep the exchange contract at `BTCUSDC isolated 6x`
-- operational pacing: `1` concurrent position, no daily entry cap, and re-evaluate the next signal only after the current position is closed
-- event policy: major `FOMC/CPI/NFP` blackout windows block new entries from `15m before` to `30m after`
-- runtime telemetry: collect and observe `runtime_signal_shadow_tilt`, but do not treat it as live authority yet
-- `ETHUSDC`: advisory/proof comparison only
+- operational pacing: `3` concurrent positions max, no daily entry cap, family/direction/loss cooldown pacing as documented in [MICRO_LIVE Current State](/Users/yumin/Documents/trading/docs/MICRO_LIVE_CURRENT_STATE.md)
+- event policy: major `FOMC/CPI/NFP` blackout windows block new entries
+- benchmark lens: `BTCUSDC + sweep_reversal + LIMIT` is advisory only
 - `trend_continuation`: proof lane only
-- `CONFIRM` and `SWEEP_CONFIRM`: research or paper-only, not live contract
+- `SWEEP_CONFIRM`/legacy `LIMIT` rows: context-only unless the live contract is explicitly changed
 
 ## Start Here
 
@@ -1110,7 +981,7 @@ pip install -e '.[dev]'
 uvicorn app.main:app --reload
 ```
 
-For a safe local/runtime configuration baseline, copy [.env.example](/Users/yumin/Documents/trading/.env.example) to `.env` and fill only the secrets and live toggles you intentionally need. The example keeps actual Binance live submit disabled by default while documenting the current MICRO_LIVE allowlist shape and the BTC sweep-reversal benchmark lens.
+For a safe local/runtime configuration baseline, copy [.env.example](/Users/yumin/Documents/trading/.env.example) to `.env` and fill only the secrets and live toggles you intentionally need. The example keeps actual Binance live submit disabled by default while documenting the current MICRO_LIVE route and tuned pacing.
 
 Run the baseline test suite:
 
@@ -1136,6 +1007,10 @@ pip install -e '.[integration]'
 Near-100 hardening plan:
 
 - [docs/MICRO_LIVE_NEAR_100_HARDENING_PLAN.md](/Users/yumin/Documents/trading/docs/MICRO_LIVE_NEAR_100_HARDENING_PLAN.md)
+
+Current MICRO_LIVE route and pacing:
+
+- [docs/MICRO_LIVE_CURRENT_STATE.md](/Users/yumin/Documents/trading/docs/MICRO_LIVE_CURRENT_STATE.md)
 
 MICRO_LIVE preflight:
 
@@ -1234,6 +1109,15 @@ Replay validation bridge audit:
 
 This is audit-only and does not change live approval. It checks whether the current replay cache clears conservative bridge floors before any manual review of replay-backed MICRO_LIVE sampling. The bridge now requires both headline expectancy and a non-negative `ev_r_lower_95`, and it adds material slice diagnostics for `direction`, `strategy_family`, and `entry_model`. `ELIGIBLE_FOR_MANUAL_BRIDGE_REVIEW_WITH_SLICE_WARNINGS` is not a clean approval; it means the aggregate passed but at least one material slice needs manual review first. The default action remains to keep the validation gate closed unless an operator explicitly reviews the bridge output.
 The bridge writes `latest.md` and `latest.json` beside timestamped reports for stable operator reads. Operational timestamp reports and latest/state aliases are written with atomic replace where these guards are on the live operating path, so interrupted runs should not leave partial reports as operator evidence.
+
+MICRO_LIVE safety drag and pacing grid search:
+
+```bash
+./.venv/bin/python scripts/run_micro_live_safety_drag_audit.py --backtest-report reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_20260515T175711Z.json --no-write-report
+./.venv/bin/python scripts/run_micro_live_safety_grid_search.py --backtest-report reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_20260515T175711Z.json --no-write-report
+```
+
+The drag audit measures the current `.env` settings. The grid search separates deployable recommendations from raw diagnostics where safety may be disabled.
 
 Session impulse retest runtime audit:
 

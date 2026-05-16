@@ -1,6 +1,6 @@
 # Auto Trading Live Go-Live 체크리스트
 
-최종 갱신: 2026-05-10
+최종 갱신: 2026-05-16
 
 ## 1. 범위
 - 이 문서는 `SHADOW -> PAPER -> MICRO_LIVE -> LIVE` 전환 전 점검 항목을 고정한다.
@@ -52,15 +52,15 @@ PAPER exit criteria:
 - [ ] 최근 reconciliation mismatch가 낮음
 
 ## 6. MICRO_LIVE 진입 기준
-- [ ] 실사용 live 계약은 `BTCUSDC`만 허용
-- [ ] 실사용 live family는 `sweep_reversal`만 허용
-- [ ] 실사용 live variant는 `LIMIT`만 허용
-- [ ] 방향 계약은 `BTCUSDC LONG|SHORT`
-- [ ] `trend_continuation + LIMIT`는 별도 `trend proof lane`으로만 추적하고 아직 live 제출 계약에는 넣지 않음
-- [ ] `A_ONLY`만 허용
-- [ ] `max concurrent positions`가 1~2로 제한됨
-- [ ] 현재 canary pacing이 `1 concurrent position` 기준임을 이해함
-- [ ] `max daily new entries == 0`이면 일일 상한이 꺼진 상태이고, 다음 진입은 포지션 종료 후 approval / safety / reconciliation 재평가로만 열림을 이해함
+- [ ] 현재 기준 문서 [MICRO_LIVE Current State](/Users/yumin/Documents/trading/docs/MICRO_LIVE_CURRENT_STATE.md)를 확인함
+- [ ] live family는 `session_impulse_retest`
+- [ ] live entry model은 `CONFIRM`
+- [ ] live symbols는 `BTCUSDC,ETHUSDC,SOLUSDC,LINKUSDC,BNBUSDC,XRPUSDC,ADAUSDC,AVAXUSDC,BCHUSDC,LTCUSDC,NEARUSDC`
+- [ ] 방향 계약은 모든 live symbol에 `LONG|SHORT`
+- [ ] live sessions는 `dead_session,london,new_york`
+- [ ] legacy `BTCUSDC + sweep_reversal + LIMIT`는 benchmark/context lens이고 현재 live route가 아님을 이해함
+- [ ] tuned pacing은 `max_concurrent_positions=3`, `family_cluster_window=30m`, `max_same_family_entries=3`, `max_same_family_direction_exposures=3`, `loss_cooldown=60m/4 losses`, `saturday_risk_multiplier=1.0`
+- [ ] `AUTO_TRADING_MICRO_LIVE_MAX_DAILY_NEW_ENTRIES=0`은 일일 상한이 꺼진 상태이며, 무제한 진입이 아니라 position cap / approval / safety / reconciliation 재평가를 계속 거친다는 뜻임을 이해함
 - [ ] `GET /execution/safety-state`에서 `kill_switch_active == false`
 - [ ] `GET /execution/safety-state`에서 `close_only_active == false`
 - [ ] `POST /validation/report` 결과가 최소 `MANUAL_REVIEW` 이상이고, 운영자가 승인함
@@ -71,30 +71,15 @@ PAPER exit criteria:
 - [ ] `runtime_allowed_reopen_scope == MICRO_LIVE_ONLY`
 - [ ] `runtime_preflight_summary.status == READY_FOR_MICRO_LIVE`
 - [ ] `runtime_operator_signoff_summary.status == ready_for_manual_micro_live_signoff`
-- [ ] `runtime_operator_signoff_summary.contract_scope == limit_only`
-- [ ] 후보가 `auto_trading_micro_live_allowed_symbols`, `auto_trading_micro_live_allowed_families`, `auto_trading_micro_live_allowed_sessions` 계약 안에 있음
-- [ ] `.env`의 MICRO_LIVE 계약이 `BTCUSDC + sweep_reversal + LIMIT`, `BTCUSDC:LONG|SHORT`, `1` concurrent position, daily cap disabled(`0`), `RISK_PCT` sizing과 일치함
+- [ ] 후보가 `auto_trading_micro_live_allowed_symbols`, `auto_trading_micro_live_allowed_families`, `auto_trading_micro_live_allowed_entry_models`, `auto_trading_micro_live_allowed_sessions`, direction contract 안에 있음
+- [ ] `.env`와 runtime `.env`의 MICRO_LIVE 계약이 `.env.example` 및 [MICRO_LIVE Current State](/Users/yumin/Documents/trading/docs/MICRO_LIVE_CURRENT_STATE.md)와 일치함
 - [ ] `AUTO_TRADING_LIVE_LIQUIDITY_GATE_ENABLED=true`와 `AUTO_TRADING_LIVE_LIQUIDITY_GATE_FAIL_CLOSED=true`
 - [ ] `runtime_self_heal_summary`에 반복 stale cleanup / stale unblock 이상 징후가 없음
 - [ ] 운영 순서를 `preflight -> runtime guard -> synthetic canary -> signoff review -> order-intents(MICRO_LIVE) -> submit(live=true)`로만 따른다
-- [ ] `live_eligible_post_patch_closed_trade_count >= 15`
-- [ ] `live_eligible_post_patch_sample_summary.replay_max_drawdown_r < 4.5`
-- [ ] `live_eligible_post_patch_sample_summary.replay_p5_r >= -1.05`
-- [ ] `live_eligible_post_patch_sample_summary.stop_loss_share < 0.45`
-- [ ] `live_eligible_post_patch_sample_summary.worst_loss_streak < 5`
-- [ ] `runtime_live_contract_scope.proof_source`가 현재 gate source를 명확히 보여줌
-- [ ] `live_execution_post_patch_closed_trade_count < 5`인 bootstrap 구간에서는 `live_eligible_post_patch_sample_summary`를 gate proof로 사용하고 있음을 이해함
-- [ ] `historical_execution_contract_proof_summary`는 advisory-only historical context이며, live gate count로 합산하지 않음을 이해함
-- [ ] `historical_execution_contract_proof_summary`가 `BTCUSDC + sweep_reversal + LIMIT` 계약의 장기 과거 성적을 별도 보여준다는 점을 확인함
-- [ ] `historical_walk_forward_execution_contract_proof_summary`는 candle-by-candle advisory walk-forward lane이며, `actual execution subset`과 별도 증거라는 점을 이해함
-- [ ] `historical_walk_forward_execution_contract_proof_summary.baseline_ts / simulation_start_ts / simulation_end_ts`로 시뮬레이션 구간을 확인함
-- [ ] `historical_walk_forward_strategy_proof_summary`는 `BTCUSDC` 중심 raw candle strategy-level replay lane이며, large-sample 전략 적합성 확인용이지 live execution gate count로 직접 합산하지 않음을 이해함
-- [ ] `trend_proof_post_patch_closed_trade_count`와 `trend_proof_candidate_summary`를 별도 관찰 대상으로 유지함
-- [ ] `historical_walk_forward_trend_proof_summary`는 `trend_continuation + LIMIT`의 advisory walk-forward lane이며 live gate count로 합산하지 않음을 이해함
-- [ ] `live_family_cluster_window_cap_reached` blocker 없음
-- [ ] `live_family_loss_cooldown_active` blocker 없음
-- [ ] `run_paper_candidate_drill.py` 기준 `family_cluster_guard_summary.active_families`가 비어 있음
-- [ ] same-window alt reversal cluster가 PAPER lineage 표본을 다시 악화시키지 않도록 family guard가 clear 상태임
+- [ ] `run_micro_live_safety_drag_audit.py`가 현재 `.env` 기준으로 baseline 대비 drag를 수치화함
+- [ ] `run_micro_live_safety_grid_search.py`의 `recommended`가 현재 `.env` pacing과 일치하거나, 차이가 있으면 그 이유를 기록함
+- [ ] safety를 끈 raw top diagnostic을 live 설정으로 착각하지 않음
+- [ ] live blocker가 있으면 `live_family_cluster_window_cap_reached`, `live_family_loss_cooldown_active`, `micro_live_position_cap_reached`를 분리해 해석함
 - [ ] major macro blackout (`FOMC`, `CPI`, `NFP`) 일정이 현재 분기 기준으로 반영돼 있고, blackout 동안 신규 `MICRO_LIVE` 진입이 막히는 구조를 이해함
 - [ ] blackout horizon이 부족하면 `scripts/build_micro_live_event_blackouts.py`로 계약 파일을 재생성하고 `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH`를 새 출력 파일에 맞춘 뒤 preflight/runtime guard를 다시 통과함
 - [ ] `scripts/run_micro_live_runtime_guard.py --days 30`가 blocking failure 없이 통과함
@@ -167,20 +152,16 @@ curl -s "http://127.0.0.1:8000/alerts/metrics?days=7&write_report=false" | jq
 ./.venv/bin/python scripts/run_micro_live_no_order_watchdog.py --days 3 --no-fail-exit
 ./.venv/bin/python scripts/run_live_reconciliation_watchdog.py --days 3 --no-fail-exit
 ./.venv/bin/python scripts/run_micro_live_boot_check.py --days 3 --limit 200 --no-fail-exit
+./.venv/bin/python scripts/run_micro_live_safety_drag_audit.py --backtest-report reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_20260515T175711Z.json --no-write-report
+./.venv/bin/python scripts/run_micro_live_safety_grid_search.py --backtest-report reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_20260515T175711Z.json --no-write-report
 ```
 
 ## 10. 운영 원칙
 - live 전환은 기능 완성 여부가 아니라 `reconciliation / safety / operator visibility`가 충분한지로 판단한다.
 - `MICRO_LIVE`는 검증 단계다. 수익 극대화 모드가 아니다.
-- `legacy` 전체 replay와 full `post-patch` cohort는 계속 advisory truth로 유지한다. 실제 live go/no-go는 `live_eligible_post_patch_sample_summary`를 따로 본다.
-- 현재 live 계약은 `BTCUSDC + sweep_reversal + LIMIT`다. `ETHUSDC`는 advisory/proof 비교용으로만 남기고, `CONFIRM` / `SWEEP_CONFIRM`은 paper 또는 research로만 유지한다.
-- raw BTC strategy proof 기준 현재 우선순위는 `BTCUSDC sweep_reversal LIMIT`이다. `ETHUSDC`는 advisory/proof 비교용으로만 남기고, `CONFIRM`은 운영 계약에서 제외한다.
-- `trend_continuation + LIMIT`는 live 계약이 아니라 `trend proof lane`이다. proof가 쌓이기 전에는 실거래 판단 근거로 과신하지 않는다.
-- `MICRO_LIVE`는 `limit_only post-patch 15+`, `maxDD < 4.5R`, `p5 >= -1.05`, `stop_loss_share < 45%`, `worst_loss_streak < 5`일 때만 검토한다.
-- `FULL LIVE`는 `limit_only post-patch 30+`, `maxDD < 4.5R`, `p5 >= -1.05`, `stop_loss_share < 40%`, `worst_loss_streak < 5`를 따로 충족할 때만 검토한다.
-- `actual execution subset`이 `5 distinct plans`를 넘기기 전까지는 live gate proof가 bootstrap 단계라는 점을 운영자가 항상 인지한다.
-- `historical execution contract proof`는 빠르게 쌓이는 advisory lane이다. `actual execution subset`이 얇을 때 참고용으로만 쓰고, live reopen gate source로 직접 승격하지 않는다.
-- `historical walk-forward execution proof`는 실제 과거 캔들을 순차 replay한 advisory lane이다. `actual execution subset`을 대체하지는 않지만, live 계약이 너무 느리게 쌓일 때 `BTCUSDC` 계약 적합성을 더 빨리 읽는 용도로 쓴다.
-- `historical walk-forward strategy proof`는 `BTCUSDC` 중심 raw candle strategy-level replay lane이다. large-sample 전략 edge 확인용으로 쓰고, `actual execution subset`과 같은 품질로 해석하면 안 된다.
-- `historical walk-forward trend proof`는 `BTCUSDC/ETHUSDC + trend_continuation + LIMIT`를 같은 방식으로 순차 replay한 lane이다. count가 0이면 추세 lane은 아직 미증명으로 본다.
+- 현재 live 계약은 `session_impulse_retest + CONFIRM + 11개 core USDC symbols`다.
+- `BTCUSDC + sweep_reversal + LIMIT`는 benchmark/legacy lens이며 live allowlist로 쓰지 않는다.
+- `legacy` 전체 replay와 full `post-patch` cohort는 advisory truth로 유지한다. 실제 live go/no-go는 현재 live route와 safety/grid audit을 기준으로 분리해서 본다.
+- safety를 끈 raw top diagnostic은 “무엇을 깎고 있는지”를 보기 위한 비교값이지 운영 설정이 아니다.
+- `FULL LIVE` 확대는 `MICRO_LIVE` live fills/closes, reconciliation, slippage, forced exit, runtime parity가 따로 충분해진 뒤에만 검토한다.
 - unresolved mismatch가 있으면 “조금 더 지켜본다”가 아니라 즉시 `close-only` 또는 `kill-switch`를 고려한다.
