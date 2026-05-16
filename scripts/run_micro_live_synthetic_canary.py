@@ -138,6 +138,39 @@ def _synthetic_liquidity_loader(settings: Any):
     return _loader
 
 
+def _synthetic_balance_loader(settings: Any):
+    def _loader() -> dict[str, Any]:
+        configured_equity = _safe_float(getattr(settings, "auto_trading_live_account_equity_usdt", 0.0))
+        assets = [
+            item.strip().upper()
+            for item in str(getattr(settings, "auto_trading_live_balance_sync_assets", "USDC,USDT") or "USDC,USDT").split(",")
+            if item.strip()
+        ] or ["USDC", "USDT"]
+        return {
+            "source": "synthetic_canary_balance",
+            "balances": [
+                {
+                    "asset": asset,
+                    "balance": configured_equity,
+                    "availableBalance": configured_equity,
+                }
+                for asset in assets
+            ],
+        }
+
+    return _loader
+
+
+def _private_balance_loader(client: BinanceFuturesClient):
+    def _loader() -> dict[str, Any]:
+        return {
+            "source": "binance_futures_balance",
+            "balances": client.fetch_futures_balances(),
+        }
+
+    return _loader
+
+
 def _public_liquidity_loader(client: BinanceFuturesClient, settings: Any):
     def _levels(raw_rows: Any) -> list[tuple[float, float]]:
         levels: list[tuple[float, float]] = []
@@ -186,7 +219,7 @@ def _public_liquidity_loader(client: BinanceFuturesClient, settings: Any):
     return _loader
 
 
-def _coordinator(*, settings: Any, rules_loader: Any, liquidity_loader: Any) -> ExecutionCoordinator:
+def _coordinator(*, settings: Any, rules_loader: Any, liquidity_loader: Any, balance_loader: Any) -> ExecutionCoordinator:
     return ExecutionCoordinator(
         plan_repo=SimpleNamespace(),
         intent_repo=SimpleNamespace(),
@@ -196,6 +229,7 @@ def _coordinator(*, settings: Any, rules_loader: Any, liquidity_loader: Any) -> 
         live_submitter=lambda **_kwargs: {"status": "DRY_RUN_NOT_SENT"},
         live_symbol_rules_loader=rules_loader,
         live_liquidity_loader=liquidity_loader,
+        live_balance_loader=balance_loader,
         settings=settings,
     )
 
@@ -243,7 +277,13 @@ def run_canary(
     )
     rules_loader = _public_symbol_rules_loader(client) if client is not None else _settings_symbol_rules_loader(settings)
     liquidity_loader = _public_liquidity_loader(client, settings) if client is not None else _synthetic_liquidity_loader(settings)
-    coordinator = _coordinator(settings=settings, rules_loader=rules_loader, liquidity_loader=liquidity_loader)
+    balance_loader = _private_balance_loader(client) if client is not None else _synthetic_balance_loader(settings)
+    coordinator = _coordinator(
+        settings=settings,
+        rules_loader=rules_loader,
+        liquidity_loader=liquidity_loader,
+        balance_loader=balance_loader,
+    )
 
     checks = _micro_live_config_drift_checks(check_binance_rules=False)
     blocking_config = _blocking_config_checks(checks)

@@ -167,6 +167,7 @@ class ExecutionCoordinator:
         live_submitter: Callable[..., dict],
         live_symbol_rules_loader: Callable[[str], dict[str, Any] | None] | None = None,
         live_liquidity_loader: Callable[..., dict[str, Any] | None] | None = None,
+        live_balance_loader: Callable[[], Any] | None = None,
         settings: Settings | None = None,
         paper_adapter: PaperExecutionAdapter | None = None,
     ):
@@ -178,6 +179,7 @@ class ExecutionCoordinator:
         self.live_submitter = live_submitter
         self.live_symbol_rules_loader = live_symbol_rules_loader
         self.live_liquidity_loader = live_liquidity_loader
+        self.live_balance_loader = live_balance_loader
         self.settings = settings or get_settings()
         self.paper_adapter = paper_adapter or PaperExecutionAdapter()
         self._live_symbol_rules_cache: dict[str, dict[str, Any]] = {}
@@ -291,6 +293,88 @@ class ExecutionCoordinator:
             return symbol_rules or None, None
         except Exception as exc:  # pragma: no cover - defensive fallback
             return None, str(exc)
+
+    @staticmethod
+    def _csv_upper(value: Any) -> list[str]:
+        items = [item.strip().upper() for item in str(value or "").split(",")]
+        return [item for item in items if item]
+
+    def _balance_rows_from_snapshot(self, snapshot: Any) -> list[dict[str, Any]]:
+        if isinstance(snapshot, list):
+            return [self._safe_dict(item) for item in snapshot if self._safe_dict(item)]
+        snapshot_payload = self._safe_dict(snapshot)
+        rows = snapshot_payload.get("balances")
+        if isinstance(rows, list):
+            return [self._safe_dict(item) for item in rows if self._safe_dict(item)]
+        return []
+
+    def _live_account_equity(self) -> tuple[float, dict[str, Any], str | None]:
+        configured_equity = self._float_or(getattr(self.settings, "auto_trading_live_account_equity_usdt", 0.0))
+        sync_enabled = self._safe_bool(getattr(self.settings, "auto_trading_live_balance_sync_enabled", False))
+        fail_closed = self._safe_bool(getattr(self.settings, "auto_trading_live_balance_sync_fail_closed", True), default=True)
+        preferred_assets = self._csv_upper(getattr(self.settings, "auto_trading_live_balance_sync_assets", "USDC,USDT")) or [
+            "USDC",
+            "USDT",
+        ]
+        details: dict[str, Any] = {
+            "configured_account_equity_usdt": round(configured_equity, 4),
+            "balance_sync_enabled": bool(sync_enabled),
+            "balance_sync_assets": preferred_assets,
+        }
+        if not sync_enabled:
+            details["account_equity_source"] = "configured"
+            return configured_equity, details, None
+
+        details["balance_sync_fail_closed"] = bool(fail_closed)
+        if self.live_balance_loader is None:
+            details["balance_sync_error"] = "live_balance_loader_missing"
+            if fail_closed:
+                return 0.0, details, "Live balance sync is enabled but no balance loader is configured."
+            details["account_equity_source"] = "configured_fallback"
+            return configured_equity, details, None
+
+        try:
+            snapshot = self.live_balance_loader()
+        except Exception as exc:  # pragma: no cover - defensive live-submit guard
+            details["balance_sync_error"] = str(exc)
+            if fail_closed:
+                return 0.0, details, f"Live balance sync failed: {exc}"
+            details["account_equity_source"] = "configured_fallback"
+            return configured_equity, details, None
+
+        rows = self._balance_rows_from_snapshot(snapshot)
+        rows_by_asset = {str(row.get("asset") or row.get("a") or "").upper(): row for row in rows}
+        details["balance_row_count"] = len(rows)
+        for asset in preferred_assets:
+            row = rows_by_asset.get(asset)
+            if not row:
+                continue
+            available = self._maybe_float(
+                row.get("availableBalance")
+                or row.get("available_balance")
+                or row.get("crossWalletBalance")
+                or row.get("walletBalance")
+                or row.get("balance")
+            )
+            if available is None or available <= 0.0:
+                continue
+            details.update(
+                {
+                    "account_equity_source": "binance_futures_available_balance",
+                    "balance_asset": asset,
+                    "balance_available_usdt": round(float(available), 4),
+                }
+            )
+            wallet_balance = self._maybe_float(row.get("balance") or row.get("walletBalance") or row.get("wallet_balance"))
+            if wallet_balance is not None:
+                details["balance_wallet_usdt"] = round(float(wallet_balance), 4)
+            return float(available), details, None
+
+        details["balance_sync_error"] = "preferred_asset_available_balance_missing"
+        if fail_closed:
+            return 0.0, details, "Live balance sync did not find a positive available balance for the configured assets."
+        details["account_equity_source"] = "configured_fallback"
+        return configured_equity, details, None
 
     def _normalize_live_limit_price(
         self,
@@ -810,7 +894,7 @@ class ExecutionCoordinator:
             return None, sizing_details, "Live submit requires a positive reference price."
         max_position_notional = 0.0
         if sizing_mode == "RISK_PCT":
-            account_equity_usdt = self._float_or(getattr(self.settings, "auto_trading_live_account_equity_usdt", 0.0))
+            account_equity_usdt, account_equity_details, account_equity_error = self._live_account_equity()
             risk_per_trade_pct = self._float_or(getattr(self.settings, "auto_trading_live_risk_per_trade_pct", 0.0))
             usable_margin_fraction = self._float_or(getattr(self.settings, "auto_trading_live_usable_margin_fraction", 0.0))
             leverage_cap = self._float_or(getattr(self.settings, "auto_trading_live_leverage_cap", 0.0))
@@ -828,6 +912,7 @@ class ExecutionCoordinator:
             sizing_details.update(
                 {
                     "account_equity_usdt": round(account_equity_usdt, 4),
+                    **account_equity_details,
                     "risk_per_trade_pct": round(risk_per_trade_pct, 6),
                     "usable_margin_fraction": round(usable_margin_fraction, 6),
                     "usable_margin_usdt": round(usable_margin_usdt, 4),
@@ -844,6 +929,8 @@ class ExecutionCoordinator:
                     "sizing_status": "capped_by_leverage" if leverage_capped else "target_risk_matched",
                 }
             )
+            if account_equity_error:
+                return None, sizing_details, account_equity_error
             if account_equity_usdt <= 0.0:
                 return None, sizing_details, "Live risk sizing requires AUTO_TRADING_LIVE_ACCOUNT_EQUITY_USDT > 0."
             if risk_per_trade_pct <= 0.0:

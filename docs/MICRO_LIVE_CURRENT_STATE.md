@@ -28,6 +28,8 @@ This is the concise operator source for the current live canary shape. Detailed 
 
 `MAX_DAILY_NEW_ENTRIES=0` means the daily cap is disabled. It does not mean unlimited entry: position cap, validation, operations checklist, kill/close-only switches, liquidity, macro blackout, exchange rules, sizing, and reconciliation still gate every submit.
 
+Live risk sizing now uses Binance futures available balance when `AUTO_TRADING_LIVE_BALANCE_SYNC_ENABLED=true`, preferring `USDC` then `USDT`. `AUTO_TRADING_LIVE_ACCOUNT_EQUITY_USDT` remains the fallback/reference value, not the primary sizing source while balance sync is enabled.
+
 ## Backtest Alignment
 
 Baseline report:
@@ -60,7 +62,7 @@ Runtime restarts sync the regular `micro_main_usdt_proxy_backtest_*.json` baseli
 
 ## Current No-Order Interpretation
 
-As of 2026-05-17 01:27 KST, the runtime is aligned to the 16-symbol MICRO_LIVE route. The system is not blocked by a symbol-list contradiction, stale validation cache, missing direction contract, WS universe mismatch, macro blackout coverage gap, or Binance trading-rule mismatch.
+As of 2026-05-17 03:17 KST, the runtime is aligned to the 16-symbol MICRO_LIVE route. The system is not blocked by a symbol-list contradiction, stale validation cache, missing direction contract, WS universe mismatch, macro blackout coverage gap, stale canary report, ops heartbeat failure, or Binance trading-rule mismatch.
 
 Latest runtime check after the 16-symbol expansion:
 
@@ -74,6 +76,9 @@ Latest runtime check after the 16-symbol expansion:
 - `session_impulse_retest_live_rollout_window`: `PASS`, core live slots `16`
 - `macro_blackout_live_coverage`: `PASS`
 - `binance_symbol_trading_rules`: `PASS`, rules loaded for `16` live symbols
+- `synthetic_canary`: `PASS`, `no_live_order_sent=true`, live sizing uses Binance futures available balance
+- `binance_rule_drift`: `PASS`, `drift_count=0` after refreshing the 16-symbol route baseline
+- `ops_heartbeat`: `PASS`, issue/warning/hard-failure counts `0`
 - `candidate_available`: `PASS`, no accepted scanner candidate is live-routable right now
 
 Interpretation:
@@ -104,4 +109,4 @@ Use these before treating the route as ready:
 
 - Historical liquidity gate drag is not exact without historical order book snapshots.
 - Backtest alignment does not guarantee live PnL; live fills, slippage, rejects, latency, and forced exits remain separate truth.
-- `Trading entry surface alert` is not by itself an order trigger. Live submit requires the current live route plus validation/operations/safety/liquidity approval.
+- `Trading entry surface alert` is reserved for live candidates or blocked live-routable candidates. Zero-live context-only surfaces should be labeled `Trading entry surface monitor` and are not order triggers. Live submit requires the current live route plus validation/operations/safety/liquidity approval.

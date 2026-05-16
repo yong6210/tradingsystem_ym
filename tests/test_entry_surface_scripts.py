@@ -664,7 +664,7 @@ def test_main_no_alertable_rows_still_emits_rendered_message(monkeypatch, tmp_pa
     assert payload["live_order_candidates"] == 0
     assert payload["operator_action_summary"]["state"] == "context_only_outside_live_route"
     assert "operator_action: state=context_only_outside_live_route" in payload["message"]
-    assert "Trading entry surface alert: live_order_candidates=0" in payload["message"]
+    assert "Trading entry surface monitor: live_order_candidates=0" in payload["message"]
 
 
 def test_main_suppresses_when_alert_state_is_unchanged(monkeypatch, tmp_path, capsys):

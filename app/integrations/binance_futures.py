@@ -509,6 +509,12 @@ class BinanceFuturesClient:
             return [row for row in (self._safe_dict(item) for item in payload) if row]
         return []
 
+    def fetch_futures_balances(self) -> list[dict[str, Any]]:
+        payload = self._signed_request("GET", "/fapi/v2/balance", {})
+        if isinstance(payload, list):
+            return [row for row in (self._safe_dict(item) for item in payload) if row]
+        return []
+
     @staticmethod
     def _normalize_position_side(value: Any) -> str:
         text = str(value or "BOTH").upper()

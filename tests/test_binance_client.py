@@ -122,6 +122,33 @@ def test_fetch_position_risk_filters_malformed_rows(monkeypatch) -> None:
     assert empty["position_amt"] == 0.0
 
 
+def test_fetch_futures_balances_filters_malformed_rows(monkeypatch) -> None:
+    def fake_signed_request(self, method: str, path: str, params: dict[str, object]) -> list[object]:
+        assert method == "GET"
+        assert path == "/fapi/v2/balance"
+        assert params == {}
+        return [
+            ["bad-row"],
+            {
+                "asset": "USDC",
+                "balance": "170.0",
+                "availableBalance": "169.5",
+            },
+        ]
+
+    monkeypatch.setattr(BinanceFuturesClient, "_signed_request", fake_signed_request)
+
+    rows = BinanceFuturesClient(api_key="key", api_secret="secret", live_trade_enabled=True).fetch_futures_balances()
+
+    assert rows == [
+        {
+            "asset": "USDC",
+            "balance": "170.0",
+            "availableBalance": "169.5",
+        }
+    ]
+
+
 def test_submit_order_uses_test_endpoint_and_echoes_payload(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

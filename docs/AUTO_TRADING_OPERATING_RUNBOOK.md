@@ -238,7 +238,7 @@ family 리뷰:
 - 차트/TradingView는 mirror다. approval이나 execution truth가 아니다.
 - `operator_action_priority`는 reading priority다. live submit instruction이 아니다.
 - `mode_advisory`, `family_execution_degradation_advisory`, `alpha_research`는 모두 advisory-only다.
-- `Trading entry surface alert`는 그 자체가 주문 트리거가 아니다. 메시지의 `live_order_candidates`, `blocked_live_candidates`, `operator_action.state`를 먼저 본다. `live_order_candidates=0`이고 `operator_action.state=context_only_outside_live_route`면 live route 밖 context row가 보인다는 뜻이다. count가 없는 legacy entry surface payload는 `[모니터링] ... 진입 표면 상태`로 표시되어야 한다.
+- `Trading entry surface alert`는 live 후보가 있거나 live-routable 후보가 주문 전 차단됐다는 뜻으로만 쓴다. `live_order_candidates=0`인 context-only surface는 `Trading entry surface monitor`로 표시되어야 하며, 메시지의 `live_order_candidates`, `blocked_live_candidates`, `operator_action.state`를 먼저 본다. `live_order_candidates=0`이고 `operator_action.state=context_only_outside_live_route`면 live route 밖 context row가 보인다는 뜻이다. count가 없는 legacy entry surface payload는 `[모니터링] ... 진입 표면 상태`로 표시되어야 한다.
 - no-order 판단은 current runtime window와 lookback을 분리한다. 현재 window가 `live_intents=0/submit_ready=0/submissions=0`이면 아직 submit 경로 실패는 아니다. 다만 lookback에 후보가 있었고 모두 차단됐다면 `sir_pre_restart_expected_orders_advisory`를 historical context로 남기고, 알림성 `WATCH`로 반복 호출하지 않는다. 다음 fresh 후보가 `submit_ready`까지 가는지 확인한다.
 - 주문 가능 여부의 운영 truth는 `live_candidate_promotion_readiness`다. 이 리포트는 런타임에서 주기 생성되고 ops heartbeat가 freshness를 감시해야 한다. 파일 timestamp가 오래됐으면 그 파일만 보고 후보 상태를 판단하지 말고 API/`check_runtime_stack.sh` 또는 갱신된 runtime report를 다시 본다.
 - 최종 승인 surface는 계속 `POST /validation/report`와 `POST /operations/checklist`다.

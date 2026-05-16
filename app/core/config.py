@@ -386,6 +386,9 @@ class Settings(BaseSettings):
     auto_trading_notional_per_r: float = 25.0
     auto_trading_live_sizing_mode: str = "RISK_PCT"
     auto_trading_live_account_equity_usdt: float = 200.0
+    auto_trading_live_balance_sync_enabled: bool = False
+    auto_trading_live_balance_sync_assets: str = "USDC,USDT"
+    auto_trading_live_balance_sync_fail_closed: bool = True
     auto_trading_live_risk_per_trade_pct: float = 0.01
     auto_trading_live_usable_margin_fraction: float = 0.85
     auto_trading_live_leverage_cap: float = 10.0

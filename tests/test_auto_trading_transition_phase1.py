@@ -809,6 +809,99 @@ def test_approval_service_keeps_sir_bootstrap_mode_watch_advisory_submit_eligibl
     assert "mode_advisory:session:watch" in payload["outcome_approval_penalty"]["reason_codes"]
 
 
+def test_approval_service_keeps_sir_bootstrap_post_cost_advisory_submit_eligible() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_enabled=True,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
+        auto_trading_micro_live_allowed_families="session_impulse_retest",
+        auto_trading_micro_live_allowed_entry_models="CONFIRM",
+        auto_trading_micro_live_allowed_sessions="london,new_york",
+        session_impulse_retest_enabled=True,
+        session_impulse_retest_shadow_only=False,
+        session_impulse_retest_partial_activation_ratio=1.0,
+    )
+    service = ExecutionPlanningService(settings=settings, rollout_provider=_MicroLiveRolloutProvider())
+    plan = _plan(
+        plan_id="sir_bootstrap_post_cost_advisory_case",
+        entry_model="CONFIRM",
+        validity={
+            "strategy_family": "session_impulse_retest",
+            "strategy_grade": "A",
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "recommended_risk_r": 0.4,
+            "regime": "trend",
+        },
+    )
+    candidate = {
+        "accepted": True,
+        "deployment_go_no_go": "GO",
+        "deployment_code": "go_runtime_gate_open",
+        "deployment_message": "GO: runtime gate is open for candidate review.",
+        "session_guidance": {"session_name": "london"},
+    }
+    executable_plan = service.build_executable_plan(plan=plan, context=None, candidate_row=candidate)
+
+    payload = service.approve(
+        plan=plan,
+        executable_plan=executable_plan,
+        candidate_row=candidate,
+        metrics={"grade": "A", "recommendation": "deploy", "risk_state": "OPEN", "risk_reason": "normal"},
+        requested_execution_mode=ExecutionMode.MICRO_LIVE,
+        safety_state={
+            "new_entry_allowed": True,
+            "session_impulse_retest_rollout_readiness": {
+                "status": "live_bootstrap_collecting",
+                "blockers": [],
+                "advisory_blockers": ["no_recent_closed_sample"],
+            },
+        },
+        outcome_inputs={
+            "execution_degradation_advisory_summary": {
+                "status": "manual_review",
+                "reason_codes": ["execution_quality_low_coverage"],
+                "sample_context": {"plans_matured": 0, "fill_events_total": 0, "closed_plans": 0},
+            },
+            "score_to_outcome_funnel_summary": {
+                "historical_execution_outcomes": {"baseline_cost_profitable_rate_from_closed": 0.0},
+                "decomposition": {
+                    "family": [
+                        {
+                            "key": "session_impulse_retest",
+                            "closed": 5,
+                            "baseline_cost_profitable_rate_from_closed": 0.2,
+                        }
+                    ],
+                    "regime": [],
+                    "session": [],
+                },
+            },
+            "mode_advisory_summary": {
+                "family": [
+                    {
+                        "bucket": "session_impulse_retest",
+                        "advisory_state": "watch",
+                        "confidence": "medium",
+                        "sample_note": "usable evidence, but still limited",
+                    }
+                ],
+                "regime": [],
+                "session": [],
+            },
+        },
+    )
+
+    assert payload["approval_state"] == ApprovalState.APPROVED_AUTO.value
+    assert payload["outcome_approval_penalty"]["status"] == "watch"
+    assert payload["outcome_approval_penalty"]["penalty_tier"] == "reason_only"
+    assert (
+        payload["outcome_approval_penalty"]["source_summary"]["execution_degradation_policy"]
+        == "advisory_until_material_sir_live_execution_sample"
+    )
+    assert "post_cost_conversion:weak_family_alignment" in payload["outcome_approval_penalty"]["reason_codes"]
+
+
 def test_approval_service_downgrades_sir_when_execution_degradation_has_material_sample() -> None:
     settings = Settings(
         _env_file=None,

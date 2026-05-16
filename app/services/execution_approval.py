@@ -567,6 +567,7 @@ class ExecutionPlanningService:
         *,
         executable_plan: dict[str, Any],
         candidate_row: dict[str, Any] | None,
+        safety_state: dict[str, Any] | None = None,
         outcome_inputs: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
         payload = dict(outcome_inputs or {})
@@ -580,6 +581,9 @@ class ExecutionPlanningService:
             return None
 
         family = str(executable_plan.get("strategy_family") or "unknown")
+        safety = dict(safety_state or {})
+        sir_rollout_readiness = dict(safety.get("session_impulse_retest_rollout_readiness") or {})
+        sir_rollout_status = str(sir_rollout_readiness.get("status") or "")
         regime = str(dict(executable_plan.get("context_snapshot") or {}).get("regime") or "unknown")
         candidate = dict(candidate_row or {})
         session_name = self._session_name(candidate, dict(candidate.get("operating_lock") or {}))
@@ -653,21 +657,25 @@ class ExecutionPlanningService:
 
         status = "watch"
         penalty_tier = "reason_only"
-        bootstrap_degradation_advisory_only = (
+        sir_bootstrap_outcome_advisory_only = (
             family == "session_impulse_retest"
-            and degradation_status == "manual_review"
+            and sir_rollout_status == "live_bootstrap_collecting"
             and not material_degradation_sample
-            and not post_cost_reason
         )
-        if (degradation_status == "manual_review" and not bootstrap_degradation_advisory_only) or (
+        if (degradation_status == "manual_review" and not sir_bootstrap_outcome_advisory_only) or (
             post_cost_reason and adverse_mode_rows
         ):
             status = "manual_review"
             penalty_tier = "downgrade_to_manual"
+        if sir_bootstrap_outcome_advisory_only:
+            status = "watch"
+            penalty_tier = "reason_only"
 
         summary = "execution degradation and post-cost outcome signals require closer review before new live entries"
         if penalty_tier == "downgrade_to_manual":
             summary = "execution degradation and post-cost outcome signals require manual review before new live entries"
+        elif sir_bootstrap_outcome_advisory_only:
+            summary = "SIR live bootstrap has no material live execution sample yet; outcome controls stay advisory until closes accumulate"
 
         return {
             "available": True,
@@ -693,7 +701,7 @@ class ExecutionPlanningService:
                 "post_cost_closed": int(post_cost_closed),
                 "execution_degradation_policy": (
                     "advisory_until_material_sir_live_execution_sample"
-                    if bootstrap_degradation_advisory_only
+                    if sir_bootstrap_outcome_advisory_only
                     else "standard"
                 ),
             },
@@ -950,6 +958,7 @@ class ExecutionPlanningService:
         outcome_approval_penalty = self._outcome_approval_penalty(
             executable_plan=executable_plan,
             candidate_row=candidate_row,
+            safety_state=safety,
             outcome_inputs=outcome_inputs,
         )
 

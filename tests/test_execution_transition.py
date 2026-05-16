@@ -94,6 +94,7 @@ def _apply_auto_trading_defaults(monkeypatch) -> None:
     monkeypatch.setattr(settings, "auto_trading_micro_live_max_daily_new_entries", 10)
     monkeypatch.setattr(settings, "auto_trading_reconciliation_user_stream_stale_seconds", 180)
     monkeypatch.setattr(settings, "binance_trade_live_enabled", False)
+    monkeypatch.setattr(settings, "auto_trading_live_balance_sync_enabled", False)
     monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", False)
     monkeypatch.setattr(settings, "portfolio_overlay_enabled", False)
     monkeypatch.setattr(settings, "transition_edge_variant_enabled", True)
@@ -3195,6 +3196,91 @@ def test_micro_live_submit_uses_risk_pct_sizing_and_caps_by_leverage(monkeypatch
     assert sizing["leverage_cap"] == 6.0
     assert sizing["leverage_capped"] is False
     assert sizing["actual_risk_usdt"] == 1.0
+
+
+def test_micro_live_submit_uses_synced_available_balance_for_risk_pct_sizing(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "RISK_PCT")
+    monkeypatch.setattr(settings, "auto_trading_live_account_equity_usdt", 200.0)
+    monkeypatch.setattr(settings, "auto_trading_live_balance_sync_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_balance_sync_assets", "USDC,USDT")
+    monkeypatch.setattr(settings, "auto_trading_live_balance_sync_fail_closed", True)
+    monkeypatch.setattr(settings, "auto_trading_live_risk_per_trade_pct", 0.005)
+    monkeypatch.setattr(settings, "auto_trading_live_usable_margin_fraction", 0.85)
+    monkeypatch.setattr(settings, "auto_trading_live_leverage_cap", 6.0)
+    monkeypatch.setattr(settings, "binance_live_min_quantity", 0.001)
+    monkeypatch.setattr(settings, "binance_live_quantity_step", 0.001)
+    suffix = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000))[-6:]
+    symbol = f"LB{suffix}USDC"
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", symbol)
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
+    monkeypatch.setattr(
+        "app.services.strategy_engine.StrategyEngine.load_binance_futures_balances",
+        lambda self: {
+            "source": "test_balance",
+            "balances": [
+                {"asset": "USDT", "availableBalance": "999.0", "balance": "999.0"},
+                {"asset": "USDC", "availableBalance": "170.0", "balance": "170.0"},
+            ],
+        },
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_submit(self, **kwargs):
+        captured.update(kwargs)
+        return {
+            "symbol": kwargs["symbol"],
+            "plan_id": kwargs["plan_id"],
+            "order_id": 987665,
+            "client_order_id": kwargs["client_order_id"],
+            "status": "NEW",
+            "side": kwargs["side"],
+            "order_type": kwargs["order_type"],
+            "reduce_only": kwargs["reduce_only"],
+        }
+
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.submit_binance_order", _fake_submit)
+
+    plan_id = f"{symbol}_balance_{suffix}"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, entry_model="LIMIT")
+
+    with SessionLocal() as db:
+        plan = db.get(Plan, plan_id)
+        assert plan is not None
+        plan.sl = 99.9
+        db.add(plan)
+        db.commit()
+
+    intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "MICRO_LIVE"},
+    )
+    assert intent.status_code == 200
+
+    submit = client.post(
+        "/execution/submit",
+        json={"intent_id": intent.json()["intent_id"], "live": True},
+    )
+    assert submit.status_code == 200
+    submit_payload = submit.json()
+    assert submit_payload["state"] == "ACKNOWLEDGED"
+    assert captured["quantity"] == 8.5
+    sizing = submit_payload["attachments"]["live_order_sizing"]
+    assert sizing["account_equity_usdt"] == 170.0
+    assert sizing["configured_account_equity_usdt"] == 200.0
+    assert sizing["account_equity_source"] == "binance_futures_available_balance"
+    assert sizing["balance_asset"] == "USDC"
+    assert sizing["target_notional"] == 850.0
+    assert sizing["actual_risk_usdt"] == 0.85
 
 
 def test_micro_live_submit_uses_symbol_specific_quantity_filters(monkeypatch) -> None:

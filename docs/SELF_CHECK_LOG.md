@@ -7631,3 +7631,38 @@
   - 현재 live 주문 authority는 계속 `session_impulse_retest + CONFIRM + 16개 core MICRO_LIVE 심볼`이다.
   - `ZECUSDC`, `UNIUSDC`는 secondary/tracked-only이며 주문 대상이 아니다.
   - 이 수정은 주문 조건 완화가 아니라 운영 surface와 fallback 기본값의 오해를 제거한 것이다.
+
+## 2026-05-17 Iteration #263
+### 추가 감사: context-only entry surface가 alert처럼 읽히는 문구 drift
+- 발견:
+  - 최신 entry surface payload는 `live_order_candidates=0`, `blocked_live_candidates=0`, `operator_action.state=context_only_outside_live_route`, `notified=false`로 정상적으로 주문 후보가 아님을 표시했다.
+  - 하지만 렌더링 첫 줄은 live 후보가 없어도 항상 `Trading entry surface alert: ...`로 시작했다.
+  - 저장 리포트나 운영 요약에서 첫 줄만 보면 “진입 alert가 떴는데 주문이 왜 안 나가지?”로 오해할 수 있었다.
+- 수정:
+  - `scripts/notify_entry_surface.py`
+    - live 주문 후보가 있거나 live-routable 후보가 주문 전 차단된 경우에만 `Trading entry surface alert`를 사용한다.
+    - live 후보/blocked-live 후보가 0인 context-only surface는 `Trading entry surface monitor`로 렌더링한다.
+  - `tests/test_entry_surface_scripts.py`
+    - context-only route mismatch 케이스가 `monitor` headline을 쓰도록 회귀 테스트를 갱신했다.
+  - `docs/ENTRY_ALERT_AUTOMATION.md`, `docs/AUTO_TRADING_OPERATING_RUNBOOK.md`, `docs/MICRO_LIVE_CURRENT_STATE.md`
+    - alert/monitor headline 구분을 문서화했다.
+- 해석:
+  - 주문 로직 변경이 아니다.
+  - live 후보가 없을 때 운영 메시지의 첫 줄만 보고 주문 후보로 착각하는 문제를 줄이는 관측성 정리다.
+
+## 2026-05-17 Iteration #264
+### 추가 감사: 운영 heartbeat 최신성/거래소 규칙 drift 오해 정리
+- 발견:
+  - `run_micro_live_ops_heartbeat.py`가 `synthetic_canary=FAIL`을 보고 있었지만, 원인은 최신 수동 canary를 `--no-write-report`로 실행해 durable runtime의 `latest.md/latest.json`이 이전 실패 리포트를 계속 가리킨 것이었다.
+  - `binance_rule_drift=WATCH/DRIFT`는 거래소 규칙 변경이 아니라, 16-symbol live route 확장 후 이전 snapshot에 없던 `1000PEPEUSDC`, `1000SHIBUSDC`, `ARBUSDC`, `DOGEUSDC`, `FILUSDC`가 `new_symbol`로 잡힌 기준선 drift였다.
+  - 최근 DB 기준 실제 제출은 2026-05-10 이후 0건이며, 2026-05-16의 SIR live 후보 1건은 당시 `outcome_penalty_manual_review`로 `SKIP_MANUAL_ONLY` 처리됐다. 현재 코드/런타임은 SIR bootstrap 상태에서 material execution sample이 없으면 이 outcome penalty를 advisory로 유지하도록 반영돼 있다.
+  - 현재 런타임 시작 이후에는 `intent`/`submission`이 없고, runtime audits는 `no_fresh_candidates`와 `no_live_route_candidate_plan`만 쌓이고 있다.
+- 수정/조치:
+  - durable runtime report 경로에 `run_micro_live_synthetic_canary.py --symbol BTCUSDC --entry-model CONFIRM`을 다시 실행해 `synthetic_canary=PASS`, `no_live_order_sent=true` 최신 리포트로 갱신했다.
+  - `run_binance_rule_drift_snapshot.py`를 16-symbol route 기준으로 다시 실행해 `drift_count=0`, `overall_status=PASS` 기준선을 갱신했다.
+  - `run_micro_live_ops_heartbeat.py --no-fail-exit --no-write-report` 재확인 결과 `overall_status=PASS`, `issue_count=0`, `warning_count=0`, `hard_failure_count=0`.
+  - `check_runtime_stack.sh` 재확인 결과 `/health/ready=ready`, WS `auto_route_errors=0`, `refresh_errors=0`, `ingest_errors=0`, `auto_route_submit_calls=0`, live route diagnosis `WAIT/no_fresh_live_signal`.
+- 해석:
+  - 현재 남은 무주문 원인은 submit/잔고/거래소 규칙/운영 heartbeat 결함이 아니라 fresh live-routable SIR candidate 부재다.
+  - 다음 fresh `session_impulse_retest + CONFIRM` 후보가 나오면 bootstrap outcome penalty만으로는 과거처럼 수동검토로 낮아지지 않아야 한다.
+  - 이후 `submit_ready > 0`인데 `submissions=0`이 다시 발생하면 그때는 active intent-to-submit bug로 취급한다.

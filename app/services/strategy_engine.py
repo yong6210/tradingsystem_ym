@@ -444,6 +444,7 @@ class StrategyEngine:
             live_submitter=self.submit_binance_order,
             live_symbol_rules_loader=self.load_binance_symbol_trading_rules,
             live_liquidity_loader=self.load_binance_live_liquidity_snapshot,
+            live_balance_loader=self.load_binance_futures_balances,
             settings=self.settings,
         )
         self.execution_reconciliation = ExecutionReconciliationService(
@@ -6309,6 +6310,12 @@ class StrategyEngine:
             "price_precision": rules.price_precision,
             "quantity_precision": rules.quantity_precision,
             "source": "binance_exchange_info",
+        }
+
+    def load_binance_futures_balances(self) -> dict[str, Any]:
+        return {
+            "source": "binance_futures_balance",
+            "balances": self.market_data.binance.fetch_futures_balances(),
         }
 
     def load_binance_live_liquidity_snapshot(

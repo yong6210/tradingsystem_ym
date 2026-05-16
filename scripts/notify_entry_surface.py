@@ -939,9 +939,10 @@ def render_message(snapshot: dict[str, Any]) -> str:
     blocked_breakdown = _blocked_route_breakdown(snapshot)
     blocked_live_count = int(blocked_breakdown.get("live_routable", 0) or 0)
     blocked_context_count = int(blocked_breakdown.get("context_only", 0) or 0)
+    surface_label = "alert" if live_count > 0 or blocked_live_count > 0 else "monitor"
     lines = [
         (
-            "Trading entry surface alert: "
+            f"Trading entry surface {surface_label}: "
             f"live_order_candidates={live_count}, review_candidates={review_count}, "
             f"blocked_live_candidates={blocked_live_count}, "
             f"blocked_context_only={blocked_context_count}"
