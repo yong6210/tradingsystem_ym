@@ -225,6 +225,18 @@ def test_health_worker_starting_heartbeat_is_degraded(tmp_path) -> None:
     assert detail == "heartbeat_starting"
 
 
+def test_health_worker_syncing_universe_heartbeat_is_ready(tmp_path) -> None:
+    service = HealthCheckService()
+    service.settings.runtime_worker_heartbeat_dir = str(tmp_path)
+    service.settings.ready_require_runtime_workers = True
+    settings = get_settings().model_copy(update={"runtime_worker_heartbeat_dir": str(tmp_path)})
+    write_worker_heartbeat("loop", settings=settings, status="ok", pid=os.getpid(), details={"phase": "syncing_universe"})
+
+    ok, detail = service._check_runtime_worker("loop")
+    assert ok is True
+    assert detail.startswith("ok:")
+
+
 def test_health_ws_heartbeat_with_no_messages_becomes_degraded(tmp_path) -> None:
     service = HealthCheckService()
     service.settings.runtime_worker_heartbeat_dir = str(tmp_path)
@@ -492,3 +504,73 @@ def test_health_ready_is_degraded_when_market_data_is_stale(monkeypatch) -> None
     snapshot = service.evaluate()
     assert snapshot.status == "degraded"
     assert snapshot.checks["market_data_1m"] is False
+
+
+def test_health_market_data_freshness_uses_live_symbol_quorum(monkeypatch) -> None:
+    service = HealthCheckService()
+    now = datetime.now(timezone.utc)
+    rows = {
+        "BTCUSDC": SimpleNamespace(ts=now - timedelta(seconds=400)),
+        "ETHUSDC": SimpleNamespace(ts=now - timedelta(seconds=40)),
+        "SOLUSDC": SimpleNamespace(ts=now - timedelta(seconds=50)),
+        "LINKUSDC": SimpleNamespace(ts=now - timedelta(seconds=60)),
+    }
+
+    class FakeSession:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *args):
+            return False
+
+    class FakeRepo:
+        def __init__(self, db):
+            pass
+
+        def get_last_candle(self, symbol, timeframe):
+            return rows.get(symbol)
+
+    monkeypatch.setattr(service, "_market_data_probe_symbols", lambda: ["BTCUSDC", "ETHUSDC", "SOLUSDC", "LINKUSDC"])
+    monkeypatch.setattr("app.services.health_check.SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr("app.services.health_check.CandleRepository", FakeRepo)
+
+    ok, detail = service._check_market_data_freshness("1m")
+
+    assert ok is True
+    assert "fresh=3/4" in detail
+    assert "stale=BTCUSDC" in detail
+
+
+def test_health_market_data_freshness_fails_when_live_symbol_quorum_is_stale(monkeypatch) -> None:
+    service = HealthCheckService()
+    now = datetime.now(timezone.utc)
+    rows = {
+        "BTCUSDC": SimpleNamespace(ts=now - timedelta(seconds=400)),
+        "ETHUSDC": SimpleNamespace(ts=now - timedelta(seconds=390)),
+        "SOLUSDC": SimpleNamespace(ts=now - timedelta(seconds=380)),
+        "LINKUSDC": SimpleNamespace(ts=now - timedelta(seconds=40)),
+    }
+
+    class FakeSession:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *args):
+            return False
+
+    class FakeRepo:
+        def __init__(self, db):
+            pass
+
+        def get_last_candle(self, symbol, timeframe):
+            return rows.get(symbol)
+
+    monkeypatch.setattr(service, "_market_data_probe_symbols", lambda: ["BTCUSDC", "ETHUSDC", "SOLUSDC", "LINKUSDC"])
+    monkeypatch.setattr("app.services.health_check.SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr("app.services.health_check.CandleRepository", FakeRepo)
+
+    ok, detail = service._check_market_data_freshness("1m")
+
+    assert ok is False
+    assert "fresh=1/4" in detail
+    assert "required=3" in detail

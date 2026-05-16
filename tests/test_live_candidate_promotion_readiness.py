@@ -335,6 +335,73 @@ def test_runtime_readiness_scope_blocker_counts_use_full_candidate_set_when_rows
     }
 
 
+def test_runtime_readiness_counts_missing_live_symbols_as_no_fresh_candidates() -> None:
+    live_symbols = {"BTCUSDC", "ETHUSDC", "SOLUSDC", "LINKUSDC"}
+    payload = LiveCandidatePromotionReadinessService().build(
+        hours=24,
+        limit=12,
+        now="2026-05-10T03:10:00Z",
+        audit_rows=[
+            {
+                "symbol": "BTCUSDC",
+                "strategy_family": "session_impulse_retest",
+                "phase": "auto_route",
+                "status": "no_live_route_candidate_plan",
+                "count": 1,
+                "latest_observed_ts": "2026-05-10T03:05:00Z",
+            }
+        ],
+        intent_rows=[],
+        submission_rows=[],
+    )
+
+    scoped = _apply_live_headline_scope(payload, live_symbols=live_symbols)
+
+    assert scoped["candidate_count"] == 1
+    assert scoped["candidate_scope_counts"] == {"total": 4, "live_routable": 4, "auxiliary": 0}
+    assert scoped["live_state_counts"] == {"NO_FRESH_LIVE_CANDIDATE": 4}
+    assert scoped["top_live_blockers"] == {"no_fresh_live_candidate": 4}
+    assert scoped["top_all_blockers"] == {"no_fresh_live_candidate": 4}
+
+
+def test_runtime_readiness_counts_missing_live_symbols_when_auxiliary_shadow_is_headline() -> None:
+    live_symbols = {"BTCUSDC", "ETHUSDC", "SOLUSDC", "LINKUSDC"}
+    payload = LiveCandidatePromotionReadinessService().build(
+        hours=24,
+        limit=12,
+        now="2026-05-10T03:10:00Z",
+        audit_rows=[
+            {
+                "symbol": "BTCUSDC",
+                "strategy_family": "session_impulse_retest",
+                "phase": "auto_route",
+                "status": "no_live_route_candidate_plan",
+                "count": 1,
+                "latest_observed_ts": "2026-05-10T03:05:00Z",
+            },
+            {
+                "symbol": "SUIUSDC",
+                "strategy_family": "session_impulse_retest",
+                "phase": "auto_route",
+                "status": "symbol_not_live_enabled_for_auto_route",
+                "count": 1,
+                "latest_observed_ts": "2026-05-10T03:06:00Z",
+            },
+        ],
+        intent_rows=[],
+        submission_rows=[],
+    )
+
+    scoped = _apply_live_headline_scope(payload, live_symbols=live_symbols)
+
+    assert scoped["candidate_scope_counts"] == {"total": 5, "live_routable": 4, "auxiliary": 1}
+    assert scoped["live_state_counts"] == {"NO_FRESH_LIVE_CANDIDATE": 4}
+    assert scoped["auxiliary_state_counts"] == {"SHADOW_SIGNAL_ONLY": 1}
+    assert scoped["top_live_blockers"] == {"no_fresh_live_candidate": 4}
+    assert scoped["top_auxiliary_blockers"] == {"symbol_not_live_enabled_for_auto_route": 1}
+    assert scoped["headline_candidate_symbols"] == ["BTCUSDC", "ETHUSDC", "LINKUSDC", "SOLUSDC"]
+
+
 def test_runtime_readiness_wait_headline_uses_live_symbols_only() -> None:
     payload = LiveCandidatePromotionReadinessService().build(
         hours=24,

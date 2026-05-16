@@ -276,36 +276,67 @@ class HealthCheckService:
             return True, f"ok:{int(age_seconds)}s:processed={processed_messages}:reconnects={reconnects}"
         return True, f"ok:{int(age_seconds)}s"
 
-    def _market_data_probe_symbol(self) -> str:
-        allowed = [
-            item.strip().upper()
-            for item in str(self.settings.session_impulse_retest_allowed_symbols or "").split(",")
-            if item.strip()
+    def _market_data_probe_symbols(self) -> list[str]:
+        raw_groups = [
+            str(getattr(self.settings, "auto_trading_micro_live_allowed_symbols", "") or ""),
+            str(getattr(self.settings, "session_impulse_retest_allowed_symbols", "") or ""),
+            str(getattr(self.settings, "ready_market_data_probe_symbol", "") or "BTCUSDC"),
         ]
-        if allowed:
-            return allowed[0]
-        return str(self.settings.ready_market_data_probe_symbol or "BTCUSDC").upper()
+        symbols: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_groups:
+            for item in str(raw or "").split(","):
+                symbol = item.strip().upper()
+                if not symbol or symbol in seen:
+                    continue
+                seen.add(symbol)
+                symbols.append(symbol)
+        return symbols[:12] or ["BTCUSDC"]
 
     def _check_market_data_freshness(self, timeframe: str) -> tuple[bool, str]:
         normalized_tf = str(timeframe or "").strip().lower()
         if normalized_tf not in {"1m", "5m"}:
             return False, f"unsupported_timeframe:{timeframe}"
-        symbol = self._market_data_probe_symbol()
+        symbols = self._market_data_probe_symbols()
         with SessionLocal() as db:
             repo = CandleRepository(db)
-            row = repo.get_last_candle(symbol, normalized_tf)
-        if row is None:
-            return False, f"missing_last_candle:{symbol}:{normalized_tf}"
-        ts = row.ts if row.ts.tzinfo else row.ts.replace(tzinfo=timezone.utc)
-        age_seconds = max(0.0, (datetime.now(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds())
+            rows = {symbol: repo.get_last_candle(symbol, normalized_tf) for symbol in symbols}
         max_age = (
             self._safe_float(self.settings.ready_market_data_1m_max_age_seconds, default=180.0)
             if normalized_tf == "1m"
             else self._safe_float(self.settings.ready_market_data_5m_max_age_seconds, default=600.0)
         )
-        if age_seconds > max_age:
-            return False, f"stale:{symbol}:{normalized_tf}:{int(age_seconds)}s"
-        return True, f"ok:{symbol}:{normalized_tf}:{int(age_seconds)}s"
+        now = datetime.now(timezone.utc)
+        fresh: list[tuple[str, int]] = []
+        stale: list[str] = []
+        missing: list[str] = []
+        for symbol, row in rows.items():
+            if row is None:
+                missing.append(symbol)
+                continue
+            ts = row.ts if row.ts.tzinfo else row.ts.replace(tzinfo=timezone.utc)
+            age_seconds = max(0.0, (now - ts.astimezone(timezone.utc)).total_seconds())
+            if age_seconds <= max_age:
+                fresh.append((symbol, int(age_seconds)))
+            else:
+                stale.append(f"{symbol}:{int(age_seconds)}s")
+        required_fresh = min(3, len(symbols))
+        if len(fresh) >= required_fresh:
+            oldest_fresh = max(age for _, age in fresh)
+            stale_suffix = f" stale={','.join(stale[:4])}" if stale else ""
+            missing_suffix = f" missing={','.join(missing[:4])}" if missing else ""
+            return (
+                True,
+                f"ok:{normalized_tf}:fresh={len(fresh)}/{len(symbols)}:oldest_fresh={oldest_fresh}s"
+                f"{stale_suffix}{missing_suffix}",
+            )
+        stale_detail = ",".join(stale[:4]) if stale else "none"
+        missing_detail = ",".join(missing[:4]) if missing else "none"
+        return (
+            False,
+            f"stale:{normalized_tf}:fresh={len(fresh)}/{len(symbols)}:required={required_fresh}:"
+            f"stale={stale_detail}:missing={missing_detail}",
+        )
 
     def evaluate(self) -> ReadySnapshot:
         checks: dict[str, bool] = {}

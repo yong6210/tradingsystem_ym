@@ -197,15 +197,32 @@ def _apply_live_headline_scope(
         live_symbols=normalized_live_symbols,
         symbols_by_blocker=dict(readiness.get("symbols_by_blocker") or {}),
     )
+    top_all_blockers = Counter(dict(readiness.get("top_blockers") or {}))
     symbols_by_state = dict(readiness.get("symbols_by_state") or {})
     live_symbols_by_state, auxiliary_symbols_by_state = _symbols_by_scope(
         symbols_by_state,
         live_symbols=normalized_live_symbols,
     )
+    if live_headline_candidate or shadow_headline_candidate:
+        observed_live_symbols = {
+            symbol
+            for symbols in live_symbols_by_state.values()
+            for symbol in symbols
+        }
+        missing_live_symbols = sorted(normalized_live_symbols - observed_live_symbols)
+        if missing_live_symbols:
+            live_symbols_by_state.setdefault("NO_FRESH_LIVE_CANDIDATE", [])
+            live_symbols_by_state["NO_FRESH_LIVE_CANDIDATE"] = sorted(
+                set(live_symbols_by_state["NO_FRESH_LIVE_CANDIDATE"]) | set(missing_live_symbols)
+            )
+            live_blockers["no_fresh_live_candidate"] = int(live_blockers.get("no_fresh_live_candidate") or 0) + len(
+                missing_live_symbols
+            )
+            top_all_blockers["no_fresh_live_candidate"] += len(missing_live_symbols)
     live_symbol_count = sum(len(symbols) for symbols in live_symbols_by_state.values())
     auxiliary_symbol_count = sum(len(symbols) for symbols in auxiliary_symbols_by_state.values())
     readiness["candidate_scope_counts"] = {
-        "total": int(readiness.get("candidate_count") or live_symbol_count + auxiliary_symbol_count),
+        "total": live_symbol_count + auxiliary_symbol_count,
         "live_routable": live_symbol_count,
         "auxiliary": auxiliary_symbol_count,
     }
@@ -215,7 +232,7 @@ def _apply_live_headline_scope(
     readiness["top_live_blockers"] = live_blockers
     readiness["top_auxiliary_blockers"] = auxiliary_blockers
     readiness["headline_top_blockers"] = live_blockers
-    readiness["top_all_blockers"] = dict(readiness.get("top_blockers") or {})
+    readiness["top_all_blockers"] = dict(top_all_blockers.most_common())
     readiness["auxiliary_symbols_by_state"] = auxiliary_symbols_by_state
     shadow_symbols = {
         str(symbol or "").strip().upper()

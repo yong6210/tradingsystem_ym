@@ -14,6 +14,10 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import get_settings
+from app.services.active_contract_replay_baseline import (
+    active_micro_live_symbol_contract,
+    usdt_proxy_contract_symbols,
+)
 from app.services.report_io import atomic_write_text
 
 
@@ -88,17 +92,39 @@ def _year_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {str(year): _stats(bucket) for year, bucket in sorted(_group(rows, lambda row: _parse_dt(row.get("entry_ts")).year).items())}
 
 
+def _trade_count(payload: dict[str, Any]) -> int:
+    return sum(len(dict(item or {}).get("trades") or []) for item in dict(payload.get("results") or {}).values())
+
+
 def _latest_trade_backtest_path() -> Path:
-    base = Path(get_settings().validation_report_dir) / "micro_main_usdt_proxy_backtests"
-    candidates = sorted(base.glob("micro_main_usdt_proxy_backtest_*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    settings = get_settings()
+    base = Path(settings.validation_report_dir) / "micro_main_usdt_proxy_backtests"
+    candidates = sorted(
+        (
+            path
+            for path in base.glob("micro_main_usdt_proxy_backtest_*.json")
+            if "unseen" not in path.name and "top" not in path.name
+        ),
+        key=lambda item: item.name,
+        reverse=True,
+    )
+    active_symbols = active_micro_live_symbol_contract(settings)
+    latest_trade_candidate: Path | None = None
     for candidate in candidates:
         try:
             payload = json.loads(candidate.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
-        trade_count = sum(len(dict(item or {}).get("trades") or []) for item in dict(payload.get("results") or {}).values())
-        if trade_count > 0:
+        if _trade_count(payload) <= 0:
+            continue
+        if latest_trade_candidate is None:
+            latest_trade_candidate = candidate
+        if active_symbols and usdt_proxy_contract_symbols(payload) != active_symbols:
+            continue
+        if active_symbols:
             return candidate
+    if latest_trade_candidate is not None:
+        return latest_trade_candidate
     raise FileNotFoundError(f"No trade-including micro-main backtest JSON found under {base}")
 
 

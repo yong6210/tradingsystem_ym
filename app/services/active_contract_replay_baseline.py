@@ -93,6 +93,28 @@ def canonical_symbol_from_proxy(value: Any) -> str:
     return symbol
 
 
+def usdt_proxy_contract_symbols(payload: dict[str, Any]) -> set[str]:
+    raw_symbols = payload.get("proxy_symbols")
+    if not isinstance(raw_symbols, list) or not raw_symbols:
+        results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
+        raw_symbols = list(results.keys()) if isinstance(results, dict) else []
+    return {canonical_symbol_from_proxy(symbol) for symbol in raw_symbols if str(symbol or "").strip()}
+
+
+def active_micro_live_symbol_contract(settings: Any) -> set[str]:
+    mode = str(getattr(settings, "auto_trading_execution_mode", "") or "").strip().upper()
+    if mode not in {"MICRO_LIVE", "LIVE"}:
+        return set()
+    return {
+        symbol
+        for symbol in normalized_string_set(
+            str(getattr(settings, "auto_trading_micro_live_allowed_symbols", "") or "").split(","),
+            case="upper",
+        )
+        if symbol
+    }
+
+
 def _recent_json_files(directory: Path, pattern: str) -> list[Path]:
     if not directory.exists():
         return []
@@ -125,11 +147,14 @@ def usdt_proxy_rows_for_active_contract(settings: Any, filters: dict[str, Any]) 
         str(getattr(settings, "auto_trading_replay_validation_bridge_backtest_dir", "") or ""),
         default="reports/validation/micro_main_usdt_proxy_backtests",
     )
+    active_symbols = active_micro_live_symbol_contract(settings)
 
     for path in _recent_json_files(directory, "micro_main_usdt_proxy_backtest_*.json"):
         try:
             payload = json.loads(path.read_text())
         except Exception:
+            continue
+        if active_symbols and usdt_proxy_contract_symbols(payload) != active_symbols:
             continue
         results = payload.get("results")
         if isinstance(results, dict):

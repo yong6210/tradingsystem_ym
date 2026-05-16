@@ -182,7 +182,7 @@ def _run_boot_check(args: argparse.Namespace) -> dict:
     return payload
 
 
-def run_once(args: argparse.Namespace) -> dict:
+def run_once(args: argparse.Namespace, *, progress_callback: Any | None = None) -> dict:
     with SessionLocal() as db:
         engine = StrategyEngine(db)
         result: dict = {
@@ -197,6 +197,7 @@ def run_once(args: argparse.Namespace) -> dict:
                 limit_5m=args.limit_5m,
                 limit_15m=args.limit_15m,
                 symbol_concurrency=args.symbol_concurrency,
+                progress_callback=progress_callback,
             )
             result["actions"].append({"sync_universe": payload})
         elif args.binance_sync:
@@ -394,7 +395,31 @@ def main() -> int:
     while True:
         started = time.time()
         try:
-            payload = run_once(args)
+            if args.sync_universe:
+                write_worker_heartbeat(
+                    "loop",
+                    status="ok",
+                    details={"phase": "syncing_universe", "interval_seconds": int(args.interval_seconds)},
+                )
+
+            def _sync_progress(progress: dict[str, Any]) -> None:
+                write_worker_heartbeat(
+                    "loop",
+                    status="ok",
+                    details={
+                        "phase": str(progress.get("phase") or "syncing_universe"),
+                        "state": str(progress.get("state") or ""),
+                        "symbol": str(progress.get("symbol") or ""),
+                        "completed_symbols": _safe_int(progress.get("completed_symbols")),
+                        "total_symbols": _safe_int(progress.get("total_symbols")),
+                        "success": _safe_int(progress.get("success")),
+                        "failed": _safe_int(progress.get("failed")),
+                        "symbol_concurrency": _safe_int(progress.get("symbol_concurrency")),
+                        "interval_seconds": int(args.interval_seconds),
+                    },
+                )
+
+            payload = run_once(args, progress_callback=_sync_progress if args.sync_universe else None)
             write_worker_heartbeat(
                 "loop",
                 status="ok",

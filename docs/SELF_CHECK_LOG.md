@@ -6890,3 +6890,192 @@
   - `./.venv/bin/python -m pytest -q tests/test_micro_live_operational_guards.py::test_launchd_generator_includes_remaining_operational_guards tests/test_micro_live_operational_guards.py::test_ops_heartbeat_report_generated_at_does_not_use_runtime_started_at_as_generation_time tests/test_micro_live_operational_guards.py::test_ops_heartbeat_runtime_started_at_uses_configured_heartbeat_dir tests/test_micro_live_operational_guards.py::test_ops_heartbeat_warns_when_runtime_scoped_report_predates_current_ws_start tests/test_micro_live_operational_guards.py::test_ops_heartbeat_allows_runtime_scoped_report_after_current_ws_start tests/test_live_candidate_promotion_readiness.py`
   - `20 passed`
   - py_compile pass for `run_micro_live_ops_heartbeat.py`, `run_live_replay_parity_audit.py`, `install_micro_live_ops_launchd.py`
+
+## 2026-05-16 Iteration #238
+### 추가 감사: 재시작 직후 current-runtime 리포트 자동 갱신
+- 발견:
+  - ops heartbeat는 이제 runtime-scoped 리포트가 현재 WS `started_at` 이후 생성됐는지 확인한다.
+  - 그런데 `restart_runtime_stack_tmp.sh`는 `/health/ready`까지만 확인하고 끝나서, 재시작 직후 `entry_surface`나 parity/latest 파일이 pre-runtime이면 다음 launchd 스케줄까지 `report_before_current_runtime_start`가 남을 수 있었다.
+  - 주문 차단은 아니지만, 사용자가 보는 “현재 상태”가 재시작 전 truth와 섞일 수 있는 운영 모순이었다.
+- 수정:
+  - `scripts/restart_runtime_stack_tmp.sh`
+    - `/health/ready` 직후 post-restart refresh를 기본 실행한다.
+    - 순서: `runtime_guard` -> `no_order_watchdog` -> `live_candidate_promotion_readiness` -> `live_replay_parity` -> `session_impulse_retest_runtime_audit` -> `entry_surface` -> `boot_check` -> `ops_heartbeat`.
+    - refresh 결과는 `~/Library/Application Support/trading/logs/post_restart_report_refresh.log`에 남긴다.
+    - refresh 실패는 로그에 남기되 runtime restart 자체를 실패시키지 않는다.
+    - 긴급 복구 시 `TRADING_POST_RESTART_REFRESH_REPORTS=0`으로 건너뛸 수 있다.
+- 검증:
+  - `bash -n scripts/restart_runtime_stack_tmp.sh`
+  - runtime source refresh 후 실제 restart로 post-restart refresh가 current-runtime heartbeat `PASS`까지 만드는지 확인했다.
+
+## 2026-05-16 Iteration #239
+### 수정: broader backtest가 live 11심볼 baseline을 덮어써 worker boot를 막는 문제
+- 발견:
+  - `micro_main_usdt_proxy_backtest_20260516T095759Z.json`는 50심볼 broader universe backtest인데 파일명이 regular baseline과 같았다.
+  - 기존 selector는 `unseen`/`top*`만 제외하고 최신 파일명을 선택해, 현재 live 11심볼 계약을 50심볼 백테스트와 비교했다.
+  - 그 결과 `micro_live_backtest_contract_alignment=FAIL`, `run_micro_live_boot_check.py=FAIL`, loop/ws worker `boot_check_failed`, `/health/ready=degraded`가 발생했다.
+  - 사용자가 말한 “백테스트 기준인데 갑자기 코인이 탈락/주문이 안 들어감”과 같은 유형의 baseline selection 모순이었다.
+- 수정:
+  - `scripts/run_micro_live_preflight.py`
+    - MICRO_LIVE contract alignment가 단순 최신 파일이 아니라 현재 live symbol contract와 정확히 맞는 최신 backtest를 고른다.
+  - `app/services/active_contract_replay_baseline.py`
+    - MICRO_LIVE/LIVE 모드에서는 active replay baseline도 현재 live symbol contract와 맞는 backtest만 사용한다.
+  - `app/services/replay_validation_bridge.py`
+    - validation bridge도 live mode에서는 broader universe backtest를 현재 live baseline으로 쓰지 않는다.
+  - `scripts/run_micro_live_safety_drag_audit.py`
+    - safety drag audit도 현재 live symbol contract와 맞는 backtest를 우선 사용한다.
+  - 문서:
+    - runbook/current state에 “단순 최신 파일명이 아니라 live contract matching baseline” 규칙을 명시했다.
+- 확인:
+  - workspace `run_micro_live_runtime_guard.py --days 3 --limit 200 --no-fail-exit`
+    - `overall_status=PASS`
+    - `micro_live_backtest_contract_alignment=PASS`
+    - source `micro_main_usdt_proxy_backtest_20260515T175711Z.json`
+  - workspace `run_micro_live_boot_check.py --days 3 --limit 200 --no-fail-exit --quiet`
+    - `overall_status=PASS`, `blocking_failure_count=0`
+
+## 2026-05-16 Iteration #240
+### 수정: loop worker 첫 universe sync 중 readiness가 죽은 starting처럼 보이는 문제
+- 발견:
+  - baseline selector 수정 후 worker boot check는 통과했지만, loop worker의 첫 `sync_universe`가 길어지는 동안 heartbeat가 `phase=starting`에 머물렀다.
+  - `/health/ready`는 `phase=starting`을 의도적으로 degraded로 보기 때문에, 실제로 CPU/DB 작업 중인 상태가 `heartbeat_starting`처럼 보였다.
+  - 이 때문에 `restart_runtime_stack_tmp.sh`도 ready가 뜰 때까지 오래 대기했고, 사용자가 보는 상태는 “기동 중인지 멈춘 건지” 구분이 어려웠다.
+- 수정:
+  - `scripts/run_worker.py`
+    - loop mode에서 `sync_universe` 실행 직전에 heartbeat를 `phase=syncing_universe`로 갱신한다.
+    - health check는 `starting`만 degraded로 두고, `syncing_universe`는 살아서 작업 중인 loop worker로 본다.
+  - 문서:
+    - runbook/current state에 `syncing_universe` phase 의미를 추가했다.
+- 검증:
+  - `./.venv/bin/python -m pytest -q tests/test_health_readiness.py::test_health_worker_starting_heartbeat_is_degraded tests/test_health_readiness.py::test_health_worker_syncing_universe_heartbeat_is_ready tests/test_run_worker_boot_check.py tests/test_script_entrypoints.py::test_worker_boot_check_is_required_only_for_live_modes`
+  - `4 passed`
+  - 전체 관련 회귀:
+    - `./.venv/bin/python -m pytest -q tests/test_micro_live_preflight.py tests/test_micro_live_operational_guards.py tests/test_validation_payload_cache.py tests/test_live_candidate_promotion_readiness.py tests/test_operator_session_brief_automation_health.py tests/test_operator_surface_divergence_snapshot.py tests/test_generate_operator_session_brief.py tests/test_notify_operator_session_brief.py tests/test_script_entrypoints.py tests/test_replay_validation_bridge.py tests/test_micro_live_safety_drag_audit.py tests/test_health_readiness.py tests/test_run_worker_boot_check.py`
+    - `219 passed`
+  - `git diff --check`
+    - pass
+
+## 2026-05-16 Iteration #241
+### 수정: readiness live scope가 최근 audit row가 있는 심볼만 세는 문제
+- 발견:
+  - 최신 runtime `live_candidate_promotion_readiness`가 `candidate_scope_counts.live_routable=7`로 나왔다.
+  - 현재 live contract는 11심볼인데, 최근 runtime candidate/audit row가 없는 `AVAXUSDC`, `BCHUSDC`, `LTCUSDC`, `NEARUSDC` 같은 심볼은 scope count에서 빠질 수 있었다.
+  - 주문 차단은 아니지만, “11심볼 live route 전체가 fresh 후보 없음인지”를 보는 운영 truth가 부분 집합처럼 보이는 모순이었다.
+- 수정:
+  - `app/services/live_candidate_promotion_readiness_runtime.py`
+    - headline이 `WAIT/no_promotable_live_candidate`이거나 auxiliary shadow signal 때문에 잠시 `WATCH/shadow_signal_only`로 잡힐 때도 live contract symbols 중 runtime row가 없는 심볼을 `NO_FRESH_LIVE_CANDIDATE`로 계산한다.
+    - `candidate_scope_counts.total/live_routable`, `live_state_counts`, `top_live_blockers`, `top_all_blockers`가 live contract 전체를 반영하도록 조정했다.
+  - 문서:
+    - current state에 missing live-contract symbols도 no-fresh candidate로 세는 규칙을 추가했다.
+- 검증:
+  - `./.venv/bin/python -m pytest -q tests/test_live_candidate_promotion_readiness.py`
+    - `17 passed`
+  - 전체 관련 회귀:
+    - `./.venv/bin/python -m pytest -q tests/test_micro_live_preflight.py tests/test_micro_live_operational_guards.py tests/test_validation_payload_cache.py tests/test_live_candidate_promotion_readiness.py tests/test_operator_session_brief_automation_health.py tests/test_operator_surface_divergence_snapshot.py tests/test_generate_operator_session_brief.py tests/test_notify_operator_session_brief.py tests/test_script_entrypoints.py tests/test_replay_validation_bridge.py tests/test_micro_live_safety_drag_audit.py tests/test_health_readiness.py tests/test_run_worker_boot_check.py`
+    - `221 passed`
+  - `git diff --check`
+    - pass
+
+## 2026-05-16 Iteration #242
+### 수정: runtime restart 중복 실행 방지 lock
+- 발견:
+  - `post_restart_report_refresh.log`에 같은 시각 `2026-05-16T10:07:56Z` refresh block이 두 번 겹쳐 있었다.
+  - 이전에 수동 재시작과 runtime-stack watchdog 재시작이 동시에 떠서 같은 API/worker를 kill/restart하고 report refresh를 섞을 수 있는 구조였다.
+  - 주문 조건을 직접 막는 버그는 아니지만, 재시작 직후 readiness/heartbeat/no-order 판단이 섞여 사용자가 보는 현재 상태를 불안정하게 만들 수 있는 운영 결함이다.
+- 수정:
+  - `scripts/restart_runtime_stack_tmp.sh`
+    - source refresh/process kill/worker start/post-restart report refresh 전 단일 실행 lock을 잡는다.
+    - 기본 lock: `~/Library/Application Support/trading/locks/restart_runtime_stack_tmp.lock`
+    - 기본 wait: `TRADING_RUNTIME_RESTART_LOCK_WAIT_SECONDS=300`
+    - stale pid lock은 제거하고 진행한다.
+  - 문서:
+    - runbook/current state에 restart lock 경로와 목적을 추가했다.
+
+## 2026-05-16 Iteration #243
+### 추가 감사: 구형 재시작 경로와 연구용 백테스트 selector 정리
+- 발견:
+  - `scripts/restart_runtime_stack.sh`가 구형 독자 재시작 경로로 남아 있었다.
+  - 이 경로를 사람이 직접 실행하면 durable runtime의 lock, source refresh, runtime heartbeat 경로, post-restart report refresh를 우회할 수 있었다.
+  - live 주문 경로는 아니지만 `run_micro_main_filter_model_search.py`, `run_micro_main_trait_policy_search.py`도 기본 backtest source를 file mtime 최신순으로 골랐다.
+  - 따라서 50심볼 broader universe backtest가 더 최신이면 compare-only research 결과가 현재 11심볼 live baseline에서 벗어나 다음 판단을 흐릴 수 있었다.
+- 수정:
+  - `scripts/restart_runtime_stack.sh`
+    - 독자 구현을 제거하고 `restart_runtime_stack_tmp.sh`로 위임하는 compatibility wrapper로 바꿨다.
+  - `scripts/run_micro_main_filter_model_search.py`
+    - 기본 `--backtest-path`가 없을 때 현재 MICRO_LIVE symbol contract와 맞는 최신 regular backtest를 우선 선택한다.
+    - `unseen`, `top*`, broader universe report는 현재 live baseline으로 자동 선택하지 않는다.
+  - `scripts/run_micro_main_trait_policy_search.py`
+    - 기본 `--baseline-backtest-path`가 없을 때 같은 live contract matching 규칙을 사용한다.
+  - 문서:
+    - runbook/current state에 구형 restart wrapper와 compare-only research selector 규칙을 추가했다.
+- 검증:
+  - `./.venv/bin/python -m pytest -q tests/test_micro_main_research_backtest_selection.py tests/test_micro_live_safety_drag_audit.py::test_latest_backtest_report_prefers_matching_live_contract tests/test_micro_live_preflight.py::test_micro_live_config_drift_checks_use_latest_matching_live_backtest_contract tests/test_replay_validation_bridge.py::test_replay_validation_bridge_skips_newer_backtest_with_different_live_contract`
+    - `5 passed`
+  - `./.venv/bin/python -m pytest -q tests/test_micro_live_preflight.py tests/test_micro_live_operational_guards.py tests/test_validation_payload_cache.py tests/test_live_candidate_promotion_readiness.py tests/test_operator_session_brief_automation_health.py tests/test_operator_surface_divergence_snapshot.py tests/test_generate_operator_session_brief.py tests/test_notify_operator_session_brief.py tests/test_script_entrypoints.py tests/test_replay_validation_bridge.py tests/test_micro_live_safety_drag_audit.py tests/test_health_readiness.py tests/test_run_worker_boot_check.py tests/test_micro_main_research_backtest_selection.py`
+    - `223 passed`
+  - `bash -n scripts/restart_runtime_stack.sh scripts/restart_runtime_stack_tmp.sh`
+    - pass
+  - `chmod +x scripts/restart_runtime_stack.sh` 확인
+
+## 2026-05-16 Iteration #244
+### 추가 감사: market-data 단일 probe와 watchdog 재시작 루프 완화
+- 발견:
+  - `/health/ready`가 market-data freshness를 사실상 첫 probe symbol인 `BTCUSDC` 중심으로 판단했다.
+  - live universe의 다른 심볼들이 fresh여도 BTC 1m이 잠깐 늦으면 전체 runtime이 `degraded`가 됐다.
+  - runtime-stack watchdog는 `starting` grace만 알고 `syncing_universe` 중 market-data warmup을 몰라서, 재시작 직후 DB/WS catch-up 구간을 restart failure로 누적할 수 있었다.
+  - 실제 로그에서도 `2026-05-16T10:27:14Z`, `10:27:45Z`, `10:28:15Z`에 market-data stale 기반 failure가 3회 누적되어 불필요한 restart가 시작됐다.
+- 수정:
+  - `app/services/health_check.py`
+    - market-data freshness probe를 단일 심볼에서 live symbol quorum으로 변경했다.
+    - MICRO_LIVE symbols를 우선 사용하고 최대 12개 probe 중 최소 `min(3, probe_count)`개가 freshness threshold 안에 있으면 pass한다.
+    - stale/missing 심볼은 health detail에 남기되, quorum이 충분하면 전체 runtime을 degraded로 만들지 않는다.
+  - `scripts/watch_runtime_stack_tmp.sh`
+    - `syncing_universe`를 startup/warmup phase로 인식한다.
+    - warming phase 안에서 market-data-only degraded면 `market_data_warmup_grace`로 보고 failure count를 초기화한다.
+  - 문서:
+    - runbook/current state에 health quorum과 watchdog warmup grace를 추가했다.
+- runtime 반영:
+  - `./scripts/install_runtime_stack_launchd.sh`로 runtime-stack watchdog LaunchAgent를 새 script로 reload했다.
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`로 API/worker에 health quorum 코드를 반영했다.
+  - 재시작 후 `/health/ready`: `ready`, `market_data_1m=ok:1m:fresh=7/12...`, `market_data_5m=ok:5m:fresh=12/12...`
+  - ops heartbeat: `PASS`, issue `0`, failure `0`, warning `0`, advisory `2`
+  - no-order watchdog: current runtime intent `0`, submit_ready `0`, submission `0`; historical advisory only.
+- 검증:
+  - `./.venv/bin/python -m pytest -q tests/test_health_readiness.py`
+    - `28 passed`
+  - 전체 관련 회귀:
+    - `./.venv/bin/python -m pytest -q tests/test_micro_live_preflight.py tests/test_micro_live_operational_guards.py tests/test_validation_payload_cache.py tests/test_live_candidate_promotion_readiness.py tests/test_operator_session_brief_automation_health.py tests/test_operator_surface_divergence_snapshot.py tests/test_generate_operator_session_brief.py tests/test_notify_operator_session_brief.py tests/test_script_entrypoints.py tests/test_replay_validation_bridge.py tests/test_micro_live_safety_drag_audit.py tests/test_health_readiness.py tests/test_run_worker_boot_check.py tests/test_micro_main_research_backtest_selection.py`
+    - `225 passed`
+  - `bash -n scripts/watch_runtime_stack_tmp.sh`
+    - pass
+  - `git diff --check`
+    - pass
+  - watchdog function smoke test: `market_data_warmup_within_grace` accepts market-data-only degraded during `syncing_universe` and rejects non-market-data core failure.
+
+## 2026-05-16 Iteration #245
+### 추가 감사: 긴 universe sync 중 loop heartbeat stale와 post-restart lock 점유 시간
+- 발견:
+  - loop worker가 `sync_universe`에 들어간 뒤 전체 symbol 처리가 끝날 때까지 중간 heartbeat를 쓰지 않았다.
+  - 30개 이상 symbol을 순차 backfill/refresh하면 몇 분이 걸릴 수 있어서, 실제 작업 중인데 `/health/ready`가 `heartbeat_stale`로 내려갈 수 있었다.
+  - post-restart refresh의 `no_order_watchdog --days 7 --limit 200`도 2분 이상 걸려 restart lock을 오래 잡았다. 깊은 7일 lookback은 scheduled job에서 충분히 돌기 때문에, 재시작 직후 current-runtime freshness 용도로는 과했다.
+- 수정:
+  - `app/services/strategy_engine.py`
+    - `sync_universe_from_binance(..., progress_callback=...)`를 추가했다.
+    - sequential/parallel sync 모두 symbol 처리 진행 시 `phase=syncing_universe`, `state`, `symbol`, `completed_symbols`, `total_symbols`를 콜백으로 보낸다.
+  - `scripts/run_worker.py`
+    - loop mode에서 sync progress를 받아 heartbeat에 기록한다.
+    - 긴 sync 중에도 `worker_loop` health detail이 최신 진행률을 보여준다.
+  - `scripts/restart_runtime_stack_tmp.sh`
+    - post-restart no-order refresh 기본 범위를 `TRADING_POST_RESTART_NO_ORDER_DAYS=1`, `TRADING_POST_RESTART_NO_ORDER_LIMIT=80`으로 줄였다.
+    - scheduled no-order job은 기존처럼 더 깊은 lookback을 담당한다.
+- runtime 확인:
+  - runtime source 반영 후 loop heartbeat 예:
+    - `phase=syncing_universe`
+    - `state=begin_symbol`
+    - `symbol=ETHUSDC`
+    - `completed_symbols=1`
+    - `total_symbols=31`
+  - `/health/ready`: `ready`, `worker_loop=ok`, `worker_ws=ok`
+- 검증:
+  - `./.venv/bin/python -m pytest -q tests/test_strategy_engine_ops.py::test_sync_universe_from_binance_with_mocked_market_data tests/test_strategy_engine_ops.py::test_sync_universe_from_binance_parallel_respects_concurrency_limit tests/test_health_readiness.py::test_health_worker_syncing_universe_heartbeat_is_ready`
+    - `3 passed`

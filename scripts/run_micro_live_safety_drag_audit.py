@@ -14,6 +14,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import get_settings
+from app.services.active_contract_replay_baseline import active_micro_live_symbol_contract, usdt_proxy_contract_symbols
 from app.services.execution_approval import ExecutionPlanningService
 from app.services.report_io import atomic_write_text
 
@@ -80,7 +81,7 @@ def _parse_ts(raw: Any) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _latest_backtest_report() -> Path:
+def _latest_backtest_report(settings: Any | None = None) -> Path:
     candidates = sorted(
         path
         for path in BACKTEST_DIR.glob("micro_main_usdt_proxy_backtest_*.json")
@@ -88,6 +89,15 @@ def _latest_backtest_report() -> Path:
     )
     if not candidates:
         raise FileNotFoundError(f"no micro_main_usdt_proxy_backtest report under {BACKTEST_DIR}")
+    active_symbols = active_micro_live_symbol_contract(settings or get_settings())
+    if active_symbols:
+        for path in reversed(candidates):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if usdt_proxy_contract_symbols(payload) == active_symbols:
+                return path
     return candidates[-1]
 
 
@@ -615,7 +625,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
 
 def main() -> int:
     args = _parse_args()
-    backtest_report = Path(args.backtest_report) if str(args.backtest_report or "").strip() else _latest_backtest_report()
+    backtest_report = Path(args.backtest_report) if str(args.backtest_report or "").strip() else _latest_backtest_report(settings)
     if not backtest_report.is_absolute():
         backtest_report = ROOT_DIR / backtest_report
     payload = build_payload(backtest_report=backtest_report, include_samples=bool(args.include_samples))

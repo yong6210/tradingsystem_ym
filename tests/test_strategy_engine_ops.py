@@ -63,8 +63,14 @@ def test_sync_universe_from_binance_with_mocked_market_data() -> None:
         )
         engine.runtime_sync_symbols = lambda limit_symbols=30: ["BTCUSDC", "ETHUSDC"]  # type: ignore[assignment]
         engine.refresh_symbol = lambda symbol: {"symbol": symbol, "updated": True, "zones": 1, "plans": 1}  # type: ignore[assignment]
+        progress: list[dict] = []
 
-        payload = engine.sync_universe_from_binance(limit_symbols=2, limit_5m=120, limit_15m=120)
+        payload = engine.sync_universe_from_binance(
+            limit_symbols=2,
+            limit_5m=120,
+            limit_15m=120,
+            progress_callback=progress.append,
+        )
 
         assert payload["processed_symbols"] == 2
         assert payload["execution_mode"] == "sequential"
@@ -73,6 +79,10 @@ def test_sync_universe_from_binance_with_mocked_market_data() -> None:
         assert payload["failed"] == 0
         assert len(payload["results"]) == 2
         assert all(item["status"] == "ok" for item in payload["results"])
+        assert progress[0]["state"] == "begin_symbol"
+        assert progress[-1]["state"] == "end_symbol"
+        assert progress[-1]["completed_symbols"] == 2
+        assert progress[-1]["total_symbols"] == 2
 
 
 def test_runtime_candidate_symbols_can_limit_ranked_outcome_inputs() -> None:

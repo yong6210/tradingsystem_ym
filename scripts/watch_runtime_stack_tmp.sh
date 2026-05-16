@@ -41,11 +41,12 @@ file_mtime_epoch() {
   return 1
 }
 
-loop_starting_within_grace() {
+loop_phase_within_grace() {
+  local phase_pattern="$1"
   local heartbeat_path="$HEARTBEAT_DIR/loop.json"
   local mtime now age
   [[ -f "$heartbeat_path" ]] || return 1
-  if ! grep -q '"phase"[[:space:]]*:[[:space:]]*"starting"' "$heartbeat_path"; then
+  if ! grep -Eq "\"phase\"[[:space:]]*:[[:space:]]*\"(${phase_pattern})\"" "$heartbeat_path"; then
     return 1
   fi
   mtime="$(file_mtime_epoch "$heartbeat_path" 2>/dev/null || true)"
@@ -53,6 +54,29 @@ loop_starting_within_grace() {
   now="$(date +%s)"
   age=$((now - mtime))
   [[ "$age" -ge 0 && "$age" -le "$STARTING_GRACE_SECONDS" ]]
+}
+
+loop_starting_within_grace() {
+  loop_phase_within_grace "starting"
+}
+
+loop_warming_within_grace() {
+  loop_phase_within_grace "starting|syncing_universe"
+}
+
+market_data_warmup_within_grace() {
+  local response="$1"
+  [[ "$response" == *'"status":"degraded"'* ]] || return 1
+  if [[ "$response" != *'"market_data_1m":false'* && "$response" != *'"market_data_5m":false'* ]]; then
+    return 1
+  fi
+  for key in '"db":true' '"binance_rest":true' '"event_backend":true' '"disk_free":true' '"worker_ws":true'; do
+    [[ "$response" == *"$key"* ]] || return 1
+  done
+  if [[ "$response" != *'"worker_loop":true'* ]] && ! loop_warming_within_grace; then
+    return 1
+  fi
+  loop_warming_within_grace
 }
 
 ready_state() {
@@ -64,6 +88,10 @@ ready_state() {
   fi
   if [[ "$response" == *'"worker_loop":"heartbeat_starting"'* ]] && loop_starting_within_grace; then
     printf 'starting_grace\n'
+    return 0
+  fi
+  if market_data_warmup_within_grace "$response"; then
+    printf 'market_data_warmup_grace\n'
     return 0
   fi
   printf 'not_ready\n'
@@ -89,6 +117,10 @@ ensure_ready() {
   if state="$(ready_state)"; then
     if [[ "$state" == "starting_grace" ]]; then
       log "runtime_starting_grace"
+      return 0
+    fi
+    if [[ "$state" == "market_data_warmup_grace" ]]; then
+      log "runtime_market_data_warmup_grace"
       return 0
     fi
     log "runtime_ready"
@@ -119,6 +151,13 @@ while true; do
   if [[ "$state" == "starting_grace" ]]; then
     if [[ "$failures" -gt 0 ]]; then
       log "runtime_starting_grace_after_failures count=$failures"
+    fi
+    failures=0
+    continue
+  fi
+  if [[ "$state" == "market_data_warmup_grace" ]]; then
+    if [[ "$failures" -gt 0 ]]; then
+      log "runtime_market_data_warmup_grace_after_failures count=$failures"
     fi
     failures=0
     continue

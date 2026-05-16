@@ -25,10 +25,15 @@ LAUNCHD_API_LABEL="${LAUNCHD_API_LABEL:-com.yumin.trading.api}"
 READY_URL="http://$API_HOST:$API_PORT/health/ready"
 REFRESH_SRC="${TRADING_REFRESH_TMP_RUNTIME_SRC:-auto}"
 READY_WAIT_SECONDS="${TRADING_RUNTIME_READY_WAIT_SECONDS:-600}"
+RESTART_LOCK_DIR="${TRADING_RUNTIME_RESTART_LOCK_DIR:-$RUNTIME_BASE/locks/restart_runtime_stack_tmp.lock}"
+RESTART_LOCK_WAIT_SECONDS="${TRADING_RUNTIME_RESTART_LOCK_WAIT_SECONDS:-300}"
 DB_PATH="$DATA_DIR/trading.db"
 DATABASE_URL="sqlite:///$DB_PATH"
 
 PYTHON_BIN="$TMP_VENV/bin/python"
+POST_RESTART_REFRESH_REPORTS="${TRADING_POST_RESTART_REFRESH_REPORTS:-1}"
+POST_RESTART_NO_ORDER_DAYS="${TRADING_POST_RESTART_NO_ORDER_DAYS:-1}"
+POST_RESTART_NO_ORDER_LIMIT="${TRADING_POST_RESTART_NO_ORDER_LIMIT:-80}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   cat >&2 <<EOF
@@ -40,6 +45,41 @@ when macOS file indexing is busy.
 EOF
   exit 1
 fi
+
+truthy_value() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+acquire_restart_lock() {
+  local waited=0
+  local owner_pid=""
+  local lock_parent
+  lock_parent="$(dirname "$RESTART_LOCK_DIR")"
+  mkdir -p "$lock_parent"
+  while ! mkdir "$RESTART_LOCK_DIR" 2>/dev/null; do
+    owner_pid="$(cat "$RESTART_LOCK_DIR/pid" 2>/dev/null || true)"
+    if [[ "$owner_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$owner_pid" 2>/dev/null; then
+      rm -rf "$RESTART_LOCK_DIR"
+      continue
+    fi
+    if [[ "$waited" -ge "$RESTART_LOCK_WAIT_SECONDS" ]]; then
+      echo "restart lock is still held after ${RESTART_LOCK_WAIT_SECONDS}s: $RESTART_LOCK_DIR pid=${owner_pid:-unknown}" >&2
+      exit 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  printf '%s\n' "$$" > "$RESTART_LOCK_DIR/pid"
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$RESTART_LOCK_DIR/started_at"
+  trap 'rm -rf "$RESTART_LOCK_DIR"' EXIT
+}
 
 copy_tree() {
   local src="$1"
@@ -105,6 +145,61 @@ sync_micro_main_backtest_reports() {
   done < <(find "$src_dir" -maxdepth 1 -type f -name 'micro_main_usdt_proxy_backtest_*.json' | sort)
 }
 
+post_restart_refresh_reports() {
+  truthy_value "$POST_RESTART_REFRESH_REPORTS" || return 0
+
+  local refresh_log="$LOG_DIR/post_restart_report_refresh.log"
+  local entry_surface_dir="$TMP_ROOT/reports/operations/entry_surface"
+  mkdir -p "$LOG_DIR" "$entry_surface_dir"
+
+  run_report_refresh() {
+    local name="$1"
+    shift
+    echo "-- $name begin $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if "$@"; then
+      echo "-- $name ok $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    else
+      echo "-- $name failed rc=$? $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    fi
+  }
+
+  {
+    echo
+    echo "===== post-restart report refresh $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
+    echo "runtime_src=$TMP_ROOT"
+    echo "heartbeat_dir=$HEARTBEAT_DIR"
+    cd "$TMP_ROOT"
+    export RUNTIME_WORKER_HEARTBEAT_DIR="$HEARTBEAT_DIR"
+    export TRADING_HEARTBEAT_DIR="$HEARTBEAT_DIR"
+    run_report_refresh runtime_guard \
+      "$PYTHON_BIN" "$TMP_ROOT/scripts/run_micro_live_runtime_guard.py" \
+      --days 30 --limit 200 --no-fail-exit --quiet
+    run_report_refresh no_order_watchdog \
+      "$PYTHON_BIN" "$TMP_ROOT/scripts/run_micro_live_no_order_watchdog.py" \
+      --days "$POST_RESTART_NO_ORDER_DAYS" --limit "$POST_RESTART_NO_ORDER_LIMIT" --no-fail-exit --quiet
+    run_report_refresh live_candidate_promotion_readiness \
+      "$PYTHON_BIN" "$TMP_ROOT/scripts/run_live_candidate_promotion_readiness.py" \
+      --hours 24 --limit 12 --since-ws-start --heartbeat-dir "$HEARTBEAT_DIR" --quiet
+    run_report_refresh live_replay_parity \
+      "$PYTHON_BIN" "$TMP_ROOT/scripts/run_live_replay_parity_audit.py" \
+      --all-live-symbols --days 3 --since-ws-start --heartbeat-dir "$HEARTBEAT_DIR" --no-fail-exit --quiet
+    run_report_refresh session_impulse_retest_runtime_audit \
+      "$PYTHON_BIN" "$TMP_ROOT/scripts/run_session_impulse_retest_runtime_audit_report.py" \
+      --hours 3 --limit 200 --since-ws-start --heartbeat-dir "$HEARTBEAT_DIR" --no-fail-exit --quiet
+    run_report_refresh entry_surface \
+      "$PYTHON_BIN" "$TMP_ROOT/scripts/notify_entry_surface.py" \
+      --quiet \
+      --lock-file "$entry_surface_dir/entry_surface.lock" \
+      --output-file "$entry_surface_dir/latest_entry_alert_run.json"
+    run_report_refresh boot_check \
+      "$PYTHON_BIN" "$TMP_ROOT/scripts/run_micro_live_boot_check.py" \
+      --days 3 --limit 200 --no-fail-exit --quiet
+    run_report_refresh ops_heartbeat \
+      "$PYTHON_BIN" "$TMP_ROOT/scripts/run_micro_live_ops_heartbeat.py" \
+      --no-fail-exit --quiet
+  } >>"$refresh_log" 2>&1
+}
+
 refresh_tmp_source() {
   if [[ "$TMP_ROOT" == "$WORKSPACE_ROOT" ]]; then
     echo "refusing to refresh runtime source in-place over workspace: $TMP_ROOT" >&2
@@ -159,6 +254,8 @@ case "$REFRESH_SRC" in
     exit 1
     ;;
 esac
+
+acquire_restart_lock
 
 if [[ "$needs_refresh" -eq 1 ]]; then
   refresh_tmp_source
@@ -253,6 +350,7 @@ last_ready_response=""
 for _ in $(seq 1 "$READY_WAIT_SECONDS"); do
   last_ready_response="$(curl -sS --max-time 5 "$READY_URL" 2>/dev/null || true)"
   if [[ "$last_ready_response" == *'"status":"ready"'* ]]; then
+    post_restart_refresh_reports || true
     printf '%s\n' "$last_ready_response"
     exit 0
   fi

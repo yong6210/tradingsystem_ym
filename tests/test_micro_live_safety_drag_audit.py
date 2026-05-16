@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -19,6 +20,30 @@ def _settings(**overrides):
     }
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def test_latest_backtest_report_prefers_matching_live_contract(monkeypatch, tmp_path) -> None:
+    backtest_dir = tmp_path / "backtests"
+    backtest_dir.mkdir()
+    matching = backtest_dir / "micro_main_usdt_proxy_backtest_20260515T175711Z.json"
+    matching.write_text(
+        json.dumps({"proxy_symbols": ["BTCUSDT"], "results": {}}),
+        encoding="utf-8",
+    )
+    (backtest_dir / "micro_main_usdt_proxy_backtest_20260516T095759Z.json").write_text(
+        json.dumps({"proxy_symbols": ["BTCUSDT", "ETHUSDT"], "results": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(audit, "BACKTEST_DIR", backtest_dir)
+
+    selected = audit._latest_backtest_report(
+        _settings(
+            auto_trading_execution_mode="MICRO_LIVE",
+            auto_trading_micro_live_allowed_symbols="BTCUSDC",
+        )
+    )
+
+    assert selected == matching
 
 
 def _row(

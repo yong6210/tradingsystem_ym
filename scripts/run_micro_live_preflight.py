@@ -495,7 +495,15 @@ def _proxy_symbol_to_live_symbol(symbol: Any) -> str:
     return text
 
 
-def _latest_micro_main_backtest_report(settings: Any) -> Path | None:
+def _backtest_contract_symbols(payload: dict[str, Any]) -> set[str]:
+    raw_symbols = payload.get("proxy_symbols")
+    if not isinstance(raw_symbols, list) or not raw_symbols:
+        results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
+        raw_symbols = list(results.keys()) if isinstance(results, dict) else []
+    return {_proxy_symbol_to_live_symbol(symbol) for symbol in raw_symbols if str(symbol or "").strip()}
+
+
+def _latest_micro_main_backtest_report(settings: Any, *, live_symbols: set[str] | None = None) -> Path | None:
     raw_dir = str(
         getattr(
             settings,
@@ -513,15 +521,15 @@ def _latest_micro_main_backtest_report(settings: Any) -> Path | None:
         )
     except OSError:
         return None
-    return candidates[-1] if candidates else None
-
-
-def _backtest_contract_symbols(payload: dict[str, Any]) -> set[str]:
-    raw_symbols = payload.get("proxy_symbols")
-    if not isinstance(raw_symbols, list) or not raw_symbols:
-        results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
-        raw_symbols = list(results.keys()) if isinstance(results, dict) else []
-    return {_proxy_symbol_to_live_symbol(symbol) for symbol in raw_symbols if str(symbol or "").strip()}
+    if not candidates:
+        return None
+    expected_symbols = {str(symbol or "").strip().upper() for symbol in set(live_symbols or set()) if str(symbol or "").strip()}
+    if expected_symbols:
+        for path in reversed(candidates):
+            payload = _read_json_file(path)
+            if _backtest_contract_symbols(payload) == expected_symbols:
+                return path
+    return candidates[-1]
 
 
 def _micro_live_backtest_contract_alignment_check(
@@ -533,7 +541,7 @@ def _micro_live_backtest_contract_alignment_check(
     live_sessions: set[str],
     direction_contract: dict[str, set[str]],
 ) -> dict[str, Any]:
-    report_path = _latest_micro_main_backtest_report(settings)
+    report_path = _latest_micro_main_backtest_report(settings, live_symbols=live_symbols)
     if report_path is None:
         return {
             "name": "micro_live_backtest_contract_alignment",

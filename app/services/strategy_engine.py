@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -8358,6 +8358,7 @@ class StrategyEngine:
         limit_5m: int = 500,
         limit_15m: int = 500,
         symbol_concurrency: int = 1,
+        progress_callback: Callable[[dict[str, Any]], Any] | None = None,
     ) -> dict:
         symbols = self.runtime_sync_symbols(limit_symbols=limit_symbols)
         results: list[dict] = []
@@ -8367,8 +8368,25 @@ class StrategyEngine:
         effective_concurrency = min(requested_concurrency, len(symbols)) if symbols else 1
         symbol_order = {symbol: index for index, symbol in enumerate(symbols)}
 
+        def emit_progress(*, symbol: str = "", state: str, completed: int) -> None:
+            if progress_callback is None:
+                return
+            progress_callback(
+                {
+                    "phase": "syncing_universe",
+                    "state": state,
+                    "symbol": symbol,
+                    "completed_symbols": int(completed),
+                    "total_symbols": len(symbols),
+                    "success": int(success),
+                    "failed": int(failed),
+                    "symbol_concurrency": int(effective_concurrency),
+                }
+            )
+
         if effective_concurrency <= 1:
             for symbol in symbols:
+                emit_progress(symbol=symbol, state="begin_symbol", completed=success + failed)
                 try:
                     result = self._sync_universe_symbol_local(
                         symbol=symbol,
@@ -8388,6 +8406,7 @@ class StrategyEngine:
                             "error": str(exc),
                         }
                     )
+                emit_progress(symbol=symbol, state="end_symbol", completed=success + failed)
         else:
             with ThreadPoolExecutor(max_workers=effective_concurrency, thread_name_prefix="sync-universe") as executor:
                 futures = {
@@ -8415,6 +8434,7 @@ class StrategyEngine:
                                 "error": str(exc),
                             }
                         )
+                    emit_progress(symbol=symbol, state="end_symbol", completed=success + failed)
 
         results.sort(key=lambda item: symbol_order.get(item.get("symbol", ""), len(symbol_order)))
         miss_detector = self.detect_session_impulse_retest_recent_misses(write_report=False)

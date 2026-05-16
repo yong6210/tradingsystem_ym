@@ -430,9 +430,12 @@ class UsdtProxyReplayValidationBridge:
 
     def _latest_backtest_entry(self, symbol: str) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
         directory = Path(str(getattr(self.settings, "auto_trading_replay_validation_bridge_backtest_dir", ""))).expanduser()
+        active_symbols = self._active_micro_live_symbol_contract()
         for path in self._recent_json_files(directory, "micro_main_usdt_proxy_backtest_*.json"):
             payload = self._load_json(path)
             if not payload or self._is_stale(payload, path):
+                continue
+            if active_symbols and self._backtest_contract_symbols(payload) != active_symbols:
                 continue
             results = payload.get("results")
             if isinstance(results, dict):
@@ -755,6 +758,19 @@ class UsdtProxyReplayValidationBridge:
         if normalized.endswith("USDT"):
             return f"{normalized[:-4]}USDC"
         return normalized
+
+    def _backtest_contract_symbols(self, payload: dict[str, Any]) -> set[str]:
+        raw_symbols = payload.get("proxy_symbols")
+        if not isinstance(raw_symbols, list) or not raw_symbols:
+            results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
+            raw_symbols = list(results.keys()) if isinstance(results, dict) else []
+        return {self._proxy_to_canonical(symbol) for symbol in raw_symbols if str(symbol or "").strip()}
+
+    def _active_micro_live_symbol_contract(self) -> set[str]:
+        mode = str(getattr(self.settings, "auto_trading_execution_mode", "") or "").strip().upper()
+        if mode not in {"MICRO_LIVE", "LIVE"}:
+            return set()
+        return self._csv_set(getattr(self.settings, "auto_trading_micro_live_allowed_symbols", ""), upper=True)
 
     def _normalize_symbol(self, symbol: Any) -> str:
         return str(symbol or "").strip().upper()
