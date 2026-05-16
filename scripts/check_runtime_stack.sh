@@ -39,7 +39,7 @@ echo "source=$PYTHON_ROOT"
 echo
 
 echo "== processes =="
-ps -axo pid,lstart,command | awk '/uvicorn app[.]main:app|run_worker[.]py --mode loop --sync-universe|run_worker[.]py --ws-stream --sync-universe/ && $0 !~ /awk|check_runtime_stack[.]sh/ { print }'
+ps -axo pid,lstart,command | awk '/uvicorn app[.]main:app|run_worker[.]py --mode loop --sync-universe|run_worker[.]py --ws-stream/ && $0 !~ /awk|check_runtime_stack[.]sh/ { print }'
 echo
 if [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
   echo "== launchd =="

@@ -19,6 +19,11 @@ def test_micro_main_universe_policy_snapshot_shapes_core_and_secondary_lists() -
         "BCHUSDC",
         "LTCUSDC",
         "NEARUSDC",
+        "1000PEPEUSDC",
+        "ARBUSDC",
+        "1000SHIBUSDC",
+        "FILUSDC",
+        "DOGEUSDC",
     ]
     assert snapshot["secondary_symbols"] == [
         "SUIUSDC",
@@ -36,12 +41,16 @@ def test_micro_main_universe_entry_returns_expected_risk_multiplier() -> None:
     avax = micro_main_universe_entry("AVAXUSDC")
     sui = micro_main_universe_entry("SUIUSDC")
     hbar = micro_main_universe_entry("HBARUSDC")
+    pepe = micro_main_universe_entry("1000PEPEUSDC")
+    doge = micro_main_universe_entry("DOGEUSDC")
     assert btc is not None
     assert link is not None
     assert xrp is not None
     assert avax is not None
     assert sui is not None
     assert hbar is not None
+    assert pepe is not None
+    assert doge is not None
     assert btc["risk_multiplier"] == 0.9
     assert link["tier"] == "core"
     assert link["risk_multiplier"] == 0.85
@@ -52,3 +61,7 @@ def test_micro_main_universe_entry_returns_expected_risk_multiplier() -> None:
     assert sui["risk_multiplier"] == 0.45
     assert hbar["tier"] == "secondary"
     assert hbar["risk_multiplier"] == 0.45
+    assert pepe["tier"] == "core"
+    assert pepe["risk_multiplier"] == 0.35
+    assert doge["tier"] == "core"
+    assert doge["risk_multiplier"] == 0.45

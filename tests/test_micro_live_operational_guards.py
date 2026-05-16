@@ -2374,6 +2374,67 @@ def test_boot_check_fails_when_failure_contract_drill_fails(monkeypatch) -> None
     assert payload["components"][-1]["name"] == "failure_contract_drill"
 
 
+def test_boot_check_synthetic_canary_matches_live_contract(monkeypatch) -> None:
+    settings = SimpleNamespace(
+        auto_trading_micro_live_allowed_symbols="ADAUSDC,BTCUSDC",
+        auto_trading_micro_live_symbol_priority="BTCUSDC,ETHUSDC",
+        auto_trading_micro_live_allowed_entry_models="CONFIRM",
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(run_micro_live_boot_check, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_micro_live_runtime_guard,
+        "build_payload",
+        lambda **_kwargs: {"overall_status": "PASS", "blocking_failures": []},
+    )
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_live_reconciliation_watchdog,
+        "build_payload",
+        lambda **_kwargs: {"overall_status": "OK", "evaluation": {"alert": False, "message": "ok"}},
+    )
+    monkeypatch.setattr(run_micro_live_boot_check.run_live_reconciliation_watchdog, "_default_stale_minutes", lambda _value: 3)
+
+    def fake_canary(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "overall_status": "PASS",
+            "symbol": kwargs.get("symbol"),
+            "entry_model": kwargs.get("entry_model"),
+            "no_live_order_sent": True,
+        }
+
+    monkeypatch.setattr(run_micro_live_boot_check.run_micro_live_synthetic_canary, "run_canary", fake_canary)
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_micro_live_failure_drill,
+        "build_payload",
+        lambda **_kwargs: {"overall_status": "PASS", "scenario_count": 8, "failed_count": 0},
+    )
+
+    payload = run_micro_live_boot_check.build_payload(
+        days=1,
+        limit=10,
+        symbol="",
+        check_binance_rules=False,
+        canary_network=False,
+    )
+
+    assert payload["overall_status"] == "PASS"
+    assert captured["symbol"] == "BTCUSDC"
+    assert captured["entry_model"] == "CONFIRM"
+    canary_component = next(item for item in payload["components"] if item["name"] == "synthetic_submit_canary")
+    assert "entry_model=CONFIRM" in canary_component["summary"]
+
+
+def test_synthetic_canary_default_symbol_preserves_micro_live_priority() -> None:
+    settings = SimpleNamespace(
+        auto_trading_micro_live_allowed_symbols="ADAUSDC,BTCUSDC",
+        auto_trading_micro_live_symbol_priority="BTCUSDC,ETHUSDC",
+    )
+
+    assert run_micro_live_synthetic_canary._first_live_symbol(settings, "") == "BTCUSDC"
+
+
 def test_boot_check_main_writes_latest_aliases(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(
         run_micro_live_boot_check,

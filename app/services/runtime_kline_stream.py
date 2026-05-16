@@ -71,6 +71,7 @@ class RuntimeKlineStreamService:
             "intervals": selected_intervals,
             "processed_messages": 0,
             "committed_candles": 0,
+            "skipped_non_final_candles": 0,
             "ingest_errors": 0,
             "skipped_reverse_timestamp": 0,
             "refresh_calls": 0,
@@ -120,28 +121,31 @@ class RuntimeKlineStreamService:
                             "is_final": kline.is_final,
                         }
 
-                        try:
-                            self.market_data.ingest_candle(payload)
-                            self.db.commit()
-                            stats["committed_candles"] += 1
-                            stats["last_ingest_success_at"] = datetime.now(timezone.utc).isoformat()
-                        except DataQualityError as exc:
-                            self.db.rollback()
-                            if str(exc) == "reverse timestamp detected":
-                                stats["skipped_reverse_timestamp"] += 1
-                            else:
+                        if kline.is_final:
+                            try:
+                                self.market_data.ingest_candle(payload)
+                                self.db.commit()
+                                stats["committed_candles"] += 1
+                                stats["last_ingest_success_at"] = datetime.now(timezone.utc).isoformat()
+                            except DataQualityError as exc:
+                                self.db.rollback()
+                                if str(exc) == "reverse timestamp detected":
+                                    stats["skipped_reverse_timestamp"] += 1
+                                else:
+                                    stats["ingest_errors"] += 1
+                                    stats["last_ingest_error"] = f"{exc.__class__.__name__}:{exc}"
+                                    stats["last_ingest_error_at"] = datetime.now(timezone.utc).isoformat()
+                                _emit_progress()
+                                continue
+                            except Exception as exc:
+                                self.db.rollback()
                                 stats["ingest_errors"] += 1
                                 stats["last_ingest_error"] = f"{exc.__class__.__name__}:{exc}"
                                 stats["last_ingest_error_at"] = datetime.now(timezone.utc).isoformat()
-                            _emit_progress()
-                            continue
-                        except Exception as exc:
-                            self.db.rollback()
-                            stats["ingest_errors"] += 1
-                            stats["last_ingest_error"] = f"{exc.__class__.__name__}:{exc}"
-                            stats["last_ingest_error_at"] = datetime.now(timezone.utc).isoformat()
-                            _emit_progress()
-                            continue
+                                _emit_progress()
+                                continue
+                        else:
+                            stats["skipped_non_final_candles"] += 1
 
                         stats["processed_messages"] += 1
                         stats["per_interval"][interval] = int(stats["per_interval"][interval]) + 1

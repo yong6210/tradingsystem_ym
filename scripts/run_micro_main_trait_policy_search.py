@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import sqlite3
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -75,6 +76,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-policies", type=int, default=96)
     parser.add_argument("--baseline-backtest-path", default="")
     parser.add_argument("--search-name", default="trait_policy")
+    parser.add_argument("--checkpoint-path", default="")
+    parser.add_argument("--rows-db-path", default="")
+    parser.add_argument("--resume-checkpoint", action="store_true")
+    parser.add_argument("--max-new-symbols", type=int, default=0)
+    parser.add_argument("--checkpoint-policy-interval", type=int, default=20)
+    parser.add_argument("--brief-log", action="store_true")
     parser.add_argument("--write-report", action="store_true")
     return parser.parse_args()
 
@@ -151,6 +158,15 @@ def _diagnostic_values(rows: list[dict[str, Any]], key: str) -> list[float]:
         if key in diagnostics:
             out.append(_safe_float(diagnostics.get(key)))
     return out
+
+
+def _compact_eval_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "symbol": row.get("symbol"),
+        "entry_ts": row.get("entry_ts"),
+        "exit_ts": row.get("exit_ts"),
+        "r_value": row.get("r_value"),
+    }
 
 
 def _symbol_trait_summary(rows: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
@@ -343,14 +359,237 @@ def _policy_rows_for_symbol(
     finally:
         engine._signal_filter_profile = original
     return [
+        _compact_eval_row(_trade_to_row(
+            trade=trade,
+            proxy_symbol=proxy_symbol,
+            canonical_symbol=canonical_symbol,
+            profile_name=profile_name,
+        ))
+        for trade in trades
+    ]
+
+
+def _row_passes_profile(row: dict[str, Any], profile: dict[str, float]) -> bool:
+    diagnostics = dict(row.get("diagnostics") or {})
+    return (
+        _safe_float(diagnostics.get("trend_strength_atr")) >= float(profile["min_trend_strength"])
+        and _safe_float(diagnostics.get("volume_factor")) >= float(profile["min_volume_factor"])
+        and _safe_float(diagnostics.get("reclaim_body_atr")) >= float(profile["min_reclaim_body_atr"])
+        and _safe_float(diagnostics.get("reclaim_overshoot_atr")) <= float(profile["reclaim_overshoot_atr"])
+    )
+
+
+def _policy_rows_for_symbol_fast(
+    *,
+    engine: SessionImpulseRetestResearch,
+    proxy_symbol: str,
+    canonical_symbol: str,
+    profile_name: str,
+    policies: list[TraitPolicy],
+) -> dict[str, list[dict[str, Any]]]:
+    base_profile = engine._signal_filter_profile()
+    profiles_by_policy = {
+        policy.name: _apply_variant_profile(
+            base_profile,
+            symbol=canonical_symbol,
+            variant=policy.variant_for_symbol(canonical_symbol),
+        )
+        for policy in policies
+    }
+    superset_profile = dict(base_profile)
+    superset_profile["min_trend_strength"] = min(profile["min_trend_strength"] for profile in profiles_by_policy.values())
+    superset_profile["min_volume_factor"] = min(profile["min_volume_factor"] for profile in profiles_by_policy.values())
+    superset_profile["min_reclaim_body_atr"] = min(profile["min_reclaim_body_atr"] for profile in profiles_by_policy.values())
+    superset_profile["reclaim_overshoot_atr"] = max(profile["reclaim_overshoot_atr"] for profile in profiles_by_policy.values())
+
+    def patched_profile(self: SessionImpulseRetestResearch) -> dict[str, float]:
+        return dict(superset_profile)
+
+    original = engine._signal_filter_profile
+    engine._signal_filter_profile = MethodType(patched_profile, engine)
+    try:
+        superset_trades = engine.backtest()
+    finally:
+        engine._signal_filter_profile = original
+
+    full_rows = [
         _trade_to_row(
             trade=trade,
             proxy_symbol=proxy_symbol,
             canonical_symbol=canonical_symbol,
             profile_name=profile_name,
         )
-        for trade in trades
+        for trade in superset_trades
     ]
+    return {
+        policy.name: [
+            _compact_eval_row(row)
+            for row in full_rows
+            if _row_passes_profile(row, profiles_by_policy[policy.name])
+        ]
+        for policy in policies
+    }
+
+
+def _checkpoint_payload(
+    *,
+    search_name: str,
+    start_ts: datetime,
+    end_ts: datetime,
+    proxy_symbols: list[str],
+    policies: list[TraitPolicy],
+    baseline_path: Path,
+    trait_summary: dict[str, dict[str, Any]],
+    group_by_symbol: dict[str, str],
+    rows_by_policy: dict[str, list[dict[str, Any]]],
+    processed_symbols: set[str],
+    policy_progress_by_symbol: dict[str, int],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "micro_main_trait_policy_checkpoint_v1",
+        "search_name": search_name,
+        "start_ts": start_ts.isoformat(),
+        "end_ts": end_ts.isoformat(),
+        "proxy_symbols": proxy_symbols,
+        "policy_names": [policy.name for policy in policies],
+        "baseline_trait_source": str(baseline_path),
+        "trait_summary": trait_summary,
+        "group_by_symbol": group_by_symbol,
+        "processed_symbols": sorted(processed_symbols),
+        "policy_progress_by_symbol": dict(sorted(policy_progress_by_symbol.items())),
+        "rows_by_policy": rows_by_policy,
+    }
+
+
+def _write_checkpoint(
+    path: Path,
+    *,
+    search_name: str,
+    start_ts: datetime,
+    end_ts: datetime,
+    proxy_symbols: list[str],
+    policies: list[TraitPolicy],
+    baseline_path: Path,
+    trait_summary: dict[str, dict[str, Any]],
+    group_by_symbol: dict[str, str],
+    rows_by_policy: dict[str, list[dict[str, Any]]] | None,
+    processed_symbols: set[str],
+    policy_progress_by_symbol: dict[str, int],
+    rows_db_path: Path | None = None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _checkpoint_payload(
+        search_name=search_name,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        proxy_symbols=proxy_symbols,
+        policies=policies,
+        baseline_path=baseline_path,
+        trait_summary=trait_summary,
+        group_by_symbol=group_by_symbol,
+        rows_by_policy=rows_by_policy or {},
+        processed_symbols=processed_symbols,
+        policy_progress_by_symbol=policy_progress_by_symbol,
+    )
+    if rows_db_path is not None:
+        payload["rows_storage"] = {"type": "sqlite", "path": str(rows_db_path)}
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False))
+
+
+def _connect_rows_db(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rows (
+            policy TEXT NOT NULL,
+            proxy_symbol TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            entry_ts TEXT NOT NULL,
+            exit_ts TEXT NOT NULL,
+            r_value REAL NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rows_policy ON rows(policy)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rows_proxy ON rows(proxy_symbol)")
+    conn.commit()
+    return conn
+
+
+def _db_row_count(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("SELECT COUNT(*) FROM rows").fetchone()[0])
+
+
+def _migrate_checkpoint_rows_to_db(
+    conn: sqlite3.Connection,
+    rows_by_policy: dict[str, list[dict[str, Any]]],
+) -> None:
+    if not rows_by_policy or _db_row_count(conn) > 0:
+        return
+    with conn:
+        for policy, rows in rows_by_policy.items():
+            conn.executemany(
+                """
+                INSERT INTO rows(policy, proxy_symbol, symbol, entry_ts, exit_ts, r_value)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        str(policy),
+                        str(row.get("proxy_symbol") or ""),
+                        str(row.get("symbol") or ""),
+                        str(row.get("entry_ts") or ""),
+                        str(row.get("exit_ts") or ""),
+                        _safe_float(row.get("r_value")),
+                    )
+                    for row in rows
+                ],
+            )
+
+
+def _store_policy_rows(
+    conn: sqlite3.Connection,
+    *,
+    policy: str,
+    proxy_symbol: str,
+    rows: list[dict[str, Any]],
+) -> None:
+    with conn:
+        conn.execute("DELETE FROM rows WHERE policy = ? AND proxy_symbol = ?", (policy, proxy_symbol))
+        conn.executemany(
+            """
+            INSERT INTO rows(policy, proxy_symbol, symbol, entry_ts, exit_ts, r_value)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    policy,
+                    proxy_symbol,
+                    str(row.get("symbol") or ""),
+                    str(row.get("entry_ts") or ""),
+                    str(row.get("exit_ts") or ""),
+                    _safe_float(row.get("r_value")),
+                )
+                for row in rows
+            ],
+        )
+
+
+def _load_rows_by_policy_from_db(conn: sqlite3.Connection, policies: list[TraitPolicy]) -> dict[str, list[dict[str, Any]]]:
+    rows_by_policy: dict[str, list[dict[str, Any]]] = {policy.name: [] for policy in policies}
+    for policy, symbol, entry_ts, exit_ts, r_value in conn.execute(
+        "SELECT policy, symbol, entry_ts, exit_ts, r_value FROM rows ORDER BY policy, exit_ts, entry_ts, symbol"
+    ):
+        rows_by_policy.setdefault(str(policy), []).append(
+            {
+                "symbol": symbol,
+                "entry_ts": entry_ts,
+                "exit_ts": exit_ts,
+                "r_value": r_value,
+            }
+        )
+    return rows_by_policy
 
 
 def main() -> int:
@@ -363,35 +602,113 @@ def main() -> int:
     baseline_path = Path(args.baseline_backtest_path).expanduser() if str(args.baseline_backtest_path or "").strip() else _latest_trade_backtest_path()
     if not baseline_path.is_absolute():
         baseline_path = ROOT_DIR / baseline_path
-    trait_summary, group_by_symbol = _symbol_trait_summary(_load_trade_rows(baseline_path))
+    report_dir = Path(settings.validation_report_dir) / "micro_main_raw_profile_model_searches"
+    checkpoint_path = Path(args.checkpoint_path).expanduser() if str(args.checkpoint_path or "").strip() else report_dir / f"{args.search_name}_checkpoint.json"
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = ROOT_DIR / checkpoint_path
+    pause_paths = [
+        checkpoint_path.with_suffix(".pause"),
+        report_dir / f"{args.search_name}.pause",
+    ]
+    active_pause_path = next((path for path in pause_paths if path.exists()), None)
+    if active_pause_path is not None:
+        print(
+            json.dumps(
+                {
+                    "status": "paused",
+                    "search_name": str(args.search_name),
+                    "pause_path": str(active_pause_path),
+                    "checkpoint_path": str(checkpoint_path),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    rows_db_path = Path(args.rows_db_path).expanduser() if str(args.rows_db_path or "").strip() else checkpoint_path.with_suffix(".sqlite3")
+    if not rows_db_path.is_absolute():
+        rows_db_path = ROOT_DIR / rows_db_path
+    rows_db = _connect_rows_db(rows_db_path)
+    checkpoint: dict[str, Any] | None = None
+    if args.resume_checkpoint and checkpoint_path.exists():
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        trait_summary = dict(checkpoint.get("trait_summary") or {})
+        group_by_symbol = {str(key): str(value) for key, value in dict(checkpoint.get("group_by_symbol") or {}).items()}
+    else:
+        trait_summary, group_by_symbol = _symbol_trait_summary(_load_trade_rows(baseline_path))
     policies = _build_trait_policies(group_by_symbol, max_policies=int(args.max_policies))
     rows_by_policy: dict[str, list[dict[str, Any]]] = {policy.name: [] for policy in policies}
+    processed_symbols: set[str] = set()
+    policy_progress_by_symbol: dict[str, int] = {}
 
-    print(
-        json.dumps(
-            {
-                "state": "start",
-                "policies": len(policies),
-                "symbols": proxy_symbols,
-                "start_ts": start_ts.isoformat(),
-                "end_ts": end_ts.isoformat(),
-                "baseline_trait_source": str(baseline_path),
-                "groups": group_by_symbol,
-            },
-            ensure_ascii=False,
-        ),
-        file=sys.stderr,
-        flush=True,
-    )
+    if checkpoint is not None:
+        expected_policy_names = [policy.name for policy in policies]
+        if list(checkpoint.get("policy_names") or []) != expected_policy_names:
+            raise ValueError(f"Checkpoint policy set does not match current policy set: {checkpoint_path}")
+        if list(checkpoint.get("proxy_symbols") or []) != proxy_symbols:
+            raise ValueError(f"Checkpoint symbol set does not match current symbol set: {checkpoint_path}")
+        start_ts = datetime.fromisoformat(str(checkpoint["start_ts"]))
+        end_ts = datetime.fromisoformat(str(checkpoint["end_ts"]))
+        _migrate_checkpoint_rows_to_db(rows_db, dict(checkpoint.get("rows_by_policy") or {}))
+        rows_by_policy = {policy.name: [] for policy in policies}
+        processed_symbols = {str(item).upper() for item in list(checkpoint.get("processed_symbols") or [])}
+        policy_progress_by_symbol = {
+            str(symbol).upper(): int(count)
+            for symbol, count in dict(checkpoint.get("policy_progress_by_symbol") or {}).items()
+        }
+
+    start_log = {
+        "state": "start",
+        "policies": len(policies),
+        "symbol_count": len(proxy_symbols),
+        "processed_count": len(processed_symbols),
+        "start_ts": start_ts.isoformat(),
+        "end_ts": end_ts.isoformat(),
+        "baseline_trait_source": str(baseline_path),
+        "checkpoint_path": str(checkpoint_path),
+        "rows_db_path": str(rows_db_path),
+    }
+    if not args.brief_log:
+        start_log["symbols"] = proxy_symbols
+        start_log["processed_symbols"] = sorted(processed_symbols)
+        start_log["groups"] = group_by_symbol
+    print(json.dumps(start_log, ensure_ascii=False), file=sys.stderr, flush=True)
 
     with (
         httpx.Client(timeout=120.0, follow_redirects=True) as monthly_client,
         httpx.Client(base_url=settings.binance_rest_base_url, timeout=30.0) as rest_client,
     ):
+        new_symbols_processed = 0
         for proxy_symbol in proxy_symbols:
+            if proxy_symbol in processed_symbols:
+                if not args.brief_log:
+                    print(
+                        json.dumps({"state": "resume_skip", "symbol": proxy_symbol}, ensure_ascii=False),
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                continue
             canonical_symbol = canonical_symbol_for_proxy(proxy_symbol)
             if canonical_symbol is None:
                 print(json.dumps({"state": "skip", "symbol": proxy_symbol, "reason": "missing_mapping"}), file=sys.stderr)
+                processed_symbols.add(proxy_symbol)
+                _write_checkpoint(
+                    checkpoint_path,
+                    search_name=str(args.search_name),
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    proxy_symbols=proxy_symbols,
+                    policies=policies,
+                    baseline_path=baseline_path,
+                    trait_summary=trait_summary,
+                    group_by_symbol=group_by_symbol,
+                    rows_by_policy=None,
+                    processed_symbols=processed_symbols,
+                    policy_progress_by_symbol=policy_progress_by_symbol,
+                    rows_db_path=rows_db_path,
+                )
+                new_symbols_processed += 1
+                if args.max_new_symbols > 0 and new_symbols_processed >= args.max_new_symbols:
+                    break
                 continue
             candles_1m = _fetch_1m_klines(
                 monthly_client,
@@ -416,6 +733,25 @@ def main() -> int:
                     file=sys.stderr,
                     flush=True,
                 )
+                processed_symbols.add(proxy_symbol)
+                _write_checkpoint(
+                    checkpoint_path,
+                    search_name=str(args.search_name),
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    proxy_symbols=proxy_symbols,
+                    policies=policies,
+                    baseline_path=baseline_path,
+                    trait_summary=trait_summary,
+                    group_by_symbol=group_by_symbol,
+                    rows_by_policy=None,
+                    processed_symbols=processed_symbols,
+                    policy_progress_by_symbol=policy_progress_by_symbol,
+                    rows_db_path=rows_db_path,
+                )
+                new_symbols_processed += 1
+                if args.max_new_symbols > 0 and new_symbols_processed >= args.max_new_symbols:
+                    break
                 continue
             profile_name = session_impulse_retest_profile_for_symbol(canonical_symbol)
             engine = SessionImpulseRetestResearch(
@@ -424,15 +760,19 @@ def main() -> int:
                 candles_5m=candles_5m,
                 profile_name=profile_name,
             )
+            symbol_rows_by_policy = _policy_rows_for_symbol_fast(
+                engine=engine,
+                proxy_symbol=proxy_symbol,
+                canonical_symbol=canonical_symbol,
+                profile_name=profile_name,
+                policies=policies,
+            )
             for index, policy in enumerate(policies, start=1):
-                rows_by_policy[policy.name].extend(
-                    _policy_rows_for_symbol(
-                        engine=engine,
-                        proxy_symbol=proxy_symbol,
-                        canonical_symbol=canonical_symbol,
-                        profile_name=profile_name,
-                        policy=policy,
-                    )
+                _store_policy_rows(
+                    rows_db,
+                    policy=policy.name,
+                    proxy_symbol=proxy_symbol,
+                    rows=symbol_rows_by_policy.get(policy.name) or [],
                 )
                 if index == 1 or index == len(policies) or index % 20 == 0:
                     print(
@@ -450,7 +790,64 @@ def main() -> int:
                         file=sys.stderr,
                         flush=True,
                     )
+                policy_progress_by_symbol[proxy_symbol] = index
+                interval = max(int(args.checkpoint_policy_interval), 0)
+                if index == len(policies) or (interval > 0 and index % interval == 0):
+                    _write_checkpoint(
+                        checkpoint_path,
+                        search_name=str(args.search_name),
+                        start_ts=start_ts,
+                        end_ts=end_ts,
+                        proxy_symbols=proxy_symbols,
+                        policies=policies,
+                        baseline_path=baseline_path,
+                        trait_summary=trait_summary,
+                        group_by_symbol=group_by_symbol,
+                        rows_by_policy=None,
+                        processed_symbols=processed_symbols,
+                        policy_progress_by_symbol=policy_progress_by_symbol,
+                        rows_db_path=rows_db_path,
+                    )
+            processed_symbols.add(proxy_symbol)
+            policy_progress_by_symbol.pop(proxy_symbol, None)
+            _write_checkpoint(
+                checkpoint_path,
+                search_name=str(args.search_name),
+                start_ts=start_ts,
+                end_ts=end_ts,
+                proxy_symbols=proxy_symbols,
+                policies=policies,
+                baseline_path=baseline_path,
+                trait_summary=trait_summary,
+                group_by_symbol=group_by_symbol,
+                rows_by_policy=None,
+                processed_symbols=processed_symbols,
+                policy_progress_by_symbol=policy_progress_by_symbol,
+                rows_db_path=rows_db_path,
+            )
+            new_symbols_processed += 1
+            if args.max_new_symbols > 0 and new_symbols_processed >= args.max_new_symbols:
+                break
 
+    missing_symbols = [symbol for symbol in proxy_symbols if symbol not in processed_symbols]
+    if missing_symbols:
+        print(
+            json.dumps(
+                {
+                    "state": "partial_complete",
+                    "processed_count": len(processed_symbols),
+                    "total_symbols": len(proxy_symbols),
+                    "remaining_symbols": missing_symbols,
+                    "checkpoint_path": str(checkpoint_path),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+        return 0
+
+    rows_by_policy = _load_rows_by_policy_from_db(rows_db, policies)
     result = _evaluate_models(rows_by_policy, variants=policies, end_ts=end_ts)
     payload: dict[str, Any] = {
         "schema_version": f"micro_main_{args.search_name}_search_v1",
@@ -459,6 +856,8 @@ def main() -> int:
         "window": {"start_ts": start_ts.isoformat(), "end_ts": end_ts.isoformat(), "days": int(args.days)},
         "model_definition": "Trait ontology policy search. Symbols are grouped by entry-time diagnostics and historical signal traits; policies apply group-level filter bundles, not per-symbol one-off settings.",
         "baseline_trait_source": str(baseline_path),
+        "checkpoint_path": str(checkpoint_path),
+        "rows_db_path": str(rows_db_path),
         "trait_summary": trait_summary,
         "group_by_symbol": group_by_symbol,
         "variant_count": len(policies),
@@ -466,7 +865,6 @@ def main() -> int:
     }
 
     if args.write_report:
-        report_dir = Path(settings.validation_report_dir) / "micro_main_raw_profile_model_searches"
         report_dir.mkdir(parents=True, exist_ok=True)
         stem = f"micro_main_{args.search_name}_{generated_at.strftime('%Y%m%dT%H%M%SZ')}"
         json_path = report_dir / f"{stem}.json"

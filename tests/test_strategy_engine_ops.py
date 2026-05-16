@@ -85,6 +85,22 @@ def test_sync_universe_from_binance_with_mocked_market_data() -> None:
         assert progress[-1]["total_symbols"] == 2
 
 
+def test_runtime_sync_symbols_can_skip_top_universe_fetch() -> None:
+    engine = object.__new__(StrategyEngine)
+    engine.settings = SimpleNamespace(
+        auto_trading_allowed_symbols="BTCUSDC",
+        auto_trading_micro_live_allowed_symbols="ETHUSDC",
+        session_impulse_retest_allowed_symbols="ETHUSDC,SUIUSDC",
+    )
+
+    def fail_refresh_universe(*_args: object, **_kwargs: object) -> list[str]:
+        raise AssertionError("limit_symbols=0 should not fetch the top universe")
+
+    engine.market_data = SimpleNamespace(refresh_universe=fail_refresh_universe)
+
+    assert engine.runtime_sync_symbols(limit_symbols=0) == ["BTCUSDC", "ETHUSDC", "SUIUSDC"]
+
+
 def test_runtime_candidate_symbols_can_limit_ranked_outcome_inputs() -> None:
     engine = object.__new__(StrategyEngine)
     engine.scanner = SimpleNamespace(

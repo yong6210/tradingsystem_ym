@@ -37,6 +37,36 @@ class _InitState:
 
 _init_state = _InitState()
 
+_SQLITE_RUNTIME_INDEXES = (
+    (
+        "ix_plans_time_state_valid_from",
+        "CREATE INDEX IF NOT EXISTS ix_plans_time_state_valid_from "
+        "ON plans (timeframe, state, valid_until, valid_from)",
+    ),
+    (
+        "ix_plans_symbol_time_state_ev",
+        "CREATE INDEX IF NOT EXISTS ix_plans_symbol_time_state_ev "
+        "ON plans (symbol, timeframe, state, ev, confidence, rr_base)",
+    ),
+    (
+        "ix_sir_runtime_audits_observed_symbol_phase_status",
+        "CREATE INDEX IF NOT EXISTS ix_sir_runtime_audits_observed_symbol_phase_status "
+        "ON session_impulse_retest_runtime_audits (observed_ts, symbol, phase, status)",
+    ),
+    (
+        "ix_order_intents_family_created_funnel",
+        "CREATE INDEX IF NOT EXISTS ix_order_intents_family_created_funnel "
+        "ON order_intents ("
+        "strategy_family, created_at, symbol, execution_mode, approval_state, submit_decision, decision_reason_code"
+        ")",
+    ),
+    (
+        "ix_order_submissions_live_submitted_funnel",
+        "CREATE INDEX IF NOT EXISTS ix_order_submissions_live_submitted_funnel "
+        "ON order_submissions (requested_live, submitted_at, intent_id, symbol, state)",
+    ),
+)
+
 
 if settings.database_url.startswith("sqlite"):
 
@@ -63,6 +93,10 @@ def init_db() -> None:
         from app.db import models  # noqa: F401
 
         Base.metadata.create_all(bind=engine)
+        if settings.database_url.startswith("sqlite"):
+            with engine.begin() as conn:
+                for _, statement in _SQLITE_RUNTIME_INDEXES:
+                    conn.execute(text(statement))
         _init_state.initialized = True
 
 

@@ -56,6 +56,51 @@ def test_stream_binance_klines_ingests_and_refreshes() -> None:
         assert refresh_calls
 
 
+def test_stream_binance_klines_skips_non_final_db_writes() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        symbol = f"WSNF{int(datetime.now(timezone.utc).timestamp())}USDC"
+        base = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+        async def fake_stream_klines(symbols: list[str], interval: str):
+            for is_final, close in ((False, 100.2), (True, 100.5)):
+                yield BinanceKline(
+                    symbol=symbol,
+                    interval=interval,
+                    open_time=base,
+                    close_time=base + timedelta(minutes=5),
+                    o=100.0,
+                    h=101.0,
+                    l=99.0,
+                    c=close,
+                    v=1000.0,
+                    is_final=is_final,
+                )
+
+        refresh_calls: list[str] = []
+        engine.market_data.binance.stream_klines = fake_stream_klines  # type: ignore[assignment]
+        engine.refresh_symbol = lambda s: refresh_calls.append(s) or {"symbol": s, "updated": True}  # type: ignore[assignment]
+
+        payload = asyncio.run(
+            engine.stream_binance_klines(
+                symbols=[symbol],
+                intervals=["5m"],
+                refresh_on_final=True,
+                max_messages=2,
+            )
+        )
+
+        candles = engine.market_data.recent_candles(symbol=symbol, timeframe="5m", limit=10)
+        assert payload["processed_messages"] == 2
+        assert payload["committed_candles"] == 1
+        assert payload["skipped_non_final_candles"] == 1
+        assert len(candles) == 1
+        assert candles[0].is_final is True
+        assert candles[0].c == 100.5
+        assert refresh_calls == [symbol]
+
+
 def test_stream_binance_klines_handles_empty_input() -> None:
     init_db()
     with SessionLocal() as db:

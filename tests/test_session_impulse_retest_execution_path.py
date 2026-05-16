@@ -2156,6 +2156,63 @@ def test_session_impulse_retest_miss_detector_skips_pre_start_trade_before_repla
         assert payload["effective_window_start"] == runtime_started_at.isoformat()
 
 
+def test_session_impulse_retest_miss_detector_counts_pre_start_intent_evidence(tmp_path) -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        engine.settings.runtime_worker_heartbeat_dir = str(tmp_path)
+        engine.settings.session_impulse_retest_enabled = True
+        engine.settings.session_impulse_retest_allowed_symbols = "BTCUSDC"
+        engine.settings.auto_trading_allowed_symbols = "BTCUSDC"
+        engine.settings.auto_trading_micro_live_allowed_symbols = "BTCUSDC"
+
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        runtime_started_at = now - timedelta(minutes=30)
+        replay_trade = SimpleNamespace(
+            entry_ts=now - timedelta(hours=1),
+            direction="long",
+            r_value=-0.5,
+            exit_reason="time_guard_10m",
+        )
+        write_worker_heartbeat(
+            "ws",
+            settings=engine.settings,
+            status="ok",
+            details={"phase": "streaming", "started_at": runtime_started_at.isoformat(), "processed_messages": 1},
+        )
+
+        expected_plan_id = engine._session_impulse_retest_plan_id_for_entry(
+            symbol="BTCUSDC",
+            direction="long",
+            entry_ts=replay_trade.entry_ts,
+        )
+
+        def fail_if_replayed(**_kwargs) -> dict:
+            raise AssertionError("pre-start trades with DB evidence should not be replay-observed")
+
+        engine._session_impulse_retest_recent_replay_trades = lambda **kwargs: [replay_trade]  # type: ignore[assignment]
+        engine._session_impulse_retest_runtime_plan_observation = fail_if_replayed  # type: ignore[assignment]
+        engine.intent_repo.list_for_plan = (  # type: ignore[assignment]
+            lambda plan_id, limit=20: [SimpleNamespace(intent_id="intent_existing")] if plan_id == expected_plan_id else []
+        )
+        engine.submission_repo.list_for_plan = lambda plan_id, limit=20: []  # type: ignore[assignment]
+
+        payload = engine.detect_session_impulse_retest_recent_misses(
+            lookback_hours=24,
+            symbols=["BTCUSDC"],
+            write_report=False,
+        )
+
+        assert payload["expected_trade_count"] == 1
+        assert payload["runtime_observed_count"] == 1
+        assert payload["before_current_runtime_start_count"] == 1
+        assert payload["observed_before_current_runtime_start_count"] == 1
+        assert payload["skipped_before_runtime_start_count"] == 0
+        assert payload["miss_count"] == 0
+        assert payload["by_symbol"]["BTCUSDC"]["runtime_observed_trades"] == 1
+        assert payload["by_symbol"]["BTCUSDC"]["observed_before_current_runtime_start"] == 1
+
+
 def test_session_impulse_retest_miss_detector_treats_existing_intent_as_observed(tmp_path) -> None:
     init_db()
     with SessionLocal() as db:

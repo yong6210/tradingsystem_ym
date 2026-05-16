@@ -46,6 +46,49 @@ def test_latest_backtest_report_prefers_matching_live_contract(monkeypatch, tmp_
     assert selected == matching
 
 
+def test_main_default_backtest_selection_uses_current_settings(monkeypatch, tmp_path, capsys) -> None:
+    selected_report = tmp_path / "micro_main_usdt_proxy_backtest_20260515T175711Z.json"
+    selected_report.write_text(json.dumps({"results": {}}), encoding="utf-8")
+    settings = _settings(
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
+    )
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        audit,
+        "_parse_args",
+        lambda: SimpleNamespace(
+            backtest_report="",
+            report_dir=str(tmp_path),
+            include_samples=False,
+            no_write_report=True,
+        ),
+    )
+    monkeypatch.setattr(audit, "get_settings", lambda: settings)
+    def _select_backtest_report(selected_settings):
+        seen["settings"] = selected_settings
+        return selected_report
+
+    monkeypatch.setattr(audit, "_latest_backtest_report", _select_backtest_report)
+    monkeypatch.setattr(
+        audit,
+        "build_payload",
+        lambda *, backtest_report, include_samples: {
+            "generated_at": "2026-05-16T00:00:00Z",
+            "backtest_report": str(backtest_report),
+            "include_samples": include_samples,
+        },
+    )
+
+    assert audit.main() == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert seen["settings"] is settings
+    assert payload["backtest_report"] == str(selected_report)
+    assert payload["include_samples"] is False
+
+
 def _row(
     *,
     symbol: str,

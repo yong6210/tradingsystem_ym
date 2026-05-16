@@ -17,7 +17,7 @@ from app.core.config import get_settings
 from app.integrations.binance_futures import BinanceFuturesClient
 from app.services.execution_coordinator import ExecutionCoordinator
 from scripts.operation_report_io import atomic_write_text, display_path, parse_report_generated_at, write_latest_aliases
-from scripts.run_micro_live_preflight import _csv_set, _micro_live_config_drift_checks
+from scripts.run_micro_live_preflight import _micro_live_config_drift_checks
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,8 +63,20 @@ def _first_live_symbol(settings: Any, explicit_symbol: str = "") -> str:
     explicit = str(explicit_symbol or "").strip().upper()
     if explicit:
         return explicit
-    symbols = sorted(_csv_set(getattr(settings, "auto_trading_micro_live_allowed_symbols", "")))
-    return symbols[0] if symbols else "BTCUSDC"
+    allowed_symbols = [
+        item.strip().upper()
+        for item in str(getattr(settings, "auto_trading_micro_live_allowed_symbols", "") or "").split(",")
+        if item.strip()
+    ]
+    allowed_symbol_set = set(allowed_symbols)
+    for priority_symbol in [
+        item.strip().upper()
+        for item in str(getattr(settings, "auto_trading_micro_live_symbol_priority", "") or "").split(",")
+        if item.strip()
+    ]:
+        if not allowed_symbol_set or priority_symbol in allowed_symbol_set:
+            return priority_symbol
+    return allowed_symbols[0] if allowed_symbols else "BTCUSDC"
 
 
 def _public_mid_price(client: BinanceFuturesClient, symbol: str) -> float:

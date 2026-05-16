@@ -34,6 +34,9 @@ PYTHON_BIN="$TMP_VENV/bin/python"
 POST_RESTART_REFRESH_REPORTS="${TRADING_POST_RESTART_REFRESH_REPORTS:-1}"
 POST_RESTART_NO_ORDER_DAYS="${TRADING_POST_RESTART_NO_ORDER_DAYS:-1}"
 POST_RESTART_NO_ORDER_LIMIT="${TRADING_POST_RESTART_NO_ORDER_LIMIT:-80}"
+WS_INTERVALS="${TRADING_WS_INTERVALS:-1m,5m,15m}"
+WS_LIMIT_SYMBOLS="${TRADING_WS_LIMIT_SYMBOLS:-30}"
+LOOP_LIMIT_SYMBOLS="${TRADING_LOOP_LIMIT_SYMBOLS:-0}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   cat >&2 <<EOF
@@ -103,6 +106,15 @@ file_size_bytes() {
     return 0
   fi
   wc -c <"$path" | tr -d ' '
+}
+
+dotenv_value() {
+  local key="$1"
+  local file="$TMP_ROOT/.env"
+  local value=""
+  [[ -f "$file" ]] || return 0
+  value="$(grep -E "^[[:space:]]*$key[[:space:]]*=" "$file" | tail -n 1 | sed -E "s/^[^=]*=//; s/[[:space:]]+#.*$//; s/^[[:space:]]+//; s/[[:space:]]+$//; s/^['\\\"]//; s/['\\\"]$//" || true)"
+  printf '%s\n' "$value"
 }
 
 rotate_log_if_large() {
@@ -335,16 +347,23 @@ cd "$TMP_ROOT"
 SPAWN_SCRIPT="$TMP_ROOT/scripts/spawn_detached_process.py"
 WORKER_SCRIPT="$TMP_ROOT/scripts/run_worker.py"
 BASE_ENV=(env PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYDANTIC_DISABLE_PLUGINS=1)
+WS_SYMBOLS="${TRADING_WS_SYMBOLS:-$(dotenv_value AUTO_TRADING_MICRO_LIVE_ALLOWED_SYMBOLS)}"
+WS_ARGS=(--ws-stream --ws-intervals "$WS_INTERVALS")
+if [[ -n "$WS_SYMBOLS" ]]; then
+  WS_ARGS+=(--ws-symbols "$WS_SYMBOLS")
+else
+  WS_ARGS+=(--sync-universe --limit-symbols "$WS_LIMIT_SYMBOLS")
+fi
 
 "$PYTHON_BIN" "$SPAWN_SCRIPT" \
   --log "$LOG_DIR/trading_api.log" \
   -- "${BASE_ENV[@]}" "$PYTHON_BIN" -m uvicorn app.main:app --host "$API_HOST" --port "$API_PORT" >/dev/null
 "$PYTHON_BIN" "$SPAWN_SCRIPT" \
   --log "$LOG_DIR/trading_worker_loop.log" \
-  -- "${BASE_ENV[@]}" "$PYTHON_BIN" "$WORKER_SCRIPT" --mode loop --sync-universe --limit-symbols 30 --symbol-concurrency 1 --limit-1m 120 --limit-5m 500 --limit-15m 500 --interval-seconds 60 >/dev/null
+  -- "${BASE_ENV[@]}" "$PYTHON_BIN" "$WORKER_SCRIPT" --mode loop --sync-universe --limit-symbols "$LOOP_LIMIT_SYMBOLS" --symbol-concurrency 1 --limit-1m 120 --limit-5m 500 --limit-15m 500 --interval-seconds 60 >/dev/null
 "$PYTHON_BIN" "$SPAWN_SCRIPT" \
   --log "$LOG_DIR/trading_worker_ws.log" \
-  -- "${BASE_ENV[@]}" "$PYTHON_BIN" "$WORKER_SCRIPT" --ws-stream --sync-universe --limit-symbols 30 --ws-intervals 1m,5m,15m >/dev/null
+  -- "${BASE_ENV[@]}" "$PYTHON_BIN" "$WORKER_SCRIPT" "${WS_ARGS[@]}" >/dev/null
 
 last_ready_response=""
 for _ in $(seq 1 "$READY_WAIT_SECONDS"); do

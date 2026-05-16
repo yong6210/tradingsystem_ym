@@ -625,6 +625,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
 
 def main() -> int:
     args = _parse_args()
+    settings = get_settings()
     backtest_report = Path(args.backtest_report) if str(args.backtest_report or "").strip() else _latest_backtest_report(settings)
     if not backtest_report.is_absolute():
         backtest_report = ROOT_DIR / backtest_report

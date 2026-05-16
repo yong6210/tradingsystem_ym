@@ -6955,6 +6955,111 @@
   - `git diff --check`
     - pass
 
+## 2026-05-16 Iteration #250
+### 추가 감사: loop worker top-30 동기화 부하 축소
+- 발견:
+  - WS 범위를 live 11심볼로 줄인 뒤에도 loop worker가 `--limit-symbols 30`으로 top universe를 계속 동기화했다.
+  - 재시작 직후 sync가 끝나면 괜찮지만, top-30 refresh가 반복되면 주문 경로에 필요 없는 비주문 심볼까지 계속 REST/backfill/refresh하면서 CPU를 다시 올릴 수 있었다.
+- 수정:
+  - `app/services/strategy_engine.py`
+    - `runtime_sync_symbols(limit_symbols=0)`이면 top universe fetch를 건너뛰고 명시 설정 심볼만 반환하도록 변경했다.
+    - 명시 설정 심볼은 `AUTO_TRADING_ALLOWED_SYMBOLS`, `AUTO_TRADING_MICRO_LIVE_ALLOWED_SYMBOLS`, `SESSION_IMPULSE_RETEST_ALLOWED_SYMBOLS` 순서로 병합한다.
+  - `scripts/restart_runtime_stack_tmp.sh`
+    - loop worker 기본 `--limit-symbols`를 `TRADING_LOOP_LIMIT_SYMBOLS:-0`으로 변경했다.
+    - broad top-30 refresh가 필요하면 `TRADING_LOOP_LIMIT_SYMBOLS=30`으로 명시 재시작한다.
+  - `tests/test_strategy_engine_ops.py`
+    - `limit_symbols=0`에서 top universe fetch를 호출하지 않는 회귀 테스트를 추가했다.
+- runtime 확인:
+  - loop command:
+    - `run_worker.py --mode loop --sync-universe --limit-symbols 0 ...`
+  - stable CPU:
+    - API `0%`
+    - loop worker `0%`
+    - WS worker 약 `3.6%`
+  - `/health/ready`: `ready`, 1m `fresh=12/12`, 5m `fresh=12/12`
+- 검증:
+  - `bash -n scripts/restart_runtime_stack_tmp.sh scripts/check_runtime_stack.sh`
+    - pass
+  - `./.venv/bin/python -m pytest tests/test_strategy_engine_ops.py tests/test_db_runtime_indexes.py tests/test_micro_live_operational_guards.py tests/test_run_worker_boot_check.py tests/test_script_entrypoints.py -q`
+    - `141 passed`
+
+## 2026-05-16 Iteration #249
+### 추가 감사: WS worker가 비주문 top-30까지 스트리밍해 CPU를 과다 사용
+- 발견:
+  - 이전 연구용 `run_micro_main_trait_policy_search.py` 프로세스가 1시간 이상 CPU 99%로 남아 있었다. 현재 운영 확인에는 필수 작업이 아니라 종료했다.
+  - child 프로세스만 종료하면 Codex 부모 아래에 남아 있던 driver loop가 checkpoint resume 방식으로 새 child를 다시 띄웠다. driver와 child를 함께 종료했다.
+  - 그 후에도 WS worker가 `--sync-universe --limit-symbols 30 --ws-intervals 1m,5m,15m`로 31개 심볼을 스트리밍하며 거의 한 코어를 사용했다.
+  - 현재 MICRO_LIVE 주문 경로는 `AUTO_TRADING_MICRO_LIVE_ALLOWED_SYMBOLS`의 11개 live core 심볼만 주문 가능하므로, WS live route가 비주문 top-30 전체를 계속 스트리밍할 필요는 없었다.
+- 수정:
+  - `scripts/restart_runtime_stack_tmp.sh`
+    - 기본 WS 심볼을 runtime `.env`의 `AUTO_TRADING_MICRO_LIVE_ALLOWED_SYMBOLS`로 설정했다.
+    - 필요 시 `TRADING_WS_SYMBOLS`로 명시 override할 수 있게 했다.
+    - `TRADING_WS_SYMBOLS`가 비어 있으면 기존처럼 `--sync-universe --limit-symbols ${TRADING_WS_LIMIT_SYMBOLS:-30}` fallback을 사용할 수 있게 했다.
+    - `TRADING_WS_INTERVALS`로 WS interval도 override 가능하게 했다.
+  - `scripts/check_runtime_stack.sh`
+    - WS 프로세스 표시 패턴을 `--sync-universe`가 없는 live-symbol stream도 잡도록 수정했다.
+  - 문서:
+    - current state와 runbook에 WS live-symbol 기본값과 override 규칙을 기록했다.
+- runtime 확인:
+  - runtime source 반영 후 WS command:
+    - `run_worker.py --ws-stream --ws-intervals 1m,5m,15m --ws-symbols BTCUSDC,ETHUSDC,SOLUSDC,LINKUSDC,BNBUSDC,XRPUSDC,ADAUSDC,AVAXUSDC,BCHUSDC,LTCUSDC,NEARUSDC`
+  - CPU:
+    - 변경 직전 WS worker: 약 `98%`
+    - 변경 후 안정 상태 WS worker: 약 `5%`
+    - loop worker: 첫 sync 후 `0%`
+  - `/health/ready`: `ready`, 1m `fresh=12/12`, 5m `fresh=12/12`
+  - WS heartbeat:
+    - `symbols=11`
+    - `auto_route_calls=11`
+    - `auto_route_submit_calls=0`
+    - `auto_route_errors=0`
+    - `refresh_errors=0`
+  - `run_micro_live_ops_heartbeat.py`: `PASS`, failure `0`, warning `0`, issue `0`, advisory `1`
+  - `live_candidate_promotion_readiness`: `WAIT/no_promotable_live_candidate`, live `11` symbols all `NO_FRESH_LIVE_CANDIDATE`
+- 검증:
+  - `bash -n scripts/restart_runtime_stack_tmp.sh scripts/check_runtime_stack.sh`
+    - pass
+  - `./.venv/bin/python -m pytest tests/test_db_runtime_indexes.py tests/test_micro_live_operational_guards.py tests/test_run_worker_boot_check.py tests/test_script_entrypoints.py -q`
+    - `115 passed`
+  - `git diff --check`
+    - pass
+
+## 2026-05-16 Iteration #248
+### 추가 감사: live candidate readiness launchd 장시간 DB scan
+- 발견:
+  - `com.trading.micro-live.live-candidate-promotion-readiness` launchd job이 3분 이상 남아 있었다.
+  - `sample` 확인 결과 Python이 SQLite `sqlite3_step`에서 DB page를 계속 읽고 있었다.
+  - 원인은 readiness가 최근 `session_impulse_retest_runtime_audits`, `order_intents`, `order_submissions`를 시간 조건으로 집계하는데, runtime DB 인덱스가 시간 조건 기준으로 최적화되어 있지 않았기 때문이다.
+  - 이 문제는 주문 제출 경로의 직접 차단은 아니지만, 5분마다 도는 운영 리포트가 큰 DB를 오래 읽어 runtime latency와 관측성 신뢰도를 떨어뜨릴 수 있었다.
+- 수정:
+  - `app/db/models.py`
+    - `ix_sir_runtime_audits_observed_symbol_phase_status`
+    - `ix_order_intents_family_created_funnel`
+    - `ix_order_submissions_live_submitted_funnel`
+  - `app/db/session.py`
+    - 기존 SQLite DB에서도 `init_db()`가 위 인덱스를 `CREATE INDEX IF NOT EXISTS`로 보장하도록 추가했다.
+  - 운영 DB:
+    - `/Users/yumin/Library/Application Support/trading/data/trading.db`에 위 인덱스 3개를 즉시 생성했다.
+  - `tests/test_db_runtime_indexes.py`
+    - model 선언과 runtime SQLite 보장 목록이 같이 유지되는 회귀 테스트를 추가했다.
+- 결과:
+  - query plan:
+    - SIR runtime audits: `USING COVERING INDEX ix_sir_runtime_audits_observed_symbol_phase_status (observed_ts>?)`
+    - order intents: `USING COVERING INDEX ix_order_intents_family_created_funnel (strategy_family=? AND created_at>?)`
+    - order submissions: `USING COVERING INDEX ix_order_submissions_live_submitted_funnel (requested_live=? AND submitted_at>?)`
+  - `run_live_candidate_promotion_readiness.py --hours 24 --limit 12 --since-ws-start --quiet`
+    - `0.399s total`
+  - runtime 재시작 후 source match:
+    - `app/db/models.py`: match
+    - `app/db/session.py`: match
+  - `/health/ready`: `ready`, 1m `fresh=12/12`, 5m `fresh=12/12`
+  - `run_micro_live_ops_heartbeat.py`: `PASS`, failure `0`, warning `0`, issue `0`, advisory `1`
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_db_runtime_indexes.py tests/test_micro_live_operational_guards.py tests/test_run_worker_boot_check.py tests/test_script_entrypoints.py -q`
+    - `115 passed`
+  - `git diff --check`
+    - pass
+
 ## 2026-05-16 Iteration #241
 ### 수정: readiness live scope가 최근 audit row가 있는 심볼만 세는 문제
 - 발견:
@@ -7079,3 +7184,143 @@
 - 검증:
   - `./.venv/bin/python -m pytest -q tests/test_strategy_engine_ops.py::test_sync_universe_from_binance_with_mocked_market_data tests/test_strategy_engine_ops.py::test_sync_universe_from_binance_parallel_respects_concurrency_limit tests/test_health_readiness.py::test_health_worker_syncing_universe_heartbeat_is_ready`
     - `3 passed`
+
+## 2026-05-16 Iteration #246
+### 추가 감사: 안전장치 드래그 감사 스크립트와 portfolio/budget 병목
+- 발견:
+  - `scripts/run_micro_live_safety_drag_audit.py` 기본 실행이 `settings` 미정의로 실패했다.
+  - 이 스크립트는 주문 경로 자체는 아니지만, “현재 안전장치가 백테스트 수익률을 얼마나 깎는지”를 확인하는 핵심 검증 도구라 깨져 있으면 안전장치 과잉 여부를 재검증할 수 없었다.
+  - `/health/ready`는 빠른데 `run_micro_live_preflight.py`가 `/execution/operator-dashboard`에서 timeout이 났다.
+  - 원인은 `/execution/operator-dashboard`의 upstream인 `/portfolio/budget`이 느린 것이었고, `plans` 테이블이 `list_exposure_candidates`에서 full scan을 하고 있었다.
+- 수정:
+  - `scripts/run_micro_live_safety_drag_audit.py`
+    - `main()`에서 `settings = get_settings()`를 먼저 만들고, 기본 backtest 선택에 현재 MICRO_LIVE 계약을 넘기도록 고쳤다.
+  - `tests/test_micro_live_safety_drag_audit.py`
+    - 기본 실행 경로가 현재 settings로 backtest selector를 호출하는 회귀 테스트를 추가했다.
+  - `app/db/models.py`, `app/db/session.py`
+    - `plans` 조회용 인덱스 `ix_plans_time_state_valid_from`, `ix_plans_symbol_time_state_ev`를 추가했다.
+    - 기존 SQLite DB에도 `CREATE INDEX IF NOT EXISTS`가 적용되도록 `init_db()`에서 runtime index를 보장한다.
+  - 운영 DB:
+    - `/Users/yumin/Library/Application Support/trading/data/trading.db`에 두 인덱스를 즉시 생성했다.
+  - 문서:
+    - current state에 최신 safety drag spot audit, 72h/168h opportunity replay, portfolio/budget index 병목 해결을 기록했다.
+    - runbook에 portfolio/budget fast check와 누락 인덱스 복구 명령을 추가했다.
+- 결과:
+  - `run_micro_live_safety_drag_audit.py --include-samples`
+    - baseline `closed=4399`, `total_r=2826.3175`, `ev_r=0.6425`
+    - after replayable safety gates `closed=4323`, `total_r=2754.7242`, `ev_r=0.6372`
+    - drag `closed -76` (`-1.7277%`), `total_r -71.5933` (`-2.5331%`)
+  - 최근 72h SIR opportunity replay:
+    - expected orders `1`, all pre-restart, old blocker `session_impulse_retest_rollout_not_ready`, potential `+1.553495R`
+  - 최근 168h SIR opportunity replay:
+    - expected orders `12`, all pre-restart
+    - old blockers: `session_impulse_retest_rollout_not_ready=6`, `rollout_session_not_allowed=5`, `validation_do_not_deploy=1`
+    - potential `+6.612254R`
+  - API latency after indexes:
+    - `/portfolio/budget?write_report=false&fast=true`: `0.326s`
+    - `/execution/operator-dashboard?...&fast=true`: `1.189s`
+  - preflight:
+    - `READY_FOR_MICRO_LIVE`
+    - operator dashboard surface timing `1.576s`
+  - entry surface:
+    - `PASS`, `notified=false`, `live_order_candidates=0`, `context_only_outside_live_route`
+  - ops heartbeat:
+    - `PASS`, warning `0`, failure `0`
+- 검증:
+  - `./.venv/bin/python -m pytest -q tests/test_micro_live_safety_drag_audit.py tests/test_entry_surface_scripts.py tests/test_notification_dispatcher.py tests/test_micro_live_preflight.py tests/test_health_readiness.py tests/test_strategy_engine_ops.py`
+    - `130 passed`
+  - 전체 관련 회귀:
+    - `./.venv/bin/python -m pytest -q tests/test_micro_live_preflight.py tests/test_micro_live_operational_guards.py tests/test_validation_payload_cache.py tests/test_live_candidate_promotion_readiness.py tests/test_operator_session_brief_automation_health.py tests/test_operator_surface_divergence_snapshot.py tests/test_generate_operator_session_brief.py tests/test_notify_operator_session_brief.py tests/test_script_entrypoints.py tests/test_replay_validation_bridge.py tests/test_micro_live_safety_drag_audit.py tests/test_health_readiness.py tests/test_run_worker_boot_check.py tests/test_micro_main_research_backtest_selection.py tests/test_strategy_engine_ops.py tests/test_entry_surface_scripts.py tests/test_notification_dispatcher.py tests/test_portfolio_budget_report.py tests/test_execution_operator_dashboard.py`
+    - `316 passed`
+
+## 2026-05-16 Iteration #247
+### 추가 감사: boot check synthetic canary의 live contract 불일치
+- 발견:
+  - `scripts/run_micro_live_boot_check.py`의 synthetic submit canary가 현재 라이브 계약과 무관하게 `entry_model="LIMIT"`을 하드코딩하고 있었다.
+  - 심볼도 허용 심볼을 정렬한 첫 번째 값으로 골라, 현재 priority first인 `BTCUSDC`가 아니라 alphabetic first symbol이 canary 대상이 될 수 있었다.
+  - 이 문제는 실제 주문 미발생의 직접 원인은 아니지만, “현재 라이브 주문 모델이 submit boundary까지 통과하는지”를 부팅 점검이 정확히 검증하지 못하는 관측성 빈틈이었다.
+- 수정:
+  - `scripts/run_micro_live_boot_check.py`
+    - synthetic canary 심볼을 `AUTO_TRADING_MICRO_LIVE_SYMBOL_PRIORITY`와 `AUTO_TRADING_MICRO_LIVE_ALLOWED_SYMBOLS`의 교집합 첫 항목으로 선택하도록 변경했다.
+    - canary entry model을 `AUTO_TRADING_MICRO_LIVE_ALLOWED_ENTRY_MODELS`의 첫 항목으로 선택하도록 변경했다.
+    - canary summary에 `entry_model`을 노출하도록 변경했다.
+  - `scripts/run_micro_live_synthetic_canary.py`
+    - 직접 실행 시 기본 심볼도 live priority를 보존하도록 변경했다.
+  - `tests/test_micro_live_operational_guards.py`
+    - boot check가 `BTCUSDC + CONFIRM` 계약으로 canary를 호출하는 회귀 테스트를 추가했다.
+    - synthetic canary 기본 심볼이 live priority를 보존하는 회귀 테스트를 추가했다.
+- runtime 확인:
+  - runtime source 반영 후 `run_micro_live_boot_check.py --days 3 --limit 200 --no-fail-exit --quiet`
+    - `synthetic_submit_canary`: `symbol=BTCUSDC entry_model=CONFIRM no_live_order_sent=True`
+    - payload: `overall_status=PASS`, `entry_model=CONFIRM`
+  - `/health/ready`: `ready`
+  - WS heartbeat:
+    - `phase=streaming`
+    - `auto_route_calls=4`
+    - `auto_route_submit_calls=0`
+    - `auto_route_errors=0`
+  - `run_micro_live_ops_heartbeat.py`: `PASS`, failure `0`, warning `0`, issue `0`, advisory `1`
+  - `live_candidate_promotion_readiness`: `PASS/WAIT`, `reason=no_promotable_live_candidate`, live `11` symbols all `NO_FRESH_LIVE_CANDIDATE`
+  - current-runtime no-order watchdog:
+    - `alert=false`
+    - `reason=no_recent_live_intents`
+    - SIR current-runtime expected orders `0`
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_micro_live_operational_guards.py tests/test_run_worker_boot_check.py tests/test_script_entrypoints.py -q`
+    - `114 passed`
+  - `git diff --check`
+    - pass
+
+## 2026-05-16 Iteration #251
+### 추가 감사: SIR miss detector가 pre-runtime intent evidence를 숨기는 문제
+- 발견:
+  - 최근 72시간을 현재 `session_impulse_retest + CONFIRM` 조건으로 리플레이하면 실제 기대 후보는 `1`건이었다.
+  - 이 후보는 2026-05-14 BTC 건으로, DB에는 이미 `session_impulse_retest_rollout_not_ready`로 막힌 `order_intents`가 남아 있었다.
+  - 그런데 `run_session_impulse_retest_miss_detector.py`는 current WS `started_at` 이전 후보를 먼저 `skipped_before_runtime_start`로 분류하고 끝냈다.
+  - 결과적으로 “후보가 없었다”와 “후보가 있었고 당시 승인에서 막혔다”가 운영 점검에서 구분되지 않는 관측성 빈틈이 있었다.
+- 수정:
+  - `app/services/strategy_engine.py`
+    - pre-runtime 후보도 예상 `plan_id`를 계산해 `order_intents`/`order_submissions`가 있으면 `runtime_observed_count`에 포함한다.
+    - 실제 replay-observation은 여전히 current WS `started_at` 이후 후보에만 적용해 pre-runtime backfill false miss는 만들지 않는다.
+    - payload에 `before_current_runtime_start_count`, `observed_before_current_runtime_start_count`, `pre_runtime_observation_note`를 추가했다.
+  - `tests/test_session_impulse_retest_execution_path.py`
+    - pre-runtime 후보에 persisted intent evidence가 있으면 replay observation 없이 observed로 세는 회귀 테스트를 추가했다.
+  - `app/services/runtime_kline_stream.py`
+    - WS worker가 Binance non-final kline 업데이트를 매번 SQLite에 upsert/commit하던 것을 final candle commit으로 제한했다.
+    - non-final update는 `processed_messages`와 `skipped_non_final_candles` telemetry에만 남긴다.
+  - `tests/test_ws_streaming.py`
+    - non-final kline은 DB에 쓰지 않고 final candle만 commit/refresh하는 회귀 테스트를 추가했다.
+  - `scripts/run_micro_main_trait_policy_search.py`
+    - `checkpoint.pause` 또는 `{search_name}.pause` 파일이 있으면 즉시 `status=paused`로 종료하도록 했다.
+    - stale Codex shell command가 `--ignore-pause`로 pause를 우회하지 못하도록 해당 옵션을 제거했다.
+  - `scripts/run_trait_policy_top50_driver.sh`
+    - untracked long-loop research driver 파일을 제거했다.
+  - runtime source에도 같은 변경을 반영하고 runtime stack을 재시작했다.
+- 결과:
+  - `run_session_impulse_retest_miss_detector.py --lookback-hours 72`
+    - `expected_trade_count=1`
+    - `runtime_observed_count=1`
+    - `before_current_runtime_start_count=1`
+    - `observed_before_current_runtime_start_count=1`
+    - `skipped_before_runtime_start_count=0`
+    - `miss_count=0`
+  - `/health/ready`: `ready`
+  - WS worker after final-only candle commit:
+    - `auto_route_calls=33`
+    - `auto_route_submit_calls=0`
+    - `refresh_errors=0`
+    - `auto_route_errors=0`
+    - CPU sample after warmup about `1%`, down from near one full core.
+  - 현재 runtime window에는 fresh SIR 후보, live intent, live submission 모두 `0`.
+  - 별도 연구용 `trait_policy_top50` driver/child가 여러 형태의 stale Codex shell process로 다시 CPU를 쓰는 것을 확인했다. `trait_policy_top50.pause`와 `trait_policy_top50_checkpoint.pause`를 만들고 우회 옵션/driver 파일을 제거한 뒤, 재확인에서 남아 있지 않았다.
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_session_impulse_retest_execution_path.py -q`
+    - `79 passed`
+  - `./.venv/bin/python -m pytest tests/test_ws_streaming.py tests/test_health_readiness.py -q`
+    - `32 passed`
+  - `./.venv/bin/python -m pytest tests/test_ws_streaming.py tests/test_health_readiness.py tests/test_session_impulse_retest_execution_path.py tests/test_micro_live_current_state_docs.py -q`
+    - `115 passed`
+  - `./.venv/bin/python -m pytest tests/test_ws_streaming.py tests/test_run_worker_boot_check.py -q`
+    - `5 passed`
+  - `./.venv/bin/python scripts/run_micro_main_trait_policy_search.py --search-name trait_policy_top50 --checkpoint-path reports/validation/micro_main_raw_profile_model_searches/trait_policy_top50_checkpoint.json --max-new-symbols 1 --brief-log`
+    - `{"status": "paused", ...}`

@@ -755,6 +755,8 @@ class StrategyEngine:
         by_symbol: dict[str, dict[str, Any]] = {}
         expected_trade_count = 0
         runtime_observed_count = 0
+        before_current_runtime_start_count = 0
+        observed_before_current_runtime_start_count = 0
         skipped_before_runtime_start_count = 0
 
         for symbol in target_symbols:
@@ -767,16 +769,33 @@ class StrategyEngine:
                 "expected_trades": len(replay_trades),
                 "runtime_observed_trades": 0,
                 "misses": 0,
+                "before_current_runtime_start": 0,
+                "observed_before_current_runtime_start": 0,
                 "skipped_before_runtime_start": 0,
             }
             expected_trade_count += len(replay_trades)
             for trade in replay_trades:
                 entry_ts = self._to_utc(trade.entry_ts)
+                direction = str(getattr(trade, "direction", "") or "").lower()
                 if runtime_started_at is not None and entry_ts < runtime_started_at:
+                    before_current_runtime_start_count += 1
+                    symbol_summary["before_current_runtime_start"] += 1
+                    expected_plan_id = self._session_impulse_retest_plan_id_for_entry(
+                        symbol=symbol,
+                        direction=direction,
+                        entry_ts=entry_ts,
+                    )
+                    intents = self.intent_repo.list_for_plan(expected_plan_id, limit=20)
+                    submissions = self.submission_repo.list_for_plan(expected_plan_id, limit=20)
+                    if intents or submissions:
+                        runtime_observed_count += 1
+                        observed_before_current_runtime_start_count += 1
+                        symbol_summary["runtime_observed_trades"] += 1
+                        symbol_summary["observed_before_current_runtime_start"] += 1
+                        continue
                     skipped_before_runtime_start_count += 1
                     symbol_summary["skipped_before_runtime_start"] += 1
                     continue
-                direction = str(getattr(trade, "direction", "") or "").lower()
                 observation = self._session_impulse_retest_runtime_plan_observation(
                     symbol=symbol,
                     entry_ts=entry_ts,
@@ -839,6 +858,10 @@ class StrategyEngine:
                 "runtime_observed_count is derived by replaying current runtime plan generation against historical candles; "
                 "it is not a persisted runtime event log."
             ),
+            "pre_runtime_observation_note": (
+                "Trades before the current websocket started_at are not replay-observed as live activity, "
+                "but persisted intents/submissions for the expected plan_id are counted as observed evidence."
+            ),
             "generated_at": now.isoformat(),
             "lookback_hours": hours,
             "window_start": cutoff.isoformat(),
@@ -849,6 +872,8 @@ class StrategyEngine:
             "symbols": target_symbols,
             "expected_trade_count": expected_trade_count,
             "runtime_observed_count": runtime_observed_count,
+            "before_current_runtime_start_count": before_current_runtime_start_count,
+            "observed_before_current_runtime_start_count": observed_before_current_runtime_start_count,
             "skipped_before_runtime_start_count": skipped_before_runtime_start_count,
             "miss_count": len(misses),
             "misses": misses,
@@ -1983,7 +2008,8 @@ class StrategyEngine:
                 if item and item not in explicit_symbols:
                     explicit_symbols.append(item)
 
-        top_symbols = list(self.market_data.refresh_universe(limit=limit_symbols))
+        normalized_limit = max(0, int(limit_symbols or 0))
+        top_symbols = list(self.market_data.refresh_universe(limit=normalized_limit)) if normalized_limit > 0 else []
         merged: list[str] = []
         for symbol in explicit_symbols + top_symbols:
             normalized = str(symbol or "").upper().strip()

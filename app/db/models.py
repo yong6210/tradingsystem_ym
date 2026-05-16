@@ -187,6 +187,8 @@ class Plan(Base):
     __tablename__ = "plans"
     __table_args__ = (
         Index("ix_plans_symbol_state_valid", "symbol", "state", "valid_until"),
+        Index("ix_plans_time_state_valid_from", "timeframe", "state", "valid_until", "valid_from"),
+        Index("ix_plans_symbol_time_state_ev", "symbol", "timeframe", "state", "ev", "confidence", "rr_base"),
         Index("ix_plans_zone_id", "zone_id"),
     )
 
@@ -391,6 +393,16 @@ class OrderIntent(Base):
     __table_args__ = (
         Index("ix_order_intents_plan_created", "plan_id", "created_at"),
         Index("ix_order_intents_symbol_created", "symbol", "created_at"),
+        Index(
+            "ix_order_intents_family_created_funnel",
+            "strategy_family",
+            "created_at",
+            "symbol",
+            "execution_mode",
+            "approval_state",
+            "submit_decision",
+            "decision_reason_code",
+        ),
         Index("ix_order_intents_decision", "submit_decision"),
     )
 
@@ -417,6 +429,14 @@ class OrderSubmission(Base):
     __table_args__ = (
         UniqueConstraint("intent_id", name="uq_order_submissions_intent"),
         Index("ix_order_submissions_symbol_state", "symbol", "state"),
+        Index(
+            "ix_order_submissions_live_submitted_funnel",
+            "requested_live",
+            "submitted_at",
+            "intent_id",
+            "symbol",
+            "state",
+        ),
         Index("ix_order_submissions_client_order_id", "client_order_id"),
     )
 
@@ -619,6 +639,7 @@ class SessionImpulseRetestRuntimeAudit(Base):
     __tablename__ = "session_impulse_retest_runtime_audits"
     __table_args__ = (
         Index("ix_sir_runtime_audits_symbol_observed", "symbol", "observed_ts"),
+        Index("ix_sir_runtime_audits_observed_symbol_phase_status", "observed_ts", "symbol", "phase", "status"),
         Index("ix_sir_runtime_audits_phase_status", "phase", "status"),
         Index("ix_sir_runtime_audits_plan_observed", "plan_id", "observed_ts"),
     )

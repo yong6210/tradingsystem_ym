@@ -249,6 +249,7 @@ def run_ws_stream(args: argparse.Namespace) -> dict:
             "refresh_calls": 0,
             "auto_route_calls": 0,
             "auto_route_submit_calls": 0,
+            "skipped_non_final_candles": 0,
             "skipped_reverse_timestamp": 0,
         }
 
@@ -267,6 +268,7 @@ def run_ws_stream(args: argparse.Namespace) -> dict:
                     "auto_route_submit_calls": _safe_int(stats.get("auto_route_submit_calls")),
                     "reconnects": _safe_int(stats.get("reconnects")),
                     "ingest_errors": _safe_int(stats.get("ingest_errors")),
+                    "skipped_non_final_candles": _safe_int(stats.get("skipped_non_final_candles")),
                     "skipped_reverse_timestamp": _safe_int(stats.get("skipped_reverse_timestamp")),
                     "refresh_errors": _safe_int(stats.get("refresh_errors")),
                     "auto_route_errors": _safe_int(stats.get("auto_route_errors")),
@@ -335,6 +337,7 @@ def run_ws_stream(args: argparse.Namespace) -> dict:
                 "auto_route_submit_calls": _safe_int(payload.get("auto_route_submit_calls")),
                 "reconnects": _safe_int(payload.get("reconnects")),
                 "ingest_errors": _safe_int(payload.get("ingest_errors")),
+                "skipped_non_final_candles": _safe_int(payload.get("skipped_non_final_candles")),
                 "skipped_reverse_timestamp": _safe_int(payload.get("skipped_reverse_timestamp")),
                 "refresh_errors": _safe_int(payload.get("refresh_errors")),
                 "auto_route_errors": _safe_int(payload.get("auto_route_errors")),

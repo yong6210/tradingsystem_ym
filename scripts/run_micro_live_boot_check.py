@@ -60,13 +60,37 @@ def _display_path(path: Path) -> str:
     return display_path(path, ROOT_DIR)
 
 
+def _csv_items(value: Any) -> list[str]:
+    seen: set[str] = set()
+    items: list[str] = []
+    for item in str(value or "").split(","):
+        normalized = item.strip().upper()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        items.append(normalized)
+    return items
+
+
 def _first_symbol(explicit: str) -> str:
     value = str(explicit or "").strip().upper()
     if value:
         return value
     settings = get_settings()
-    symbols = sorted(_csv_set(getattr(settings, "auto_trading_micro_live_allowed_symbols", "")))
-    return symbols[0] if symbols else "BTCUSDC"
+    allowed_symbols = _csv_items(getattr(settings, "auto_trading_micro_live_allowed_symbols", ""))
+    allowed_symbol_set = set(allowed_symbols)
+    for priority_symbol in _csv_items(getattr(settings, "auto_trading_micro_live_symbol_priority", "")):
+        if not allowed_symbol_set or priority_symbol in allowed_symbol_set:
+            return priority_symbol
+    return allowed_symbols[0] if allowed_symbols else "BTCUSDC"
+
+
+def _first_entry_model() -> str:
+    settings = get_settings()
+    for entry_model in _csv_items(getattr(settings, "auto_trading_micro_live_allowed_entry_models", "")):
+        if entry_model:
+            return entry_model
+    return "LIMIT"
 
 
 def _component(name: str, status: str, *, blocking: bool, summary: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -145,7 +169,7 @@ def build_payload(
     canary = run_micro_live_synthetic_canary.run_canary(
         symbol=_first_symbol(symbol),
         direction="long",
-        entry_model="LIMIT",
+        entry_model=_first_entry_model(),
         entry_price=0.0,
         stop_bps=50.0,
         use_network=bool(canary_network),
@@ -155,7 +179,10 @@ def build_payload(
             "synthetic_submit_canary",
             str(canary.get("overall_status") or "FAIL"),
             blocking=str(canary.get("overall_status") or "").upper() != "PASS",
-            summary=f"symbol={canary.get('symbol')} no_live_order_sent={canary.get('no_live_order_sent')}",
+            summary=(
+                f"symbol={canary.get('symbol')} entry_model={canary.get('entry_model')} "
+                f"no_live_order_sent={canary.get('no_live_order_sent')}"
+            ),
             payload=canary,
         )
     )
