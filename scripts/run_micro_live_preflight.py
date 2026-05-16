@@ -472,6 +472,111 @@ def _parse_direction_contract(value: Any) -> dict[str, set[str]]:
     return contract
 
 
+def _proxy_symbol_to_live_symbol(symbol: Any) -> str:
+    text = str(symbol or "").strip().upper()
+    if text.endswith("USDT"):
+        return f"{text[:-4]}USDC"
+    return text
+
+
+def _latest_micro_main_backtest_report(settings: Any) -> Path | None:
+    raw_dir = str(
+        getattr(
+            settings,
+            "auto_trading_replay_validation_bridge_backtest_dir",
+            "reports/validation/micro_main_usdt_proxy_backtests",
+        )
+        or "reports/validation/micro_main_usdt_proxy_backtests"
+    ).strip()
+    report_dir = _resolve_root_path(raw_dir)
+    try:
+        candidates = sorted(
+            path
+            for path in report_dir.glob("micro_main_usdt_proxy_backtest_*.json")
+            if "unseen" not in path.name and "top" not in path.name
+        )
+    except OSError:
+        return None
+    return candidates[-1] if candidates else None
+
+
+def _backtest_contract_symbols(payload: dict[str, Any]) -> set[str]:
+    raw_symbols = payload.get("proxy_symbols")
+    if not isinstance(raw_symbols, list) or not raw_symbols:
+        results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
+        raw_symbols = list(results.keys()) if isinstance(results, dict) else []
+    return {_proxy_symbol_to_live_symbol(symbol) for symbol in raw_symbols if str(symbol or "").strip()}
+
+
+def _micro_live_backtest_contract_alignment_check(
+    *,
+    settings: Any,
+    live_symbols: set[str],
+    live_families: set[str],
+    live_entry_models: set[str],
+    live_sessions: set[str],
+    direction_contract: dict[str, set[str]],
+) -> dict[str, Any]:
+    report_path = _latest_micro_main_backtest_report(settings)
+    if report_path is None:
+        return {
+            "name": "micro_live_backtest_contract_alignment",
+            "status": "FAIL",
+            "severity": "blocking",
+            "message": "no micro_main_usdt_proxy_backtest report found for current MICRO_LIVE contract alignment",
+        }
+    payload = _read_json_file(report_path)
+    expected_symbols = _backtest_contract_symbols(payload)
+    expected_families = {"session_impulse_retest"}
+    expected_entry_models = {"CONFIRM"}
+    expected_sessions = {"dead_session", "london", "new_york"}
+
+    missing_symbols = sorted(expected_symbols - live_symbols)
+    unexpected_symbols = sorted(live_symbols - expected_symbols)
+    missing_families = sorted(expected_families - live_families)
+    unexpected_families = sorted(live_families - expected_families)
+    missing_entry_models = sorted(expected_entry_models - live_entry_models)
+    unexpected_entry_models = sorted(live_entry_models - expected_entry_models)
+    missing_sessions = sorted(expected_sessions - live_sessions)
+    unexpected_sessions = sorted(live_sessions - expected_sessions)
+    missing_direction_symbols = sorted(
+        symbol
+        for symbol in expected_symbols
+        if not {"LONG", "SHORT"}.issubset(direction_contract.get(symbol, set()))
+    )
+
+    aligned = not any(
+        [
+            missing_symbols,
+            unexpected_symbols,
+            missing_families,
+            unexpected_families,
+            missing_entry_models,
+            unexpected_entry_models,
+            missing_sessions,
+            unexpected_sessions,
+            missing_direction_symbols,
+        ]
+    )
+    return {
+        "name": "micro_live_backtest_contract_alignment",
+        "status": _status(aligned),
+        "severity": "blocking",
+        "message": (
+            f"source={_display_path(report_path)}; expected_symbols={len(expected_symbols)}; "
+            f"missing_symbols={','.join(missing_symbols) if missing_symbols else 'none'}; "
+            f"unexpected_symbols={','.join(unexpected_symbols) if unexpected_symbols else 'none'}; "
+            f"missing_families={','.join(missing_families) if missing_families else 'none'}; "
+            f"unexpected_families={','.join(unexpected_families) if unexpected_families else 'none'}; "
+            f"missing_entry_models={','.join(missing_entry_models) if missing_entry_models else 'none'}; "
+            f"unexpected_entry_models={','.join(unexpected_entry_models) if unexpected_entry_models else 'none'}; "
+            f"missing_sessions={','.join(missing_sessions) if missing_sessions else 'none'}; "
+            f"unexpected_sessions={','.join(unexpected_sessions) if unexpected_sessions else 'none'}; "
+            f"missing_long_short_direction={','.join(missing_direction_symbols) if missing_direction_symbols else 'none'}"
+        ),
+    }
+
+
 def _resolve_root_path(raw_path: Any) -> Path:
     path = Path(str(raw_path or "")).expanduser()
     return path if path.is_absolute() else ROOT_DIR / path
@@ -783,6 +888,17 @@ def _micro_live_config_drift_checks(*, check_binance_rules: bool = False) -> lis
             "severity": "blocking",
             "message": f"allowed_entry_models={','.join(sorted(live_entry_models)) if live_entry_models else 'none'}",
         }
+    )
+    live_sessions = _csv_set(getattr(settings, "auto_trading_micro_live_allowed_sessions", ""), lower=True)
+    checks.append(
+        _micro_live_backtest_contract_alignment_check(
+            settings=settings,
+            live_symbols=live_symbols,
+            live_families=live_families,
+            live_entry_models=live_entry_models,
+            live_sessions=live_sessions,
+            direction_contract=direction_contract,
+        )
     )
 
     if live_mode and ws_symbols:

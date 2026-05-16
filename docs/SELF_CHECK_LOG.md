@@ -6546,3 +6546,49 @@
   - runtime_src py_compile pass
   - `git diff --check`
   - pass
+
+## 2026-05-16 Iteration #229
+### 개선: 백테스트 계약 대비 MICRO_LIVE 과차단 guard 추가
+- 발견:
+  - `run_micro_live_safety_drag_audit.py`는 현재 `.env` 계약이 기준 백테스트 4,399건을 0건 탈락시키는지 확인하지만, `run_micro_live_runtime_guard.py`의 일반 allowlist checks는 live symbols/families 간 내부 정합성만 봤다.
+  - 따라서 `.env`가 예전처럼 `BTC/ETH`, `LIMIT`, 세션 누락, direction contract 누락 상태로 돌아가도 일반 allowlist끼리만 맞으면 백테스트 계약 drift를 직접 설명하지 못할 수 있었다.
+- 수정:
+  - `scripts/run_micro_live_preflight.py`
+    - `micro_live_backtest_contract_alignment` check를 추가했다.
+    - 최신 `micro_main_usdt_proxy_backtest_*.json`의 proxy symbols를 USDC live symbols로 변환해 현재 MICRO_LIVE 계약과 비교한다.
+    - 비교 항목: live symbols, family=`session_impulse_retest`, entry model=`CONFIRM`, sessions=`dead_session/london/new_york`, 각 live symbol의 `LONG|SHORT` direction contract.
+    - 이 항목은 blocking check이며, mismatch가 있으면 runtime guard/preflight가 `FAIL`로 드러낸다.
+  - 문서:
+    - `MICRO_LIVE_CURRENT_STATE.md`와 `AUTO_TRADING_OPERATING_RUNBOOK.md`에 새 guard 해석을 추가했다.
+- 현재 확인:
+  - `run_micro_live_runtime_guard.py --days 30 --no-fail-exit --no-write-report`
+  - `micro_live_backtest_contract_alignment=PASS`
+  - source: `reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_20260515T175711Z.json`
+  - expected symbols `11`, missing/unexpected symbols `none`, missing/unexpected entry models `none`, missing sessions `none`, missing long/short direction `none`
+- 검증:
+  - `./.venv/bin/pytest tests/test_micro_live_preflight.py::test_micro_live_config_drift_checks_align_current_backtest_contract tests/test_micro_live_preflight.py::test_micro_live_config_drift_checks_fail_backtest_contract_drift tests/test_micro_live_preflight.py::test_micro_live_config_drift_checks_flag_missing_direction_contract_symbol tests/test_micro_live_runtime_guard.py -q`
+  - `4 passed`
+
+## 2026-05-16 Iteration #230
+### 수정: runtime watchdog 시작 구간 과민 재시작 방지
+- 발견:
+  - runtime source refresh 후 `loop` worker가 첫 `sync_universe`를 끝내기 전에는 heartbeat가 `phase=starting`으로 남는다.
+  - 기존 `watch_runtime_stack_tmp.sh`는 이 상태를 일반 `not_ready`로 세 번만 관찰하면 runtime stack을 다시 재시작했다.
+  - 첫 sync가 90초보다 길어지면 watchdog가 끝나기 전에 worker를 죽여, `loop`가 계속 `starting`에 갇히는 재시작 루프가 생길 수 있었다.
+- 수정:
+  - `scripts/watch_runtime_stack_tmp.sh`
+    - `worker_loop=heartbeat_starting`이면서 loop heartbeat 파일이 최근이면 `starting_grace`로 분리한다.
+    - 기본 grace는 `TRADING_RUNTIME_WATCHDOG_STARTING_GRACE_SECONDS=900`이다.
+    - `starting_grace` 동안에는 failure count를 올리지 않고 재시작하지 않는다.
+  - `scripts/restart_runtime_stack_tmp.sh`
+    - ready 대기 시간을 `TRADING_RUNTIME_READY_WAIT_SECONDS`로 설정 가능하게 하고 기본값을 `600`초로 늘렸다.
+- runtime 반영:
+  - `com.yumin.trading.runtime-stack` LaunchAgent를 잠시 내린 뒤 runtime source refresh/restart를 실행했다.
+  - 수정된 watchdog 스크립트로 LaunchAgent를 다시 bootstrap했다.
+  - 최종 `/health/ready`: `ready`
+  - runtime guard: `overall_status=PASS`, `operational_status=PASS`, `micro_live_backtest_contract_alignment=PASS`
+- 검증:
+  - `bash -n scripts/watch_runtime_stack_tmp.sh`
+  - `bash -n scripts/restart_runtime_stack_tmp.sh`
+  - `./.venv/bin/pytest tests/test_micro_live_preflight.py tests/test_micro_live_runtime_guard.py tests/test_micro_live_operational_guards.py::test_runtime_guard_main_writes_latest_aliases -q`
+  - `26 passed`

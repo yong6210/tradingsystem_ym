@@ -45,15 +45,19 @@ Current safety/grid result:
 
 The raw top diagnostic can match the baseline by disabling safety/unlimited exposure. That is not a live canary setting.
 
+Runtime guard must also show `micro_live_backtest_contract_alignment=PASS`. This check compares the current MICRO_LIVE allowlist, family, entry model, sessions, and long/short direction contract against the current SIR backtest source above. If this fails, the system has drifted away from the backtest contract even if the ordinary allowlist checks pass.
+
 ## Current No-Order Interpretation
 
-As of 2026-05-16 KST, runtime health and live route settings are aligned, but there have been no fresh `session_impulse_retest + CONFIRM` live candidates since the latest observed runtime restart at `2026-05-16 13:00:13 KST` (`2026-05-16T04:00:13Z`).
+As of 2026-05-16 17:06 KST, runtime health and live route settings are aligned, but there have been no fresh `session_impulse_retest + CONFIRM` live candidates since the latest observed runtime restart at `2026-05-16 16:37:47 KST` (`2026-05-16T07:37:47Z`).
 
-Latest runtime check after the status-shape cleanup:
+Latest runtime check after the backtest-contract guard and watchdog cleanup:
 
-- `entry_surface/latest_entry_alert_run.json`: `PASS`, `reason=no_live_order_candidates_context_only_route_mismatch`, `live_order_candidates=0`, `blocked_live_order_candidates=0`, `operator_action_summary.state=context_only_outside_live_route`
-- `live_candidate_promotion_readiness/latest.json`: `PASS`, `state=WAIT`, `reason=no_promotable_live_candidate`
-- `micro_live_ops_heartbeat/latest.json`: `WATCH`, hard failures `0`, warnings `2` (`sir_pre_restart_expected_orders_blocked`, `runtime_window_thin_but_lookback_flow_warning`)
+- `/health/ready`: `ready`
+- `run_micro_live_runtime_guard.py`: `PASS`, `micro_live_backtest_contract_alignment=PASS`, live intents `0`, submissions `0`
+- `check_runtime_stack.sh`: `WAIT/no_fresh_live_signal`, runtime 이후 expected/missed SIR trades `0/0`
+- `live_candidate_promotion_readiness`: `WAIT`, `reason=no_promotable_live_candidate`, live core symbols `11` all `NO_FRESH_LIVE_CANDIDATE`
+- auxiliary SIR signals exist on `SUIUSDC`, `AAVEUSDC`, `HBARUSDC`, but these are shadow-only and not part of the 11-symbol baseline contract
 
 Recent no-order reports must be read in two layers:
 

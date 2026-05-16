@@ -522,12 +522,12 @@ def main() -> int:
         md_path = report_dir / f"{stem}.md"
         latest_json = report_dir / f"latest_{args.search_name}_raw_profile_search.json"
         latest_md = report_dir / f"latest_{args.search_name}_raw_profile_search.md"
+        payload["report_path"] = str(json_path)
+        payload["latest_report_path"] = str(latest_json)
         atomic_write_text(json_path, json.dumps(payload, ensure_ascii=False, indent=2))
         atomic_write_text(md_path, _render_markdown(payload))
         atomic_write_text(latest_json, json.dumps(payload, ensure_ascii=False, indent=2))
         atomic_write_text(latest_md, _render_markdown(payload))
-        payload["report_path"] = str(json_path)
-        payload["latest_report_path"] = str(latest_json)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 

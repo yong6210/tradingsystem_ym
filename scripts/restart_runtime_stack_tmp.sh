@@ -24,6 +24,7 @@ API_PORT="${API_PORT:-8000}"
 LAUNCHD_API_LABEL="${LAUNCHD_API_LABEL:-com.yumin.trading.api}"
 READY_URL="http://$API_HOST:$API_PORT/health/ready"
 REFRESH_SRC="${TRADING_REFRESH_TMP_RUNTIME_SRC:-auto}"
+READY_WAIT_SECONDS="${TRADING_RUNTIME_READY_WAIT_SECONDS:-600}"
 DB_PATH="$DATA_DIR/trading.db"
 DATABASE_URL="sqlite:///$DB_PATH"
 
@@ -233,7 +234,7 @@ BASE_ENV=(env PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYDANTIC_DISABLE_PLUG
   -- "${BASE_ENV[@]}" "$PYTHON_BIN" "$WORKER_SCRIPT" --ws-stream --sync-universe --limit-symbols 30 --ws-intervals 1m,5m,15m >/dev/null
 
 last_ready_response=""
-for _ in $(seq 1 180); do
+for _ in $(seq 1 "$READY_WAIT_SECONDS"); do
   last_ready_response="$(curl -sS --max-time 5 "$READY_URL" 2>/dev/null || true)"
   if [[ "$last_ready_response" == *'"status":"ready"'* ]]; then
     printf '%s\n' "$last_ready_response"
