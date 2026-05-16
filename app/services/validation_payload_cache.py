@@ -13,7 +13,7 @@ from app.core.config import Settings, sqlite_database_path_from_url
 
 
 READ_ONLY_RECOMPUTE_CACHE_TTL_SECONDS = 120.0
-VALIDATION_PAYLOAD_CACHE_MAX_AGE_SECONDS = 900.0
+VALIDATION_PAYLOAD_CACHE_MAX_AGE_SECONDS = 21600.0
 READ_ONLY_RECOMPUTE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
@@ -72,7 +72,12 @@ class ValidationPayloadCacheService:
 
     def max_age_seconds(self) -> float:
         try:
-            return max(1.0, float(getattr(self.settings, "validation_payload_cache_max_age_seconds", 900.0)))
+            value = getattr(
+                self.settings,
+                "validation_payload_cache_max_age_seconds",
+                VALIDATION_PAYLOAD_CACHE_MAX_AGE_SECONDS,
+            )
+            return max(1.0, float(value))
         except (TypeError, ValueError):
             return VALIDATION_PAYLOAD_CACHE_MAX_AGE_SECONDS
 

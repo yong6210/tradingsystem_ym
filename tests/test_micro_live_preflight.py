@@ -780,6 +780,75 @@ def test_main_blocks_preflight_on_manual_review_approval_surface(monkeypatch, ca
     assert "approve=manual review first" in validation_check["message"]
 
 
+def test_main_allows_checklist_advisory_manual_review_when_validation_is_go(monkeypatch, capsys) -> None:
+    _patch_config_drift_pass(monkeypatch)
+    monkeypatch.setattr(
+        run_micro_live_preflight,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol="BTCUSDC",
+            universe="usdc_perp_top30",
+            days=7,
+            candidate_limit=10,
+            report_dir="reports/operations/micro_live_preflight",
+            no_write_report=True,
+        ),
+    )
+
+    checklist = _checklist_payload(approve_value="manual review first")
+    checklist["deployment_go_no_go"] = "MANUAL_REVIEW"
+    checklist["playbook_go_no_go"] = "MANUAL_REVIEW"
+    checklist["playbook_action"] = "proceed_with_configured_rollout"
+    checklist["overall_status"] = "WARN"
+    checklist["blocking_failures"] = 0
+    checklist["manual_actions"] = 0
+    checklist["warnings"] = 14
+    checklist["approval_strip_summary"].update(
+        {
+            "approve_reason": "GO: approval template is aligned with replay-backed downside.",
+            "align_value": "deployment_drift",
+            "align_reason": (
+                "validation=GO | checklist=MANUAL_REVIEW | validation_action=proceed_with_configured_rollout | "
+                "checklist_action=proceed_with_configured_rollout | checklist_status=WARN | "
+                "blocking_failures=0 | manual_actions=0 | warnings=14"
+            ),
+            "act_value": "proceed_with_configured_rollout",
+            "act_reason": "GO: approval template is aligned with replay-backed downside.",
+            "act_priority_level": "watch",
+        }
+    )
+
+    def _request_json(base_url: str, method: str, path: str, **kwargs):  # noqa: ARG001
+        if path == "/health/ready":
+            return _ready_payload()
+        if path == "/execution/operator-dashboard":
+            return _dashboard_payload()
+        if path == "/execution/safety-state":
+            return _safety_payload()
+        if path == "/execution/reconcile":
+            return _reconcile_payload()
+        if path == "/validation/report":
+            return _validation_payload()
+        if path == "/operations/checklist":
+            return checklist
+        if path == "/alerts/metrics":
+            return _alerts_payload()
+        if path == "/scanner/top":
+            return _empty_scanner_payload()
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(run_micro_live_preflight, "_request_json", _request_json)
+
+    assert run_micro_live_preflight.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["overall_status"] == "READY_FOR_MICRO_LIVE"
+    checklist_check = next(item for item in payload["checks"] if item["name"] == "checklist_language")
+    assert checklist_check["status"] == "PASS"
+    assert "approve=manual review first" in checklist_check["message"]
+
+
 def test_failed_root_cause_groups_non_manual_approval_surface_failures() -> None:
     details = run_micro_live_preflight._failed_root_cause_details(
         [

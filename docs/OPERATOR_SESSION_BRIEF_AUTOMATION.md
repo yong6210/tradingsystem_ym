@@ -13,9 +13,9 @@ The brief now also carries `top_action_followup_command`, so if `operator_action
 It now also carries `review_followup_ledger.last_status`, `last_action`, `recent_entry_count`, and `last_followup_command`, so the handoff shows whether the latest review packet actually resolved a runnable target or stalled at `NO_TARGET`.
 The markdown brief now uses the same `approve -> align -> act` wording again inside `Surface Alignment`, so `dashboard`, `validation`, and `checklist` detail lines do not fall back to raw `deployment_go_no_go / playbook_action` phrasing.
 The notifier detail lines now follow the same rule, so `dashboard`, `validation`, and `checklist` are summarized as per-surface `approve / align / act` lines instead of raw deployment and playbook dumps.
-Use the wrapper below so channel, brief mode, state file, and latest run artifact stay in one place.
+Use the wrapper below when you want a workspace-local manual run, so channel, brief mode, state file, and latest run artifact stay in one place.
 
-The wrapper prefers `/Users/yumin/Documents/trading/.venv/bin/python` and falls back to `python3` if the virtualenv binary is not present.
+The wrapper prefers `/Users/yumin/Documents/trading/.venv/bin/python` and falls back to `python3` if the virtualenv binary is not present. Installed `launchd` jobs do not use this wrapper; they run the durable runtime copy under `/Users/yumin/Library/Application Support/trading/runtime_src` with `/Users/yumin/Library/Application Support/trading/runtime_venv/bin/python`.
 The notifier uses a non-overlap lock and a generation timeout. If a previous brief is still running, the next tick writes `reason=operator_session_brief_already_running` and exits without sending. If snapshot generation times out or fails, the latest artifact records `reason=brief_generation_failed` and the notifier does not dispatch.
 
 ## Wrapper
@@ -67,6 +67,8 @@ bash /Users/yumin/Documents/trading/scripts/run_operator_session_brief_tick.sh
 
 ## Artifacts
 
+Workspace manual wrapper artifacts:
+
 - latest shift-start wrapper payload:
   - `/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/latest_operator_session_brief_shift_start.json`
 - latest shift-end wrapper payload:
@@ -81,6 +83,20 @@ bash /Users/yumin/Documents/trading/scripts/run_operator_session_brief_tick.sh
   - `/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/`
 - supporting divergence snapshot:
   - `/Users/yumin/Documents/trading/reports/operations/operator_surface_divergence/`
+
+Installed launchd runtime artifacts:
+
+- latest shift-start payload:
+  - `/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/operator_session_briefs/latest_operator_session_brief_shift_start.json`
+- latest shift-end payload:
+  - `/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/operator_session_briefs/latest_operator_session_brief_shift_end.json`
+- launchd stdout/stderr:
+  - `/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/operator_session_briefs/launchd.shift_start.out.log`
+  - `/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/operator_session_briefs/launchd.shift_start.err.log`
+  - `/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/operator_session_briefs/launchd.shift_end.out.log`
+  - `/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/operator_session_briefs/launchd.shift_end.err.log`
+
+If live send is not allowed, the latest payload can show `delivery.reason=live_send_not_allowed` and no dedupe state file may be written. That is not unhealthy by itself; automation health should treat the latest payload as the freshness source and require the dedupe state only after an actual delivery.
 
 ## Quick Checks
 
@@ -127,16 +143,20 @@ Inspect the dedupe state:
 cat /Users/yumin/Documents/trading/reports/operations/operator_session_briefs/last_alert_state_shift_start_system.json
 ```
 
-Check launchd automation health:
+Check launchd automation health against the installed runtime copy:
 
 ```bash
-./.venv/bin/python /Users/yumin/Documents/trading/scripts/check_operator_session_brief_automation.py --strict
+'/Users/yumin/Library/Application Support/trading/runtime_venv/bin/python' \
+  '/Users/yumin/Library/Application Support/trading/runtime_src/scripts/check_operator_session_brief_automation.py' \
+  --strict
 ```
 
 Check delivery channel preflight:
 
 ```bash
-./.venv/bin/python /Users/yumin/Documents/trading/scripts/check_operator_session_brief_delivery_preflight.py --strict
+'/Users/yumin/Library/Application Support/trading/runtime_venv/bin/python' \
+  '/Users/yumin/Library/Application Support/trading/runtime_src/scripts/check_operator_session_brief_delivery_preflight.py' \
+  --strict
 ```
 
 ## Cron Example
@@ -167,7 +187,14 @@ Repository plists:
 - `/Users/yumin/Documents/trading/launchd/com.yumin.trading.operator-brief-shift-start.plist`
 - `/Users/yumin/Documents/trading/launchd/com.yumin.trading.operator-brief-shift-end.plist`
 
-The plists call `notify_operator_session_brief.py` directly through the project virtualenv Python and only pin `OPERATOR_BRIEF_MODE`. Keep delivery secrets and delivery-mode toggles out of the plist and inject them through `launchctl setenv`.
+The plists call `notify_operator_session_brief.py --quiet` directly through the runtime virtualenv Python and only pin `OPERATOR_BRIEF_MODE`. Keep delivery secrets and delivery-mode toggles out of the plist and inject them through `launchctl setenv`.
+
+Expected plist execution contract:
+
+- python: `/Users/yumin/Library/Application Support/trading/runtime_venv/bin/python`
+- script: `/Users/yumin/Library/Application Support/trading/runtime_src/scripts/notify_operator_session_brief.py`
+- working directory: `/Users/yumin/Library/Application Support/trading/runtime_src`
+- standard output/error: `/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/operator_session_briefs/launchd.*.log`
 
 Set the shared channel in your user launchd environment:
 
@@ -229,9 +256,9 @@ launchctl bootout "gui/$(id -u)/com.yumin.trading.operator-brief-shift-end"
 ```
 
 Artifacts:
-- `/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/launchd.shift_start.out.log`
-- `/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/launchd.shift_start.err.log`
-- `/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/launchd.shift_end.out.log`
-- `/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/launchd.shift_end.err.log`
-- `/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/operator_session_brief_automation_health_*.md`
-- `/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/operator_session_brief_delivery_preflight_*.md`
+- `/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/operator_session_briefs/launchd.shift_start.out.log`
+- `/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/operator_session_briefs/launchd.shift_start.err.log`
+- `/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/operator_session_briefs/launchd.shift_end.out.log`
+- `/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/operator_session_briefs/launchd.shift_end.err.log`
+- `/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/operator_session_briefs/operator_session_brief_automation_health_*.md`
+- `/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/operator_session_briefs/operator_session_brief_delivery_preflight_*.md`

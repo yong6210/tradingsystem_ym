@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 import re
 import sys
 from datetime import UTC, datetime, timedelta
@@ -24,12 +25,14 @@ _DEFAULT_JOBS: dict[str, Any] = {
         "pattern": "reports/operations/micro_live_runtime_guard/*.md",
         "max_age_minutes": 35,
         "pass_statuses": {"PASS"},
+        "requires_current_runtime": True,
     },
     "no_order_watchdog": {
         "pattern": "reports/operations/micro_live_no_order_watchdog/*.md",
         "max_age_minutes": 75,
         "pass_statuses": {"OK", "PASS"},
         "watch_statuses": {"ALERT", "WATCH", "WARN"},
+        "requires_current_runtime": True,
     },
     "reconciliation_watchdog": {
         "pattern": "reports/operations/live_reconciliation_watchdog/*.md",
@@ -46,6 +49,14 @@ _DEFAULT_JOBS: dict[str, Any] = {
         "pattern": "reports/operations/micro_live_boot_check/*.md",
         "max_age_minutes": 35,
         "pass_statuses": {"PASS"},
+        "requires_current_runtime": True,
+    },
+    "live_candidate_promotion_readiness": {
+        "pattern": "reports/operations/live_candidate_promotion_readiness/*.md",
+        "max_age_minutes": 20,
+        "pass_statuses": {"PASS"},
+        "watch_statuses": {"WATCH"},
+        "requires_current_runtime": True,
     },
     "binance_rule_drift": {
         "pattern": "reports/operations/binance_rule_snapshots/latest.json",
@@ -64,12 +75,14 @@ _DEFAULT_JOBS: dict[str, Any] = {
         "max_age_minutes": 130,
         "pass_statuses": {"PASS"},
         "watch_statuses": {"WATCH"},
+        "requires_current_runtime": True,
     },
     "session_impulse_retest_runtime_audit": {
         "pattern": "reports/operations/session_impulse_retest_runtime_audit/*.md",
         "max_age_minutes": 75,
         "pass_statuses": {"PASS"},
         "watch_statuses": {"WATCH"},
+        "requires_current_runtime": True,
     },
     "entry_surface": {
         "pattern": "reports/operations/entry_surface/latest_entry_alert_run.json",
@@ -77,6 +90,7 @@ _DEFAULT_JOBS: dict[str, Any] = {
         "content_type": "entry_surface_run",
         "pass_statuses": {"PASS"},
         "watch_statuses": {"WATCH"},
+        "requires_current_runtime": True,
     },
     "failure_drill": {
         "pattern": "reports/operations/micro_live_failure_drill/*.md",
@@ -158,6 +172,7 @@ def _coerce_job_config(raw_config: Any) -> dict[str, Any]:
             "content_type": str(raw_config.get("content_type") or ""),
             "min_horizon_days": raw_config.get("min_horizon_days"),
             "stale_status": str(raw_config.get("stale_status") or "FAIL").upper(),
+            "requires_current_runtime": _safe_bool(raw_config.get("requires_current_runtime")),
             "pass_statuses": {str(item).upper() for item in set(raw_config.get("pass_statuses") or set())},
             "watch_statuses": {str(item).upper() for item in set(raw_config.get("watch_statuses") or set())},
         }
@@ -169,6 +184,7 @@ def _coerce_job_config(raw_config: Any) -> dict[str, Any]:
         "content_type": "",
         "min_horizon_days": None,
         "stale_status": "FAIL",
+        "requires_current_runtime": False,
         "pass_statuses": {"PASS", "OK"},
         "watch_statuses": set(),
     }
@@ -244,6 +260,34 @@ def _parse_utc_ts(value: Any) -> datetime | None:
     except ValueError:
         return None
     return parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _report_generated_at(payload: dict[str, Any], *, fallback_mtime: datetime) -> datetime:
+    candidates = [
+        payload.get("generated_at"),
+        dict(payload.get("evaluation") or {}).get("generated_at"),
+        dict(payload.get("readiness") or {}).get("evaluated_at"),
+    ]
+    current = dict(payload.get("current") or {})
+    if current:
+        candidates.append(current.get("generated_at"))
+    for value in candidates:
+        parsed = _parse_utc_ts(value)
+        if parsed is not None:
+            return parsed
+    return fallback_mtime.astimezone(UTC) if fallback_mtime.tzinfo is not None else fallback_mtime.replace(tzinfo=UTC)
+
+
+def _runtime_started_at_from_heartbeat() -> datetime | None:
+    heartbeat_dir = (
+        os.environ.get("RUNTIME_WORKER_HEARTBEAT_DIR")
+        or os.environ.get("TRADING_HEARTBEAT_DIR")
+        or str(getattr(get_settings(), "runtime_worker_heartbeat_dir", "") or "")
+        or str(Path.home() / "Library/Application Support/trading/heartbeats")
+    )
+    payload = _read_json(Path(heartbeat_dir).expanduser() / "ws.json")
+    details = dict(payload.get("details") or {}) if isinstance(payload, dict) else {}
+    return _parse_utc_ts(details.get("started_at") or payload.get("started_at"))
 
 
 def _macro_blackout_contract_status(*, payload: dict[str, Any], now: datetime, min_horizon_days: int) -> dict[str, Any]:
@@ -415,8 +459,28 @@ def _content_status_row(*, report_status: str, pass_statuses: set[str], watch_st
     return {"content_status": "FAIL", "content_reason": f"content_status_{report_status.lower() or 'unaccepted'}"}
 
 
+def _advisory_status_row(payload: dict[str, Any]) -> dict[str, str]:
+    evaluation = dict(payload.get("evaluation") or {})
+    if _safe_bool(evaluation.get("historical_advisory")):
+        return {
+            "advisory_status": "INFO",
+            "advisory_reason": str(evaluation.get("reason") or "historical_advisory"),
+            "advisory_detail": str(evaluation.get("next_action_text") or evaluation.get("message") or ""),
+        }
+    if _safe_bool(evaluation.get("lookback_advisory")):
+        lookback_status = str(evaluation.get("lookback_status") or "WATCH").lower()
+        lookback_reason = str(evaluation.get("lookback_reason") or "lookback_advisory")
+        return {
+            "advisory_status": "INFO",
+            "advisory_reason": f"lookback_{lookback_status}_{lookback_reason}",
+            "advisory_detail": str(evaluation.get("diagnosis") or lookback_reason),
+        }
+    return {"advisory_status": "", "advisory_reason": "", "advisory_detail": ""}
+
+
 def evaluate_ops_heartbeat(*, now: datetime | None = None, jobs: dict[str, Any] | None = None) -> dict[str, Any]:
     current = (now or datetime.now(UTC)).astimezone(UTC)
+    runtime_started_at = _runtime_started_at_from_heartbeat()
     rows: list[dict[str, Any]] = []
     for name, raw_config in (jobs or _DEFAULT_JOBS).items():
         config = _coerce_job_config(raw_config)
@@ -446,6 +510,7 @@ def evaluate_ops_heartbeat(*, now: datetime | None = None, jobs: dict[str, Any] 
         age_minutes = max(0.0, (current - mtime).total_seconds() / 60.0)
         stale = age_minutes > float(max_age_minutes)
         report_payload = _read_report_payload(latest)
+        report_generated_at = _report_generated_at(report_payload, fallback_mtime=mtime)
         status_payload: dict[str, Any] = {}
         if str(config.get("content_type") or "") == "macro_blackout_contract":
             min_horizon_raw = config.get("min_horizon_days")
@@ -467,10 +532,18 @@ def evaluate_ops_heartbeat(*, now: datetime | None = None, jobs: dict[str, Any] 
             pass_statuses=set(config.get("pass_statuses") or set()),
             watch_statuses=set(config.get("watch_statuses") or set()),
         )
+        advisory = _advisory_status_row(report_payload)
         stale_status = str(config.get("stale_status") or "FAIL").upper()
         if stale and stale_status not in {"PASS", "WATCH", "FAIL"}:
             stale_status = "FAIL"
         freshness_status = stale_status if stale else "PASS"
+        pre_runtime_restart = (
+            _safe_bool(config.get("requires_current_runtime"))
+            and runtime_started_at is not None
+            and report_generated_at < runtime_started_at - timedelta(seconds=5)
+        )
+        if pre_runtime_restart:
+            freshness_status = "WATCH"
         row_status = "FAIL" if freshness_status == "FAIL" or content["content_status"] == "FAIL" else content["content_status"]
         if freshness_status == "WATCH" and row_status == "PASS":
             row_status = "WATCH"
@@ -486,6 +559,11 @@ def evaluate_ops_heartbeat(*, now: datetime | None = None, jobs: dict[str, Any] 
                 "configured_path": _display_path(configured_path) if configured_path is not None else "",
                 "latest_path": _display_path(latest),
                 "latest_mtime": mtime.isoformat().replace("+00:00", "Z"),
+                "report_generated_at": report_generated_at.isoformat().replace("+00:00", "Z"),
+                "runtime_started_at": runtime_started_at.isoformat().replace("+00:00", "Z")
+                if runtime_started_at is not None
+                else "",
+                "requires_current_runtime": _safe_bool(config.get("requires_current_runtime")),
                 "age_minutes": round(age_minutes, 2),
                 "max_age_minutes": max_age_minutes,
                 "freshness_status": freshness_status,
@@ -499,20 +577,30 @@ def evaluate_ops_heartbeat(*, now: datetime | None = None, jobs: dict[str, Any] 
                 "upcoming_windows": status_payload.get("upcoming_windows"),
                 "invalid_windows": status_payload.get("invalid_windows"),
                 **content,
+                **advisory,
             }
         )
+        if pre_runtime_restart:
+            rows[-1]["reason"] = "report_before_current_runtime_start"
+            rows[-1]["status_detail"] = (
+                f"report_generated_at={report_generated_at.isoformat().replace('+00:00', 'Z')} "
+                f"runtime_started_at={runtime_started_at.isoformat().replace('+00:00', 'Z')}"
+            )
     hard_failures = [row for row in rows if row["status"] == "FAIL"]
     warnings = [row for row in rows if row["status"] == "WATCH"]
+    advisories = [row for row in rows if row.get("advisory_status")]
     issues = hard_failures + warnings
     status = "FAIL" if hard_failures else "WATCH" if warnings else "PASS"
     return {
         "status": status,
         "issue_count": len(issues),
+        "advisory_count": len(advisories),
         "failure_count": len(hard_failures),
         "hard_failure_count": len(hard_failures),
         "warning_count": len(warnings),
         "jobs": rows,
         "issues": issues,
+        "advisories": advisories,
         "failures": hard_failures,
         "hard_failures": hard_failures,
         "warnings": warnings,
@@ -549,6 +637,8 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
             detail = f" | detail={row.get('status_detail')}"
         if row.get("horizon_days") is not None:
             detail += f" | horizon_days={row.get('horizon_days')}"
+        if row.get("advisory_reason"):
+            detail += f" | advisory={row.get('advisory_reason')}"
         lines.append(
             f"- {row.get('name')}: {row.get('status')} | {row.get('reason')} | report_status={row.get('report_status') or 'n/a'}{detail} | source={row.get('path_source') or 'n/a'} | latest={row.get('latest_path') or 'none'} | age={row.get('age_minutes')}"
         )
@@ -594,19 +684,40 @@ def _issue_summary(rows: list[dict[str, Any]], *, limit: int = 3) -> str:
     return "; ".join(_issue_line(dict(row)) for row in clipped) + suffix
 
 
+def _advisory_line(row: dict[str, Any]) -> str:
+    name = str(row.get("name") or "unknown")
+    reason = str(row.get("advisory_reason") or "advisory")
+    detail = str(row.get("advisory_detail") or "").strip()
+    if len(detail) > 120:
+        detail = f"{detail[:117]}..."
+    return f"{name}={reason}" + (f" {detail}" if detail else "")
+
+
+def _advisory_summary(rows: list[dict[str, Any]], *, limit: int = 3) -> str:
+    if not rows:
+        return "없음"
+    clipped = rows[: max(1, int(limit))]
+    suffix = f" 외 {len(rows) - len(clipped)}개" if len(rows) > len(clipped) else ""
+    return "; ".join(_advisory_line(dict(row)) for row in clipped) + suffix
+
+
 def _message(payload: dict[str, Any]) -> str:
     evaluation = dict(payload.get("evaluation") or {})
     hard_failures = list(evaluation.get("hard_failures") or [])
     warnings = list(evaluation.get("warnings") or [])
+    advisories = list(evaluation.get("advisories") or [])
     next_action = "다음: FAIL은 즉시 조치, WATCH는 해당 리포트 원인 확인"
     if warnings and not hard_failures:
         next_action = "다음: WATCH는 자동 관찰; 반복/악화 시 해당 리포트 확인"
+    if advisories and not warnings and not hard_failures:
+        next_action = "다음: PASS 유지; 참고 항목은 자동 기록"
     return "\n".join(
         [
             "MICRO_LIVE 운영 점검",
-            f"상태: {payload.get('overall_status')} / fail={evaluation.get('hard_failure_count')} watch={evaluation.get('warning_count')}",
+            f"상태: {payload.get('overall_status')} / fail={evaluation.get('hard_failure_count')} watch={evaluation.get('warning_count')} advisory={evaluation.get('advisory_count', 0)}",
             f"긴급: {_issue_summary([dict(item) for item in hard_failures], limit=3)}",
             f"주의: {_issue_summary([dict(item) for item in warnings], limit=3)}",
+            f"참고: {_advisory_summary([dict(item) for item in advisories], limit=3)}",
             next_action,
         ]
     )

@@ -513,6 +513,7 @@ class LiveCandidatePromotionReadinessService:
         evidence_freshness_counts: Counter[str] = Counter()
         latest_evidence_at = ""
         symbols_by_state: dict[str, list[str]] = defaultdict(list)
+        symbols_by_blocker: dict[str, list[str]] = defaultdict(list)
         for candidate in candidates.values():
             for field in ("latest_audit_at", "latest_intent_at", "latest_submission_at"):
                 self._remember_latest(candidate, "latest_evidence_at", candidate.get(field))
@@ -537,6 +538,8 @@ class LiveCandidatePromotionReadinessService:
             symbol = str(candidate["symbol"])
             if symbol not in symbols_by_state[state]:
                 symbols_by_state[state].append(symbol)
+            if primary_blocker and symbol not in symbols_by_blocker[primary_blocker]:
+                symbols_by_blocker[primary_blocker].append(symbol)
             rows.append(
                 {
                     "symbol": symbol,
@@ -599,6 +602,7 @@ class LiveCandidatePromotionReadinessService:
             "top_audit_statuses": dict(audit_status_evidence_counts.most_common(8)),
             "top_actions": dict(action_counts.most_common(5)),
             "symbols_by_state": {key: sorted(value) for key, value in sorted(symbols_by_state.items())},
+            "symbols_by_blocker": {key: sorted(value) for key, value in sorted(symbols_by_blocker.items())},
             "candidates": rows[: max(1, int(limit))],
         }
 

@@ -6630,3 +6630,263 @@
   - `10 passed`
   - `git diff --check`
   - pass
+
+## 2026-05-16 Iteration #232
+### 수정: preflight가 advisory-only checklist warning을 hard NOT_READY로 오해하지 않게 분리
+- 발견:
+  - `validation/report` refresh 후 validation은 `GO`/`approval usable`이었다.
+  - 하지만 `operations/checklist`는 `blocking_failures=0`, `manual_actions=0`, `warnings=14`인 상태에서도 전체 `deployment_go_no_go=MANUAL_REVIEW`, `approval_strip_summary.approve_value=manual review first`를 표시했다.
+  - 기존 `run_micro_live_preflight.py`는 checklist의 `manual review first`를 무조건 hard failure로 세어 `overall_status=NOT_READY`를 냈다.
+  - 이 상태는 실제 현재 주문 경로 blocker라기보다 thin sample/execution quality 같은 advisory-only 운영 경고가 섞인 상태라, 사용자가 “시스템은 PASS인데 preflight는 NOT_READY”라는 모순으로 읽을 수 있었다.
+- 수정:
+  - `scripts/run_micro_live_preflight.py`
+    - validation surface는 기존처럼 `approval usable`만 통과한다.
+    - checklist surface는 validation이 `GO` 성격이고 `act=proceed_with_configured_rollout`, `blocking_failures=0`, `manual_actions=0`이면 advisory warning만 남은 상태로 보고 preflight hard failure로 세지 않는다.
+    - validation 자체가 manual review/no-go이거나 checklist에 blocking/manual item이 있으면 계속 `NOT_READY`다.
+  - 문서:
+    - `MICRO_LIVE_CURRENT_STATE.md`와 `AUTO_TRADING_OPERATING_RUNBOOK.md`에 advisory-only checklist warning 해석을 추가했다.
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - 최종 `/health/ready`: `ready`
+  - runtime source `scripts/run_micro_live_preflight.py` sync 확인
+  - runtime preflight:
+    - `overall_status=READY_FOR_MICRO_LIVE`
+    - validation check `PASS`, `approve=approval usable`
+    - checklist check `PASS`, `approve=manual review first`, `align=deployment_drift`, `act=proceed_with_configured_rollout`
+    - contract check `micro_live_backtest_contract_alignment=PASS`
+  - runtime guard:
+    - `overall_status=PASS`, `operational_status=PASS`, live intents/submissions `0/0`
+  - no-order watchdog:
+    - current runtime expected orders `0`
+    - lookback expected orders `1` and this is pre-restart `session_impulse_retest_rollout_not_ready`
+- 검증:
+  - `./.venv/bin/pytest -q tests/test_micro_live_preflight.py::test_main_allows_checklist_advisory_manual_review_when_validation_is_go tests/test_micro_live_preflight.py::test_main_blocks_preflight_on_manual_review_approval_surface tests/test_micro_live_preflight.py::test_main_emits_approval_surfaces_and_ready_status`
+  - `3 passed`
+  - `./.venv/bin/python -m py_compile scripts/run_micro_live_preflight.py`
+  - pass
+  - `./.venv/bin/pytest -q tests/test_micro_live_preflight.py tests/test_micro_live_runtime_guard.py tests/test_micro_live_operational_guards.py::test_runtime_guard_main_writes_latest_aliases`
+  - `27 passed`
+  - `git diff --check`
+  - pass
+
+## 2026-05-16 Iteration #233
+### 수정: 과거 missed opportunity 경고가 현재 주문 차단 알림처럼 반복되지 않게 분리
+- 발견:
+  - 현재 runtime 이후에는 fresh SIR 후보, live intent, submit blocker가 모두 0인데도 `no_order_watchdog`가 재시작 전 missed opportunity를 `WATCH/WARN`으로 계속 올렸다.
+  - `live_replay_parity`도 현재 runtime window가 evidence floor 미만이라 판단할 수 없는 상태인데, lookback warning 때문에 headline을 `WATCH`로 바꿔 ops heartbeat가 계속 “확인 필요”로 읽을 수 있었다.
+  - 둘 다 주문 submit을 막는 결함은 아니지만, 사용자가 “현재도 뭔가 막혀 있다”로 오해할 수 있는 관측성 결함이다.
+- 수정:
+  - `scripts/run_micro_live_no_order_watchdog.py`
+    - 현재 runtime 기대 주문이 0이고 missed opportunity가 모두 pre-restart 이력이면 `sir_pre_restart_expected_orders_advisory`로 남긴다.
+    - 상태는 `OK/INFO`, `alert=false`, `historical_advisory=true`로 두어 no-order 직접 알림과 ops heartbeat 반복 WATCH를 막는다.
+    - 현재 runtime의 active expected order 누락이나 order-blocking audit가 있으면 기존처럼 active WARN/ALERT가 우선한다.
+  - `scripts/run_live_replay_parity_audit.py`
+    - runtime window가 evidence floor 미만이면 current headline `PASS`를 유지한다.
+    - lookback `WATCH/ALERT`는 `lookback_advisory=true`, `lookback_status`, `lookback_reason`, `lookback_top_block_reasons`로만 노출한다.
+  - 문서:
+    - `MICRO_LIVE_CURRENT_STATE.md`와 `AUTO_TRADING_OPERATING_RUNBOOK.md`에 historical advisory와 current active blocker 구분을 반영했다.
+- 기대 효과:
+  - 과거에 주문이 막혔던 기록은 사라지지 않는다.
+  - 하지만 현재 새 후보가 없고 차단도 없는 상태를 반복 운영 알림으로 띄우지 않는다.
+  - 다음 fresh 후보에서 `submit_ready > 0`인데 `submission=0`이 나오거나, runtime expected order가 있는데 intent가 없으면 다시 active issue로 올라온다.
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - 최종 `/health/ready`: `ready`
+  - runtime source `scripts/run_micro_live_no_order_watchdog.py`, `scripts/run_live_replay_parity_audit.py` workspace와 일치 확인
+  - no-order latest:
+    - `status=OK`, `severity=INFO`, `alert=false`
+    - `reason=sir_pre_restart_expected_orders_advisory`
+    - current runtime expected `0`, lookback expected `1`, pre-restart `1`
+  - live replay parity latest:
+    - `overall_status=PASS`
+    - `reason=portfolio_runtime_window_below_live_replay_parity_evidence_floor`
+    - `lookback_advisory=true`, `lookback_status=WATCH`, `operator_action_required=false`
+  - ops heartbeat latest:
+    - `overall_status=PASS`, `failures=0`, `warnings=0`
+  - 추가 보정:
+    - `scripts/run_micro_live_ops_heartbeat.py`가 `historical_advisory=true`와 `lookback_advisory=true`를 `advisory_count`/`advisories`로 보존한다.
+    - 이 항목들은 알림성 `WATCH`가 아니므로 top-level은 `PASS`지만, heartbeat report와 message의 `참고` 라인에 남는다.
+    - 목적은 “현재 조치할 장애 없음”을 유지하면서도 7일 lookback의 missed/blocked flow를 운영 기록에서 숨기지 않는 것이다.
+  - validation cache:
+    - restart 직후 read-only cache가 없어 preflight가 한 번 `validation unavailable`로 떨어졌고, `validation/report` refresh 완료 후 cache가 생성됐다.
+    - 이후 preflight는 `READY_FOR_MICRO_LIVE`; validation/checklist/candidate checks 모두 `PASS`.
+    - 추가 확인 결과 validation cache 자동 refresh launchd job은 없었고, 기본 TTL 15분은 preflight를 주기적으로 다시 `validation unavailable`로 흔들 수 있었다.
+    - `app/core/config.py`와 `app/services/validation_payload_cache.py`의 기본 TTL을 6시간(`21600s`)으로 조정했다. 이는 주문 승인 완화가 아니라 read-only 운영 preflight 캐시 안정화다.
+- 검증:
+  - `./.venv/bin/python -m pytest -q tests/test_micro_live_operational_guards.py::test_ops_heartbeat_keeps_historical_and_lookback_advisories_non_paging tests/test_micro_live_operational_guards.py::test_ops_heartbeat_message_watch_only_is_monitoring_action`
+  - `2 passed`
+  - `./.venv/bin/python -m pytest -q tests/test_micro_live_preflight.py tests/test_micro_live_operational_guards.py tests/test_validation_payload_cache.py`
+  - `123 passed`
+  - `git diff --check`
+  - pass
+
+## 2026-05-16 Iteration #234
+### 운영 개선: 주문 truth 리포트의 stale latest 방지
+- 발견:
+  - `live_candidate_promotion_readiness`는 주문 가능 여부의 truth source인데, 독립 launchd 작업으로 주기 갱신되지 않았다.
+  - `check_runtime_stack.sh`와 API는 fresh 계산을 보여주지만, `reports/operations/live_candidate_promotion_readiness/latest.json` 파일만 보면 재시작 전 timestamp가 남아 오해할 수 있었다.
+  - workspace에서 스크립트를 직접 실행하면 workspace report가 갱신되고, 실제 운영은 `runtime_src` report를 읽는다. 따라서 최종 운영 판정은 runtime_src 기준으로 확인해야 한다.
+- 수정:
+  - `scripts/install_micro_live_ops_launchd.py`
+    - `live_candidate_promotion_readiness` launchd job을 추가했다.
+    - 5분 주기로 `run_live_candidate_promotion_readiness.py --hours 24 --limit 12 --since-ws-start --quiet`를 실행한다.
+  - `scripts/run_micro_live_ops_heartbeat.py`
+    - `reports/operations/live_candidate_promotion_readiness/*.md`를 freshness/content 감시 대상에 추가했다.
+    - `PASS`는 통과, `WATCH`는 watch, stale이면 heartbeat issue로 잡는다.
+  - `scripts/run_live_candidate_promotion_readiness.py`
+    - launchd 로그가 불필요하게 커지지 않도록 `--quiet`를 추가했다.
+  - 문서:
+    - `MICRO_LIVE_CURRENT_STATE.md`와 `AUTO_TRADING_OPERATING_RUNBOOK.md`에 주문 truth 리포트 freshness 해석을 추가했다.
+- 현재 runtime 확인:
+  - runtime source 동기화 후 runtime stack을 재시작했다.
+  - launchd 운영 감시 job을 재설치/로드했다: `job_count=13`, 신규 `com.trading.micro-live.live-candidate-promotion-readiness` 포함, load returncode `0`.
+  - 신규 LaunchAgent 확인: `runs=1`, `last exit code=0`, `run interval=300 seconds`, stdout/stderr log `0 bytes`.
+  - runtime `live_candidate_promotion_readiness`: `PASS/WAIT`, `reason=no_promotable_live_candidate`, `readiness_scope=runtime_since_ws_start`, runtime started `2026-05-16T09:23:20Z`
+  - runtime no-order watchdog: `OK/INFO`, `sir_pre_restart_expected_orders_advisory`, current expected `0`, 7-day lookback expected `12`, all pre-restart
+  - runtime parity: `PASS`, current runtime window evidence floor 미만, lookback advisory only
+  - runtime entry surface dry-run: `notified=false`, `LIVE_ORDER_CANDIDATE=0`, `operator_action.state=context_only_outside_live_route`, top reason `strategy_family_not_live_route`
+  - runtime preflight: `READY_FOR_MICRO_LIVE`
+  - runtime ops heartbeat: `PASS`, issue `0`, failure `0`, warning `0`, advisory `2`; `live_candidate_promotion_readiness` job status `PASS`, age `<1m`.
+- 검증:
+  - `./.venv/bin/python -m pytest -q tests/test_micro_live_operational_guards.py::test_launchd_generator_includes_remaining_operational_guards tests/test_micro_live_operational_guards.py::test_ops_heartbeat_defaults_include_live_candidate_promotion_readiness tests/test_micro_live_operational_guards.py::test_ops_heartbeat_defaults_include_entry_surface tests/test_live_candidate_promotion_readiness.py`
+  - `17 passed`
+  - `./.venv/bin/python -m py_compile scripts/run_live_candidate_promotion_readiness.py scripts/install_micro_live_ops_launchd.py scripts/run_micro_live_ops_heartbeat.py`
+  - pass
+  - `./.venv/bin/python -m pytest -q tests/test_micro_live_preflight.py tests/test_micro_live_operational_guards.py tests/test_validation_payload_cache.py tests/test_live_candidate_promotion_readiness.py`
+  - `140 passed`
+  - `git diff --check`
+  - pass
+
+## 2026-05-16 Iteration #235
+### 수정: operator brief가 runtime truth와 다른 소스를 보고 확인 필요처럼 보이던 경로 정리
+- 발견:
+  - `com.yumin.trading.operator-brief-shift-start/end` LaunchAgent가 workspace `.venv`와 workspace script/report를 기준으로 남아 있으면, 실제 runtime 상태와 다른 operator brief가 계속 생성될 수 있었다.
+  - runtime brief 자체도 validation `GO` + checklist `manual review first` + `act=proceed_with_configured_rollout` + `blocking_failures=0` + `manual_actions=0` 조합을 hard divergence처럼 읽어 `DEPLOYMENT_REVIEW_REQUIRED`로 과하게 분류할 수 있었다.
+  - `check_operator_session_brief_automation.py`도 workspace에서 실행하면 정상 runtime launchd working directory를 오히려 unexpected directory로 볼 수 있었고, live send guard 때문에 dedupe state가 없을 때도 strict health를 실패로 볼 수 있었다.
+- 수정:
+  - `scripts/collect_operator_surface_divergence_snapshot.py`
+    - validation/checklist/dashboard의 `approve -> align -> act` 값을 normalized alignment로 비교한다.
+    - advisory-only checklist manual review는 hard divergence가 아니라 `approval_usable`로 정규화한다.
+    - `continue_candidate_review_under_portfolio_caps`와 `proceed_with_configured_rollout`은 같은 configured rollout 계열 act로 정규화한다.
+  - `launchd/com.yumin.trading.operator-brief-shift-start.plist`
+  - `launchd/com.yumin.trading.operator-brief-shift-end.plist`
+    - `runtime_venv/bin/python`, `runtime_src/scripts/notify_operator_session_brief.py --quiet`, `WorkingDirectory=runtime_src`, runtime log path로 고정했다.
+  - `scripts/notify_operator_session_brief.py`
+    - `--quiet`를 추가해 launchd stdout 로그가 message 본문으로 커지지 않게 했다.
+  - `scripts/check_operator_session_brief_automation.py`
+    - workspace root와 runtime root를 모두 허용 working directory로 본다.
+    - `OPERATOR_BRIEF_CHANNEL`이 unset이면 notifier 기본값과 같이 `system`으로 해석한다.
+    - report dir 기본값은 설치된 agent working directory의 `reports/operations/operator_session_briefs`로 추론한다.
+    - latest payload가 `delivery.reason=live_send_not_allowed`처럼 실제 전송이 없었던 경우 dedupe state 파일 부재를 unhealthy로 보지 않는다.
+  - 문서:
+    - runbook과 operator brief automation 문서에 runtime launchd authority, `ALIGNED_MONITOR` 해석, advisory-only manual review 의미, runtime artifact 경로를 반영했다.
+- 현재 runtime 확인:
+  - operator brief LaunchAgents를 runtime plist로 재설치/로드했다.
+  - `launchctl print` 기준 start/end 모두 runtime python/script/working directory를 사용하고, `runs>=1`, `last exit code=0`이다.
+  - runtime latest shift-start/shift-end payload는 `current.brief_status=ALIGNED_MONITOR`, `deployment_alignment=ALIGNED`, `playbook_alignment=ALIGNED`, validation `GO`, checklist `manual review first`다.
+  - 이 상태는 주문 차단이 아니라 "현재 live-order candidate 없음 + operator monitoring"으로 읽는다.
+- 검증:
+  - `./.venv/bin/python -m pytest -q tests/test_operator_surface_divergence_snapshot.py tests/test_generate_operator_session_brief.py tests/test_notify_operator_session_brief.py`
+  - `11 passed`
+  - `./.venv/bin/python -m pytest -q tests/test_operator_surface_divergence_snapshot.py tests/test_generate_operator_session_brief.py tests/test_notify_operator_session_brief.py tests/test_script_entrypoints.py`
+  - `28 passed`
+  - `./.venv/bin/python -m py_compile scripts/collect_operator_surface_divergence_snapshot.py scripts/generate_operator_session_brief.py scripts/notify_operator_session_brief.py`
+  - pass
+  - `plutil -lint launchd/com.yumin.trading.operator-brief-shift-start.plist launchd/com.yumin.trading.operator-brief-shift-end.plist`
+  - pass
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: `ready`
+  - runtime `check_operator_session_brief_automation.py --strict`
+    - `healthy=true`, `issues=[]`
+    - start/end agents use `/Users/yumin/Library/Application Support/trading/runtime_src`, `last_exit_code=0`, `runs=2`
+    - latest artifacts healthy; dedupe state files optional because `delivery.reason=live_send_not_allowed`
+  - runtime preflight:
+    - `overall_status=READY_FOR_MICRO_LIVE`
+    - `new_entries_allowed=PASS`
+    - `validation_language=PASS approve=approval usable`
+    - `checklist_language=PASS approve=manual review first act=proceed_with_configured_rollout`
+    - `candidate_available=PASS`, no accepted scanner candidate is live-routable right now
+  - runtime readiness:
+    - `state=WAIT`, `status=PASS`, `reason=no_promotable_live_candidate`
+    - live routable symbols `11` all `NO_FRESH_LIVE_CANDIDATE`
+    - auxiliary shadow-only `AAVEUSDC/HBARUSDC/SUIUSDC`
+  - runtime no-order watchdog:
+    - `status=OK`, `severity=INFO`, `alert=false`, `reason=sir_pre_restart_expected_orders_advisory`
+    - current runtime expected orders `0`, live intents `0`, submit_ready `0`, submissions `0`
+    - 7d lookback expected `12`, all pre-restart historical advisory
+  - runtime ops heartbeat:
+    - `overall_status=PASS`, issue `0`, failure `0`, warning `0`, advisory `2`
+  - `./.venv/bin/python -m pytest -q tests/test_micro_live_preflight.py tests/test_micro_live_operational_guards.py tests/test_validation_payload_cache.py tests/test_live_candidate_promotion_readiness.py tests/test_operator_session_brief_automation_health.py tests/test_operator_surface_divergence_snapshot.py tests/test_generate_operator_session_brief.py tests/test_notify_operator_session_brief.py tests/test_script_entrypoints.py`
+  - `174 passed`
+  - runtime source `check_operator_session_brief_automation.py`, `collect_operator_surface_divergence_snapshot.py`, `notify_operator_session_brief.py` workspace와 일치 확인
+  - runtime py_compile pass
+  - `git diff --check`
+  - pass
+
+## 2026-05-16 Iteration #236
+### 수정: readiness scope 집계 truncation과 재시작 전 latest 리포트 오인 방지
+- 발견:
+  - `live_candidate_promotion_readiness`는 전체 후보 `14`개 중 `--limit 12`개만 `candidates`에 저장한다.
+  - 그런데 runtime live/auxiliary blocker 집계가 전체 후보가 아니라 잘린 `candidates` 목록을 기준으로 다시 계산되어, live 심볼 `11`개가 모두 `NO_FRESH_LIVE_CANDIDATE`인데도 `top_live_blockers.no_fresh_live_candidate=9`처럼 보일 수 있었다.
+  - 또한 runtime stack 재시작 직후 일부 `latest.json/latest.md`는 파일 age 기준으로 fresh였지만 현재 WS worker `started_at`보다 전에 생성된 리포트였다. 이 경우 ops heartbeat가 재시작 전 truth를 현재 runtime truth처럼 PASS 처리할 수 있었다.
+- 수정:
+  - `app/services/live_candidate_promotion_readiness.py`
+    - 전체 후보 기준 `symbols_by_blocker`를 payload에 추가했다.
+  - `app/services/live_candidate_promotion_readiness_runtime.py`
+    - live/auxiliary blocker scope count를 제한된 `candidates` rows가 아니라 `symbols_by_blocker` 기준으로 계산한다.
+    - 표시 후보가 `12`개로 잘려도 scope count와 blocker count는 전체 `14`개 기준으로 남는다.
+  - `scripts/run_micro_live_ops_heartbeat.py`
+    - runtime-scoped job에 `requires_current_runtime=True`를 추가했다.
+    - 현재 WS heartbeat의 `details.started_at`을 읽어 `runtime_guard`, `no_order_watchdog`, `boot_check`, `live_candidate_promotion_readiness`, `live_replay_parity`, `session_impulse_retest_runtime_audit`, `entry_surface` 리포트가 current runtime 이후 생성됐는지 확인한다.
+    - 리포트가 current runtime 시작 전이면 파일 age가 fresh여도 `WATCH/report_before_current_runtime_start`로 올린다.
+- runtime 확인:
+  - 수정 반영 후 runtime stack을 재시작했다.
+  - 재시작 직후 새 heartbeat는 의도대로 pre-restart report 7개를 `WATCH/report_before_current_runtime_start`로 잡았다.
+  - current runtime 기준 리포트들을 다시 생성한 뒤 ops heartbeat는 `PASS`, issue `0`, failure `0`, warning `0`, advisory `2`로 돌아왔다.
+  - runtime readiness:
+    - `state=WAIT`, `status=PASS`, `reason=no_promotable_live_candidate`
+    - `candidate_scope_counts={'total': 14, 'live_routable': 11, 'auxiliary': 3}`
+    - `live_state_counts={'NO_FRESH_LIVE_CANDIDATE': 11}`
+    - `top_live_blockers={'no_fresh_live_candidate': 11}`
+    - displayed candidates `12`, candidate_count `14`
+  - runtime route:
+    - `/health/ready=ready`
+    - runtime expected SIR trades `0`, miss `0`
+    - live intents `0`, submissions `0`
+    - live route diagnosis `WAIT/no_fresh_live_signal`
+- 검증:
+  - `./.venv/bin/python -m pytest -q tests/test_live_candidate_promotion_readiness.py tests/test_micro_live_operational_guards.py::test_ops_heartbeat_defaults_include_live_candidate_promotion_readiness tests/test_execution_operator_dashboard.py`
+  - `27 passed`
+  - `./.venv/bin/python -m pytest -q tests/test_micro_live_operational_guards.py::test_ops_heartbeat_warns_when_runtime_scoped_report_predates_current_ws_start tests/test_micro_live_operational_guards.py::test_ops_heartbeat_allows_runtime_scoped_report_after_current_ws_start tests/test_micro_live_operational_guards.py::test_ops_heartbeat_defaults_include_live_replay_parity tests/test_micro_live_operational_guards.py::test_ops_heartbeat_defaults_include_entry_surface tests/test_micro_live_operational_guards.py::test_ops_heartbeat_defaults_include_live_candidate_promotion_readiness tests/test_live_candidate_promotion_readiness.py`
+  - `20 passed`
+  - py_compile pass for `run_micro_live_ops_heartbeat.py`, `live_candidate_promotion_readiness.py`, `live_candidate_promotion_readiness_runtime.py`
+
+## 2026-05-16 Iteration #237
+### 추가 감사: runtime freshness 판정의 생성시각 오인과 live replay stdout 로그 폭증 방지
+- 발견:
+  - Iteration #236의 ops heartbeat freshness 검사는 current WS `started_at` 이후 생성된 리포트인지 보지만, helper가 `runtime_started_at`을 report generation time 후보로 같이 쓰고 있었다.
+  - `runtime_started_at`은 리포트 생성 시각이 아니라 runtime window anchor라서, `generated_at`이 없는 리포트가 있으면 실제보다 최신으로 오해할 수 있었다.
+  - 또한 `live_replay_parity` launchd는 hourly job인데 JSON 전체를 stdout에 출력해 runtime launchd log가 1.8MB까지 커졌다. 주문 차단은 아니지만 운영 로그 확인과 장기 유지에 불필요한 부담이다.
+- 수정:
+  - `scripts/run_micro_live_ops_heartbeat.py`
+    - report generation time 후보에서 `runtime_started_at`을 제거했다.
+    - 생성시각이 없으면 file mtime fallback만 쓴다.
+    - WS heartbeat 경로는 hard-coded home path보다 `RUNTIME_WORKER_HEARTBEAT_DIR`, `TRADING_HEARTBEAT_DIR`, settings `runtime_worker_heartbeat_dir`를 우선한다.
+  - `scripts/run_live_replay_parity_audit.py`
+    - `--quiet` 옵션을 추가했다.
+  - `scripts/install_micro_live_ops_launchd.py`
+    - `live_replay_parity` launchd job에 `--quiet`를 추가했다.
+  - 문서:
+    - runbook의 launchd guard 목록과 quiet mode 설명을 현재 13개 job 구성에 맞췄다.
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`
+  - `/health/ready`: `ready`
+  - runtime `install_micro_live_ops_launchd.py --install --unload --load`: `overall_status=PASS`, `job_count=13`
+  - installed `com.trading.micro-live.live-replay-parity` ProgramArguments에 `--quiet` 포함 확인
+  - 재시작 직후 entry surface latest만 pre-runtime으로 남아 ops heartbeat가 `WATCH/report_before_current_runtime_start`를 냈고, entry surface를 current runtime 기준으로 갱신한 뒤 ops heartbeat는 `PASS`, issue `0`, warning `0`, failure `0`, advisory `2`로 복귀했다.
+- 검증:
+  - `./.venv/bin/python -m pytest -q tests/test_micro_live_operational_guards.py::test_ops_heartbeat_report_generated_at_does_not_use_runtime_started_at_as_generation_time tests/test_micro_live_operational_guards.py::test_ops_heartbeat_runtime_started_at_uses_configured_heartbeat_dir tests/test_micro_live_operational_guards.py::test_ops_heartbeat_warns_when_runtime_scoped_report_predates_current_ws_start tests/test_micro_live_operational_guards.py::test_ops_heartbeat_allows_runtime_scoped_report_after_current_ws_start`
+  - `4 passed`
+  - `./.venv/bin/python -m pytest -q tests/test_micro_live_operational_guards.py::test_launchd_generator_includes_remaining_operational_guards tests/test_micro_live_operational_guards.py::test_ops_heartbeat_report_generated_at_does_not_use_runtime_started_at_as_generation_time tests/test_micro_live_operational_guards.py::test_ops_heartbeat_runtime_started_at_uses_configured_heartbeat_dir tests/test_micro_live_operational_guards.py::test_ops_heartbeat_warns_when_runtime_scoped_report_predates_current_ws_start tests/test_micro_live_operational_guards.py::test_ops_heartbeat_allows_runtime_scoped_report_after_current_ws_start tests/test_live_candidate_promotion_readiness.py`
+  - `20 passed`
+  - py_compile pass for `run_micro_live_ops_heartbeat.py`, `run_live_replay_parity_audit.py`, `install_micro_live_ops_launchd.py`

@@ -46,6 +46,40 @@ def test_surface_strip_summary_prefers_nested_validation_strip() -> None:
     assert summary["act_value"] == "review_runtime_execution_drag_before_expansion"
 
 
+def test_alignment_normalizes_advisory_only_checklist_manual_review() -> None:
+    dashboard_strip = {
+        "approve_value": "approval usable",
+        "act_value": "continue_candidate_review_under_portfolio_caps",
+    }
+    validation_strip = {
+        "approve_value": "GO",
+        "act_value": "proceed_with_configured_rollout",
+    }
+    checklist_strip = {
+        "approve_value": "manual review first",
+        "act_value": "proceed_with_configured_rollout",
+    }
+    checklist = {"blocking_failures": 0, "manual_actions": 0, "warnings": 14}
+
+    deployment_alignment = snapshot_script._alignment(
+        [
+            snapshot_script._normalized_approve_alignment_value(dashboard_strip, surface={}),
+            snapshot_script._normalized_approve_alignment_value(validation_strip, surface={}),
+            snapshot_script._normalized_approve_alignment_value(checklist_strip, surface=checklist),
+        ]
+    )
+    playbook_alignment = snapshot_script._alignment(
+        [
+            snapshot_script._normalized_act_alignment_value(dashboard_strip),
+            snapshot_script._normalized_act_alignment_value(validation_strip),
+            snapshot_script._normalized_act_alignment_value(checklist_strip),
+        ]
+    )
+
+    assert deployment_alignment == "ALIGNED"
+    assert playbook_alignment == "ALIGNED"
+
+
 def test_write_report_uses_surface_strip_lines(tmp_path: Path) -> None:
     payload = {
         "generated_at": "2026-03-24T00:00:00+00:00",

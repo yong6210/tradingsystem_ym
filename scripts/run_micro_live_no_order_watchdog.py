@@ -325,14 +325,15 @@ def _augment_no_order_evaluation(
     watch = dict(context.get("watch_status_counts") or {})
     if lookback_expected_orders > 0 and lookback_pre_restart_orders > 0 and not order_blocking:
         reason_summary = _counts_summary_text(lookback_reason_counts, limit=3)
-        enriched["alert"] = True
-        enriched["status"] = "WATCH"
-        enriched["severity"] = "WARN"
-        enriched["reason"] = "sir_pre_restart_expected_orders_blocked"
-        enriched["candidate_generation_status"] = "pre_restart_backtest_opportunities_blocked"
+        enriched["alert"] = False
+        enriched["status"] = "OK"
+        enriched["severity"] = "INFO"
+        enriched["reason"] = "sir_pre_restart_expected_orders_advisory"
+        enriched["historical_advisory"] = True
+        enriched["candidate_generation_status"] = "pre_restart_backtest_opportunities_advisory"
         enriched["next_action_text"] = (
-            f"재시작 전 SIR 백테스트조건 후보 {lookback_pre_restart_orders}건이 주문으로 못 감: "
-            f"{reason_summary or 'reason=none'}; 현재 설정으로 다음 fresh 후보 submit_ready 여부 확인"
+            f"재시작 전 SIR 백테스트조건 후보 {lookback_pre_restart_orders}건이 주문으로 못 간 이력 기록: "
+            f"{reason_summary or 'reason=none'}; 현재 런타임은 다음 fresh 후보 submit_ready 여부만 확인"
         )
         previous_next_action = str(evaluation.get("next_action_text") or "")
         current_message = str(enriched.get("message") or "")

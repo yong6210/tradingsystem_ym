@@ -164,7 +164,7 @@ def test_no_order_watchdog_alerts_when_backtest_opportunity_has_no_live_intent()
     assert "SIR_opportunity=active_expected=2,lookback_expected=3" in enriched["message"]
 
 
-def test_no_order_watchdog_warns_when_pre_restart_opportunities_were_blocked() -> None:
+def test_no_order_watchdog_records_pre_restart_opportunities_as_advisory() -> None:
     evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
         lifecycle={
             "summary": {
@@ -208,11 +208,12 @@ def test_no_order_watchdog_warns_when_pre_restart_opportunities_were_blocked() -
         },
     )
 
-    assert enriched["alert"] is True
-    assert enriched["status"] == "WATCH"
-    assert enriched["severity"] == "WARN"
-    assert enriched["reason"] == "sir_pre_restart_expected_orders_blocked"
-    assert enriched["candidate_generation_status"] == "pre_restart_backtest_opportunities_blocked"
+    assert enriched["alert"] is False
+    assert enriched["status"] == "OK"
+    assert enriched["severity"] == "INFO"
+    assert enriched["reason"] == "sir_pre_restart_expected_orders_advisory"
+    assert enriched["historical_advisory"] is True
+    assert enriched["candidate_generation_status"] == "pre_restart_backtest_opportunities_advisory"
     assert "pre_restart=12" in enriched["message"]
     assert "session_impulse_retest_rollout_not_ready=6" in enriched["message"]
 
@@ -1819,10 +1820,12 @@ def test_live_replay_parity_portfolio_runtime_scope_keeps_lookback_context(monke
         start_at=start_at,
     )
 
-    assert payload["overall_status"] == "WATCH"
+    assert payload["overall_status"] == "PASS"
     assert payload["parity_scope"] == "runtime_since_ws_start"
-    assert payload["evaluation"]["reason"] == "runtime_window_thin_but_lookback_flow_warning"
+    assert payload["evaluation"]["reason"] == "portfolio_runtime_window_below_live_replay_parity_evidence_floor"
+    assert payload["evaluation"]["lookback_advisory"] is True
     assert payload["evaluation"]["lookback_status"] == "WATCH"
+    assert payload["evaluation"]["operator_action_required"] is False
     assert payload["evaluation"]["runtime_below_evidence_floor_symbol_count"] == 2
     assert payload["lookback_evaluation_summary"]["status"] == "WATCH"
 
@@ -2058,6 +2061,7 @@ def test_launchd_generator_includes_remaining_operational_guards(tmp_path) -> No
     assert "com.test.micro.reconciliation-watchdog" in labels
     assert "com.test.micro.boot-check" in labels
     assert "com.test.micro.ops-heartbeat" in labels
+    assert "com.test.micro.live-candidate-promotion-readiness" in labels
     assert "com.test.micro.replay-validation-bridge" in labels
     assert "com.test.micro.live-replay-parity" in labels
     assert "com.test.micro.session-impulse-retest-runtime-audit" in labels
@@ -2067,6 +2071,8 @@ def test_launchd_generator_includes_remaining_operational_guards(tmp_path) -> No
         "no_order_watchdog",
         "reconciliation_watchdog",
         "boot_check",
+        "live_candidate_promotion_readiness",
+        "live_replay_parity",
         "ops_heartbeat",
         "session_impulse_retest_runtime_audit",
     }
@@ -2076,6 +2082,10 @@ def test_launchd_generator_includes_remaining_operational_guards(tmp_path) -> No
     live_replay_job = next(job for job in jobs if job.name == "live_replay_parity")
     assert "run_live_replay_parity_audit.py" in live_replay_job.args[1]
     assert "--all-live-symbols" in live_replay_job.args
+    readiness_job = next(job for job in jobs if job.name == "live_candidate_promotion_readiness")
+    assert "run_live_candidate_promotion_readiness.py" in readiness_job.args[1]
+    assert readiness_job.start_interval == 5 * 60
+    assert "--since-ws-start" in readiness_job.args
     assert any((tmp_path / f"{label}.plist").exists() for label in labels)
 
 
@@ -2402,6 +2412,85 @@ def test_ops_heartbeat_message_watch_only_is_monitoring_action() -> None:
     assert "다음: WATCH는 자동 관찰; 반복/악화 시 해당 리포트 확인" in message
 
 
+def test_ops_heartbeat_keeps_historical_and_lookback_advisories_non_paging(monkeypatch, tmp_path) -> None:
+    no_order = tmp_path / "no_order.md"
+    no_order.write_text(
+        "\n".join(
+            [
+                "- status: OK",
+                "```json",
+                json.dumps(
+                    {
+                        "evaluation": {
+                            "status": "OK",
+                            "reason": "sir_pre_restart_expected_orders_advisory",
+                            "historical_advisory": True,
+                            "next_action_text": "재시작 전 후보 이력 기록; 현재 런타임은 fresh 후보 대기",
+                        }
+                    }
+                ),
+                "```",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    parity = tmp_path / "parity.md"
+    parity.write_text(
+        "\n".join(
+            [
+                "- overall_status: PASS",
+                "```json",
+                json.dumps(
+                    {
+                        "overall_status": "PASS",
+                        "evaluation": {
+                            "status": "PASS",
+                            "reason": "portfolio_runtime_window_below_live_replay_parity_evidence_floor",
+                            "lookback_advisory": True,
+                            "lookback_status": "ALERT",
+                            "lookback_reason": "portfolio_symbol_live_flow_below_replay_baseline",
+                        },
+                    }
+                ),
+                "```",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        run_micro_live_ops_heartbeat,
+        "_DEFAULT_JOBS",
+        {
+            "no_order_watchdog": {
+                "pattern": str(no_order),
+                "max_age_minutes": 75,
+                "pass_statuses": {"OK", "PASS"},
+                "watch_statuses": {"ALERT", "WATCH", "WARN"},
+            },
+            "live_replay_parity": {
+                "pattern": str(parity),
+                "max_age_minutes": 130,
+                "pass_statuses": {"PASS"},
+                "watch_statuses": {"WATCH"},
+            },
+        },
+    )
+
+    now = datetime.fromtimestamp(max(no_order.stat().st_mtime, parity.stat().st_mtime), tz=UTC)
+    result = run_micro_live_ops_heartbeat.evaluate_ops_heartbeat(now=now)
+
+    assert result["status"] == "PASS"
+    assert result["warning_count"] == 0
+    assert result["advisory_count"] == 2
+    assert [row["name"] for row in result["advisories"]] == ["no_order_watchdog", "live_replay_parity"]
+
+    message = run_micro_live_ops_heartbeat._message({"overall_status": result["status"], "evaluation": result})
+    assert "상태: PASS / fail=0 watch=0 advisory=2" in message
+    assert "참고: no_order_watchdog=sir_pre_restart_expected_orders_advisory" in message
+    assert "live_replay_parity=lookback_alert_portfolio_symbol_live_flow_below_replay_baseline" in message
+    assert "다음: PASS 유지; 참고 항목은 자동 기록" in message
+
+
 def test_ops_heartbeat_cooldown_blocks_repeated_same_issue(tmp_path) -> None:
     payload = {
         "overall_status": "WATCH",
@@ -2634,12 +2723,119 @@ def test_ops_heartbeat_warns_on_fresh_report_warning_status(monkeypatch, tmp_pat
     assert result["warnings"][0]["reason"] == "content_status_alert"
 
 
+def test_ops_heartbeat_warns_when_runtime_scoped_report_predates_current_ws_start(monkeypatch, tmp_path) -> None:
+    report = tmp_path / "runtime_guard.md"
+    report.write_text(
+        "\n".join(
+            [
+                "# runtime guard",
+                "",
+                "```json",
+                json.dumps({"generated_at": "2026-05-10T00:04:00Z", "overall_status": "PASS"}),
+                "```",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        run_micro_live_ops_heartbeat,
+        "_runtime_started_at_from_heartbeat",
+        lambda: datetime(2026, 5, 10, 0, 5, tzinfo=UTC),
+    )
+    monkeypatch.setattr(
+        run_micro_live_ops_heartbeat,
+        "_DEFAULT_JOBS",
+        {
+            "runtime_guard": {
+                "pattern": str(report),
+                "max_age_minutes": 15,
+                "pass_statuses": {"PASS"},
+                "requires_current_runtime": True,
+            }
+        },
+    )
+
+    result = run_micro_live_ops_heartbeat.evaluate_ops_heartbeat(now=datetime(2026, 5, 10, 0, 6, tzinfo=UTC))
+
+    assert result["status"] == "WATCH"
+    assert result["warning_count"] == 1
+    warning = result["warnings"][0]
+    assert warning["reason"] == "report_before_current_runtime_start"
+    assert warning["freshness_status"] == "WATCH"
+    assert warning["report_generated_at"] == "2026-05-10T00:04:00Z"
+    assert warning["runtime_started_at"] == "2026-05-10T00:05:00Z"
+
+
+def test_ops_heartbeat_report_generated_at_does_not_use_runtime_started_at_as_generation_time() -> None:
+    fallback_mtime = datetime(2026, 5, 10, 0, 4, tzinfo=UTC)
+
+    generated = run_micro_live_ops_heartbeat._report_generated_at(
+        {"runtime_started_at": "2026-05-10T00:06:00Z"},
+        fallback_mtime=fallback_mtime,
+    )
+
+    assert generated == fallback_mtime
+
+
+def test_ops_heartbeat_runtime_started_at_uses_configured_heartbeat_dir(monkeypatch, tmp_path) -> None:
+    heartbeat_dir = tmp_path / "heartbeats"
+    heartbeat_dir.mkdir()
+    (heartbeat_dir / "ws.json").write_text(
+        json.dumps({"details": {"started_at": "2026-05-10T00:05:00Z"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RUNTIME_WORKER_HEARTBEAT_DIR", str(heartbeat_dir))
+
+    assert run_micro_live_ops_heartbeat._runtime_started_at_from_heartbeat() == datetime(
+        2026, 5, 10, 0, 5, tzinfo=UTC
+    )
+
+
+def test_ops_heartbeat_allows_runtime_scoped_report_after_current_ws_start(monkeypatch, tmp_path) -> None:
+    report = tmp_path / "runtime_guard.md"
+    report.write_text(
+        "\n".join(
+            [
+                "# runtime guard",
+                "",
+                "```json",
+                json.dumps({"generated_at": "2026-05-10T00:06:00Z", "overall_status": "PASS"}),
+                "```",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        run_micro_live_ops_heartbeat,
+        "_runtime_started_at_from_heartbeat",
+        lambda: datetime(2026, 5, 10, 0, 5, tzinfo=UTC),
+    )
+    monkeypatch.setattr(
+        run_micro_live_ops_heartbeat,
+        "_DEFAULT_JOBS",
+        {
+            "runtime_guard": {
+                "pattern": str(report),
+                "max_age_minutes": 15,
+                "pass_statuses": {"PASS"},
+                "requires_current_runtime": True,
+            }
+        },
+    )
+
+    result = run_micro_live_ops_heartbeat.evaluate_ops_heartbeat(now=datetime(2026, 5, 10, 0, 7, tzinfo=UTC))
+
+    assert result["status"] == "PASS"
+    assert result["warning_count"] == 0
+
+
 def test_ops_heartbeat_defaults_include_live_replay_parity() -> None:
     config = run_micro_live_ops_heartbeat._DEFAULT_JOBS["live_replay_parity"]
 
     assert config["pattern"] == "reports/operations/live_replay_parity/*.md"
     assert config["pass_statuses"] == {"PASS"}
     assert config["watch_statuses"] == {"WATCH"}
+    assert config["requires_current_runtime"] is True
 
 
 def test_ops_heartbeat_defaults_include_entry_surface() -> None:
@@ -2648,6 +2844,17 @@ def test_ops_heartbeat_defaults_include_entry_surface() -> None:
     assert config["pattern"] == "reports/operations/entry_surface/latest_entry_alert_run.json"
     assert config["content_type"] == "entry_surface_run"
     assert config["pass_statuses"] == {"PASS"}
+    assert config["requires_current_runtime"] is True
+
+
+def test_ops_heartbeat_defaults_include_live_candidate_promotion_readiness() -> None:
+    config = run_micro_live_ops_heartbeat._DEFAULT_JOBS["live_candidate_promotion_readiness"]
+
+    assert config["pattern"] == "reports/operations/live_candidate_promotion_readiness/*.md"
+    assert config["max_age_minutes"] == 20
+    assert config["pass_statuses"] == {"PASS"}
+    assert config["watch_statuses"] == {"WATCH"}
+    assert config["requires_current_runtime"] is True
 
 
 def test_ops_heartbeat_checks_entry_surface_latest_payload(monkeypatch, tmp_path) -> None:

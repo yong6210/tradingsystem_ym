@@ -170,7 +170,7 @@ class Settings(BaseSettings):
 
     # Validation report output.
     validation_report_dir: str = "reports/validation"
-    validation_payload_cache_max_age_seconds: float = 900.0
+    validation_payload_cache_max_age_seconds: float = 21600.0
     validation_payload_cache_stale_on_database_change: bool = False
     operations_checklist_report_dir: str = "reports/operations"
     kill_condition_automation_live_enabled: bool = False

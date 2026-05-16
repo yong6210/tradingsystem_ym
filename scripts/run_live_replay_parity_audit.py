@@ -49,6 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-dir", default="reports/operations/live_replay_parity")
     parser.add_argument("--no-write-report", action="store_true")
     parser.add_argument("--no-fail-exit", action="store_true")
+    parser.add_argument("--quiet", action="store_true", help="Write report artifacts without printing stdout.")
     return parser.parse_args()
 
 
@@ -710,8 +711,8 @@ def _evaluation_summary(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _surface_runtime_pass_with_lookback_warning(payload: dict[str, Any]) -> dict[str, Any]:
-    """Lift hidden lookback warnings when runtime scope is too short to judge flow."""
+def _annotate_runtime_pass_with_lookback_warning(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep lookback context visible without paging when the fresh runtime window is too thin."""
     enriched = dict(payload)
     evaluation = dict(enriched.get("evaluation") or {})
     lookback = dict(enriched.get("lookback_evaluation_summary") or {})
@@ -726,12 +727,11 @@ def _surface_runtime_pass_with_lookback_warning(payload: dict[str, Any]) -> dict
         }
         and lookback_status in {"WATCH", "ALERT"}
     ):
-        evaluation["status"] = "WATCH"
-        evaluation["reason"] = "runtime_window_thin_but_lookback_flow_warning"
+        evaluation["lookback_advisory"] = True
         evaluation["lookback_status"] = lookback_status
         evaluation["lookback_reason"] = lookback.get("reason")
         evaluation["lookback_top_block_reasons"] = lookback.get("top_block_reasons") or {}
-        enriched["overall_status"] = "WATCH"
+        evaluation["operator_action_required"] = False
         enriched["evaluation"] = evaluation
     return enriched
 
@@ -813,7 +813,7 @@ def build_payload(
     else:
         payload["lookback_evaluation_summary"] = {}
         payload["lookback_lifecycle_summary"] = {}
-    payload = _surface_runtime_pass_with_lookback_warning(payload)
+    payload = _annotate_runtime_pass_with_lookback_warning(payload)
     return payload
 
 
@@ -949,7 +949,7 @@ def build_portfolio_payload(
         payload["lookback_evaluation_summary"] = _evaluation_summary(lookback_payload)
     else:
         payload["lookback_evaluation_summary"] = {}
-    payload = _surface_runtime_pass_with_lookback_warning(payload)
+    payload = _annotate_runtime_pass_with_lookback_warning(payload)
     return payload
 
 
@@ -1039,7 +1039,8 @@ def main() -> int:
                 json_default=_json_default,
             )
         )
-    print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
+    if not bool(args.quiet):
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     fail = payload["overall_status"] == "ALERT"
     return 1 if fail and not bool(args.no_fail_exit) else 0
 

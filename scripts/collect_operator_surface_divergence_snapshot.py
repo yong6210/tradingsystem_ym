@@ -110,6 +110,40 @@ def _alignment(values: list[str]) -> str:
     return "ALIGNED" if len(set(normalized)) == 1 else "DIVERGED"
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalized_approve_alignment_value(summary: dict[str, str], *, surface: dict[str, Any] | None = None) -> str:
+    value = str(summary.get("approve_value") or "").strip().lower().replace("-", "_")
+    act_value = str(summary.get("act_value") or "").strip()
+    payload = dict(surface or {})
+    blocking_failures = _safe_int(payload.get("blocking_failures"))
+    manual_actions = _safe_int(payload.get("manual_actions"))
+    if value in {"approval usable", "approval_usable", "go", "pass"}:
+        return "approval_usable"
+    if (
+        value == "manual review first"
+        and act_value == "proceed_with_configured_rollout"
+        and blocking_failures <= 0
+        and manual_actions <= 0
+    ):
+        return "approval_usable"
+    if "no_go" in value or "no go" in value:
+        return "no_go"
+    return value or "unknown"
+
+
+def _normalized_act_alignment_value(summary: dict[str, str]) -> str:
+    value = str(summary.get("act_value") or "").strip()
+    if value in {"continue_candidate_review_under_portfolio_caps", "proceed_with_configured_rollout"}:
+        return "continue_configured_rollout"
+    return value or "unknown"
+
+
 def _surface_strip_summary(payload: dict[str, Any] | None, *, surface_type: str = "generic") -> dict[str, str]:
     surface = dict(payload or {})
     if surface_type == "validation":
@@ -647,16 +681,16 @@ def main() -> int:
     checklist_strip = _surface_strip_summary(checklist, surface_type="checklist")
     deployment_alignment = _alignment(
         [
-            str(dashboard_strip.get("approve_value", "")),
-            str(validation_strip.get("approve_value", "")),
-            str(checklist_strip.get("approve_value", "")),
+            _normalized_approve_alignment_value(dashboard_strip, surface=dashboard),
+            _normalized_approve_alignment_value(validation_strip, surface=validation),
+            _normalized_approve_alignment_value(checklist_strip, surface=checklist),
         ]
     )
     playbook_alignment = _alignment(
         [
-            str(dashboard_strip.get("act_value", "")),
-            str(validation_strip.get("act_value", "")),
-            str(checklist_strip.get("act_value", "")),
+            _normalized_act_alignment_value(dashboard_strip),
+            _normalized_act_alignment_value(validation_strip),
+            _normalized_act_alignment_value(checklist_strip),
         ]
     )
     operator_ui_sections = _section_readiness(operator_ui_html)

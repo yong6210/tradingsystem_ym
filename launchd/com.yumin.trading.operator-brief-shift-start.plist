@@ -7,12 +7,13 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/yumin/Documents/trading/.venv/bin/python</string>
-    <string>/Users/yumin/Documents/trading/scripts/notify_operator_session_brief.py</string>
-  </array>
+	    <string>/Users/yumin/Library/Application Support/trading/runtime_venv/bin/python</string>
+	    <string>/Users/yumin/Library/Application Support/trading/runtime_src/scripts/notify_operator_session_brief.py</string>
+	    <string>--quiet</string>
+	  </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/yumin/Documents/trading</string>
+	  <string>/Users/yumin/Library/Application Support/trading/runtime_src</string>
 
   <key>EnvironmentVariables</key>
   <dict>
@@ -27,9 +28,9 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/launchd.shift_start.out.log</string>
+	  <string>/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/operator_session_briefs/launchd.shift_start.out.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/yumin/Documents/trading/reports/operations/operator_session_briefs/launchd.shift_start.err.log</string>
+	  <string>/Users/yumin/Library/Application Support/trading/runtime_src/reports/operations/operator_session_briefs/launchd.shift_start.err.log</string>
 </dict>
 </plist>

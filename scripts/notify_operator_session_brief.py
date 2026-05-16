@@ -121,6 +121,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-live-send", action="store_true")
     parser.add_argument("--force-send", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--quiet", action="store_true", help="Write latest/state artifacts without printing JSON to stdout.")
     args = parser.parse_args()
     if not args.allow_live_send and _env_flag("OPERATOR_BRIEF_ALLOW_LIVE_SEND"):
         args.allow_live_send = True
@@ -129,6 +130,11 @@ def parse_args() -> argparse.Namespace:
     if not args.dry_run and _env_flag("OPERATOR_BRIEF_DRY_RUN"):
         args.dry_run = True
     return args
+
+
+def _print_result(args: argparse.Namespace, result: dict[str, Any]) -> None:
+    if not bool(getattr(args, "quiet", False)):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -612,11 +618,12 @@ def main() -> int:
             "allow_live_send": bool(args.allow_live_send),
             "force_send": bool(args.force_send),
             "dry_run": bool(args.dry_run),
+            "quiet": bool(getattr(args, "quiet", False)),
             "notified": False,
             "reason": "operator_session_brief_already_running",
         }
         _write_json(latest_run_file, result)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        _print_result(args, result)
         return 0
 
     try:
@@ -633,12 +640,13 @@ def main() -> int:
                 "allow_live_send": bool(args.allow_live_send),
                 "force_send": bool(args.force_send),
                 "dry_run": bool(args.dry_run),
+                "quiet": bool(getattr(args, "quiet", False)),
                 "notified": False,
                 "reason": "brief_generation_failed",
                 "error": str(exc),
             }
             _write_json(latest_run_file, result)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            _print_result(args, result)
             return 0
 
         current = _alert_state(brief)
@@ -661,6 +669,7 @@ def main() -> int:
             "allow_live_send": bool(args.allow_live_send),
             "force_send": bool(args.force_send),
             "dry_run": bool(args.dry_run),
+            "quiet": bool(getattr(args, "quiet", False)),
             "notified": False,
         }
 
@@ -670,13 +679,13 @@ def main() -> int:
         if not changed and not args.force_send:
             _write_json(state_file, current)
             _write_json(latest_run_file, result)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            _print_result(args, result)
             return 0
 
         if args.dry_run:
             _write_json(state_file, current)
             _write_json(latest_run_file, result)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            _print_result(args, result)
             return 0
 
         if not args.allow_live_send:
@@ -687,7 +696,7 @@ def main() -> int:
                 "reason": "live_send_not_allowed",
             }
             _write_json(latest_run_file, result)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            _print_result(args, result)
             return 0
 
         settings = get_settings()
@@ -705,7 +714,7 @@ def main() -> int:
         result["notified"] = _safe_bool(delivery.get("delivered"))
         _write_json(state_file, current)
         _write_json(latest_run_file, result)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        _print_result(args, result)
         return 0
     finally:
         _release_lock(lock_fd)

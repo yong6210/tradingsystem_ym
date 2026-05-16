@@ -299,6 +299,22 @@ def _surface_allows_preflight(summary: dict[str, str]) -> bool:
     return approve_value in {"approval usable", "approved", "go"}
 
 
+def _checklist_allows_preflight(summary: dict[str, str]) -> bool:
+    if _surface_allows_preflight(summary):
+        return True
+    approve_value = str(summary.get("approve_value") or "").strip().lower()
+    act_value = str(summary.get("act_value") or "").strip().lower()
+    approve_reason = str(summary.get("approve_reason") or "").strip().lower()
+    align_reason = str(summary.get("align_reason") or "").strip().lower()
+    if approve_value != "manual review first":
+        return False
+    if not approve_reason.startswith("go:"):
+        return False
+    if act_value not in {"proceed_with_configured_rollout", "continue_candidate_review_under_portfolio_caps"}:
+        return False
+    return "blocking_failures=0" in align_reason and "manual_actions=0" in align_reason
+
+
 def _root_cause_token(value: str) -> str:
     chars: list[str] = []
     previous_sep = False
@@ -1697,7 +1713,7 @@ def main() -> int:
     checks.append(
         {
             "name": "checklist_language",
-            "status": _status(_surface_allows_preflight(checklist_strip)),
+            "status": _status(_checklist_allows_preflight(checklist_strip)),
             "message": (
                 f"approve={checklist_strip.get('approve_value', '')} | "
                 f"align={checklist_strip.get('align_value', '')} | "

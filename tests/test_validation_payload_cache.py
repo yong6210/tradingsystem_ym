@@ -7,6 +7,19 @@ from types import SimpleNamespace
 from app.services.validation_payload_cache import READ_ONLY_RECOMPUTE_CACHE, ValidationPayloadCacheService
 
 
+def test_validation_payload_cache_default_ttl_is_six_hours(tmp_path) -> None:
+    cache = ValidationPayloadCacheService(
+        SimpleNamespace(
+            database_url=f"sqlite:///{tmp_path / 'trading.db'}",
+            strategy_version="v1",
+            validation_report_dir=str(tmp_path / "reports"),
+            validation_payload_cache_stale_on_database_change=False,
+        )
+    )
+
+    assert cache.max_age_seconds() == 21600.0
+
+
 def test_validation_payload_cache_uses_ttl_even_when_database_is_newer_by_default(tmp_path) -> None:
     READ_ONLY_RECOMPUTE_CACHE.clear()
     try:

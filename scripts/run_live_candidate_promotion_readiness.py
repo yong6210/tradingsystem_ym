@@ -53,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-dir", default="reports/operations/live_candidate_promotion_readiness")
     parser.add_argument("--no-write-report", action="store_true")
     parser.add_argument("--compact", action="store_true", help="Print a compact operator summary instead of JSON.")
+    parser.add_argument("--quiet", action="store_true", help="Write report artifacts without printing stdout.")
     return parser.parse_args()
 
 
@@ -330,6 +331,8 @@ def main() -> None:
                 json_default=_json_default,
             )
         )
+    if args.quiet:
+        return
     if args.compact:
         print(_compact_text(payload))
     else:

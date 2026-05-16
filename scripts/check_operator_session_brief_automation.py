@@ -18,6 +18,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 REPORT_DIR = ROOT_DIR / "reports" / "operations" / "operator_session_briefs"
+RUNTIME_ROOT_DIR = Path.home() / "Library/Application Support/trading/runtime_src"
 START_LABEL = "com.yumin.trading.operator-brief-shift-start"
 END_LABEL = "com.yumin.trading.operator-brief-shift-end"
 
@@ -45,7 +46,17 @@ def parse_args() -> argparse.Namespace:
         description="Check launchd-based operator session brief automation health."
     )
     parser.add_argument("--max-age-minutes", type=int, default=30)
-    parser.add_argument("--report-dir", default=str(REPORT_DIR))
+    parser.add_argument(
+        "--report-dir",
+        default="",
+        help="Defaults to the installed agent working directory's operator_session_briefs report dir.",
+    )
+    parser.add_argument(
+        "--expected-working-directory",
+        action="append",
+        default=[],
+        help="Allowed launchd working directory. May be passed more than once.",
+    )
     parser.add_argument("--write-report", action="store_true")
     parser.add_argument("--strict", action="store_true")
     return parser.parse_args()
@@ -65,6 +76,20 @@ def _display_path(path: Path) -> str:
 def _resolve_root_path(raw_path: str | Path) -> Path:
     path = Path(raw_path).expanduser()
     return path if path.is_absolute() else ROOT_DIR / path
+
+
+def _default_expected_roots() -> list[Path]:
+    roots = [ROOT_DIR.resolve()]
+    runtime_root = RUNTIME_ROOT_DIR.resolve()
+    if runtime_root not in roots:
+        roots.append(runtime_root)
+    return roots
+
+
+def _resolve_expected_roots(raw_roots: list[str] | None = None) -> list[Path]:
+    if raw_roots:
+        return [_resolve_root_path(raw).resolve() for raw in raw_roots if raw]
+    return _default_expected_roots()
 
 
 def _launchctl_executable() -> str:
@@ -88,7 +113,12 @@ def _extract_value(pattern: str, text: str) -> str:
     return match.group(1).strip()
 
 
-def parse_launchctl_print(label: str, raw: str) -> AgentStatus:
+def parse_launchctl_print(
+    label: str,
+    raw: str,
+    *,
+    expected_working_directories: list[Path] | None = None,
+) -> AgentStatus:
     state = _extract_value(r"^\s*state = (.+)$", raw)
     last_exit_code_raw = _extract_value(r"^\s*last exit code = (.+)$", raw)
     runs_raw = _extract_value(r"^\s*runs = (.+)$", raw)
@@ -96,12 +126,14 @@ def parse_launchctl_print(label: str, raw: str) -> AgentStatus:
     stdout_path = _extract_value(r"^\s*stdout path = (.+)$", raw)
     stderr_path = _extract_value(r"^\s*stderr path = (.+)$", raw)
     brief_mode = _extract_value(r"^\s*OPERATOR_BRIEF_MODE => (.+)$", raw)
-    channel = _extract_value(r"^\s*OPERATOR_BRIEF_CHANNEL => (.+)$", raw)
+    channel = _extract_value(r"^\s*OPERATOR_BRIEF_CHANNEL => (.+)$", raw) or "system"
     dry_run = _extract_value(r"^\s*OPERATOR_BRIEF_DRY_RUN => (.+)$", raw)
 
     issues: list[str] = []
     last_exit_code = int(last_exit_code_raw) if last_exit_code_raw.isdigit() else None
     runs = int(runs_raw) if runs_raw.isdigit() else None
+    expected_roots = expected_working_directories or _default_expected_roots()
+    working_path = Path(working_directory).expanduser().resolve() if working_directory else None
 
     if state != "not running":
         issues.append(f"unexpected launchd state: {state or 'missing'}")
@@ -109,7 +141,7 @@ def parse_launchctl_print(label: str, raw: str) -> AgentStatus:
         issues.append(f"last exit code is not zero: {last_exit_code_raw or 'missing'}")
     if runs is None or runs < 1:
         issues.append("launchd runs count is missing or zero")
-    if Path(working_directory).expanduser() != ROOT_DIR:
+    if working_path not in expected_roots:
         issues.append(f"unexpected working directory: {working_directory or 'missing'}")
     if not stdout_path:
         issues.append("stdout path missing")
@@ -147,14 +179,21 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _artifact_status(path: Path, *, max_age_minutes: int, expected_mode: str) -> dict[str, Any]:
+def _artifact_status(
+    path: Path,
+    *,
+    max_age_minutes: int,
+    expected_mode: str,
+    required: bool = True,
+) -> dict[str, Any]:
     issues: list[str] = []
     exists = path.exists()
     payload: dict[str, Any] | None = None
     age_seconds: float | None = None
     modified_at: str | None = None
     if not exists:
-        issues.append("file missing")
+        if required:
+            issues.append("file missing")
     else:
         stat = path.stat()
         modified = datetime.fromtimestamp(stat.st_mtime, UTC)
@@ -169,6 +208,7 @@ def _artifact_status(path: Path, *, max_age_minutes: int, expected_mode: str) ->
 
     return {
         "path": str(path),
+        "required": required,
         "exists": exists,
         "modified_at": modified_at,
         "age_seconds": age_seconds,
@@ -187,17 +227,60 @@ def _mode_paths(report_dir: Path, mode: str, channel: str) -> dict[str, Path]:
     }
 
 
-def _evaluate_status(report_dir: Path, max_age_minutes: int) -> dict[str, Any]:
-    start_agent = parse_launchctl_print(START_LABEL, _run_launchctl_print(START_LABEL))
-    end_agent = parse_launchctl_print(END_LABEL, _run_launchctl_print(END_LABEL))
+def _report_dir_from_agents(report_dir: Path | None, start_agent: AgentStatus, end_agent: AgentStatus) -> Path:
+    if report_dir is not None:
+        return report_dir
+    for agent in (start_agent, end_agent):
+        if agent.working_directory:
+            return Path(agent.working_directory).expanduser().resolve() / "reports" / "operations" / "operator_session_briefs"
+    return REPORT_DIR.resolve()
+
+
+def _state_artifact_required(latest_artifact: dict[str, Any]) -> bool:
+    payload = latest_artifact.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    delivery = payload.get("delivery")
+    delivered = isinstance(delivery, dict) and bool(delivery.get("delivered"))
+    return bool(payload.get("notified") or delivered)
+
+
+def _evaluate_status(
+    report_dir: Path | None,
+    max_age_minutes: int,
+    *,
+    expected_working_directories: list[Path] | None = None,
+) -> dict[str, Any]:
+    expected_roots = expected_working_directories or _default_expected_roots()
+    start_agent = parse_launchctl_print(
+        START_LABEL,
+        _run_launchctl_print(START_LABEL),
+        expected_working_directories=expected_roots,
+    )
+    end_agent = parse_launchctl_print(
+        END_LABEL,
+        _run_launchctl_print(END_LABEL),
+        expected_working_directories=expected_roots,
+    )
+    report_dir = _report_dir_from_agents(report_dir, start_agent, end_agent)
     channel = start_agent.channel or end_agent.channel or "system"
 
     start_paths = _mode_paths(report_dir, "shift-start", channel)
     end_paths = _mode_paths(report_dir, "shift-end", channel)
     start_latest = _artifact_status(start_paths["latest"], max_age_minutes=max_age_minutes, expected_mode="shift-start")
     end_latest = _artifact_status(end_paths["latest"], max_age_minutes=max_age_minutes, expected_mode="shift-end")
-    start_state = _artifact_status(start_paths["state"], max_age_minutes=max_age_minutes, expected_mode="shift-start")
-    end_state = _artifact_status(end_paths["state"], max_age_minutes=max_age_minutes, expected_mode="shift-end")
+    start_state = _artifact_status(
+        start_paths["state"],
+        max_age_minutes=max_age_minutes,
+        expected_mode="shift-start",
+        required=_state_artifact_required(start_latest),
+    )
+    end_state = _artifact_status(
+        end_paths["state"],
+        max_age_minutes=max_age_minutes,
+        expected_mode="shift-end",
+        required=_state_artifact_required(end_latest),
+    )
 
     issues: list[str] = []
     for agent in (start_agent, end_agent):
@@ -214,6 +297,8 @@ def _evaluate_status(report_dir: Path, max_age_minutes: int) -> dict[str, Any]:
         "generated_at": _now().isoformat(),
         "channel": channel,
         "max_age_minutes": max_age_minutes,
+        "report_dir": str(report_dir),
+        "expected_working_directories": [str(path) for path in expected_roots],
         "healthy": not issues,
         "issues": issues,
         "agents": {
@@ -229,8 +314,17 @@ def _evaluate_status(report_dir: Path, max_age_minutes: int) -> dict[str, Any]:
     }
 
 
-def evaluate_status(report_dir: Path, max_age_minutes: int) -> dict[str, Any]:
-    return _evaluate_status(report_dir, max_age_minutes)
+def evaluate_status(
+    report_dir: Path | None,
+    max_age_minutes: int,
+    *,
+    expected_working_directories: list[Path] | None = None,
+) -> dict[str, Any]:
+    return _evaluate_status(
+        report_dir,
+        max_age_minutes,
+        expected_working_directories=expected_working_directories,
+    )
 
 
 def _write_report(path: Path, payload: dict[str, Any]) -> None:
@@ -242,6 +336,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     lines.append(f"- healthy: {payload['healthy']}")
     lines.append(f"- channel: {payload['channel']}")
     lines.append(f"- max_age_minutes: {payload['max_age_minutes']}")
+    lines.append(f"- report_dir: {payload['report_dir']}")
     lines.append("")
     lines.append("## Agents")
     lines.append("")
@@ -275,10 +370,16 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
 
 def main() -> int:
     args = parse_args()
-    report_dir = _resolve_root_path(args.report_dir).resolve()
-    payload = evaluate_status(report_dir, args.max_age_minutes)
+    report_dir = _resolve_root_path(args.report_dir).resolve() if args.report_dir else None
+    expected_roots = _resolve_expected_roots(args.expected_working_directory)
+    payload = evaluate_status(
+        report_dir,
+        args.max_age_minutes,
+        expected_working_directories=expected_roots,
+    )
 
     if args.write_report:
+        report_dir = Path(payload["report_dir"])
         timestamp = _now().strftime("%Y%m%dT%H%M%SZ")
         report_path = report_dir / f"operator_session_brief_automation_health_{timestamp}.md"
         _write_report(report_path, payload)

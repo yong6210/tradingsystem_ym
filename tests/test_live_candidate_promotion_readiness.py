@@ -274,6 +274,67 @@ def test_runtime_readiness_keeps_shadow_only_as_auxiliary_when_live_symbols_are_
     assert scoped["operator_review_items"][0]["symbol"] == "BTCUSDC"
 
 
+def test_runtime_readiness_scope_blocker_counts_use_full_candidate_set_when_rows_are_limited() -> None:
+    live_symbols = {
+        "ADAUSDC",
+        "AVAXUSDC",
+        "BCHUSDC",
+        "BNBUSDC",
+        "BTCUSDC",
+        "ETHUSDC",
+        "LINKUSDC",
+        "LTCUSDC",
+        "NEARUSDC",
+        "SOLUSDC",
+        "XRPUSDC",
+    }
+    audit_rows = [
+        {
+            "symbol": symbol,
+            "strategy_family": "session_impulse_retest",
+            "phase": "auto_route",
+            "status": "no_live_route_candidate_plan",
+            "count": 1,
+            "latest_observed_ts": "2026-05-10T03:00:00Z",
+        }
+        for symbol in sorted(live_symbols)
+    ]
+    audit_rows.extend(
+        {
+            "symbol": symbol,
+            "strategy_family": "session_impulse_retest",
+            "phase": "auto_route",
+            "status": "symbol_not_live_enabled_for_auto_route",
+            "count": 1,
+            "latest_observed_ts": "2026-05-10T03:05:00Z",
+        }
+        for symbol in ("AAVEUSDC", "HBARUSDC", "SUIUSDC")
+    )
+    payload = LiveCandidatePromotionReadinessService().build(
+        hours=24,
+        limit=12,
+        now="2026-05-10T03:10:00Z",
+        audit_rows=audit_rows,
+        intent_rows=[],
+        submission_rows=[],
+    )
+
+    scoped = _apply_live_headline_scope(payload, live_symbols=live_symbols)
+
+    assert len(scoped["candidates"]) == 12
+    assert scoped["candidate_count"] == 14
+    assert scoped["candidate_scope_counts"] == {"total": 14, "live_routable": 11, "auxiliary": 3}
+    assert scoped["live_state_counts"] == {"NO_FRESH_LIVE_CANDIDATE": 11}
+    assert scoped["auxiliary_state_counts"] == {"SHADOW_SIGNAL_ONLY": 3}
+    assert scoped["top_live_blockers"] == {"no_fresh_live_candidate": 11}
+    assert scoped["top_auxiliary_blockers"] == {"symbol_not_live_enabled_for_auto_route": 3}
+    assert scoped["headline_top_blockers"] == {"no_fresh_live_candidate": 11}
+    assert scoped["top_all_blockers"] == {
+        "no_fresh_live_candidate": 11,
+        "symbol_not_live_enabled_for_auto_route": 3,
+    }
+
+
 def test_runtime_readiness_wait_headline_uses_live_symbols_only() -> None:
     payload = LiveCandidatePromotionReadinessService().build(
         hours=24,

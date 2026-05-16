@@ -139,9 +139,29 @@ def _auxiliary_display_counts(symbols_by_state: dict[str, list[str]]) -> dict[st
     return dict(counts.most_common())
 
 
-def _blocker_counts_by_scope(rows: list[dict[str, Any]], *, live_symbols: set[str]) -> tuple[dict[str, int], dict[str, int]]:
+def _blocker_counts_by_scope(
+    rows: list[dict[str, Any]],
+    *,
+    live_symbols: set[str],
+    symbols_by_blocker: dict[str, Any] | None = None,
+) -> tuple[dict[str, int], dict[str, int]]:
     live_counts: Counter[str] = Counter()
     auxiliary_counts: Counter[str] = Counter()
+    if symbols_by_blocker:
+        for blocker, raw_symbols in symbols_by_blocker.items():
+            blocker_text = str(blocker or "").strip()
+            if not blocker_text:
+                continue
+            for raw_symbol in list(raw_symbols or []):
+                symbol = str(raw_symbol or "").strip().upper()
+                if not symbol:
+                    continue
+                if symbol in live_symbols:
+                    live_counts[blocker_text] += 1
+                else:
+                    auxiliary_counts[blocker_text] += 1
+        return dict(live_counts.most_common(8)), dict(auxiliary_counts.most_common(8))
+
     for row in rows:
         symbol = str(row.get("symbol") or "").strip().upper()
         blocker = str(row.get("primary_blocker") or "").strip()
@@ -172,7 +192,11 @@ def _apply_live_headline_scope(
         return readiness
 
     rows = [dict(row) for row in list(readiness.get("candidates") or []) if isinstance(row, dict)]
-    live_blockers, auxiliary_blockers = _blocker_counts_by_scope(rows, live_symbols=normalized_live_symbols)
+    live_blockers, auxiliary_blockers = _blocker_counts_by_scope(
+        rows,
+        live_symbols=normalized_live_symbols,
+        symbols_by_blocker=dict(readiness.get("symbols_by_blocker") or {}),
+    )
     symbols_by_state = dict(readiness.get("symbols_by_state") or {})
     live_symbols_by_state, auxiliary_symbols_by_state = _symbols_by_scope(
         symbols_by_state,

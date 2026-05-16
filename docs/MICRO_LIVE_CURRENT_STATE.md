@@ -51,31 +51,42 @@ Runtime restarts sync the regular `micro_main_usdt_proxy_backtest_*.json` baseli
 
 ## Current No-Order Interpretation
 
-As of 2026-05-16 17:24 KST, runtime health and live route settings are aligned, but there have been no fresh `session_impulse_retest + CONFIRM` live candidates since the latest observed runtime restart at `2026-05-16 17:23:23 KST` (`2026-05-16T08:23:23Z`).
+As of 2026-05-16 18:25 KST, runtime health and live route settings are aligned, but there have been no fresh `session_impulse_retest + CONFIRM` live candidates since the latest observed runtime restart at `2026-05-16 18:23:20 KST` (`2026-05-16T09:23:20Z`).
 
-Latest runtime check after the backtest-contract guard, watchdog cleanup, and replay baseline source-order cleanup:
+Latest runtime check after the backtest-contract guard, watchdog cleanup, replay baseline source-order cleanup, and preflight advisory-checklist cleanup:
 
 - `/health/ready`: `ready`
 - `run_micro_live_runtime_guard.py`: `PASS`, `micro_live_backtest_contract_alignment=PASS`, live intents `0`, submissions `0`
+- `run_micro_live_preflight.py`: `READY_FOR_MICRO_LIVE`; validation `approval usable`, checklist advisory warnings only (`blocking_failures=0`, `manual_actions=0`)
 - `check_runtime_stack.sh`: `WAIT/no_fresh_live_signal`, runtime 이후 expected/missed SIR trades `0/0`
-- `live_replay_parity_audit`: current runtime window below evidence floor, replay source `micro_main_usdt_proxy_backtest_20260515T175711Z.json`
+- `run_micro_live_no_order_watchdog.py`: `OK/INFO`, `reason=sir_pre_restart_expected_orders_advisory`, current runtime expected orders `0`, 7-day lookback expected orders `12`, all pre-restart
+- `run_live_replay_parity_audit.py`: `PASS`, current runtime window below evidence floor, `lookback_advisory=true`, replay source `micro_main_usdt_proxy_backtest_20260515T175711Z.json`
+- `run_micro_live_ops_heartbeat.py`: `PASS`, warnings `0`, failures `0`; historical/lookback flow differences are retained as non-paging advisories
 - `live_candidate_promotion_readiness`: `WAIT`, `reason=no_promotable_live_candidate`, live core symbols `11` all `NO_FRESH_LIVE_CANDIDATE`
+- `live_candidate_promotion_readiness` now has a scheduled runtime report and ops-heartbeat freshness check; stale order-truth reports should show up as heartbeat issues instead of silently remaining old.
+- `live_candidate_promotion_readiness` scope counts and blocker counts are computed from the full candidate set, not just the displayed `--limit` rows. `candidate_count=14` with displayed candidates `12` should still show `top_live_blockers.no_fresh_live_candidate=11`.
+- `run_micro_live_ops_heartbeat.py` now treats runtime-scoped reports generated before the current WS `started_at` as `WATCH/report_before_current_runtime_start`, even if the file mtime is fresh. After a restart, refresh runtime guard/no-order/parity/session audit/entry surface before treating the heartbeat as current.
+- operator session brief launchd now runs from runtime authority (`runtime_venv` + `runtime_src`) and writes runtime artifacts; current runtime brief should read `ALIGNED_MONITOR`, not `DEPLOYMENT_REVIEW_REQUIRED`, when validation is `GO` and checklist manual review is advisory-only.
 - auxiliary SIR signals exist on `SUIUSDC`, `AAVEUSDC`, `HBARUSDC`, but these are shadow-only and not part of the 11-symbol baseline contract
+- validation payload cache TTL is 6 hours, so read-only preflight does not flip back to `validation unavailable` every 15 minutes when no validation refresh job is scheduled.
 
 Recent no-order reports must be read in two layers:
 
 - current runtime window: `live_intents=0`, `submit_ready=0`, `submissions=0`; this means there is no current submit failure yet.
 - pre-restart lookback: valid backtest-condition candidates existed before the restart, but old gates skipped them. In the 7-day audit this was `12` expected SIR orders, with top reasons `session_impulse_retest_rollout_not_ready`, `rollout_session_not_allowed`, and `validation_do_not_deploy`.
 
-The no-order watchdog now surfaces this as `sir_pre_restart_expected_orders_blocked` instead of reporting a clean fresh-candidate wait. Because this is historical/pre-restart context rather than a current submit failure, it is `WATCH/WARN`, not a current-route `ALERT`. The live replay parity report also surfaces `runtime_window_thin_but_lookback_flow_warning` when the current runtime window is thin but lookback flow shows missed/blocked opportunities. If lookback intents exist but all of them are `SKIP_SHADOW_ONLY`/blocked and submissions are still `0`, parity reports `WATCH` even when intent frequency itself is above the replay baseline.
+The no-order watchdog now keeps this as `sir_pre_restart_expected_orders_advisory` instead of reporting a clean fresh-candidate wait. Because this is historical/pre-restart context rather than a current submit failure, it is `OK/INFO` with `historical_advisory=true`, not a paging `WATCH`. The live replay parity report also keeps lookback flow warnings visible with `lookback_advisory=true` when the current runtime window is thin but lookback flow shows missed/blocked opportunities. In that thin fresh-runtime case, parity keeps the current headline `PASS` and the lookback warning stays in `lookback_evaluation_summary`.
+
+The ops heartbeat reads those flags as advisories. They appear in `advisory_count` and the report's `참고` line, while `overall_status` remains `PASS` and Discord does not page the operator.
 
 Operator rule:
 
-- If the report says `sir_pre_restart_expected_orders_blocked`, the issue is historical missed opportunity context, not a current exchange submit error.
+- If the report says `sir_pre_restart_expected_orders_advisory`, the issue is historical missed opportunity context, not a current exchange submit error.
 - If a fresh candidate appears and `submit_ready > 0` but `submissions=0`, treat that as an active intent-to-submission bug.
 - If `Trading entry surface alert` shows `live_order_candidates=0` with `context_only_outside_live_route`, that is not an entry confirmation. It only says non-live-route context rows are active.
 - If a no-order watchdog notification is `WATCH` only, the Discord title should be `[모니터링] MICRO_LIVE 주문 흐름 관찰`, not `[운영] ... 확인 필요`.
 - If a `confirm` subscription alert appears, read it as `signal-only no-order` unless it is accompanied by `LIVE_ORDER_CANDIDATE`, an order intent, submission, or fill. The Discord title should be `[모니터링] ... 주문 전 관찰 알림(주문 아님)`.
+- If an operator session brief says `ALIGNED_MONITOR`, validation/checklist are not currently hard-blocking orders. `manual_review` in the kernel means operator attention/context-only monitoring unless paired with validation `NO_GO`, checklist blocking failures, or a live-order blocker.
 
 ## Required Checks
 
