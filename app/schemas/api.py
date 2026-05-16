@@ -698,6 +698,7 @@ class AlertRetryQueueRunOut(ORMModel):
     delivered: int = 0
     requeued: int = 0
     dead_lettered: int = 0
+    expired: int = 0
 
 
 class ExecutionFillIn(ORMModel):

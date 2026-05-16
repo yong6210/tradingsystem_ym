@@ -586,7 +586,7 @@ class NotificationDispatcher:
     @classmethod
     def _format_discord_trade_signal(cls, *, alert_type: str, symbol: str, payload: dict[str, Any]) -> str:
         title_by_type = {
-            "confirm": "조건 확인 신호(주문 아님)",
+            "confirm": "주문 전 관찰 알림(주문 아님)",
             "entry": "진입 발생",
             "partial_exit": "부분 청산 발생",
             "tp": "목표가 도달",
@@ -602,7 +602,8 @@ class NotificationDispatcher:
         price = payload.get("event_price") or payload.get("price") or payload.get("fill_price") or payload.get("entry_price")
         expected = payload.get("expected_summary")
 
-        lines = [f"[중요] {symbol} {title}"]
+        prefix = "[모니터링]" if alert_type == "confirm" else "[중요]"
+        lines = [f"{prefix} {symbol} {title}"]
         if direction or price:
             parts = []
             if direction:
@@ -615,7 +616,7 @@ class NotificationDispatcher:
         if plan_id:
             lines.append(f"플랜: {plan_id}")
         if alert_type == "confirm" or cls._safe_bool(payload.get("order_submission_expected"), default=True) is False:
-            lines.append("주문: 제출 아님 | 실제 주문은 LIVE_ORDER_CANDIDATE/진입 발생 기준")
+            lines.append("주문: 제출 아님 | 실제 주문 알림은 라이브 주문 후보/진입 발생 기준")
         return "\n".join(lines)
 
     @classmethod
@@ -665,15 +666,15 @@ class NotificationDispatcher:
         report_path = payload.get("report_path")
 
         title = f"[운영] {symbol} 확인 필요"
-        if str(alert_type or "").strip().lower() == "entry_surface_alert" and "live_order_candidates=" in message:
-            live_count = cls._entry_surface_live_order_count(message)
-            blocked_live_count = cls._entry_surface_count(message, "blocked_live_candidates=")
-            if live_count > 0:
-                title = f"[중요] {symbol} 라이브 주문 후보 확인"
-            elif blocked_live_count > 0:
-                title = f"[주의] {symbol} 라이브 주문 후보 차단"
-            else:
-                title = f"[모니터링] {symbol} 주문 후보 없음"
+        if str(alert_type or "").strip().lower() == "entry_surface_alert":
+            title = cls._entry_surface_operational_title(
+                symbol=symbol,
+                payload=payload,
+                message=message,
+                headline=headline,
+            )
+        elif cls._is_watch_only_no_order_watchdog(alert_type=alert_type, payload=payload):
+            title = f"[모니터링] {symbol} 주문 흐름 관찰"
         elif cls._is_watch_only_ops_heartbeat(summary_lines):
             title = f"[모니터링] {symbol} 운영 관찰"
 
@@ -728,6 +729,13 @@ class NotificationDispatcher:
         return False
 
     @classmethod
+    def _is_watch_only_no_order_watchdog(cls, *, alert_type: str, payload: dict[str, Any]) -> bool:
+        if str(alert_type or "").strip().lower() != "micro_live_no_order_watchdog":
+            return False
+        status = str(payload.get("status") or "").strip().upper()
+        return status == "WATCH"
+
+    @classmethod
     def _entry_surface_live_order_count(cls, message: str) -> int:
         return cls._entry_surface_count(message, "live_order_candidates=")
 
@@ -747,6 +755,69 @@ class NotificationDispatcher:
             if digits:
                 return int("".join(digits))
         return 0
+
+    @classmethod
+    def _entry_surface_operational_title(
+        cls,
+        *,
+        symbol: str,
+        payload: dict[str, Any],
+        message: str,
+        headline: str,
+    ) -> str:
+        live_count = cls._entry_surface_optional_count(
+            payload=payload,
+            message=message,
+            marker="live_order_candidates=",
+            payload_key="live_order_candidates",
+            entry_count_key="LIVE_ORDER_CANDIDATE",
+        )
+        blocked_live_count = cls._entry_surface_optional_count(
+            payload=payload,
+            message=message,
+            marker="blocked_live_candidates=",
+            payload_key="blocked_live_order_candidates",
+            entry_count_key=None,
+        )
+        if live_count is not None or blocked_live_count is not None:
+            if (live_count or 0) > 0:
+                return f"[중요] {symbol} 라이브 주문 후보 확인"
+            if (blocked_live_count or 0) > 0:
+                return f"[주의] {symbol} 라이브 주문 후보 차단"
+            return f"[모니터링] {symbol} 주문 후보 없음"
+        if headline.lower().startswith("trading entry surface alert"):
+            return f"[모니터링] {symbol} 진입 표면 상태"
+        return f"[운영] {symbol} 확인 필요"
+
+    @classmethod
+    def _entry_surface_optional_count(
+        cls,
+        *,
+        payload: dict[str, Any],
+        message: str,
+        marker: str,
+        payload_key: str,
+        entry_count_key: str | None,
+    ) -> int | None:
+        if marker in message:
+            return cls._entry_surface_count(message, marker)
+        value = payload.get(payload_key)
+        if value is None and entry_count_key:
+            entry_counts = payload.get("entry_counts")
+            if isinstance(entry_counts, dict):
+                value = entry_counts.get(entry_count_key)
+        if value is None and entry_count_key:
+            snapshot = payload.get("snapshot")
+            if isinstance(snapshot, dict):
+                counts = snapshot.get("counts")
+                if isinstance(counts, dict):
+                    value = counts.get(entry_count_key)
+        if value is None:
+            return None
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return None
 
     @classmethod
     def _format_discord_test(cls, *, symbol: str, payload: dict[str, Any]) -> str:

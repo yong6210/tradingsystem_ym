@@ -303,6 +303,8 @@ def _augment_no_order_evaluation(
     lookback_opportunity_summary = dict(opportunity.get("lookback_summary") or {})
     active_expected_orders = _safe_int(active_opportunity_summary.get("expected_order_count"))
     lookback_expected_orders = _safe_int(lookback_opportunity_summary.get("expected_order_count"))
+    lookback_pre_restart_orders = _safe_int(lookback_opportunity_summary.get("before_current_runtime_start_count"))
+    lookback_reason_counts = dict(lookback_opportunity_summary.get("reason_counts") or {})
     if active_expected_orders > 0:
         enriched["alert"] = True
         enriched["status"] = "ALERT"
@@ -321,7 +323,42 @@ def _augment_no_order_evaluation(
     no_candidate = dict(context.get("no_candidate_status_counts") or {})
     non_blocking = dict(context.get("non_blocking_status_counts") or {})
     watch = dict(context.get("watch_status_counts") or {})
+    if lookback_expected_orders > 0 and lookback_pre_restart_orders > 0 and not order_blocking:
+        reason_summary = _counts_summary_text(lookback_reason_counts, limit=3)
+        enriched["alert"] = True
+        enriched["status"] = "WATCH"
+        enriched["severity"] = "WARN"
+        enriched["reason"] = "sir_pre_restart_expected_orders_blocked"
+        enriched["candidate_generation_status"] = "pre_restart_backtest_opportunities_blocked"
+        enriched["next_action_text"] = (
+            f"재시작 전 SIR 백테스트조건 후보 {lookback_pre_restart_orders}건이 주문으로 못 감: "
+            f"{reason_summary or 'reason=none'}; 현재 설정으로 다음 fresh 후보 submit_ready 여부 확인"
+        )
+        previous_next_action = str(evaluation.get("next_action_text") or "")
+        current_message = str(enriched.get("message") or "")
+        if previous_next_action and current_message:
+            current_message = current_message.replace(
+                f"actions={previous_next_action}",
+                f"actions={enriched.get('next_action_text')}",
+            )
+        enriched["message"] = (
+            f"{current_message or enriched.get('message')} "
+            f"SIR={enriched.get('candidate_generation_status')} "
+            f"no_candidate={_counts_summary_text(no_candidate, limit=2)} "
+            f"watch={_counts_summary_text(watch, limit=2)} "
+            f"non_blocking={_counts_summary_text(non_blocking, limit=2)} "
+            f"order_blocking={_counts_summary_text(order_blocking, limit=2)} "
+            f"SIR_opportunity=active_expected={active_expected_orders},"
+            f"lookback_expected={lookback_expected_orders},"
+            f"pre_restart={lookback_pre_restart_orders},"
+            f"lookback_reasons={reason_summary or 'none'}"
+        )
+        return enriched
     if order_blocking:
+        enriched["alert"] = True
+        enriched["status"] = "ALERT"
+        enriched["severity"] = "WARN"
+        enriched["reason"] = "sir_runtime_order_blocking_audit_present"
         enriched["candidate_generation_status"] = "order_blocking_audit_present"
         enriched["next_action_text"] = f"SIR runtime audit order_blocking 확인: {_counts_summary_text(order_blocking)}"
     elif no_candidate:
@@ -472,12 +509,26 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
         lookback_summary = dict(opportunity_context.get("lookback_summary") or {})
         active_perf = dict(active_summary.get("potential_performance") or {})
         lookback_perf = dict(lookback_summary.get("potential_performance") or {})
+        pre_restart_count = _safe_int(lookback_summary.get("before_current_runtime_start_count"))
+        lookback_reason_text = _counts_summary_text(dict(lookback_summary.get("reason_counts") or {}), limit=3)
+        pre_restart_text = (
+            f", pre_restart={pre_restart_count}건"
+            if pre_restart_count > 0
+            else ""
+        )
+        reason_text = (
+            f", reasons={lookback_reason_text}"
+            if lookback_reason_text
+            else ""
+        )
         lines.append(
             "백테스트조건: "
             f"runtime_expected={active_summary.get('expected_order_count', 0)}건/"
             f"{active_perf.get('total_r', 0)}R, "
             f"lookback_expected={lookback_summary.get('expected_order_count', 0)}건/"
             f"{lookback_perf.get('total_r', 0)}R"
+            f"{pre_restart_text}"
+            f"{reason_text}"
         )
     lines.extend(
         [
@@ -624,12 +675,15 @@ def main() -> int:
             force=bool(args.force_notify),
         ):
             settings = get_settings()
+            notification_status = str(evaluation.get("status") or "WARN").upper()
+            if str(evaluation.get("severity") or "").upper() == "FAIL":
+                notification_status = "FAIL"
             delivery = NotificationDispatcher(settings).dispatch(
                 channel=str(args.channel),
                 alert_type="micro_live_no_order_watchdog",
                 symbol="MICRO_LIVE",
                 payload={
-                    "status": "WARN",
+                    "status": notification_status,
                     "force_send": True,
                     "message": _watchdog_message(payload),
                     "report_path": payload.get("report_path"),

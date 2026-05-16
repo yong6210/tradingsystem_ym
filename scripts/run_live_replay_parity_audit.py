@@ -494,6 +494,15 @@ def _flow_diagnosis(
     rejected_or_error = _safe_int(summary.get("rejected_or_error_count"))
     entry_fills = _safe_int(summary.get("entry_fill_count"))
     top_reason = next(iter(top_reasons.keys()), "")
+    decision_counts = {
+        str(key or ""): _safe_int(value)
+        for key, value in dict(live_intents.get("by_decision") or {}).items()
+    }
+    non_submit_decision_count = sum(
+        count
+        for decision, count in decision_counts.items()
+        if decision.upper() not in {"SUBMIT_READY", "SUBMITTED", "SUBMIT"}
+    )
 
     if expected <= 0.0:
         stage = "baseline_unavailable"
@@ -515,9 +524,18 @@ def _flow_diagnosis(
         primary_reason = "live_submission_rejected_or_error"
         action = "Binance reject/error payload, minNotional/stepSize/leverage/margin 규칙을 확인"
         summary_ko = "라이브 주문 제출 이후 거래소 reject/error가 발생했습니다."
-    elif intent_count > 0 and blocked >= intent_count and submit_ready <= 0:
+    elif (
+        intent_count > 0
+        and submit_ready <= 0
+        and submissions <= 0
+        and (
+            blocked >= intent_count
+            or bool(top_reasons)
+            or non_submit_decision_count >= intent_count
+        )
+    ):
         stage = "approval_gate_blocked"
-        primary_reason = str(top_reason or "all_recent_live_intents_blocked")
+        primary_reason = str(top_reason or "all_recent_live_intents_not_submit_ready")
         action = "validation_block_detail, rollout/session gate, runtime deployment gate를 확인"
         summary_ko = "신호는 intent까지 왔지만 승인 게이트에서 전부 막혔습니다."
     elif submissions > 0 and entry_fills <= 0:
@@ -549,6 +567,8 @@ def _flow_diagnosis(
         "rejected_or_error": rejected_or_error,
         "entry_fills": entry_fills,
         "top_block_reason": str(top_reason or ""),
+        "decision_counts": decision_counts,
+        "non_submit_decision_count": non_submit_decision_count,
     }
 
 
@@ -690,6 +710,32 @@ def _evaluation_summary(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _surface_runtime_pass_with_lookback_warning(payload: dict[str, Any]) -> dict[str, Any]:
+    """Lift hidden lookback warnings when runtime scope is too short to judge flow."""
+    enriched = dict(payload)
+    evaluation = dict(enriched.get("evaluation") or {})
+    lookback = dict(enriched.get("lookback_evaluation_summary") or {})
+    current_reason = str(evaluation.get("reason") or "")
+    current_status = str(enriched.get("overall_status") or evaluation.get("status") or "")
+    lookback_status = str(lookback.get("status") or "")
+    if (
+        current_status == "PASS"
+        and current_reason in {
+            "runtime_window_below_live_replay_parity_evidence_floor",
+            "portfolio_runtime_window_below_live_replay_parity_evidence_floor",
+        }
+        and lookback_status in {"WATCH", "ALERT"}
+    ):
+        evaluation["status"] = "WATCH"
+        evaluation["reason"] = "runtime_window_thin_but_lookback_flow_warning"
+        evaluation["lookback_status"] = lookback_status
+        evaluation["lookback_reason"] = lookback.get("reason")
+        evaluation["lookback_top_block_reasons"] = lookback.get("top_block_reasons") or {}
+        enriched["overall_status"] = "WATCH"
+        enriched["evaluation"] = evaluation
+    return enriched
+
+
 def build_payload(
     *,
     base_url: str,
@@ -767,6 +813,7 @@ def build_payload(
     else:
         payload["lookback_evaluation_summary"] = {}
         payload["lookback_lifecycle_summary"] = {}
+    payload = _surface_runtime_pass_with_lookback_warning(payload)
     return payload
 
 
@@ -902,6 +949,7 @@ def build_portfolio_payload(
         payload["lookback_evaluation_summary"] = _evaluation_summary(lookback_payload)
     else:
         payload["lookback_evaluation_summary"] = {}
+    payload = _surface_runtime_pass_with_lookback_warning(payload)
     return payload
 
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete
 from sqlalchemy import select
@@ -235,3 +235,65 @@ def test_retry_processor_tolerates_malformed_task_payload(monkeypatch) -> None:
             assert retry_alert.payload["delivery"]["delivered"] is True
     finally:
         settings.alert_discord_webhook_url = old_url
+
+
+def test_retry_processor_expires_stale_queued_alert_without_dispatch() -> None:
+    init_db()
+    NotificationDispatcher.reset_circuit_state()
+    settings = get_settings()
+    old_max_age = settings.alert_retry_queue_max_age_seconds
+
+    try:
+        settings.alert_retry_queue_max_age_seconds = 3600
+        stale_ts = datetime.now(timezone.utc) - timedelta(days=3)
+
+        with SessionLocal() as db:
+            db.execute(delete(AlertSubscription))
+            db.execute(delete(AlertRetryTask))
+            db.add(
+                AlertRetryTask(
+                    task_id="alert_retry_stale_queued_payload",
+                    source_alert_id="source_stale",
+                    dedupe_key="source_stale:discord:discord:webhook",
+                    channel="discord",
+                    symbol="BTCUSDC",
+                    type="validation_warn",
+                    target="discord:webhook",
+                    payload={"message": "stale validation warning"},
+                    status="queued",
+                    attempts=0,
+                    max_attempts=4,
+                    next_retry_ts=stale_ts,
+                    last_reason="http_503",
+                    last_status_code=503,
+                    created_ts=stale_ts,
+                    updated_ts=stale_ts,
+                )
+            )
+            db.commit()
+
+            engine = StrategyEngine(db)
+
+            def _raise_if_dispatched(**_: object) -> dict:
+                raise AssertionError("stale retry task should expire without dispatch")
+
+            engine.alert_retry_queue.dispatcher.dispatch = _raise_if_dispatched  # type: ignore[method-assign]
+
+            processed = engine.process_alert_retry_queue(limit=10)
+
+            assert processed["scanned"] == 1
+            assert processed["expired"] == 1
+            assert processed["delivered"] == 0
+            assert processed["requeued"] == 0
+            assert processed["dead_lettered"] == 0
+
+            row = db.scalar(select(AlertRetryTask).where(AlertRetryTask.task_id == "alert_retry_stale_queued_payload"))
+            assert row is not None
+            assert row.status == "expired"
+            assert row.last_reason == "stale_retry_task_expired"
+            retry_alert = db.scalar(
+                select(AlertSubscription).where(AlertSubscription.alert_id.like("alert_retry_alert_retry_stale%"))
+            )
+            assert retry_alert is None
+    finally:
+        settings.alert_retry_queue_max_age_seconds = old_max_age

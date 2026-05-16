@@ -103,11 +103,42 @@ def test_readiness_script_runtime_scope_keeps_lookback_context(monkeypatch) -> N
     assert calls == [start_at, None]
     assert payload["readiness_scope"] == "runtime_since_ws_start"
     assert payload["runtime_started_at"] == "2026-05-10T01:00:00Z"
+    assert payload["status"] == "PASS"
+    assert payload["overall_status"] == "PASS"
+    assert payload["state"] == "WAIT"
+    assert payload["reason"] == "no_promotable_live_candidate"
+    assert payload["status_detail"] == "live_candidate_promotion_readiness_no_promotable_live_candidate"
+    assert payload["promotion_decision"] == "wait_for_fresh_promotable_candidate"
     assert payload["readiness"]["headline_reason"] == "no_promotable_live_candidate"
     assert payload["lookback_readiness_summary"]["headline_reason"] == "session_impulse_retest_rollout_not_ready"
     assert payload["lookback_readiness_summary"]["top_intent_reasons"] == {
         "session_impulse_retest_rollout_not_ready": 2
     }
+
+
+def test_readiness_script_status_fields_map_headline_states() -> None:
+    assert run_live_candidate_promotion_readiness._status_fields(
+        {
+            "headline_state": "WAIT",
+            "headline_reason": "no_promotable_live_candidate",
+            "promotion_decision": "wait_for_fresh_promotable_candidate",
+            "headline_action": "wait",
+        }
+    ) == {
+        "status": "PASS",
+        "overall_status": "PASS",
+        "state": "WAIT",
+        "reason": "no_promotable_live_candidate",
+        "status_detail": "live_candidate_promotion_readiness_no_promotable_live_candidate",
+        "promotion_decision": "wait_for_fresh_promotable_candidate",
+        "action": "wait",
+    }
+    assert run_live_candidate_promotion_readiness._status_fields(
+        {"headline_state": "BLOCKED", "headline_reason": "validation_do_not_deploy"}
+    )["status"] == "WATCH"
+    assert run_live_candidate_promotion_readiness._status_fields(
+        {"headline_state": "FAIL", "headline_reason": "submit_ready_gap_present"}
+    )["status"] == "FAIL"
 
 
 def test_readiness_keeps_secondary_blockers_visible() -> None:

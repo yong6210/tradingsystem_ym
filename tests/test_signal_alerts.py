@@ -93,8 +93,8 @@ def test_pre_entry_touch_and_confirm_alerts_emit_from_subscriptions(monkeypatch)
         assert summary["confirm"] == 1
         assert summary["emitted_total"] == 2
         assert [row["alert_type"] for row in calls] == ["touch", "confirm"]
-        assert "entry touched:" in calls[0]["payload"]["message"]
-        assert "confirm window open:" in calls[1]["payload"]["message"]
+        assert "signal-only no-order touch:" in calls[0]["payload"]["message"]
+        assert "signal-only no-order confirm:" in calls[1]["payload"]["message"]
         assert calls[0]["payload"]["order_submission_expected"] is False
         assert calls[0]["payload"]["order_truth"] == "pre_entry_signal_only"
         assert calls[1]["payload"]["order_submission_expected"] is False
@@ -236,6 +236,7 @@ def test_session_impulse_retest_confirm_message_uses_prop_manual_format(monkeypa
         assert summary["confirm"] == 1
         assert len(calls) == 1
         message = str(calls[0]["payload"]["message"])
+        assert message.startswith("signal-only no-order confirm:")
         assert "LONG e=100.0000 sl=98.8000 tp1=101.0000 tp2=102.0000" in message
         assert "exp=" in message
 

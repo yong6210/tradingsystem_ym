@@ -6567,12 +6567,12 @@ class StrategyEngine:
             ).strip()
             expiry_text = f"exp={valid_until_text or 'signal_expiry'}"
             if alert_type == "confirm":
-                message = f"{dir_text} {levels_text} {expiry_text}".strip()
+                message = f"signal-only no-order confirm: {dir_text} {levels_text} {expiry_text}".strip()
                 if expected_summary:
                     message = f"{message} | {expected_summary}"
                 return message
             if alert_type == "touch":
-                message = f"{dir_text} watch {levels_text} {expiry_text}".strip()
+                message = f"signal-only no-order touch: {dir_text} watch {levels_text} {expiry_text}".strip()
                 if expected_summary:
                     message = f"{message} | {expected_summary}"
                 return message
@@ -6613,12 +6613,12 @@ class StrategyEngine:
             )
         elif alert_type == "touch":
             message = (
-                f"entry touched: {direction} {entry_model} plan={plan_id} "
+                f"signal-only no-order touch: {direction} {entry_model} plan={plan_id} "
                 f"price={self._fmt_number(event_price)} entry={self._fmt_number(entry_price)}"
             )
         elif alert_type == "confirm":
             message = (
-                f"confirm window open: {direction} {entry_model} plan={plan_id} "
+                f"signal-only no-order confirm: {direction} {entry_model} plan={plan_id} "
                 f"price={self._fmt_number(event_price)} entry={self._fmt_number(entry_price)}"
             )
         elif alert_type == "entry":

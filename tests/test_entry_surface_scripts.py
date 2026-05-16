@@ -328,8 +328,12 @@ def test_main_lock_contention_writes_latest_output_file(monkeypatch, tmp_path, c
 
     payload = json.loads(output_file.read_text(encoding="utf-8"))
     assert exit_code == 0
+    assert payload["generated_at"]
     assert capsys.readouterr().out == ""
     assert payload["reason"] == "entry_surface_tick_already_running"
+    assert payload["status"] == "WATCH"
+    assert payload["overall_status"] == "WATCH"
+    assert payload["status_detail"] == "entry_surface_previous_tick_still_running"
     assert payload["lock_file"] == str(lock_file.resolve())
     assert payload["notified"] is False
 
@@ -601,6 +605,9 @@ def test_main_dry_run_prints_snapshot_without_dispatch(monkeypatch, capsys):
     assert exit_code == 0
     assert payload["notified"] is False
     assert payload["channel"] == "discord"
+    assert payload["status"] == "WATCH"
+    assert payload["overall_status"] == "WATCH"
+    assert payload["status_detail"] == "entry_surface_live_order_candidate_present"
     assert "message" in payload
     assert payload["state_written"] is False
     assert payload["snapshot"]["counts"][notify_entry_surface.LIVE_ORDER_CANDIDATE] == 1
@@ -646,8 +653,12 @@ def test_main_no_alertable_rows_still_emits_rendered_message(monkeypatch, tmp_pa
     payload = json.loads(capsys.readouterr().out)
 
     assert exit_code == 0
+    assert payload["generated_at"]
     assert payload["reason"] == "no_live_order_candidates_context_only_route_mismatch"
     assert payload["legacy_reason"] == "no_alertable_rows"
+    assert payload["status"] == "PASS"
+    assert payload["overall_status"] == "PASS"
+    assert payload["status_detail"] == "entry_surface_context_only_outside_live_route"
     assert payload["notified"] is False
     assert payload["state_written"] is True
     assert payload["live_order_candidates"] == 0
@@ -753,6 +764,7 @@ def test_main_writes_state_after_successful_delivery(monkeypatch, tmp_path, caps
 
     assert exit_code == 0
     assert payload["notified"] is True
+    assert payload["status"] == "WATCH"
     assert payload["state_written"] is True
     assert stored["alert_state"]["counts"][notify_entry_surface.LIVE_ORDER_CANDIDATE] == 1
     assert stored["alert_state_signature"]
@@ -851,6 +863,9 @@ def test_main_emits_request_failure_without_dispatch(monkeypatch, tmp_path, caps
 
     assert exit_code == 0
     assert payload["reason"] == "source_request_failed"
+    assert payload["status"] == "FAIL"
+    assert payload["overall_status"] == "FAIL"
+    assert payload["status_detail"] == "entry_surface_source_request_failed"
     assert payload["notified"] is False
     assert "timed out" in payload["error"]
 

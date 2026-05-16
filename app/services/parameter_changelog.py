@@ -102,6 +102,7 @@ TRACKED_PARAMETER_KEYS = [
     "alert_retry_queue_max_attempts",
     "alert_retry_queue_backoff_seconds",
     "alert_retry_queue_jitter_seconds",
+    "alert_retry_queue_max_age_seconds",
     "alert_slo_target_success_rate",
     "alert_slo_warn_success_rate",
     "alert_slo_max_p95_latency_ms",

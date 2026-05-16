@@ -19,11 +19,20 @@ from app.main import app
 from app.services.lane_tracker import get_execution_lane_tracker, reset_execution_lane_tracker
 from app.services.strategy_engine import StrategyEngine
 from app.services.family_rollout import RolloutPolicyService
+from app.services.family_rollout import RolloutPolicyBootstrap
 from app.services.operating_lock import OperatingLockSnapshot
 from app.services.safety_locks import SafetyLockService
 from app.services.thesis_fingerprint import ThesisFingerprintService
 
 client = TestClient(app)
+
+
+def test_family_rollout_bootstrap_keeps_sweep_reversal_out_of_micro_live_by_default() -> None:
+    policy = RolloutPolicyBootstrap().get("sweep_reversal")
+
+    assert policy.live_enabled is False
+    assert policy.max_execution_mode == ExecutionMode.PAPER
+    assert policy.max_risk_r == 0.0
 
 
 def _reset_execution_control_state() -> None:
@@ -80,6 +89,7 @@ def _apply_auto_trading_defaults(monkeypatch) -> None:
     monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", "")
     monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "")
     monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_sessions", "london,new_york,overlap")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_entry_models", "LIMIT,CONFIRM")
     monkeypatch.setattr(settings, "auto_trading_micro_live_max_concurrent_positions", 5)
     monkeypatch.setattr(settings, "auto_trading_micro_live_max_daily_new_entries", 10)
     monkeypatch.setattr(settings, "auto_trading_reconciliation_user_stream_stale_seconds", 180)
@@ -222,6 +232,9 @@ def test_execution_preview_and_approval_respect_family_rollout(monkeypatch) -> N
 def test_execution_approval_blocks_same_window_family_cluster_for_micro_live(monkeypatch) -> None:
     init_db()
     _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trading_live_family_cluster_window_minutes", 30)
+    monkeypatch.setattr(settings, "auto_trading_live_max_same_family_entries_per_window", 1)
     monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
     monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
     monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)

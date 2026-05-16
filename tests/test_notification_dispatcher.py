@@ -255,6 +255,40 @@ def test_dispatcher_entry_surface_context_only_blocked_title_stays_monitoring() 
     assert "라이브 주문 후보 차단" not in message
 
 
+def test_dispatcher_entry_surface_uses_payload_counts_when_message_counts_are_missing() -> None:
+    message = NotificationDispatcher._format_discord_message(
+        alert_type="entry_surface_alert",
+        symbol="USDC_PERP_TOP30",
+        payload={
+            "live_order_candidates": 0,
+            "blocked_live_order_candidates": 0,
+            "message": (
+                "Trading entry surface alert\n"
+                "scope: USDC_PERP_TOP30"
+            ),
+        },
+    )
+
+    assert message.startswith("[모니터링] USDC_PERP_TOP30 주문 후보 없음")
+    assert "확인 필요" not in message
+
+
+def test_dispatcher_entry_surface_legacy_message_without_counts_is_monitoring() -> None:
+    message = NotificationDispatcher._format_discord_message(
+        alert_type="entry_surface_alert",
+        symbol="USDC_PERP_TOP30",
+        payload={
+            "message": (
+                "Trading entry surface alert\n"
+                "scope: USDC_PERP_TOP30"
+            )
+        },
+    )
+
+    assert message.startswith("[모니터링] USDC_PERP_TOP30 진입 표면 상태")
+    assert "확인 필요" not in message
+
+
 def test_dispatcher_entry_surface_alert_without_entry_counts_uses_operational_title() -> None:
     message = NotificationDispatcher._format_discord_message(
         alert_type="entry_surface_alert",
@@ -286,6 +320,24 @@ def test_dispatcher_micro_live_no_order_watchdog_uses_operational_title() -> Non
 
     assert message.startswith("[운영] MICRO_LIVE 확인 필요")
     assert "주문 후보 없음" not in message
+
+
+def test_dispatcher_micro_live_no_order_watchdog_watch_title_is_monitoring() -> None:
+    message = NotificationDispatcher._format_discord_message(
+        alert_type="micro_live_no_order_watchdog",
+        symbol="MICRO_LIVE",
+        payload={
+            "status": "WATCH",
+            "message": (
+                "MICRO_LIVE 주문 없음\n"
+                "런타임 재시작 이후: intent 0건 / 제출 0건\n"
+                "백테스트조건: runtime_expected=0건, lookback_expected=12건, pre_restart=12건"
+            ),
+        },
+    )
+
+    assert message.startswith("[모니터링] MICRO_LIVE 주문 흐름 관찰")
+    assert "확인 필요" not in message
 
 
 def test_dispatcher_operational_watchdog_types_are_not_low_importance_suppressed() -> None:
@@ -332,9 +384,10 @@ def test_dispatcher_confirm_signal_is_labeled_as_non_order_signal() -> None:
         },
     )
 
-    assert message.startswith("[중요] BTCUSDC 조건 확인 신호(주문 아님)")
+    assert message.startswith("[모니터링] BTCUSDC 주문 전 관찰 알림(주문 아님)")
     assert "주문: 제출 아님" in message
     assert "진입 확인 신호" not in message
+    assert "[중요]" not in message
 
 
 def test_dispatcher_partial_exit_and_sl_are_trade_alerts_not_suppressed() -> None:

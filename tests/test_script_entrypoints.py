@@ -179,6 +179,74 @@ def test_worker_safe_int_tolerates_malformed_heartbeat_stats() -> None:
     assert run_worker._safe_int("3") == 3
 
 
+def test_worker_loop_log_compaction_omits_full_universe_results() -> None:
+    payload = {
+        "ts": "2026-05-16T04:00:00+00:00",
+        "actions": [
+            {
+                "sync_universe": {
+                    "universe": "usdc_perp_top30",
+                    "requested_symbols": 2,
+                    "processed_symbols": 2,
+                    "success": 2,
+                    "failed": 0,
+                    "results": [
+                        {
+                            "symbol": "BTCUSDC",
+                            "status": "ok",
+                            "refresh": {
+                                "session_impulse_retest_generated_count": 1,
+                                "session_impulse_retest_generation_state": "generated",
+                                "signal_alerts": {"emitted_total": 2},
+                            },
+                            "auto_route": {
+                                "reason": "no_live_route_candidate_plan",
+                                "submit_calls": 0,
+                                "intents_created": 0,
+                            },
+                        },
+                        {
+                            "symbol": "ETHUSDC",
+                            "status": "ok",
+                            "refresh": {
+                                "session_impulse_retest_generated_count": 0,
+                                "session_impulse_retest_generation_state": "no_fresh_candidates",
+                            },
+                            "auto_route": {
+                                "reason": "ws_stream_active_route_suppressed",
+                                "submit_calls": 1,
+                                "intents_created": 1,
+                            },
+                        },
+                    ],
+                    "session_impulse_retest_miss_detector": {
+                        "enabled": True,
+                        "expected_trade_count": 1,
+                        "runtime_observed_count": 1,
+                        "miss_count": 0,
+                        "runtime_started_at": "2026-05-16T03:40:50Z",
+                    },
+                }
+            }
+        ],
+        "outbox": {"counts": {"published": 1}},
+    }
+
+    compact = run_worker._compact_worker_log_payload(payload)
+    sync = compact["actions"][0]["sync_universe"]
+
+    assert "results" not in sync
+    assert sync["result_count"] == 2
+    assert sync["session_impulse_retest_generated_count"] == 1
+    assert sync["signal_alerts_emitted"] == 2
+    assert sync["auto_route_submit_calls"] == 1
+    assert sync["auto_route_reason_counts"] == {
+        "no_live_route_candidate_plan": 1,
+        "ws_stream_active_route_suppressed": 1,
+    }
+    assert sync["session_impulse_retest_miss_detector"]["miss_count"] == 0
+
+
 def test_session_impulse_retest_opportunity_report_performance_uses_configured_risk() -> None:
     rows = [{"r_value": 1.0}, {"r_value": -0.5}, {"r_value": 2.0}]
 

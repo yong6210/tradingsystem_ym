@@ -6180,3 +6180,369 @@
   - daily operations: `docs/AUTO_TRADING_OPERATING_RUNBOOK.md`
   - go-live checklist: `docs/AUTO_TRADING_LIVE_GO_LIVE_CHECKLIST.md`
   - historical trace: `docs/SELF_CHECK_LOG.md`
+
+## 2026-05-16 Iteration #220
+### no-order 모순 감사: 재시작 전 차단 이력과 현재 후보 없음 분리
+- 요청:
+  - 주문이 계속 0건인 상태에서 current/runtime/log/report를 끝까지 다시 보고, 모순이나 이상한 부분을 찾는다.
+- 확인한 현재 상태:
+  - runtime started at `2026-05-15T18:31:49.804083Z` (`2026-05-16 03:31:49 KST`)
+  - live contract: `session_impulse_retest + CONFIRM + 11 core USDC symbols + dead_session/london/new_york`
+  - runtime guard: `PASS`, blocking/warning failure `0`
+  - current runtime SIR lifecycle: `live_intents=0`, `submit_ready=0`, `submissions=0`
+  - therefore current window has no exchange submit failure yet; the immediate state is fresh live-route candidate wait.
+- 발견한 모순/이상점:
+  - no-order watchdog이 current runtime candidate가 0이면 clean wait처럼 보였고, 재시작 전 lookback의 missed/blocked opportunity를 headline으로 충분히 올리지 못했다.
+  - live replay parity가 current runtime evidence floor 때문에 top-level `PASS`가 될 수 있었고, 같은 payload의 lookback summary가 `WATCH/ALERT`인 상태와 충돌해 보였다.
+  - `family_rollout` bootstrap default에서 legacy `sweep_reversal`이 `MICRO_LIVE` live-enabled로 열릴 수 있는 과거 기본값이 남아 있었다. 현재 DB/env는 막고 있지만, DB reset/missing 시 안전하지 않은 default였다.
+- 수정:
+  - `scripts/run_micro_live_no_order_watchdog.py`
+    - current runtime 후보가 0이어도 lookback expected SIR orders가 있고 모두 재시작 전 차단/skip이면 `sir_pre_restart_expected_orders_blocked` WARN/ALERT로 올린다.
+    - message에 `pre_restart`, `lookback_reasons`, `active_expected`, `lookback_expected`를 직접 남긴다.
+    - current runtime의 `order_blocking_status_counts`가 있으면 `sir_runtime_order_blocking_audit_present` WARN/ALERT로 올리고, 과거 pre-restart context보다 현재 차단을 우선 headline으로 유지한다.
+  - `scripts/run_live_replay_parity_audit.py`
+    - runtime window가 thin해서 `PASS`여도 lookback summary가 `WATCH/ALERT`이면 top-level을 `WATCH`로 올리고 `runtime_window_thin_but_lookback_flow_warning`을 남긴다.
+  - `app/services/family_rollout.py`
+    - bootstrap `sweep_reversal` 기본값을 `live_enabled=false`, `max_execution_mode=PAPER`, `max_risk_r=0.0`으로 낮췄다.
+  - 문서:
+    - `docs/MICRO_LIVE_CURRENT_STATE.md`에 current no-order interpretation을 추가했다.
+    - `docs/AUTO_TRADING_OPERATING_RUNBOOK.md`에 entry surface/no-order 해석 규칙을 추가했다.
+- runtime 반영:
+  - 수정 파일을 `/Users/yumin/Library/Application Support/trading/runtime_src`로 동기화했다.
+  - 3일 watchdog no-write 검증:
+    - status `ALERT`, severity `WARN`
+    - reason `sir_pre_restart_expected_orders_blocked`
+    - current runtime expected `0`, lookback expected `1`, pre-restart `1`
+    - reason `session_impulse_retest_rollout_not_ready=1`
+  - 7일 watchdog 검증:
+    - lookback expected SIR orders `12`
+    - reasons: `session_impulse_retest_rollout_not_ready=6`, `rollout_session_not_allowed=5`, `validation_do_not_deploy=1`
+    - potential replay result: `8W/4L`, `+6.612254R`
+  - 3일 live replay parity no-write 검증:
+    - top-level `overall_status=WATCH`
+    - reason `runtime_window_thin_but_lookback_flow_warning`
+    - lookback status `WATCH`
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_micro_live_operational_guards.py::test_no_order_watchdog_warns_when_pre_restart_opportunities_were_blocked tests/test_micro_live_operational_guards.py::test_no_order_watchdog_prioritizes_current_order_blocking_over_pre_restart_context tests/test_micro_live_operational_guards.py::test_no_order_watchdog_message_includes_pre_restart_opportunity_context tests/test_micro_live_operational_guards.py::test_live_replay_parity_portfolio_runtime_scope_keeps_lookback_context tests/test_execution_transition.py::test_family_rollout_bootstrap_keeps_sweep_reversal_out_of_micro_live_by_default tests/test_execution_transition.py::test_execution_preview_and_approval_respect_family_rollout tests/test_notification_dispatcher.py::test_dispatcher_entry_surface_context_only_title_is_monitoring -q`
+  - `7 passed`
+  - `./.venv/bin/python -m pytest tests/test_micro_live_operational_guards.py tests/test_execution_transition.py tests/test_notification_dispatcher.py -q`
+  - `159 passed`
+  - `git diff --check`
+  - pass
+
+## 2026-05-16 Iteration #221
+### 알림 오해 방지: entry surface legacy payload 제목 보강
+- 발견:
+  - 현재 `notify_entry_surface.py`가 만드는 message는 `live_order_candidates`, `blocked_live_candidates`를 포함하고 있어 정상적으로 `[모니터링] ... 주문 후보 없음`으로 표시된다.
+  - 다만 dispatcher는 message 문자열 안에 `live_order_candidates=`가 없으면 top-level `live_order_candidates` / `blocked_live_order_candidates` / `entry_counts`를 보지 않았다.
+  - 따라서 과거 형식 또는 부분 payload가 `entry_surface_alert`로 들어오면 `Trading entry surface alert`인데도 제목이 `[운영] ... 확인 필요`로 보일 수 있었다.
+- 수정:
+  - `app/services/notification_dispatcher.py`
+    - entry surface alert 제목 판정이 message marker뿐 아니라 top-level count와 `entry_counts` / `snapshot.counts`를 fallback으로 읽는다.
+    - count가 전혀 없는 legacy `Trading entry surface alert`는 `[모니터링] ... 진입 표면 상태`로 표시한다.
+    - watchdog/ops/reconciliation처럼 entry surface가 아닌 운영 메시지가 실수로 `entry_surface_alert` 타입으로 들어와도 headline이 entry surface가 아니면 기존 `[운영] ... 확인 필요`를 유지한다.
+- runtime 반영:
+  - workspace `app/services/notification_dispatcher.py`를 runtime_src에 동기화했다.
+  - 현재 runtime entry surface latest:
+    - `live_order_candidates=0`
+    - `blocked_live_order_candidates=0`
+    - `operator_action.state=context_only_outside_live_route`
+    - `notified=false`
+  - launchd stderr 로그:
+    - no-order/watchdog, live-replay-parity, entry-surface, ops-heartbeat 모두 `0` bytes
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_notification_dispatcher.py tests/test_entry_surface_scripts.py tests/test_micro_live_operational_guards.py -q`
+  - `129 passed`
+  - `./.venv/bin/python -m pytest tests/test_micro_live_operational_guards.py tests/test_execution_transition.py tests/test_notification_dispatcher.py tests/test_entry_surface_scripts.py -q`
+  - `182 passed`
+  - `./.venv/bin/python -m py_compile app/services/notification_dispatcher.py`
+  - pass
+
+## 2026-05-16 Iteration #222
+### 알림 오해 방지: confirm subscription을 주문 전 관찰 알림으로 낮춤
+- 발견:
+  - 재시작 이후 주문 intent/submission/fill은 0건이지만, `alerts` 테이블에는 `legacy_zone_plan`의 `confirm` subscription alert가 새로 남아 있었다.
+  - payload에는 이미 `order_submission_expected=false`, `order_truth=pre_entry_signal_only`가 있었지만, 원문 message가 `confirm window open` 형태라 사용자가 “진입 확인신호인데 주문이 안 들어감”으로 읽기 쉬웠다.
+  - Discord 제목도 `조건 확인 신호(주문 아님)`이어서 `주문 아님`은 들어가지만, `[중요]`와 `확인 신호` 표현이 운영상 혼선을 만들 수 있었다.
+- 수정:
+  - `app/services/notification_dispatcher.py`
+    - `confirm` Discord 제목을 `[모니터링] ... 주문 전 관찰 알림(주문 아님)`으로 낮췄다.
+    - confirm 알림은 `[중요]`를 쓰지 않는다.
+    - 주문 라인은 `주문: 제출 아님 | 실제 주문 알림은 라이브 주문 후보/진입 발생 기준`으로 바꿨다.
+  - `app/services/strategy_engine.py`
+    - pre-entry `touch/confirm` 원본 message를 `signal-only no-order ...`로 시작하게 바꿨다.
+    - `session_impulse_retest` 전용 confirm/touch 원문도 같은 no-order prefix를 붙인다.
+  - 문서:
+    - `docs/AUTO_TRADING_OPERATING_RUNBOOK.md`와 `docs/MICRO_LIVE_CURRENT_STATE.md`에 confirm subscription은 주문 truth가 아니라는 해석 규칙을 갱신했다.
+    - `launchctl kickstart`는 `runtime-stack` watchdog wrapper만 다시 시작하고, 이미 ready인 내부 `uvicorn`/worker는 그대로 둘 수 있다는 운영 주의사항을 runbook에 추가했다.
+- runtime 반영:
+  - workspace 변경 파일을 `/Users/yumin/Library/Application Support/trading/runtime_src`에 동기화했다.
+  - 처음 `launchctl kickstart -k gui/$(id -u)/com.yumin.trading.runtime-stack`를 실행했을 때 wrapper만 새로 뜨고 기존 `uvicorn`/worker PID가 유지되는 것을 확인했다.
+  - 이후 `/Users/yumin/Library/Application Support/trading/runtime_src/scripts/restart_runtime_stack_tmp.sh`를 실행해 실제 API/loop/ws worker를 새 PID로 교체했다.
+  - `/health/ready`는 최종 `ready`로 복구됐고, `check_runtime_stack.sh` 기준 live route diagnosis는 `WAIT/no_fresh_live_signal`이다.
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_notification_dispatcher.py tests/test_signal_alerts.py -q`
+  - `31 passed`
+  - `./.venv/bin/python -m pytest tests/test_micro_live_operational_guards.py tests/test_execution_transition.py tests/test_notification_dispatcher.py tests/test_entry_surface_scripts.py tests/test_signal_alerts.py -q`
+  - `189 passed`
+  - `./.venv/bin/python -m py_compile app/services/notification_dispatcher.py app/services/strategy_engine.py`
+  - pass
+  - `./scripts/check_runtime_stack.sh`
+  - pass
+
+## 2026-05-16 Iteration #223
+### 운영 해석 보강: intent 빈도 PASS와 주문 제출 가능 PASS를 분리
+- 발견:
+  - `run_live_replay_parity_audit.py --days 7`에서 BTCUSDC lookback은 replay 기대 빈도 대비 live intent 빈도가 충분하다는 이유로 `PASS/live_flow_within_replay_baseline`가 될 수 있었다.
+  - 하지만 해당 intent 4건은 모두 `APPROVED_SHADOW / SKIP_SHADOW_ONLY`였고, `requested_live_count=0`, `submission_count=0`이었다.
+  - 주문 관점에서는 “flow 빈도는 충분하지만 전부 제출 불가”이므로 PASS로만 보이면 사용자가 “정상인데 왜 주문 0건?”으로 오해할 수 있다.
+  - no-order watchdog도 재시작 전 missed opportunity context를 `ALERT/WARN`으로 표시해 현재 submit 장애처럼 보일 수 있었다.
+- 수정:
+  - `scripts/run_live_replay_parity_audit.py`
+    - `blocked=0`이어도 `top_block_reasons`가 있고 `submit_ready=0`, `submission_count=0`이면 `approval_gate_blocked`로 본다.
+    - `by_decision=SKIP_SHADOW_ONLY` 같은 non-submit decision이 intent 전체를 차지해도 `approval_gate_blocked`로 본다.
+    - 따라서 lookback intent 빈도는 충분해도 실제 주문 제출 가능성이 0이면 `WATCH`로 표시한다.
+  - `scripts/run_micro_live_no_order_watchdog.py`
+    - 현재 runtime 이후 기대 후보가 아니라 재시작 전 missed opportunity만 있는 경우 `sir_pre_restart_expected_orders_blocked`를 `WATCH/WARN`으로 낮췄다.
+  - 문서:
+    - `docs/MICRO_LIVE_CURRENT_STATE.md`와 `docs/AUTO_TRADING_OPERATING_RUNBOOK.md`에 `intent flow`와 `order-submittable flow`를 분리해서 해석하도록 갱신했다.
+- runtime 반영:
+  - 두 스크립트를 `/Users/yumin/Library/Application Support/trading/runtime_src/scripts/`에 동기화했다.
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_micro_live_operational_guards.py::test_live_replay_parity_marks_shadow_only_intent_flow_as_watch_even_when_blocked_count_zero tests/test_micro_live_operational_guards.py::test_live_replay_parity_marks_sufficient_intent_flow_but_blocked_orders_as_watch tests/test_micro_live_operational_guards.py::test_live_replay_parity_portfolio_runtime_scope_keeps_lookback_context -q`
+  - `3 passed`
+  - `./.venv/bin/python -m pytest tests/test_micro_live_operational_guards.py::test_no_order_watchdog_warns_when_pre_restart_opportunities_were_blocked tests/test_micro_live_operational_guards.py::test_no_order_watchdog_alerts_when_backtest_opportunity_has_no_live_intent tests/test_micro_live_operational_guards.py::test_no_order_watchdog_prioritizes_current_order_blocking_over_pre_restart_context tests/test_micro_live_operational_guards.py::test_live_replay_parity_marks_shadow_only_intent_flow_as_watch_even_when_blocked_count_zero -q`
+  - `4 passed`
+  - `./.venv/bin/python -m py_compile scripts/run_micro_live_no_order_watchdog.py scripts/run_live_replay_parity_audit.py`
+  - pass
+  - live replay parity no-write:
+    - `overall_status=WATCH`
+    - `reason=runtime_window_thin_but_lookback_flow_warning`
+    - `lookback_evaluation_summary.status=WATCH`
+    - `lookback_reason=session_impulse_retest_rollout_not_ready`
+  - no-order watchdog no-write:
+    - `status=WATCH`
+    - `severity=WARN`
+    - `reason=sir_pre_restart_expected_orders_blocked`
+
+## 2026-05-16 Iteration #224
+### 알림/문서 마감 감사: WATCH-only no-order를 확인 필요에서 관찰로 낮춤
+- 발견:
+  - Iteration #223 이후 no-order watchdog은 재시작 전 missed opportunity만 남은 경우 `WATCH/WARN`으로 낮아졌지만, Discord 제목은 여전히 기본 운영 제목인 `[운영] MICRO_LIVE 확인 필요`가 될 수 있었다.
+  - 이 상태는 현재 submit 장애가 아닌데도 사용자가 “지금 당장 봐야 하는 주문 실패”로 읽을 수 있는 마지막 알림 표현 빈틈이었다.
+  - `docs/MICRO_LIVE_CURRENT_STATE.md`의 최신 runtime restart 시각도 현재 관측값과 맞지 않았다.
+- 수정:
+  - `app/services/notification_dispatcher.py`
+    - `micro_live_no_order_watchdog` payload status가 `WATCH`이면 제목을 `[모니터링] MICRO_LIVE 주문 흐름 관찰`로 표시한다.
+  - `scripts/run_micro_live_no_order_watchdog.py`
+    - 알림 payload status를 고정 `WARN`이 아니라 실제 evaluation status로 보낸다.
+    - severity가 `FAIL`이면 status를 `FAIL`로 보낸다.
+  - 문서:
+    - `docs/MICRO_LIVE_CURRENT_STATE.md`의 최신 runtime restart 관측 시각을 `2026-05-16 12:40:50 KST` / `2026-05-16T03:40:50Z`로 고쳤다.
+    - no-order `WATCH` 알림은 확인 필요가 아니라 주문 흐름 관찰로 읽도록 문서화했다.
+    - entry surface legacy payload는 확인 필요가 아니라 monitoring state로 읽도록 runbook 문구를 정리했다.
+- runtime 반영:
+  - `app/services/notification_dispatcher.py`, `scripts/run_micro_live_no_order_watchdog.py`, `scripts/run_live_replay_parity_audit.py`, `app/services/strategy_engine.py`, `app/services/family_rollout.py`가 workspace와 runtime_src에서 동일함을 `cmp`로 확인했다.
+- 현재 runtime 확인:
+  - API/loop/ws worker ready.
+  - WS worker `started_at=2026-05-16T03:40:50.148468Z`.
+  - runtime 이후 `order_intents=0`, `order_submissions=0`, `binance_order_ledger=0`, `execution_fills=0`, `alerts=0`.
+  - `check_runtime_stack.sh` 기준 `live_route_diagnosis=WAIT/no_fresh_live_signal`.
+  - 현재 runtime miss detector: `expected_trade_count=0`, `runtime_observed_count=0`, `miss_count=0`.
+  - 현재 no-order latest: `WATCH/WARN`, `reason=sir_pre_restart_expected_orders_blocked`.
+  - 현재 live replay parity latest: `WATCH`, `reason=runtime_window_thin_but_lookback_flow_warning`; lookback은 `ALERT`지만 current runtime window는 evidence floor 미만이다.
+  - ops heartbeat no-write: hard failure `0`, warnings `2` (`no_order_watchdog`, `live_replay_parity`).
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_notification_dispatcher.py::test_dispatcher_micro_live_no_order_watchdog_uses_operational_title tests/test_notification_dispatcher.py::test_dispatcher_micro_live_no_order_watchdog_watch_title_is_monitoring tests/test_micro_live_operational_guards.py::test_no_order_watchdog_main_does_not_record_cooldown_when_delivery_fails -q`
+  - `3 passed`
+  - `./.venv/bin/python -m pytest tests/test_micro_live_operational_guards.py tests/test_execution_transition.py tests/test_notification_dispatcher.py tests/test_entry_surface_scripts.py tests/test_signal_alerts.py -q`
+  - `191 passed`
+  - `./scripts/check_runtime_stack.sh`
+  - pass
+  - `git diff --check`
+  - pass
+
+## 2026-05-16 Iteration #225
+### 오래된 알림 retry queue 만료 처리
+- 발견:
+  - `alert_retry_queue`에 오래된 queued 항목 13건이 남아 있었다.
+  - 내역:
+    - `validation_warn` 9건
+    - `session_impulse_retest_miss` 3건
+    - `test` 1건
+  - 생성 시각은 `2026-03-28`부터 `2026-05-10`까지였고, 원인은 `http_429`, `http_503`, `exception:*`, `discord_not_configured`였다.
+  - 기존 `process_alert_retry_queue.py`는 queued 항목이 due이면 나이를 보지 않고 다시 dispatch할 수 있었다. 즉 며칠 전 경고가 지금 다시 전송되어 현재 주문 문제처럼 보일 수 있는 운영 혼선 위험이 있었다.
+- 수정:
+  - `app/core/config.py`
+    - `alert_retry_queue_max_age_seconds=86400` 기본값 추가.
+  - `app/services/alert_retry_queue.py`
+    - queued task의 `updated_ts/created_ts`가 max age를 넘으면 dispatch하지 않고 `expired`로 닫는다.
+    - 처리 결과에 `expired` 카운트를 추가한다.
+    - status snapshot의 `retry_policy`에 `max_age_seconds`를 표시한다.
+  - `app/db/repositories.py`
+    - `mark_expired()` 추가.
+  - `app/schemas/api.py`
+    - retry queue process 응답에 `expired` 필드를 추가.
+  - `app/services/alert_metrics.py`, `app/services/parameter_changelog.py`
+    - retry queue max age를 metric/policy/changelog 표면에 노출.
+  - `tests/test_alert_retry_queue.py`
+    - stale queued task가 dispatch 없이 `expired/stale_retry_task_expired`로 닫히는 회귀 테스트 추가.
+  - `docs/AUTO_TRADING_OPERATING_RUNBOOK.md`
+    - retry queue TTL 운영 규칙 문서화.
+- runtime 반영:
+  - 수정 파일을 runtime_src에 동기화했고 py_compile을 통과했다.
+  - 잘못된 중첩 복사 경로 `/runtime_src/app/app`은 제거했다.
+  - runtime_src에서 `scripts/process_alert_retry_queue.py --limit 100` 실행:
+    - `scanned=13`
+    - `expired=13`
+    - `delivered=0`
+    - `requeued=0`
+    - `dead_lettered=0`
+  - DB 확인:
+    - queued retry task `0`
+    - expired retry task `13`
+    - sample reason `stale_retry_task_expired`
+  - heartbeat 재실행:
+    - hard failure `0`
+    - warnings `2`: `no_order_watchdog=sir_pre_restart_expected_orders_blocked`, `live_replay_parity=runtime_window_thin_but_lookback_flow_warning`
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_alert_retry_queue.py -q`
+  - `5 passed`
+  - `./.venv/bin/python -m pytest tests/test_api_smoke.py::test_health_and_bootstrap_flow -q`
+  - `1 passed`
+  - `./.venv/bin/python -m pytest tests/test_notification_dispatcher.py tests/test_micro_live_operational_guards.py -q`
+  - `110 passed`
+  - `./.venv/bin/python -m pytest tests/test_alert_retry_queue.py tests/test_api_smoke.py::test_health_and_bootstrap_flow tests/test_notification_dispatcher.py tests/test_micro_live_operational_guards.py tests/test_operational_checklist.py -q`
+  - `127 passed`
+  - `./.venv/bin/python -m py_compile app/services/alert_retry_queue.py app/db/repositories.py app/core/config.py app/services/alert_metrics.py app/schemas/api.py scripts/process_alert_retry_queue.py`
+  - pass
+  - `git diff --check`
+  - pass
+
+## 2026-05-16 Iteration #226
+### loop worker 로그 비대화 방지
+- 발견:
+  - `trading_worker_loop.log`는 loop worker가 매 분 `sync_universe` 전체 결과를 stdout에 그대로 출력해 빠르게 커질 수 있었다.
+  - 실제 로그 디렉터리에는 과거 rotation 파일 `trading_worker_loop.log.1=160M`, `trading_worker_loop.log.2=652M`가 남아 있었다.
+  - 현재 주문 장애 원인은 아니지만, 장기 실행 시 디스크/가독성/운영 속도에 불필요한 부담을 줄 수 있는 부분이었다.
+- 수정:
+  - `scripts/run_worker.py`
+    - loop mode 반복 출력에 `_compact_worker_log_payload()`를 적용했다.
+    - `sync_universe.results` 전체를 출력하지 않고 아래 요약만 남긴다:
+      - processed/success/failed/result_count
+      - worker status counts
+      - `session_impulse_retest` generated count/state counts
+      - signal alert emitted count
+      - auto-route submit/intents count
+      - auto-route reason counts
+      - miss detector 핵심 count
+    - `once` mode와 WS 종료 payload는 기존 동작을 유지한다.
+  - `tests/test_script_entrypoints.py`
+    - full `results`가 loop log compact payload에 남지 않는 회귀 테스트 추가.
+- runtime 반영:
+  - workspace `scripts/run_worker.py`를 runtime_src에 동기화했다.
+  - runtime stack을 `2026-05-16T04:00:13Z`에 재시작했다.
+  - `/health/ready` 통과.
+  - 새 loop log는 compact 형태로 출력됨을 확인했다:
+    - `result_count=30`
+    - `session_impulse_retest_generation_state_counts={'no_fresh_candidates': 30}`
+    - `auto_route_reason_counts={'ws_stream_active_route_suppressed': 30}`
+    - full `results` 없음
+- 현재 runtime 확인:
+  - `check_runtime_stack.sh` 통과.
+  - WS worker `started_at=2026-05-16T04:00:13.265317Z`.
+  - live route diagnosis: `WAIT/no_fresh_live_signal`.
+  - runtime 이후 submissions/requested_live/intents: `0`.
+  - miss detector: `expected_trade_count=0`, `runtime_observed_count=0`, `miss_count=0`.
+  - no-order latest: `WATCH/sir_pre_restart_expected_orders_blocked`.
+  - live replay parity latest: `WATCH/runtime_window_thin_but_lookback_flow_warning`.
+  - ops heartbeat latest: hard failure `0`, warnings `2`.
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_script_entrypoints.py::test_worker_loop_log_compaction_omits_full_universe_results tests/test_script_entrypoints.py::test_worker_safe_int_tolerates_malformed_heartbeat_stats tests/test_run_worker_boot_check.py -q`
+  - `3 passed`
+  - `./.venv/bin/python -m py_compile scripts/run_worker.py`
+  - pass
+  - runtime_src `scripts/run_worker.py` py_compile pass
+  - final related bundle:
+    - `./.venv/bin/python -m pytest tests/test_micro_live_operational_guards.py tests/test_execution_transition.py tests/test_notification_dispatcher.py tests/test_entry_surface_scripts.py tests/test_signal_alerts.py tests/test_alert_retry_queue.py tests/test_script_entrypoints.py::test_worker_loop_log_compaction_omits_full_universe_results tests/test_run_worker_boot_check.py -q`
+    - `198 passed`
+
+## 2026-05-16 Iteration #227
+### entry surface latest JSON top-level timestamp 보강
+- 발견:
+  - `reports/operations/entry_surface/latest_entry_alert_run.json`에는 `snapshot.generated_at`은 있었지만 top-level `generated_at`이 없었다.
+  - 기능상 장애는 아니지만, no-order/parity/heartbeat처럼 top-level 시각을 읽는 운영 리포트와 형태가 달라 수동 비교 때 혼선을 만들 수 있었다.
+- 수정:
+  - `scripts/notify_entry_surface.py`
+    - lock contention, source request failure, 정상 result 모두 top-level `generated_at`을 포함한다.
+  - `tests/test_entry_surface_scripts.py`
+    - lock contention result와 no-alertable result에 `generated_at`이 있는지 검증한다.
+- runtime 반영:
+  - runtime_src `scripts/notify_entry_surface.py`와 workspace 파일 일치를 확인했다.
+  - runtime_src에서 `notify_entry_surface.py --quiet --output-file reports/operations/entry_surface/latest_entry_alert_run.json`를 실행해 latest 파일을 새 형식으로 갱신했다.
+  - latest entry surface:
+    - `generated_at=2026-05-16T04:05:11.562535+00:00`
+    - `reason=no_live_order_candidates_context_only_route_mismatch`
+    - `live_order_candidates=0`
+    - `operator_action_summary.state=context_only_outside_live_route`
+  - ops heartbeat 갱신:
+    - entry_surface `PASS`
+    - hard failure `0`
+    - warnings `2`
+- 검증:
+  - `./.venv/bin/python -m pytest tests/test_entry_surface_scripts.py::test_main_lock_contention_writes_latest_output_file tests/test_entry_surface_scripts.py::test_main_no_alertable_rows_still_emits_rendered_message -q`
+  - `2 passed`
+  - `./.venv/bin/python -m pytest tests/test_entry_surface_scripts.py -q`
+  - `21 passed`
+  - `./.venv/bin/python -m py_compile scripts/notify_entry_surface.py`
+  - pass
+  - runtime_src `scripts/notify_entry_surface.py` py_compile pass
+
+## 2026-05-16 Iteration #228
+### 운영 리포트 상태 키 표준화
+- 발견:
+  - `entry_surface/latest_entry_alert_run.json`은 heartbeat가 내부적으로 `PASS/WATCH/FAIL`을 재계산했지만, 파일 자체에는 top-level `status/overall_status/status_detail`이 없어 다른 수동 감사에서 상태 없는 리포트처럼 보일 수 있었다.
+  - `live_candidate_promotion_readiness/latest.json`은 주문 truth로 계속 읽히는 리포트인데 top-level에는 `readiness.headline_state`만 있고 표준 `status`가 없었다.
+- 수정:
+  - `scripts/notify_entry_surface.py`
+    - 정상 result에 top-level `status/overall_status/status_detail`을 추가했다.
+    - `live_order_candidate_present`/`live_order_candidate_blocked`는 `WATCH`, context-only/no-surface 정상 대기는 `PASS`로 저장한다.
+    - lock contention은 `WATCH`, source request failure는 `FAIL`로 저장한다.
+  - `scripts/run_micro_live_ops_heartbeat.py`
+    - entry surface payload에 top-level status가 있으면 이를 존중한다.
+    - status가 없는 구형 payload는 operator action으로 `PASS/WATCH`를 보수적으로 유도한다.
+  - `scripts/run_live_candidate_promotion_readiness.py`
+    - latest JSON/markdown에 top-level `status/overall_status/state/reason/status_detail/promotion_decision/action`을 추가했다.
+    - `WAIT`은 `PASS`, `BLOCKED/WATCH`는 `WATCH`, `FAIL`은 `FAIL`로 매핑한다.
+  - 문서:
+    - `MICRO_LIVE_CURRENT_STATE.md`, `AUTO_TRADING_OPERATING_RUNBOOK.md`, `LIVE_CANDIDATE_READINESS_CONTRACT.md`에 status 해석을 반영했다.
+- runtime 반영:
+  - `notify_entry_surface.py`, `run_micro_live_ops_heartbeat.py`, `run_live_candidate_promotion_readiness.py`를 runtime_src에 동기화했다.
+  - runtime entry surface latest:
+    - `status=PASS`
+    - `reason=no_live_order_candidates_context_only_route_mismatch`
+    - `live_order_candidates=0`
+    - `blocked_live_order_candidates=0`
+  - runtime live candidate promotion readiness latest:
+    - `status=PASS`
+    - `state=WAIT`
+    - `reason=no_promotable_live_candidate`
+  - runtime ops heartbeat latest:
+    - `overall_status=WATCH`
+    - hard failure `0`
+    - warnings `2`: `no_order_watchdog=sir_pre_restart_expected_orders_blocked`, `live_replay_parity=runtime_window_thin_but_lookback_flow_warning`
+  - `check_runtime_stack.sh` 통과:
+    - `/health/ready=ready`
+    - live route diagnosis `WAIT/no_fresh_live_signal`
+    - runtime 이후 `intents=0`, `submissions=0`
+    - miss detector `expected_trade_count=0`, `miss_count=0`
+- 검증:
+  - `./.venv/bin/pytest -q tests/test_entry_surface_scripts.py tests/test_micro_live_operational_guards.py::test_ops_heartbeat_checks_entry_surface_latest_payload tests/test_micro_live_operational_guards.py::test_ops_heartbeat_watches_entry_surface_live_candidate tests/test_micro_live_operational_guards.py::test_ops_heartbeat_fails_on_entry_surface_source_request_failure`
+  - `24 passed`
+  - `./.venv/bin/pytest -q tests/test_live_candidate_promotion_readiness.py tests/test_entry_surface_scripts.py tests/test_micro_live_operational_guards.py::test_ops_heartbeat_checks_entry_surface_latest_payload tests/test_micro_live_operational_guards.py::test_ops_heartbeat_watches_entry_surface_live_candidate tests/test_micro_live_operational_guards.py::test_ops_heartbeat_fails_on_entry_surface_source_request_failure`
+  - `38 passed`
+  - `./.venv/bin/python -m py_compile scripts/run_live_candidate_promotion_readiness.py scripts/notify_entry_surface.py scripts/run_micro_live_ops_heartbeat.py`
+  - pass
+  - runtime_src py_compile pass
+  - `git diff --check`
+  - pass

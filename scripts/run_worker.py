@@ -6,8 +6,10 @@ import argparse
 import json
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -58,6 +60,87 @@ def _safe_int(value: object, default: int = 0) -> int:
         return int(value or default)
     except (TypeError, ValueError):
         return int(default)
+
+
+def _top_counts(counter: Counter[str], *, limit: int = 8) -> dict[str, int]:
+    return {key: int(value) for key, value in counter.most_common(limit)}
+
+
+def _compact_sync_universe_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    results = [dict(item) for item in list(payload.get("results") or []) if isinstance(item, dict)]
+    route_reasons: Counter[str] = Counter()
+    sir_states: Counter[str] = Counter()
+    worker_statuses: Counter[str] = Counter()
+    submit_calls = 0
+    intents_created = 0
+    sir_generated = 0
+    signal_alerts = 0
+
+    for row in results:
+        worker_statuses[str(row.get("status") or "unknown")] += 1
+        refresh = dict(row.get("refresh") or {})
+        auto_route = dict(row.get("auto_route") or {})
+        route_reasons[str(auto_route.get("reason") or "none")] += 1
+        sir_states[str(refresh.get("session_impulse_retest_generation_state") or refresh.get("legacy_plan_generation_state") or "unknown")] += 1
+        submit_calls += _safe_int(auto_route.get("submit_calls"))
+        intents_created += _safe_int(auto_route.get("intents_created"))
+        sir_generated += _safe_int(refresh.get("session_impulse_retest_generated_count"))
+        signal_alerts += _safe_int(dict(refresh.get("signal_alerts") or {}).get("emitted_total"))
+
+    miss = dict(payload.get("session_impulse_retest_miss_detector") or {})
+    miss_summary = {
+        "enabled": bool(miss.get("enabled")),
+        "expected_trade_count": _safe_int(miss.get("expected_trade_count")),
+        "runtime_observed_count": _safe_int(miss.get("runtime_observed_count")),
+        "miss_count": _safe_int(miss.get("miss_count")),
+        "runtime_started_at": miss.get("runtime_started_at"),
+    }
+    return {
+        "universe": payload.get("universe"),
+        "requested_symbols": _safe_int(payload.get("requested_symbols")),
+        "processed_symbols": _safe_int(payload.get("processed_symbols")),
+        "success": _safe_int(payload.get("success")),
+        "failed": _safe_int(payload.get("failed")),
+        "result_count": len(results),
+        "worker_status_counts": _top_counts(worker_statuses),
+        "session_impulse_retest_generated_count": sir_generated,
+        "session_impulse_retest_generation_state_counts": _top_counts(sir_states),
+        "signal_alerts_emitted": signal_alerts,
+        "auto_route_submit_calls": submit_calls,
+        "auto_route_intents_created": intents_created,
+        "auto_route_reason_counts": _top_counts(route_reasons),
+        "session_impulse_retest_miss_detector": miss_summary,
+    }
+
+
+def _compact_worker_log_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {
+        "ts": payload.get("ts"),
+        "actions": [],
+        "outbox": payload.get("outbox", {}),
+    }
+    for action in list(payload.get("actions") or []):
+        if not isinstance(action, dict):
+            continue
+        if "sync_universe" in action and isinstance(action["sync_universe"], dict):
+            compact["actions"].append({"sync_universe": _compact_sync_universe_payload(action["sync_universe"])})
+            continue
+        action_name = next(iter(action.keys()), "action")
+        action_payload = action.get(action_name)
+        if isinstance(action_payload, dict):
+            compact["actions"].append(
+                {
+                    action_name: {
+                        "symbol": action_payload.get("symbol"),
+                        "status": action_payload.get("status"),
+                        "reason": action_payload.get("reason"),
+                        "updated": action_payload.get("updated"),
+                    }
+                }
+            )
+        else:
+            compact["actions"].append({action_name: str(action_payload)})
+    return compact
 
 
 def _worker_role(args: argparse.Namespace) -> str:
@@ -320,7 +403,7 @@ def main() -> int:
                     "outbox": payload.get("outbox", {}),
                 },
             )
-            print(json.dumps(payload, ensure_ascii=False, default=str), flush=True)
+            print(json.dumps(_compact_worker_log_payload(payload), ensure_ascii=False, default=str), flush=True)
         except Exception as exc:
             write_worker_heartbeat("loop", status="error", details={"error": str(exc)})
             error_payload = {

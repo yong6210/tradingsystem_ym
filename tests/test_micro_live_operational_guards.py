@@ -164,6 +164,99 @@ def test_no_order_watchdog_alerts_when_backtest_opportunity_has_no_live_intent()
     assert "SIR_opportunity=active_expected=2,lookback_expected=3" in enriched["message"]
 
 
+def test_no_order_watchdog_warns_when_pre_restart_opportunities_were_blocked() -> None:
+    evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
+        lifecycle={
+            "summary": {
+                "submission_count": 0,
+                "requested_live_count": 0,
+                "rejected_or_error_count": 0,
+                "live_intents": {"total": 0, "submit_ready": 0, "blocked": 0, "top_block_reasons": {}},
+            }
+        },
+        min_intents=1,
+    )
+
+    enriched = run_micro_live_no_order_watchdog._augment_no_order_evaluation(
+        evaluation,
+        candidate_context={
+            "source": "session_impulse_retest_runtime_audit",
+            "scope": "runtime_since_ws_start",
+            "audit_count": 20,
+            "no_candidate_status_counts": {"no_live_route_candidate_plan": 8},
+            "watch_status_counts": {},
+            "non_blocking_status_counts": {"ws_stream_active_route_suppressed": 12},
+            "order_blocking_status_counts": {},
+        },
+        opportunity_context={
+            "source": "session_impulse_retest_opportunity_report",
+            "status": "ok",
+            "summary": {
+                "expected_order_count": 0,
+                "potential_performance": {"total_r": 0},
+            },
+            "lookback_summary": {
+                "expected_order_count": 12,
+                "before_current_runtime_start_count": 12,
+                "reason_counts": {
+                    "session_impulse_retest_rollout_not_ready": 6,
+                    "rollout_session_not_allowed": 5,
+                    "validation_do_not_deploy": 1,
+                },
+                "potential_performance": {"total_r": 6.61},
+            },
+        },
+    )
+
+    assert enriched["alert"] is True
+    assert enriched["status"] == "WATCH"
+    assert enriched["severity"] == "WARN"
+    assert enriched["reason"] == "sir_pre_restart_expected_orders_blocked"
+    assert enriched["candidate_generation_status"] == "pre_restart_backtest_opportunities_blocked"
+    assert "pre_restart=12" in enriched["message"]
+    assert "session_impulse_retest_rollout_not_ready=6" in enriched["message"]
+
+
+def test_no_order_watchdog_prioritizes_current_order_blocking_over_pre_restart_context() -> None:
+    evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
+        lifecycle={
+            "summary": {
+                "submission_count": 0,
+                "requested_live_count": 0,
+                "rejected_or_error_count": 0,
+                "live_intents": {"total": 0, "submit_ready": 0, "blocked": 0, "top_block_reasons": {}},
+            }
+        },
+        min_intents=1,
+    )
+
+    enriched = run_micro_live_no_order_watchdog._augment_no_order_evaluation(
+        evaluation,
+        candidate_context={
+            "source": "session_impulse_retest_runtime_audit",
+            "scope": "runtime_since_ws_start",
+            "audit_count": 20,
+            "no_candidate_status_counts": {},
+            "watch_status_counts": {},
+            "non_blocking_status_counts": {},
+            "order_blocking_status_counts": {"no_runtime_candidate": 1},
+        },
+        opportunity_context={
+            "source": "session_impulse_retest_opportunity_report",
+            "status": "ok",
+            "summary": {"expected_order_count": 0},
+            "lookback_summary": {
+                "expected_order_count": 12,
+                "before_current_runtime_start_count": 12,
+                "reason_counts": {"session_impulse_retest_rollout_not_ready": 12},
+            },
+        },
+    )
+
+    assert enriched["reason"] == "sir_runtime_order_blocking_audit_present"
+    assert enriched["candidate_generation_status"] == "order_blocking_audit_present"
+
+
 def test_no_order_watchdog_augments_watch_only_sir_candidate_context() -> None:
     evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
         lifecycle={
@@ -334,6 +427,40 @@ def test_no_order_watchdog_message_includes_backtest_opportunity_context() -> No
     )
 
     assert "백테스트조건: runtime_expected=2건/1.25R, lookback_expected=3건/0.75R" in message
+
+
+def test_no_order_watchdog_message_includes_pre_restart_opportunity_context() -> None:
+    message = run_micro_live_no_order_watchdog._watchdog_message(
+        {
+            "window_days": 7,
+            "watchdog_scope": "runtime_since_ws_start",
+            "watchdog_scope_label": "런타임 재시작 이후",
+            "lookback_lifecycle_summary": {"requested_live_count": 0, "live_intents": {"total": 0}},
+            "evaluation": {
+                "intent_count": 0,
+                "requested_live_count": 0,
+                "top_block_reasons": {},
+                "first_block_detail_text": "",
+                "next_action_text": "재시작 전 SIR 후보 확인",
+                "session_impulse_retest_opportunity_context": {
+                    "summary": {
+                        "expected_order_count": 0,
+                        "potential_performance": {"total_r": 0},
+                    },
+                    "lookback_summary": {
+                        "expected_order_count": 12,
+                        "before_current_runtime_start_count": 12,
+                        "reason_counts": {"rollout_session_not_allowed": 5},
+                        "potential_performance": {"total_r": 6.61},
+                    },
+                },
+            },
+        }
+    )
+
+    assert "백테스트조건: runtime_expected=0건/0R, lookback_expected=12건/6.61R" in message
+    assert "pre_restart=12건" in message
+    assert "reasons=rollout_session_not_allowed=5" in message
 
 
 def test_no_order_watchdog_main_writes_latest_aliases(monkeypatch, tmp_path, capsys) -> None:
@@ -1104,6 +1231,44 @@ def test_live_replay_parity_marks_sufficient_intent_flow_but_blocked_orders_as_w
     assert result["order_flow_status"] == "WATCH"
 
 
+def test_live_replay_parity_marks_shadow_only_intent_flow_as_watch_even_when_blocked_count_zero() -> None:
+    dashboard = {
+        "active_contract": {
+            "replay_flow_baseline": {
+                "expected_active_contract_candidates_per_week_from_replay": 1.0,
+                "observed_current_window_active_contract_intents_per_week_live": 5.0,
+            }
+        }
+    }
+    lifecycle = {
+        "summary": {
+            "submission_count": 0,
+            "requested_live_count": 0,
+            "rejected_or_error_count": 0,
+            "entry_fill_count": 0,
+            "live_intents": {
+                "total": 4,
+                "submit_ready": 0,
+                "blocked": 0,
+                "by_decision": {"SKIP_SHADOW_ONLY": 4},
+                "top_block_reasons": {"session_impulse_retest_rollout_not_ready": 4},
+            },
+        }
+    }
+
+    result = run_live_replay_parity_audit.evaluate_parity(
+        dashboard=dashboard,
+        lifecycle=lifecycle,
+        min_flow_ratio=0.25,
+    )
+
+    assert result["status"] == "WATCH"
+    assert result["reason"] == "session_impulse_retest_rollout_not_ready"
+    assert result["order_flow_status"] == "WATCH"
+    assert result["flow_diagnosis"]["stage"] == "approval_gate_blocked"
+    assert result["flow_diagnosis"]["decision_counts"] == {"SKIP_SHADOW_ONLY": 4}
+
+
 def test_live_replay_parity_lifecycle_uses_active_contract_family_filter(monkeypatch) -> None:
     captured: dict[str, object] = {}
     dashboard = {
@@ -1587,9 +1752,10 @@ def test_live_replay_parity_portfolio_runtime_scope_keeps_lookback_context(monke
         start_at=start_at,
     )
 
-    assert payload["overall_status"] == "PASS"
+    assert payload["overall_status"] == "WATCH"
     assert payload["parity_scope"] == "runtime_since_ws_start"
-    assert payload["evaluation"]["reason"] == "portfolio_runtime_window_below_live_replay_parity_evidence_floor"
+    assert payload["evaluation"]["reason"] == "runtime_window_thin_but_lookback_flow_warning"
+    assert payload["evaluation"]["lookback_status"] == "WATCH"
     assert payload["evaluation"]["runtime_below_evidence_floor_symbol_count"] == 2
     assert payload["lookback_evaluation_summary"]["status"] == "WATCH"
 
@@ -2467,6 +2633,53 @@ def test_ops_heartbeat_checks_entry_surface_latest_payload(monkeypatch, tmp_path
         "no_live_order_candidates_context_only_route_mismatch | operator_action=context_only_outside_live_route | "
         "next=wait_for_live_route_candidate_or_change_live_contract_intentionally | "
         "route_reason=strategy_family_not_live_route:22"
+    )
+
+
+def test_ops_heartbeat_watches_entry_surface_live_candidate(monkeypatch, tmp_path) -> None:
+    report = tmp_path / "latest_entry_alert_run.json"
+    report.write_text(
+        json.dumps(
+            {
+                "status": "WATCH",
+                "overall_status": "WATCH",
+                "reason": "dry_run",
+                "notified": False,
+                "live_order_candidates": 1,
+                "blocked_live_order_candidates": 0,
+                "operator_action_summary": {
+                    "state": "live_order_candidate_present",
+                    "next_action": "review_live_order_candidate_intent_submission",
+                    "message": "LIVE_ORDER_CANDIDATE가 있어 intent/submission/fill 경로를 확인할 상태",
+                },
+                "snapshot": {"counts": {"LIVE_ORDER_CANDIDATE": 1}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        run_micro_live_ops_heartbeat,
+        "_DEFAULT_JOBS",
+        {
+            "entry_surface": {
+                "pattern": str(report),
+                "max_age_minutes": 15,
+                "content_type": "entry_surface_run",
+                "pass_statuses": {"PASS"},
+                "watch_statuses": {"WATCH"},
+            }
+        },
+    )
+
+    now = datetime.fromtimestamp(report.stat().st_mtime, tz=UTC)
+    result = run_micro_live_ops_heartbeat.evaluate_ops_heartbeat(now=now)
+
+    assert result["status"] == "WATCH"
+    assert result["warnings"][0]["name"] == "entry_surface"
+    assert result["warnings"][0]["report_status"] == "WATCH"
+    assert result["warnings"][0]["status_detail"] == (
+        "dry_run | operator_action=live_order_candidate_present | "
+        "next=review_live_order_candidate_intent_submission"
     )
 
 

@@ -339,8 +339,12 @@ def _entry_surface_run_status(*, payload: dict[str, Any]) -> dict[str, Any]:
     operator_action = _entry_surface_operator_action(payload)
     status_detail = _entry_surface_status_detail(reason or "entry_surface_run_ok", operator_action)
     message = str(operator_action.get("message") or "").strip() or reason or "entry_surface_run_ok"
+    report_status = str(payload.get("overall_status") or payload.get("status") or "").strip().upper()
+    if report_status not in {"PASS", "WATCH", "FAIL"}:
+        operator_state = str(operator_action.get("state") or "").strip()
+        report_status = "WATCH" if operator_state in {"live_order_candidate_present", "live_order_candidate_blocked"} else "PASS"
     return {
-        "overall_status": "PASS",
+        "overall_status": report_status,
         "reason": reason or "entry_surface_run_ok",
         "status_detail": status_detail,
         "message": message,

@@ -1,6 +1,6 @@
 # Live Candidate Readiness Contract
 
-최종 갱신: 2026-05-11
+최종 갱신: 2026-05-16
 
 ## Purpose
 
@@ -35,6 +35,12 @@
 6. submission / reconciliation truth
 
 ## State Semantics
+
+Script/report status mapping:
+
+- top-level `status=PASS`: headline is `WAIT`, usually `no_promotable_live_candidate`; this is normal fresh setup waiting.
+- top-level `status=WATCH`: headline is `BLOCKED` or `WATCH`; this is operational attention, not an order instruction.
+- top-level `status=FAIL`: headline is `FAIL`; this usually means a submit-ready gap or another route integrity problem.
 
 | State | Meaning | Operator Interpretation |
 | --- | --- | --- |

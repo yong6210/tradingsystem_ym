@@ -215,6 +215,7 @@ class Settings(BaseSettings):
     alert_retry_queue_max_attempts: int = 4
     alert_retry_queue_backoff_seconds: float = 30.0
     alert_retry_queue_jitter_seconds: float = 0.0
+    alert_retry_queue_max_age_seconds: int = 86400
     alert_metrics_report_dir: str = "reports/alerts"
     alert_metrics_default_days: int = 30
     alert_slo_target_success_rate: float = 0.995

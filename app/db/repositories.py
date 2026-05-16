@@ -1427,6 +1427,13 @@ class AlertRetryQueueRepository:
         self.db.add(row)
         return row
 
+    def mark_expired(self, row: AlertRetryTask, *, reason: str, status_code: int | None) -> AlertRetryTask:
+        row.status = "expired"
+        row.last_reason = reason[:200]
+        row.last_status_code = status_code
+        self.db.add(row)
+        return row
+
     def requeue(self, row: AlertRetryTask, *, next_retry_ts: datetime) -> AlertRetryTask:
         row.status = "queued"
         row.attempts = 0

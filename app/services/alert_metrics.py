@@ -457,6 +457,7 @@ class AlertMetricsService:
                     "max_attempts": _safe_int(self.settings.alert_retry_queue_max_attempts, default=4),
                     "retry_backoff_seconds": _safe_float(self.settings.alert_retry_queue_backoff_seconds, default=30.0),
                     "retry_jitter_seconds": _safe_float(self.settings.alert_retry_queue_jitter_seconds),
+                    "max_age_seconds": _safe_int(self.settings.alert_retry_queue_max_age_seconds, default=86400),
                 },
             }
 

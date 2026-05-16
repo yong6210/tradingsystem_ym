@@ -110,6 +110,28 @@ def _readiness_summary(readiness: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _status_fields(readiness: dict[str, Any]) -> dict[str, str]:
+    headline_state = str(readiness.get("headline_state") or "WATCH").strip().upper()
+    headline_reason = str(readiness.get("headline_reason") or "readiness_unavailable").strip()
+    if headline_state == "FAIL":
+        status = "FAIL"
+    elif headline_state in {"BLOCKED", "WATCH"}:
+        status = "WATCH"
+    elif headline_state == "WAIT":
+        status = "PASS"
+    else:
+        status = "WATCH"
+    return {
+        "status": status,
+        "overall_status": status,
+        "state": headline_state,
+        "reason": headline_reason,
+        "status_detail": f"live_candidate_promotion_readiness_{headline_reason}",
+        "promotion_decision": str(readiness.get("promotion_decision") or ""),
+        "action": str(readiness.get("headline_action") or ""),
+    }
+
+
 def build_payload(
     *,
     hours: int,
@@ -139,6 +161,7 @@ def build_payload(
             payload["lookback_readiness_summary"] = _readiness_summary(dict(lookback_payload.get("readiness") or {}))
         else:
             payload["lookback_readiness_summary"] = {}
+        payload.update(_status_fields(dict(payload.get("readiness") or {})))
         return payload
 
 
@@ -148,6 +171,8 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         "# Live Candidate Promotion Readiness",
         "",
         f"- generated_at: {payload.get('generated_at')}",
+        f"- overall_status: {payload.get('overall_status')}",
+        f"- status_detail: {payload.get('status_detail')}",
         f"- symbol: {payload.get('symbol') or 'ALL'}",
         f"- readiness_scope: {payload.get('readiness_scope')}",
         f"- runtime_started_at: {payload.get('runtime_started_at') or 'none'}",

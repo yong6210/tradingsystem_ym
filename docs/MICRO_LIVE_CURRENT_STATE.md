@@ -45,6 +45,31 @@ Current safety/grid result:
 
 The raw top diagnostic can match the baseline by disabling safety/unlimited exposure. That is not a live canary setting.
 
+## Current No-Order Interpretation
+
+As of 2026-05-16 KST, runtime health and live route settings are aligned, but there have been no fresh `session_impulse_retest + CONFIRM` live candidates since the latest observed runtime restart at `2026-05-16 13:00:13 KST` (`2026-05-16T04:00:13Z`).
+
+Latest runtime check after the status-shape cleanup:
+
+- `entry_surface/latest_entry_alert_run.json`: `PASS`, `reason=no_live_order_candidates_context_only_route_mismatch`, `live_order_candidates=0`, `blocked_live_order_candidates=0`, `operator_action_summary.state=context_only_outside_live_route`
+- `live_candidate_promotion_readiness/latest.json`: `PASS`, `state=WAIT`, `reason=no_promotable_live_candidate`
+- `micro_live_ops_heartbeat/latest.json`: `WATCH`, hard failures `0`, warnings `2` (`sir_pre_restart_expected_orders_blocked`, `runtime_window_thin_but_lookback_flow_warning`)
+
+Recent no-order reports must be read in two layers:
+
+- current runtime window: `live_intents=0`, `submit_ready=0`, `submissions=0`; this means there is no current submit failure yet.
+- pre-restart lookback: valid backtest-condition candidates existed before the restart, but old gates skipped them. In the 7-day audit this was `12` expected SIR orders, with top reasons `session_impulse_retest_rollout_not_ready`, `rollout_session_not_allowed`, and `validation_do_not_deploy`.
+
+The no-order watchdog now surfaces this as `sir_pre_restart_expected_orders_blocked` instead of reporting a clean fresh-candidate wait. Because this is historical/pre-restart context rather than a current submit failure, it is `WATCH/WARN`, not a current-route `ALERT`. The live replay parity report also surfaces `runtime_window_thin_but_lookback_flow_warning` when the current runtime window is thin but lookback flow shows missed/blocked opportunities. If lookback intents exist but all of them are `SKIP_SHADOW_ONLY`/blocked and submissions are still `0`, parity reports `WATCH` even when intent frequency itself is above the replay baseline.
+
+Operator rule:
+
+- If the report says `sir_pre_restart_expected_orders_blocked`, the issue is historical missed opportunity context, not a current exchange submit error.
+- If a fresh candidate appears and `submit_ready > 0` but `submissions=0`, treat that as an active intent-to-submission bug.
+- If `Trading entry surface alert` shows `live_order_candidates=0` with `context_only_outside_live_route`, that is not an entry confirmation. It only says non-live-route context rows are active.
+- If a no-order watchdog notification is `WATCH` only, the Discord title should be `[모니터링] MICRO_LIVE 주문 흐름 관찰`, not `[운영] ... 확인 필요`.
+- If a `confirm` subscription alert appears, read it as `signal-only no-order` unless it is accompanied by `LIVE_ORDER_CANDIDATE`, an order intent, submission, or fill. The Discord title should be `[모니터링] ... 주문 전 관찰 알림(주문 아님)`.
+
 ## Required Checks
 
 Use these before treating the route as ready:

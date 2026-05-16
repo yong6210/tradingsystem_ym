@@ -32,9 +32,9 @@ class RolloutPolicyBootstrap:
         ),
         "sweep_reversal": RolloutPolicy(
             strategy_family="sweep_reversal",
-            live_enabled=True,
-            max_execution_mode=ExecutionMode.MICRO_LIVE,
-            max_risk_r=0.5,
+            live_enabled=False,
+            max_execution_mode=ExecutionMode.PAPER,
+            max_risk_r=0.0,
             allowed_sessions=("london", "new_york"),
             min_quality_score=70.0,
         ),

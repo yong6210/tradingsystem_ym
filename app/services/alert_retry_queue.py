@@ -99,10 +99,20 @@ class AlertRetryQueueService:
             "delivered": 0,
             "requeued": 0,
             "dead_lettered": 0,
+            "expired": 0,
         }
         now = datetime.now(timezone.utc)
 
         for row in rows:
+            if self._is_expired(row, now=now):
+                self.repo.mark_expired(
+                    row,
+                    reason="stale_retry_task_expired",
+                    status_code=row.last_status_code,
+                )
+                stats["expired"] += 1
+                continue
+
             self.repo.increment_attempt(row)
             row_payload = _safe_mapping(row.payload)
             delivery = self.dispatcher.dispatch(
@@ -199,6 +209,7 @@ class AlertRetryQueueService:
                 "max_attempts": self._safe_int(self.settings.alert_retry_queue_max_attempts, default=4),
                 "retry_backoff_seconds": self._safe_float(self.settings.alert_retry_queue_backoff_seconds, default=30.0),
                 "retry_jitter_seconds": self._safe_float(self.settings.alert_retry_queue_jitter_seconds),
+                "max_age_seconds": self._max_age_seconds(),
                 "circuit_cooldown_seconds": self._safe_int(self.settings.alert_circuit_breaker_cooldown_seconds, default=90),
             },
         }
@@ -259,3 +270,17 @@ class AlertRetryQueueService:
         if jitter > 0:
             delay += random.uniform(0.0, jitter)
         return delay
+
+    def _max_age_seconds(self) -> int:
+        return max(0, self._safe_int(self.settings.alert_retry_queue_max_age_seconds, default=86400))
+
+    def _is_expired(self, row: AlertRetryTask, *, now: datetime) -> bool:
+        max_age_seconds = self._max_age_seconds()
+        if max_age_seconds <= 0:
+            return False
+        reference_ts = row.updated_ts or row.created_ts
+        if reference_ts is None:
+            return False
+        if reference_ts.tzinfo is None:
+            reference_ts = reference_ts.replace(tzinfo=timezone.utc)
+        return (now - reference_ts).total_seconds() > max_age_seconds

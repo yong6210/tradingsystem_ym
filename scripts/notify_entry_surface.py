@@ -1013,6 +1013,17 @@ def _no_alertable_reason(snapshot: dict[str, Any]) -> str:
     return "no_alertable_rows"
 
 
+def _result_status_fields(snapshot: dict[str, Any]) -> dict[str, str]:
+    action = dict(snapshot.get("operator_action_summary") or _entry_surface_operator_action(snapshot))
+    state = str(action.get("state") or "").strip()
+    status = "WATCH" if _has_alertable_rows(snapshot) else "PASS"
+    return {
+        "status": status,
+        "overall_status": status,
+        "status_detail": f"entry_surface_{state}" if state else f"entry_surface_{status.lower()}",
+    }
+
+
 def _blocked_live_candidate_count(snapshot: dict[str, Any]) -> int:
     return int(_blocked_route_breakdown(snapshot).get("live_routable", 0) or 0)
 
@@ -1108,6 +1119,7 @@ def main() -> int:
         _emit_result(
             output_file,
             {
+                "generated_at": now.isoformat(),
                 "base_url": args.base_url,
                 "universe": args.universe,
                 "symbol": str(args.symbol or "").strip() or None,
@@ -1119,6 +1131,9 @@ def main() -> int:
                 "notified": False,
                 "state_written": False,
                 "dedupe_suppressed": True,
+                "status": "WATCH",
+                "overall_status": "WATCH",
+                "status_detail": "entry_surface_previous_tick_still_running",
                 "reason": "entry_surface_tick_already_running",
             },
             quiet=quiet,
@@ -1140,6 +1155,7 @@ def main() -> int:
         _emit_result(
             output_file,
             {
+                "generated_at": now.isoformat(),
                 "base_url": args.base_url,
                 "universe": args.universe,
                 "symbol": str(args.symbol or "").strip() or None,
@@ -1151,6 +1167,9 @@ def main() -> int:
                 "notified": False,
                 "state_written": False,
                 "dedupe_suppressed": False,
+                "status": "FAIL",
+                "overall_status": "FAIL",
+                "status_detail": "entry_surface_source_request_failed",
                 "reason": "source_request_failed",
                 "error": str(exc),
             },
@@ -1179,6 +1198,7 @@ def main() -> int:
     )
 
     result: dict[str, Any] = {
+        "generated_at": now.isoformat(),
         "base_url": args.base_url,
         "universe": args.universe,
         "symbol": str(args.symbol or "").strip() or None,
@@ -1194,6 +1214,7 @@ def main() -> int:
         "notified": False,
         "state_written": False,
         "dedupe_suppressed": False,
+        **_result_status_fields(snapshot),
         **_result_count_fields(snapshot),
     }
     message = render_message(snapshot)
