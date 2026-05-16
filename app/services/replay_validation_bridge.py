@@ -676,7 +676,10 @@ class UsdtProxyReplayValidationBridge:
     def _recent_json_files(self, directory: Path, pattern: str) -> list[Path]:
         if not directory.exists():
             return []
-        return sorted((path for path in directory.glob(pattern) if path.is_file()), key=lambda item: item.stat().st_mtime, reverse=True)
+        candidates = [path for path in directory.glob(pattern) if path.is_file()]
+        if pattern == "micro_main_usdt_proxy_backtest_*.json":
+            candidates = [path for path in candidates if "unseen" not in path.name and "top" not in path.name]
+        return sorted(candidates, key=lambda item: item.name, reverse=True)
 
     def _load_json(self, path: Path) -> dict[str, Any] | None:
         try:

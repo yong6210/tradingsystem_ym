@@ -6592,3 +6592,41 @@
   - `bash -n scripts/restart_runtime_stack_tmp.sh`
   - `./.venv/bin/pytest tests/test_micro_live_preflight.py tests/test_micro_live_runtime_guard.py tests/test_micro_live_operational_guards.py::test_runtime_guard_main_writes_latest_aliases -q`
   - `26 passed`
+
+## 2026-05-16 Iteration #231
+### 수정: runtime 백테스트 기준선 동기화와 최신 파일 선택 기준 고정
+- 발견:
+  - workspace의 최신 regular SIR backtest는 `micro_main_usdt_proxy_backtest_20260515T175711Z.json`인데, runtime reports에는 오래된 regular backtest들이 함께 남아 있었다.
+  - `micro_live_backtest_contract_alignment` guard는 파일명 기준 최신 regular report를 보고 `20260515T175711Z`를 사용했지만, dashboard/parity/validation bridge 계열의 active-contract baseline loader는 파일 mtime 기준으로 최신 파일을 골랐다.
+  - runtime reports로 파일을 복사하면 “새로 복사된 오래된 파일”의 mtime이 더 최신이 될 수 있어, 일부 replay parity 표면이 `20260515T083304Z`를 기준으로 잡는 혼선이 생겼다.
+- 수정:
+  - `scripts/restart_runtime_stack_tmp.sh`
+    - workspace `reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_*.json`를 durable runtime reports로 동기화한다.
+    - 복사 시 `cp -p`를 사용해 원본 timestamp를 유지한다.
+  - `app/services/active_contract_replay_baseline.py`
+    - active-contract USDT proxy baseline 선택을 mtime이 아니라 파일명 timestamp 내림차순으로 고정했다.
+    - `unseen`/`top*` variant report는 live contract baseline 후보에서 제외한다.
+  - `app/services/replay_validation_bridge.py`
+    - replay validation bridge도 같은 기준으로 regular backtest를 선택한다.
+  - 문서:
+    - `MICRO_LIVE_CURRENT_STATE.md`와 `AUTO_TRADING_OPERATING_RUNBOOK.md`에 runtime report sync와 최신 기준선 선택 규칙을 명시했다.
+- 왜 그렇게 판단했는가:
+  - 이 문제는 주문 submit을 직접 막는 버그는 아니지만, “현재 live가 어떤 백테스트와 비교되고 있는지”를 흔들어 백테스트 대비 과차단 여부를 오해하게 만든다.
+  - live contract truth는 regular 11-symbol SIR/CONFIRM backtest여야 하고, 파일 복사 순서나 mtime은 운영 truth가 아니다.
+- runtime 반영:
+  - `TRADING_REFRESH_TMP_RUNTIME_SRC=1 ./scripts/restart_runtime_stack_tmp.sh`로 runtime source를 갱신하고 API/loop/ws worker를 재시작했다.
+  - 최종 `/health/ready`: `ready`
+  - runtime source sync: `active_contract_replay_baseline.py`, `replay_validation_bridge.py`, `restart_runtime_stack_tmp.sh` workspace와 runtime_src 일치
+  - runtime guard: `overall_status=PASS`, `operational_status=PASS`, `micro_live_backtest_contract_alignment=PASS`
+  - guard source: `runtime reports/.../micro_main_usdt_proxy_backtest_20260515T175711Z.json`
+  - live replay parity current runtime source: `micro_main_usdt_proxy_backtest_20260515T175711Z.json`
+  - `check_runtime_stack.sh`: `WAIT/no_fresh_live_signal`, runtime 이후 expected/missed SIR trades `0/0`, live intents/submissions `0/0`
+- 검증:
+  - `bash -n scripts/restart_runtime_stack_tmp.sh`
+  - `./.venv/bin/python -m py_compile app/services/active_contract_replay_baseline.py app/services/replay_validation_bridge.py`
+  - `./.venv/bin/pytest -q tests/test_micro_live_operational_guards.py::test_live_replay_parity_prefers_latest_named_usdt_proxy_baseline_over_mtime tests/test_replay_validation_bridge.py::test_replay_validation_bridge_prefers_latest_named_backtest_over_mtime`
+  - `2 passed`
+  - `./.venv/bin/pytest -q tests/test_replay_validation_bridge.py tests/test_micro_live_operational_guards.py::test_live_replay_parity_uses_usdt_proxy_baseline_for_session_impulse_retest tests/test_micro_live_operational_guards.py::test_live_replay_parity_prefers_latest_named_usdt_proxy_baseline_over_mtime tests/test_execution_operator_dashboard.py::test_execution_operator_dashboard_uses_usdt_proxy_for_sir_active_contract_replay_baseline tests/test_strategy_engine_ops.py::test_active_contract_replay_hits_uses_usdt_proxy_for_session_impulse_retest`
+  - `10 passed`
+  - `git diff --check`
+  - pass

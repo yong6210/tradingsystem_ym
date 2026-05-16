@@ -96,9 +96,12 @@ def canonical_symbol_from_proxy(value: Any) -> str:
 def _recent_json_files(directory: Path, pattern: str) -> list[Path]:
     if not directory.exists():
         return []
+    candidates = [path for path in directory.glob(pattern) if path.is_file()]
+    if pattern == "micro_main_usdt_proxy_backtest_*.json":
+        candidates = [path for path in candidates if "unseen" not in path.name and "top" not in path.name]
     return sorted(
-        [path for path in directory.glob(pattern) if path.is_file()],
-        key=lambda path: (path.stat().st_mtime, path.name),
+        candidates,
+        key=lambda path: path.name,
         reverse=True,
     )
 

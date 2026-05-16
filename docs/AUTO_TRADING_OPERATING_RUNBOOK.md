@@ -300,6 +300,8 @@ TRADING_RUNTIME_WATCHDOG_ONCE=1 ./scripts/watch_runtime_stack_tmp.sh
 
 runtime-stack watchdog는 재시작 직후 `loop` worker의 첫 `sync_universe`가 길어질 수 있음을 감안해 `heartbeat_starting`을 바로 hard failure로 보지 않는다. `TRADING_RUNTIME_WATCHDOG_STARTING_GRACE_SECONDS` 기본값은 `900`초이며, 이 grace 안에서는 `starting_grace`로 보고 재시작하지 않는다. `restart_runtime_stack_tmp.sh`의 ready 대기는 `TRADING_RUNTIME_READY_WAIT_SECONDS`로 조정하며 기본값은 `600`초다.
 
+`restart_runtime_stack_tmp.sh`는 workspace의 `reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_*.json`도 runtime reports로 동기화한다. MICRO_LIVE contract guard, replay parity, dashboard baseline, replay validation bridge는 복사 시각이 아니라 파일명 timestamp 기준 최신 regular backtest를 사용해야 한다. `unseen`/`top*` variant report는 live contract baseline이 아니다.
+
 코드 반영 목적의 재시작은 `launchctl kickstart gui/$(id -u)/com.yumin.trading.runtime-stack`만으로 끝내지 않는다. `runtime-stack` LaunchAgent는 watchdog wrapper이고, `/health/ready`가 이미 `ready`면 내부 `uvicorn`/worker 프로세스를 그대로 둘 수 있다. 실제 API/worker 코드 교체가 필요하면 `~/Library/Application Support/trading/runtime_src/scripts/restart_runtime_stack_tmp.sh` 또는 workspace의 `./scripts/restart_runtime_stack_tmp.sh`를 실행한 뒤 `./scripts/check_runtime_stack.sh`로 새 PID와 `/health/ready`를 확인한다.
 
 LaunchAgent 재설치:

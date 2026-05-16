@@ -90,6 +90,21 @@ rotate_log_if_large() {
   mv "$path" "$path.1"
 }
 
+sync_micro_main_backtest_reports() {
+  local src_dir="$WORKSPACE_ROOT/reports/validation/micro_main_usdt_proxy_backtests"
+  local dst_dir="$REPORTS_DIR/validation/micro_main_usdt_proxy_backtests"
+  local path dst
+
+  [[ -d "$src_dir" ]] || return 0
+  mkdir -p "$dst_dir"
+  while IFS= read -r path; do
+    dst="$dst_dir/$(basename "$path")"
+    if [[ ! -f "$dst" ]] || ! cmp -s "$path" "$dst"; then
+      cp -p "$path" "$dst"
+    fi
+  done < <(find "$src_dir" -maxdepth 1 -type f -name 'micro_main_usdt_proxy_backtest_*.json' | sort)
+}
+
 refresh_tmp_source() {
   if [[ "$TMP_ROOT" == "$WORKSPACE_ROOT" ]]; then
     echo "refusing to refresh runtime source in-place over workspace: $TMP_ROOT" >&2
@@ -148,6 +163,7 @@ esac
 if [[ "$needs_refresh" -eq 1 ]]; then
   refresh_tmp_source
 fi
+sync_micro_main_backtest_reports
 
 if [[ ! -f "$TMP_ROOT/scripts/run_worker.py" || ! -f "$TMP_ROOT/scripts/spawn_detached_process.py" ]]; then
   echo "runtime source is incomplete: $TMP_ROOT" >&2

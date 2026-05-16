@@ -47,15 +47,18 @@ The raw top diagnostic can match the baseline by disabling safety/unlimited expo
 
 Runtime guard must also show `micro_live_backtest_contract_alignment=PASS`. This check compares the current MICRO_LIVE allowlist, family, entry model, sessions, and long/short direction contract against the current SIR backtest source above. If this fails, the system has drifted away from the backtest contract even if the ordinary allowlist checks pass.
 
+Runtime restarts sync the regular `micro_main_usdt_proxy_backtest_*.json` baseline files from workspace reports into durable runtime reports. Runtime replay surfaces choose the latest regular report by filename timestamp, not by copy/mtime. `unseen` and `top*` reports are excluded from live contract baseline selection.
+
 ## Current No-Order Interpretation
 
-As of 2026-05-16 17:06 KST, runtime health and live route settings are aligned, but there have been no fresh `session_impulse_retest + CONFIRM` live candidates since the latest observed runtime restart at `2026-05-16 16:37:47 KST` (`2026-05-16T07:37:47Z`).
+As of 2026-05-16 17:24 KST, runtime health and live route settings are aligned, but there have been no fresh `session_impulse_retest + CONFIRM` live candidates since the latest observed runtime restart at `2026-05-16 17:23:23 KST` (`2026-05-16T08:23:23Z`).
 
-Latest runtime check after the backtest-contract guard and watchdog cleanup:
+Latest runtime check after the backtest-contract guard, watchdog cleanup, and replay baseline source-order cleanup:
 
 - `/health/ready`: `ready`
 - `run_micro_live_runtime_guard.py`: `PASS`, `micro_live_backtest_contract_alignment=PASS`, live intents `0`, submissions `0`
 - `check_runtime_stack.sh`: `WAIT/no_fresh_live_signal`, runtime 이후 expected/missed SIR trades `0/0`
+- `live_replay_parity_audit`: current runtime window below evidence floor, replay source `micro_main_usdt_proxy_backtest_20260515T175711Z.json`
 - `live_candidate_promotion_readiness`: `WAIT`, `reason=no_promotable_live_candidate`, live core symbols `11` all `NO_FRESH_LIVE_CANDIDATE`
 - auxiliary SIR signals exist on `SUIUSDC`, `AAVEUSDC`, `HBARUSDC`, but these are shadow-only and not part of the 11-symbol baseline contract
 

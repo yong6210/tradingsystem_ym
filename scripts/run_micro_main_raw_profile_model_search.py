@@ -70,6 +70,24 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--days", type=int, default=1095)
     parser.add_argument("--max-variants", type=int, default=0)
+    parser.add_argument(
+        "--variant-name",
+        action="append",
+        default=[],
+        help="Run only matching variant name(s). Can be passed multiple times.",
+    )
+    parser.add_argument(
+        "--canonical-mode",
+        choices=("usdc-proxy", "proxy-symbol"),
+        default="usdc-proxy",
+        help="Use mapped USDC strategy symbols or preserve the fetched proxy symbol as the strategy symbol.",
+    )
+    parser.add_argument(
+        "--profile-mode",
+        choices=("canonical", "mapped-usdc"),
+        default="canonical",
+        help="Select profile lookup from the strategy symbol or the mapped USDC symbol.",
+    )
     parser.add_argument("--search-name", default="continuation")
     parser.add_argument("--write-report", action="store_true")
     return parser.parse_args()
@@ -243,11 +261,36 @@ def _build_variants() -> list[Variant]:
     return variants
 
 
+def _remap_variant_exclusions(variant: Variant, *, canonical_mode: str) -> Variant:
+    if canonical_mode != "proxy-symbol":
+        return variant
+    exclusions = tuple(
+        item[:-4] + "USDT" if str(item).upper().endswith("USDC") else str(item).upper()
+        for item in variant.exclude_symbols
+    )
+    if exclusions == variant.exclude_symbols:
+        return variant
+    return Variant(
+        name=f"{variant.name}_usdt_symbols",
+        body_delta=variant.body_delta,
+        volume_mult=variant.volume_mult,
+        trend_delta=variant.trend_delta,
+        overshoot_delta=variant.overshoot_delta,
+        drive_delta=variant.drive_delta,
+        max_risk_delta=variant.max_risk_delta,
+        retest_delta=variant.retest_delta,
+        close_delta=variant.close_delta,
+        exclude_symbols=exclusions,
+        notes=(variant.notes + "; " if variant.notes else "") + "USDT symbol exclusion mapping",
+    )
+
+
 def _variant_rows_for_symbol(
     *,
     engine: SessionImpulseRetestResearch,
     proxy_symbol: str,
     canonical_symbol: str,
+    profile_name: str,
     variant: Variant,
 ) -> list[dict[str, Any]]:
     base_profile = engine._signal_filter_profile()
@@ -267,7 +310,7 @@ def _variant_rows_for_symbol(
             trade=trade,
             proxy_symbol=proxy_symbol,
             canonical_symbol=canonical_symbol,
-            profile_name=session_impulse_retest_profile_for_symbol(canonical_symbol),
+            profile_name=profile_name,
         )
         for trade in trades
     ]
@@ -419,8 +462,12 @@ def main() -> int:
     start_ts = end_ts - timedelta(days=max(int(args.days), 1))
     proxy_symbols = [item.strip().upper() for item in str(args.symbols or "").split(",") if item.strip()]
     variants = _build_variants()
+    selected_variant_names = {str(item).strip() for item in args.variant_name if str(item).strip()}
+    if selected_variant_names:
+        variants = [variant for variant in variants if variant.name in selected_variant_names]
     if int(args.max_variants or 0) > 0:
         variants = variants[: int(args.max_variants)]
+    variants = [_remap_variant_exclusions(variant, canonical_mode=str(args.canonical_mode)) for variant in variants]
     variant_names = [variant.name for variant in variants]
     rows_by_variant: dict[str, list[dict[str, Any]]] = {name: [] for name in variant_names}
 
@@ -432,6 +479,8 @@ def main() -> int:
                 "symbols": proxy_symbols,
                 "start_ts": start_ts.isoformat(),
                 "end_ts": end_ts.isoformat(),
+                "canonical_mode": args.canonical_mode,
+                "profile_mode": args.profile_mode,
             },
             ensure_ascii=False,
         ),
@@ -444,10 +493,16 @@ def main() -> int:
         httpx.Client(base_url=settings.binance_rest_base_url, timeout=30.0) as rest_client,
     ):
         for proxy_symbol in proxy_symbols:
-            canonical_symbol = canonical_symbol_for_proxy(proxy_symbol)
-            if canonical_symbol is None:
+            mapped_symbol = canonical_symbol_for_proxy(proxy_symbol)
+            if mapped_symbol is None:
                 print(json.dumps({"state": "skip", "symbol": proxy_symbol, "reason": "missing_mapping"}), file=sys.stderr)
                 continue
+            report_symbol = proxy_symbol if args.canonical_mode == "proxy-symbol" else mapped_symbol
+            strategy_symbol = mapped_symbol
+            if args.canonical_mode == "proxy-symbol" and args.profile_mode == "canonical":
+                strategy_symbol = proxy_symbol
+            profile_lookup_symbol = mapped_symbol if args.profile_mode == "mapped-usdc" else strategy_symbol
+            profile_name = session_impulse_retest_profile_for_symbol(profile_lookup_symbol)
             candles_1m = _fetch_1m_klines(
                 monthly_client,
                 rest_client,
@@ -473,17 +528,18 @@ def main() -> int:
                 )
                 continue
             engine = SessionImpulseRetestResearch(
-                symbol=canonical_symbol,
+                symbol=strategy_symbol,
                 candles_1m=candles_1m,
                 candles_5m=candles_5m,
-                profile_name=session_impulse_retest_profile_for_symbol(canonical_symbol),
+                profile_name=profile_name,
             )
             for index, variant in enumerate(variants, start=1):
                 rows_by_variant[variant.name].extend(
                     _variant_rows_for_symbol(
                         engine=engine,
                         proxy_symbol=proxy_symbol,
-                        canonical_symbol=canonical_symbol,
+                        canonical_symbol=report_symbol,
+                        profile_name=profile_name,
                         variant=variant,
                     )
                 )
@@ -493,6 +549,8 @@ def main() -> int:
                             {
                                 "state": "progress",
                                 "symbol": proxy_symbol,
+                                "strategy_symbol": strategy_symbol,
+                                "report_symbol": report_symbol,
                                 "variant_index": index,
                                 "variant_count": len(variants),
                                 "variant": variant.name,
@@ -509,6 +567,8 @@ def main() -> int:
         "generated_at": generated_at.isoformat(),
         "search_name": str(args.search_name),
         "window": {"start_ts": start_ts.isoformat(), "end_ts": end_ts.isoformat(), "days": int(args.days)},
+        "canonical_mode": str(args.canonical_mode),
+        "profile_mode": str(args.profile_mode),
         "model_definition": "Full raw-candle SessionImpulseRetest profile search. Signals are regenerated for each variant.",
         "variant_count": len(variants),
         **result,
