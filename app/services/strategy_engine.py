@@ -5984,10 +5984,15 @@ class StrategyEngine:
         side: str | None = None,
         order_type: str | None = None,
         price: float | None = None,
+        stop_price: float | None = None,
         quantity: float | None = None,
         time_in_force: str | None = None,
         reduce_only: bool | None = None,
         position_side: str | None = None,
+        close_position: bool | None = None,
+        working_type: str | None = None,
+        order_purpose: str | None = None,
+        parent_client_order_id: str | None = None,
         client_order_id: str | None = None,
         plan_id: str | None = None,
     ) -> dict[str, Any]:
@@ -6012,6 +6017,9 @@ class StrategyEngine:
             "side": str(raw_payload.get("side") or side or ""),
             "order_type": str(raw_payload.get("type") or order_type or ""),
             "price": self._maybe_float(raw_payload.get("price")) if raw_payload.get("price") not in (None, "") else price,
+            "stop_price": self._maybe_float(raw_payload.get("stopPrice") or raw_payload.get("stop_price"))
+            if (raw_payload.get("stopPrice") or raw_payload.get("stop_price")) not in (None, "")
+            else stop_price,
             "orig_qty": self._maybe_float(raw_payload.get("origQty")) if raw_payload.get("origQty") not in (None, "") else quantity,
             "executed_qty": self._maybe_float(raw_payload.get("executedQty")),
             "reduce_only": (
@@ -6020,6 +6028,14 @@ class StrategyEngine:
                 else self._safe_bool(reduce_only)
             ),
             "position_side": normalized_position_side,
+            "close_position": (
+                self._safe_bool(raw_payload.get("closePosition"))
+                if raw_payload.get("closePosition") is not None
+                else self._safe_bool(close_position)
+            ),
+            "working_type": str(raw_payload.get("workingType") or working_type or ""),
+            "order_purpose": str(order_purpose or ""),
+            "parent_client_order_id": str(parent_client_order_id or ""),
             "time_in_force": str(raw_payload.get("timeInForce") or time_in_force or ""),
             "raw": raw_payload,
         }
@@ -6035,6 +6051,21 @@ class StrategyEngine:
         client_order_id = str(payload.get("client_order_id") or "")
         if not client_order_id:
             return {}
+        existing = self.binance_order_repo.get(client_order_id)
+        existing_raw = _safe_dict(getattr(existing, "raw", None)) if existing is not None else {}
+        raw_payload = _safe_dict(payload.get("raw")) or _safe_dict(payload)
+        ledger_raw = {**existing_raw, **raw_payload}
+        for key in (
+            "order_purpose",
+            "parent_client_order_id",
+            "stop_price",
+            "close_position",
+            "working_type",
+            "position_side",
+        ):
+            value = payload.get(key)
+            if value not in {None, ""}:
+                ledger_raw[key] = value
         row = self.binance_order_repo.upsert(
             client_order_id=client_order_id,
             exchange_order_id=self._maybe_int(payload.get("order_id")),
@@ -6054,7 +6085,7 @@ class StrategyEngine:
             last_event_type=event_type,
             last_trade_id=trade_id,
             last_event_ts=event_ts,
-            raw=_safe_dict(payload.get("raw")) or _safe_dict(payload),
+            raw=ledger_raw,
         )
         self.db.flush()
         return {
@@ -6077,6 +6108,18 @@ class StrategyEngine:
         if row is None and order_id is not None:
             row = self.binance_order_repo.get_by_exchange_order_id(order_id)
         return row.plan_id if row is not None else None
+
+    def _live_protection_already_attached(self, *, plan_id: str, symbol: str) -> bool:
+        terminal = {"FILLED", "CANCELED", "CANCELLED", "REJECTED", "EXPIRED"}
+        for row in self.binance_order_repo.list_recent(symbol=symbol, limit=200):
+            if str(row.plan_id or "") != str(plan_id or ""):
+                continue
+            if str(row.status or "").upper() in terminal:
+                continue
+            raw = _safe_dict(getattr(row, "raw", None))
+            if str(raw.get("order_purpose") or "").startswith("live_protection:stop_loss"):
+                return True
+        return False
 
     @staticmethod
     def _position_row_to_dict(row: Any) -> dict[str, Any]:
@@ -6127,14 +6170,27 @@ class StrategyEngine:
         return f"binance_order_{order_id}_{execution_type}"
 
     def _infer_exit_reason_from_binance_event(self, event: dict[str, Any]) -> str | None:
-        if not self._safe_bool(event.get("reduce_only")):
+        order_purpose = str(event.get("order_purpose") or "")
+        protection_order = order_purpose.startswith("live_protection:")
+        if not self._safe_bool(event.get("reduce_only")) and not protection_order:
             return None
         order_type = str(event.get("order_type") or "").upper()
-        if "TAKE_PROFIT" in order_type:
+        if "TAKE_PROFIT" in order_type or order_purpose.startswith("live_protection:tp"):
             return "target_tp1"
-        if "STOP" in order_type:
+        if "STOP" in order_type or order_purpose == "live_protection:stop_loss":
             return "stop_loss"
         return "manual_flatten"
+
+    def _is_binance_protection_close_event(self, event: dict[str, Any]) -> bool:
+        if self._safe_bool(event.get("reduce_only")):
+            return True
+        order_purpose = str(event.get("order_purpose") or "")
+        if order_purpose.startswith("live_protection:"):
+            return True
+        order_type = str(event.get("order_type") or "").upper()
+        if "STOP" in order_type or "TAKE_PROFIT" in order_type:
+            return True
+        return False
 
     def _infer_fill_stage_from_binance_event(
         self,
@@ -6147,7 +6203,7 @@ class StrategyEngine:
         last_fill_price = self._maybe_float(event.get("last_fill_price")) or 0.0
         if last_fill_qty <= 0.0 or last_fill_price <= 0.0:
             return None
-        if not self._safe_bool(event.get("reduce_only")):
+        if not self._is_binance_protection_close_event(event):
             return ExecutionFillStage.ENTRY
 
         symbol = str(event.get("symbol") or "")
@@ -6264,11 +6320,16 @@ class StrategyEngine:
         symbol: str,
         side: str,
         order_type: str,
-        quantity: float,
+        quantity: float | None = None,
         price: float | None = None,
+        stop_price: float | None = None,
         time_in_force: str = "GTC",
         reduce_only: bool = False,
         position_side: str | None = None,
+        close_position: bool = False,
+        working_type: str | None = None,
+        order_purpose: str | None = None,
+        parent_client_order_id: str | None = None,
         client_order_id: str | None = None,
         plan_id: str | None = None,
         live: bool = False,
@@ -6281,9 +6342,12 @@ class StrategyEngine:
             order_type=order_type,
             quantity=quantity,
             price=price,
+            stop_price=stop_price,
             time_in_force=time_in_force,
             reduce_only=reduce_only,
             position_side=position_side,
+            close_position=close_position,
+            working_type=working_type,
             client_order_id=effective_client_order_id,
             live=live,
             new_order_resp_type=new_order_resp_type,
@@ -6296,10 +6360,15 @@ class StrategyEngine:
             side=side,
             order_type=order_type,
             price=price,
+            stop_price=stop_price,
             quantity=quantity,
             time_in_force=time_in_force,
             reduce_only=reduce_only,
             position_side=position_side,
+            close_position=close_position,
+            working_type=working_type,
+            order_purpose=order_purpose,
+            parent_client_order_id=parent_client_order_id,
             client_order_id=effective_client_order_id,
             plan_id=plan_id,
         )
@@ -6530,6 +6599,252 @@ class StrategyEngine:
             "positions": payload,
         }
 
+    def process_live_tp_market_fallbacks(
+        self,
+        *,
+        symbol: str | None = None,
+        now: datetime | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        fallback_seconds = int(getattr(self.settings, "auto_trading_live_tp_market_fallback_seconds", 20) or 0)
+        if fallback_seconds <= 0:
+            return {"status": "DISABLED", "reason": "tp_market_fallback_disabled", "actions": []}
+        if not self._safe_bool(getattr(self.settings, "binance_trade_live_enabled", False)):
+            return {"status": "DISABLED", "reason": "binance_live_orders_disabled", "actions": []}
+
+        normalized_now = self._to_utc(now) if now is not None else datetime.now(timezone.utc)
+        terminal = {"FILLED", "CANCELED", "CANCELLED", "REJECTED", "EXPIRED"}
+        rows = self.binance_order_repo.list_recent(symbol=symbol, limit=max(1, int(limit)))
+        candidates = []
+        for row in rows:
+            raw = _safe_dict(getattr(row, "raw", None))
+            if not str(raw.get("order_purpose") or "").startswith("live_protection:tp"):
+                continue
+            if str(row.order_type or "").upper() != "LIMIT":
+                continue
+            if str(row.status or "").upper() in terminal:
+                continue
+            candidates.append(row)
+
+        actions: list[dict[str, Any]] = []
+        for row in candidates:
+            raw = _safe_dict(getattr(row, "raw", None))
+            reference_ts = self._to_utc(row.last_event_ts or row.updated_at or row.created_at)
+            age_seconds = max((normalized_now - reference_ts).total_seconds(), 0.0)
+            if age_seconds < fallback_seconds:
+                actions.append(
+                    {
+                        "client_order_id": row.client_order_id,
+                        "symbol": row.symbol,
+                        "status": "WAITING",
+                        "reason": "fallback_grace_period_active",
+                        "age_seconds": round(age_seconds, 3),
+                        "fallback_seconds": fallback_seconds,
+                    }
+                )
+                continue
+
+            position_side = str(raw.get("position_side") or "").upper()
+            try:
+                position_rows = [
+                    self.market_data.binance.normalize_position_risk_row(item)
+                    for item in self.market_data.binance.fetch_position_risk(row.symbol)
+                ]
+            except Exception as exc:
+                actions.append(
+                    {
+                        "client_order_id": row.client_order_id,
+                        "symbol": row.symbol,
+                        "status": "ERROR",
+                        "reason": "position_sync_failed",
+                        "error": f"{exc.__class__.__name__}:{exc}",
+                    }
+                )
+                continue
+
+            matching_positions = [
+                item
+                for item in position_rows
+                if str(item.get("symbol") or "").upper() == str(row.symbol or "").upper()
+                and abs(self._maybe_float(item.get("position_amt")) or 0.0) > 1e-10
+                and (not position_side or str(item.get("position_side") or "BOTH").upper() in {position_side, "BOTH"})
+            ]
+            if not matching_positions:
+                actions.append(
+                    {
+                        "client_order_id": row.client_order_id,
+                        "symbol": row.symbol,
+                        "status": "SKIPPED",
+                        "reason": "no_matching_open_position",
+                    }
+                )
+                continue
+            position = matching_positions[0]
+            mark_price = self._maybe_float(position.get("mark_price")) or 0.0
+            target_price = self._maybe_float(row.price) or self._maybe_float(raw.get("price")) or 0.0
+            side = str(row.side or "").upper()
+            touched = (side == "SELL" and mark_price >= target_price > 0.0) or (side == "BUY" and 0.0 < mark_price <= target_price)
+            if not touched:
+                actions.append(
+                    {
+                        "client_order_id": row.client_order_id,
+                        "symbol": row.symbol,
+                        "status": "SKIPPED",
+                        "reason": "target_not_touched",
+                        "mark_price": round(mark_price, 8),
+                        "target_price": round(target_price, 8),
+                    }
+                )
+                continue
+
+            try:
+                exchange_order = self.query_binance_order(symbol=row.symbol, client_order_id=row.client_order_id)
+            except Exception as exc:
+                actions.append(
+                    {
+                        "client_order_id": row.client_order_id,
+                        "symbol": row.symbol,
+                        "status": "ERROR",
+                        "reason": "query_order_failed",
+                        "error": f"{exc.__class__.__name__}:{exc}",
+                    }
+                )
+                continue
+            if str(exchange_order.get("status") or "").upper() in terminal:
+                actions.append(
+                    {
+                        "client_order_id": row.client_order_id,
+                        "symbol": row.symbol,
+                        "status": "SKIPPED",
+                        "reason": "order_already_terminal",
+                        "exchange_status": exchange_order.get("status"),
+                    }
+                )
+                continue
+
+            order_remaining = max(
+                (self._maybe_float(exchange_order.get("orig_qty")) or self._maybe_float(row.orig_qty) or 0.0)
+                - (self._maybe_float(exchange_order.get("executed_qty")) or self._maybe_float(row.executed_qty) or 0.0),
+                0.0,
+            )
+            position_remaining = abs(self._maybe_float(position.get("position_amt")) or 0.0)
+            step, min_quantity, _rules = self.execution_coordinator._live_protection_quantity_rules(str(row.symbol or "").upper())
+            market_quantity = self.execution_coordinator._round_down_to_step(min(order_remaining, position_remaining), step=step)
+            if market_quantity < min_quantity:
+                actions.append(
+                    {
+                        "client_order_id": row.client_order_id,
+                        "symbol": row.symbol,
+                        "status": "SKIPPED",
+                        "reason": "fallback_quantity_below_minimum",
+                        "remaining_quantity": round(min(order_remaining, position_remaining), 8),
+                        "min_quantity": round(min_quantity, 8),
+                    }
+                )
+                continue
+
+            try:
+                cancel_result = self.cancel_binance_order(symbol=row.symbol, client_order_id=row.client_order_id)
+                hedge_mode = position_side in {"LONG", "SHORT"}
+                market_result = self.submit_binance_order(
+                    symbol=row.symbol,
+                    side=side,
+                    order_type="MARKET",
+                    quantity=float(market_quantity),
+                    reduce_only=False if hedge_mode else True,
+                    position_side=position_side or None,
+                    client_order_id=f"tpmkt_{uuid4().hex[:20]}",
+                    plan_id=row.plan_id,
+                    live=True,
+                    new_order_resp_type="RESULT",
+                    order_purpose="live_protection:tp_market_fallback",
+                    parent_client_order_id=row.client_order_id,
+                )
+                actions.append(
+                    {
+                        "client_order_id": row.client_order_id,
+                        "symbol": row.symbol,
+                        "status": "MARKET_FALLBACK_SUBMITTED",
+                        "quantity": float(market_quantity),
+                        "cancel_result": cancel_result,
+                        "market_result": market_result,
+                    }
+                )
+            except Exception as exc:
+                self.db.rollback()
+                actions.append(
+                    {
+                        "client_order_id": row.client_order_id,
+                        "symbol": row.symbol,
+                        "status": "ERROR",
+                        "reason": "market_fallback_submit_failed",
+                        "error": f"{exc.__class__.__name__}:{exc}",
+                    }
+                )
+
+        submitted = sum(1 for item in actions if item.get("status") == "MARKET_FALLBACK_SUBMITTED")
+        return {
+            "status": "OK",
+            "symbol": symbol.upper() if symbol else "",
+            "fallback_seconds": fallback_seconds,
+            "candidate_count": len(candidates),
+            "submitted_count": submitted,
+            "actions": actions,
+        }
+
+    def _cancel_live_protection_siblings(
+        self,
+        *,
+        plan_id: str,
+        symbol: str,
+        current_client_order_id: str,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        if not self._safe_bool(getattr(self.settings, "binance_trade_live_enabled", False)):
+            return {"status": "DISABLED", "reason": "binance_live_orders_disabled", "actions": []}
+        terminal = {"FILLED", "CANCELED", "CANCELLED", "REJECTED", "EXPIRED"}
+        actions: list[dict[str, Any]] = []
+        for row in self.binance_order_repo.list_recent(symbol=symbol, limit=max(1, int(limit))):
+            if str(row.plan_id or "") != str(plan_id or ""):
+                continue
+            if str(row.client_order_id or "") == str(current_client_order_id or ""):
+                continue
+            if str(row.status or "").upper() in terminal:
+                continue
+            raw = _safe_dict(getattr(row, "raw", None))
+            if not str(raw.get("order_purpose") or "").startswith("live_protection:"):
+                continue
+            try:
+                cancel_result = self.cancel_binance_order(symbol=row.symbol, client_order_id=row.client_order_id)
+                actions.append(
+                    {
+                        "client_order_id": row.client_order_id,
+                        "symbol": row.symbol,
+                        "status": "CANCEL_SUBMITTED",
+                        "cancel_result": cancel_result,
+                    }
+                )
+            except Exception as exc:
+                self.db.rollback()
+                actions.append(
+                    {
+                        "client_order_id": row.client_order_id,
+                        "symbol": row.symbol,
+                        "status": "ERROR",
+                        "reason": "sibling_cancel_failed",
+                        "error": f"{exc.__class__.__name__}:{exc}",
+                    }
+                )
+        failed = sum(1 for item in actions if item.get("status") == "ERROR")
+        return {
+            "status": "ERROR" if failed else "OK",
+            "plan_id": plan_id,
+            "symbol": symbol,
+            "cancelled_count": sum(1 for item in actions if item.get("status") == "CANCEL_SUBMITTED"),
+            "error_count": failed,
+            "actions": actions,
+        }
+
     def ingest_binance_user_stream_event(self, *, payload: dict[str, Any]) -> dict[str, Any]:
         payload_map = _safe_dict(payload)
         normalized = (
@@ -6569,8 +6884,20 @@ class StrategyEngine:
                 "reason": "unsupported_user_stream_event",
             }
 
+        client_order_id = str(normalized.get("client_order_id") or "")
+        existing_ledger = self.binance_order_repo.get(client_order_id) if client_order_id else None
+        existing_raw = _safe_dict(getattr(existing_ledger, "raw", None)) if existing_ledger is not None else {}
+        order_purpose = str(existing_raw.get("order_purpose") or "")
+        parent_client_order_id = str(existing_raw.get("parent_client_order_id") or "")
+        if order_purpose or parent_client_order_id:
+            normalized = {
+                **normalized,
+                **({"order_purpose": order_purpose} if order_purpose else {}),
+                **({"parent_client_order_id": parent_client_order_id} if parent_client_order_id else {}),
+            }
+
         plan_id = self._resolve_plan_id_from_binance_order(
-            client_order_id=str(normalized.get("client_order_id") or ""),
+            client_order_id=client_order_id,
             order_id=self._maybe_int(normalized.get("order_id")),
         )
         order_payload = {
@@ -6590,6 +6917,9 @@ class StrategyEngine:
             "orig_qty": self._maybe_float(normalized.get("original_qty")),
             "executed_qty": self._maybe_float(normalized.get("cumulative_fill_qty")),
             "reduce_only": self._safe_bool(normalized.get("reduce_only")),
+            "position_side": str(normalized.get("position_side") or ""),
+            "order_purpose": order_purpose,
+            "parent_client_order_id": parent_client_order_id,
             "time_in_force": str(normalized.get("time_in_force") or ""),
             "raw": _safe_dict(normalized.get("raw")),
         }
@@ -6615,6 +6945,8 @@ class StrategyEngine:
             }
 
         fill_ingest = None
+        protection_attach = None
+        protection_sibling_cancel = None
         plan = self.plan_repo.get(plan_id) if plan_id else None
         stage = self._infer_fill_stage_from_binance_event(event=normalized, plan=plan, current_positions=position_rows)
         duplicate_submit_fill = self._matching_submit_response_fill(
@@ -6668,6 +7000,26 @@ class StrategyEngine:
                 fee=0.0,
                 payload=fill_payload,
             )
+            if (
+                stage == ExecutionFillStage.ENTRY
+                and not self._safe_bool(fill_ingest.get("duplicate"))
+                and not self._live_protection_already_attached(plan_id=plan.plan_id, symbol=plan.symbol)
+            ):
+                protection_attach = self.execution_coordinator.attach_live_protection_orders(
+                    plan=plan,
+                    entry_quantity=self._maybe_float(normalized.get("last_fill_qty"))
+                    or self._maybe_float(normalized.get("cumulative_fill_qty"))
+                    or 0.0,
+                    position_side=str(normalized.get("position_side") or "") or None,
+                    parent_client_order_id=client_order_id,
+                    live=True,
+                )
+            if stage == ExecutionFillStage.CLOSED and self._is_binance_protection_close_event(normalized):
+                protection_sibling_cancel = self._cancel_live_protection_siblings(
+                    plan_id=plan.plan_id,
+                    symbol=plan.symbol,
+                    current_client_order_id=client_order_id,
+                )
         else:
             self.db.commit()
 
@@ -6683,6 +7035,8 @@ class StrategyEngine:
             "submission_sync": submission_sync,
             "position_sync": position_sync,
             "fill_ingest": fill_ingest,
+            "protection_attach": protection_attach,
+            "protection_sibling_cancel": protection_sibling_cancel,
         }
 
     def process_binance_user_stream(
@@ -8687,12 +9041,14 @@ class StrategyEngine:
                 if plan_ids
                 else self.auto_route_symbol(symbol=symbol)
             )
+        tp_market_fallback = self.process_live_tp_market_fallbacks(symbol=symbol)
         return {
             "symbol": symbol,
             "status": "ok",
             "backfill": backfill,
             "refresh": refresh,
             "auto_route": auto_route,
+            "tp_market_fallback": tp_market_fallback,
         }
 
     @staticmethod
@@ -8726,6 +9082,7 @@ class StrategyEngine:
             refresh_symbol=self.refresh_symbol,
             auto_route_symbol=self.auto_route_symbol,
             auto_route_session_impulse_retest_plans=self.auto_route_session_impulse_retest_plans,
+            tp_market_fallback_processor=self.process_live_tp_market_fallbacks,
         )
         return await stream.stream(
             symbols=symbols,

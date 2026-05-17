@@ -426,6 +426,10 @@ class Settings(BaseSettings):
     auto_trading_live_liquidity_gate_partial_submit_enabled: bool = False
     auto_trading_live_liquidity_gate_max_tranches: int = 3
     auto_trading_live_liquidity_gate_min_tranche_notional_usdt: float = 10.0
+    auto_trading_live_protection_orders_enabled: bool = True
+    auto_trading_live_stop_working_type: str = "MARK_PRICE"
+    auto_trading_live_tp_limit_attach_enabled: bool = True
+    auto_trading_live_tp_market_fallback_seconds: int = 20
     auto_trading_micro_live_allowed_symbols: str = CURRENT_MICRO_LIVE_SYMBOLS
     auto_trading_micro_live_symbol_priority: str = CURRENT_MICRO_LIVE_SYMBOLS
     auto_trading_micro_live_direction_contract: str = CURRENT_MICRO_LIVE_DIRECTION_CONTRACT

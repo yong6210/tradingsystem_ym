@@ -860,6 +860,233 @@ class ExecutionCoordinator:
         }
         return fill_id, float(fill_price), float(executed_qty), fill_payload
 
+    @staticmethod
+    def _live_close_side(plan: Plan) -> str:
+        return "SELL" if str(plan.direction or "").lower() == "long" else "BUY"
+
+    @staticmethod
+    def _is_hedge_position_side(position_side: str | None) -> bool:
+        return str(position_side or "").upper() in {"LONG", "SHORT"}
+
+    @staticmethod
+    def _protection_client_order_id(role: str) -> str:
+        normalized_role = "".join(ch for ch in str(role or "protect").lower() if ch.isalnum() or ch in {"_", "-"})
+        normalized_role = normalized_role[:8] or "protect"
+        return f"{normalized_role}_{uuid4().hex[:20]}"
+
+    def _live_protection_quantity_rules(self, symbol: str) -> tuple[float, float, dict[str, Any]]:
+        default_step = self._float_or(getattr(self.settings, "binance_live_quantity_step", 0.001), 0.001)
+        default_min_quantity = self._float_or(getattr(self.settings, "binance_live_min_quantity", default_step), default_step)
+        symbol_rules, symbol_rules_error = self._live_symbol_rules(symbol)
+        step = self._float_or((symbol_rules or {}).get("quantity_step"), default_step)
+        min_quantity = self._float_or((symbol_rules or {}).get("min_quantity"), default_min_quantity or step)
+        details = {
+            "quantity_step": round(max(step, 1e-9), 8),
+            "min_quantity": round(max(min_quantity, step, 1e-9), 8),
+            "symbol_rules_source": str((symbol_rules or {}).get("source") or "settings_default"),
+        }
+        if symbol_rules_error:
+            details["symbol_rules_loader_error"] = symbol_rules_error
+        return max(step, 1e-9), max(min_quantity, step, 1e-9), details
+
+    def _live_tp_targets(self, *, plan: Plan, entry_quantity: float) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        step, min_quantity, rules = self._live_protection_quantity_rules(str(plan.symbol or "").upper())
+        split = self._safe_dict(getattr(plan, "split", None))
+        raw_targets = [
+            ("tp1", getattr(plan, "tp1", None), self._float_or(split.get("tp1"), 0.0)),
+            ("tp2", getattr(plan, "tp2", None), self._float_or(split.get("tp2"), 0.0)),
+            ("tp3", getattr(plan, "tp3", None), self._float_or(split.get("tp3", split.get("runner")), 0.0)),
+        ]
+        if sum(max(float(weight or 0.0), 0.0) for _, _, weight in raw_targets) <= 0.0:
+            raw_targets = [("tp1", getattr(plan, "tp1", None), 1.0)]
+
+        remaining = self._round_down_to_step(entry_quantity, step=step)
+        targets: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for label, price_value, weight in raw_targets:
+            if remaining < min_quantity:
+                break
+            price = self._maybe_float(price_value)
+            fraction = max(float(weight or 0.0), 0.0)
+            if price is None or price <= 0.0 or fraction <= 0.0:
+                skipped.append({"label": label, "reason": "invalid_price_or_split"})
+                continue
+            requested_qty = min(entry_quantity * fraction, remaining)
+            quantity = self._round_down_to_step(requested_qty, step=step)
+            if quantity < min_quantity:
+                skipped.append(
+                    {
+                        "label": label,
+                        "reason": "quantity_below_minimum",
+                        "requested_quantity": round(requested_qty, 8),
+                        **rules,
+                    }
+                )
+                continue
+            normalized_price, price_details = self._normalize_live_limit_price(
+                symbol=str(plan.symbol or "").upper(),
+                side=self._live_close_side(plan),
+                requested_price=price,
+            )
+            if normalized_price is None or normalized_price <= 0.0:
+                skipped.append({"label": label, "reason": "price_normalization_failed", "requested_price": price})
+                continue
+            targets.append(
+                {
+                    "label": label,
+                    "price": float(normalized_price),
+                    "quantity": float(quantity),
+                    "split": round(fraction, 8),
+                    "price_details": price_details,
+                    **rules,
+                }
+            )
+            remaining = self._round_down_to_step(remaining - quantity, step=step)
+        return targets, skipped
+
+    def attach_live_protection_orders(
+        self,
+        *,
+        plan: Plan,
+        entry_quantity: float,
+        position_side: str | None,
+        parent_client_order_id: str,
+        live: bool = True,
+    ) -> dict[str, Any]:
+        enabled = self._safe_bool(getattr(self.settings, "auto_trading_live_protection_orders_enabled", True), default=True)
+        if not enabled:
+            return {"status": "DISABLED", "orders": [], "errors": [], "parent_client_order_id": parent_client_order_id}
+
+        symbol = str(plan.symbol or "").upper()
+        quantity = self._maybe_float(entry_quantity)
+        if quantity is None or quantity <= 0.0:
+            return {
+                "status": "SKIPPED",
+                "reason": "entry_quantity_missing",
+                "orders": [],
+                "errors": [],
+                "parent_client_order_id": parent_client_order_id,
+            }
+
+        close_side = self._live_close_side(plan)
+        live_position_side = position_side or self._binance_live_position_side(plan=plan, side=close_side)
+        hedge_mode = self._is_hedge_position_side(live_position_side)
+        stop_price, stop_price_details = self._normalize_live_limit_price(
+            symbol=symbol,
+            side=close_side,
+            requested_price=self._maybe_float(getattr(plan, "sl", None)),
+        )
+        if stop_price is None or stop_price <= 0.0:
+            return {
+                "status": "FAILED",
+                "reason": "stop_price_missing",
+                "orders": [],
+                "errors": [{"role": "stop_loss", "message": "Live protection requires a positive stop price."}],
+                "parent_client_order_id": parent_client_order_id,
+            }
+
+        working_type = str(getattr(self.settings, "auto_trading_live_stop_working_type", "MARK_PRICE") or "MARK_PRICE").upper()
+        stop_order = {
+            "role": "stop_loss",
+            "client_order_id": self._protection_client_order_id("sl"),
+            "order_type": "STOP_MARKET",
+            "side": close_side,
+            "stop_price": float(stop_price),
+            "quantity": None,
+            "close_position": True,
+            "position_side": live_position_side,
+            "working_type": working_type,
+            "price_details": stop_price_details,
+        }
+        orders: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+
+        try:
+            stop_result = self.live_submitter(
+                symbol=symbol,
+                side=close_side,
+                order_type="STOP_MARKET",
+                quantity=None,
+                price=None,
+                stop_price=float(stop_price),
+                time_in_force="GTC",
+                reduce_only=False,
+                position_side=live_position_side,
+                close_position=True,
+                working_type=working_type,
+                order_purpose="live_protection:stop_loss",
+                parent_client_order_id=parent_client_order_id,
+                client_order_id=stop_order["client_order_id"],
+                plan_id=plan.plan_id,
+                live=live,
+                new_order_resp_type="ACK",
+            )
+            orders.append({**stop_order, "result": self._safe_dict(stop_result)})
+        except Exception as exc:
+            errors.append({"role": "stop_loss", "type": exc.__class__.__name__, "message": str(exc)})
+            return {
+                "status": "FAILED",
+                "reason": "stop_loss_attach_failed",
+                "orders": orders,
+                "errors": errors,
+                "parent_client_order_id": parent_client_order_id,
+                "requires_reconciliation": True,
+            }
+
+        tp_enabled = self._safe_bool(getattr(self.settings, "auto_trading_live_tp_limit_attach_enabled", True), default=True)
+        skipped_targets: list[dict[str, Any]] = []
+        if tp_enabled:
+            tp_targets, skipped_targets = self._live_tp_targets(plan=plan, entry_quantity=float(quantity))
+            for target in tp_targets:
+                tp_order = {
+                    "role": str(target["label"]),
+                    "client_order_id": self._protection_client_order_id(str(target["label"])),
+                    "order_type": "LIMIT",
+                    "side": close_side,
+                    "price": float(target["price"]),
+                    "quantity": float(target["quantity"]),
+                    "position_side": live_position_side,
+                    "reduce_only": False if hedge_mode else True,
+                    "tp_market_fallback_seconds": int(getattr(self.settings, "auto_trading_live_tp_market_fallback_seconds", 20) or 0),
+                    "target": target,
+                }
+                try:
+                    tp_result = self.live_submitter(
+                        symbol=symbol,
+                        side=close_side,
+                        order_type="LIMIT",
+                        quantity=float(target["quantity"]),
+                        price=float(target["price"]),
+                        stop_price=None,
+                        time_in_force="GTC",
+                        reduce_only=False if hedge_mode else True,
+                        position_side=live_position_side,
+                        close_position=False,
+                        working_type=None,
+                        order_purpose=f"live_protection:{target['label']}",
+                        parent_client_order_id=parent_client_order_id,
+                        client_order_id=tp_order["client_order_id"],
+                        plan_id=plan.plan_id,
+                        live=live,
+                        new_order_resp_type="ACK",
+                    )
+                    orders.append({**tp_order, "result": self._safe_dict(tp_result)})
+                except Exception as exc:
+                    errors.append({"role": str(target["label"]), "type": exc.__class__.__name__, "message": str(exc)})
+
+        status = "ATTACHED" if not errors else "PARTIAL"
+        return {
+            "status": status,
+            "orders": orders,
+            "errors": errors,
+            "skipped_targets": skipped_targets,
+            "parent_client_order_id": parent_client_order_id,
+            "position_side": live_position_side,
+            "close_side": close_side,
+            "tp_limit_attach_enabled": tp_enabled,
+            "requires_reconciliation": bool(errors),
+        }
+
     def _live_order_sizing(self, *, intent: OrderIntent, plan: Plan) -> tuple[float | None, dict[str, Any], str | None]:
         payload = self._safe_dict(intent.payload)
         executable_plan = self._safe_dict(payload.get("executable_plan"))
@@ -1500,6 +1727,33 @@ class ExecutionCoordinator:
             row.raw = {
                 **self._safe_dict(row.raw),
                 "fill_results": fill_results,
+            }
+            protection_orders = self.attach_live_protection_orders(
+                plan=plan,
+                entry_quantity=fill_qty,
+                position_side=live_position_side,
+                parent_client_order_id=client_order_id,
+                live=True,
+            )
+            row.attachments = {
+                **self._safe_dict(row.attachments),
+                "live_protection_orders": protection_orders,
+                **({"requires_reconciliation": True} if self._safe_bool(protection_orders.get("requires_reconciliation")) else {}),
+            }
+            row.raw = {
+                **self._safe_dict(row.raw),
+                "live_protection_orders": protection_orders,
+            }
+            if self._safe_bool(protection_orders.get("requires_reconciliation")):
+                row.message = "Live entry filled but protection order attachment needs reconciliation."
+        elif state == OrderLifecycleState.ACKNOWLEDGED:
+            row.attachments = {
+                **self._safe_dict(row.attachments),
+                "live_protection_orders": {
+                    "status": "PENDING_ENTRY_FILL",
+                    "parent_client_order_id": client_order_id,
+                    "message": "Protection orders will attach after an entry fill is observed.",
+                },
             }
         tracker = self._lane_tracker()
         tracker.record_submitted(is_variant=self._intent_is_transition_edge_variant(intent))

@@ -215,7 +215,8 @@ def run_once(args: argparse.Namespace, *, progress_callback: Any | None = None) 
         else:
             payload = engine.refresh_symbol(args.symbol)
             route_payload = engine.auto_route_symbol(symbol=args.symbol)
-            result["actions"].append({"refresh_symbol": payload, "auto_route": route_payload})
+            fallback_payload = engine.process_live_tp_market_fallbacks(symbol=args.symbol)
+            result["actions"].append({"refresh_symbol": payload, "auto_route": route_payload, "tp_market_fallback": fallback_payload})
 
         if args.reprocess_events:
             payload = engine.reprocess_events(limit=200)
@@ -270,16 +271,20 @@ def run_ws_stream(args: argparse.Namespace) -> dict:
                     "refresh_calls": _safe_int(stats.get("refresh_calls")),
                     "auto_route_calls": _safe_int(stats.get("auto_route_calls")),
                     "auto_route_submit_calls": _safe_int(stats.get("auto_route_submit_calls")),
+                    "tp_market_fallback_calls": _safe_int(stats.get("tp_market_fallback_calls")),
+                    "tp_market_fallback_submitted": _safe_int(stats.get("tp_market_fallback_submitted")),
                     "reconnects": _safe_int(stats.get("reconnects")),
                     "ingest_errors": _safe_int(stats.get("ingest_errors")),
                     "skipped_non_final_candles": _safe_int(stats.get("skipped_non_final_candles")),
                     "skipped_reverse_timestamp": _safe_int(stats.get("skipped_reverse_timestamp")),
                     "refresh_errors": _safe_int(stats.get("refresh_errors")),
                     "auto_route_errors": _safe_int(stats.get("auto_route_errors")),
+                    "tp_market_fallback_errors": _safe_int(stats.get("tp_market_fallback_errors")),
                     "progress_callback_errors": _safe_int(stats.get("progress_callback_errors")),
                     "last_ingest_error": str(stats.get("last_ingest_error") or ""),
                     "last_refresh_error": str(stats.get("last_refresh_error") or ""),
                     "last_auto_route_error": str(stats.get("last_auto_route_error") or ""),
+                    "last_tp_market_fallback_error": str(stats.get("last_tp_market_fallback_error") or ""),
                     "last_progress_callback_error": str(stats.get("last_progress_callback_error") or ""),
                     "last_ingest_success_at": str(stats.get("last_ingest_success_at") or ""),
                     "last_ingest_error_at": str(stats.get("last_ingest_error_at") or ""),
@@ -287,6 +292,8 @@ def run_ws_stream(args: argparse.Namespace) -> dict:
                     "last_refresh_error_at": str(stats.get("last_refresh_error_at") or ""),
                     "last_auto_route_success_at": str(stats.get("last_auto_route_success_at") or ""),
                     "last_auto_route_error_at": str(stats.get("last_auto_route_error_at") or ""),
+                    "last_tp_market_fallback_success_at": str(stats.get("last_tp_market_fallback_success_at") or ""),
+                    "last_tp_market_fallback_error_at": str(stats.get("last_tp_market_fallback_error_at") or ""),
                     "last_progress_callback_success_at": str(stats.get("last_progress_callback_success_at") or ""),
                     "last_progress_callback_error_at": str(stats.get("last_progress_callback_error_at") or ""),
                     "last_stream_error": str(stats.get("last_stream_error") or ""),
@@ -339,16 +346,20 @@ def run_ws_stream(args: argparse.Namespace) -> dict:
                 "refresh_calls": _safe_int(payload.get("refresh_calls")),
                 "auto_route_calls": _safe_int(payload.get("auto_route_calls")),
                 "auto_route_submit_calls": _safe_int(payload.get("auto_route_submit_calls")),
+                "tp_market_fallback_calls": _safe_int(payload.get("tp_market_fallback_calls")),
+                "tp_market_fallback_submitted": _safe_int(payload.get("tp_market_fallback_submitted")),
                 "reconnects": _safe_int(payload.get("reconnects")),
                 "ingest_errors": _safe_int(payload.get("ingest_errors")),
                 "skipped_non_final_candles": _safe_int(payload.get("skipped_non_final_candles")),
                 "skipped_reverse_timestamp": _safe_int(payload.get("skipped_reverse_timestamp")),
                 "refresh_errors": _safe_int(payload.get("refresh_errors")),
                 "auto_route_errors": _safe_int(payload.get("auto_route_errors")),
+                "tp_market_fallback_errors": _safe_int(payload.get("tp_market_fallback_errors")),
                 "progress_callback_errors": _safe_int(payload.get("progress_callback_errors")),
                 "last_ingest_error": str(payload.get("last_ingest_error") or ""),
                 "last_refresh_error": str(payload.get("last_refresh_error") or ""),
                 "last_auto_route_error": str(payload.get("last_auto_route_error") or ""),
+                "last_tp_market_fallback_error": str(payload.get("last_tp_market_fallback_error") or ""),
                 "last_progress_callback_error": str(payload.get("last_progress_callback_error") or ""),
                 "last_ingest_success_at": str(payload.get("last_ingest_success_at") or ""),
                 "last_ingest_error_at": str(payload.get("last_ingest_error_at") or ""),
@@ -356,6 +367,8 @@ def run_ws_stream(args: argparse.Namespace) -> dict:
                 "last_refresh_error_at": str(payload.get("last_refresh_error_at") or ""),
                 "last_auto_route_success_at": str(payload.get("last_auto_route_success_at") or ""),
                 "last_auto_route_error_at": str(payload.get("last_auto_route_error_at") or ""),
+                "last_tp_market_fallback_success_at": str(payload.get("last_tp_market_fallback_success_at") or ""),
+                "last_tp_market_fallback_error_at": str(payload.get("last_tp_market_fallback_error_at") or ""),
                 "last_progress_callback_success_at": str(payload.get("last_progress_callback_success_at") or ""),
                 "last_progress_callback_error_at": str(payload.get("last_progress_callback_error_at") or ""),
                 "last_stream_error": str(payload.get("last_stream_error") or ""),

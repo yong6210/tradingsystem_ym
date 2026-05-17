@@ -2886,6 +2886,7 @@ def test_boot_check_synthetic_canary_matches_live_contract(monkeypatch) -> None:
         auto_trading_micro_live_allowed_entry_models="CONFIRM",
     )
     captured: dict[str, object] = {}
+    reconciliation_captured: dict[str, object] = {}
 
     monkeypatch.setattr(run_micro_live_boot_check, "get_settings", lambda: settings)
     monkeypatch.setattr(
@@ -2893,11 +2894,12 @@ def test_boot_check_synthetic_canary_matches_live_contract(monkeypatch) -> None:
         "build_payload",
         lambda **_kwargs: {"overall_status": "PASS", "blocking_failures": []},
     )
-    monkeypatch.setattr(
-        run_micro_live_boot_check.run_live_reconciliation_watchdog,
-        "build_payload",
-        lambda **_kwargs: {"overall_status": "OK", "evaluation": {"alert": False, "message": "ok"}},
-    )
+
+    def fake_reconciliation(**kwargs: object) -> dict[str, object]:
+        reconciliation_captured.update(kwargs)
+        return {"overall_status": "OK", "evaluation": {"alert": False, "message": "ok"}}
+
+    monkeypatch.setattr(run_micro_live_boot_check.run_live_reconciliation_watchdog, "build_payload", fake_reconciliation)
     monkeypatch.setattr(run_micro_live_boot_check.run_live_reconciliation_watchdog, "_default_stale_minutes", lambda _value: 3)
 
     def fake_canary(**kwargs: object) -> dict[str, object]:
@@ -2927,6 +2929,7 @@ def test_boot_check_synthetic_canary_matches_live_contract(monkeypatch) -> None:
     assert payload["overall_status"] == "PASS"
     assert captured["symbol"] == "BTCUSDC"
     assert captured["entry_model"] == "CONFIRM"
+    assert reconciliation_captured["symbols"] == {"ADAUSDC", "BTCUSDC"}
     canary_component = next(item for item in payload["components"] if item["name"] == "synthetic_submit_canary")
     assert "entry_model=CONFIRM" in canary_component["summary"]
 
@@ -2938,6 +2941,16 @@ def test_synthetic_canary_default_symbol_preserves_micro_live_priority() -> None
     )
 
     assert run_micro_live_synthetic_canary._first_live_symbol(settings, "") == "BTCUSDC"
+
+
+def test_boot_check_ignores_explicit_symbol_outside_live_universe(monkeypatch) -> None:
+    settings = SimpleNamespace(
+        auto_trading_micro_live_allowed_symbols="BTCUSDT,ETHUSDT",
+        auto_trading_micro_live_symbol_priority="ETHUSDT,BTCUSDT",
+    )
+    monkeypatch.setattr(run_micro_live_boot_check, "get_settings", lambda: settings)
+
+    assert run_micro_live_boot_check._first_symbol("BTCUSDC") == "ETHUSDT"
 
 
 def test_boot_check_main_writes_latest_aliases(monkeypatch, tmp_path, capsys) -> None:

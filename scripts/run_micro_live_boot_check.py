@@ -74,11 +74,11 @@ def _csv_items(value: Any) -> list[str]:
 
 def _first_symbol(explicit: str) -> str:
     value = str(explicit or "").strip().upper()
-    if value:
-        return value
     settings = get_settings()
     allowed_symbols = _csv_items(getattr(settings, "auto_trading_micro_live_allowed_symbols", ""))
     allowed_symbol_set = set(allowed_symbols)
+    if value and (not allowed_symbol_set or value in allowed_symbol_set):
+        return value
     for priority_symbol in _csv_items(getattr(settings, "auto_trading_micro_live_symbol_priority", "")):
         if not allowed_symbol_set or priority_symbol in allowed_symbol_set:
             return priority_symbol
@@ -91,6 +91,17 @@ def _first_entry_model() -> str:
         if entry_model:
             return entry_model
     return "LIMIT"
+
+
+def _reconciliation_scope_symbols(explicit: str) -> set[str]:
+    settings = get_settings()
+    allowed = set(_csv_items(getattr(settings, "auto_trading_micro_live_allowed_symbols", "")))
+    if not allowed:
+        allowed = set(_csv_items(getattr(settings, "auto_trading_allowed_symbols", "")))
+    requested = str(explicit or "").strip().upper()
+    if requested:
+        return {requested} if not allowed or requested in allowed else allowed
+    return allowed
 
 
 def _component(name: str, status: str, *, blocking: bool, summary: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -148,9 +159,10 @@ def build_payload(
     )
 
     stale_minutes = run_live_reconciliation_watchdog._default_stale_minutes(0)
+    reconciliation_symbols = _reconciliation_scope_symbols(symbol)
     reconciliation = run_live_reconciliation_watchdog.build_payload(
         days=max(1, int(days)),
-        symbols=set(),
+        symbols=reconciliation_symbols,
         limit=max(1, int(limit)),
         stale_minutes=stale_minutes,
         event_lookback_minutes=60,

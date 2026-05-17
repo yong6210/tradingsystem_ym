@@ -2262,6 +2262,91 @@ def test_reconcile_route_reports_missing_stop_stale_stream_and_size_mismatch() -
     assert payload["lock_required"] is True
 
 
+def test_reconcile_route_accepts_hedge_mode_protection_orders_without_reduce_only() -> None:
+    init_db()
+    symbol = f"RECON{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 33}USDC"
+    plan_id = f"{symbol}_protected"
+    _seed_plan(symbol=symbol, family="trend_continuation", plan_id=plan_id, state="ENTERED")
+
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        db.add(
+            BinancePositionSnapshot(
+                position_key=f"{symbol}:LONG",
+                symbol=symbol,
+                position_side="LONG",
+                position_amt=1.0,
+                entry_price=100.0,
+                break_even_price=100.0,
+                mark_price=100.5,
+                liquidation_price=80.0,
+                unrealized_pnl=0.5,
+                notional=100.5,
+                leverage=2,
+                margin_type="cross",
+                isolated_wallet=0.0,
+                update_ts=now,
+                raw={},
+            )
+        )
+        db.add(
+            BinanceOrderLedger(
+                client_order_id=f"{symbol}_sl",
+                exchange_order_id=223456,
+                plan_id=plan_id,
+                symbol=symbol,
+                side="SELL",
+                order_type="STOP_MARKET",
+                status="NEW",
+                reduce_only=False,
+                requested_live=True,
+                live_enabled=True,
+                test_order=False,
+                price=98.5,
+                orig_qty=0.0,
+                executed_qty=0.0,
+                time_in_force="",
+                last_event_type="submit",
+                last_trade_id=None,
+                last_event_ts=now,
+                raw={"order_purpose": "live_protection:stop_loss", "close_position": True, "position_side": "LONG"},
+            )
+        )
+        db.add(
+            BinanceOrderLedger(
+                client_order_id=f"{symbol}_tp1",
+                exchange_order_id=223457,
+                plan_id=plan_id,
+                symbol=symbol,
+                side="SELL",
+                order_type="LIMIT",
+                status="NEW",
+                reduce_only=False,
+                requested_live=True,
+                live_enabled=True,
+                test_order=False,
+                price=101.5,
+                orig_qty=1.0,
+                executed_qty=0.0,
+                time_in_force="GTC",
+                last_event_type="submit",
+                last_trade_id=None,
+                last_event_ts=now,
+                raw={"order_purpose": "live_protection:tp1", "position_side": "LONG"},
+            )
+        )
+        db.commit()
+
+    reconcile = client.post("/execution/reconcile", json={"symbol": symbol})
+    assert reconcile.status_code == 200
+    payload = reconcile.json()
+    mismatch_types = {item["mismatch_type"] for item in payload["mismatches"]}
+    assert "MISSING_STOP_ORDER" not in mismatch_types
+    assert "MISSING_TP_ORDER" not in mismatch_types
+    assert "ORPHAN_ORDER_EXCHANGE" not in mismatch_types
+    assert payload["lock_required"] is False
+
+
 def test_reconcile_handles_naive_submission_timestamp_and_reports_fill_gap() -> None:
     init_db()
     symbol = f"FILLGAP{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 31}USDC"
@@ -2601,6 +2686,90 @@ def test_micro_live_submit_path_uses_binance_adapter_when_gates_pass(monkeypatch
     assert submit_payload["attachments"]["live_position_side"] == "LONG"
     assert submit_payload["attachments"]["live_order_sizing"]["max_position_notional"] == 12.5
     assert submit_payload["attachments"]["live_order_sizing"]["normalized_quantity"] == 0.125
+
+
+def test_micro_live_filled_submit_attaches_stop_and_take_profit_orders(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "binance_live_position_side_mode", "HEDGE")
+    monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "NOTIONAL_PER_R")
+    monkeypatch.setattr(settings, "auto_trading_notional_per_r", 25.0)
+    monkeypatch.setattr(settings, "binance_live_min_quantity", 0.001)
+    monkeypatch.setattr(settings, "binance_live_quantity_step", 0.001)
+    suffix = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000))[-6:]
+    symbol = f"PF{suffix}USDC"
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", symbol)
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_submit(self, **kwargs):
+        calls.append(dict(kwargs))
+        is_entry = len(calls) == 1
+        return {
+            "symbol": kwargs["symbol"],
+            "plan_id": kwargs["plan_id"],
+            "order_id": 990000 + len(calls),
+            "client_order_id": kwargs["client_order_id"],
+            "status": "FILLED" if is_entry else "NEW",
+            "side": kwargs["side"],
+            "order_type": kwargs["order_type"],
+            "reduce_only": kwargs["reduce_only"],
+            "position_side": kwargs.get("position_side") or "",
+            "executed_qty": kwargs["quantity"] if is_entry else 0.0,
+            "avg_price": 100.0 if is_entry else 0.0,
+            "raw": {
+                "orderId": str(990000 + len(calls)),
+                "executedQty": str(kwargs["quantity"] if is_entry else 0.0),
+                "avgPrice": "100.0" if is_entry else "0",
+            },
+        }
+
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.submit_binance_order", _fake_submit)
+
+    plan_id = f"{symbol}_protect_{suffix}"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, entry_model="CONFIRM")
+
+    intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "MICRO_LIVE"},
+    )
+    assert intent.status_code == 200
+    intent_payload = intent.json()
+
+    submit = client.post(
+        "/execution/submit",
+        json={"intent_id": intent_payload["intent_id"], "live": True},
+    )
+    assert submit.status_code == 200
+    payload = submit.json()
+    assert payload["state"] == "FILLED"
+    assert payload["attachments"]["immediate_fill_ingested"] is True
+    assert payload["attachments"]["live_protection_orders"]["status"] == "ATTACHED"
+
+    assert len(calls) == 5
+    entry, stop, tp1, tp2, tp3 = calls
+    assert entry["order_type"] == "MARKET"
+    assert entry["side"] == "BUY"
+    assert entry["position_side"] == "LONG"
+    assert stop["order_type"] == "STOP_MARKET"
+    assert stop["side"] == "SELL"
+    assert stop["stop_price"] == 98.5
+    assert stop["close_position"] is True
+    assert stop["quantity"] is None
+    assert stop["position_side"] == "LONG"
+    assert stop["working_type"] == "MARK_PRICE"
+    assert [tp1["order_type"], tp2["order_type"], tp3["order_type"]] == ["LIMIT", "LIMIT", "LIMIT"]
+    assert [tp1["price"], tp2["price"], tp3["price"]] == [101.0, 102.0, 103.0]
+    assert [tp1["quantity"], tp2["quantity"], tp3["quantity"]] == [0.075, 0.031, 0.018]
+    assert [tp1["reduce_only"], tp2["reduce_only"], tp3["reduce_only"]] == [False, False, False]
 
 
 def test_micro_live_submit_malformed_live_submitter_response_requires_reconciliation(monkeypatch) -> None:

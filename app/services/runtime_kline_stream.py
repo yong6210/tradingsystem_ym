@@ -17,6 +17,10 @@ class AutoRouteSessionImpulseRetestPlans(Protocol):
     def __call__(self, *, symbol: str, plan_ids: list[str]) -> dict[str, Any]: ...
 
 
+class TpMarketFallbackProcessor(Protocol):
+    def __call__(self, *, symbol: str) -> dict[str, Any]: ...
+
+
 ProgressCallback = Callable[[dict[str, Any]], Any]
 RefreshSymbol = Callable[[str], dict[str, Any]]
 
@@ -38,6 +42,7 @@ class RuntimeKlineStreamService:
         refresh_symbol: RefreshSymbol,
         auto_route_symbol: AutoRouteSymbol,
         auto_route_session_impulse_retest_plans: AutoRouteSessionImpulseRetestPlans,
+        tp_market_fallback_processor: TpMarketFallbackProcessor | None = None,
     ):
         self.db = db
         self.market_data = market_data
@@ -45,6 +50,7 @@ class RuntimeKlineStreamService:
         self.refresh_symbol = refresh_symbol
         self.auto_route_symbol = auto_route_symbol
         self.auto_route_session_impulse_retest_plans = auto_route_session_impulse_retest_plans
+        self.tp_market_fallback_processor = tp_market_fallback_processor
 
     async def stream(
         self,
@@ -80,6 +86,9 @@ class RuntimeKlineStreamService:
             "auto_route_submit_calls": 0,
             "auto_route_intents_created": 0,
             "auto_route_errors": 0,
+            "tp_market_fallback_calls": 0,
+            "tp_market_fallback_submitted": 0,
+            "tp_market_fallback_errors": 0,
             "progress_callback_errors": 0,
             "reconnects": 0,
             "per_interval": {iv: 0 for iv in selected_intervals},
@@ -194,6 +203,20 @@ class RuntimeKlineStreamService:
                                         stats["auto_route_errors"] += 1
                                         stats["last_auto_route_error"] = f"{exc.__class__.__name__}:{exc}"
                                         stats["last_auto_route_error_at"] = datetime.now(timezone.utc).isoformat()
+                                    if self.tp_market_fallback_processor is not None:
+                                        try:
+                                            fallback_payload = self.tp_market_fallback_processor(symbol=kline.symbol)
+                                            stats["tp_market_fallback_calls"] += 1
+                                            stats["tp_market_fallback_submitted"] += int(
+                                                fallback_payload.get("submitted_count", 0) or 0
+                                            )
+                                            stats["last_tp_market_fallback_error"] = ""
+                                            stats["last_tp_market_fallback_success_at"] = datetime.now(timezone.utc).isoformat()
+                                        except Exception as exc:
+                                            self.db.rollback()
+                                            stats["tp_market_fallback_errors"] += 1
+                                            stats["last_tp_market_fallback_error"] = f"{exc.__class__.__name__}:{exc}"
+                                            stats["last_tp_market_fallback_error_at"] = datetime.now(timezone.utc).isoformat()
                                 refresh_guard[refresh_key] = now
 
                         _emit_progress()

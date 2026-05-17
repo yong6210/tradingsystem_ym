@@ -752,12 +752,15 @@ class BinanceSyncOut(ORMModel):
 class BinanceOrderSubmitIn(ORMModel):
     symbol: str = Field(min_length=3, max_length=30)
     side: str = Field(pattern="^(BUY|SELL)$")
-    order_type: str = Field(pattern="^(MARKET|LIMIT)$")
-    quantity: float = Field(gt=0)
+    order_type: str = Field(pattern="^(MARKET|LIMIT|STOP|STOP_MARKET|TAKE_PROFIT|TAKE_PROFIT_MARKET)$")
+    quantity: float | None = Field(default=None, gt=0)
     price: float | None = Field(default=None, gt=0)
+    stop_price: float | None = Field(default=None, gt=0)
     time_in_force: str = Field(default="GTC", pattern="^(GTC|IOC|FOK)$")
     reduce_only: bool = False
     position_side: str | None = Field(default=None, pattern="^(BOTH|LONG|SHORT)$")
+    close_position: bool = False
+    working_type: str | None = Field(default=None, pattern="^(MARK_PRICE|CONTRACT_PRICE)$")
     client_order_id: str | None = Field(default=None, min_length=4, max_length=36)
     plan_id: str | None = Field(default=None, min_length=4, max_length=50)
     live: bool = False
@@ -778,10 +781,13 @@ class BinanceOrderOut(ORMModel):
     side: str = ""
     order_type: str = ""
     price: float | None = None
+    stop_price: float | None = None
     orig_qty: float | None = None
     executed_qty: float | None = None
     reduce_only: bool | None = None
     position_side: str = ""
+    close_position: bool = False
+    working_type: str = ""
     time_in_force: str = ""
     raw: dict[str, Any] = Field(default_factory=dict)
 

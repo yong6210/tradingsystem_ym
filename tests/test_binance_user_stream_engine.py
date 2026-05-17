@@ -333,6 +333,285 @@ def test_ingest_binance_user_stream_reduce_only_trade_can_close_plan() -> None:
         assert refreshed.state == PlanState.CLOSED.value
 
 
+def test_ingest_binance_user_stream_hedge_protection_limit_can_close_plan() -> None:
+    init_db()
+    symbol = f"BUS{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 2}USDC"
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        plan = _seed_plan(db, symbol=symbol, plan_id=f"{symbol}_hedge_tp_plan", direction="long", state="ENTERED")
+        trade_id = int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 2
+
+        engine.binance_order_repo.upsert(
+            client_order_id="tp1-hedge-1",
+            exchange_order_id=32334,
+            plan_id=plan.plan_id,
+            symbol=symbol,
+            side="SELL",
+            order_type="LIMIT",
+            status="NEW",
+            reduce_only=False,
+            requested_live=True,
+            live_enabled=True,
+            test_order=False,
+            price=101.5,
+            orig_qty=0.01,
+            executed_qty=0.0,
+            time_in_force="GTC",
+            last_event_type="submit",
+            last_trade_id=None,
+            last_event_ts=datetime.now(timezone.utc),
+            raw={"order_purpose": "live_protection:tp1", "parent_client_order_id": "entry-hedge-1"},
+        )
+        db.commit()
+
+        engine.market_data.binance.fetch_position_risk = lambda symbol=None: [  # type: ignore[assignment]
+            {
+                "symbol": symbol or "BTCUSDC",
+                "positionSide": "LONG",
+                "positionAmt": "0.0",
+                "entryPrice": "0.0",
+                "breakEvenPrice": "0.0",
+                "markPrice": "101.5",
+                "liquidationPrice": "0.0",
+                "unRealizedProfit": "0.0",
+                "notional": "0.0",
+                "leverage": "5",
+                "marginType": "isolated",
+                "isolatedWallet": "0.0",
+                "updateTime": 1700000000000,
+            }
+        ]
+
+        result = engine.ingest_binance_user_stream_event(
+            payload={
+                "e": "ORDER_TRADE_UPDATE",
+                "E": 1700000005000,
+                "o": {
+                    "s": symbol,
+                    "i": 32334,
+                    "c": "tp1-hedge-1",
+                    "S": "SELL",
+                    "o": "LIMIT",
+                    "f": "GTC",
+                    "X": "FILLED",
+                    "x": "TRADE",
+                    "R": False,
+                    "ps": "LONG",
+                    "l": "0.01",
+                    "L": "101.5",
+                    "z": "0.01",
+                    "q": "0.01",
+                    "ap": "101.5",
+                    "rp": "1.5",
+                    "t": trade_id,
+                },
+            }
+        )
+
+        assert result["accepted"] is True
+        assert result["fill_ingest"] is not None
+        assert result["fill_ingest"]["stage"] == "CLOSED"
+        assert result["fill_ingest"]["exit_reason"] == "target_tp1"
+        assert result["fill_ingest"]["duplicate"] is False
+
+        db.expire_all()
+        refreshed = db.get(Plan, plan.plan_id)
+        assert refreshed is not None
+        assert refreshed.state == PlanState.CLOSED.value
+
+
+def test_ingest_binance_user_stream_closed_protection_cancels_sibling_orders(monkeypatch) -> None:
+    init_db()
+    symbol = f"BUS{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 4}USDC"
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        monkeypatch.setattr(engine.settings, "binance_trade_live_enabled", True)
+        plan = _seed_plan(db, symbol=symbol, plan_id=f"{symbol}_sibling_cancel_plan", direction="long", state="ENTERED")
+        trade_id = int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 4
+
+        engine.binance_order_repo.upsert(
+            client_order_id="sl-sibling-1",
+            exchange_order_id=42334,
+            plan_id=plan.plan_id,
+            symbol=symbol,
+            side="SELL",
+            order_type="STOP_MARKET",
+            status="NEW",
+            reduce_only=False,
+            requested_live=True,
+            live_enabled=True,
+            test_order=False,
+            price=98.5,
+            orig_qty=0.0,
+            executed_qty=0.0,
+            time_in_force="",
+            last_event_type="submit",
+            last_trade_id=None,
+            last_event_ts=datetime.now(timezone.utc),
+            raw={"order_purpose": "live_protection:stop_loss", "position_side": "LONG", "close_position": True},
+        )
+        engine.binance_order_repo.upsert(
+            client_order_id="tp1-sibling-1",
+            exchange_order_id=42335,
+            plan_id=plan.plan_id,
+            symbol=symbol,
+            side="SELL",
+            order_type="LIMIT",
+            status="NEW",
+            reduce_only=False,
+            requested_live=True,
+            live_enabled=True,
+            test_order=False,
+            price=101.5,
+            orig_qty=0.01,
+            executed_qty=0.0,
+            time_in_force="GTC",
+            last_event_type="submit",
+            last_trade_id=None,
+            last_event_ts=datetime.now(timezone.utc),
+            raw={"order_purpose": "live_protection:tp1", "position_side": "LONG"},
+        )
+        db.commit()
+
+        engine.market_data.binance.fetch_position_risk = lambda symbol=None: [  # type: ignore[assignment]
+            {
+                "symbol": symbol or "BTCUSDC",
+                "positionSide": "LONG",
+                "positionAmt": "0.0",
+                "entryPrice": "0.0",
+                "breakEvenPrice": "0.0",
+                "markPrice": "98.5",
+                "liquidationPrice": "0.0",
+                "unRealizedProfit": "0.0",
+                "notional": "0.0",
+                "leverage": "5",
+                "marginType": "isolated",
+                "isolatedWallet": "0.0",
+                "updateTime": 1700000000000,
+            }
+        ]
+        cancel_calls: list[dict[str, object]] = []
+
+        def _cancel(**kwargs):
+            cancel_calls.append(kwargs)
+            return {"status": "CANCELED", **kwargs}
+
+        engine.cancel_binance_order = _cancel  # type: ignore[method-assign]
+
+        result = engine.ingest_binance_user_stream_event(
+            payload={
+                "e": "ORDER_TRADE_UPDATE",
+                "E": 1700000005000,
+                "o": {
+                    "s": symbol,
+                    "i": 42334,
+                    "c": "sl-sibling-1",
+                    "S": "SELL",
+                    "o": "STOP_MARKET",
+                    "f": "GTC",
+                    "X": "FILLED",
+                    "x": "TRADE",
+                    "R": False,
+                    "ps": "LONG",
+                    "l": "0.01",
+                    "L": "98.5",
+                    "z": "0.01",
+                    "q": "0.01",
+                    "ap": "98.5",
+                    "rp": "-1.5",
+                    "t": trade_id,
+                },
+            }
+        )
+
+        assert result["accepted"] is True
+        assert result["fill_ingest"]["stage"] == "CLOSED"
+        assert result["fill_ingest"]["exit_reason"] == "stop_loss"
+        assert result["protection_sibling_cancel"]["cancelled_count"] == 1
+        assert cancel_calls == [{"symbol": symbol, "client_order_id": "tp1-sibling-1"}]
+
+
+def test_process_live_tp_market_fallback_cancels_stale_touched_limit_and_closes_market(monkeypatch) -> None:
+    init_db()
+    symbol = f"BUS{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 3}USDC"
+    now = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        monkeypatch.setattr(engine.settings, "binance_trade_live_enabled", True)
+        monkeypatch.setattr(engine.settings, "auto_trading_live_tp_market_fallback_seconds", 20)
+        plan = _seed_plan(db, symbol=symbol, plan_id=f"{symbol}_fallback_plan", direction="long", state="ENTERED")
+        engine.binance_order_repo.upsert(
+            client_order_id="tp1-fallback-1",
+            exchange_order_id=42334,
+            plan_id=plan.plan_id,
+            symbol=symbol,
+            side="SELL",
+            order_type="LIMIT",
+            status="NEW",
+            reduce_only=False,
+            requested_live=True,
+            live_enabled=True,
+            test_order=False,
+            price=101.5,
+            orig_qty=0.01,
+            executed_qty=0.0,
+            time_in_force="GTC",
+            last_event_type="submit",
+            last_trade_id=None,
+            last_event_ts=now - timedelta(seconds=30),
+            raw={"order_purpose": "live_protection:tp1", "position_side": "LONG", "parent_client_order_id": "entry-1"},
+        )
+        db.commit()
+
+        engine.execution_coordinator.live_symbol_rules_loader = lambda symbol: {  # type: ignore[assignment]
+            "symbol": symbol,
+            "quantity_step": 0.001,
+            "min_quantity": 0.001,
+            "source": "test_rules",
+        }
+        engine.market_data.binance.fetch_position_risk = lambda symbol=None: [  # type: ignore[assignment]
+            {
+                "symbol": symbol or "BTCUSDC",
+                "positionSide": "LONG",
+                "positionAmt": "0.01",
+                "entryPrice": "100.0",
+                "breakEvenPrice": "100.0",
+                "markPrice": "101.6",
+                "liquidationPrice": "50.0",
+                "unRealizedProfit": "0.1",
+                "notional": "1.016",
+                "leverage": "5",
+                "marginType": "isolated",
+                "isolatedWallet": "10.0",
+                "updateTime": 1700000000000,
+            }
+        ]
+        engine.query_binance_order = lambda **kwargs: {  # type: ignore[method-assign]
+            "status": "NEW",
+            "orig_qty": 0.01,
+            "executed_qty": 0.0,
+        }
+        engine.cancel_binance_order = lambda **kwargs: {"status": "CANCELED", **kwargs}  # type: ignore[method-assign]
+        submitted: dict[str, object] = {}
+
+        def _submit_market(**kwargs):
+            submitted.update(kwargs)
+            return {"status": "FILLED", "client_order_id": kwargs["client_order_id"], "orig_qty": kwargs["quantity"]}
+
+        engine.submit_binance_order = _submit_market  # type: ignore[method-assign]
+
+        result = engine.process_live_tp_market_fallbacks(symbol=symbol, now=now)
+
+        assert result["submitted_count"] == 1
+        assert result["actions"][0]["status"] == "MARKET_FALLBACK_SUBMITTED"
+        assert submitted["order_type"] == "MARKET"
+        assert submitted["side"] == "SELL"
+        assert submitted["quantity"] == 0.01
+        assert submitted["position_side"] == "LONG"
+        assert submitted["reduce_only"] is False
+        assert submitted["order_purpose"] == "live_protection:tp_market_fallback"
+
+
 def test_ingest_binance_user_stream_skips_duplicate_submit_response_entry_fill() -> None:
     init_db()
     symbol = f"BUS{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 2}USDC"

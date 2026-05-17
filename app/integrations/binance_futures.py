@@ -391,11 +391,14 @@ class BinanceFuturesClient:
         symbol: str,
         side: str,
         order_type: str,
-        quantity: float,
+        quantity: float | None = None,
         price: float | None = None,
+        stop_price: float | None = None,
         time_in_force: str = "GTC",
         reduce_only: bool = False,
         position_side: str | None = None,
+        close_position: bool = False,
+        working_type: str | None = None,
         client_order_id: str | None = None,
         live: bool = False,
         new_order_resp_type: str = "RESULT",
@@ -403,6 +406,10 @@ class BinanceFuturesClient:
         normalized_type = order_type.upper()
         if normalized_type == "LIMIT" and price is None:
             raise ValueError("limit_orders_require_price")
+        if normalized_type in {"STOP", "STOP_MARKET", "TAKE_PROFIT", "TAKE_PROFIT_MARKET"} and stop_price is None:
+            raise ValueError("conditional_orders_require_stop_price")
+        if normalized_type in {"MARKET", "LIMIT", "STOP", "STOP_MARKET", "TAKE_PROFIT", "TAKE_PROFIT_MARKET"} and quantity is None and not close_position:
+            raise ValueError("orders_require_quantity")
         if live and not self.live_trade_enabled:
             raise RuntimeError("binance_live_orders_disabled")
         normalized_position_side = str(position_side or "").strip().upper()
@@ -416,14 +423,21 @@ class BinanceFuturesClient:
             "quantity": quantity,
             "timeInForce": time_in_force.upper() if normalized_type == "LIMIT" else None,
             "price": price if normalized_type == "LIMIT" else None,
+            "stopPrice": stop_price if normalized_type in {"STOP", "STOP_MARKET", "TAKE_PROFIT", "TAKE_PROFIT_MARKET"} else None,
             "reduceOnly": reduce_only,
+            "closePosition": close_position if close_position else None,
+            "workingType": working_type.upper() if working_type else None,
             "newClientOrderId": client_order_id,
             "newOrderRespType": new_order_resp_type.upper(),
         }
         if normalized_position_side:
             params["positionSide"] = normalized_position_side
-            if not reduce_only:
+            if not reduce_only or close_position:
                 params.pop("reduceOnly", None)
+        if close_position:
+            params.pop("quantity", None)
+            params.pop("reduceOnly", None)
+        params = {key: value for key, value in params.items() if value is not None}
         path = "/fapi/v1/order" if live else "/fapi/v1/order/test"
         payload = self._signed_request("POST", path, params)
         if payload and not isinstance(payload, Mapping):
@@ -434,13 +448,16 @@ class BinanceFuturesClient:
                 "side": side.upper(),
                 "type": normalized_type,
                 "price": self._format_decimal(price) if price is not None else "0",
-                "origQty": self._format_decimal(quantity),
+                "origQty": self._format_decimal(quantity) if quantity is not None else "0",
                 "executedQty": "0",
                 "status": "TEST_ACCEPTED",
                 "clientOrderId": client_order_id or "",
                 "timeInForce": time_in_force.upper() if normalized_type == "LIMIT" else "",
                 "reduceOnly": reduce_only,
                 "positionSide": normalized_position_side,
+                "stopPrice": self._format_decimal(stop_price) if stop_price is not None else "0",
+                "closePosition": close_position,
+                "workingType": working_type.upper() if working_type else "",
                 "testOrder": True,
             }
         return payload

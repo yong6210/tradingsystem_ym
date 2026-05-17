@@ -145,6 +145,31 @@ class ExecutionReconciliationService:
     def _lock_scope_for(self, mismatch_type: str) -> LockScopeType | None:
         return _HARD_LOCK_MISMATCHES.get(mismatch_type)
 
+    @staticmethod
+    def _order_raw(row: Any) -> dict[str, Any]:
+        raw = getattr(row, "raw", None)
+        return raw if isinstance(raw, dict) else {}
+
+    def _is_live_protection_row(self, row: Any) -> bool:
+        raw = self._order_raw(row)
+        return str(raw.get("order_purpose") or "").startswith("live_protection:")
+
+    def _is_live_protection_order(self, row: Any, *, role: str) -> bool:
+        raw = self._order_raw(row)
+        purpose = str(raw.get("order_purpose") or "")
+        order_type = str(row.order_type or "").upper()
+        backed_by_exchange_close = self._safe_bool(row.reduce_only) or self._safe_bool(
+            raw.get("close_position", raw.get("closePosition"))
+        )
+        if role == "stop":
+            return "STOP" in order_type and (backed_by_exchange_close or purpose == "live_protection:stop_loss")
+        if role == "tp":
+            return (
+                ("TAKE_PROFIT" in order_type or purpose.startswith("live_protection:tp"))
+                and (backed_by_exchange_close or purpose.startswith("live_protection:tp"))
+            )
+        return False
+
     def _apply_lock_for(self, *, symbol: str, mismatch: dict[str, Any]) -> tuple[bool, str | None]:
         scope_type = self._lock_scope_for(mismatch["mismatch_type"])
         if scope_type is None:
@@ -183,6 +208,8 @@ class ExecutionReconciliationService:
 
         for client_order_id, row in exchange_by_client.items():
             if client_order_id not in local_by_client:
+                if self._is_live_protection_row(row):
+                    continue
                 mismatches.append(
                     self._mismatch(
                         "ORPHAN_ORDER_EXCHANGE",
@@ -233,15 +260,14 @@ class ExecutionReconciliationService:
             )
 
         if exchange_positions:
-            reduce_only_orders = [row for row in exchange_orders if self._safe_bool(row.reduce_only)]
-            stop_present = any("STOP" in str(row.order_type or "").upper() for row in reduce_only_orders)
-            tp_present = any("TAKE_PROFIT" in str(row.order_type or "").upper() for row in reduce_only_orders)
+            stop_present = any(self._is_live_protection_order(row, role="stop") for row in exchange_orders)
+            tp_present = any(self._is_live_protection_order(row, role="tp") for row in exchange_orders)
             if not stop_present:
                 mismatches.append(
                     self._mismatch(
                         "MISSING_STOP_ORDER",
                         ReconciliationSeverity.CRITICAL,
-                        "Exchange position is open but no reduce-only stop order is present.",
+                        "Exchange position is open but no live stop protection order is present.",
                     )
                 )
             if not tp_present:
@@ -249,7 +275,7 @@ class ExecutionReconciliationService:
                     self._mismatch(
                         "MISSING_TP_ORDER",
                         ReconciliationSeverity.WARNING,
-                        "Exchange position is open but no reduce-only take-profit order is present.",
+                        "Exchange position is open but no live take-profit protection order is present.",
                     )
                 )
 

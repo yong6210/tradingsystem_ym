@@ -230,6 +230,49 @@ def test_submit_order_includes_position_side_for_hedge_mode(monkeypatch) -> None
     assert payload["positionSide"] == "LONG"
 
 
+def test_submit_order_supports_stop_market_close_position(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_signed_request(self, method: str, path: str, params: dict[str, object]) -> dict[str, object]:
+        captured["method"] = method
+        captured["path"] = path
+        captured["params"] = params
+        return {}
+
+    monkeypatch.setattr(BinanceFuturesClient, "_signed_request", fake_signed_request)
+    client = BinanceFuturesClient(
+        api_key="key",
+        api_secret="secret",
+        live_trade_enabled=False,
+    )
+
+    payload = client.submit_order(
+        symbol="BTCUSDC",
+        side="SELL",
+        order_type="STOP_MARKET",
+        stop_price=98.5,
+        close_position=True,
+        position_side="LONG",
+        working_type="MARK_PRICE",
+        client_order_id="sl-test-order-1",
+        live=False,
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/fapi/v1/order/test"
+    params = captured["params"]
+    assert isinstance(params, dict)
+    assert params["type"] == "STOP_MARKET"
+    assert params["stopPrice"] == 98.5
+    assert params["closePosition"] is True
+    assert params["positionSide"] == "LONG"
+    assert params["workingType"] == "MARK_PRICE"
+    assert "quantity" not in params
+    assert "reduceOnly" not in params
+    assert payload["closePosition"] is True
+    assert payload["stopPrice"] == "98.5"
+
+
 def test_submit_order_rejects_malformed_exchange_response(monkeypatch) -> None:
     def fake_signed_request(self, method: str, path: str, params: dict[str, object]) -> list[str]:
         return ["bad-response"]
