@@ -2419,6 +2419,35 @@ def test_reconciliation_watchdog_flags_stale_live_submission_without_ledger() ->
     assert result["issues"][0]["type"] == "missing_live_ledger_for_open_submission"
 
 
+def test_reconciliation_watchdog_treats_liquidity_reject_as_safety_warning() -> None:
+    now = datetime(2026, 5, 10, 12, tzinfo=UTC)
+
+    result = run_live_reconciliation_watchdog.evaluate_reconciliation_watchdog(
+        submissions=[
+            {
+                "submission_id": "sub_1",
+                "symbol": "ADAUSDC",
+                "client_order_id": "cid_1",
+                "state": "REJECTED",
+                "submit_status": "LIVE_LIQUIDITY_SPLIT_REQUIRED",
+                "requested_live": True,
+                "submitted_at": datetime(2026, 5, 10, 11, 50, tzinfo=UTC),
+                "updated_at": datetime(2026, 5, 10, 11, 50, tzinfo=UTC),
+            }
+        ],
+        ledgers=[],
+        positions=[],
+        events=[],
+        now=now,
+        stale_minutes=3,
+        event_lookback_minutes=60,
+    )
+
+    assert result["status"] == "ALERT"
+    assert result["severity"] == "WARN"
+    assert result["issues"][0]["type"] == "live_submission_safety_rejected"
+
+
 def test_reconciliation_watchdog_warns_when_filled_entry_has_no_position_snapshot() -> None:
     now = datetime(2026, 5, 10, 12, tzinfo=UTC)
 

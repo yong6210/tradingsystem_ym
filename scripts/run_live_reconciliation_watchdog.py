@@ -25,6 +25,7 @@ from scripts.operation_report_io import atomic_write_text, display_path, parse_r
 _OPEN_SUBMISSION_STATES = {"CREATED", "SUBMITTED", "ACKNOWLEDGED", "PARTIALLY_FILLED"}
 _TERMINAL_LEDGER_STATES = {"FILLED", "CANCELED", "CANCELLED", "REJECTED", "EXPIRED"}
 _ERROR_SUBMIT_STATES = {"REJECTED", "ERROR", "FAILED", "LIVE_SUBMIT_ERROR"}
+_SAFETY_REJECTION_SUBMIT_STATUSES = {"LIVE_LIQUIDITY_BLOCKED", "LIVE_LIQUIDITY_SPLIT_REQUIRED"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -249,11 +250,14 @@ def evaluate_reconciliation_watchdog(
         reference_ts = _latest(row.get("updated_at"), row.get("submitted_at"))
         stale = reference_ts is not None and reference_ts <= normalized_now - stale_delta
         if state in _ERROR_SUBMIT_STATES or submit_status in _ERROR_SUBMIT_STATES:
+            safety_rejection = submit_status in _SAFETY_REJECTION_SUBMIT_STATUSES
             issues.append(
                 _issue(
-                    "live_submission_error",
-                    "FAIL",
-                    "라이브 주문 제출이 거절/오류 상태입니다.",
+                    "live_submission_safety_rejected" if safety_rejection else "live_submission_error",
+                    "WARN" if safety_rejection else "FAIL",
+                    "라이브 주문이 유동성 안전장치에서 차단됐습니다."
+                    if safety_rejection
+                    else "라이브 주문 제출이 거절/오류 상태입니다.",
                     symbol=symbol,
                     client_order_id=client_order_id,
                     details={"state": state, "submit_status": submit_status, "age_minutes": _age_minutes(normalized_now, reference_ts)},
