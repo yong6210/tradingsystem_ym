@@ -69,6 +69,7 @@ def test_runtime_scripts_support_direct_help_from_other_cwd(tmp_path: Path) -> N
         ROOT_DIR / "scripts" / "run_micro_live_synthetic_canary.py",
         ROOT_DIR / "scripts" / "run_micro_main_usdc_backtest.py",
         ROOT_DIR / "scripts" / "run_micro_main_usdt_backtest.py",
+        ROOT_DIR / "scripts" / "run_micro_main_usdt_portfolio_replay_from_backtest.py",
         ROOT_DIR / "scripts" / "run_micro_main_weighted_filter_backtest.py",
         ROOT_DIR / "scripts" / "run_live_reconciliation_watchdog.py",
         ROOT_DIR / "scripts" / "run_replay_validation_bridge.py",

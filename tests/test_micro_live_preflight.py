@@ -780,6 +780,20 @@ def test_surface_strip_summary_prefers_nested_validation_strip() -> None:
     assert summary["act_value"] == "review_runtime_execution_drag_before_expansion"
 
 
+def test_preflight_arg_defaults_follow_current_runtime_settings() -> None:
+    args = SimpleNamespace(symbol="", universe="")
+    settings = SimpleNamespace(
+        ready_market_data_probe_symbol="BTCUSDT",
+        auto_trading_micro_live_allowed_symbols="ETHUSDT,BTCUSDT",
+        universe_name="usdt_reliable_balanced_31",
+    )
+
+    resolved = run_micro_live_preflight._apply_preflight_arg_defaults(args, settings)
+
+    assert resolved.symbol == "BTCUSDT"
+    assert resolved.universe == "usdt_reliable_balanced_31"
+
+
 def test_main_emits_approval_surfaces_and_ready_status(monkeypatch, capsys) -> None:
     _patch_config_drift_pass(monkeypatch)
     monkeypatch.setattr(

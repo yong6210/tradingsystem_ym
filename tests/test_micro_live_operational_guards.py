@@ -2419,6 +2419,76 @@ def test_reconciliation_watchdog_flags_stale_live_submission_without_ledger() ->
     assert result["issues"][0]["type"] == "missing_live_ledger_for_open_submission"
 
 
+def test_reconciliation_watchdog_warns_when_filled_entry_has_no_position_snapshot() -> None:
+    now = datetime(2026, 5, 10, 12, tzinfo=UTC)
+
+    result = run_live_reconciliation_watchdog.evaluate_reconciliation_watchdog(
+        submissions=[],
+        ledgers=[
+            {
+                "client_order_id": "cid_1",
+                "symbol": "ADAUSDC",
+                "side": "SELL",
+                "position_side": "SHORT",
+                "reduce_only": False,
+                "status": "FILLED",
+                "requested_live": True,
+                "executed_qty": 120.0,
+                "updated_at": datetime(2026, 5, 10, 11, 50, tzinfo=UTC),
+                "created_at": datetime(2026, 5, 10, 11, 50, tzinfo=UTC),
+            }
+        ],
+        positions=[],
+        events=[],
+        now=now,
+        stale_minutes=3,
+        event_lookback_minutes=60,
+    )
+
+    assert result["status"] == "ALERT"
+    assert result["severity"] == "WARN"
+    assert result["issues"][0]["type"] == "filled_entry_without_position_snapshot"
+
+
+def test_reconciliation_watchdog_accepts_matching_open_position_snapshot() -> None:
+    now = datetime(2026, 5, 10, 12, tzinfo=UTC)
+
+    result = run_live_reconciliation_watchdog.evaluate_reconciliation_watchdog(
+        submissions=[],
+        ledgers=[
+            {
+                "client_order_id": "cid_1",
+                "symbol": "ADAUSDC",
+                "side": "SELL",
+                "position_side": "SHORT",
+                "reduce_only": False,
+                "status": "FILLED",
+                "requested_live": True,
+                "executed_qty": 120.0,
+                "updated_at": datetime(2026, 5, 10, 11, 50, tzinfo=UTC),
+                "created_at": datetime(2026, 5, 10, 11, 50, tzinfo=UTC),
+            }
+        ],
+        positions=[
+            {
+                "position_key": "ADAUSDC:SHORT",
+                "symbol": "ADAUSDC",
+                "position_side": "SHORT",
+                "position_amt": -120.0,
+                "update_ts": datetime(2026, 5, 10, 11, 59, tzinfo=UTC),
+                "updated_at": datetime(2026, 5, 10, 11, 59, tzinfo=UTC),
+            }
+        ],
+        events=[],
+        now=now,
+        stale_minutes=3,
+        event_lookback_minutes=60,
+    )
+
+    assert result["status"] == "OK"
+    assert result["issues"] == []
+
+
 def test_reconciliation_watchdog_main_writes_latest_aliases(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(
         run_live_reconciliation_watchdog,

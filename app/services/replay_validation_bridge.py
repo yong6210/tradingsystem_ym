@@ -718,6 +718,9 @@ class UsdtProxyReplayValidationBridge:
             payload = self._load_json(path)
             if not payload or self._is_stale(payload, path):
                 continue
+            active_symbols = self._active_micro_live_symbol_contract()
+            if active_symbols and self._portfolio_contract_symbols(payload) != active_symbols:
+                continue
             symbol_rows = payload.get("symbols")
             if not isinstance(symbol_rows, dict) or symbol not in symbol_rows:
                 continue
@@ -766,6 +769,19 @@ class UsdtProxyReplayValidationBridge:
                 failures,
             )
         return None
+
+    def _portfolio_contract_symbols(self, payload: dict[str, Any]) -> set[str]:
+        settings_payload = payload.get("settings")
+        raw_symbols: Any = None
+        if isinstance(settings_payload, dict):
+            raw_symbols = settings_payload.get("symbols")
+        if not isinstance(raw_symbols, list) or not raw_symbols:
+            raw_symbols = payload.get("symbols")
+            if isinstance(raw_symbols, dict):
+                raw_symbols = list(raw_symbols.keys())
+        if not isinstance(raw_symbols, list):
+            return set()
+        return {self._normalize_symbol(symbol) for symbol in raw_symbols if str(symbol or "").strip()}
 
     def _recent_json_files(self, directory: Path, pattern: str) -> list[Path]:
         if not directory.exists():

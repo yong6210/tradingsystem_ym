@@ -429,6 +429,11 @@ def _simulate_pacing(
 def build_payload(*, backtest_report: Path, include_samples: bool = False) -> dict[str, Any]:
     settings = get_settings()
     report_payload, trades = _load_trades(backtest_report)
+    active_contract = active_micro_live_symbol_contract(settings)
+    backtest_contract = usdt_proxy_contract_symbols(report_payload)
+    missing_from_backtest = sorted(active_contract - backtest_contract)
+    unexpected_in_backtest = sorted(backtest_contract - active_contract)
+    contract_mismatch = bool(active_contract and backtest_contract and (missing_from_backtest or unexpected_in_backtest))
     event_blackouts = _load_event_blackouts(settings)
     plan_blocklist = _load_plan_blocklist(settings)
 
@@ -543,8 +548,21 @@ def build_payload(*, backtest_report: Path, include_samples: bool = False) -> di
     return {
         "schema_version": "micro_live_safety_drag_audit_v1",
         "generated_at": _now().isoformat().replace("+00:00", "Z"),
+        "overall_status": "CONFIG_MISMATCH" if contract_mismatch else "PASS",
         "backtest_report": _display_path(backtest_report),
         "backtest_generated_at": report_payload.get("generated_at"),
+        "contract_alignment": {
+            "status": "MISMATCH" if contract_mismatch else "PASS",
+            "active_symbols": sorted(active_contract),
+            "backtest_symbols": sorted(backtest_contract),
+            "missing_from_backtest": missing_from_backtest,
+            "unexpected_in_backtest": unexpected_in_backtest,
+            "message": (
+                "Backtest report symbols do not match the current live symbol contract; drag numbers mainly reflect config/report mismatch."
+                if contract_mismatch
+                else "Backtest report symbols match the current live symbol contract."
+            ),
+        },
         "config": {
             "allowed_symbols": sorted(_csv_set(getattr(settings, "auto_trading_micro_live_allowed_symbols", ""), case="upper")),
             "allowed_families": sorted(_csv_set(getattr(settings, "auto_trading_micro_live_allowed_families", ""), case="lower")),
@@ -584,6 +602,13 @@ def build_payload(*, backtest_report: Path, include_samples: bool = False) -> di
             "removed_nonpositive_r": round(sum(_safe_float(row.get("r_value_float")) for row in all_blocked if _safe_float(row.get("r_value_float")) <= 0.0), 4),
         },
         "notes": [
+            *(
+                [
+                    "Contract mismatch detected: use a backtest generated for the same live symbols before interpreting safety drag.",
+                ]
+                if contract_mismatch
+                else []
+            ),
             "Replayable gates use the current .env contract against historical backtest trades.",
             "Session names are reconstructed from configured UTC London/New York windows; all remaining hours are dead_session.",
             "Liquidity depth/spread/slippage drag is not exact from this report because historical orderbook snapshots are not in the backtest artifact.",

@@ -30,8 +30,8 @@ _RECENT_SURFACE_TIMINGS: list[dict[str, Any]] = []
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run MICRO_LIVE preflight checks against the local API.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--symbol", default="BTCUSDC")
-    parser.add_argument("--universe", default="usdc_perp_top30")
+    parser.add_argument("--symbol", default="")
+    parser.add_argument("--universe", default="")
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--candidate-limit", type=int, default=10)
     parser.add_argument("--report-dir", default="reports/operations/micro_live_preflight")
@@ -49,6 +49,26 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no-write-report", action="store_true")
     return parser.parse_args()
+
+
+def _first_csv_value(raw: Any) -> str:
+    for item in str(raw or "").split(","):
+        text = str(item or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _apply_preflight_arg_defaults(args: argparse.Namespace, settings: Any) -> argparse.Namespace:
+    if not str(getattr(args, "symbol", "") or "").strip():
+        args.symbol = (
+            str(getattr(settings, "ready_market_data_probe_symbol", "") or "").strip()
+            or _first_csv_value(getattr(settings, "auto_trading_micro_live_allowed_symbols", ""))
+            or "BTCUSDC"
+        )
+    if not str(getattr(args, "universe", "") or "").strip():
+        args.universe = str(getattr(settings, "universe_name", "") or "").strip() or "usdc_perp_top30"
+    return args
 
 
 def _now() -> datetime:
@@ -1657,6 +1677,8 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
 def main() -> int:
     global _REQUEST_TIMEOUT_SECONDS
     args = parse_args()
+    settings = get_settings()
+    args = _apply_preflight_arg_defaults(args, settings)
     _REQUEST_TIMEOUT_SECONDS = max(1.0, float(getattr(args, "request_timeout", _REQUEST_TIMEOUT_SECONDS)))
     _RECENT_SURFACE_TIMINGS.clear()
     args.surface_timings = _RECENT_SURFACE_TIMINGS

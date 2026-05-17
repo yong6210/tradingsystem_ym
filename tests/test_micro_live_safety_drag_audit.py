@@ -146,3 +146,48 @@ def test_saturday_risk_multiplier_is_applied_to_accepted_rows() -> None:
     assert blocked == []
     assert accepted[0]["audit_risk_multiplier"] == 0.75
     assert accepted[0]["risk_adjusted_r"] == 1.5
+
+
+def test_build_payload_marks_backtest_live_contract_mismatch(monkeypatch, tmp_path) -> None:
+    start = datetime(2026, 5, 16, 1, 0, tzinfo=UTC)
+    report = tmp_path / "micro_main_usdt_backtest_20260516T000000Z.json"
+    report.write_text(
+        json.dumps(
+            {
+                "source": "micro_main_usdt_backtest",
+                "generated_at": start.isoformat(),
+                "symbols": ["BTCUSDT"],
+                "results": {
+                    "BTCUSDT": {
+                        "trades": [
+                            {
+                                "family": "session_impulse_retest",
+                                "symbol": "BTCUSDT",
+                                "direction": "long",
+                                "entry_ts": start.isoformat(),
+                                "exit_ts": (start + timedelta(minutes=5)).isoformat(),
+                                "entry_price": 100.0,
+                                "stop_distance_pct": 0.01,
+                                "r_value": 1.0,
+                            }
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = _settings(
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
+    )
+    monkeypatch.setattr(audit, "get_settings", lambda: settings)
+    monkeypatch.setattr(audit, "_load_event_blackouts", lambda _settings: [])
+    monkeypatch.setattr(audit, "_load_plan_blocklist", lambda _settings: set())
+
+    payload = audit.build_payload(backtest_report=report, include_samples=False)
+
+    assert payload["overall_status"] == "CONFIG_MISMATCH"
+    assert payload["contract_alignment"]["status"] == "MISMATCH"
+    assert payload["contract_alignment"]["missing_from_backtest"] == ["BTCUSDC"]
+    assert payload["contract_alignment"]["unexpected_in_backtest"] == ["BTCUSDT"]

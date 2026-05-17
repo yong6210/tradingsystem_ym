@@ -570,6 +570,77 @@ def test_replay_validation_bridge_skips_newer_backtest_with_different_live_contr
     assert "20260515T175711Z" in metrics["validation_bridge"]["source_reports"]["backtest_report"]
 
 
+def test_replay_validation_bridge_skips_portfolio_replay_with_different_live_contract(tmp_path: Path) -> None:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    _write_json(
+        tmp_path / "backtests" / "micro_main_usdt_proxy_backtest_20260515T175711Z.json",
+        {
+            "generated_at": generated_at,
+            "days": 1095,
+            "proxy_symbols": ["BTCUSDT"],
+            "results": {
+                "BTCUSDT": {
+                    "proxy_symbol": "BTCUSDT",
+                    "canonical_symbol": "BTCUSDC",
+                    "summary": {
+                        "closed": 141,
+                        "ev_r": 0.5307,
+                        "total_r": 74.8267,
+                        "win_rate": 0.6454,
+                        "decision": "PASS",
+                    },
+                }
+            },
+        },
+    )
+    _write_json(
+        tmp_path / "risk_sweeps" / "micro_main_usdt_proxy_yearly_portfolio_replay_20260516T095759Z.json",
+        {
+            "generated_at": generated_at,
+            "settings": {"symbols": ["BTCUSDC", "ETHUSDC"]},
+            "symbols": {"BTCUSDC": {}, "ETHUSDC": {}},
+            "horizons": {
+                "year_1": {"1.0%": {"accepted_trades": 10, "return_pct": -5.0, "max_drawdown_pct": 6.90}},
+                "year_2": {"1.0%": {"accepted_trades": 10, "return_pct": -5.0, "max_drawdown_pct": 10.93}},
+                "year_3": {"1.0%": {"accepted_trades": 10, "return_pct": -5.0, "max_drawdown_pct": 6.16}},
+            },
+        },
+    )
+    _write_json(
+        tmp_path / "risk_sweeps" / "micro_main_usdt_proxy_yearly_portfolio_replay_20260510T113926Z.json",
+        {
+            "generated_at": generated_at,
+            "settings": {"symbols": ["BTCUSDC"]},
+            "symbols": {"BTCUSDC": {"year_1": {}, "year_2": {}, "year_3": {}}},
+            "horizons": {
+                "year_1": {"1.0%": {"accepted_trades": 1437, "return_pct": 743.83, "max_drawdown_pct": 6.90}},
+                "year_2": {"1.0%": {"accepted_trades": 1597, "return_pct": 941.94, "max_drawdown_pct": 10.93}},
+                "year_3": {"1.0%": {"accepted_trades": 1363, "return_pct": 740.05, "max_drawdown_pct": 6.16}},
+            },
+        },
+    )
+    settings = _settings(tmp_path)
+    settings.auto_trading_execution_mode = "MICRO_LIVE"
+    settings.auto_trading_micro_live_allowed_symbols = "BTCUSDC"
+    bridge = UsdtProxyReplayValidationBridge(settings)
+
+    metrics = bridge.apply_to_metrics(
+        {
+            "grade": "F",
+            "recommendation": "do-not-deploy",
+            "sample_size": 0,
+            "risk_state": "OPEN",
+            "risk_reason": "normal",
+        },
+        symbol="BTCUSDC",
+        family="session_impulse_retest",
+        requested_mode=ExecutionMode.MICRO_LIVE.value,
+    )
+
+    assert metrics["validation_bridge"]["applied"] is True
+    assert "20260510T113926Z" in metrics["validation_bridge"]["source_reports"]["portfolio_report"]
+
+
 def test_replay_validation_bridge_does_not_override_existing_live_sample(tmp_path: Path) -> None:
     _write_pass_reports(tmp_path)
     bridge = UsdtProxyReplayValidationBridge(_settings(tmp_path))

@@ -137,11 +137,15 @@ def _submission_dict(row: OrderSubmission) -> dict[str, Any]:
 
 
 def _ledger_dict(row: BinanceOrderLedger) -> dict[str, Any]:
+    raw = dict(row.raw or {}) if isinstance(row.raw, dict) else {}
     return {
         "client_order_id": row.client_order_id,
         "exchange_order_id": row.exchange_order_id,
         "plan_id": row.plan_id,
         "symbol": row.symbol,
+        "side": row.side,
+        "reduce_only": _safe_bool(row.reduce_only),
+        "position_side": str(raw.get("positionSide") or raw.get("position_side") or ""),
         "status": row.status,
         "requested_live": _safe_bool(row.requested_live),
         "test_order": _safe_bool(row.test_order),
@@ -220,7 +224,21 @@ def evaluate_reconciliation_watchdog(
     stale_delta = timedelta(minutes=max(1, int(stale_minutes)))
     event_delta = timedelta(minutes=max(1, int(event_lookback_minutes)))
     ledger_by_client = {str(row.get("client_order_id") or ""): row for row in ledgers if row.get("client_order_id")}
+    open_positions = [row for row in positions if abs(_safe_float(row.get("position_amt"))) > 1e-12]
     issues: list[dict[str, Any]] = []
+
+    def matching_open_position(ledger: dict[str, Any]) -> dict[str, Any] | None:
+        symbol = str(ledger.get("symbol") or "")
+        desired_side = str(ledger.get("position_side") or "").upper()
+        if desired_side not in {"LONG", "SHORT", "BOTH"}:
+            desired_side = "LONG" if str(ledger.get("side") or "").upper() == "BUY" else "SHORT"
+        for position in open_positions:
+            if str(position.get("symbol") or "") != symbol:
+                continue
+            position_side = str(position.get("position_side") or "").upper()
+            if desired_side in {"", "BOTH"} or position_side in {"", "BOTH", desired_side}:
+                return position
+        return None
 
     for row in submissions:
         state = str(row.get("state") or "").upper()
@@ -283,6 +301,31 @@ def evaluate_reconciliation_watchdog(
     for row in ledgers:
         status = str(row.get("status") or "").upper()
         if status in _TERMINAL_LEDGER_STATES:
+            reference_ts = _latest(row.get("last_event_ts"), row.get("updated_at"), row.get("created_at"))
+            stale = reference_ts is not None and reference_ts <= normalized_now - stale_delta
+            if (
+                status == "FILLED"
+                and stale
+                and _safe_float(row.get("executed_qty")) > 0.0
+                and not _safe_bool(row.get("reduce_only"))
+                and matching_open_position(row) is None
+            ):
+                issues.append(
+                    _issue(
+                        "filled_entry_without_position_snapshot",
+                        "WARN",
+                        "체결된 live 진입 주문과 매칭되는 open position snapshot이 없습니다.",
+                        symbol=str(row.get("symbol") or ""),
+                        client_order_id=str(row.get("client_order_id") or ""),
+                        details={
+                            "status": status,
+                            "side": row.get("side"),
+                            "position_side": row.get("position_side"),
+                            "executed_qty": row.get("executed_qty"),
+                            "age_minutes": _age_minutes(normalized_now, reference_ts),
+                        },
+                    )
+                )
             continue
         reference_ts = _latest(row.get("last_event_ts"), row.get("updated_at"), row.get("created_at"))
         if reference_ts is None or reference_ts <= normalized_now - stale_delta:
@@ -350,7 +393,7 @@ def evaluate_reconciliation_watchdog(
         "summary": {
             "live_submission_count": len(submissions),
             "live_ledger_count": len(ledgers),
-            "open_position_count": sum(1 for row in positions if abs(_safe_float(row.get("position_amt"))) > 1e-12),
+            "open_position_count": len(open_positions),
             "recent_reconciliation_event_count": len(events),
         },
     }
