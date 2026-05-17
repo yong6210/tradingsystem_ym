@@ -73,15 +73,15 @@ def test_operator_action_priority_promotes_edge_experiment_when_no_stronger_sign
     assert payload["experiment_context"]["blocked_candidate_focus"]["symbol"] == "ETHUSDC"
     assert payload["experiment_context"]["entry_timing_target"]["symbol"] == "BTCUSDC"
     assert payload["experiment_context"]["entry_timing_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review"
+        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action run_entry_timing_split_review"
     )
     assert payload["experiment_context"]["execution_style_target"]["symbol"] == "BTCUSDC"
     assert payload["experiment_context"]["execution_style_target"]["focus_source"] == "accepted_candidate_focus"
     assert payload["experiment_context"]["execution_style_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action run_execution_style_split_review"
+        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action run_execution_style_split_review"
     )
     assert payload["top_action_followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review"
+        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action run_entry_timing_split_review"
     )
     assert payload["next_actions"] == []
     assert payload["experiment_execution_policy"]["active_action"] == "run_entry_timing_split_review"
@@ -90,7 +90,7 @@ def test_operator_action_priority_promotes_edge_experiment_when_no_stronger_sign
     assert payload["deferred_experiment_actions"][0]["target_status"] == "ACTIONABLE_ENTRY"
     assert payload["deferred_experiment_actions"][0]["target_family"] == "sweep_reversal"
     assert payload["deferred_experiment_actions"][0]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action run_execution_style_split_review"
+        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action run_execution_style_split_review"
     )
     assert "edge:watch_edge" in payload["supporting_signals"]
     assert "entry_timing:early_limit" in payload["supporting_signals"]
@@ -161,10 +161,10 @@ def test_operator_action_priority_escalates_edge_evolution_reduce_review() -> No
     assert payload["priority_source"] == "edge_evolution"
     assert payload["action_family"] == "allocation_review"
     assert payload["top_action_followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action reduce_baseline_allocation_review"
+        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action reduce_baseline_allocation_review"
     )
     assert payload["next_actions"][0]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review"
+        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action run_entry_timing_split_review"
     )
     assert "edge_evolution:reduce_candidate" in payload["supporting_signals"]
     assert "promotion_candidate:entry_timing:early_limit" in payload["supporting_signals"]

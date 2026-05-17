@@ -16,7 +16,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import get_settings
-from app.db.models import BinanceOrderLedger, BinancePositionSnapshot, ExecutionReconciliationEvent, OrderSubmission
+from app.db.models import BinanceOrderLedger, BinancePositionSnapshot, ExecutionFill, ExecutionReconciliationEvent, OrderSubmission, Plan
 from app.db.session import SessionLocal, init_db
 from app.services.notification_dispatcher import NotificationDispatcher
 from scripts.operation_report_io import atomic_write_text, display_path, parse_report_generated_at, write_json, write_latest_aliases
@@ -168,6 +168,21 @@ def _position_dict(row: BinancePositionSnapshot) -> dict[str, Any]:
     }
 
 
+def _plan_dict(row: Plan, *, latest_fill: ExecutionFill | None = None) -> dict[str, Any]:
+    return {
+        "plan_id": row.plan_id,
+        "symbol": row.symbol,
+        "direction": row.direction,
+        "state": row.state,
+        "valid_from": _model_dt(row, "valid_from"),
+        "valid_until": _model_dt(row, "valid_until"),
+        "latest_fill_id": getattr(latest_fill, "fill_id", None),
+        "latest_fill_stage": getattr(latest_fill, "stage", None),
+        "latest_fill_to_state": getattr(latest_fill, "to_state", None),
+        "latest_fill_ts": _model_dt(latest_fill, "fill_ts") if latest_fill is not None else None,
+    }
+
+
 def _event_dict(row: ExecutionReconciliationEvent) -> dict[str, Any]:
     return {
         "event_id": row.event_id,
@@ -220,12 +235,18 @@ def evaluate_reconciliation_watchdog(
     now: datetime,
     stale_minutes: int,
     event_lookback_minutes: int,
+    plans: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     normalized_now = _as_utc(now) or datetime.now(UTC)
     stale_delta = timedelta(minutes=max(1, int(stale_minutes)))
     event_delta = timedelta(minutes=max(1, int(event_lookback_minutes)))
     ledger_by_client = {str(row.get("client_order_id") or ""): row for row in ledgers if row.get("client_order_id")}
     open_positions = [row for row in positions if abs(_safe_float(row.get("position_amt"))) > 1e-12]
+    local_open_plans = [
+        row
+        for row in list(plans or [])
+        if str(row.get("state") or "").upper() in {"ENTERED", "PARTIAL_EXIT"}
+    ]
     issues: list[dict[str, Any]] = []
 
     def matching_open_position(ledger: dict[str, Any]) -> dict[str, Any] | None:
@@ -238,6 +259,17 @@ def evaluate_reconciliation_watchdog(
                 continue
             position_side = str(position.get("position_side") or "").upper()
             if desired_side in {"", "BOTH"} or position_side in {"", "BOTH", desired_side}:
+                return position
+        return None
+
+    def matching_open_position_for_plan(plan: dict[str, Any]) -> dict[str, Any] | None:
+        symbol = str(plan.get("symbol") or "")
+        desired_side = "LONG" if str(plan.get("direction") or "").lower() == "long" else "SHORT"
+        for position in open_positions:
+            if str(position.get("symbol") or "") != symbol:
+                continue
+            position_side = str(position.get("position_side") or "").upper()
+            if position_side in {"", "BOTH", desired_side}:
                 return position
         return None
 
@@ -359,6 +391,41 @@ def evaluate_reconciliation_watchdog(
                 )
             )
 
+    for row in local_open_plans:
+        if str(row.get("latest_fill_stage") or "").upper() == "CLOSED":
+            issues.append(
+                _issue(
+                    "local_plan_state_stale_after_closed_fill",
+                    "WARN",
+                    "로컬 plan은 open 상태인데 최신 execution fill은 CLOSED입니다.",
+                    symbol=str(row.get("symbol") or ""),
+                    details={
+                        "plan_id": row.get("plan_id"),
+                        "state": row.get("state"),
+                        "latest_fill_id": row.get("latest_fill_id"),
+                        "latest_fill_stage": row.get("latest_fill_stage"),
+                        "latest_fill_to_state": row.get("latest_fill_to_state"),
+                    },
+                )
+            )
+            continue
+        if matching_open_position_for_plan(row) is not None:
+            continue
+        issues.append(
+            _issue(
+                "local_open_plan_without_position_snapshot",
+                "WARN",
+                "로컬 plan은 open 상태인데 Binance open position snapshot이 없습니다.",
+                symbol=str(row.get("symbol") or ""),
+                details={
+                    "plan_id": row.get("plan_id"),
+                    "state": row.get("state"),
+                    "direction": row.get("direction"),
+                    "valid_from": row.get("valid_from"),
+                },
+            )
+        )
+
     for row in events:
         created_at = _as_utc(row.get("created_at"))
         if created_at is None or created_at < normalized_now - event_delta:
@@ -398,6 +465,10 @@ def evaluate_reconciliation_watchdog(
             "live_submission_count": len(submissions),
             "live_ledger_count": len(ledgers),
             "open_position_count": len(open_positions),
+            "local_open_plan_count": len(local_open_plans),
+            "local_plan_state_stale_after_closed_fill_count": sum(
+                1 for row in local_open_plans if str(row.get("latest_fill_stage") or "").upper() == "CLOSED"
+            ),
             "recent_reconciliation_event_count": len(events),
         },
     }
@@ -432,6 +503,23 @@ def _fetch_state(*, symbols: set[str], days: int, limit: int) -> dict[str, list[
             position_stmt = position_stmt.where(BinancePositionSnapshot.symbol.in_(sorted(symbols)))
         positions = [_position_dict(row) for row in db.scalars(position_stmt)]
 
+        plan_stmt = (
+            select(Plan)
+            .where(Plan.state.in_(["ENTERED", "PARTIAL_EXIT"]))
+            .order_by(desc(Plan.valid_from))
+            .limit(max(1, int(limit)))
+        )
+        if symbols:
+            plan_stmt = plan_stmt.where(Plan.symbol.in_(sorted(symbols)))
+        plan_rows = list(db.scalars(plan_stmt))
+        latest_fill_by_plan_id: dict[str, ExecutionFill] = {}
+        plan_ids = [str(row.plan_id) for row in plan_rows]
+        if plan_ids:
+            fill_stmt = select(ExecutionFill).where(ExecutionFill.plan_id.in_(plan_ids)).order_by(ExecutionFill.fill_ts.asc(), ExecutionFill.created_at.asc())
+            for fill in db.scalars(fill_stmt):
+                latest_fill_by_plan_id[str(fill.plan_id)] = fill
+        plans = [_plan_dict(row, latest_fill=latest_fill_by_plan_id.get(str(row.plan_id))) for row in plan_rows]
+
         event_stmt = (
             select(ExecutionReconciliationEvent)
             .where(ExecutionReconciliationEvent.created_at >= cutoff)
@@ -441,7 +529,7 @@ def _fetch_state(*, symbols: set[str], days: int, limit: int) -> dict[str, list[
         if symbols:
             event_stmt = event_stmt.where(ExecutionReconciliationEvent.symbol.in_(sorted(symbols)))
         events = [_event_dict(row) for row in db.scalars(event_stmt)]
-    return {"submissions": submissions, "ledgers": ledgers, "positions": positions, "events": events}
+    return {"submissions": submissions, "ledgers": ledgers, "positions": positions, "plans": plans, "events": events}
 
 
 def _default_stale_minutes(explicit: int) -> int:
@@ -459,6 +547,7 @@ def build_payload(*, days: int, symbols: set[str], limit: int, stale_minutes: in
         submissions=state["submissions"],
         ledgers=state["ledgers"],
         positions=state["positions"],
+        plans=state["plans"],
         events=state["events"],
         now=now,
         stale_minutes=stale_minutes,

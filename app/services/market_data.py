@@ -158,10 +158,17 @@ class MarketDataService:
         history_batches_1m: int = 0,
         history_batches_5m: int = 0,
         history_batches_15m: int = 0,
+        min_1m_history_candles: int = 0,
     ) -> dict[str, int]:
         count_1m = self.backfill_from_binance(symbol=symbol, timeframe="1m", limit=limit_1m) if int(limit_1m) > 0 else 0
         count_5m = self.backfill_from_binance(symbol=symbol, timeframe="5m", limit=limit_5m)
         count_15m = self.backfill_from_binance(symbol=symbol, timeframe="15m", limit=limit_15m)
+        min_1m_history = max(0, int(min_1m_history_candles))
+        current_1m_count = (
+            len(self.candle_repo.list_recent(symbol=symbol, timeframe="1m", limit=min_1m_history))
+            if min_1m_history > 0
+            else 0
+        )
         history_1m = (
             self.backfill_history_before_latest(
                 symbol=symbol,
@@ -169,7 +176,9 @@ class MarketDataService:
                 limit=limit_1m,
                 batches=history_batches_1m,
             )
-            if int(limit_1m) > 0 and int(history_batches_1m) > 0
+            if int(limit_1m) > 0
+            and int(history_batches_1m) > 0
+            and (min_1m_history <= 0 or current_1m_count < min_1m_history)
             else 0
         )
         history_5m = (

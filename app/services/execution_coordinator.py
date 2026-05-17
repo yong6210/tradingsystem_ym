@@ -1200,10 +1200,13 @@ class ExecutionCoordinator:
         if sizing_mode == "RISK_PCT":
             account_equity_usdt, account_equity_details, account_equity_error = self._live_account_equity()
             risk_per_trade_pct = self._float_or(getattr(self.settings, "auto_trading_live_risk_per_trade_pct", 0.0))
+            recommended_risk_r = max(self._float_or(quality_snapshot.get("recommended_risk_r")), 0.0)
+            applied_risk_multiplier = min(recommended_risk_r, 1.0)
             usable_margin_fraction = self._float_or(getattr(self.settings, "auto_trading_live_usable_margin_fraction", 0.0))
             leverage_cap = self._float_or(getattr(self.settings, "auto_trading_live_leverage_cap", 0.0))
             stop_pct = abs(reference_price - stop_price) / reference_price if reference_price > 0.0 else 0.0
-            target_risk_usdt = account_equity_usdt * risk_per_trade_pct
+            effective_risk_per_trade_pct = risk_per_trade_pct * applied_risk_multiplier
+            target_risk_usdt = account_equity_usdt * effective_risk_per_trade_pct
             usable_margin_usdt = account_equity_usdt * usable_margin_fraction
             target_notional = target_risk_usdt / stop_pct if stop_pct > 0.0 else 0.0
             leverage_cap_notional = max(usable_margin_usdt, 0.0) * max(leverage_cap, 0.0)
@@ -1218,6 +1221,10 @@ class ExecutionCoordinator:
                     "account_equity_usdt": round(account_equity_usdt, 4),
                     **account_equity_details,
                     "risk_per_trade_pct": round(risk_per_trade_pct, 6),
+                    "recommended_risk_multiplier": round(recommended_risk_r, 6),
+                    "applied_risk_multiplier": round(applied_risk_multiplier, 6),
+                    "effective_risk_per_trade_pct": round(effective_risk_per_trade_pct, 6),
+                    "risk_multiplier_capped": bool(recommended_risk_r > applied_risk_multiplier),
                     "usable_margin_fraction": round(usable_margin_fraction, 6),
                     "usable_margin_usdt": round(usable_margin_usdt, 4),
                     "stop_pct": round(stop_pct, 8),
@@ -1239,6 +1246,8 @@ class ExecutionCoordinator:
                 return None, sizing_details, "Live risk sizing requires AUTO_TRADING_LIVE_ACCOUNT_EQUITY_USDT > 0."
             if risk_per_trade_pct <= 0.0:
                 return None, sizing_details, "Live risk sizing requires AUTO_TRADING_LIVE_RISK_PER_TRADE_PCT > 0."
+            if recommended_risk_r <= 0.0:
+                return None, sizing_details, "Live risk sizing requires a positive recommended_risk_r."
             if usable_margin_fraction <= 0.0:
                 return None, sizing_details, "Live risk sizing requires AUTO_TRADING_LIVE_USABLE_MARGIN_FRACTION > 0."
             if leverage_cap <= 0.0:

@@ -2291,6 +2291,83 @@ def test_reconcile_route_reports_missing_stop_stale_stream_and_size_mismatch() -
     assert payload["lock_required"] is True
 
 
+def test_reconcile_route_reports_local_open_plan_without_exchange_position() -> None:
+    init_db()
+    symbol = f"RECON{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 31}USDC"
+    plan_id = f"{symbol}_entered_flat_exchange"
+    _seed_plan(symbol=symbol, family="trend_continuation", plan_id=plan_id, state="ENTERED")
+
+    reconcile = client.post("/execution/reconcile", json={"symbol": symbol})
+    assert reconcile.status_code == 200
+    payload = reconcile.json()
+    mismatch_types = {item["mismatch_type"] for item in payload["mismatches"]}
+
+    assert "ORPHAN_POSITION_LOCAL" in mismatch_types
+    assert payload["highest_severity"] == "WARNING"
+    assert payload["lock_required"] is False
+
+
+def test_reconcile_auto_resolve_closes_plan_when_latest_fill_is_closed() -> None:
+    init_db()
+    symbol = f"RECON{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 32}USDC"
+    plan_id = f"{symbol}_stale_partial"
+    _seed_plan(symbol=symbol, family="trend_continuation", plan_id=plan_id, state="PARTIAL_EXIT")
+    fill_ts = datetime.now(timezone.utc)
+
+    with SessionLocal() as db:
+        db.add(
+            ExecutionFill(
+                fill_id=f"{plan_id}_partial_fill",
+                plan_id=plan_id,
+                symbol=symbol,
+                stage="PARTIAL_EXIT",
+                fill_ts=fill_ts,
+                price=99.0,
+                qty=1.0,
+                fee=0.0,
+                from_state="ENTERED",
+                to_state="PARTIAL_EXIT",
+                state_changed=True,
+                payload={"source": "test", "exit_reason": "target_tp1"},
+                strategy_version="v1",
+                created_at=fill_ts,
+            )
+        )
+        db.add(
+            ExecutionFill(
+                fill_id=f"{plan_id}_closed_fill",
+                plan_id=plan_id,
+                symbol=symbol,
+                stage="CLOSED",
+                fill_ts=fill_ts,
+                price=100.0,
+                qty=1.0,
+                fee=0.0,
+                from_state="PARTIAL_EXIT",
+                to_state="CLOSED",
+                state_changed=True,
+                payload={"source": "test", "exit_reason": "target_tp3"},
+                strategy_version="v1",
+                created_at=fill_ts + timedelta(seconds=1),
+            )
+        )
+        db.commit()
+
+    reconcile = client.post("/execution/reconcile?auto_resolve=true", json={"symbol": symbol})
+    assert reconcile.status_code == 200
+    payload = reconcile.json()
+    mismatch_types = {item["mismatch_type"] for item in payload["mismatches"]}
+
+    assert "LOCAL_PLAN_STATE_STALE_AFTER_CLOSED_FILL" in mismatch_types
+    assert "ORPHAN_POSITION_LOCAL" not in mismatch_types
+    assert payload["auto_resolve_applied"] is True
+
+    with SessionLocal() as db:
+        refreshed = db.get(Plan, plan_id)
+        assert refreshed is not None
+        assert refreshed.state == "CLOSED"
+
+
 def test_reconcile_route_accepts_hedge_mode_protection_orders_without_reduce_only() -> None:
     init_db()
     symbol = f"RECON{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 33}USDC"
@@ -3439,15 +3516,18 @@ def test_micro_live_submit_uses_risk_pct_sizing_and_caps_by_leverage(monkeypatch
     assert submit_payload["adapter"] == "binance"
     assert submit_payload["requested_live"] is True
     assert submit_payload["state"] == "ACKNOWLEDGED"
-    assert captured["quantity"] == 10.0
+    assert captured["quantity"] == 5.0
     sizing = submit_payload["attachments"]["live_order_sizing"]
     assert sizing["sizing_mode"] == "RISK_PCT"
-    assert sizing["target_notional"] == 1000.0
-    assert sizing["max_position_notional"] == 1000.0
-    assert sizing["required_leverage"] == 5.8824
+    assert sizing["recommended_risk_multiplier"] == 0.5
+    assert sizing["applied_risk_multiplier"] == 0.5
+    assert sizing["effective_risk_per_trade_pct"] == 0.0025
+    assert sizing["target_notional"] == 500.0
+    assert sizing["max_position_notional"] == 500.0
+    assert sizing["required_leverage"] == 2.9412
     assert sizing["leverage_cap"] == 6.0
     assert sizing["leverage_capped"] is False
-    assert sizing["actual_risk_usdt"] == 1.0
+    assert sizing["actual_risk_usdt"] == 0.5
 
 
 def test_micro_live_submit_blocks_on_account_protection_failures(monkeypatch) -> None:
@@ -3592,14 +3672,15 @@ def test_micro_live_submit_uses_synced_available_balance_for_risk_pct_sizing(mon
     assert submit.status_code == 200
     submit_payload = submit.json()
     assert submit_payload["state"] == "ACKNOWLEDGED"
-    assert captured["quantity"] == 8.5
+    assert captured["quantity"] == 4.25
     sizing = submit_payload["attachments"]["live_order_sizing"]
     assert sizing["account_equity_usdt"] == 170.0
     assert sizing["configured_account_equity_usdt"] == 200.0
     assert sizing["account_equity_source"] == "binance_futures_available_balance"
     assert sizing["balance_asset"] == "USDC"
-    assert sizing["target_notional"] == 850.0
-    assert sizing["actual_risk_usdt"] == 0.85
+    assert sizing["recommended_risk_multiplier"] == 0.5
+    assert sizing["target_notional"] == 425.0
+    assert sizing["actual_risk_usdt"] == 0.425
 
 
 def test_micro_live_submit_uses_symbol_specific_quantity_filters(monkeypatch) -> None:

@@ -3,6 +3,53 @@ from __future__ import annotations
 from scripts import run_micro_live_runtime_guard
 
 
+class _FakeCandleRepo:
+    def __init__(self, counts: dict[tuple[str, str], int]):
+        self.counts = counts
+
+    def list_recent(self, *, symbol: str, timeframe: str, limit: int):
+        count = self.counts.get((symbol, timeframe), 0)
+        return [object()] * min(count, limit)
+
+
+def test_live_candle_depth_check_fails_when_strategy_history_is_short() -> None:
+    check = run_micro_live_runtime_guard._live_candle_depth_check(
+        _FakeCandleRepo(
+            {
+                ("BTCUSDT", "1m"): 599,
+                ("BTCUSDT", "5m"): 200,
+                ("ETHUSDT", "1m"): 600,
+                ("ETHUSDT", "5m"): 199,
+            }
+        ),
+        symbols=["BTCUSDT", "ETHUSDT"],
+    )
+
+    assert check["status"] == "FAIL"
+    assert check["severity"] == "blocking"
+    assert check["deficient_count"] == 2
+    assert "BTCUSDT" in check["message"]
+    assert "ETHUSDT" in check["message"]
+
+
+def test_live_candle_depth_check_passes_when_strategy_history_is_ready() -> None:
+    check = run_micro_live_runtime_guard._live_candle_depth_check(
+        _FakeCandleRepo(
+            {
+                ("BTCUSDT", "1m"): 900,
+                ("BTCUSDT", "5m"): 500,
+                ("ETHUSDT", "1m"): 600,
+                ("ETHUSDT", "5m"): 200,
+            }
+        ),
+        symbols=["BTCUSDT", "ETHUSDT"],
+    )
+
+    assert check["status"] == "PASS"
+    assert check["deficient_count"] == 0
+    assert "deficient=none" in check["message"]
+
+
 def test_runtime_guard_reports_blocking_failures_and_blocked_live_intents() -> None:
     checks = [
         {"name": "config_execution_mode", "status": "PASS", "severity": "blocking", "message": "ok"},

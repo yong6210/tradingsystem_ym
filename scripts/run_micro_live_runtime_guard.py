@@ -13,11 +13,16 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import get_settings
+from app.db.repositories import CandleRepository
 from app.db.session import SessionLocal, init_db
 from app.services.live_order_lifecycle import LiveOrderLifecycleReporter
 from app.services.runtime_worker_heartbeat import read_worker_heartbeat
 from scripts.operation_report_io import atomic_write_text, display_path, parse_report_generated_at, write_latest_aliases
 from scripts.run_micro_live_preflight import _micro_live_config_drift_checks
+
+
+SESSION_IMPULSE_RETEST_MIN_1M_CANDLES = 600
+SESSION_IMPULSE_RETEST_MIN_5M_CANDLES = 200
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,6 +51,10 @@ def _display_path(path: Path) -> str:
 
 def _csv_set(value: Any) -> set[str]:
     return {item.strip() for item in str(value or "").split(",") if item.strip()}
+
+
+def _csv_upper_set(value: Any) -> set[str]:
+    return {item.strip().upper() for item in str(value or "").split(",") if item.strip()}
 
 
 def _parse_utc_ts(value: Any) -> datetime | None:
@@ -81,6 +90,58 @@ def _warning_failures(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for item in checks
         if str(item.get("severity") or "").lower() != "blocking" and str(item.get("status") or "").upper() != "PASS"
     ]
+
+
+def _live_candle_depth_check(
+    candle_repo: Any,
+    *,
+    symbols: list[str],
+    min_1m: int = SESSION_IMPULSE_RETEST_MIN_1M_CANDLES,
+    min_5m: int = SESSION_IMPULSE_RETEST_MIN_5M_CANDLES,
+) -> dict[str, Any]:
+    normalized_symbols = sorted({str(symbol or "").upper().strip() for symbol in symbols if str(symbol or "").strip()})
+    deficits: list[dict[str, Any]] = []
+    min_observed_1m: int | None = None
+    min_observed_5m: int | None = None
+    for symbol in normalized_symbols:
+        count_1m = len(candle_repo.list_recent(symbol=symbol, timeframe="1m", limit=max(1, int(min_1m))))
+        count_5m = len(candle_repo.list_recent(symbol=symbol, timeframe="5m", limit=max(1, int(min_5m))))
+        min_observed_1m = count_1m if min_observed_1m is None else min(min_observed_1m, count_1m)
+        min_observed_5m = count_5m if min_observed_5m is None else min(min_observed_5m, count_5m)
+        if count_1m < int(min_1m) or count_5m < int(min_5m):
+            deficits.append(
+                {
+                    "symbol": symbol,
+                    "candles_1m": count_1m,
+                    "candles_5m": count_5m,
+                    "required_1m": int(min_1m),
+                    "required_5m": int(min_5m),
+                }
+            )
+
+    if not normalized_symbols:
+        return {
+            "name": "live_candle_depth",
+            "status": "FAIL",
+            "severity": "blocking",
+            "message": "live_symbols=0; cannot verify SIR candle depth",
+            "deficits": [],
+        }
+
+    deficient_symbols = [str(item["symbol"]) for item in deficits[:8]]
+    status = "PASS" if not deficits else "FAIL"
+    return {
+        "name": "live_candle_depth",
+        "status": status,
+        "severity": "blocking",
+        "message": (
+            f"symbols={len(normalized_symbols)}; min_1m={int(min_1m)}; min_5m={int(min_5m)}; "
+            f"min_observed_1m={min_observed_1m}; min_observed_5m={min_observed_5m}; "
+            f"deficient={','.join(deficient_symbols) if deficient_symbols else 'none'}"
+        ),
+        "deficient_count": len(deficits),
+        "deficits": deficits[:20],
+    }
 
 
 _BLOCK_REASON_ACTIONS = {
@@ -179,25 +240,31 @@ def build_payload(*, days: int, limit: int, check_binance_rules: bool) -> dict[s
     family_filter = _csv_set(getattr(settings, "auto_trading_micro_live_allowed_families", ""))
     if not family_filter:
         family_filter = _csv_set(getattr(settings, "auto_trading_allowed_families", ""))
+    symbol_filter = _csv_upper_set(getattr(settings, "auto_trading_micro_live_allowed_symbols", ""))
+    if not symbol_filter:
+        symbol_filter = _csv_upper_set(getattr(settings, "auto_trading_allowed_symbols", ""))
     runtime_started_at = _ws_runtime_started_at()
     checks = _micro_live_config_drift_checks(check_binance_rules=check_binance_rules)
-    failures = _blocking_failures(checks)
-    warnings = _warning_failures(checks)
     init_db()
     with SessionLocal() as db:
+        checks.append(_live_candle_depth_check(CandleRepository(db), symbols=sorted(symbol_filter)))
         lifecycle = LiveOrderLifecycleReporter(db).generate(
             days=days,
             live_only=True,
             limit=limit,
             start_at=runtime_started_at,
+            symbols=sorted(symbol_filter),
             strategy_families=sorted(family_filter),
         )
+    failures = _blocking_failures(checks)
+    warnings = _warning_failures(checks)
     blocked_diagnostics = _blocked_intent_diagnostics(lifecycle)
     recommendations = _recommendations(blocking_failures=failures, lifecycle=lifecycle)
     return {
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "runtime_started_at": runtime_started_at.isoformat() if runtime_started_at else None,
         "family_filter": sorted(family_filter),
+        "symbol_filter": sorted(symbol_filter),
         "overall_status": "FAIL" if failures else ("WATCH" if warnings else "PASS"),
         "operational_status": _operational_status(
             blocking_failures=failures,
@@ -223,6 +290,7 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         f"- generated_at: {payload.get('generated_at')}",
         f"- runtime_started_at: {payload.get('runtime_started_at') or 'none'}",
         f"- family_filter: {','.join(payload.get('family_filter') or []) or 'none'}",
+        f"- symbol_filter: {','.join(payload.get('symbol_filter') or []) or 'none'}",
         f"- overall_status: {payload.get('overall_status')}",
         f"- operational_status: {payload.get('operational_status')}",
         f"- blocking_failures: {len(payload.get('blocking_failures') or [])}",

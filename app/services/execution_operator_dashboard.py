@@ -1547,6 +1547,7 @@ class ExecutionOperatorDashboardService:
         auto_promotion_rollout_execution_summary: dict[str, Any] | None = None,
         performance_decomposition_summary: dict[str, Any] | None = None,
         execution_friction_measurement_summary: dict[str, Any] | None = None,
+        reconciliation_symbols: list[str] | None = None,
         forward_stress_regime_validation_summary: dict[str, Any] | None = None,
         kill_condition_automation_summary: dict[str, Any] | None = None,
         b_continuation_activation_summary: dict[str, Any] | None = None,
@@ -1601,7 +1602,12 @@ class ExecutionOperatorDashboardService:
         ]
         reconciliation_events = [
             self._reconciliation_row(row)
-            for row in self.reconciliation_repo.list_recent(symbol=symbol, limit=reconcile_limit, days=days)
+            for row in self.reconciliation_repo.list_recent(
+                symbol=symbol,
+                symbols=None if symbol else reconciliation_symbols,
+                limit=reconcile_limit,
+                days=days,
+            )
         ]
         portfolio_summary_payload = self._portfolio_summary(portfolio_summary)
         accepted_candidate_rows = list(portfolio_summary.get("accepted_candidates") or [])
@@ -1808,6 +1814,7 @@ class ExecutionOperatorDashboardService:
             "transition_edge_variant": dict(safety_state.get("transition_edge_variant") or {}) or None,
             "session_impulse_retest_universe_policy": dict(safety_state.get("session_impulse_retest_universe_policy") or {}) or None,
             "session_impulse_retest_rollout_readiness": dict(safety_state.get("session_impulse_retest_rollout_readiness") or {}) or None,
+            "live_account_protection": dict(safety_state.get("live_account_protection") or {}) or None,
             "recent_intent_count": len(recent_intents),
             "recent_intents": recent_intents,
             "open_order_count": len(open_orders),

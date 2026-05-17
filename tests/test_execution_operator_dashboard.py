@@ -17,6 +17,7 @@ from app.db.repositories import (
     OrderIntentRepository,
     OrderSubmissionRepository,
 )
+from app.schemas.execution import ExecutionOperatorDashboardResponse, SafetyStateResponse
 from app.services.execution.rollout import RolloutPolicyService
 from app.services.execution.safety import SafetyLockService
 from app.services.execution_operator_dashboard import ExecutionOperatorDashboardService
@@ -135,6 +136,44 @@ def test_safety_state_reflects_latest_live_account_protection_failure(monkeypatc
         "BTCUSDC:missing_stop_protection",
         "BTCUSDC:out_of_universe_open_position",
     ]
+    assert SafetyStateResponse(**payload).model_dump()["live_account_protection"]["decision"] == "BLOCK"
+
+    with SessionLocal() as db:
+        service = ExecutionOperatorDashboardService(
+            intent_repo=OrderIntentRepository(db),
+            submission_repo=OrderSubmissionRepository(db),
+            reconciliation_repo=ExecutionReconciliationEventRepository(db),
+            position_repo=BinancePositionRepository(db),
+            settings=settings,
+        )
+        dashboard = service.generate(
+            symbol="BTCUSDT",
+            days=7,
+            intent_limit=1,
+            reconcile_limit=1,
+            safety_state=payload,
+            portfolio_summary={},
+            alert_summary={},
+            execution_quality_summary=None,
+        )
+
+    assert dashboard["live_account_protection"]["decision"] == "BLOCK"
+    assert ExecutionOperatorDashboardResponse(**dashboard).model_dump()["live_account_protection"]["decision"] == "BLOCK"
+
+
+def test_safety_state_scopes_session_impulse_retest_policy_to_configured_symbols(monkeypatch) -> None:
+    init_db()
+    _apply_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "session_impulse_retest_allowed_symbols", "BTCUSDT,ETHUSDT,SOLUSDT")
+
+    with SessionLocal() as db:
+        payload = StrategyEngine(db).safety_state(symbol="BTCUSDT")
+
+    policy = payload["session_impulse_retest_universe_policy"]
+    assert policy["scope"] == "configured_symbols"
+    assert policy["core_symbols"] == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    assert all(str(symbol).endswith("USDT") for symbol in policy["allowed_symbols"])
 
 
 def _seed_rollout_and_lock(symbol: str) -> None:
@@ -893,6 +932,54 @@ def test_execution_operator_dashboard_aggregates_runtime_state(monkeypatch) -> N
     assert payload["transition_edge_variant"]["enabled"] is True
     assert payload["transition_edge_variant"]["shadow_only"] is True
     assert payload["transition_edge_variant"]["live_lane"]["counts"]["base"]["intent"] == 0
+
+
+def test_execution_operator_dashboard_scopes_reconciliation_events_to_universe(monkeypatch) -> None:
+    init_db()
+    _apply_defaults(monkeypatch)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    with SessionLocal() as db:
+        db.add(
+            ExecutionReconciliationEvent(
+                event_id=f"recon_old_usdc_{int(now.timestamp() * 1_000_000)}",
+                symbol="ADAUSDC",
+                mismatch_type="LOCAL_PLAN_STATE_STALE_AFTER_CLOSED_FILL",
+                severity="WARNING",
+                message="Old USDC reconciliation event should not degrade the USDT universe view.",
+                local_snapshot={"plan_id": "old_usdc_plan"},
+                exchange_snapshot={},
+                payload={},
+                lock_required=False,
+                lock_applied=False,
+                lock_scope=None,
+                created_at=now,
+            )
+        )
+        db.commit()
+
+        service = ExecutionOperatorDashboardService(
+            intent_repo=OrderIntentRepository(db),
+            submission_repo=OrderSubmissionRepository(db),
+            reconciliation_repo=ExecutionReconciliationEventRepository(db),
+            position_repo=BinancePositionRepository(db),
+            settings=get_settings(),
+        )
+        payload = service.generate(
+            symbol=None,
+            days=7,
+            intent_limit=5,
+            reconcile_limit=5,
+            reconciliation_symbols=["BTCUSDT", "ETHUSDT"],
+            safety_state={"new_entry_allowed": True},
+            portfolio_summary={"universe": "usdt_reliable_balanced_31"},
+            alert_summary={},
+            execution_quality_summary=None,
+        )
+
+    assert payload["recent_reconciliation_count"] == 0
+    assert payload["recent_reconciliation_summary"]["healthy"] is True
+    assert payload["recent_reconciliation_summary"]["active_event_count"] == 0
 
 
 def test_reconciliation_summary_ages_out_stale_events() -> None:

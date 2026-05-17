@@ -276,6 +276,7 @@ class SafetyStateResponse(ORMModel):
     transition_edge_variant: dict[str, Any] = Field(default_factory=dict)
     session_impulse_retest_universe_policy: dict[str, Any] = Field(default_factory=dict)
     session_impulse_retest_rollout_readiness: dict[str, Any] = Field(default_factory=dict)
+    live_account_protection: dict[str, Any] = Field(default_factory=dict)
     matching_locks: list[SafetyLockSnapshot] = Field(default_factory=list)
     active_locks: list[SafetyLockSnapshot] = Field(default_factory=list)
     rollout_policies: list[RolloutPolicySnapshot] = Field(default_factory=list)
@@ -434,6 +435,7 @@ class ExecutionOperatorDashboardResponse(ORMModel):
     session_impulse_retest_shadow: dict[str, Any] | None = None
     session_impulse_retest_universe_policy: dict[str, Any] | None = None
     session_impulse_retest_rollout_readiness: dict[str, Any] | None = None
+    live_account_protection: dict[str, Any] | None = None
     portfolio_summary: dict[str, Any] = Field(default_factory=dict)
     active_contract: dict[str, Any] | None = None
     signal_funnel: dict[str, Any] = Field(default_factory=dict)

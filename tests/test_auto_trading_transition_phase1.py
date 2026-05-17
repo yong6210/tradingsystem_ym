@@ -14,6 +14,7 @@ from app.db.models import Plan
 from app.db.session import SessionLocal, init_db
 from app.domain.execution import RolloutPolicy
 from app.main import app
+from app.schemas.api import ScannerItemOut
 from app.services.execution_approval import ExecutionPlanningService
 from app.services.operator_text import why_now_message
 from app.services import scanner as scanner_module
@@ -140,6 +141,31 @@ class _DeadSessionMicroLiveRolloutProvider:
 def test_why_now_mapping_and_fallback() -> None:
     assert why_now_message("sweep_reversal_limit") == "extreme location + rejection + clean limit"
     assert why_now_message("custom_reason_code") == "custom reason code"
+
+
+def test_scanner_item_schema_preserves_live_route_metadata() -> None:
+    payload = ScannerItemOut(
+        symbol="BTCUSDT",
+        plan_id="plan_live_route_schema",
+        zone_id="zone_live_route_schema",
+        direction="long",
+        entry_model="CONFIRM",
+        final_rank_score=10.0,
+        ev=0.2,
+        rr_base=2.0,
+        friction_penalty=0.01,
+        entry_surface_route={
+            "status": "context_only",
+            "live_routable": False,
+            "reasons": ["strategy_family_not_live_route"],
+        },
+        live_routable=False,
+    )
+
+    dumped = payload.model_dump()
+    assert dumped["live_routable"] is False
+    assert dumped["entry_surface_route"]["status"] == "context_only"
+    assert dumped["entry_surface_route"]["reasons"] == ["strategy_family_not_live_route"]
 
 
 def test_scanner_top_assessed_candidate_supports_accepted_blocked_and_none(monkeypatch) -> None:
@@ -363,6 +389,7 @@ def test_validation_do_not_deploy_detail_classifies_missing_sample_root_cause() 
                 _env_file=None,
                 auto_trading_enabled=True,
                 auto_trading_execution_mode="MICRO_LIVE",
+                auto_trading_micro_live_allowed_symbols="BTCUSDC",
                 auto_trading_micro_live_allowed_families="",
                 auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
             ),
@@ -392,6 +419,7 @@ def test_validation_do_not_deploy_detail_classifies_missing_sample_root_cause() 
                 _env_file=None,
                 auto_trading_enabled=True,
                 auto_trading_execution_mode="MICRO_LIVE",
+                auto_trading_micro_live_allowed_symbols="BTCUSDC",
                 auto_trading_micro_live_allowed_families="",
                 auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
             ),
@@ -413,6 +441,7 @@ def test_validation_do_not_deploy_detail_classifies_missing_sample_root_cause() 
                 auto_trading_enabled=True,
                 auto_trading_execution_mode="MICRO_LIVE",
                 auto_trading_allowed_symbols="ETHUSDC",
+                auto_trading_micro_live_allowed_symbols="ETHUSDC",
                 auto_trading_micro_live_allowed_families="",
                 auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
             ),
@@ -433,6 +462,7 @@ def test_validation_do_not_deploy_detail_classifies_missing_sample_root_cause() 
                 _env_file=None,
                 auto_trading_enabled=True,
                 auto_trading_execution_mode="MICRO_LIVE",
+                auto_trading_micro_live_allowed_symbols="BTCUSDC",
                 auto_trading_micro_live_allowed_families="",
                 auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
             ),
@@ -457,6 +487,7 @@ def test_validation_do_not_deploy_detail_classifies_missing_sample_root_cause() 
                 _env_file=None,
                 auto_trading_enabled=True,
                 auto_trading_execution_mode="MICRO_LIVE",
+                auto_trading_micro_live_allowed_symbols="BTCUSDC",
                 auto_trading_micro_live_allowed_families="",
                 auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
             ),
@@ -515,12 +546,12 @@ def test_auto_trading_settings_defaults_and_preview_approval_api_paths() -> None
     assert settings.auto_trading_micro_live_max_daily_new_entries == 0
     assert settings.session_impulse_retest_enabled is True
     assert settings.session_impulse_retest_shadow_only is False
-    assert settings.session_impulse_retest_core_live_slots == 16
+    assert settings.session_impulse_retest_core_live_slots == 31
     assert settings.session_impulse_retest_partial_activation_ratio == 1.0
-    assert "DOGEUSDC" in settings.session_impulse_retest_allowed_symbols
-    assert "HBARUSDC" in settings.session_impulse_retest_allowed_symbols
-    assert "ZECUSDC" in settings.session_impulse_retest_allowed_symbols
-    assert "UNIUSDC" in settings.session_impulse_retest_allowed_symbols
+    assert "DOGEUSDT" in settings.session_impulse_retest_allowed_symbols
+    assert "HBARUSDT" in settings.session_impulse_retest_allowed_symbols
+    assert "ZECUSDT" in settings.session_impulse_retest_allowed_symbols
+    assert "UNIUSDT" in settings.session_impulse_retest_allowed_symbols
 
     now = datetime.now(timezone.utc).replace(microsecond=0)
     test_symbol = f"REPOTEST{int(now.timestamp())}USDC"
@@ -1287,6 +1318,7 @@ def test_approval_service_blocks_micro_live_on_same_window_family_cluster() -> N
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
     )
@@ -1327,6 +1359,7 @@ def test_approval_service_blocks_micro_live_when_entry_is_not_limit() -> None:
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT",
     )
@@ -1357,6 +1390,7 @@ def test_approval_service_allows_micro_live_when_entry_model_is_in_allowlist() -
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
     )
@@ -1386,6 +1420,7 @@ def test_approval_service_blocks_micro_live_on_recent_family_loss_cooldown() -> 
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
     )
@@ -1473,6 +1508,7 @@ def test_approval_service_holds_out_transition_variant_by_stable_partial_gate() 
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
         transition_edge_variant_partial_activation_ratio=0.0,
@@ -1520,6 +1556,7 @@ def test_approval_service_allows_transition_variant_when_partial_gate_selects_sa
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
         transition_edge_variant_partial_activation_ratio=1.0,
@@ -1600,6 +1637,7 @@ def test_approval_service_blocks_micro_live_on_session_direction_hour_contract()
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
         auto_trading_micro_live_session_direction_blocked_hours_utc=f"BTCUSDC:new_york:LONG:{current_hour_utc}",
@@ -1633,6 +1671,7 @@ def test_approval_service_allows_micro_live_outside_session_direction_hour_contr
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
         auto_trading_micro_live_session_direction_blocked_hours_utc=f"BTCUSDC:new_york:LONG:{blocked_hour_utc}",
@@ -1663,6 +1702,7 @@ def test_approval_service_ignores_micro_live_daily_entry_cap_when_disabled() -> 
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
         auto_trading_micro_live_max_daily_new_entries=0,
@@ -1695,6 +1735,7 @@ def test_approval_service_blocks_micro_live_on_strategy_hour_contract() -> None:
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,SWEEP_CONFIRM",
         auto_trading_micro_live_symbol_family_entry_direction_blocked_hours_utc=(
@@ -1741,6 +1782,7 @@ def test_approval_service_allows_micro_live_outside_strategy_hour_contract() -> 
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,SWEEP_CONFIRM",
         auto_trading_micro_live_symbol_family_entry_direction_blocked_hours_utc=(
@@ -1804,6 +1846,7 @@ def test_approval_service_blocks_micro_live_on_strategy_time_contract(tmp_path: 
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,SWEEP_CONFIRM",
         auto_trading_micro_live_strategy_time_contract_path=str(contract_path),
@@ -1867,6 +1910,7 @@ def test_approval_service_allows_micro_live_outside_strategy_time_contract(tmp_p
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,SWEEP_CONFIRM",
         auto_trading_micro_live_strategy_time_contract_path=str(contract_path),
@@ -1930,6 +1974,7 @@ def test_approval_service_blocks_micro_live_on_strategy_time_contract_with_calen
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,SWEEP_CONFIRM",
         auto_trading_micro_live_strategy_time_contract_path=str(contract_path),
@@ -1977,6 +2022,7 @@ def test_approval_service_blocks_micro_live_on_plan_blocklist(tmp_path: Path) ->
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
         auto_trading_micro_live_plan_blocklist_path=str(blocklist_path),
@@ -2027,6 +2073,7 @@ def test_approval_service_blocks_micro_live_on_event_blackout_window(tmp_path: P
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,CONFIRM",
         auto_trading_micro_live_event_blackout_path=str(blackout_path),
@@ -2089,6 +2136,7 @@ def test_approval_service_allows_micro_live_outside_event_blackout_scope(tmp_pat
         _env_file=None,
         auto_trading_enabled=True,
         auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
         auto_trading_micro_live_allowed_families="",
         auto_trading_micro_live_allowed_entry_models="LIMIT,SWEEP_CONFIRM",
         auto_trading_micro_live_event_blackout_path=str(blackout_path),

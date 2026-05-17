@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.core.enums import ExecutionFillStage, OrderLifecycleState, PlanState
-from app.db.models import OrderSubmission, Plan
+from app.db.models import BinancePositionSnapshot, OrderSubmission, Plan
 from app.db.session import SessionLocal, init_db
 from app.services.strategy_engine import StrategyEngine
 
@@ -43,6 +43,60 @@ def _seed_plan(db, *, symbol: str, plan_id: str, direction: str = "long", state:
     db.add(plan)
     db.commit()
     return plan
+
+
+def test_list_binance_positions_refresh_clears_stale_open_snapshot() -> None:
+    init_db()
+    symbol = f"BUS{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 21}USDT"
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        db.add(
+            BinancePositionSnapshot(
+                position_key=f"{symbol}:LONG",
+                symbol=symbol,
+                position_side="LONG",
+                position_amt=2.0,
+                entry_price=100.0,
+                break_even_price=100.0,
+                mark_price=101.0,
+                liquidation_price=50.0,
+                unrealized_pnl=2.0,
+                notional=202.0,
+                leverage=5,
+                margin_type="isolated",
+                isolated_wallet=10.0,
+                update_ts=now - timedelta(hours=1),
+                raw={"source": "stale_test"},
+            )
+        )
+        db.commit()
+
+        engine.market_data.binance.fetch_position_risk = lambda symbol=None: [  # type: ignore[assignment]
+            {
+                "symbol": symbol,
+                "positionSide": "LONG",
+                "positionAmt": "0",
+                "entryPrice": "0",
+                "breakEvenPrice": "0",
+                "markPrice": "101",
+                "liquidationPrice": "0",
+                "unRealizedProfit": "0",
+                "notional": "0",
+                "leverage": "5",
+                "marginType": "isolated",
+                "isolatedWallet": "0",
+                "updateTime": int(now.timestamp() * 1000),
+            }
+        ]
+
+        stale = engine.list_binance_positions(symbol=symbol, open_only=True, refresh=False)
+        refreshed = engine.list_binance_positions(symbol=symbol, open_only=True, refresh=True)
+
+    assert stale["count"] == 1
+    assert refreshed["refreshed"] is True
+    assert refreshed["refresh_sync"]["open_positions"] == 0
+    assert refreshed["count"] == 0
 
 
 def test_ingest_binance_user_stream_order_trade_update_maps_to_entry() -> None:

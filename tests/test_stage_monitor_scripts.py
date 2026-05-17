@@ -82,7 +82,7 @@ def _validation_report(
         },
         "operator_action_priority_summary": {
             "top_action": top_operator_action,
-            "top_action_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review",
+            "top_action_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action reduce_baseline_allocation_review",
             "experiment_context": {
                 "entry_timing_preferred_variant": "early_limit",
                 "execution_style_preferred_variant": "passive_limit",
@@ -136,7 +136,7 @@ def _validation_report(
             "last_status": "READY",
             "last_action": "reduce_baseline_allocation_review",
             "recent_entry_count": 3,
-            "last_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review",
+            "last_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action reduce_baseline_allocation_review",
         },
     }
     if approval_template_focus is not None:
@@ -237,7 +237,7 @@ def test_stage_payload_reports_blocked_state(monkeypatch):
     assert payload["selected_trial_run_id"] is None
     assert payload["execution_degradation"] == "manual_review"
     assert payload["top_operator_action_followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review"
+        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action reduce_baseline_allocation_review"
     )
     assert payload["dashboard_approval_strip"]["approve_value"] == "entry gate blocked"
     assert payload["validation_approval_strip"]["act_value"] == "review_runtime_execution_drag_before_expansion"
@@ -260,11 +260,11 @@ def test_stage_payload_reports_blocked_state(monkeypatch):
     assert payload["entry_timing_review_target"]["symbol"] == "BTCUSDC"
     assert payload["entry_timing_review_target"]["action"] == "run_entry_timing_split_review"
     assert payload["entry_timing_review_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review"
+        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_entry_timing_split_review"
     )
     assert payload["execution_style_review_target"]["symbol"] == "BTCUSDC"
     assert payload["execution_style_review_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_execution_style_split_review"
+        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_execution_style_split_review"
     )
     assert payload["representative_candidates"]["accepted"]["symbol"] == "BTCUSDC"
     assert payload["representative_candidates"]["blocked"]["symbol"] == "ETHUSDC"
@@ -382,16 +382,16 @@ def test_stage_payload_predicts_post_unlock_stage_when_risk_gate_is_only_blocker
     assert payload["post_unlock_review_summary"]["expected_stage_after_unlock"] == "2_LINEAGE_READY"
     assert payload["post_unlock_review_summary"]["next_review_step"] == "wait_for_operating_lock_to_clear"
     assert payload["post_unlock_review_summary"]["bundle_review_command"].endswith(
-        "scripts/run_post_unlock_review.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30"
+        "scripts/run_post_unlock_review.py --symbol BTCUSDT --universe usdt_reliable_balanced_31 --days 30"
     )
     assert payload["post_unlock_bundle_result"]["status"] == "waiting_for_review_window"
     assert payload["runtime_reopen_status"]["status"] == "waiting_for_operating_lock"
     assert payload["runtime_reopen_status"]["ready"] is False
     assert payload["post_unlock_review_summary"]["primary_review_command"].endswith(
-        "scripts/run_micro_live_preflight.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30"
+        "scripts/run_micro_live_preflight.py --symbol BTCUSDT --universe usdt_reliable_balanced_31 --days 30"
     )
     assert payload["post_unlock_review_summary"]["secondary_review_command"].endswith(
-        "scripts/run_post_live_pruning_review.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30"
+        "scripts/run_post_live_pruning_review.py --symbol BTCUSDT --universe usdt_reliable_balanced_31 --days 30"
     )
 
 
@@ -404,7 +404,7 @@ def test_stage_payload_uses_active_lineage_sample_for_candidate_gate(monkeypatch
             "sample_limit": limit,
             "samples": [
                 {
-                    "symbol": "ARBUSDC",
+                    "symbol": "ARBUSDT",
                     "strategy_family": "sweep_reversal",
                     "status": "OPEN_PAPER_SAMPLE",
                     "plan_id": "plan_zone_c15debc65a13_confirm",
@@ -434,7 +434,7 @@ def test_stage_payload_uses_active_lineage_sample_for_candidate_gate(monkeypatch
         lineage_sample_days=180,
     )
 
-    assert payload["active_lineage_sample_focus"]["symbol"] == "ARBUSDC"
+    assert payload["active_lineage_sample_focus"]["symbol"] == "ARBUSDT"
     assert payload["open_lineage_sample_summary"]["open_sample_count"] == 1
     assert payload["candidate_gate_ready"] is True
     assert payload["active_lineage_sample_health"]["active"] is True
@@ -802,7 +802,7 @@ def test_runtime_operator_signoff_summary_line_surfaces_manual_micro_live_ready(
             "next_step": "review_required_warning_and_record_micro_live_signoff",
             "intent_execution_mode": "MICRO_LIVE",
             "contract_scope": "limit_only",
-            "review_command": "./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --no-write-report",
+            "review_command": "./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --no-write-report",
         }
     )
 
@@ -820,8 +820,8 @@ def test_runtime_operator_action_line_surfaces_operator_sequence():
     line = ops_stage_board._runtime_operator_action_line(
         {
             "status": "ready_for_manual_micro_live_signoff",
-            "review_command": "./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --no-write-report",
-            "signoff_review_command": "./.venv/bin/python scripts/run_runtime_signoff_review.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30",
+            "review_command": "./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --no-write-report",
+            "signoff_review_command": "./.venv/bin/python scripts/run_runtime_signoff_review.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30",
             "submit_path_summary": "APPROVED_* -> order-intents(MICRO_LIVE) -> submit(live=true, limit_only)",
             "candidate_requirements_summary": "use only APPROVED_* limit_only symbols=BTCUSDC priority=BTCUSDC families=sweep_reversal directions=BTCUSDC:LONG|SHORT sessions=london,new_york,overlap intents within MICRO_LIVE_ONLY",
         }
@@ -977,14 +977,14 @@ def test_ops_stage_board_applies_runtime_actionable_live_candidate_summary() -> 
             "representative_candidates": {
                 "accepted": None,
                 "blocked": {
-                    "symbol": "ARBUSDC",
+                    "symbol": "ARBUSDT",
                     "strategy_family": "legacy_zone_plan",
                     "status": "BLOCKED_SETUP",
                 },
             },
             "recent_execution_intent_focus": {
-                "symbol": "BTCUSDC",
-                "strategy_family": "sweep_reversal",
+                "symbol": "BTCUSDT",
+                "strategy_family": "session_impulse_retest",
                 "allowed_execution_mode": "PAPER",
                 "approval_state": "APPROVED_AUTO",
                 "decision_reason_code": "submit_ready",
@@ -995,17 +995,17 @@ def test_ops_stage_board_applies_runtime_actionable_live_candidate_summary() -> 
             "runtime_live_contract_history_summary": {
                 "matching_intent_count_total": 2,
                 "matching_intent_count_30d": 0,
-                "symbol_counts_summary": "BTCUSDC=2/0",
+                "symbol_counts_summary": "BTCUSDT=2/0",
             },
             "paper_lineage_watch_summary": {
                 "allowed_symbol_family_visibility": {
-                    "BTCUSDC": ["legacy_zone_plan", "sweep_reversal"],
+                    "BTCUSDT": ["legacy_zone_plan", "session_impulse_retest"],
                 },
-                "allowed_symbol_family_visibility_line": "BTCUSDC=legacy_zone_plan,sweep_reversal",
+                "allowed_symbol_family_visibility_line": "BTCUSDT=legacy_zone_plan,session_impulse_retest",
                 "allowed_symbol_regime_visibility": {
-                    "BTCUSDC": ["range"],
+                    "BTCUSDT": ["range"],
                 },
-                "allowed_symbol_regime_visibility_line": "BTCUSDC=range",
+                "allowed_symbol_regime_visibility_line": "BTCUSDT=range",
             },
         }
     )
@@ -1013,14 +1013,14 @@ def test_ops_stage_board_applies_runtime_actionable_live_candidate_summary() -> 
     summary = payload["runtime_actionable_live_candidate_summary"]
     assert summary["status"] == "recent_paper_intent_requires_micro_live_promotion"
     assert summary["reason_code"] == "paper_intent_requires_micro_live_promotion"
-    assert summary["recent_intent_symbol"] == "BTCUSDC"
+    assert summary["recent_intent_symbol"] == "BTCUSDT"
     assert summary["next_trigger"] == "operator_creates_micro_live_intent_for_allowed_candidate"
     assert summary["historical_contract_match_count"] == 2
     assert summary["historical_contract_match_count_30d"] == 0
-    assert summary["historical_contract_match_summary"] == "BTCUSDC=2/0"
-    assert summary["watch_allowed_symbol_regime_visibility_line"] == "BTCUSDC=range"
-    assert "historical contract intent counts BTCUSDC=2/0" in summary["summary"]
-    assert "current watch regime BTCUSDC=range" in summary["summary"]
+    assert summary["historical_contract_match_summary"] == "BTCUSDT=2/0"
+    assert summary["watch_allowed_symbol_regime_visibility_line"] == "BTCUSDT=range"
+    assert "historical contract intent counts BTCUSDT=2/0" in summary["summary"]
+    assert "current watch regime BTCUSDT=range" in summary["summary"]
 
 
 def test_ops_stage_board_runtime_actionable_summary_prefers_recent_contract_match() -> None:
@@ -1033,14 +1033,14 @@ def test_ops_stage_board_runtime_actionable_summary_prefers_recent_contract_matc
             "representative_candidates": {
                 "accepted": None,
                 "blocked": {
-                    "symbol": "ARBUSDC",
+                    "symbol": "ARBUSDT",
                     "strategy_family": "legacy_zone_plan",
                     "status": "BLOCKED_SETUP",
                 },
             },
             "recent_execution_intent_focus": {
-                "symbol": "BTCUSDC",
-                "strategy_family": "sweep_reversal",
+                "symbol": "BTCUSDT",
+                "strategy_family": "session_impulse_retest",
                 "entry_type": "stop_market",
                 "allowed_execution_mode": "PAPER",
                 "approval_state": "APPROVED_AUTO",
@@ -1048,14 +1048,14 @@ def test_ops_stage_board_runtime_actionable_summary_prefers_recent_contract_matc
             },
             "recent_contract_matching_intent_summary": {
                 "matching_intent_count": 3,
-                "latest_symbol": "BTCUSDC",
-                "latest_family": "sweep_reversal",
+                "latest_symbol": "BTCUSDT",
+                "latest_family": "session_impulse_retest",
                 "latest_execution_mode": "PAPER",
                 "latest_allowed_execution_mode": "PAPER",
                 "latest_approval_state": "APPROVED_AUTO",
                 "latest_reason_code": "submit_ready",
-                "latest_entry_type": "limit",
-                "latest_entry_model": "LIMIT",
+                "latest_entry_type": "confirm",
+                "latest_entry_model": "CONFIRM",
             },
         }
     )
@@ -1063,12 +1063,12 @@ def test_ops_stage_board_runtime_actionable_summary_prefers_recent_contract_matc
     summary = payload["runtime_actionable_live_candidate_summary"]
     assert summary["status"] == "recent_paper_intent_requires_micro_live_promotion"
     assert summary["reason_code"] == "paper_intent_requires_micro_live_promotion"
-    assert summary["recent_intent_symbol"] == "BTCUSDC"
-    assert summary["recent_intent_family"] == "sweep_reversal"
-    assert summary["recent_intent_entry_type"] == "LIMIT"
+    assert summary["recent_intent_symbol"] == "BTCUSDT"
+    assert summary["recent_intent_family"] == "session_impulse_retest"
+    assert summary["recent_intent_entry_type"] == "CONFIRM"
     assert summary["recent_contract_match_count"] == 3
     assert summary["next_trigger"] == "operator_creates_micro_live_intent_for_allowed_candidate"
-    assert "BTCUSDC/sweep_reversal/PAPER" in summary["summary"]
+    assert "BTCUSDT/session_impulse_retest/PAPER" in summary["summary"]
     assert "STOP_MARKET" not in summary["summary"]
 
 
@@ -1082,14 +1082,14 @@ def test_ops_stage_board_runtime_actionable_summary_marks_recent_contract_match_
             "representative_candidates": {
                 "accepted": None,
                 "blocked": {
-                    "symbol": "ARBUSDC",
+                    "symbol": "ARBUSDT",
                     "strategy_family": "legacy_zone_plan",
                     "status": "BLOCKED_SETUP",
                 },
             },
             "recent_execution_intent_focus": {
-                "symbol": "BTCUSDC",
-                "strategy_family": "sweep_reversal",
+                "symbol": "BTCUSDT",
+                "strategy_family": "session_impulse_retest",
                 "entry_type": "stop_market",
                 "allowed_execution_mode": "PAPER",
                 "approval_state": "APPROVED_AUTO",
@@ -1097,23 +1097,23 @@ def test_ops_stage_board_runtime_actionable_summary_marks_recent_contract_match_
             },
             "recent_contract_matching_intent_summary": {
                 "matching_intent_count": 44,
-                "latest_symbol": "TIAUSDC",
-                "latest_family": "sweep_reversal",
+                "latest_symbol": "TIAUSDT",
+                "latest_family": "session_impulse_retest",
                 "latest_execution_mode": "PAPER",
                 "latest_allowed_execution_mode": "PAPER",
                 "latest_approval_state": "APPROVED_AUTO",
                 "latest_reason_code": "paper lineage override bypassed thesis duplicate block for eligible A-grade PAPER sampling.",
-                "latest_entry_type": "limit",
-                "latest_entry_model": "LIMIT",
-                "latest_submit_ready_symbol": "ETHUSDC",
-                "latest_submit_ready_family": "sweep_reversal",
+                "latest_entry_type": "confirm",
+                "latest_entry_model": "CONFIRM",
+                "latest_submit_ready_symbol": "ETHUSDT",
+                "latest_submit_ready_family": "session_impulse_retest",
                 "latest_submit_ready_direction": "LONG",
                 "latest_submit_ready_execution_mode": "PAPER",
                 "latest_submit_ready_allowed_execution_mode": "PAPER",
                 "latest_submit_ready_approval_state": "APPROVED_AUTO",
                 "latest_submit_ready_reason_code": "submit_ready",
-                "latest_submit_ready_entry_type": "limit",
-                "latest_submit_ready_entry_model": "LIMIT",
+                "latest_submit_ready_entry_type": "confirm",
+                "latest_submit_ready_entry_model": "CONFIRM",
                 "latest_submit_ready_created_at": "2026-04-15 14:48:09.972149",
             },
         }
@@ -1122,18 +1122,19 @@ def test_ops_stage_board_runtime_actionable_summary_marks_recent_contract_match_
     summary = payload["runtime_actionable_live_candidate_summary"]
     assert summary["status"] == "recent_paper_intent_requires_micro_live_promotion"
     assert summary["reason_code"] == "paper_intent_requires_micro_live_promotion"
-    assert summary["recent_intent_symbol"] == "ETHUSDC"
-    assert summary["recent_intent_family"] == "sweep_reversal"
-    assert summary["recent_intent_entry_type"] == "LIMIT"
-    assert summary["recent_submit_ready_symbol"] == "ETHUSDC"
-    assert summary["recent_submit_ready_family"] == "sweep_reversal"
+    assert summary["recent_intent_symbol"] == "ETHUSDT"
+    assert summary["recent_intent_family"] == "session_impulse_retest"
+    assert summary["recent_intent_entry_type"] == "CONFIRM"
+    assert summary["recent_submit_ready_symbol"] == "ETHUSDT"
+    assert summary["recent_submit_ready_family"] == "session_impulse_retest"
     assert summary["recent_submit_ready_direction"] == "LONG"
     assert summary["recent_submit_ready_created_at"] == "2026-04-15 14:48:09.972149"
     assert summary["recent_contract_match_count"] == 44
     assert summary["next_trigger"] == "operator_creates_micro_live_intent_for_allowed_candidate"
-    assert "latest surfaced intent ETHUSDC/sweep_reversal/PAPER is approved but was created by the PAPER drill" in summary["summary"]
-    assert "last submit_ready limit candidate was ETHUSDC/sweep_reversal/LONG at 2026-04-15 14:48:09.972149" in summary["summary"]
-    assert "nearest surfaced candidate ARBUSDC/legacy_zone_plan remains blocked" in summary["summary"]
+    assert "latest surfaced intent ETHUSDT/session_impulse_retest/PAPER is approved but was created by the PAPER drill" in summary["summary"]
+    assert "last submit_ready" in summary["summary"]
+    assert "ETHUSDT/session_impulse_retest/LONG at 2026-04-15 14:48:09.972149" in summary["summary"]
+    assert "nearest surfaced candidate ARBUSDT/legacy_zone_plan remains blocked" in summary["summary"]
 
 
 def test_ops_stage_board_runtime_actionable_summary_marks_candidate_direction_outside_contract(monkeypatch) -> None:
@@ -1582,7 +1583,7 @@ def test_collect_events_emits_transition_events():
             "last_status": "NO_TARGET",
             "last_action": "reduce_baseline_allocation_review",
             "recent_entry_count": 2,
-            "last_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review",
+            "last_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdt_reliable_balanced_31 --days 30 --action reduce_baseline_allocation_review",
         },
         "entry_timing_review_target": {
             "action": "run_entry_timing_split_review",
@@ -1592,7 +1593,7 @@ def test_collect_events_emits_transition_events():
             "strategy_family": "trend_continuation",
             "block_reason": "portfolio_cap",
             "focus_source": "blocked_candidate_focus",
-            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review",
+            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_entry_timing_split_review",
         },
         "execution_style_review_target": {
             "action": "run_execution_style_split_review",
@@ -1602,7 +1603,7 @@ def test_collect_events_emits_transition_events():
             "strategy_family": "trend_continuation",
             "block_reason": "portfolio_cap",
             "focus_source": "blocked_candidate_focus",
-            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdc_perp_top30 --days 30 --action run_execution_style_split_review",
+            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol ETHUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_execution_style_split_review",
         },
         "representative_candidates": {
             "accepted": {
@@ -1678,7 +1679,7 @@ def test_collect_events_emits_transition_events():
             "last_status": "READY",
             "last_action": "reduce_baseline_allocation_review",
             "recent_entry_count": 3,
-            "last_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review",
+            "last_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action reduce_baseline_allocation_review",
         },
         "lineage_sample_summary": {
             "scope": "family_global",
@@ -1709,7 +1710,7 @@ def test_collect_events_emits_transition_events():
             "status": "ACTIONABLE_ENTRY",
             "strategy_family": "sweep_reversal",
             "focus_source": "accepted_candidate_focus",
-            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review",
+            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_entry_timing_split_review",
         },
         "execution_style_review_target": {
             "action": "run_execution_style_split_review",
@@ -1718,7 +1719,7 @@ def test_collect_events_emits_transition_events():
             "status": "ACTIONABLE_ENTRY",
             "strategy_family": "sweep_reversal",
             "focus_source": "accepted_candidate_focus",
-            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_execution_style_split_review",
+            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_execution_style_split_review",
         },
         "representative_candidates": {
             "accepted": {
@@ -2229,7 +2230,7 @@ def test_render_message_uses_approval_surface_lines() -> None:
             "last_status": "READY",
             "last_action": "reduce_baseline_allocation_review",
             "recent_entry_count": 3,
-            "last_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action reduce_baseline_allocation_review",
+            "last_followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action reduce_baseline_allocation_review",
         },
         "lineage_sample_summary": {
             "scope": "family_global",
@@ -2261,7 +2262,7 @@ def test_render_message_uses_approval_surface_lines() -> None:
             "status": "ACTIONABLE_ENTRY",
             "strategy_family": "sweep_reversal",
             "focus_source": "accepted_candidate_focus",
-            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review",
+            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_entry_timing_split_review",
         },
         "execution_style_review_target": {
             "action": "run_execution_style_split_review",
@@ -2270,7 +2271,7 @@ def test_render_message_uses_approval_surface_lines() -> None:
             "status": "ACTIONABLE_ENTRY",
             "strategy_family": "sweep_reversal",
             "focus_source": "accepted_candidate_focus",
-            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_execution_style_split_review",
+            "followup_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_execution_style_split_review",
         },
         "representative_candidates": {
             "accepted": {
@@ -2302,9 +2303,9 @@ def test_render_message_uses_approval_surface_lines() -> None:
             "current_checklist_status": "FAIL",
             "current_validation_playbook_go_no_go": "MANUAL_REVIEW",
             "next_review_step": "wait_for_operating_lock_to_clear",
-            "bundle_review_command": "./.venv/bin/python scripts/run_post_unlock_review.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30",
-            "primary_review_command": "./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30",
-            "secondary_review_command": "./.venv/bin/python scripts/run_post_live_pruning_review.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30",
+            "bundle_review_command": "./.venv/bin/python scripts/run_post_unlock_review.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30",
+            "primary_review_command": "./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30",
+            "secondary_review_command": "./.venv/bin/python scripts/run_post_live_pruning_review.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30",
         },
         "post_unlock_bundle_result": {
             "active": True,
@@ -2388,7 +2389,7 @@ def test_render_message_uses_approval_surface_lines() -> None:
                 "mitigation_execution_plan": {
                     "primary_focus_label": "confirm 진입 타이밍 축소",
                     "primary_status": "candidate_review_pending",
-                    "primary_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review",
+                    "primary_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_entry_timing_split_review",
                     "secondary_focus_label": "non-confirm fail-fast",
                     "secondary_status": "deferred_by_experiment_sequence",
                     "secondary_command": "",
@@ -2421,7 +2422,7 @@ def test_render_message_uses_approval_surface_lines() -> None:
                 "mitigation_review_summary": {
                     "primary_action_code": "range_entry_timing_review",
                     "primary_action_status": "candidate_review_pending",
-                    "primary_action_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review",
+                    "primary_action_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_entry_timing_split_review",
                     "items": [
                         {
                             "code": "range_entry_timing_review",
@@ -2446,7 +2447,7 @@ def test_render_message_uses_approval_surface_lines() -> None:
             "available": True,
             "primary_action_code": "range_entry_timing_review",
             "primary_action_status": "candidate_review_pending",
-            "primary_action_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review",
+            "primary_action_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_entry_timing_split_review",
             "primary_action_constraint": "waiting_for_actionable_entry_timing_target",
             "actionable_now_count": 0,
             "candidate_pending_count": 1,
@@ -2491,8 +2492,8 @@ def test_render_message_uses_approval_surface_lines() -> None:
             "next_step": "review_required_warning_and_record_micro_live_signoff",
             "intent_execution_mode": "MICRO_LIVE",
             "contract_scope": "limit_only",
-            "review_command": "./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --no-write-report",
-            "signoff_review_command": "./.venv/bin/python scripts/run_runtime_signoff_review.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30",
+            "review_command": "./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --no-write-report",
+            "signoff_review_command": "./.venv/bin/python scripts/run_runtime_signoff_review.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30",
             "candidate_requirements_summary": "use only APPROVED_* limit_only symbols=BTCUSDC priority=BTCUSDC families=sweep_reversal directions=BTCUSDC:LONG|SHORT sessions=london,new_york,overlap intents within MICRO_LIVE_ONLY",
         },
             "runtime_actionable_live_candidate_summary": {
@@ -2568,7 +2569,7 @@ def test_collect_events_reports_runtime_mitigation_actionable_with_command() -> 
             "available": True,
             "primary_action_code": "range_entry_timing_review",
             "primary_action_status": "actionable_now",
-            "primary_action_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review",
+            "primary_action_command": "./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_entry_timing_split_review",
             "primary_focus_label": "confirm 진입 타이밍 축소",
             "secondary_focus_label": "non-confirm fail-fast",
             "secondary_status": "deferred_by_experiment_sequence",

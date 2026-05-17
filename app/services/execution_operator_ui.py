@@ -3296,30 +3296,41 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         $('candidate-list').innerHTML = '<div class="empty">실행 가능한 후보가 없습니다.</div>';
         return;
       }
-      $('candidate-list').innerHTML = scannerRows.slice(0, 8).map((row, index) => `
-        <div class="list-card">
-          <div class="title">
-            <span>${esc(`#${index + 1} ${row.symbol}${row.symbol === symbol ? ' (현재)' : ''}`)}</span>
-            <span class="badge ${badgeClass(row.deployment_go_no_go || row.operator_status)}">${esc(row.deployment_go_no_go || row.operator_status || 'n/a')}</span>
+      $('candidate-list').innerHTML = scannerRows.slice(0, 8).map((row, index) => {
+        const route = row?.entry_surface_route || {};
+        const routeStatus = row?.live_routable ? 'live route' : (route?.status || 'context-only');
+        const routeReasons = Array.isArray(route?.reasons) && route.reasons.length
+          ? route.reasons.join(',')
+          : '';
+        return `
+          <div class="list-card">
+            <div class="title">
+              <span>${esc(`#${index + 1} ${row.symbol}${row.symbol === symbol ? ' (현재)' : ''}`)}</span>
+              <span class="badge ${badgeClass(row.deployment_go_no_go || row.operator_status)}">${esc(row.deployment_go_no_go || row.operator_status || 'n/a')}</span>
+            </div>
+            <div class="desc">${esc(row.block_reason_message || row.deployment_message || row.expected_summary || '요약 없음')}</div>
+            <div class="meta-row">
+              ${badge('Live Route', routeStatus)}
+              ${routeReasons ? badge('Route 이유', routeReasons) : ''}
+            </div>
+            <div class="meta-row">
+              ${badge('Family', row.strategy_family || 'n/a')}
+              ${badge('Cluster', row.strategy_cluster || row.multi_strategy_overlay?.cluster || 'n/a')}
+              ${badge('Cluster 상태', row.strategy_cluster_status || row.multi_strategy_overlay?.strategy_cluster_status || 'n/a')}
+            </div>
+            <div class="meta-row">
+              ${badge('모델', row.entry_model || 'n/a')}
+              ${badge('등급', row.strategy_grade || 'n/a')}
+              ${badge('B 상태', row.b_continuation_activation?.activation_state || 'n/a')}
+            </div>
+            <div class="meta-row">
+              ${badge('Est. win', fmtPercent(row.expected_win_prob))}
+              ${badge('Est. EV', fmtR(row.expected_ev_r))}
+              ${badge('리스크', fmtR(row.recommended_risk_r))}
+            </div>
           </div>
-          <div class="desc">${esc(row.block_reason_message || row.deployment_message || row.expected_summary || '요약 없음')}</div>
-          <div class="meta-row">
-            ${badge('Family', row.strategy_family || 'n/a')}
-            ${badge('Cluster', row.strategy_cluster || row.multi_strategy_overlay?.cluster || 'n/a')}
-            ${badge('Cluster 상태', row.strategy_cluster_status || row.multi_strategy_overlay?.strategy_cluster_status || 'n/a')}
-          </div>
-          <div class="meta-row">
-            ${badge('모델', row.entry_model || 'n/a')}
-            ${badge('등급', row.strategy_grade || 'n/a')}
-            ${badge('B 상태', row.b_continuation_activation?.activation_state || 'n/a')}
-          </div>
-          <div class="meta-row">
-            ${badge('Est. win', fmtPercent(row.expected_win_prob))}
-            ${badge('Est. EV', fmtR(row.expected_ev_r))}
-            ${badge('리스크', fmtR(row.recommended_risk_r))}
-          </div>
-        </div>
-      `).join('');
+        `;
+      }).join('');
     }
 
     function renderPassRateTable(title, rows, emptyText) {

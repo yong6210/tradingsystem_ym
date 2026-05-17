@@ -258,3 +258,51 @@ def test_live_order_lifecycle_filters_intents_by_family_and_start_at() -> None:
     assert live_intents["distinct_plan_count"] == 1
     assert live_intents["duplicate_plan_intent_count"] == 0
     assert live_intents["top_block_reasons"] == {"candidate_waiting": 1}
+
+
+def test_live_order_lifecycle_filters_intents_by_symbol_allowlist() -> None:
+    now = datetime.now(timezone.utc)
+    suffix = uuid4().hex
+    with SessionLocal() as db:
+        db.add_all(
+            [
+                OrderIntent(
+                    intent_id=f"intent_lifecycle_symbol_btc_{suffix}",
+                    plan_id=f"plan_lifecycle_symbol_btc_{suffix}",
+                    symbol="BTCUSDT",
+                    strategy_family="session_impulse_retest",
+                    execution_mode="MICRO_LIVE",
+                    approval_state="BLOCKED",
+                    submit_decision="SKIP_BLOCKED",
+                    decision_reason_code="candidate_waiting",
+                    decision_reason_message="current symbol",
+                    created_at=now - timedelta(minutes=5),
+                ),
+                OrderIntent(
+                    intent_id=f"intent_lifecycle_symbol_ada_{suffix}",
+                    plan_id=f"plan_lifecycle_symbol_ada_{suffix}",
+                    symbol="ADAUSDC",
+                    strategy_family="session_impulse_retest",
+                    execution_mode="MICRO_LIVE",
+                    approval_state="BLOCKED",
+                    submit_decision="SKIP_BLOCKED",
+                    decision_reason_code="old_usdc_symbol",
+                    decision_reason_message="old symbol",
+                    created_at=now - timedelta(minutes=4),
+                ),
+            ]
+        )
+        db.flush()
+
+        payload = LiveOrderLifecycleReporter(db).generate(
+            days=1,
+            live_only=True,
+            generated_at=now,
+            symbols=["BTCUSDT"],
+            strategy_families=["session_impulse_retest"],
+        )
+
+    live_intents = payload["summary"]["live_intents"]
+    assert payload["symbols"] == ["BTCUSDT"]
+    assert live_intents["total"] == 1
+    assert live_intents["top_block_reasons"] == {"candidate_waiting": 1}

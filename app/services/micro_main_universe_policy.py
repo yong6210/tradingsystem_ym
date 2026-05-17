@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from collections.abc import Iterable
 from typing import Any
 
 
@@ -265,25 +266,36 @@ def micro_main_universe_entry(symbol: str) -> dict[str, Any] | None:
     return asdict(entry) if entry else None
 
 
-def build_micro_main_universe_policy_snapshot() -> dict[str, Any]:
+def _entries_for_symbols(symbols: Iterable[str] | None = None) -> tuple[MicroMainUniverseEntry, ...]:
+    if symbols is None:
+        return _ALL_ENTRIES
+    allowed = {str(item or "").upper().strip() for item in symbols if str(item or "").strip()}
+    if not allowed:
+        return ()
+    return tuple(entry for entry in _ALL_ENTRIES if entry.symbol in allowed)
+
+
+def build_micro_main_universe_policy_snapshot(*, symbols: Iterable[str] | None = None) -> dict[str, Any]:
+    entries = _entries_for_symbols(symbols)
     return {
         "family": "session_impulse_retest",
-        "core_symbols": [entry.symbol for entry in _ALL_ENTRIES if entry.tier == "core"],
-        "secondary_symbols": [entry.symbol for entry in _ALL_ENTRIES if entry.tier == "secondary"],
-        "allowed_symbols": [entry.symbol for entry in _ALL_ENTRIES],
+        "core_symbols": [entry.symbol for entry in entries if entry.tier == "core"],
+        "secondary_symbols": [entry.symbol for entry in entries if entry.tier == "secondary"],
+        "allowed_symbols": [entry.symbol for entry in entries],
         "partial_activation_priority": [
             entry.symbol
-            for entry in sorted(_ALL_ENTRIES, key=lambda item: item.rollout_priority)
+            for entry in sorted(entries, key=lambda item: item.rollout_priority)
         ],
         "risk_multipliers": {
             entry.symbol: round(float(entry.risk_multiplier), 4)
-            for entry in _ALL_ENTRIES
+            for entry in entries
         },
-        "entries": [asdict(entry) for entry in _ALL_ENTRIES],
+        "entries": [asdict(entry) for entry in entries],
         "policy_note": (
             "Core symbols are eligible for the first live rollout after shadow validation. "
             "Secondary symbols remain shadow-first and should receive lower risk caps."
         ),
+        "scope": "all_known_symbols" if symbols is None else "configured_symbols",
     }
 
 
@@ -294,8 +306,9 @@ def build_micro_main_rollout_contract_snapshot(
     partial_activation_ratio: float,
     core_live_slots: int,
     secondary_live_enabled: bool,
+    symbols: Iterable[str] | None = None,
 ) -> dict[str, Any]:
-    snapshot = build_micro_main_universe_policy_snapshot()
+    snapshot = build_micro_main_universe_policy_snapshot(symbols=symbols)
     snapshot["rollout_contract"] = {
         "enabled": _safe_bool(enabled),
         "shadow_only": _safe_bool(shadow_only),

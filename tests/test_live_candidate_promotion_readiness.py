@@ -451,6 +451,66 @@ def test_runtime_readiness_wait_headline_uses_live_symbols_only() -> None:
     assert scoped["headline_action"] == "Current live symbols have no fresh live-eligible candidate."
 
 
+def test_runtime_readiness_downgrades_auxiliary_blocker_when_live_symbols_are_waiting() -> None:
+    payload = LiveCandidatePromotionReadinessService().build(
+        hours=24,
+        now="2026-05-10T03:10:00Z",
+        audit_rows=[
+            {
+                "symbol": "BTCUSDT",
+                "strategy_family": "session_impulse_retest",
+                "phase": "auto_route",
+                "status": "no_live_route_candidate_plan",
+                "count": 1,
+                "latest_observed_ts": "2026-05-10T03:05:00Z",
+            },
+            {
+                "symbol": "ETHUSDT",
+                "strategy_family": "session_impulse_retest",
+                "phase": "auto_route",
+                "status": "no_live_route_candidate_plan",
+                "count": 1,
+                "latest_observed_ts": "2026-05-10T03:04:00Z",
+            },
+            {
+                "symbol": "BTCUSDC",
+                "strategy_family": "session_impulse_retest",
+                "phase": "auto_route",
+                "status": "intent_blocked",
+                "count": 1,
+                "latest_observed_ts": "2026-05-10T03:03:00Z",
+            },
+        ],
+        intent_rows=[
+            {
+                "symbol": "BTCUSDC",
+                "strategy_family": "session_impulse_retest",
+                "execution_mode": "MICRO_LIVE",
+                "approval_state": "BLOCKED",
+                "submit_decision": "SKIP_BLOCKED",
+                "decision_reason_code": "session_impulse_retest_rollout_not_ready",
+                "count": 1,
+            }
+        ],
+        submission_rows=[],
+    )
+
+    original_headline_state = payload["headline_state"]
+
+    scoped = _apply_live_headline_scope(payload, live_symbols={"BTCUSDT", "ETHUSDT"})
+
+    assert original_headline_state == "BLOCKED"
+    assert scoped["headline_state"] == "WAIT"
+    assert scoped["headline_reason"] == "no_promotable_live_candidate"
+    assert scoped["headline_scope"] == "live_routable_symbols"
+    assert scoped["headline_candidate_symbols"] == ["BTCUSDT", "ETHUSDT"]
+    assert scoped["candidate_scope_counts"] == {"total": 3, "live_routable": 2, "auxiliary": 1}
+    assert scoped["live_state_counts"] == {"NO_FRESH_LIVE_CANDIDATE": 2}
+    assert scoped["auxiliary_state_counts"] == {"GATE_BLOCKED": 1}
+    assert scoped["top_live_blockers"] == {"no_fresh_live_candidate": 2}
+    assert scoped["top_auxiliary_blockers"] == {"session_impulse_retest_rollout_not_ready": 1}
+
+
 def test_readiness_headline_prefers_actual_gate_blocker_over_wait_reasons() -> None:
     payload = LiveCandidatePromotionReadinessService().build(
         hours=24,

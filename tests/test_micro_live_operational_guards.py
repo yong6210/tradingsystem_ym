@@ -685,6 +685,51 @@ def test_no_order_watchdog_main_does_not_record_cooldown_when_delivery_fails(mon
     assert not state_file.exists()
 
 
+def test_no_order_watchdog_scopes_lifecycle_to_micro_live_symbols(monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "session_impulse_retest")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", "ETHUSDT,BTCUSDT")
+    calls: list[dict] = []
+
+    class FakeSession:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeReporter:
+        def __init__(self, _db) -> None:
+            pass
+
+        def generate(self, **kwargs):
+            calls.append(dict(kwargs))
+            return {
+                "window_start": "2026-05-10T00:00:00+00:00",
+                "summary": {"requested_live_count": 0, "live_intents": {"total": 0}},
+            }
+
+    monkeypatch.setattr(run_micro_live_no_order_watchdog, "init_db", lambda: None)
+    monkeypatch.setattr(run_micro_live_no_order_watchdog, "SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(run_micro_live_no_order_watchdog, "LiveOrderLifecycleReporter", FakeReporter)
+    monkeypatch.setattr(run_micro_live_no_order_watchdog, "_ws_runtime_started_at", lambda: None)
+    monkeypatch.setattr(
+        run_micro_live_no_order_watchdog,
+        "_session_impulse_retest_candidate_context",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        run_micro_live_no_order_watchdog,
+        "_session_impulse_retest_opportunity_context",
+        lambda **_kwargs: {},
+    )
+
+    payload = run_micro_live_no_order_watchdog.build_payload(days=3, limit=200, min_intents=1)
+
+    assert calls[0]["symbols"] == ["BTCUSDT", "ETHUSDT"]
+    assert payload["symbol_filter"] == ["BTCUSDT", "ETHUSDT"]
+
+
 def test_synthetic_canary_passes_with_no_network_and_valid_settings(monkeypatch) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "RISK_PCT")
@@ -2518,6 +2563,64 @@ def test_reconciliation_watchdog_accepts_matching_open_position_snapshot() -> No
 
     assert result["status"] == "OK"
     assert result["issues"] == []
+
+
+def test_reconciliation_watchdog_warns_when_local_plan_is_open_without_position_snapshot() -> None:
+    now = datetime(2026, 5, 10, 12, tzinfo=UTC)
+
+    result = run_live_reconciliation_watchdog.evaluate_reconciliation_watchdog(
+        submissions=[],
+        ledgers=[],
+        positions=[],
+        events=[],
+        plans=[
+            {
+                "plan_id": "sir_ADAUSDC_S_20260510T1150",
+                "symbol": "ADAUSDC",
+                "direction": "short",
+                "state": "ENTERED",
+                "valid_from": datetime(2026, 5, 10, 11, 50, tzinfo=UTC),
+            }
+        ],
+        now=now,
+        stale_minutes=3,
+        event_lookback_minutes=60,
+    )
+
+    assert result["status"] == "ALERT"
+    assert result["severity"] == "WARN"
+    assert result["issues"][0]["type"] == "local_open_plan_without_position_snapshot"
+    assert result["summary"]["local_open_plan_count"] == 1
+
+
+def test_reconciliation_watchdog_warns_separately_when_local_plan_has_closed_fill() -> None:
+    now = datetime(2026, 5, 10, 12, tzinfo=UTC)
+
+    result = run_live_reconciliation_watchdog.evaluate_reconciliation_watchdog(
+        submissions=[],
+        ledgers=[],
+        positions=[],
+        events=[],
+        plans=[
+            {
+                "plan_id": "plan_closed_fill_state_stale",
+                "symbol": "ARBUSDC",
+                "direction": "short",
+                "state": "PARTIAL_EXIT",
+                "latest_fill_id": "fill_closed_1",
+                "latest_fill_stage": "CLOSED",
+                "latest_fill_to_state": "CLOSED",
+                "valid_from": datetime(2026, 5, 10, 11, 50, tzinfo=UTC),
+            }
+        ],
+        now=now,
+        stale_minutes=3,
+        event_lookback_minutes=60,
+    )
+
+    issue_types = [issue["type"] for issue in result["issues"]]
+    assert issue_types == ["local_plan_state_stale_after_closed_fill"]
+    assert result["summary"]["local_plan_state_stale_after_closed_fill_count"] == 1
 
 
 def test_account_protection_audit_flags_unprotected_out_of_universe_position() -> None:

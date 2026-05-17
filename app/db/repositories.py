@@ -1244,12 +1244,17 @@ class ExecutionReconciliationEventRepository:
         self,
         *,
         symbol: str | None = None,
+        symbols: Iterable[str] | None = None,
         limit: int = 100,
         days: int | None = None,
     ) -> list[ExecutionReconciliationEvent]:
         stmt = select(ExecutionReconciliationEvent)
         if symbol:
             stmt = stmt.where(ExecutionReconciliationEvent.symbol == symbol.upper())
+        elif symbols is not None:
+            normalized_symbols = sorted({str(item).strip().upper() for item in symbols if str(item).strip()})
+            if normalized_symbols:
+                stmt = stmt.where(ExecutionReconciliationEvent.symbol.in_(normalized_symbols))
         if days is not None:
             cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))
             stmt = stmt.where(ExecutionReconciliationEvent.created_at >= cutoff)

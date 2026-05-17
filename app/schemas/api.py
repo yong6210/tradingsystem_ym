@@ -168,6 +168,8 @@ class ScannerItemOut(ORMModel):
     thesis_primary_symbol: str | None = None
     thesis_rejected_reason: str | None = None
     thesis_active_cluster_count: int = 0
+    entry_surface_route: dict[str, Any] | None = None
+    live_routable: bool | None = None
 
 
 class IndicatorContextOut(ORMModel):
@@ -855,6 +857,9 @@ class BinancePositionOut(ORMModel):
 class BinancePositionsOut(ORMModel):
     symbol: str | None = None
     open_only: bool = False
+    refreshed: bool = False
+    refresh_error: str | None = None
+    refresh_sync: dict[str, Any] | None = None
     count: int
     positions: list[BinancePositionOut] = Field(default_factory=list)
 

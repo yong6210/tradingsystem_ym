@@ -122,6 +122,14 @@ class LiveOrderLifecycleReporter:
             if str(item or "").strip()
         }
 
+    @staticmethod
+    def _normalize_symbols(value: list[str] | tuple[str, ...] | set[str] | None) -> set[str]:
+        return {
+            str(item or "").strip().upper()
+            for item in list(value or [])
+            if str(item or "").strip()
+        }
+
     @classmethod
     def _blocked_intent_detail(cls, row: OrderIntent) -> dict[str, Any]:
         approval = cls._safe_dict(row.approval_snapshot)
@@ -225,11 +233,16 @@ class LiveOrderLifecycleReporter:
         cutoff: datetime,
         symbol: str | None,
         live_only: bool,
+        symbols: list[str] | tuple[str, ...] | set[str] | None = None,
         strategy_families: list[str] | tuple[str, ...] | set[str] | None = None,
     ) -> dict[str, Any]:
         stmt = select(OrderIntent).where(OrderIntent.created_at >= cutoff)
         if symbol:
             stmt = stmt.where(OrderIntent.symbol == symbol.upper())
+        else:
+            symbol_filter = self._normalize_symbols(symbols)
+            if symbol_filter:
+                stmt = stmt.where(OrderIntent.symbol.in_(sorted(symbol_filter)))
         if live_only:
             stmt = stmt.where(OrderIntent.execution_mode.in_(("MICRO_LIVE", "LIVE")))
         family_filter = self._normalize_families(strategy_families)
@@ -285,6 +298,7 @@ class LiveOrderLifecycleReporter:
         *,
         days: int = 30,
         symbol: str | None = None,
+        symbols: list[str] | tuple[str, ...] | set[str] | None = None,
         live_only: bool = True,
         limit: int = 100,
         generated_at: datetime | None = None,
@@ -296,6 +310,10 @@ class LiveOrderLifecycleReporter:
         stmt = select(OrderSubmission).where(OrderSubmission.submitted_at >= cutoff)
         if symbol:
             stmt = stmt.where(OrderSubmission.symbol == symbol.upper())
+        else:
+            symbol_filter = self._normalize_symbols(symbols)
+            if symbol_filter:
+                stmt = stmt.where(OrderSubmission.symbol.in_(sorted(symbol_filter)))
         if live_only:
             stmt = stmt.where(OrderSubmission.requested_live.is_(True))
         stmt = stmt.order_by(desc(OrderSubmission.submitted_at), desc(OrderSubmission.updated_at)).limit(max(1, int(limit)))
@@ -427,6 +445,7 @@ class LiveOrderLifecycleReporter:
             "window_start": cutoff.isoformat(),
             "window_days": max(1, int(days)),
             "symbol": symbol.upper() if symbol else "",
+            "symbols": sorted(self._normalize_symbols(symbols)) if not symbol else [symbol.upper()],
             "live_only": self._safe_bool(live_only),
             "summary": {
                 "submission_count": len(submissions),
@@ -444,6 +463,7 @@ class LiveOrderLifecycleReporter:
                 "live_intents": self._intent_counts(
                     cutoff=cutoff,
                     symbol=symbol,
+                    symbols=symbols,
                     live_only=self._safe_bool(live_only),
                     strategy_families=family_filter,
                 ),

@@ -172,7 +172,7 @@ sync_micro_main_backtest_reports() {
       if [[ ! -f "$dst" ]] || ! cmp -s "$path" "$dst"; then
         cp -p "$path" "$dst"
       fi
-    done < <(find "$src_dir" -maxdepth 1 -type f -name "$pattern" | sort)
+    done < <(find "$src_dir" -maxdepth 1 -type f -name "$pattern" 2>/dev/null | sort)
   done
 }
 
@@ -382,7 +382,7 @@ fi
   -- "${BASE_ENV[@]}" "$PYTHON_BIN" -m uvicorn app.main:app --host "$API_HOST" --port "$API_PORT" >/dev/null
 "$PYTHON_BIN" "$SPAWN_SCRIPT" \
   --log "$LOG_DIR/trading_worker_loop.log" \
-  -- "${BASE_ENV[@]}" "$PYTHON_BIN" "$WORKER_SCRIPT" --mode loop --sync-universe --limit-symbols "$LOOP_LIMIT_SYMBOLS" --symbol-concurrency 1 --limit-1m 120 --limit-5m 500 --limit-15m 500 --interval-seconds 60 >/dev/null
+  -- "${BASE_ENV[@]}" "$PYTHON_BIN" "$WORKER_SCRIPT" --mode loop --sync-universe --limit-symbols "$LOOP_LIMIT_SYMBOLS" --symbol-concurrency 1 --limit-1m 900 --history-batches-1m 1 --min-1m-history-candles 900 --limit-5m 500 --limit-15m 500 --interval-seconds 60 >/dev/null
 "$PYTHON_BIN" "$SPAWN_SCRIPT" \
   --log "$LOG_DIR/trading_worker_ws.log" \
   -- "${BASE_ENV[@]}" "$PYTHON_BIN" "$WORKER_SCRIPT" "${WS_ARGS[@]}" >/dev/null

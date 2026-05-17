@@ -95,6 +95,10 @@ def _csv_set(value: Any) -> set[str]:
     return {item.strip() for item in str(value or "").split(",") if item.strip()}
 
 
+def _csv_upper_set(value: Any) -> set[str]:
+    return {item.strip().upper() for item in str(value or "").split(",") if item.strip()}
+
+
 def _parse_utc_ts(value: Any) -> datetime | None:
     text = str(value or "").strip()
     if not text:
@@ -671,6 +675,9 @@ def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
     family_filter = _csv_set(getattr(settings, "auto_trading_micro_live_allowed_families", ""))
     if not family_filter:
         family_filter = _csv_set(getattr(settings, "auto_trading_allowed_families", ""))
+    symbol_filter = _csv_upper_set(getattr(settings, "auto_trading_micro_live_allowed_symbols", ""))
+    if not symbol_filter:
+        symbol_filter = _csv_upper_set(getattr(settings, "auto_trading_allowed_symbols", ""))
     runtime_started_at = _ws_runtime_started_at()
     with SessionLocal() as db:
         reporter = LiveOrderLifecycleReporter(db)
@@ -678,6 +685,7 @@ def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
             days=days,
             live_only=True,
             limit=limit,
+            symbols=sorted(symbol_filter),
             strategy_families=sorted(family_filter),
         )
         lifecycle = reporter.generate(
@@ -685,6 +693,7 @@ def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
             live_only=True,
             limit=limit,
             start_at=runtime_started_at,
+            symbols=sorted(symbol_filter),
             strategy_families=sorted(family_filter),
         ) if runtime_started_at is not None else lookback_lifecycle
         candidate_context = (
@@ -726,6 +735,7 @@ def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
         "watchdog_scope_label": _watchdog_scope_label(runtime_started_at=runtime_started_at, days=days),
         "lookback_window_start": lookback_lifecycle.get("window_start"),
         "family_filter": sorted(family_filter),
+        "symbol_filter": sorted(symbol_filter),
         "min_intents": max(1, int(min_intents)),
         "evaluation": evaluation,
         "candidate_generation_context": candidate_context,
@@ -752,6 +762,7 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         f"- runtime_age_minutes: {payload.get('runtime_age_minutes') if payload.get('runtime_age_minutes') is not None else 'none'}",
         f"- runtime_sampling_note: {payload.get('runtime_sampling_note') or 'none'}",
         f"- lookback_window_start: {payload.get('lookback_window_start') or 'none'}",
+        f"- symbol_filter: {','.join(payload.get('symbol_filter') or []) or 'none'}",
         f"- message: {evaluation.get('message')}",
         f"- first_block_detail: {evaluation.get('first_block_detail_text') or 'none'}",
         f"- actions: {evaluation.get('next_action_text') or _diagnostic_actions_text(list(evaluation.get('blocked_intent_diagnostics') or []))}",

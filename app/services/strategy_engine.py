@@ -84,7 +84,9 @@ from app.services.kill_condition_automation import KillConditionAutomationServic
 from app.services.lane_tracker import get_execution_lane_tracker
 from app.services.live_candidate_promotion_readiness_runtime import build_live_candidate_promotion_readiness_from_db
 from app.services.live_route_contract import (
+    attach_live_route_status,
     live_route_contract_from_readiness,
+    live_route_contract_from_settings,
     portfolio_live_route_context as build_portfolio_live_route_context,
     row_direction,
     row_entry_model,
@@ -1228,6 +1230,13 @@ class StrategyEngine:
                 states=tracked_states,
             )
 
+        requested_mode = ExecutionMode.MICRO_LIVE if mode_value == ExecutionMode.MICRO_LIVE.value else ExecutionMode.LIVE
+        live_symbols = self._auto_route_live_routable_symbols(requested_mode)
+
+        def _live_symbol_allowed(value: Any) -> bool:
+            symbol = str(value or "").upper().strip()
+            return not live_symbols or not symbol or symbol in live_symbols
+
         recent_live_submission_plan_ids: set[str] = set()
         for row in self.submission_repo.list_recent(days=2, limit=5000):
             plan_id = str(getattr(row, "plan_id", "") or "")
@@ -1237,6 +1246,8 @@ class StrategyEngine:
             if submitted_at is None:
                 continue
             if submitted_at < start_of_day:
+                continue
+            if not _live_symbol_allowed(getattr(row, "symbol", "")):
                 continue
             if self._submission_counts_as_live_contract(row):
                 recent_live_submission_plan_ids.add(plan_id)
@@ -1254,6 +1265,8 @@ class StrategyEngine:
             if valid_from is None:
                 continue
             if valid_from < start_of_day:
+                continue
+            if not _live_symbol_allowed(getattr(row, "symbol", "")):
                 continue
             validity = _safe_dict(getattr(row, "validity", None))
             row_mode = str(validity.get("execution_mode") or "").upper()
@@ -1275,17 +1288,28 @@ class StrategyEngine:
         if mode_value not in {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value}:
             return rows
 
+        requested_mode = ExecutionMode.MICRO_LIVE if mode_value == ExecutionMode.MICRO_LIVE.value else ExecutionMode.LIVE
+        live_symbols = self._auto_route_live_routable_symbols(requested_mode)
+
+        def _live_symbol_allowed(value: Any) -> bool:
+            symbol = str(value or "").upper().strip()
+            return not live_symbols or not symbol or symbol in live_symbols
+
         allowed_live_modes = {ExecutionMode.MICRO_LIVE.value, ExecutionMode.LIVE.value}
         recent_live_submission_plan_ids: set[str] = set()
         for submission in self.submission_repo.list_recent(days=7, limit=5000):
             plan_id = str(getattr(submission, "plan_id", "") or "")
             if not plan_id:
                 continue
+            if not _live_symbol_allowed(getattr(submission, "symbol", "")):
+                continue
             if self._submission_counts_as_live_contract(submission):
                 recent_live_submission_plan_ids.add(plan_id)
 
         filtered_rows = []
         for row in rows:
+            if not _live_symbol_allowed(getattr(row, "symbol", "")):
+                continue
             validity = _safe_dict(getattr(row, "validity", None))
             row_mode = str(validity.get("execution_mode") or "").upper()
             if row_mode in allowed_live_modes or str(getattr(row, "plan_id", "") or "") in recent_live_submission_plan_ids:
@@ -1295,7 +1319,7 @@ class StrategyEngine:
         if callable(get_plan):
             for plan_id in sorted(recent_live_submission_plan_ids - present_plan_ids):
                 row = get_plan(plan_id)
-                if row is not None:
+                if row is not None and _live_symbol_allowed(getattr(row, "symbol", "")):
                     filtered_rows.append(row)
         return filtered_rows
 
@@ -2068,7 +2092,8 @@ class StrategyEngine:
         )
 
     def _session_impulse_retest_rollout_readiness(self, *, symbol: str, shadow_summary: dict[str, Any] | None = None) -> dict[str, Any]:
-        universe_policy = build_micro_main_universe_policy_snapshot()
+        allowed_symbols = self._session_impulse_retest_allowed_symbols()
+        universe_policy = build_micro_main_universe_policy_snapshot(symbols=allowed_symbols or None)
         readiness = evaluate_micro_main_live_readiness(
             symbol=symbol,
             shadow_summary=shadow_summary,
@@ -2878,6 +2903,7 @@ class StrategyEngine:
         self,
         *,
         symbol: str | None,
+        symbols: list[str] | None = None,
         days: int,
         limit: int = 20,
     ) -> dict[str, Any]:
@@ -2887,7 +2913,12 @@ class StrategyEngine:
                 "lock_required": self._safe_bool(getattr(row, "lock_required", False)),
                 "created_at": getattr(row, "created_at", None),
             }
-            for row in self.reconciliation_event_repo.list_recent(symbol=symbol, limit=limit, days=days)
+            for row in self.reconciliation_event_repo.list_recent(
+                symbol=symbol,
+                symbols=None if symbol else symbols,
+                limit=limit,
+                days=days,
+            )
         ]
         return self.execution_operator_dashboard_service._reconciliation_summary(events)
 
@@ -3796,9 +3827,9 @@ class StrategyEngine:
 
     def _auto_route_live_routable_symbols(self, requested_mode: ExecutionMode | None) -> set[str]:
         if requested_mode == ExecutionMode.MICRO_LIVE:
-            return set(self._csv_items(self.settings.auto_trading_micro_live_allowed_symbols, case="upper"))
+            return set(self._csv_items(getattr(self.settings, "auto_trading_micro_live_allowed_symbols", ""), case="upper"))
         if requested_mode == ExecutionMode.LIVE:
-            return set(self._csv_items(self.settings.auto_trading_allowed_symbols, case="upper"))
+            return set(self._csv_items(getattr(self.settings, "auto_trading_allowed_symbols", ""), case="upper"))
         return set()
 
     def _auto_route_live_routable_families(self, requested_mode: ExecutionMode | None) -> set[str]:
@@ -5213,6 +5244,7 @@ class StrategyEngine:
             partial_activation_ratio=self._maybe_float(self.settings.session_impulse_retest_partial_activation_ratio) or 0.0,
             core_live_slots=self._maybe_int(self.settings.session_impulse_retest_core_live_slots) or 0,
             secondary_live_enabled=self._safe_bool(self.settings.session_impulse_retest_secondary_live_enabled),
+            symbols=self._session_impulse_retest_allowed_symbols() or None,
         )
         if symbol:
             shadow_summary = self._session_impulse_retest_shadow_summary(symbol=symbol)
@@ -5409,6 +5441,7 @@ class StrategyEngine:
                 secondary_live_enabled=self._safe_bool(
                     self.settings.session_impulse_retest_secondary_live_enabled
                 ),
+                symbols=self._session_impulse_retest_allowed_symbols() or None,
             )
             return payload
 
@@ -5418,6 +5451,7 @@ class StrategyEngine:
             write_report=False,
             outcome_symbol_limit=0 if bool(fast) else max(1, int(portfolio_limit)),
         )
+        reconciliation_symbols = None if symbol else [str(item).upper() for item in self.market_data.default_universe(universe)]
         alert_summary = self.alert_metrics_report(days=days, write_report=False)
         execution_quality_summary = None
         if symbol:
@@ -5435,6 +5469,7 @@ class StrategyEngine:
             )
         recent_reconciliation_summary = self._recent_reconciliation_summary(
             symbol=symbol,
+            symbols=reconciliation_symbols,
             days=days,
             limit=reconcile_limit,
         )
@@ -5455,6 +5490,7 @@ class StrategyEngine:
                 execution_quality_summary=execution_quality_summary,
                 active_contract_summary=active_contract_summary,
                 execution_friction_measurement_summary=execution_friction_measurement_summary,
+                reconciliation_symbols=reconciliation_symbols,
             )
             return attach_runtime_dashboard_extensions(payload)
 
@@ -5826,6 +5862,7 @@ class StrategyEngine:
             outcome_bucket_granularity_summary=outcome_bucket_granularity_summary,
             opportunity_capture_summary=opportunity_capture_summary,
             execution_friction_measurement_summary=execution_friction_measurement_summary,
+            reconciliation_symbols=reconciliation_symbols,
             forward_stress_regime_validation_summary=forward_stress_regime_validation_summary,
             kill_condition_automation_summary=kill_condition_automation_summary,
         )
@@ -6731,12 +6768,27 @@ class StrategyEngine:
             "positions": normalized,
         }
 
-    def list_binance_positions(self, *, symbol: str | None = None, open_only: bool = False) -> dict[str, Any]:
+    def list_binance_positions(self, *, symbol: str | None = None, open_only: bool = False, refresh: bool = False) -> dict[str, Any]:
+        refresh_sync: dict[str, Any] | None = None
+        refresh_error: str | None = None
+        if refresh:
+            try:
+                sync_result = self.sync_binance_positions(symbol=symbol)
+                refresh_sync = {
+                    "symbol": sync_result.get("symbol"),
+                    "synced": sync_result.get("synced"),
+                    "open_positions": sync_result.get("open_positions"),
+                }
+            except Exception as exc:  # pragma: no cover - network/client-specific branch
+                refresh_error = str(exc)
         rows = self.binance_position_repo.list_open(symbol=symbol) if open_only else self.binance_position_repo.list_all(symbol=symbol)
         payload = [self._position_row_to_dict(row) for row in rows]
         return {
             "symbol": symbol.upper() if symbol else None,
             "open_only": bool(open_only),
+            "refreshed": bool(refresh) and refresh_error is None,
+            "refresh_error": refresh_error,
+            "refresh_sync": refresh_sync,
             "count": len(payload),
             "positions": payload,
         }
@@ -8753,7 +8805,7 @@ class StrategyEngine:
                 limit=0 if bool(fast) else limit,
             )
         )
-        return self.scanner.top_opportunities(
+        rows = self.scanner.top_opportunities(
             # Overlay fields are added inside scanner service, but keep the same engine-facing contract here.
             symbols=symbols,
             limit=limit,
@@ -8764,6 +8816,8 @@ class StrategyEngine:
             operating_lock=operating_lock.to_dict(),
             outcome_inputs_by_symbol=outcome_inputs_by_symbol,
         )
+        live_route_contract = live_route_contract_from_settings(self.settings)
+        return [attach_live_route_status(dict(row), live_route_contract) for row in rows]
 
     def portfolio_budget_report(
         self,
@@ -9014,12 +9068,16 @@ class StrategyEngine:
         limit_1m: int = 0,
         limit_5m: int = 500,
         limit_15m: int = 500,
+        history_batches_1m: int = 0,
+        min_1m_history_candles: int = 0,
     ) -> dict:
         summary = self.market_data.backfill_symbol_timeframes(
             symbol=symbol,
             limit_1m=limit_1m,
             limit_5m=limit_5m,
             limit_15m=limit_15m,
+            history_batches_1m=history_batches_1m,
+            min_1m_history_candles=min_1m_history_candles,
         )
         self.db.commit()
         refresh = self.refresh_symbol(symbol)
@@ -9043,6 +9101,8 @@ class StrategyEngine:
         limit_1m: int = 0,
         limit_5m: int = 500,
         limit_15m: int = 500,
+        history_batches_1m: int = 0,
+        min_1m_history_candles: int = 0,
         symbol_concurrency: int = 1,
         progress_callback: Callable[[dict[str, Any]], Any] | None = None,
     ) -> dict:
@@ -9079,6 +9139,8 @@ class StrategyEngine:
                         limit_1m=limit_1m,
                         limit_5m=limit_5m,
                         limit_15m=limit_15m,
+                        history_batches_1m=history_batches_1m,
+                        min_1m_history_candles=min_1m_history_candles,
                     )
                     success += 1
                     results.append(result)
@@ -9102,6 +9164,8 @@ class StrategyEngine:
                         limit_1m=limit_1m,
                         limit_5m=limit_5m,
                         limit_15m=limit_15m,
+                        history_batches_1m=history_batches_1m,
+                        min_1m_history_candles=min_1m_history_candles,
                     ): symbol
                     for symbol in symbols
                 }
@@ -9141,12 +9205,23 @@ class StrategyEngine:
             "session_impulse_retest_miss_alert": miss_alert,
         }
 
-    def _sync_universe_symbol_local(self, *, symbol: str, limit_1m: int, limit_5m: int, limit_15m: int) -> dict:
+    def _sync_universe_symbol_local(
+        self,
+        *,
+        symbol: str,
+        limit_1m: int,
+        limit_5m: int,
+        limit_15m: int,
+        history_batches_1m: int = 0,
+        min_1m_history_candles: int = 0,
+    ) -> dict:
         backfill = self.market_data.backfill_symbol_timeframes(
             symbol=symbol,
             limit_1m=limit_1m,
             limit_5m=limit_5m,
             limit_15m=limit_15m,
+            history_batches_1m=history_batches_1m,
+            min_1m_history_candles=min_1m_history_candles,
         )
         self.db.commit()
         refresh = self.refresh_symbol(symbol)
@@ -9194,7 +9269,15 @@ class StrategyEngine:
         }
 
     @staticmethod
-    def _sync_universe_symbol_isolated(*, symbol: str, limit_1m: int, limit_5m: int, limit_15m: int) -> dict:
+    def _sync_universe_symbol_isolated(
+        *,
+        symbol: str,
+        limit_1m: int,
+        limit_5m: int,
+        limit_15m: int,
+        history_batches_1m: int = 0,
+        min_1m_history_candles: int = 0,
+    ) -> dict:
         with SessionLocal() as db:
             engine = StrategyEngine(db)
             try:
@@ -9203,6 +9286,8 @@ class StrategyEngine:
                     limit_1m=limit_1m,
                     limit_5m=limit_5m,
                     limit_15m=limit_15m,
+                    history_batches_1m=history_batches_1m,
+                    min_1m_history_candles=min_1m_history_candles,
                 )
             except Exception:
                 db.rollback()

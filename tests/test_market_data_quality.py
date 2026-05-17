@@ -313,3 +313,89 @@ def test_backfill_history_before_latest_allows_stale_historical_rows() -> None:
             base + timedelta(minutes=5),
             base + timedelta(minutes=10),
         ]
+
+
+def test_backfill_symbol_timeframes_prepends_1m_history_until_minimum_is_met() -> None:
+    init_db()
+    symbol = f"MINH{uuid4().hex[:6].upper()}USDC"
+    base = _recent_base()
+
+    def kline(offset_minutes: int, *, interval: str = "1m") -> BinanceKline:
+        open_time = base + timedelta(minutes=offset_minutes)
+        return BinanceKline(
+            symbol=symbol,
+            interval=interval,
+            open_time=open_time,
+            close_time=open_time + timedelta(minutes=1),
+            o=100.0 + offset_minutes,
+            h=100.5 + offset_minutes,
+            l=99.5 + offset_minutes,
+            c=100.2 + offset_minutes,
+            v=1000.0,
+            is_final=True,
+        )
+
+    with SessionLocal() as db:
+        repo = CandleRepository(db)
+        repo.upsert(
+            Candle(
+                symbol=symbol,
+                timeframe="1m",
+                ts=base + timedelta(minutes=5),
+                o=105.0,
+                h=105.5,
+                l=104.5,
+                c=105.2,
+                v=1000.0,
+                source="seed",
+                is_final=True,
+            )
+        )
+        db.commit()
+
+        service = MarketDataService(repo)
+        history_fetches = 0
+
+        def fake_fetch_klines(**kwargs: object) -> list[BinanceKline]:
+            nonlocal history_fetches
+            if kwargs.get("interval") != "1m":
+                return []
+            if kwargs.get("end_time_ms") is not None:
+                history_fetches += 1
+                return [kline(3), kline(4)]
+            return [kline(5), kline(6)]
+
+        service.binance.fetch_klines = fake_fetch_klines  # type: ignore[assignment]
+
+        summary = service.backfill_symbol_timeframes(
+            symbol=symbol,
+            limit_1m=2,
+            limit_5m=0,
+            limit_15m=0,
+            history_batches_1m=1,
+            min_1m_history_candles=3,
+        )
+        db.commit()
+
+        candles = repo.list_recent(symbol=symbol, timeframe="1m", limit=10)
+
+        assert summary["history_1m"] == 2
+        assert history_fetches == 1
+        assert [DataQualityGate._as_utc(row.ts) for row in candles] == [
+            base + timedelta(minutes=3),
+            base + timedelta(minutes=4),
+            base + timedelta(minutes=5),
+            base + timedelta(minutes=6),
+        ]
+
+        summary = service.backfill_symbol_timeframes(
+            symbol=symbol,
+            limit_1m=2,
+            limit_5m=0,
+            limit_15m=0,
+            history_batches_1m=1,
+            min_1m_history_candles=3,
+        )
+
+        assert summary["history_1m"] == 0
+        assert history_fetches == 1

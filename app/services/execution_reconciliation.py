@@ -9,7 +9,7 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from app.core.config import Settings, get_settings
-from app.core.enums import LockScopeType, LockSeverity, PlanState, ReconciliationSeverity
+from app.core.enums import ExecutionFillStage, LockScopeType, LockSeverity, PlanState, ReconciliationSeverity
 from app.db.models import ExecutionReconciliationEvent, Plan
 from app.repositories.execution import (
     BinanceOrderLedgerRepository,
@@ -77,6 +77,19 @@ class ExecutionReconciliationService:
             .order_by(Plan.valid_from.desc())
         )
         return list(self.plan_repo.db.scalars(stmt))
+
+    def _latest_fill_for_plan(self, plan: Plan) -> Any | None:
+        fills = self.fill_repo.list_for_plans(plan_ids=[str(plan.plan_id)], symbol=str(plan.symbol))
+        if not fills:
+            return None
+        min_ts = datetime.min.replace(tzinfo=timezone.utc)
+        return max(
+            fills,
+            key=lambda row: (
+                self._utc(row.fill_ts) or min_ts,
+                self._utc(getattr(row, "created_at", None)) or min_ts,
+            ),
+        )
 
     @staticmethod
     def _utc(value: datetime | None) -> datetime | None:
@@ -231,7 +244,36 @@ class ExecutionReconciliationService:
 
         local_plans = self._local_open_plans(normalized_symbol)
         exchange_positions = self.binance_position_repo.list_open(symbol=normalized_symbol)
-        if exchange_positions and not local_plans:
+        auto_resolve_applied = False
+        latest_fill_by_plan_id: dict[str, Any] = {str(plan.plan_id): self._latest_fill_for_plan(plan) for plan in local_plans}
+        stale_closed_fill_plan_ids: set[str] = set()
+        for plan in local_plans:
+            latest_fill = latest_fill_by_plan_id.get(str(plan.plan_id))
+            if str(getattr(latest_fill, "stage", "") or "") != ExecutionFillStage.CLOSED.value:
+                continue
+            stale_closed_fill_plan_ids.add(str(plan.plan_id))
+            mismatches.append(
+                self._mismatch(
+                    "LOCAL_PLAN_STATE_STALE_AFTER_CLOSED_FILL",
+                    ReconciliationSeverity.WARNING,
+                    "Local plan state is open but its latest execution fill is CLOSED.",
+                    local_snapshot={
+                        "plan_id": plan.plan_id,
+                        "state": plan.state,
+                        "latest_fill_id": getattr(latest_fill, "fill_id", ""),
+                        "latest_fill_stage": getattr(latest_fill, "stage", ""),
+                        "latest_fill_to_state": getattr(latest_fill, "to_state", ""),
+                    },
+                    exchange_snapshot={"positions": []},
+                )
+            )
+            if auto_resolve:
+                plan.state = PlanState.CLOSED.value
+                self.plan_repo.db.add(plan)
+                auto_resolve_applied = True
+
+        effective_local_plans = [plan for plan in local_plans if str(plan.plan_id) not in stale_closed_fill_plan_ids]
+        if exchange_positions and not effective_local_plans:
             mismatches.append(
                 self._mismatch(
                     "ORPHAN_POSITION_EXCHANGE",
@@ -245,16 +287,29 @@ class ExecutionReconciliationService:
                     },
                 )
             )
+        if effective_local_plans and not exchange_positions:
+            mismatches.append(
+                self._mismatch(
+                    "ORPHAN_POSITION_LOCAL",
+                    ReconciliationSeverity.WARNING,
+                    "Local plan state is open but the exchange position snapshot is flat.",
+                    local_snapshot={
+                        "open_plan_count": len(effective_local_plans),
+                        "plan_ids": [row.plan_id for row in effective_local_plans],
+                    },
+                    exchange_snapshot={"positions": []},
+                )
+            )
 
-        local_size_proxy = float(len(local_plans))
+        local_size_proxy = float(len(effective_local_plans))
         exchange_size = round(sum(abs(float(row.position_amt or 0.0)) for row in exchange_positions), 8)
-        if local_plans and exchange_positions and abs(local_size_proxy - exchange_size) > 1e-9:
+        if effective_local_plans and exchange_positions and abs(local_size_proxy - exchange_size) > 1e-9:
             mismatches.append(
                 self._mismatch(
                     "POSITION_SIZE_MISMATCH",
                     ReconciliationSeverity.CRITICAL,
                     "Local open position count proxy does not match the exchange position size snapshot.",
-                    local_snapshot={"open_plan_count": local_size_proxy, "plan_ids": [row.plan_id for row in local_plans]},
+                    local_snapshot={"open_plan_count": local_size_proxy, "plan_ids": [row.plan_id for row in effective_local_plans]},
                     exchange_snapshot={"position_size": exchange_size},
                 )
             )
@@ -360,7 +415,7 @@ class ExecutionReconciliationService:
             highest_severity=highest,
             lock_required=lock_required,
             auto_resolve_requested=bool(auto_resolve),
-            auto_resolve_applied=False,
+            auto_resolve_applied=auto_resolve_applied,
             apply_lock_requested=bool(apply_lock),
             events_recorded=len(mismatches),
             generated_at=now,

@@ -81,6 +81,8 @@ def test_binance_user_stream_and_positions_routes(monkeypatch) -> None:
         lambda self, **kwargs: {
             "symbol": kwargs.get("symbol"),
             "open_only": kwargs.get("open_only", False),
+            "refreshed": kwargs.get("refresh", False),
+            "refresh_sync": {"synced": 1, "open_positions": 1} if kwargs.get("refresh", False) else None,
             "count": 1,
             "positions": [
                 {
@@ -138,3 +140,5 @@ def test_binance_user_stream_and_positions_routes(monkeypatch) -> None:
     list_resp = client.get("/internal/binance/positions?symbol=BTCUSDC&open_only=true")
     assert list_resp.status_code == 200
     assert list_resp.json()["count"] == 1
+    assert list_resp.json()["refreshed"] is True
+    assert list_resp.json()["refresh_sync"]["open_positions"] == 1

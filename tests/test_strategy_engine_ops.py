@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from types import SimpleNamespace
 
-from app.core.enums import PlanState, RiskGateState
+from app.core.enums import ExecutionMode, PlanState, RiskGateState
 from app.db.models import Plan
 from app.db.session import SessionLocal, init_db
 from app.services import strategy_engine as strategy_engine_module
@@ -53,22 +53,44 @@ def test_sync_universe_from_binance_with_mocked_market_data() -> None:
         engine = StrategyEngine(db)
 
         engine.market_data.refresh_universe = lambda limit=30: ["BTCUSDC", "ETHUSDC"]  # type: ignore[assignment]
-        engine.market_data.backfill_symbol_timeframes = (  # type: ignore[assignment]
-            lambda symbol, limit_1m=0, limit_5m=0, limit_15m=0: {
+        backfill_calls: list[dict] = []
+
+        def fake_backfill_symbol_timeframes(
+            symbol: str,
+            limit_1m: int = 0,
+            limit_5m: int = 0,
+            limit_15m: int = 0,
+            history_batches_1m: int = 0,
+            min_1m_history_candles: int = 0,
+            **_kwargs: object,
+        ) -> dict:
+            backfill_calls.append(
+                {
+                    "symbol": symbol,
+                    "history_batches_1m": history_batches_1m,
+                    "min_1m_history_candles": min_1m_history_candles,
+                }
+            )
+            return {
                 "1m": limit_1m,
                 "5m": 10,
                 "15m": 10,
+                "history_1m": history_batches_1m,
                 "total": limit_1m + 20,
             }
-        )
+
+        engine.market_data.backfill_symbol_timeframes = fake_backfill_symbol_timeframes  # type: ignore[assignment]
         engine.runtime_sync_symbols = lambda limit_symbols=30: ["BTCUSDC", "ETHUSDC"]  # type: ignore[assignment]
         engine.refresh_symbol = lambda symbol: {"symbol": symbol, "updated": True, "zones": 1, "plans": 1}  # type: ignore[assignment]
         progress: list[dict] = []
 
         payload = engine.sync_universe_from_binance(
             limit_symbols=2,
+            limit_1m=900,
             limit_5m=120,
             limit_15m=120,
+            history_batches_1m=1,
+            min_1m_history_candles=900,
             progress_callback=progress.append,
         )
 
@@ -83,6 +105,10 @@ def test_sync_universe_from_binance_with_mocked_market_data() -> None:
         assert progress[-1]["state"] == "end_symbol"
         assert progress[-1]["completed_symbols"] == 2
         assert progress[-1]["total_symbols"] == 2
+        assert backfill_calls == [
+            {"symbol": "BTCUSDC", "history_batches_1m": 1, "min_1m_history_candles": 900},
+            {"symbol": "ETHUSDC", "history_batches_1m": 1, "min_1m_history_candles": 900},
+        ]
 
 
 def test_runtime_sync_symbols_can_skip_top_universe_fetch() -> None:
@@ -128,6 +154,60 @@ def test_runtime_candidate_symbols_can_limit_ranked_outcome_inputs() -> None:
     ) == []
 
 
+def test_scanner_top_marks_context_only_rows_with_live_route_status() -> None:
+    engine = object.__new__(StrategyEngine)
+    engine.settings = SimpleNamespace(
+        auto_trading_execution_mode=ExecutionMode.MICRO_LIVE,
+        auto_trading_micro_live_allowed_symbols="BTCUSDT",
+        auto_trading_micro_live_allowed_families="session_impulse_retest",
+        auto_trading_micro_live_allowed_entry_models="CONFIRM",
+        auto_trading_micro_live_allowed_sessions="",
+        auto_trading_micro_live_direction_contract="BTCUSDT:LONG",
+        universe_name="usdt_reliable_balanced_31",
+    )
+    engine.market_data = SimpleNamespace(
+        default_universe=lambda _universe: ["BTCUSDT"],
+        refresh_universe=lambda limit=30: [],
+    )
+    engine._today_trade_count = lambda: 0  # type: ignore[assignment]
+    engine._current_exposure_rows = lambda: []  # type: ignore[assignment]
+    engine._operating_lock_snapshot = lambda: SimpleNamespace(to_dict=lambda: {})  # type: ignore[assignment]
+    engine._gate_context_for_symbol = lambda **_kwargs: (  # type: ignore[assignment]
+        None,
+        RiskGateState.OPEN,
+        "normal",
+        SimpleNamespace(to_dict=lambda: {}),
+    )
+    engine._runtime_candidate_symbols = lambda **kwargs: list(kwargs["symbols"])  # type: ignore[assignment]
+    engine._outcome_inputs_for_symbols = lambda **_kwargs: {}  # type: ignore[assignment]
+    engine.scanner = SimpleNamespace(
+        top_opportunities=lambda **_kwargs: [
+            {
+                "symbol": "BTCUSDT",
+                "strategy_family": "legacy_zone_plan",
+                "entry_model": "CONFIRM",
+                "direction": "long",
+                "final_rank_score": 10.0,
+            },
+            {
+                "symbol": "BTCUSDT",
+                "strategy_family": "session_impulse_retest",
+                "entry_model": "CONFIRM",
+                "direction": "long",
+                "final_rank_score": 9.0,
+            },
+        ]
+    )
+
+    rows = engine.scanner_top(universe="usdt_reliable_balanced_31", limit=10, fast=True)
+
+    assert rows[0]["live_routable"] is False
+    assert rows[0]["entry_surface_route"]["status"] == "context_only"
+    assert "strategy_family_not_live_route" in rows[0]["entry_surface_route"]["reasons"]
+    assert rows[1]["live_routable"] is True
+    assert rows[1]["entry_surface_route"]["status"] == "live_route_candidate"
+
+
 def test_sync_universe_from_binance_parallel_respects_concurrency_limit() -> None:
     init_db()
     with SessionLocal() as db:
@@ -137,13 +217,28 @@ def test_sync_universe_from_binance_parallel_respects_concurrency_limit() -> Non
         engine.market_data.refresh_universe = lambda limit=30: symbols  # type: ignore[assignment]
         engine.runtime_sync_symbols = lambda limit_symbols=30: symbols  # type: ignore[assignment]
 
-        def fake_isolated_sync(*, symbol: str, limit_1m: int, limit_5m: int, limit_15m: int) -> dict:
+        def fake_isolated_sync(
+            *,
+            symbol: str,
+            limit_1m: int,
+            limit_5m: int,
+            limit_15m: int,
+            history_batches_1m: int = 0,
+            min_1m_history_candles: int = 0,
+        ) -> dict:
             delay = {"BTCUSDC": 0.04, "ETHUSDC": 0.01, "SOLUSDC": 0.02}.get(symbol, 0.0)
             time.sleep(delay)
             return {
                 "symbol": symbol,
                 "status": "ok",
-                "backfill": {"1m": limit_1m, "5m": limit_5m, "15m": limit_15m, "total": limit_1m + limit_5m + limit_15m},
+                "backfill": {
+                    "1m": limit_1m,
+                    "5m": limit_5m,
+                    "15m": limit_15m,
+                    "history_1m": history_batches_1m,
+                    "min_1m_history_candles": min_1m_history_candles,
+                    "total": limit_1m + limit_5m + limit_15m,
+                },
                 "refresh": {"symbol": symbol, "updated": True},
             }
 
@@ -151,8 +246,11 @@ def test_sync_universe_from_binance_parallel_respects_concurrency_limit() -> Non
 
         payload = engine.sync_universe_from_binance(
             limit_symbols=3,
+            limit_1m=900,
             limit_5m=111,
             limit_15m=222,
+            history_batches_1m=1,
+            min_1m_history_candles=900,
             symbol_concurrency=2,
         )
 
@@ -163,6 +261,8 @@ def test_sync_universe_from_binance_parallel_respects_concurrency_limit() -> Non
         assert payload["success"] == 3
         assert payload["failed"] == 0
         assert [item["symbol"] for item in payload["results"]] == symbols
+        assert all(item["backfill"]["history_1m"] == 1 for item in payload["results"])
+        assert all(item["backfill"]["min_1m_history_candles"] == 900 for item in payload["results"])
 
 
 def test_send_test_alert_generates_unique_ids_for_same_symbol() -> None:
@@ -1180,6 +1280,52 @@ def test_current_exposure_rows_ignores_non_live_modes_during_micro_live() -> Non
     assert rows == [micro_live_row, live_row, unknown_row]
 
 
+def test_current_exposure_rows_ignore_out_of_current_live_universe_during_micro_live() -> None:
+    engine = object.__new__(StrategyEngine)
+    engine.settings = SimpleNamespace(
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDT",
+        portfolio_overlay_include_planned_exposure=False,
+    )
+    current_live_row = SimpleNamespace(plan_id="current_live_plan", symbol="BTCUSDT", validity={"execution_mode": "MICRO_LIVE"})
+    old_live_row = SimpleNamespace(plan_id="old_live_plan", symbol="ADAUSDC", validity={"execution_mode": "MICRO_LIVE"})
+    current_submission_row = SimpleNamespace(plan_id="current_submission_plan", symbol="BTCUSDT", validity={})
+    old_submission_row = SimpleNamespace(plan_id="old_submission_plan", symbol="ADAUSDC", validity={})
+
+    engine.plan_repo = SimpleNamespace(
+        list_exposure_candidates=lambda **kwargs: [
+            current_live_row,
+            old_live_row,
+            current_submission_row,
+            old_submission_row,
+        ],
+        get=lambda plan_id: None,
+    )
+    engine.submission_repo = SimpleNamespace(
+        list_recent=lambda **kwargs: [
+            SimpleNamespace(
+                plan_id="current_submission_plan",
+                symbol="BTCUSDT",
+                adapter="binance",
+                state="FILLED",
+                requested_live=True,
+                execution_mode="MICRO_LIVE",
+            ),
+            SimpleNamespace(
+                plan_id="old_submission_plan",
+                symbol="ADAUSDC",
+                adapter="binance",
+                state="FILLED",
+                requested_live=True,
+                execution_mode="MICRO_LIVE",
+            ),
+        ]
+    )
+
+    rows = engine._current_exposure_rows()
+    assert rows == [current_live_row, current_submission_row]
+
+
 def test_active_contract_transition_edge_variant_shadow_uses_generation_diagnostics_snapshot() -> None:
     engine = object.__new__(StrategyEngine)
     engine.settings = SimpleNamespace(
@@ -1359,6 +1505,57 @@ def test_today_trade_count_ignores_non_live_modes_during_micro_live() -> None:
     )
 
     assert engine._today_trade_count() == 3
+
+
+def test_today_trade_count_ignores_out_of_current_live_universe_during_micro_live() -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    start_of_day = now.replace(hour=0, minute=0, second=0)
+
+    engine = object.__new__(StrategyEngine)
+    engine.settings = SimpleNamespace(
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDT",
+    )
+    engine.plan_repo = SimpleNamespace(
+        list_recent_global=lambda **kwargs: [
+            SimpleNamespace(
+                plan_id="current_live_plan",
+                symbol="BTCUSDT",
+                valid_from=start_of_day + timedelta(hours=1),
+                validity={"execution_mode": "MICRO_LIVE"},
+            ),
+            SimpleNamespace(
+                plan_id="old_live_plan",
+                symbol="ADAUSDC",
+                valid_from=start_of_day + timedelta(hours=1),
+                validity={"execution_mode": "MICRO_LIVE"},
+            ),
+        ]
+    )
+    engine.submission_repo = SimpleNamespace(
+        list_recent=lambda **kwargs: [
+            SimpleNamespace(
+                plan_id="current_submission_plan",
+                symbol="BTCUSDT",
+                adapter="binance",
+                state="FILLED",
+                requested_live=True,
+                execution_mode="MICRO_LIVE",
+                submitted_at=start_of_day + timedelta(hours=2),
+            ),
+            SimpleNamespace(
+                plan_id="old_submission_plan",
+                symbol="ADAUSDC",
+                adapter="binance",
+                state="FILLED",
+                requested_live=True,
+                execution_mode="MICRO_LIVE",
+                submitted_at=start_of_day + timedelta(hours=2),
+            ),
+        ]
+    )
+
+    assert engine._today_trade_count() == 2
 
 
 def test_active_contract_filters_include_direction_contract_and_apply_it() -> None:

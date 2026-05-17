@@ -184,12 +184,6 @@ def _apply_live_headline_scope(
     readiness["live_routable_symbols"] = sorted(normalized_live_symbols)
     if filter_symbol or not normalized_live_symbols:
         return readiness
-    headline_state = str(readiness.get("headline_state") or "")
-    headline_reason = str(readiness.get("headline_reason") or "")
-    live_headline_candidate = headline_state == "WAIT" and headline_reason == "no_promotable_live_candidate"
-    shadow_headline_candidate = headline_state == "WATCH" and headline_reason == "shadow_signal_only"
-    if not live_headline_candidate and not shadow_headline_candidate:
-        return readiness
 
     rows = [dict(row) for row in list(readiness.get("candidates") or []) if isinstance(row, dict)]
     live_blockers, auxiliary_blockers = _blocker_counts_by_scope(
@@ -203,6 +197,10 @@ def _apply_live_headline_scope(
         symbols_by_state,
         live_symbols=normalized_live_symbols,
     )
+    headline_state = str(readiness.get("headline_state") or "")
+    headline_reason = str(readiness.get("headline_reason") or "")
+    live_headline_candidate = headline_state == "WAIT" and headline_reason == "no_promotable_live_candidate"
+    shadow_headline_candidate = headline_state == "WATCH" and headline_reason == "shadow_signal_only"
     if live_headline_candidate or shadow_headline_candidate:
         observed_live_symbols = {
             symbol
@@ -268,7 +266,17 @@ def _apply_live_headline_scope(
         if str(row.get("symbol") or "").strip().upper() in normalized_live_symbols
         and str(row.get("promotion_state") or "") in live_wait_states
     ]
-    if not live_wait_symbols:
+    headline_symbols = {
+        str(symbol or "").strip().upper()
+        for symbol in list(readiness.get("headline_candidate_symbols") or [])
+        if str(symbol or "").strip()
+    }
+    headline_has_live_symbol = bool(headline_symbols & normalized_live_symbols)
+    should_scope_to_live_wait = bool(
+        live_wait_symbols
+        and (live_headline_candidate or shadow_headline_candidate or not headline_has_live_symbol)
+    )
+    if not should_scope_to_live_wait:
         return readiness
 
     latest = ""

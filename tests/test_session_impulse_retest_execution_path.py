@@ -234,6 +234,7 @@ def _patch_live_contract(engine: StrategyEngine, *, allowed_symbols: list[str]) 
     engine.settings.auto_trading_allowed_families = "sweep_reversal,session_impulse_retest"
     engine.settings.auto_trading_micro_live_allowed_symbols = symbols_csv
     engine.settings.auto_trading_micro_live_allowed_families = "sweep_reversal,session_impulse_retest"
+    engine.settings.session_impulse_retest_allowed_symbols = symbols_csv
     engine.settings.auto_trading_micro_live_allowed_sessions = "london,new_york"
     engine.settings.auto_trading_micro_live_allowed_entry_models = "LIMIT,CONFIRM"
     engine.settings.auto_trading_micro_live_max_concurrent_positions = 10
@@ -1506,6 +1507,7 @@ def test_current_exposure_rows_include_recent_live_submission_without_plan_execu
     with SessionLocal() as db:
         engine = StrategyEngine(db)
         engine.settings.auto_trading_execution_mode = ExecutionMode.MICRO_LIVE
+        engine.settings.auto_trading_micro_live_allowed_symbols = "BTCUSDC"
         plan = _micro_plan(symbol="BTCUSDC", plan_id="sir_BTCUSDC_exposure_test")
         validity = dict(plan.validity or {})
         validity.pop("execution_mode", None)

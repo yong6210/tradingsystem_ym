@@ -33,6 +33,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit-1m", type=int, default=120)
     parser.add_argument("--limit-5m", type=int, default=500)
     parser.add_argument("--limit-15m", type=int, default=500)
+    parser.add_argument("--history-batches-1m", type=int, default=0)
+    parser.add_argument("--min-1m-history-candles", type=int, default=0)
 
     parser.add_argument("--binance-sync", action="store_true")
     parser.add_argument("--ws-stream", action="store_true")
@@ -201,6 +203,8 @@ def run_once(args: argparse.Namespace, *, progress_callback: Any | None = None) 
                 limit_1m=args.limit_1m,
                 limit_5m=args.limit_5m,
                 limit_15m=args.limit_15m,
+                history_batches_1m=args.history_batches_1m,
+                min_1m_history_candles=args.min_1m_history_candles,
                 symbol_concurrency=args.symbol_concurrency,
                 progress_callback=progress_callback,
             )
@@ -211,6 +215,8 @@ def run_once(args: argparse.Namespace, *, progress_callback: Any | None = None) 
                 limit_1m=args.limit_1m,
                 limit_5m=args.limit_5m,
                 limit_15m=args.limit_15m,
+                history_batches_1m=args.history_batches_1m,
+                min_1m_history_candles=args.min_1m_history_candles,
             )
             result["actions"].append({"sync_symbol": payload})
         else:

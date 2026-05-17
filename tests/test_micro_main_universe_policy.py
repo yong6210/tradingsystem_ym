@@ -7,6 +7,7 @@ from app.services.micro_main_universe_policy import (
 def test_micro_main_universe_policy_snapshot_shapes_core_and_secondary_lists() -> None:
     snapshot = build_micro_main_universe_policy_snapshot()
     assert snapshot["family"] == "session_impulse_retest"
+    assert snapshot["scope"] == "all_known_symbols"
     expected_usdc_core = [
         "BTCUSDC",
         "ETHUSDC",
@@ -70,6 +71,17 @@ def test_micro_main_universe_policy_snapshot_shapes_core_and_secondary_lists() -
     assert snapshot["partial_activation_priority"][0] == "BTCUSDC"
     assert "UNIUSDC" in snapshot["partial_activation_priority"]
     assert snapshot["partial_activation_priority"][-1] == "DASHUSDT"
+
+
+def test_micro_main_universe_policy_snapshot_can_scope_to_configured_symbols() -> None:
+    snapshot = build_micro_main_universe_policy_snapshot(symbols=["BTCUSDT", "ETHUSDT", "ADAUSDC"])
+
+    assert snapshot["scope"] == "configured_symbols"
+    assert snapshot["core_symbols"] == ["ADAUSDC", "BTCUSDT", "ETHUSDT"]
+    assert snapshot["secondary_symbols"] == []
+    assert snapshot["allowed_symbols"] == ["ADAUSDC", "BTCUSDT", "ETHUSDT"]
+    assert snapshot["partial_activation_priority"] == ["BTCUSDT", "ETHUSDT", "ADAUSDC"]
+    assert set(snapshot["risk_multipliers"]) == {"BTCUSDT", "ETHUSDT", "ADAUSDC"}
 
 
 def test_micro_main_universe_entry_returns_expected_risk_multiplier() -> None:

@@ -663,6 +663,8 @@ def sync_binance_symbol(
     limit_1m: int = Query(default=0, ge=0, le=3000),
     limit_5m: int = Query(default=500, ge=100, le=1500),
     limit_15m: int = Query(default=500, ge=100, le=1500),
+    history_batches_1m: int = Query(default=0, ge=0, le=10),
+    min_1m_history_candles: int = Query(default=0, ge=0, le=3000),
     engine: StrategyEngine = Depends(get_engine),
 ) -> BinanceSyncOut:
     payload = engine.sync_symbol_from_binance(
@@ -670,6 +672,8 @@ def sync_binance_symbol(
         limit_1m=limit_1m,
         limit_5m=limit_5m,
         limit_15m=limit_15m,
+        history_batches_1m=history_batches_1m,
+        min_1m_history_candles=min_1m_history_candles,
     )
     return BinanceSyncOut(**payload)
 
@@ -817,9 +821,10 @@ def sync_binance_positions(
 def list_binance_positions(
     symbol: str | None = Query(default=None),
     open_only: bool = Query(default=False),
+    refresh: bool = Query(default=True),
     engine: StrategyEngine = Depends(get_engine),
 ) -> BinancePositionsOut:
-    result = engine.list_binance_positions(symbol=symbol, open_only=open_only)
+    result = engine.list_binance_positions(symbol=symbol, open_only=open_only, refresh=refresh)
     return BinancePositionsOut(**result)
 
 
@@ -830,6 +835,8 @@ def sync_binance_universe(
     limit_1m: int = Query(default=0, ge=0, le=3000),
     limit_5m: int = Query(default=500, ge=100, le=1500),
     limit_15m: int = Query(default=500, ge=100, le=1500),
+    history_batches_1m: int = Query(default=0, ge=0, le=10),
+    min_1m_history_candles: int = Query(default=0, ge=0, le=3000),
     engine: StrategyEngine = Depends(get_engine),
 ) -> UniverseSyncOut:
     payload = engine.sync_universe_from_binance(
@@ -838,6 +845,8 @@ def sync_binance_universe(
         limit_1m=limit_1m,
         limit_5m=limit_5m,
         limit_15m=limit_15m,
+        history_batches_1m=history_batches_1m,
+        min_1m_history_candles=min_1m_history_candles,
     )
     return UniverseSyncOut(**payload)
 

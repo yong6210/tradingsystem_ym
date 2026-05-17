@@ -59,6 +59,7 @@ def test_session_impulse_retest_runtime_plan_builds_when_signal_is_fresh(monkeyp
 
     with SessionLocal() as db:
         engine = StrategyEngine(db)
+        engine.settings.session_impulse_retest_allowed_symbols = "BTCUSDC"
         plan = engine._session_impulse_retest_runtime_plan(
             symbol="BTCUSDC",
             candles_1m=candles_1m,
@@ -108,6 +109,7 @@ def test_session_impulse_retest_runtime_plan_applies_saturday_risk_haircut(monke
 
     with SessionLocal() as db:
         engine = StrategyEngine(db)
+        engine.settings.session_impulse_retest_allowed_symbols = "BTCUSDC"
         engine.settings.session_impulse_retest_saturday_risk_multiplier = 0.75
         plan = engine._session_impulse_retest_runtime_plan(
             symbol="BTCUSDC",

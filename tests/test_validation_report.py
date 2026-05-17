@@ -2240,11 +2240,11 @@ def test_validation_report_generation(monkeypatch) -> None:
     assert result["operator_action_priority_summary"]["capture_context"]["family_focus"]["key"] == "trend_continuation"
     assert result["operator_action_priority_summary"]["experiment_context"]["entry_timing_target"]["symbol"] == "BTCUSDC"
     assert result["operator_action_priority_summary"]["experiment_context"]["entry_timing_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_entry_timing_split_review"
+        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_entry_timing_split_review"
     )
     assert result["operator_action_priority_summary"]["experiment_context"]["execution_style_target"]["symbol"] == "BTCUSDC"
     assert result["operator_action_priority_summary"]["experiment_context"]["execution_style_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdc_perp_top30 --days 30 --action run_execution_style_split_review"
+        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_execution_style_split_review"
     )
     assert result["operator_action_priority_summary"]["advisory_only"] is True
     assert len(result["operator_action_priority_summary"]["next_actions"]) == 1
