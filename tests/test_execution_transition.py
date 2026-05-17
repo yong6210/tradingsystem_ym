@@ -121,6 +121,54 @@ def test_risk_pct_sizing_reports_actual_risk_after_quantity_step_rounding() -> N
     assert details["quantity_rounding_loss_risk_usdt"] == 0.0407
 
 
+def test_risk_pct_sizing_can_cap_strategy_equity_below_account_equity() -> None:
+    coordinator = ExecutionCoordinator.__new__(ExecutionCoordinator)
+    coordinator.settings = SimpleNamespace(
+        auto_trading_live_sizing_mode="RISK_PCT",
+        auto_trading_live_account_equity_usdt=1_000_000.0,
+        auto_trading_live_strategy_equity_cap_usdt=1_000.0,
+        auto_trading_live_balance_sync_enabled=False,
+        auto_trading_live_balance_sync_assets="USDT,USDC",
+        auto_trading_live_balance_sync_fail_closed=True,
+        auto_trading_live_risk_per_trade_pct=0.01,
+        auto_trading_live_usable_margin_fraction=1.0,
+        auto_trading_live_leverage_cap=10.0,
+        auto_trading_live_liquidity_gate_partial_submit_enabled=False,
+        binance_live_quantity_step=0.001,
+        binance_live_min_quantity=0.001,
+    )
+    coordinator._live_symbol_rules_cache = {}
+    coordinator.live_symbol_rules_loader = lambda _symbol: {
+        "quantity_step": 0.001,
+        "min_quantity": 0.001,
+        "source": "test_rules",
+    }
+    plan = SimpleNamespace(symbol="BTCUSDT", entry_price=100.0, sl=99.0)
+    intent = SimpleNamespace(
+        payload={
+            "executable_plan": {
+                "entry_trigger_price": 100.0,
+                "stop_price": 99.0,
+            }
+        },
+        quality_snapshot={"recommended_risk_r": 1.0},
+        dedupe_result={},
+    )
+
+    quantity, details, error = coordinator._live_order_sizing(intent=intent, plan=plan)
+
+    assert error is None
+    assert quantity == 10.0
+    assert details["account_equity_usdt"] == 1_000_000.0
+    assert details["strategy_equity_cap_usdt"] == 1_000.0
+    assert details["sizing_equity_usdt"] == 1_000.0
+    assert details["strategy_equity_capped"] is True
+    assert details["target_risk_usdt"] == 10.0
+    assert details["target_notional"] == 1000.0
+    assert details["actual_risk_pct"] == 0.00001
+    assert details["actual_risk_pct_of_sizing_equity"] == 0.01
+
+
 def test_risk_pct_sizing_uses_weighted_risk_sizing_multiplier() -> None:
     coordinator = ExecutionCoordinator.__new__(ExecutionCoordinator)
     coordinator.settings = SimpleNamespace(

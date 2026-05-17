@@ -686,10 +686,15 @@ class ExecutionCoordinator:
         if str(adjusted_sizing.get("sizing_mode") or "").strip().upper() == "RISK_PCT":
             stop_pct = self._float_or(adjusted_sizing.get("stop_pct"))
             account_equity_usdt = self._float_or(adjusted_sizing.get("account_equity_usdt"))
+            sizing_equity_usdt = self._float_or(adjusted_sizing.get("sizing_equity_usdt"), account_equity_usdt)
             actual_risk_usdt = submitted_notional * stop_pct
             adjusted_sizing["actual_risk_usdt"] = round(actual_risk_usdt, 4)
             adjusted_sizing["actual_risk_pct"] = round(
                 actual_risk_usdt / account_equity_usdt if account_equity_usdt > 0.0 else 0.0,
+                6,
+            )
+            adjusted_sizing["actual_risk_pct_of_sizing_equity"] = round(
+                actual_risk_usdt / sizing_equity_usdt if sizing_equity_usdt > 0.0 else 0.0,
                 6,
             )
         return partial_quantity, adjusted_sizing, None
@@ -1232,6 +1237,15 @@ class ExecutionCoordinator:
         max_position_notional = 0.0
         if sizing_mode == "RISK_PCT":
             account_equity_usdt, account_equity_details, account_equity_error = self._live_account_equity()
+            strategy_equity_cap_usdt = max(
+                self._float_or(getattr(self.settings, "auto_trading_live_strategy_equity_cap_usdt", 0.0)),
+                0.0,
+            )
+            sizing_equity_usdt = (
+                min(account_equity_usdt, strategy_equity_cap_usdt)
+                if strategy_equity_cap_usdt > 0.0
+                else account_equity_usdt
+            )
             risk_per_trade_pct = self._float_or(getattr(self.settings, "auto_trading_live_risk_per_trade_pct", 0.0))
             recommended_risk_r = max(self._float_or(quality_snapshot.get("recommended_risk_r")), 0.0)
             risk_sizing_r = max(
@@ -1243,20 +1257,28 @@ class ExecutionCoordinator:
             leverage_cap = self._float_or(getattr(self.settings, "auto_trading_live_leverage_cap", 0.0))
             stop_pct = abs(reference_price - stop_price) / reference_price if reference_price > 0.0 else 0.0
             effective_risk_per_trade_pct = risk_per_trade_pct * applied_risk_multiplier
-            target_risk_usdt = account_equity_usdt * effective_risk_per_trade_pct
-            usable_margin_usdt = account_equity_usdt * usable_margin_fraction
+            target_risk_usdt = sizing_equity_usdt * effective_risk_per_trade_pct
+            usable_margin_usdt = sizing_equity_usdt * usable_margin_fraction
             target_notional = target_risk_usdt / stop_pct if stop_pct > 0.0 else 0.0
             leverage_cap_notional = max(usable_margin_usdt, 0.0) * max(leverage_cap, 0.0)
             max_position_notional = min(target_notional, leverage_cap_notional) if leverage_cap_notional > 0.0 else 0.0
             required_leverage = target_notional / usable_margin_usdt if usable_margin_usdt > 0.0 else 0.0
             actual_risk_usdt = max_position_notional * stop_pct
             actual_risk_pct = actual_risk_usdt / account_equity_usdt if account_equity_usdt > 0.0 else 0.0
+            actual_risk_pct_of_sizing_equity = (
+                actual_risk_usdt / sizing_equity_usdt if sizing_equity_usdt > 0.0 else 0.0
+            )
             leverage_capped = max_position_notional + 1e-12 < target_notional
 
             sizing_details.update(
                 {
                     "account_equity_usdt": round(account_equity_usdt, 4),
                     **account_equity_details,
+                    "strategy_equity_cap_usdt": round(strategy_equity_cap_usdt, 4),
+                    "sizing_equity_usdt": round(sizing_equity_usdt, 4),
+                    "strategy_equity_capped": bool(
+                        strategy_equity_cap_usdt > 0.0 and sizing_equity_usdt + 1e-12 < account_equity_usdt
+                    ),
                     "risk_per_trade_pct": round(risk_per_trade_pct, 6),
                     "recommended_risk_multiplier": round(recommended_risk_r, 6),
                     "risk_sizing_multiplier": round(risk_sizing_r, 6),
@@ -1274,6 +1296,7 @@ class ExecutionCoordinator:
                     "max_position_notional": round(max_position_notional, 4),
                     "actual_risk_usdt": round(actual_risk_usdt, 4),
                     "actual_risk_pct": round(actual_risk_pct, 6),
+                    "actual_risk_pct_of_sizing_equity": round(actual_risk_pct_of_sizing_equity, 6),
                     "leverage_capped": bool(leverage_capped),
                     "sizing_status": "capped_by_leverage" if leverage_capped else "target_risk_matched",
                 }
@@ -1282,6 +1305,8 @@ class ExecutionCoordinator:
                 return None, sizing_details, account_equity_error
             if account_equity_usdt <= 0.0:
                 return None, sizing_details, "Live risk sizing requires AUTO_TRADING_LIVE_ACCOUNT_EQUITY_USDT > 0."
+            if sizing_equity_usdt <= 0.0:
+                return None, sizing_details, "Live risk sizing requires a positive sizing equity."
             if risk_per_trade_pct <= 0.0:
                 return None, sizing_details, "Live risk sizing requires AUTO_TRADING_LIVE_RISK_PER_TRADE_PCT > 0."
             if risk_sizing_r <= 0.0:
@@ -1333,12 +1358,20 @@ class ExecutionCoordinator:
         if sizing_mode == "RISK_PCT":
             stop_pct = self._float_or(sizing_details.get("stop_pct"))
             account_equity_usdt = self._float_or(sizing_details.get("account_equity_usdt"))
+            sizing_equity_usdt = self._float_or(sizing_details.get("sizing_equity_usdt"), account_equity_usdt)
             normalized_actual_risk_usdt = normalized_notional * stop_pct
             normalized_actual_risk_pct = (
                 normalized_actual_risk_usdt / account_equity_usdt if account_equity_usdt > 0.0 else 0.0
             )
+            normalized_actual_risk_pct_of_sizing_equity = (
+                normalized_actual_risk_usdt / sizing_equity_usdt if sizing_equity_usdt > 0.0 else 0.0
+            )
             sizing_details["actual_risk_usdt"] = round(normalized_actual_risk_usdt, 4)
             sizing_details["actual_risk_pct"] = round(normalized_actual_risk_pct, 6)
+            sizing_details["actual_risk_pct_of_sizing_equity"] = round(
+                normalized_actual_risk_pct_of_sizing_equity,
+                6,
+            )
             sizing_details["quantity_rounding_loss_notional"] = round(
                 max(max_position_notional - normalized_notional, 0.0),
                 4,
