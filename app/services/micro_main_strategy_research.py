@@ -54,6 +54,13 @@ _PROFILE_SYMBOL_BLOCKED_SIGNAL_HOURS: dict[str, dict[str, tuple[int, ...]]] = {
 }
 
 
+def _profile_symbol(symbol: str) -> str:
+    normalized = str(symbol or "").strip().upper()
+    if normalized.endswith("USDT"):
+        return f"{normalized[:-4]}USDC"
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class MicroSignal:
     family: str
@@ -175,6 +182,7 @@ class SessionImpulseRetestResearch:
 
     def __init__(self, *, symbol: str, candles_1m: list[Candle], candles_5m: list[Candle], profile_name: str = "baseline"):
         self.symbol = str(symbol).upper()
+        self.profile_symbol = _profile_symbol(self.symbol)
         self.profile_name = str(profile_name or "baseline").strip().lower() or "baseline"
         self.candles_1m = list(candles_1m)
         self.candles_5m = list(candles_5m)
@@ -197,13 +205,13 @@ class SessionImpulseRetestResearch:
 
     def _signal_filter_profile(self) -> dict[str, float]:
         profile = dict(self._PROFILE_DEFAULTS.get(self.profile_name) or self._PROFILE_DEFAULTS["baseline"])
-        profile.update((self._PROFILE_SYMBOL_OVERRIDES.get(self.profile_name) or {}).get(self.symbol, {}))
+        profile.update((self._PROFILE_SYMBOL_OVERRIDES.get(self.profile_name) or {}).get(self.profile_symbol, {}))
         return profile
 
     def _blocked_signal_hours(self) -> tuple[int, ...]:
         return tuple(
             int(hour)
-            for hour in (_PROFILE_SYMBOL_BLOCKED_SIGNAL_HOURS.get(self.profile_name) or {}).get(self.symbol, ())
+            for hour in (_PROFILE_SYMBOL_BLOCKED_SIGNAL_HOURS.get(self.profile_name) or {}).get(self.profile_symbol, ())
         )
 
     @staticmethod
@@ -714,7 +722,7 @@ def evaluate_session_impulse_retest_shadow_filters(*, diagnostics: dict[str, Any
 
 
 def session_impulse_retest_profile_for_symbol(symbol: str) -> str:
-    normalized_symbol = str(symbol or "").upper()
+    normalized_symbol = _profile_symbol(str(symbol or "").upper())
     return str(_SESSION_IMPULSE_RETEST_PROFILE_BY_SYMBOL.get(normalized_symbol, "baseline"))
 
 

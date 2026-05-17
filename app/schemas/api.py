@@ -757,6 +757,7 @@ class BinanceOrderSubmitIn(ORMModel):
     price: float | None = Field(default=None, gt=0)
     time_in_force: str = Field(default="GTC", pattern="^(GTC|IOC|FOK)$")
     reduce_only: bool = False
+    position_side: str | None = Field(default=None, pattern="^(BOTH|LONG|SHORT)$")
     client_order_id: str | None = Field(default=None, min_length=4, max_length=36)
     plan_id: str | None = Field(default=None, min_length=4, max_length=50)
     live: bool = False
@@ -780,6 +781,7 @@ class BinanceOrderOut(ORMModel):
     orig_qty: float | None = None
     executed_qty: float | None = None
     reduce_only: bool | None = None
+    position_side: str = ""
     time_in_force: str = ""
     raw: dict[str, Any] = Field(default_factory=dict)
 

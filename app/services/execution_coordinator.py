@@ -445,6 +445,18 @@ class ExecutionCoordinator:
             return False
         return bool(default)
 
+    def _binance_live_position_side(self, *, plan: Plan, side: str) -> str | None:
+        mode = str(getattr(self.settings, "binance_live_position_side_mode", "ONE_WAY") or "ONE_WAY").strip().upper()
+        mode = mode.replace("-", "_").replace(" ", "_")
+        if mode not in {"HEDGE", "HEDGE_MODE", "DUAL", "DUAL_SIDE", "DUAL_SIDE_POSITION"}:
+            return None
+        direction = str(getattr(plan, "direction", "") or "").strip().lower()
+        if direction == "long":
+            return "LONG"
+        if direction == "short":
+            return "SHORT"
+        return "LONG" if str(side or "").upper() == "BUY" else "SHORT"
+
     def _partial_submit_enabled(self) -> bool:
         return self._safe_bool(getattr(self.settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", False))
 
@@ -1211,6 +1223,7 @@ class ExecutionCoordinator:
             return row, [], False
 
         live_side = "BUY" if str(plan.direction).lower() == "long" else "SELL"
+        live_position_side = self._binance_live_position_side(plan=plan, side=live_side)
         live_order_type = "LIMIT" if str(plan.entry_model).upper() == "LIMIT" else "MARKET"
         live_limit_price = float(plan.entry_price) if live_order_type == "LIMIT" else None
         normalized_live_price, live_price_details = self._normalize_live_limit_price(
@@ -1336,12 +1349,14 @@ class ExecutionCoordinator:
                 "live_submit_claimed": True,
                 "session_guidance": self._safe_dict(intent.session_guidance),
                 "live_order_sizing": live_sizing,
+                **({"live_position_side": live_position_side} if live_position_side else {}),
                 **({"live_tranche": live_tranche} if live_tranche else {}),
                 **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
             },
             raw={
                 "live_submit_claimed": True,
                 "live_order_sizing": live_sizing,
+                **({"live_position_side": live_position_side} if live_position_side else {}),
                 **({"live_tranche": live_tranche} if live_tranche else {}),
                 **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
                 "intent_snapshot": {"session_guidance": self._safe_dict(intent.session_guidance)},
@@ -1372,6 +1387,7 @@ class ExecutionCoordinator:
                 price=normalized_live_price if live_order_type == "LIMIT" else None,
                 time_in_force="GTC",
                 reduce_only=False,
+                position_side=live_position_side,
                 client_order_id=client_order_id,
                 plan_id=plan.plan_id,
                 live=True,
@@ -1400,6 +1416,7 @@ class ExecutionCoordinator:
                 "reentry_blocked_until_reconciled": True,
                 "session_guidance": self._safe_dict(intent.session_guidance),
                 "live_order_sizing": live_sizing,
+                **({"live_position_side": live_position_side} if live_position_side else {}),
                 **({"live_tranche": live_tranche} if live_tranche else {}),
                 **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
                 "live_submit_error": live_submit_error,
@@ -1409,6 +1426,7 @@ class ExecutionCoordinator:
                 "unknown_exchange_state": True,
                 "requires_reconciliation": True,
                 "live_order_sizing": live_sizing,
+                **({"live_position_side": live_position_side} if live_position_side else {}),
                 **({"live_tranche": live_tranche} if live_tranche else {}),
                 **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
                 "live_submit_error": live_submit_error,
@@ -1438,6 +1456,7 @@ class ExecutionCoordinator:
             **self._safe_dict(row.attachments),
             "status": "pending_attach",
             "live_order_sizing": live_sizing,
+            **({"live_position_side": live_position_side} if live_position_side else {}),
             **({"live_tranche": live_tranche} if live_tranche else {}),
             **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
             "session_guidance": self._safe_dict(intent.session_guidance),
@@ -1446,6 +1465,7 @@ class ExecutionCoordinator:
             **self._safe_dict(row.raw),
             **live_result,
             "live_order_sizing": live_sizing,
+            **({"live_position_side": live_position_side} if live_position_side else {}),
             **({"live_tranche": live_tranche} if live_tranche else {}),
             **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
             "intent_snapshot": {"session_guidance": self._safe_dict(intent.session_guidance)},

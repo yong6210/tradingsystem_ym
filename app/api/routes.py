@@ -688,6 +688,7 @@ def submit_binance_order(
             price=payload.price,
             time_in_force=payload.time_in_force,
             reduce_only=payload.reduce_only,
+            position_side=payload.position_side,
             client_order_id=payload.client_order_id,
             plan_id=payload.plan_id,
             live=payload.live,

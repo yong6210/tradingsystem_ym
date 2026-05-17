@@ -8,6 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from app.core.enums import ExecutionMode
+from app.services.active_contract_replay_baseline import (
+    USDC_DIRECT_BACKTEST_SOURCE,
+    USDT_DIRECT_BACKTEST_SOURCE,
+    USDT_PROXY_BACKTEST_SOURCE,
+    _entry_effective_window_days,
+    resolve_report_dir,
+)
 from app.services.family_rollout import RolloutPolicyBootstrap
 
 
@@ -127,19 +134,20 @@ class UsdtProxyReplayValidationBridge:
             return ReplayValidationEvidence(
                 approval_usable=False,
                 reason_code="replay_validation_backtest_missing",
-                message="No recent USDT proxy replay backtest entry exists for this symbol.",
+                message="No recent active-contract replay backtest entry exists for this symbol.",
                 metrics={},
                 source={},
                 reason_codes=("replay_validation_backtest_missing",),
                 failures=(),
             )
-        backtest_path, backtest_payload, entry = backtest
+        backtest_path, backtest_payload, entry, source_name, effective_days, days_source = backtest
         summary = dict(entry.get("summary") or {})
         closed = self._safe_int(summary.get("closed") or summary.get("closed_trades") or summary.get("trade_count"))
         ev_r = self._safe_float(summary.get("ev_r") or summary.get("expectancy_r"))
         win_rate = self._safe_float(summary.get("win_rate"))
         total_r = self._safe_float(summary.get("total_r"))
-        days = self._safe_int(backtest_payload.get("days"))
+        days = max(0.0, float(effective_days))
+        requested_days = max(0.0, self._safe_float(backtest_payload.get("days")))
         decision = str(summary.get("decision") or "").upper()
 
         min_days = self._safe_int(getattr(self.settings, "auto_trading_replay_validation_bridge_min_days", 1000), default=1000)
@@ -151,7 +159,7 @@ class UsdtProxyReplayValidationBridge:
         if decision != "PASS":
             failures.append({"code": "replay_validation_decision_not_pass", "value": decision or "missing", "required": "PASS"})
         if days < min_days:
-            failures.append({"code": "replay_validation_days_below_floor", "value": days, "required": min_days})
+            failures.append({"code": "replay_validation_days_below_floor", "value": round(days, 2), "required": min_days})
         if closed < min_trades:
             failures.append({"code": "replay_validation_trades_below_floor", "value": closed, "required": min_trades})
         if ev_r < min_ev_r:
@@ -177,14 +185,22 @@ class UsdtProxyReplayValidationBridge:
             "ev_r": round(ev_r, 4),
             "win_rate": round(win_rate, 4),
             "total_r": round(total_r, 4),
-            "days": days,
+            "days": round(days, 4),
+            "requested_days": requested_days,
+            "days_source": days_source,
             "total_score": total_score,
             **portfolio_metrics,
         }
+        source_proxy_symbol = str(entry.get("proxy_symbol") or "").strip()
+        if not source_proxy_symbol and source_name == USDT_DIRECT_BACKTEST_SOURCE:
+            source_proxy_symbol = str(entry.get("symbol") or entry.get("canonical_symbol") or normalized_symbol).strip()
+
         source = {
+            "bridge_source": self._bridge_source_name(source_name),
+            "backtest_source": source_name,
             "backtest_report": str(backtest_path),
             "generated_at": str(backtest_payload.get("generated_at") or ""),
-            "proxy_symbol": str(entry.get("proxy_symbol") or ""),
+            "proxy_symbol": source_proxy_symbol,
             "canonical_symbol": str(entry.get("canonical_symbol") or normalized_symbol),
             **portfolio_source,
         }
@@ -193,7 +209,7 @@ class UsdtProxyReplayValidationBridge:
             return ReplayValidationEvidence(
                 approval_usable=False,
                 reason_code=str(failures[0].get("code") or "replay_validation_not_usable"),
-                message="USDT proxy replay evidence exists but does not clear the live validation bridge floors.",
+                message="Active-contract replay evidence exists but does not clear the live validation bridge floors.",
                 metrics=base_metrics,
                 source=source,
                 reason_codes=tuple(str(item.get("code") or "") for item in failures if str(item.get("code") or "").strip()),
@@ -204,13 +220,13 @@ class UsdtProxyReplayValidationBridge:
         return ReplayValidationEvidence(
             approval_usable=True,
             reason_code="replay_validation_bridge_approval_usable",
-            message="Recent 3-year USDT proxy replay clears the live validation bridge floors.",
+            message="Recent active-contract replay clears the live validation bridge floors.",
             metrics={**base_metrics, "grade": grade, "recommendation": recommendation},
-            source={**source, "bridge_source": "usdt_proxy_replay_bridge"},
+            source=source,
             reason_codes=(
                 "replay_validation_bridge_approval_usable",
-                "usdt_proxy_3y_strategy_pass",
-                "usdt_proxy_portfolio_replay_pass",
+                f"{source_name}_strategy_pass",
+                "portfolio_replay_pass",
             ),
             failures=(),
         )
@@ -428,31 +444,94 @@ class UsdtProxyReplayValidationBridge:
             failures=(),
         )
 
-    def _latest_backtest_entry(self, symbol: str) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
-        directory = Path(str(getattr(self.settings, "auto_trading_replay_validation_bridge_backtest_dir", ""))).expanduser()
+    def _latest_backtest_entry(self, symbol: str) -> tuple[Path, dict[str, Any], dict[str, Any], str, float, str] | None:
+        candidates: list[tuple[float, int, float, str, str, Path, dict[str, Any], dict[str, Any], str, str]] = []
         active_symbols = self._active_micro_live_symbol_contract()
-        for path in self._recent_json_files(directory, "micro_main_usdt_proxy_backtest_*.json"):
-            payload = self._load_json(path)
-            if not payload or self._is_stale(payload, path):
+        patterns = (
+            ("micro_main_usdc_backtest_*.json", USDC_DIRECT_BACKTEST_SOURCE),
+            ("micro_main_usdt_backtest_*.json", USDT_DIRECT_BACKTEST_SOURCE),
+            ("micro_main_usdt_proxy_backtest_*.json", USDT_PROXY_BACKTEST_SOURCE),
+        )
+        for directory in self._backtest_report_dirs():
+            for pattern, source_name in patterns:
+                for path in self._recent_json_files(directory, pattern):
+                    payload = self._load_json(path)
+                    if not payload or self._is_stale(payload, path):
+                        continue
+                    if active_symbols and self._backtest_contract_symbols(payload) != active_symbols:
+                        continue
+                    results = payload.get("results")
+                    if isinstance(results, dict):
+                        iterable = results.items()
+                    elif isinstance(results, list):
+                        iterable = ((None, item) for item in results)
+                    else:
+                        continue
+                    for key, raw_entry in iterable:
+                        if not isinstance(raw_entry, dict):
+                            continue
+                        canonical = self._normalize_symbol(
+                            raw_entry.get("canonical_symbol")
+                            or raw_entry.get("symbol")
+                            or self._symbol_for_backtest_source(raw_entry.get("proxy_symbol") or key, source_name)
+                        )
+                        if canonical != symbol:
+                            continue
+                        days, days_source = _entry_effective_window_days(payload, raw_entry)
+                        candidates.append(
+                            (
+                                max(0.0, float(days)),
+                                self._source_priority(source_name),
+                                max(0.0, self._safe_float(payload.get("days"))),
+                                path.name,
+                                str(path),
+                                path,
+                                payload,
+                                raw_entry,
+                                source_name,
+                                days_source,
+                            )
+                        )
+        if not candidates:
+            return None
+        _days, _source_priority, _requested_days, _name, _path_key, path, payload, entry, source_name, days_source = max(candidates)
+        return path, payload, entry, source_name, _days, days_source
+
+    def _backtest_report_dirs(self) -> list[Path]:
+        configured = resolve_report_dir(
+            self.settings,
+            str(getattr(self.settings, "auto_trading_replay_validation_bridge_backtest_dir", "") or ""),
+            default="reports/validation/micro_main_usdt_proxy_backtests",
+        )
+        dirs = [configured]
+        if configured.name == "micro_main_usdt_proxy_backtests":
+            dirs.extend([configured.parent / "micro_main_usdc_backtests", configured.parent / "micro_main_usdt_backtests"])
+        elif configured.name == "micro_main_usdc_backtests":
+            dirs.extend([configured.parent / "micro_main_usdt_proxy_backtests", configured.parent / "micro_main_usdt_backtests"])
+        elif configured.name == "micro_main_usdt_backtests":
+            dirs.extend([configured.parent / "micro_main_usdc_backtests", configured.parent / "micro_main_usdt_proxy_backtests"])
+        unique: list[Path] = []
+        seen: set[Path] = set()
+        for directory in dirs:
+            if directory in seen:
                 continue
-            if active_symbols and self._backtest_contract_symbols(payload) != active_symbols:
-                continue
-            results = payload.get("results")
-            if isinstance(results, dict):
-                iterable = results.items()
-            elif isinstance(results, list):
-                iterable = ((None, item) for item in results)
-            else:
-                continue
-            for key, raw_entry in iterable:
-                if not isinstance(raw_entry, dict):
-                    continue
-                canonical = self._normalize_symbol(
-                    raw_entry.get("canonical_symbol") or self._proxy_to_canonical(raw_entry.get("proxy_symbol") or key)
-                )
-                if canonical == symbol:
-                    return path, payload, raw_entry
-        return None
+            seen.add(directory)
+            unique.append(directory)
+        return unique
+
+    @staticmethod
+    def _source_priority(source_name: str) -> int:
+        if source_name == USDT_DIRECT_BACKTEST_SOURCE:
+            return 2
+        return 1 if source_name == USDC_DIRECT_BACKTEST_SOURCE else 0
+
+    @staticmethod
+    def _bridge_source_name(source_name: str) -> str:
+        if source_name == USDT_DIRECT_BACKTEST_SOURCE:
+            return "usdt_direct_replay_bridge"
+        if source_name == USDC_DIRECT_BACKTEST_SOURCE:
+            return "usdc_direct_replay_bridge"
+        return "usdt_proxy_replay_bridge"
 
     def _historical_walk_forward_cache_path(self) -> Path:
         raw_path = str(
@@ -623,7 +702,19 @@ class UsdtProxyReplayValidationBridge:
             default=25.0,
         )
 
-        for path in self._recent_json_files(directory, "micro_main_usdt_proxy_yearly_portfolio_replay_*.json"):
+        portfolio_paths: list[Path] = []
+        for pattern in (
+            "micro_main_usdt_yearly_portfolio_replay_*.json",
+            "micro_main_usdt_proxy_yearly_portfolio_replay_*.json",
+        ):
+            portfolio_paths.extend(self._recent_json_files(directory, pattern))
+        portfolio_paths = sorted(
+            {path.resolve(): path for path in portfolio_paths}.values(),
+            key=lambda item: (item.stat().st_mtime_ns, item.name),
+            reverse=True,
+        )
+
+        for path in portfolio_paths:
             payload = self._load_json(path)
             if not payload or self._is_stale(payload, path):
                 continue
@@ -759,12 +850,21 @@ class UsdtProxyReplayValidationBridge:
             return f"{normalized[:-4]}USDC"
         return normalized
 
+    def _symbol_for_backtest_source(self, symbol: Any, source_name: str) -> str:
+        normalized = self._normalize_symbol(symbol)
+        if source_name == USDT_DIRECT_BACKTEST_SOURCE:
+            return normalized
+        return self._proxy_to_canonical(normalized)
+
     def _backtest_contract_symbols(self, payload: dict[str, Any]) -> set[str]:
-        raw_symbols = payload.get("proxy_symbols")
+        source_name = str(payload.get("source") or "").strip()
+        raw_symbols = payload.get("symbols")
+        if not isinstance(raw_symbols, list) or not raw_symbols:
+            raw_symbols = payload.get("proxy_symbols")
         if not isinstance(raw_symbols, list) or not raw_symbols:
             results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
             raw_symbols = list(results.keys()) if isinstance(results, dict) else []
-        return {self._proxy_to_canonical(symbol) for symbol in raw_symbols if str(symbol or "").strip()}
+        return {self._symbol_for_backtest_source(symbol, source_name) for symbol in raw_symbols if str(symbol or "").strip()}
 
     def _active_micro_live_symbol_contract(self) -> set[str]:
         mode = str(getattr(self.settings, "auto_trading_execution_mode", "") or "").strip().upper()

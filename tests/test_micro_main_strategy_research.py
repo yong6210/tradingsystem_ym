@@ -120,6 +120,8 @@ def test_micro_main_runtime_profile_mapping_is_hybrid() -> None:
     assert session_impulse_retest_profile_for_symbol("ETHUSDC") == "relaxed_v1"
     assert session_impulse_retest_profile_for_symbol("LINKUSDC") == "relaxed_v1"
     assert session_impulse_retest_profile_for_symbol("ADAUSDC") == "relaxed_v1"
+    assert session_impulse_retest_profile_for_symbol("ETHUSDT") == "relaxed_v1"
+    assert session_impulse_retest_profile_for_symbol("LINKUSDT") == "relaxed_v1"
     assert session_impulse_retest_profile_for_symbol("UNKNOWNUSDC") == "baseline"
 
 
@@ -129,6 +131,8 @@ def test_micro_main_blocked_signal_hours_are_symbol_specific() -> None:
     btc_5m = _candles("BTCUSDC", "5m", 5, 400, start)
     btc_engine = SessionImpulseRetestResearch(symbol="BTCUSDC", candles_1m=btc_1m, candles_5m=btc_5m)
     assert btc_engine._blocked_signal_hours() == (0,)
+    btc_usdt_engine = SessionImpulseRetestResearch(symbol="BTCUSDT", candles_1m=btc_1m, candles_5m=btc_5m)
+    assert btc_usdt_engine._blocked_signal_hours() == (0,)
 
     link_1m = _candles("LINKUSDC", "1m", 1, 1200, start)
     link_5m = _candles("LINKUSDC", "5m", 5, 400, start)
@@ -139,6 +143,13 @@ def test_micro_main_blocked_signal_hours_are_symbol_specific() -> None:
         profile_name="relaxed_v1",
     )
     assert link_engine._blocked_signal_hours() == (8,)
+    link_usdt_engine = SessionImpulseRetestResearch(
+        symbol="LINKUSDT",
+        candles_1m=link_1m,
+        candles_5m=link_5m,
+        profile_name="relaxed_v1",
+    )
+    assert link_usdt_engine._blocked_signal_hours() == (8,)
 
     eth_1m = _candles("ETHUSDC", "1m", 1, 1200, start)
     eth_5m = _candles("ETHUSDC", "5m", 5, 400, start)

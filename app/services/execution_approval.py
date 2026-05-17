@@ -597,8 +597,9 @@ class ExecutionPlanningService:
         session_funnel = self._find_decomposition_bucket(score_to_outcome, axis="session", bucket=session_name)
 
         degradation_status = str(execution_degradation.get("status") or "healthy").lower()
+        degradation_advisory_only = self._bool(execution_degradation.get("advisory_only"))
         degradation_sample = dict(execution_degradation.get("sample_context") or {})
-        material_degradation_sample = any(
+        material_degradation_sample = (not degradation_advisory_only) and any(
             self._safe_int(degradation_sample.get(key), default=0) > 0
             for key in ("plans_matured", "fill_events_total", "closed_plans")
         )
@@ -662,7 +663,11 @@ class ExecutionPlanningService:
             and sir_rollout_status == "live_bootstrap_collecting"
             and not material_degradation_sample
         )
-        if (degradation_status == "manual_review" and not sir_bootstrap_outcome_advisory_only) or (
+        if (
+            degradation_status == "manual_review"
+            and not degradation_advisory_only
+            and not sir_bootstrap_outcome_advisory_only
+        ) or (
             post_cost_reason and adverse_mode_rows
         ):
             status = "manual_review"
@@ -702,6 +707,8 @@ class ExecutionPlanningService:
                 "execution_degradation_policy": (
                     "advisory_until_material_sir_live_execution_sample"
                     if sir_bootstrap_outcome_advisory_only
+                    else "advisory_only"
+                    if degradation_advisory_only
                     else "standard"
                 ),
             },

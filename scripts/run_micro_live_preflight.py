@@ -495,15 +495,74 @@ def _proxy_symbol_to_live_symbol(symbol: Any) -> str:
     return text
 
 
+def _backtest_symbol_to_contract_symbol(symbol: Any, payload: dict[str, Any]) -> str:
+    text = str(symbol or "").strip().upper()
+    if str(payload.get("source") or "").strip() == "micro_main_usdt_backtest":
+        return text
+    return _proxy_symbol_to_live_symbol(text)
+
+
 def _backtest_contract_symbols(payload: dict[str, Any]) -> set[str]:
-    raw_symbols = payload.get("proxy_symbols")
+    raw_symbols = payload.get("symbols")
+    if not isinstance(raw_symbols, list) or not raw_symbols:
+        raw_symbols = payload.get("proxy_symbols")
     if not isinstance(raw_symbols, list) or not raw_symbols:
         results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
         raw_symbols = list(results.keys()) if isinstance(results, dict) else []
-    return {_proxy_symbol_to_live_symbol(symbol) for symbol in raw_symbols if str(symbol or "").strip()}
+    return {_backtest_symbol_to_contract_symbol(symbol, payload) for symbol in raw_symbols if str(symbol or "").strip()}
 
 
-def _latest_micro_main_backtest_report(settings: Any, *, live_symbols: set[str] | None = None) -> Path | None:
+def _backtest_report_days(payload: dict[str, Any]) -> int:
+    try:
+        return max(0, int(float(payload.get("days") or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _window_days(window: dict[str, Any], start_key: str, end_key: str) -> float | None:
+    start = _parse_utc_ts(window.get(start_key))
+    end = _parse_utc_ts(window.get(end_key))
+    if start is None or end is None or end <= start:
+        return None
+    return (end - start).total_seconds() / 86400.0
+
+
+def _backtest_effective_days_range(payload: dict[str, Any], expected_symbols: set[str]) -> tuple[float | None, float | None]:
+    results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
+    if not results:
+        return None, None
+    values: list[float] = []
+    for key, raw_entry in results.items():
+        if not isinstance(raw_entry, dict):
+            continue
+        symbol = _backtest_symbol_to_contract_symbol(
+            raw_entry.get("canonical_symbol") or raw_entry.get("symbol") or raw_entry.get("proxy_symbol") or key,
+            payload,
+        )
+        if expected_symbols and symbol not in expected_symbols:
+            continue
+        window = raw_entry.get("window") if isinstance(raw_entry.get("window"), dict) else {}
+        for start_key, end_key in (
+            ("effective_start_ts", "effective_end_ts"),
+            ("actual_start_1m_ts", "actual_end_1m_ts"),
+            ("requested_start_ts", "requested_end_ts"),
+        ):
+            days = _window_days(window, start_key, end_key)
+            if days is not None:
+                values.append(days)
+                break
+    if not values:
+        return None, None
+    return min(values), max(values)
+
+
+def _backtest_report_source_priority(path: Path) -> int:
+    if path.name.startswith("micro_main_usdt_backtest_"):
+        return 2
+    return 1 if path.name.startswith("micro_main_usdc_backtest_") else 0
+
+
+def _micro_main_backtest_report_dirs(settings: Any) -> list[Path]:
     raw_dir = str(
         getattr(
             settings,
@@ -513,22 +572,55 @@ def _latest_micro_main_backtest_report(settings: Any, *, live_symbols: set[str] 
         or "reports/validation/micro_main_usdt_proxy_backtests"
     ).strip()
     report_dir = _resolve_root_path(raw_dir)
-    try:
-        candidates = sorted(
-            path
-            for path in report_dir.glob("micro_main_usdt_proxy_backtest_*.json")
-            if "unseen" not in path.name and "top" not in path.name
-        )
-    except OSError:
-        return None
+    dirs = [report_dir]
+    if report_dir.name == "micro_main_usdt_proxy_backtests":
+        dirs.extend([report_dir.parent / "micro_main_usdc_backtests", report_dir.parent / "micro_main_usdt_backtests"])
+    elif report_dir.name == "micro_main_usdc_backtests":
+        dirs.extend([report_dir.parent / "micro_main_usdt_proxy_backtests", report_dir.parent / "micro_main_usdt_backtests"])
+    elif report_dir.name == "micro_main_usdt_backtests":
+        dirs.extend([report_dir.parent / "micro_main_usdc_backtests", report_dir.parent / "micro_main_usdt_proxy_backtests"])
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for directory in dirs:
+        if directory in seen:
+            continue
+        seen.add(directory)
+        unique.append(directory)
+    return unique
+
+
+def _micro_main_backtest_candidates(settings: Any) -> list[Path]:
+    candidates: list[Path] = []
+    patterns = ("micro_main_usdc_backtest_*.json", "micro_main_usdt_backtest_*.json", "micro_main_usdt_proxy_backtest_*.json")
+    for report_dir in _micro_main_backtest_report_dirs(settings):
+        for pattern in patterns:
+            try:
+                for path in report_dir.glob(pattern):
+                    if not path.is_file():
+                        continue
+                    if pattern == "micro_main_usdt_proxy_backtest_*.json" and (
+                        "unseen" in path.name or "top" in path.name
+                    ):
+                        continue
+                    candidates.append(path)
+            except OSError:
+                continue
+    return sorted(set(candidates))
+
+
+def _latest_micro_main_backtest_report(settings: Any, *, live_symbols: set[str] | None = None) -> Path | None:
+    candidates = _micro_main_backtest_candidates(settings)
     if not candidates:
         return None
     expected_symbols = {str(symbol or "").strip().upper() for symbol in set(live_symbols or set()) if str(symbol or "").strip()}
     if expected_symbols:
+        matching: list[tuple[int, int, str, Path]] = []
         for path in reversed(candidates):
             payload = _read_json_file(path)
             if _backtest_contract_symbols(payload) == expected_symbols:
-                return path
+                matching.append((_backtest_report_days(payload), _backtest_report_source_priority(path), path.name, path))
+        if matching:
+            return sorted(matching, reverse=True)[0][3]
     return candidates[-1]
 
 
@@ -547,10 +639,14 @@ def _micro_live_backtest_contract_alignment_check(
             "name": "micro_live_backtest_contract_alignment",
             "status": "FAIL",
             "severity": "blocking",
-            "message": "no micro_main_usdt_proxy_backtest report found for current MICRO_LIVE contract alignment",
+            "message": (
+                "no micro_main_usdc_backtest, micro_main_usdt_backtest, or micro_main_usdt_proxy_backtest report found "
+                "for current MICRO_LIVE contract alignment"
+            ),
         }
     payload = _read_json_file(report_path)
     expected_symbols = _backtest_contract_symbols(payload)
+    effective_min_days, effective_max_days = _backtest_effective_days_range(payload, expected_symbols)
     expected_families = {"session_impulse_retest"}
     expected_entry_models = {"CONFIRM"}
     expected_sessions = {"dead_session", "london", "new_york"}
@@ -588,6 +684,10 @@ def _micro_live_backtest_contract_alignment_check(
         "severity": "blocking",
         "message": (
             f"source={_display_path(report_path)}; expected_symbols={len(expected_symbols)}; "
+            f"requested_days={_backtest_report_days(payload)}; "
+            f"effective_days_range="
+            f"{round(effective_min_days, 1) if effective_min_days is not None else 'unknown'}.."
+            f"{round(effective_max_days, 1) if effective_max_days is not None else 'unknown'}; "
             f"missing_symbols={','.join(missing_symbols) if missing_symbols else 'none'}; "
             f"unexpected_symbols={','.join(unexpected_symbols) if unexpected_symbols else 'none'}; "
             f"missing_families={','.join(missing_families) if missing_families else 'none'}; "

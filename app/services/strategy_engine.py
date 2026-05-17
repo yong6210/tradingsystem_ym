@@ -5987,6 +5987,7 @@ class StrategyEngine:
         quantity: float | None = None,
         time_in_force: str | None = None,
         reduce_only: bool | None = None,
+        position_side: str | None = None,
         client_order_id: str | None = None,
         plan_id: str | None = None,
     ) -> dict[str, Any]:
@@ -5995,6 +5996,8 @@ class StrategyEngine:
         status = raw_payload.get("status")
         if not status and action == "submit" and not requested_live:
             status = "TEST_ACCEPTED"
+        raw_position_side = raw_payload.get("positionSide") or raw_payload.get("position_side") or raw_payload.get("ps")
+        normalized_position_side = str(raw_position_side or position_side or "").upper()
         return {
             "action": action,
             "mode": "live" if requested_live else "test",
@@ -6016,6 +6019,7 @@ class StrategyEngine:
                 if raw_payload.get("reduceOnly") is not None
                 else self._safe_bool(reduce_only)
             ),
+            "position_side": normalized_position_side,
             "time_in_force": str(raw_payload.get("timeInForce") or time_in_force or ""),
             "raw": raw_payload,
         }
@@ -6264,6 +6268,7 @@ class StrategyEngine:
         price: float | None = None,
         time_in_force: str = "GTC",
         reduce_only: bool = False,
+        position_side: str | None = None,
         client_order_id: str | None = None,
         plan_id: str | None = None,
         live: bool = False,
@@ -6278,6 +6283,7 @@ class StrategyEngine:
             price=price,
             time_in_force=time_in_force,
             reduce_only=reduce_only,
+            position_side=position_side,
             client_order_id=effective_client_order_id,
             live=live,
             new_order_resp_type=new_order_resp_type,
@@ -6293,6 +6299,7 @@ class StrategyEngine:
             quantity=quantity,
             time_in_force=time_in_force,
             reduce_only=reduce_only,
+            position_side=position_side,
             client_order_id=effective_client_order_id,
             plan_id=plan_id,
         )
@@ -6385,15 +6392,24 @@ class StrategyEngine:
             else:
                 market_slippage_bps = max(0.0, (effective_reference - market_fill_avg_price) / effective_reference * 10_000.0)
 
-        klines_1m = self.market_data.binance.fetch_klines(symbol=normalized_symbol, interval="1m", limit=5)
+        klines_1m = self.market_data.binance.fetch_klines(symbol=normalized_symbol, interval="1m", limit=6)
         quote_volumes = []
+        now = datetime.now(timezone.utc)
         for row in klines_1m:
+            close_time = getattr(row, "close_time", None)
+            if close_time is not None:
+                if close_time.tzinfo is None:
+                    close_time = close_time.replace(tzinfo=timezone.utc)
+                else:
+                    close_time = close_time.astimezone(timezone.utc)
+                if close_time > now:
+                    continue
             close_price = self._maybe_float(row.c)
             volume = self._maybe_float(row.v)
             if close_price is not None and volume is not None and close_price > 0.0 and volume >= 0.0:
                 quote_volumes.append(close_price * volume)
         recent_1m_quote_volume = quote_volumes[-1] if quote_volumes else None
-        recent_5m_quote_volume = sum(quote_volumes) if quote_volumes else None
+        recent_5m_quote_volume = sum(quote_volumes[-5:]) if quote_volumes else None
         order_notional = max(self._maybe_float(quantity) or 0.0, 0.0) * max(effective_reference, 0.0)
 
         return {

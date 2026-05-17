@@ -201,7 +201,16 @@ def _public_liquidity_loader(client: BinanceFuturesClient, settings: Any):
         opposite_depth = sum(level_price * level_qty for level_price, level_qty in opposite)
         spread_bps = ((best_ask - best_bid) / mid * 10_000.0) if mid > 0.0 else None
         quote_volumes: list[float] = []
-        for row in client.fetch_klines(symbol=symbol, interval="1m", limit=5):
+        now = datetime.now(UTC)
+        for row in client.fetch_klines(symbol=symbol, interval="1m", limit=6):
+            close_time = getattr(row, "close_time", None)
+            if close_time is not None:
+                if close_time.tzinfo is None:
+                    close_time = close_time.replace(tzinfo=UTC)
+                else:
+                    close_time = close_time.astimezone(UTC)
+                if close_time > now:
+                    continue
             quote_volumes.append(float(row.c) * float(row.v))
         order_notional = quantity * max(effective_reference, 0.0)
         return {
@@ -213,7 +222,7 @@ def _public_liquidity_loader(client: BinanceFuturesClient, settings: Any):
             "spread_bps": round(float(spread_bps), 4) if spread_bps is not None else None,
             "market_slippage_bps": 0.0,
             "recent_1m_quote_volume": round(quote_volumes[-1], 4) if quote_volumes else None,
-            "recent_5m_quote_volume": round(sum(quote_volumes), 4) if quote_volumes else None,
+            "recent_5m_quote_volume": round(sum(quote_volumes[-5:]), 4) if quote_volumes else None,
         }
 
     return _loader
@@ -306,6 +315,28 @@ def run_canary(
                 price=normalized_price,
                 reference_price=normalized_price or reference_price,
             )
+            if str(liquidity_gate.get("decision") or "PASS").upper() == "SPLIT_REQUIRED":
+                partial_quantity, adjusted_sizing, partial_error = coordinator._partial_tranche_order(
+                    intent=intent,
+                    plan=plan,
+                    live_quantity=live_quantity,
+                    live_sizing=live_sizing,
+                    liquidity_gate=liquidity_gate,
+                    reference_price=normalized_price or reference_price,
+                )
+                if partial_error is None and partial_quantity is not None:
+                    live_quantity = partial_quantity
+                    live_sizing = adjusted_sizing
+                    liquidity_gate = {
+                        **liquidity_gate,
+                        "decision": "SPLIT_PARTIAL_SUBMIT",
+                        "message": "Live order size would be reduced by liquidity gate and routed as a tranche.",
+                    }
+                else:
+                    liquidity_gate = {
+                        **liquidity_gate,
+                        "partial_submit_error": partial_error,
+                    }
         except Exception as exc:
             liquidity_error = f"{exc.__class__.__name__}:{exc}"
 

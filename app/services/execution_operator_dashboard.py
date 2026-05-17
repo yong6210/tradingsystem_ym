@@ -1214,7 +1214,7 @@ class ExecutionOperatorDashboardService:
             )
             return {
                 "available": True,
-                "source": "micro_main_usdt_proxy_backtest",
+                "source": str(usdt_proxy.get("source") or "micro_main_usdt_proxy_backtest"),
                 "source_path": str(usdt_proxy.get("source_path") or ""),
                 "generated_at": str(usdt_proxy.get("generated_at") or ""),
                 "replay_window_days": round(replay_window_days, 4),

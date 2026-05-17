@@ -17,7 +17,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from app.core.config import get_settings
+from app.core.config import CURRENT_MICRO_LIVE_USDT_SYMBOLS, get_settings
 from app.db.models import Candle
 from app.integrations.binance_futures import BinanceFuturesClient
 from app.services.micro_main_strategy_research import MicroTrade, SessionImpulseRetestResearch
@@ -42,10 +42,12 @@ class PortfolioReplayTrade:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Replay a yearly fixed-equity portfolio using USDT proxy micro-main trades.")
+    parser = argparse.ArgumentParser(
+        description="Replay a yearly fixed-equity portfolio using USDT proxy or direct USDT micro-main trades."
+    )
     parser.add_argument(
         "--symbols",
-        default="BTCUSDT,ETHUSDT,XRPUSDT,BNBUSDT,SOLUSDT,ADAUSDT,LINKUSDT,AVAXUSDT,BCHUSDT,LTCUSDT",
+        default=CURRENT_MICRO_LIVE_USDT_SYMBOLS,
     )
     parser.add_argument("--days", type=int, default=1095)
     parser.add_argument("--account-equity-usdt", type=float, default=200.0)
@@ -53,8 +55,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--usable-margin-fraction", type=float, default=0.85)
     parser.add_argument("--leverage-cap", type=float, default=10.0)
     parser.add_argument("--max-concurrent-positions", type=int, default=2)
+    parser.add_argument("--direct-usdt", action="store_true")
     parser.add_argument("--write-report", action="store_true")
     return parser.parse_args()
+
+
+def _canonical_symbol_for_mode(proxy_symbol: str, *, direct_usdt: bool) -> str | None:
+    normalized = str(proxy_symbol or "").strip().upper()
+    if not normalized:
+        return None
+    if direct_usdt:
+        return normalized
+    return canonical_symbol_for_proxy(normalized)
 
 
 def _round_down_to_step(value: float, *, step: float) -> float:
@@ -232,7 +244,7 @@ def main() -> int:
         httpx.Client(base_url=settings.binance_rest_base_url, timeout=30.0) as rest_client,
     ):
         for proxy_symbol in proxy_symbols:
-            canonical_symbol = canonical_symbol_for_proxy(proxy_symbol)
+            canonical_symbol = _canonical_symbol_for_mode(proxy_symbol, direct_usdt=bool(args.direct_usdt))
             if canonical_symbol is None:
                 continue
             trades = _fetch_symbol_trades(
@@ -311,9 +323,13 @@ def main() -> int:
         }
 
     payload: dict[str, Any] = {
+        "source": "micro_main_usdt_yearly_portfolio_replay"
+        if args.direct_usdt
+        else "micro_main_usdt_proxy_yearly_portfolio_replay",
+        "quote_asset": "USDT" if args.direct_usdt else "USDC",
         "generated_at": generated_at.isoformat(),
         "settings": {
-            "symbols": [canonical_symbol_for_proxy(item) or item for item in proxy_symbols],
+            "symbols": [_canonical_symbol_for_mode(item, direct_usdt=bool(args.direct_usdt)) or item for item in proxy_symbols],
             "proxy_symbols": proxy_symbols,
             "days": int(args.days),
             "account_equity_usdt": float(args.account_equity_usdt),
@@ -321,7 +337,10 @@ def main() -> int:
             "usable_margin_fraction": float(args.usable_margin_fraction),
             "leverage_cap": float(args.leverage_cap),
             "max_concurrent_positions": int(args.max_concurrent_positions),
-            "note": "yearly fixed-equity execution-faithful replay using USDT proxy trades and Binance symbol trading rules",
+            "direct_usdt": bool(args.direct_usdt),
+            "note": "yearly fixed-equity execution-faithful replay using direct USDT trades and Binance symbol trading rules"
+            if args.direct_usdt
+            else "yearly fixed-equity execution-faithful replay using USDT proxy trades and Binance symbol trading rules",
         },
         "horizons": horizons,
         "symbols": symbol_summaries,
@@ -330,7 +349,12 @@ def main() -> int:
     if args.write_report:
         out_dir = Path(settings.validation_report_dir) / "micro_main_risk_sweeps"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"micro_main_usdt_proxy_yearly_portfolio_replay_{generated_at.strftime('%Y%m%dT%H%M%SZ')}.json"
+        report_prefix = (
+            "micro_main_usdt_yearly_portfolio_replay"
+            if args.direct_usdt
+            else "micro_main_usdt_proxy_yearly_portfolio_replay"
+        )
+        out_path = out_dir / f"{report_prefix}_{generated_at.strftime('%Y%m%dT%H%M%SZ')}.json"
         payload["report_path"] = str(out_path)
         atomic_write_text(out_path, json.dumps(payload, ensure_ascii=False, indent=2))
 

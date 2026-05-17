@@ -218,6 +218,7 @@ def test_micro_live_config_drift_checks_align_current_backtest_contract(monkeypa
 
     assert alignment["status"] == "PASS"
     assert "expected_symbols=2" in alignment["message"]
+    assert "requested_days=0" in alignment["message"]
     assert "missing_symbols=none" in alignment["message"]
     assert "missing_entry_models=none" in alignment["message"]
 
@@ -266,6 +267,134 @@ def test_micro_live_config_drift_checks_use_latest_matching_live_backtest_contra
     assert alignment["status"] == "PASS"
     assert "20260515T175711Z" in alignment["message"]
     assert "expected_symbols=2" in alignment["message"]
+
+
+def test_micro_live_backtest_contract_prefers_longer_matching_report(tmp_path) -> None:
+    report_dir = tmp_path / "backtests"
+    report_dir.mkdir()
+    long_path = report_dir / "micro_main_usdt_proxy_backtest_20260515T175711Z.json"
+    short_path = report_dir / "micro_main_usdt_proxy_backtest_20260516T184951Z.json"
+    payload = {"proxy_symbols": ["BTCUSDT", "ETHUSDT"], "results": {}}
+    long_path.write_text(json.dumps({**payload, "days": 1825}), encoding="utf-8")
+    short_path.write_text(json.dumps({**payload, "days": 30}), encoding="utf-8")
+
+    settings = SimpleNamespace(auto_trading_replay_validation_bridge_backtest_dir=str(report_dir))
+
+    selected = run_micro_live_preflight._latest_micro_main_backtest_report(
+        settings,
+        live_symbols={"BTCUSDC", "ETHUSDC"},
+    )
+
+    assert selected == long_path
+
+
+def test_micro_live_backtest_contract_prefers_usdc_report_when_days_match(tmp_path) -> None:
+    validation_dir = tmp_path / "reports" / "validation"
+    usdt_dir = validation_dir / "micro_main_usdt_proxy_backtests"
+    usdc_dir = validation_dir / "micro_main_usdc_backtests"
+    usdt_dir.mkdir(parents=True)
+    usdc_dir.mkdir(parents=True)
+    usdt_path = usdt_dir / "micro_main_usdt_proxy_backtest_20260515T175711Z.json"
+    usdc_path = usdc_dir / "micro_main_usdc_backtest_20260515T175711Z.json"
+    usdt_path.write_text(
+        json.dumps({"proxy_symbols": ["BTCUSDT", "ETHUSDT"], "results": {}, "days": 1825}),
+        encoding="utf-8",
+    )
+    usdc_path.write_text(
+        json.dumps({"symbols": ["BTCUSDC", "ETHUSDC"], "results": {}, "days": 1825}),
+        encoding="utf-8",
+    )
+
+    settings = SimpleNamespace(auto_trading_replay_validation_bridge_backtest_dir=str(usdt_dir))
+
+    selected = run_micro_live_preflight._latest_micro_main_backtest_report(
+        settings,
+        live_symbols={"BTCUSDC", "ETHUSDC"},
+    )
+
+    assert selected == usdc_path
+
+
+def test_micro_live_backtest_contract_accepts_direct_usdt_report(tmp_path) -> None:
+    validation_dir = tmp_path / "reports" / "validation"
+    usdt_dir = validation_dir / "micro_main_usdt_backtests"
+    usdt_dir.mkdir(parents=True)
+    usdt_path = usdt_dir / "micro_main_usdt_backtest_20260515T175711Z.json"
+    usdt_path.write_text(
+        json.dumps(
+            {
+                "source": "micro_main_usdt_backtest",
+                "symbols": ["BTCUSDT", "ETHUSDT"],
+                "results": {},
+                "days": 1095,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = SimpleNamespace(auto_trading_replay_validation_bridge_backtest_dir=str(usdt_dir))
+
+    selected = run_micro_live_preflight._latest_micro_main_backtest_report(
+        settings,
+        live_symbols={"BTCUSDT", "ETHUSDT"},
+    )
+
+    assert selected == usdt_path
+
+
+def test_micro_live_backtest_contract_alignment_reports_effective_days(monkeypatch, tmp_path) -> None:
+    settings = run_micro_live_preflight.get_settings()
+    heartbeat_dir = tmp_path / "heartbeats"
+    heartbeat_dir.mkdir()
+    (heartbeat_dir / "ws.json").write_text(
+        json.dumps({"details": {"symbols": ["BTCUSDC"]}}),
+        encoding="utf-8",
+    )
+    report_dir = tmp_path / "backtests"
+    report_dir.mkdir()
+    (report_dir / "micro_main_usdc_backtest_20260516T000000Z.json").write_text(
+        json.dumps(
+            {
+                "days": 1825,
+                "symbols": ["BTCUSDC"],
+                "results": {
+                    "BTCUSDC": {
+                        "symbol": "BTCUSDC",
+                        "window": {
+                            "effective_start_ts": "2026-05-01T00:00:00+00:00",
+                            "effective_end_ts": "2026-05-08T00:00:00+00:00",
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(settings, "runtime_worker_heartbeat_dir", str(heartbeat_dir))
+    monkeypatch.setattr(settings, "auto_trading_replay_validation_bridge_backtest_dir", str(report_dir))
+    monkeypatch.setattr(settings, "auto_trading_execution_mode", "MICRO_LIVE")
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_allowed_symbols", "BTCUSDC")
+    monkeypatch.setattr(settings, "auto_trading_allowed_families", "session_impulse_retest")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", "BTCUSDC")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "session_impulse_retest")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_entry_models", "CONFIRM")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_sessions", "dead_session,london,new_york")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_direction_contract", "BTCUSDC:LONG|SHORT")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_event_blackout_path", "")
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_fail_closed", True)
+    monkeypatch.setattr(settings, "session_impulse_retest_enabled", True)
+    monkeypatch.setattr(settings, "session_impulse_retest_shadow_only", False)
+    monkeypatch.setattr(settings, "session_impulse_retest_allowed_symbols", "BTCUSDC")
+
+    checks = run_micro_live_preflight._micro_live_config_drift_checks()
+    alignment = {item["name"]: item for item in checks}["micro_live_backtest_contract_alignment"]
+
+    assert alignment["status"] == "PASS"
+    assert "requested_days=1825" in alignment["message"]
+    assert "effective_days_range=7.0..7.0" in alignment["message"]
 
 
 def test_micro_live_config_drift_checks_fail_backtest_contract_drift(monkeypatch, tmp_path) -> None:

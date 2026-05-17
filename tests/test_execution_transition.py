@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -17,6 +18,7 @@ from app.db.repositories import (
 from app.db.session import SessionLocal, init_db
 from app.main import app
 from app.services.lane_tracker import get_execution_lane_tracker, reset_execution_lane_tracker
+from app.services.execution_coordinator import ExecutionCoordinator
 from app.services.strategy_engine import StrategyEngine
 from app.services.family_rollout import RolloutPolicyService
 from app.services.family_rollout import RolloutPolicyBootstrap
@@ -33,6 +35,17 @@ def test_family_rollout_bootstrap_keeps_sweep_reversal_out_of_micro_live_by_defa
     assert policy.live_enabled is False
     assert policy.max_execution_mode == ExecutionMode.PAPER
     assert policy.max_risk_r == 0.0
+
+
+def test_binance_live_position_side_mode_maps_hedge_directions() -> None:
+    coordinator = ExecutionCoordinator.__new__(ExecutionCoordinator)
+    coordinator.settings = SimpleNamespace(binance_live_position_side_mode="HEDGE")
+
+    assert coordinator._binance_live_position_side(plan=SimpleNamespace(direction="long"), side="BUY") == "LONG"
+    assert coordinator._binance_live_position_side(plan=SimpleNamespace(direction="short"), side="SELL") == "SHORT"
+
+    coordinator.settings = SimpleNamespace(binance_live_position_side_mode="ONE_WAY")
+    assert coordinator._binance_live_position_side(plan=SimpleNamespace(direction="long"), side="BUY") is None
 
 
 def _reset_execution_control_state() -> None:
@@ -94,6 +107,7 @@ def _apply_auto_trading_defaults(monkeypatch) -> None:
     monkeypatch.setattr(settings, "auto_trading_micro_live_max_daily_new_entries", 10)
     monkeypatch.setattr(settings, "auto_trading_reconciliation_user_stream_stale_seconds", 180)
     monkeypatch.setattr(settings, "binance_trade_live_enabled", False)
+    monkeypatch.setattr(settings, "binance_live_position_side_mode", "ONE_WAY")
     monkeypatch.setattr(settings, "auto_trading_live_balance_sync_enabled", False)
     monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", False)
     monkeypatch.setattr(settings, "portfolio_overlay_enabled", False)
@@ -2530,6 +2544,7 @@ def test_micro_live_submit_path_uses_binance_adapter_when_gates_pass(monkeypatch
     _apply_auto_trading_defaults(monkeypatch)
     settings = get_settings()
     monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "binance_live_position_side_mode", "HEDGE")
     monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "NOTIONAL_PER_R")
     monkeypatch.setattr(settings, "auto_trading_notional_per_r", 25.0)
     monkeypatch.setattr(settings, "binance_live_min_quantity", 0.001)
@@ -2582,6 +2597,8 @@ def test_micro_live_submit_path_uses_binance_adapter_when_gates_pass(monkeypatch
     assert submit_payload["requested_live"] is True
     assert submit_payload["state"] == "ACKNOWLEDGED"
     assert captured["quantity"] == 0.125
+    assert captured["position_side"] == "LONG"
+    assert submit_payload["attachments"]["live_position_side"] == "LONG"
     assert submit_payload["attachments"]["live_order_sizing"]["max_position_notional"] == 12.5
     assert submit_payload["attachments"]["live_order_sizing"]["normalized_quantity"] == 0.125
 
@@ -2824,6 +2841,43 @@ def test_micro_live_submit_runs_liquidity_gate_when_enabled(monkeypatch) -> None
     assert captured["quantity"] == 0.125
     assert submit_payload["attachments"]["live_liquidity_gate"]["decision"] == "PASS"
     assert submit_payload["attachments"]["live_order_sizing"]["liquidity_gate_decision"] == "PASS"
+
+
+def test_live_liquidity_snapshot_ignores_open_rest_kline(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    class _FakeBinance:
+        def fetch_order_book(self, *, symbol: str, limit: int) -> dict:
+            return {
+                "bids": [["99.9", "100"]],
+                "asks": [["100.1", "100"]],
+            }
+
+        def fetch_klines(self, *, symbol: str, interval: str, limit: int):
+            return [
+                SimpleNamespace(c=100.0, v=10.0, close_time=now - timedelta(minutes=5)),
+                SimpleNamespace(c=100.0, v=20.0, close_time=now - timedelta(minutes=4)),
+                SimpleNamespace(c=100.0, v=30.0, close_time=now - timedelta(minutes=3)),
+                SimpleNamespace(c=100.0, v=40.0, close_time=now - timedelta(minutes=2)),
+                SimpleNamespace(c=100.0, v=50.0, close_time=now - timedelta(minutes=1)),
+                SimpleNamespace(c=100.0, v=0.01, close_time=now + timedelta(seconds=45)),
+            ]
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        engine.market_data.binance = _FakeBinance()
+        snapshot = engine.load_binance_live_liquidity_snapshot(
+            symbol="BTCUSDC",
+            side="BUY",
+            order_type="MARKET",
+            quantity=1.0,
+            reference_price=100.0,
+        )
+
+    assert snapshot["recent_1m_quote_volume"] == 5000.0
+    assert snapshot["recent_5m_quote_volume"] == 15000.0
 
 
 def test_micro_live_submit_blocks_thin_liquidity_before_binance_submit(monkeypatch) -> None:

@@ -194,6 +194,42 @@ def test_submit_order_uses_test_endpoint_and_echoes_payload(monkeypatch) -> None
     assert payload["clientOrderId"] == "test-order-1"
 
 
+def test_submit_order_includes_position_side_for_hedge_mode(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_signed_request(self, method: str, path: str, params: dict[str, object]) -> dict[str, object]:
+        captured["method"] = method
+        captured["path"] = path
+        captured["params"] = params
+        return {}
+
+    monkeypatch.setattr(BinanceFuturesClient, "_signed_request", fake_signed_request)
+    client = BinanceFuturesClient(
+        api_key="key",
+        api_secret="secret",
+        live_trade_enabled=False,
+    )
+
+    payload = client.submit_order(
+        symbol="BTCUSDC",
+        side="BUY",
+        order_type="MARKET",
+        quantity=0.01,
+        reduce_only=False,
+        position_side="LONG",
+        client_order_id="test-order-2",
+        live=False,
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/fapi/v1/order/test"
+    params = captured["params"]
+    assert isinstance(params, dict)
+    assert params["positionSide"] == "LONG"
+    assert "reduceOnly" not in params
+    assert payload["positionSide"] == "LONG"
+
+
 def test_submit_order_rejects_malformed_exchange_response(monkeypatch) -> None:
     def fake_signed_request(self, method: str, path: str, params: dict[str, object]) -> list[str]:
         return ["bad-response"]

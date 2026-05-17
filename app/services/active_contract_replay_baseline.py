@@ -9,6 +9,9 @@ from typing import Any
 
 SESSION_IMPULSE_RETEST_FAMILY = "session_impulse_retest"
 SESSION_IMPULSE_RETEST_ENTRY_MODEL = "CONFIRM"
+USDC_DIRECT_BACKTEST_SOURCE = "micro_main_usdc_backtest"
+USDT_DIRECT_BACKTEST_SOURCE = "micro_main_usdt_backtest"
+USDT_PROXY_BACKTEST_SOURCE = "micro_main_usdt_proxy_backtest"
 
 
 def normalized_string_set(values: list[Any] | tuple[Any, ...] | set[Any] | None, *, case: str) -> set[str]:
@@ -47,6 +50,16 @@ def safe_int(value: Any, default: int = 0) -> int:
     except (TypeError, ValueError):
         return default
     return int(parsed) if isfinite(parsed) else default
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    if value in (None, "", "None"):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return float(parsed) if isfinite(parsed) else default
 
 
 def session_bucket(settings: Any, ts: datetime | None) -> str:
@@ -93,12 +106,22 @@ def canonical_symbol_from_proxy(value: Any) -> str:
     return symbol
 
 
+def contract_symbol_for_source(value: Any, source: str) -> str:
+    symbol = str(value or "").strip().upper()
+    if source == USDT_DIRECT_BACKTEST_SOURCE:
+        return symbol
+    return canonical_symbol_from_proxy(symbol)
+
+
 def usdt_proxy_contract_symbols(payload: dict[str, Any]) -> set[str]:
-    raw_symbols = payload.get("proxy_symbols")
+    source = str(payload.get("source") or "").strip()
+    raw_symbols = payload.get("symbols")
+    if not isinstance(raw_symbols, list) or not raw_symbols:
+        raw_symbols = payload.get("proxy_symbols")
     if not isinstance(raw_symbols, list) or not raw_symbols:
         results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
         raw_symbols = list(results.keys()) if isinstance(results, dict) else []
-    return {canonical_symbol_from_proxy(symbol) for symbol in raw_symbols if str(symbol or "").strip()}
+    return {contract_symbol_for_source(symbol, source) for symbol in raw_symbols if str(symbol or "").strip()}
 
 
 def active_micro_live_symbol_contract(settings: Any) -> set[str]:
@@ -128,6 +151,87 @@ def _recent_json_files(directory: Path, pattern: str) -> list[Path]:
     )
 
 
+def _report_source_priority(source: str) -> int:
+    if source == USDT_DIRECT_BACKTEST_SOURCE:
+        return 2
+    return 1 if source == USDC_DIRECT_BACKTEST_SOURCE else 0
+
+
+def _active_contract_report_dirs(settings: Any) -> list[Path]:
+    configured = resolve_report_dir(
+        settings,
+        str(getattr(settings, "auto_trading_replay_validation_bridge_backtest_dir", "") or ""),
+        default="reports/validation/micro_main_usdt_proxy_backtests",
+    )
+    dirs = [configured]
+    if configured.name == "micro_main_usdt_proxy_backtests":
+        dirs.extend([configured.parent / "micro_main_usdc_backtests", configured.parent / "micro_main_usdt_backtests"])
+    elif configured.name == "micro_main_usdc_backtests":
+        dirs.extend([configured.parent / "micro_main_usdt_proxy_backtests", configured.parent / "micro_main_usdt_backtests"])
+    elif configured.name == "micro_main_usdt_backtests":
+        dirs.extend([configured.parent / "micro_main_usdc_backtests", configured.parent / "micro_main_usdt_proxy_backtests"])
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for directory in dirs:
+        if directory in seen:
+            continue
+        seen.add(directory)
+        unique.append(directory)
+    return unique
+
+
+def _ranked_active_contract_reports(settings: Any) -> list[tuple[Path, dict[str, Any], str]]:
+    ranked: list[tuple[int, int, str, Path, dict[str, Any], str]] = []
+    patterns = (
+        ("micro_main_usdc_backtest_*.json", USDC_DIRECT_BACKTEST_SOURCE),
+        ("micro_main_usdt_backtest_*.json", USDT_DIRECT_BACKTEST_SOURCE),
+        ("micro_main_usdt_proxy_backtest_*.json", USDT_PROXY_BACKTEST_SOURCE),
+    )
+    for directory in _active_contract_report_dirs(settings):
+        for pattern, source in patterns:
+            for path in _recent_json_files(directory, pattern):
+                try:
+                    payload = json.loads(path.read_text())
+                except Exception:
+                    continue
+                ranked.append(
+                    (
+                        safe_int(payload.get("days"), 0),
+                        _report_source_priority(source),
+                        path.name,
+                        path,
+                        payload,
+                        source,
+                    )
+                )
+    return [
+        (path, payload, source)
+        for _days, _source_priority, _name, path, payload, source in sorted(ranked, reverse=True)
+    ]
+
+
+def _window_days_from_pair(window: dict[str, Any], start_key: str, end_key: str) -> float | None:
+    start = parse_ts(window.get(start_key))
+    end = parse_ts(window.get(end_key))
+    if start is None or end is None or end <= start:
+        return None
+    return (end - start).total_seconds() / 86400.0
+
+
+def _entry_effective_window_days(payload: dict[str, Any], raw_entry: dict[str, Any]) -> tuple[float, str]:
+    window = dict(raw_entry.get("window") or {})
+    for source, start_key, end_key in (
+        ("entry_effective_window", "effective_start_ts", "effective_end_ts"),
+        ("entry_actual_1m_window", "actual_start_1m_ts", "actual_end_1m_ts"),
+        ("entry_requested_window", "requested_start_ts", "requested_end_ts"),
+    ):
+        days = _window_days_from_pair(window, start_key, end_key)
+        if days is not None:
+            return max(days, 1e-9), source
+    report_days = safe_float(payload.get("days"), 0.0)
+    return max(report_days, 0.0), "report_days"
+
+
 def usdt_proxy_rows_for_active_contract(settings: Any, filters: dict[str, Any]) -> dict[str, Any] | None:
     filter_payload = dict(filters or {})
     families = normalized_string_set(filter_payload.get("strategy_families"), case="lower")
@@ -142,18 +246,9 @@ def usdt_proxy_rows_for_active_contract(settings: Any, filters: dict[str, Any]) 
         return None
     directions = normalized_string_set(filter_payload.get("directions"), case="upper")
     sessions = normalized_string_set(filter_payload.get("sessions"), case="lower")
-    directory = resolve_report_dir(
-        settings,
-        str(getattr(settings, "auto_trading_replay_validation_bridge_backtest_dir", "") or ""),
-        default="reports/validation/micro_main_usdt_proxy_backtests",
-    )
     active_symbols = active_micro_live_symbol_contract(settings)
 
-    for path in _recent_json_files(directory, "micro_main_usdt_proxy_backtest_*.json"):
-        try:
-            payload = json.loads(path.read_text())
-        except Exception:
-            continue
+    for path, payload, source in _ranked_active_contract_reports(settings):
         if active_symbols and usdt_proxy_contract_symbols(payload) != active_symbols:
             continue
         results = payload.get("results")
@@ -166,8 +261,11 @@ def usdt_proxy_rows_for_active_contract(settings: Any, filters: dict[str, Any]) 
         for key, raw_entry in iterable:
             if not isinstance(raw_entry, dict):
                 continue
-            proxy_symbol = str(raw_entry.get("proxy_symbol") or key or "").strip().upper()
-            canonical = canonical_symbol_from_proxy(raw_entry.get("canonical_symbol") or proxy_symbol)
+            proxy_symbol = str(raw_entry.get("proxy_symbol") or key or raw_entry.get("symbol") or "").strip().upper()
+            canonical = contract_symbol_for_source(
+                raw_entry.get("canonical_symbol") or raw_entry.get("symbol") or proxy_symbol,
+                source,
+            )
             if canonical != symbol:
                 continue
             rows: list[dict[str, Any]] = []
@@ -197,11 +295,14 @@ def usdt_proxy_rows_for_active_contract(settings: Any, filters: dict[str, Any]) 
                         "generated_session": generated_session,
                     }
                 )
+            effective_days, effective_days_source = _entry_effective_window_days(payload, raw_entry)
             return {
-                "source": "micro_main_usdt_proxy_backtest",
+                "source": source,
                 "source_path": str(path),
                 "generated_at": str(payload.get("generated_at") or ""),
-                "days": max(safe_int(payload.get("days"), 0), 0),
+                "days": effective_days,
+                "requested_days": max(safe_float(payload.get("days"), 0.0), 0.0),
+                "days_source": effective_days_source,
                 "window": dict(raw_entry.get("window") or {}),
                 "summary": dict(raw_entry.get("summary") or {}),
                 "rows": rows,

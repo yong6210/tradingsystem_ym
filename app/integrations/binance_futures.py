@@ -395,6 +395,7 @@ class BinanceFuturesClient:
         price: float | None = None,
         time_in_force: str = "GTC",
         reduce_only: bool = False,
+        position_side: str | None = None,
         client_order_id: str | None = None,
         live: bool = False,
         new_order_resp_type: str = "RESULT",
@@ -404,6 +405,9 @@ class BinanceFuturesClient:
             raise ValueError("limit_orders_require_price")
         if live and not self.live_trade_enabled:
             raise RuntimeError("binance_live_orders_disabled")
+        normalized_position_side = str(position_side or "").strip().upper()
+        if normalized_position_side and normalized_position_side not in {"BOTH", "LONG", "SHORT"}:
+            raise ValueError("binance_position_side_invalid")
 
         params: dict[str, Any] = {
             "symbol": symbol.upper(),
@@ -416,6 +420,10 @@ class BinanceFuturesClient:
             "newClientOrderId": client_order_id,
             "newOrderRespType": new_order_resp_type.upper(),
         }
+        if normalized_position_side:
+            params["positionSide"] = normalized_position_side
+            if not reduce_only:
+                params.pop("reduceOnly", None)
         path = "/fapi/v1/order" if live else "/fapi/v1/order/test"
         payload = self._signed_request("POST", path, params)
         if payload and not isinstance(payload, Mapping):
@@ -432,6 +440,7 @@ class BinanceFuturesClient:
                 "clientOrderId": client_order_id or "",
                 "timeInForce": time_in_force.upper() if normalized_type == "LIMIT" else "",
                 "reduceOnly": reduce_only,
+                "positionSide": normalized_position_side,
                 "testOrder": True,
             }
         return payload
@@ -774,7 +783,8 @@ class BinanceFuturesClient:
             response.raise_for_status()
         return True
 
-    def fetch_top_usdc_perp_symbols(self, limit: int = 30) -> list[str]:
+    def fetch_top_perp_symbols(self, *, quote_asset: str = "USDC", limit: int = 30) -> list[str]:
+        normalized_quote = str(quote_asset or "USDC").strip().upper()
         with httpx.Client(base_url=self.rest_base_url, timeout=self.timeout_seconds) as client:
             response = client.get("/fapi/v1/ticker/24hr")
             response.raise_for_status()
@@ -787,13 +797,19 @@ class BinanceFuturesClient:
             if not row_payload:
                 continue
             symbol = str(row_payload.get("symbol", ""))
-            if not symbol.endswith("USDC"):
+            if not symbol.endswith(normalized_quote):
                 continue
             quote_vol = self._safe_float(row_payload.get("quoteVolume"))
             candidates.append((symbol, quote_vol))
 
         candidates.sort(key=lambda x: x[1], reverse=True)
         return [s for s, _ in candidates[:limit]]
+
+    def fetch_top_usdc_perp_symbols(self, limit: int = 30) -> list[str]:
+        return self.fetch_top_perp_symbols(quote_asset="USDC", limit=limit)
+
+    def fetch_top_usdt_perp_symbols(self, limit: int = 30) -> list[str]:
+        return self.fetch_top_perp_symbols(quote_asset="USDT", limit=limit)
 
     async def stream_klines(self, symbols: list[str], interval: str) -> AsyncIterator[BinanceKline]:
         """Combined stream async generator.

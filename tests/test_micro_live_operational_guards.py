@@ -714,6 +714,59 @@ def test_synthetic_canary_passes_with_no_network_and_valid_settings(monkeypatch)
     assert payload["live_sizing"]["normalized_quantity"] > 0
 
 
+def test_synthetic_canary_counts_liquidity_partial_submit_as_pass(monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "RISK_PCT")
+    monkeypatch.setattr(settings, "auto_trading_live_account_equity_usdt", 200.0)
+    monkeypatch.setattr(settings, "auto_trading_live_balance_sync_enabled", False)
+    monkeypatch.setattr(settings, "auto_trading_live_risk_per_trade_pct", 0.01)
+    monkeypatch.setattr(settings, "auto_trading_live_usable_margin_fraction", 0.85)
+    monkeypatch.setattr(settings, "auto_trading_live_leverage_cap", 10.0)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_fail_closed", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_min_tranche_notional_usdt", 10.0)
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", "BTCUSDC")
+    monkeypatch.setattr(
+        run_micro_live_synthetic_canary,
+        "_micro_live_config_drift_checks",
+        lambda **_kwargs: [{"name": "config", "status": "PASS", "severity": "blocking", "message": "ok"}],
+    )
+
+    def _thin_liquidity_loader(_settings):
+        def _loader(**kwargs):
+            quantity = float(kwargs["quantity"])
+            reference_price = float(kwargs["reference_price"])
+            return {
+                "source": "test_thin_liquidity",
+                "order_notional": round(quantity * reference_price, 4),
+                "opposite_depth_notional": 50_000.0,
+                "spread_bps": 1.0,
+                "market_slippage_bps": 1.0,
+                "recent_1m_quote_volume": 1_000.0,
+                "recent_5m_quote_volume": 5_000.0,
+            }
+
+        return _loader
+
+    monkeypatch.setattr(run_micro_live_synthetic_canary, "_synthetic_liquidity_loader", _thin_liquidity_loader)
+
+    payload = run_micro_live_synthetic_canary.run_canary(
+        symbol="BTCUSDC",
+        direction="long",
+        entry_model="LIMIT",
+        entry_price=100.0,
+        stop_bps=100.0,
+        use_network=False,
+    )
+
+    assert payload["overall_status"] == "PASS"
+    assert payload["liquidity_gate"]["decision"] == "SPLIT_PARTIAL_SUBMIT"
+    assert payload["live_sizing"]["liquidity_gate_decision"] == "SPLIT_PARTIAL_SUBMIT"
+    assert payload["live_sizing"]["max_position_notional"] == 20.0
+    assert payload["live_sizing"]["live_tranche"]["remaining_notional"] == 180.0
+
+
 def test_runtime_guard_main_writes_latest_aliases(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(
         run_micro_live_runtime_guard,
@@ -1211,6 +1264,155 @@ def test_live_replay_parity_uses_usdt_proxy_baseline_for_session_impulse_retest(
     assert payload["live_vs_replay_flow_ratio"] == 0.5
 
 
+def test_live_replay_parity_prefers_usdc_baseline_when_days_match(monkeypatch, tmp_path) -> None:
+    validation_dir = tmp_path / "reports" / "validation"
+    usdt_dir = validation_dir / "micro_main_usdt_proxy_backtests"
+    usdc_dir = validation_dir / "micro_main_usdc_backtests"
+    usdt_dir.mkdir(parents=True)
+    usdc_dir.mkdir(parents=True)
+    (usdt_dir / "micro_main_usdt_proxy_backtest_20260510T000000Z.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-05-10T00:00:00Z",
+                "days": 14,
+                "proxy_symbols": ["BTCUSDT"],
+                "results": {
+                    "BTCUSDT": {
+                        "proxy_symbol": "BTCUSDT",
+                        "canonical_symbol": "BTCUSDC",
+                        "trades": [
+                            {
+                                "family": "session_impulse_retest",
+                                "direction": "long",
+                                "entry_ts": "2026-05-01T07:30:00+00:00",
+                            }
+                        ],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (usdc_dir / "micro_main_usdc_backtest_20260510T000000Z.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-05-10T00:00:00Z",
+                "days": 14,
+                "symbols": ["BTCUSDC"],
+                "results": {
+                    "BTCUSDC": {
+                        "symbol": "BTCUSDC",
+                        "trades": [
+                            {
+                                "family": "session_impulse_retest",
+                                "direction": "long",
+                                "entry_ts": "2026-05-01T07:30:00+00:00",
+                            },
+                            {
+                                "family": "session_impulse_retest",
+                                "direction": "short",
+                                "entry_ts": "2026-05-02T13:30:00+00:00",
+                            },
+                        ],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = SimpleNamespace(
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
+        auto_trading_replay_validation_bridge_backtest_dir=str(usdt_dir),
+        validation_report_dir=str(validation_dir),
+        trading_session_london_start_hour_utc=7,
+        trading_session_london_end_hour_utc=12,
+        trading_session_new_york_start_hour_utc=13,
+        trading_session_new_york_end_hour_utc=18,
+    )
+    monkeypatch.setattr(run_live_replay_parity_audit, "get_settings", lambda: settings)
+
+    payload = run_live_replay_parity_audit._local_replay_flow_baseline(
+        filters={
+            "symbol": "BTCUSDC",
+            "strategy_families": ["session_impulse_retest"],
+            "entry_models": ["CONFIRM"],
+            "directions": ["LONG", "SHORT"],
+            "sessions": ["london", "new_york"],
+        },
+        cadence_window={"current_window_active_contract_intents_per_week": 0.5},
+    )
+
+    assert payload is not None
+    assert payload["source"] == "micro_main_usdc_backtest"
+    assert payload["matched_replay_rows"] == 2
+    assert payload["expected_active_contract_candidates_per_week_from_replay"] == 1.0
+
+
+def test_live_replay_parity_uses_usdc_effective_window_days(monkeypatch, tmp_path) -> None:
+    validation_dir = tmp_path / "reports" / "validation"
+    usdc_dir = validation_dir / "micro_main_usdc_backtests"
+    usdc_dir.mkdir(parents=True)
+    (usdc_dir / "micro_main_usdc_backtest_20260510T000000Z.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-05-10T00:00:00Z",
+                "days": 1825,
+                "symbols": ["BTCUSDC"],
+                "results": {
+                    "BTCUSDC": {
+                        "symbol": "BTCUSDC",
+                        "window": {
+                            "effective_start_ts": "2026-05-01T00:00:00+00:00",
+                            "effective_end_ts": "2026-05-08T00:00:00+00:00",
+                        },
+                        "trades": [
+                            {
+                                "family": "session_impulse_retest",
+                                "direction": "long",
+                                "entry_ts": "2026-05-01T07:30:00+00:00",
+                            },
+                            {
+                                "family": "session_impulse_retest",
+                                "direction": "short",
+                                "entry_ts": "2026-05-02T13:30:00+00:00",
+                            },
+                        ],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = SimpleNamespace(
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDC",
+        auto_trading_replay_validation_bridge_backtest_dir=str(usdc_dir),
+        validation_report_dir=str(validation_dir),
+        trading_session_london_start_hour_utc=7,
+        trading_session_london_end_hour_utc=12,
+        trading_session_new_york_start_hour_utc=13,
+        trading_session_new_york_end_hour_utc=18,
+    )
+    monkeypatch.setattr(run_live_replay_parity_audit, "get_settings", lambda: settings)
+
+    payload = run_live_replay_parity_audit._local_replay_flow_baseline(
+        filters={
+            "symbol": "BTCUSDC",
+            "strategy_families": ["session_impulse_retest"],
+            "entry_models": ["CONFIRM"],
+            "directions": ["LONG", "SHORT"],
+            "sessions": ["london", "new_york"],
+        },
+        cadence_window={"current_window_active_contract_intents_per_week": 1.0},
+    )
+
+    assert payload is not None
+    assert payload["source"] == "micro_main_usdc_backtest"
+    assert payload["replay_window_days"] == 7.0
+    assert payload["expected_active_contract_candidates_per_week_from_replay"] == 2.0
+
+
 def test_live_replay_parity_prefers_latest_named_usdt_proxy_baseline_over_mtime(monkeypatch, tmp_path) -> None:
     backtest_dir = tmp_path / "reports" / "validation" / "micro_main_usdt_proxy_backtests"
     backtest_dir.mkdir(parents=True)
@@ -1252,6 +1454,74 @@ def test_live_replay_parity_prefers_latest_named_usdt_proxy_baseline_over_mtime(
         encoding="utf-8",
     )
     old_path.touch()
+    settings = SimpleNamespace(
+        auto_trading_replay_validation_bridge_backtest_dir=str(backtest_dir),
+        validation_report_dir=str(tmp_path / "reports" / "validation"),
+        trading_session_london_start_hour_utc=7,
+        trading_session_london_end_hour_utc=12,
+        trading_session_new_york_start_hour_utc=13,
+        trading_session_new_york_end_hour_utc=18,
+    )
+    monkeypatch.setattr(run_live_replay_parity_audit, "get_settings", lambda: settings)
+
+    payload = run_live_replay_parity_audit._local_replay_flow_baseline(
+        filters={
+            "symbol": "BTCUSDC",
+            "strategy_families": ["session_impulse_retest"],
+            "entry_models": ["CONFIRM"],
+            "directions": ["LONG", "SHORT"],
+            "sessions": ["london", "new_york"],
+        },
+        cadence_window={"current_window_active_contract_intents_per_week": 0.5},
+    )
+
+    assert payload is not None
+    assert "20260515T175711Z" in payload["source_path"]
+    assert payload["matched_replay_rows"] == 2
+
+
+def test_live_replay_parity_prefers_longer_matching_usdt_proxy_baseline(monkeypatch, tmp_path) -> None:
+    backtest_dir = tmp_path / "reports" / "validation" / "micro_main_usdt_proxy_backtests"
+    backtest_dir.mkdir(parents=True)
+    long_path = backtest_dir / "micro_main_usdt_proxy_backtest_20260515T175711Z.json"
+    short_path = backtest_dir / "micro_main_usdt_proxy_backtest_20260516T184951Z.json"
+    long_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-05-15T17:57:11Z",
+                "days": 1825,
+                "proxy_symbols": ["BTCUSDT"],
+                "results": {
+                    "BTCUSDT": {
+                        "proxy_symbol": "BTCUSDT",
+                        "canonical_symbol": "BTCUSDC",
+                        "trades": [
+                            {"family": "session_impulse_retest", "direction": "long", "entry_ts": "2026-05-01T07:30:00+00:00"},
+                            {"family": "session_impulse_retest", "direction": "short", "entry_ts": "2026-05-02T13:30:00+00:00"},
+                        ],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    short_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-05-16T18:49:51Z",
+                "days": 30,
+                "proxy_symbols": ["BTCUSDT"],
+                "results": {
+                    "BTCUSDT": {
+                        "proxy_symbol": "BTCUSDT",
+                        "canonical_symbol": "BTCUSDC",
+                        "trades": [{"family": "session_impulse_retest", "direction": "long", "entry_ts": "2026-05-01T07:30:00+00:00"}],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     settings = SimpleNamespace(
         auto_trading_replay_validation_bridge_backtest_dir=str(backtest_dir),
         validation_report_dir=str(tmp_path / "reports" / "validation"),

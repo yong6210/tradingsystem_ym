@@ -545,7 +545,7 @@ def test_health_market_data_probe_symbols_cover_current_micro_live_contract() ->
     service = HealthCheckService()
     live_symbols = (
         "BTCUSDC,ETHUSDC,SOLUSDC,LINKUSDC,BNBUSDC,XRPUSDC,ADAUSDC,AVAXUSDC,"
-        "BCHUSDC,LTCUSDC,NEARUSDC,1000PEPEUSDC,ARBUSDC,1000SHIBUSDC,FILUSDC,DOGEUSDC"
+        "BCHUSDC,LTCUSDC,NEARUSDC,FILUSDC,DOGEUSDC"
     )
     service.settings = SimpleNamespace(
         auto_trading_micro_live_allowed_symbols=live_symbols,
@@ -555,7 +555,7 @@ def test_health_market_data_probe_symbols_cover_current_micro_live_contract() ->
 
     symbols = service._market_data_probe_symbols()
 
-    assert len(symbols) == 16
+    assert len(symbols) == 13
     assert symbols[-1] == "DOGEUSDC"
     assert "SUIUSDC" not in symbols
     assert "AAVEUSDC" not in symbols

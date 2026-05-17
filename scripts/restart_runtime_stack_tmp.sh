@@ -143,18 +143,21 @@ rotate_log_if_large() {
 }
 
 sync_micro_main_backtest_reports() {
-  local src_dir="$WORKSPACE_ROOT/reports/validation/micro_main_usdt_proxy_backtests"
-  local dst_dir="$REPORTS_DIR/validation/micro_main_usdt_proxy_backtests"
-  local path dst
+  local report_dir path dst src_dir dst_dir pattern
 
-  [[ -d "$src_dir" ]] || return 0
-  mkdir -p "$dst_dir"
-  while IFS= read -r path; do
-    dst="$dst_dir/$(basename "$path")"
-    if [[ ! -f "$dst" ]] || ! cmp -s "$path" "$dst"; then
-      cp -p "$path" "$dst"
-    fi
-  done < <(find "$src_dir" -maxdepth 1 -type f -name 'micro_main_usdt_proxy_backtest_*.json' | sort)
+  for report_dir in micro_main_usdt_proxy_backtests micro_main_usdc_backtests micro_main_usdt_backtests micro_main_risk_sweeps; do
+    src_dir="$WORKSPACE_ROOT/reports/validation/$report_dir"
+    dst_dir="$REPORTS_DIR/validation/$report_dir"
+    [[ -d "$src_dir" ]] || continue
+    mkdir -p "$dst_dir"
+    pattern='*.json'
+    while IFS= read -r path; do
+      dst="$dst_dir/$(basename "$path")"
+      if [[ ! -f "$dst" ]] || ! cmp -s "$path" "$dst"; then
+        cp -p "$path" "$dst"
+      fi
+    done < <(find "$src_dir" -maxdepth 1 -type f -name "$pattern" | sort)
+  done
 }
 
 post_restart_refresh_reports() {

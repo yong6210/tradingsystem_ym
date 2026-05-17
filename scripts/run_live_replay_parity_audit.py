@@ -340,7 +340,7 @@ def _local_replay_flow_baseline(*, filters: dict[str, Any], cadence_window: dict
         observed = _safe_float(cadence_window.get("current_window_active_contract_intents_per_week"))
         return {
             "available": True,
-            "source": "micro_main_usdt_proxy_backtest",
+            "source": str(usdt_proxy.get("source") or "micro_main_usdt_proxy_backtest"),
             "source_path": str(usdt_proxy.get("source_path") or ""),
             "generated_at": str(usdt_proxy.get("generated_at") or ""),
             "contract_filters": {
