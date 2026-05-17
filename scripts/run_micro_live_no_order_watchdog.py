@@ -809,6 +809,7 @@ def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
         candidate_context=candidate_context,
         opportunity_context=opportunity_context,
     )
+    overall_status = str(evaluation.get("status") or ("ALERT" if _safe_bool(evaluation.get("alert")) else "OK")).upper()
     watchdog_scope = "runtime_since_ws_start" if runtime_started_at is not None else "lookback_window"
     generated_at = datetime.now(UTC)
     runtime_age = _runtime_age_minutes(generated_at=generated_at, runtime_started_at=runtime_started_at)
@@ -819,6 +820,7 @@ def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
     )
     return {
         "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+        "overall_status": overall_status,
         "window_days": max(1, int(days)),
         "runtime_started_at": runtime_started_at.isoformat() if runtime_started_at else None,
         "runtime_age_minutes": runtime_age,
@@ -845,6 +847,7 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         "# MICRO_LIVE No-Order Watchdog",
         "",
         f"- generated_at: {payload.get('generated_at')}",
+        f"- overall_status: {payload.get('overall_status') or evaluation.get('status')}",
         f"- status: {evaluation.get('status')}",
         f"- severity: {evaluation.get('severity')}",
         f"- reason: {evaluation.get('reason')}",
@@ -888,6 +891,11 @@ def _notification_delivered(result: dict[str, Any]) -> bool:
 def main() -> int:
     args = parse_args()
     payload = build_payload(days=max(1, int(args.days)), limit=max(1, int(args.limit)), min_intents=max(1, int(args.min_intents)))
+    evaluation = dict(payload.get("evaluation") or {})
+    payload.setdefault(
+        "overall_status",
+        str(evaluation.get("status") or ("ALERT" if _safe_bool(evaluation.get("alert")) else "OK")).upper(),
+    )
     if not args.no_write_report:
         generated = parse_report_generated_at(payload.get("generated_at"))
         report_dir = ROOT_DIR / args.report_dir
@@ -898,7 +906,6 @@ def main() -> int:
         _write_report(report_path, payload, atomic=True)
         payload.update(_write_latest_aliases(report_dir=report_dir, payload=payload))
 
-    evaluation = dict(payload.get("evaluation") or {})
     alert_active = _safe_bool(evaluation.get("alert"))
     if bool(args.notify) and alert_active:
         state_file = _resolve_root_path(str(args.state_file))

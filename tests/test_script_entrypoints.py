@@ -482,6 +482,38 @@ def test_session_impulse_retest_runtime_audit_status_summary_splits_blocking_and
     assert summary["order_blocking_status_counts"] == {"intent_blocked": 1, "submit_error": 1}
 
 
+def test_session_impulse_retest_runtime_audit_phase_summaries_keep_refresh_visible() -> None:
+    start_at = datetime(2026, 5, 10, 0, 30, tzinfo=UTC)
+
+    summaries = sir_runtime_audit_report._phase_status_summaries(
+        {
+            "refresh": [
+                {
+                    "observed_ts": "2026-05-10T00:00:00Z",
+                    "phase": "refresh",
+                    "status": "stale_refresh",
+                },
+                {
+                    "observed_ts": "2026-05-10T01:00:00Z",
+                    "phase": "refresh",
+                    "status": "no_fresh_candidates",
+                },
+            ],
+            "auto_route": [
+                {
+                    "observed_ts": "2026-05-10T01:01:00Z",
+                    "phase": "auto_route",
+                    "status": "no_live_route_candidate_plan",
+                },
+            ],
+        },
+        start_at=start_at,
+    )
+
+    assert summaries["refresh"]["status_counts"] == {"no_fresh_candidates": 1}
+    assert summaries["auto_route"]["no_candidate_status_counts"] == {"no_live_route_candidate_plan": 1}
+
+
 def test_session_impulse_retest_runtime_audit_filters_runtime_scope() -> None:
     rows = [
         {"observed_ts": "2026-05-10T00:00:00Z", "status": "submit_error"},

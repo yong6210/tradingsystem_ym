@@ -8,8 +8,12 @@ from app.services.strategy_mode import StrategyModeService
 def test_strategy_mode_policy_defaults_to_a_only() -> None:
     settings = get_settings()
     old_mode = settings.strategy_mode
+    old_daily_trades = settings.strategy_mode_a_only_max_daily_trades
+    old_total_risk = settings.strategy_mode_a_only_max_total_risk_r
     try:
         settings.strategy_mode = StrategyMode.A_ONLY
+        settings.strategy_mode_a_only_max_daily_trades = 3
+        settings.strategy_mode_a_only_max_total_risk_r = 1.5
         service = StrategyModeService(settings)
         policy = service.policy()
         assert policy.mode == StrategyMode.A_ONLY
@@ -19,6 +23,8 @@ def test_strategy_mode_policy_defaults_to_a_only() -> None:
         assert policy.max_total_risk_r == 1.5
     finally:
         settings.strategy_mode = old_mode
+        settings.strategy_mode_a_only_max_daily_trades = old_daily_trades
+        settings.strategy_mode_a_only_max_total_risk_r = old_total_risk
 
 
 def test_strategy_mode_policy_tolerates_malformed_numeric_settings() -> None:

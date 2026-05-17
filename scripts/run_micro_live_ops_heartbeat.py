@@ -61,8 +61,7 @@ _DEFAULT_JOBS: dict[str, Any] = {
     "liquidity_universe": {
         "pattern": "reports/operations/micro_live_liquidity_universe/*.md",
         "max_age_minutes": 190,
-        "pass_statuses": {"PASS"},
-        "watch_statuses": {"WATCH"},
+        "pass_statuses": {"PASS", "WATCH"},
     },
     "boot_check": {
         "pattern": "reports/operations/micro_live_boot_check/*.md",

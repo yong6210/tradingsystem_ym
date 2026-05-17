@@ -684,7 +684,9 @@ def test_no_order_watchdog_main_writes_latest_aliases(monkeypatch, tmp_path, cap
     assert (tmp_path / "latest.md").exists()
     assert (tmp_path / "latest.json").exists()
     assert output["latest_report_path"].endswith("latest.md")
+    assert output["overall_status"] == "OK"
     latest_payload = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
+    assert latest_payload["overall_status"] == "OK"
     assert latest_payload["evaluation"]["status"] == "OK"
 
 
@@ -929,6 +931,7 @@ def test_synthetic_canary_blocks_tiny_liquidity_partial_submit(monkeypatch) -> N
 
 def test_liquidity_universe_summarizes_symbol_direction_passes(monkeypatch) -> None:
     calls: list[dict] = []
+    config_calls = 0
 
     def fake_run_canary(**kwargs):
         calls.append(dict(kwargs))
@@ -956,7 +959,13 @@ def test_liquidity_universe_summarizes_symbol_direction_passes(monkeypatch) -> N
             "liquidity_gate": gate,
         }
 
+    def fake_config_checks(**_kwargs):
+        nonlocal config_calls
+        config_calls += 1
+        return [{"name": "config", "status": "PASS", "severity": "blocking", "message": "ok"}]
+
     monkeypatch.setattr(run_micro_live_liquidity_universe, "run_canary", fake_run_canary)
+    monkeypatch.setattr(run_micro_live_liquidity_universe, "_micro_live_config_drift_checks", fake_config_checks)
     payload = run_micro_live_liquidity_universe.build_payload(
         symbols="BTCUSDT,ETHUSDT",
         directions="long,short",
@@ -977,6 +986,99 @@ def test_liquidity_universe_summarizes_symbol_direction_passes(monkeypatch) -> N
     assert calls[0]["symbol"] == "BTCUSDT"
     assert calls[0]["direction"] == "long"
     assert calls[0]["use_private_balance"] is False
+    assert calls[0]["config_checks"][0]["name"] == "config"
+    assert config_calls == 1
+    assert payload["symbols"] == ["BTCUSDT", "ETHUSDT"]
+    assert payload["recommended_execution_symbols"] == ["BTCUSDT"]
+    assert payload["symbols_by_executability"] == {
+        "all_directions": ["BTCUSDT"],
+        "one_direction": ["ETHUSDT"],
+        "blocked": [],
+    }
+    assert payload["symbols_with_one_direction_pass"] == ["ETHUSDT"]
+    assert payload["symbols_without_direction_pass"] == []
+    assert payload["symbol_direction_statuses"]["ETHUSDT"]["executability"] == "one_direction"
+    assert payload["symbol_direction_statuses"]["ETHUSDT"]["failed_directions"] == ["short"]
+
+
+def test_liquidity_universe_fails_when_too_few_symbols_are_executable(monkeypatch) -> None:
+    def fake_run_canary(**kwargs):
+        symbol = str(kwargs["symbol"])
+        status = "PASS" if symbol == "BTCUSDT" else "FAIL"
+        return {
+            "overall_status": status,
+            "live_sizing": {
+                "target_notional": 100.0,
+                "normalized_notional": 100.0 if status == "PASS" else 0.0,
+                "actual_risk_pct": 0.01 if status == "PASS" else 0.0,
+            },
+            "liquidity_gate": {
+                "decision": "PASS" if status == "PASS" else "BLOCK",
+                "message": "ok" if status == "PASS" else "blocked",
+                "reason_codes": [] if status == "PASS" else ["spread_too_wide"],
+            },
+        }
+
+    monkeypatch.setattr(run_micro_live_liquidity_universe, "run_canary", fake_run_canary)
+    monkeypatch.setattr(
+        run_micro_live_liquidity_universe,
+        "_micro_live_config_drift_checks",
+        lambda **_kwargs: [{"name": "config", "status": "PASS", "severity": "blocking", "message": "ok"}],
+    )
+    payload = run_micro_live_liquidity_universe.build_payload(
+        symbols="BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT",
+        directions="long,short",
+        sleep_seconds=0.0,
+        max_retries=0,
+        use_network=True,
+        min_executable_fraction=0.60,
+        min_check_pass_fraction=0.50,
+    )
+
+    assert payload["overall_status"] == "FAIL"
+    assert payload["executable_symbol_count"] == 1
+    assert payload["minimum_executable_symbols"] == 3
+    assert "liquidity_universe_too_few_executable_symbols" in payload["failure_reasons"]
+    assert "liquidity_universe_too_few_passed_checks" in payload["failure_reasons"]
+
+
+def test_liquidity_universe_fails_when_private_balance_snapshot_fails(monkeypatch) -> None:
+    def fake_run_canary(**_kwargs):
+        return {
+            "overall_status": "PASS",
+            "live_sizing": {
+                "target_notional": 100.0,
+                "normalized_notional": 100.0,
+                "actual_risk_pct": 0.01,
+            },
+            "liquidity_gate": {"decision": "PASS", "message": "ok", "reason_codes": []},
+        }
+
+    class FakeClient:
+        def fetch_futures_balances(self):
+            raise RuntimeError("balance unavailable")
+
+    monkeypatch.setattr(run_micro_live_liquidity_universe, "run_canary", fake_run_canary)
+    monkeypatch.setattr(run_micro_live_liquidity_universe, "BinanceFuturesClient", lambda: FakeClient())
+    monkeypatch.setattr(
+        run_micro_live_liquidity_universe,
+        "_micro_live_config_drift_checks",
+        lambda **_kwargs: [{"name": "config", "status": "PASS", "severity": "blocking", "message": "ok"}],
+    )
+
+    payload = run_micro_live_liquidity_universe.build_payload(
+        symbols="BTCUSDT,ETHUSDT",
+        directions="long,short",
+        sleep_seconds=0.0,
+        max_retries=0,
+        use_network=True,
+        use_private_balance=True,
+    )
+
+    assert payload["overall_status"] == "FAIL"
+    assert payload["pass_count"] == 4
+    assert payload["balance_error"] == "RuntimeError:balance unavailable"
+    assert "liquidity_universe_balance_snapshot_error" in payload["failure_reasons"]
 
 
 def test_runtime_guard_main_writes_latest_aliases(monkeypatch, tmp_path, capsys) -> None:
@@ -4196,8 +4298,7 @@ def test_ops_heartbeat_defaults_include_liquidity_universe() -> None:
     config = run_micro_live_ops_heartbeat._DEFAULT_JOBS["liquidity_universe"]
 
     assert config["pattern"] == "reports/operations/micro_live_liquidity_universe/*.md"
-    assert config["pass_statuses"] == {"PASS"}
-    assert config["watch_statuses"] == {"WATCH"}
+    assert config["pass_statuses"] == {"PASS", "WATCH"}
 
 
 def test_ops_heartbeat_checks_entry_surface_latest_payload(monkeypatch, tmp_path) -> None:

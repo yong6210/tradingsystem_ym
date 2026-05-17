@@ -254,6 +254,7 @@ def run_canary(
     use_network: bool,
     use_private_balance: bool = True,
     balance_snapshot: Any | None = None,
+    config_checks: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     normalized_symbol = _first_live_symbol(settings, symbol)
@@ -305,7 +306,7 @@ def run_canary(
         balance_loader=balance_loader,
     )
 
-    checks = _micro_live_config_drift_checks(check_binance_rules=False)
+    checks = config_checks if config_checks is not None else _micro_live_config_drift_checks(check_binance_rules=False)
     blocking_config = _blocking_config_checks(checks)
     live_quantity, live_sizing, sizing_error = coordinator._live_order_sizing(intent=intent, plan=plan)
     side = "BUY" if normalized_direction == "long" else "SELL"

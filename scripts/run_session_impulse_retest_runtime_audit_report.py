@@ -155,6 +155,17 @@ def _status_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _phase_status_summaries(
+    phase_rows: dict[str, list[dict[str, Any]]],
+    *,
+    start_at: datetime | None = None,
+) -> dict[str, Any]:
+    summaries: dict[str, Any] = {}
+    for phase, rows in sorted(phase_rows.items()):
+        summaries[str(phase)] = _status_summary(_rows_since(rows, start_at))
+    return summaries
+
+
 def _compact_audit(row: dict[str, Any]) -> dict[str, Any]:
     payload = dict(row.get("payload") or {})
     diagnostics = dict(payload.get("plan_generation_diagnostics") or {})
@@ -221,8 +232,21 @@ def build_payload(
             status=status,
             limit=max(1, int(limit)),
         )
+        phase_lookback_rows: dict[str, list[dict[str, Any]]] = {}
+        if phase is None and status is None:
+            for phase_name in ("refresh", "auto_route"):
+                phase_lookback_rows[phase_name] = engine.session_impulse_retest_runtime_audits_recent(
+                    hours=max(1, int(hours)),
+                    symbol=symbol,
+                    phase=phase_name,
+                    status=None,
+                    limit=max(1, int(limit)),
+                )
+        elif phase is not None:
+            phase_lookback_rows[str(phase)] = list(lookback_rows)
     rows = _rows_since(lookback_rows, start_at)
     summary = _status_summary(rows)
+    phase_summaries = _phase_status_summaries(phase_lookback_rows, start_at=start_at)
     return {
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "hours": max(1, int(hours)),
@@ -232,7 +256,9 @@ def build_payload(
         "phase_filter": str(phase or ""),
         "status_filter": str(status or ""),
         **summary,
+        "phase_summaries": phase_summaries,
         "lookback_summary": _status_summary(lookback_rows) if start_at is not None else {},
+        "lookback_phase_summaries": _phase_status_summaries(phase_lookback_rows) if start_at is not None else {},
         "recent_audits": [_compact_audit(row) for row in rows[: max(1, int(limit))]],
         "lookback_recent_audits": [_compact_audit(row) for row in lookback_rows[: max(1, int(limit))]] if start_at is not None else [],
     }
@@ -255,7 +281,9 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         f"- order_blocking_status_counts: {payload.get('order_blocking_status_counts')}",
         f"- non_blocking_status_counts: {payload.get('non_blocking_status_counts')}",
         f"- no_candidate_status_counts: {payload.get('no_candidate_status_counts')}",
+        f"- phase_summaries: {payload.get('phase_summaries') or {}}",
         f"- lookback_summary: {payload.get('lookback_summary') or {}}",
+        f"- lookback_phase_summaries: {payload.get('lookback_phase_summaries') or {}}",
         "",
         "## Recent Audits",
         "",
