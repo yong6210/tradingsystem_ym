@@ -23,6 +23,7 @@ from scripts import run_micro_live_failure_drill
 from scripts import run_micro_live_no_order_watchdog
 from scripts import run_micro_live_ops_heartbeat
 from scripts import run_micro_live_runtime_guard
+from scripts import run_micro_live_liquidity_universe
 from scripts import run_micro_live_synthetic_canary
 
 
@@ -150,6 +151,61 @@ def test_no_order_watchdog_augments_no_intents_with_sir_candidate_context() -> N
     assert "watch=symbol_not_live_enabled_for_auto_route=2" in enriched["message"]
 
 
+def test_no_order_watchdog_surfaces_latest_signal_reason_counts() -> None:
+    evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
+        lifecycle={
+            "summary": {
+                "submission_count": 0,
+                "requested_live_count": 0,
+                "rejected_or_error_count": 0,
+                "live_intents": {"total": 0, "submit_ready": 0, "blocked": 0, "top_block_reasons": {}},
+            }
+        },
+        min_intents=1,
+    )
+
+    enriched = run_micro_live_no_order_watchdog._augment_no_order_evaluation(
+        evaluation,
+        candidate_context={
+            "source": "session_impulse_retest_runtime_audit",
+            "scope": "runtime_since_ws_start",
+            "audit_count": 12,
+            "no_candidate_status_counts": {"no_live_route_candidate_plan": 7},
+            "watch_status_counts": {},
+            "non_blocking_status_counts": {},
+            "order_blocking_status_counts": {},
+            "latest_signal_reason_counts": {
+                "after_session_signal_window": 5,
+                "trend_strength_too_weak": 2,
+            },
+        },
+    )
+
+    assert enriched["candidate_generation_status"] == "no_live_route_candidate"
+    assert "신호 없음 이유: after_session_signal_window=5, trend_strength_too_weak=2" in enriched["next_action_text"]
+    assert "signal_reasons=after_session_signal_window=5, trend_strength_too_weak=2" in enriched["message"]
+
+
+def test_no_order_watchdog_filters_refresh_context_by_created_at() -> None:
+    start_at = datetime(2026, 5, 17, 13, 22, tzinfo=UTC)
+    rows = [
+        {
+            "created_at": "2026-05-17T13:23:00+00:00",
+            "observed_ts": "2026-05-17T13:20:00+00:00",
+            "status": "no_fresh_candidates",
+        },
+        {
+            "created_at": "2026-05-17T13:21:59+00:00",
+            "observed_ts": "2026-05-17T13:25:00+00:00",
+            "status": "no_fresh_candidates",
+        },
+    ]
+
+    filtered = run_micro_live_no_order_watchdog._rows_created_since(rows, start_at)
+
+    assert filtered == [rows[0]]
+
+
 def test_no_order_watchdog_alerts_when_backtest_opportunity_has_no_live_intent() -> None:
     evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
         lifecycle={
@@ -218,6 +274,7 @@ def test_no_order_watchdog_records_pre_restart_opportunities_as_advisory() -> No
             "watch_status_counts": {},
             "non_blocking_status_counts": {"ws_stream_active_route_suppressed": 12},
             "order_blocking_status_counts": {},
+            "latest_signal_reason_counts": {"opening_range_too_wide": 6},
         },
         opportunity_context={
             "source": "session_impulse_retest_opportunity_report",
@@ -246,6 +303,7 @@ def test_no_order_watchdog_records_pre_restart_opportunities_as_advisory() -> No
     assert enriched["reason"] == "sir_pre_restart_expected_orders_advisory"
     assert enriched["historical_advisory"] is True
     assert enriched["candidate_generation_status"] == "pre_restart_backtest_opportunities_advisory"
+    assert "현재 신호 없음 이유: opening_range_too_wide=6" in enriched["next_action_text"]
     assert "pre_restart=12" in enriched["message"]
     assert "before_runtime_start=12" in enriched["message"]
 
@@ -773,6 +831,7 @@ def test_synthetic_canary_counts_liquidity_partial_submit_as_pass(monkeypatch) -
     monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_fail_closed", True)
     monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", True)
     monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_min_tranche_notional_usdt", 10.0)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_min_tranche_target_fraction", 0.0)
     monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", "BTCUSDC")
     monkeypatch.setattr(
         run_micro_live_synthetic_canary,
@@ -811,7 +870,113 @@ def test_synthetic_canary_counts_liquidity_partial_submit_as_pass(monkeypatch) -
     assert payload["liquidity_gate"]["decision"] == "SPLIT_PARTIAL_SUBMIT"
     assert payload["live_sizing"]["liquidity_gate_decision"] == "SPLIT_PARTIAL_SUBMIT"
     assert payload["live_sizing"]["max_position_notional"] == 20.0
+    assert payload["live_sizing"]["normalized_notional"] == 20.0
+    assert payload["live_sizing"]["actual_risk_pct"] == 0.001
     assert payload["live_sizing"]["live_tranche"]["remaining_notional"] == 180.0
+
+
+def test_synthetic_canary_blocks_tiny_liquidity_partial_submit(monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "RISK_PCT")
+    monkeypatch.setattr(settings, "auto_trading_live_account_equity_usdt", 200.0)
+    monkeypatch.setattr(settings, "auto_trading_live_balance_sync_enabled", False)
+    monkeypatch.setattr(settings, "auto_trading_live_risk_per_trade_pct", 0.01)
+    monkeypatch.setattr(settings, "auto_trading_live_usable_margin_fraction", 0.85)
+    monkeypatch.setattr(settings, "auto_trading_live_leverage_cap", 10.0)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_fail_closed", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_min_tranche_notional_usdt", 10.0)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_min_tranche_target_fraction", 0.5)
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", "BTCUSDC")
+    monkeypatch.setattr(
+        run_micro_live_synthetic_canary,
+        "_micro_live_config_drift_checks",
+        lambda **_kwargs: [{"name": "config", "status": "PASS", "severity": "blocking", "message": "ok"}],
+    )
+
+    def _thin_liquidity_loader(_settings):
+        def _loader(**kwargs):
+            quantity = float(kwargs["quantity"])
+            reference_price = float(kwargs["reference_price"])
+            return {
+                "source": "test_thin_liquidity",
+                "order_notional": round(quantity * reference_price, 4),
+                "opposite_depth_notional": 50_000.0,
+                "spread_bps": 1.0,
+                "market_slippage_bps": 1.0,
+                "recent_1m_quote_volume": 1_000.0,
+                "recent_5m_quote_volume": 5_000.0,
+            }
+
+        return _loader
+
+    monkeypatch.setattr(run_micro_live_synthetic_canary, "_synthetic_liquidity_loader", _thin_liquidity_loader)
+
+    payload = run_micro_live_synthetic_canary.run_canary(
+        symbol="BTCUSDC",
+        direction="long",
+        entry_model="LIMIT",
+        entry_price=100.0,
+        stop_bps=100.0,
+        use_network=False,
+    )
+
+    assert payload["overall_status"] == "FAIL"
+    assert payload["liquidity_gate"]["decision"] == "SPLIT_REQUIRED"
+    assert payload["liquidity_gate"]["partial_submit_error"] == "partial_submit_target_fraction_below_minimum"
+
+
+def test_liquidity_universe_summarizes_symbol_direction_passes(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    def fake_run_canary(**kwargs):
+        calls.append(dict(kwargs))
+        symbol = str(kwargs["symbol"])
+        direction = str(kwargs["direction"])
+        status = "PASS"
+        decision = "PASS"
+        gate = {"decision": decision, "message": "ok", "reason_codes": []}
+        sizing = {
+            "target_notional": 100.0,
+            "normalized_notional": 100.0,
+            "actual_risk_pct": 0.01,
+        }
+        if symbol == "ETHUSDT" and direction == "long":
+            decision = "SPLIT_PARTIAL_SUBMIT"
+            gate = {"decision": decision, "message": "partial", "reason_codes": ["one_minute_participation_too_high"]}
+            sizing["live_tranche"] = {"submitted_target_fraction": 0.75}
+        if symbol == "ETHUSDT" and direction == "short":
+            status = "FAIL"
+            decision = "BLOCK"
+            gate = {"decision": decision, "message": "blocked", "reason_codes": ["spread_too_wide"]}
+        return {
+            "overall_status": status,
+            "live_sizing": sizing,
+            "liquidity_gate": gate,
+        }
+
+    monkeypatch.setattr(run_micro_live_liquidity_universe, "run_canary", fake_run_canary)
+    payload = run_micro_live_liquidity_universe.build_payload(
+        symbols="BTCUSDT,ETHUSDT",
+        directions="long,short",
+        sleep_seconds=0.0,
+        max_retries=0,
+        use_network=True,
+    )
+
+    assert payload["overall_status"] == "WATCH"
+    assert payload["no_live_order_sent"] is True
+    assert payload["check_count"] == 4
+    assert payload["pass_count"] == 3
+    assert payload["executable_symbol_count"] == 2
+    assert payload["fully_executable_symbol_count"] == 1
+    assert payload["symbols_with_all_directions_pass"] == ["BTCUSDT"]
+    assert payload["by_direction"]["long"]["partial_symbols"] == ["ETHUSDT"]
+    assert payload["by_direction"]["short"]["blocked_symbols"] == ["ETHUSDT"]
+    assert calls[0]["symbol"] == "BTCUSDT"
+    assert calls[0]["direction"] == "long"
+    assert calls[0]["use_private_balance"] is False
 
 
 def test_runtime_guard_main_writes_latest_aliases(monkeypatch, tmp_path, capsys) -> None:
@@ -2956,6 +3121,7 @@ def test_launchd_generator_includes_remaining_operational_guards(tmp_path) -> No
     assert "com.test.micro.live-leverage-cap-sync" in labels
     assert "com.test.micro.boot-check" in labels
     assert "com.test.micro.ops-heartbeat" in labels
+    assert "com.test.micro.liquidity-universe" in labels
     assert "com.test.micro.live-candidate-promotion-readiness" in labels
     assert "com.test.micro.replay-validation-bridge" in labels
     assert "com.test.micro.live-replay-parity" in labels
@@ -2967,6 +3133,7 @@ def test_launchd_generator_includes_remaining_operational_guards(tmp_path) -> No
         "reconciliation_watchdog",
         "live_account_protection_audit",
         "live_leverage_cap_sync",
+        "liquidity_universe",
         "boot_check",
         "live_candidate_promotion_readiness",
         "live_replay_parity",
@@ -2983,6 +3150,10 @@ def test_launchd_generator_includes_remaining_operational_guards(tmp_path) -> No
     assert "run_live_candidate_promotion_readiness.py" in readiness_job.args[1]
     assert readiness_job.start_interval == 5 * 60
     assert "--since-ws-start" in readiness_job.args
+    liquidity_job = next(job for job in jobs if job.name == "liquidity_universe")
+    assert "run_micro_live_liquidity_universe.py" in liquidity_job.args[1]
+    assert "--use-private-balance" in liquidity_job.args
+    assert liquidity_job.start_interval == 2 * 60 * 60
     assert any((tmp_path / f"{label}.plist").exists() for label in labels)
 
 
@@ -4019,6 +4190,14 @@ def test_ops_heartbeat_defaults_include_live_candidate_promotion_readiness() -> 
     assert config["pass_statuses"] == {"PASS"}
     assert config["watch_statuses"] == {"WATCH"}
     assert config["requires_current_runtime"] is True
+
+
+def test_ops_heartbeat_defaults_include_liquidity_universe() -> None:
+    config = run_micro_live_ops_heartbeat._DEFAULT_JOBS["liquidity_universe"]
+
+    assert config["pattern"] == "reports/operations/micro_live_liquidity_universe/*.md"
+    assert config["pass_statuses"] == {"PASS"}
+    assert config["watch_statuses"] == {"WATCH"}
 
 
 def test_ops_heartbeat_checks_entry_surface_latest_payload(monkeypatch, tmp_path) -> None:

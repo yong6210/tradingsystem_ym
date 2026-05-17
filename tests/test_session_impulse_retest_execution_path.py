@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from app.core.enums import ApprovalState, ExecutionMode, OrderLifecycleState, SubmitDecision
+from app.core.enums import ApprovalState, ExecutionMode, OrderLifecycleState, PlanState, SubmitDecision
 from app.db.models import ExecutionFill, OrderIntent, OrderSubmission, Plan
 from app.db.session import SessionLocal, init_db
 from app.domain.execution import RolloutPolicy
@@ -244,7 +244,10 @@ def _patch_live_contract(engine: StrategyEngine, *, allowed_symbols: list[str]) 
     engine.settings.auto_trading_notional_per_r = 25.0
     engine.settings.binance_live_min_quantity = 0.001
     engine.settings.binance_live_quantity_step = 0.001
+    engine.settings.auto_trading_live_account_protection_gate_enabled = False
+    engine.settings.auto_trading_live_balance_sync_enabled = False
     engine.settings.auto_trading_live_liquidity_gate_enabled = False
+    engine.settings.auto_trading_live_liquidity_gate_min_tranche_target_fraction = 0.0
     engine.settings.session_impulse_retest_shadow_only = False
     engine.settings.session_impulse_retest_partial_activation_ratio = 1.0
     engine.execution_coordinator.live_symbol_rules_loader = lambda symbol: {
@@ -1778,6 +1781,40 @@ def test_session_impulse_retest_direct_plan_route_creates_and_submits_live_inten
         assert submitted_calls == [("intent_direct_route_btc", True)]
 
 
+def test_session_impulse_retest_empty_direct_route_does_not_scan_legacy_plans() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        _patch_live_contract(engine, allowed_symbols=["BTCUSDC"])
+        legacy_plan = _sweep_plan(symbol="BTCUSDC", plan_id="legacy_BTCUSDC_noise")
+        db.add(legacy_plan)
+        db.commit()
+
+        engine.create_order_intent = lambda **kwargs: (_ for _ in ()).throw(AssertionError("empty SIR route must not create intent"))  # type: ignore[assignment]
+        engine.submit_order_intent = lambda **kwargs: (_ for _ in ()).throw(AssertionError("empty SIR route must not submit"))  # type: ignore[assignment]
+
+        payload = engine.auto_route_session_impulse_retest_plans(
+            symbol="BTCUSDC",
+            plan_ids=[],
+        )
+
+        assert payload["reason"] == "no_live_route_candidate_plan"
+        assert payload["plans_considered"] == 0
+        assert payload["intents_created"] == 0
+        assert payload["submit_calls"] == 0
+        assert "rejected_plan_counts" not in payload
+
+        audits = engine.session_impulse_retest_runtime_audits_recent(
+            hours=1,
+            symbol="BTCUSDC",
+            phase="auto_route",
+            limit=5,
+        )
+        assert audits
+        assert audits[0]["status"] == "no_live_route_candidate_plan"
+        assert audits[0]["payload"]["plans_considered"] == 0
+
+
 def test_session_impulse_retest_shadow_symbol_is_not_auto_routed_live() -> None:
     init_db()
     with SessionLocal() as db:
@@ -1959,6 +1996,54 @@ def test_stream_binance_klines_refreshes_1m_and_5m_final_for_same_symbol() -> No
             ("BTCUSDC", ("sir_BTCUSDC_L_test",)),
             ("BTCUSDC", ("sir_BTCUSDC_L_test",)),
         ]
+
+
+def test_stream_binance_klines_uses_empty_sir_route_without_legacy_fallback() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        refresh_calls: list[str] = []
+        auto_route_calls: list[tuple[str, tuple[str, ...]]] = []
+        base_ts = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+
+        async def fake_stream_klines(*, symbols, interval):
+            del symbols, interval
+            yield SimpleNamespace(
+                symbol="BTCUSDC",
+                open_time=base_ts,
+                o=100.0,
+                h=101.0,
+                l=99.5,
+                c=100.5,
+                v=10.0,
+                is_final=True,
+            )
+
+        engine.market_data.binance.stream_klines = fake_stream_klines  # type: ignore[assignment]
+        engine.market_data.ingest_candle = lambda payload: None  # type: ignore[assignment]
+        engine.refresh_symbol = (  # type: ignore[assignment]
+            lambda symbol: refresh_calls.append(str(symbol)) or {"symbol": symbol, "session_impulse_retest_plan_ids": []}
+        )
+        engine.auto_route_session_impulse_retest_plans = (  # type: ignore[assignment]
+            lambda *, symbol, plan_ids: auto_route_calls.append((str(symbol), tuple(plan_ids))) or {"submit_calls": 0, "intents_created": 0}
+        )
+        engine.auto_route_symbol = (  # type: ignore[assignment]
+            lambda *, symbol: (_ for _ in ()).throw(AssertionError("legacy fallback auto_route_symbol should not be used"))
+        )
+
+        payload = asyncio.run(
+            engine.stream_binance_klines(
+                symbols=["BTCUSDC"],
+                intervals=["1m"],
+                refresh_on_final=True,
+                max_messages=1,
+            )
+        )
+
+        assert payload["refresh_calls"] == 1
+        assert payload["auto_route_calls"] == 1
+        assert refresh_calls == ["BTCUSDC"]
+        assert auto_route_calls == [("BTCUSDC", ())]
 
 
 def test_session_impulse_retest_miss_detector_flags_missing_intent(tmp_path) -> None:
@@ -2709,6 +2794,10 @@ def test_session_impulse_retest_refresh_audit_status_stays_no_fresh_without_sir_
         payload = engine.refresh_symbol(symbol)
 
         assert payload["session_impulse_retest_generated_count"] == 0
+        signal_diagnostics = payload["plan_generation_diagnostics"]["session_impulse_retest_latest_signal"]
+        assert signal_diagnostics["schema_version"] == "session_impulse_retest_latest_signal_diagnostics_v1"
+        assert signal_diagnostics["symbol"] == symbol
+        assert signal_diagnostics["status"] in {"no_fresh_signal", "fresh_signal"}
         audits = engine.session_impulse_retest_runtime_audits_recent(
             hours=1,
             symbol=symbol,
@@ -2716,7 +2805,130 @@ def test_session_impulse_retest_refresh_audit_status_stays_no_fresh_without_sir_
             limit=1,
         )
         assert audits
+        assert audits[0]["created_at"]
         assert audits[0]["status"] == "no_fresh_candidates"
+
+
+def test_session_impulse_retest_only_micro_live_refresh_skips_legacy_plan_generation() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        symbol = "BTCUSDT"
+        _patch_live_contract(engine, allowed_symbols=[symbol])
+        engine.settings.auto_trading_allowed_families = "session_impulse_retest"
+        engine.settings.auto_trading_micro_live_allowed_families = "session_impulse_retest"
+        base_ts = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        generated_micro = _micro_plan(symbol=symbol, plan_id="sir_BTCUSDT_refresh_generated")
+        stale_legacy = _sweep_plan(symbol=symbol, plan_id="legacy_BTCUSDT_stale_active")
+        db.add(stale_legacy)
+        db.commit()
+        emitted_plans: list[Plan] = []
+        upserted_plans: list[Plan] = []
+
+        engine.market_data.recent_candles = lambda *args, **kwargs: [  # type: ignore[assignment]
+            SimpleNamespace(
+                ts=base_ts - timedelta(minutes=max(0, kwargs.get("limit", 10) - 1 - i)),
+                o=100.0,
+                h=101.0,
+                l=99.0,
+                c=100.5,
+                v=10.0,
+            )
+            for i in range(kwargs.get("limit", 10))
+        ]
+        engine.context_engine.build_snapshot = lambda **kwargs: SimpleNamespace(  # type: ignore[assignment]
+            jump_rate_5m=0.0,
+            atr5=1.0,
+            transition_score=50.0,
+            transition_state="none",
+            transition_lock_reason=None,
+        )
+        engine.zone_repo.list_all = lambda **kwargs: []  # type: ignore[assignment]
+        engine.zone_engine.refresh = lambda **kwargs: []  # type: ignore[assignment]
+        engine._evaluate_gate = lambda **kwargs: (SimpleNamespace(value="OPEN"), True, "normal", SimpleNamespace(to_dict=lambda: {}))  # type: ignore[assignment]
+        engine._runtime_feature_calibration = lambda **kwargs: ("range", None)  # type: ignore[assignment]
+        engine.plan_repo.list_exposure_candidates = lambda **kwargs: []  # type: ignore[assignment]
+        engine.plan_generator.generate = lambda **kwargs: (_ for _ in ()).throw(AssertionError("legacy generator should be skipped"))  # type: ignore[assignment]
+        engine.plan_generator.generation_diagnostics = lambda **kwargs: (_ for _ in ()).throw(AssertionError("legacy diagnostics should be skipped"))  # type: ignore[assignment]
+        engine.plan_generator.resolve_regime_label = lambda context: "range"  # type: ignore[assignment]
+        engine._session_impulse_retest_runtime_plan = lambda **kwargs: generated_micro  # type: ignore[assignment]
+        engine.plan_repo.upsert_many = lambda plans: upserted_plans.extend(plans)  # type: ignore[assignment]
+        engine.plan_repo.invalidate_expired = lambda: None  # type: ignore[assignment]
+        engine.plan_repo.list_active_for_symbol = lambda **kwargs: [stale_legacy, generated_micro]  # type: ignore[assignment]
+
+        def _capture_alerts(**kwargs) -> dict:
+            emitted_plans.extend(kwargs["plans"])
+            return {"near": 0, "touch": 0, "confirm": 0, "emitted_total": 0}
+
+        engine._emit_pre_entry_plan_alerts = _capture_alerts  # type: ignore[assignment]
+        engine.events.publish = lambda *args, **kwargs: None  # type: ignore[assignment]
+
+        payload = engine.refresh_symbol(symbol)
+
+        diagnostics = payload["plan_generation_diagnostics"]
+        assert payload["plans"] == 0
+        assert payload["session_impulse_retest_generated_count"] == 1
+        assert payload["active_signal_plan_count"] == 1
+        assert diagnostics["legacy_plan_generation_enabled"] is False
+        assert diagnostics["legacy_plan_generation_reason"] == "micro_live_session_impulse_retest_only"
+        assert diagnostics["generated_plan_count"] == 1
+        assert diagnostics["archived_non_routable_plan_count"] == 1
+        assert payload["archived_non_routable_plan_count"] == 1
+        assert [plan.plan_id for plan in upserted_plans] == [generated_micro.plan_id]
+        assert [plan.plan_id for plan in emitted_plans] == [generated_micro.plan_id]
+        assert db.get(Plan, stale_legacy.plan_id).state == PlanState.ARCHIVED.value
+
+
+def test_mixed_family_micro_live_refresh_keeps_legacy_plan_generation() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        symbol = "BTCUSDT"
+        _patch_live_contract(engine, allowed_symbols=[symbol])
+        base_ts = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        generated_legacy = _sweep_plan(symbol=symbol, plan_id="sweep_BTCUSDT_refresh_generated")
+        generated_calls: list[str] = []
+        upserted_plans: list[Plan] = []
+
+        engine.market_data.recent_candles = lambda *args, **kwargs: [  # type: ignore[assignment]
+            SimpleNamespace(
+                ts=base_ts - timedelta(minutes=max(0, kwargs.get("limit", 10) - 1 - i)),
+                o=100.0,
+                h=101.0,
+                l=99.0,
+                c=100.5,
+                v=10.0,
+            )
+            for i in range(kwargs.get("limit", 10))
+        ]
+        engine.context_engine.build_snapshot = lambda **kwargs: SimpleNamespace(  # type: ignore[assignment]
+            jump_rate_5m=0.0,
+            atr5=1.0,
+            transition_score=50.0,
+            transition_state="none",
+            transition_lock_reason=None,
+        )
+        engine.zone_repo.list_all = lambda **kwargs: []  # type: ignore[assignment]
+        engine.zone_engine.refresh = lambda **kwargs: []  # type: ignore[assignment]
+        engine._evaluate_gate = lambda **kwargs: (SimpleNamespace(value="OPEN"), True, "normal", SimpleNamespace(to_dict=lambda: {}))  # type: ignore[assignment]
+        engine._runtime_feature_calibration = lambda **kwargs: ("range", None)  # type: ignore[assignment]
+        engine.plan_repo.list_exposure_candidates = lambda **kwargs: []  # type: ignore[assignment]
+        engine.plan_generator.generate = lambda **kwargs: generated_calls.append(kwargs["symbol"]) or [SimpleNamespace(plan=generated_legacy)]  # type: ignore[assignment]
+        engine.plan_generator.resolve_regime_label = lambda context: "range"  # type: ignore[assignment]
+        engine._session_impulse_retest_runtime_plan = lambda **kwargs: None  # type: ignore[assignment]
+        engine.plan_repo.upsert_many = lambda plans: upserted_plans.extend(plans)  # type: ignore[assignment]
+        engine.plan_repo.invalidate_expired = lambda: None  # type: ignore[assignment]
+        engine.plan_repo.list_active_for_symbol = lambda **kwargs: []  # type: ignore[assignment]
+        engine._emit_pre_entry_plan_alerts = lambda **kwargs: {"near": 0, "touch": 0, "confirm": 0, "emitted_total": 0}  # type: ignore[assignment]
+        engine.events.publish = lambda *args, **kwargs: None  # type: ignore[assignment]
+
+        payload = engine.refresh_symbol(symbol)
+
+        assert generated_calls == [symbol]
+        assert payload["plans"] == 1
+        assert payload["session_impulse_retest_generated_count"] == 0
+        assert payload["plan_generation_diagnostics"]["legacy_plan_generation_enabled"] is True
+        assert [plan.plan_id for plan in upserted_plans] == [generated_legacy.plan_id]
 
 
 def test_session_impulse_retest_refresh_audit_marks_family_disabled(monkeypatch) -> None:

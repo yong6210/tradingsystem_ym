@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-dir", default="reports/operations/micro_live_synthetic_canary")
     parser.add_argument("--no-write-report", action="store_true")
     parser.add_argument("--no-network", action="store_true", help="Use settings/default rule and synthetic liquidity loaders only.")
+    parser.add_argument("--no-private-balance", action="store_true", help="Use the configured/synced equity snapshot instead of private balance API.")
     parser.add_argument("--no-fail-exit", action="store_true")
     return parser.parse_args()
 
@@ -251,6 +252,8 @@ def run_canary(
     entry_price: float,
     stop_bps: float,
     use_network: bool,
+    use_private_balance: bool = True,
+    balance_snapshot: Any | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     normalized_symbol = _first_live_symbol(settings, symbol)
@@ -286,7 +289,15 @@ def run_canary(
     )
     rules_loader = _public_symbol_rules_loader(client) if client is not None else _settings_symbol_rules_loader(settings)
     liquidity_loader = _public_liquidity_loader(client, settings) if client is not None else _synthetic_liquidity_loader(settings)
-    balance_loader = _private_balance_loader(client) if client is not None else _synthetic_balance_loader(settings)
+    if balance_snapshot is not None:
+        balance_loader = lambda: balance_snapshot
+        balance_source = "provided_snapshot"
+    elif client is not None and use_private_balance:
+        balance_loader = _private_balance_loader(client)
+        balance_source = "private_balance_api"
+    else:
+        balance_loader = _synthetic_balance_loader(settings)
+        balance_source = "configured_or_synthetic"
     coordinator = _coordinator(
         settings=settings,
         rules_loader=rules_loader,
@@ -380,6 +391,8 @@ def run_canary(
         "reference_price": round(reference_price, 8),
         "stop_price": round(stop_price, 8),
         "use_network": bool(use_network),
+        "use_private_balance": bool(use_private_balance and client is not None),
+        "balance_source": balance_source,
         "checks": path_checks,
         "live_sizing": live_sizing,
         "normalized_price": normalized_price,
@@ -418,6 +431,7 @@ def main() -> int:
         entry_price=float(args.entry_price or 0.0),
         stop_bps=float(args.stop_bps or 50.0),
         use_network=not bool(args.no_network),
+        use_private_balance=not bool(args.no_private_balance),
     )
     if not args.no_write_report:
         generated = parse_report_generated_at(payload.get("generated_at"))

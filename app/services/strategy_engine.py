@@ -2218,6 +2218,41 @@ class StrategyEngine:
         filtered_rows = self._session_impulse_retest_live_exposure_rows(exposure_rows)
         return len(self.scanner.overlay.thesis_cluster_summary(filtered_rows))
 
+    def _session_impulse_retest_latest_signal_diagnostics(
+        self,
+        *,
+        symbol: str,
+        candles_1m: list[Any],
+        candles_5m: list[Any],
+    ) -> dict[str, Any]:
+        normalized_symbol = str(symbol or "").upper()
+        if not self._safe_bool(self.settings.session_impulse_retest_enabled):
+            return {
+                "schema_version": "session_impulse_retest_latest_signal_diagnostics_v1",
+                "symbol": normalized_symbol,
+                "status": "disabled",
+                "reason": "session_impulse_retest_disabled",
+                "candles_1m": len(candles_1m),
+                "candles_5m": len(candles_5m),
+            }
+        allowed_symbols = self._session_impulse_retest_allowed_symbols()
+        if allowed_symbols and normalized_symbol not in allowed_symbols:
+            return {
+                "schema_version": "session_impulse_retest_latest_signal_diagnostics_v1",
+                "symbol": normalized_symbol,
+                "status": "symbol_not_allowed",
+                "reason": "symbol_not_in_session_impulse_retest_contract",
+                "candles_1m": len(candles_1m),
+                "candles_5m": len(candles_5m),
+            }
+        runtime = SessionImpulseRetestResearch(
+            symbol=normalized_symbol,
+            candles_1m=candles_1m,
+            candles_5m=candles_5m,
+            profile_name=session_impulse_retest_profile_for_symbol(normalized_symbol),
+        )
+        return runtime.latest_signal_diagnostics(freshness_minutes=20)
+
     def _session_impulse_retest_runtime_plan(
         self,
         *,
@@ -3818,6 +3853,11 @@ class StrategyEngine:
                     if (observed_ts := self._maybe_utc(getattr(row, "observed_ts", None))) is not None
                     else ""
                 ),
+                "created_at": (
+                    created_at.isoformat()
+                    if (created_at := self._maybe_utc(getattr(row, "created_at", None))) is not None
+                    else ""
+                ),
                 "payload": self._session_impulse_retest_runtime_audit_json_safe(
                     _safe_dict(getattr(row, "payload", None))
                 ),
@@ -3840,6 +3880,13 @@ class StrategyEngine:
         if requested_mode == ExecutionMode.LIVE:
             return set(self._csv_items(self.settings.auto_trading_allowed_families, case="lower"))
         return set()
+
+    def _legacy_plan_generation_enabled_for_runtime(self) -> bool:
+        requested_mode = self._auto_route_requested_mode()
+        if requested_mode != ExecutionMode.MICRO_LIVE:
+            return True
+        routable_families = self._auto_route_live_routable_families(requested_mode)
+        return routable_families != {_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY}
 
     def _auto_route_live_entry_models(self, requested_mode: ExecutionMode | None) -> set[str]:
         if requested_mode in {ExecutionMode.MICRO_LIVE, ExecutionMode.LIVE}:
@@ -4214,7 +4261,84 @@ class StrategyEngine:
         )
 
     def auto_route_session_impulse_retest_plans(self, *, symbol: str, plan_ids: list[str]) -> dict[str, Any]:
-        return self.auto_route_live_plans(symbol=symbol, plan_ids=plan_ids)
+        normalized_symbol = str(symbol or "").upper().strip()
+        normalized_plan_ids = [str(plan_id or "").strip() for plan_id in list(plan_ids or []) if str(plan_id or "").strip()]
+        if normalized_plan_ids:
+            return self.auto_route_live_plans(symbol=normalized_symbol, plan_ids=normalized_plan_ids)
+
+        now = datetime.now(timezone.utc)
+        requested_mode = self._auto_route_requested_mode()
+        families_considered = self._auto_route_live_families_considered(requested_mode)
+        if requested_mode is None:
+            return self._finalize_auto_route_audit(
+                symbol=normalized_symbol,
+                observed_ts=now,
+                response={
+                    "symbol": normalized_symbol,
+                    "enabled": False,
+                    "reason": "auto_trading_disabled_or_shadow_mode",
+                    "families_considered": families_considered,
+                    "plans_considered": 0,
+                    "intents_created": 0,
+                    "submit_calls": 0,
+                    "results": [],
+                },
+            )
+
+        routable_symbols = self._auto_route_live_routable_symbols(requested_mode)
+        if not routable_symbols or normalized_symbol not in routable_symbols:
+            return self._finalize_auto_route_audit(
+                symbol=normalized_symbol,
+                observed_ts=now,
+                response={
+                    "symbol": normalized_symbol,
+                    "enabled": False,
+                    "requested_mode": requested_mode.value,
+                    "reason": "symbol_not_live_enabled_for_auto_route",
+                    "families_considered": families_considered,
+                    "plans_considered": 0,
+                    "intents_created": 0,
+                    "submit_calls": 0,
+                    "results": [],
+                },
+            )
+        if not families_considered:
+            return self._finalize_auto_route_audit(
+                symbol=normalized_symbol,
+                observed_ts=now,
+                response={
+                    "symbol": normalized_symbol,
+                    "enabled": False,
+                    "requested_mode": requested_mode.value,
+                    "reason": "live_route_contract_empty",
+                    "families_considered": families_considered,
+                    "plans_considered": 0,
+                    "intents_created": 0,
+                    "submit_calls": 0,
+                    "results": [],
+                },
+            )
+        if not self._session_impulse_retest_symbol_tracked(normalized_symbol):
+            reason = "symbol_not_enabled_for_session_impulse_retest"
+        else:
+            allowed, reason = self._session_impulse_retest_live_auto_route_allowed()
+            if allowed:
+                reason = "no_live_route_candidate_plan"
+        return self._finalize_auto_route_audit(
+            symbol=normalized_symbol,
+            observed_ts=now,
+            response={
+                "symbol": normalized_symbol,
+                "enabled": True,
+                "requested_mode": requested_mode.value,
+                "reason": reason,
+                "families_considered": families_considered,
+                "plans_considered": 0,
+                "intents_created": 0,
+                "submit_calls": 0,
+                "results": [],
+            },
+        )
 
     def auto_route_symbol(self, *, symbol: str) -> dict[str, Any]:
         return self.auto_route_live_plans(symbol=symbol)
@@ -8228,6 +8352,7 @@ class StrategyEngine:
         session_impulse_retest_active_thesis_clusters = self._session_impulse_retest_active_thesis_clusters(
             exposure_rows
         )
+        legacy_plan_generation_enabled = self._legacy_plan_generation_enabled_for_runtime()
         ranked_plans = (
             self.plan_generator.generate(
                 symbol=symbol,
@@ -8237,10 +8362,11 @@ class StrategyEngine:
                 importance_calibration=feature_calibration,
                 active_thesis_clusters=active_thesis_clusters,
             )
-            if can_open
+            if can_open and legacy_plan_generation_enabled
             else []
         )
         micro_runtime_plans: list[Plan] = []
+        session_impulse_retest_signal_diagnostics: dict[str, Any] | None = None
         if can_open:
             micro_plan = self._session_impulse_retest_runtime_plan(
                 symbol=symbol,
@@ -8250,6 +8376,12 @@ class StrategyEngine:
             )
             if micro_plan is not None:
                 micro_runtime_plans.append(micro_plan)
+            else:
+                session_impulse_retest_signal_diagnostics = self._session_impulse_retest_latest_signal_diagnostics(
+                    symbol=symbol,
+                    candles_1m=candles1,
+                    candles_5m=candles5,
+                )
         if can_open:
             if ranked_plans:
                 plan_generation_diagnostics = {
@@ -8261,6 +8393,20 @@ class StrategyEngine:
                     "transition_lock_reason": context.transition_lock_reason,
                     "active_zone_count": len(active_zones),
                     "generated_plan_count": len(ranked_plans) + len(micro_runtime_plans),
+                    "legacy_plan_generation_enabled": legacy_plan_generation_enabled,
+                }
+            elif not legacy_plan_generation_enabled:
+                plan_generation_diagnostics = {
+                    "schema_version": "plan_generation_diagnostics_v1",
+                    "symbol": symbol,
+                    "generation_state": "micro_main_generated" if micro_runtime_plans else "no_fresh_candidates",
+                    "regime_profile": self.plan_generator.resolve_regime_label(context),
+                    "transition_state": context.transition_state,
+                    "transition_lock_reason": context.transition_lock_reason,
+                    "active_zone_count": len(active_zones),
+                    "generated_plan_count": len(micro_runtime_plans),
+                    "legacy_plan_generation_enabled": False,
+                    "legacy_plan_generation_reason": "micro_live_session_impulse_retest_only",
                 }
             else:
                 plan_generation_diagnostics = self.plan_generator.generation_diagnostics(
@@ -8274,6 +8420,7 @@ class StrategyEngine:
                     "micro_main_generated" if micro_runtime_plans else "no_fresh_candidates"
                 )
                 plan_generation_diagnostics["generated_plan_count"] = len(micro_runtime_plans)
+                plan_generation_diagnostics["legacy_plan_generation_enabled"] = legacy_plan_generation_enabled
         else:
             plan_generation_diagnostics = {
                 "schema_version": "plan_generation_diagnostics_v1",
@@ -8285,15 +8432,35 @@ class StrategyEngine:
                 "transition_lock_reason": context.transition_lock_reason,
                 "active_zone_count": len(active_zones),
                 "generated_plan_count": 0,
+                "legacy_plan_generation_enabled": legacy_plan_generation_enabled,
             }
+        if session_impulse_retest_signal_diagnostics is not None:
+            plan_generation_diagnostics["session_impulse_retest_latest_signal"] = (
+                session_impulse_retest_signal_diagnostics
+            )
         self.plan_repo.upsert_many([x.plan for x in ranked_plans] + micro_runtime_plans)
         self.plan_repo.invalidate_expired()
+        archived_non_routable_plan_count = 0
+        if not legacy_plan_generation_enabled:
+            archived_non_routable_plan_count = self.plan_repo.archive_active_for_symbol_except_families(
+                symbol=symbol,
+                timeframe="5m",
+                allowed_families={_AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY},
+                states=[PlanState.PLANNED.value, PlanState.ARMED.value],
+            )
+            plan_generation_diagnostics["archived_non_routable_plan_count"] = archived_non_routable_plan_count
         active_signal_plans = self.plan_repo.list_active_for_symbol(
             symbol=symbol,
             timeframe="5m",
             states=[PlanState.PLANNED.value, PlanState.ARMED.value],
             limit=max(20, self._max_candidate_plans_per_symbol() * 4),
         )
+        if not legacy_plan_generation_enabled:
+            active_signal_plans = [
+                plan
+                for plan in active_signal_plans
+                if self._plan_strategy_family(plan) == _AUTO_ROUTE_SESSION_IMPULSE_RETEST_FAMILY
+            ]
         signal_alerts = self._emit_pre_entry_plan_alerts(
             symbol=symbol,
             plans=active_signal_plans,
@@ -8317,6 +8484,7 @@ class StrategyEngine:
             "session_impulse_retest_generated_count": len(micro_runtime_plans),
             "session_impulse_retest_plan_ids": [str(plan.plan_id) for plan in micro_runtime_plans],
             "active_signal_plan_count": len(active_signal_plans),
+            "archived_non_routable_plan_count": archived_non_routable_plan_count,
             "plan_generation_diagnostics": plan_generation_diagnostics,
             "risk_state": gate_state.value,
             "gate_reason": gate_reason,
@@ -9082,10 +9250,9 @@ class StrategyEngine:
         self.db.commit()
         refresh = self.refresh_symbol(symbol)
         plan_ids = list(refresh.get("session_impulse_retest_plan_ids") or [])
-        auto_route = (
-            self.auto_route_session_impulse_retest_plans(symbol=symbol, plan_ids=plan_ids)
-            if plan_ids
-            else self.auto_route_symbol(symbol=symbol)
+        auto_route = self.auto_route_session_impulse_retest_plans(
+            symbol=symbol,
+            plan_ids=plan_ids,
         )
         return {
             "symbol": symbol,
@@ -9253,10 +9420,9 @@ class StrategyEngine:
                 response=auto_route,
             )
         else:
-            auto_route = (
-                self.auto_route_session_impulse_retest_plans(symbol=symbol, plan_ids=plan_ids)
-                if plan_ids
-                else self.auto_route_symbol(symbol=symbol)
+            auto_route = self.auto_route_session_impulse_retest_plans(
+                symbol=symbol,
+                plan_ids=plan_ids,
             )
         tp_market_fallback = self.process_live_tp_market_fallbacks(symbol=symbol)
         return {

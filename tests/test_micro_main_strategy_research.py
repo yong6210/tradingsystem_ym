@@ -50,6 +50,46 @@ def test_micro_main_strategy_backtest_runs() -> None:
     assert isinstance(trades, list)
 
 
+def test_micro_main_latest_signal_diagnostics_explain_no_fresh_signal() -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    candles_1m = _candles("TESTUSDC", "1m", 1, 1200, start)
+    candles_5m = _candles("TESTUSDC", "5m", 5, 400, start)
+    engine = SessionImpulseRetestResearch(symbol="TESTUSDC", candles_1m=candles_1m, candles_5m=candles_5m)
+
+    payload = engine.latest_signal_diagnostics(freshness_minutes=20)
+
+    assert payload["schema_version"] == "session_impulse_retest_latest_signal_diagnostics_v1"
+    assert payload["symbol"] == "TESTUSDC"
+    assert payload["status"] in {"no_fresh_signal", "fresh_signal"}
+    assert payload["scan_bars"] > 0
+    if payload["status"] == "no_fresh_signal":
+        assert payload["reason"]
+        assert isinstance(payload["reason_counts"], dict)
+        assert payload["latest_checked"]["reason"]
+
+
+def test_micro_main_latest_signal_diagnostics_prefers_latest_checked_reason() -> None:
+    start = datetime(2026, 5, 17, 12, 30, tzinfo=UTC)
+    candles_1m = _candles("TESTUSDC", "1m", 1, 900, start)
+    candles_5m = _candles("TESTUSDC", "5m", 5, 180, start)
+    engine = SessionImpulseRetestResearch(symbol="TESTUSDC", candles_1m=candles_1m, candles_5m=candles_5m)
+    diagnostics = [
+        {"setup_ts": "latest", "reason": "trend_strength_too_weak"},
+        {"setup_ts": "older-1", "reason": "before_session_signal_window"},
+        {"setup_ts": "older-2", "reason": "before_session_signal_window"},
+    ]
+
+    engine._build_signal = lambda idx: None  # type: ignore[method-assign]
+    engine._signal_rejection_diagnostics = (  # type: ignore[method-assign]
+        lambda idx: diagnostics.pop(0) if diagnostics else {"setup_ts": "older", "reason": "before_session_signal_window"}
+    )
+
+    payload = engine.latest_signal_diagnostics(freshness_minutes=20)
+
+    assert payload["reason_counts"]["before_session_signal_window"] > payload["reason_counts"]["trend_strength_too_weak"]
+    assert payload["reason"] == "trend_strength_too_weak"
+
+
 def test_micro_main_signal_filter_profile_merges_symbol_override() -> None:
     start = datetime(2026, 1, 1, tzinfo=UTC)
     candles_1m = _candles("BTCUSDC", "1m", 1, 1200, start)
@@ -170,6 +210,21 @@ def test_micro_main_blocked_signal_hours_are_symbol_specific() -> None:
         profile_name="relaxed_v1",
     )
     assert ada_engine._blocked_signal_hours() == (7,)
+
+
+def test_micro_main_session_anchor_lookup_covers_long_anchor_gap_for_diagnostics() -> None:
+    start = datetime(2026, 5, 17, 5, 0, tzinfo=UTC)
+    candles_1m = _candles("TESTUSDC", "1m", 1, 1200, start)
+    candles_5m = _candles("TESTUSDC", "5m", 5, 120, start)
+    engine = SessionImpulseRetestResearch(symbol="TESTUSDC", candles_1m=candles_1m, candles_5m=candles_5m)
+    idx = engine.ts_5m.index(datetime(2026, 5, 17, 12, 55, tzinfo=UTC))
+
+    anchor_idx = engine._session_anchor_index(idx)
+    diagnostic = engine._signal_rejection_diagnostics(idx)
+
+    assert anchor_idx is not None
+    assert engine.ts_5m[anchor_idx] == datetime(2026, 5, 17, 6, 0, tzinfo=UTC)
+    assert diagnostic["reason"] == "after_session_signal_window"
 
 
 def test_micro_main_time_guard_reason_prefers_tighter_guard_first() -> None:

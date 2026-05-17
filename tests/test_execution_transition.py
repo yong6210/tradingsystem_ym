@@ -76,6 +76,51 @@ def test_live_account_protection_gate_fails_closed_on_invalid_payload() -> None:
     assert result["reason"] == "account_protection_payload_invalid"
 
 
+def test_risk_pct_sizing_reports_actual_risk_after_quantity_step_rounding() -> None:
+    coordinator = ExecutionCoordinator.__new__(ExecutionCoordinator)
+    coordinator.settings = SimpleNamespace(
+        auto_trading_live_sizing_mode="RISK_PCT",
+        auto_trading_live_account_equity_usdt=200.0,
+        auto_trading_live_balance_sync_enabled=False,
+        auto_trading_live_balance_sync_assets="USDT,USDC",
+        auto_trading_live_balance_sync_fail_closed=True,
+        auto_trading_live_risk_per_trade_pct=0.01,
+        auto_trading_live_usable_margin_fraction=1.0,
+        auto_trading_live_leverage_cap=10.0,
+        auto_trading_live_liquidity_gate_partial_submit_enabled=False,
+        binance_live_quantity_step=0.001,
+        binance_live_min_quantity=0.001,
+    )
+    coordinator._live_symbol_rules_cache = {}
+    coordinator.live_symbol_rules_loader = lambda _symbol: {
+        "quantity_step": 0.001,
+        "min_quantity": 0.001,
+        "source": "test_rules",
+    }
+    plan = SimpleNamespace(symbol="BTCUSDT", entry_price=78_372.75, sl=77_980.88625)
+    intent = SimpleNamespace(
+        payload={
+            "executable_plan": {
+                "entry_trigger_price": 78_372.75,
+                "stop_price": 77_980.88625,
+            }
+        },
+        quality_snapshot={"recommended_risk_r": 1.0},
+        dedupe_result={},
+    )
+
+    quantity, details, error = coordinator._live_order_sizing(intent=intent, plan=plan)
+
+    assert error is None
+    assert quantity == 0.005
+    assert details["target_risk_usdt"] == 2.0
+    assert details["target_notional"] == 400.0
+    assert details["normalized_notional"] == 391.8637
+    assert details["actual_risk_usdt"] == 1.9593
+    assert details["actual_risk_pct"] == 0.009797
+    assert details["quantity_rounding_loss_risk_usdt"] == 0.0407
+
+
 def _reset_execution_control_state() -> None:
     reset_execution_lane_tracker()
     with SessionLocal() as db:
@@ -2307,6 +2352,30 @@ def test_reconcile_route_reports_local_open_plan_without_exchange_position() -> 
     assert payload["lock_required"] is False
 
 
+def test_reconcile_auto_resolve_closes_local_open_plan_when_exchange_is_flat() -> None:
+    init_db()
+    symbol = f"RECON{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 131}USDC"
+    plan_id = f"{symbol}_entered_flat_exchange"
+    _seed_plan(symbol=symbol, family="trend_continuation", plan_id=plan_id, state="ENTERED")
+
+    reconcile = client.post("/execution/reconcile?auto_resolve=true", json={"symbol": symbol})
+    assert reconcile.status_code == 200
+    payload = reconcile.json()
+    mismatch_types = {item["mismatch_type"] for item in payload["mismatches"]}
+
+    assert "ORPHAN_POSITION_LOCAL" in mismatch_types
+    assert payload["highest_severity"] == "WARNING"
+    assert payload["lock_required"] is False
+    assert payload["auto_resolve_applied"] is True
+
+    with SessionLocal() as db:
+        refreshed = db.get(Plan, plan_id)
+        assert refreshed is not None
+        assert refreshed.state == "CLOSED"
+        assert refreshed.validity["reconcile_auto_close_reason"] == "exchange_flat_no_open_orders"
+        assert refreshed.validity["reconcile_auto_close_mismatch"] == "ORPHAN_POSITION_LOCAL"
+
+
 def test_reconcile_auto_resolve_closes_plan_when_latest_fill_is_closed() -> None:
     init_db()
     symbol = f"RECON{int(datetime.now(timezone.utc).timestamp() * 1_000_000) + 32}USDC"
@@ -3223,6 +3292,7 @@ def test_micro_live_submit_routes_partial_tranche_when_liquidity_size_is_too_lar
     monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", True)
     monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", True)
     monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_min_depth_usdt", 0.0)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_min_tranche_target_fraction", 0.0)
     monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "NOTIONAL_PER_R")
     monkeypatch.setattr(settings, "auto_trading_notional_per_r", 2500.0)
     suffix = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000))[-6:]
@@ -3287,6 +3357,7 @@ def test_micro_live_submit_routes_partial_tranche_when_liquidity_size_is_too_lar
     assert sizing["liquidity_gate_decision"] == "SPLIT_PARTIAL_SUBMIT"
     assert sizing["original_max_position_notional"] == 1250.0
     assert sizing["max_position_notional"] == 100.0
+    assert sizing["normalized_notional"] == 100.0
     tranche = submit_payload["attachments"]["live_tranche"]
     assert tranche["tranche_index"] == 1
     assert tranche["submitted_notional"] == 100.0
@@ -3302,6 +3373,7 @@ def test_micro_live_submit_allows_next_signal_to_fill_remaining_tranche(monkeypa
     monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", True)
     monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_partial_submit_enabled", True)
     monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_min_depth_usdt", 0.0)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_min_tranche_target_fraction", 0.0)
     monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "NOTIONAL_PER_R")
     monkeypatch.setattr(settings, "auto_trading_notional_per_r", 2500.0)
     suffix = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000))[-6:]
@@ -3524,10 +3596,13 @@ def test_micro_live_submit_uses_risk_pct_sizing_and_caps_by_leverage(monkeypatch
     assert sizing["effective_risk_per_trade_pct"] == 0.0025
     assert sizing["target_notional"] == 500.0
     assert sizing["max_position_notional"] == 500.0
+    assert sizing["normalized_notional"] == 500.0
     assert sizing["required_leverage"] == 2.9412
     assert sizing["leverage_cap"] == 6.0
     assert sizing["leverage_capped"] is False
     assert sizing["actual_risk_usdt"] == 0.5
+    assert sizing["quantity_rounding_loss_notional"] == 0.0
+    assert sizing["quantity_rounding_loss_risk_usdt"] == 0.0
 
 
 def test_micro_live_submit_blocks_on_account_protection_failures(monkeypatch) -> None:
@@ -3680,6 +3755,7 @@ def test_micro_live_submit_uses_synced_available_balance_for_risk_pct_sizing(mon
     assert sizing["balance_asset"] == "USDC"
     assert sizing["recommended_risk_multiplier"] == 0.5
     assert sizing["target_notional"] == 425.0
+    assert sizing["normalized_notional"] == 425.0
     assert sizing["actual_risk_usdt"] == 0.425
 
 

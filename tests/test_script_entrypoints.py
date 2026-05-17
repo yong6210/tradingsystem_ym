@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -46,6 +46,7 @@ import scripts.run_micro_live_boot_check as micro_live_boot_check
 import scripts.run_micro_live_no_order_watchdog as micro_live_no_order_watchdog
 import scripts.run_micro_live_ops_heartbeat as micro_live_ops_heartbeat
 import scripts.run_micro_live_runtime_guard as micro_live_runtime_guard
+import scripts.run_micro_live_liquidity_universe as micro_live_liquidity_universe
 import scripts.run_micro_live_synthetic_canary as micro_live_synthetic_canary
 import scripts.run_live_order_lifecycle_report as live_order_lifecycle_report
 import scripts.run_paper_candidate_drill as paper_candidate_drill
@@ -68,6 +69,7 @@ def test_runtime_scripts_support_direct_help_from_other_cwd(tmp_path: Path) -> N
         ROOT_DIR / "scripts" / "run_micro_live_preflight.py",
         ROOT_DIR / "scripts" / "run_micro_live_no_order_watchdog.py",
         ROOT_DIR / "scripts" / "run_micro_live_runtime_guard.py",
+        ROOT_DIR / "scripts" / "run_micro_live_liquidity_universe.py",
         ROOT_DIR / "scripts" / "run_micro_live_synthetic_canary.py",
         ROOT_DIR / "scripts" / "run_micro_main_usdc_backtest.py",
         ROOT_DIR / "scripts" / "run_micro_main_usdt_backtest.py",
@@ -118,6 +120,7 @@ def test_script_display_paths_allow_absolute_outputs_outside_repo(tmp_path: Path
         micro_live_ops_heartbeat,
         micro_live_preflight,
         micro_live_runtime_guard,
+        micro_live_liquidity_universe,
         micro_live_synthetic_canary,
         paper_candidate_drill,
         post_live_pruning,
@@ -263,6 +266,36 @@ def test_worker_loop_log_compaction_omits_full_universe_results() -> None:
     }
 
 
+def test_worker_loop_log_compaction_keeps_failed_symbol_samples() -> None:
+    payload = {
+        "ts": "2026-05-16T04:00:00+00:00",
+        "actions": [
+            {
+                "sync_universe": {
+                    "universe": "usdt_reliable_balanced_31",
+                    "requested_symbols": 2,
+                    "processed_symbols": 2,
+                    "success": 1,
+                    "failed": 1,
+                    "results": [
+                        {"symbol": "BTCUSDT", "status": "ok"},
+                        {"symbol": "FILUSDT", "status": "error", "error": "temporary kline fetch timeout"},
+                    ],
+                }
+            }
+        ],
+        "outbox": {"counts": {"published": 1}},
+    }
+
+    compact = run_worker._compact_worker_log_payload(payload)
+    sync = compact["actions"][0]["sync_universe"]
+
+    assert "results" not in sync
+    assert sync["failed_symbol_samples"] == [
+        {"symbol": "FILUSDT", "status": "error", "error": "temporary kline fetch timeout"}
+    ]
+
+
 def test_session_impulse_retest_opportunity_report_performance_uses_configured_risk() -> None:
     rows = [{"r_value": 1.0}, {"r_value": -0.5}, {"r_value": 2.0}]
 
@@ -354,6 +387,30 @@ def test_session_impulse_retest_opportunity_summary_can_exclude_pre_runtime_rows
     assert active["potential_performance"]["total_r"] == -0.5
     assert lookback["expected_order_count"] == 2
     assert lookback["before_current_runtime_start_count"] == 1
+
+
+def test_session_impulse_retest_opportunity_coverage_marks_limited_local_candles() -> None:
+    now = datetime(2026, 5, 17, 12, 0, tzinfo=UTC)
+
+    class FakeCandleRepo:
+        def get_first_candle(self, symbol: str, timeframe: str) -> SimpleNamespace:
+            del symbol, timeframe
+            return SimpleNamespace(ts=now - timedelta(hours=20))
+
+        def get_last_candle(self, symbol: str, timeframe: str) -> SimpleNamespace:
+            del symbol, timeframe
+            return SimpleNamespace(ts=now)
+
+    coverage = sir_opportunity_report._candle_coverage_for_symbols(
+        SimpleNamespace(candle_repo=FakeCandleRepo()),
+        symbols=["BTCUSDT", "ETHUSDT"],
+        cutoff=now - timedelta(hours=168),
+        end_ts=now,
+    )
+
+    assert coverage["coverage_limited"] is True
+    assert coverage["min_local_1m_coverage_hours"] == 20.0
+    assert coverage["full_requested_lookback_with_preload_available"] is False
 
 
 def test_session_impulse_retest_runtime_audit_summary_separates_sir_from_legacy_generation() -> None:

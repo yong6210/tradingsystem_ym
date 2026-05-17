@@ -216,6 +216,21 @@ def _lookback_hours_label(value: Any, *, fallback_days: Any = None) -> str:
     return f"최근 {hours}시간"
 
 
+def _opportunity_coverage_text(coverage: dict[str, Any]) -> str:
+    if not coverage:
+        return ""
+    if not _safe_bool(coverage.get("coverage_limited")):
+        return ""
+    hours = coverage.get("min_local_1m_coverage_hours")
+    try:
+        parsed_hours = float(hours)
+    except (TypeError, ValueError):
+        parsed_hours = 0.0
+    if parsed_hours > 0:
+        return f"로컬 캔들 커버리지 약 {parsed_hours:.1f}시간"
+    return "로컬 캔들 커버리지 제한"
+
+
 def _watchdog_scope_label(*, runtime_started_at: datetime | None, days: int) -> str:
     if runtime_started_at is not None:
         return "런타임 재시작 이후"
@@ -230,6 +245,17 @@ def _rows_since(rows: list[dict[str, Any]], start_at: datetime | None) -> list[d
         for row in rows
         if (observed_at := _parse_utc_ts(row.get("observed_ts"))) is not None
         and observed_at >= start_at
+    ]
+
+
+def _rows_created_since(rows: list[dict[str, Any]], start_at: datetime | None) -> list[dict[str, Any]]:
+    if start_at is None:
+        return list(rows)
+    return [
+        row
+        for row in rows
+        if (created_at := _parse_utc_ts(row.get("created_at"))) is not None
+        and created_at >= start_at
     ]
 
 
@@ -272,13 +298,26 @@ def _session_impulse_retest_candidate_context(
         )
         or []
     )
+    refresh_lookback_rows = list(
+        engine.session_impulse_retest_runtime_audits_recent(
+            hours=max(1, int(hours)),
+            phase="refresh",
+            limit=max(1, int(limit)),
+        )
+        or []
+    )
     rows = _rows_since(lookback_rows, runtime_started_at)
+    refresh_rows = _rows_created_since(refresh_lookback_rows, runtime_started_at)
     status_counts = Counter(str(row.get("status") or "unknown") for row in rows)
     hard = Counter({key: value for key, value in status_counts.items() if key in _SIR_HARD_STATUSES or key.endswith("_error")})
     watch = Counter({key: value for key, value in status_counts.items() if key in _SIR_WATCH_STATUSES})
     no_candidate: Counter[str] = Counter()
     non_blocking: Counter[str] = Counter()
     order_blocking: Counter[str] = Counter()
+    signal_status_counts: Counter[str] = Counter()
+    signal_reason_counts: Counter[str] = Counter()
+    closest_setup_reason_counts: Counter[str] = Counter()
+    latest_signal_sample: dict[str, Any] = {}
     for row in rows:
         status = str(row.get("status") or "unknown")
         payload = dict(row.get("payload") or {}) if isinstance(row.get("payload"), dict) else {}
@@ -289,18 +328,45 @@ def _session_impulse_retest_candidate_context(
             non_blocking[status] += 1
         if status in _SIR_ORDER_BLOCKING_STATUSES or blocking_live_route is True:
             order_blocking[status] += 1
+    for row in refresh_rows:
+        payload = dict(row.get("payload") or {}) if isinstance(row.get("payload"), dict) else {}
+        generation = dict(payload.get("plan_generation_diagnostics") or {})
+        signal = dict(generation.get("session_impulse_retest_latest_signal") or {})
+        if not signal:
+            continue
+        if not latest_signal_sample:
+            latest_signal_sample = {
+                "symbol": row.get("symbol"),
+                "status": signal.get("status"),
+                "reason": signal.get("reason"),
+                "latest_checked_reason": dict(signal.get("latest_checked") or {}).get("reason"),
+                "closest_setup_reason": dict(signal.get("closest_setup") or {}).get("reason"),
+            }
+        status = str(signal.get("status") or "unknown")
+        reason = str(signal.get("reason") or "unknown")
+        closest_reason = str(dict(signal.get("closest_setup") or {}).get("reason") or "")
+        signal_status_counts[status] += 1
+        signal_reason_counts[reason] += 1
+        if closest_reason:
+            closest_setup_reason_counts[closest_reason] += 1
     return {
         "source": "session_impulse_retest_runtime_audit",
         "scope": "runtime_since_ws_start" if runtime_started_at is not None else "lookback_window",
         "hours": max(1, int(hours)),
         "audit_count": len(rows),
+        "refresh_audit_count": len(refresh_rows),
         "status_counts": _counter_dict(status_counts),
         "hard_status_counts": _counter_dict(hard),
         "watch_status_counts": _counter_dict(watch),
         "order_blocking_status_counts": _counter_dict(order_blocking),
         "non_blocking_status_counts": _counter_dict(non_blocking),
         "no_candidate_status_counts": _counter_dict(no_candidate),
+        "latest_signal_status_counts": _counter_dict(signal_status_counts),
+        "latest_signal_reason_counts": _counter_dict(signal_reason_counts),
+        "latest_signal_closest_setup_reason_counts": _counter_dict(closest_setup_reason_counts),
+        "latest_signal_sample": latest_signal_sample,
         "lookback_audit_count": len(lookback_rows),
+        "lookback_refresh_audit_count": len(refresh_lookback_rows),
     }
 
 
@@ -336,6 +402,7 @@ def _session_impulse_retest_opportunity_context(*, hours: int) -> dict[str, Any]
         "lookback_hours": report.get("lookback_hours"),
         "opportunity_scope": report.get("opportunity_scope"),
         "runtime_started_at": report.get("runtime_started_at"),
+        "coverage": dict(report.get("coverage") or {}),
         "contract": dict(report.get("contract") or {}),
         "summary": dict(report.get("summary") or {}),
         "lookback_summary": dict(report.get("lookback_summary") or {}),
@@ -368,6 +435,9 @@ def _augment_no_order_evaluation(
     lookback_blocked_or_skipped = _safe_int(lookback_status_counts.get("blocked_or_skipped"))
     lookback_hours = _safe_int(opportunity.get("lookback_hours"))
     lookback_window_label = _lookback_hours_label(lookback_hours) or "lookback"
+    coverage_text = _opportunity_coverage_text(dict(opportunity.get("coverage") or {}))
+    coverage_clause = f",coverage={coverage_text}" if coverage_text else ""
+    coverage_note = f" ({coverage_text}; 전체 {lookback_window_label} 아님)" if coverage_text else ""
     if active_expected_orders > 0:
         enriched["alert"] = True
         enriched["status"] = "ALERT"
@@ -375,18 +445,24 @@ def _augment_no_order_evaluation(
         enriched["reason"] = "sir_backtest_opportunity_without_live_intent"
         enriched["candidate_generation_status"] = "backtest_expected_opportunities_missing_live_intents"
         enriched["next_action_text"] = (
-            f"{lookback_window_label} SIR 백테스트 조건 후보 {active_expected_orders}건 재생됨: runtime plan/intent 누락 확인"
+            f"{lookback_window_label} SIR 백테스트 조건 후보 {active_expected_orders}건 재생됨"
+            f"{coverage_note}: runtime plan/intent 누락 확인"
         )
         enriched["message"] = (
             f"{enriched.get('message')} "
             f"SIR_opportunity=lookback_hours={lookback_hours},"
             f"active_expected={active_expected_orders},lookback_expected={lookback_expected_orders}"
+            f"{coverage_clause}"
         )
         return enriched
     order_blocking = dict(context.get("order_blocking_status_counts") or {})
     no_candidate = dict(context.get("no_candidate_status_counts") or {})
     non_blocking = dict(context.get("non_blocking_status_counts") or {})
     watch = dict(context.get("watch_status_counts") or {})
+    signal_reasons = dict(context.get("latest_signal_reason_counts") or {})
+    signal_reason_text = _counts_summary_text(signal_reasons, limit=3)
+    signal_reason_clause = f" signal_reasons={signal_reason_text}" if signal_reason_text != "none" else ""
+    current_signal_note = f"; 현재 신호 없음 이유: {signal_reason_text}" if signal_reason_text != "none" else ""
     if lookback_expected_orders > 0 and lookback_pre_restart_orders > 0 and not order_blocking and (
         lookback_blocked_or_skipped > 0 or lookback_blocking_reasons
     ):
@@ -401,7 +477,8 @@ def _augment_no_order_evaluation(
         enriched["candidate_generation_status"] = "pre_restart_blocked_opportunities"
         enriched["next_action_text"] = (
             f"재시작 전 {lookback_window_label} SIR 후보 중 제출 전 차단 이력 확인: "
-            f"{reason_summary or 'reason=none'}; 현재 설정으로 같은 차단이 반복되는지 확인"
+            f"{reason_summary or 'reason=none'}{coverage_note}; 현재 설정으로 같은 차단이 반복되는지 확인"
+            f"{current_signal_note}"
         )
         previous_next_action = str(evaluation.get("next_action_text") or "")
         current_message = str(enriched.get("message") or "")
@@ -417,12 +494,14 @@ def _augment_no_order_evaluation(
             f"watch={_counts_summary_text(watch, limit=2)} "
             f"non_blocking={_counts_summary_text(non_blocking, limit=2)} "
             f"order_blocking={_counts_summary_text(order_blocking, limit=2)} "
+            f"{signal_reason_clause} "
             f"SIR_opportunity=lookback_hours={lookback_hours},"
             f"active_expected={active_expected_orders},"
             f"lookback_expected={lookback_expected_orders},"
             f"pre_restart={lookback_pre_restart_orders},"
             f"blocked_or_skipped={lookback_blocked_or_skipped},"
             f"blocking_reasons={reason_summary or 'none'}"
+            f"{coverage_clause}"
         )
         return enriched
     if lookback_expected_orders > 0 and lookback_pre_restart_orders > 0 and not order_blocking:
@@ -435,7 +514,8 @@ def _augment_no_order_evaluation(
         enriched["candidate_generation_status"] = "pre_restart_backtest_opportunities_advisory"
         enriched["next_action_text"] = (
             f"재시작 전 {lookback_window_label} SIR 백테스트조건 후보 {lookback_pre_restart_orders}건이 주문으로 못 간 이력 기록: "
-            f"{reason_summary or 'reason=none'}; 현재 런타임은 다음 fresh 후보 submit_ready 여부만 확인"
+            f"{reason_summary or 'reason=none'}{coverage_note}; 현재 런타임은 다음 fresh 후보 submit_ready 여부만 확인"
+            f"{current_signal_note}"
         )
         previous_next_action = str(evaluation.get("next_action_text") or "")
         current_message = str(enriched.get("message") or "")
@@ -451,11 +531,13 @@ def _augment_no_order_evaluation(
             f"watch={_counts_summary_text(watch, limit=2)} "
             f"non_blocking={_counts_summary_text(non_blocking, limit=2)} "
             f"order_blocking={_counts_summary_text(order_blocking, limit=2)} "
+            f"{signal_reason_clause} "
             f"SIR_opportunity=lookback_hours={lookback_hours},"
             f"active_expected={active_expected_orders},"
             f"lookback_expected={lookback_expected_orders},"
             f"pre_restart={lookback_pre_restart_orders},"
             f"lookback_reasons={reason_summary or 'none'}"
+            f"{coverage_clause}"
         )
         return enriched
     if order_blocking:
@@ -467,7 +549,8 @@ def _augment_no_order_evaluation(
         enriched["next_action_text"] = f"SIR runtime audit order_blocking 확인: {_counts_summary_text(order_blocking)}"
     elif no_candidate:
         enriched["candidate_generation_status"] = "no_live_route_candidate"
-        enriched["next_action_text"] = f"SIR fresh 후보 대기: {_counts_summary_text(no_candidate)}"
+        signal_text = f"; 신호 없음 이유: {signal_reason_text}" if signal_reason_text != "none" else ""
+        enriched["next_action_text"] = f"SIR fresh 후보 대기: {_counts_summary_text(no_candidate)}{signal_text}"
     elif watch:
         enriched["candidate_generation_status"] = "watch_candidate_context"
         enriched["next_action_text"] = f"SIR 후보 생성 watch 확인: {_counts_summary_text(watch)}"
@@ -493,8 +576,10 @@ def _augment_no_order_evaluation(
         f"watch={_counts_summary_text(watch, limit=2)} "
         f"non_blocking={_counts_summary_text(non_blocking, limit=2)} "
         f"order_blocking={_counts_summary_text(order_blocking, limit=2)} "
+        f"{signal_reason_clause} "
         f"SIR_opportunity=lookback_hours={lookback_hours},"
         f"active_expected={active_expected_orders},lookback_expected={lookback_expected_orders}"
+        f"{coverage_clause}"
     )
     return enriched
 
@@ -618,6 +703,12 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
         )
     candidate_context = dict(evaluation.get("candidate_generation_context") or payload.get("candidate_generation_context") or {})
     if candidate_context:
+        signal_reason_counts = dict(candidate_context.get("latest_signal_reason_counts") or {})
+        signal_text = (
+            f" / signal_reasons={_counts_summary_text(signal_reason_counts, limit=2)}"
+            if signal_reason_counts
+            else ""
+        )
         lines.append(
             "후보: "
             f"SIR audit {candidate_context.get('audit_count', 0)}건 / "
@@ -625,6 +716,7 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
             f"watch={_counts_summary_text(dict(candidate_context.get('watch_status_counts') or {}), limit=2)} / "
             f"non_blocking={_counts_summary_text(dict(candidate_context.get('non_blocking_status_counts') or {}), limit=2)} / "
             f"order_blocking={_counts_summary_text(dict(candidate_context.get('order_blocking_status_counts') or {}), limit=2)}"
+            f"{signal_text}"
         )
     opportunity_context = dict(evaluation.get("session_impulse_retest_opportunity_context") or {})
     if opportunity_context:

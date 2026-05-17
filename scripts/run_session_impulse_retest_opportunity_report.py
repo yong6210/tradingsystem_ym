@@ -177,6 +177,92 @@ def _summary_for_opportunities(
     }
 
 
+def _candle_coverage_for_symbols(
+    engine: StrategyEngine,
+    *,
+    symbols: list[str],
+    cutoff: datetime,
+    end_ts: datetime,
+) -> dict[str, Any]:
+    requested_hours = max(0.0, (_to_utc(end_ts) - _to_utc(cutoff)).total_seconds() / 3600.0)
+    preload_cutoff = _to_utc(cutoff) - timedelta(hours=12)
+    rows: list[dict[str, Any]] = []
+    missing_1m: list[str] = []
+    missing_5m: list[str] = []
+    for symbol in symbols:
+        first_1m = engine.candle_repo.get_first_candle(symbol, "1m")
+        last_1m = engine.candle_repo.get_last_candle(symbol, "1m")
+        first_5m = engine.candle_repo.get_first_candle(symbol, "5m")
+        last_5m = engine.candle_repo.get_last_candle(symbol, "5m")
+        if first_1m is None or last_1m is None:
+            missing_1m.append(symbol)
+            continue
+        if first_5m is None or last_5m is None:
+            missing_5m.append(symbol)
+        first_1m_ts = _to_utc(first_1m.ts)
+        last_1m_ts = min(_to_utc(last_1m.ts), _to_utc(end_ts))
+        coverage_hours = max(0.0, (last_1m_ts - first_1m_ts).total_seconds() / 3600.0)
+        rows.append(
+            {
+                "symbol": symbol,
+                "first_1m_ts": first_1m_ts,
+                "last_1m_ts": last_1m_ts,
+                "coverage_hours": coverage_hours,
+                "covers_requested_window": first_1m_ts <= _to_utc(cutoff),
+                "covers_requested_window_with_preload": first_1m_ts <= preload_cutoff,
+            }
+        )
+
+    if not rows:
+        return {
+            "requested_lookback_hours": round(requested_hours, 2),
+            "symbol_count": len(symbols),
+            "covered_symbol_count": 0,
+            "coverage_limited": True,
+            "missing_1m_symbols": missing_1m,
+            "missing_5m_symbols": missing_5m,
+            "note": "No local 1m candles were available for the requested symbols.",
+        }
+
+    first_values = [row["first_1m_ts"] for row in rows]
+    last_values = [row["last_1m_ts"] for row in rows]
+    coverage_values = [float(row["coverage_hours"]) for row in rows]
+    limited_symbols = [
+        str(row["symbol"])
+        for row in rows
+        if not bool(row.get("covers_requested_window_with_preload"))
+    ]
+    coverage_limited = bool(limited_symbols or missing_1m or missing_5m)
+    min_coverage = min(coverage_values)
+    return {
+        "requested_lookback_hours": round(requested_hours, 2),
+        "requested_start_ts": _to_utc(cutoff).isoformat(),
+        "window_end_ts": _to_utc(end_ts).isoformat(),
+        "symbol_count": len(symbols),
+        "covered_symbol_count": len(rows),
+        "min_first_1m_ts": min(first_values).isoformat(),
+        "max_first_1m_ts": max(first_values).isoformat(),
+        "min_last_1m_ts": min(last_values).isoformat(),
+        "max_last_1m_ts": max(last_values).isoformat(),
+        "min_local_1m_coverage_hours": round(min_coverage, 2),
+        "max_local_1m_coverage_hours": round(max(coverage_values), 2),
+        "full_requested_lookback_available": all(bool(row.get("covers_requested_window")) for row in rows)
+        and not missing_1m,
+        "full_requested_lookback_with_preload_available": not limited_symbols and not missing_1m,
+        "coverage_limited": coverage_limited,
+        "limited_symbol_count": len(limited_symbols),
+        "limited_symbols_sample": limited_symbols[:10],
+        "missing_1m_symbols": missing_1m,
+        "missing_5m_symbols": missing_5m,
+        "note": (
+            f"Local candle replay covers at least {min_coverage:.1f}h of 1m data; "
+            "use the external historical replay for older opportunities."
+            if coverage_limited
+            else "Local candles cover the requested lookback window plus replay preload."
+        ),
+    }
+
+
 def _report_path(settings: Any, generated_at: datetime) -> Path:
     out_dir = Path(str(getattr(settings, "validation_report_dir", "reports/validation"))) / "micro_main_opportunity_reports"
     if not out_dir.is_absolute():
@@ -195,6 +281,12 @@ def build_report(*, lookback_hours: int, symbols: list[str] | None = None) -> di
         target_symbols = engine._session_impulse_retest_miss_detector_symbols(symbols=symbols)
         cutoff = now - timedelta(hours=max(1, int(lookback_hours)))
         runtime_started_at = engine._session_impulse_retest_runtime_started_at()
+        coverage = _candle_coverage_for_symbols(
+            engine,
+            symbols=target_symbols,
+            cutoff=cutoff,
+            end_ts=now,
+        )
         opportunities: list[dict[str, Any]] = []
 
         for symbol in target_symbols:
@@ -279,6 +371,7 @@ def build_report(*, lookback_hours: int, symbols: list[str] | None = None) -> di
         "window_start": cutoff.isoformat(),
         "window_end": now.isoformat(),
         "runtime_started_at": runtime_started_at.isoformat() if runtime_started_at else None,
+        "coverage": coverage,
         "contract": {
             "family": "session_impulse_retest",
             "entry_model": "CONFIRM",
@@ -325,6 +418,7 @@ def main() -> int:
                         "lookback_hours",
                         "opportunity_scope",
                         "runtime_started_at",
+                        "coverage",
                         "contract",
                         "summary",
                         "lookback_summary",

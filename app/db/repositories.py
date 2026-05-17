@@ -642,6 +642,42 @@ class PlanRepository:
         )
         return list(self.db.scalars(stmt))
 
+    def archive_active_for_symbol_except_families(
+        self,
+        *,
+        symbol: str,
+        timeframe: str = "5m",
+        allowed_families: set[str],
+        states: list[str] | None = None,
+        limit: int = 5000,
+    ) -> int:
+        now = datetime.now(timezone.utc)
+        active_states = states or [PlanState.PLANNED.value, PlanState.ARMED.value]
+        normalized_allowed = {str(item or "").strip().lower() for item in allowed_families if str(item or "").strip()}
+        if not normalized_allowed:
+            return 0
+        stmt = (
+            select(Plan)
+            .where(
+                Plan.symbol == symbol,
+                Plan.timeframe == timeframe,
+                Plan.state.in_(active_states),
+                Plan.valid_until > now,
+            )
+            .order_by(desc(Plan.valid_from), desc(Plan.ev))
+            .limit(max(1, int(limit or 1)))
+        )
+        archived = 0
+        for row in list(self.db.scalars(stmt)):
+            validity = row.validity if isinstance(row.validity, dict) else {}
+            family = str(validity.get("strategy_family") or "legacy_zone_plan").strip().lower()
+            if family in normalized_allowed:
+                continue
+            row.state = PlanState.ARCHIVED.value
+            self.db.add(row)
+            archived += 1
+        return archived
+
     def count_since(
         self,
         *,

@@ -102,6 +102,7 @@ class SessionImpulseRetestResearch:
     _MAX_HOLD_MINUTES = 40
     _TIME_GUARD_10M_MIN_MFE_R = 0.20
     _TIME_GUARD_20M_MIN_MFE_R = 0.35
+    _SESSION_ANCHOR_LOOKBACK_BARS = 180
     _PROFILE_DEFAULTS: ClassVar[dict[str, dict[str, float]]] = {
         "baseline": {
             "min_offset_bars": 5.0,
@@ -297,7 +298,7 @@ class SessionImpulseRetestResearch:
         return (0, 6, 13)
 
     def _session_anchor_index(self, idx: int) -> int | None:
-        for probe in range(idx, max(-1, idx - 72), -1):
+        for probe in range(idx, max(-1, idx - self._SESSION_ANCHOR_LOOKBACK_BARS), -1):
             ts = self.ts_5m[probe]
             if ts.minute == 0 and ts.hour in self._session_anchor_hours():
                 return probe
@@ -521,6 +522,263 @@ class SessionImpulseRetestResearch:
                         diagnostics=diagnostics,
                     )
         return None
+
+    @staticmethod
+    def _round_metric(value: Any) -> Any:
+        if isinstance(value, float):
+            return round(value, 6)
+        return value
+
+    @staticmethod
+    def _failed_conditions(conditions: dict[str, bool]) -> list[str]:
+        return [name for name, passed in conditions.items() if not bool(passed)]
+
+    def _signal_rejection_diagnostics(self, idx: int) -> dict[str, Any]:
+        profile = self._signal_filter_profile()
+        setup_ts = self.ts_5m[idx]
+        payload: dict[str, Any] = {
+            "setup_ts": setup_ts.isoformat(),
+            "setup_hour_utc": setup_ts.hour,
+            "setup_weekday_utc": setup_ts.weekday(),
+        }
+        if setup_ts.hour in self._blocked_signal_hours():
+            return {**payload, "reason": "blocked_signal_hour"}
+        session_anchor = self._session_anchor_index(idx)
+        if session_anchor is None:
+            return {**payload, "reason": "no_session_anchor"}
+        offset = idx - session_anchor
+        payload["offset_bars"] = offset
+        if offset < int(profile["min_offset_bars"]):
+            return {**payload, "reason": "before_session_signal_window"}
+        if offset > int(profile["max_offset_bars"]):
+            return {**payload, "reason": "after_session_signal_window"}
+
+        atr = max(self.atr_5m[idx], 1e-9)
+        orb_end = min(session_anchor + 4, len(self.candles_5m))
+        if idx <= orb_end:
+            return {**payload, "reason": "opening_range_not_complete"}
+        orb_high = self._rolling_high_5m(session_anchor, orb_end)
+        orb_low = self._rolling_low_5m(session_anchor, orb_end)
+        orb_width = orb_high - orb_low
+        orb_width_atr = float(orb_width / atr)
+        payload["orb_width_atr"] = orb_width_atr
+        if orb_width <= float(profile["min_orb_width_atr"]) * atr:
+            return {**payload, "reason": "opening_range_too_narrow"}
+        if orb_width >= float(profile["max_orb_width_atr"]) * atr:
+            return {**payload, "reason": "opening_range_too_wide"}
+
+        trend_strength = abs(self.ema_fast_5m[idx] - self.ema_slow_5m[idx]) / atr
+        payload["trend_strength_atr"] = float(trend_strength)
+        if trend_strength < float(profile["min_trend_strength"]):
+            return {**payload, "reason": "trend_strength_too_weak"}
+
+        volume_med = self._volume_median_5m(idx - 16, idx)
+        drive_high = self._rolling_high_5m(orb_end, idx)
+        drive_low = self._rolling_low_5m(orb_end, idx)
+        vwap = self.session_vwap_5m[idx]
+        volume_factor = float(self.volumes_5m[idx] / max(volume_med, 1e-9))
+        reclaim_body_atr = float(self._body_size_5m(idx) / atr)
+        reclaim_close_position = float(self._close_position_in_bar_5m(idx))
+        breakout_long = any(
+            self.closes_5m[probe] > orb_high + float(profile["breakout_buffer_atr"]) * max(self.atr_5m[probe], 1e-9)
+            and self._body_size_5m(probe) >= float(profile["min_breakout_body_atr"]) * max(self.atr_5m[probe], 1e-9)
+            and self._close_position_in_bar_5m(probe) >= float(profile["min_breakout_close_long"])
+            for probe in range(orb_end, idx)
+        )
+        breakout_short = any(
+            self.closes_5m[probe] < orb_low - float(profile["breakout_buffer_atr"]) * max(self.atr_5m[probe], 1e-9)
+            and self._body_size_5m(probe) >= float(profile["min_breakout_body_atr"]) * max(self.atr_5m[probe], 1e-9)
+            and self._close_position_in_bar_5m(probe) <= float(profile["max_breakout_close_short"])
+            for probe in range(orb_end, idx)
+        )
+        long_reclaim = max(orb_high, vwap)
+        short_reclaim = min(orb_low, vwap)
+        long_conditions = {
+            "ema_trend": self.ema_fast_5m[idx] > self.ema_slow_5m[idx],
+            "drive_extension": drive_high >= orb_high + float(profile["min_drive_extension_atr"]) * atr,
+            "breakout": breakout_long,
+            "reclaim_touch": self.lows_5m[idx] <= long_reclaim + float(profile["reclaim_touch_buffer_atr"]) * atr,
+            "reclaim_overshoot": self.lows_5m[idx] >= long_reclaim - float(profile["reclaim_overshoot_atr"]) * atr,
+            "reclaim_close": self.closes_5m[idx] >= long_reclaim + float(profile["reclaim_close_buffer_atr"]) * atr,
+            "candle_direction": self.closes_5m[idx] > self.opens_5m[idx],
+            "reclaim_body": self._body_size_5m(idx) >= float(profile["min_reclaim_body_atr"]) * atr,
+            "reclaim_close_position": reclaim_close_position >= float(profile["min_reclaim_close_long"]),
+            "volume": self.volumes_5m[idx] >= max(volume_med * float(profile["min_volume_factor"]), 1e-9),
+        }
+        short_conditions = {
+            "ema_trend": self.ema_fast_5m[idx] < self.ema_slow_5m[idx],
+            "drive_extension": drive_low <= orb_low - float(profile["min_drive_extension_atr"]) * atr,
+            "breakout": breakout_short,
+            "reclaim_touch": self.highs_5m[idx] >= short_reclaim - float(profile["reclaim_touch_buffer_atr"]) * atr,
+            "reclaim_overshoot": self.highs_5m[idx] <= short_reclaim + float(profile["reclaim_overshoot_atr"]) * atr,
+            "reclaim_close": self.closes_5m[idx] <= short_reclaim - float(profile["reclaim_close_buffer_atr"]) * atr,
+            "candle_direction": self.closes_5m[idx] < self.opens_5m[idx],
+            "reclaim_body": self._body_size_5m(idx) >= float(profile["min_reclaim_body_atr"]) * atr,
+            "reclaim_close_position": reclaim_close_position <= float(profile["max_reclaim_close_short"]),
+            "volume": self.volumes_5m[idx] >= max(volume_med * float(profile["min_volume_factor"]), 1e-9),
+        }
+
+        long_pass_count = sum(1 for passed in long_conditions.values() if passed)
+        short_pass_count = sum(1 for passed in short_conditions.values() if passed)
+        direction: Direction = "long" if long_pass_count >= short_pass_count else "short"
+        selected_conditions = long_conditions if direction == "long" else short_conditions
+        reclaim_level = long_reclaim if direction == "long" else short_reclaim
+        if not all(selected_conditions.values()):
+            return {
+                **payload,
+                "reason": "setup_conditions_not_met",
+                "closest_direction": direction,
+                "long_pass_count": long_pass_count,
+                "short_pass_count": short_pass_count,
+                "failed_conditions": self._failed_conditions(selected_conditions),
+                "volume_factor": volume_factor,
+                "reclaim_body_atr": reclaim_body_atr,
+                "reclaim_close_position": reclaim_close_position,
+            }
+
+        entry = self._find_1m_entry(
+            setup_idx_5m=idx,
+            direction=direction,
+            reclaim_level=reclaim_level,
+            atr_5m=atr,
+            retest_buffer_atr=float(profile["entry_retest_buffer_atr"]),
+            max_retest_wait_minutes=float(profile["max_retest_wait_minutes"]),
+        )
+        if entry is None:
+            return {
+                **payload,
+                "reason": "no_1m_retest_entry",
+                "closest_direction": direction,
+                "long_pass_count": long_pass_count,
+                "short_pass_count": short_pass_count,
+                "volume_factor": volume_factor,
+                "reclaim_body_atr": reclaim_body_atr,
+                "reclaim_close_position": reclaim_close_position,
+            }
+        entry_ts, entry_price = entry
+        if direction == "long":
+            stop = min(self.lows_5m[idx], reclaim_level) - float(profile["stop_buffer_atr"]) * atr
+            risk_abs = entry_price - stop
+        else:
+            stop = max(self.highs_5m[idx], reclaim_level) + float(profile["stop_buffer_atr"]) * atr
+            risk_abs = stop - entry_price
+        min_risk_abs = max(float(profile["min_risk_atr"]) * atr, entry_price * float(profile["min_risk_pct"]))
+        max_risk_abs = float(profile["max_risk_atr"]) * atr
+        risk_atr = float(risk_abs / atr)
+        retest_wait_minutes = max(int((entry_ts - self.ts_5m[idx]).total_seconds() // 60), 0)
+        if risk_abs < min_risk_abs:
+            reason = "risk_too_small"
+        elif risk_abs > max_risk_abs:
+            reason = "risk_too_large"
+        elif not self._passes_late_retest_risk_filter(
+            profile,
+            risk_atr=risk_atr,
+            retest_wait_minutes=retest_wait_minutes,
+        ):
+            reason = "late_retest_risk_filter"
+        else:
+            reason = "accepted_by_diagnostics"
+        return {
+            **payload,
+            "reason": reason,
+            "closest_direction": direction,
+            "entry_ts": entry_ts.isoformat(),
+            "retest_wait_minutes": retest_wait_minutes,
+            "risk_atr": risk_atr,
+            "risk_pct": float(risk_abs / max(entry_price, 1e-9)),
+            "volume_factor": volume_factor,
+            "reclaim_body_atr": reclaim_body_atr,
+            "reclaim_close_position": reclaim_close_position,
+        }
+
+    def latest_signal_diagnostics(self, *, freshness_minutes: int = 20) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "schema_version": "session_impulse_retest_latest_signal_diagnostics_v1",
+            "symbol": self.symbol,
+            "profile_symbol": self.profile_symbol,
+            "profile_name": self.profile_name,
+            "freshness_minutes": int(freshness_minutes),
+            "candles_1m": len(self.candles_1m),
+            "candles_5m": len(self.candles_5m),
+            "status": "no_fresh_signal",
+            "reason": "no_recent_signal",
+        }
+        if len(self.candles_5m) < 80 or len(self.candles_1m) < 600:
+            payload["status"] = "insufficient_candles"
+            payload["reason"] = "insufficient_1m_or_5m_candles"
+            return payload
+        last_ts = self._normalize_ts(self.candles_1m[-1].ts)
+        min_ts = last_ts - timedelta(minutes=max(int(freshness_minutes), 1))
+        start = max(60, len(self.candles_5m) - 12)
+        reason_counts: dict[str, int] = {}
+        scanned: list[dict[str, Any]] = []
+        stale_candidate: dict[str, Any] | None = None
+        future_candidate: dict[str, Any] | None = None
+        for idx in range(len(self.candles_5m) - 2, start - 1, -1):
+            signal = self._build_signal(idx)
+            if signal is not None:
+                candidate = {
+                    "setup_ts": signal.setup_ts.isoformat(),
+                    "entry_ts": signal.entry_ts.isoformat(),
+                    "direction": signal.direction,
+                    "diagnostics": {
+                        key: self._round_metric(value)
+                        for key, value in sorted(dict(signal.diagnostics or {}).items())
+                    },
+                }
+                if signal.entry_ts < min_ts:
+                    stale_candidate = stale_candidate or candidate
+                    reason = "candidate_stale"
+                elif signal.entry_ts > last_ts:
+                    future_candidate = future_candidate or candidate
+                    reason = "candidate_after_latest_candle"
+                else:
+                    payload.update(
+                        {
+                            "status": "fresh_signal",
+                            "reason": "fresh_signal_available",
+                            "last_1m_ts": last_ts.isoformat(),
+                            "min_fresh_entry_ts": min_ts.isoformat(),
+                            "scan_bars": len(scanned) + 1,
+                            "fresh_candidate": candidate,
+                        }
+                    )
+                    return payload
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                scanned.append({**candidate, "reason": reason})
+                continue
+
+            diagnostic = self._signal_rejection_diagnostics(idx)
+            reason = str(diagnostic.get("reason") or "unknown")
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            scanned.append({key: self._round_metric(value) for key, value in diagnostic.items()})
+
+        best = max(
+            scanned,
+            key=lambda item: int(item.get("long_pass_count", 0) or 0) + int(item.get("short_pass_count", 0) or 0),
+            default={},
+        )
+        payload.update(
+            {
+                "last_1m_ts": last_ts.isoformat(),
+                "min_fresh_entry_ts": min_ts.isoformat(),
+                "scan_bars": len(scanned),
+                "reason_counts": reason_counts,
+                "latest_checked": scanned[0] if scanned else {},
+                "closest_setup": best,
+                "latest_stale_candidate": stale_candidate,
+                "latest_future_candidate": future_candidate,
+            }
+        )
+        if stale_candidate is not None:
+            payload["reason"] = "latest_candidate_stale"
+        elif future_candidate is not None:
+            payload["reason"] = "latest_candidate_after_latest_candle"
+        elif scanned and str(scanned[0].get("reason") or "").strip():
+            payload["reason"] = str(scanned[0].get("reason"))
+        elif reason_counts:
+            payload["reason"] = max(reason_counts.items(), key=lambda item: item[1])[0]
+        return payload
 
     def _simulate_trade(self, signal: MicroSignal) -> MicroTrade | None:
         entry_idx = self._index_1m_by_ts.get(signal.entry_ts)

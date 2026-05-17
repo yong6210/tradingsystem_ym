@@ -82,6 +82,49 @@ def test_session_impulse_retest_runtime_plan_builds_when_signal_is_fresh(monkeyp
         assert plan.validity["session_impulse_retest_signal"]["diagnostics"]["reclaim_body_atr"] == 0.24
 
 
+def test_session_impulse_retest_runtime_plan_applies_usdt_universe_risk_multiplier(monkeypatch) -> None:
+    init_db()
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    candles_1m = _candles("BTCUSDT", "1m", 1, 1200, start)
+    candles_5m = _candles("BTCUSDT", "5m", 5, 300, start)
+    last_ts = candles_1m[-1].ts
+    fake_signal = MicroSignal(
+        family="session_impulse_retest",
+        direction="long",
+        signal_ts=last_ts - timedelta(minutes=7),
+        setup_ts=last_ts - timedelta(minutes=6),
+        entry_ts=last_ts - timedelta(minutes=4),
+        entry_price=120.0,
+        stop_price=119.0,
+        target_price=122.0,
+        max_hold_minutes=25,
+        regime_hint="trend",
+    )
+
+    monkeypatch.setattr(
+        strategy_engine_module.SessionImpulseRetestResearch,
+        "latest_signal",
+        lambda self, freshness_minutes=20: fake_signal,
+    )
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        engine.settings.session_impulse_retest_allowed_symbols = "BTCUSDT"
+        plan = engine._session_impulse_retest_runtime_plan(
+            symbol="BTCUSDT",
+            candles_1m=candles_1m,
+            candles_5m=candles_5m,
+            active_thesis_clusters=0,
+        )
+
+        assert plan is not None
+        sizing = dict(plan.validity["strategy_sizing"])
+        assert sizing["pre_universe_final_risk_r"] == 0.595
+        assert sizing["universe_risk_multiplier"] == 0.9
+        assert sizing["final_risk_r"] == 0.5355
+        assert plan.validity["recommended_risk_r"] == 0.5355
+
+
 def test_session_impulse_retest_runtime_plan_applies_saturday_risk_haircut(monkeypatch) -> None:
     init_db()
     start = datetime(2026, 1, 3, tzinfo=UTC)

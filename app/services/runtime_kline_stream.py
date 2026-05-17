@@ -185,13 +185,9 @@ class RuntimeKlineStreamService:
                                 if refresh_ok:
                                     try:
                                         plan_ids = list((refresh_payload or {}).get("session_impulse_retest_plan_ids") or [])
-                                        route_payload = (
-                                            self.auto_route_session_impulse_retest_plans(
-                                                symbol=kline.symbol,
-                                                plan_ids=plan_ids,
-                                            )
-                                            if plan_ids
-                                            else self.auto_route_symbol(symbol=kline.symbol)
+                                        route_payload = self.auto_route_session_impulse_retest_plans(
+                                            symbol=kline.symbol,
+                                            plan_ids=plan_ids,
                                         )
                                         stats["auto_route_calls"] += 1
                                         stats["auto_route_submit_calls"] += int(route_payload.get("submit_calls", 0) or 0)

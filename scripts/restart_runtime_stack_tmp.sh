@@ -228,6 +228,9 @@ post_restart_refresh_reports() {
     run_report_refresh boot_check \
       "$PYTHON_BIN" "$TMP_ROOT/scripts/run_micro_live_boot_check.py" \
       --days 3 --limit 200 --no-fail-exit --quiet
+    run_report_refresh liquidity_universe \
+      "$PYTHON_BIN" "$TMP_ROOT/scripts/run_micro_live_liquidity_universe.py" \
+      --use-private-balance --sleep-seconds 0.8 --max-retries 2 --retry-sleep-seconds 12 --no-fail-exit --quiet
     run_report_refresh ops_heartbeat \
       "$PYTHON_BIN" "$TMP_ROOT/scripts/run_micro_live_ops_heartbeat.py" \
       --no-fail-exit --quiet

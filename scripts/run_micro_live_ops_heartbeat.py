@@ -58,6 +58,12 @@ _DEFAULT_JOBS: dict[str, Any] = {
         "max_age_minutes": 130,
         "pass_statuses": {"PASS"},
     },
+    "liquidity_universe": {
+        "pattern": "reports/operations/micro_live_liquidity_universe/*.md",
+        "max_age_minutes": 190,
+        "pass_statuses": {"PASS"},
+        "watch_statuses": {"WATCH"},
+    },
     "boot_check": {
         "pattern": "reports/operations/micro_live_boot_check/*.md",
         "max_age_minutes": 35,

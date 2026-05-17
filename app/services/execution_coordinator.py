@@ -626,6 +626,15 @@ class ExecutionCoordinator:
         submitted_notional = partial_quantity * reference_price
         if submitted_notional < min_tranche_notional:
             return None, {}, "partial_submit_rounded_notional_below_minimum"
+        submitted_fraction = submitted_notional / target_notional if target_notional > 0.0 else 0.0
+        min_target_fraction = max(
+            0.0,
+            self._float_or(
+                getattr(self.settings, "auto_trading_live_liquidity_gate_min_tranche_target_fraction", 0.0),
+            ),
+        )
+        if min_target_fraction > 0.0 and submitted_fraction + 1e-12 < min_target_fraction:
+            return None, {}, "partial_submit_target_fraction_below_minimum"
 
         continuation = self._intent_tranche_continuation(intent)
         remaining_before = self._maybe_float(continuation.get("remaining_notional")) if continuation else None
@@ -652,6 +661,8 @@ class ExecutionCoordinator:
             "target_notional": round(float(total_target_notional), 4),
             "remaining_notional_before": round(float(remaining_before), 4),
             "submitted_notional": round(submitted_notional, 4),
+            "submitted_target_fraction": round(submitted_fraction, 6),
+            "min_target_fraction": round(min_target_fraction, 6),
             "remaining_notional": round(remaining_after, 4),
             "min_tranche_notional": round(min_tranche_notional, 4),
             "additive_allowed": bool(additive_allowed),
@@ -662,11 +673,25 @@ class ExecutionCoordinator:
             **self._safe_dict(live_sizing),
             "liquidity_gate_decision": "SPLIT_PARTIAL_SUBMIT",
             "original_normalized_quantity": round(float(live_quantity or 0.0), 8),
+            "original_normalized_notional": round(float(live_quantity or 0.0) * float(reference_price), 4),
             "original_max_position_notional": round(float(target_notional), 4),
             "normalized_quantity": round(float(partial_quantity), 8),
+            "normalized_notional": round(submitted_notional, 4),
             "max_position_notional": round(submitted_notional, 4),
+            "liquidity_tranche_reduction_notional": round(max(float(target_notional) - submitted_notional, 0.0), 4),
+            "liquidity_tranche_submitted_fraction": round(submitted_fraction, 6),
+            "liquidity_tranche_min_target_fraction": round(min_target_fraction, 6),
             "live_tranche": live_tranche,
         }
+        if str(adjusted_sizing.get("sizing_mode") or "").strip().upper() == "RISK_PCT":
+            stop_pct = self._float_or(adjusted_sizing.get("stop_pct"))
+            account_equity_usdt = self._float_or(adjusted_sizing.get("account_equity_usdt"))
+            actual_risk_usdt = submitted_notional * stop_pct
+            adjusted_sizing["actual_risk_usdt"] = round(actual_risk_usdt, 4)
+            adjusted_sizing["actual_risk_pct"] = round(
+                actual_risk_usdt / account_equity_usdt if account_equity_usdt > 0.0 else 0.0,
+                6,
+            )
         return partial_quantity, adjusted_sizing, None
 
     def _live_liquidity_gate(
@@ -1290,6 +1315,25 @@ class ExecutionCoordinator:
         normalized_quantity = self._round_down_to_step(raw_quantity, step=step)
         sizing_details["raw_quantity"] = round(raw_quantity, 8)
         sizing_details["normalized_quantity"] = round(normalized_quantity, 8)
+        normalized_notional = normalized_quantity * reference_price
+        sizing_details["normalized_notional"] = round(normalized_notional, 4)
+        if sizing_mode == "RISK_PCT":
+            stop_pct = self._float_or(sizing_details.get("stop_pct"))
+            account_equity_usdt = self._float_or(sizing_details.get("account_equity_usdt"))
+            normalized_actual_risk_usdt = normalized_notional * stop_pct
+            normalized_actual_risk_pct = (
+                normalized_actual_risk_usdt / account_equity_usdt if account_equity_usdt > 0.0 else 0.0
+            )
+            sizing_details["actual_risk_usdt"] = round(normalized_actual_risk_usdt, 4)
+            sizing_details["actual_risk_pct"] = round(normalized_actual_risk_pct, 6)
+            sizing_details["quantity_rounding_loss_notional"] = round(
+                max(max_position_notional - normalized_notional, 0.0),
+                4,
+            )
+            sizing_details["quantity_rounding_loss_risk_usdt"] = round(
+                max((max_position_notional - normalized_notional) * stop_pct, 0.0),
+                4,
+            )
 
         if normalized_quantity + 1e-12 < min_quantity:
             return (

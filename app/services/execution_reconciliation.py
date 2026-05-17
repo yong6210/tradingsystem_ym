@@ -91,6 +91,18 @@ class ExecutionReconciliationService:
             ),
         )
 
+    def _auto_close_exchange_flat_plans(self, *, plans: list[Plan], now: datetime) -> None:
+        for plan in plans:
+            previous_state = str(plan.state or "")
+            validity = dict(plan.validity or {})
+            validity["reconcile_auto_closed_at"] = now.isoformat()
+            validity["reconcile_auto_close_reason"] = "exchange_flat_no_open_orders"
+            validity["reconcile_auto_close_mismatch"] = "ORPHAN_POSITION_LOCAL"
+            validity["reconcile_auto_close_previous_state"] = previous_state
+            plan.validity = validity
+            plan.state = PlanState.CLOSED.value
+            self.plan_repo.db.add(plan)
+
     @staticmethod
     def _utc(value: datetime | None) -> datetime | None:
         if value is None:
@@ -288,6 +300,7 @@ class ExecutionReconciliationService:
                 )
             )
         if effective_local_plans and not exchange_positions:
+            auto_resolvable_flat_local = not local_orders and not exchange_orders
             mismatches.append(
                 self._mismatch(
                     "ORPHAN_POSITION_LOCAL",
@@ -296,10 +309,16 @@ class ExecutionReconciliationService:
                     local_snapshot={
                         "open_plan_count": len(effective_local_plans),
                         "plan_ids": [row.plan_id for row in effective_local_plans],
+                        "open_local_submission_count": len(local_orders),
+                        "open_exchange_order_count": len(exchange_orders),
+                        "auto_resolvable": auto_resolvable_flat_local,
                     },
                     exchange_snapshot={"positions": []},
                 )
             )
+            if auto_resolve and auto_resolvable_flat_local:
+                self._auto_close_exchange_flat_plans(plans=effective_local_plans, now=now)
+                auto_resolve_applied = True
 
         local_size_proxy = float(len(effective_local_plans))
         exchange_size = round(sum(abs(float(row.position_amt or 0.0)) for row in exchange_positions), 8)

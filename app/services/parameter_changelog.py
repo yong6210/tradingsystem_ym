@@ -207,6 +207,7 @@ TRACKED_PARAMETER_KEYS = [
     "auto_trading_live_liquidity_gate_partial_submit_enabled",
     "auto_trading_live_liquidity_gate_max_tranches",
     "auto_trading_live_liquidity_gate_min_tranche_notional_usdt",
+    "auto_trading_live_liquidity_gate_min_tranche_target_fraction",
     "auto_trading_micro_live_allowed_entry_models",
     "auto_trading_micro_live_session_direction_blocked_hours_utc",
     "auto_trading_micro_live_symbol_family_entry_direction_blocked_hours_utc",

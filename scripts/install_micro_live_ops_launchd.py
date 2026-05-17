@@ -196,6 +196,24 @@ def build_jobs(*, label_prefix: str, python_bin: str, env_file: str = "") -> lis
             start_interval=60 * 60,
         ),
         LaunchdJob(
+            name="liquidity_universe",
+            label=f"{prefix}.liquidity-universe",
+            args=[
+                py,
+                _script("run_micro_live_liquidity_universe.py"),
+                "--use-private-balance",
+                "--sleep-seconds",
+                "0.8",
+                "--max-retries",
+                "2",
+                "--retry-sleep-seconds",
+                "12",
+                "--no-fail-exit",
+                "--quiet",
+            ],
+            start_interval=2 * 60 * 60,
+        ),
+        LaunchdJob(
             name="boot_check",
             label=f"{prefix}.boot-check",
             args=[

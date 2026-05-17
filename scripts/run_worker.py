@@ -77,9 +77,19 @@ def _compact_sync_universe_payload(payload: dict[str, Any]) -> dict[str, Any]:
     intents_created = 0
     sir_generated = 0
     signal_alerts = 0
+    failed_symbol_samples: list[dict[str, str]] = []
 
     for row in results:
-        worker_statuses[str(row.get("status") or "unknown")] += 1
+        status = str(row.get("status") or "unknown")
+        worker_statuses[status] += 1
+        if status != "ok":
+            failed_symbol_samples.append(
+                {
+                    "symbol": str(row.get("symbol") or ""),
+                    "status": status,
+                    "error": str(row.get("error") or row.get("message") or "")[:300],
+                }
+            )
         refresh = dict(row.get("refresh") or {})
         auto_route = dict(row.get("auto_route") or {})
         route_reasons[str(auto_route.get("reason") or "none")] += 1
@@ -109,6 +119,7 @@ def _compact_sync_universe_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "failed": _safe_int(payload.get("failed")),
         "result_count": len(results),
         "worker_status_counts": _top_counts(worker_statuses),
+        "failed_symbol_samples": failed_symbol_samples[:8],
         "session_impulse_retest_generated_count": sir_generated,
         "session_impulse_retest_generation_state_counts": _top_counts(sir_states),
         "signal_alerts_emitted": signal_alerts,
