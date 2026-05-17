@@ -109,9 +109,19 @@ def _macro_blackout_output_path(*, env_file: str = "") -> str:
     return str(configured or "").strip() or _DEFAULT_MACRO_BLACKOUT_OUTPUT
 
 
+def _micro_live_symbols(*, env_file: str = "") -> str:
+    configured = (
+        _env_file_value(env_file, "AUTO_TRADING_MICRO_LIVE_ALLOWED_SYMBOLS")
+        or os.environ.get("AUTO_TRADING_MICRO_LIVE_ALLOWED_SYMBOLS")
+        or getattr(get_settings(), "auto_trading_micro_live_allowed_symbols", "")
+    )
+    return str(configured or "").strip()
+
+
 def build_jobs(*, label_prefix: str, python_bin: str, env_file: str = "") -> list[LaunchdJob]:
     prefix = str(label_prefix or "com.trading.micro-live").strip().rstrip(".")
     py = str(python_bin or sys.executable)
+    live_symbols = _micro_live_symbols(env_file=env_file)
     return [
         LaunchdJob(
             name="runtime_guard",
@@ -150,11 +160,34 @@ def build_jobs(*, label_prefix: str, python_bin: str, env_file: str = "") -> lis
                 _script("run_live_reconciliation_watchdog.py"),
                 "--days",
                 "3",
+                *(["--symbols", live_symbols] if live_symbols else []),
                 "--notify",
                 "--no-fail-exit",
                 "--quiet",
             ],
             start_interval=5 * 60,
+        ),
+        LaunchdJob(
+            name="live_account_protection_audit",
+            label=f"{prefix}.live-account-protection-audit",
+            args=[
+                py,
+                _script("run_live_account_protection_audit.py"),
+                "--no-fail-exit",
+                "--quiet",
+            ],
+            start_interval=5 * 60,
+        ),
+        LaunchdJob(
+            name="live_leverage_cap_sync",
+            label=f"{prefix}.live-leverage-cap-sync",
+            args=[
+                py,
+                _script("run_live_leverage_cap_sync.py"),
+                "--no-fail-exit",
+                "--quiet",
+            ],
+            start_interval=30 * 60,
         ),
         LaunchdJob(
             name="synthetic_canary",

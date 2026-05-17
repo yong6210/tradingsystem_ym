@@ -23,9 +23,9 @@ from app.services.transition_variant_live_readiness import (
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Summarize transition edge variant live readiness.")
-    parser.add_argument("--symbols", default="BTCUSDC,ETHUSDC")
+    parser.add_argument("--symbols", default="BTCUSDT,ETHUSDT")
     parser.add_argument("--days", type=int, default=7)
-    parser.add_argument("--universe", default="usdc_perp_top30")
+    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
     parser.add_argument("--write-report", action="store_true")
     return parser.parse_args()
 

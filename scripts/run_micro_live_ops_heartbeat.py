@@ -25,6 +25,7 @@ _DEFAULT_JOBS: dict[str, Any] = {
         "pattern": "reports/operations/micro_live_runtime_guard/*.md",
         "max_age_minutes": 35,
         "pass_statuses": {"PASS"},
+        "watch_statuses": {"WATCH"},
         "requires_current_runtime": True,
     },
     "no_order_watchdog": {
@@ -37,6 +38,18 @@ _DEFAULT_JOBS: dict[str, Any] = {
     "reconciliation_watchdog": {
         "pattern": "reports/operations/live_reconciliation_watchdog/*.md",
         "max_age_minutes": 20,
+        "pass_statuses": {"OK", "PASS"},
+        "watch_statuses": {"WATCH", "WARN"},
+    },
+    "live_account_protection_audit": {
+        "pattern": "reports/operations/live_account_protection_audit/*.md",
+        "max_age_minutes": 20,
+        "pass_statuses": {"OK", "PASS"},
+        "watch_statuses": {"ALERT", "WATCH", "WARN"},
+    },
+    "live_leverage_cap_sync": {
+        "pattern": "reports/operations/live_leverage_cap_sync/*.md",
+        "max_age_minutes": 75,
         "pass_statuses": {"OK", "PASS"},
         "watch_statuses": {"WATCH", "WARN"},
     },

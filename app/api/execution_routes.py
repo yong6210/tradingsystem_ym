@@ -30,8 +30,8 @@ router = APIRouter()
 
 @router.get("/execution/operator-ui", response_class=HTMLResponse)
 def execution_operator_ui(
-    symbol: str | None = Query(default="BTCUSDC"),
-    universe: str = Query(default="usdc_perp_top30"),
+    symbol: str | None = Query(default="BTCUSDT"),
+    universe: str = Query(default="usdt_reliable_balanced_31"),
     days: int = Query(default=7, ge=1, le=365),
 ) -> HTMLResponse:
     html = build_execution_operator_ui(symbol=symbol, universe=universe, days=days)
@@ -230,7 +230,7 @@ def execution_safety_state(
 @router.get("/execution/operator-dashboard", response_model=ExecutionOperatorDashboardResponse)
 def execution_operator_dashboard(
     symbol: str | None = Query(default=None),
-    universe: str = Query(default="usdc_perp_top30"),
+    universe: str = Query(default="usdt_reliable_balanced_31"),
     portfolio_limit: int = Query(default=10, ge=1, le=50),
     intent_limit: int = Query(default=10, ge=1, le=50),
     reconcile_limit: int = Query(default=10, ge=1, le=50),

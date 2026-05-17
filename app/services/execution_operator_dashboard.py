@@ -1364,7 +1364,7 @@ class ExecutionOperatorDashboardService:
         payload: dict[str, Any] | None,
         *,
         symbol: str = "",
-        universe: str = "usdc_perp_top30",
+        universe: str = "usdt_reliable_balanced_31",
         days: int = 7,
     ) -> dict[str, Any] | None:
         if not payload:
@@ -1626,7 +1626,7 @@ class ExecutionOperatorDashboardService:
         operator_action_priority_payload = self._operator_action_priority_summary(
             operator_action_priority_summary,
             symbol=symbol or "",
-            universe=str(portfolio_summary_payload.get("universe") or "usdc_perp_top30"),
+            universe=str(portfolio_summary_payload.get("universe") or "usdt_reliable_balanced_31"),
             days=max(int(days), 1),
         )
         outcome_attribution_summary = summarize_outcome_attribution(
@@ -1641,7 +1641,7 @@ class ExecutionOperatorDashboardService:
         )
         review_followup_ledger_summary = summarize_split_review_followup_ledger(
             symbol=symbol or "",
-            universe=str(portfolio_summary_payload.get("universe") or "usdc_perp_top30"),
+            universe=str(portfolio_summary_payload.get("universe") or "usdt_reliable_balanced_31"),
         )
         edge_evolution_summary = summarize_edge_evolution_rule(
             build_edge_evolution_rule(

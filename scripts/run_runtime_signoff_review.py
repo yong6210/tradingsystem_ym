@@ -274,8 +274,8 @@ def parse_args() -> argparse.Namespace:
         description="Summarize the remaining runtime operator sign-off decision."
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--symbol", default="BTCUSDC")
-    parser.add_argument("--universe", default="usdc_perp_top30")
+    parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--stage-file", default=str(DEFAULT_STAGE_FILE))
     parser.add_argument("--report-dir", default="reports/operations/runtime_signoff_reviews")
@@ -465,8 +465,8 @@ def _build_runtime_operator_signoff_summary(
     runtime_signoff_summary: dict[str, Any] | None,
     runtime_reopen_gate_summary: dict[str, Any] | None = None,
     base_url: str = "http://127.0.0.1:8000",
-    symbol: str = "BTCUSDC",
-    universe: str = "usdc_perp_top30",
+    symbol: str = "BTCUSDT",
+    universe: str = "usdt_reliable_balanced_31",
     days: int = 30,
 ) -> dict[str, Any]:
     decision = dict(runtime_decision or {})
@@ -2318,8 +2318,8 @@ def _refresh_focus_from_local_artifact(
     focus: dict[str, Any] | None,
     *,
     stage: dict[str, Any] | None = None,
-    symbol: str = "BTCUSDC",
-    universe: str = "usdc_perp_top30",
+    symbol: str = "BTCUSDT",
+    universe: str = "usdt_reliable_balanced_31",
     days: int = 30,
     artifact_path_override: str = "",
 ) -> dict[str, Any]:
@@ -2579,7 +2579,7 @@ def _attach_approval_template_focus(
             downside_profile=downside,
             stage=stage,
             symbol=symbol,
-            universe=str(payload.get("universe") or stage.get("universe") or "usdc_perp_top30"),
+            universe=str(payload.get("universe") or stage.get("universe") or "usdt_reliable_balanced_31"),
             days=int(payload.get("days") or stage.get("days") or 30),
         )
         if mitigation_review_summary:
@@ -2695,7 +2695,7 @@ def _attach_approval_template_focus(
             focus,
             stage=stage,
             symbol=symbol,
-            universe=str(payload.get("universe") or stage.get("universe") or "usdc_perp_top30"),
+            universe=str(payload.get("universe") or stage.get("universe") or "usdt_reliable_balanced_31"),
             days=int(payload.get("days") or stage.get("days") or 30),
             artifact_path_override=str(focus.get("artifact_path") or ""),
         )

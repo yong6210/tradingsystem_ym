@@ -58,7 +58,7 @@ class StrategyFamilyRouter:
         fallback = self._csv_items(getattr(self.settings, "auto_trading_micro_live_allowed_symbols", ""))
         if fallback:
             return fallback
-        return {"BTCUSDC", "ETHUSDC"}
+        return {"BTCUSDT", "ETHUSDT", "BTCUSDC", "ETHUSDC"}
 
     def _trend_proof_regime_relaxed(self, *, symbol: str, context: ContextSnapshot, regime_name: str) -> bool:
         if regime_name == "trend":

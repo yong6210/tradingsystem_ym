@@ -92,8 +92,8 @@ def parse_args() -> argparse.Namespace:
         description="Build a concrete follow-up packet for split-review actions from the latest operator priority."
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--symbol", default="BTCUSDC")
-    parser.add_argument("--universe", default="usdc_perp_top30")
+    parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument(
         "--action",

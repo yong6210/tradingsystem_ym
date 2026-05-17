@@ -28,7 +28,7 @@ from scripts.run_transition_confluence_shadow_scan import (
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run repo-native future-blind trend_continuation scan with A/B comparison.")
     parser.add_argument("--lookback-days", type=int, default=365)
-    parser.add_argument("--symbol", default="BTCUSDC")
+    parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--trend-entry-models", default="LIMIT,CONFIRM")
     parser.add_argument("--compare-a-entry-models", default="LIMIT")
     parser.add_argument("--write-report", action="store_true")

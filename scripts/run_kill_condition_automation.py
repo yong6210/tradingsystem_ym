@@ -20,8 +20,8 @@ from scripts.operation_report_io import atomic_write_text
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run kill-condition automation review or explicit-arm live apply.")
-    parser.add_argument("--symbol", default="BTCUSDC")
-    parser.add_argument("--universe", default="usdc_perp_top30")
+    parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
     parser.add_argument("--family", default=None)
     parser.add_argument("--session-name", default=None)
     parser.add_argument("--days", type=int, default=30)

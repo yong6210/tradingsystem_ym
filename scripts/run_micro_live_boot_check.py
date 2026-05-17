@@ -14,6 +14,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.core.config import get_settings
 from scripts import run_binance_rule_drift_snapshot
+from scripts import run_live_account_protection_audit
 from scripts import run_live_reconciliation_watchdog
 from scripts import run_micro_live_failure_drill
 from scripts import run_micro_live_runtime_guard
@@ -82,7 +83,7 @@ def _first_symbol(explicit: str) -> str:
     for priority_symbol in _csv_items(getattr(settings, "auto_trading_micro_live_symbol_priority", "")):
         if not allowed_symbol_set or priority_symbol in allowed_symbol_set:
             return priority_symbol
-    return allowed_symbols[0] if allowed_symbols else "BTCUSDC"
+    return allowed_symbols[0] if allowed_symbols else "BTCUSDT"
 
 
 def _first_entry_model() -> str:
@@ -132,6 +133,30 @@ def _rule_drift_component() -> dict[str, Any]:
     return _component("binance_rule_drift", status, blocking=bool(drift), summary=summary, payload=payload)
 
 
+def _account_protection_component() -> dict[str, Any]:
+    try:
+        payload = run_live_account_protection_audit.build_payload()
+    except Exception as exc:
+        return _component(
+            "live_account_protection_audit",
+            "FAIL",
+            blocking=True,
+            summary=f"{exc.__class__.__name__}:{exc}",
+            payload={},
+        )
+    fail_count = int(payload.get("fail_count") or 0)
+    warn_count = int(payload.get("warn_count") or 0)
+    open_positions = int(payload.get("open_position_count") or 0)
+    status = "FAIL" if fail_count else "PASS"
+    return _component(
+        "live_account_protection_audit",
+        status,
+        blocking=fail_count > 0,
+        summary=f"open_positions={open_positions} fail={fail_count} warn={warn_count}",
+        payload=payload,
+    )
+
+
 def build_payload(
     *,
     days: int,
@@ -148,12 +173,13 @@ def build_payload(
         limit=max(1, int(limit)),
         check_binance_rules=bool(check_binance_rules),
     )
+    runtime_blocking_failures = list(runtime.get("blocking_failures") or [])
     components.append(
         _component(
             "runtime_guard",
             str(runtime.get("overall_status") or "FAIL"),
-            blocking=str(runtime.get("overall_status") or "").upper() != "PASS",
-            summary=f"blocking_failures={len(runtime.get('blocking_failures') or [])}",
+            blocking=bool(runtime_blocking_failures),
+            summary=f"blocking_failures={len(runtime_blocking_failures)}",
             payload=runtime,
         )
     )
@@ -177,6 +203,8 @@ def build_payload(
             payload=reconciliation,
         )
     )
+
+    components.append(_account_protection_component())
 
     canary = run_micro_live_synthetic_canary.run_canary(
         symbol=_first_symbol(symbol),

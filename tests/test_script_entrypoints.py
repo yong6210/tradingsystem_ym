@@ -34,6 +34,8 @@ import scripts.run_worker as run_worker
 import scripts.run_execution_incident_drill as incident_drill
 import scripts.run_reaction_gate_variant_backtest as reaction_variant_backtest
 import scripts.run_binance_rule_drift_snapshot as binance_rule_drift
+import scripts.run_live_account_protection_audit as live_account_protection_audit
+import scripts.run_live_leverage_cap_sync as live_leverage_cap_sync
 import scripts.run_live_reconciliation_watchdog as live_reconciliation_watchdog
 import scripts.run_live_replay_parity_audit as live_replay_parity
 import scripts.run_replay_validation_bridge as replay_validation_bridge
@@ -71,6 +73,8 @@ def test_runtime_scripts_support_direct_help_from_other_cwd(tmp_path: Path) -> N
         ROOT_DIR / "scripts" / "run_micro_main_usdt_backtest.py",
         ROOT_DIR / "scripts" / "run_micro_main_usdt_portfolio_replay_from_backtest.py",
         ROOT_DIR / "scripts" / "run_micro_main_weighted_filter_backtest.py",
+        ROOT_DIR / "scripts" / "run_live_account_protection_audit.py",
+        ROOT_DIR / "scripts" / "run_live_leverage_cap_sync.py",
         ROOT_DIR / "scripts" / "run_live_reconciliation_watchdog.py",
         ROOT_DIR / "scripts" / "run_replay_validation_bridge.py",
         ROOT_DIR / "scripts" / "run_session_impulse_retest_opportunity_report.py",
@@ -105,6 +109,7 @@ def test_script_display_paths_allow_absolute_outputs_outside_repo(tmp_path: Path
         incident_drill,
         install_micro_live_ops_launchd,
         live_order_lifecycle_report,
+        live_leverage_cap_sync,
         live_reconciliation_watchdog,
         live_replay_parity,
         replay_validation_bridge,
@@ -523,16 +528,20 @@ def test_worker_completed_heartbeat_preserves_stream_diagnostics(monkeypatch: py
         "refresh_calls": 2,
         "auto_route_calls": 0,
         "auto_route_submit_calls": 1,
+        "tp_market_fallback_calls": 0,
+        "tp_market_fallback_submitted": 0,
         "reconnects": 0,
         "ingest_errors": 0,
         "skipped_non_final_candles": 0,
         "skipped_reverse_timestamp": 4,
         "refresh_errors": 5,
         "auto_route_errors": 6,
+        "tp_market_fallback_errors": 0,
         "progress_callback_errors": 3,
         "last_ingest_error": "",
         "last_refresh_error": "",
         "last_auto_route_error": "",
+        "last_tp_market_fallback_error": "",
         "last_progress_callback_error": "RuntimeError: boom",
         "last_ingest_success_at": "",
         "last_ingest_error_at": "",
@@ -540,6 +549,8 @@ def test_worker_completed_heartbeat_preserves_stream_diagnostics(monkeypatch: py
         "last_refresh_error_at": "",
         "last_auto_route_success_at": "",
         "last_auto_route_error_at": "",
+        "last_tp_market_fallback_success_at": "",
+        "last_tp_market_fallback_error_at": "",
         "last_progress_callback_success_at": "",
         "last_progress_callback_error_at": "",
         "last_stream_error": "ConnectionClosed: test",

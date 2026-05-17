@@ -22,7 +22,7 @@ from app.services.historical_walk_forward_proof import HistoricalWalkForwardProo
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Rebuild runtime snapshots at replay timestamps and diff input/generation alignment.")
-    parser.add_argument("--symbol", default="BTCUSDC")
+    parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--family", default="sweep_reversal")
     parser.add_argument("--entry-model", default="LIMIT")

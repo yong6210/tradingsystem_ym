@@ -81,6 +81,62 @@ def _apply_defaults(monkeypatch) -> None:
     )
 
 
+def test_safety_state_reflects_latest_live_account_protection_failure(monkeypatch, tmp_path) -> None:
+    init_db()
+    _apply_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trading_live_account_protection_gate_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_account_protection_gate_fail_closed", True)
+    monkeypatch.setattr("app.services.strategy_engine.ROOT_DIR", tmp_path)
+
+    report_dir = tmp_path / "reports" / "operations" / "live_account_protection_audit"
+    report_dir.mkdir(parents=True)
+    (report_dir / "latest.json").write_text(
+        json.dumps(
+            {
+                "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "overall_status": "ALERT",
+                "severity": "FAIL",
+                "fail_count": 2,
+                "warn_count": 0,
+                "open_position_count": 1,
+                "open_order_count": 1,
+                "issues": [
+                    {
+                        "type": "missing_stop_protection",
+                        "severity": "FAIL",
+                        "symbol": "BTCUSDC",
+                        "position_side": "LONG",
+                    },
+                    {
+                        "type": "out_of_universe_open_position",
+                        "severity": "FAIL",
+                        "symbol": "BTCUSDC",
+                        "position_side": "LONG",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with SessionLocal() as db:
+        safety = SafetyLockService(repo=SafetyLockRepository(db), settings=settings)
+        safety.release_reason(scope_type="GLOBAL", reason_code=SafetyLockService.CLOSE_ONLY_REASON)
+        safety.release_reason(scope_type="GLOBAL", reason_code=SafetyLockService.KILL_SWITCH_REASON)
+        db.commit()
+
+        payload = StrategyEngine(db).safety_state()
+
+    assert payload["new_entry_allowed"] is False
+    assert payload["blocking_reason_code"] == "live_account_protection_audit"
+    assert payload["live_account_protection"]["decision"] == "BLOCK"
+    assert payload["live_account_protection"]["issue_codes"] == [
+        "BTCUSDC:missing_stop_protection",
+        "BTCUSDC:out_of_universe_open_position",
+    ]
+
+
 def _seed_rollout_and_lock(symbol: str) -> None:
     with SessionLocal() as db:
         rollout = RolloutPolicyService(repo=FamilyRolloutPolicyRepository(db))
@@ -2403,11 +2459,11 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
     assert signal_funnel["operator_action_priority"]["capture_context"]["dominant_bottleneck"]["reason"] == "execution_fill_shortfall"
     assert signal_funnel["operator_action_priority"]["experiment_context"]["entry_timing_target"]["symbol"] == "BTCUSDC"
     assert signal_funnel["operator_action_priority"]["experiment_context"]["entry_timing_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action run_entry_timing_split_review"
+        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action run_entry_timing_split_review"
     )
     assert signal_funnel["operator_action_priority"]["experiment_context"]["execution_style_target"]["symbol"] == "BTCUSDC"
     assert signal_funnel["operator_action_priority"]["experiment_context"]["execution_style_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdc_perp_top30 --days 7 --action run_execution_style_split_review"
+        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action run_execution_style_split_review"
     )
     assert signal_funnel["operator_action_priority"]["experiment_context"]["accepted_candidate_focus"]["symbol"] == "BTCUSDC"
     assert signal_funnel["operator_action_priority"]["advisory_only"] is True

@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
         "--families",
         default=os.environ.get("PAPER_LINEAGE_WATCH_FAMILIES", "sweep_reversal,trend_continuation"),
     )
-    parser.add_argument("--universe", default=os.environ.get("PAPER_LINEAGE_WATCH_UNIVERSE", "usdc_perp_top30"))
+    parser.add_argument("--universe", default=os.environ.get("PAPER_LINEAGE_WATCH_UNIVERSE", "usdt_reliable_balanced_31"))
     parser.add_argument("--symbol", default=os.environ.get("PAPER_LINEAGE_WATCH_SYMBOL"))
     parser.add_argument(
         "--candidate-limit",

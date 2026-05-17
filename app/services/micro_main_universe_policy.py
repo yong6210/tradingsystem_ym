@@ -222,7 +222,42 @@ _ENTRIES: tuple[MicroMainUniverseEntry, ...] = (
     ),
 )
 
-_ENTRY_MAP = {entry.symbol: entry for entry in _ENTRIES}
+_USDT_RELIABLE_BALANCED_31: tuple[MicroMainUniverseEntry, ...] = (
+    MicroMainUniverseEntry("BTCUSDT", "core", 1, 0.90, 0.5781, 0.6617, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("ETHUSDT", "core", 2, 1.00, 0.6269, 0.6649, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("SOLUSDT", "core", 3, 0.90, 0.6864, 0.6603, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("BNBUSDT", "core", 4, 0.75, 0.6755, 0.6768, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("XRPUSDT", "core", 5, 0.60, 0.5818, 0.6509, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("ADAUSDT", "core", 6, 0.55, 0.5770, 0.6373, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("AVAXUSDT", "core", 7, 0.35, 0.5666, 0.6248, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("LINKUSDT", "core", 8, 0.85, 0.6680, 0.6662, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("DOGEUSDT", "core", 9, 0.45, 0.8013, 0.7070, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("BCHUSDT", "core", 10, 0.45, 0.7377, 0.6912, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("LTCUSDT", "core", 11, 0.45, 0.7637, 0.7053, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("NEARUSDT", "core", 12, 0.40, 0.7700, 0.6791, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("FILUSDT", "core", 13, 0.45, 0.8333, 0.7128, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("DOTUSDT", "core", 14, 0.40, 0.7733, 0.6951, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("ATOMUSDT", "core", 15, 0.40, 0.7849, 0.7037, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("ETCUSDT", "core", 16, 0.40, 0.8065, 0.7214, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("HBARUSDT", "core", 17, 0.45, 0.7442, 0.6853, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("AAVEUSDT", "core", 18, 0.35, 0.6239, 0.6393, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("UNIUSDT", "core", 19, 0.40, 0.7563, 0.6800, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("SUIUSDT", "core", 20, 0.45, 0.6846, 0.6484, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("INJUSDT", "core", 21, 0.40, 0.7920, 0.6877, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("FETUSDT", "core", 22, 0.40, 0.7582, 0.6790, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("ARBUSDT", "core", 23, 0.40, 0.8929, 0.7255, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("APTUSDT", "core", 24, 0.40, 0.8859, 0.7288, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("RUNEUSDT", "core", 25, 0.35, 0.7489, 0.6853, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("PENDLEUSDT", "core", 26, 0.35, 0.9353, 0.7284, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("ICPUSDT", "core", 27, 0.40, 0.9029, 0.7348, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("XLMUSDT", "core", 28, 0.35, 0.8199, 0.7302, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("ZECUSDT", "core", 29, 0.35, 0.7198, 0.6695, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("QNTUSDT", "core", 30, 0.30, 0.6241, 0.6561, "USDT reliable-balanced live universe member from the 3y validation set."),
+    MicroMainUniverseEntry("DASHUSDT", "core", 31, 0.30, 0.7136, 0.6860, "USDT reliable-balanced live universe member from the 3y validation set."),
+)
+
+_ALL_ENTRIES = _ENTRIES + _USDT_RELIABLE_BALANCED_31
+_ENTRY_MAP = {entry.symbol: entry for entry in _ALL_ENTRIES}
 
 
 def micro_main_universe_entry(symbol: str) -> dict[str, Any] | None:
@@ -233,18 +268,18 @@ def micro_main_universe_entry(symbol: str) -> dict[str, Any] | None:
 def build_micro_main_universe_policy_snapshot() -> dict[str, Any]:
     return {
         "family": "session_impulse_retest",
-        "core_symbols": [entry.symbol for entry in _ENTRIES if entry.tier == "core"],
-        "secondary_symbols": [entry.symbol for entry in _ENTRIES if entry.tier == "secondary"],
-        "allowed_symbols": [entry.symbol for entry in _ENTRIES],
+        "core_symbols": [entry.symbol for entry in _ALL_ENTRIES if entry.tier == "core"],
+        "secondary_symbols": [entry.symbol for entry in _ALL_ENTRIES if entry.tier == "secondary"],
+        "allowed_symbols": [entry.symbol for entry in _ALL_ENTRIES],
         "partial_activation_priority": [
             entry.symbol
-            for entry in sorted(_ENTRIES, key=lambda item: item.rollout_priority)
+            for entry in sorted(_ALL_ENTRIES, key=lambda item: item.rollout_priority)
         ],
         "risk_multipliers": {
             entry.symbol: round(float(entry.risk_multiplier), 4)
-            for entry in _ENTRIES
+            for entry in _ALL_ENTRIES
         },
-        "entries": [asdict(entry) for entry in _ENTRIES],
+        "entries": [asdict(entry) for entry in _ALL_ENTRIES],
         "policy_note": (
             "Core symbols are eligible for the first live rollout after shadow validation. "
             "Secondary symbols remain shadow-first and should receive lower risk caps."

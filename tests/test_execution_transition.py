@@ -48,6 +48,34 @@ def test_binance_live_position_side_mode_maps_hedge_directions() -> None:
     assert coordinator._binance_live_position_side(plan=SimpleNamespace(direction="long"), side="BUY") is None
 
 
+def test_live_account_protection_gate_fails_closed_without_loader() -> None:
+    coordinator = ExecutionCoordinator.__new__(ExecutionCoordinator)
+    coordinator.settings = SimpleNamespace(
+        auto_trading_live_account_protection_gate_enabled=True,
+        auto_trading_live_account_protection_gate_fail_closed=True,
+    )
+    coordinator.live_account_protection_loader = None
+
+    result = coordinator._live_account_protection_gate()
+
+    assert result["decision"] == "BLOCK"
+    assert result["reason"] == "loader_not_configured"
+
+
+def test_live_account_protection_gate_fails_closed_on_invalid_payload() -> None:
+    coordinator = ExecutionCoordinator.__new__(ExecutionCoordinator)
+    coordinator.settings = SimpleNamespace(
+        auto_trading_live_account_protection_gate_enabled=True,
+        auto_trading_live_account_protection_gate_fail_closed=True,
+    )
+    coordinator.live_account_protection_loader = lambda: {}
+
+    result = coordinator._live_account_protection_gate()
+
+    assert result["decision"] == "BLOCK"
+    assert result["reason"] == "account_protection_payload_invalid"
+
+
 def _reset_execution_control_state() -> None:
     reset_execution_lane_tracker()
     with SessionLocal() as db:
@@ -110,6 +138,7 @@ def _apply_auto_trading_defaults(monkeypatch) -> None:
     monkeypatch.setattr(settings, "binance_live_position_side_mode", "ONE_WAY")
     monkeypatch.setattr(settings, "auto_trading_live_balance_sync_enabled", False)
     monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", False)
+    monkeypatch.setattr(settings, "auto_trading_live_account_protection_gate_enabled", False)
     monkeypatch.setattr(settings, "portfolio_overlay_enabled", False)
     monkeypatch.setattr(settings, "transition_edge_variant_enabled", True)
     monkeypatch.setattr(settings, "transition_edge_variant_shadow_only", True)
@@ -3419,6 +3448,73 @@ def test_micro_live_submit_uses_risk_pct_sizing_and_caps_by_leverage(monkeypatch
     assert sizing["leverage_cap"] == 6.0
     assert sizing["leverage_capped"] is False
     assert sizing["actual_risk_usdt"] == 1.0
+
+
+def test_micro_live_submit_blocks_on_account_protection_failures(monkeypatch) -> None:
+    init_db()
+    _apply_auto_trading_defaults(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_account_protection_gate_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_account_protection_gate_fail_closed", True)
+    monkeypatch.setattr(settings, "auto_trading_live_sizing_mode", "NOTIONAL_PER_R")
+    monkeypatch.setattr(settings, "auto_trading_notional_per_r", 25.0)
+    suffix = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000))[-6:]
+    symbol = f"LG{suffix}USDC"
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", symbol)
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "sweep_reversal")
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.metrics", _good_metrics)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._gate_context_for_symbol", _open_gate_context)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._today_trade_count", lambda self: 0)
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._current_exposure_rows", lambda self: [])
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine._live_cluster_guard", lambda self, **kwargs: {})
+    monkeypatch.setattr(
+        "app.services.strategy_engine.StrategyEngine.load_binance_account_protection_snapshot",
+        lambda self: {
+            "overall_status": "ALERT",
+            "severity": "FAIL",
+            "fail_count": 1,
+            "warn_count": 0,
+            "open_position_count": 1,
+            "issues": [
+                {
+                    "type": "missing_stop_protection",
+                    "severity": "FAIL",
+                    "symbol": "ADAUSDC",
+                    "position_side": "SHORT",
+                }
+            ],
+        },
+    )
+
+    def _unexpected_submit(self, **kwargs):
+        raise AssertionError("live submitter should not be called when account protection fails")
+
+    monkeypatch.setattr("app.services.strategy_engine.StrategyEngine.submit_binance_order", _unexpected_submit)
+
+    plan_id = f"{symbol}_gate_{suffix}"
+    _seed_plan(symbol=symbol, family="sweep_reversal", plan_id=plan_id, entry_model="LIMIT")
+
+    intent = client.post(
+        "/execution/order-intents",
+        json={"plan_id": plan_id, "execution_mode": "MICRO_LIVE"},
+    )
+    assert intent.status_code == 200
+    intent_payload = intent.json()
+    assert intent_payload["submit_decision"] == "SUBMIT"
+
+    submit = client.post(
+        "/execution/submit",
+        json={"intent_id": intent_payload["intent_id"], "live": True},
+    )
+    assert submit.status_code == 200
+    submit_payload = submit.json()
+    assert submit_payload["state"] == "REJECTED"
+    assert submit_payload["submit_status"] == "LIVE_ACCOUNT_PROTECTION_BLOCKED"
+    gate = submit_payload["attachments"]["live_account_protection_gate"]
+    assert gate["decision"] == "BLOCK"
+    assert gate["fail_count"] == 1
+    assert gate["issues"][0]["type"] == "missing_stop_protection"
 
 
 def test_micro_live_submit_uses_synced_available_balance_for_risk_pct_sizing(monkeypatch) -> None:

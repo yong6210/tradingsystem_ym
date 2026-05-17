@@ -20,7 +20,7 @@ from app.services.pair_strategy_research import PairStrategyResearchEngine, summ
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run BTC-ETH SMT divergence research scan.")
-    parser.add_argument("--leader", default="BTCUSDC")
+    parser.add_argument("--leader", default="BTCUSDT")
     parser.add_argument("--confirmer", default="ETHUSDC")
     parser.add_argument("--lookback-days", type=int, default=365)
     parser.add_argument("--write-report", action="store_true")

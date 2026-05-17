@@ -35,3 +35,49 @@ def test_worker_once_boot_check_failure_does_not_write_unsupported_heartbeat(mon
     )
 
     assert payload["overall_status"] == "FAIL"
+
+
+def test_worker_ws_boot_check_failure_records_started_at(monkeypatch) -> None:
+    monkeypatch.setattr(
+        micro_live_boot_check,
+        "build_payload",
+        lambda **_kwargs: {
+            "overall_status": "FAIL",
+            "blocking_failure_count": 1,
+            "next_actions": ["fix_live_account_protection_audit"],
+        },
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_heartbeat(role: str, *, status: str, details: dict) -> None:
+        calls.append({"role": role, "status": status, "details": details})
+
+    monkeypatch.setattr(run_worker, "write_worker_heartbeat", fake_heartbeat)
+
+    payload = run_worker._run_boot_check(
+        argparse.Namespace(
+            mode="once",
+            ws_stream=True,
+            boot_check_days=3,
+            boot_check_limit=200,
+            symbol="BTCUSDT",
+            boot_check_binance_rules=False,
+            boot_check_canary_network=False,
+        ),
+        started_at="2026-05-17T09:48:00+00:00",
+    )
+
+    assert payload["overall_status"] == "FAIL"
+    assert calls == [
+        {
+            "role": "ws",
+            "status": "error",
+            "details": {
+                "phase": "boot_check_failed",
+                "started_at": "2026-05-17T09:48:00+00:00",
+                "overall_status": "FAIL",
+                "blocking_failure_count": 1,
+                "next_actions": ["fix_live_account_protection_audit"],
+            },
+        }
+    ]

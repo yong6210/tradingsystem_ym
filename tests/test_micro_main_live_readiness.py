@@ -136,3 +136,26 @@ def test_micro_main_live_readiness_core_slots_count_core_symbols_only() -> None:
     assert readiness.status == "live_bootstrap_collecting"
     assert readiness.blockers == ()
     assert readiness.shadow_metrics["core_live_rank"] == 11
+
+
+def test_micro_main_live_readiness_ranks_usdt_rollout_window_separately_from_usdc() -> None:
+    readiness = evaluate_micro_main_live_readiness(
+        symbol="DASHUSDT",
+        shadow_summary={
+            "available": True,
+            "decision": "REJECT",
+            "recent_closed": 0,
+            "ev_r": 0.0,
+            "total_r": 0.0,
+        },
+        universe_policy=build_micro_main_universe_policy_snapshot(),
+        enabled=True,
+        shadow_only=False,
+        partial_ratio=1.0,
+        core_live_slots=31,
+        secondary_live_enabled=False,
+    )
+
+    assert readiness.status == "live_bootstrap_collecting"
+    assert readiness.blockers == ()
+    assert readiness.shadow_metrics["core_live_rank"] == 31

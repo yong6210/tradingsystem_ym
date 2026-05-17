@@ -35,8 +35,8 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run auto-trading incident drill scenarios")
-    parser.add_argument("--symbol", default="BTCUSDC")
-    parser.add_argument("--universe", default="usdc_perp_top30")
+    parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
     parser.add_argument("--family", default="trend_continuation")
     parser.add_argument(
         "--scenario",

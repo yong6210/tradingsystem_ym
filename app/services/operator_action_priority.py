@@ -108,7 +108,7 @@ class OperatorActionPriorityService:
                 portfolio.get("universe")
                 or dashboard.get("universe")
                 or opportunity_capture.get("universe")
-                or "usdc_perp_top30"
+                or "usdt_reliable_balanced_31"
             ),
             "days": max(
                 self._int(
@@ -150,7 +150,7 @@ class OperatorActionPriorityService:
         item["followup_command"] = self._split_review_followup_command(
             action=action,
             symbol=str(item.get("symbol") or command_context.get("symbol") or ""),
-            universe=str(command_context.get("universe") or "usdc_perp_top30"),
+            universe=str(command_context.get("universe") or "usdt_reliable_balanced_31"),
             days=max(self._int(command_context.get("days"), 7), 1),
         )
         return item
@@ -165,7 +165,7 @@ class OperatorActionPriorityService:
         item["followup_command"] = self._split_review_followup_command(
             action=str(item.get("action") or ""),
             symbol=str(item.get("target_symbol") or command_context.get("symbol") or ""),
-            universe=str(command_context.get("universe") or "usdc_perp_top30"),
+            universe=str(command_context.get("universe") or "usdt_reliable_balanced_31"),
             days=max(self._int(command_context.get("days"), 7), 1),
         )
         return item

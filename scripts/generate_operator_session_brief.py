@@ -36,8 +36,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate a markdown operator session brief from the latest operator surface divergence snapshot."
     )
-    parser.add_argument("--symbol", default="BTCUSDC")
-    parser.add_argument("--universe", default="usdc_perp_top30")
+    parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--portfolio-limit", type=int, default=5)
     parser.add_argument("--intent-limit", type=int, default=5)

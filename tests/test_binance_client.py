@@ -324,6 +324,47 @@ def test_query_and_cancel_require_identifier() -> None:
         client.cancel_order(symbol="BTCUSDC")
 
 
+def test_change_initial_leverage_uses_signed_endpoint(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_signed_request(self, method: str, path: str, params: dict[str, object]) -> dict[str, object]:
+        captured["method"] = method
+        captured["path"] = path
+        captured["params"] = params
+        return {"symbol": "BTCUSDT", "leverage": 10, "maxNotionalValue": "50000000"}
+
+    monkeypatch.setattr(BinanceFuturesClient, "_signed_request", fake_signed_request)
+    client = BinanceFuturesClient(api_key="key", api_secret="secret", live_trade_enabled=True)
+
+    payload = client.change_initial_leverage(symbol="btcusdt", leverage=10, live=True)
+
+    assert payload["leverage"] == 10
+    assert captured == {
+        "method": "POST",
+        "path": "/fapi/v1/leverage",
+        "params": {"symbol": "BTCUSDT", "leverage": 10},
+    }
+
+
+def test_change_initial_leverage_dry_run_does_not_call_exchange(monkeypatch) -> None:
+    def fake_signed_request(self, method: str, path: str, params: dict[str, object]) -> dict[str, object]:
+        raise AssertionError("dry run should not call signed endpoint")
+
+    monkeypatch.setattr(BinanceFuturesClient, "_signed_request", fake_signed_request)
+    client = BinanceFuturesClient(api_key="key", api_secret="secret", live_trade_enabled=False)
+
+    payload = client.change_initial_leverage(symbol="ethusdt", leverage=10, live=False)
+
+    assert payload == {"symbol": "ETHUSDT", "leverage": 10, "dryRun": True}
+
+
+def test_change_initial_leverage_live_disabled_raises() -> None:
+    client = BinanceFuturesClient(api_key="key", api_secret="secret", live_trade_enabled=False)
+
+    with pytest.raises(RuntimeError, match="binance_live_account_config_disabled"):
+        client.change_initial_leverage(symbol="BTCUSDT", leverage=10, live=True)
+
+
 def test_user_stream_listen_key_routes_use_keyed_request(monkeypatch) -> None:
     captured: list[tuple[str, str, dict[str, object] | None]] = []
 
@@ -369,6 +410,43 @@ def test_fetch_position_risk_uses_signed_request(monkeypatch) -> None:
         "method": "GET",
         "path": "/fapi/v2/positionRisk",
         "params": {"symbol": "BTCUSDC"},
+    }
+
+
+def test_fetch_open_orders_uses_signed_request(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_signed_request(self, method: str, path: str, params: dict[str, object]) -> list[object]:
+        captured["method"] = method
+        captured["path"] = path
+        captured["params"] = params
+        return [
+            ["bad-row"],
+            {
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "type": "STOP_MARKET",
+                "status": "NEW",
+            },
+        ]
+
+    monkeypatch.setattr(BinanceFuturesClient, "_signed_request", fake_signed_request)
+    client = BinanceFuturesClient(api_key="key", api_secret="secret", live_trade_enabled=True)
+
+    payload = client.fetch_open_orders(symbol="btcusdt")
+
+    assert payload == [
+        {
+            "symbol": "BTCUSDT",
+            "side": "SELL",
+            "type": "STOP_MARKET",
+            "status": "NEW",
+        }
+    ]
+    assert captured == {
+        "method": "GET",
+        "path": "/fapi/v1/openOrders",
+        "params": {"symbol": "BTCUSDT"},
     }
 
 

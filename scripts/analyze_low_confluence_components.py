@@ -25,7 +25,7 @@ COMPONENTS = ["liquidity", "fvg_displacement", "htf_alignment", "ob_freshness", 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze low-confluence false negatives on same replay timestamps.")
-    parser.add_argument("--symbol", default="BTCUSDC")
+    parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--family", default="sweep_reversal")
     parser.add_argument("--entry-model", default="LIMIT")

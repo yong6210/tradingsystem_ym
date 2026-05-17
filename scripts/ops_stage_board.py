@@ -36,8 +36,8 @@ def parse_args() -> argparse.Namespace:
         description="Show the current operating stage from validation, checklist, and operator dashboard surfaces."
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--symbol", default="BTCUSDC")
-    parser.add_argument("--universe", default="usdc_perp_top30")
+    parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument(
@@ -2736,8 +2736,8 @@ def _build_stage_payload(
     checklist: dict[str, Any],
     dashboard: dict[str, Any],
     *,
-    symbol: str = "BTCUSDC",
-    universe: str = "usdc_perp_top30",
+    symbol: str = "BTCUSDT",
+    universe: str = "usdt_reliable_balanced_31",
     days: int = 30,
     lineage_sample_scope: str = "symbol_edge_proof",
     lineage_families: str = "sweep_reversal",

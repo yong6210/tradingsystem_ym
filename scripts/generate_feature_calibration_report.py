@@ -16,7 +16,7 @@ from app.services.strategy_engine import StrategyEngine
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate feature calibration report")
-    parser.add_argument("--symbol", default="BTCUSDC")
+    parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--refresh", action="store_true")
     parser.add_argument("--no-write-report", action="store_true")
     return parser.parse_args()

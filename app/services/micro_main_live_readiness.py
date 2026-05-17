@@ -19,6 +19,14 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
     return bool(default)
 
 
+def _quote_suffix(symbol: str) -> str:
+    normalized = str(symbol or "").upper().strip()
+    for quote in ("USDT", "USDC"):
+        if normalized.endswith(quote):
+            return quote
+    return ""
+
+
 @dataclass(frozen=True, slots=True)
 class MicroMainLiveReadiness:
     symbol: str
@@ -35,10 +43,12 @@ class MicroMainLiveReadiness:
 
 
 def _core_live_rank(*, entries: list[Any], symbol: str) -> int:
+    quote = _quote_suffix(symbol)
     core_entries = [
         item
         for item in entries
         if str(dict(item).get("tier") or "").strip().lower() == "core"
+        and (not quote or _quote_suffix(str(dict(item).get("symbol") or "")) == quote)
     ]
     ordered_core_symbols = [
         str(dict(item).get("symbol") or "").upper()

@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=["once", "loop"], default="once")
     parser.add_argument("--interval-seconds", type=int, default=60)
 
-    parser.add_argument("--symbol", default="BTCUSDC")
+    parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--sync-universe", action="store_true")
     parser.add_argument("--limit-symbols", type=int, default=30)
     parser.add_argument("--symbol-concurrency", type=int, default=1)
@@ -160,7 +160,7 @@ def _live_mode_requires_boot_check() -> bool:
     return str(getattr(settings, "auto_trading_execution_mode", "") or "").strip().upper() in {"MICRO_LIVE", "LIVE"}
 
 
-def _run_boot_check(args: argparse.Namespace) -> dict:
+def _run_boot_check(args: argparse.Namespace, *, started_at: str | None = None) -> dict:
     from scripts import run_micro_live_boot_check
 
     payload = run_micro_live_boot_check.build_payload(
@@ -178,6 +178,7 @@ def _run_boot_check(args: argparse.Namespace) -> dict:
                 status="error",
                 details={
                     "phase": "boot_check_failed",
+                    "started_at": started_at or datetime.now(timezone.utc).isoformat(),
                     "overall_status": payload.get("overall_status"),
                     "blocking_failure_count": payload.get("blocking_failure_count"),
                     "next_actions": list(payload.get("next_actions") or []),
@@ -383,8 +384,9 @@ def main() -> int:
     args = parse_args()
     init_db()
     role = _worker_role(args)
+    worker_started_at = datetime.now(timezone.utc).isoformat()
     if not bool(args.skip_boot_check) and _live_mode_requires_boot_check():
-        boot_check = _run_boot_check(args)
+        boot_check = _run_boot_check(args, started_at=worker_started_at)
         if str(boot_check.get("overall_status") or "").upper() != "PASS":
             payload = {
                 "ts": datetime.now(timezone.utc).isoformat(),

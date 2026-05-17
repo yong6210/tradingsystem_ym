@@ -19,6 +19,7 @@ if str(ROOT_DIR) not in sys.path:
 from app.core.config import get_settings
 from app.core import operator_surface_contracts as osc
 from app.services.micro_main_universe_policy import build_micro_main_universe_policy_snapshot
+from scripts import run_live_account_protection_audit
 from scripts.operation_report_io import atomic_write_text
 
 _REQUEST_RETRY_ATTEMPTS = 3
@@ -64,10 +65,10 @@ def _apply_preflight_arg_defaults(args: argparse.Namespace, settings: Any) -> ar
         args.symbol = (
             str(getattr(settings, "ready_market_data_probe_symbol", "") or "").strip()
             or _first_csv_value(getattr(settings, "auto_trading_micro_live_allowed_symbols", ""))
-            or "BTCUSDC"
+            or "BTCUSDT"
         )
     if not str(getattr(args, "universe", "") or "").strip():
-        args.universe = str(getattr(settings, "universe_name", "") or "").strip() or "usdc_perp_top30"
+        args.universe = str(getattr(settings, "universe_name", "") or "").strip() or "usdt_reliable_balanced_31"
     return args
 
 
@@ -435,6 +436,14 @@ def _csv_list(value: Any, *, lower: bool = False) -> list[str]:
     return list(dict.fromkeys(normalized))
 
 
+def _quote_suffix(symbol: str) -> str:
+    normalized = str(symbol or "").upper().strip()
+    for quote in ("USDT", "USDC"):
+        if normalized.endswith(quote):
+            return quote
+    return ""
+
+
 def _sir_live_rollout_window_check(
     *,
     live_symbols: set[str],
@@ -447,19 +456,6 @@ def _sir_live_rollout_window_check(
         for item in list(policy.get("entries") or [])
         if str(item.get("symbol") or "").strip()
     }
-    core_rank = {
-        str(item.get("symbol") or "").upper(): index + 1
-        for index, item in enumerate(
-            sorted(
-                [
-                    dict(item)
-                    for item in list(policy.get("entries") or [])
-                    if str(dict(item).get("tier") or "").strip().lower() == "core"
-                ],
-                key=lambda row: _int(row.get("rollout_priority"), default=0),
-            )
-        )
-    }
     missing_universe = sorted(symbol for symbol in live_symbols if symbol not in entries)
     outside_core_window: list[str] = []
     secondary_disabled: list[str] = []
@@ -469,6 +465,20 @@ def _sir_live_rollout_window_check(
             continue
         tier = str(entry.get("tier") or "").strip().lower()
         priority = _int(entry.get("rollout_priority"), default=0)
+        quote = _quote_suffix(symbol)
+        ranked_core = sorted(
+            [
+                dict(item)
+                for item in list(policy.get("entries") or [])
+                if str(dict(item).get("tier") or "").strip().lower() == "core"
+                and (not quote or _quote_suffix(str(dict(item).get("symbol") or "")) == quote)
+            ],
+            key=lambda row: _int(row.get("rollout_priority"), default=0),
+        )
+        core_rank = {
+            str(item.get("symbol") or "").upper(): index + 1
+            for index, item in enumerate(ranked_core)
+        }
         symbol_core_rank = _int(core_rank.get(symbol), default=0)
         if tier == "core" and core_live_slots > 0 and symbol_core_rank > core_live_slots:
             outside_core_window.append(f"{symbol}:core{symbol_core_rank}/p{priority}")
@@ -952,6 +962,35 @@ def _binance_rule_checks(symbols: set[str]) -> list[dict[str, Any]]:
     ]
 
 
+def _live_account_protection_check() -> dict[str, Any]:
+    try:
+        payload = run_live_account_protection_audit.build_payload()
+    except Exception as exc:
+        return {
+            "name": "live_account_protection_audit",
+            "status": "FAIL",
+            "severity": "blocking",
+            "message": f"account protection audit failed: {exc.__class__.__name__}:{exc}",
+        }
+    fail_count = _int(payload.get("fail_count"), default=0)
+    warn_count = _int(payload.get("warn_count"), default=0)
+    open_positions = _int(payload.get("open_position_count"), default=0)
+    issues = [
+        f"{item.get('symbol')}:{item.get('type')}"
+        for item in list(payload.get("issues") or [])[:5]
+        if isinstance(item, dict)
+    ]
+    return {
+        "name": "live_account_protection_audit",
+        "status": _status(fail_count == 0),
+        "severity": "blocking",
+        "message": (
+            f"open_positions={open_positions}; fail={fail_count}; warn={warn_count}; "
+            f"issues={','.join(issues) if issues else 'none'}"
+        ),
+    }
+
+
 def _micro_live_config_drift_checks(*, check_binance_rules: bool = False) -> list[dict[str, Any]]:
     settings = get_settings()
     mode = str(getattr(settings, "auto_trading_execution_mode", "") or "").strip().upper()
@@ -1123,6 +1162,7 @@ def _micro_live_config_drift_checks(*, check_binance_rules: bool = False) -> lis
             ),
         }
     )
+    checks.append(_live_account_protection_check())
     if check_binance_rules:
         checks.extend(_binance_rule_checks(live_symbols))
     return checks

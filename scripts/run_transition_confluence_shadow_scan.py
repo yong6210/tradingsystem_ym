@@ -109,7 +109,7 @@ class ConfluenceShadowPlanGenerator(VariantPlanGenerator):
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run future-blind transition/confluence shadow scans.")
     parser.add_argument("--lookback-days", type=int, default=365)
-    parser.add_argument("--symbol", default="BTCUSDC")
+    parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--family", default="sweep_reversal")
     parser.add_argument("--entry-model", default="LIMIT")
     parser.add_argument("--variants", default=",".join(item.name for item in _DEFAULT_VARIANTS))

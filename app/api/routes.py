@@ -226,7 +226,7 @@ def get_top_plans(
 
 @router.get("/scanner/top", response_model=list[ScannerItemOut])
 def scanner_top(
-    universe: str = Query(default="usdc_perp_top30"),
+    universe: str = Query(default="usdt_reliable_balanced_31"),
     limit: int = Query(default=20, ge=1, le=100),
     fast: bool = Query(default=False),
     engine: StrategyEngine = Depends(get_engine),
@@ -237,7 +237,7 @@ def scanner_top(
 
 @router.get("/portfolio/budget", response_model=PortfolioBudgetReportOut)
 def portfolio_budget(
-    universe: str = Query(default="usdc_perp_top30"),
+    universe: str = Query(default="usdt_reliable_balanced_31"),
     limit: int = Query(default=20, ge=1, le=100),
     write_report: bool = Query(default=True),
     fast: bool = Query(default=False),
@@ -296,7 +296,7 @@ def indicator_pine_script() -> PlainTextResponse:
 @router.post("/operations/checklist", response_model=OperationalChecklistOut)
 def operational_checklist(
     symbol: str,
-    universe: str = Query(default="usdc_perp_top30"),
+    universe: str = Query(default="usdt_reliable_balanced_31"),
     limit: int = Query(default=20, ge=1, le=100),
     days: int = Query(default=30, ge=1, le=365),
     alert_test_lookback_hours: int = Query(default=24, ge=1, le=168),
@@ -585,7 +585,7 @@ def validation_scalp_experiment(
 
 @router.get("/validation/alpha-research", response_model=AlphaResearchOut)
 def validation_alpha_research(
-    universe: str = Query(default="usdc_perp_top30"),
+    universe: str = Query(default="usdt_reliable_balanced_31"),
     symbol: str | None = Query(default=None),
     write_report: bool = Query(default=True),
     engine: StrategyEngine = Depends(get_engine),
@@ -643,7 +643,7 @@ def _validation_report_cache_miss_payload(symbol: str) -> dict[str, Any]:
 
 @router.post("/internal/demo/bootstrap")
 def bootstrap_demo(
-    symbol: str = Query(default="BTCUSDC"),
+    symbol: str = Query(default="BTCUSDT"),
     engine: StrategyEngine = Depends(get_engine),
 ) -> dict:
     from app.services.demo_data import DemoDataService
@@ -659,7 +659,7 @@ def bootstrap_demo(
 
 @router.post("/internal/binance/sync", response_model=BinanceSyncOut)
 def sync_binance_symbol(
-    symbol: str = Query(default="BTCUSDC"),
+    symbol: str = Query(default="BTCUSDT"),
     limit_1m: int = Query(default=0, ge=0, le=3000),
     limit_5m: int = Query(default=500, ge=100, le=1500),
     limit_15m: int = Query(default=500, ge=100, le=1500),

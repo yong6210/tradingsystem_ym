@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--seed-symbol",
-        default="BTCUSDC",
+        default="BTCUSDT",
         help="Symbol used for write/read smoke checks",
     )
     return parser.parse_args()

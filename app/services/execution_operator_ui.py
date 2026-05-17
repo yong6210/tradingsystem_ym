@@ -534,7 +534,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
   <section class="controls">
     <div>
       <label for="symbol">심볼</label>
-      <input id="symbol" value="__DEFAULT_SYMBOL__" placeholder="BTCUSDC" />
+      <input id="symbol" value="__DEFAULT_SYMBOL__" placeholder="BTCUSDT" />
     </div>
     <div>
       <label for="universe">유니버스</label>
@@ -3934,7 +3934,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
 
     async function refresh() {
       const symbol = $('symbol').value.trim();
-      const universe = $('universe').value.trim() || 'usdc_perp_top30';
+      const universe = $('universe').value.trim() || 'usdt_reliable_balanced_31';
       const days = Math.max(parseInt($('days').value || '7', 10), 1);
       $('status').textContent = '운영 화면 데이터를 불러오는 중...';
       const dashboardUrl = `/execution/operator-dashboard?symbol=${encodeURIComponent(symbol)}&universe=${encodeURIComponent(universe)}&portfolio_limit=10&intent_limit=10&reconcile_limit=10&days=${days}&fast=true`;

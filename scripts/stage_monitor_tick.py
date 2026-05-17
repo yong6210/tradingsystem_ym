@@ -48,8 +48,8 @@ def parse_args() -> argparse.Namespace:
         description="Run the stage monitor board build and stage-change notifier in one Python process."
     )
     parser.add_argument("--base-url", default=os.environ.get("STAGE_MONITOR_BASE_URL", "http://127.0.0.1:8000"))
-    parser.add_argument("--symbol", default=os.environ.get("STAGE_MONITOR_SYMBOL", "BTCUSDC"))
-    parser.add_argument("--universe", default=os.environ.get("STAGE_MONITOR_UNIVERSE", "usdc_perp_top30"))
+    parser.add_argument("--symbol", default=os.environ.get("STAGE_MONITOR_SYMBOL", "BTCUSDT"))
+    parser.add_argument("--universe", default=os.environ.get("STAGE_MONITOR_UNIVERSE", "usdt_reliable_balanced_31"))
     parser.add_argument("--limit", type=int, default=int(os.environ.get("STAGE_MONITOR_LIMIT", "20")))
     parser.add_argument("--days", type=int, default=int(os.environ.get("STAGE_MONITOR_DAYS", "30")))
     parser.add_argument(
@@ -1133,8 +1133,8 @@ def _apply_runtime_operator_signoff_summary(
 ) -> dict[str, Any]:
     snapshot = dict(current or {})
     base_url = str(getattr(args, "base_url", "http://127.0.0.1:8000") or "http://127.0.0.1:8000")
-    symbol = str(getattr(args, "symbol", snapshot.get("symbol") or "BTCUSDC") or "BTCUSDC")
-    universe = str(getattr(args, "universe", "usdc_perp_top30") or "usdc_perp_top30")
+    symbol = str(getattr(args, "symbol", snapshot.get("symbol") or "BTCUSDT") or "BTCUSDT")
+    universe = str(getattr(args, "universe", "usdt_reliable_balanced_31") or "usdt_reliable_balanced_31")
     days = int(getattr(args, "days", 30) or 30)
     snapshot["runtime_operator_signoff_summary"] = run_runtime_signoff_review._build_runtime_operator_signoff_summary(
         runtime_decision=dict(snapshot.get("runtime_decision") or {}),
@@ -1667,7 +1667,7 @@ def _apply_runtime_signoff_approval_focus(
             previous_focus,
             stage=snapshot,
             symbol=symbol,
-            universe=str(snapshot.get("universe") or "usdc_perp_top30"),
+            universe=str(snapshot.get("universe") or "usdt_reliable_balanced_31"),
             days=int(snapshot.get("days") or 30),
         )
         refreshed_focus["computed_at"] = datetime.now(timezone.utc).isoformat()
@@ -1719,7 +1719,7 @@ def _apply_runtime_signoff_approval_focus(
                 previous_focus,
                 stage=snapshot,
                 symbol=symbol,
-                universe=str(snapshot.get("universe") or "usdc_perp_top30"),
+                universe=str(snapshot.get("universe") or "usdt_reliable_balanced_31"),
                 days=int(snapshot.get("days") or 30),
             )
             refreshed_focus["computed_at"] = datetime.now(timezone.utc).isoformat()

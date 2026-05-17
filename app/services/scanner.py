@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import CURRENT_MICRO_LIVE_USDT_SYMBOLS, get_settings
 from app.core.enums import PlanState, RiskGateState
 from app.db.models import Plan
 from app.db.repositories import CandleRepository, PlanRepository
@@ -52,12 +52,16 @@ USDC_PERP_TOP30 = [
     "WIFUSDC",
     "PEPEUSDC",
 ]
+USDT_RELIABLE_BALANCED_31 = [item for item in CURRENT_MICRO_LIVE_USDT_SYMBOLS.split(",") if item]
 
 _THESIS = ThesisFingerprintService()
 
 
 def get_universe_symbols(universe: str) -> list[str]:
-    if universe == "usdc_perp_top30":
+    normalized = str(universe or "").strip().lower()
+    if normalized == "usdt_reliable_balanced_31":
+        return USDT_RELIABLE_BALANCED_31
+    if normalized == "usdc_perp_top30":
         return USDC_PERP_TOP30
     return []
 

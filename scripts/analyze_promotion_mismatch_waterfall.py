@@ -51,7 +51,7 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze replay-vs-runtime promotion mismatch waterfall.")
-    parser.add_argument("--symbol", default="BTCUSDC")
+    parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument(
         "--replay-path",

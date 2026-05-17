@@ -89,7 +89,7 @@ from app.db.session import SessionLocal
 from app.db.repositories import CandleRepository
 with SessionLocal() as db:
     repo = CandleRepository(db)
-    for sym in ["BTCUSDC", "SOLUSDC", "XRPUSDC"]:
+    for sym in ["BTCUSDT", "SOLUSDT", "XRPUSDT"]:
         row1 = repo.get_last_candle(sym, "1m")
         row5 = repo.get_last_candle(sym, "5m")
         print(sym, "1m", row1.ts.isoformat() if row1 else None, "5m", row5.ts.isoformat() if row5 else None)

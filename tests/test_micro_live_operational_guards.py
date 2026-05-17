@@ -14,6 +14,8 @@ from scripts import build_micro_live_strategy_time_contract
 from scripts import operation_report_io
 from scripts import run_binance_rule_drift_snapshot
 from scripts import run_live_reconciliation_watchdog
+from scripts import run_live_account_protection_audit
+from scripts import run_live_leverage_cap_sync
 from scripts import run_live_replay_parity_audit
 from scripts import run_replay_validation_bridge
 from scripts import run_micro_live_boot_check
@@ -2518,6 +2520,219 @@ def test_reconciliation_watchdog_accepts_matching_open_position_snapshot() -> No
     assert result["issues"] == []
 
 
+def test_account_protection_audit_flags_unprotected_out_of_universe_position() -> None:
+    now = datetime(2026, 5, 10, 12, tzinfo=UTC)
+
+    result = run_live_account_protection_audit.evaluate_account_protection(
+        positions=[
+            {
+                "symbol": "ADAUSDC",
+                "position_side": "SHORT",
+                "position_amt": -305.9,
+                "entry_price": 0.2538,
+                "mark_price": 0.2558,
+            }
+        ],
+        open_orders=[],
+        allowed_symbols={"BTCUSDT", "ETHUSDT"},
+        now=now,
+    )
+
+    issue_types = {issue["type"] for issue in result["issues"]}
+    assert result["overall_status"] == "ALERT"
+    assert result["severity"] == "FAIL"
+    assert "missing_stop_protection" in issue_types
+    assert "missing_take_profit_protection" in issue_types
+    assert "out_of_universe_open_position" in issue_types
+
+
+def test_account_protection_report_dir_resolves_against_script_root(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(run_live_account_protection_audit, "ROOT_DIR", tmp_path)
+
+    relative = run_live_account_protection_audit._resolve_report_dir("reports/operations/live_account_protection_audit")
+    absolute = run_live_account_protection_audit._resolve_report_dir(str(tmp_path / "custom"))
+
+    assert relative == tmp_path / "reports" / "operations" / "live_account_protection_audit"
+    assert absolute == tmp_path / "custom"
+
+
+def test_account_protection_audit_flags_exchange_leverage_above_cap() -> None:
+    now = datetime(2026, 5, 10, 12, tzinfo=UTC)
+
+    result = run_live_account_protection_audit.evaluate_account_protection(
+        positions=[
+            {
+                "symbol": "ADAUSDC",
+                "position_side": "SHORT",
+                "position_amt": -305.9,
+                "entry_price": 0.2538,
+                "mark_price": 0.2558,
+                "leverage": 20,
+            }
+        ],
+        open_orders=[],
+        allowed_symbols={"ADAUSDC"},
+        leverage_cap=10,
+        now=now,
+    )
+
+    issue_types = {issue["type"] for issue in result["issues"]}
+    assert "exchange_leverage_above_cap" in issue_types
+    assert result["positions"][0]["leverage"] == 20
+    assert result["positions"][0]["leverage_cap"] == 10
+    assert result["positions"][0]["leverage_cap_breached"] is True
+
+
+def test_account_protection_audit_accepts_hedge_mode_stop_and_tp_without_reduce_only() -> None:
+    now = datetime(2026, 5, 10, 12, tzinfo=UTC)
+
+    result = run_live_account_protection_audit.evaluate_account_protection(
+        positions=[
+            {
+                "symbol": "BTCUSDT",
+                "position_side": "LONG",
+                "position_amt": 0.01,
+                "entry_price": 100.0,
+                "mark_price": 101.0,
+            }
+        ],
+        open_orders=[
+            {
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "positionSide": "LONG",
+                "type": "STOP_MARKET",
+                "status": "NEW",
+                "closePosition": True,
+            },
+            {
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "positionSide": "LONG",
+                "type": "LIMIT",
+                "status": "NEW",
+                "price": "101.5",
+                "reduceOnly": False,
+            },
+        ],
+        allowed_symbols={"BTCUSDT", "ETHUSDT"},
+        now=now,
+    )
+
+    assert result["overall_status"] == "OK"
+    assert result["issues"] == []
+    assert result["positions"][0]["has_stop"] is True
+    assert result["positions"][0]["has_take_profit"] is True
+
+
+def test_account_protection_audit_does_not_count_unfavorable_close_limit_as_tp() -> None:
+    now = datetime(2026, 5, 10, 12, tzinfo=UTC)
+
+    result = run_live_account_protection_audit.evaluate_account_protection(
+        positions=[
+            {
+                "symbol": "ADAUSDC",
+                "position_side": "SHORT",
+                "position_amt": -305.9,
+                "entry_price": 0.2538,
+                "mark_price": 0.2558,
+            }
+        ],
+        open_orders=[
+            {
+                "symbol": "ADAUSDC",
+                "side": "BUY",
+                "positionSide": "SHORT",
+                "type": "LIMIT",
+                "status": "NEW",
+                "price": "0.2553",
+                "reduceOnly": True,
+            }
+        ],
+        allowed_symbols={"BTCUSDT", "ETHUSDT"},
+        now=now,
+    )
+
+    issue_types = {issue["type"] for issue in result["issues"]}
+    assert result["positions"][0]["has_take_profit"] is False
+    assert "missing_take_profit_protection" in issue_types
+
+
+def test_live_leverage_cap_sync_aligns_universe_and_open_positions(monkeypatch) -> None:
+    calls: list[tuple[str, int, bool]] = []
+
+    class FakeClient:
+        def fetch_position_risk(self) -> list[dict[str, object]]:
+            return [
+                {"symbol": "BTCUSDT", "positionAmt": "0", "leverage": "6"},
+                {"symbol": "ETHUSDT", "positionAmt": "0", "leverage": "12"},
+                {"symbol": "ADAUSDC", "positionAmt": "-305.9", "leverage": "20"},
+            ]
+
+        def normalize_position_risk_row(self, row: dict[str, object]) -> dict[str, object]:
+            return {
+                "symbol": str(row["symbol"]),
+                "position_amt": float(row["positionAmt"]),
+                "leverage": int(str(row["leverage"])),
+            }
+
+        def change_initial_leverage(self, *, symbol: str, leverage: int, live: bool) -> dict[str, object]:
+            calls.append((symbol, leverage, live))
+            return {"symbol": symbol, "leverage": leverage}
+
+    monkeypatch.setattr(run_live_leverage_cap_sync, "BinanceFuturesClient", FakeClient)
+    monkeypatch.setattr(
+        run_live_leverage_cap_sync,
+        "get_settings",
+        lambda: SimpleNamespace(
+            auto_trading_live_leverage_cap=10,
+            auto_trading_micro_live_allowed_symbols="BTCUSDT,ETHUSDT",
+        ),
+    )
+
+    payload = run_live_leverage_cap_sync.build_payload(apply=True)
+
+    assert payload["overall_status"] == "OK"
+    assert payload["changed_count"] == 3
+    assert calls == [("BTCUSDT", 10, True), ("ETHUSDT", 10, True), ("ADAUSDC", 10, True)]
+
+
+def test_live_leverage_cap_sync_aggregates_duplicate_symbol_position_rows(monkeypatch) -> None:
+    class FakeClient:
+        def fetch_position_risk(self) -> list[dict[str, object]]:
+            return [
+                {"symbol": "BTCUSDC", "positionAmt": "0", "leverage": "10"},
+                {"symbol": "BTCUSDC", "positionAmt": "0.01", "leverage": "10"},
+            ]
+
+        def normalize_position_risk_row(self, row: dict[str, object]) -> dict[str, object]:
+            return {
+                "symbol": str(row["symbol"]),
+                "position_amt": float(row["positionAmt"]),
+                "leverage": int(str(row["leverage"])),
+            }
+
+        def change_initial_leverage(self, *, symbol: str, leverage: int, live: bool) -> dict[str, object]:
+            raise AssertionError("dry-run should not change leverage")
+
+    monkeypatch.setattr(run_live_leverage_cap_sync, "BinanceFuturesClient", FakeClient)
+    monkeypatch.setattr(
+        run_live_leverage_cap_sync,
+        "get_settings",
+        lambda: SimpleNamespace(
+            auto_trading_live_leverage_cap=10,
+            auto_trading_micro_live_allowed_symbols="BTCUSDT",
+        ),
+    )
+
+    payload = run_live_leverage_cap_sync.build_payload(apply=False)
+
+    btcusdc = next(row for row in payload["symbols"] if row["symbol"] == "BTCUSDC")
+    assert btcusdc["position_amt"] == 0.01
+    assert btcusdc["gross_position_amt"] == 0.01
+    assert btcusdc["has_open_position"] is True
+
+
 def test_reconciliation_watchdog_main_writes_latest_aliases(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(
         run_live_reconciliation_watchdog,
@@ -2634,6 +2849,8 @@ def test_launchd_generator_includes_remaining_operational_guards(tmp_path) -> No
     labels = {row["label"] for row in rows}
 
     assert "com.test.micro.reconciliation-watchdog" in labels
+    assert "com.test.micro.live-account-protection-audit" in labels
+    assert "com.test.micro.live-leverage-cap-sync" in labels
     assert "com.test.micro.boot-check" in labels
     assert "com.test.micro.ops-heartbeat" in labels
     assert "com.test.micro.live-candidate-promotion-readiness" in labels
@@ -2645,6 +2862,8 @@ def test_launchd_generator_includes_remaining_operational_guards(tmp_path) -> No
         "runtime_guard",
         "no_order_watchdog",
         "reconciliation_watchdog",
+        "live_account_protection_audit",
+        "live_leverage_cap_sync",
         "boot_check",
         "live_candidate_promotion_readiness",
         "live_replay_parity",
@@ -2758,6 +2977,21 @@ def test_launchd_generator_uses_env_file_macro_blackout_contract(monkeypatch, tm
     assert output_arg == str(env_configured)
 
 
+def test_launchd_reconciliation_watchdog_scopes_to_env_live_symbols(tmp_path) -> None:
+    env_file = tmp_path / "ops.env"
+    env_file.write_text("AUTO_TRADING_MICRO_LIVE_ALLOWED_SYMBOLS=BTCUSDT,ETHUSDT\n", encoding="utf-8")
+
+    jobs = install_micro_live_ops_launchd.build_jobs(
+        label_prefix="com.test.micro",
+        python_bin="/usr/bin/python3",
+        env_file=str(env_file),
+    )
+    reconciliation_job = next(job for job in jobs if job.name == "reconciliation_watchdog")
+
+    assert "--symbols" in reconciliation_job.args
+    assert reconciliation_job.args[reconciliation_job.args.index("--symbols") + 1] == "BTCUSDT,ETHUSDT"
+
+
 def test_launchd_generator_returns_failure_when_load_fails(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(
         sys,
@@ -2808,7 +3042,22 @@ def test_launchd_generator_keeps_unload_failure_as_warning(monkeypatch, tmp_path
     assert payload["overall_status"] == "WARN"
 
 
+def _patch_boot_account_protection_ok(monkeypatch) -> None:
+    monkeypatch.setattr(
+        run_micro_live_boot_check,
+        "_account_protection_component",
+        lambda: run_micro_live_boot_check._component(
+            "live_account_protection_audit",
+            "PASS",
+            blocking=False,
+            summary="open_positions=0 fail=0 warn=0",
+            payload={"fail_count": 0, "warn_count": 0, "open_position_count": 0},
+        ),
+    )
+
+
 def test_boot_check_fails_when_reconciliation_watchdog_alerts(monkeypatch) -> None:
+    _patch_boot_account_protection_ok(monkeypatch)
     monkeypatch.setattr(
         run_micro_live_boot_check.run_micro_live_runtime_guard,
         "build_payload",
@@ -2844,6 +3093,7 @@ def test_boot_check_fails_when_reconciliation_watchdog_alerts(monkeypatch) -> No
 
 
 def test_boot_check_fails_when_failure_contract_drill_fails(monkeypatch) -> None:
+    _patch_boot_account_protection_ok(monkeypatch)
     monkeypatch.setattr(
         run_micro_live_boot_check.run_micro_live_runtime_guard,
         "build_payload",
@@ -2879,7 +3129,92 @@ def test_boot_check_fails_when_failure_contract_drill_fails(monkeypatch) -> None
     assert payload["components"][-1]["name"] == "failure_contract_drill"
 
 
+def test_boot_check_fails_when_account_protection_has_failures(monkeypatch) -> None:
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_micro_live_runtime_guard,
+        "build_payload",
+        lambda **_kwargs: {"overall_status": "PASS", "blocking_failures": []},
+    )
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_live_reconciliation_watchdog,
+        "build_payload",
+        lambda **_kwargs: {"overall_status": "OK", "evaluation": {"alert": False, "message": "ok"}},
+    )
+    monkeypatch.setattr(run_micro_live_boot_check.run_live_reconciliation_watchdog, "_default_stale_minutes", lambda _value: 3)
+    monkeypatch.setattr(
+        run_micro_live_boot_check,
+        "_account_protection_component",
+        lambda: run_micro_live_boot_check._component(
+            "live_account_protection_audit",
+            "FAIL",
+            blocking=True,
+            summary="open_positions=1 fail=1 warn=2",
+            payload={"fail_count": 1, "warn_count": 2, "open_position_count": 1},
+        ),
+    )
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_micro_live_synthetic_canary,
+        "run_canary",
+        lambda **_kwargs: {"overall_status": "PASS", "symbol": "BTCUSDT", "entry_model": "CONFIRM", "no_live_order_sent": True},
+    )
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_micro_live_failure_drill,
+        "build_payload",
+        lambda **_kwargs: {"overall_status": "PASS", "scenario_count": 8, "failed_count": 0},
+    )
+
+    payload = run_micro_live_boot_check.build_payload(
+        days=1,
+        limit=10,
+        symbol="BTCUSDT",
+        check_binance_rules=False,
+        canary_network=False,
+    )
+
+    assert payload["overall_status"] == "FAIL"
+    assert payload["blocking_failure_count"] == 1
+    account_component = next(item for item in payload["components"] if item["name"] == "live_account_protection_audit")
+    assert account_component["blocking"] is True
+
+
+def test_boot_check_allows_runtime_watch_without_blocking_failures(monkeypatch) -> None:
+    _patch_boot_account_protection_ok(monkeypatch)
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_micro_live_runtime_guard,
+        "build_payload",
+        lambda **_kwargs: {"overall_status": "WATCH", "blocking_failures": []},
+    )
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_live_reconciliation_watchdog,
+        "build_payload",
+        lambda **_kwargs: {"overall_status": "OK", "evaluation": {"alert": False, "message": "ok"}},
+    )
+    monkeypatch.setattr(run_micro_live_boot_check.run_live_reconciliation_watchdog, "_default_stale_minutes", lambda _value: 3)
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_micro_live_synthetic_canary,
+        "run_canary",
+        lambda **_kwargs: {"overall_status": "PASS", "symbol": "BTCUSDT", "entry_model": "CONFIRM", "no_live_order_sent": True},
+    )
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_micro_live_failure_drill,
+        "build_payload",
+        lambda **_kwargs: {"overall_status": "PASS", "scenario_count": 8, "failed_count": 0},
+    )
+
+    payload = run_micro_live_boot_check.build_payload(
+        days=1,
+        limit=10,
+        symbol="BTCUSDT",
+        check_binance_rules=False,
+        canary_network=False,
+    )
+
+    assert payload["overall_status"] == "PASS"
+    assert payload["blocking_failure_count"] == 0
+
+
 def test_boot_check_synthetic_canary_matches_live_contract(monkeypatch) -> None:
+    _patch_boot_account_protection_ok(monkeypatch)
     settings = SimpleNamespace(
         auto_trading_micro_live_allowed_symbols="ADAUSDC,BTCUSDC",
         auto_trading_micro_live_symbol_priority="BTCUSDC,ETHUSDC",
@@ -3040,6 +3375,41 @@ def test_ops_heartbeat_prefers_runtime_report_root_for_relative_patterns(monkeyp
     assert result["status"] == "PASS"
     assert result["report_root"] == str(runtime_root)
     assert result["jobs"][0]["latest_path"] == str(report)
+
+
+def test_ops_heartbeat_treats_configured_watch_status_as_warning(monkeypatch, tmp_path) -> None:
+    report = tmp_path / "runtime_guard.md"
+    report.write_text(
+        "\n".join(
+            [
+                "# Runtime Guard",
+                "",
+                "```json",
+                json.dumps({"generated_at": "2026-05-10T00:00:00Z", "overall_status": "WATCH"}),
+                "```",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(run_micro_live_ops_heartbeat, "_runtime_started_at_from_heartbeat", lambda: None)
+    monkeypatch.setattr(
+        run_micro_live_ops_heartbeat,
+        "_DEFAULT_JOBS",
+        {
+            "runtime_guard": {
+                "pattern": str(report),
+                "max_age_minutes": 15,
+                "pass_statuses": {"PASS"},
+                "watch_statuses": {"WATCH"},
+            }
+        },
+    )
+
+    now = datetime.fromtimestamp(report.stat().st_mtime, tz=UTC)
+    result = run_micro_live_ops_heartbeat.evaluate_ops_heartbeat(now=now)
+
+    assert result["status"] == "WATCH"
+    assert result["jobs"][0]["status"] == "WATCH"
 
 
 def test_ops_heartbeat_message_separates_failures_and_warnings() -> None:

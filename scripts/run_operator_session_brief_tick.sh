@@ -31,8 +31,8 @@ STATE_PATH="${OPERATOR_BRIEF_STATE_FILE:-$BRIEF_DIR/last_alert_state_${MODE_SLUG
 LOCK_PATH="${OPERATOR_BRIEF_LOCK_FILE:-$BRIEF_DIR/operator_session_brief_${MODE_SLUG}.lock}"
 
 NOTIFY_ARGS=(
-  --symbol "${OPERATOR_BRIEF_SYMBOL:-BTCUSDC}"
-  --universe "${OPERATOR_BRIEF_UNIVERSE:-usdc_perp_top30}"
+  --symbol "${OPERATOR_BRIEF_SYMBOL:-BTCUSDT}"
+  --universe "${OPERATOR_BRIEF_UNIVERSE:-usdt_reliable_balanced_31}"
   --days "${OPERATOR_BRIEF_DAYS:-7}"
   --portfolio-limit "${OPERATOR_BRIEF_PORTFOLIO_LIMIT:-5}"
   --intent-limit "${OPERATOR_BRIEF_INTENT_LIMIT:-5}"

@@ -102,7 +102,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--symbol", default=None, help="Optional symbol pin. If omitted, pick the best eligible candidate.")
-    parser.add_argument("--universe", default="usdc_perp_top30")
+    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
     parser.add_argument("--families", default="trend_continuation,sweep_reversal")
     parser.add_argument("--candidate-limit", type=int, default=100)
     parser.add_argument("--include-manual-review", action="store_true")

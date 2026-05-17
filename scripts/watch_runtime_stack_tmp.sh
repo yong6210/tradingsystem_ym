@@ -56,6 +56,18 @@ loop_phase_within_grace() {
   [[ "$age" -ge 0 && "$age" -le "$STARTING_GRACE_SECONDS" ]]
 }
 
+heartbeat_phase_is() {
+  local role="$1"
+  local phase="$2"
+  local heartbeat_path="$HEARTBEAT_DIR/$role.json"
+  [[ -f "$heartbeat_path" ]] || return 1
+  grep -Eq "\"phase\"[[:space:]]*:[[:space:]]*\"$phase\"" "$heartbeat_path"
+}
+
+boot_check_blocked() {
+  heartbeat_phase_is loop boot_check_failed && heartbeat_phase_is ws boot_check_failed
+}
+
 loop_starting_within_grace() {
   loop_phase_within_grace "starting"
 }
@@ -94,6 +106,10 @@ ready_state() {
     printf 'market_data_warmup_grace\n'
     return 0
   fi
+  if boot_check_blocked; then
+    printf 'boot_check_blocked\n'
+    return 0
+  fi
   printf 'not_ready\n'
   return 1
 }
@@ -121,6 +137,10 @@ ensure_ready() {
     fi
     if [[ "$state" == "market_data_warmup_grace" ]]; then
       log "runtime_market_data_warmup_grace"
+      return 0
+    fi
+    if [[ "$state" == "boot_check_blocked" ]]; then
+      log "runtime_boot_check_blocked"
       return 0
     fi
     log "runtime_ready"
@@ -158,6 +178,13 @@ while true; do
   if [[ "$state" == "market_data_warmup_grace" ]]; then
     if [[ "$failures" -gt 0 ]]; then
       log "runtime_market_data_warmup_grace_after_failures count=$failures"
+    fi
+    failures=0
+    continue
+  fi
+  if [[ "$state" == "boot_check_blocked" ]]; then
+    if [[ "$failures" -gt 0 ]]; then
+      log "runtime_boot_check_blocked_after_failures count=$failures"
     fi
     failures=0
     continue

@@ -502,6 +502,35 @@ class BinanceFuturesClient:
             },
         )
 
+    def change_initial_leverage(self, *, symbol: str, leverage: int | float, live: bool = False) -> dict[str, Any]:
+        normalized_symbol = str(symbol or "").strip().upper()
+        if not normalized_symbol:
+            raise ValueError("symbol_required")
+        normalized_leverage = self._safe_int(leverage)
+        if normalized_leverage <= 0:
+            raise ValueError("binance_leverage_must_be_positive")
+        if normalized_leverage > 125:
+            raise ValueError("binance_leverage_too_high")
+        if not live:
+            return {
+                "symbol": normalized_symbol,
+                "leverage": normalized_leverage,
+                "dryRun": True,
+            }
+        if not self.live_trade_enabled:
+            raise RuntimeError("binance_live_account_config_disabled")
+        payload = self._signed_request(
+            "POST",
+            "/fapi/v1/leverage",
+            {
+                "symbol": normalized_symbol,
+                "leverage": normalized_leverage,
+            },
+        )
+        if payload and not isinstance(payload, Mapping):
+            raise RuntimeError(f"binance_leverage_response_malformed:{type(payload).__name__}")
+        return self._safe_dict(payload)
+
     def create_user_stream_listen_key(self) -> dict[str, Any]:
         payload = self._safe_dict(self._keyed_request("POST", "/fapi/v1/listenKey"))
         return {
@@ -529,6 +558,16 @@ class BinanceFuturesClient:
         payload = self._signed_request(
             "GET",
             "/fapi/v2/positionRisk",
+            {"symbol": symbol.upper() if symbol else None},
+        )
+        if isinstance(payload, list):
+            return [row for row in (self._safe_dict(item) for item in payload) if row]
+        return []
+
+    def fetch_open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        payload = self._signed_request(
+            "GET",
+            "/fapi/v1/openOrders",
             {"symbol": symbol.upper() if symbol else None},
         )
         if isinstance(payload, list):

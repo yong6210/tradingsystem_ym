@@ -37,9 +37,9 @@ _PORTFOLIO_ORDER_GATE_STAGES = {"approval_gate_blocked", "submitted_waiting_for_
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare live MICRO_LIVE flow against replay/dashboard flow baseline.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--symbol", default="BTCUSDC")
+    parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--all-live-symbols", action="store_true")
-    parser.add_argument("--universe", default="usdc_perp_top30")
+    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--since-ws-start", action="store_true", help="Compatibility flag; runtime scope is the default when ws started_at is available.")
     parser.add_argument("--lookback-only", action="store_true", help="Ignore ws started_at and use the full --days lookback as the active parity window.")

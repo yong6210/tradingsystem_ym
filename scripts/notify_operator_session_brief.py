@@ -95,8 +95,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate or read the latest operator session brief and send a concise handoff message when state changes."
     )
-    parser.add_argument("--symbol", default=_env_default("OPERATOR_BRIEF_SYMBOL", "BTCUSDC"))
-    parser.add_argument("--universe", default=_env_default("OPERATOR_BRIEF_UNIVERSE", "usdc_perp_top30"))
+    parser.add_argument("--symbol", default=_env_default("OPERATOR_BRIEF_SYMBOL", "BTCUSDT"))
+    parser.add_argument("--universe", default=_env_default("OPERATOR_BRIEF_UNIVERSE", "usdt_reliable_balanced_31"))
     parser.add_argument("--days", type=int, default=int(_env_default("OPERATOR_BRIEF_DAYS", "7")))
     parser.add_argument("--portfolio-limit", type=int, default=int(_env_default("OPERATOR_BRIEF_PORTFOLIO_LIMIT", "5")))
     parser.add_argument("--intent-limit", type=int, default=int(_env_default("OPERATOR_BRIEF_INTENT_LIMIT", "5")))

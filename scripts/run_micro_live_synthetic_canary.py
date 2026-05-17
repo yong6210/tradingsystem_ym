@@ -76,7 +76,7 @@ def _first_live_symbol(settings: Any, explicit_symbol: str = "") -> str:
     ]:
         if not allowed_symbol_set or priority_symbol in allowed_symbol_set:
             return priority_symbol
-    return allowed_symbols[0] if allowed_symbols else "BTCUSDC"
+    return allowed_symbols[0] if allowed_symbols else "BTCUSDT"
 
 
 def _public_mid_price(client: BinanceFuturesClient, symbol: str) -> float:
@@ -143,9 +143,9 @@ def _synthetic_balance_loader(settings: Any):
         configured_equity = _safe_float(getattr(settings, "auto_trading_live_account_equity_usdt", 0.0))
         assets = [
             item.strip().upper()
-            for item in str(getattr(settings, "auto_trading_live_balance_sync_assets", "USDC,USDT") or "USDC,USDT").split(",")
+            for item in str(getattr(settings, "auto_trading_live_balance_sync_assets", "USDT,USDC") or "USDT,USDC").split(",")
             if item.strip()
-        ] or ["USDC", "USDT"]
+        ] or ["USDT", "USDC"]
         return {
             "source": "synthetic_canary_balance",
             "balances": [

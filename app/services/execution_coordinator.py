@@ -168,6 +168,7 @@ class ExecutionCoordinator:
         live_symbol_rules_loader: Callable[[str], dict[str, Any] | None] | None = None,
         live_liquidity_loader: Callable[..., dict[str, Any] | None] | None = None,
         live_balance_loader: Callable[[], Any] | None = None,
+        live_account_protection_loader: Callable[[], dict[str, Any] | None] | None = None,
         settings: Settings | None = None,
         paper_adapter: PaperExecutionAdapter | None = None,
     ):
@@ -180,6 +181,7 @@ class ExecutionCoordinator:
         self.live_symbol_rules_loader = live_symbol_rules_loader
         self.live_liquidity_loader = live_liquidity_loader
         self.live_balance_loader = live_balance_loader
+        self.live_account_protection_loader = live_account_protection_loader
         self.settings = settings or get_settings()
         self.paper_adapter = paper_adapter or PaperExecutionAdapter()
         self._live_symbol_rules_cache: dict[str, dict[str, Any]] = {}
@@ -312,9 +314,9 @@ class ExecutionCoordinator:
         configured_equity = self._float_or(getattr(self.settings, "auto_trading_live_account_equity_usdt", 0.0))
         sync_enabled = self._safe_bool(getattr(self.settings, "auto_trading_live_balance_sync_enabled", False))
         fail_closed = self._safe_bool(getattr(self.settings, "auto_trading_live_balance_sync_fail_closed", True), default=True)
-        preferred_assets = self._csv_upper(getattr(self.settings, "auto_trading_live_balance_sync_assets", "USDC,USDT")) or [
-            "USDC",
+        preferred_assets = self._csv_upper(getattr(self.settings, "auto_trading_live_balance_sync_assets", "USDT,USDC")) or [
             "USDT",
+            "USDC",
         ]
         details: dict[str, Any] = {
             "configured_account_equity_usdt": round(configured_equity, 4),
@@ -375,6 +377,69 @@ class ExecutionCoordinator:
             return 0.0, details, "Live balance sync did not find a positive available balance for the configured assets."
         details["account_equity_source"] = "configured_fallback"
         return configured_equity, details, None
+
+    def _live_account_protection_gate(self) -> dict[str, Any]:
+        enabled = self._safe_bool(
+            getattr(self.settings, "auto_trading_live_account_protection_gate_enabled", True),
+            default=True,
+        )
+        fail_closed = self._safe_bool(
+            getattr(self.settings, "auto_trading_live_account_protection_gate_fail_closed", True),
+            default=True,
+        )
+        details: dict[str, Any] = {
+            "enabled": bool(enabled),
+            "fail_closed": bool(fail_closed),
+            "decision": "PASS",
+            "reason": "disabled" if not enabled else "ok",
+        }
+        if not enabled:
+            return details
+        if self.live_account_protection_loader is None:
+            details.update(
+                {
+                    "decision": "BLOCK" if fail_closed else "PASS",
+                    "reason": "loader_not_configured",
+                }
+            )
+            return details
+        try:
+            payload = self.live_account_protection_loader()
+        except Exception as exc:  # pragma: no cover - defensive live-submit guard
+            details.update(
+                {
+                    "decision": "BLOCK" if fail_closed else "PASS",
+                    "reason": "account_protection_check_error",
+                    "error": f"{exc.__class__.__name__}:{exc}",
+                }
+            )
+            return details
+
+        payload_dict = self._safe_dict(payload)
+        if not payload_dict or "fail_count" not in payload_dict:
+            details.update(
+                {
+                    "decision": "BLOCK" if fail_closed else "PASS",
+                    "reason": "account_protection_payload_invalid",
+                }
+            )
+            return details
+        fail_count = int(self._float_or(payload_dict.get("fail_count")))
+        warn_count = int(self._float_or(payload_dict.get("warn_count")))
+        details.update(
+            {
+                "reason": "account_protection_failures" if fail_count > 0 else "ok",
+                "overall_status": str(payload_dict.get("overall_status") or ""),
+                "severity": str(payload_dict.get("severity") or ""),
+                "fail_count": fail_count,
+                "warn_count": warn_count,
+                "open_position_count": int(self._float_or(payload_dict.get("open_position_count"))),
+                "issues": list(payload_dict.get("issues") or [])[:10],
+            }
+        )
+        if fail_count > 0:
+            details["decision"] = "BLOCK"
+        return details
 
     def _normalize_live_limit_price(
         self,
@@ -1426,6 +1491,27 @@ class ExecutionCoordinator:
                 client_order_id=client_order_id,
                 requested_live=live,
             )
+            return row, [], False
+
+        account_protection_gate = self._live_account_protection_gate()
+        if str(account_protection_gate.get("decision") or "PASS").upper() != "PASS":
+            row = self._rejection_submission(
+                intent=intent,
+                plan=plan,
+                message="Live submit blocked because account protection audit has unresolved failures.",
+                submit_status="LIVE_ACCOUNT_PROTECTION_BLOCKED",
+                client_order_id=client_order_id,
+                requested_live=live,
+            )
+            row.attachments = {
+                **self._safe_dict(row.attachments),
+                "live_account_protection_gate": account_protection_gate,
+                "session_guidance": self._safe_dict(intent.session_guidance),
+            }
+            row.raw = {
+                **self._safe_dict(row.raw),
+                "live_account_protection_gate": account_protection_gate,
+            }
             return row, [], False
 
         live_quantity, live_sizing, sizing_error = self._live_order_sizing(intent=intent, plan=plan)

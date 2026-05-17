@@ -445,6 +445,7 @@ class StrategyEngine:
             live_symbol_rules_loader=self.load_binance_symbol_trading_rules,
             live_liquidity_loader=self.load_binance_live_liquidity_snapshot,
             live_balance_loader=self.load_binance_futures_balances,
+            live_account_protection_loader=self.load_binance_account_protection_snapshot,
             settings=self.settings,
         )
         self.execution_reconciliation = ExecutionReconciliationService(
@@ -5067,6 +5068,119 @@ class StrategyEngine:
             "generated_at": result.generated_at,
         }
 
+    def _latest_live_account_protection_report_path(self) -> Path:
+        return ROOT_DIR / "reports" / "operations" / "live_account_protection_audit" / "latest.json"
+
+    def _parse_live_account_protection_generated_at(self, value: Any) -> datetime | None:
+        if value in (None, "", "None"):
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _live_account_protection_safety_overlay(self) -> dict[str, Any]:
+        enabled = self._safe_bool(
+            getattr(self.settings, "auto_trading_live_account_protection_gate_enabled", True),
+            default=True,
+        )
+        requested_mode = self._auto_route_requested_mode()
+        live_mode = requested_mode in {ExecutionMode.MICRO_LIVE, ExecutionMode.LIVE}
+        report_path = self._latest_live_account_protection_report_path()
+        base = {
+            "enabled": enabled,
+            "available": False,
+            "source": "latest_report",
+            "report_path": str(report_path),
+            "decision": "PASS",
+            "reason": "disabled" if not enabled else ("not_live_mode" if not live_mode else "latest_report_missing"),
+            "fail_count": 0,
+            "warn_count": 0,
+            "open_position_count": 0,
+            "issues": [],
+        }
+        if not enabled or not live_mode:
+            return base
+
+        fail_closed = self._safe_bool(
+            getattr(self.settings, "auto_trading_live_account_protection_gate_fail_closed", True),
+            default=True,
+        )
+        live_exchange_enabled = self._safe_bool(getattr(self.settings, "binance_trade_live_enabled", False))
+        block_if_unavailable = fail_closed and live_exchange_enabled
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            base["decision"] = "BLOCK" if block_if_unavailable else "UNKNOWN"
+            base["reason"] = "latest_report_missing_fail_closed" if block_if_unavailable else "latest_report_missing"
+            return base
+        except (OSError, json.JSONDecodeError) as exc:
+            base["decision"] = "BLOCK" if block_if_unavailable else "UNKNOWN"
+            base["reason"] = "latest_report_invalid_fail_closed" if block_if_unavailable else "latest_report_invalid"
+            base["error"] = f"{exc.__class__.__name__}:{exc}"
+            return base
+        if not isinstance(payload, Mapping):
+            base["decision"] = "BLOCK" if block_if_unavailable else "UNKNOWN"
+            base["reason"] = "latest_report_invalid_fail_closed" if block_if_unavailable else "latest_report_invalid"
+            return base
+
+        generated_at = self._parse_live_account_protection_generated_at(payload.get("generated_at"))
+        age_seconds = None
+        if generated_at is not None:
+            age_seconds = max(0.0, (datetime.now(timezone.utc) - generated_at).total_seconds())
+        stale = age_seconds is None or age_seconds > 15 * 60
+        if stale and block_if_unavailable:
+            base.update(
+                {
+                    "available": True,
+                    "decision": "BLOCK",
+                    "reason": "latest_report_stale_fail_closed",
+                    "generated_at": payload.get("generated_at"),
+                    "age_seconds": age_seconds,
+                }
+            )
+            return base
+
+        issues = [dict(item) for item in list(payload.get("issues") or []) if isinstance(item, Mapping)]
+        fail_count = self._maybe_int(payload.get("fail_count")) or 0
+        warn_count = self._maybe_int(payload.get("warn_count")) or 0
+        if fail_count <= 0 and str(payload.get("severity") or "").upper() == "FAIL":
+            fail_count = 1
+        decision = "BLOCK" if fail_count > 0 else "PASS"
+        issue_codes = [
+            ":".join(
+                part
+                for part in (
+                    str(item.get("symbol") or "").upper(),
+                    str(item.get("type") or "").strip(),
+                )
+                if part
+            )
+            for item in issues[:12]
+        ]
+        base.update(
+            {
+                "available": True,
+                "decision": decision,
+                "reason": "account_protection_failures" if decision == "BLOCK" else "ok",
+                "generated_at": payload.get("generated_at"),
+                "age_seconds": age_seconds,
+                "stale": stale,
+                "overall_status": payload.get("overall_status"),
+                "severity": payload.get("severity"),
+                "fail_count": fail_count,
+                "warn_count": warn_count,
+                "open_position_count": self._maybe_int(payload.get("open_position_count")) or 0,
+                "open_order_count": self._maybe_int(payload.get("open_order_count")) or 0,
+                "issues": issues[:12],
+                "issue_codes": issue_codes,
+            }
+        )
+        return base
+
     def _safety_state_payload(
         self,
         *,
@@ -5106,6 +5220,19 @@ class StrategyEngine:
                 symbol=symbol,
                 shadow_summary=shadow_summary,
             )
+        live_account_protection = self._live_account_protection_safety_overlay()
+        payload["live_account_protection"] = live_account_protection
+        if str(live_account_protection.get("decision") or "").upper() == "BLOCK":
+            payload["new_entry_allowed"] = False
+            if not str(payload.get("blocking_reason_code") or "").strip():
+                issue_codes = list(live_account_protection.get("issue_codes") or [])
+                issue_text = ", ".join(str(item) for item in issue_codes[:4] if str(item).strip())
+                payload["blocking_reason_code"] = "live_account_protection_audit"
+                payload["blocking_reason_message"] = (
+                    f"Live account protection audit blocks new entries: {issue_text}."
+                    if issue_text
+                    else "Live account protection audit blocks new entries."
+                )
         return payload
 
     def safety_state(
@@ -5480,7 +5607,7 @@ class StrategyEngine:
         )
         review_followup_ledger_summary = summarize_split_review_followup_ledger(
             symbol=symbol or "",
-            universe=str(portfolio_summary.get("universe") or "usdc_perp_top30"),
+            universe=str(portfolio_summary.get("universe") or "usdt_reliable_balanced_31"),
         )
         edge_evolution_rule_summary = summarize_edge_evolution_rule(
             build_edge_evolution_rule(
@@ -6393,6 +6520,21 @@ class StrategyEngine:
             "source": "binance_futures_balance",
             "balances": self.market_data.binance.fetch_futures_balances(),
         }
+
+    def load_binance_account_protection_snapshot(self) -> dict[str, Any]:
+        from scripts.run_live_account_protection_audit import evaluate_account_protection
+
+        allowed_symbols = set(self._csv_items(getattr(self.settings, "auto_trading_micro_live_allowed_symbols", ""), case="upper"))
+        raw_positions = self.market_data.binance.fetch_position_risk()
+        raw_open_orders = self.market_data.binance.fetch_open_orders()
+        positions = [self.market_data.binance.normalize_position_risk_row(row) for row in raw_positions]
+        return evaluate_account_protection(
+            positions=positions,
+            open_orders=raw_open_orders,
+            allowed_symbols=allowed_symbols,
+            leverage_cap=self._maybe_float(getattr(self.settings, "auto_trading_live_leverage_cap", 0.0)) or 0.0,
+            now=datetime.now(timezone.utc),
+        )
 
     def load_binance_live_liquidity_snapshot(
         self,

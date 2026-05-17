@@ -99,7 +99,7 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--universe", default="usdc_perp_top30")
+    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--symbol", default="")
     parser.add_argument("--max-per-status", type=int, default=3)

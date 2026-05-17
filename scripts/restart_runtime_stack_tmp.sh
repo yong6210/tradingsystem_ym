@@ -117,6 +117,22 @@ dotenv_value() {
   printf '%s\n' "$value"
 }
 
+heartbeat_phase() {
+  local role="$1"
+  local path="$HEARTBEAT_DIR/$role.json"
+  [[ -f "$path" ]] || return 0
+  grep -E '"phase"[[:space:]]*:[[:space:]]*"[^"]+"' "$path" \
+    | tail -n 1 \
+    | sed -E 's/.*"phase"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true
+}
+
+workers_blocked_by_boot_check() {
+  local loop_phase ws_phase
+  loop_phase="$(heartbeat_phase loop)"
+  ws_phase="$(heartbeat_phase ws)"
+  [[ "$loop_phase" == "boot_check_failed" && "$ws_phase" == "boot_check_failed" ]]
+}
+
 rotate_log_if_large() {
   local path="$1"
   local max_bytes="${LOG_ROTATE_MAX_BYTES:-0}"
@@ -192,6 +208,9 @@ post_restart_refresh_reports() {
     run_report_refresh no_order_watchdog \
       "$PYTHON_BIN" "$TMP_ROOT/scripts/run_micro_live_no_order_watchdog.py" \
       --days "$POST_RESTART_NO_ORDER_DAYS" --limit "$POST_RESTART_NO_ORDER_LIMIT" --no-fail-exit --quiet
+    run_report_refresh live_account_protection_audit \
+      "$PYTHON_BIN" "$TMP_ROOT/scripts/run_live_account_protection_audit.py" \
+      --no-fail-exit --quiet
     run_report_refresh live_candidate_promotion_readiness \
       "$PYTHON_BIN" "$TMP_ROOT/scripts/run_live_candidate_promotion_readiness.py" \
       --hours 24 --limit 12 --since-ws-start --heartbeat-dir "$HEARTBEAT_DIR" --quiet
@@ -374,6 +393,11 @@ for _ in $(seq 1 "$READY_WAIT_SECONDS"); do
   if [[ "$last_ready_response" == *'"status":"ready"'* ]]; then
     post_restart_refresh_reports || true
     printf '%s\n' "$last_ready_response"
+    exit 0
+  fi
+  if workers_blocked_by_boot_check; then
+    post_restart_refresh_reports || true
+    printf '{"status":"blocked","reason":"boot_check_failed","loop_phase":"boot_check_failed","ws_phase":"boot_check_failed"}\n'
     exit 0
   fi
   sleep 1

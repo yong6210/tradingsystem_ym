@@ -16,7 +16,7 @@ from app.services.strategy_engine import StrategyEngine
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate portfolio budget report")
-    parser.add_argument("--universe", default="usdc_perp_top30")
+    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--no-write-report", action="store_true")
     return parser.parse_args()

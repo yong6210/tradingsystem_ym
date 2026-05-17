@@ -17,7 +17,7 @@ from app.services.strategy_engine import StrategyEngine
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate operational checklist report")
     parser.add_argument("--symbol", required=True)
-    parser.add_argument("--universe", default="usdc_perp_top30")
+    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--alert-test-lookback-hours", type=int, default=24)

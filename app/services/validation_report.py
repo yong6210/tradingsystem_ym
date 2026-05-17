@@ -1447,7 +1447,7 @@ class ValidationReportService:
         operator_action_priority_payload = self._normalize_operator_action_priority_payload(
             operator_action_priority,
             symbol=symbol,
-            universe=str(getattr(self.settings, "universe_name", "usdc_perp_top30") or "usdc_perp_top30"),
+            universe=str(getattr(self.settings, "universe_name", "usdt_reliable_balanced_31") or "usdt_reliable_balanced_31"),
             days=max(int(score_to_outcome_payload.get("report_window_days", 0) or 0), 1) if score_to_outcome_payload else 7,
         )
         operator_action_priority_lines: list[str] = []
@@ -2427,7 +2427,7 @@ class ValidationReportService:
         edge_experiment_summary = summarize_edge_experiment_review(edge_experiment_review)
         review_followup_ledger_summary = summarize_split_review_followup_ledger(
             symbol=symbol,
-            universe=str(getattr(self.settings, "universe_name", "usdc_perp_top30") or "usdc_perp_top30"),
+            universe=str(getattr(self.settings, "universe_name", "usdt_reliable_balanced_31") or "usdt_reliable_balanced_31"),
         )
         edge_experiment_lines: list[str] = []
         if edge_experiment_summary:
