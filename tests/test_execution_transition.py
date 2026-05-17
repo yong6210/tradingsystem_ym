@@ -121,6 +121,56 @@ def test_risk_pct_sizing_reports_actual_risk_after_quantity_step_rounding() -> N
     assert details["quantity_rounding_loss_risk_usdt"] == 0.0407
 
 
+def test_risk_pct_sizing_uses_weighted_risk_sizing_multiplier() -> None:
+    coordinator = ExecutionCoordinator.__new__(ExecutionCoordinator)
+    coordinator.settings = SimpleNamespace(
+        auto_trading_live_sizing_mode="RISK_PCT",
+        auto_trading_live_account_equity_usdt=200.0,
+        auto_trading_live_balance_sync_enabled=False,
+        auto_trading_live_balance_sync_assets="USDT,USDC",
+        auto_trading_live_balance_sync_fail_closed=True,
+        auto_trading_live_risk_per_trade_pct=0.01,
+        auto_trading_live_usable_margin_fraction=1.0,
+        auto_trading_live_leverage_cap=10.0,
+        auto_trading_live_liquidity_gate_partial_submit_enabled=False,
+        binance_live_quantity_step=0.001,
+        binance_live_min_quantity=0.001,
+    )
+    coordinator._live_symbol_rules_cache = {}
+    coordinator.live_symbol_rules_loader = lambda _symbol: {
+        "quantity_step": 0.001,
+        "min_quantity": 0.001,
+        "source": "test_rules",
+    }
+    plan = SimpleNamespace(symbol="BTCUSDT", entry_price=78_372.75, sl=77_980.88625)
+    intent = SimpleNamespace(
+        payload={
+            "executable_plan": {
+                "entry_trigger_price": 78_372.75,
+                "stop_price": 77_980.88625,
+            }
+        },
+        quality_snapshot={
+            "recommended_risk_r": 1.0,
+            "base_recommended_risk_r": 1.0,
+            "allocated_risk_r": 0.5,
+            "allocation_weight": 0.5,
+            "risk_sizing_r": 0.5,
+            "risk_allocator": {"applied": True},
+        },
+        dedupe_result={},
+    )
+
+    quantity, details, error = coordinator._live_order_sizing(intent=intent, plan=plan)
+
+    assert error is None
+    assert quantity == 0.002
+    assert details["recommended_risk_multiplier"] == 1.0
+    assert details["risk_sizing_multiplier"] == 0.5
+    assert details["target_risk_usdt"] == 1.0
+    assert details["actual_risk_pct"] == 0.003919
+
+
 def _reset_execution_control_state() -> None:
     reset_execution_lane_tracker()
     with SessionLocal() as db:

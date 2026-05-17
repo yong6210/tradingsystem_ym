@@ -416,6 +416,17 @@ class OrderIntentService:
             "setup_grade": str(executable_plan.get("setup_grade") or ""),
             "setup_score": OrderIntentService._safe_float(executable_plan.get("setup_score", 0.0)),
             "recommended_risk_r": OrderIntentService._safe_float(executable_plan.get("recommended_risk_r", 0.0)),
+            "base_recommended_risk_r": OrderIntentService._safe_float(
+                executable_plan.get("base_recommended_risk_r", executable_plan.get("recommended_risk_r", 0.0))
+            ),
+            "allocated_risk_r": OrderIntentService._safe_float(
+                executable_plan.get("allocated_risk_r", executable_plan.get("recommended_risk_r", 0.0))
+            ),
+            "allocation_weight": OrderIntentService._safe_float(executable_plan.get("allocation_weight", 1.0), 1.0),
+            "risk_sizing_r": OrderIntentService._safe_float(
+                executable_plan.get("risk_sizing_r", executable_plan.get("recommended_risk_r", 0.0))
+            ),
+            "risk_allocator": dict(executable_plan.get("risk_allocator") or {}),
             "expected_ev_r": OrderIntentService._safe_float(expected_summary.get("expected_ev_r", 0.0)),
         }
 

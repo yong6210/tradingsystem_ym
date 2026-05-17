@@ -16,6 +16,7 @@ from app.services.operator_text import entry_condition_message, why_now_message
 from app.services.portfolio_risk_overlay import PortfolioRiskOverlayService
 from app.services.session_guidance import SessionGuidanceService
 from app.services.strategy_cluster_balance import StrategyClusterBalanceService
+from app.services.market_data import configured_usdt_universe_symbols
 from app.services.thesis_fingerprint import ThesisFingerprintService
 from app.services.multi_strategy_ab import MultiStrategyABExpansionService
 
@@ -60,7 +61,8 @@ _THESIS = ThesisFingerprintService()
 def get_universe_symbols(universe: str) -> list[str]:
     normalized = str(universe or "").strip().lower()
     if normalized == "usdt_reliable_balanced_31":
-        return USDT_RELIABLE_BALANCED_31
+        configured = configured_usdt_universe_symbols()
+        return configured or USDT_RELIABLE_BALANCED_31
     if normalized == "usdc_perp_top30":
         return USDC_PERP_TOP30
     return []

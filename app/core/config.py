@@ -416,6 +416,8 @@ class Settings(BaseSettings):
     auto_trading_live_risk_per_trade_pct: float = 0.01
     auto_trading_live_usable_margin_fraction: float = 0.85
     auto_trading_live_leverage_cap: float = 10.0
+    auto_trading_live_weighted_risk_allocator_enabled: bool = True
+    auto_trading_live_weighted_risk_max_r: float = 1.0
     auto_trading_live_account_protection_gate_enabled: bool = True
     auto_trading_live_account_protection_gate_fail_closed: bool = True
     auto_trading_max_slippage_bps: float = 12.0

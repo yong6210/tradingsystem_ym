@@ -1040,7 +1040,8 @@ class PortfolioRiskOverlayService:
                 )
                 row["capital_pressure"] = str(capital_allocator.get("capital_pressure", "neutral") or "neutral")
                 row["mode_projected_trade_count"] = int(today_trade_count) + accepted_count + 1
-                row["mode_projected_total_risk_r"] = round(float(current_total_risk_local) + float(row.get("recommended_risk_r", 0.0) or 0.0), 4)
+                effective_candidate_risk_r = float(row.get("allocated_risk_r", row.get("recommended_risk_r", 0.0)) or 0.0)
+                row["mode_projected_total_risk_r"] = round(float(current_total_risk_local) + effective_candidate_risk_r, 4)
                 pre_outcome_final_rank_score = round(
                     float(row.get("adjusted_rank_score", row.get("final_rank_score", 0.0))) - session_penalty,
                     4,
@@ -1075,7 +1076,7 @@ class PortfolioRiskOverlayService:
                     row["block_reason_message"] = block_reason_message(row["block_reason"])
                 elif self.mode.projected_total_risk_exceeded(
                     current_total_risk_r=current_total_risk_local,
-                    candidate_risk_r=float(row.get("recommended_risk_r", 0.0) or 0.0),
+                    candidate_risk_r=effective_candidate_risk_r,
                     mode=mode_policy.mode,
                 ):
                     row["accepted"] = False
@@ -1083,7 +1084,7 @@ class PortfolioRiskOverlayService:
                     row["block_reason_message"] = block_reason_message(row["block_reason"])
                 elif row["accepted"]:
                     accepted_count += 1
-                    current_total_risk_local += float(row.get("recommended_risk_r", 0.0) or 0.0)
+                    current_total_risk_local += effective_candidate_risk_r
                     accepted_rows.append(row)
                     row["block_reason_message"] = None
                 assessed.append(row)
@@ -1273,7 +1274,8 @@ class PortfolioRiskOverlayService:
                 continue
             projected_trade_count = int(today_trade_count) + len(accepted) + 1
             row["mode_projected_trade_count"] = projected_trade_count
-            row["mode_projected_total_risk_r"] = round(float(current_total_risk_r) + float(row.get("recommended_risk_r", 0.0) or 0.0), 4)
+            effective_candidate_risk_r = float(row.get("allocated_risk_r", row.get("recommended_risk_r", 0.0)) or 0.0)
+            row["mode_projected_total_risk_r"] = round(float(current_total_risk_r) + effective_candidate_risk_r, 4)
             if mode_policy.shadow_only:
                 row["block_reason"] = "mode_shadow_only"
                 row["block_reason_message"] = block_reason_message(row["block_reason"])
@@ -1295,7 +1297,7 @@ class PortfolioRiskOverlayService:
                 continue
             if self.mode.projected_total_risk_exceeded(
                 current_total_risk_r=current_total_risk_r,
-                candidate_risk_r=float(row.get("recommended_risk_r", 0.0) or 0.0),
+                candidate_risk_r=effective_candidate_risk_r,
                 mode=mode_policy.mode,
             ):
                 row["block_reason"] = "mode_total_risk_cap_reached"
@@ -1334,7 +1336,7 @@ class PortfolioRiskOverlayService:
             row["block_reason"] = None
             row["block_reason_message"] = None
             row["thesis_rejected_reason"] = None
-            current_total_risk_r = float(current_total_risk_r) + float(row.get("recommended_risk_r", 0.0) or 0.0)
+            current_total_risk_r = float(current_total_risk_r) + effective_candidate_risk_r
             accepted.append(row)
             if transition_overlay_key:
                 accepted_transition_overlay_keys.add(transition_overlay_key)

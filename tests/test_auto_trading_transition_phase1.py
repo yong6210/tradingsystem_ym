@@ -15,6 +15,7 @@ from app.db.session import SessionLocal, init_db
 from app.domain.execution import RolloutPolicy
 from app.main import app
 from app.schemas.api import ScannerItemOut
+from app.services.order_intents import OrderIntentService
 from app.services.execution_approval import ExecutionPlanningService
 from app.services.operator_text import why_now_message
 from app.services import scanner as scanner_module
@@ -239,6 +240,104 @@ def test_execution_plan_builder_maps_entry_models(entry_model: str, expected_ent
     assert payload["execution_mode"] == ExecutionMode.PAPER.value
     assert (payload["entry_limit_price"] is not None) is expects_limit
     assert (payload["entry_trigger_price"] is None) is expects_limit
+
+
+def test_execution_plan_builder_uses_weighted_allocated_risk_for_micro_live() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_notional_per_r=25.0,
+        auto_trading_live_weighted_risk_allocator_enabled=True,
+        auto_trading_live_weighted_risk_max_r=1.0,
+    )
+    service = ExecutionPlanningService(settings=settings)
+    plan = _plan(
+        plan_id="builder_weighted_allocator",
+        validity={
+            "strategy_family": "trend_continuation",
+            "strategy_grade": "A",
+            "strategy_family_score": 90.0,
+            "regime": "trend",
+            "strategy_mode": StrategyMode.A_ONLY.value,
+            "recommended_risk_r": 0.5,
+        },
+    )
+
+    payload = service.build_executable_plan(
+        plan=plan,
+        context=None,
+        candidate_row={
+            "accepted": True,
+            "deployment_go_no_go": "GO",
+            "recommended_risk_r": 0.5,
+            "allocated_risk_r": 0.8,
+            "allocation_weight": 1.6,
+            "capital_allocator": {
+                "tier": "boost",
+                "allocated_risk_r": 0.8,
+                "allocation_weight": 1.6,
+                "capital_pressure": "underallocated_positive",
+            },
+        },
+        execution_mode=ExecutionMode.MICRO_LIVE,
+    )
+
+    assert payload["base_recommended_risk_r"] == 0.5
+    assert payload["allocated_risk_r"] == 0.8
+    assert payload["allocation_weight"] == 1.6
+    assert payload["recommended_risk_r"] == 0.8
+    assert payload["risk_sizing_r"] == 0.8
+    assert payload["max_position_notional"] == 20.0
+    assert payload["risk_allocator"]["applied"] is True
+    assert payload["risk_allocator"]["capital_allocator_tier"] == "boost"
+
+
+def test_execution_plan_builder_caps_weighted_risk_for_micro_live() -> None:
+    settings = Settings(
+        _env_file=None,
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_live_weighted_risk_allocator_enabled=True,
+        auto_trading_live_weighted_risk_max_r=1.0,
+    )
+    service = ExecutionPlanningService(settings=settings)
+    plan = _plan(
+        plan_id="builder_weighted_allocator_cap",
+        validity={"recommended_risk_r": 0.7, "strategy_family": "trend_continuation", "strategy_grade": "A"},
+    )
+
+    payload = service.build_executable_plan(
+        plan=plan,
+        context=None,
+        candidate_row={"accepted": True, "allocated_risk_r": 1.4, "allocation_weight": 2.0},
+        execution_mode=ExecutionMode.MICRO_LIVE,
+    )
+
+    assert payload["recommended_risk_r"] == 1.0
+    assert payload["risk_allocator"]["capped"] is True
+    assert "single_position_risk_cap" in payload["risk_allocator"]["reason_codes"]
+
+
+def test_order_intent_quality_snapshot_carries_weighted_risk_contract() -> None:
+    snapshot = OrderIntentService._quality_snapshot(
+        approval={"validation_grade": "A", "risk_state": "OPEN"},
+        executable_plan={
+            "setup_grade": "A",
+            "setup_score": 88.0,
+            "recommended_risk_r": 0.8,
+            "base_recommended_risk_r": 0.5,
+            "allocated_risk_r": 0.8,
+            "allocation_weight": 1.6,
+            "risk_sizing_r": 0.8,
+            "risk_allocator": {"applied": True, "capital_allocator_tier": "boost"},
+            "expected_summary": {"expected_ev_r": 0.42},
+        },
+    )
+
+    assert snapshot["recommended_risk_r"] == 0.8
+    assert snapshot["base_recommended_risk_r"] == 0.5
+    assert snapshot["allocated_risk_r"] == 0.8
+    assert snapshot["risk_sizing_r"] == 0.8
+    assert snapshot["risk_allocator"]["capital_allocator_tier"] == "boost"
 
 
 def test_execution_plan_builder_tolerates_malformed_numeric_settings() -> None:

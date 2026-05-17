@@ -78,6 +78,69 @@ class ExecutionPlanningService:
             return default
         return int(parsed) if isfinite(parsed) else default
 
+    def _risk_allocator_contract(
+        self,
+        *,
+        base_recommended_risk_r: float,
+        candidate: dict[str, Any],
+        validity: dict[str, Any],
+        execution_mode: ExecutionMode,
+    ) -> dict[str, Any]:
+        capital_allocator = dict(candidate.get("capital_allocator") or validity.get("capital_allocator") or {})
+        candidate_allocated_risk = candidate.get("allocated_risk_r")
+        raw_allocated_risk = (
+            candidate_allocated_risk
+            if candidate_allocated_risk is not None and str(candidate_allocated_risk).strip() != ""
+            else capital_allocator.get("allocated_risk_r", validity.get("allocated_risk_r"))
+        )
+        allocated_risk_r = self._safe_float(raw_allocated_risk, default=base_recommended_risk_r)
+        if allocated_risk_r <= 0.0 and base_recommended_risk_r > 0.0:
+            allocated_risk_r = base_recommended_risk_r
+        allocation_weight = self._safe_float(
+            candidate.get("allocation_weight", capital_allocator.get("allocation_weight", 1.0)),
+            default=1.0,
+        )
+        enabled = self._bool(getattr(self.settings, "auto_trading_live_weighted_risk_allocator_enabled", True))
+        live_mode = execution_mode in {ExecutionMode.MICRO_LIVE, ExecutionMode.LIVE}
+        weighted_risk_r = base_recommended_risk_r
+        applied = False
+        reason_codes: list[str] = []
+        if enabled and live_mode:
+            weighted_risk_r = allocated_risk_r
+            applied = abs(weighted_risk_r - base_recommended_risk_r) > 1e-9
+            reason_codes.append("capital_allocator_weighted_risk")
+        elif not enabled:
+            reason_codes.append("weighted_allocator_disabled")
+        else:
+            reason_codes.append("non_live_execution_mode")
+
+        max_risk_r = self._safe_float(
+            getattr(self.settings, "auto_trading_live_weighted_risk_max_r", 1.0),
+            default=1.0,
+        )
+        capped = False
+        if live_mode and max_risk_r > 0.0 and weighted_risk_r > max_risk_r:
+            weighted_risk_r = max_risk_r
+            capped = True
+            applied = True
+            reason_codes.append("single_position_risk_cap")
+
+        weighted_risk_r = round(max(weighted_risk_r, 0.0), 4)
+        return {
+            "enabled": bool(enabled),
+            "applied": bool(applied),
+            "live_mode": bool(live_mode),
+            "base_recommended_risk_r": round(max(base_recommended_risk_r, 0.0), 4),
+            "allocated_risk_r": round(max(allocated_risk_r, 0.0), 4),
+            "allocation_weight": round(max(allocation_weight, 0.0), 4),
+            "risk_sizing_r": weighted_risk_r,
+            "max_risk_r": round(max_risk_r, 4),
+            "capped": bool(capped),
+            "capital_allocator_tier": str(capital_allocator.get("tier") or "neutral"),
+            "capital_pressure": str(capital_allocator.get("capital_pressure") or "neutral"),
+            "reason_codes": list(dict.fromkeys(reason_codes)),
+        }
+
     @staticmethod
     def _symbol_list(values: list[Any] | None, *, limit: int = 4) -> str:
         symbols = [str(item or "").upper() for item in list(values or []) if str(item or "").strip()]
@@ -725,7 +788,16 @@ class ExecutionPlanningService:
         validity = dict(plan.validity or {})
         candidate = dict(candidate_row or {})
         effective_mode = execution_mode or self.active_execution_mode()
-        recommended_risk_r = self._safe_float(validity.get("recommended_risk_r", candidate.get("recommended_risk_r", 0.0)))
+        base_recommended_risk_r = self._safe_float(
+            validity.get("recommended_risk_r", candidate.get("recommended_risk_r", 0.0))
+        )
+        risk_allocator = self._risk_allocator_contract(
+            base_recommended_risk_r=base_recommended_risk_r,
+            candidate=candidate,
+            validity=validity,
+            execution_mode=effective_mode,
+        )
+        recommended_risk_r = self._safe_float(risk_allocator.get("risk_sizing_r"), default=base_recommended_risk_r)
         family = self._text(validity.get("strategy_family"), "legacy_zone_plan").lower()
         tf = self._text(plan.timeframe, "5m")
         valid_for_seconds = max(
@@ -774,6 +846,11 @@ class ExecutionPlanningService:
             "stop_price": self._safe_float(plan.sl),
             "tp_targets": self._tp_targets(plan),
             "recommended_risk_r": recommended_risk_r,
+            "base_recommended_risk_r": risk_allocator["base_recommended_risk_r"],
+            "allocated_risk_r": risk_allocator["allocated_risk_r"],
+            "allocation_weight": risk_allocator["allocation_weight"],
+            "risk_sizing_r": risk_allocator["risk_sizing_r"],
+            "risk_allocator": risk_allocator,
             "max_position_notional": round(
                 max(0.0, recommended_risk_r) * self._safe_float(self.settings.auto_trading_notional_per_r, default=25.0),
                 4,

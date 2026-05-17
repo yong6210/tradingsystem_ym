@@ -9,6 +9,33 @@ from app.db.repositories import CandleRepository
 from app.integrations.binance_futures import BinanceFuturesClient
 
 
+def _csv_symbols(raw: object) -> list[str]:
+    symbols: list[str] = []
+    for item in str(raw or "").split(","):
+        symbol = item.strip().upper()
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+    return symbols
+
+
+def configured_usdt_universe_symbols(settings: object | None = None) -> list[str]:
+    if settings is None:
+        try:
+            settings = get_settings()
+        except Exception:
+            return []
+
+    for attr in (
+        "auto_trading_micro_live_allowed_symbols",
+        "session_impulse_retest_allowed_symbols",
+        "auto_trading_allowed_symbols",
+    ):
+        symbols = [symbol for symbol in _csv_symbols(getattr(settings, attr, "")) if symbol.endswith("USDT")]
+        if symbols:
+            return symbols
+    return []
+
+
 class DataQualityError(ValueError):
     pass
 
@@ -222,7 +249,8 @@ class MarketDataService:
     def default_universe(name: str = "usdt_reliable_balanced_31") -> list[str]:
         normalized = str(name or "").strip().lower()
         if normalized == "usdt_reliable_balanced_31":
-            return [item for item in CURRENT_MICRO_LIVE_USDT_SYMBOLS.split(",") if item]
+            configured = configured_usdt_universe_symbols()
+            return configured or [item for item in CURRENT_MICRO_LIVE_USDT_SYMBOLS.split(",") if item]
         if normalized != "usdc_perp_top30":
             return []
         return [
