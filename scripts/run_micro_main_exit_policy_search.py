@@ -123,6 +123,48 @@ def build_exit_policies() -> list[SessionImpulseRetestExitPolicy]:
         guard="current",
         tp_profile="live_35_65",
     )
+    for stop_after_partial_rr in (0.0, 0.10):
+        policies.append(
+            SessionImpulseRetestExitPolicy(
+                name=f"pm_legacy_live_split_stop_after_partial_{stop_after_partial_rr:.2f}r",
+                stop_mode="legacy",
+                target_rr=2.0,
+                max_hold_minutes=40,
+                time_guard_10m_min_mfe_r=0.20,
+                time_guard_20m_min_mfe_r=0.35,
+                tp1_rr=1.0,
+                tp1_fraction=0.35,
+                tp2_rr=2.0,
+                tp2_fraction=0.65,
+                stop_after_partial_rr=stop_after_partial_rr,
+            )
+        )
+    for stop_after_partial_rr in (0.0, 0.10):
+        for after_partial_only in (True, False):
+            policies.append(
+                SessionImpulseRetestExitPolicy(
+                    name=(
+                        "pm_legacy_live_split_"
+                        f"stop{stop_after_partial_rr:.2f}r_"
+                        f"advvol_{'postpartial' if after_partial_only else 'any'}"
+                    ),
+                    stop_mode="legacy",
+                    target_rr=2.0,
+                    max_hold_minutes=40,
+                    time_guard_10m_min_mfe_r=0.20,
+                    time_guard_20m_min_mfe_r=0.35,
+                    tp1_rr=1.0,
+                    tp1_fraction=0.35,
+                    tp2_rr=2.0,
+                    tp2_fraction=0.65,
+                    stop_after_partial_rr=stop_after_partial_rr,
+                    adverse_volume_exit_enabled=True,
+                    adverse_volume_exit_after_partial_only=after_partial_only,
+                    adverse_volume_exit_min_factor=3.0,
+                    adverse_volume_exit_min_body_r=0.35,
+                    adverse_volume_exit_lookback_bars=20,
+                )
+            )
     policies.append(
         SessionImpulseRetestExitPolicy(
             name="adaptive_floor_min_0_003_live_split",
@@ -140,6 +182,25 @@ def build_exit_policies() -> list[SessionImpulseRetestExitPolicy]:
             adaptive_targets_enabled=True,
         )
     )
+    for stop_after_partial_rr in (0.0, 0.10):
+        policies.append(
+            SessionImpulseRetestExitPolicy(
+                name=f"pm_adaptive_floor_stop_after_partial_{stop_after_partial_rr:.2f}r",
+                stop_mode="floor",
+                min_stop_pct=0.003,
+                min_risk_atr=0.35,
+                target_rr=2.5,
+                max_hold_minutes=40,
+                time_guard_10m_min_mfe_r=0.20,
+                time_guard_20m_min_mfe_r=0.35,
+                tp1_rr=1.0,
+                tp1_fraction=0.35,
+                tp2_rr=2.5,
+                tp2_fraction=0.65,
+                adaptive_targets_enabled=True,
+                stop_after_partial_rr=stop_after_partial_rr,
+            )
+        )
     policies.append(
         SessionImpulseRetestExitPolicy(
             name="structure_adaptive_floor_min_0_003_live_split",
@@ -163,6 +224,57 @@ def build_exit_policies() -> list[SessionImpulseRetestExitPolicy]:
             structure_tp_max_rr=3.2,
         )
     )
+    for swing, stop_buffer, target_buffer in ((6, 0.12, 0.08), (12, 0.18, 0.10)):
+        policies.append(
+            SessionImpulseRetestExitPolicy(
+                name=f"structure_buffered_swing{swing}_stop{stop_buffer:.2f}_tpbuf{target_buffer:.2f}",
+                stop_mode="structure_floor",
+                swing_lookback_bars=swing,
+                stop_buffer_atr=stop_buffer,
+                min_stop_pct=0.003,
+                min_risk_atr=0.35,
+                target_rr=2.5,
+                max_hold_minutes=40,
+                time_guard_10m_min_mfe_r=0.20,
+                time_guard_20m_min_mfe_r=0.35,
+                tp1_rr=1.0,
+                tp1_fraction=0.35,
+                tp2_rr=2.5,
+                tp2_fraction=0.65,
+                adaptive_targets_enabled=True,
+                structure_targets_enabled=True,
+                structure_entry_max_distance_atr=0.45,
+                structure_target_buffer_atr=target_buffer,
+                structure_tp1_min_rr=0.8,
+                structure_tp2_min_rr=1.6,
+                structure_tp_max_rr=3.2,
+            )
+        )
+    for stop_after_partial_rr in (0.0, 0.10):
+        policies.append(
+            SessionImpulseRetestExitPolicy(
+                name=f"pm_structure_adaptive_stop_after_partial_{stop_after_partial_rr:.2f}r",
+                stop_mode="floor",
+                min_stop_pct=0.003,
+                min_risk_atr=0.35,
+                target_rr=2.5,
+                max_hold_minutes=40,
+                time_guard_10m_min_mfe_r=0.20,
+                time_guard_20m_min_mfe_r=0.35,
+                tp1_rr=1.0,
+                tp1_fraction=0.35,
+                tp2_rr=2.5,
+                tp2_fraction=0.65,
+                adaptive_targets_enabled=True,
+                structure_targets_enabled=True,
+                structure_entry_max_distance_atr=0.45,
+                structure_target_buffer_atr=0.05,
+                structure_tp1_min_rr=0.8,
+                structure_tp2_min_rr=1.6,
+                structure_tp_max_rr=3.2,
+                stop_after_partial_rr=stop_after_partial_rr,
+            )
+        )
     for min_score in (0.0, 0.4, 0.7, 1.0):
         for lookback_days in (21, 42):
             for hold in (40, 90, 240, 720):
@@ -453,6 +565,7 @@ def main() -> int:
             "stage2_policy_count": len(stage2_policies),
             "notes": [
                 "entry signal is still session_impulse_retest; this search changes only SL/TP and time-exit behavior",
+                "1m entries are searched only after the completed 5m setup candle is actionable to avoid same-bar lookahead",
                 "higher-timeframe structure candidates add 1d/4h order blocks, FVGs, high-volume rejection zones, and recent volume nodes as compareable anchors/targets",
                 "same-minute stop and target collision is treated as stop-first",
                 "fee model uses existing round-trip fee assumption from SessionImpulseRetestResearch",

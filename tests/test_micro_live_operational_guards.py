@@ -3432,7 +3432,7 @@ def _patch_boot_account_protection_ok(monkeypatch) -> None:
     )
 
 
-def test_boot_check_fails_when_reconciliation_watchdog_alerts(monkeypatch) -> None:
+def test_boot_check_warns_when_reconciliation_watchdog_has_warn_only_alert(monkeypatch) -> None:
     _patch_boot_account_protection_ok(monkeypatch)
     monkeypatch.setattr(
         run_micro_live_boot_check.run_micro_live_runtime_guard,
@@ -3442,7 +3442,52 @@ def test_boot_check_fails_when_reconciliation_watchdog_alerts(monkeypatch) -> No
     monkeypatch.setattr(
         run_micro_live_boot_check.run_live_reconciliation_watchdog,
         "build_payload",
-        lambda **_kwargs: {"overall_status": "ALERT", "evaluation": {"alert": True, "message": "gap"}},
+        lambda **_kwargs: {
+            "overall_status": "ALERT",
+            "evaluation": {"alert": True, "message": "gap", "fail_count": 0, "warn_count": 1},
+        },
+    )
+    monkeypatch.setattr(run_micro_live_boot_check.run_live_reconciliation_watchdog, "_default_stale_minutes", lambda _value: 3)
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_micro_live_synthetic_canary,
+        "run_canary",
+        lambda **_kwargs: {"overall_status": "PASS", "symbol": "BTCUSDC", "no_live_order_sent": True},
+    )
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_micro_live_failure_drill,
+        "build_payload",
+        lambda **_kwargs: {"overall_status": "PASS", "scenario_count": 8, "failed_count": 0},
+    )
+
+    payload = run_micro_live_boot_check.build_payload(
+        days=1,
+        limit=10,
+        symbol="BTCUSDC",
+        check_binance_rules=False,
+        canary_network=False,
+    )
+
+    assert payload["overall_status"] == "PASS"
+    assert payload["blocking_failure_count"] == 0
+    component = next(item for item in payload["components"] if item["name"] == "reconciliation_watchdog")
+    assert component["status"] == "WARN"
+    assert component["blocking"] is False
+
+
+def test_boot_check_fails_when_reconciliation_watchdog_has_failures(monkeypatch) -> None:
+    _patch_boot_account_protection_ok(monkeypatch)
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_micro_live_runtime_guard,
+        "build_payload",
+        lambda **_kwargs: {"overall_status": "PASS", "blocking_failures": []},
+    )
+    monkeypatch.setattr(
+        run_micro_live_boot_check.run_live_reconciliation_watchdog,
+        "build_payload",
+        lambda **_kwargs: {
+            "overall_status": "ALERT",
+            "evaluation": {"alert": True, "message": "gap", "fail_count": 1, "warn_count": 0},
+        },
     )
     monkeypatch.setattr(run_micro_live_boot_check.run_live_reconciliation_watchdog, "_default_stale_minutes", lambda _value: 3)
     monkeypatch.setattr(
@@ -3466,6 +3511,9 @@ def test_boot_check_fails_when_reconciliation_watchdog_alerts(monkeypatch) -> No
 
     assert payload["overall_status"] == "FAIL"
     assert payload["blocking_failure_count"] == 1
+    component = next(item for item in payload["components"] if item["name"] == "reconciliation_watchdog")
+    assert component["status"] == "FAIL"
+    assert component["blocking"] is True
 
 
 def test_boot_check_fails_when_failure_contract_drill_fails(monkeypatch) -> None:

@@ -9,7 +9,11 @@ _STATE_CONFIDENCE = {
     "a_concentrated": "low",
     "guarded_rebalance": "medium",
     "balanced_mix": "high",
+    "legacy_ab_not_applicable": "medium",
 }
+
+_CURRENT_LIVE_CONTRACT_CLUSTER = "current_live_contract"
+_LEGACY_AB_CLUSTERS = {"a_reversal", "b_continuation", "research_only_sidecar"}
 
 _ACTIVATION_SEVERITY = {
     "research_only": 0,
@@ -60,6 +64,8 @@ class StrategyClusterBalanceService:
             return "b_continuation"
         if family == "range_rotation":
             return "research_only_sidecar"
+        if family == "session_impulse_retest":
+            return _CURRENT_LIVE_CONTRACT_CLUSTER
         return ""
 
     @staticmethod
@@ -178,6 +184,8 @@ class StrategyClusterBalanceService:
             return "b_continuation"
         if family == "range_rotation":
             return "research_only_sidecar"
+        if family == "session_impulse_retest":
+            return _CURRENT_LIVE_CONTRACT_CLUSTER
         return ""
 
     def generate(
@@ -210,6 +218,51 @@ class StrategyClusterBalanceService:
             rows=row_list,
             portfolio_budget=portfolio_budget_payload,
         )
+        current_live_bucket = self._cluster_bucket(family_mix, _CURRENT_LIVE_CONTRACT_CLUSTER)
+        legacy_ab_mix = [
+            dict(row)
+            for row in family_mix
+            if str(row.get("cluster") or "").strip().lower() in _LEGACY_AB_CLUSTERS
+        ]
+        if current_live_bucket and not legacy_ab_mix:
+            current_family = str(current_live_bucket.get("raw_family") or "session_impulse_retest").strip().lower()
+            return {
+                "available": True,
+                "advisory_only": True,
+                "mode": mode,
+                "balance_state": "legacy_ab_not_applicable",
+                "balance_bias": "follow_current_live_contract",
+                "headline_cluster": _CURRENT_LIVE_CONTRACT_CLUSTER,
+                "target_mix": "current_live_contract",
+                "confidence": _STATE_CONFIDENCE["legacy_ab_not_applicable"],
+                "family_mix": family_mix,
+                "summary": (
+                    "Legacy A/B cluster balance is not applicable to the current SIR live contract."
+                ),
+                "reason_codes": self._dedupe(
+                    [
+                        "cluster_balance:legacy_ab_not_applicable",
+                        f"mode:{mode.lower()}",
+                        "headline_cluster:current_live_contract",
+                        f"current_live_family:{current_family}",
+                    ]
+                ),
+                "source_summary": {
+                    "current_live_family": current_family,
+                    "current_live_total_candidates": int(current_live_bucket.get("total_candidates", 0) or 0),
+                    "current_live_accepted_candidates": int(current_live_bucket.get("accepted_candidates", 0) or 0),
+                    "a_total_candidates": 0,
+                    "a_accepted_candidates": 0,
+                    "b_total_candidates": 0,
+                    "b_accepted_candidates": 0,
+                    "b_alpha_research_candidates": 0,
+                    "b_activation_state": "not_applicable",
+                    "b_activation_bias": "not_applicable",
+                    "b_cluster_status": "not_applicable",
+                    "allocator_focus": current_family,
+                    "allocator_state": "current_live_contract",
+                },
+            }
         a_bucket = self._cluster_bucket(family_mix, "a_reversal")
         b_bucket = self._cluster_bucket(family_mix, "b_continuation")
         b_activation_state, b_activation_bias = self._resolve_b_activation(
@@ -340,7 +393,10 @@ class StrategyClusterBalanceService:
                 annotated.append(item)
                 continue
 
-            if cluster == "b_continuation":
+            if cluster == _CURRENT_LIVE_CONTRACT_CLUSTER:
+                pressure = "current_live_contract"
+                summary = "session_impulse_retest is the current live contract; legacy A/B balance pressure is not applied."
+            elif cluster == "b_continuation":
                 if balance_state == "balanced_mix":
                     pressure = "balanced_support"
                     summary = "B continuation is represented in the current mix and should stay as a guarded secondary cluster."

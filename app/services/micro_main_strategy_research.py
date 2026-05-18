@@ -169,6 +169,13 @@ class SessionImpulseRetestExitPolicy:
     higher_timeframe_target_enabled: bool = True
     higher_timeframe_stop_enabled: bool = False
     higher_timeframe_stop_buffer_atr: float = 0.08
+    stop_after_partial_rr: float | None = None
+    adverse_volume_exit_enabled: bool = False
+    adverse_volume_exit_after_partial_only: bool = True
+    adverse_volume_exit_min_factor: float = 3.0
+    adverse_volume_exit_min_body_r: float = 0.35
+    adverse_volume_exit_lookback_bars: int = 20
+    entry_confirmation_delay_minutes: int = 5
 
     def tp_levels(self) -> tuple[tuple[str, float, float], ...]:
         return self._normalize_tp_levels(
@@ -315,6 +322,7 @@ class SessionImpulseRetestResearch:
         self.highs_1m = [float(c.h) for c in self.candles_1m]
         self.lows_1m = [float(c.l) for c in self.candles_1m]
         self.closes_1m = [float(c.c) for c in self.candles_1m]
+        self.volumes_1m = [float(c.v) for c in self.candles_1m]
         self.opens_5m = [float(c.o) for c in self.candles_5m]
         self.highs_5m = [float(c.h) for c in self.candles_5m]
         self.lows_5m = [float(c.l) for c in self.candles_5m]
@@ -893,7 +901,7 @@ class SessionImpulseRetestResearch:
         retest_buffer_atr: float,
         max_retest_wait_minutes: float,
     ) -> tuple[datetime, float] | None:
-        start_ts = self.ts_5m[setup_idx_5m]
+        start_ts = self._entry_actionable_ts(setup_idx_5m)
         max_wait = max(int(max_retest_wait_minutes), 0)
         end_ts = start_ts + timedelta(minutes=max_wait + 1)
         start_idx = self._index_1m_by_ts.get(start_ts)
@@ -918,6 +926,10 @@ class SessionImpulseRetestResearch:
             idx += 1
         return None
 
+    def _entry_actionable_ts(self, setup_idx_5m: int) -> datetime:
+        delay_minutes = max(int(self.exit_policy.entry_confirmation_delay_minutes), 0)
+        return self.ts_5m[setup_idx_5m] + timedelta(minutes=delay_minutes)
+
     @classmethod
     def _time_guard_exit_reason(cls, *, held_minutes: int, best_progress_r: float) -> str | None:
         if held_minutes >= 20 and best_progress_r < cls._TIME_GUARD_20M_MIN_MFE_R:
@@ -940,6 +952,55 @@ class SessionImpulseRetestResearch:
         if guard_10 is not None and held_minutes >= 10 and best_progress_r < float(guard_10):
             return "time_guard_10m"
         return None
+
+    def _median_1m_volume(self, *, end_idx: int, lookback_bars: int) -> float:
+        lookback = max(int(lookback_bars), 1)
+        end = max(0, min(int(end_idx), len(self.volumes_1m)))
+        start = max(0, end - lookback)
+        values = [float(value) for value in self.volumes_1m[start:end] if float(value) > 0.0]
+        if not values:
+            return 0.0
+        return float(median(values))
+
+    def _adverse_volume_exit_details(
+        self,
+        *,
+        policy: SessionImpulseRetestExitPolicy,
+        signal: MicroSignal,
+        idx: int,
+        entry_idx: int,
+        risk_abs: float,
+        remaining_fraction: float,
+    ) -> dict[str, float | str] | None:
+        if not _safe_bool(policy.adverse_volume_exit_enabled):
+            return None
+        if idx <= entry_idx:
+            return None
+        if _safe_bool(policy.adverse_volume_exit_after_partial_only) and remaining_fraction >= 0.999999:
+            return None
+        lookback = max(int(policy.adverse_volume_exit_lookback_bars), 1)
+        volume_med = self._median_1m_volume(end_idx=idx, lookback_bars=lookback)
+        if volume_med <= 0.0:
+            return None
+        volume_factor = float(self.volumes_1m[idx] / max(volume_med, 1e-9))
+        min_factor = max(float(policy.adverse_volume_exit_min_factor), 0.0)
+        if volume_factor < min_factor:
+            return None
+        body = float(self.closes_1m[idx] - self.opens_1m[idx])
+        adverse_body_r = -body / risk_abs if signal.direction == "long" else body / risk_abs
+        min_body_r = max(float(policy.adverse_volume_exit_min_body_r), 0.0)
+        if adverse_body_r < min_body_r:
+            return None
+        close_r = (
+            (self.closes_1m[idx] - signal.entry_price) / risk_abs
+            if signal.direction == "long"
+            else (signal.entry_price - self.closes_1m[idx]) / risk_abs
+        )
+        return {
+            "volume_factor": round(float(volume_factor), 6),
+            "adverse_body_r": round(float(adverse_body_r), 6),
+            "close_r": round(float(close_r), 6),
+        }
 
     @staticmethod
     def _exit_policy_quality_score(diagnostics: Mapping[str, Any]) -> float:
@@ -1274,11 +1335,12 @@ class SessionImpulseRetestResearch:
             )
             if entry is not None:
                 entry_ts, entry_price = entry
+                actionable_ts = self._entry_actionable_ts(idx)
                 stop = min(self.lows_5m[idx], long_reclaim) - float(profile["stop_buffer_atr"]) * atr
                 risk_abs = entry_price - stop
                 min_risk_abs = max(float(profile["min_risk_atr"]) * atr, entry_price * float(profile["min_risk_pct"]))
                 risk_atr = float(risk_abs / atr)
-                retest_wait_minutes = max(int((entry_ts - self.ts_5m[idx]).total_seconds() // 60), 0)
+                retest_wait_minutes = max(int((entry_ts - actionable_ts).total_seconds() // 60), 0)
                 if (
                     min_risk_abs <= risk_abs <= float(profile["max_risk_atr"]) * atr
                     and self._passes_late_retest_risk_filter(
@@ -1318,6 +1380,11 @@ class SessionImpulseRetestResearch:
                     diagnostics = {
                         **base_diagnostics,
                         "entry_key_level": float(long_reclaim),
+                        "entry_actionable_ts": actionable_ts.isoformat(),
+                        "entry_confirmation_delay_minutes": max(
+                            int(self.exit_policy.entry_confirmation_delay_minutes),
+                            0,
+                        ),
                         "entry_zone_low": float(long_reclaim - float(profile["entry_retest_buffer_atr"]) * atr),
                         "entry_zone_high": float(long_reclaim + float(profile["entry_retest_buffer_atr"]) * atr),
                         "entry_distance_atr": float(abs(entry_price - long_reclaim) / atr),
@@ -1376,11 +1443,12 @@ class SessionImpulseRetestResearch:
             )
             if entry is not None:
                 entry_ts, entry_price = entry
+                actionable_ts = self._entry_actionable_ts(idx)
                 stop = max(self.highs_5m[idx], short_reclaim) + float(profile["stop_buffer_atr"]) * atr
                 risk_abs = stop - entry_price
                 min_risk_abs = max(float(profile["min_risk_atr"]) * atr, entry_price * float(profile["min_risk_pct"]))
                 risk_atr = float(risk_abs / atr)
-                retest_wait_minutes = max(int((entry_ts - self.ts_5m[idx]).total_seconds() // 60), 0)
+                retest_wait_minutes = max(int((entry_ts - actionable_ts).total_seconds() // 60), 0)
                 if (
                     min_risk_abs <= risk_abs <= float(profile["max_risk_atr"]) * atr
                     and self._passes_late_retest_risk_filter(
@@ -1420,6 +1488,11 @@ class SessionImpulseRetestResearch:
                     diagnostics = {
                         **base_diagnostics,
                         "entry_key_level": float(short_reclaim),
+                        "entry_actionable_ts": actionable_ts.isoformat(),
+                        "entry_confirmation_delay_minutes": max(
+                            int(self.exit_policy.entry_confirmation_delay_minutes),
+                            0,
+                        ),
                         "entry_zone_low": float(short_reclaim - float(profile["entry_retest_buffer_atr"]) * atr),
                         "entry_zone_high": float(short_reclaim + float(profile["entry_retest_buffer_atr"]) * atr),
                         "entry_distance_atr": float(abs(entry_price - short_reclaim) / atr),
@@ -1725,6 +1798,9 @@ class SessionImpulseRetestResearch:
         realized_gross_r = 0.0
         remaining_fraction = 1.0
         hit_target_labels: set[str] = set()
+        active_stop_price = float(signal.stop_price)
+        management_events: list[str] = []
+        management_details: dict[str, Any] = {}
 
         idx = entry_idx
         while idx < len(self.ts_1m) and self.ts_1m[idx] <= end_ts:
@@ -1733,11 +1809,11 @@ class SessionImpulseRetestResearch:
             if signal.direction == "long":
                 best_progress_r = max(best_progress_r, (self.highs_1m[idx] - signal.entry_price) / risk_abs)
                 hit_target = self.highs_1m[idx] >= signal.target_price
-                hit_stop = self.lows_1m[idx] <= signal.stop_price
+                hit_stop = self.lows_1m[idx] <= active_stop_price
             else:
                 best_progress_r = max(best_progress_r, (signal.entry_price - self.lows_1m[idx]) / risk_abs)
                 hit_target = self.lows_1m[idx] <= signal.target_price
-                hit_stop = self.highs_1m[idx] >= signal.stop_price
+                hit_stop = self.highs_1m[idx] >= active_stop_price
             if tp_levels:
                 hit_target = any(
                     label not in hit_target_labels
@@ -1753,11 +1829,16 @@ class SessionImpulseRetestResearch:
                 hit_target = False
             if hit_stop:
                 exit_idx = idx
-                exit_price = signal.stop_price
+                exit_price = active_stop_price
                 exit_reason = "stop"
                 if remaining_fraction < 0.999999:
                     exit_reason = "stop_after_partial"
-                realized_gross_r += remaining_fraction * -1.0
+                stop_r = (
+                    (active_stop_price - signal.entry_price) / risk_abs
+                    if signal.direction == "long"
+                    else (signal.entry_price - active_stop_price) / risk_abs
+                )
+                realized_gross_r += remaining_fraction * stop_r
                 remaining_fraction = 0.0
                 break
             if hit_target:
@@ -1792,6 +1873,49 @@ class SessionImpulseRetestResearch:
                     exit_reason = f"target_{label}"
                 if remaining_fraction <= 1e-9:
                     break
+                if policy.stop_after_partial_rr is not None and remaining_fraction < 0.999999:
+                    stop_rr = _safe_float(policy.stop_after_partial_rr, 0.0)
+                    desired_stop = signal.entry_price + (1.0 if signal.direction == "long" else -1.0) * stop_rr * risk_abs
+                    previous_stop = active_stop_price
+                    if signal.direction == "long":
+                        active_stop_price = max(active_stop_price, desired_stop)
+                        managed_stop_hit = self.lows_1m[idx] <= active_stop_price
+                    else:
+                        active_stop_price = min(active_stop_price, desired_stop)
+                        managed_stop_hit = self.highs_1m[idx] >= active_stop_price
+                    if active_stop_price != previous_stop:
+                        management_events.append("stop_after_partial_adjusted")
+                        management_details["managed_stop_after_partial_rr"] = round(float(stop_rr), 6)
+                        management_details["managed_stop_after_partial_price"] = round(float(active_stop_price), 8)
+                    if managed_stop_hit:
+                        exit_idx = idx
+                        exit_price = active_stop_price
+                        exit_reason = "stop_after_partial"
+                        close_r = (
+                            (active_stop_price - signal.entry_price) / risk_abs
+                            if signal.direction == "long"
+                            else (signal.entry_price - active_stop_price) / risk_abs
+                        )
+                        realized_gross_r += remaining_fraction * close_r
+                        remaining_fraction = 0.0
+                        break
+            adverse_exit = self._adverse_volume_exit_details(
+                policy=policy,
+                signal=signal,
+                idx=idx,
+                entry_idx=entry_idx,
+                risk_abs=risk_abs,
+                remaining_fraction=remaining_fraction,
+            )
+            if adverse_exit is not None and remaining_fraction > 1e-9:
+                exit_idx = idx
+                exit_price = self.closes_1m[idx]
+                exit_reason = "adverse_volume_exit"
+                realized_gross_r += remaining_fraction * float(adverse_exit["close_r"])
+                remaining_fraction = 0.0
+                management_events.append("adverse_volume_exit")
+                management_details["adverse_volume_exit"] = adverse_exit
+                break
             held_minutes = max(int((self.ts_1m[idx] - signal.entry_ts).total_seconds() // 60), 0)
             time_guard_reason = self._policy_time_guard_exit_reason(
                 policy=policy,
@@ -1850,6 +1974,8 @@ class SessionImpulseRetestResearch:
                 "entry_weekday_utc": signal.entry_ts.weekday(),
                 "hold_minutes": hold_minutes,
                 "partial_target_labels": sorted(hit_target_labels),
+                "position_management_events": management_events,
+                **management_details,
             },
         )
 

@@ -1,127 +1,76 @@
 # MICRO_LIVE Current State
 
-Last updated: 2026-05-17 03:29 KST
+Last updated: 2026-05-18 20:36 KST
 
 This is the concise operator source for the current live canary shape. Whole-system snapshot stays in [CURRENT_SYSTEM_STATE.md](/Users/yumin/Documents/trading/docs/CURRENT_SYSTEM_STATE.md); detailed history stays in [SELF_CHECK_LOG.md](/Users/yumin/Documents/trading/docs/SELF_CHECK_LOG.md); daily procedures stay in [AUTO_TRADING_OPERATING_RUNBOOK.md](/Users/yumin/Documents/trading/docs/AUTO_TRADING_OPERATING_RUNBOOK.md).
 
 ## Live Route
 
 - execution mode: `MICRO_LIVE`
+- trade state: `CLOSE_ONLY`
 - strategy family: `session_impulse_retest`
 - entry model: `CONFIRM`
-- symbols: `BTCUSDC`, `ETHUSDC`, `SOLUSDC`, `LINKUSDC`, `BNBUSDC`, `XRPUSDC`, `ADAUSDC`, `AVAXUSDC`, `BCHUSDC`, `LTCUSDC`, `NEARUSDC`, `1000PEPEUSDC`, `ARBUSDC`, `1000SHIBUSDC`, `FILUSDC`, `DOGEUSDC`
+- symbols: `BTCUSDT`, `ETHUSDT`, `SOLUSDT`, `BNBUSDT`, `XRPUSDT`, `ADAUSDT`, `AVAXUSDT`, `LINKUSDT`, `DOGEUSDT`, `BCHUSDT`, `LTCUSDT`, `NEARUSDT`, `FILUSDT`, `DOTUSDT`, `ATOMUSDT`, `ETCUSDT`, `HBARUSDT`, `AAVEUSDT`, `UNIUSDT`, `SUIUSDT`, `INJUSDT`, `FETUSDT`, `ARBUSDT`, `APTUSDT`, `RUNEUSDT`, `PENDLEUSDT`, `ICPUSDT`, `XLMUSDT`, `ZECUSDT`, `QNTUSDT`, `DASHUSDT`
 - directions: `LONG|SHORT` for every live symbol in the direction contract
 - sessions: `dead_session`, `london`, `new_york`
-- benchmark-only legacy lens: `BTCUSDC + sweep_reversal + LIMIT`
-- context-only rows: legacy `SWEEP_CONFIRM`/`LIMIT` sweep rows, non-live symbols, and non-live families unless the contract is explicitly changed
 
-## Tuned Pacing
+`AUTO_TRADING_CLOSE_ONLY=true` is the current recommended runtime state. It blocks new entries while keeping the stack available for position protection, reconciliation, and reduce-only cleanup.
 
+## Why Close-Only
+
+The SIR backtest was corrected on 2026-05-18 to avoid same-5m-bar lookahead. Before the correction, a completed 5m candle could create a signal while the 1m entry search still started at that 5m candle's open time. Live trading only knows that completed 5m candle after it closes, so those same-bar entries were not realistically tradable.
+
+After the correction, the quick 31-symbol USDT check changed from positive to negative:
+
+- report: `reports/validation/micro_main_exit_policy_search/micro_main_exit_policy_search_20260518T112504Z.json`
+- current live-style split policy: `closed=279`, `total_r=-134.6996`, `ev=-0.4828`, `win=0.2760`
+- best stage2 candidate in that run: `closed=205`, `total_r=-62.7606`, `ev=-0.3061`, `win=0.4049`
+
+Plain meaning: the old optimistic SIR result should not be trusted for live enablement. The no-order problem was not just "no fresh signal"; the previous backtest protocol was too generous versus live timing.
+
+## Current Runtime Settings
+
+- `AUTO_TRADING_EXECUTION_MODE=MICRO_LIVE`
+- `AUTO_TRADING_CLOSE_ONLY=true`
+- `BINANCE_TRADE_LIVE_ENABLED=true`
+- `AUTO_TRADING_ALLOWED_FAMILIES=session_impulse_retest`
+- `AUTO_TRADING_MICRO_LIVE_ALLOWED_FAMILIES=session_impulse_retest`
+- `AUTO_TRADING_MICRO_LIVE_ALLOWED_ENTRY_MODELS=CONFIRM`
 - `AUTO_TRADING_MICRO_LIVE_MAX_CONCURRENT_POSITIONS=3`
 - `AUTO_TRADING_MICRO_LIVE_MAX_DAILY_NEW_ENTRIES=0`
-- `AUTO_TRADING_LIVE_FAMILY_CLUSTER_WINDOW_MINUTES=30`
-- `AUTO_TRADING_LIVE_MAX_SAME_FAMILY_ENTRIES_PER_WINDOW=3`
-- `AUTO_TRADING_LIVE_MAX_SAME_FAMILY_DIRECTION_EXPOSURES=3`
-- `AUTO_TRADING_LIVE_RECENT_LOSS_COOLDOWN_MINUTES=60`
-- `AUTO_TRADING_LIVE_RECENT_LOSS_TRIGGER_COUNT=4`
-- `SESSION_IMPULSE_RETEST_SATURDAY_RISK_MULTIPLIER=1.0`
+- `AUTO_TRADING_LIVE_BREAKEVEN_AFTER_PARTIAL_ENABLED=false`
+- `SESSION_IMPULSE_RETEST_EXIT_POLICY_NAME=structure_buffered_swing6_stop0.12_tpbuf0.08`
+- `SESSION_IMPULSE_RETEST_EXIT_STOP_MODE=structure_floor`
 
-`MAX_DAILY_NEW_ENTRIES=0` means the daily cap is disabled. It does not mean unlimited entry: position cap, validation, operations checklist, kill/close-only switches, liquidity, macro blackout, exchange rules, sizing, and reconciliation still gate every submit.
+`MAX_DAILY_NEW_ENTRIES=0` means the daily cap is disabled. It does not override close-only. With close-only on, new entries are blocked regardless of candidate quality.
 
-Live risk sizing now uses Binance futures available balance when `AUTO_TRADING_LIVE_BALANCE_SYNC_ENABLED=true`, preferring `USDC` then `USDT`. `AUTO_TRADING_LIVE_ACCOUNT_EQUITY_USDT` remains the fallback/reference value, not the primary sizing source while balance sync is enabled.
+Live risk sizing uses Binance futures available balance when `AUTO_TRADING_LIVE_BALANCE_SYNC_ENABLED=true`, with `USDT,USDC` in the sync asset list. `AUTO_TRADING_LIVE_ACCOUNT_EQUITY_USDT` remains the fallback/reference value, not the primary sizing source while balance sync is enabled.
 
-## Backtest Alignment
-
-Baseline report:
-
-- `reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_20260516T160212Z.json`
-- frequency: `closed=8828` over `1825` days, or `4.837` closed trades/day across the current 16-symbol live contract
-
-Current safety/grid result:
-
-- report: `reports/validation/micro_live_safety_drag_audits/micro_live_safety_grid_search_20260516T162903Z.md`
-- evaluated cases: `7,683`
-- deployable filter: `1 <= max_pos <= 3`, cluster brake active, same-direction brake active, loss cooldown active
-- baseline: `closed=8828`, `total_r=6343.8982`, `ev_r=0.7186`, `win_rate=0.6764`
-- current/recommended: `closed=8508`, `total_r=6013.8505`, `ev=0.7068`, `win=0.6732`
-- drag vs baseline: `closed -320` (`-3.6248%`), `total_r -330.0477` (`-5.2026%`)
-
-The raw top diagnostic can match the baseline by disabling safety/unlimited exposure. That is not a live canary setting.
-
-Latest safety drag spot audit:
-
-- report: `reports/validation/micro_live_safety_drag_audits/micro_live_safety_drag_audit_20260516T162755Z.md`
-- baseline: `closed=8828`, `total_r=6343.8982`, `ev_r=0.7186`
-- after replayable safety gates: `closed=8508`, `total_r=6013.8505`, `ev_r=0.7068`
-- replayable drag: `closed -320` (`-3.6248%`), `total_r -330.0477` (`-5.2026%`)
-- removed reasons: `micro_live_position_cap_reached=302`, `live_family_loss_cooldown_active=18`
-
-Runtime guard must also show `micro_live_backtest_contract_alignment=PASS`. This check compares the current MICRO_LIVE allowlist, family, entry model, sessions, and long/short direction contract against the current SIR backtest source above. If this fails, the system has drifted away from the backtest contract even if the ordinary allowlist checks pass.
-
-Runtime restarts sync the regular `micro_main_usdt_proxy_backtest_*.json` baseline files from workspace reports into durable runtime reports. Runtime replay surfaces and compare-only research searches choose the latest report that matches the current MICRO_LIVE symbol contract, not simply the newest filename or copy/mtime. `unseen`, `top*`, and broader experiment reports do not replace the 16-symbol live contract baseline unless the live contract is explicitly changed.
-
-## Current Runtime Snapshot
-
-As of 2026-05-17 03:29 KST, the runtime is aligned to the 16-symbol MICRO_LIVE route. The system is not blocked by a symbol-list contradiction, stale validation cache, missing direction contract, WS universe mismatch, macro blackout coverage gap, stale canary report, boot-check failure, reconciliation failure, safety lock, open exchange position, or Binance trading-rule mismatch.
-
-Latest runtime check after the 16-symbol expansion:
-
-- `/health/ready`: `ready`; worker loop/ws ok; 1m and 5m market data fresh for `16/16` live symbols.
-- `/execution/safety-state`: `new_entries_allowed=true`, kill switch off, close-only off.
-- `/execution/operator-dashboard`: `GO`, `go_runtime_gate_open`, `order_route_approve_value=waiting_for_live_candidate`.
-- `/internal/binance/positions?open_only=true`: `count=0`.
-- `run_micro_live_runtime_guard.py`: `PASS`, blocking failures `0`.
-- `run_micro_live_boot_check.py`: `PASS`, blocking failures `0`.
-- `run_live_reconciliation_watchdog.py`: `OK`, reconciliation issues `0`.
-- `run_micro_live_synthetic_canary.py`: `PASS`, `no_live_order_sent=true`, live sizing uses Binance futures available balance.
-- `run_session_impulse_retest_runtime_audit_report.py`: `PASS`, no hard route failures.
-- `run_micro_live_no_order_watchdog.py`: `OK/INFO`, only pre-restart advisory context.
-- `run_micro_live_ops_heartbeat.py`: `WATCH`, hard failures `0`, warning `1`.
-- `run_replay_validation_bridge.py`: `WATCH`, audit-only mixed bridge evidence; live approval unchanged.
-- `micro_live_backtest_contract_alignment`: `PASS`, source `micro_main_usdt_proxy_backtest_20260516T160212Z.json`, expected symbols `16`.
-- `live_symbol_allowlist_alignment`: `PASS`, missing from global allowlist `none`.
-- `live_direction_contract_coverage`: `PASS`, contract symbols `16`, missing `none`.
-- `ws_universe_contains_live_symbols`: `PASS`, WS symbols `16`, missing live symbols `none`.
-- `session_impulse_retest_live_rollout_window`: `PASS`, core live slots `16`.
-- `macro_blackout_live_coverage`: `PASS`.
-- `binance_rule_drift`: `PASS`.
-- `candidate_available`: `PASS/WAIT`, no fresh live-routable SIR candidate is available right now.
-
-Heartbeat `WATCH` detail:
-
-- `replay_validation_bridge` is `WATCH` because bridge evidence is mixed.
-- `11` symbols are `ELIGIBLE_FOR_RUNTIME_VALIDATION_BRIDGE`.
-- `5` symbols are `NOT_ELIGIBLE` only because `replay_validation_portfolio_replay_missing`: `1000PEPEUSDC`, `1000SHIBUSDC`, `ARBUSDC`, `DOGEUSDC`, `FILUSDC`.
-- This is an audit-only warning and does not mean an attempted live order failed.
-
-## Current No-Order Interpretation
-
-Interpretation:
-
-- No current order is not the same as an order error. The route is open, but there is no fresh live-routable `session_impulse_retest + CONFIRM` candidate at this moment.
-- If a fresh candidate appears and `submit_ready > 0` but `submissions=0`, treat that as an active intent-to-submission bug.
-- If there is no accepted live-routable candidate, the correct state is wait/monitor.
-- `execution_quality_low_coverage` and low live closed-sample outcome controls are advisory during SIR MICRO_LIVE bootstrap. They may add `outcome_approval_penalty.status=watch`, but they must not downgrade an otherwise valid SIR live bootstrap candidate to `SKIP_MANUAL_ONLY` until a material live execution sample exists.
-- For SIR replay/runtime parity, read `runtime_observed_count` together with `observed_submit_ready_intent_count`, `observed_non_submit_intent_count`, and `observed_non_submit_reason_counts`. An observed plan with only non-submit intents explains why no order was sent; it is not the same as a fresh submit-ready gap.
-- For no-order reports, read `runtime_age_minutes` before judging a 3-day window. Current-runtime scope resets on WS restart. Also compare `live_intents.total` with `distinct_plan_count`, because repeated blocked/shadow checks for the same plan are not separate backtest opportunities.
-- Auxiliary SIR signals on `SUIUSDC`, `AAVEUSDC`, `HBARUSDC`, `ZECUSDC`, and `UNIUSDC` are shadow-only and are not part of the 16-symbol baseline contract.
-- The selected expansion did not make the live route 31 symbols because only 5 of the selected expansion names currently have tradable Binance USDC perpetuals in this route: `1000PEPEUSDC`, `ARBUSDC`, `1000SHIBUSDC`, `FILUSDC`, and `DOGEUSDC`.
-- The selected names that are USDT-only require a separate USDT live-route change before they can be traded live by this system.
+The configured SIR exit policy is structure-buffered, but it is not a reason to re-enable entries by itself. For a long, SL is placed beyond the recent swing low with an ATR buffer and TP is placed slightly before the structure target. For a short, the same idea is mirrored above swing highs and before support targets.
 
 ## Required Checks
 
-Use these before treating the route as ready:
+Use these before treating the route as ready again:
 
 ```bash
 ./.venv/bin/python scripts/run_micro_live_runtime_guard.py --days 30 --no-fail-exit
 ./.venv/bin/python scripts/run_micro_live_boot_check.py --days 3 --limit 200 --no-fail-exit
-./.venv/bin/python scripts/run_micro_live_synthetic_canary.py --symbol BTCUSDC --entry-model CONFIRM --direction long --stop-bps 50 --no-fail-exit
-./.venv/bin/python scripts/run_micro_live_safety_drag_audit.py --backtest-report reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_20260516T160212Z.json --no-write-report
-./.venv/bin/python scripts/run_micro_live_safety_grid_search.py --backtest-report reports/validation/micro_main_usdt_proxy_backtests/micro_main_usdt_proxy_backtest_20260516T160212Z.json --no-write-report
+./.venv/bin/python scripts/run_micro_live_synthetic_canary.py --symbol BTCUSDT --entry-model CONFIRM --direction long --stop-bps 50 --no-fail-exit
+./.venv/bin/python scripts/run_micro_main_exit_policy_search.py --max-policies 14 --stage1-symbols BTCUSDT,ETHUSDT,SOLUSDT --stage1-days 180 --stage1-min-trades 10 --stage2-days 365 --stage2-min-trades 30 --stage2-top 10 --write-report
 ```
+
+## Next Research Direction
+
+Do not re-enable new SIR entries until one of these passes no-lookahead testing:
+
+- after-close retest/continuation: signal is confirmed at the 5m close, then entry is only allowed after that close.
+- true intrabar simulation: use only information that would have been known inside the developing 5m candle.
+- structure-first entries: key levels, order-block/FVG/volume-node context, and support/resistance exits must still be tested under the same no-lookahead rule.
+
+Any future 3y/5y report must state whether 1m entries were searched only after the 5m setup candle became actionable.
 
 ## Known Limits
 
 - Historical liquidity gate drag is not exact without historical order book snapshots.
 - Backtest alignment does not guarantee live PnL; live fills, slippage, rejects, latency, and forced exits remain separate truth.
-- `Trading entry surface alert` is reserved for live candidates or blocked live-routable candidates. Zero-live context-only surfaces should be labeled `Trading entry surface monitor` and are not order triggers. Live submit requires the current live route plus validation/operations/safety/liquidity approval.
+- A/B legacy governance reports may still be useful as historical context, but they are not the production anchor for the current USDT 31 SIR route.

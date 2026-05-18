@@ -2142,7 +2142,17 @@ class StrategyEngine:
                 )
                 or "structure_adaptive_floor_min_0_003_live_split"
             ),
-            stop_mode="floor",
+            stop_mode=str(getattr(self.settings, "session_impulse_retest_exit_stop_mode", "floor") or "floor").strip().lower(),
+            swing_lookback_bars=max(
+                self._maybe_int(getattr(self.settings, "session_impulse_retest_exit_structure_stop_swing_bars", 6))
+                or 6,
+                1,
+            ),
+            stop_buffer_atr=max(
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_structure_stop_buffer_atr", 0.12))
+                or 0.0,
+                0.0,
+            ),
             min_stop_pct=max(
                 self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_min_stop_pct", 0.003)) or 0.0,
                 0.0,
@@ -7427,7 +7437,7 @@ class StrategyEngine:
     ) -> dict[str, Any]:
         if not self._safe_bool(getattr(self.settings, "auto_trading_live_position_manager_enabled", True), default=True):
             return {"status": "DISABLED", "reason": "position_manager_disabled", "actions": []}
-        if not self._safe_bool(getattr(self.settings, "auto_trading_live_breakeven_after_partial_enabled", True), default=True):
+        if not self._safe_bool(getattr(self.settings, "auto_trading_live_breakeven_after_partial_enabled", False), default=False):
             return {"status": "DISABLED", "reason": "breakeven_after_partial_disabled", "actions": []}
         if not self._safe_bool(getattr(self.settings, "binance_trade_live_enabled", False)):
             return {"status": "DISABLED", "reason": "binance_live_orders_disabled", "actions": []}

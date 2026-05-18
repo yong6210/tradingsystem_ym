@@ -342,6 +342,100 @@ def test_session_impulse_retest_structure_exit_uses_key_levels() -> None:
     assert round(adjusted.diagnostics["policy_tp2_rr"], 8) == 2.4
 
 
+def test_session_impulse_retest_structure_targets_buffer_before_key_level() -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    candles_1m = _candles("TESTUSDT", "1m", 1, 1200, start)
+    candles_5m = _candles("TESTUSDT", "5m", 5, 400, start)
+    engine = SessionImpulseRetestResearch(
+        symbol="TESTUSDT",
+        candles_1m=candles_1m,
+        candles_5m=candles_5m,
+        exit_policy=SessionImpulseRetestExitPolicy(
+            name="structure_buffered_targets",
+            stop_mode="floor",
+            min_stop_pct=0.0,
+            min_risk_atr=0.0,
+            tp1_fraction=0.35,
+            tp2_fraction=0.65,
+            adaptive_targets_enabled=False,
+            structure_targets_enabled=True,
+            structure_target_buffer_atr=0.10,
+            structure_tp1_min_rr=0.8,
+            structure_tp2_min_rr=1.6,
+        ),
+    )
+    engine.atr_5m[120] = 1.0
+    setup_ts = engine.ts_5m[120]
+    signal = MicroSignal(
+        family="session_impulse_retest",
+        direction="long",
+        signal_ts=setup_ts,
+        setup_ts=setup_ts,
+        entry_ts=setup_ts,
+        entry_price=100.0,
+        stop_price=99.0,
+        target_price=102.0,
+        max_hold_minutes=40,
+        regime_hint="session_open",
+        diagnostics={
+            "entry_distance_atr": 0.10,
+            "structure_target_prices": [101.2, 102.4],
+            "structure_target_sources": ["near_resistance", "far_resistance"],
+        },
+    )
+
+    adjusted = engine._apply_exit_policy(signal)
+
+    assert adjusted is not None
+    assert round(adjusted.diagnostics["policy_structure_tp1_price"], 8) == 101.1
+    assert round(adjusted.diagnostics["policy_structure_tp2_price"], 8) == 102.3
+    assert round(adjusted.diagnostics["policy_tp1_rr"], 8) == 1.1
+    assert round(adjusted.diagnostics["policy_tp2_rr"], 8) == 2.3
+
+
+def test_session_impulse_retest_structure_stop_buffers_beyond_swing_level() -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    candles_1m = _candles("TESTUSDT", "1m", 1, 1200, start)
+    candles_5m = _candles("TESTUSDT", "5m", 5, 400, start)
+    engine = SessionImpulseRetestResearch(
+        symbol="TESTUSDT",
+        candles_1m=candles_1m,
+        candles_5m=candles_5m,
+        exit_policy=SessionImpulseRetestExitPolicy(
+            name="structure_buffered_stop",
+            stop_mode="structure_floor",
+            swing_lookback_bars=6,
+            stop_buffer_atr=0.12,
+            min_stop_pct=0.0,
+            min_risk_atr=0.0,
+            target_rr=2.0,
+        ),
+    )
+    engine.atr_5m[120] = 1.0
+    for idx in range(115, 121):
+        engine.lows_5m[idx] = 99.4
+    engine.lows_5m[118] = 99.0
+    setup_ts = engine.ts_5m[120]
+    signal = MicroSignal(
+        family="session_impulse_retest",
+        direction="long",
+        signal_ts=setup_ts,
+        setup_ts=setup_ts,
+        entry_ts=setup_ts,
+        entry_price=100.0,
+        stop_price=99.7,
+        target_price=101.0,
+        max_hold_minutes=40,
+        regime_hint="session_open",
+    )
+
+    adjusted = engine._apply_exit_policy(signal)
+
+    assert adjusted is not None
+    assert round(adjusted.stop_price, 8) == 98.88
+    assert round(adjusted.diagnostics["policy_risk_atr"], 8) == 1.12
+
+
 def test_session_impulse_retest_structure_exit_skips_chased_entry() -> None:
     start = datetime(2026, 1, 1, tzinfo=UTC)
     candles_1m = _candles("TESTUSDT", "1m", 1, 1200, start)
@@ -375,6 +469,162 @@ def test_session_impulse_retest_structure_exit_skips_chased_entry() -> None:
     )
 
     assert engine._apply_exit_policy(signal) is None
+
+
+def test_session_impulse_retest_entry_waits_until_setup_candle_is_actionable() -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    candles_1m = _candles("TESTUSDT", "1m", 1, 40, start)
+    candles_5m = _candles("TESTUSDT", "5m", 5, 12, start)
+    setup_idx = 2
+    inside_idx = 10
+    actionable_idx = 15
+    candles_1m[inside_idx].o = 99.8
+    candles_1m[inside_idx].h = 100.4
+    candles_1m[inside_idx].l = 99.9
+    candles_1m[inside_idx].c = 100.2
+    candles_1m[actionable_idx].o = 99.9
+    candles_1m[actionable_idx].h = 100.3
+    candles_1m[actionable_idx].l = 99.95
+    candles_1m[actionable_idx].c = 100.1
+    engine = SessionImpulseRetestResearch(symbol="TESTUSDT", candles_1m=candles_1m, candles_5m=candles_5m)
+
+    entry = engine._find_1m_entry(
+        setup_idx_5m=setup_idx,
+        direction="long",
+        reclaim_level=100.0,
+        atr_5m=1.0,
+        retest_buffer_atr=0.1,
+        max_retest_wait_minutes=3,
+    )
+
+    assert entry is not None
+    assert entry[0] == start + timedelta(minutes=15)
+    assert entry[1] == 100.1
+
+
+def test_session_impulse_retest_entry_ignores_same_5m_bar_retest() -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    candles_1m = _candles("TESTUSDT", "1m", 1, 40, start)
+    candles_5m = _candles("TESTUSDT", "5m", 5, 12, start)
+    setup_idx = 2
+    candles_1m[10].o = 99.8
+    candles_1m[10].h = 100.4
+    candles_1m[10].l = 99.9
+    candles_1m[10].c = 100.2
+    for idx in range(15, 19):
+        candles_1m[idx].o = 100.2
+        candles_1m[idx].h = 100.4
+        candles_1m[idx].l = 100.15
+        candles_1m[idx].c = 100.1
+    engine = SessionImpulseRetestResearch(symbol="TESTUSDT", candles_1m=candles_1m, candles_5m=candles_5m)
+
+    entry = engine._find_1m_entry(
+        setup_idx_5m=setup_idx,
+        direction="long",
+        reclaim_level=100.0,
+        atr_5m=1.0,
+        retest_buffer_atr=0.1,
+        max_retest_wait_minutes=3,
+    )
+
+    assert entry is None
+
+
+def test_session_impulse_retest_backtest_moves_stop_after_partial() -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    candles_1m = _candles("TESTUSDT", "1m", 1, 120, start)
+    candles_5m = _candles("TESTUSDT", "5m", 5, 80, start)
+    candles_1m[10].o = 100.0
+    candles_1m[10].h = 101.1
+    candles_1m[10].l = 100.2
+    candles_1m[10].c = 101.0
+    candles_1m[11].o = 100.8
+    candles_1m[11].h = 100.9
+    candles_1m[11].l = 99.95
+    candles_1m[11].c = 100.1
+    engine = SessionImpulseRetestResearch(
+        symbol="TESTUSDT",
+        candles_1m=candles_1m,
+        candles_5m=candles_5m,
+        exit_policy=SessionImpulseRetestExitPolicy(
+            name="managed_split",
+            tp1_rr=1.0,
+            tp1_fraction=0.35,
+            tp2_rr=2.0,
+            tp2_fraction=0.65,
+            stop_after_partial_rr=0.0,
+        ),
+    )
+    signal = MicroSignal(
+        family="session_impulse_retest",
+        direction="long",
+        signal_ts=candles_1m[10].ts,
+        setup_ts=candles_1m[10].ts,
+        entry_ts=candles_1m[10].ts,
+        entry_price=100.0,
+        stop_price=99.0,
+        target_price=102.0,
+        max_hold_minutes=20,
+        regime_hint="test",
+    )
+
+    trade = engine._simulate_trade(signal)
+
+    assert trade is not None
+    assert trade.exit_reason == "stop_after_partial"
+    assert round(trade.gross_r, 8) == 0.35
+    assert trade.diagnostics["position_management_events"] == ["stop_after_partial_adjusted"]
+    assert trade.diagnostics["managed_stop_after_partial_price"] == 100.0
+
+
+def test_session_impulse_retest_backtest_can_exit_on_adverse_volume() -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    candles_1m = _candles("TESTUSDT", "1m", 1, 120, start)
+    candles_5m = _candles("TESTUSDT", "5m", 5, 80, start)
+    for idx in range(5, 12):
+        candles_1m[idx].v = 1000.0
+    candles_1m[10].o = 100.0
+    candles_1m[10].h = 100.4
+    candles_1m[10].l = 99.9
+    candles_1m[10].c = 100.2
+    candles_1m[11].o = 100.4
+    candles_1m[11].h = 100.5
+    candles_1m[11].l = 99.8
+    candles_1m[11].c = 99.9
+    candles_1m[11].v = 5000.0
+    engine = SessionImpulseRetestResearch(
+        symbol="TESTUSDT",
+        candles_1m=candles_1m,
+        candles_5m=candles_5m,
+        exit_policy=SessionImpulseRetestExitPolicy(
+            name="managed_adverse_volume",
+            adverse_volume_exit_enabled=True,
+            adverse_volume_exit_after_partial_only=False,
+            adverse_volume_exit_min_factor=3.0,
+            adverse_volume_exit_min_body_r=0.35,
+            adverse_volume_exit_lookback_bars=5,
+        ),
+    )
+    signal = MicroSignal(
+        family="session_impulse_retest",
+        direction="long",
+        signal_ts=candles_1m[10].ts,
+        setup_ts=candles_1m[10].ts,
+        entry_ts=candles_1m[10].ts,
+        entry_price=100.0,
+        stop_price=99.0,
+        target_price=102.0,
+        max_hold_minutes=20,
+        regime_hint="test",
+    )
+
+    trade = engine._simulate_trade(signal)
+
+    assert trade is not None
+    assert trade.exit_reason == "adverse_volume_exit"
+    assert round(trade.gross_r, 8) == -0.1
+    assert trade.diagnostics["position_management_events"] == ["adverse_volume_exit"]
+    assert trade.diagnostics["adverse_volume_exit"]["volume_factor"] == 5.0
 
 
 def test_session_impulse_retest_higher_timeframe_context_finds_anchor_and_target() -> None:

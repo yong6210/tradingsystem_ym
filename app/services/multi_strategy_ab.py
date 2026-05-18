@@ -5,6 +5,8 @@ from typing import Any
 
 
 _LIVE_MODES = {"A_ONLY", "A_PLUS_B"}
+_CURRENT_LIVE_CONTRACT_CLUSTER = "current_live_contract"
+_LEGACY_AB_CLUSTERS = {"a_reversal", "b_continuation", "research_only_sidecar"}
 
 
 class MultiStrategyABExpansionService:
@@ -45,6 +47,8 @@ class MultiStrategyABExpansionService:
             return "b_continuation"
         if family == "range_rotation":
             return "research_only_sidecar"
+        if family == "session_impulse_retest":
+            return _CURRENT_LIVE_CONTRACT_CLUSTER
         return ""
 
     @staticmethod
@@ -204,10 +208,23 @@ class MultiStrategyABExpansionService:
             if not live_eligible:
                 guarded = True
         else:
-            cluster_status = "research_only_sidecar"
-            guarded = True
-            reason_codes.append("sidecar:range_rotation")
-            summary = "Range rotation remains a research-only sidecar in the first-wave A/B contract."
+            if cluster == _CURRENT_LIVE_CONTRACT_CLUSTER:
+                live_eligible = not mode_shadow_only and not alpha_research_candidate
+                guarded = not live_eligible
+                cluster_status = "live_contract_outside_legacy_ab" if live_eligible else "guarded_live_contract_outside_legacy_ab"
+                reason_codes.append("ab_lens:not_applicable_to_current_live_contract")
+                if mode_shadow_only:
+                    reason_codes.append("current_live_contract:mode_shadow_only")
+                if alpha_research_candidate:
+                    reason_codes.append("current_live_contract:alpha_research_candidate")
+                summary = (
+                    "session_impulse_retest is the current live contract and sits outside the legacy first-wave A/B lens."
+                )
+            else:
+                cluster_status = "research_only_sidecar"
+                guarded = True
+                reason_codes.append("sidecar:range_rotation")
+                summary = "Range rotation remains a research-only sidecar in the first-wave A/B contract."
 
         return {
             "available": True,
@@ -312,6 +329,63 @@ class MultiStrategyABExpansionService:
         )
         if not family_mix and not mode:
             return {"available": False, "advisory_only": True, "summary": "multi-strategy A/B summary unavailable"}
+
+        current_live_mix = [
+            dict(row)
+            for row in family_mix
+            if str(row.get("cluster") or "").strip().lower() == _CURRENT_LIVE_CONTRACT_CLUSTER
+        ]
+        legacy_ab_mix = [
+            dict(row)
+            for row in family_mix
+            if str(row.get("cluster") or "").strip().lower() in _LEGACY_AB_CLUSTERS
+        ]
+        if current_live_mix and not legacy_ab_mix:
+            current_family = str(current_live_mix[0].get("raw_family") or "session_impulse_retest").strip().lower()
+            current_overlay = self.overlay_for_row(
+                {"strategy_family": current_family, "strategy_mode": mode},
+                score_to_outcome_funnel=score_to_outcome_funnel,
+                family_execution_degradation_advisory=family_execution_degradation_advisory,
+                rollout_recommendation=rollout_recommendation,
+                strategy_lifecycle=strategy_lifecycle,
+            ) or {}
+            return {
+                "available": True,
+                "advisory_only": True,
+                "mode": mode,
+                "raw_family_anchor": current_family,
+                "a_cluster": {
+                    "available": False,
+                    "cluster": "a_reversal",
+                    "strategy_cluster_status": "not_applicable_to_current_live_contract",
+                },
+                "b_cluster": {
+                    "available": False,
+                    "cluster": "b_continuation",
+                    "strategy_cluster_status": "not_applicable_to_current_live_contract",
+                },
+                "research_sidecar": {
+                    "available": False,
+                    "cluster": "research_only_sidecar",
+                    "strategy_cluster_status": "not_applicable_to_current_live_contract",
+                },
+                "current_live_contract": {
+                    **current_overlay,
+                    **current_live_mix[0],
+                },
+                "family_mix": family_mix,
+                "summary": (
+                    "Legacy A/B expansion is not applicable to the current live contract; "
+                    "session_impulse_retest is the active SIR route."
+                ),
+                "reason_codes": self._dedupe(
+                    [
+                        f"mode:{mode.lower()}",
+                        "ab_lens:not_applicable_to_current_live_contract",
+                        f"current_live_family:{current_family}",
+                    ]
+                ),
+            }
 
         a_overlay = self.overlay_for_row(
             {"strategy_family": "sweep_reversal", "strategy_mode": mode},

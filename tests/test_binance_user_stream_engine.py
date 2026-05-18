@@ -673,6 +673,7 @@ def test_process_live_position_management_moves_stop_to_breakeven_after_partial_
     with SessionLocal() as db:
         engine = StrategyEngine(db)
         monkeypatch.setattr(engine.settings, "binance_trade_live_enabled", True)
+        monkeypatch.setattr(engine.settings, "auto_trading_live_breakeven_after_partial_enabled", True)
         monkeypatch.setattr(engine.settings, "auto_trading_live_stop_precheck_min_cushion_bps", 5.0)
         monkeypatch.setattr(engine.settings, "auto_trading_live_breakeven_offset_bps", 1.0)
         monkeypatch.setattr(engine.settings, "auto_trading_live_breakeven_min_improvement_bps", 1.0)
@@ -760,6 +761,7 @@ def test_ingest_binance_user_stream_partial_tp_moves_stop_to_breakeven(monkeypat
     with SessionLocal() as db:
         engine = StrategyEngine(db)
         monkeypatch.setattr(engine.settings, "binance_trade_live_enabled", True)
+        monkeypatch.setattr(engine.settings, "auto_trading_live_breakeven_after_partial_enabled", True)
         monkeypatch.setattr(engine.settings, "auto_trading_live_stop_precheck_min_cushion_bps", 5.0)
         monkeypatch.setattr(engine.settings, "auto_trading_live_breakeven_offset_bps", 1.0)
         plan = _seed_plan(db, symbol=symbol, plan_id=f"{symbol}_partial_be_plan", direction="long", state="ENTERED")

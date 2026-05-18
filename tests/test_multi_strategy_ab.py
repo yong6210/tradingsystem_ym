@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.services.multi_strategy_ab import MultiStrategyABExpansionService
+from app.services.strategy_cluster_balance import StrategyClusterBalanceService
 
 
 def test_multi_strategy_ab_overlay_marks_b_compare_only_under_a_only() -> None:
@@ -90,3 +91,41 @@ def test_multi_strategy_ab_summary_marks_b_probation_ready_with_cleared_guardrai
     assert summary["b_cluster"]["strategy_cluster_status"] == "probation_ready"
     assert summary["b_cluster"]["live_eligible"] is True
     assert summary["b_cluster"]["guardrail_reasons"] == []
+
+
+def test_multi_strategy_ab_summary_marks_sir_as_outside_legacy_ab_lens() -> None:
+    service = MultiStrategyABExpansionService()
+
+    summary = service.generate(
+        portfolio_budget={
+            "strategy_mode": "A_ONLY",
+            "accepted_candidates": [
+                {"strategy_family": "session_impulse_retest", "accepted": True},
+            ],
+        },
+    )
+
+    assert summary["available"] is True
+    assert summary["raw_family_anchor"] == "session_impulse_retest"
+    assert summary["a_cluster"]["strategy_cluster_status"] == "not_applicable_to_current_live_contract"
+    assert summary["current_live_contract"]["cluster"] == "current_live_contract"
+    assert "ab_lens:not_applicable_to_current_live_contract" in summary["reason_codes"]
+
+
+def test_strategy_cluster_balance_marks_sir_as_outside_legacy_ab_balance() -> None:
+    service = StrategyClusterBalanceService()
+
+    summary = service.generate(
+        multi_strategy_ab={},
+        portfolio_budget={
+            "strategy_mode": "A_ONLY",
+            "accepted_candidates": [
+                {"strategy_family": "session_impulse_retest", "accepted": True},
+            ],
+        },
+    )
+
+    assert summary["available"] is True
+    assert summary["balance_state"] == "legacy_ab_not_applicable"
+    assert summary["balance_bias"] == "follow_current_live_contract"
+    assert summary["headline_cluster"] == "current_live_contract"

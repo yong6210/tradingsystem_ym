@@ -194,11 +194,13 @@ def build_payload(
         event_lookback_minutes=60,
     )
     reconciliation_eval = dict(reconciliation.get("evaluation") or {})
+    reconciliation_fail_count = int(reconciliation_eval.get("fail_count") or 0)
+    reconciliation_alert = _safe_bool(reconciliation_eval.get("alert"))
     components.append(
         _component(
             "reconciliation_watchdog",
-            "FAIL" if _safe_bool(reconciliation_eval.get("alert")) else "PASS",
-            blocking=_safe_bool(reconciliation_eval.get("alert")),
+            "FAIL" if reconciliation_fail_count > 0 else ("WARN" if reconciliation_alert else "PASS"),
+            blocking=reconciliation_fail_count > 0,
             summary=str(reconciliation_eval.get("message") or ""),
             payload=reconciliation,
         )

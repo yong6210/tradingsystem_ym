@@ -164,8 +164,11 @@ class Settings(BaseSettings):
     session_impulse_retest_miss_alert_enabled: bool = True
     session_impulse_retest_miss_alert_cooldown_seconds: int = 1800
     session_impulse_retest_exit_policy_name: str = "structure_adaptive_floor_min_0_003_live_split"
+    session_impulse_retest_exit_stop_mode: str = "floor"
     session_impulse_retest_exit_min_stop_pct: float = 0.003
     session_impulse_retest_exit_min_risk_atr: float = 0.35
+    session_impulse_retest_exit_structure_stop_swing_bars: int = 6
+    session_impulse_retest_exit_structure_stop_buffer_atr: float = 0.12
     session_impulse_retest_exit_target_rr: float = 2.5
     session_impulse_retest_exit_max_hold_minutes: int = 40
     session_impulse_retest_exit_time_guard_enabled: bool = True
@@ -472,7 +475,7 @@ class Settings(BaseSettings):
     auto_trading_live_tp_limit_attach_enabled: bool = True
     auto_trading_live_tp_market_fallback_seconds: int = 20
     auto_trading_live_position_manager_enabled: bool = True
-    auto_trading_live_breakeven_after_partial_enabled: bool = True
+    auto_trading_live_breakeven_after_partial_enabled: bool = False
     auto_trading_live_breakeven_offset_bps: float = 1.0
     auto_trading_live_breakeven_min_improvement_bps: float = 1.0
     auto_trading_micro_live_allowed_symbols: str = CURRENT_MICRO_LIVE_SYMBOLS
