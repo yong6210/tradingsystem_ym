@@ -2138,9 +2138,9 @@ class StrategyEngine:
                 getattr(
                     self.settings,
                     "session_impulse_retest_exit_policy_name",
-                    "adaptive_floor_min_0_003_live_split",
+                    "structure_adaptive_floor_min_0_003_live_split",
                 )
-                or "adaptive_floor_min_0_003_live_split"
+                or "structure_adaptive_floor_min_0_003_live_split"
             ),
             stop_mode="floor",
             min_stop_pct=max(
@@ -2207,6 +2207,79 @@ class StrategyEngine:
             adaptive_defensive_tp1_fraction=max(
                 self._maybe_float(
                     getattr(self.settings, "session_impulse_retest_exit_adaptive_defensive_tp1_fraction", 0.45)
+                )
+                or 0.0,
+                0.0,
+            ),
+            structure_targets_enabled=self._safe_bool(
+                getattr(self.settings, "session_impulse_retest_exit_structure_targets_enabled", True),
+                default=True,
+            ),
+            structure_entry_max_distance_atr=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_structure_entry_max_distance_atr", 0.45)
+                )
+                or 0.0,
+                0.0,
+            ),
+            structure_target_buffer_atr=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_structure_target_buffer_atr", 0.05)
+                )
+                or 0.0,
+                0.0,
+            ),
+            structure_tp1_min_rr=max(
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_structure_tp1_min_rr", 0.8))
+                or 0.8,
+                0.1,
+            ),
+            structure_tp2_min_rr=max(
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_structure_tp2_min_rr", 1.6))
+                or 1.6,
+                0.1,
+            ),
+            structure_tp_max_rr=max(
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_structure_tp_max_rr", 3.2))
+                or 3.2,
+                0.1,
+            ),
+            higher_timeframe_structure_enabled=self._safe_bool(
+                getattr(self.settings, "session_impulse_retest_exit_higher_timeframe_structure_enabled", False),
+                default=False,
+            ),
+            higher_timeframe_entry_min_score=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_higher_timeframe_entry_min_score", 0.0)
+                )
+                or 0.0,
+                0.0,
+            ),
+            higher_timeframe_entry_max_distance_atr=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_higher_timeframe_entry_max_distance_atr", 0.8)
+                )
+                or 0.0,
+                0.0,
+            ),
+            higher_timeframe_lookback_days=max(
+                self._maybe_int(
+                    getattr(self.settings, "session_impulse_retest_exit_higher_timeframe_lookback_days", 28)
+                )
+                or 28,
+                7,
+            ),
+            higher_timeframe_target_enabled=self._safe_bool(
+                getattr(self.settings, "session_impulse_retest_exit_higher_timeframe_target_enabled", True),
+                default=True,
+            ),
+            higher_timeframe_stop_enabled=self._safe_bool(
+                getattr(self.settings, "session_impulse_retest_exit_higher_timeframe_stop_enabled", False),
+                default=False,
+            ),
+            higher_timeframe_stop_buffer_atr=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_higher_timeframe_stop_buffer_atr", 0.08)
                 )
                 or 0.0,
                 0.0,
@@ -7232,6 +7305,334 @@ class StrategyEngine:
             "actions": actions,
         }
 
+    @staticmethod
+    def _terminal_binance_order_statuses() -> set[str]:
+        return {"FILLED", "CANCELED", "CANCELLED", "REJECTED", "EXPIRED"}
+
+    def _recent_open_live_protection_orders(
+        self,
+        *,
+        plan_id: str,
+        symbol: str,
+        purpose_prefix: str,
+        limit: int = 200,
+    ) -> list[Any]:
+        rows: list[Any] = []
+        terminal = self._terminal_binance_order_statuses()
+        for row in self.binance_order_repo.list_recent(symbol=symbol, limit=max(1, int(limit))):
+            if str(row.plan_id or "") != str(plan_id or ""):
+                continue
+            if str(row.status or "").upper() in terminal:
+                continue
+            raw = _safe_dict(getattr(row, "raw", None))
+            if not str(raw.get("order_purpose") or "").startswith(purpose_prefix):
+                continue
+            rows.append(row)
+        return rows
+
+    def _protection_stop_price(self, row: Any) -> float | None:
+        raw = _safe_dict(getattr(row, "raw", None))
+        return (
+            self._maybe_float(raw.get("stop_price"))
+            or self._maybe_float(raw.get("stopPrice"))
+            or self._maybe_float(getattr(row, "price", None))
+            or self._maybe_float(raw.get("price"))
+        )
+
+    def _position_matches_plan(self, *, plan: Plan, position: dict[str, Any]) -> bool:
+        if str(position.get("symbol") or "").upper() != str(plan.symbol or "").upper():
+            return False
+        amount = self._maybe_float(position.get("position_amt")) or 0.0
+        if abs(amount) <= 1e-10:
+            return False
+        position_side = str(position.get("position_side") or "BOTH").upper()
+        direction = str(plan.direction or "").lower()
+        if direction == "long":
+            return position_side in {"LONG", "BOTH"} and (position_side == "LONG" or amount > 0.0)
+        if direction == "short":
+            return position_side in {"SHORT", "BOTH"} and (position_side == "SHORT" or amount < 0.0)
+        return False
+
+    def _desired_breakeven_stop(self, *, plan: Plan, position: dict[str, Any]) -> tuple[float, dict[str, Any]] | None:
+        entry_candidates = (
+            self._maybe_float(position.get("break_even_price")),
+            self._maybe_float(position.get("entry_price")),
+            self._maybe_float(getattr(plan, "entry_price", None)),
+        )
+        entry_reference = next((value for value in entry_candidates if value is not None and value > 0.0), None)
+        if entry_reference is None:
+            return None
+        offset_bps = max(
+            self._maybe_float(getattr(self.settings, "auto_trading_live_breakeven_offset_bps", 1.0)) or 0.0,
+            0.0,
+        )
+        offset_abs = float(entry_reference) * offset_bps / 10_000.0
+        direction = str(plan.direction or "").lower()
+        raw_stop = float(entry_reference) + offset_abs if direction == "long" else float(entry_reference) - offset_abs
+        close_side = self.execution_coordinator._live_close_side(plan)
+        normalized_stop, price_details = self.execution_coordinator._normalize_live_limit_price(
+            symbol=str(plan.symbol or "").upper(),
+            side=close_side,
+            requested_price=raw_stop,
+        )
+        if normalized_stop is None or normalized_stop <= 0.0:
+            return None
+        return float(normalized_stop), {
+            "entry_reference": round(float(entry_reference), 8),
+            "offset_bps": round(float(offset_bps), 4),
+            "raw_stop": round(float(raw_stop), 8),
+            "price_details": price_details,
+        }
+
+    def _breakeven_stop_has_mark_cushion(self, *, plan: Plan, position: dict[str, Any], stop_price: float) -> tuple[bool, dict[str, Any]]:
+        mark_price = self._maybe_float(position.get("mark_price")) or 0.0
+        min_cushion_bps = max(
+            self._maybe_float(getattr(self.settings, "auto_trading_live_stop_precheck_min_cushion_bps", 5.0)) or 0.0,
+            0.0,
+        )
+        direction = str(plan.direction or "").lower()
+        if mark_price <= 0.0:
+            return False, {"reason": "mark_price_unavailable", "mark_price": mark_price}
+        if direction == "long":
+            cushion_bps = (mark_price - float(stop_price)) / mark_price * 10_000.0
+        else:
+            cushion_bps = (float(stop_price) - mark_price) / mark_price * 10_000.0
+        return cushion_bps >= min_cushion_bps, {
+            "mark_price": round(float(mark_price), 8),
+            "stop_price": round(float(stop_price), 8),
+            "cushion_bps": round(float(cushion_bps), 4),
+            "min_cushion_bps": round(float(min_cushion_bps), 4),
+        }
+
+    def _stop_improvement_bps(self, *, plan: Plan, current_stop: float | None, desired_stop: float) -> float:
+        if current_stop is None or current_stop <= 0.0:
+            return float("inf")
+        reference = max(self._maybe_float(getattr(plan, "entry_price", None)) or desired_stop, 1e-9)
+        if str(plan.direction or "").lower() == "long":
+            return (float(desired_stop) - float(current_stop)) / reference * 10_000.0
+        return (float(current_stop) - float(desired_stop)) / reference * 10_000.0
+
+    def _plan_has_partial_exit(self, plan: Plan) -> bool:
+        if str(plan.state or "") == PlanState.PARTIAL_EXIT.value:
+            return True
+        fills = self.fill_repo.list_for_plans(plan_ids=[str(plan.plan_id)], symbol=str(plan.symbol))
+        return any(str(getattr(fill, "stage", "") or "") == ExecutionFillStage.PARTIAL_EXIT.value for fill in fills)
+
+    def process_live_position_management(
+        self,
+        *,
+        symbol: str | None = None,
+        now: datetime | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        if not self._safe_bool(getattr(self.settings, "auto_trading_live_position_manager_enabled", True), default=True):
+            return {"status": "DISABLED", "reason": "position_manager_disabled", "actions": []}
+        if not self._safe_bool(getattr(self.settings, "auto_trading_live_breakeven_after_partial_enabled", True), default=True):
+            return {"status": "DISABLED", "reason": "breakeven_after_partial_disabled", "actions": []}
+        if not self._safe_bool(getattr(self.settings, "binance_trade_live_enabled", False)):
+            return {"status": "DISABLED", "reason": "binance_live_orders_disabled", "actions": []}
+
+        normalized_symbol = str(symbol or "").upper()
+        candidate_plans = (
+            self.plan_repo.list_recent(symbol=normalized_symbol, days=14, limit=max(1, int(limit)))
+            if normalized_symbol
+            else self.plan_repo.list_recent_global(days=14, states=[PlanState.ENTERED.value, PlanState.PARTIAL_EXIT.value], limit=max(1, int(limit)))
+        )
+        plans = [
+            plan
+            for plan in candidate_plans
+            if str(plan.state or "") in {PlanState.ENTERED.value, PlanState.PARTIAL_EXIT.value}
+        ]
+        if not plans:
+            return {"status": "OK", "reason": "no_open_local_plans", "actions": []}
+
+        symbols = sorted({str(plan.symbol or "").upper() for plan in plans if str(plan.symbol or "").strip()})
+        positions_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        actions: list[dict[str, Any]] = []
+        for item_symbol in symbols:
+            try:
+                sync_payload = self.sync_binance_positions(symbol=item_symbol)
+                positions_by_symbol[item_symbol] = [
+                    _safe_dict(item) for item in list(sync_payload.get("positions") or []) if isinstance(item, dict)
+                ]
+            except Exception as exc:
+                actions.append(
+                    {
+                        "symbol": item_symbol,
+                        "status": "ERROR",
+                        "reason": "position_sync_failed",
+                        "error": f"{exc.__class__.__name__}:{exc}",
+                    }
+                )
+                positions_by_symbol[item_symbol] = [self._position_row_to_dict(row) for row in self.binance_position_repo.list_open(symbol=item_symbol)]
+
+        min_improvement_bps = max(
+            self._maybe_float(getattr(self.settings, "auto_trading_live_breakeven_min_improvement_bps", 1.0)) or 0.0,
+            0.0,
+        )
+        adjusted_count = 0
+        for plan in plans:
+            plan_symbol = str(plan.symbol or "").upper()
+            if not self._plan_has_partial_exit(plan):
+                actions.append({"plan_id": plan.plan_id, "symbol": plan_symbol, "status": "SKIPPED", "reason": "waiting_for_partial_exit"})
+                continue
+            matching_positions = [
+                position for position in positions_by_symbol.get(plan_symbol, []) if self._position_matches_plan(plan=plan, position=position)
+            ]
+            if not matching_positions:
+                actions.append({"plan_id": plan.plan_id, "symbol": plan_symbol, "status": "SKIPPED", "reason": "no_matching_open_position"})
+                continue
+            position = matching_positions[0]
+            desired = self._desired_breakeven_stop(plan=plan, position=position)
+            if desired is None:
+                actions.append({"plan_id": plan.plan_id, "symbol": plan_symbol, "status": "SKIPPED", "reason": "breakeven_stop_unavailable"})
+                continue
+            desired_stop, desired_details = desired
+            has_cushion, cushion_details = self._breakeven_stop_has_mark_cushion(
+                plan=plan,
+                position=position,
+                stop_price=desired_stop,
+            )
+            if not has_cushion:
+                actions.append(
+                    {
+                        "plan_id": plan.plan_id,
+                        "symbol": plan_symbol,
+                        "status": "SKIPPED",
+                        "reason": "breakeven_stop_too_close_to_mark",
+                        **desired_details,
+                        **cushion_details,
+                    }
+                )
+                continue
+
+            stop_orders = self._recent_open_live_protection_orders(
+                plan_id=str(plan.plan_id),
+                symbol=plan_symbol,
+                purpose_prefix="live_protection:stop_loss",
+                limit=max(1, int(limit)),
+            )
+            current_prices = [
+                price for price in (self._protection_stop_price(row) for row in stop_orders) if price is not None and price > 0.0
+            ]
+            current_stop = None
+            if current_prices:
+                current_stop = max(current_prices) if str(plan.direction or "").lower() == "long" else min(current_prices)
+            improvement_bps = self._stop_improvement_bps(plan=plan, current_stop=current_stop, desired_stop=desired_stop)
+            if improvement_bps < min_improvement_bps:
+                actions.append(
+                    {
+                        "plan_id": plan.plan_id,
+                        "symbol": plan_symbol,
+                        "status": "SKIPPED",
+                        "reason": "existing_stop_already_good",
+                        "current_stop": round(float(current_stop or 0.0), 8),
+                        "desired_stop": round(float(desired_stop), 8),
+                        "improvement_bps": round(float(improvement_bps), 4),
+                        "min_improvement_bps": round(float(min_improvement_bps), 4),
+                    }
+                )
+                continue
+
+            close_side = self.execution_coordinator._live_close_side(plan)
+            position_side = str(position.get("position_side") or "").upper() or None
+            hedge_mode = self.execution_coordinator._is_hedge_position_side(position_side)
+            client_order_id = self.execution_coordinator._protection_client_order_id("be_sl")
+            try:
+                submit_result = self.submit_binance_order(
+                    symbol=plan_symbol,
+                    side=close_side,
+                    order_type="STOP_MARKET",
+                    quantity=None,
+                    price=None,
+                    stop_price=float(desired_stop),
+                    time_in_force="GTC",
+                    reduce_only=False,
+                    position_side=position_side,
+                    close_position=True,
+                    working_type=str(getattr(self.settings, "auto_trading_live_stop_working_type", "MARK_PRICE") or "MARK_PRICE").upper(),
+                    order_purpose="live_protection:stop_loss_breakeven",
+                    parent_client_order_id=str((stop_orders[0].client_order_id if stop_orders else "") or plan.plan_id),
+                    client_order_id=client_order_id,
+                    plan_id=plan.plan_id,
+                    live=True,
+                    new_order_resp_type="ACK",
+                )
+            except Exception as exc:
+                self.db.rollback()
+                actions.append(
+                    {
+                        "plan_id": plan.plan_id,
+                        "symbol": plan_symbol,
+                        "status": "ERROR",
+                        "reason": "breakeven_stop_submit_failed",
+                        "error": f"{exc.__class__.__name__}:{exc}",
+                        "desired_stop": round(float(desired_stop), 8),
+                    }
+                )
+                continue
+
+            cancel_actions: list[dict[str, Any]] = []
+            for old_stop in stop_orders:
+                try:
+                    cancel_actions.append(
+                        {
+                            "client_order_id": old_stop.client_order_id,
+                            "status": "CANCEL_SUBMITTED",
+                            "cancel_result": self.cancel_binance_order(symbol=plan_symbol, client_order_id=old_stop.client_order_id),
+                        }
+                    )
+                except Exception as exc:
+                    self.db.rollback()
+                    cancel_actions.append(
+                        {
+                            "client_order_id": old_stop.client_order_id,
+                            "status": "ERROR",
+                            "reason": "old_stop_cancel_failed",
+                            "error": f"{exc.__class__.__name__}:{exc}",
+                        }
+                    )
+
+            validity = _safe_dict(getattr(plan, "validity", None))
+            validity["live_position_manager"] = {
+                "last_action": "breakeven_stop_submitted",
+                "at": (self._to_utc(now) if now is not None else datetime.now(timezone.utc)).isoformat(),
+                "desired_stop": round(float(desired_stop), 8),
+                "previous_stop": round(float(current_stop), 8) if current_stop is not None else None,
+                "improvement_bps": round(float(improvement_bps), 4) if improvement_bps != float("inf") else None,
+            }
+            plan.validity = validity
+            self.db.add(plan)
+            self.db.commit()
+            adjusted_count += 1
+            actions.append(
+                {
+                    "plan_id": plan.plan_id,
+                    "symbol": plan_symbol,
+                    "status": "BREAKEVEN_STOP_MOVED" if stop_orders else "BREAKEVEN_STOP_ATTACHED",
+                    "desired_stop": round(float(desired_stop), 8),
+                    "current_stop": round(float(current_stop), 8) if current_stop is not None else None,
+                    "improvement_bps": round(float(improvement_bps), 4) if improvement_bps != float("inf") else None,
+                    "close_side": close_side,
+                    "position_side": position_side,
+                    "hedge_mode": hedge_mode,
+                    "submit_result": submit_result,
+                    "cancel_actions": cancel_actions,
+                    **desired_details,
+                    **cushion_details,
+                }
+            )
+
+        error_count = sum(1 for item in actions if item.get("status") == "ERROR")
+        return {
+            "status": "ERROR" if error_count else "OK",
+            "symbol": normalized_symbol,
+            "plan_count": len(plans),
+            "adjusted_count": adjusted_count,
+            "error_count": error_count,
+            "actions": actions,
+        }
+
     def _cancel_live_protection_siblings(
         self,
         *,
@@ -7387,6 +7788,7 @@ class StrategyEngine:
         fill_ingest = None
         protection_attach = None
         protection_sibling_cancel = None
+        protection_management = None
         plan = self.plan_repo.get(plan_id) if plan_id else None
         stage = self._infer_fill_stage_from_binance_event(event=normalized, plan=plan, current_positions=position_rows)
         duplicate_submit_fill = self._matching_submit_response_fill(
@@ -7462,6 +7864,11 @@ class StrategyEngine:
                     symbol=plan.symbol,
                     current_client_order_id=client_order_id,
                 )
+            if stage == ExecutionFillStage.PARTIAL_EXIT and self._is_binance_protection_close_event(normalized):
+                protection_management = self.process_live_position_management(
+                    symbol=plan.symbol,
+                    now=self._to_utc(normalized.get("event_ts")),
+                )
         else:
             self.db.commit()
 
@@ -7479,6 +7886,7 @@ class StrategyEngine:
             "fill_ingest": fill_ingest,
             "protection_attach": protection_attach,
             "protection_sibling_cancel": protection_sibling_cancel,
+            "protection_management": protection_management,
         }
 
     def process_binance_user_stream(
@@ -9549,6 +9957,7 @@ class StrategyEngine:
                 plan_ids=plan_ids,
             )
         tp_market_fallback = self.process_live_tp_market_fallbacks(symbol=symbol)
+        position_management = self.process_live_position_management(symbol=symbol)
         return {
             "symbol": symbol,
             "status": "ok",
@@ -9556,6 +9965,7 @@ class StrategyEngine:
             "refresh": refresh,
             "auto_route": auto_route,
             "tp_market_fallback": tp_market_fallback,
+            "position_management": position_management,
         }
 
     @staticmethod
@@ -9600,6 +10010,7 @@ class StrategyEngine:
             auto_route_symbol=self.auto_route_symbol,
             auto_route_session_impulse_retest_plans=self.auto_route_session_impulse_retest_plans,
             tp_market_fallback_processor=self.process_live_tp_market_fallbacks,
+            position_management_processor=self.process_live_position_management,
         )
         return await stream.stream(
             symbols=symbols,

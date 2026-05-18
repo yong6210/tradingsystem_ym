@@ -110,6 +110,22 @@ class MicroTrade:
 
 
 @dataclass(frozen=True, slots=True)
+class StructureZone:
+    kind: str
+    side: Literal["support", "resistance"]
+    low: float
+    high: float
+    score: float
+    timeframe: str
+    source_ts: datetime
+    source: str
+
+    @property
+    def mid(self) -> float:
+        return float((self.low + self.high) / 2.0)
+
+
+@dataclass(frozen=True, slots=True)
 class SessionImpulseRetestExitPolicy:
     name: str = "legacy_full_2r"
     stop_mode: Literal["legacy", "floor", "structure_floor"] = "legacy"
@@ -140,6 +156,19 @@ class SessionImpulseRetestExitPolicy:
     adaptive_quality_defensive_threshold: float = 0.42
     adaptive_stop_expansion_strong_max: float = 1.4
     adaptive_stop_expansion_defensive_threshold: float = 1.8
+    structure_targets_enabled: bool = False
+    structure_entry_max_distance_atr: float = 0.45
+    structure_target_buffer_atr: float = 0.05
+    structure_tp1_min_rr: float = 0.80
+    structure_tp2_min_rr: float = 1.60
+    structure_tp_max_rr: float = 3.20
+    higher_timeframe_structure_enabled: bool = False
+    higher_timeframe_entry_min_score: float = 0.0
+    higher_timeframe_entry_max_distance_atr: float = 0.80
+    higher_timeframe_lookback_days: int = 28
+    higher_timeframe_target_enabled: bool = True
+    higher_timeframe_stop_enabled: bool = False
+    higher_timeframe_stop_buffer_atr: float = 0.08
 
     def tp_levels(self) -> tuple[tuple[str, float, float], ...]:
         return self._normalize_tp_levels(
@@ -295,6 +324,10 @@ class SessionImpulseRetestResearch:
         self.ema_fast_5m = self._build_ema_5m(20)
         self.ema_slow_5m = self._build_ema_5m(50)
         self.session_vwap_5m = self._build_session_vwap_5m()
+        self.htf_4h_bars = self._resample_5m_bars(240)
+        self.htf_1d_bars = self._resample_5m_bars(1440)
+        self.htf_4h_atr = self._build_resampled_atr(self.htf_4h_bars)
+        self.htf_1d_atr = self._build_resampled_atr(self.htf_1d_bars)
         self._index_1m_by_ts = {ts: idx for idx, ts in enumerate(self.ts_1m)}
         self._index_5m_by_ts = {ts: idx for idx, ts in enumerate(self.ts_5m)}
         self.exit_policy = self._normalize_exit_policy(exit_policy)
@@ -386,6 +419,51 @@ class SessionImpulseRetestResearch:
             out.append(float(cumulative_pv / max(cumulative_volume, 1e-9)))
         return out
 
+    def _resample_5m_bars(self, interval_minutes: int) -> list[dict[str, Any]]:
+        interval = max(int(interval_minutes), 5)
+        bars: list[dict[str, Any]] = []
+        for idx, ts in enumerate(self.ts_5m):
+            minute_of_day = ts.hour * 60 + ts.minute
+            bucket_minutes = (minute_of_day // interval) * interval
+            bucket_start = ts.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(minutes=bucket_minutes)
+            bucket_end = bucket_start + timedelta(minutes=interval)
+            if not bars or bars[-1]["start_ts"] != bucket_start:
+                bars.append(
+                    {
+                        "start_ts": bucket_start,
+                        "end_ts": bucket_end,
+                        "o": self.opens_5m[idx],
+                        "h": self.highs_5m[idx],
+                        "l": self.lows_5m[idx],
+                        "c": self.closes_5m[idx],
+                        "v": self.volumes_5m[idx],
+                    }
+                )
+                continue
+            bar = bars[-1]
+            bar["h"] = max(float(bar["h"]), self.highs_5m[idx])
+            bar["l"] = min(float(bar["l"]), self.lows_5m[idx])
+            bar["c"] = self.closes_5m[idx]
+            bar["v"] = float(bar["v"]) + self.volumes_5m[idx]
+        return bars
+
+    @staticmethod
+    def _build_resampled_atr(bars: list[dict[str, Any]], lookback: int = 14) -> list[float]:
+        if len(bars) < 2:
+            return [0.0] * len(bars)
+        out = [0.0]
+        trs: list[float] = []
+        prev_close = _safe_float(bars[0].get("c"), 0.0)
+        for idx in range(1, len(bars)):
+            high = _safe_float(bars[idx].get("h"), 0.0)
+            low = _safe_float(bars[idx].get("l"), 0.0)
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            trs.append(float(tr))
+            prev_close = _safe_float(bars[idx].get("c"), prev_close)
+            recent = trs[-lookback:]
+            out.append(float(sum(recent) / len(recent)))
+        return out
+
     def _volume_median_5m(self, start: int, end: int) -> float:
         values = self.volumes_5m[max(0, start):max(0, end)]
         return float(median(values)) if values else 0.0
@@ -399,6 +477,394 @@ class SessionImpulseRetestResearch:
     def _close_position_in_bar_5m(self, idx: int) -> float:
         rng = max(self._bar_range_5m(idx), 1e-9)
         return float((self.closes_5m[idx] - self.lows_5m[idx]) / rng)
+
+    @staticmethod
+    def _zone_distance(price: float, zone: StructureZone) -> float:
+        if zone.low <= price <= zone.high:
+            return 0.0
+        if price < zone.low:
+            return float(zone.low - price)
+        return float(price - zone.high)
+
+    @staticmethod
+    def _zone_payload(zone: StructureZone, *, distance_atr: float | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "kind": zone.kind,
+            "side": zone.side,
+            "low": round(float(zone.low), 8),
+            "high": round(float(zone.high), 8),
+            "mid": round(float(zone.mid), 8),
+            "score": round(float(zone.score), 6),
+            "timeframe": zone.timeframe,
+            "source_ts": zone.source_ts.isoformat(),
+            "source": zone.source,
+        }
+        if distance_atr is not None:
+            payload["distance_atr"] = round(float(distance_atr), 6)
+        return payload
+
+    @staticmethod
+    def _bar_body_zone(bar: Mapping[str, Any], *, side: Literal["support", "resistance"]) -> tuple[float, float]:
+        open_price = _safe_float(bar.get("o"), 0.0)
+        close_price = _safe_float(bar.get("c"), 0.0)
+        low = _safe_float(bar.get("l"), 0.0)
+        high = _safe_float(bar.get("h"), 0.0)
+        body_low = min(open_price, close_price)
+        body_high = max(open_price, close_price)
+        if side == "support":
+            return float(low), float(max(body_high, low))
+        return float(min(body_low, high)), float(high)
+
+    def _htf_order_block_zones(
+        self,
+        *,
+        bars: list[dict[str, Any]],
+        atr_values: list[float],
+        setup_ts: datetime,
+        timeframe: str,
+        lookback_days: int,
+    ) -> list[StructureZone]:
+        completed_pairs = [
+            (idx, bar)
+            for idx, bar in enumerate(bars)
+            if bar["end_ts"] <= setup_ts and bar["start_ts"] >= setup_ts - timedelta(days=lookback_days)
+        ]
+        completed = [bar for _idx, bar in completed_pairs]
+        if len(completed_pairs) < 5:
+            return []
+        zones: list[StructureZone] = []
+        for local_idx in range(0, max(0, len(completed) - 3)):
+            idx = completed_pairs[local_idx][0]
+            bar = completed[local_idx]
+            atr = max(float(atr_values[idx] if idx < len(atr_values) else 0.0), 1e-9)
+            open_price = _safe_float(bar.get("o"), 0.0)
+            close_price = _safe_float(bar.get("c"), 0.0)
+            high = _safe_float(bar.get("h"), 0.0)
+            low = _safe_float(bar.get("l"), 0.0)
+            future = completed[local_idx + 1:local_idx + 4]
+            age_days = max((setup_ts - bar["start_ts"]).total_seconds() / 86400.0, 0.0)
+            recency = max(0.25, 1.0 - age_days / max(float(lookback_days) * 1.5, 1.0))
+            if close_price < open_price:
+                impulse = (max(_safe_float(item.get("h"), high) for item in future) - high) / atr
+                if impulse >= 1.15:
+                    zone_low, zone_high = self._bar_body_zone(bar, side="support")
+                    zones.append(
+                        StructureZone(
+                            kind="order_block",
+                            side="support",
+                            low=zone_low,
+                            high=zone_high,
+                            score=float(min(3.0, impulse) * recency),
+                            timeframe=timeframe,
+                            source_ts=bar["start_ts"],
+                            source=f"{timeframe}_bullish_order_block",
+                        )
+                    )
+            if close_price > open_price:
+                impulse = (low - min(_safe_float(item.get("l"), low) for item in future)) / atr
+                if impulse >= 1.15:
+                    zone_low, zone_high = self._bar_body_zone(bar, side="resistance")
+                    zones.append(
+                        StructureZone(
+                            kind="order_block",
+                            side="resistance",
+                            low=zone_low,
+                            high=zone_high,
+                            score=float(min(3.0, impulse) * recency),
+                            timeframe=timeframe,
+                            source_ts=bar["start_ts"],
+                            source=f"{timeframe}_bearish_order_block",
+                        )
+                    )
+        return zones
+
+    def _htf_fvg_zones(
+        self,
+        *,
+        bars: list[dict[str, Any]],
+        atr_values: list[float],
+        setup_ts: datetime,
+        timeframe: str,
+        lookback_days: int,
+    ) -> list[StructureZone]:
+        completed_pairs = [
+            (idx, bar)
+            for idx, bar in enumerate(bars)
+            if bar["end_ts"] <= setup_ts and bar["start_ts"] >= setup_ts - timedelta(days=lookback_days)
+        ]
+        completed = [bar for _idx, bar in completed_pairs]
+        if len(completed_pairs) < 3:
+            return []
+        zones: list[StructureZone] = []
+        for local_idx in range(2, len(completed)):
+            idx = completed_pairs[local_idx][0]
+            left = completed[local_idx - 2]
+            right = completed[local_idx]
+            atr = max(float(atr_values[idx] if idx < len(atr_values) else 0.0), 1e-9)
+            left_high = _safe_float(left.get("h"), 0.0)
+            left_low = _safe_float(left.get("l"), 0.0)
+            right_high = _safe_float(right.get("h"), 0.0)
+            right_low = _safe_float(right.get("l"), 0.0)
+            age_days = max((setup_ts - right["start_ts"]).total_seconds() / 86400.0, 0.0)
+            recency = max(0.20, 1.0 - age_days / max(float(lookback_days), 1.0))
+            if right_low > left_high:
+                gap_atr = (right_low - left_high) / atr
+                if gap_atr >= 0.12:
+                    zones.append(
+                        StructureZone(
+                            kind="fvg",
+                            side="support",
+                            low=float(left_high),
+                            high=float(right_low),
+                            score=float((1.0 + min(gap_atr, 1.5)) * recency),
+                            timeframe=timeframe,
+                            source_ts=right["start_ts"],
+                            source=f"{timeframe}_bullish_fvg",
+                        )
+                    )
+            if right_high < left_low:
+                gap_atr = (left_low - right_high) / atr
+                if gap_atr >= 0.12:
+                    zones.append(
+                        StructureZone(
+                            kind="fvg",
+                            side="resistance",
+                            low=float(right_high),
+                            high=float(left_low),
+                            score=float((1.0 + min(gap_atr, 1.5)) * recency),
+                            timeframe=timeframe,
+                            source_ts=right["start_ts"],
+                            source=f"{timeframe}_bearish_fvg",
+                        )
+                    )
+        return zones
+
+    def _high_volume_reversal_zones(
+        self,
+        *,
+        setup_idx: int,
+        setup_ts: datetime,
+        lookback_days: int,
+    ) -> list[StructureZone]:
+        min_ts = setup_ts - timedelta(days=lookback_days)
+        start = max(0, setup_idx - int(lookback_days * 24 * 12))
+        zones: list[StructureZone] = []
+        for idx in range(start, setup_idx):
+            if self.ts_5m[idx] < min_ts:
+                continue
+            atr = max(self.atr_5m[idx], 1e-9)
+            bar_range = max(self._bar_range_5m(idx), 1e-9)
+            if bar_range < 0.8 * atr:
+                continue
+            volume_med = self._volume_median_5m(idx - 96, idx)
+            if volume_med <= 0.0:
+                continue
+            volume_factor = self.volumes_5m[idx] / volume_med
+            if volume_factor < 2.0:
+                continue
+            body_low = min(self.opens_5m[idx], self.closes_5m[idx])
+            body_high = max(self.opens_5m[idx], self.closes_5m[idx])
+            lower_wick = max(body_low - self.lows_5m[idx], 0.0)
+            upper_wick = max(self.highs_5m[idx] - body_high, 0.0)
+            close_pos = self._close_position_in_bar_5m(idx)
+            age_days = max((setup_ts - self.ts_5m[idx]).total_seconds() / 86400.0, 0.0)
+            recency = max(0.20, 1.0 - age_days / max(float(lookback_days), 1.0))
+            if lower_wick / bar_range >= 0.40 and close_pos >= 0.55:
+                zones.append(
+                    StructureZone(
+                        kind="high_volume_reversal",
+                        side="support",
+                        low=float(self.lows_5m[idx]),
+                        high=float(body_low),
+                        score=float(min(volume_factor / 2.0, 2.5) * recency),
+                        timeframe="5m",
+                        source_ts=self.ts_5m[idx],
+                        source="5m_high_volume_lower_rejection",
+                    )
+                )
+            if upper_wick / bar_range >= 0.40 and close_pos <= 0.45:
+                zones.append(
+                    StructureZone(
+                        kind="high_volume_reversal",
+                        side="resistance",
+                        low=float(body_high),
+                        high=float(self.highs_5m[idx]),
+                        score=float(min(volume_factor / 2.0, 2.5) * recency),
+                        timeframe="5m",
+                        source_ts=self.ts_5m[idx],
+                        source="5m_high_volume_upper_rejection",
+                    )
+                )
+        return zones[-80:]
+
+    def _volume_node_zones(
+        self,
+        *,
+        setup_idx: int,
+        setup_ts: datetime,
+        entry_price: float,
+        lookback_days: int,
+    ) -> list[StructureZone]:
+        start = max(0, setup_idx - int(lookback_days * 24 * 12))
+        highs = self.highs_5m[start:setup_idx]
+        lows = self.lows_5m[start:setup_idx]
+        if len(highs) < 100:
+            return []
+        low = min(lows)
+        high = max(highs)
+        if high <= low:
+            return []
+        bin_count = 64
+        width = (high - low) / bin_count
+        volumes = [0.0] * bin_count
+        for idx in range(start, setup_idx):
+            typical = (self.highs_5m[idx] + self.lows_5m[idx] + self.closes_5m[idx]) / 3.0
+            bucket = max(0, min(bin_count - 1, int((typical - low) / max(width, 1e-9))))
+            volumes[bucket] += self.volumes_5m[idx]
+        ranked = sorted(range(bin_count), key=lambda item: volumes[item], reverse=True)[:6]
+        max_volume = max(volumes) if volumes else 0.0
+        zones: list[StructureZone] = []
+        for bucket in ranked:
+            if max_volume <= 0.0 or volumes[bucket] <= 0.0:
+                continue
+            zone_low = low + bucket * width
+            zone_high = zone_low + width
+            mid = (zone_low + zone_high) / 2.0
+            side: Literal["support", "resistance"] = "support" if mid <= entry_price else "resistance"
+            zones.append(
+                StructureZone(
+                    kind="volume_node",
+                    side=side,
+                    low=float(zone_low),
+                    high=float(zone_high),
+                    score=float(0.80 * volumes[bucket] / max_volume),
+                    timeframe=f"{lookback_days}d",
+                    source_ts=setup_ts - timedelta(days=lookback_days),
+                    source=f"{lookback_days}d_volume_node",
+                )
+            )
+        return zones
+
+    def _higher_timeframe_structure_context(
+        self,
+        *,
+        setup_idx: int,
+        direction: Direction,
+        entry_price: float,
+        atr: float,
+    ) -> dict[str, Any]:
+        policy = self.exit_policy
+        if not _safe_bool(policy.higher_timeframe_structure_enabled):
+            return {}
+        setup_ts = self.ts_5m[setup_idx]
+        lookback_days = max(int(policy.higher_timeframe_lookback_days), 7)
+        zones: list[StructureZone] = []
+        zones.extend(
+            self._htf_order_block_zones(
+                bars=self.htf_1d_bars,
+                atr_values=self.htf_1d_atr,
+                setup_ts=setup_ts,
+                timeframe="1d",
+                lookback_days=lookback_days,
+            )
+        )
+        zones.extend(
+            self._htf_fvg_zones(
+                bars=self.htf_1d_bars,
+                atr_values=self.htf_1d_atr,
+                setup_ts=setup_ts,
+                timeframe="1d",
+                lookback_days=lookback_days,
+            )
+        )
+        zones.extend(
+            self._htf_order_block_zones(
+                bars=self.htf_4h_bars,
+                atr_values=self.htf_4h_atr,
+                setup_ts=setup_ts,
+                timeframe="4h",
+                lookback_days=lookback_days,
+            )
+        )
+        zones.extend(
+            self._htf_fvg_zones(
+                bars=self.htf_4h_bars,
+                atr_values=self.htf_4h_atr,
+                setup_ts=setup_ts,
+                timeframe="4h",
+                lookback_days=lookback_days,
+            )
+        )
+        zones.extend(self._high_volume_reversal_zones(setup_idx=setup_idx, setup_ts=setup_ts, lookback_days=lookback_days))
+        zones.extend(
+            self._volume_node_zones(
+                setup_idx=setup_idx,
+                setup_ts=setup_ts,
+                entry_price=entry_price,
+                lookback_days=lookback_days,
+            )
+        )
+        if not zones:
+            return {
+                "htf_structure_enabled": True,
+                "htf_structure_anchor_score": 0.0,
+                "htf_structure_zone_count": 0,
+            }
+
+        anchor_side: Literal["support", "resistance"] = "support" if direction == "long" else "resistance"
+        target_side: Literal["support", "resistance"] = "resistance" if direction == "long" else "support"
+        max_distance_atr = max(float(policy.higher_timeframe_entry_max_distance_atr), 0.0)
+        anchor_candidates: list[tuple[float, float, StructureZone]] = []
+        for zone in zones:
+            if zone.side != anchor_side:
+                continue
+            distance = self._zone_distance(entry_price, zone)
+            distance_atr = distance / max(float(atr), 1e-9)
+            if max_distance_atr > 0.0 and distance_atr > max_distance_atr:
+                continue
+            adjusted_score = float(zone.score) / (1.0 + distance_atr)
+            anchor_candidates.append((adjusted_score, distance_atr, zone))
+        anchor_candidates.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+        anchor = anchor_candidates[0] if anchor_candidates else None
+
+        direction_sign = 1.0 if direction == "long" else -1.0
+        target_candidates: list[tuple[float, float, StructureZone]] = []
+        for zone in zones:
+            if zone.side != target_side:
+                continue
+            target_price = zone.low if direction == "long" else zone.high
+            progress_atr = direction_sign * (target_price - entry_price) / max(float(atr), 1e-9)
+            if progress_atr <= 0.25:
+                continue
+            target_candidates.append((progress_atr, zone.score, zone))
+        target_candidates.sort(key=lambda item: item[0])
+
+        payload: dict[str, Any] = {
+            "htf_structure_enabled": True,
+            "htf_structure_zone_count": len(zones),
+            "htf_structure_anchor_score": round(float(anchor[0]), 6) if anchor is not None else 0.0,
+            "htf_structure_anchor_distance_atr": round(float(anchor[1]), 6) if anchor is not None else None,
+            "htf_structure_anchor": self._zone_payload(anchor[2], distance_atr=anchor[1]) if anchor is not None else None,
+        }
+        if anchor is not None:
+            payload.update(
+                {
+                    "htf_structure_anchor_kind": anchor[2].kind,
+                    "htf_structure_anchor_source": anchor[2].source,
+                    "htf_structure_anchor_low": float(anchor[2].low),
+                    "htf_structure_anchor_high": float(anchor[2].high),
+                }
+            )
+        if _safe_bool(policy.higher_timeframe_target_enabled):
+            selected_targets = target_candidates[:6]
+            payload["htf_structure_target_prices"] = [
+                float(item[2].low if direction == "long" else item[2].high) for item in selected_targets
+            ]
+            payload["htf_structure_target_sources"] = [str(item[2].source) for item in selected_targets]
+            payload["htf_structure_targets"] = [
+                self._zone_payload(item[2], distance_atr=item[0]) for item in selected_targets
+            ]
+        return payload
 
     @staticmethod
     def _session_anchor_hours() -> tuple[int, ...]:
@@ -535,6 +1001,87 @@ class SessionImpulseRetestResearch:
         )
         return profile, target_rr, tp_levels, quality_score
 
+    @staticmethod
+    def _structure_tp_profile(
+        *,
+        policy: SessionImpulseRetestExitPolicy,
+        signal: MicroSignal,
+        entry: float,
+        risk_abs: float,
+        atr: float,
+        target_profile: str,
+        tp1_fraction: float,
+    ) -> tuple[float, tuple[tuple[str, float, float], ...], dict[str, Any]] | None:
+        raw_prices = signal.diagnostics.get("structure_target_prices") if signal.diagnostics else None
+        raw_sources = signal.diagnostics.get("structure_target_sources") if signal.diagnostics else None
+        if not isinstance(raw_prices, list):
+            return None
+        sources = raw_sources if isinstance(raw_sources, list) else []
+        direction_sign = 1.0 if signal.direction == "long" else -1.0
+        buffer_abs = max(float(policy.structure_target_buffer_atr), 0.0) * max(float(atr), 1e-9)
+        candidates: list[dict[str, Any]] = []
+        for idx, raw_price in enumerate(raw_prices):
+            level_price = _safe_float(raw_price, 0.0)
+            if level_price <= 0.0:
+                continue
+            target_price = level_price - direction_sign * buffer_abs
+            rr = direction_sign * (target_price - entry) / max(risk_abs, 1e-9)
+            if rr <= 0.0:
+                continue
+            source = str(sources[idx]) if idx < len(sources) else f"structure_target_{idx + 1}"
+            candidates.append(
+                {
+                    "source": source,
+                    "level_price": level_price,
+                    "target_price": target_price,
+                    "rr": rr,
+                }
+            )
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: float(item["rr"]))
+        tp1_min_rr = max(float(policy.structure_tp1_min_rr), 0.1)
+        tp2_min_rr = max(float(policy.structure_tp2_min_rr), tp1_min_rr + 0.25)
+        tp_max_rr = max(float(policy.structure_tp_max_rr), tp2_min_rr)
+        tp1_candidate = next((item for item in candidates if float(item["rr"]) >= tp1_min_rr), None)
+        if tp1_candidate is None:
+            return None
+        tp2_candidate = next(
+            (
+                item
+                for item in candidates
+                if float(item["rr"]) >= max(tp2_min_rr, float(tp1_candidate["rr"]) + 0.25)
+                and float(item["rr"]) <= tp_max_rr
+            ),
+            None,
+        )
+        if tp2_candidate is None:
+            return None
+
+        tp1_rr = float(tp1_candidate["rr"])
+        tp2_rr = float(tp2_candidate["rr"])
+        levels = SessionImpulseRetestExitPolicy._normalize_tp_levels(
+            (
+                ("tp1", tp1_rr, tp1_fraction),
+                ("tp2", tp2_rr, 1.0 - tp1_fraction),
+            )
+        )
+        return (
+            tp2_rr,
+            levels,
+            {
+                "policy_target_profile": f"structure_{target_profile}",
+                "policy_structure_tp1_source": tp1_candidate["source"],
+                "policy_structure_tp2_source": tp2_candidate["source"],
+                "policy_structure_tp1_price": float(tp1_candidate["target_price"]),
+                "policy_structure_tp2_price": float(tp2_candidate["target_price"]),
+                "policy_structure_tp1_level_price": float(tp1_candidate["level_price"]),
+                "policy_structure_tp2_level_price": float(tp2_candidate["level_price"]),
+                "policy_structure_candidate_count": len(candidates),
+            },
+        )
+
     def _apply_exit_policy(self, signal: MicroSignal) -> MicroSignal | None:
         policy = self.exit_policy
         setup_idx = self._index_5m_by_ts.get(self._normalize_ts(signal.setup_ts))
@@ -543,6 +1090,16 @@ class SessionImpulseRetestResearch:
         entry = float(signal.entry_price)
         if entry <= 0.0:
             return None
+        if _safe_bool(policy.structure_targets_enabled):
+            entry_distance_atr = _safe_float((signal.diagnostics or {}).get("entry_distance_atr"), 0.0)
+            max_entry_distance_atr = max(float(policy.structure_entry_max_distance_atr), 0.0)
+            if max_entry_distance_atr > 0.0 and entry_distance_atr > max_entry_distance_atr:
+                return None
+        if _safe_bool(policy.higher_timeframe_structure_enabled):
+            min_anchor_score = max(float(policy.higher_timeframe_entry_min_score), 0.0)
+            anchor_score = _safe_float((signal.diagnostics or {}).get("htf_structure_anchor_score"), 0.0)
+            if min_anchor_score > 0.0 and anchor_score < min_anchor_score:
+                return None
         direction_sign = 1.0 if signal.direction == "long" else -1.0
         atr = max(float(self.atr_5m[setup_idx]), 1e-9)
         legacy_stop = float(signal.stop_price)
@@ -561,6 +1118,14 @@ class SessionImpulseRetestResearch:
             else:
                 structure_stop = self._rolling_high_5m(start, setup_idx + 1) + buffer_atr * atr
                 stop = max(legacy_stop, structure_stop)
+        if _safe_bool(policy.higher_timeframe_structure_enabled) and _safe_bool(policy.higher_timeframe_stop_enabled):
+            buffer_abs = max(float(policy.higher_timeframe_stop_buffer_atr), 0.0) * atr
+            anchor_low = _safe_float((signal.diagnostics or {}).get("htf_structure_anchor_low"), 0.0)
+            anchor_high = _safe_float((signal.diagnostics or {}).get("htf_structure_anchor_high"), 0.0)
+            if signal.direction == "long" and anchor_low > 0.0 and anchor_low < entry:
+                stop = min(stop, anchor_low - buffer_abs)
+            elif signal.direction == "short" and anchor_high > 0.0 and anchor_high > entry:
+                stop = max(stop, anchor_high + buffer_abs)
 
         risk_abs = entry - stop if signal.direction == "long" else stop - entry
         if risk_abs <= 0.0:
@@ -582,12 +1147,27 @@ class SessionImpulseRetestResearch:
         quality_score = self._exit_policy_quality_score(signal.diagnostics or {})
         tp_levels = policy.tp_levels()
         target_rr = max(float(policy.target_rr), 0.1)
+        structure_diagnostics: dict[str, Any] = {}
         if _safe_bool(policy.adaptive_targets_enabled):
             target_profile, target_rr, tp_levels, quality_score = self._adaptive_tp_profile(
                 policy=policy,
                 diagnostics=signal.diagnostics or {},
                 stop_expansion_ratio=stop_expansion_ratio,
             )
+        if _safe_bool(policy.structure_targets_enabled):
+            tp1_fraction = tp_levels[0][2] if tp_levels else float(policy.tp1_fraction or 0.35)
+            structure_profile = self._structure_tp_profile(
+                policy=policy,
+                signal=signal,
+                entry=entry,
+                risk_abs=risk_abs,
+                atr=atr,
+                target_profile=target_profile,
+                tp1_fraction=tp1_fraction,
+            )
+            if structure_profile is not None:
+                target_rr, tp_levels, structure_diagnostics = structure_profile
+                target_profile = str(structure_diagnostics.get("policy_target_profile") or target_profile)
         target = entry + direction_sign * target_rr * risk_abs
         tp_diagnostics: dict[str, float] = {}
         for label, rr, fraction in tp_levels:
@@ -607,6 +1187,7 @@ class SessionImpulseRetestResearch:
             "policy_target_profile": target_profile,
             "policy_quality_score": quality_score,
             "policy_max_hold_minutes": int(policy.max_hold_minutes),
+            **structure_diagnostics,
             **tp_diagnostics,
         }
         return MicroSignal(
@@ -706,13 +1287,49 @@ class SessionImpulseRetestResearch:
                         retest_wait_minutes=retest_wait_minutes,
                     )
                 ):
+                    structure_context = self._higher_timeframe_structure_context(
+                        setup_idx=idx,
+                        direction="long",
+                        entry_price=entry_price,
+                        atr=atr,
+                    )
+                    session_target_pairs = [
+                        ("drive_high", drive_high),
+                        ("opening_range_measured_move_1x", orb_high + orb_width),
+                        ("opening_range_measured_move_1_5x", orb_high + 1.5 * orb_width),
+                        ("opening_range_measured_move_2x", orb_high + 2.0 * orb_width),
+                    ]
+                    htf_prices = list(structure_context.get("htf_structure_target_prices") or [])
+                    htf_sources = list(structure_context.get("htf_structure_target_sources") or [])
+                    structure_target_prices = [
+                        float(price)
+                        for _source, price in session_target_pairs
+                        if float(price) > float(entry_price)
+                    ]
+                    structure_target_sources = [
+                        source
+                        for source, price in session_target_pairs
+                        if float(price) > float(entry_price)
+                    ]
+                    for htf_source, htf_price in zip(htf_sources, htf_prices, strict=False):
+                        if _safe_float(htf_price, 0.0) > float(entry_price):
+                            structure_target_sources.append(f"htf:{htf_source}")
+                            structure_target_prices.append(float(htf_price))
                     diagnostics = {
                         **base_diagnostics,
+                        "entry_key_level": float(long_reclaim),
+                        "entry_zone_low": float(long_reclaim - float(profile["entry_retest_buffer_atr"]) * atr),
+                        "entry_zone_high": float(long_reclaim + float(profile["entry_retest_buffer_atr"]) * atr),
+                        "entry_distance_atr": float(abs(entry_price - long_reclaim) / atr),
+                        "stop_key_level": float(min(self.lows_5m[idx], long_reclaim)),
+                        "structure_target_prices": structure_target_prices,
+                        "structure_target_sources": structure_target_sources,
                         "drive_extension_atr": float((drive_high - orb_high) / atr),
                         "reclaim_overshoot_atr": float((long_reclaim - self.lows_5m[idx]) / atr),
                         "retest_wait_minutes": retest_wait_minutes,
                         "risk_atr": risk_atr,
                         "risk_pct": float(risk_abs / max(entry_price, 1e-9)),
+                        **structure_context,
                     }
                     return self._apply_exit_policy(
                         MicroSignal(
@@ -772,13 +1389,49 @@ class SessionImpulseRetestResearch:
                         retest_wait_minutes=retest_wait_minutes,
                     )
                 ):
+                    structure_context = self._higher_timeframe_structure_context(
+                        setup_idx=idx,
+                        direction="short",
+                        entry_price=entry_price,
+                        atr=atr,
+                    )
+                    session_target_pairs = [
+                        ("drive_low", drive_low),
+                        ("opening_range_measured_move_1x", orb_low - orb_width),
+                        ("opening_range_measured_move_1_5x", orb_low - 1.5 * orb_width),
+                        ("opening_range_measured_move_2x", orb_low - 2.0 * orb_width),
+                    ]
+                    htf_prices = list(structure_context.get("htf_structure_target_prices") or [])
+                    htf_sources = list(structure_context.get("htf_structure_target_sources") or [])
+                    structure_target_prices = [
+                        float(price)
+                        for _source, price in session_target_pairs
+                        if float(price) < float(entry_price)
+                    ]
+                    structure_target_sources = [
+                        source
+                        for source, price in session_target_pairs
+                        if float(price) < float(entry_price)
+                    ]
+                    for htf_source, htf_price in zip(htf_sources, htf_prices, strict=False):
+                        if 0.0 < _safe_float(htf_price, 0.0) < float(entry_price):
+                            structure_target_sources.append(f"htf:{htf_source}")
+                            structure_target_prices.append(float(htf_price))
                     diagnostics = {
                         **base_diagnostics,
+                        "entry_key_level": float(short_reclaim),
+                        "entry_zone_low": float(short_reclaim - float(profile["entry_retest_buffer_atr"]) * atr),
+                        "entry_zone_high": float(short_reclaim + float(profile["entry_retest_buffer_atr"]) * atr),
+                        "entry_distance_atr": float(abs(entry_price - short_reclaim) / atr),
+                        "stop_key_level": float(max(self.highs_5m[idx], short_reclaim)),
+                        "structure_target_prices": structure_target_prices,
+                        "structure_target_sources": structure_target_sources,
                         "drive_extension_atr": float((orb_low - drive_low) / atr),
                         "reclaim_overshoot_atr": float((self.highs_5m[idx] - short_reclaim) / atr),
                         "retest_wait_minutes": retest_wait_minutes,
                         "risk_atr": risk_atr,
                         "risk_pct": float(risk_abs / max(entry_price, 1e-9)),
+                        **structure_context,
                     }
                     return self._apply_exit_policy(
                         MicroSignal(

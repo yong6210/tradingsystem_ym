@@ -143,7 +143,7 @@ def test_session_impulse_retest_runtime_plan_uses_exit_policy_levels(monkeypatch
         max_hold_minutes=40,
         regime_hint="trend",
         diagnostics={
-            "exit_policy_name": "adaptive_floor_min_0_003_live_split",
+            "exit_policy_name": "structure_adaptive_floor_min_0_003_live_split",
             "policy_target_rr": 2.5,
             "policy_target_profile": "strong",
             "policy_tp1_rr": 1.0,

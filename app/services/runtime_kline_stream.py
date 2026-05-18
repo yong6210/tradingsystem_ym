@@ -21,6 +21,10 @@ class TpMarketFallbackProcessor(Protocol):
     def __call__(self, *, symbol: str) -> dict[str, Any]: ...
 
 
+class PositionManagementProcessor(Protocol):
+    def __call__(self, *, symbol: str) -> dict[str, Any]: ...
+
+
 ProgressCallback = Callable[[dict[str, Any]], Any]
 RefreshSymbol = Callable[[str], dict[str, Any]]
 
@@ -43,6 +47,7 @@ class RuntimeKlineStreamService:
         auto_route_symbol: AutoRouteSymbol,
         auto_route_session_impulse_retest_plans: AutoRouteSessionImpulseRetestPlans,
         tp_market_fallback_processor: TpMarketFallbackProcessor | None = None,
+        position_management_processor: PositionManagementProcessor | None = None,
     ):
         self.db = db
         self.market_data = market_data
@@ -51,6 +56,7 @@ class RuntimeKlineStreamService:
         self.auto_route_symbol = auto_route_symbol
         self.auto_route_session_impulse_retest_plans = auto_route_session_impulse_retest_plans
         self.tp_market_fallback_processor = tp_market_fallback_processor
+        self.position_management_processor = position_management_processor
 
     async def stream(
         self,
@@ -89,6 +95,9 @@ class RuntimeKlineStreamService:
             "tp_market_fallback_calls": 0,
             "tp_market_fallback_submitted": 0,
             "tp_market_fallback_errors": 0,
+            "position_management_calls": 0,
+            "position_management_adjusted": 0,
+            "position_management_errors": 0,
             "progress_callback_errors": 0,
             "reconnects": 0,
             "per_interval": {iv: 0 for iv in selected_intervals},
@@ -213,6 +222,20 @@ class RuntimeKlineStreamService:
                                             stats["tp_market_fallback_errors"] += 1
                                             stats["last_tp_market_fallback_error"] = f"{exc.__class__.__name__}:{exc}"
                                             stats["last_tp_market_fallback_error_at"] = datetime.now(timezone.utc).isoformat()
+                                    if self.position_management_processor is not None:
+                                        try:
+                                            management_payload = self.position_management_processor(symbol=kline.symbol)
+                                            stats["position_management_calls"] += 1
+                                            stats["position_management_adjusted"] += int(
+                                                management_payload.get("adjusted_count", 0) or 0
+                                            )
+                                            stats["last_position_management_error"] = ""
+                                            stats["last_position_management_success_at"] = datetime.now(timezone.utc).isoformat()
+                                        except Exception as exc:
+                                            self.db.rollback()
+                                            stats["position_management_errors"] += 1
+                                            stats["last_position_management_error"] = f"{exc.__class__.__name__}:{exc}"
+                                            stats["last_position_management_error_at"] = datetime.now(timezone.utc).isoformat()
                                 refresh_guard[refresh_key] = now
 
                         _emit_progress()

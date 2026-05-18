@@ -163,7 +163,7 @@ class Settings(BaseSettings):
     session_impulse_retest_miss_detector_report_dir: str = "reports/validation/micro_main_miss_detectors"
     session_impulse_retest_miss_alert_enabled: bool = True
     session_impulse_retest_miss_alert_cooldown_seconds: int = 1800
-    session_impulse_retest_exit_policy_name: str = "adaptive_floor_min_0_003_live_split"
+    session_impulse_retest_exit_policy_name: str = "structure_adaptive_floor_min_0_003_live_split"
     session_impulse_retest_exit_min_stop_pct: float = 0.003
     session_impulse_retest_exit_min_risk_atr: float = 0.35
     session_impulse_retest_exit_target_rr: float = 2.5
@@ -178,6 +178,19 @@ class Settings(BaseSettings):
     session_impulse_retest_exit_adaptive_strong_tp1_fraction: float = 0.25
     session_impulse_retest_exit_adaptive_normal_tp1_fraction: float = 0.35
     session_impulse_retest_exit_adaptive_defensive_tp1_fraction: float = 0.45
+    session_impulse_retest_exit_structure_targets_enabled: bool = True
+    session_impulse_retest_exit_structure_entry_max_distance_atr: float = 0.45
+    session_impulse_retest_exit_structure_target_buffer_atr: float = 0.05
+    session_impulse_retest_exit_structure_tp1_min_rr: float = 0.8
+    session_impulse_retest_exit_structure_tp2_min_rr: float = 1.6
+    session_impulse_retest_exit_structure_tp_max_rr: float = 3.2
+    session_impulse_retest_exit_higher_timeframe_structure_enabled: bool = False
+    session_impulse_retest_exit_higher_timeframe_entry_min_score: float = 0.0
+    session_impulse_retest_exit_higher_timeframe_entry_max_distance_atr: float = 0.8
+    session_impulse_retest_exit_higher_timeframe_lookback_days: int = 28
+    session_impulse_retest_exit_higher_timeframe_target_enabled: bool = True
+    session_impulse_retest_exit_higher_timeframe_stop_enabled: bool = False
+    session_impulse_retest_exit_higher_timeframe_stop_buffer_atr: float = 0.08
 
     # Zone type importance multipliers (lower multiplier means less trust).
     weight_zone_ob: float = 1.00
@@ -458,6 +471,10 @@ class Settings(BaseSettings):
     auto_trading_live_protection_failure_flatten_enabled: bool = True
     auto_trading_live_tp_limit_attach_enabled: bool = True
     auto_trading_live_tp_market_fallback_seconds: int = 20
+    auto_trading_live_position_manager_enabled: bool = True
+    auto_trading_live_breakeven_after_partial_enabled: bool = True
+    auto_trading_live_breakeven_offset_bps: float = 1.0
+    auto_trading_live_breakeven_min_improvement_bps: float = 1.0
     auto_trading_micro_live_allowed_symbols: str = CURRENT_MICRO_LIVE_SYMBOLS
     auto_trading_micro_live_symbol_priority: str = CURRENT_MICRO_LIVE_SYMBOLS
     auto_trading_micro_live_direction_contract: str = CURRENT_MICRO_LIVE_DIRECTION_CONTRACT

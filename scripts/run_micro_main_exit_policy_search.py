@@ -35,6 +35,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--stage1-days", type=int, default=365)
     parser.add_argument("--stage2-days", type=int, default=1095)
     parser.add_argument("--stage2-top", type=int, default=30)
+    parser.add_argument("--stage1-min-trades", type=int, default=0)
+    parser.add_argument("--stage2-min-trades", type=int, default=0)
     parser.add_argument("--max-policies", type=int, default=0)
     parser.add_argument("--report-dir", default="reports/validation/micro_main_exit_policy_search")
     parser.add_argument("--write-report", action="store_true")
@@ -138,6 +140,75 @@ def build_exit_policies() -> list[SessionImpulseRetestExitPolicy]:
             adaptive_targets_enabled=True,
         )
     )
+    policies.append(
+        SessionImpulseRetestExitPolicy(
+            name="structure_adaptive_floor_min_0_003_live_split",
+            stop_mode="floor",
+            min_stop_pct=0.003,
+            min_risk_atr=0.35,
+            target_rr=2.5,
+            max_hold_minutes=40,
+            time_guard_10m_min_mfe_r=0.20,
+            time_guard_20m_min_mfe_r=0.35,
+            tp1_rr=1.0,
+            tp1_fraction=0.35,
+            tp2_rr=2.5,
+            tp2_fraction=0.65,
+            adaptive_targets_enabled=True,
+            structure_targets_enabled=True,
+            structure_entry_max_distance_atr=0.45,
+            structure_target_buffer_atr=0.05,
+            structure_tp1_min_rr=0.8,
+            structure_tp2_min_rr=1.6,
+            structure_tp_max_rr=3.2,
+        )
+    )
+    for min_score in (0.0, 0.4, 0.7, 1.0):
+        for lookback_days in (21, 42):
+            for hold in (40, 90, 240, 720):
+                for stop_enabled in (False, True):
+                    for tp_max_rr in (3.2, 4.5):
+                        swing_suffix = "scalp" if hold <= 90 else "short_swing"
+                        policies.append(
+                            SessionImpulseRetestExitPolicy(
+                                name=(
+                                    f"htf_structure:{swing_suffix}:score{min_score:.1f}:"
+                                    f"lookback{lookback_days}:hold{hold}:"
+                                    f"stop{'on' if stop_enabled else 'off'}:tpmax{tp_max_rr:.1f}"
+                                ),
+                                stop_mode="floor",
+                                min_stop_pct=0.003,
+                                min_risk_atr=0.35,
+                                target_rr=3.0 if hold <= 90 else 4.0,
+                                max_hold_minutes=hold,
+                                time_guard_10m_min_mfe_r=0.20 if hold <= 90 else None,
+                                time_guard_20m_min_mfe_r=0.35 if hold <= 90 else None,
+                                tp1_rr=1.0,
+                                tp1_fraction=0.30 if hold <= 90 else 0.25,
+                                tp2_rr=3.0 if hold <= 90 else 4.0,
+                                tp2_fraction=0.70 if hold <= 90 else 0.75,
+                                adaptive_targets_enabled=True,
+                                adaptive_strong_target_rr=3.0 if hold <= 90 else 4.0,
+                                adaptive_normal_target_rr=2.4 if hold <= 90 else 3.2,
+                                adaptive_defensive_target_rr=2.0 if hold <= 90 else 2.4,
+                                adaptive_strong_tp1_fraction=0.25,
+                                adaptive_normal_tp1_fraction=0.35,
+                                adaptive_defensive_tp1_fraction=0.45,
+                                structure_targets_enabled=True,
+                                structure_entry_max_distance_atr=0.45,
+                                structure_target_buffer_atr=0.05,
+                                structure_tp1_min_rr=0.8,
+                                structure_tp2_min_rr=1.6 if hold <= 90 else 2.0,
+                                structure_tp_max_rr=tp_max_rr,
+                                higher_timeframe_structure_enabled=True,
+                                higher_timeframe_entry_min_score=min_score,
+                                higher_timeframe_entry_max_distance_atr=0.8,
+                                higher_timeframe_lookback_days=lookback_days,
+                                higher_timeframe_target_enabled=True,
+                                higher_timeframe_stop_enabled=stop_enabled,
+                                higher_timeframe_stop_buffer_atr=0.08,
+                            )
+                        )
     for min_stop in (0.003, 0.004, 0.005):
         for min_risk_atr in (0.0, 0.35):
             for rr in (2.0, 2.5, 3.0):
@@ -356,7 +427,9 @@ def main() -> int:
             monthly_client=monthly_client,
             rest_client=rest_client,
         )
-        stage1_ranked = _rank(stage1_rows, min_trades=max(20, int(args.stage1_days) // 2))
+        stage1_min_trades = int(args.stage1_min_trades or 0) or max(20, int(args.stage1_days) // 2)
+        stage2_min_trades = int(args.stage2_min_trades or 0) or max(50, int(args.stage2_days) // 2)
+        stage1_ranked = _rank(stage1_rows, min_trades=stage1_min_trades)
         stage2_policies = [_policy_from_row(row) for row in stage1_ranked[: max(int(args.stage2_top), 1)]]
         stage2_rows, stage2_data = run_stage(
             symbols=symbols,
@@ -374,10 +447,13 @@ def main() -> int:
             "stage1_symbols": stage1_symbols,
             "stage1_days": int(args.stage1_days),
             "stage2_days": int(args.stage2_days),
+            "stage1_min_trades": stage1_min_trades,
+            "stage2_min_trades": stage2_min_trades,
             "policy_count": len(policies),
             "stage2_policy_count": len(stage2_policies),
             "notes": [
                 "entry signal is still session_impulse_retest; this search changes only SL/TP and time-exit behavior",
+                "higher-timeframe structure candidates add 1d/4h order blocks, FVGs, high-volume rejection zones, and recent volume nodes as compareable anchors/targets",
                 "same-minute stop and target collision is treated as stop-first",
                 "fee model uses existing round-trip fee assumption from SessionImpulseRetestResearch",
             ],
@@ -385,7 +461,8 @@ def main() -> int:
         "stage1_data_status": stage1_data,
         "stage2_data_status": stage2_data,
         "stage1_top": stage1_ranked[:50],
-        "stage2_top": _rank(stage2_rows, min_trades=max(50, int(args.stage2_days) // 2))[:50],
+        "stage1_all": stage1_rows,
+        "stage2_top": _rank(stage2_rows, min_trades=stage2_min_trades)[:50],
         "stage2_all": stage2_rows,
     }
     if args.write_report:
