@@ -111,6 +111,53 @@ def _add_policy(
     policies.append(SessionImpulseRetestExitPolicy(**payload))
 
 
+def _add_structure_buffered_policy(
+    policies: list[SessionImpulseRetestExitPolicy],
+    *,
+    swing: int,
+    stop_buffer: float,
+    target_buffer: float,
+    name_suffix: str = "",
+    stop_after_partial_rr: float | None = None,
+    adverse_volume_exit_enabled: bool = False,
+    adverse_volume_exit_after_partial_only: bool = True,
+    adverse_volume_exit_min_factor: float = 2.5,
+    adverse_volume_exit_min_body_r: float = 0.25,
+) -> None:
+    suffix = f"_{name_suffix}" if name_suffix else ""
+    policies.append(
+        SessionImpulseRetestExitPolicy(
+            name=f"structure_buffered_swing{swing}_stop{stop_buffer:.2f}_tpbuf{target_buffer:.2f}{suffix}",
+            stop_mode="structure_floor",
+            swing_lookback_bars=swing,
+            stop_buffer_atr=stop_buffer,
+            min_stop_pct=0.003,
+            min_risk_atr=0.35,
+            target_rr=2.5,
+            max_hold_minutes=40,
+            time_guard_10m_min_mfe_r=0.20,
+            time_guard_20m_min_mfe_r=0.35,
+            tp1_rr=1.0,
+            tp1_fraction=0.35,
+            tp2_rr=2.5,
+            tp2_fraction=0.65,
+            adaptive_targets_enabled=True,
+            structure_targets_enabled=True,
+            structure_entry_max_distance_atr=0.45,
+            structure_target_buffer_atr=target_buffer,
+            structure_tp1_min_rr=0.8,
+            structure_tp2_min_rr=1.6,
+            structure_tp_max_rr=3.2,
+            stop_after_partial_rr=stop_after_partial_rr,
+            adverse_volume_exit_enabled=adverse_volume_exit_enabled,
+            adverse_volume_exit_after_partial_only=adverse_volume_exit_after_partial_only,
+            adverse_volume_exit_min_factor=adverse_volume_exit_min_factor,
+            adverse_volume_exit_min_body_r=adverse_volume_exit_min_body_r,
+            adverse_volume_exit_lookback_bars=20,
+        )
+    )
+
+
 def build_exit_policies() -> list[SessionImpulseRetestExitPolicy]:
     policies: list[SessionImpulseRetestExitPolicy] = []
     _add_policy(policies, name="legacy_full_2r", stop_mode="legacy", rr=2.0, hold=40, guard="current")
@@ -225,31 +272,36 @@ def build_exit_policies() -> list[SessionImpulseRetestExitPolicy]:
         )
     )
     for swing, stop_buffer, target_buffer in ((6, 0.12, 0.08), (12, 0.18, 0.10)):
-        policies.append(
-            SessionImpulseRetestExitPolicy(
-                name=f"structure_buffered_swing{swing}_stop{stop_buffer:.2f}_tpbuf{target_buffer:.2f}",
-                stop_mode="structure_floor",
-                swing_lookback_bars=swing,
-                stop_buffer_atr=stop_buffer,
-                min_stop_pct=0.003,
-                min_risk_atr=0.35,
-                target_rr=2.5,
-                max_hold_minutes=40,
-                time_guard_10m_min_mfe_r=0.20,
-                time_guard_20m_min_mfe_r=0.35,
-                tp1_rr=1.0,
-                tp1_fraction=0.35,
-                tp2_rr=2.5,
-                tp2_fraction=0.65,
-                adaptive_targets_enabled=True,
-                structure_targets_enabled=True,
-                structure_entry_max_distance_atr=0.45,
-                structure_target_buffer_atr=target_buffer,
-                structure_tp1_min_rr=0.8,
-                structure_tp2_min_rr=1.6,
-                structure_tp_max_rr=3.2,
-            )
+        _add_structure_buffered_policy(
+            policies,
+            swing=swing,
+            stop_buffer=stop_buffer,
+            target_buffer=target_buffer,
         )
+    for stop_after_partial_rr in (0.0, 0.10, 0.20):
+        _add_structure_buffered_policy(
+            policies,
+            swing=6,
+            stop_buffer=0.12,
+            target_buffer=0.08,
+            name_suffix=f"pm_stop{stop_after_partial_rr:.2f}r",
+            stop_after_partial_rr=stop_after_partial_rr,
+        )
+    for stop_after_partial_rr in (0.0, 0.10):
+        for after_partial_only in (True, False):
+            _add_structure_buffered_policy(
+                policies,
+                swing=6,
+                stop_buffer=0.12,
+                target_buffer=0.08,
+                name_suffix=(
+                    f"pm_stop{stop_after_partial_rr:.2f}r_advvol_"
+                    f"{'postpartial' if after_partial_only else 'any'}"
+                ),
+                stop_after_partial_rr=stop_after_partial_rr,
+                adverse_volume_exit_enabled=True,
+                adverse_volume_exit_after_partial_only=after_partial_only,
+            )
     for stop_after_partial_rr in (0.0, 0.10):
         policies.append(
             SessionImpulseRetestExitPolicy(

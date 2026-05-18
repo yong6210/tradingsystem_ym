@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -360,6 +360,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--report-dir", default="reports/validation/micro_main_intrabar_research")
     parser.add_argument("--write-report", action="store_true")
+    parser.add_argument("--include-trades", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
     return parser.parse_args()
 
 
@@ -379,7 +381,45 @@ def _select_policies(names: list[str]) -> list[SessionImpulseRetestExitPolicy]:
     missing = [name for name in names if name not in by_name]
     if missing:
         raise SystemExit(f"unknown policies: {','.join(missing)}")
-    return [by_name[name] for name in names]
+    return [intrabar_exit_policy(by_name[name]) for name in names]
+
+
+def intrabar_exit_policy(policy: SessionImpulseRetestExitPolicy) -> SessionImpulseRetestExitPolicy:
+    return replace(policy, entry_confirmation_delay_minutes=0)
+
+
+def _nested_value(row: dict[str, Any], key: str, default: str = "unknown") -> str:
+    if key.startswith("diagnostics."):
+        value: Any = row.get("diagnostics")
+        parts = key.split(".")[1:]
+    else:
+        value = row
+        parts = key.split(".")
+    for part in parts:
+        if not isinstance(value, dict):
+            return default
+        value = value.get(part)
+    if value in (None, ""):
+        return default
+    return str(value)
+
+
+def _grouped_summaries(rows: list[dict[str, Any]], key: str) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(_nested_value(row, key), []).append(row)
+    summaries = {name: summarize_rows(items) for name, items in grouped.items()}
+    return dict(
+        sorted(
+            summaries.items(),
+            key=lambda item: float(item[1].get("total_r", 0.0) or 0.0),
+            reverse=True,
+        )
+    )
+
+
+def _report_stamp(value: datetime) -> str:
+    return value.strftime("%Y%m%dT%H%M%S%fZ")
 
 
 def main() -> int:
@@ -421,13 +461,23 @@ def main() -> int:
                 rows_by_policy[policy.name].extend(_trade_row(trade, policy=policy) for trade in trades)
             print(json.dumps({"symbol": symbol, "status": "done", **data_status[symbol]}), file=sys.stderr, flush=True)
 
-    results = [
-        {
+    results = []
+    for policy in policies:
+        rows = rows_by_policy[policy.name]
+        item: dict[str, Any] = {
             "policy": asdict(policy),
-            "summary": summarize_rows(rows_by_policy[policy.name]),
+            "summary": summarize_rows(rows),
+            "breakdowns": {
+                "by_symbol": _grouped_summaries(rows, "symbol"),
+                "by_direction": _grouped_summaries(rows, "direction"),
+                "by_exit_reason": _grouped_summaries(rows, "exit_reason"),
+                "by_setup_hour_utc": _grouped_summaries(rows, "diagnostics.setup_hour_utc"),
+                "by_intrabar_elapsed_minutes": _grouped_summaries(rows, "diagnostics.intrabar_elapsed_minutes"),
+            },
         }
-        for policy in policies
-    ]
+        if args.include_trades:
+            item["trades"] = rows
+        results.append(item)
     output = {
         "schema_version": "micro_main_intrabar_research_v1",
         "generated_at": generated_at.isoformat(),
@@ -451,10 +501,11 @@ def main() -> int:
     if args.write_report:
         out_dir = ROOT_DIR / str(args.report_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"micro_main_intrabar_research_{generated_at.strftime('%Y%m%dT%H%M%SZ')}.json"
+        out_path = out_dir / f"micro_main_intrabar_research_{_report_stamp(generated_at)}.json"
         atomic_write_text(out_path, json.dumps(output, ensure_ascii=False, indent=2, default=str))
         output["report_path"] = str(out_path.relative_to(ROOT_DIR))
-    print(json.dumps(output, ensure_ascii=False, indent=2, default=str))
+    if not args.quiet:
+        print(json.dumps(output, ensure_ascii=False, indent=2, default=str))
     return 0
 
 
