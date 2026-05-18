@@ -121,6 +121,23 @@ def build_exit_policies() -> list[SessionImpulseRetestExitPolicy]:
         guard="current",
         tp_profile="live_35_65",
     )
+    policies.append(
+        SessionImpulseRetestExitPolicy(
+            name="adaptive_floor_min_0_003_live_split",
+            stop_mode="floor",
+            min_stop_pct=0.003,
+            min_risk_atr=0.35,
+            target_rr=2.5,
+            max_hold_minutes=40,
+            time_guard_10m_min_mfe_r=0.20,
+            time_guard_20m_min_mfe_r=0.35,
+            tp1_rr=1.0,
+            tp1_fraction=0.35,
+            tp2_rr=2.5,
+            tp2_fraction=0.65,
+            adaptive_targets_enabled=True,
+        )
+    )
     for min_stop in (0.003, 0.004, 0.005):
         for min_risk_atr in (0.0, 0.35):
             for rr in (2.0, 2.5, 3.0):

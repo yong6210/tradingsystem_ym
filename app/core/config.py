@@ -163,6 +163,21 @@ class Settings(BaseSettings):
     session_impulse_retest_miss_detector_report_dir: str = "reports/validation/micro_main_miss_detectors"
     session_impulse_retest_miss_alert_enabled: bool = True
     session_impulse_retest_miss_alert_cooldown_seconds: int = 1800
+    session_impulse_retest_exit_policy_name: str = "adaptive_floor_min_0_003_live_split"
+    session_impulse_retest_exit_min_stop_pct: float = 0.003
+    session_impulse_retest_exit_min_risk_atr: float = 0.35
+    session_impulse_retest_exit_target_rr: float = 2.5
+    session_impulse_retest_exit_max_hold_minutes: int = 40
+    session_impulse_retest_exit_time_guard_enabled: bool = True
+    session_impulse_retest_exit_tp1_rr: float = 1.0
+    session_impulse_retest_exit_tp1_fraction: float = 0.35
+    session_impulse_retest_exit_tp2_fraction: float = 0.65
+    session_impulse_retest_exit_adaptive_targets_enabled: bool = True
+    session_impulse_retest_exit_adaptive_normal_target_rr: float = 2.2
+    session_impulse_retest_exit_adaptive_defensive_target_rr: float = 2.0
+    session_impulse_retest_exit_adaptive_strong_tp1_fraction: float = 0.25
+    session_impulse_retest_exit_adaptive_normal_tp1_fraction: float = 0.35
+    session_impulse_retest_exit_adaptive_defensive_tp1_fraction: float = 0.45
 
     # Zone type importance multipliers (lower multiplier means less trust).
     weight_zone_ob: float = 1.00

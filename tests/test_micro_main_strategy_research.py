@@ -2,6 +2,8 @@ from datetime import UTC, datetime, timedelta
 
 from app.db.models import Candle
 from app.services.micro_main_strategy_research import (
+    MicroSignal,
+    SessionImpulseRetestExitPolicy,
     SessionImpulseRetestResearch,
     build_session_impulse_retest_shadow_summary,
     decision_for_micro_summary,
@@ -231,6 +233,56 @@ def test_micro_main_time_guard_reason_prefers_tighter_guard_first() -> None:
     assert SessionImpulseRetestResearch._time_guard_exit_reason(held_minutes=10, best_progress_r=0.10) == "time_guard_10m"
     assert SessionImpulseRetestResearch._time_guard_exit_reason(held_minutes=20, best_progress_r=0.20) == "time_guard_20m"
     assert SessionImpulseRetestResearch._time_guard_exit_reason(held_minutes=20, best_progress_r=0.50) is None
+
+
+def test_session_impulse_retest_adaptive_exit_defends_expanded_stops() -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    candles_1m = _candles("TESTUSDT", "1m", 1, 1200, start)
+    candles_5m = _candles("TESTUSDT", "5m", 5, 400, start)
+    engine = SessionImpulseRetestResearch(
+        symbol="TESTUSDT",
+        candles_1m=candles_1m,
+        candles_5m=candles_5m,
+        exit_policy=SessionImpulseRetestExitPolicy(
+            name="adaptive_floor_min_0_003_live_split",
+            stop_mode="floor",
+            min_stop_pct=0.003,
+            target_rr=2.5,
+            tp1_rr=1.0,
+            tp1_fraction=0.35,
+            tp2_rr=2.5,
+            tp2_fraction=0.65,
+            adaptive_targets_enabled=True,
+        ),
+    )
+    setup_ts = engine.ts_5m[120]
+    signal = MicroSignal(
+        family="session_impulse_retest",
+        direction="long",
+        signal_ts=setup_ts,
+        setup_ts=setup_ts,
+        entry_ts=setup_ts,
+        entry_price=100.0,
+        stop_price=99.9,
+        target_price=100.2,
+        max_hold_minutes=40,
+        regime_hint="session_open",
+        diagnostics={
+            "reclaim_body_atr": 0.60,
+            "volume_factor": 1.80,
+            "trend_strength_atr": 0.80,
+            "drive_extension_atr": 1.10,
+            "retest_wait_minutes": 0,
+        },
+    )
+
+    adjusted = engine._apply_exit_policy(signal)
+
+    assert adjusted is not None
+    assert adjusted.diagnostics["policy_target_profile"] == "defensive"
+    assert adjusted.diagnostics["policy_target_rr"] == 2.0
+    assert round(adjusted.diagnostics["policy_tp1_fraction"], 8) == 0.45
+    assert round(adjusted.diagnostics["policy_tp2_fraction"], 8) == 0.55
 
 
 def test_micro_main_shadow_summary_respects_symbol_contract() -> None:

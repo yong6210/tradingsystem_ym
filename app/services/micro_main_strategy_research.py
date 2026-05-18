@@ -25,6 +25,18 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
     return bool(default)
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return parsed if parsed == parsed else float(default)
+
+
+def _clamp_float(value: float, low: float = 0.0, high: float = 1.0) -> float:
+    return max(float(low), min(float(high), float(value)))
+
+
 _SESSION_IMPULSE_RETEST_PROFILE_BY_SYMBOL: dict[str, str] = {
     "BTCUSDC": "baseline",
     "BNBUSDC": "baseline",
@@ -117,14 +129,53 @@ class SessionImpulseRetestExitPolicy:
     tp2_fraction: float = 0.0
     tp3_rr: float = 0.0
     tp3_fraction: float = 0.0
+    adaptive_targets_enabled: bool = False
+    adaptive_strong_target_rr: float = 2.5
+    adaptive_normal_target_rr: float = 2.2
+    adaptive_defensive_target_rr: float = 2.0
+    adaptive_strong_tp1_fraction: float = 0.25
+    adaptive_normal_tp1_fraction: float = 0.35
+    adaptive_defensive_tp1_fraction: float = 0.45
+    adaptive_quality_strong_threshold: float = 0.68
+    adaptive_quality_defensive_threshold: float = 0.42
+    adaptive_stop_expansion_strong_max: float = 1.4
+    adaptive_stop_expansion_defensive_threshold: float = 1.8
 
     def tp_levels(self) -> tuple[tuple[str, float, float], ...]:
-        levels = (
-            ("tp1", float(self.tp1_rr), max(float(self.tp1_fraction), 0.0)),
-            ("tp2", float(self.tp2_rr), max(float(self.tp2_fraction), 0.0)),
-            ("tp3", float(self.tp3_rr), max(float(self.tp3_fraction), 0.0)),
+        return self._normalize_tp_levels(
+            (
+                ("tp1", float(self.tp1_rr), max(float(self.tp1_fraction), 0.0)),
+                ("tp2", float(self.tp2_rr), max(float(self.tp2_fraction), 0.0)),
+                ("tp3", float(self.tp3_rr), max(float(self.tp3_fraction), 0.0)),
+            )
         )
-        clean = tuple((label, rr, fraction) for label, rr, fraction in levels if rr > 0.0 and fraction > 0.0)
+
+    def tp_levels_for_diagnostics(self, diagnostics: Mapping[str, Any] | None) -> tuple[tuple[str, float, float], ...]:
+        if not diagnostics:
+            return ()
+        return self._normalize_tp_levels(
+            (
+                (
+                    label,
+                    _safe_float(diagnostics.get(f"policy_{label}_rr"), 0.0),
+                    _safe_float(diagnostics.get(f"policy_{label}_fraction"), 0.0),
+                )
+                for label in ("tp1", "tp2", "tp3")
+            )
+        )
+
+    def tp_levels_for_signal(self, diagnostics: Mapping[str, Any] | None) -> tuple[tuple[str, float, float], ...]:
+        return self.tp_levels_for_diagnostics(diagnostics) or self.tp_levels()
+
+    @staticmethod
+    def _normalize_tp_levels(
+        levels: tuple[tuple[str, float, float], ...] | Any,
+    ) -> tuple[tuple[str, float, float], ...]:
+        clean = tuple(
+            (str(label), float(rr), max(float(fraction), 0.0))
+            for label, rr, fraction in levels
+            if float(rr) > 0.0 and float(fraction) > 0.0
+        )
         total = sum(fraction for _label, _rr, fraction in clean)
         if total <= 1e-9:
             return ()
@@ -424,6 +475,66 @@ class SessionImpulseRetestResearch:
             return "time_guard_10m"
         return None
 
+    @staticmethod
+    def _exit_policy_quality_score(diagnostics: Mapping[str, Any]) -> float:
+        body = _safe_float(diagnostics.get("reclaim_body_atr"), 0.0)
+        volume = _safe_float(diagnostics.get("volume_factor"), 0.0)
+        trend = _safe_float(diagnostics.get("trend_strength_atr"), 0.0)
+        drive = _safe_float(diagnostics.get("drive_extension_atr"), 0.0)
+        wait = _safe_float(diagnostics.get("retest_wait_minutes"), 3.0)
+        body_score = _clamp_float((body - 0.20) / 0.35)
+        volume_score = _clamp_float((volume - 0.80) / 0.70)
+        trend_score = _clamp_float((trend - 0.20) / 0.45)
+        drive_score = _clamp_float((drive - 0.30) / 0.70)
+        wait_score = _clamp_float((3.0 - wait) / 3.0)
+        return float(
+            0.25 * body_score
+            + 0.25 * volume_score
+            + 0.20 * trend_score
+            + 0.20 * drive_score
+            + 0.10 * wait_score
+        )
+
+    @staticmethod
+    def _adaptive_tp_profile(
+        *,
+        policy: SessionImpulseRetestExitPolicy,
+        diagnostics: Mapping[str, Any],
+        stop_expansion_ratio: float,
+    ) -> tuple[str, float, tuple[tuple[str, float, float], ...], float]:
+        quality_score = SessionImpulseRetestResearch._exit_policy_quality_score(diagnostics)
+        strong_target_rr = max(_safe_float(policy.adaptive_strong_target_rr, policy.target_rr), 0.1)
+        normal_target_rr = max(min(_safe_float(policy.adaptive_normal_target_rr, 2.2), strong_target_rr), 0.1)
+        defensive_target_rr = max(min(_safe_float(policy.adaptive_defensive_target_rr, 2.0), normal_target_rr), 0.1)
+
+        if (
+            stop_expansion_ratio >= max(float(policy.adaptive_stop_expansion_defensive_threshold), 1.0)
+            or quality_score <= float(policy.adaptive_quality_defensive_threshold)
+        ):
+            profile = "defensive"
+            target_rr = defensive_target_rr
+            tp1_fraction = _clamp_float(float(policy.adaptive_defensive_tp1_fraction), 0.05, 0.95)
+        elif (
+            quality_score >= float(policy.adaptive_quality_strong_threshold)
+            and stop_expansion_ratio <= max(float(policy.adaptive_stop_expansion_strong_max), 1.0)
+        ):
+            profile = "strong"
+            target_rr = strong_target_rr
+            tp1_fraction = _clamp_float(float(policy.adaptive_strong_tp1_fraction), 0.05, 0.95)
+        else:
+            profile = "normal"
+            target_rr = normal_target_rr
+            tp1_fraction = _clamp_float(float(policy.adaptive_normal_tp1_fraction), 0.05, 0.95)
+
+        tp1_rr = max(float(policy.tp1_rr or 1.0), 0.1)
+        tp_levels = SessionImpulseRetestExitPolicy._normalize_tp_levels(
+            (
+                ("tp1", min(tp1_rr, target_rr), tp1_fraction),
+                ("tp2", target_rr, 1.0 - tp1_fraction),
+            )
+        )
+        return profile, target_rr, tp_levels, quality_score
+
     def _apply_exit_policy(self, signal: MicroSignal) -> MicroSignal | None:
         policy = self.exit_policy
         setup_idx = self._index_5m_by_ts.get(self._normalize_ts(signal.setup_ts))
@@ -465,19 +576,38 @@ class SessionImpulseRetestResearch:
         if float(policy.max_risk_atr) > 0.0 and risk_atr > float(policy.max_risk_atr):
             return None
 
+        legacy_risk_pct = abs(entry - legacy_stop) / max(entry, 1e-9)
+        stop_expansion_ratio = stop_pct / max(legacy_risk_pct, 1e-9)
+        target_profile = "fixed"
+        quality_score = self._exit_policy_quality_score(signal.diagnostics or {})
+        tp_levels = policy.tp_levels()
         target_rr = max(float(policy.target_rr), 0.1)
+        if _safe_bool(policy.adaptive_targets_enabled):
+            target_profile, target_rr, tp_levels, quality_score = self._adaptive_tp_profile(
+                policy=policy,
+                diagnostics=signal.diagnostics or {},
+                stop_expansion_ratio=stop_expansion_ratio,
+            )
         target = entry + direction_sign * target_rr * risk_abs
+        tp_diagnostics: dict[str, float] = {}
+        for label, rr, fraction in tp_levels:
+            tp_diagnostics[f"policy_{label}_rr"] = float(rr)
+            tp_diagnostics[f"policy_{label}_fraction"] = float(fraction)
         diagnostics = {
             **dict(signal.diagnostics or {}),
             "exit_policy_name": policy.name,
             "exit_policy_stop_mode": policy.stop_mode,
             "legacy_stop_price": legacy_stop,
             "legacy_target_price": float(signal.target_price),
-            "legacy_risk_pct": abs(entry - legacy_stop) / max(entry, 1e-9),
+            "legacy_risk_pct": legacy_risk_pct,
             "policy_risk_pct": stop_pct,
             "policy_risk_atr": risk_atr,
+            "policy_stop_expansion_ratio": stop_expansion_ratio,
             "policy_target_rr": target_rr,
+            "policy_target_profile": target_profile,
+            "policy_quality_score": quality_score,
             "policy_max_hold_minutes": int(policy.max_hold_minutes),
+            **tp_diagnostics,
         }
         return MicroSignal(
             family=signal.family,
@@ -932,7 +1062,8 @@ class SessionImpulseRetestResearch:
         if risk_abs <= 1e-9:
             return None
         policy = self.exit_policy
-        tp_levels = policy.tp_levels()
+        signal_target_rr = abs(float(signal.target_price) - float(signal.entry_price)) / risk_abs
+        tp_levels = policy.tp_levels_for_signal(signal.diagnostics)
         end_ts = signal.entry_ts + timedelta(minutes=signal.max_hold_minutes)
         exit_idx = entry_idx
         exit_price = self.closes_1m[entry_idx]
@@ -981,7 +1112,7 @@ class SessionImpulseRetestResearch:
                     exit_idx = idx
                     exit_price = signal.target_price
                     exit_reason = "target"
-                    realized_gross_r = 1.0 * float(policy.target_rr)
+                    realized_gross_r = float(signal_target_rr)
                     remaining_fraction = 0.0
                     break
                 for label, rr, fraction in tp_levels:

@@ -110,6 +110,7 @@ from app.services.learning import LearningService
 from app.services.market_data import MarketDataService
 from app.services.metrics import summarize_outcomes
 from app.services.micro_main_strategy_research import (
+    SessionImpulseRetestExitPolicy,
     SessionImpulseRetestResearch,
     build_session_impulse_retest_shadow_summary,
     evaluate_session_impulse_retest_shadow_filters,
@@ -558,6 +559,7 @@ class StrategyEngine:
             candles_1m=candles_1m,
             candles_5m=candles_5m,
             profile_name=session_impulse_retest_profile_for_symbol(symbol),
+            exit_policy=self._session_impulse_retest_exit_policy(),
         )
         return [
             trade
@@ -2122,6 +2124,95 @@ class StrategyEngine:
             return False
         return normalized_symbol in allowed_symbols
 
+    def _session_impulse_retest_exit_policy(self) -> SessionImpulseRetestExitPolicy:
+        time_guard_enabled = self._safe_bool(
+            getattr(self.settings, "session_impulse_retest_exit_time_guard_enabled", True),
+            default=True,
+        )
+        target_rr = max(
+            self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_target_rr", 2.5)) or 2.5,
+            0.1,
+        )
+        return SessionImpulseRetestExitPolicy(
+            name=str(
+                getattr(
+                    self.settings,
+                    "session_impulse_retest_exit_policy_name",
+                    "adaptive_floor_min_0_003_live_split",
+                )
+                or "adaptive_floor_min_0_003_live_split"
+            ),
+            stop_mode="floor",
+            min_stop_pct=max(
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_min_stop_pct", 0.003)) or 0.0,
+                0.0,
+            ),
+            min_risk_atr=max(
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_min_risk_atr", 0.35)) or 0.0,
+                0.0,
+            ),
+            target_rr=target_rr,
+            max_hold_minutes=max(
+                self._maybe_int(getattr(self.settings, "session_impulse_retest_exit_max_hold_minutes", 40)) or 40,
+                1,
+            ),
+            time_guard_10m_min_mfe_r=0.20 if time_guard_enabled else None,
+            time_guard_20m_min_mfe_r=0.35 if time_guard_enabled else None,
+            tp1_rr=max(
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_tp1_rr", 1.0)) or 1.0,
+                0.0,
+            ),
+            tp1_fraction=max(
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_tp1_fraction", 0.35)) or 0.0,
+                0.0,
+            ),
+            tp2_rr=target_rr,
+            tp2_fraction=max(
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_tp2_fraction", 0.65)) or 0.0,
+                0.0,
+            ),
+            adaptive_targets_enabled=self._safe_bool(
+                getattr(self.settings, "session_impulse_retest_exit_adaptive_targets_enabled", True),
+                default=True,
+            ),
+            adaptive_strong_target_rr=target_rr,
+            adaptive_normal_target_rr=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_adaptive_normal_target_rr", 2.2)
+                )
+                or 2.2,
+                0.1,
+            ),
+            adaptive_defensive_target_rr=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_adaptive_defensive_target_rr", 2.0)
+                )
+                or 2.0,
+                0.1,
+            ),
+            adaptive_strong_tp1_fraction=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_adaptive_strong_tp1_fraction", 0.25)
+                )
+                or 0.0,
+                0.0,
+            ),
+            adaptive_normal_tp1_fraction=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_adaptive_normal_tp1_fraction", 0.35)
+                )
+                or 0.0,
+                0.0,
+            ),
+            adaptive_defensive_tp1_fraction=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_adaptive_defensive_tp1_fraction", 0.45)
+                )
+                or 0.0,
+                0.0,
+            ),
+        )
+
     def _session_impulse_retest_live_routable_symbols(self, requested_mode: ExecutionMode | None) -> set[str]:
         tracked = self._session_impulse_retest_allowed_symbols()
         if requested_mode == ExecutionMode.MICRO_LIVE:
@@ -2250,6 +2341,7 @@ class StrategyEngine:
             candles_1m=candles_1m,
             candles_5m=candles_5m,
             profile_name=session_impulse_retest_profile_for_symbol(normalized_symbol),
+            exit_policy=self._session_impulse_retest_exit_policy(),
         )
         return runtime.latest_signal_diagnostics(freshness_minutes=20)
 
@@ -2275,6 +2367,7 @@ class StrategyEngine:
             candles_1m=candles_1m,
             candles_5m=candles_5m,
             profile_name=session_impulse_retest_profile_for_symbol(normalized_symbol),
+            exit_policy=self._session_impulse_retest_exit_policy(),
         )
         signal = runtime.latest_signal(freshness_minutes=20)
         if signal is None:
@@ -2348,10 +2441,38 @@ class StrategyEngine:
 
         risk_abs = max(abs(signal.entry_price - signal.stop_price), 1e-9)
         direction_sign = 1.0 if signal.direction == "long" else -1.0
+        policy_target_rr = abs(float(signal.target_price) - float(signal.entry_price)) / risk_abs
         tp1 = float(signal.entry_price + direction_sign * risk_abs)
         tp2 = float(signal.target_price)
         tp3 = float(signal.target_price)
         split = {"tp1": 0.35, "tp2": 0.65, "runner": 0.0}
+        rr_min = 1.0
+        rr_base = round(float(policy_target_rr), 4)
+        rr_opt = round(float(policy_target_rr), 4)
+        policy_levels = (
+            runtime.exit_policy.tp_levels_for_signal(signal_diagnostics)
+            if signal_diagnostics.get("exit_policy_name")
+            else ()
+        )
+        if policy_levels:
+            first = policy_levels[0]
+            second = policy_levels[1] if len(policy_levels) > 1 else policy_levels[0]
+            third = policy_levels[2] if len(policy_levels) > 2 else second
+
+            def _level_price(level: tuple[str, float, float]) -> float:
+                return float(signal.entry_price + direction_sign * float(level[1]) * risk_abs)
+
+            tp1 = _level_price(first)
+            tp2 = _level_price(second)
+            tp3 = _level_price(third)
+            split = {
+                "tp1": round(float(first[2]), 8),
+                "tp2": round(float(second[2]) if len(policy_levels) > 1 else 0.0, 8),
+                "runner": round(float(third[2]) if len(policy_levels) > 2 else 0.0, 8),
+            }
+            rr_min = round(float(first[1]), 4)
+            rr_base = round(float(second[1]), 4)
+            rr_opt = round(float(third[1]), 4)
         cost_est = round(abs(signal.entry_price) * 0.0006 / risk_abs, 4)
         expected_ev_at_size_r = round(benchmark_ev_r * final_risk_r, 4)
 
@@ -2389,6 +2510,7 @@ class StrategyEngine:
                 f"EV≈{benchmark_ev_r:+.2f}R | tier={tier}"
             ),
             "session_impulse_retest_operational_risk_multiplier": round(saturday_risk_multiplier, 4),
+            "session_impulse_retest_exit_policy": asdict(runtime.exit_policy),
             "reaction_classification": "acceptance_confirmed",
             "transition_state": "none",
             "session_impulse_retest_signal": {
@@ -2432,9 +2554,9 @@ class StrategyEngine:
             tp2=tp2,
             tp3=tp3,
             split=split,
-            rr_min=1.0,
-            rr_base=2.0,
-            rr_opt=2.0,
+            rr_min=rr_min,
+            rr_base=rr_base,
+            rr_opt=rr_opt,
             ev=round(benchmark_ev_r, 4),
             cost_est=cost_est,
             confidence=round(min(max(setup_score / 100.0, 0.0), 1.0), 4),
