@@ -7328,6 +7328,8 @@ class StrategyEngine:
                     entry_quantity=self._maybe_float(normalized.get("last_fill_qty"))
                     or self._maybe_float(normalized.get("cumulative_fill_qty"))
                     or 0.0,
+                    entry_price=self._maybe_float(normalized.get("last_fill_price"))
+                    or self._maybe_float(normalized.get("avg_price")),
                     position_side=str(normalized.get("position_side") or "") or None,
                     parent_client_order_id=client_order_id,
                     live=True,

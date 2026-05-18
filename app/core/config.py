@@ -437,6 +437,10 @@ class Settings(BaseSettings):
     auto_trading_live_liquidity_gate_min_tranche_target_fraction: float = 0.0
     auto_trading_live_protection_orders_enabled: bool = True
     auto_trading_live_stop_working_type: str = "MARK_PRICE"
+    auto_trading_live_stop_precheck_enabled: bool = True
+    auto_trading_live_stop_precheck_fail_closed: bool = True
+    auto_trading_live_stop_precheck_min_cushion_bps: float = 5.0
+    auto_trading_live_protection_failure_flatten_enabled: bool = True
     auto_trading_live_tp_limit_attach_enabled: bool = True
     auto_trading_live_tp_market_fallback_seconds: int = 20
     auto_trading_micro_live_allowed_symbols: str = CURRENT_MICRO_LIVE_SYMBOLS

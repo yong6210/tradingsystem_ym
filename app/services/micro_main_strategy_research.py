@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from statistics import median
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Mapping
 
 from app.db.models import Candle
 
@@ -97,6 +97,40 @@ class MicroTrade:
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class SessionImpulseRetestExitPolicy:
+    name: str = "legacy_full_2r"
+    stop_mode: Literal["legacy", "floor", "structure_floor"] = "legacy"
+    swing_lookback_bars: int = 0
+    stop_buffer_atr: float | None = None
+    min_stop_pct: float = 0.0
+    min_risk_atr: float = 0.0
+    max_stop_pct: float = 0.0
+    max_risk_atr: float = 0.0
+    target_rr: float = 2.0
+    max_hold_minutes: int = 40
+    time_guard_10m_min_mfe_r: float | None = 0.20
+    time_guard_20m_min_mfe_r: float | None = 0.35
+    tp1_rr: float = 0.0
+    tp1_fraction: float = 0.0
+    tp2_rr: float = 0.0
+    tp2_fraction: float = 0.0
+    tp3_rr: float = 0.0
+    tp3_fraction: float = 0.0
+
+    def tp_levels(self) -> tuple[tuple[str, float, float], ...]:
+        levels = (
+            ("tp1", float(self.tp1_rr), max(float(self.tp1_fraction), 0.0)),
+            ("tp2", float(self.tp2_rr), max(float(self.tp2_fraction), 0.0)),
+            ("tp3", float(self.tp3_rr), max(float(self.tp3_fraction), 0.0)),
+        )
+        clean = tuple((label, rr, fraction) for label, rr, fraction in levels if rr > 0.0 and fraction > 0.0)
+        total = sum(fraction for _label, _rr, fraction in clean)
+        if total <= 1e-9:
+            return ()
+        return tuple((label, rr, fraction / total) for label, rr, fraction in clean)
+
+
 class SessionImpulseRetestResearch:
     _FEE_RATE_ROUND_TRIP = 0.0006
     _MAX_HOLD_MINUTES = 40
@@ -181,7 +215,15 @@ class SessionImpulseRetestResearch:
         },
     }
 
-    def __init__(self, *, symbol: str, candles_1m: list[Candle], candles_5m: list[Candle], profile_name: str = "baseline"):
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        candles_1m: list[Candle],
+        candles_5m: list[Candle],
+        profile_name: str = "baseline",
+        exit_policy: SessionImpulseRetestExitPolicy | Mapping[str, Any] | None = None,
+    ):
         self.symbol = str(symbol).upper()
         self.profile_symbol = _profile_symbol(self.symbol)
         self.profile_name = str(profile_name or "baseline").strip().lower() or "baseline"
@@ -203,6 +245,20 @@ class SessionImpulseRetestResearch:
         self.ema_slow_5m = self._build_ema_5m(50)
         self.session_vwap_5m = self._build_session_vwap_5m()
         self._index_1m_by_ts = {ts: idx for idx, ts in enumerate(self.ts_1m)}
+        self._index_5m_by_ts = {ts: idx for idx, ts in enumerate(self.ts_5m)}
+        self.exit_policy = self._normalize_exit_policy(exit_policy)
+
+    @staticmethod
+    def _normalize_exit_policy(
+        value: SessionImpulseRetestExitPolicy | Mapping[str, Any] | None,
+    ) -> SessionImpulseRetestExitPolicy:
+        if isinstance(value, SessionImpulseRetestExitPolicy):
+            return value
+        if isinstance(value, Mapping):
+            allowed = set(SessionImpulseRetestExitPolicy.__dataclass_fields__)
+            payload = {str(key): item for key, item in value.items() if str(key) in allowed}
+            return SessionImpulseRetestExitPolicy(**payload)
+        return SessionImpulseRetestExitPolicy()
 
     def _signal_filter_profile(self) -> dict[str, float]:
         profile = dict(self._PROFILE_DEFAULTS.get(self.profile_name) or self._PROFILE_DEFAULTS["baseline"])
@@ -353,6 +409,90 @@ class SessionImpulseRetestResearch:
             return "time_guard_10m"
         return None
 
+    @staticmethod
+    def _policy_time_guard_exit_reason(
+        *,
+        policy: SessionImpulseRetestExitPolicy,
+        held_minutes: int,
+        best_progress_r: float,
+    ) -> str | None:
+        guard_20 = policy.time_guard_20m_min_mfe_r
+        guard_10 = policy.time_guard_10m_min_mfe_r
+        if guard_20 is not None and held_minutes >= 20 and best_progress_r < float(guard_20):
+            return "time_guard_20m"
+        if guard_10 is not None and held_minutes >= 10 and best_progress_r < float(guard_10):
+            return "time_guard_10m"
+        return None
+
+    def _apply_exit_policy(self, signal: MicroSignal) -> MicroSignal | None:
+        policy = self.exit_policy
+        setup_idx = self._index_5m_by_ts.get(self._normalize_ts(signal.setup_ts))
+        if setup_idx is None:
+            return signal
+        entry = float(signal.entry_price)
+        if entry <= 0.0:
+            return None
+        direction_sign = 1.0 if signal.direction == "long" else -1.0
+        atr = max(float(self.atr_5m[setup_idx]), 1e-9)
+        legacy_stop = float(signal.stop_price)
+        stop = legacy_stop
+        if policy.stop_mode == "structure_floor":
+            lookback = max(int(policy.swing_lookback_bars), 1)
+            start = max(0, setup_idx - lookback + 1)
+            buffer_atr = (
+                float(policy.stop_buffer_atr)
+                if policy.stop_buffer_atr is not None
+                else float(self._signal_filter_profile().get("stop_buffer_atr", 0.0) or 0.0)
+            )
+            if signal.direction == "long":
+                structure_stop = self._rolling_low_5m(start, setup_idx + 1) - buffer_atr * atr
+                stop = min(legacy_stop, structure_stop)
+            else:
+                structure_stop = self._rolling_high_5m(start, setup_idx + 1) + buffer_atr * atr
+                stop = max(legacy_stop, structure_stop)
+
+        risk_abs = entry - stop if signal.direction == "long" else stop - entry
+        if risk_abs <= 0.0:
+            return None
+        min_risk_abs = max(float(policy.min_stop_pct) * entry, float(policy.min_risk_atr) * atr)
+        if min_risk_abs > 0.0 and risk_abs < min_risk_abs:
+            stop = entry - direction_sign * min_risk_abs
+            risk_abs = min_risk_abs
+        stop_pct = risk_abs / max(entry, 1e-9)
+        risk_atr = risk_abs / atr
+        if float(policy.max_stop_pct) > 0.0 and stop_pct > float(policy.max_stop_pct):
+            return None
+        if float(policy.max_risk_atr) > 0.0 and risk_atr > float(policy.max_risk_atr):
+            return None
+
+        target_rr = max(float(policy.target_rr), 0.1)
+        target = entry + direction_sign * target_rr * risk_abs
+        diagnostics = {
+            **dict(signal.diagnostics or {}),
+            "exit_policy_name": policy.name,
+            "exit_policy_stop_mode": policy.stop_mode,
+            "legacy_stop_price": legacy_stop,
+            "legacy_target_price": float(signal.target_price),
+            "legacy_risk_pct": abs(entry - legacy_stop) / max(entry, 1e-9),
+            "policy_risk_pct": stop_pct,
+            "policy_risk_atr": risk_atr,
+            "policy_target_rr": target_rr,
+            "policy_max_hold_minutes": int(policy.max_hold_minutes),
+        }
+        return MicroSignal(
+            family=signal.family,
+            direction=signal.direction,
+            signal_ts=signal.signal_ts,
+            setup_ts=signal.setup_ts,
+            entry_ts=signal.entry_ts,
+            entry_price=entry,
+            stop_price=stop,
+            target_price=target,
+            max_hold_minutes=max(int(policy.max_hold_minutes), 1),
+            regime_hint=signal.regime_hint,
+            diagnostics=diagnostics,
+        )
+
     def _build_signal(self, idx: int) -> MicroSignal | None:
         profile = self._signal_filter_profile()
         if self.ts_5m[idx].hour in self._blocked_signal_hours():
@@ -444,18 +584,20 @@ class SessionImpulseRetestResearch:
                         "risk_atr": risk_atr,
                         "risk_pct": float(risk_abs / max(entry_price, 1e-9)),
                     }
-                    return MicroSignal(
-                        family="session_impulse_retest",
-                        direction="long",
-                        signal_ts=self.ts_5m[idx],
-                        setup_ts=self.ts_5m[idx],
-                        entry_ts=entry_ts,
-                        entry_price=entry_price,
-                        stop_price=stop,
-                        target_price=entry_price + 2.0 * risk_abs,
-                        max_hold_minutes=self._MAX_HOLD_MINUTES,
-                        regime_hint="session_open",
-                        diagnostics=diagnostics,
+                    return self._apply_exit_policy(
+                        MicroSignal(
+                            family="session_impulse_retest",
+                            direction="long",
+                            signal_ts=self.ts_5m[idx],
+                            setup_ts=self.ts_5m[idx],
+                            entry_ts=entry_ts,
+                            entry_price=entry_price,
+                            stop_price=stop,
+                            target_price=entry_price + 2.0 * risk_abs,
+                            max_hold_minutes=self._MAX_HOLD_MINUTES,
+                            regime_hint="session_open",
+                            diagnostics=diagnostics,
+                        )
                     )
 
         breakout_short = any(
@@ -508,18 +650,20 @@ class SessionImpulseRetestResearch:
                         "risk_atr": risk_atr,
                         "risk_pct": float(risk_abs / max(entry_price, 1e-9)),
                     }
-                    return MicroSignal(
-                        family="session_impulse_retest",
-                        direction="short",
-                        signal_ts=self.ts_5m[idx],
-                        setup_ts=self.ts_5m[idx],
-                        entry_ts=entry_ts,
-                        entry_price=entry_price,
-                        stop_price=stop,
-                        target_price=entry_price - 2.0 * risk_abs,
-                        max_hold_minutes=self._MAX_HOLD_MINUTES,
-                        regime_hint="session_open",
-                        diagnostics=diagnostics,
+                    return self._apply_exit_policy(
+                        MicroSignal(
+                            family="session_impulse_retest",
+                            direction="short",
+                            signal_ts=self.ts_5m[idx],
+                            setup_ts=self.ts_5m[idx],
+                            entry_ts=entry_ts,
+                            entry_price=entry_price,
+                            stop_price=stop,
+                            target_price=entry_price - 2.0 * risk_abs,
+                            max_hold_minutes=self._MAX_HOLD_MINUTES,
+                            regime_hint="session_open",
+                            diagnostics=diagnostics,
+                        )
                     )
         return None
 
@@ -787,11 +931,16 @@ class SessionImpulseRetestResearch:
         risk_abs = abs(signal.entry_price - signal.stop_price)
         if risk_abs <= 1e-9:
             return None
+        policy = self.exit_policy
+        tp_levels = policy.tp_levels()
         end_ts = signal.entry_ts + timedelta(minutes=signal.max_hold_minutes)
         exit_idx = entry_idx
         exit_price = self.closes_1m[entry_idx]
         exit_reason = "time_exit"
         best_progress_r = 0.0
+        realized_gross_r = 0.0
+        remaining_fraction = 1.0
+        hit_target_labels: set[str] = set()
 
         idx = entry_idx
         while idx < len(self.ts_1m) and self.ts_1m[idx] <= end_ts:
@@ -805,6 +954,16 @@ class SessionImpulseRetestResearch:
                 best_progress_r = max(best_progress_r, (signal.entry_price - self.lows_1m[idx]) / risk_abs)
                 hit_target = self.lows_1m[idx] <= signal.target_price
                 hit_stop = self.highs_1m[idx] >= signal.stop_price
+            if tp_levels:
+                hit_target = any(
+                    label not in hit_target_labels
+                    and (
+                        self.highs_1m[idx] >= signal.entry_price + rr * risk_abs
+                        if signal.direction == "long"
+                        else self.lows_1m[idx] <= signal.entry_price - rr * risk_abs
+                    )
+                    for label, rr, _fraction in tp_levels
+                )
             if hit_target and hit_stop:
                 hit_stop = True
                 hit_target = False
@@ -812,14 +971,46 @@ class SessionImpulseRetestResearch:
                 exit_idx = idx
                 exit_price = signal.stop_price
                 exit_reason = "stop"
+                if remaining_fraction < 0.999999:
+                    exit_reason = "stop_after_partial"
+                realized_gross_r += remaining_fraction * -1.0
+                remaining_fraction = 0.0
                 break
             if hit_target:
-                exit_idx = idx
-                exit_price = signal.target_price
-                exit_reason = "target"
-                break
+                if not tp_levels:
+                    exit_idx = idx
+                    exit_price = signal.target_price
+                    exit_reason = "target"
+                    realized_gross_r = 1.0 * float(policy.target_rr)
+                    remaining_fraction = 0.0
+                    break
+                for label, rr, fraction in tp_levels:
+                    if label in hit_target_labels or remaining_fraction <= 1e-9:
+                        continue
+                    target_price = (
+                        signal.entry_price + rr * risk_abs
+                        if signal.direction == "long"
+                        else signal.entry_price - rr * risk_abs
+                    )
+                    target_hit = (
+                        self.highs_1m[idx] >= target_price
+                        if signal.direction == "long"
+                        else self.lows_1m[idx] <= target_price
+                    )
+                    if not target_hit:
+                        continue
+                    qty = min(float(fraction), remaining_fraction)
+                    realized_gross_r += qty * float(rr)
+                    remaining_fraction = max(0.0, remaining_fraction - qty)
+                    hit_target_labels.add(label)
+                    exit_idx = idx
+                    exit_price = target_price
+                    exit_reason = f"target_{label}"
+                if remaining_fraction <= 1e-9:
+                    break
             held_minutes = max(int((self.ts_1m[idx] - signal.entry_ts).total_seconds() // 60), 0)
-            time_guard_reason = self._time_guard_exit_reason(
+            time_guard_reason = self._policy_time_guard_exit_reason(
+                policy=policy,
                 held_minutes=held_minutes,
                 best_progress_r=best_progress_r,
             )
@@ -827,16 +1018,27 @@ class SessionImpulseRetestResearch:
                 exit_idx = idx
                 exit_price = self.closes_1m[idx]
                 exit_reason = time_guard_reason
+                close_r = (
+                    (exit_price - signal.entry_price) / risk_abs
+                    if signal.direction == "long"
+                    else (signal.entry_price - exit_price) / risk_abs
+                )
+                realized_gross_r += remaining_fraction * close_r
+                remaining_fraction = 0.0
                 break
             exit_idx = idx
             exit_price = self.closes_1m[idx]
             idx += 1
 
-        gross_r = (
-            (exit_price - signal.entry_price) / risk_abs
-            if signal.direction == "long"
-            else (signal.entry_price - exit_price) / risk_abs
-        )
+        if remaining_fraction > 1e-9:
+            close_r = (
+                (exit_price - signal.entry_price) / risk_abs
+                if signal.direction == "long"
+                else (signal.entry_price - exit_price) / risk_abs
+            )
+            realized_gross_r += remaining_fraction * close_r
+            remaining_fraction = 0.0
+        gross_r = float(realized_gross_r)
         fee_abs = abs(signal.entry_price) * self._FEE_RATE_ROUND_TRIP
         cost_r = float(fee_abs / risk_abs)
         net_r = float(gross_r - cost_r)
@@ -863,6 +1065,7 @@ class SessionImpulseRetestResearch:
                 "entry_hour_utc": signal.entry_ts.hour,
                 "entry_weekday_utc": signal.entry_ts.weekday(),
                 "hold_minutes": hold_minutes,
+                "partial_target_labels": sorted(hit_target_labels),
             },
         )
 

@@ -9,7 +9,14 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from app.core.config import Settings, get_settings
-from app.core.enums import ApprovalState, ExecutionFillStage, ExecutionMode, OrderLifecycleState, SubmitDecision
+from app.core.enums import (
+    ApprovalState,
+    ExecutionFillStage,
+    ExecutionMode,
+    ExitReason,
+    OrderLifecycleState,
+    SubmitDecision,
+)
 from app.db.models import OrderIntent, OrderSubmission, Plan
 from app.repositories.execution import OrderIntentRepository, OrderSubmissionRepository, PlanRepository
 from app.services.lane_tracker import get_execution_lane_tracker
@@ -903,6 +910,202 @@ class ExecutionCoordinator:
             "snapshot": snapshot_payload,
         }
 
+    def _estimated_entry_reference_price(
+        self,
+        *,
+        side: str,
+        order_type: str,
+        normalized_price: float | None,
+        liquidity_gate: dict[str, Any],
+        live_sizing: dict[str, Any],
+    ) -> tuple[float, dict[str, Any]]:
+        snapshot = self._safe_dict(liquidity_gate.get("snapshot"))
+        normalized_side = str(side or "").upper()
+        normalized_order_type = str(order_type or "").upper()
+        candidates: list[tuple[str, Any]] = []
+
+        marketable_now = self._safe_bool(snapshot.get("marketable_now"), default=normalized_order_type != "LIMIT")
+        if normalized_order_type != "LIMIT" or marketable_now:
+            candidates.append(("market_fill_avg_price", snapshot.get("market_fill_avg_price")))
+            if normalized_side == "BUY":
+                candidates.append(("best_ask", snapshot.get("best_ask")))
+            elif normalized_side == "SELL":
+                candidates.append(("best_bid", snapshot.get("best_bid")))
+            candidates.append(("mid_price", snapshot.get("mid_price")))
+        else:
+            candidates.append(("normalized_limit_price", normalized_price))
+
+        candidates.extend(
+            [
+                ("normalized_live_price", normalized_price),
+                ("sizing_reference_price", live_sizing.get("reference_price")),
+            ]
+        )
+        for source, value in candidates:
+            parsed = self._maybe_float(value)
+            if parsed is not None and parsed > 0.0:
+                return float(parsed), {"reference_price_source": source, "reference_price": round(float(parsed), 8)}
+        return 0.0, {"reference_price_source": "unavailable", "reference_price": 0.0}
+
+    def _live_stop_distance_guard(
+        self,
+        *,
+        plan: Plan,
+        stop_price: float,
+        reference_price: float,
+        context: str,
+    ) -> dict[str, Any]:
+        enabled = self._safe_bool(getattr(self.settings, "auto_trading_live_stop_precheck_enabled", True), default=True)
+        fail_closed = self._safe_bool(
+            getattr(self.settings, "auto_trading_live_stop_precheck_fail_closed", True),
+            default=True,
+        )
+        min_cushion_bps = max(
+            self._float_or(getattr(self.settings, "auto_trading_live_stop_precheck_min_cushion_bps", 5.0), 5.0),
+            0.0,
+        )
+        details: dict[str, Any] = {
+            "enabled": bool(enabled),
+            "decision": "PASS",
+            "reason_codes": [],
+            "context": str(context or ""),
+            "reference_price": round(float(reference_price or 0.0), 8),
+            "stop_price": round(float(stop_price or 0.0), 8),
+            "min_cushion_bps": round(min_cushion_bps, 4),
+        }
+        if not enabled:
+            details["reason"] = "disabled"
+            return details
+        if reference_price <= 0.0 or stop_price <= 0.0:
+            details.update(
+                {
+                    "decision": "BLOCK" if fail_closed else "PASS",
+                    "reason_codes": ["stop_reference_price_unavailable"],
+                    "message": "Live entry blocked because stop distance could not be checked.",
+                }
+            )
+            return details
+
+        direction = str(getattr(plan, "direction", "") or "").lower()
+        if direction == "short":
+            cushion_bps = (float(stop_price) - reference_price) / reference_price * 10_000.0
+            immediate_trigger = float(stop_price) <= reference_price
+        else:
+            cushion_bps = (reference_price - float(stop_price)) / reference_price * 10_000.0
+            immediate_trigger = float(stop_price) >= reference_price
+        details["stop_cushion_bps"] = round(float(cushion_bps), 4)
+        details["direction"] = direction
+
+        if immediate_trigger:
+            details.update(
+                {
+                    "decision": "BLOCK",
+                    "reason_codes": ["stop_would_immediately_trigger"],
+                    "message": "Live order blocked because the stop is already on the trigger side of the reference price.",
+                }
+            )
+            return details
+        if cushion_bps < min_cushion_bps:
+            too_close_reason = (
+                "stop_too_close_to_actual_fill"
+                if str(context or "").lower() == "actual_fill"
+                else "stop_too_close_to_estimated_fill"
+            )
+            details.update(
+                {
+                    "decision": "BLOCK",
+                    "reason_codes": [too_close_reason],
+                    "message": (
+                        "Live order blocked because the stop is too close to the reference price "
+                        f"({cushion_bps:.2f}bps < {min_cushion_bps:.2f}bps)."
+                    ),
+                }
+            )
+            return details
+
+        details["message"] = "Live stop distance guard passed."
+        return details
+
+    def _live_stop_precheck(
+        self,
+        *,
+        plan: Plan,
+        live_side: str,
+        live_order_type: str,
+        normalized_live_price: float | None,
+        liquidity_gate: dict[str, Any],
+        live_sizing: dict[str, Any],
+    ) -> dict[str, Any]:
+        enabled = self._safe_bool(getattr(self.settings, "auto_trading_live_stop_precheck_enabled", True), default=True)
+        fail_closed = self._safe_bool(
+            getattr(self.settings, "auto_trading_live_stop_precheck_fail_closed", True),
+            default=True,
+        )
+        min_cushion_bps = max(
+            self._float_or(getattr(self.settings, "auto_trading_live_stop_precheck_min_cushion_bps", 5.0), 5.0),
+            0.0,
+        )
+        details: dict[str, Any] = {
+            "enabled": bool(enabled),
+            "decision": "PASS",
+            "reason_codes": [],
+            "min_cushion_bps": round(min_cushion_bps, 4),
+        }
+        if not enabled:
+            details["reason"] = "disabled"
+            return details
+
+        close_side = self._live_close_side(plan)
+        stop_price, stop_price_details = self._normalize_live_limit_price(
+            symbol=str(plan.symbol or "").upper(),
+            side=close_side,
+            requested_price=self._maybe_float(getattr(plan, "sl", None)),
+        )
+        details.update(
+            {
+                "close_side": close_side,
+                "entry_side": str(live_side or "").upper(),
+                "entry_order_type": str(live_order_type or "").upper(),
+                "stop_price": round(float(stop_price or 0.0), 8),
+                "stop_price_details": stop_price_details,
+            }
+        )
+        if stop_price is None or stop_price <= 0.0:
+            details.update(
+                {
+                    "decision": "BLOCK" if fail_closed else "PASS",
+                    "reason_codes": ["stop_price_missing"],
+                    "message": "Live entry blocked because stop price is missing.",
+                }
+            )
+            return details
+
+        reference_price, reference_details = self._estimated_entry_reference_price(
+            side=live_side,
+            order_type=live_order_type,
+            normalized_price=normalized_live_price,
+            liquidity_gate=liquidity_gate,
+            live_sizing=live_sizing,
+        )
+        details.update(reference_details)
+        if reference_price <= 0.0:
+            details.update(
+                {
+                    "decision": "BLOCK" if fail_closed else "PASS",
+                    "reason_codes": ["stop_reference_price_unavailable"],
+                    "message": "Live entry blocked because stop precheck has no current reference price.",
+                }
+            )
+            return details
+
+        guard = self._live_stop_distance_guard(
+            plan=plan,
+            stop_price=float(stop_price),
+            reference_price=reference_price,
+            context="estimated_fill",
+        )
+        return {**details, **guard}
+
     def _live_submit_fill_payload(
         self,
         *,
@@ -1039,11 +1242,179 @@ class ExecutionCoordinator:
             remaining = self._round_down_to_step(remaining - quantity, step=step)
         return targets, skipped
 
+    def _live_filled_order_payload(
+        self,
+        *,
+        plan: Plan,
+        live_result: dict[str, Any],
+        client_order_id: str,
+        source: str,
+        notes: dict[str, Any] | None = None,
+    ) -> tuple[str, float, float, dict[str, Any]] | None:
+        status = str(live_result.get("status") or "").upper()
+        if status not in {"PARTIALLY_FILLED", "FILLED"}:
+            return None
+
+        raw = self._safe_dict(live_result.get("raw"))
+        executed_qty = (
+            self._maybe_float(live_result.get("executed_qty"))
+            or self._maybe_float(raw.get("executedQty"))
+            or self._maybe_float(raw.get("executed_qty"))
+        )
+        if executed_qty is None or executed_qty <= 0.0:
+            return None
+
+        fill_price = (
+            self._maybe_float(live_result.get("avg_price"))
+            or self._maybe_float(raw.get("avgPrice"))
+            or self._maybe_float(raw.get("avg_price"))
+            or self._maybe_float(live_result.get("price"))
+            or self._maybe_float(raw.get("price"))
+        )
+        if fill_price is None or fill_price <= 0.0:
+            return None
+
+        exchange_order_id = str(
+            live_result.get("order_id")
+            or raw.get("orderId")
+            or live_result.get("exchange_order_id")
+            or ""
+        ).strip()
+        fill_anchor = exchange_order_id or client_order_id or str(plan.plan_id or "")
+        fill_payload = {
+            "source": source,
+            "client_order_id": str(live_result.get("client_order_id") or client_order_id),
+            "exchange_order_id": exchange_order_id,
+            "submit_status": status,
+            "partial": status == "PARTIALLY_FILLED",
+            "side": str(live_result.get("side") or ""),
+            "order_type": str(live_result.get("order_type") or ""),
+            "reduce_only": self._safe_bool(live_result.get("reduce_only")),
+            "notes": dict(notes or {}),
+        }
+        return fill_anchor, float(fill_price), float(executed_qty), fill_payload
+
+    def _emergency_flatten_after_protection_failure(
+        self,
+        *,
+        plan: Plan,
+        entry_quantity: float,
+        close_side: str,
+        position_side: str | None,
+        hedge_mode: bool,
+        parent_client_order_id: str,
+        failure_reason: str,
+        errors: list[dict[str, Any]],
+        live: bool,
+    ) -> dict[str, Any]:
+        enabled = self._safe_bool(
+            getattr(self.settings, "auto_trading_live_protection_failure_flatten_enabled", True),
+            default=True,
+        )
+        if not enabled:
+            return {
+                "status": "DISABLED",
+                "reason": "protection_failure_flatten_disabled",
+                "requires_reconciliation": True,
+            }
+
+        step, min_quantity, rules = self._live_protection_quantity_rules(str(plan.symbol or "").upper())
+        quantity = self._round_down_to_step(entry_quantity, step=step)
+        if quantity < min_quantity:
+            return {
+                "status": "SKIPPED",
+                "reason": "flatten_quantity_below_minimum",
+                "quantity": round(quantity, 8),
+                **rules,
+                "requires_reconciliation": True,
+            }
+
+        client_order_id = self._protection_client_order_id("flat")
+        try:
+            flatten_result = self.live_submitter(
+                symbol=str(plan.symbol or "").upper(),
+                side=close_side,
+                order_type="MARKET",
+                quantity=float(quantity),
+                price=None,
+                stop_price=None,
+                time_in_force="GTC",
+                reduce_only=False if hedge_mode else True,
+                position_side=position_side,
+                close_position=False,
+                working_type=None,
+                order_purpose="live_protection:emergency_flatten",
+                parent_client_order_id=parent_client_order_id,
+                client_order_id=client_order_id,
+                plan_id=plan.plan_id,
+                live=live,
+                new_order_resp_type="RESULT",
+            )
+        except Exception as exc:
+            return {
+                "status": "ERROR",
+                "reason": "emergency_flatten_submit_failed",
+                "client_order_id": client_order_id,
+                "quantity": float(quantity),
+                "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                "requires_reconciliation": True,
+            }
+
+        normalized_result = self._safe_dict(flatten_result)
+        fill_payload = self._live_filled_order_payload(
+            plan=plan,
+            live_result=normalized_result,
+            client_order_id=client_order_id,
+            source="live_protection_failure_flatten",
+            notes={
+                "failure_reason": failure_reason,
+                "protection_errors": errors,
+                "parent_client_order_id": parent_client_order_id,
+            },
+        )
+        fill_ingest = None
+        if fill_payload is not None:
+            fill_anchor, fill_price, fill_qty, payload = fill_payload
+            status = str(normalized_result.get("status") or "").upper()
+            stage = ExecutionFillStage.CLOSED if status == "FILLED" else ExecutionFillStage.PARTIAL_EXIT
+            payload = {
+                **payload,
+                "exit_reason": ExitReason.RISK_LOCK_FLATTEN.value,
+                "reason": "live_protection_failure_flatten",
+            }
+            fill_ingest = self.fill_ingest(
+                fill_id=f"binance_emergency_flatten_{fill_anchor}_{status.lower()}",
+                plan_id=plan.plan_id,
+                symbol=plan.symbol,
+                stage=stage,
+                fill_ts=datetime.now(timezone.utc),
+                price=fill_price,
+                qty=fill_qty,
+                fee=0.0,
+                payload=payload,
+            )
+
+        accepted = self._safe_bool(self._safe_dict(fill_ingest).get("accepted")) if fill_ingest is not None else False
+        fully_closed = (
+            accepted
+            and str(self._safe_dict(fill_ingest).get("stage") or "") == ExecutionFillStage.CLOSED.value
+        )
+        return {
+            "status": "FILLED" if fully_closed else str(normalized_result.get("status") or "SUBMITTED").upper(),
+            "reason": "emergency_flatten_submitted",
+            "client_order_id": client_order_id,
+            "quantity": float(quantity),
+            "result": normalized_result,
+            "fill_ingest": fill_ingest,
+            "requires_reconciliation": not fully_closed,
+        }
+
     def attach_live_protection_orders(
         self,
         *,
         plan: Plan,
         entry_quantity: float,
+        entry_price: float | None = None,
         position_side: str | None,
         parent_client_order_id: str,
         live: bool = True,
@@ -1080,6 +1451,51 @@ class ExecutionCoordinator:
                 "parent_client_order_id": parent_client_order_id,
             }
 
+        orders: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        entry_reference_price = self._maybe_float(entry_price)
+        if entry_reference_price is not None and entry_reference_price > 0.0:
+            actual_fill_stop_guard = self._live_stop_distance_guard(
+                plan=plan,
+                stop_price=float(stop_price),
+                reference_price=float(entry_reference_price),
+                context="actual_fill",
+            )
+            if str(actual_fill_stop_guard.get("decision") or "PASS").upper() != "PASS":
+                errors.append(
+                    {
+                        "role": "stop_loss",
+                        "type": "StopDistanceGuardBlocked",
+                        "message": str(actual_fill_stop_guard.get("message") or "Stop is too close to actual fill."),
+                        "details": actual_fill_stop_guard,
+                    }
+                )
+                emergency_flatten = self._emergency_flatten_after_protection_failure(
+                    plan=plan,
+                    entry_quantity=float(quantity),
+                    close_side=close_side,
+                    position_side=live_position_side,
+                    hedge_mode=hedge_mode,
+                    parent_client_order_id=parent_client_order_id,
+                    failure_reason="actual_fill_stop_distance_guard_blocked",
+                    errors=errors,
+                    live=live,
+                )
+                flattened = (
+                    str(emergency_flatten.get("status") or "").upper() == "FILLED"
+                    and not self._safe_bool(emergency_flatten.get("requires_reconciliation"), default=True)
+                )
+                return {
+                    "status": "EMERGENCY_FLATTENED" if flattened else "FAILED",
+                    "reason": "actual_fill_stop_distance_guard_blocked",
+                    "orders": orders,
+                    "errors": errors,
+                    "actual_fill_stop_guard": actual_fill_stop_guard,
+                    "emergency_flatten": emergency_flatten,
+                    "parent_client_order_id": parent_client_order_id,
+                    "requires_reconciliation": not flattened,
+                }
+
         working_type = str(getattr(self.settings, "auto_trading_live_stop_working_type", "MARK_PRICE") or "MARK_PRICE").upper()
         stop_order = {
             "role": "stop_loss",
@@ -1093,8 +1509,6 @@ class ExecutionCoordinator:
             "working_type": working_type,
             "price_details": stop_price_details,
         }
-        orders: list[dict[str, Any]] = []
-        errors: list[dict[str, Any]] = []
 
         try:
             stop_result = self.live_submitter(
@@ -1119,13 +1533,29 @@ class ExecutionCoordinator:
             orders.append({**stop_order, "result": self._safe_dict(stop_result)})
         except Exception as exc:
             errors.append({"role": "stop_loss", "type": exc.__class__.__name__, "message": str(exc)})
+            emergency_flatten = self._emergency_flatten_after_protection_failure(
+                plan=plan,
+                entry_quantity=float(quantity),
+                close_side=close_side,
+                position_side=live_position_side,
+                hedge_mode=hedge_mode,
+                parent_client_order_id=parent_client_order_id,
+                failure_reason="stop_loss_attach_failed",
+                errors=errors,
+                live=live,
+            )
+            flattened = (
+                str(emergency_flatten.get("status") or "").upper() == "FILLED"
+                and not self._safe_bool(emergency_flatten.get("requires_reconciliation"), default=True)
+            )
             return {
-                "status": "FAILED",
+                "status": "EMERGENCY_FLATTENED" if flattened else "FAILED",
                 "reason": "stop_loss_attach_failed",
                 "orders": orders,
                 "errors": errors,
+                "emergency_flatten": emergency_flatten,
                 "parent_client_order_id": parent_client_order_id,
-                "requires_reconciliation": True,
+                "requires_reconciliation": not flattened,
             }
 
         tp_enabled = self._safe_bool(getattr(self.settings, "auto_trading_live_tp_limit_attach_enabled", True), default=True)
@@ -1740,6 +2170,40 @@ class ExecutionCoordinator:
         else:
             live_tranche = {}
 
+        stop_precheck = self._live_stop_precheck(
+            plan=plan,
+            live_side=live_side,
+            live_order_type=live_order_type,
+            normalized_live_price=normalized_live_price,
+            liquidity_gate=liquidity_gate,
+            live_sizing=live_sizing,
+        )
+        if str(stop_precheck.get("decision") or "PASS").upper() != "PASS":
+            row = self._rejection_submission(
+                intent=intent,
+                plan=plan,
+                message=str(stop_precheck.get("message") or "Live stop precheck blocked the order."),
+                submit_status="LIVE_STOP_PRECHECK_BLOCKED",
+                client_order_id=client_order_id,
+                requested_live=live,
+            )
+            row.attachments = {
+                **self._safe_dict(row.attachments),
+                "live_order_sizing": live_sizing,
+                "live_stop_precheck": stop_precheck,
+                "session_guidance": self._safe_dict(intent.session_guidance),
+                **({"live_position_side": live_position_side} if live_position_side else {}),
+                **({"live_tranche": live_tranche} if live_tranche else {}),
+                **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
+            }
+            row.raw = {
+                **self._safe_dict(row.raw),
+                "live_order_sizing": live_sizing,
+                "live_stop_precheck": stop_precheck,
+                **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
+            }
+            return row, [], False
+
         claim_submitted_at = datetime.now(timezone.utc)
         row = OrderSubmission(
             submission_id=f"sub_{uuid4().hex[:20]}",
@@ -1761,6 +2225,7 @@ class ExecutionCoordinator:
                 "live_submit_claimed": True,
                 "session_guidance": self._safe_dict(intent.session_guidance),
                 "live_order_sizing": live_sizing,
+                "live_stop_precheck": stop_precheck,
                 **({"live_position_side": live_position_side} if live_position_side else {}),
                 **({"live_tranche": live_tranche} if live_tranche else {}),
                 **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
@@ -1768,6 +2233,7 @@ class ExecutionCoordinator:
             raw={
                 "live_submit_claimed": True,
                 "live_order_sizing": live_sizing,
+                "live_stop_precheck": stop_precheck,
                 **({"live_position_side": live_position_side} if live_position_side else {}),
                 **({"live_tranche": live_tranche} if live_tranche else {}),
                 **({"live_liquidity_gate": liquidity_gate} if liquidity_gate_enabled else {}),
@@ -1916,6 +2382,7 @@ class ExecutionCoordinator:
             protection_orders = self.attach_live_protection_orders(
                 plan=plan,
                 entry_quantity=fill_qty,
+                entry_price=fill_price,
                 position_side=live_position_side,
                 parent_client_order_id=client_order_id,
                 live=True,
