@@ -1,37 +1,33 @@
 # MICRO_LIVE Current State
 
-Last updated: 2026-05-18 20:36 KST
+Last updated: 2026-05-19 KST
 
 This is the concise operator source for the current live canary shape. Whole-system snapshot stays in [CURRENT_SYSTEM_STATE.md](/Users/yumin/Documents/trading/docs/CURRENT_SYSTEM_STATE.md); detailed history stays in [SELF_CHECK_LOG.md](/Users/yumin/Documents/trading/docs/SELF_CHECK_LOG.md); daily procedures stay in [AUTO_TRADING_OPERATING_RUNBOOK.md](/Users/yumin/Documents/trading/docs/AUTO_TRADING_OPERATING_RUNBOOK.md).
 
 ## Live Route
 
 - execution mode: `MICRO_LIVE`
-- trade state: `CLOSE_ONLY`
+- trade state: `LIVE_ENTRIES_ENABLED`
 - strategy family: `session_impulse_retest`
 - entry model: `CONFIRM`
 - symbols: `BTCUSDT`, `ETHUSDT`, `SOLUSDT`, `BNBUSDT`, `XRPUSDT`, `ADAUSDT`, `AVAXUSDT`, `LINKUSDT`, `DOGEUSDT`, `BCHUSDT`, `LTCUSDT`, `NEARUSDT`, `FILUSDT`, `DOTUSDT`, `ATOMUSDT`, `ETCUSDT`, `HBARUSDT`, `AAVEUSDT`, `UNIUSDT`, `SUIUSDT`, `INJUSDT`, `FETUSDT`, `ARBUSDT`, `APTUSDT`, `RUNEUSDT`, `PENDLEUSDT`, `ICPUSDT`, `XLMUSDT`, `ZECUSDT`, `QNTUSDT`, `DASHUSDT`
 - directions: `LONG|SHORT` for every live symbol in the direction contract
 - sessions: `dead_session`, `london`, `new_york`
 
-`AUTO_TRADING_CLOSE_ONLY=true` is the current recommended runtime state. It blocks new entries while keeping the stack available for position protection, reconciliation, and reduce-only cleanup.
+`AUTO_TRADING_CLOSE_ONLY=false` opens new entries when a fresh `session_impulse_retest` candidate passes the live approval, liquidity, sizing, stop precheck, and account-protection gates. It does not force an entry.
 
-## Why Close-Only
+## Live Enablement Note
 
-The SIR backtest was corrected on 2026-05-18 to avoid same-5m-bar lookahead. Before the correction, a completed 5m candle could create a signal while the 1m entry search still started at that 5m candle's open time. Live trading only knows that completed 5m candle after it closes, so those same-bar entries were not realistically tradable.
+The current live route is operator-enabled on the proven `session_impulse_retest` family with the `legacy_full_2r` exit shape. Runtime protection remains mandatory: live stop precheck, exchange protection orders, reconciliation, and emergency flatten on protection failure stay enabled.
 
-After the correction, the quick 31-symbol USDT check changed from positive to negative:
+Earlier no-lookahead research found that some same-5m-bar assumptions were too optimistic. Treat this live state as controlled MICRO_LIVE operation, not proof that every research variant is production-safe.
 
-- report: `reports/validation/micro_main_exit_policy_search/micro_main_exit_policy_search_20260518T112504Z.json`
-- current live-style split policy: `closed=279`, `total_r=-134.6996`, `ev=-0.4828`, `win=0.2760`
-- best stage2 candidate in that run: `closed=205`, `total_r=-62.7606`, `ev=-0.3061`, `win=0.4049`
-
-Plain meaning: the old optimistic SIR result should not be trusted for live enablement. The no-order problem was not just "no fresh signal"; the previous backtest protocol was too generous versus live timing.
+Plain meaning: entries are allowed, but live fills, stop attachment, latency, and replay/live parity are still the source of truth.
 
 ## Current Runtime Settings
 
 - `AUTO_TRADING_EXECUTION_MODE=MICRO_LIVE`
-- `AUTO_TRADING_CLOSE_ONLY=true`
+- `AUTO_TRADING_CLOSE_ONLY=false`
 - `BINANCE_TRADE_LIVE_ENABLED=true`
 - `AUTO_TRADING_ALLOWED_FAMILIES=session_impulse_retest`
 - `AUTO_TRADING_MICRO_LIVE_ALLOWED_FAMILIES=session_impulse_retest`
@@ -39,14 +35,15 @@ Plain meaning: the old optimistic SIR result should not be trusted for live enab
 - `AUTO_TRADING_MICRO_LIVE_MAX_CONCURRENT_POSITIONS=3`
 - `AUTO_TRADING_MICRO_LIVE_MAX_DAILY_NEW_ENTRIES=0`
 - `AUTO_TRADING_LIVE_BREAKEVEN_AFTER_PARTIAL_ENABLED=false`
-- `SESSION_IMPULSE_RETEST_EXIT_POLICY_NAME=structure_buffered_swing6_stop0.12_tpbuf0.08`
-- `SESSION_IMPULSE_RETEST_EXIT_STOP_MODE=structure_floor`
+- `SESSION_IMPULSE_RETEST_EXIT_POLICY_NAME=legacy_full_2r`
+- `SESSION_IMPULSE_RETEST_EXIT_STOP_MODE=legacy`
+- `SESSION_IMPULSE_RETEST_EXIT_TARGET_RR=2.0`
 
-`MAX_DAILY_NEW_ENTRIES=0` means the daily cap is disabled. It does not override close-only. With close-only on, new entries are blocked regardless of candidate quality.
+`MAX_DAILY_NEW_ENTRIES=0` means the daily cap is disabled. It does not force entries; fresh candidates still have to pass the live route gates.
 
 Live risk sizing uses Binance futures available balance when `AUTO_TRADING_LIVE_BALANCE_SYNC_ENABLED=true`, with `USDT,USDC` in the sync asset list. `AUTO_TRADING_LIVE_ACCOUNT_EQUITY_USDT` remains the fallback/reference value, not the primary sizing source while balance sync is enabled.
 
-The configured SIR exit policy is structure-buffered, but it is not a reason to re-enable entries by itself. For a long, SL is placed beyond the recent swing low with an ATR buffer and TP is placed slightly before the structure target. For a short, the same idea is mirrored above swing highs and before support targets.
+The configured SIR exit policy is full-target `2R`. If no explicit split levels are present, runtime plans use a single full-size take-profit at the 2R target instead of the older `1R 35% + 2R 65%` default split.
 
 ## Required Checks
 
@@ -61,7 +58,7 @@ Use these before treating the route as ready again:
 
 ## Next Research Direction
 
-Do not re-enable new SIR entries until one of these passes no-lookahead testing:
+Continue validating these before scaling SIR exposure:
 
 - after-close retest/continuation: signal is confirmed at the 5m close, then entry is only allowed after that close.
 - true intrabar simulation: use only information that would have been known inside the developing 5m candle.

@@ -2525,11 +2525,11 @@ class StrategyEngine:
         risk_abs = max(abs(signal.entry_price - signal.stop_price), 1e-9)
         direction_sign = 1.0 if signal.direction == "long" else -1.0
         policy_target_rr = abs(float(signal.target_price) - float(signal.entry_price)) / risk_abs
-        tp1 = float(signal.entry_price + direction_sign * risk_abs)
+        tp1 = float(signal.target_price)
         tp2 = float(signal.target_price)
         tp3 = float(signal.target_price)
-        split = {"tp1": 0.35, "tp2": 0.65, "runner": 0.0}
-        rr_min = 1.0
+        split = {"tp1": 1.0, "tp2": 0.0, "runner": 0.0}
+        rr_min = round(float(policy_target_rr), 4)
         rr_base = round(float(policy_target_rr), 4)
         rr_opt = round(float(policy_target_rr), 4)
         policy_levels = (

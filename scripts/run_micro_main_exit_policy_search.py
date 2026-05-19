@@ -373,6 +373,49 @@ def build_exit_policies() -> list[SessionImpulseRetestExitPolicy]:
                                 higher_timeframe_stop_buffer_atr=0.08,
                             )
                         )
+    for lookback_days in (21, 42):
+        for hold in (40, 60):
+            for stop_enabled in (False, True):
+                for ideal_rr in (1.8, 2.2):
+                    for tp_max_rr in (2.8, 3.5):
+                        policies.append(
+                            SessionImpulseRetestExitPolicy(
+                                name=(
+                                    "important_zone:"
+                                    f"lookback{lookback_days}:hold{hold}:"
+                                    f"stop{'on' if stop_enabled else 'off'}:"
+                                    f"ideal{ideal_rr:.1f}:tpmax{tp_max_rr:.1f}"
+                                ),
+                                stop_mode="legacy",
+                                target_rr=2.0,
+                                max_hold_minutes=hold,
+                                time_guard_10m_min_mfe_r=0.20,
+                                time_guard_20m_min_mfe_r=0.35,
+                                tp1_rr=1.0,
+                                tp1_fraction=0.35,
+                                tp2_rr=2.0,
+                                tp2_fraction=0.65,
+                                higher_timeframe_structure_enabled=True,
+                                higher_timeframe_entry_min_score=0.0,
+                                higher_timeframe_entry_max_distance_atr=1.2,
+                                higher_timeframe_lookback_days=lookback_days,
+                                higher_timeframe_target_enabled=True,
+                                higher_timeframe_stop_enabled=False,
+                                important_zone_exit_enabled=True,
+                                important_zone_stop_enabled=stop_enabled,
+                                important_zone_target_enabled=True,
+                                important_zone_stop_buffer_atr=0.08,
+                                important_zone_target_buffer_atr=0.05,
+                                important_zone_min_anchor_score=0.25,
+                                important_zone_min_stop_ratio=0.65,
+                                important_zone_max_stop_ratio=1.60,
+                                important_zone_tp1_min_rr=0.75,
+                                important_zone_tp2_min_rr=1.35,
+                                important_zone_tp_max_rr=tp_max_rr,
+                                important_zone_ideal_tp2_rr=ideal_rr,
+                                important_zone_tp1_fraction=0.35,
+                            )
+                        )
     for min_stop in (0.003, 0.004, 0.005):
         for min_risk_atr in (0.0, 0.35):
             for rr in (2.0, 2.5, 3.0):

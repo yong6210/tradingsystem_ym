@@ -393,6 +393,80 @@ def test_session_impulse_retest_structure_targets_buffer_before_key_level() -> N
     assert round(adjusted.diagnostics["policy_tp2_rr"], 8) == 2.3
 
 
+def test_session_impulse_retest_important_zone_exit_uses_scored_context() -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    candles_1m = _candles("TESTUSDT", "1m", 1, 1200, start)
+    candles_5m = _candles("TESTUSDT", "5m", 5, 400, start)
+    engine = SessionImpulseRetestResearch(
+        symbol="TESTUSDT",
+        candles_1m=candles_1m,
+        candles_5m=candles_5m,
+        exit_policy=SessionImpulseRetestExitPolicy(
+            name="important_zone_test",
+            higher_timeframe_structure_enabled=True,
+            important_zone_exit_enabled=True,
+            important_zone_stop_enabled=True,
+            important_zone_stop_buffer_atr=0.10,
+            important_zone_target_buffer_atr=0.10,
+            important_zone_tp2_min_rr=1.3,
+            important_zone_tp_max_rr=3.2,
+            important_zone_ideal_tp2_rr=2.0,
+            important_zone_tp1_fraction=0.35,
+        ),
+    )
+    engine.atr_5m[120] = 1.0
+    setup_ts = engine.ts_5m[120]
+    signal = MicroSignal(
+        family="session_impulse_retest",
+        direction="long",
+        signal_ts=setup_ts,
+        setup_ts=setup_ts,
+        entry_ts=setup_ts,
+        entry_price=100.0,
+        stop_price=99.0,
+        target_price=102.0,
+        max_hold_minutes=40,
+        regime_hint="session_open",
+        diagnostics={
+            "htf_structure_enabled": True,
+            "htf_structure_anchor_score": 1.0,
+            "htf_structure_anchor_low": 99.2,
+            "htf_structure_anchor_high": 99.6,
+            "htf_structure_anchor_source": "4h_bullish_order_block",
+            "htf_structure_targets": [
+                {
+                    "kind": "fvg",
+                    "side": "resistance",
+                    "low": 101.5,
+                    "high": 101.8,
+                    "score": 1.0,
+                    "timeframe": "4h",
+                    "source": "4h_bearish_fvg",
+                },
+                {
+                    "kind": "order_block",
+                    "side": "resistance",
+                    "low": 102.4,
+                    "high": 102.8,
+                    "score": 3.0,
+                    "timeframe": "1d",
+                    "source": "1d_bearish_order_block",
+                },
+            ],
+        },
+    )
+
+    adjusted = engine._apply_exit_policy(signal)
+
+    assert adjusted is not None
+    assert round(adjusted.stop_price, 8) == 99.1
+    assert adjusted.diagnostics["policy_target_profile"] == "important_zone"
+    assert adjusted.diagnostics["policy_important_zone_stop_source"] == "4h_bullish_order_block"
+    assert adjusted.diagnostics["policy_important_zone_tp2_source"] == "1d_bearish_order_block"
+    assert round(adjusted.diagnostics["policy_tp1_fraction"], 8) == 0.35
+    assert round(adjusted.diagnostics["policy_tp2_fraction"], 8) == 0.65
+
+
 def test_session_impulse_retest_structure_stop_buffers_beyond_swing_level() -> None:
     start = datetime(2026, 1, 1, tzinfo=UTC)
     candles_1m = _candles("TESTUSDT", "1m", 1, 1200, start)

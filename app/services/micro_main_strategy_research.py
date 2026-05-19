@@ -169,6 +169,19 @@ class SessionImpulseRetestExitPolicy:
     higher_timeframe_target_enabled: bool = True
     higher_timeframe_stop_enabled: bool = False
     higher_timeframe_stop_buffer_atr: float = 0.08
+    important_zone_exit_enabled: bool = False
+    important_zone_stop_enabled: bool = True
+    important_zone_target_enabled: bool = True
+    important_zone_stop_buffer_atr: float = 0.08
+    important_zone_target_buffer_atr: float = 0.05
+    important_zone_min_anchor_score: float = 0.0
+    important_zone_min_stop_ratio: float = 0.65
+    important_zone_max_stop_ratio: float = 1.60
+    important_zone_tp1_min_rr: float = 0.75
+    important_zone_tp2_min_rr: float = 1.50
+    important_zone_tp_max_rr: float = 3.20
+    important_zone_ideal_tp2_rr: float = 2.00
+    important_zone_tp1_fraction: float = 0.35
     stop_after_partial_rr: float | None = None
     adverse_volume_exit_enabled: bool = False
     adverse_volume_exit_after_partial_only: bool = True
@@ -1143,6 +1156,227 @@ class SessionImpulseRetestResearch:
             },
         )
 
+    @staticmethod
+    def _important_zone_source_score(source: str, kind: str = "", timeframe: str = "") -> float:
+        text = f"{source} {kind} {timeframe}".lower()
+        score = 0.50
+        if "1d" in text:
+            score += 0.75
+        if "4h" in text:
+            score += 0.45
+        if "order_block" in text:
+            score += 0.45
+        if "fvg" in text:
+            score += 0.30
+        if "high_volume" in text or "volume_node" in text:
+            score += 0.35
+        if "drive_high" in text or "drive_low" in text:
+            score += 0.35
+        if "opening_range_measured_move_1x" in text:
+            score += 0.25
+        if "opening_range_measured_move_1_5x" in text:
+            score += 0.15
+        return float(score)
+
+    @classmethod
+    def _important_zone_target_candidates(
+        cls,
+        *,
+        policy: SessionImpulseRetestExitPolicy,
+        signal: MicroSignal,
+        entry: float,
+        risk_abs: float,
+        atr: float,
+        diagnostics: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        direction_sign = 1.0 if signal.direction == "long" else -1.0
+        buffer_abs = max(float(policy.important_zone_target_buffer_atr), 0.0) * max(float(atr), 1e-9)
+        candidates: list[dict[str, Any]] = []
+
+        raw_prices = diagnostics.get("structure_target_prices")
+        raw_sources = diagnostics.get("structure_target_sources")
+        sources = raw_sources if isinstance(raw_sources, list) else []
+        if isinstance(raw_prices, list):
+            for idx, raw_price in enumerate(raw_prices):
+                level_price = _safe_float(raw_price, 0.0)
+                if level_price <= 0.0:
+                    continue
+                source = str(sources[idx]) if idx < len(sources) else f"session_structure_{idx + 1}"
+                target_price = level_price - direction_sign * buffer_abs
+                rr = direction_sign * (target_price - entry) / max(risk_abs, 1e-9)
+                if rr <= 0.0:
+                    continue
+                candidates.append(
+                    {
+                        "source": source,
+                        "level_price": level_price,
+                        "target_price": target_price,
+                        "rr": rr,
+                        "score": cls._important_zone_source_score(source),
+                        "kind": "session_structure",
+                        "timeframe": "5m",
+                    }
+                )
+
+        htf_targets = diagnostics.get("htf_structure_targets")
+        if isinstance(htf_targets, list):
+            for idx, item in enumerate(htf_targets):
+                if not isinstance(item, Mapping):
+                    continue
+                source = str(item.get("source") or f"htf_structure_{idx + 1}")
+                kind = str(item.get("kind") or "")
+                timeframe = str(item.get("timeframe") or "")
+                level_price = _safe_float(item.get("low") if signal.direction == "long" else item.get("high"), 0.0)
+                if level_price <= 0.0:
+                    continue
+                target_price = level_price - direction_sign * buffer_abs
+                rr = direction_sign * (target_price - entry) / max(risk_abs, 1e-9)
+                if rr <= 0.0:
+                    continue
+                raw_score = max(_safe_float(item.get("score"), 0.0), 0.0)
+                candidates.append(
+                    {
+                        "source": source,
+                        "level_price": level_price,
+                        "target_price": target_price,
+                        "rr": rr,
+                        "score": raw_score + cls._important_zone_source_score(source, kind, timeframe),
+                        "kind": kind,
+                        "timeframe": timeframe,
+                    }
+                )
+
+        deduped: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for item in sorted(candidates, key=lambda row: (-float(row["score"]), float(row["rr"]))):
+            price_key = int(round(float(item["level_price"]) * 1_000_000))
+            if price_key in seen:
+                continue
+            seen.add(price_key)
+            deduped.append(item)
+        return deduped
+
+    @classmethod
+    def _important_zone_tp_profile(
+        cls,
+        *,
+        policy: SessionImpulseRetestExitPolicy,
+        signal: MicroSignal,
+        entry: float,
+        risk_abs: float,
+        atr: float,
+        diagnostics: Mapping[str, Any],
+    ) -> tuple[float, tuple[tuple[str, float, float], ...], dict[str, Any]] | None:
+        candidates = cls._important_zone_target_candidates(
+            policy=policy,
+            signal=signal,
+            entry=entry,
+            risk_abs=risk_abs,
+            atr=atr,
+            diagnostics=diagnostics,
+        )
+        tp2_min_rr = max(float(policy.important_zone_tp2_min_rr), 0.25)
+        tp_max_rr = max(float(policy.important_zone_tp_max_rr), tp2_min_rr)
+        ideal_rr = max(float(policy.important_zone_ideal_tp2_rr), tp2_min_rr)
+        eligible = [
+            item
+            for item in candidates
+            if tp2_min_rr <= float(item["rr"]) <= tp_max_rr
+        ]
+        if not eligible:
+            return None
+
+        def rank(item: dict[str, Any]) -> tuple[float, float]:
+            rr = float(item["rr"])
+            rr_penalty = abs(rr - ideal_rr) / max(ideal_rr, 1e-9)
+            return (float(item["score"]) / (1.0 + rr_penalty), -rr)
+
+        tp2 = max(eligible, key=rank)
+        tp1_min_rr = max(float(policy.important_zone_tp1_min_rr), 0.1)
+        tp1_candidates = [
+            item
+            for item in candidates
+            if tp1_min_rr <= float(item["rr"]) < max(float(tp2["rr"]) - 0.20, tp1_min_rr)
+        ]
+        tp1 = min(tp1_candidates, key=lambda item: float(item["rr"])) if tp1_candidates else None
+        tp1_fraction = _clamp_float(float(policy.important_zone_tp1_fraction), 0.05, 0.95)
+        levels_source: tuple[tuple[str, float, float], ...]
+        if tp1 is not None:
+            levels_source = (
+                ("tp1", float(tp1["rr"]), tp1_fraction),
+                ("tp2", float(tp2["rr"]), 1.0 - tp1_fraction),
+            )
+        else:
+            levels_source = (("tp2", float(tp2["rr"]), 1.0),)
+        levels = SessionImpulseRetestExitPolicy._normalize_tp_levels(levels_source)
+        return (
+            float(tp2["rr"]),
+            levels,
+            {
+                "policy_target_profile": "important_zone",
+                "policy_important_zone_candidate_count": len(candidates),
+                "policy_important_zone_tp2_source": tp2["source"],
+                "policy_important_zone_tp2_kind": tp2["kind"],
+                "policy_important_zone_tp2_timeframe": tp2["timeframe"],
+                "policy_important_zone_tp2_score": round(float(tp2["score"]), 6),
+                "policy_important_zone_tp2_level_price": float(tp2["level_price"]),
+                "policy_important_zone_tp2_price": float(tp2["target_price"]),
+                "policy_important_zone_tp2_rank": round(rank(tp2)[0], 6),
+                **(
+                    {
+                        "policy_important_zone_tp1_source": tp1["source"],
+                        "policy_important_zone_tp1_kind": tp1["kind"],
+                        "policy_important_zone_tp1_timeframe": tp1["timeframe"],
+                        "policy_important_zone_tp1_score": round(float(tp1["score"]), 6),
+                        "policy_important_zone_tp1_level_price": float(tp1["level_price"]),
+                        "policy_important_zone_tp1_price": float(tp1["target_price"]),
+                    }
+                    if tp1 is not None
+                    else {}
+                ),
+            },
+        )
+
+    @staticmethod
+    def _important_zone_stop_price(
+        *,
+        policy: SessionImpulseRetestExitPolicy,
+        signal: MicroSignal,
+        entry: float,
+        current_stop: float,
+        atr: float,
+        diagnostics: Mapping[str, Any],
+    ) -> tuple[float, dict[str, Any]]:
+        if not _safe_bool(policy.important_zone_stop_enabled):
+            return current_stop, {}
+        anchor_score = _safe_float(diagnostics.get("htf_structure_anchor_score"), 0.0)
+        if anchor_score < max(float(policy.important_zone_min_anchor_score), 0.0):
+            return current_stop, {}
+        anchor_low = _safe_float(diagnostics.get("htf_structure_anchor_low"), 0.0)
+        anchor_high = _safe_float(diagnostics.get("htf_structure_anchor_high"), 0.0)
+        if anchor_low <= 0.0 or anchor_high <= 0.0:
+            return current_stop, {}
+        buffer_abs = max(float(policy.important_zone_stop_buffer_atr), 0.0) * max(float(atr), 1e-9)
+        direction_sign = 1.0 if signal.direction == "long" else -1.0
+        candidate = anchor_low - buffer_abs if signal.direction == "long" else anchor_high + buffer_abs
+        if (entry - candidate) * direction_sign <= 0.0:
+            return current_stop, {}
+        legacy_risk_abs = abs(entry - current_stop)
+        candidate_risk_abs = abs(entry - candidate)
+        if legacy_risk_abs <= 1e-9:
+            return current_stop, {}
+        ratio = candidate_risk_abs / legacy_risk_abs
+        if ratio < max(float(policy.important_zone_min_stop_ratio), 0.05):
+            return current_stop, {}
+        if ratio > max(float(policy.important_zone_max_stop_ratio), 0.05):
+            return current_stop, {}
+        return float(candidate), {
+            "policy_important_zone_stop_source": str(diagnostics.get("htf_structure_anchor_source") or "unknown"),
+            "policy_important_zone_stop_score": round(float(anchor_score), 6),
+            "policy_important_zone_stop_price": float(candidate),
+            "policy_important_zone_stop_ratio": round(float(ratio), 6),
+        }
+
     def _apply_exit_policy(self, signal: MicroSignal) -> MicroSignal | None:
         policy = self.exit_policy
         setup_idx = self._index_5m_by_ts.get(self._normalize_ts(signal.setup_ts))
@@ -1151,18 +1385,31 @@ class SessionImpulseRetestResearch:
         entry = float(signal.entry_price)
         if entry <= 0.0:
             return None
+        direction_sign = 1.0 if signal.direction == "long" else -1.0
+        atr = max(float(self.atr_5m[setup_idx]), 1e-9)
+        diagnostics_base = dict(signal.diagnostics or {})
+        if (
+            (_safe_bool(policy.higher_timeframe_structure_enabled) or _safe_bool(policy.important_zone_exit_enabled))
+            and not _safe_bool(diagnostics_base.get("htf_structure_enabled"))
+        ):
+            diagnostics_base.update(
+                self._higher_timeframe_structure_context(
+                    setup_idx=setup_idx,
+                    direction=signal.direction,
+                    entry_price=entry,
+                    atr=atr,
+                )
+            )
         if _safe_bool(policy.structure_targets_enabled):
-            entry_distance_atr = _safe_float((signal.diagnostics or {}).get("entry_distance_atr"), 0.0)
+            entry_distance_atr = _safe_float(diagnostics_base.get("entry_distance_atr"), 0.0)
             max_entry_distance_atr = max(float(policy.structure_entry_max_distance_atr), 0.0)
             if max_entry_distance_atr > 0.0 and entry_distance_atr > max_entry_distance_atr:
                 return None
         if _safe_bool(policy.higher_timeframe_structure_enabled):
             min_anchor_score = max(float(policy.higher_timeframe_entry_min_score), 0.0)
-            anchor_score = _safe_float((signal.diagnostics or {}).get("htf_structure_anchor_score"), 0.0)
+            anchor_score = _safe_float(diagnostics_base.get("htf_structure_anchor_score"), 0.0)
             if min_anchor_score > 0.0 and anchor_score < min_anchor_score:
                 return None
-        direction_sign = 1.0 if signal.direction == "long" else -1.0
-        atr = max(float(self.atr_5m[setup_idx]), 1e-9)
         legacy_stop = float(signal.stop_price)
         stop = legacy_stop
         if policy.stop_mode == "structure_floor":
@@ -1181,12 +1428,22 @@ class SessionImpulseRetestResearch:
                 stop = max(legacy_stop, structure_stop)
         if _safe_bool(policy.higher_timeframe_structure_enabled) and _safe_bool(policy.higher_timeframe_stop_enabled):
             buffer_abs = max(float(policy.higher_timeframe_stop_buffer_atr), 0.0) * atr
-            anchor_low = _safe_float((signal.diagnostics or {}).get("htf_structure_anchor_low"), 0.0)
-            anchor_high = _safe_float((signal.diagnostics or {}).get("htf_structure_anchor_high"), 0.0)
+            anchor_low = _safe_float(diagnostics_base.get("htf_structure_anchor_low"), 0.0)
+            anchor_high = _safe_float(diagnostics_base.get("htf_structure_anchor_high"), 0.0)
             if signal.direction == "long" and anchor_low > 0.0 and anchor_low < entry:
                 stop = min(stop, anchor_low - buffer_abs)
             elif signal.direction == "short" and anchor_high > 0.0 and anchor_high > entry:
                 stop = max(stop, anchor_high + buffer_abs)
+        important_zone_diagnostics: dict[str, Any] = {}
+        if _safe_bool(policy.important_zone_exit_enabled):
+            stop, important_zone_diagnostics = self._important_zone_stop_price(
+                policy=policy,
+                signal=signal,
+                entry=entry,
+                current_stop=stop,
+                atr=atr,
+                diagnostics=diagnostics_base,
+            )
 
         risk_abs = entry - stop if signal.direction == "long" else stop - entry
         if risk_abs <= 0.0:
@@ -1205,14 +1462,14 @@ class SessionImpulseRetestResearch:
         legacy_risk_pct = abs(entry - legacy_stop) / max(entry, 1e-9)
         stop_expansion_ratio = stop_pct / max(legacy_risk_pct, 1e-9)
         target_profile = "fixed"
-        quality_score = self._exit_policy_quality_score(signal.diagnostics or {})
+        quality_score = self._exit_policy_quality_score(diagnostics_base)
         tp_levels = policy.tp_levels()
         target_rr = max(float(policy.target_rr), 0.1)
-        structure_diagnostics: dict[str, Any] = {}
+        target_diagnostics: dict[str, Any] = {}
         if _safe_bool(policy.adaptive_targets_enabled):
             target_profile, target_rr, tp_levels, quality_score = self._adaptive_tp_profile(
                 policy=policy,
-                diagnostics=signal.diagnostics or {},
+                diagnostics=diagnostics_base,
                 stop_expansion_ratio=stop_expansion_ratio,
             )
         if _safe_bool(policy.structure_targets_enabled):
@@ -1227,15 +1484,27 @@ class SessionImpulseRetestResearch:
                 tp1_fraction=tp1_fraction,
             )
             if structure_profile is not None:
-                target_rr, tp_levels, structure_diagnostics = structure_profile
-                target_profile = str(structure_diagnostics.get("policy_target_profile") or target_profile)
+                target_rr, tp_levels, target_diagnostics = structure_profile
+                target_profile = str(target_diagnostics.get("policy_target_profile") or target_profile)
+        if _safe_bool(policy.important_zone_exit_enabled) and _safe_bool(policy.important_zone_target_enabled):
+            important_zone_profile = self._important_zone_tp_profile(
+                policy=policy,
+                signal=signal,
+                entry=entry,
+                risk_abs=risk_abs,
+                atr=atr,
+                diagnostics=diagnostics_base,
+            )
+            if important_zone_profile is not None:
+                target_rr, tp_levels, target_diagnostics = important_zone_profile
+                target_profile = str(target_diagnostics.get("policy_target_profile") or target_profile)
         target = entry + direction_sign * target_rr * risk_abs
         tp_diagnostics: dict[str, float] = {}
         for label, rr, fraction in tp_levels:
             tp_diagnostics[f"policy_{label}_rr"] = float(rr)
             tp_diagnostics[f"policy_{label}_fraction"] = float(fraction)
         diagnostics = {
-            **dict(signal.diagnostics or {}),
+            **diagnostics_base,
             "exit_policy_name": policy.name,
             "exit_policy_stop_mode": policy.stop_mode,
             "legacy_stop_price": legacy_stop,
@@ -1248,7 +1517,8 @@ class SessionImpulseRetestResearch:
             "policy_target_profile": target_profile,
             "policy_quality_score": quality_score,
             "policy_max_hold_minutes": int(policy.max_hold_minutes),
-            **structure_diagnostics,
+            **important_zone_diagnostics,
+            **target_diagnostics,
             **tp_diagnostics,
         }
         return MicroSignal(
