@@ -243,7 +243,10 @@ class KillConditionAutomationService:
         if kill_condition_state == "throttle_review":
             return "Current evidence justifies throttle review, but not close-only or kill-switch escalation."
         if kill_condition_state == "close_only_review":
-            return "Current evidence is weak enough that close-only review should happen before new entries continue."
+            return (
+                "Current evidence is weak enough to review close-only rules before expanding live entries; "
+                "this is advisory and does not automatically block the current live route."
+            )
         if kill_condition_state == "kill_switch_review":
             return "Multiple hard-failure axes are aligned; kill-switch review is justified before trusting live operation."
         return "Current stop evidence does not justify automatic escalation beyond observation."

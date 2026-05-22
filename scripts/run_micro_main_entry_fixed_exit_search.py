@@ -36,9 +36,16 @@ def _parse_args() -> argparse.Namespace:
         description="Search exit policies while keeping the original session_impulse_retest entries fixed."
     )
     parser.add_argument("--symbols", default=CURRENT_MICRO_LIVE_USDT_SYMBOLS)
+    parser.add_argument(
+        "--contract-path",
+        action="append",
+        default=[],
+        help="Paper/live filter contract path. Can be repeated or comma-separated.",
+    )
     parser.add_argument("--days", type=int, default=1095)
     parser.add_argument("--max-policies", type=int, default=0)
     parser.add_argument("--policy-names", default="")
+    parser.add_argument("--baseline-policy-name", default=BASELINE_POLICY_NAME)
     parser.add_argument("--entry-delay-minutes", type=int, default=5)
     parser.add_argument("--trade-count-floor-ratio", type=float, default=0.98)
     parser.add_argument("--top-limit", type=int, default=50)
@@ -62,6 +69,121 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return default
+
+
+def _resolve_path(raw: str | Path) -> Path:
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = ROOT_DIR / path
+    return path
+
+
+def _csv_contract_paths(values: list[str]) -> list[Path]:
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for value in values or []:
+        for raw in str(value or "").split(","):
+            if not raw.strip():
+                continue
+            path = _resolve_path(raw.strip())
+            if path not in seen:
+                out.append(path)
+                seen.add(path)
+    return out
+
+
+def _load_signal_contracts(paths: list[Path]) -> list[dict[str, Any]]:
+    contracts: list[dict[str, Any]] = []
+    for path in paths:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        paper_contract = dict(payload.get("paper_contract") or payload)
+        symbols = {
+            str(symbol).strip().upper()
+            for symbol in list(paper_contract.get("symbols") or [])
+            if str(symbol).strip()
+        }
+        contracts.append(
+            {
+                "path": str(path.relative_to(ROOT_DIR) if path.is_relative_to(ROOT_DIR) else path),
+                "policy_name": paper_contract.get("policy_name"),
+                "exit_policy_name": paper_contract.get("exit_policy_name"),
+                "symbols": sorted(symbols),
+                "filter_contract": dict(paper_contract.get("filter_contract") or {}),
+            }
+        )
+    return contracts
+
+
+def _passes_signal_contract(signal: MicroSignal, *, symbol: str, contract: dict[str, Any]) -> bool:
+    symbols = {str(item).strip().upper() for item in list(contract.get("symbols") or []) if str(item).strip()}
+    if symbols and str(symbol or "").strip().upper() not in symbols:
+        return False
+
+    filter_contract = dict(contract.get("filter_contract") or {})
+    diagnostics = dict(signal.diagnostics or {})
+
+    expected_direction = str(filter_contract.get("direction") or "").strip().lower()
+    if expected_direction and expected_direction != "both" and str(signal.direction).strip().lower() != expected_direction:
+        return False
+
+    allowed_hours = {_safe_int(hour, -1) for hour in list(filter_contract.get("setup_hour_utc") or [])}
+    if allowed_hours and _safe_int(diagnostics.get("setup_hour_utc"), -1) not in allowed_hours:
+        return False
+
+    min_volume_factor = filter_contract.get("min_volume_factor")
+    if min_volume_factor is not None and _safe_float(diagnostics.get("volume_factor")) < _safe_float(min_volume_factor):
+        return False
+
+    min_reclaim_body_atr = filter_contract.get("min_reclaim_body_atr")
+    if (
+        min_reclaim_body_atr is not None
+        and _safe_float(diagnostics.get("reclaim_body_atr")) < _safe_float(min_reclaim_body_atr)
+    ):
+        return False
+
+    min_risk_atr = filter_contract.get("min_risk_atr")
+    if min_risk_atr is not None and _safe_float(diagnostics.get("risk_atr")) < _safe_float(min_risk_atr):
+        return False
+
+    max_risk_atr = filter_contract.get("max_risk_atr")
+    if max_risk_atr is not None and _safe_float(diagnostics.get("risk_atr")) > _safe_float(max_risk_atr):
+        return False
+
+    max_retest_wait_minutes = filter_contract.get("max_retest_wait_minutes")
+    if (
+        max_retest_wait_minutes is not None
+        and _safe_float(diagnostics.get("retest_wait_minutes")) > _safe_float(max_retest_wait_minutes)
+    ):
+        return False
+
+    max_entry_distance_atr = filter_contract.get("max_entry_distance_atr")
+    if (
+        max_entry_distance_atr is not None
+        and _safe_float(diagnostics.get("entry_distance_atr")) > _safe_float(max_entry_distance_atr)
+    ):
+        return False
+
+    return True
+
+
+def _filter_base_signals(
+    *,
+    symbol: str,
+    base_signals: list[MicroSignal],
+    signal_contracts: list[dict[str, Any]],
+) -> tuple[list[MicroSignal], dict[str, int]]:
+    if not signal_contracts:
+        return list(base_signals), {}
+    selected: list[MicroSignal] = []
+    matched_by_contract = {str(contract.get("path") or idx): 0 for idx, contract in enumerate(signal_contracts)}
+    for signal in base_signals:
+        for idx, contract in enumerate(signal_contracts):
+            key = str(contract.get("path") or idx)
+            if _passes_signal_contract(signal, symbol=symbol, contract=contract):
+                matched_by_contract[key] = matched_by_contract.get(key, 0) + 1
+                selected.append(signal)
+                break
+    return selected, matched_by_contract
 
 
 def _entry_fixed_policy(
@@ -233,6 +355,8 @@ def _run_symbol(
     end_ts: datetime,
     policies: list[SessionImpulseRetestExitPolicy],
     entry_delay_minutes: int,
+    baseline_policy_name: str,
+    signal_contracts: list[dict[str, Any]],
     rows_by_policy: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
     candles_1m = _fetch_1m_klines(monthly_client, rest_client, symbol=symbol, start_ts=start_ts, end_ts=end_ts)
@@ -254,12 +378,19 @@ def _run_symbol(
         candles_5m=candles_5m,
         profile_name=session_impulse_retest_profile_for_symbol(symbol),
         exit_policy=SessionImpulseRetestExitPolicy(
-            name=BASELINE_POLICY_NAME,
+            name=baseline_policy_name,
             entry_confirmation_delay_minutes=max(int(entry_delay_minutes), 0),
         ),
     )
-    base_signals = _collect_base_signals(engine)
+    raw_base_signals = _collect_base_signals(engine)
+    base_signals, matched_by_contract = _filter_base_signals(
+        symbol=symbol,
+        base_signals=raw_base_signals,
+        signal_contracts=signal_contracts,
+    )
+    status["raw_base_signal_count"] = len(raw_base_signals)
     status["base_signal_count"] = len(base_signals)
+    status["contract_matched_signal_count"] = matched_by_contract
     status["status"] = "done"
     status["policy_rejected_signals"] = {}
     structure_context_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -288,6 +419,8 @@ def build_report(
     trade_count_floor_ratio: float,
     top_limit: int,
     include_trades: bool,
+    signal_contracts: list[dict[str, Any]],
+    baseline_policy_name: str = BASELINE_POLICY_NAME,
     entry_delay_minutes: int = 5,
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
@@ -310,7 +443,7 @@ def build_report(
             item["trades"] = rows
         results.append(item)
 
-    baseline = next((row for row in results if dict(row.get("policy") or {}).get("name") == BASELINE_POLICY_NAME), None)
+    baseline = next((row for row in results if dict(row.get("policy") or {}).get("name") == baseline_policy_name), None)
     baseline_closed = _safe_int(dict((baseline or {}).get("summary") or {}).get("closed"))
     floor = int(max(0.0, min(float(trade_count_floor_ratio), 1.0)) * max(baseline_closed, 1))
     same_entry_results = [row for row in results if _safe_int(dict(row.get("summary") or {}).get("closed")) >= floor]
@@ -339,8 +472,9 @@ def build_report(
             "start_ts": start_ts.isoformat(),
             "end_ts": end_ts.isoformat(),
             "policy_count": len(policies),
-            "baseline_policy_name": BASELINE_POLICY_NAME,
+            "baseline_policy_name": baseline_policy_name,
             "entry_delay_minutes": max(int(entry_delay_minutes), 0),
+            "filter_contracts": signal_contracts,
             "trade_count_floor_ratio": float(trade_count_floor_ratio),
             "trade_count_floor": floor,
             "notes": [
@@ -364,16 +498,19 @@ def main() -> int:
     generated_at = datetime.now(UTC)
     settings = get_settings()
     symbols = _csv(args.symbols)
+    contract_paths = _csv_contract_paths(list(args.contract_path or []))
+    signal_contracts = _load_signal_contracts(contract_paths)
+    baseline_policy_name = str(args.baseline_policy_name or BASELINE_POLICY_NAME).strip() or BASELINE_POLICY_NAME
     entry_delay_minutes = max(int(args.entry_delay_minutes), 0)
     policies = _select_policies(
         str(args.policy_names or ""),
         int(args.max_policies or 0),
         entry_delay_minutes=entry_delay_minutes,
     )
-    if BASELINE_POLICY_NAME not in {policy.name for policy in policies}:
+    if baseline_policy_name not in {policy.name for policy in policies}:
         policies = [
             SessionImpulseRetestExitPolicy(
-                name=BASELINE_POLICY_NAME,
+                name=baseline_policy_name,
                 entry_confirmation_delay_minutes=entry_delay_minutes,
             ),
             *policies,
@@ -397,6 +534,8 @@ def main() -> int:
                 policies=policies,
                 rows_by_policy=rows_by_policy,
                 entry_delay_minutes=entry_delay_minutes,
+                baseline_policy_name=baseline_policy_name,
+                signal_contracts=signal_contracts,
             )
             data_status[symbol] = status
             print(
@@ -404,6 +543,7 @@ def main() -> int:
                     {
                         "symbol": symbol,
                         "status": status.get("status"),
+                        "raw_base_signal_count": status.get("raw_base_signal_count"),
                         "base_signal_count": status.get("base_signal_count"),
                         "candles_1m": status.get("candles_1m"),
                     },
@@ -425,6 +565,8 @@ def main() -> int:
         trade_count_floor_ratio=float(args.trade_count_floor_ratio),
         top_limit=int(args.top_limit),
         include_trades=bool(args.include_trades),
+        signal_contracts=signal_contracts,
+        baseline_policy_name=baseline_policy_name,
         entry_delay_minutes=entry_delay_minutes,
     )
     if args.write_report:

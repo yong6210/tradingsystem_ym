@@ -16,6 +16,7 @@ from app.services.active_contract_replay_baseline import usdt_proxy_rows_for_act
 from app.services.edge_experiment_review import build_edge_experiment_review, summarize_edge_experiment_review
 from app.services.edge_evolution_rule import build_edge_evolution_rule, summarize_edge_evolution_rule
 from app.services.live_route_contract import row_session_name
+from app.services.market_data import configured_usdt_universe_name
 from app.services.outcome_control_trace import (
     build_outcome_control_trace,
     runtime_outcome_control_trace,
@@ -1364,15 +1365,16 @@ class ExecutionOperatorDashboardService:
         payload: dict[str, Any] | None,
         *,
         symbol: str = "",
-        universe: str = "usdt_reliable_balanced_31",
+        universe: str = "",
         days: int = 7,
     ) -> dict[str, Any] | None:
         if not payload:
             return None
+        resolved_universe = str(universe or configured_usdt_universe_name())
         priority = ExecutionOperatorDashboardService._normalize_operator_action_priority_payload(
             payload,
             symbol=symbol,
-            universe=universe,
+            universe=resolved_universe,
             days=days,
         )
         return {
@@ -1632,7 +1634,7 @@ class ExecutionOperatorDashboardService:
         operator_action_priority_payload = self._operator_action_priority_summary(
             operator_action_priority_summary,
             symbol=symbol or "",
-            universe=str(portfolio_summary_payload.get("universe") or "usdt_reliable_balanced_31"),
+            universe=str(portfolio_summary_payload.get("universe") or configured_usdt_universe_name()),
             days=max(int(days), 1),
         )
         outcome_attribution_summary = summarize_outcome_attribution(
@@ -1647,7 +1649,7 @@ class ExecutionOperatorDashboardService:
         )
         review_followup_ledger_summary = summarize_split_review_followup_ledger(
             symbol=symbol or "",
-            universe=str(portfolio_summary_payload.get("universe") or "usdt_reliable_balanced_31"),
+            universe=str(portfolio_summary_payload.get("universe") or configured_usdt_universe_name()),
         )
         edge_evolution_summary = summarize_edge_evolution_rule(
             build_edge_evolution_rule(

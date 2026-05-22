@@ -142,3 +142,34 @@ def test_replay_review_applies_risk_atr_contract(tmp_path: Path) -> None:
 
     assert payload["matched_trade_count"] == 1
     assert payload["windows"][-1]["summary"]["total_r"] == 1.0
+
+
+def test_replay_review_infers_intrabar_report_from_walkforward_source(tmp_path: Path) -> None:
+    contract = tmp_path / "contract.json"
+    walkforward = tmp_path / "walkforward.json"
+    report = tmp_path / "intrabar.json"
+    _write_contract(contract)
+    contract_payload = json.loads(contract.read_text(encoding="utf-8"))
+    contract_payload["candidate"] = {"source_path": str(walkforward)}
+    contract.write_text(json.dumps(contract_payload), encoding="utf-8")
+    walkforward.write_text(
+        json.dumps(
+            {
+                "schema_version": "micro_intrabar_walkforward_symbol_filters_v1",
+                "source": {"sources": [{"path": str(report)}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_intrabar_report(
+        report,
+        [_trade("BTCUSDT", "2026-05-18T13:00:00+00:00", 1.0)],
+    )
+
+    payload = replay.build_payload(
+        contract,
+        generated_at=datetime(2026, 5, 18, tzinfo=UTC),
+    )
+
+    assert payload["intrabar_report_path"] == str(report)
+    assert payload["matched_trade_count"] == 1

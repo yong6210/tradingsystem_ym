@@ -799,9 +799,17 @@ class PortfolioBudgetReportService:
             alpha_research_candidates,
             outcome_inputs_by_symbol=outcome_inputs_by_symbol,
         )
+        live_route_contract = self._live_route_contract_from_settings()
+        configured_live_universe = str(getattr(self.settings, "universe_name", "") or "").strip().lower()
+        active_strategy_families = (
+            list(live_route_contract.get("strategy_families") or [])
+            if str(universe or "").strip().lower() == configured_live_universe
+            else []
+        )
         multi_strategy_ab_summary = self.multi_strategy_ab.generate(
             portfolio_budget={
                 "strategy_mode": mode_policy.mode.value,
+                "active_strategy_families": active_strategy_families,
                 "accepted_candidates": accepted_candidates,
                 "blocked_candidates": blocked_candidates,
                 "alpha_research_candidates": alpha_research_candidates,
@@ -813,6 +821,7 @@ class PortfolioBudgetReportService:
             rows=[*accepted_candidates, *blocked_candidates, *alpha_research_candidates],
             portfolio_budget={
                 "strategy_mode": mode_policy.mode.value,
+                "active_strategy_families": active_strategy_families,
                 "accepted_candidates": accepted_candidates,
                 "blocked_candidates": blocked_candidates,
                 "alpha_research_candidates": alpha_research_candidates,
@@ -848,7 +857,6 @@ class PortfolioBudgetReportService:
             alpha_research_candidates,
             edge_experiment_lookup=edge_experiment_lookup,
         )
-        live_route_contract = self._live_route_contract_from_settings()
         accepted_candidates = [
             self._attach_live_route_status(row, live_route_contract) for row in accepted_candidates
         ]

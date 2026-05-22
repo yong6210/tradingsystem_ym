@@ -1,6 +1,8 @@
 # Kill Condition Automation Live Runbook
 
-최종 갱신: 2026-03-24
+최종 갱신: 2026-05-19
+
+현재 운영 예시는 `USDT 11심볼 + session_impulse_retest` 기준이다. 예전 `BTCUSDC / usdc_perp_top30` 예시는 현재 live 계약이 아니다.
 
 ## 1. 목적
 - `kill_condition_automation` proposal summary를 실제 `close-only` 또는 `kill-switch` live write로 번역할 때 같은 절차를 반복하게 만든다.
@@ -28,12 +30,12 @@ export KILL_CONDITION_AUTOMATION_ARM_TOKEN="replace-with-long-random-token"
 사전 확인:
 
 ```bash
-curl -s "http://127.0.0.1:8000/execution/safety-state?symbol=BTCUSDC" | jq
-curl -s -X POST "http://127.0.0.1:8000/validation/report?symbol=BTCUSDC" | jq '{
+curl -s "http://127.0.0.1:8000/execution/safety-state?symbol=BTCUSDT" | jq
+curl -s -X POST "http://127.0.0.1:8000/validation/report?symbol=BTCUSDT" | jq '{
   kill_condition_automation_available,
   kill_condition_automation_summary
 }'
-curl -s "http://127.0.0.1:8000/execution/operator-dashboard?symbol=BTCUSDC&universe=usdc_perp_top30&days=7" | jq '.signal_funnel.kill_condition_automation'
+curl -s "http://127.0.0.1:8000/execution/operator-dashboard?symbol=BTCUSDT&universe=micro_live_usdt_11&days=7" | jq '.signal_funnel.kill_condition_automation'
 ```
 
 브라우저에서는 `GET /execution/operator-ui` 홈의 `Kill Condition Inspector`를 먼저 본다.
@@ -43,8 +45,8 @@ curl -s "http://127.0.0.1:8000/execution/operator-dashboard?symbol=BTCUSDC&unive
 
 ```bash
 ./.venv/bin/python scripts/run_kill_condition_automation.py \
-  --symbol BTCUSDC \
-  --universe usdc_perp_top30 \
+  --symbol BTCUSDT \
+  --universe micro_live_usdt_11 \
   --days 7
 ```
 
@@ -54,8 +56,8 @@ API dry-run:
 curl -s -X POST "http://127.0.0.1:8000/execution/control/kill-condition/apply" \
   -H "Content-Type: application/json" \
   -d '{
-    "symbol":"BTCUSDC",
-    "universe":"usdc_perp_top30",
+    "symbol":"BTCUSDT",
+    "universe":"micro_live_usdt_11",
     "days":7,
     "dry_run":true,
     "allow_live_write":false,
@@ -73,8 +75,8 @@ curl -s -X POST "http://127.0.0.1:8000/execution/control/kill-condition/apply" \
 ### 5.1 스크립트
 ```bash
 ./.venv/bin/python scripts/run_kill_condition_automation.py \
-  --symbol BTCUSDC \
-  --universe usdc_perp_top30 \
+  --symbol BTCUSDT \
+  --universe micro_live_usdt_11 \
   --days 7 \
   --allow-live-write \
   --arm-token "$KILL_CONDITION_AUTOMATION_ARM_TOKEN" \
@@ -88,8 +90,8 @@ curl -s -X POST "http://127.0.0.1:8000/execution/control/kill-condition/apply" \
 curl -s -X POST "http://127.0.0.1:8000/execution/control/kill-condition/apply" \
   -H "Content-Type: application/json" \
   -d "{
-    \"symbol\":\"BTCUSDC\",
-    \"universe\":\"usdc_perp_top30\",
+    \"symbol\":\"BTCUSDT\",
+    \"universe\":\"micro_live_usdt_11\",
     \"days\":7,
     \"dry_run\":false,
     \"allow_live_write\":true,
@@ -106,7 +108,7 @@ curl -s -X POST "http://127.0.0.1:8000/execution/control/kill-condition/apply" \
 
 ## 6. 적용 후 확인
 ```bash
-curl -s "http://127.0.0.1:8000/execution/safety-state?symbol=BTCUSDC" | jq
+curl -s "http://127.0.0.1:8000/execution/safety-state?symbol=BTCUSDT" | jq
 ```
 
 추가 확인:

@@ -2,9 +2,25 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+_LEGACY_APPROVAL_GO_TEXT = (
+    "GO: approval template is aligned with replay-backed downside and the current threshold-lineage winner."
+)
+_CURRENT_APPROVAL_GO_TEXT = "GO: approval template is aligned with the configured replay-backed validation evidence."
+
 
 def _text(value: Any) -> str:
     return str(value or "")
+
+
+def _normalize_validation_alert_text(value: Any) -> str:
+    text = _text(value)
+    if not text:
+        return ""
+    return (
+        text.replace(_LEGACY_APPROVAL_GO_TEXT, _CURRENT_APPROVAL_GO_TEXT)
+        .replace("winner=", "validation_lineage=")
+        .replace("; promotion=", "; recommended_action=")
+    )
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -14,13 +30,13 @@ def _mapping(value: Any) -> dict[str, Any]:
 def _approval_strip_summary(summary: Mapping[str, Any] | None) -> dict[str, str]:
     summary_dict = _mapping(summary)
     return {
-        "primary_reason": _text(summary_dict.get("primary_reason")),
+        "primary_reason": _normalize_validation_alert_text(summary_dict.get("primary_reason")),
         "approve_value": _text(summary_dict.get("approve_value")),
-        "approve_reason": _text(summary_dict.get("approve_reason")),
+        "approve_reason": _normalize_validation_alert_text(summary_dict.get("approve_reason")),
         "align_value": _text(summary_dict.get("align_value")),
-        "align_reason": _text(summary_dict.get("align_reason")),
+        "align_reason": _normalize_validation_alert_text(summary_dict.get("align_reason")),
         "act_value": _text(summary_dict.get("act_value")),
-        "act_reason": _text(summary_dict.get("act_reason")),
+        "act_reason": _normalize_validation_alert_text(summary_dict.get("act_reason")),
         "act_priority_level": _text(summary_dict.get("act_priority_level")),
     }
 
@@ -30,15 +46,15 @@ def approval_summary_passthrough(summary: Mapping[str, Any] | None) -> dict[str,
     return {
         "deployment_go_no_go": _text(summary_dict.get("playbook_go_no_go")),
         "deployment_code": _text(summary_dict.get("playbook_code")),
-        "deployment_message": _text(summary_dict.get("playbook_message")),
+        "deployment_message": _normalize_validation_alert_text(summary_dict.get("playbook_message")),
         "approval_topline_status": _text(summary_dict.get("topline_status")),
         "approval_topline_code": _text(summary_dict.get("topline_code")),
-        "approval_topline_message": _text(summary_dict.get("topline_message")),
-        "approval_topline_summary_line": _text(summary_dict.get("topline_summary_line")),
+        "approval_topline_message": _normalize_validation_alert_text(summary_dict.get("topline_message")),
+        "approval_topline_summary_line": _normalize_validation_alert_text(summary_dict.get("topline_summary_line")),
         "playbook_go_no_go": _text(summary_dict.get("playbook_go_no_go")),
         "playbook_code": _text(summary_dict.get("playbook_code")),
         "playbook_action": _text(summary_dict.get("playbook_action")),
-        "playbook_message": _text(summary_dict.get("playbook_message")),
+        "playbook_message": _normalize_validation_alert_text(summary_dict.get("playbook_message")),
     }
 
 
@@ -77,12 +93,12 @@ def validation_alert_contract(payload: Mapping[str, Any] | None) -> dict[str, st
             or payload_dict.get("approval_playbook_code")
             or payload_dict.get("playbook_code")
         ),
-        "deployment_message": _text(
+        "deployment_message": _normalize_validation_alert_text(
             payload_dict.get("deployment_message")
             or payload_dict.get("approval_playbook_message")
             or payload_dict.get("playbook_message")
         ),
-        "approval_topline_summary_line": _text(
+        "approval_topline_summary_line": _normalize_validation_alert_text(
             payload_dict.get("approval_topline_summary_line") or payload_dict.get("topline_summary_line")
         ),
         "approval_playbook_go_no_go": _text(
@@ -92,7 +108,7 @@ def validation_alert_contract(payload: Mapping[str, Any] | None) -> dict[str, st
         "approval_playbook_action": _text(
             payload_dict.get("approval_playbook_action") or payload_dict.get("playbook_action")
         ),
-        "approval_playbook_message": _text(
+        "approval_playbook_message": _normalize_validation_alert_text(
             payload_dict.get("approval_playbook_message") or payload_dict.get("playbook_message")
         ),
     }
@@ -103,13 +119,13 @@ def validation_alert_strip_summary(payload: Mapping[str, Any] | None) -> dict[st
     existing = _approval_strip_summary(payload_dict.get("approval_strip_summary"))
     if any(existing.values()):
         return {
-            "primary_reason": existing.get("primary_reason", ""),
+            "primary_reason": _normalize_validation_alert_text(existing.get("primary_reason", "")),
             "approve_value": existing.get("approve_value") or "n/a",
-            "approve_reason": existing.get("approve_reason", ""),
+            "approve_reason": _normalize_validation_alert_text(existing.get("approve_reason", "")),
             "align_value": existing.get("align_value") or "n/a",
-            "align_reason": existing.get("align_reason", ""),
+            "align_reason": _normalize_validation_alert_text(existing.get("align_reason", "")),
             "act_value": existing.get("act_value") or "review_validation_alert_contract",
-            "act_reason": existing.get("act_reason", ""),
+            "act_reason": _normalize_validation_alert_text(existing.get("act_reason", "")),
             "act_priority_level": existing.get("act_priority_level") or "monitor",
         }
 
@@ -126,13 +142,13 @@ def validation_alert_strip_summary(payload: Mapping[str, Any] | None) -> dict[st
     }
     priority_map = {"GO": "monitor", "MANUAL_REVIEW": "watch", "NO_GO": "urgent"}
     return {
-        "primary_reason": approval_summary_line or playbook_message or deployment_message,
+        "primary_reason": _normalize_validation_alert_text(approval_summary_line or playbook_message or deployment_message),
         "approve_value": approve_map.get(deployment_go_no_go, deployment_go_no_go.lower() or "n/a"),
-        "approve_reason": approval_summary_line or deployment_message or playbook_message,
+        "approve_reason": _normalize_validation_alert_text(approval_summary_line or deployment_message or playbook_message),
         "align_value": "aligned" if not playbook_go_no_go or playbook_go_no_go == deployment_go_no_go else "playbook_drift",
-        "align_reason": playbook_message or approval_summary_line or deployment_message,
+        "align_reason": _normalize_validation_alert_text(playbook_message or approval_summary_line or deployment_message),
         "act_value": _text(contract.get("approval_playbook_action")) or "review_validation_alert_contract",
-        "act_reason": playbook_message or deployment_message or approval_summary_line,
+        "act_reason": _normalize_validation_alert_text(playbook_message or deployment_message or approval_summary_line),
         "act_priority_level": priority_map.get(deployment_go_no_go, "monitor"),
     }
 

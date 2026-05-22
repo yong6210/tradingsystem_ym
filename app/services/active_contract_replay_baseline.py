@@ -12,6 +12,8 @@ SESSION_IMPULSE_RETEST_ENTRY_MODEL = "CONFIRM"
 USDC_DIRECT_BACKTEST_SOURCE = "micro_main_usdc_backtest"
 USDT_DIRECT_BACKTEST_SOURCE = "micro_main_usdt_backtest"
 USDT_PROXY_BACKTEST_SOURCE = "micro_main_usdt_proxy_backtest"
+PORTFOLIO_MIX_REVIEW_SOURCE = "micro_intrabar_candidate_portfolio_mix_review"
+DEFAULT_PORTFOLIO_MIX_REPORT = "reports/operations/micro_intrabar_long_short_portfolio_mix_review_drop_arb/latest.json"
 
 
 def normalized_string_set(values: list[Any] | tuple[Any, ...] | set[Any] | None, *, case: str) -> set[str]:
@@ -106,22 +108,31 @@ def canonical_symbol_from_proxy(value: Any) -> str:
     return symbol
 
 
-def contract_symbol_for_source(value: Any, source: str) -> str:
+def contract_symbol_for_source(value: Any, source: str, *, proxy_symbol: bool = False) -> str:
     symbol = str(value or "").strip().upper()
-    if source == USDT_DIRECT_BACKTEST_SOURCE:
-        return symbol
-    return canonical_symbol_from_proxy(symbol)
+    if source == USDT_PROXY_BACKTEST_SOURCE or proxy_symbol:
+        return canonical_symbol_from_proxy(symbol)
+    return symbol
 
 
-def usdt_proxy_contract_symbols(payload: dict[str, Any]) -> set[str]:
-    source = str(payload.get("source") or "").strip()
+def usdt_proxy_contract_symbols(payload: dict[str, Any], *, source_hint: str = "") -> set[str]:
+    source = str(payload.get("source") or source_hint or "").strip()
     raw_symbols = payload.get("symbols")
+    proxy_symbols = False
     if not isinstance(raw_symbols, list) or not raw_symbols:
         raw_symbols = payload.get("proxy_symbols")
+        proxy_symbols = True
+    if not isinstance(raw_symbols, list) or not raw_symbols:
+        raw_symbols = payload.get("combined_symbols")
+        proxy_symbols = False
     if not isinstance(raw_symbols, list) or not raw_symbols:
         results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
         raw_symbols = list(results.keys()) if isinstance(results, dict) else []
-    return {contract_symbol_for_source(symbol, source) for symbol in raw_symbols if str(symbol or "").strip()}
+    return {
+        contract_symbol_for_source(symbol, source, proxy_symbol=proxy_symbols)
+        for symbol in raw_symbols
+        if str(symbol or "").strip()
+    }
 
 
 def active_micro_live_symbol_contract(settings: Any) -> set[str]:
@@ -152,9 +163,18 @@ def _recent_json_files(directory: Path, pattern: str) -> list[Path]:
 
 
 def _report_source_priority(source: str) -> int:
+    if source == PORTFOLIO_MIX_REVIEW_SOURCE:
+        return 3
     if source == USDT_DIRECT_BACKTEST_SOURCE:
         return 2
     return 1 if source == USDC_DIRECT_BACKTEST_SOURCE else 0
+
+
+def _report_days(payload: dict[str, Any]) -> int:
+    raw_days = payload.get("days")
+    if raw_days is None and isinstance(payload.get("settings"), dict):
+        raw_days = dict(payload.get("settings") or {}).get("days")
+    return safe_int(raw_days, 0)
 
 
 def _active_contract_report_dirs(settings: Any) -> list[Path]:
@@ -196,7 +216,7 @@ def _ranked_active_contract_reports(settings: Any) -> list[tuple[Path, dict[str,
                     continue
                 ranked.append(
                     (
-                        safe_int(payload.get("days"), 0),
+                        _report_days(payload),
                         _report_source_priority(source),
                         path.name,
                         path,
@@ -204,6 +224,34 @@ def _ranked_active_contract_reports(settings: Any) -> list[tuple[Path, dict[str,
                         source,
                     )
                 )
+    portfolio_mix_path = Path(
+        str(
+            getattr(
+                settings,
+                "auto_trading_replay_validation_bridge_portfolio_mix_report_path",
+                DEFAULT_PORTFOLIO_MIX_REPORT,
+            )
+            or DEFAULT_PORTFOLIO_MIX_REPORT
+        )
+    ).expanduser()
+    if not portfolio_mix_path.is_absolute():
+        portfolio_mix_path = resolve_report_dir(settings, str(portfolio_mix_path), default=DEFAULT_PORTFOLIO_MIX_REPORT)
+    if portfolio_mix_path.is_file():
+        try:
+            payload = json.loads(portfolio_mix_path.read_text())
+        except Exception:
+            payload = {}
+        if str(payload.get("schema_version") or "") == "micro_intrabar_candidate_portfolio_mix_review_v1":
+            ranked.append(
+                (
+                    _report_days(payload),
+                    _report_source_priority(PORTFOLIO_MIX_REVIEW_SOURCE),
+                    portfolio_mix_path.name,
+                    portfolio_mix_path,
+                    payload,
+                    PORTFOLIO_MIX_REVIEW_SOURCE,
+                )
+            )
     return [
         (path, payload, source)
         for _days, _source_priority, _name, path, payload, source in sorted(ranked, reverse=True)
@@ -232,6 +280,68 @@ def _entry_effective_window_days(payload: dict[str, Any], raw_entry: dict[str, A
     return max(report_days, 0.0), "report_days"
 
 
+def _portfolio_mix_rows_for_symbol(
+    *,
+    settings: Any,
+    path: Path,
+    payload: dict[str, Any],
+    symbol: str,
+    directions: set[str],
+    sessions: set[str],
+) -> dict[str, Any] | None:
+    report_days = max(safe_float(dict(payload.get("settings") or {}).get("days"), 0.0), 1.0)
+    for item in list(payload.get("per_contract") or []):
+        if not isinstance(item, dict):
+            continue
+        contract_symbols = [str(raw or "").strip().upper() for raw in list(item.get("symbols") or []) if str(raw or "").strip()]
+        if symbol not in contract_symbols:
+            continue
+        direction = str(dict(item.get("filter_contract") or {}).get("direction") or "").strip().upper()
+        if directions and direction not in directions:
+            continue
+        setup_hours = [
+            safe_int(raw, -1)
+            for raw in list(dict(item.get("filter_contract") or {}).get("setup_hour_utc") or [])
+        ]
+        generated_sessions = {
+            session_bucket(settings, datetime(2026, 1, 1, max(0, min(hour, 23)), tzinfo=timezone.utc))
+            for hour in setup_hours
+            if 0 <= hour <= 23
+        }
+        if sessions and generated_sessions and not (generated_sessions & sessions):
+            continue
+        closed = safe_int(dict(item.get("summary") or {}).get("closed"), 0)
+        symbol_count = max(len(contract_symbols), 1)
+        allocated_rows = max(int(round(closed / symbol_count)), 0)
+        generated_session = sorted(generated_sessions)[0] if generated_sessions else ""
+        rows = [
+            {
+                "symbol": symbol,
+                "strategy_family": SESSION_IMPULSE_RETEST_FAMILY,
+                "entry_model": SESSION_IMPULSE_RETEST_ENTRY_MODEL,
+                "direction": direction,
+                "generated_session": generated_session,
+                "generated_ts": "",
+                "portfolio_mix_estimated_row": True,
+            }
+            for _ in range(allocated_rows)
+        ]
+        return {
+            "source": PORTFOLIO_MIX_REVIEW_SOURCE,
+            "source_path": str(path),
+            "generated_at": str(payload.get("generated_at") or ""),
+            "days": report_days,
+            "requested_days": report_days,
+            "days_source": "portfolio_mix_settings_days",
+            "window": {},
+            "summary": dict(item.get("summary") or {}),
+            "rows": rows,
+            "estimated_rows": True,
+            "allocation_method": "per_contract_closed_divided_by_contract_symbol_count",
+        }
+    return None
+
+
 def usdt_proxy_rows_for_active_contract(settings: Any, filters: dict[str, Any]) -> dict[str, Any] | None:
     filter_payload = dict(filters or {})
     families = normalized_string_set(filter_payload.get("strategy_families"), case="lower")
@@ -249,7 +359,19 @@ def usdt_proxy_rows_for_active_contract(settings: Any, filters: dict[str, Any]) 
     active_symbols = active_micro_live_symbol_contract(settings)
 
     for path, payload, source in _ranked_active_contract_reports(settings):
-        if active_symbols and usdt_proxy_contract_symbols(payload) != active_symbols:
+        if active_symbols and usdt_proxy_contract_symbols(payload, source_hint=source) != active_symbols:
+            continue
+        if source == PORTFOLIO_MIX_REVIEW_SOURCE:
+            portfolio_rows = _portfolio_mix_rows_for_symbol(
+                settings=settings,
+                path=path,
+                payload=payload,
+                symbol=symbol,
+                directions=directions,
+                sessions=sessions,
+            )
+            if portfolio_rows is not None:
+                return portfolio_rows
             continue
         results = payload.get("results")
         if isinstance(results, dict):
@@ -265,6 +387,7 @@ def usdt_proxy_rows_for_active_contract(settings: Any, filters: dict[str, Any]) 
             canonical = contract_symbol_for_source(
                 raw_entry.get("canonical_symbol") or raw_entry.get("symbol") or proxy_symbol,
                 source,
+                proxy_symbol=bool(raw_entry.get("proxy_symbol")) and not raw_entry.get("canonical_symbol"),
             )
             if canonical != symbol:
                 continue

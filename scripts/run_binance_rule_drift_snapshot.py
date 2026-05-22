@@ -91,9 +91,6 @@ def compare_rule_snapshots(*, previous: dict[str, Any], current: dict[str, Any])
                 fields[key] = {"old": old.get(key), "new": row.get(key)}
         if fields:
             changes.append({"symbol": symbol, "change_type": "rule_changed", "fields": fields})
-    current_symbols = {str(row.get("symbol") or "").upper() for row in list(current.get("rules") or []) if isinstance(row, dict)}
-    for symbol in sorted(set(previous_rules) - current_symbols):
-        changes.append({"symbol": symbol, "change_type": "missing_from_current", "fields": {}})
     return changes
 
 

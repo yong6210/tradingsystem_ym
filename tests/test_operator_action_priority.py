@@ -5,6 +5,70 @@ from datetime import UTC, datetime, timedelta
 from app.services.operator_action_priority import OperatorActionPriorityService
 
 
+def test_operator_action_priority_keeps_go_playbook_as_monitor_when_execution_sample_is_empty() -> None:
+    service = OperatorActionPriorityService()
+
+    payload = service.generate(
+        dashboard={
+            "playbook_action": "continue_candidate_review_under_portfolio_caps",
+            "playbook_message": "GO: runtime gate is open for candidate review.",
+            "signal_funnel": {
+                "execution_degradation_advisory": {
+                    "available": True,
+                    "status": "manual_review",
+                    "healthy": False,
+                    "summary": "execution quality needs review before expansion",
+                    "recommended_action": "review_execution_quality_before_live_expansion",
+                    "sample_context": {"plans_matured": 0, "fill_events_total": 0, "closed_plans": 0},
+                    "advisory_only": True,
+                },
+                "family_execution_degradation_advisory": {"available": False},
+                "mode_advisory": {"available": False},
+                "alpha_research_recommended_action": {"available": False},
+            },
+        },
+        checklist={},
+        validation={},
+    )
+
+    assert payload["top_action"] == "continue_candidate_review_under_portfolio_caps"
+    assert payload["priority_level"] == "monitor"
+    assert payload["priority_source"] == "playbook"
+    assert payload["next_actions"][0]["action"] == "review_execution_quality_before_live_expansion"
+    assert payload["next_actions"][0]["priority_level"] == "monitor"
+
+
+def test_operator_action_priority_escalates_execution_degradation_when_sample_exists() -> None:
+    service = OperatorActionPriorityService()
+
+    payload = service.generate(
+        dashboard={
+            "playbook_action": "continue_candidate_review_under_portfolio_caps",
+            "playbook_message": "GO: runtime gate is open for candidate review.",
+            "signal_funnel": {
+                "execution_degradation_advisory": {
+                    "available": True,
+                    "status": "manual_review",
+                    "healthy": False,
+                    "summary": "fill coverage is degrading",
+                    "recommended_action": "review_runtime_execution_drag_before_expansion",
+                    "sample_context": {"plans_matured": 9, "fill_events_total": 7, "closed_plans": 3},
+                    "advisory_only": True,
+                },
+                "family_execution_degradation_advisory": {"available": False},
+                "mode_advisory": {"available": False},
+                "alpha_research_recommended_action": {"available": False},
+            },
+        },
+        checklist={},
+        validation={},
+    )
+
+    assert payload["top_action"] == "review_runtime_execution_drag_before_expansion"
+    assert payload["priority_level"] == "urgent"
+    assert payload["priority_source"] == "execution_degradation"
+
+
 def test_operator_action_priority_promotes_edge_experiment_when_no_stronger_signal() -> None:
     service = OperatorActionPriorityService()
 
@@ -73,15 +137,15 @@ def test_operator_action_priority_promotes_edge_experiment_when_no_stronger_sign
     assert payload["experiment_context"]["blocked_candidate_focus"]["symbol"] == "ETHUSDC"
     assert payload["experiment_context"]["entry_timing_target"]["symbol"] == "BTCUSDC"
     assert payload["experiment_context"]["entry_timing_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action run_entry_timing_split_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 7 --action run_entry_timing_split_review"
     )
     assert payload["experiment_context"]["execution_style_target"]["symbol"] == "BTCUSDC"
     assert payload["experiment_context"]["execution_style_target"]["focus_source"] == "accepted_candidate_focus"
     assert payload["experiment_context"]["execution_style_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action run_execution_style_split_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 7 --action run_execution_style_split_review"
     )
     assert payload["top_action_followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action run_entry_timing_split_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 7 --action run_entry_timing_split_review"
     )
     assert payload["next_actions"] == []
     assert payload["experiment_execution_policy"]["active_action"] == "run_entry_timing_split_review"
@@ -90,7 +154,7 @@ def test_operator_action_priority_promotes_edge_experiment_when_no_stronger_sign
     assert payload["deferred_experiment_actions"][0]["target_status"] == "ACTIONABLE_ENTRY"
     assert payload["deferred_experiment_actions"][0]["target_family"] == "sweep_reversal"
     assert payload["deferred_experiment_actions"][0]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action run_execution_style_split_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 7 --action run_execution_style_split_review"
     )
     assert "edge:watch_edge" in payload["supporting_signals"]
     assert "entry_timing:early_limit" in payload["supporting_signals"]
@@ -161,10 +225,10 @@ def test_operator_action_priority_escalates_edge_evolution_reduce_review() -> No
     assert payload["priority_source"] == "edge_evolution"
     assert payload["action_family"] == "allocation_review"
     assert payload["top_action_followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action reduce_baseline_allocation_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 7 --action reduce_baseline_allocation_review"
     )
     assert payload["next_actions"][0]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action run_entry_timing_split_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 7 --action run_entry_timing_split_review"
     )
     assert "edge_evolution:reduce_candidate" in payload["supporting_signals"]
     assert "promotion_candidate:entry_timing:early_limit" in payload["supporting_signals"]

@@ -6,6 +6,8 @@ import glob
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -76,6 +78,11 @@ _DEFAULT_JOBS: dict[str, Any] = {
         "watch_statuses": {"WATCH"},
         "requires_current_runtime": True,
     },
+    "validation_report_refresh": {
+        "pattern": "reports/operations/validation_report_refresh/*.md",
+        "max_age_minutes": 300,
+        "pass_statuses": {"PASS"},
+    },
     "binance_rule_drift": {
         "pattern": "reports/operations/binance_rule_snapshots/latest.json",
         "max_age_minutes": 1800,
@@ -123,7 +130,25 @@ _DEFAULT_JOBS: dict[str, Any] = {
         "pass_statuses": {"PASS"},
         "stale_status": "WATCH",
     },
+    "competing_trading_runtime": {
+        "pattern": "",
+        "max_age_minutes": 0,
+        "content_type": "competing_trading_runtime",
+        "pass_statuses": {"PASS"},
+        "watch_statuses": {"WATCH"},
+    },
 }
+
+_DEFAULT_FORBIDDEN_LAUNCHD_LABELS = (
+    "com.yumin.real.bybitbot",
+    "com.yumin.real.retrain",
+)
+
+_DEFAULT_FORBIDDEN_PROCESS_PATTERNS = (
+    r"IdeaProjects/real1",
+    r"\bbot\.main\b",
+    r"\bpybit\b",
+)
 
 
 def _safe_bool(value: Any, default: bool = False) -> bool:
@@ -138,6 +163,29 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
             return False
     return True if value else False
+
+
+def _csv_values(raw_value: str, *, defaults: tuple[str, ...]) -> list[str]:
+    value = str(raw_value or "").strip()
+    if not value:
+        return list(defaults)
+    if value.lower() in {"none", "off", "disabled", "0"}:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _forbidden_launchd_labels() -> list[str]:
+    return _csv_values(
+        os.environ.get("TRADING_FORBIDDEN_LAUNCHD_LABELS", ""),
+        defaults=_DEFAULT_FORBIDDEN_LAUNCHD_LABELS,
+    )
+
+
+def _forbidden_process_patterns() -> list[str]:
+    return _csv_values(
+        os.environ.get("TRADING_FORBIDDEN_PROCESS_PATTERNS", ""),
+        defaults=_DEFAULT_FORBIDDEN_PROCESS_PATTERNS,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -423,6 +471,23 @@ def _entry_surface_run_status(*, payload: dict[str, Any]) -> dict[str, Any]:
             "status_detail": "entry_surface_snapshot_missing",
             "message": reason or "entry_surface_snapshot_missing",
         }
+    expected_universe = _configured_universe_name()
+    observed_universe = _entry_surface_observed_universe(payload)
+    if expected_universe and observed_universe and observed_universe != expected_universe:
+        operator_action = _entry_surface_operator_action(payload)
+        return {
+            "overall_status": "WATCH",
+            "reason": "entry_surface_universe_mismatch",
+            "status_detail": (
+                f"entry_surface_universe_mismatch observed={observed_universe} expected={expected_universe}"
+            ),
+            "message": (
+                f"entry surface is reading {observed_universe}, but live universe is {expected_universe}"
+            ),
+            "entry_surface_operator_action_state": str(operator_action.get("state") or ""),
+            "entry_surface_operator_next_action": str(operator_action.get("next_action") or ""),
+            "entry_surface_operator_route_reason": str(operator_action.get("top_route_mismatch_reason") or ""),
+        }
     operator_action = _entry_surface_operator_action(payload)
     status_detail = _entry_surface_status_detail(reason or "entry_surface_run_ok", operator_action)
     message = str(operator_action.get("message") or "").strip() or reason or "entry_surface_run_ok"
@@ -439,6 +504,23 @@ def _entry_surface_run_status(*, payload: dict[str, Any]) -> dict[str, Any]:
         "entry_surface_operator_next_action": str(operator_action.get("next_action") or ""),
         "entry_surface_operator_route_reason": str(operator_action.get("top_route_mismatch_reason") or ""),
     }
+
+
+def _configured_universe_name() -> str:
+    try:
+        raw = getattr(get_settings(), "universe_name", "")
+    except Exception:
+        raw = ""
+    return str(raw or "").strip().lower()
+
+
+def _entry_surface_observed_universe(payload: dict[str, Any]) -> str:
+    snapshot = dict(payload.get("snapshot") or {}) if isinstance(payload.get("snapshot"), dict) else {}
+    for value in (payload.get("universe"), snapshot.get("universe"), snapshot.get("scope")):
+        normalized = str(value or "").strip().lower()
+        if normalized:
+            return normalized
+    return ""
 
 
 def _entry_surface_operator_action(payload: dict[str, Any]) -> dict[str, str]:
@@ -469,6 +551,90 @@ def _entry_surface_status_detail(base_reason: str, operator_action: dict[str, st
     if route_reason and route_reason != "none":
         parts.append(f"route_reason={route_reason}")
     return " | ".join(parts)
+
+
+def _launchctl_label_loaded(label: str) -> bool | None:
+    launchctl = shutil.which("launchctl")
+    if not launchctl or sys.platform != "darwin":
+        return None
+    try:
+        result = subprocess.run(
+            [launchctl, "print", f"gui/{os.getuid()}/{label}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.returncode == 0
+
+
+def _matching_forbidden_processes(patterns: list[str]) -> list[dict[str, str]]:
+    if not patterns:
+        return []
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    compiled: list[tuple[str, re.Pattern[str]]] = []
+    for pattern in patterns:
+        try:
+            compiled.append((pattern, re.compile(pattern)))
+        except re.error:
+            continue
+    own_pid = str(os.getpid())
+    matches: list[dict[str, str]] = []
+    for raw_line in str(result.stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        pid, _, command = line.partition(" ")
+        if pid.strip() == own_pid:
+            continue
+        for pattern, regex in compiled:
+            if regex.search(command):
+                matches.append(
+                    {
+                        "pid": pid.strip(),
+                        "pattern": pattern,
+                        "command": command[:300],
+                    }
+                )
+                break
+    return matches
+
+
+def _competing_trading_runtime_status() -> dict[str, Any]:
+    labels = _forbidden_launchd_labels()
+    loaded_labels = [label for label in labels if _launchctl_label_loaded(label) is True]
+    launchctl_checked = bool(shutil.which("launchctl") and sys.platform == "darwin")
+    process_matches = _matching_forbidden_processes(_forbidden_process_patterns())
+    if loaded_labels or process_matches:
+        return {
+            "overall_status": "FAIL",
+            "status_detail": "competing_trading_runtime_detected",
+            "message": "forbidden launchd label or stale trading process is active",
+            "forbidden_launchd_labels_loaded": loaded_labels,
+            "forbidden_process_matches": process_matches,
+            "launchctl_checked": launchctl_checked,
+        }
+    return {
+        "overall_status": "PASS",
+        "status_detail": "no_competing_trading_runtime_detected",
+        "message": "no forbidden launchd labels or stale trading processes detected",
+        "forbidden_launchd_labels_loaded": [],
+        "forbidden_process_matches": [],
+        "launchctl_checked": launchctl_checked,
+    }
 
 
 def _report_status(payload: dict[str, Any]) -> str:
@@ -530,6 +696,46 @@ def evaluate_ops_heartbeat(*, now: datetime | None = None, jobs: dict[str, Any] 
         config = _coerce_job_config(raw_config)
         pattern = str(config.get("pattern") or "")
         max_age_minutes = int(config.get("max_age_minutes") or 0)
+        if str(config.get("content_type") or "") == "competing_trading_runtime":
+            status_payload = _competing_trading_runtime_status()
+            report_status = _report_status(status_payload)
+            report_reason = _report_reason(status_payload)
+            content = _content_status_row(
+                report_status=report_status,
+                pass_statuses=set(config.get("pass_statuses") or set()),
+                watch_statuses=set(config.get("watch_statuses") or set()),
+            )
+            row_status = "FAIL" if content["content_status"] == "FAIL" else content["content_status"]
+            if row_status == "UNKNOWN":
+                row_status = "PASS"
+            rows.append(
+                {
+                    "name": name,
+                    "status": row_status,
+                    "reason": content["content_reason"],
+                    "pattern": pattern,
+                    "path_source": "direct_check",
+                    "configured_path": "",
+                    "latest_path": "direct_check",
+                    "latest_mtime": current.isoformat().replace("+00:00", "Z"),
+                    "report_generated_at": current.isoformat().replace("+00:00", "Z"),
+                    "runtime_started_at": runtime_started_at.isoformat().replace("+00:00", "Z")
+                    if runtime_started_at is not None
+                    else "",
+                    "requires_current_runtime": False,
+                    "age_minutes": 0.0,
+                    "max_age_minutes": max_age_minutes,
+                    "freshness_status": "PASS",
+                    "report_status": report_status,
+                    "report_reason": report_reason,
+                    "status_detail": status_payload.get("status_detail", "") or report_reason,
+                    **content,
+                    "forbidden_launchd_labels_loaded": status_payload.get("forbidden_launchd_labels_loaded", []),
+                    "forbidden_process_matches": status_payload.get("forbidden_process_matches", []),
+                    "launchctl_checked": status_payload.get("launchctl_checked", False),
+                }
+            )
+            continue
         configured_path = _configured_path_from_setting(str(config.get("path_setting") or ""))
         path_source = "configured_path" if configured_path is not None else "pattern_latest"
         latest = configured_path if configured_path is not None and configured_path.is_file() else _latest_match(pattern)

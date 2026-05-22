@@ -75,6 +75,34 @@ class BinanceLiquidationOrder:
     raw: dict[str, Any]
 
 
+class BinanceFuturesHTTPError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        path: str,
+        code: int | None = None,
+        binance_message: str = "",
+        response_text: str = "",
+    ):
+        self.status_code = int(status_code)
+        self.path = str(path or "")
+        self.code = code
+        self.binance_message = str(binance_message or "")
+        self.response_text = str(response_text or "")
+        detail_parts = [
+            f"status={self.status_code}",
+            f"path={self.path}",
+        ]
+        if self.code is not None:
+            detail_parts.append(f"code={self.code}")
+        if self.binance_message:
+            detail_parts.append(f"msg={self.binance_message}")
+        elif self.response_text:
+            detail_parts.append(f"body={self.response_text}")
+        super().__init__("binance_http_error:" + ":".join(detail_parts))
+
+
 @dataclass(slots=True)
 class BinanceSymbolTradingRules:
     symbol: str
@@ -249,6 +277,30 @@ class BinanceFuturesClient:
         return dict(value) if isinstance(value, Mapping) else {}
 
     @staticmethod
+    def _raise_for_status(response: httpx.Response, *, path: str) -> None:
+        if response.status_code < 400:
+            return
+        payload: dict[str, Any] = {}
+        response_text = ""
+        try:
+            parsed = response.json()
+        except ValueError:
+            response_text = response.text[:300]
+        else:
+            payload = BinanceFuturesClient._safe_dict(parsed)
+            if payload:
+                response_text = json.dumps(payload, ensure_ascii=True, sort_keys=True)[:300]
+        raw_code = payload.get("code")
+        code = BinanceFuturesClient._safe_int(raw_code) if raw_code not in {None, ""} else None
+        raise BinanceFuturesHTTPError(
+            status_code=response.status_code,
+            path=path,
+            code=code,
+            binance_message=str(payload.get("msg") or payload.get("message") or ""),
+            response_text=response_text,
+        )
+
+    @staticmethod
     def _format_decimal(value: float | int | str | Decimal) -> str:
         normalized = Decimal(str(value))
         text = format(normalized, "f")
@@ -293,7 +345,7 @@ class BinanceFuturesClient:
                 params=signed_params,
                 headers={"X-MBX-APIKEY": self.api_key},
             )
-            response.raise_for_status()
+            self._raise_for_status(response, path=path)
             if response.content:
                 return response.json()
         return {}
@@ -312,7 +364,7 @@ class BinanceFuturesClient:
                 params=request_params or None,
                 headers={"X-MBX-APIKEY": self.api_key},
             )
-            response.raise_for_status()
+            self._raise_for_status(response, path=path)
             if response.content:
                 return response.json()
         return {}
@@ -325,7 +377,7 @@ class BinanceFuturesClient:
         }
         with httpx.Client(base_url=self.rest_base_url, timeout=self.timeout_seconds) as client:
             response = client.get(path, params=request_params or None)
-            response.raise_for_status()
+            self._raise_for_status(response, path=path)
             if response.content:
                 return response.json()
         return {}
@@ -663,6 +715,8 @@ class BinanceFuturesClient:
                 "original_qty": BinanceFuturesClient._safe_float(order.get("q")),
                 "avg_price": BinanceFuturesClient._safe_float(order.get("ap")),
                 "realized_pnl": BinanceFuturesClient._safe_float(order.get("rp")),
+                "commission": BinanceFuturesClient._safe_float(order.get("n") or order.get("commission")),
+                "commission_asset": str(order.get("N") or order.get("commissionAsset") or ""),
                 "trade_id": BinanceFuturesClient._safe_int(order.get("t")) or None,
                 "raw": data,
             }
@@ -688,6 +742,8 @@ class BinanceFuturesClient:
                 "original_qty": BinanceFuturesClient._safe_float(data.get("q")),
                 "avg_price": BinanceFuturesClient._safe_float(data.get("ap")),
                 "realized_pnl": BinanceFuturesClient._safe_float(data.get("rp")),
+                "commission": BinanceFuturesClient._safe_float(data.get("n") or data.get("commission")),
+                "commission_asset": str(data.get("N") or data.get("commissionAsset") or ""),
                 "trade_id": BinanceFuturesClient._safe_int(data.get("t")) or None,
                 "raw": data,
             }
@@ -736,7 +792,7 @@ class BinanceFuturesClient:
 
         with httpx.Client(base_url=self.rest_base_url, timeout=self.timeout_seconds) as client:
             response = client.get("/fapi/v1/klines", params=params)
-            response.raise_for_status()
+            self._raise_for_status(response, path="/fapi/v1/klines")
             payload = response.json()
 
         rows = []
@@ -756,7 +812,7 @@ class BinanceFuturesClient:
                 "/fapi/v1/depth",
                 params={"symbol": symbol.upper(), "limit": normalized_limit},
             )
-            response.raise_for_status()
+            self._raise_for_status(response, path="/fapi/v1/depth")
             payload = response.json()
         return self._safe_dict(payload)
 
@@ -778,7 +834,7 @@ class BinanceFuturesClient:
             params["endTime"] = end_time_ms
         with httpx.Client(base_url=self.rest_base_url, timeout=self.timeout_seconds) as client:
             response = client.get("/fapi/v1/fundingRate", params=params)
-            response.raise_for_status()
+            self._raise_for_status(response, path="/fapi/v1/fundingRate")
             payload = response.json()
         rows = payload if isinstance(payload, list) else []
         return [self._parse_funding_rate_row(symbol.upper(), row) for row in rows if isinstance(row, Mapping)]
@@ -803,7 +859,7 @@ class BinanceFuturesClient:
             params["endTime"] = end_time_ms
         with httpx.Client(base_url=self.rest_base_url, timeout=self.timeout_seconds) as client:
             response = client.get("/futures/data/openInterestHist", params=params)
-            response.raise_for_status()
+            self._raise_for_status(response, path="/futures/data/openInterestHist")
             payload = response.json()
         rows = payload if isinstance(payload, list) else []
         return [self._parse_open_interest_hist_row(symbol.upper(), period, row) for row in rows if isinstance(row, Mapping)]
@@ -828,7 +884,7 @@ class BinanceFuturesClient:
             params["endTime"] = end_time_ms
         with httpx.Client(base_url=self.rest_base_url, timeout=self.timeout_seconds) as client:
             response = client.get("/fapi/v1/premiumIndexKlines", params=params)
-            response.raise_for_status()
+            self._raise_for_status(response, path="/fapi/v1/premiumIndexKlines")
             payload = response.json()
         rows = payload if isinstance(payload, list) else []
         return [self._parse_basis_kline_row(symbol.upper(), interval, row) for row in rows if isinstance(row, list)]
@@ -836,14 +892,14 @@ class BinanceFuturesClient:
     def ping(self) -> bool:
         with httpx.Client(base_url=self.rest_base_url, timeout=self.timeout_seconds) as client:
             response = client.get("/fapi/v1/ping")
-            response.raise_for_status()
+            self._raise_for_status(response, path="/fapi/v1/ping")
         return True
 
     def fetch_top_perp_symbols(self, *, quote_asset: str = "USDC", limit: int = 30) -> list[str]:
         normalized_quote = str(quote_asset or "USDC").strip().upper()
         with httpx.Client(base_url=self.rest_base_url, timeout=self.timeout_seconds) as client:
             response = client.get("/fapi/v1/ticker/24hr")
-            response.raise_for_status()
+            self._raise_for_status(response, path="/fapi/v1/ticker/24hr")
             rows = response.json()
 
         candidates: list[tuple[str, float]] = []

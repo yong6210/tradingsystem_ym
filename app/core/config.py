@@ -36,11 +36,17 @@ CURRENT_MICRO_LIVE_USDT_SYMBOLS = (
     "ARBUSDT,APTUSDT,RUNEUSDT,PENDLEUSDT,ICPUSDT,XLMUSDT,ZECUSDT,QNTUSDT,DASHUSDT"
 )
 CURRENT_MICRO_LIVE_SYMBOLS = CURRENT_MICRO_LIVE_USDT_SYMBOLS
+CURRENT_MICRO_LIVE_USDT_ACTIVE_SYMBOLS = (
+    "ADAUSDT,ATOMUSDT,BTCUSDT,FETUSDT,INJUSDT,LINKUSDT,LTCUSDT,"
+    "NEARUSDT,RUNEUSDT,SUIUSDT,ZECUSDT"
+)
+CURRENT_MICRO_LIVE_ACTIVE_SYMBOLS = CURRENT_MICRO_LIVE_USDT_ACTIVE_SYMBOLS
 CURRENT_SESSION_IMPULSE_RETEST_USDC_SYMBOLS = (
     f"{CURRENT_MICRO_LIVE_USDC_SYMBOLS},SUIUSDC,AAVEUSDC,HBARUSDC,ZECUSDC,UNIUSDC"
 )
 CURRENT_SESSION_IMPULSE_RETEST_SYMBOLS = CURRENT_MICRO_LIVE_USDT_SYMBOLS
 CURRENT_SESSION_IMPULSE_RETEST_USDT_SYMBOLS = CURRENT_MICRO_LIVE_USDT_SYMBOLS
+CURRENT_SESSION_IMPULSE_RETEST_ACTIVE_SYMBOLS = CURRENT_MICRO_LIVE_USDT_ACTIVE_SYMBOLS
 CURRENT_MICRO_LIVE_USDC_DIRECTION_CONTRACT = (
     "BTCUSDC:LONG|SHORT,ETHUSDC:LONG|SHORT,SOLUSDC:LONG|SHORT,LINKUSDC:LONG|SHORT,"
     "BNBUSDC:LONG|SHORT,XRPUSDC:LONG|SHORT,ADAUSDC:LONG|SHORT,AVAXUSDC:LONG|SHORT,"
@@ -49,6 +55,12 @@ CURRENT_MICRO_LIVE_USDC_DIRECTION_CONTRACT = (
 )
 CURRENT_MICRO_LIVE_USDT_DIRECTION_CONTRACT = _direction_contract(CURRENT_MICRO_LIVE_USDT_SYMBOLS)
 CURRENT_MICRO_LIVE_DIRECTION_CONTRACT = CURRENT_MICRO_LIVE_USDT_DIRECTION_CONTRACT
+CURRENT_MICRO_LIVE_USDT_ACTIVE_DIRECTION_CONTRACT = (
+    "ADAUSDT:LONG,ATOMUSDT:SHORT,BTCUSDT:LONG,FETUSDT:SHORT,"
+    "INJUSDT:LONG,LINKUSDT:LONG,LTCUSDT:SHORT,NEARUSDT:SHORT,RUNEUSDT:SHORT,"
+    "SUIUSDT:SHORT,ZECUSDT:SHORT"
+)
+CURRENT_MICRO_LIVE_ACTIVE_DIRECTION_CONTRACT = CURRENT_MICRO_LIVE_USDT_ACTIVE_DIRECTION_CONTRACT
 
 
 def sqlite_database_path_from_url(database_url: str) -> Path | None:
@@ -153,35 +165,44 @@ class Settings(BaseSettings):
     transition_edge_variant_lane_tracker_window: int = 20
     session_impulse_retest_enabled: bool = True
     session_impulse_retest_shadow_only: bool = False
-    session_impulse_retest_allowed_symbols: str = CURRENT_SESSION_IMPULSE_RETEST_SYMBOLS
+    session_impulse_retest_allowed_symbols: str = CURRENT_SESSION_IMPULSE_RETEST_ACTIVE_SYMBOLS
     session_impulse_retest_partial_activation_ratio: float = 1.0
-    session_impulse_retest_core_live_slots: int = 31
+    # This is a rollout-rank window, not the active symbol count.  The current
+    # 11-symbol USDT allowlist includes ZECUSDT at core rank 29.
+    session_impulse_retest_core_live_slots: int = 29
     session_impulse_retest_secondary_live_enabled: bool = False
     session_impulse_retest_saturday_risk_multiplier: float = 1.0
+    session_impulse_retest_live_entry_route_window_seconds: int = 180
+    session_impulse_retest_entry_timing_model: str = "confirmed_5m_retest"
+    session_impulse_retest_intrabar_long_setup_hours_utc: str = ""
+    session_impulse_retest_intrabar_short_setup_hours_utc: str = ""
+    session_impulse_retest_intrabar_long_min_reclaim_body_atr: float = 0.0
+    session_impulse_retest_intrabar_short_min_reclaim_body_atr: float = 0.0
     session_impulse_retest_miss_detector_enabled: bool = True
     session_impulse_retest_miss_detector_lookback_hours: int = 24
     session_impulse_retest_miss_detector_report_dir: str = "reports/validation/micro_main_miss_detectors"
     session_impulse_retest_miss_alert_enabled: bool = True
     session_impulse_retest_miss_alert_cooldown_seconds: int = 1800
-    session_impulse_retest_exit_policy_name: str = "structure_adaptive_floor_min_0_003_live_split"
-    session_impulse_retest_exit_stop_mode: str = "floor"
-    session_impulse_retest_exit_min_stop_pct: float = 0.003
-    session_impulse_retest_exit_min_risk_atr: float = 0.35
+    session_impulse_retest_exit_policy_name: str = "structure_buffered_swing6_stop0.12_tpbuf0.08_pm_stop0.00r_advvol_any"
+    session_impulse_retest_exit_stop_mode: str = "structure_floor"
+    session_impulse_retest_exit_min_stop_pct: float = 0.0
+    session_impulse_retest_exit_min_risk_atr: float = 0.0
     session_impulse_retest_exit_structure_stop_swing_bars: int = 6
     session_impulse_retest_exit_structure_stop_buffer_atr: float = 0.12
     session_impulse_retest_exit_target_rr: float = 2.5
     session_impulse_retest_exit_max_hold_minutes: int = 40
+    session_impulse_retest_exit_entry_confirmation_delay_minutes: int = 5
     session_impulse_retest_exit_time_guard_enabled: bool = True
     session_impulse_retest_exit_tp1_rr: float = 1.0
     session_impulse_retest_exit_tp1_fraction: float = 0.35
     session_impulse_retest_exit_tp2_fraction: float = 0.65
-    session_impulse_retest_exit_adaptive_targets_enabled: bool = True
+    session_impulse_retest_exit_adaptive_targets_enabled: bool = False
     session_impulse_retest_exit_adaptive_normal_target_rr: float = 2.2
     session_impulse_retest_exit_adaptive_defensive_target_rr: float = 2.0
     session_impulse_retest_exit_adaptive_strong_tp1_fraction: float = 0.25
     session_impulse_retest_exit_adaptive_normal_tp1_fraction: float = 0.35
     session_impulse_retest_exit_adaptive_defensive_tp1_fraction: float = 0.45
-    session_impulse_retest_exit_structure_targets_enabled: bool = True
+    session_impulse_retest_exit_structure_targets_enabled: bool = False
     session_impulse_retest_exit_structure_entry_max_distance_atr: float = 0.45
     session_impulse_retest_exit_structure_target_buffer_atr: float = 0.05
     session_impulse_retest_exit_structure_tp1_min_rr: float = 0.8
@@ -194,6 +215,25 @@ class Settings(BaseSettings):
     session_impulse_retest_exit_higher_timeframe_target_enabled: bool = True
     session_impulse_retest_exit_higher_timeframe_stop_enabled: bool = False
     session_impulse_retest_exit_higher_timeframe_stop_buffer_atr: float = 0.08
+    session_impulse_retest_exit_important_zone_exit_enabled: bool = False
+    session_impulse_retest_exit_important_zone_stop_enabled: bool = True
+    session_impulse_retest_exit_important_zone_target_enabled: bool = True
+    session_impulse_retest_exit_important_zone_stop_buffer_atr: float = 0.08
+    session_impulse_retest_exit_important_zone_target_buffer_atr: float = 0.05
+    session_impulse_retest_exit_important_zone_min_anchor_score: float = 0.0
+    session_impulse_retest_exit_important_zone_min_stop_ratio: float = 0.65
+    session_impulse_retest_exit_important_zone_max_stop_ratio: float = 1.60
+    session_impulse_retest_exit_important_zone_tp1_min_rr: float = 0.75
+    session_impulse_retest_exit_important_zone_tp2_min_rr: float = 1.50
+    session_impulse_retest_exit_important_zone_tp_max_rr: float = 3.20
+    session_impulse_retest_exit_important_zone_ideal_tp2_rr: float = 2.00
+    session_impulse_retest_exit_important_zone_tp1_fraction: float = 0.35
+    session_impulse_retest_exit_stop_after_partial_rr: float | None = 0.0
+    session_impulse_retest_exit_adverse_volume_enabled: bool = True
+    session_impulse_retest_exit_adverse_volume_after_partial_only: bool = False
+    session_impulse_retest_exit_adverse_volume_min_factor: float = 3.0
+    session_impulse_retest_exit_adverse_volume_min_body_r: float = 0.35
+    session_impulse_retest_exit_adverse_volume_lookback_bars: int = 20
 
     # Zone type importance multipliers (lower multiplier means less trust).
     weight_zone_ob: float = 1.00
@@ -207,7 +247,7 @@ class Settings(BaseSettings):
 
     topn_default: int = 10
     scanner_default_limit: int = 20
-    universe_name: str = "usdt_reliable_balanced_31"
+    universe_name: str = "micro_live_usdt_11"
 
     taker_fee_bps: float = Field(default=4.0, description="taker fee bps")
     maker_fee_bps: float = Field(default=2.0, description="maker fee bps")
@@ -417,6 +457,9 @@ class Settings(BaseSettings):
     auto_trading_replay_validation_bridge_enabled: bool = True
     auto_trading_replay_validation_bridge_backtest_dir: str = "reports/validation/micro_main_usdt_proxy_backtests"
     auto_trading_replay_validation_bridge_portfolio_dir: str = "reports/validation/micro_main_risk_sweeps"
+    auto_trading_replay_validation_bridge_portfolio_mix_report_path: str = (
+        "reports/operations/micro_intrabar_long_short_portfolio_mix_review_drop_arb/latest.json"
+    )
     auto_trading_replay_validation_bridge_max_age_days: float = 14.0
     auto_trading_replay_validation_bridge_min_days: int = 1000
     auto_trading_replay_validation_bridge_min_trades: int = 80
@@ -462,25 +505,40 @@ class Settings(BaseSettings):
     auto_trading_live_liquidity_gate_max_5m_volume_participation: float = 0.01
     auto_trading_live_liquidity_gate_max_spread_bps: float = 8.0
     auto_trading_live_liquidity_gate_max_market_slippage_bps: float = 10.0
-    auto_trading_live_liquidity_gate_partial_submit_enabled: bool = False
+    auto_trading_live_liquidity_gate_partial_submit_enabled: bool = True
     auto_trading_live_liquidity_gate_max_tranches: int = 3
     auto_trading_live_liquidity_gate_min_tranche_notional_usdt: float = 10.0
-    auto_trading_live_liquidity_gate_min_tranche_target_fraction: float = 0.0
+    auto_trading_live_liquidity_gate_min_tranche_target_fraction: float = 0.10
     auto_trading_live_protection_orders_enabled: bool = True
     auto_trading_live_stop_working_type: str = "MARK_PRICE"
     auto_trading_live_stop_precheck_enabled: bool = True
     auto_trading_live_stop_precheck_fail_closed: bool = True
     auto_trading_live_stop_precheck_min_cushion_bps: float = 5.0
+    auto_trading_live_stop_precheck_min_tick_cushion: int = 3
+    auto_trading_live_stop_mark_price_guard_enabled: bool = True
     auto_trading_live_protection_failure_flatten_enabled: bool = True
+    auto_trading_live_protection_verify_after_attach_enabled: bool = True
+    auto_trading_live_protection_verify_fail_closed: bool = True
+    auto_trading_live_protection_verify_attempts: int = 3
+    auto_trading_live_protection_verify_sleep_seconds: float = 0.5
+    auto_trading_live_take_profit_verify_after_attach_enabled: bool = True
+    auto_trading_live_missing_stop_watchdog_flatten_enabled: bool = True
+    auto_trading_live_missing_stop_watchdog_cancel_open_orders: bool = True
+    auto_trading_live_unexpected_open_order_watchdog_cancel_enabled: bool = True
     auto_trading_live_tp_limit_attach_enabled: bool = True
     auto_trading_live_tp_market_fallback_seconds: int = 20
     auto_trading_live_position_manager_enabled: bool = True
-    auto_trading_live_breakeven_after_partial_enabled: bool = False
-    auto_trading_live_breakeven_offset_bps: float = 1.0
-    auto_trading_live_breakeven_min_improvement_bps: float = 1.0
-    auto_trading_micro_live_allowed_symbols: str = CURRENT_MICRO_LIVE_SYMBOLS
-    auto_trading_micro_live_symbol_priority: str = CURRENT_MICRO_LIVE_SYMBOLS
-    auto_trading_micro_live_direction_contract: str = CURRENT_MICRO_LIVE_DIRECTION_CONTRACT
+    auto_trading_live_breakeven_after_partial_enabled: bool = True
+    auto_trading_live_breakeven_offset_bps: float = 0.0
+    auto_trading_live_breakeven_min_improvement_bps: float = 0.0
+    auto_trading_live_adverse_volume_exit_enabled: bool = True
+    auto_trading_live_adverse_volume_exit_after_partial_only: bool = False
+    auto_trading_live_adverse_volume_exit_min_factor: float = 3.0
+    auto_trading_live_adverse_volume_exit_min_body_r: float = 0.35
+    auto_trading_live_adverse_volume_exit_lookback_bars: int = 20
+    auto_trading_micro_live_allowed_symbols: str = CURRENT_MICRO_LIVE_ACTIVE_SYMBOLS
+    auto_trading_micro_live_symbol_priority: str = CURRENT_MICRO_LIVE_ACTIVE_SYMBOLS
+    auto_trading_micro_live_direction_contract: str = CURRENT_MICRO_LIVE_ACTIVE_DIRECTION_CONTRACT
     auto_trading_micro_live_session_direction_blocked_hours_utc: str = ""
     auto_trading_micro_live_priority_submit_ready_lookback_minutes: int = 180
     auto_trading_micro_live_allowed_families: str = "session_impulse_retest"
@@ -490,7 +548,7 @@ class Settings(BaseSettings):
     auto_trading_micro_live_event_blackout_min_horizon_days: int = 45
     auto_trading_micro_live_strategy_time_contract_path: str = ""
     auto_trading_micro_live_plan_blocklist_path: str = ""
-    auto_trading_micro_live_max_concurrent_positions: int = 3
+    auto_trading_micro_live_max_concurrent_positions: int = 2
     auto_trading_micro_live_max_daily_new_entries: int = 0
     auto_trading_micro_live_allowed_sessions: str = "dead_session,london,new_york"
     auto_trading_trend_proof_allowed_symbols: str = "BTCUSDT,ETHUSDT,BTCUSDC,ETHUSDC"

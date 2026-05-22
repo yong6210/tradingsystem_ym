@@ -1,6 +1,6 @@
 {
   "schema_version": "micro_live_event_blackout_v1",
-  "generated_at": "2026-05-17T07:39:25Z",
+  "generated_at": "2026-05-19T09:59:37.773848Z",
   "overall_status": "PASS_WITH_WARNINGS",
   "source_errors": [],
   "source_warnings": [
@@ -1017,39 +1017,5 @@
       "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
     }
   ],
-  "output_path": "reports/validation/contracts/micro_live_event_blackouts_major_us_macro_q2_2026_v1.json",
-  "universe_name": "usdt_reliable_balanced_31",
-  "contract_symbols": [
-    "BTCUSDT",
-    "ETHUSDT",
-    "SOLUSDT",
-    "BNBUSDT",
-    "XRPUSDT",
-    "ADAUSDT",
-    "AVAXUSDT",
-    "LINKUSDT",
-    "DOGEUSDT",
-    "BCHUSDT",
-    "LTCUSDT",
-    "NEARUSDT",
-    "FILUSDT",
-    "DOTUSDT",
-    "ATOMUSDT",
-    "ETCUSDT",
-    "HBARUSDT",
-    "AAVEUSDT",
-    "UNIUSDT",
-    "SUIUSDT",
-    "INJUSDT",
-    "FETUSDT",
-    "ARBUSDT",
-    "APTUSDT",
-    "RUNEUSDT",
-    "PENDLEUSDT",
-    "ICPUSDT",
-    "XLMUSDT",
-    "ZECUSDT",
-    "QNTUSDT",
-    "DASHUSDT"
-  ]
+  "output_path": "reports/validation/contracts/micro_live_event_blackouts_major_us_macro_q2_2026_v1.json"
 }

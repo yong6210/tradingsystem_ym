@@ -170,6 +170,8 @@ def _worker_role(args: argparse.Namespace) -> str:
 
 def _live_mode_requires_boot_check() -> bool:
     settings = get_settings()
+    if bool(getattr(settings, "auto_trading_close_only", False)):
+        return False
     return str(getattr(settings, "auto_trading_execution_mode", "") or "").strip().upper() in {"MICRO_LIVE", "LIVE"}
 
 

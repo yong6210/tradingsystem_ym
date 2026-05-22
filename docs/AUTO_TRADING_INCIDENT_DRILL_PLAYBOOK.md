@@ -25,8 +25,8 @@
 3. operator dashboard와 safety-state가 읽혀야 한다.
 
 ```bash
-curl -s "http://127.0.0.1:8000/execution/operator-dashboard?symbol=BTCUSDC&universe=usdc_perp_top30&days=7" | jq
-curl -s "http://127.0.0.1:8000/execution/safety-state?symbol=BTCUSDC&family=trend_continuation" | jq
+curl -s "http://127.0.0.1:8000/execution/operator-dashboard?symbol=BTCUSDT&universe=micro_live_usdt_11&days=7" | jq
+curl -s "http://127.0.0.1:8000/execution/safety-state?symbol=BTCUSDT&family=session_impulse_retest" | jq
 ```
 
 ## 표준 drill 시나리오
@@ -50,7 +50,7 @@ curl -s "http://127.0.0.1:8000/execution/safety-state?symbol=BTCUSDC&family=tren
 ```bash
 curl -s -X POST "http://127.0.0.1:8000/execution/reconcile?auto_resolve=false&apply_lock=false" \
   -H "Content-Type: application/json" \
-  -d '{"symbol":"BTCUSDC"}' | jq
+  -d '{"symbol":"BTCUSDT"}' | jq
 ```
 
 확인 포인트:
@@ -111,13 +111,13 @@ curl -s -X POST "http://127.0.0.1:8000/execution/control/close-only" \
 목적:
 - family rollout block이 operator surface에 반영되는지 확인한다.
 
-예시: `trend_continuation`을 임시로 shadow cap으로 내린다.
+예시: `session_impulse_retest`를 임시로 shadow cap으로 내린다.
 
 ```bash
 curl -s -X POST "http://127.0.0.1:8000/execution/control/rollout-policy" \
   -H "Content-Type: application/json" \
   -d '{
-    "family":"trend_continuation",
+    "family":"session_impulse_retest",
     "live_enabled":false,
     "max_execution_mode":"SHADOW",
     "max_risk_r":0.0,
@@ -140,8 +140,8 @@ curl -s -X POST "http://127.0.0.1:8000/execution/control/rollout-policy" \
 
 ```bash
 python scripts/run_execution_incident_drill.py \
-  --symbol BTCUSDC \
-  --family trend_continuation
+  --symbol BTCUSDT \
+  --family session_impulse_retest
 ```
 
 주요 옵션:

@@ -9,7 +9,14 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.core.enums import ExecutionFillStage
-from app.db.models import BinanceOrderLedger, ExecutionFill, OrderIntent, OrderSubmission, Plan
+from app.db.models import (
+    BinanceOrderLedger,
+    ExecutionFill,
+    ExecutionReconciliationEvent,
+    OrderIntent,
+    OrderSubmission,
+    Plan,
+)
 
 
 class LiveOrderLifecycleReporter:
@@ -213,19 +220,80 @@ class LiveOrderLifecycleReporter:
         return str(state or "").upper() in {"FILLED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED"}
 
     @classmethod
-    def _lifecycle_status(cls, *, submission: OrderSubmission, fills: list[ExecutionFill]) -> str:
-        stages = {str(fill.stage or "").upper() for fill in fills}
+    def _fill_matches_submission(cls, *, fill: ExecutionFill, submission: OrderSubmission) -> bool:
+        payload = cls._safe_dict(fill.payload)
+        client_order_id = str(payload.get("client_order_id") or "").strip()
+        exchange_order_id = str(payload.get("exchange_order_id") or "").strip()
+        submission_client_order_id = str(submission.client_order_id or "").strip()
+        submission_exchange_order_id = str(submission.exchange_order_id or "").strip()
+        if submission_client_order_id and client_order_id == submission_client_order_id:
+            return True
+        if submission_exchange_order_id and exchange_order_id == submission_exchange_order_id:
+            return True
+        return False
+
+    @classmethod
+    def _fills_for_submission(
+        cls,
+        *,
+        submission: OrderSubmission,
+        plan_fills: list[ExecutionFill],
+    ) -> tuple[list[ExecutionFill], list[ExecutionFill], list[ExecutionFill]]:
+        entry_fills = [
+            fill
+            for fill in plan_fills
+            if str(fill.stage) == ExecutionFillStage.ENTRY.value
+            and cls._fill_matches_submission(fill=fill, submission=submission)
+        ]
+        if not entry_fills:
+            return [], [], []
+
+        first_entry_ts = min(cls._sort_ts(fill.fill_ts or fill.created_at) for fill in entry_fills)
+        exit_fills = [
+            fill
+            for fill in plan_fills
+            if str(fill.stage) in {ExecutionFillStage.PARTIAL_EXIT.value, ExecutionFillStage.CLOSED.value}
+            and cls._sort_ts(fill.fill_ts or fill.created_at) >= first_entry_ts
+        ]
+        closed_fills = [fill for fill in exit_fills if str(fill.stage) == ExecutionFillStage.CLOSED.value]
+        return entry_fills, exit_fills, closed_fills
+
+    @classmethod
+    def _lifecycle_status(
+        cls,
+        *,
+        submission: OrderSubmission,
+        entry_fills: list[ExecutionFill],
+        closed_fills: list[ExecutionFill],
+        exchange_flat_after_entry: bool = False,
+    ) -> str:
         state = str(submission.state or "").upper()
         submit_status = str(submission.submit_status or "").upper()
-        if ExecutionFillStage.CLOSED.value in stages:
+        if closed_fills:
             return "closed"
-        if ExecutionFillStage.ENTRY.value in stages:
+        if exchange_flat_after_entry and entry_fills:
+            return "exchange_flat_after_entry"
+        if entry_fills:
             return "open_after_entry"
         if state in {"REJECTED", "CANCELLED", "CANCELED"} or "ERROR" in submit_status:
             return "rejected_or_error"
         if cls._terminal_submission_state(state):
             return "terminal_without_entry_fill"
         return "submitted_without_entry_fill"
+
+    @classmethod
+    def _flat_reconciliation_by_plan(
+        cls,
+        reconciliation_events: list[ExecutionReconciliationEvent],
+    ) -> dict[str, ExecutionReconciliationEvent]:
+        by_plan: dict[str, ExecutionReconciliationEvent] = {}
+        for event in sorted(reconciliation_events, key=lambda row: cls._sort_ts(row.created_at)):
+            local_snapshot = cls._safe_dict(event.local_snapshot)
+            for plan_id in list(local_snapshot.get("plan_ids") or []):
+                normalized = str(plan_id or "").strip()
+                if normalized:
+                    by_plan[normalized] = event
+        return by_plan
 
     def _intent_counts(
         self,
@@ -351,6 +419,21 @@ class LiveOrderLifecycleReporter:
         fills_by_plan: dict[str, list[ExecutionFill]] = defaultdict(list)
         for fill in fill_rows:
             fills_by_plan[fill.plan_id].append(fill)
+        submission_symbols = sorted({str(row.symbol or "").upper() for row in submissions if str(row.symbol or "").strip()})
+        reconciliation_rows = (
+            list(
+                self.db.scalars(
+                    select(ExecutionReconciliationEvent)
+                    .where(ExecutionReconciliationEvent.created_at >= cutoff)
+                    .where(ExecutionReconciliationEvent.mismatch_type == "ORPHAN_POSITION_LOCAL")
+                    .where(ExecutionReconciliationEvent.symbol.in_(submission_symbols))
+                    .order_by(ExecutionReconciliationEvent.created_at.asc())
+                )
+            )
+            if submission_symbols
+            else []
+        )
+        flat_reconciliation_by_plan = self._flat_reconciliation_by_plan(reconciliation_rows)
         ledger_rows = (
             list(
                 self.db.scalars(
@@ -373,21 +456,31 @@ class LiveOrderLifecycleReporter:
             intent = intents.get(submission.intent_id)
             plan = plans.get(submission.plan_id)
             plan_fills = fills_by_plan.get(submission.plan_id, [])
-            entry_fills = [fill for fill in plan_fills if str(fill.stage) == ExecutionFillStage.ENTRY.value]
-            exit_fills = [
-                fill
-                for fill in plan_fills
-                if str(fill.stage) in {ExecutionFillStage.PARTIAL_EXIT.value, ExecutionFillStage.CLOSED.value}
-            ]
-            closed_fills = [fill for fill in plan_fills if str(fill.stage) == ExecutionFillStage.CLOSED.value]
+            entry_fills, exit_fills, closed_fills = self._fills_for_submission(
+                submission=submission,
+                plan_fills=plan_fills,
+            )
             entry_price = self._weighted_price(entry_fills)
             exit_price = self._weighted_price(exit_fills)
             slippage_bps = self._entry_slippage_bps(plan=plan, entry_price=entry_price)
             payload_realized_r = self._payload_realized_r(closed_fills or exit_fills)
             computed_realized_r = self._computed_realized_r(plan=plan, entry_price=entry_price, exit_price=exit_price)
             realized_r = payload_realized_r if payload_realized_r is not None else computed_realized_r
-            fee_total = sum(self._safe_float(fill.fee) for fill in plan_fills)
-            lifecycle_status = self._lifecycle_status(submission=submission, fills=plan_fills)
+            fee_total = sum(self._safe_float(fill.fee) for fill in entry_fills + exit_fills)
+            flat_reconciliation = flat_reconciliation_by_plan.get(submission.plan_id)
+            latest_entry_ts = max((self._sort_ts(fill.fill_ts or fill.created_at) for fill in entry_fills), default=None)
+            exchange_flat_after_entry = (
+                flat_reconciliation is not None
+                and latest_entry_ts is not None
+                and self._sort_ts(flat_reconciliation.created_at) >= latest_entry_ts
+            )
+            reconciliation_event = flat_reconciliation if exchange_flat_after_entry else None
+            lifecycle_status = self._lifecycle_status(
+                submission=submission,
+                entry_fills=entry_fills,
+                closed_fills=closed_fills,
+                exchange_flat_after_entry=exchange_flat_after_entry,
+            )
             ledger = ledgers_by_client_order_id.get(submission.client_order_id)
 
             if slippage_bps is not None:
@@ -433,6 +526,10 @@ class LiveOrderLifecycleReporter:
                     "exit_reason": self._exit_reason(closed_fills or exit_fills, plan),
                     "fee_total": round(fee_total, 8),
                     "lifecycle_status": lifecycle_status,
+                    "exchange_flat_after_entry": exchange_flat_after_entry,
+                    "reconciliation_event_id": str(getattr(reconciliation_event, "event_id", "") or ""),
+                    "reconciliation_mismatch_type": str(getattr(reconciliation_event, "mismatch_type", "") or ""),
+                    "reconciliation_created_at": self._iso(getattr(reconciliation_event, "created_at", None)),
                     "binance_ledger_status": str(getattr(ledger, "status", "") or ""),
                     "binance_executed_qty": self._safe_float(getattr(ledger, "executed_qty", 0.0)) if ledger else None,
                     "binance_live_enabled": self._safe_bool(getattr(ledger, "live_enabled", False)) if ledger else None,
@@ -453,6 +550,7 @@ class LiveOrderLifecycleReporter:
                 "entry_fill_count": sum(int(row["entry_fill_count"]) for row in rows),
                 "closed_count": int(status_counts.get("closed", 0)),
                 "open_after_entry_count": int(status_counts.get("open_after_entry", 0)),
+                "exchange_flat_after_entry_count": int(status_counts.get("exchange_flat_after_entry", 0)),
                 "submitted_without_entry_fill_count": int(status_counts.get("submitted_without_entry_fill", 0)),
                 "rejected_or_error_count": int(status_counts.get("rejected_or_error", 0)),
                 "total_fee": round(total_fee, 8),

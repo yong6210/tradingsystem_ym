@@ -1,6 +1,6 @@
 # Live Candidate Readiness Contract
 
-최종 갱신: 2026-05-16
+최종 갱신: 2026-05-19
 
 ## Purpose
 
@@ -78,7 +78,7 @@ Script/report status mapping:
 
 예:
 
-- `BTCUSDC`: `WAIT / no_promotable_live_candidate`
+- `BTCUSDT`: `WAIT / no_promotable_live_candidate`
 - global: `BLOCKED / validation_do_not_deploy`
 - 해석: BTC는 지금 fresh setup이 없고, 전체 live 승격은 validation block 때문에 열면 안 된다.
 

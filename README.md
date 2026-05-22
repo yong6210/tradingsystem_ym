@@ -11,7 +11,7 @@ Trading Engine v1 is a verification-first trading engine for operator-led automa
 
 - It treats `POST /validation/report` and `POST /operations/checklist` as the final approval surfaces.
 - It treats scanner, portfolio, and operator surfaces as runtime decision support, not order authority by themselves.
-- It currently operates with an `A_ONLY` live stance and prefers verification over signal proliferation.
+- It currently operates the `session_impulse_retest` MICRO_LIVE route while keeping legacy A/B language as research context only.
 - It tracks execution quality, fills, positions, alerts, and reconciliation as first-class operational signals.
 - It keeps quality-gate near-miss candidates in a research backlog via `/validation/alpha-research` instead of silently dropping them.
 
@@ -19,47 +19,23 @@ If you only remember one rule: chart and scanner views explain what the engine s
 
 ## Session Impulse Retest Runtime Status
 
-As of `2026-05-11`, the active runtime work for the newer `session_impulse_retest` family is centered on **runtime correctness, observability, and loss-attribution hardening**, not on broadening the live contract.
+As of `2026-05-20`, the active MICRO_LIVE route is **USDT 11 symbols + `session_impulse_retest` + `CONFIRM` + structure-buffered exits**.
 
-Current `session_impulse_retest` universe:
+Current `session_impulse_retest` live universe:
 
-- live/core:
-  - `BTCUSDC`
-  - `ETHUSDC`
-  - `SOLUSDC`
-  - `LINKUSDC`
-  - `BNBUSDC`
-  - `XRPUSDC`
-  - `ADAUSDC`
-  - `AVAXUSDC`
-  - `BCHUSDC`
-  - `LTCUSDC`
-  - `NEARUSDC`
-  - `1000PEPEUSDC`
-  - `ARBUSDC`
-  - `1000SHIBUSDC`
-  - `FILUSDC`
-  - `DOGEUSDC`
-- shadow/secondary:
-  - `SUIUSDC`
-  - `AAVEUSDC`
-  - `HBARUSDC`
-  - `ZECUSDC`
-  - `UNIUSDC`
+- `ADAUSDT`, `ATOMUSDT`, `BTCUSDT`, `FETUSDT`, `INJUSDT`, `LINKUSDT`, `LTCUSDT`, `NEARUSDT`, `RUNEUSDT`, `SUIUSDT`, `ZECUSDT`
 
 Important operating rules for this family:
 
-- `session_impulse_retest` runtime audits are now **recorded only for tracked symbols** in the family allowlist.
+- `session_impulse_retest` runtime audits are recorded only for tracked symbols in the family allowlist.
 - `session_impulse_retest` only accepts a 1m retest entry within 3 minutes of the 5m setup bar. The 2026-05-10 3-year loss attribution showed retests after 3 minutes were consistently negative across years, so late retests are no longer eligible for live or replay entries.
 - If stop distance is already high (`risk_atr >= 1.0`), the 1m retest must arrive within 2 minutes. The 2026-05-10 loss replay showed high-risk retests that only appeared on minute 3 had negative contribution.
-- `ETHUSDC` uses the relaxed profile but requires `min_volume_factor=0.90`; ETH low-volume relaxed entries were the clearest remaining symbol-specific loss bucket.
 - `/health/ready` now checks:
   - API dependencies
   - disk free space for the runtime database path
   - `worker_loop` fresh heartbeat, `ok` status, and live PID
   - `worker_ws` fresh heartbeat, `ok` status, live PID, and no-message timeout
-  - `BTCUSDC` `1m` freshness
-  - `BTCUSDC` `5m` freshness
+  - fresh `1m` and `5m` candles for the current live symbol set
 - `worker_ws` heartbeat includes processed message count, reconnect count, ingest errors, and skipped reverse-timestamp candles.
 - `session_impulse_retest` runtime diagnosis should be read from the audit table, not guessed from scanner output alone.
 
@@ -90,7 +66,7 @@ Primary runtime scripts:
 - live candidate promotion readiness:
   - [/Users/yumin/Documents/trading/scripts/run_live_candidate_promotion_readiness.py](/Users/yumin/Documents/trading/scripts/run_live_candidate_promotion_readiness.py)
   - contract: [LIVE_CANDIDATE_READINESS_CONTRACT.md](/Users/yumin/Documents/trading/docs/LIVE_CANDIDATE_READINESS_CONTRACT.md)
-  - compresses existing runtime audits and order-intent blockers into compare-only states such as `GATE_BLOCKED`, `SHADOW_SIGNAL_ONLY`, and `SUBMIT_READY_GAP`; it supports `--symbol ADAUSDC`, prints latest evidence timestamps plus `fresh`/`recent`/`stale`/`old` freshness labels, separates headline evidence from overall latest evidence, adds `promotion_decision` / `attention_flags` / `operator_review_items`, and never expands live authority
+  - compresses existing runtime audits and order-intent blockers into compare-only states such as `GATE_BLOCKED`, `SHADOW_SIGNAL_ONLY`, and `SUBMIT_READY_GAP`; it supports `--symbol ADAUSDT`, prints latest evidence timestamps plus `fresh`/`recent`/`stale`/`old` freshness labels, separates headline evidence from overall latest evidence, adds `promotion_decision` / `attention_flags` / `operator_review_items`, and never expands live authority
 - `/execution/operator-ui` reads the dashboard through `fast=true` and renders live candidate readiness even when heavier validation/checklist/scanner surfaces are temporarily slow; slow optional surfaces show `source_unavailable` fallback text instead of blocking the whole page.
 - When a symbol is selected, `/execution/operator-ui` shows both selected-symbol readiness and `live_candidate_promotion_readiness_global` so a local `WAIT` state cannot hide a global `BLOCKED` promotion gate.
 
@@ -100,7 +76,7 @@ Recommended checks:
 cd /Users/yumin/Documents/trading
 bash scripts/check_runtime_stack.sh
 PYTHONPATH="$PWD" .venv/bin/python scripts/run_live_candidate_promotion_readiness.py --compact --no-write-report
-PYTHONPATH="$PWD" .venv/bin/python scripts/run_live_candidate_promotion_readiness.py --symbol ADAUSDC --compact --no-write-report
+PYTHONPATH="$PWD" .venv/bin/python scripts/run_live_candidate_promotion_readiness.py --symbol ADAUSDT --compact --no-write-report
 PYTHONPATH="$PWD" .venv/bin/python scripts/run_session_impulse_retest_runtime_audit_report.py --hours 24 --limit 50
 PYTHONPATH="$PWD" .venv/bin/python scripts/run_micro_main_usdt_proxy_backtest.py --days 1095 --write-report --write-loss-analysis
 ```
@@ -155,17 +131,18 @@ Current live route:
 - execution mode: `MICRO_LIVE`
 - strategy family: `session_impulse_retest`
 - entry model: `CONFIRM`
-- live symbols: `BTCUSDC`, `ETHUSDC`, `SOLUSDC`, `LINKUSDC`, `BNBUSDC`, `XRPUSDC`, `ADAUSDC`, `AVAXUSDC`, `BCHUSDC`, `LTCUSDC`, `NEARUSDC`
+- live symbols: `ADAUSDT`, `ATOMUSDT`, `BTCUSDT`, `FETUSDT`, `INJUSDT`, `LINKUSDT`, `LTCUSDT`, `NEARUSDT`, `RUNEUSDT`, `SUIUSDT`, `ZECUSDT`
 - sessions: `dead_session`, `london`, `new_york`
-- tuned pacing: `max_concurrent_positions=3`, `family_cluster_window=30m`, `max_same_family_entries=3`, `max_same_family_direction_exposures=3`, `loss_cooldown=60m/4 losses`, `saturday_risk_multiplier=1.0`
+- tuned pacing: `max_concurrent_positions=2`, `max_daily_new_entries=0` meaning no daily cap, `family_cluster_window=30m`, `max_same_family_entries=2`, `max_same_family_direction_exposures=2`, `loss_cooldown=60m/4 losses`, `saturday_risk_multiplier=1.0`, `leverage_cap=10x`
+
+`ARBUSDT` was removed from the active allowlist after repeated live liquidity checks showed poor execution quality. The active replay-alignment report is `reports/operations/micro_intrabar_long_short_portfolio_mix_review_drop_arb/latest.json`.
 
 The older `BTCUSDC + sweep_reversal + LIMIT` path is now a benchmark/legacy execution lens, not the current live allowlist. Do not mix benchmark counts with the live route when diagnosing order flow.
 
 Backtest alignment for the current route:
 
-- baseline: `closed=4399`, `total_r=2826.3175`, `ev_r=0.6425`
-- current safety-adjusted route: `closed=4323`, `total_r=2754.7242`, `ev=0.6372`
-- drag vs baseline: `total_r -2.5331%`
+- latest route details and required checks are maintained in [MICRO_LIVE Current State](/Users/yumin/Documents/trading/docs/MICRO_LIVE_CURRENT_STATE.md).
+- historical USDT proxy reports are research context only unless they state no-lookahead entry timing and match the current live contract.
 
 Live submit still requires validation, operations checklist, kill/close-only checks, liquidity, macro blackout, exchange rules, sizing, and reconciliation approval. `Trading entry surface alert` is not by itself an order trigger.
 
@@ -205,7 +182,7 @@ This project has already gone through several operating-contract revisions. The 
   - `BTCUSDC only`
   - `BTCUSDC SHORT only`
 - `BTCUSDC SHORT only` looked numerically stronger, but we explicitly rejected it as the live contract because it hard-coded a directional bet and threw away valid long setups.
-- Earlier decision at that stage: keep `BTCUSDC LONG|SHORT`, but treat `short-bias` as advisory evidence rather than a hard operating rule. This has since been superseded by the current `session_impulse_retest + CONFIRM` 16-symbol route.
+- Earlier decision at that stage: keep `BTCUSDC LONG|SHORT`, but treat `short-bias` as advisory evidence rather than a hard operating rule. This has since been superseded by the current `session_impulse_retest + CONFIRM` USDT 11-symbol route.
 
 7. Reliability and observability work
 - We fixed repeated stage snapshot regressions where empty runtime summaries overwrote valid ones.
@@ -240,7 +217,7 @@ This project has already gone through several operating-contract revisions. The 
 - We also fixed an opportunity-capture misclassification where empty blocked-mix buckets could still read as `quality_blocking`.
 - Current interpretation: the active contract is not presently bottlenecked by `submit_to_fill`; it is bottlenecked by `selection_shortfall` and a still-thin closed-trade sample.
 
-## Current Evidence And Operating Interpretation
+## Historical Evidence And Operating Interpretation
 
 Large-sample historical replay was used to shape the contract. The key comparisons were:
 
@@ -263,10 +240,10 @@ Interpretation:
 
 - `BTCUSDC SHORT only` is numerically stronger
 - but the improvement is not large enough to justify forcing the system into one direction
-- therefore the live contract stays `BTCUSDC LONG|SHORT`
+- therefore that historical canary stayed `BTCUSDC LONG|SHORT` at the time
 - `BTC short-bias` remains useful as research guidance, not as hard live policy
 
-## Current Concerns
+## Historical Concerns
 
 These are the real engineering and strategy concerns at this point.
 
@@ -830,17 +807,17 @@ These are compare-only readability aliases for operators. They do not replace `r
 
 - `GET /health/ready`
   First readiness check before using any operator surface.
-- `GET /execution/operator-dashboard?symbol=BTCUSDC&universe=usdc_perp_top30&days=7`
+- `GET /execution/operator-dashboard?symbol=BTCUSDT&universe=micro_live_usdt_11&days=7`
   Main runtime operating payload.
-- `GET /execution/operator-ui?symbol=BTCUSDC&universe=usdc_perp_top30&days=7`
+- `GET /execution/operator-ui?symbol=BTCUSDT&universe=micro_live_usdt_11&days=7`
   Browser operator surface.
-- `GET /portfolio/budget?universe=usdc_perp_top30&limit=20&write_report=true`
+- `GET /portfolio/budget?universe=micro_live_usdt_11&limit=11&write_report=true`
   Portfolio headroom and blocked-reason review.
-- `POST /validation/report?symbol=BTCUSDC`
+- `POST /validation/report?symbol=BTCUSDT`
   Final deployment approval summary and research outputs.
-- `POST /operations/checklist?symbol=BTCUSDC&universe=usdc_perp_top30`
+- `POST /operations/checklist?symbol=BTCUSDT&universe=micro_live_usdt_11`
   Final operator checklist and playbook output.
-- `GET /validation/alpha-research?universe=usdc_perp_top30&symbol=BTCUSDC&write_report=true`
+- `GET /validation/alpha-research?universe=micro_live_usdt_11&symbol=BTCUSDT&write_report=true`
   Quality near-miss research backlog.
 - `POST /execution/plans/preview`
   Preview executable contract for a plan before approval.
@@ -1002,7 +979,7 @@ Try two requests immediately after the server starts:
 
 ```bash
 curl -s "http://127.0.0.1:8000/health/ready" | jq
-curl -s "http://127.0.0.1:8000/execution/operator-dashboard?symbol=BTCUSDC&universe=usdc_perp_top30&days=7" | jq
+curl -s "http://127.0.0.1:8000/execution/operator-dashboard?symbol=BTCUSDT&universe=micro_live_usdt_11&days=7" | jq
 ```
 
 If you need live Binance user-stream or integration extras:
@@ -1025,7 +1002,7 @@ Current MICRO_LIVE route and pacing:
 MICRO_LIVE preflight:
 
 ```bash
-./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --days 7 --request-timeout 20
+./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDT --days 7 --request-timeout 20
 ```
 
 The current MICRO_LIVE setup must keep `.env` allowlists, direction contracts, strategy-family allowlists, entry-model allowlists, worker WS universe, event-blackout coverage, and fail-closed liquidity gates aligned before live orders are allowed.
@@ -1103,11 +1080,11 @@ This snapshots each live symbol's `quantity_step`, `min_quantity`, `tick_size`, 
 Live-vs-replay parity audit:
 
 ```bash
-./.venv/bin/python scripts/run_live_replay_parity_audit.py --symbol BTCUSDC --days 30 --no-fail-exit
+./.venv/bin/python scripts/run_live_replay_parity_audit.py --symbol BTCUSDT --days 30 --no-fail-exit
 ./.venv/bin/python scripts/run_live_replay_parity_audit.py --all-live-symbols --days 3 --no-fail-exit
 ```
 
-This compares live active-contract cadence against the operator-dashboard replay flow baseline and attaches recent live intent/submission block reasons. It computes the active-contract cadence and replay baseline directly from local DB/files first, then falls back to the local API, so the audit is not dependent on the web server being up. `--all-live-symbols` aggregates the current 16-symbol live universe. When a WS worker `started_at` heartbeat exists, the active parity window defaults to `runtime_since_ws_start`; the full `--days` window remains in `lookback_evaluation_summary`. Use `--lookback-only` when you intentionally want the historical window as the headline. A runtime window with fewer than two expected replay candidates and no live intent/submission is treated as candidate wait, not a current flow warning. Portfolio `ALERT` is reserved for aggregate flow shortfall or material per-symbol shortfall; short non-runtime per-symbol windows with fewer than two expected replay candidates are `WATCH` unless an intent-to-submission or exchange reject/error problem is present. Portfolio `WATCH` reasons separate thin live flow (`portfolio_symbol_live_flow_watch_thin_window`) from order-gate waiting (`portfolio_symbol_order_flow_blocked_or_waiting`) and mixed cases (`portfolio_symbol_live_flow_and_order_gate_watch`). Each symbol also gets a `flow_diagnosis.stage`, such as `signal_or_plan_generation_gap`, `approval_gate_blocked`, `intent_to_submission_gap`, or `exchange_submission_rejected_or_error`. A symbol can be `WATCH` even when replay cadence is sufficient if all recent intents are blocked before order submission. The audit writes timestamped reports plus `latest.md` and `latest.json` for stable operator reads.
+This compares live active-contract cadence against the operator-dashboard replay flow baseline and attaches recent live intent/submission block reasons. It computes the active-contract cadence and replay baseline directly from local DB/files first, then falls back to the local API, so the audit is not dependent on the web server being up. `--all-live-symbols` aggregates the current 11-symbol live universe. When a WS worker `started_at` heartbeat exists, the active parity window defaults to `runtime_since_ws_start`; the full `--days` window remains in `lookback_evaluation_summary`. Use `--lookback-only` when you intentionally want the historical window as the headline. A runtime window with fewer than two expected replay candidates and no live intent/submission is treated as candidate wait, not a current flow warning. Portfolio `ALERT` is reserved for aggregate flow shortfall or material per-symbol shortfall; short non-runtime per-symbol windows with fewer than two expected replay candidates are `WATCH` unless an intent-to-submission or exchange reject/error problem is present. Portfolio `WATCH` reasons separate thin live flow (`portfolio_symbol_live_flow_watch_thin_window`) from order-gate waiting (`portfolio_symbol_order_flow_blocked_or_waiting`) and mixed cases (`portfolio_symbol_live_flow_and_order_gate_watch`). Each symbol also gets a `flow_diagnosis.stage`, such as `signal_or_plan_generation_gap`, `approval_gate_blocked`, `intent_to_submission_gap`, or `exchange_submission_rejected_or_error`. A symbol can be `WATCH` even when replay cadence is sufficient if all recent intents are blocked before order submission. The audit writes timestamped reports plus `latest.md` and `latest.json` for stable operator reads.
 
 When an intent is blocked by `validation_do_not_deploy`, the approval snapshot and lifecycle reports include `validation_block_detail.primary_cause` plus `root_causes`, so the operator can distinguish missing validation sample, non-positive expectancy, zero/missing win rate, score floor failure, risk-gate closure, and runtime candidate blocks without reading raw logs.
 
@@ -1164,14 +1141,14 @@ By default this only writes plists under `reports/operations/launchd`. Use `--in
 Split review followup packet:
 
 ```bash
-./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --days 7 --action auto
+./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDT --universe micro_live_usdt_11 --days 7 --action auto
 ```
 
 The followup packet turns the latest `operator_action_priority`, `edge_experiment_review`, and `edge_evolution_rule` into a concrete `selected_action + target_contract + review_steps` bundle, then appends the result to `review_followup_ledger`, so split review prep stops being a manual copy/paste exercise even when the top action is `reduce`, `promote`, or `kill-review`.
 The intended live experiment loop is fixed: generate the packet from `operator_action_priority` or `top_action_followup_command`, run the real split observation in market, accumulate new closed trades, rerun `edge_experiment_review`, rerun `edge_evolution_rule`, and only then interpret `promote / reduce / kill-review`.
 If the packet returns `NO_TARGET` or `NO_REVIEW_ACTION_AVAILABLE`, treat that as a blocker signal rather than an experiment result: clear approval blockers, restore target contract carryover, or wait for enough closed-trade evidence before trying to interpret edge evolution.
 If the same packet already exists in fresh `READY` history, if the last packet for that action stalled at `NO_TARGET`, or if the same packet has already been generated three times in a row, `operator_action_priority` now suppresses that duplicate packet and surfaces the suppression through `blocking_signals` / `dedupe_suppressed_actions`.
-After the operator has actually resolved a packet, append the outcome back into the same ledger with `./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --days 7 --action reduce_baseline_allocation_review --transition-status REDUCE_CONFIRMED` or another transition status (`ACKED`, `COMPLETED`, `REJECTED`, `PROMOTE_CONFIRMED`, `KILL_REVIEW_ESCALATED`). That transition history is what lets later `edge_evolution_rule` runs strengthen recommendation language instead of repeating a first-pass advisory forever.
+After the operator has actually resolved a packet, append the outcome back into the same ledger with `./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDT --universe micro_live_usdt_11 --days 7 --action reduce_baseline_allocation_review --transition-status REDUCE_CONFIRMED` or another transition status (`ACKED`, `COMPLETED`, `REJECTED`, `PROMOTE_CONFIRMED`, `KILL_REVIEW_ESCALATED`). That transition history is what lets later `edge_evolution_rule` runs strengthen recommendation language instead of repeating a first-pass advisory forever.
 The operator surface divergence snapshot, session brief, and stage monitor now also carry the same ready-to-run followup command on each `entry_timing_review_target` / `execution_style_review_target` line, preserve `top_action_followup_command` for non-split edge-evolution review actions, and surface `review_followup_ledger.last_status / last_action` so recent packet history survives handoff.
 The server-side `operator_action_priority` payload now also carries `top_action_followup_command` plus per-row `next_actions[].followup_command` for split-review actions, so dashboard, validation, checklist, and UI can point to the same runnable packet command.
 
@@ -1194,7 +1171,7 @@ The watcher output now also carries top-level `edge_experiment_review` plus `can
 Post-live pruning review:
 
 ```bash
-./.venv/bin/python scripts/run_post_live_pruning_review.py --symbol BTCUSDC --days 7
+./.venv/bin/python scripts/run_post_live_pruning_review.py --symbol BTCUSDT --days 7
 ```
 
 The pruning review output now includes `approval_surfaces`, `edge_experiment_review`, `edge_evolution_rule`, `review_followup_ledger`, and representative accepted/blocked candidate split focus, so the reopen decision stays separate from the current split-test focus while still preserving whether the latest review packet actually resolved a runnable target.
@@ -1202,13 +1179,13 @@ The pruning review output now includes `approval_surfaces`, `edge_experiment_rev
 Execution incident drill:
 
 ```bash
-python scripts/run_execution_incident_drill.py --symbol BTCUSDC --scenario dashboard --scenario reconcile
+python scripts/run_execution_incident_drill.py --symbol BTCUSDT --family session_impulse_retest --scenario dashboard --scenario reconcile
 ```
 
 Open the operator UI:
 
 ```bash
-open "http://127.0.0.1:8000/execution/operator-ui?symbol=BTCUSDC&universe=usdc_perp_top30&days=7"
+open "http://127.0.0.1:8000/execution/operator-ui?symbol=BTCUSDT&universe=micro_live_usdt_11&days=7"
 ```
 
 ## Notes
@@ -1324,7 +1301,7 @@ python scripts/generate_parameter_changelog.py --trigger manual
 Feature calibration report:
 
 ```bash
-python scripts/generate_feature_calibration_report.py --symbol BTCUSDC --refresh
+python scripts/generate_feature_calibration_report.py --symbol BTCUSDT --refresh
 ```
 
 Feature calibration runtime prerequisites: `matched_samples >= feature_calibration_min_matches` and `baseline.generated_plans >= feature_calibration_min_generated_plans`.
@@ -1332,7 +1309,7 @@ Feature calibration runtime prerequisites: `matched_samples >= feature_calibrati
 Execution quality report:
 
 ```bash
-python scripts/generate_execution_quality_report.py --symbol BTCUSDC --days 30
+python scripts/generate_execution_quality_report.py --symbol BTCUSDT --days 30
 ```
 
 Execution quality uses `execution_fills` as the primary source for fill-rate, slippage, latency, and fees. `zone_outcomes` is only a fallback for older coverage.
@@ -1353,7 +1330,7 @@ Combined live alpha operating review:
 Replay evidence review:
 
 ```bash
-./.venv/bin/python scripts/run_replay_evidence_review.py --symbol BTCUSDC --days 180
+./.venv/bin/python scripts/run_replay_evidence_review.py --symbol BTCUSDT --days 180
 ```
 
 ## Execution Friction Measurement
@@ -1386,7 +1363,7 @@ Replay evidence review:
 Portfolio budget report:
 
 ```bash
-python scripts/generate_portfolio_budget_report.py --universe usdc_perp_top30 --limit 20
+python scripts/generate_portfolio_budget_report.py --universe micro_live_usdt_11 --limit 11
 ```
 
 Alert metrics report:
@@ -1426,7 +1403,7 @@ Send a channel smoke alert:
 ```bash
 curl -X POST "http://127.0.0.1:8000/alerts/test" \
   -H "Content-Type: application/json" \
-  -d '{"channel":"discord","symbol":"BTCUSDC","message":"validation pipeline alive"}'
+  -d '{"channel":"discord","symbol":"BTCUSDT","message":"validation pipeline alive"}'
 ```
 
 ## Worker
@@ -1434,7 +1411,7 @@ curl -X POST "http://127.0.0.1:8000/alerts/test" \
 Run one-shot symbol sync plus event reprocess:
 
 ```bash
-python scripts/run_worker.py --mode once --binance-sync --symbol BTCUSDC --reprocess-events
+python scripts/run_worker.py --mode once --binance-sync --symbol BTCUSDT --reprocess-events
 ```
 
 Run continuous universe sync every five minutes:
@@ -1446,7 +1423,7 @@ python scripts/run_worker.py --mode loop --sync-universe --limit-symbols 30 --sy
 Run WebSocket stream ingest for one symbol:
 
 ```bash
-python scripts/run_worker.py --ws-stream --symbol BTCUSDC --ws-intervals 5m,15m
+python scripts/run_worker.py --ws-stream --symbol BTCUSDT --ws-intervals 5m,15m
 ```
 
 Run WebSocket stream ingest for the top universe with live refresh:

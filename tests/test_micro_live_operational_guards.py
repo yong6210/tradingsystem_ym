@@ -4,6 +4,7 @@ import json
 import plistlib
 import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.core.config import get_settings
@@ -186,6 +187,43 @@ def test_no_order_watchdog_surfaces_latest_signal_reason_counts() -> None:
     assert "signal_reasons=after_session_signal_window=5, trend_strength_too_weak=2" in enriched["message"]
 
 
+def test_no_order_watchdog_surfaces_next_sir_signal_window() -> None:
+    schedule = run_micro_live_no_order_watchdog._session_impulse_retest_signal_window_context(
+        symbols=["BTCUSDT", "ADAUSDT"],
+        generated_at=datetime(2026, 5, 19, 21, 30, tzinfo=UTC),
+    )
+    evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
+        lifecycle={
+            "summary": {
+                "submission_count": 0,
+                "requested_live_count": 0,
+                "rejected_or_error_count": 0,
+                "live_intents": {"total": 0, "submit_ready": 0, "blocked": 0, "top_block_reasons": {}},
+            }
+        },
+        min_intents=1,
+    )
+
+    enriched = run_micro_live_no_order_watchdog._augment_no_order_evaluation(
+        evaluation,
+        candidate_context={
+            "source": "session_impulse_retest_runtime_audit",
+            "scope": "runtime_since_ws_start",
+            "audit_count": 12,
+            "no_candidate_status_counts": {"no_live_route_candidate_plan": 7},
+            "watch_status_counts": {},
+            "non_blocking_status_counts": {},
+            "order_blocking_status_counts": {},
+            "latest_signal_reason_counts": {"after_session_signal_window": 5},
+            "signal_window_schedule": schedule,
+        },
+    )
+
+    assert schedule["next_window"]["anchor_hour_utc"] == 0
+    assert "다음 관찰창 05-20 09:20-11:00 KST" in enriched["next_action_text"]
+    assert "signal_window=다음 관찰창 05-20 09:20-11:00 KST" in enriched["message"]
+
+
 def test_no_order_watchdog_filters_refresh_context_by_created_at() -> None:
     start_at = datetime(2026, 5, 17, 13, 22, tzinfo=UTC)
     rows = [
@@ -308,6 +346,45 @@ def test_no_order_watchdog_records_pre_restart_opportunities_as_advisory() -> No
     assert "before_runtime_start=12" in enriched["message"]
 
 
+def test_no_order_watchdog_message_includes_direction_filtered_opportunities() -> None:
+    evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
+        lifecycle={
+            "summary": {
+                "submission_count": 0,
+                "requested_live_count": 0,
+                "rejected_or_error_count": 0,
+                "live_intents": {"total": 0, "submit_ready": 0, "blocked": 0, "top_block_reasons": {}},
+            }
+        },
+        min_intents=1,
+    )
+
+    enriched = run_micro_live_no_order_watchdog._augment_no_order_evaluation(
+        evaluation,
+        candidate_context={
+            "source": "session_impulse_retest_runtime_audit",
+            "scope": "runtime_since_ws_start",
+            "audit_count": 11,
+            "no_candidate_status_counts": {"no_fresh_live_candidate": 11},
+            "watch_status_counts": {},
+            "non_blocking_status_counts": {},
+            "order_blocking_status_counts": {},
+        },
+        opportunity_context={
+            "source": "session_impulse_retest_opportunity_report",
+            "status": "ok",
+            "lookback_hours": 72,
+            "direction_filtered_count": 3,
+            "summary": {"expected_order_count": 0, "potential_performance": {"total_r": 0}},
+            "lookback_summary": {"expected_order_count": 0, "potential_performance": {"total_r": 0}},
+        },
+    )
+
+    assert enriched["alert"] is False
+    assert enriched["reason"] == "no_recent_live_intents"
+    assert "direction_filtered=3" in enriched["message"]
+
+
 def test_no_order_watchdog_alerts_on_pre_restart_blocked_opportunities() -> None:
     evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
         lifecycle={
@@ -373,6 +450,118 @@ def test_no_order_watchdog_alerts_on_pre_restart_blocked_opportunities() -> None
     }
     assert "blocked_or_skipped=17" in enriched["message"]
     assert "validation_do_not_deploy=4" in enriched["message"]
+
+
+def test_no_order_watchdog_downgrades_losing_pre_restart_blocked_opportunities() -> None:
+    evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
+        lifecycle={
+            "summary": {
+                "submission_count": 0,
+                "requested_live_count": 0,
+                "rejected_or_error_count": 0,
+                "live_intents": {"total": 0, "submit_ready": 0, "blocked": 0, "top_block_reasons": {}},
+            }
+        },
+        min_intents=1,
+    )
+
+    enriched = run_micro_live_no_order_watchdog._augment_no_order_evaluation(
+        evaluation,
+        candidate_context={
+            "source": "session_impulse_retest_runtime_audit",
+            "scope": "runtime_since_ws_start",
+            "audit_count": 20,
+            "no_candidate_status_counts": {"no_live_route_candidate_plan": 8},
+            "watch_status_counts": {},
+            "non_blocking_status_counts": {"ws_stream_active_route_suppressed": 12},
+            "order_blocking_status_counts": {},
+        },
+        opportunity_context={
+            "source": "session_impulse_retest_opportunity_report",
+            "status": "ok",
+            "summary": {
+                "expected_order_count": 0,
+                "potential_performance": {"total_r": 0},
+            },
+            "lookback_summary": {
+                "expected_order_count": 2,
+                "before_current_runtime_start_count": 2,
+                "status_counts": {
+                    "blocked_or_skipped": 1,
+                    "pre_runtime_backfill_without_intent": 1,
+                },
+                "reason_counts": {
+                    "LIVE_LIQUIDITY_BLOCKED": 1,
+                    "before_runtime_start": 1,
+                },
+                "potential_performance": {"total_r": -2.46},
+            },
+        },
+    )
+
+    assert enriched["alert"] is False
+    assert enriched["status"] == "OK"
+    assert enriched["severity"] == "INFO"
+    assert enriched["reason"] == "sir_pre_restart_blocked_opportunities_non_positive_advisory"
+    assert enriched["historical_advisory"] is True
+    assert enriched["candidate_generation_status"] == "pre_restart_blocked_opportunities_non_positive_advisory"
+    assert "총 R이 양수가 아니므로" in enriched["next_action_text"]
+
+
+def test_no_order_watchdog_does_not_treat_filled_pre_restart_opportunity_as_blocked() -> None:
+    evaluation = run_micro_live_no_order_watchdog.evaluate_no_order_watchdog(
+        lifecycle={
+            "summary": {
+                "submission_count": 0,
+                "requested_live_count": 0,
+                "rejected_or_error_count": 0,
+                "live_intents": {"total": 0, "submit_ready": 0, "blocked": 0, "top_block_reasons": {}},
+            }
+        },
+        min_intents=1,
+    )
+
+    enriched = run_micro_live_no_order_watchdog._augment_no_order_evaluation(
+        evaluation,
+        candidate_context={
+            "source": "session_impulse_retest_runtime_audit",
+            "scope": "runtime_since_ws_start",
+            "audit_count": 20,
+            "no_candidate_status_counts": {"no_live_route_candidate_plan": 8},
+            "watch_status_counts": {},
+            "non_blocking_status_counts": {"ws_stream_active_route_suppressed": 12},
+            "order_blocking_status_counts": {},
+        },
+        opportunity_context={
+            "source": "session_impulse_retest_opportunity_report",
+            "status": "ok",
+            "summary": {
+                "expected_order_count": 0,
+                "potential_performance": {"total_r": 0},
+            },
+            "lookback_summary": {
+                "expected_order_count": 2,
+                "before_current_runtime_start_count": 2,
+                "status_counts": {
+                    "submitted": 1,
+                    "pre_runtime_backfill_without_intent": 1,
+                },
+                "reason_counts": {
+                    "FILLED": 1,
+                    "before_runtime_start": 1,
+                },
+                "potential_performance": {"total_r": -2.46},
+            },
+        },
+    )
+
+    assert enriched["alert"] is False
+    assert enriched["status"] == "OK"
+    assert enriched["severity"] == "INFO"
+    assert enriched["reason"] == "sir_pre_restart_expected_orders_advisory"
+    assert enriched["historical_advisory"] is True
+    assert enriched["candidate_generation_status"] == "pre_restart_backtest_opportunities_advisory"
+    assert "제출 전 차단" not in enriched["next_action_text"]
 
 
 def test_no_order_watchdog_prioritizes_current_order_blocking_over_pre_restart_context() -> None:
@@ -545,6 +734,12 @@ def test_no_order_watchdog_message_separates_runtime_scope_from_lookback_context
                     "watch_status_counts": {"symbol_not_live_enabled_for_auto_route": 1},
                     "non_blocking_status_counts": {"ws_stream_active_route_suppressed": 5},
                     "order_blocking_status_counts": {},
+                    "signal_window_schedule": {
+                        "next_window": {
+                            "start_utc": "2026-05-20T00:20:00Z",
+                            "end_utc": "2026-05-20T02:00:00Z",
+                        }
+                    },
                 },
             },
         }
@@ -554,6 +749,7 @@ def test_no_order_watchdog_message_separates_runtime_scope_from_lookback_context
     assert "참고: 최근 3일 전체 intent 14건 / 제출 2건" in message
     assert "후보: SIR audit 8건 / no_candidate=no_live_route_candidate_plan=3" in message
     assert "watch=symbol_not_live_enabled_for_auto_route=1" in message
+    assert "신호창: 다음 관찰창 05-20 09:20-11:00 KST" in message
     assert "최근 3일: intent 0건" not in message
 
 
@@ -1001,6 +1197,88 @@ def test_liquidity_universe_summarizes_symbol_direction_passes(monkeypatch) -> N
     assert payload["symbol_direction_statuses"]["ETHUSDT"]["failed_directions"] == ["short"]
 
 
+def test_liquidity_universe_canary_uses_live_route_risk(monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "strategy_mode", "A_ONLY")
+    monkeypatch.setattr(settings, "sizing_grade_a_r", 1.0)
+    monkeypatch.setattr(settings, "sizing_regime_factor_trend", 1.0)
+    monkeypatch.setattr(settings, "sizing_reaction_factor_confirm_only", 0.7)
+    monkeypatch.setattr(settings, "sizing_execution_factor_confirm", 0.85)
+    monkeypatch.setattr(settings, "sizing_thesis_factor_none", 1.0)
+
+    calls: list[dict] = []
+
+    def fake_run_canary(**kwargs):
+        calls.append(dict(kwargs))
+        return {
+            "overall_status": "PASS",
+            "live_sizing": {
+                "target_notional": 100.0,
+                "normalized_notional": 100.0,
+                "actual_risk_pct": 0.01,
+            },
+            "liquidity_gate": {"decision": "PASS", "message": "ok", "reason_codes": []},
+        }
+
+    monkeypatch.setattr(run_micro_live_liquidity_universe, "run_canary", fake_run_canary)
+    monkeypatch.setattr(
+        run_micro_live_liquidity_universe,
+        "_micro_live_config_drift_checks",
+        lambda **_kwargs: [{"name": "config", "status": "PASS", "severity": "blocking", "message": "ok"}],
+    )
+
+    payload = run_micro_live_liquidity_universe.build_payload(
+        symbols="BTCUSDT,ARBUSDT",
+        directions="short",
+        entry_model="CONFIRM",
+        sleep_seconds=0.0,
+        max_retries=0,
+        use_network=False,
+    )
+
+    assert payload["overall_status"] == "PASS"
+    assert [round(float(call["risk_r"]), 4) for call in calls] == [0.5355, 0.238]
+
+
+def test_liquidity_universe_contract_mode_checks_only_live_directions(monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trading_micro_live_direction_contract", "BTCUSDT:LONG,ARBUSDT:SHORT")
+
+    calls: list[dict] = []
+
+    def fake_run_canary(**kwargs):
+        calls.append(dict(kwargs))
+        return {
+            "overall_status": "PASS",
+            "live_sizing": {
+                "target_notional": 100.0,
+                "normalized_notional": 100.0,
+                "actual_risk_pct": 0.01,
+            },
+            "liquidity_gate": {"decision": "PASS", "message": "ok", "reason_codes": []},
+        }
+
+    monkeypatch.setattr(run_micro_live_liquidity_universe, "run_canary", fake_run_canary)
+    monkeypatch.setattr(
+        run_micro_live_liquidity_universe,
+        "_micro_live_config_drift_checks",
+        lambda **_kwargs: [{"name": "config", "status": "PASS", "severity": "blocking", "message": "ok"}],
+    )
+
+    payload = run_micro_live_liquidity_universe.build_payload(
+        symbols="BTCUSDT,ARBUSDT",
+        directions="contract",
+        sleep_seconds=0.0,
+        max_retries=0,
+        use_network=False,
+    )
+
+    assert payload["direction_mode"] == "contract"
+    assert payload["check_count"] == 2
+    assert [(call["symbol"], call["direction"]) for call in calls] == [("BTCUSDT", "long"), ("ARBUSDT", "short")]
+    assert payload["symbol_directions"] == {"BTCUSDT": ["long"], "ARBUSDT": ["short"]}
+
+
 def test_liquidity_universe_fails_when_too_few_symbols_are_executable(monkeypatch) -> None:
     def fake_run_canary(**kwargs):
         symbol = str(kwargs["symbol"])
@@ -1428,6 +1706,38 @@ def test_binance_rule_drift_snapshot_detects_field_changes() -> None:
     ]
 
 
+def test_binance_rule_drift_snapshot_ignores_intentionally_removed_symbols() -> None:
+    previous = {
+        "rules": [
+            {
+                "symbol": "BTCUSDC",
+                "quantity_step": 0.001,
+                "min_quantity": 0.001,
+                "tick_size": 0.1,
+                "price_precision": 1,
+                "quantity_precision": 3,
+                "status": "TRADING",
+                "contract_type": "PERPETUAL",
+            },
+            {
+                "symbol": "ETHUSDC",
+                "quantity_step": 0.001,
+                "min_quantity": 0.001,
+                "tick_size": 0.01,
+                "price_precision": 2,
+                "quantity_precision": 3,
+                "status": "TRADING",
+                "contract_type": "PERPETUAL",
+            },
+        ]
+    }
+    current = {"rules": [dict(previous["rules"][0])]}
+
+    changes = run_binance_rule_drift_snapshot.compare_rule_snapshots(previous=previous, current=current)
+
+    assert changes == []
+
+
 def test_binance_rule_drift_snapshot_main_writes_latest_json_atomically(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(
         run_binance_rule_drift_snapshot,
@@ -1576,6 +1886,67 @@ def test_live_replay_parity_uses_usdt_proxy_baseline_for_session_impulse_retest(
     assert payload["matched_replay_rows"] == 2
     assert payload["expected_active_contract_candidates_per_week_from_replay"] == 1.0
     assert payload["live_vs_replay_flow_ratio"] == 0.5
+
+
+def test_live_replay_parity_uses_portfolio_mix_baseline_for_active_usdt_candidate(monkeypatch, tmp_path) -> None:
+    backtest_dir = tmp_path / "reports" / "validation" / "micro_main_usdt_backtests"
+    backtest_dir.mkdir(parents=True)
+    portfolio_path = tmp_path / "reports" / "operations" / "micro_intrabar_long_short_portfolio_mix_review" / "latest.json"
+    portfolio_path.parent.mkdir(parents=True)
+    portfolio_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "micro_intrabar_candidate_portfolio_mix_review_v1",
+                "generated_at": "2026-05-20T00:00:00Z",
+                "combined_symbols": ["ADAUSDT", "BTCUSDT"],
+                "settings": {"days": 14},
+                "per_contract": [
+                    {
+                        "symbols": ["ADAUSDT"],
+                        "filter_contract": {"direction": "long", "setup_hour_utc": [14]},
+                        "summary": {"closed": 4},
+                    },
+                    {
+                        "symbols": ["BTCUSDT"],
+                        "filter_contract": {"direction": "short", "setup_hour_utc": [7]},
+                        "summary": {"closed": 6},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = SimpleNamespace(
+        auto_trading_replay_validation_bridge_backtest_dir=str(backtest_dir),
+        auto_trading_replay_validation_bridge_portfolio_mix_report_path=str(portfolio_path),
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="ADAUSDT,BTCUSDT",
+        validation_report_dir=str(tmp_path / "reports" / "validation"),
+        trading_session_london_start_hour_utc=7,
+        trading_session_london_end_hour_utc=12,
+        trading_session_new_york_start_hour_utc=13,
+        trading_session_new_york_end_hour_utc=18,
+    )
+    monkeypatch.setattr(run_live_replay_parity_audit, "get_settings", lambda: settings)
+
+    payload = run_live_replay_parity_audit._local_replay_flow_baseline(
+        filters={
+            "symbol": "ADAUSDT",
+            "strategy_families": ["session_impulse_retest"],
+            "entry_models": ["CONFIRM"],
+            "directions": ["LONG"],
+            "sessions": ["new_york"],
+            "family_sessions": {"session_impulse_retest": ["new_york"]},
+            "session_filter_source": "micro_live_settings",
+        },
+        cadence_window={"current_window_active_contract_intents_per_week": 0.5},
+    )
+
+    assert payload is not None
+    assert payload["source"] == "micro_intrabar_candidate_portfolio_mix_review"
+    assert payload["matched_replay_rows"] == 4
+    assert payload["expected_active_contract_candidates_per_week_from_replay"] == 2.0
+    assert payload["live_vs_replay_flow_ratio"] == 0.25
 
 
 def test_live_replay_parity_prefers_usdc_baseline_when_days_match(monkeypatch, tmp_path) -> None:
@@ -2360,6 +2731,86 @@ def test_replay_validation_bridge_build_payload_uses_runtime_bridge_for_session_
     assert payload["rows"][0]["replay_metrics"]["sample_size"] == 141
 
 
+def test_replay_validation_bridge_uses_portfolio_mix_guard_for_current_sir_contract(monkeypatch, tmp_path) -> None:
+    portfolio_path = tmp_path / "reports" / "operations" / "micro_intrabar_long_short_portfolio_mix_review" / "latest.json"
+    portfolio_path.parent.mkdir(parents=True, exist_ok=True)
+    portfolio_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "micro_intrabar_candidate_portfolio_mix_review_v1",
+                "generated_at": "2026-05-19T16:45:20+00:00",
+                "combined_symbols": ["BTCUSDT", "ARBUSDT"],
+                "combined": {
+                    "summary": {
+                        "closed": 451,
+                        "total_r": 84.1429,
+                        "ev_r": 0.1866,
+                        "win_rate": 0.5233,
+                        "max_dd_r": 6.5096,
+                        "score": 5.8884,
+                    }
+                },
+                "recommended_state": "PORTFOLIO_MIX_PAPER_WATCH",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(run_replay_validation_bridge, "_portfolio_mix_report_path", lambda: portfolio_path)
+    monkeypatch.setattr(run_replay_validation_bridge, "_live_symbols_from_settings", lambda: ["BTCUSDT", "ARBUSDT"])
+    monkeypatch.setattr(
+        run_replay_validation_bridge,
+        "_active_contract_filters_from_settings",
+        lambda symbol: {
+            "symbol": symbol,
+            "execution_mode": "MICRO_LIVE",
+            "strategy_families": ["session_impulse_retest"],
+            "entry_models": ["CONFIRM"],
+            "directions": ["LONG"] if symbol == "BTCUSDT" else ["SHORT"],
+            "sessions": ["dead_session", "london", "new_york"],
+            "family_sessions": {"session_impulse_retest": ["dead_session", "london", "new_york"]},
+            "session_filter_source": "micro_live_settings",
+        },
+    )
+
+    class MissingBridge:
+        def __init__(self, _settings):
+            pass
+
+        def evaluate(self, *, symbol: str, family: str, entry_model: str = ""):
+            return run_replay_validation_bridge.ReplayValidationEvidence(
+                approval_usable=False,
+                reason_code="replay_validation_backtest_missing",
+                message="missing",
+                metrics={},
+                source={},
+                reason_codes=("replay_validation_backtest_missing",),
+                failures=(),
+            )
+
+    monkeypatch.setattr(run_replay_validation_bridge, "UsdtProxyReplayValidationBridge", MissingBridge)
+
+    payload = run_replay_validation_bridge.build_payload(
+        symbol="",
+        all_live_symbols=True,
+        cache_file=str(tmp_path / "missing.json"),
+        thresholds={
+            "min_sample": 120,
+            "min_ev_r": 0.20,
+            "min_ev_lower_r": 0.0,
+            "min_win_rate": 0.48,
+            "min_p1r": 0.0,
+            "min_slice_sample": 30,
+            "max_stop_loss_share": 0.45,
+            "max_drawdown_r": 4.5,
+        },
+    )
+
+    assert payload["overall_status"] == "PASS"
+    assert payload["reason"] == "session_impulse_retest_portfolio_mix_guard_is_order_authority"
+    assert payload["decision_counts"] == {"PORTFOLIO_MIX_RUNTIME_GUARDED": 2}
+    assert payload["rows"][0]["replay_metrics"]["sample_size"] == 451
+
+
 def test_replay_validation_bridge_warns_when_material_slice_is_weak() -> None:
     payload = {
         "trade_rows": [
@@ -2762,6 +3213,81 @@ def test_reconciliation_watchdog_treats_liquidity_reject_as_safety_warning() -> 
     assert result["issues"][0]["type"] == "live_submission_safety_rejected"
 
 
+def test_reconciliation_watchdog_treats_stop_precheck_reject_as_safety_warning() -> None:
+    now = datetime(2026, 5, 10, 12, tzinfo=UTC)
+
+    result = run_live_reconciliation_watchdog.evaluate_reconciliation_watchdog(
+        submissions=[
+            {
+                "submission_id": "sub_1",
+                "symbol": "SOLUSDC",
+                "client_order_id": "cid_1",
+                "state": "REJECTED",
+                "submit_status": "LIVE_STOP_PRECHECK_BLOCKED",
+                "requested_live": True,
+                "submitted_at": datetime(2026, 5, 10, 11, 50, tzinfo=UTC),
+                "updated_at": datetime(2026, 5, 10, 11, 50, tzinfo=UTC),
+            }
+        ],
+        ledgers=[],
+        positions=[],
+        events=[],
+        now=now,
+        stale_minutes=3,
+        event_lookback_minutes=60,
+    )
+
+    assert result["status"] == "ALERT"
+    assert result["severity"] == "WARN"
+    assert result["issues"][0]["type"] == "live_submission_safety_rejected"
+
+
+def test_reconciliation_watchdog_ignores_old_liquidity_reject_warning() -> None:
+    now = datetime(2026, 5, 10, 12, tzinfo=UTC)
+
+    result = run_live_reconciliation_watchdog.evaluate_reconciliation_watchdog(
+        submissions=[
+            {
+                "submission_id": "sub_1",
+                "symbol": "ADAUSDC",
+                "client_order_id": "cid_1",
+                "state": "REJECTED",
+                "submit_status": "LIVE_LIQUIDITY_SPLIT_REQUIRED",
+                "requested_live": True,
+                "submitted_at": datetime(2026, 5, 10, 10, 50, tzinfo=UTC),
+                "updated_at": datetime(2026, 5, 10, 10, 50, tzinfo=UTC),
+            }
+        ],
+        ledgers=[],
+        positions=[],
+        events=[],
+        now=now,
+        stale_minutes=3,
+        event_lookback_minutes=60,
+    )
+
+    assert result["status"] == "OK"
+    assert result["issues"] == []
+
+
+def test_reconciliation_watchdog_current_contract_symbols_prefers_micro_live_symbols() -> None:
+    settings = SimpleNamespace(
+        auto_trading_micro_live_allowed_symbols="BTCUSDT,ETHUSDT",
+        auto_trading_allowed_symbols="BTCUSDC,ETHUSDC",
+    )
+
+    assert run_live_reconciliation_watchdog._current_contract_symbols(settings) == {"BTCUSDT", "ETHUSDT"}
+
+
+def test_reconciliation_watchdog_current_contract_symbols_falls_back_to_global() -> None:
+    settings = SimpleNamespace(
+        auto_trading_micro_live_allowed_symbols="",
+        auto_trading_allowed_symbols="BTCUSDT,ETHUSDT",
+    )
+
+    assert run_live_reconciliation_watchdog._current_contract_symbols(settings) == {"BTCUSDT", "ETHUSDT"}
+
+
 def test_reconciliation_watchdog_warns_when_filled_entry_has_no_position_snapshot() -> None:
     now = datetime(2026, 5, 10, 12, tzinfo=UTC)
 
@@ -2770,6 +3296,7 @@ def test_reconciliation_watchdog_warns_when_filled_entry_has_no_position_snapsho
         ledgers=[
             {
                 "client_order_id": "cid_1",
+                "plan_id": "plan_1",
                 "symbol": "ADAUSDC",
                 "side": "SELL",
                 "position_side": "SHORT",
@@ -2782,6 +3309,7 @@ def test_reconciliation_watchdog_warns_when_filled_entry_has_no_position_snapsho
             }
         ],
         positions=[],
+        plans=[{"plan_id": "plan_1", "symbol": "ADAUSDC", "direction": "short", "state": "ENTERED"}],
         events=[],
         now=now,
         stale_minutes=3,
@@ -2791,6 +3319,38 @@ def test_reconciliation_watchdog_warns_when_filled_entry_has_no_position_snapsho
     assert result["status"] == "ALERT"
     assert result["severity"] == "WARN"
     assert result["issues"][0]["type"] == "filled_entry_without_position_snapshot"
+
+
+def test_reconciliation_watchdog_ignores_filled_entry_without_open_local_plan() -> None:
+    now = datetime(2026, 5, 10, 12, tzinfo=UTC)
+
+    result = run_live_reconciliation_watchdog.evaluate_reconciliation_watchdog(
+        submissions=[],
+        ledgers=[
+            {
+                "client_order_id": "cid_1",
+                "plan_id": "plan_closed",
+                "symbol": "ADAUSDC",
+                "side": "SELL",
+                "position_side": "SHORT",
+                "reduce_only": False,
+                "status": "FILLED",
+                "requested_live": True,
+                "executed_qty": 120.0,
+                "updated_at": datetime(2026, 5, 10, 11, 50, tzinfo=UTC),
+                "created_at": datetime(2026, 5, 10, 11, 50, tzinfo=UTC),
+            }
+        ],
+        positions=[],
+        plans=[],
+        events=[],
+        now=now,
+        stale_minutes=3,
+        event_lookback_minutes=60,
+    )
+
+    assert result["status"] == "OK"
+    assert result["issues"] == []
 
 
 def test_reconciliation_watchdog_accepts_matching_open_position_snapshot() -> None:
@@ -2916,6 +3476,39 @@ def test_account_protection_audit_flags_unprotected_out_of_universe_position() -
     assert "out_of_universe_open_position" in issue_types
 
 
+def test_account_protection_audit_flags_orphan_entry_open_order() -> None:
+    now = datetime(2026, 5, 10, 12, tzinfo=UTC)
+
+    result = run_live_account_protection_audit.evaluate_account_protection(
+        positions=[],
+        open_orders=[
+            {
+                "symbol": "SOLUSDC",
+                "orderId": 1001,
+                "clientOrderId": "web-order",
+                "side": "BUY",
+                "positionSide": "LONG",
+                "type": "LIMIT",
+                "status": "NEW",
+                "origQty": "8.74",
+                "price": "83.75",
+                "reduceOnly": False,
+            }
+        ],
+        allowed_symbols={"BTCUSDT", "ETHUSDT"},
+        now=now,
+    )
+
+    issue_types = {issue["type"] for issue in result["issues"]}
+    assert result["overall_status"] == "ALERT"
+    assert result["severity"] == "FAIL"
+    assert "out_of_universe_open_order" in issue_types
+    assert "orphan_entry_order_without_position" in issue_types
+    assert result["orders"][0]["can_increase_position"] is True
+    assert result["orders"][0]["matching_position"] is False
+    assert result["orders"][0]["in_live_universe"] is False
+
+
 def test_account_protection_report_dir_resolves_against_script_root(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(run_live_account_protection_audit, "ROOT_DIR", tmp_path)
 
@@ -3026,6 +3619,125 @@ def test_account_protection_audit_does_not_count_unfavorable_close_limit_as_tp()
     issue_types = {issue["type"] for issue in result["issues"]}
     assert result["positions"][0]["has_take_profit"] is False
     assert "missing_take_profit_protection" in issue_types
+
+
+def test_account_protection_missing_stop_flatten_dry_run() -> None:
+    payload = {
+        "issues": [
+            {"type": "missing_stop_protection", "severity": "FAIL", "symbol": "BTCUSDT", "position_side": "LONG"}
+        ],
+        "positions": [
+            {
+                "symbol": "BTCUSDT",
+                "position_side": "LONG",
+                "position_amt": 0.012,
+                "has_stop": False,
+            }
+        ],
+    }
+
+    class FakeClient:
+        def fetch_symbol_trading_rules(self, symbol: str) -> SimpleNamespace:
+            return SimpleNamespace(quantity_step=0.001, min_quantity=0.001)
+
+    result = run_live_account_protection_audit.apply_missing_stop_flatten(
+        payload,
+        client=FakeClient(),
+        live=False,
+    )
+
+    action = result["missing_stop_flatten"]["actions"][0]
+    assert action["status"] == "DRY_RUN"
+    assert action["side"] == "SELL"
+    assert action["quantity"] == 0.012
+
+
+def test_account_protection_missing_stop_flatten_submits_market_and_cancels_orders() -> None:
+    payload = {
+        "issues": [
+            {"type": "missing_stop_protection", "severity": "FAIL", "symbol": "ETHUSDT", "position_side": "SHORT"}
+        ],
+        "positions": [
+            {
+                "symbol": "ETHUSDT",
+                "position_side": "SHORT",
+                "position_amt": -0.1234,
+                "has_stop": False,
+            }
+        ],
+    }
+    submissions: list[dict[str, object]] = []
+    cancels: list[dict[str, object]] = []
+
+    class FakeClient:
+        def fetch_symbol_trading_rules(self, symbol: str) -> SimpleNamespace:
+            return SimpleNamespace(quantity_step=0.001, min_quantity=0.001)
+
+        def submit_order(self, **kwargs: object) -> dict[str, object]:
+            submissions.append(dict(kwargs))
+            return {"status": "FILLED", "clientOrderId": kwargs["client_order_id"]}
+
+        def fetch_open_orders(self, symbol: str) -> list[dict[str, object]]:
+            return [{"symbol": symbol, "orderId": 1001, "clientOrderId": "tp-left"}]
+
+        def cancel_order(self, **kwargs: object) -> dict[str, object]:
+            cancels.append(dict(kwargs))
+            return {"status": "CANCELED", **kwargs}
+
+    result = run_live_account_protection_audit.apply_missing_stop_flatten(
+        payload,
+        client=FakeClient(),
+        live=True,
+    )
+
+    assert result["missing_stop_flatten"]["status"] == "SUBMITTED"
+    assert submissions[0]["symbol"] == "ETHUSDT"
+    assert submissions[0]["side"] == "BUY"
+    assert submissions[0]["order_type"] == "MARKET"
+    assert submissions[0]["quantity"] == 0.123
+    assert submissions[0]["position_side"] == "SHORT"
+    assert submissions[0]["live"] is True
+    assert cancels == [{"symbol": "ETHUSDT", "order_id": 1001, "client_order_id": "tp-left"}]
+
+
+def test_account_protection_unexpected_open_order_cancel_submits_cancel() -> None:
+    payload = {
+        "orders": [
+            {
+                "symbol": "SOLUSDC",
+                "order_id": "12418092988",
+                "client_order_id": "web-order",
+                "side": "BUY",
+                "position_side": "LONG",
+                "order_type": "LIMIT",
+                "active": True,
+                "can_increase_position": True,
+                "matching_position": False,
+                "in_live_universe": False,
+            }
+        ]
+    }
+    cancels: list[dict[str, object]] = []
+
+    class FakeClient:
+        def cancel_order(self, **kwargs: object) -> dict[str, object]:
+            cancels.append(dict(kwargs))
+            return {"status": "CANCELED", **kwargs}
+
+    result = run_live_account_protection_audit.apply_unexpected_open_order_cancel(
+        payload,
+        client=FakeClient(),
+        live=True,
+    )
+
+    assert result["unexpected_open_order_cancel"]["status"] == "SUBMITTED"
+    assert cancels == [
+        {
+            "symbol": "SOLUSDC",
+            "order_id": 12418092988,
+            "client_order_id": "web-order",
+        }
+    ]
 
 
 def test_live_leverage_cap_sync_aligns_universe_and_open_positions(monkeypatch) -> None:
@@ -3229,6 +3941,7 @@ def test_launchd_generator_includes_remaining_operational_guards(tmp_path) -> No
     assert "com.test.micro.live-replay-parity" in labels
     assert "com.test.micro.session-impulse-retest-runtime-audit" in labels
     assert "com.test.micro.failure-drill" in labels
+    assert "com.test.micro.validation-report-refresh" in labels
     quiet_job_names = {
         "runtime_guard",
         "no_order_watchdog",
@@ -3241,10 +3954,14 @@ def test_launchd_generator_includes_remaining_operational_guards(tmp_path) -> No
         "live_replay_parity",
         "ops_heartbeat",
         "session_impulse_retest_runtime_audit",
+        "validation_report_refresh",
     }
     for job in jobs:
         if job.name in quiet_job_names:
             assert "--quiet" in job.args
+    no_order_job = next(job for job in jobs if job.name == "no_order_watchdog")
+    assert "run_micro_live_no_order_watchdog.py" in no_order_job.args[1]
+    assert no_order_job.start_interval == 5 * 60
     live_replay_job = next(job for job in jobs if job.name == "live_replay_parity")
     assert "run_live_replay_parity_audit.py" in live_replay_job.args[1]
     assert "--all-live-symbols" in live_replay_job.args
@@ -3256,7 +3973,36 @@ def test_launchd_generator_includes_remaining_operational_guards(tmp_path) -> No
     assert "run_micro_live_liquidity_universe.py" in liquidity_job.args[1]
     assert "--use-private-balance" in liquidity_job.args
     assert liquidity_job.start_interval == 2 * 60 * 60
+    validation_refresh_job = next(job for job in jobs if job.name == "validation_report_refresh")
+    assert "run_validation_report_refresh.py" in validation_refresh_job.args[1]
+    assert validation_refresh_job.start_interval == 4 * 60 * 60
     assert any((tmp_path / f"{label}.plist").exists() for label in labels)
+
+
+def test_launchd_generator_uses_working_dir_for_scripts_and_logs(tmp_path) -> None:
+    runtime_root = tmp_path / "runtime_src"
+    output_dir = tmp_path / "plists"
+    jobs = install_micro_live_ops_launchd.build_jobs(label_prefix="com.test.micro", python_bin="/usr/bin/python3")
+
+    rows = install_micro_live_ops_launchd.write_plists(
+        output_dir=output_dir,
+        jobs=jobs,
+        working_dir=runtime_root,
+        env_file="",
+    )
+
+    readiness = next(row for row in rows if row["name"] == "live_candidate_promotion_readiness")
+    with Path(readiness["path"]).open("rb") as handle:
+        payload = plistlib.load(handle)
+
+    assert payload["ProgramArguments"][1] == str(runtime_root / "scripts/run_live_candidate_promotion_readiness.py")
+    assert payload["WorkingDirectory"] == str(runtime_root)
+    assert payload["StandardOutPath"] == str(
+        runtime_root / "reports/operations/launchd/logs/live_candidate_promotion_readiness.out.log"
+    )
+    assert payload["StandardErrorPath"] == str(
+        runtime_root / "reports/operations/launchd/logs/live_candidate_promotion_readiness.err.log"
+    )
 
 
 def test_launchd_generator_replaces_plists_atomically(tmp_path) -> None:
@@ -3700,6 +4446,12 @@ def test_synthetic_canary_default_symbol_preserves_micro_live_priority() -> None
     )
 
     assert run_micro_live_synthetic_canary._first_live_symbol(settings, "") == "BTCUSDC"
+
+
+def test_synthetic_canary_default_entry_model_matches_live_contract() -> None:
+    settings = SimpleNamespace(auto_trading_micro_live_allowed_entry_models="CONFIRM")
+
+    assert run_micro_live_synthetic_canary._first_live_entry_model(settings, "") == "CONFIRM"
 
 
 def test_boot_check_ignores_explicit_symbol_outside_live_universe(monkeypatch) -> None:
@@ -4342,11 +5094,63 @@ def test_ops_heartbeat_defaults_include_live_candidate_promotion_readiness() -> 
     assert config["requires_current_runtime"] is True
 
 
+def test_ops_heartbeat_defaults_include_validation_report_refresh() -> None:
+    config = run_micro_live_ops_heartbeat._DEFAULT_JOBS["validation_report_refresh"]
+
+    assert config["pattern"] == "reports/operations/validation_report_refresh/*.md"
+    assert config["max_age_minutes"] == 300
+    assert config["pass_statuses"] == {"PASS"}
+
+
 def test_ops_heartbeat_defaults_include_liquidity_universe() -> None:
     config = run_micro_live_ops_heartbeat._DEFAULT_JOBS["liquidity_universe"]
 
     assert config["pattern"] == "reports/operations/micro_live_liquidity_universe/*.md"
     assert config["pass_statuses"] == {"PASS", "WATCH"}
+
+
+def test_ops_heartbeat_defaults_include_competing_trading_runtime_guard() -> None:
+    config = run_micro_live_ops_heartbeat._DEFAULT_JOBS["competing_trading_runtime"]
+
+    assert config["content_type"] == "competing_trading_runtime"
+    assert config["pass_statuses"] == {"PASS"}
+    assert config["watch_statuses"] == {"WATCH"}
+
+
+def test_ops_heartbeat_fails_when_competing_trading_runtime_is_detected(monkeypatch) -> None:
+    monkeypatch.setattr(
+        run_micro_live_ops_heartbeat,
+        "_DEFAULT_JOBS",
+        {
+            "competing_trading_runtime": {
+                "pattern": "",
+                "max_age_minutes": 0,
+                "content_type": "competing_trading_runtime",
+                "pass_statuses": {"PASS"},
+                "watch_statuses": {"WATCH"},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        run_micro_live_ops_heartbeat,
+        "_competing_trading_runtime_status",
+        lambda: {
+            "overall_status": "FAIL",
+            "status_detail": "competing_trading_runtime_detected",
+            "forbidden_launchd_labels_loaded": ["com.yumin.real.bybitbot"],
+            "forbidden_process_matches": [{"pid": "123", "pattern": "pybit", "command": "python -m bot.main"}],
+            "launchctl_checked": True,
+        },
+    )
+
+    result = run_micro_live_ops_heartbeat.evaluate_ops_heartbeat(now=datetime(2026, 5, 10, tzinfo=UTC))
+
+    assert result["status"] == "FAIL"
+    failure = result["hard_failures"][0]
+    assert failure["name"] == "competing_trading_runtime"
+    assert failure["latest_path"] == "direct_check"
+    assert failure["status_detail"] == "competing_trading_runtime_detected"
+    assert failure["forbidden_launchd_labels_loaded"] == ["com.yumin.real.bybitbot"]
 
 
 def test_ops_heartbeat_checks_entry_surface_latest_payload(monkeypatch, tmp_path) -> None:
@@ -4399,6 +5203,54 @@ def test_ops_heartbeat_checks_entry_surface_latest_payload(monkeypatch, tmp_path
         "no_live_order_candidates_context_only_route_mismatch | operator_action=context_only_outside_live_route | "
         "next=wait_for_live_route_candidate_or_change_live_contract_intentionally | "
         "route_reason=strategy_family_not_live_route:22"
+    )
+
+
+def test_ops_heartbeat_watches_entry_surface_universe_mismatch(monkeypatch, tmp_path) -> None:
+    report = tmp_path / "latest_entry_alert_run.json"
+    report.write_text(
+        json.dumps(
+            {
+                "status": "PASS",
+                "reason": "no_surface_candidates",
+                "universe": "usdc_perp_top30",
+                "operator_action_summary": {
+                    "state": "no_surface_candidates",
+                    "next_action": "wait_for_fresh_live_candidate",
+                    "message": "no candidates",
+                },
+                "snapshot": {"counts": {"LIVE_ORDER_CANDIDATE": 0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class Settings:
+        universe_name = "usdt_reliable_balanced_31"
+
+    monkeypatch.setattr(run_micro_live_ops_heartbeat, "get_settings", lambda: Settings())
+    monkeypatch.setattr(
+        run_micro_live_ops_heartbeat,
+        "_DEFAULT_JOBS",
+        {
+            "entry_surface": {
+                "pattern": str(report),
+                "max_age_minutes": 15,
+                "content_type": "entry_surface_run",
+                "pass_statuses": {"PASS"},
+                "watch_statuses": {"WATCH"},
+            }
+        },
+    )
+
+    now = datetime.fromtimestamp(report.stat().st_mtime, tz=UTC)
+    result = run_micro_live_ops_heartbeat.evaluate_ops_heartbeat(now=now)
+
+    assert result["status"] == "WATCH"
+    assert result["warnings"][0]["name"] == "entry_surface"
+    assert result["warnings"][0]["report_status"] == "WATCH"
+    assert result["warnings"][0]["status_detail"] == (
+        "entry_surface_universe_mismatch observed=usdc_perp_top30 expected=usdt_reliable_balanced_31"
     )
 
 

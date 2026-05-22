@@ -6,7 +6,14 @@ from uuid import uuid4
 
 import pytest
 
-from app.db.models import BinanceOrderLedger, ExecutionFill, OrderIntent, OrderSubmission, Plan
+from app.db.models import (
+    BinanceOrderLedger,
+    ExecutionFill,
+    ExecutionReconciliationEvent,
+    OrderIntent,
+    OrderSubmission,
+    Plan,
+)
 from app.db.session import SessionLocal
 from app.services.live_order_lifecycle import LiveOrderLifecycleReporter
 
@@ -196,6 +203,245 @@ def test_live_order_lifecycle_report_links_intent_submission_fill_and_ledger() -
     assert row["lifecycle_status"] == "closed"
     assert row["binance_ledger_status"] == "FILLED"
     assert row["binance_test_order"] is False
+
+
+def test_live_order_lifecycle_does_not_attach_entry_fill_to_rejected_duplicate_submission() -> None:
+    now = datetime.now(timezone.utc)
+    suffix = uuid4().hex[:10]
+    symbol = f"DUP{suffix}USDT".upper()
+    with SessionLocal() as db:
+        plan = Plan(
+            plan_id=f"plan_lifecycle_dup_{suffix}",
+            zone_id=f"zone_lifecycle_dup_{suffix}",
+            symbol=symbol,
+            timeframe="5m",
+            direction="long",
+            entry_model="MARKET",
+            entry_price=10.0,
+            sl=9.9,
+            tp1=10.1,
+            tp2=10.2,
+            tp3=10.3,
+            split={},
+            rr_min=1.0,
+            rr_base=2.0,
+            rr_opt=3.0,
+            ev=0.2,
+            cost_est=0.01,
+            confidence=80.0,
+            validity={"strategy_family": "session_impulse_retest"},
+            state="PLANNED",
+            valid_from=now - timedelta(minutes=10),
+            valid_until=now + timedelta(minutes=60),
+            strategy_version="v1",
+        )
+        filled_intent = OrderIntent(
+            intent_id=f"intent_lifecycle_dup_filled_{suffix}",
+            plan_id=plan.plan_id,
+            symbol=symbol,
+            strategy_family="session_impulse_retest",
+            execution_mode="MICRO_LIVE",
+            approval_state="APPROVED_AUTO",
+            submit_decision="SUBMIT",
+            decision_reason_code="submit_ready",
+            decision_reason_message="ready",
+            created_at=now - timedelta(minutes=9),
+        )
+        rejected_intent = OrderIntent(
+            intent_id=f"intent_lifecycle_dup_rejected_{suffix}",
+            plan_id=plan.plan_id,
+            symbol=symbol,
+            strategy_family="session_impulse_retest",
+            execution_mode="MICRO_LIVE",
+            approval_state="APPROVED_AUTO",
+            submit_decision="SUBMIT",
+            decision_reason_code="submit_ready",
+            decision_reason_message="duplicate try",
+            created_at=now - timedelta(minutes=8),
+        )
+        filled_submission = OrderSubmission(
+            submission_id=f"sub_lifecycle_dup_filled_{suffix}",
+            intent_id=filled_intent.intent_id,
+            plan_id=plan.plan_id,
+            symbol=symbol,
+            client_order_id=f"intent-filled-{suffix}",
+            exchange_order_id=f"1{suffix[:6]}",
+            state="FILLED",
+            submit_status="FILLED",
+            message="ok",
+            adapter="binance",
+            execution_mode="MICRO_LIVE",
+            side="BUY",
+            order_type="MARKET",
+            reduce_only=False,
+            requested_live=True,
+            submitted_at=now - timedelta(minutes=7),
+            acknowledged_at=now - timedelta(minutes=7),
+        )
+        rejected_submission = OrderSubmission(
+            submission_id=f"sub_lifecycle_dup_rejected_{suffix}",
+            intent_id=rejected_intent.intent_id,
+            plan_id=plan.plan_id,
+            symbol=symbol,
+            client_order_id=f"intent-rejected-{suffix}",
+            exchange_order_id=None,
+            state="REJECTED",
+            submit_status="LIVE_LIQUIDITY_BLOCKED",
+            message="blocked",
+            adapter="none",
+            execution_mode="MICRO_LIVE",
+            side="BUY",
+            order_type="MARKET",
+            reduce_only=False,
+            requested_live=True,
+            submitted_at=now - timedelta(minutes=6),
+            acknowledged_at=None,
+        )
+        entry_fill = ExecutionFill(
+            fill_id=f"fill_lifecycle_dup_entry_{suffix}",
+            plan_id=plan.plan_id,
+            symbol=symbol,
+            stage="ENTRY",
+            fill_ts=now - timedelta(minutes=6, seconds=30),
+            price=10.0,
+            qty=1.0,
+            fee=0.01,
+            from_state="ARMED",
+            to_state="ENTERED",
+            state_changed=True,
+            payload={
+                "client_order_id": filled_submission.client_order_id,
+                "exchange_order_id": filled_submission.exchange_order_id,
+            },
+            strategy_version="v1",
+        )
+        db.add_all([plan, filled_intent, rejected_intent, filled_submission, rejected_submission, entry_fill])
+        db.flush()
+
+        payload = LiveOrderLifecycleReporter(db).generate(
+            days=1,
+            symbol=symbol,
+            live_only=True,
+            generated_at=now,
+        )
+
+    rows = {row["submission_id"]: row for row in payload["rows"]}
+    assert rows[filled_submission.submission_id]["entry_fill_count"] == 1
+    assert rows[filled_submission.submission_id]["lifecycle_status"] == "open_after_entry"
+    assert rows[rejected_submission.submission_id]["entry_fill_count"] == 0
+    assert rows[rejected_submission.submission_id]["lifecycle_status"] == "rejected_or_error"
+    assert payload["summary"]["open_after_entry_count"] == 1
+    assert payload["summary"]["rejected_or_error_count"] == 1
+
+
+def test_live_order_lifecycle_marks_exchange_flat_reconciliation_after_entry() -> None:
+    now = datetime.now(timezone.utc)
+    suffix = uuid4().hex[:10]
+    symbol = f"FLT{suffix}USDT".upper()
+    with SessionLocal() as db:
+        plan = Plan(
+            plan_id=f"plan_lifecycle_flat_{suffix}",
+            zone_id=f"zone_lifecycle_flat_{suffix}",
+            symbol=symbol,
+            timeframe="5m",
+            direction="long",
+            entry_model="MARKET",
+            entry_price=10.0,
+            sl=9.9,
+            tp1=10.1,
+            tp2=10.2,
+            tp3=10.3,
+            split={},
+            rr_min=1.0,
+            rr_base=2.0,
+            rr_opt=3.0,
+            ev=0.2,
+            cost_est=0.01,
+            confidence=80.0,
+            validity={"strategy_family": "session_impulse_retest"},
+            state="PLANNED",
+            valid_from=now - timedelta(minutes=10),
+            valid_until=now + timedelta(minutes=60),
+            strategy_version="v1",
+        )
+        intent = OrderIntent(
+            intent_id=f"intent_lifecycle_flat_{suffix}",
+            plan_id=plan.plan_id,
+            symbol=symbol,
+            strategy_family="session_impulse_retest",
+            execution_mode="MICRO_LIVE",
+            approval_state="APPROVED_AUTO",
+            submit_decision="SUBMIT",
+            decision_reason_code="submit_ready",
+            decision_reason_message="ready",
+            created_at=now - timedelta(minutes=9),
+        )
+        submission = OrderSubmission(
+            submission_id=f"sub_lifecycle_flat_{suffix}",
+            intent_id=intent.intent_id,
+            plan_id=plan.plan_id,
+            symbol=symbol,
+            client_order_id=f"intent-flat-{suffix}",
+            exchange_order_id=f"2{suffix[:6]}",
+            state="FILLED",
+            submit_status="FILLED",
+            message="ok",
+            adapter="binance",
+            execution_mode="MICRO_LIVE",
+            side="BUY",
+            order_type="MARKET",
+            reduce_only=False,
+            requested_live=True,
+            submitted_at=now - timedelta(minutes=8),
+            acknowledged_at=now - timedelta(minutes=8),
+        )
+        entry_fill = ExecutionFill(
+            fill_id=f"fill_lifecycle_flat_entry_{suffix}",
+            plan_id=plan.plan_id,
+            symbol=symbol,
+            stage="ENTRY",
+            fill_ts=now - timedelta(minutes=7),
+            price=10.0,
+            qty=1.0,
+            fee=0.01,
+            from_state="ARMED",
+            to_state="ENTERED",
+            state_changed=True,
+            payload={
+                "client_order_id": submission.client_order_id,
+                "exchange_order_id": submission.exchange_order_id,
+            },
+            strategy_version="v1",
+        )
+        reconciliation = ExecutionReconciliationEvent(
+            event_id=f"recon_lifecycle_flat_{suffix}",
+            symbol=symbol,
+            mismatch_type="ORPHAN_POSITION_LOCAL",
+            severity="WARNING",
+            message="Local plan state is open but the exchange position snapshot is flat.",
+            local_snapshot={"plan_ids": [plan.plan_id]},
+            exchange_snapshot={"positions": []},
+            payload={"auto_resolve_requested": True},
+            lock_required=False,
+            lock_applied=False,
+            created_at=now - timedelta(minutes=5),
+        )
+        db.add_all([plan, intent, submission, entry_fill, reconciliation])
+        db.flush()
+
+        payload = LiveOrderLifecycleReporter(db).generate(
+            days=1,
+            symbol=symbol,
+            live_only=True,
+            generated_at=now,
+        )
+
+    row = payload["rows"][0]
+    assert row["lifecycle_status"] == "exchange_flat_after_entry"
+    assert row["exchange_flat_after_entry"] is True
+    assert row["reconciliation_event_id"] == reconciliation.event_id
+    assert payload["summary"]["open_after_entry_count"] == 0
+    assert payload["summary"]["exchange_flat_after_entry_count"] == 1
 
 
 def test_live_order_lifecycle_filters_intents_by_family_and_start_at() -> None:

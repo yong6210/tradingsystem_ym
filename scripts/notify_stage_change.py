@@ -1460,6 +1460,7 @@ def _render_message(current: dict[str, Any], events: list[dict[str, str]]) -> st
     edge = dict(current.get("edge_experiment_review") or {})
     posture = dict(edge.get("edge_proof_posture") or {})
     edge_kpis = dict(edge.get("daily_edge_kpis") or {})
+    edge_symbol = str(edge.get("symbol") or edge_kpis.get("symbol") or current.get("symbol") or "심볼").strip().upper()
     active_sample = dict(current.get("active_lineage_sample_focus") or {})
     active_symbol = str(active_sample.get("symbol") or "없음")
     if active_sample.get("symbol"):
@@ -1558,7 +1559,7 @@ def _render_message(current: dict[str, Any], events: list[dict[str, str]]) -> st
                 f"{int(lineage.get('proof_goal_closed_trades') or 0)}"
             ),
             (
-                "BTCUSDC 운영검증: "
+                f"{edge_symbol} 운영검증: "
                 f"{int(edge.get('closed_trade_count') or edge_kpis.get('closed_trade_count') or 0)}/"
                 f"{int(edge.get('edge_proof_goal_closed_trades') or 0)}"
                 f" / 상태={posture.get('state') or 'n/a'}"
@@ -1899,7 +1900,7 @@ def _ko_signoff_code(value: Any) -> str:
         "execution_reconciliation_review": "실행 정합성 점검",
         "kill_switch_review": "킬스위치 검토",
         "portfolio_headroom_review": "포트폴리오 여유 검토",
-        "symbol_edge_thin": "BTCUSDC 표본 얇음",
+        "symbol_edge_thin": "심볼 표본 얇음",
     }
     return mapping.get(raw, str(value or "n/a"))
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import importlib.util
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -85,6 +86,78 @@ def test_build_payload_surfaces_primary_required_review():
     assert payload["runtime_signoff_review_command"].endswith(
         "--symbol BTCUSDC --universe usdc_perp_top30 --days 30"
     )
+
+
+def test_main_reports_not_ready_when_stage_file_is_missing(monkeypatch, tmp_path, capsys):
+    missing_stage = tmp_path / "missing_current_stage.json"
+    report_dir = tmp_path / "reports"
+    monkeypatch.setattr(
+        runtime_signoff_review,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol="BTCUSDT",
+            universe="usdt_reliable_balanced_31",
+            days=30,
+            stage_file=str(missing_stage),
+            report_dir=str(report_dir),
+            no_write_report=True,
+        ),
+    )
+
+    exit_code = runtime_signoff_review.main()
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "NOT_READY_FOR_SIGNOFF"
+    assert payload["runtime_reopen_status"]["status"] == "stage_monitor_missing"
+    assert payload["primary_required_review"]["code"] == "stage_monitor_snapshot_missing"
+    assert payload["operator_recommendation"] == "wait_until_runtime_ready"
+
+
+def test_main_reports_not_ready_when_stage_file_is_stale(monkeypatch, tmp_path, capsys):
+    now = datetime(2026, 5, 19, 10, 0, tzinfo=UTC)
+    stage_file = tmp_path / "current_stage.json"
+    stage_file.write_text(
+        json.dumps(
+            {
+                "generated_at": (now - timedelta(hours=3)).isoformat(),
+                "runtime_reopen_status": {"status": "ready_to_reopen_runtime", "ready": True},
+                "runtime_signoff_summary": {
+                    "status": "ready_for_operator_signoff",
+                    "required_reviews": [],
+                    "advisory_reviews": [],
+                },
+                "lineage_sample_summary": {"closed_trade_count": 100, "proof_goal_closed_trades": 100},
+                "risk_gate_summary": {"status": "PASS", "risk_state": "OPEN"},
+                "validation_approval_strip": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime_signoff_review, "_now", lambda: now)
+    monkeypatch.setattr(
+        runtime_signoff_review,
+        "parse_args",
+        lambda: SimpleNamespace(
+            base_url="http://127.0.0.1:8000",
+            symbol="BTCUSDT",
+            universe="usdt_reliable_balanced_31",
+            days=30,
+            stage_file=str(stage_file),
+            report_dir=str(tmp_path / "reports"),
+            no_write_report=True,
+        ),
+    )
+
+    exit_code = runtime_signoff_review.main()
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "NOT_READY_FOR_SIGNOFF"
+    assert payload["runtime_reopen_status"]["status"] == "stage_monitor_stale"
+    assert payload["primary_required_review"]["code"] == "stage_monitor_snapshot_stale"
+    assert payload["primary_required_review"]["age_minutes"] == 180.0
 
 
 def test_request_json_with_retry_wraps_remote_disconnected_as_runtime_error():
@@ -590,6 +663,7 @@ def test_build_runtime_operator_signoff_summary_marks_manual_micro_live_ready(mo
         runtime_signoff_review,
         "get_settings",
         lambda: SimpleNamespace(
+            auto_trading_execution_mode="MICRO_LIVE",
             auto_trading_micro_live_allowed_symbols="BTCUSDC",
             auto_trading_micro_live_allowed_families="sweep_reversal",
             auto_trading_micro_live_allowed_sessions="london,new_york,overlap",
@@ -635,6 +709,115 @@ def test_build_runtime_operator_signoff_summary_marks_manual_micro_live_ready(mo
     assert summary["signoff_review_command"].endswith("--symbol BTCUSDC --universe usdc_perp_top30 --days 30")
     assert "\"execution_mode\":\"MICRO_LIVE\"" in summary["intent_command_template"]
     assert "\"live\":true" in summary["submit_command_template"]
+
+
+def test_build_runtime_operator_signoff_summary_defaults_to_micro_live_when_scope_none(monkeypatch):
+    monkeypatch.setattr(
+        runtime_signoff_review,
+        "get_settings",
+        lambda: SimpleNamespace(
+            auto_trading_execution_mode="MICRO_LIVE",
+            auto_trading_micro_live_allowed_symbols="BTCUSDT,ETHUSDT",
+            auto_trading_micro_live_symbol_priority="BTCUSDT,ETHUSDT",
+            auto_trading_micro_live_allowed_families="session_impulse_retest",
+            auto_trading_micro_live_allowed_sessions="",
+            auto_trading_micro_live_direction_contract="",
+        ),
+    )
+
+    summary = runtime_signoff_review._build_runtime_operator_signoff_summary(
+        runtime_decision={
+            "effective_action": "wait_until_runtime_ready",
+            "allowed_reopen_scope": "none",
+        },
+        runtime_preflight_summary={"status": "READY_FOR_MICRO_LIVE"},
+        runtime_signoff_summary={},
+        runtime_reopen_gate_summary={},
+        base_url="http://127.0.0.1:8000",
+        symbol="BTCUSDT",
+        universe="usdt_reliable_balanced_31",
+        days=30,
+    )
+
+    assert summary["active"] is False
+    assert summary["configured_execution_mode"] == "MICRO_LIVE"
+    assert summary["intent_execution_mode"] == "MICRO_LIVE"
+    assert summary["full_live_command_available"] is False
+    assert "\"execution_mode\":\"MICRO_LIVE\"" in summary["intent_command_template"]
+    assert "\"execution_mode\":\"LIVE\"" not in summary["intent_command_template"]
+    assert "order-intents(MICRO_LIVE)" in summary["submit_path_summary"]
+
+
+def test_build_runtime_operator_signoff_summary_keeps_micro_live_command_until_runtime_promoted(monkeypatch):
+    monkeypatch.setattr(
+        runtime_signoff_review,
+        "get_settings",
+        lambda: SimpleNamespace(
+            auto_trading_execution_mode="MICRO_LIVE",
+            auto_trading_micro_live_allowed_symbols="BTCUSDT",
+            auto_trading_micro_live_symbol_priority="BTCUSDT",
+            auto_trading_micro_live_allowed_families="session_impulse_retest",
+            auto_trading_micro_live_allowed_sessions="",
+            auto_trading_micro_live_direction_contract="BTCUSDT:LONG|SHORT",
+        ),
+    )
+
+    summary = runtime_signoff_review._build_runtime_operator_signoff_summary(
+        runtime_decision={
+            "effective_action": "conditional_full_live_signoff",
+            "allowed_reopen_scope": "MICRO_LIVE_OR_LIVE",
+        },
+        runtime_preflight_summary={"status": "READY_FOR_MICRO_LIVE"},
+        runtime_signoff_summary={"required_reviews": [{"code": "approval_template_review"}]},
+        runtime_reopen_gate_summary={"full_live": {"contract_scope": "limit_only"}},
+        base_url="http://127.0.0.1:8000",
+        symbol="BTCUSDT",
+        universe="usdt_reliable_balanced_31",
+        days=30,
+    )
+
+    assert summary["status"] == "ready_for_manual_full_live_signoff"
+    assert summary["allowed_scope"] == "MICRO_LIVE_OR_LIVE"
+    assert summary["configured_execution_mode"] == "MICRO_LIVE"
+    assert summary["intent_execution_mode"] == "MICRO_LIVE"
+    assert summary["full_live_command_available"] is False
+    assert "\"execution_mode\":\"MICRO_LIVE\"" in summary["intent_command_template"]
+    assert "\"execution_mode\":\"LIVE\"" not in summary["intent_command_template"]
+    assert "operator command remains MICRO_LIVE" in summary["summary"]
+
+
+def test_build_runtime_operator_signoff_summary_allows_live_command_only_when_configured_live(monkeypatch):
+    monkeypatch.setattr(
+        runtime_signoff_review,
+        "get_settings",
+        lambda: SimpleNamespace(
+            auto_trading_execution_mode="LIVE",
+            auto_trading_micro_live_allowed_symbols="BTCUSDT",
+            auto_trading_micro_live_symbol_priority="BTCUSDT",
+            auto_trading_micro_live_allowed_families="session_impulse_retest",
+            auto_trading_micro_live_allowed_sessions="",
+            auto_trading_micro_live_direction_contract="BTCUSDT:LONG|SHORT",
+        ),
+    )
+
+    summary = runtime_signoff_review._build_runtime_operator_signoff_summary(
+        runtime_decision={
+            "effective_action": "conditional_full_live_signoff",
+            "allowed_reopen_scope": "MICRO_LIVE_OR_LIVE",
+        },
+        runtime_preflight_summary={"status": "READY_FOR_MICRO_LIVE"},
+        runtime_signoff_summary={},
+        runtime_reopen_gate_summary={"full_live": {"contract_scope": "limit_only"}},
+        base_url="http://127.0.0.1:8000",
+        symbol="BTCUSDT",
+        universe="usdt_reliable_balanced_31",
+        days=30,
+    )
+
+    assert summary["configured_execution_mode"] == "LIVE"
+    assert summary["intent_execution_mode"] == "LIVE"
+    assert summary["full_live_command_available"] is True
+    assert "\"execution_mode\":\"LIVE\"" in summary["intent_command_template"]
 
 
 def test_approval_template_focus_symbol_uses_global_lineage_namespace():

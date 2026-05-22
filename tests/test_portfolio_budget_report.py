@@ -24,6 +24,7 @@ def test_portfolio_budget_report_summarizes_exposure_and_headroom() -> None:
         "portfolio_overlay_max_directional_exposure": 1,
         "portfolio_overlay_max_cluster_exposure": 1,
         "portfolio_overlay_min_risk_budget_score": 0.0,
+        "strategy_mode_a_only_max_daily_trades": 3,
     }
     old_values = {key: getattr(settings, key) for key in updates}
     now = datetime.now(timezone.utc).replace(microsecond=0)

@@ -59,10 +59,13 @@ def _isolate_test_database() -> None:
     from app.db.base import Base
 
     config.get_settings.cache_clear()
+    db_path = config.sqlite_database_path_from_url(str(session.settings.database_url))
+    if db_path is None or _TEST_ROOT not in {db_path, *db_path.parents}:
+        raise RuntimeError(f"Refusing to run pytest against non-test database: {session.settings.database_url}")
     close_all_sessions()
     Base.metadata.drop_all(bind=session.engine)
     Base.metadata.create_all(bind=session.engine)
-    session._initialized = True
+    session._init_state.initialized = True
     yield
     close_all_sessions()
 

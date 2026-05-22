@@ -24,6 +24,7 @@ from app.services.family_rollout import RolloutPolicyBootstrap
 from app.services.historical_walk_forward_split_review import HistoricalWalkForwardSplitReviewService
 from app.services.live_route_contract import row_session_name
 from app.services.live_order_lifecycle import LiveOrderLifecycleReporter
+from app.services.market_data import configured_usdt_universe_name
 from app.services.runtime_worker_heartbeat import read_worker_heartbeat
 from scripts.operation_report_io import atomic_write_text, parse_report_generated_at, write_latest_aliases
 
@@ -39,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--all-live-symbols", action="store_true")
-    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
+    parser.add_argument("--universe", default=configured_usdt_universe_name())
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--since-ws-start", action="store_true", help="Compatibility flag; runtime scope is the default when ws started_at is available.")
     parser.add_argument("--lookback-only", action="store_true", help="Ignore ws started_at and use the full --days lookback as the active parity window.")

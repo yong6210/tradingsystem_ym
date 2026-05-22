@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
+from app.services.market_data import configured_usdt_universe_name
+
 
 class OperatorActionPriorityService:
     _REVIEW_PACKET_FRESH_HOURS = 12
@@ -108,7 +110,7 @@ class OperatorActionPriorityService:
                 portfolio.get("universe")
                 or dashboard.get("universe")
                 or opportunity_capture.get("universe")
-                or "usdt_reliable_balanced_31"
+                or configured_usdt_universe_name()
             ),
             "days": max(
                 self._int(
@@ -150,7 +152,7 @@ class OperatorActionPriorityService:
         item["followup_command"] = self._split_review_followup_command(
             action=action,
             symbol=str(item.get("symbol") or command_context.get("symbol") or ""),
-            universe=str(command_context.get("universe") or "usdt_reliable_balanced_31"),
+            universe=str(command_context.get("universe") or configured_usdt_universe_name()),
             days=max(self._int(command_context.get("days"), 7), 1),
         )
         return item
@@ -165,7 +167,7 @@ class OperatorActionPriorityService:
         item["followup_command"] = self._split_review_followup_command(
             action=str(item.get("action") or ""),
             symbol=str(item.get("target_symbol") or command_context.get("symbol") or ""),
-            universe=str(command_context.get("universe") or "usdt_reliable_balanced_31"),
+            universe=str(command_context.get("universe") or configured_usdt_universe_name()),
             days=max(self._int(command_context.get("days"), 7), 1),
         )
         return item
@@ -311,6 +313,44 @@ class OperatorActionPriorityService:
                 "advisory_only": True,
             }
         )
+
+    @classmethod
+    def _sample_context_has_material_execution(cls, payload: dict[str, Any]) -> bool:
+        sample = cls._dict(payload.get("sample_context"))
+        return any(
+            cls._int(sample.get(key), default=0) > 0
+            for key in ("plans_matured", "fill_events_total", "closed_plans")
+        )
+
+    @classmethod
+    def _execution_degradation_priority(cls, payload: dict[str, Any]) -> str:
+        status = str(payload.get("status") or "").strip().lower()
+        material_sample = cls._sample_context_has_material_execution(payload)
+        if status == "manual_review":
+            return "urgent" if material_sample else "monitor"
+        if status == "watch":
+            return "watch" if material_sample else "monitor"
+        return "monitor"
+
+    @staticmethod
+    def _playbook_priority(action: str | None, reason: str | None = None) -> str:
+        normalized = str(action or "").strip().lower()
+        reason_text = str(reason or "").strip().lower()
+        if not normalized:
+            return "monitor"
+        if normalized in {
+            "continue_candidate_review_under_portfolio_caps",
+            "proceed_with_configured_rollout",
+            "continue_runtime_monitoring",
+            "wait_for_fresh_promotable_candidate",
+            "wait_for_live_candidate",
+        } or normalized.startswith(("continue_", "proceed_", "wait_")):
+            return "monitor"
+        if normalized.startswith(("clear_", "hold_", "stop_", "disable_", "lock_", "kill_")) or "no_go" in reason_text:
+            return "urgent"
+        if "manual_review" in reason_text or "review" in normalized:
+            return "watch"
+        return "monitor"
 
     @staticmethod
     def _normalize_priority_source(value: str | None) -> str:
@@ -983,7 +1023,7 @@ class OperatorActionPriorityService:
                 next_actions,
                 action=str(playbook_action),
                 reason=str(playbook_reason),
-                priority_level="urgent",
+                priority_level=self._playbook_priority(playbook_action, playbook_reason),
                 source="playbook",
                 action_family="playbook",
             )
@@ -1000,7 +1040,7 @@ class OperatorActionPriorityService:
                     degradation.get("summary")
                     or "global execution degradation requires manual review"
                 ),
-                priority_level="urgent",
+                priority_level=self._execution_degradation_priority(degradation),
                 source="execution_degradation",
                 action_family="execution_review",
             )
@@ -1015,7 +1055,7 @@ class OperatorActionPriorityService:
                     degradation.get("summary")
                     or "global execution quality is drifting"
                 ),
-                priority_level="watch",
+                priority_level=self._execution_degradation_priority(degradation),
                 source="execution_degradation",
                 action_family="execution_review",
             )

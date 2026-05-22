@@ -2273,7 +2273,10 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
                 "active_manual_override": False,
                 "manual_override_reason": "",
                 "arm_required": True,
-                "summary": "Current evidence is weak enough that close-only review should happen before new entries continue.",
+                "summary": (
+                    "Current evidence is weak enough to review close-only rules before expanding live entries; "
+                    "this is advisory and does not automatically block the current live route."
+                ),
                 "reason_codes": [
                     "kill_condition:close_only_review",
                     "risk_gate:closed",
@@ -2546,11 +2549,11 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
     assert signal_funnel["operator_action_priority"]["capture_context"]["dominant_bottleneck"]["reason"] == "execution_fill_shortfall"
     assert signal_funnel["operator_action_priority"]["experiment_context"]["entry_timing_target"]["symbol"] == "BTCUSDC"
     assert signal_funnel["operator_action_priority"]["experiment_context"]["entry_timing_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action run_entry_timing_split_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 7 --action run_entry_timing_split_review"
     )
     assert signal_funnel["operator_action_priority"]["experiment_context"]["execution_style_target"]["symbol"] == "BTCUSDC"
     assert signal_funnel["operator_action_priority"]["experiment_context"]["execution_style_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 7 --action run_execution_style_split_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 7 --action run_execution_style_split_review"
     )
     assert signal_funnel["operator_action_priority"]["experiment_context"]["accepted_candidate_focus"]["symbol"] == "BTCUSDC"
     assert signal_funnel["operator_action_priority"]["advisory_only"] is True

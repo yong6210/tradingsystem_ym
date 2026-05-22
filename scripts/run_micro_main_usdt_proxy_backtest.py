@@ -8,7 +8,7 @@ import io
 import json
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -391,6 +391,60 @@ def _trade_to_row(*, trade: Any, proxy_symbol: str, canonical_symbol: str, profi
     return row
 
 
+def _trade_matches_signal_contract(*, trade: Any, canonical_symbol: str, contract: dict[str, Any]) -> bool:
+    symbols = {str(item).strip().upper() for item in list(contract.get("symbols") or []) if str(item).strip()}
+    if symbols and str(canonical_symbol or "").strip().upper() not in symbols:
+        return False
+
+    filter_contract = dict(contract.get("filter_contract") or {})
+    diagnostics = dict(getattr(trade, "diagnostics", {}) or {})
+
+    expected_direction = str(filter_contract.get("direction") or "").strip().lower()
+    if expected_direction and expected_direction != "both" and str(getattr(trade, "direction", "")).lower() != expected_direction:
+        return False
+
+    allowed_hours = {_safe_int(hour, -1) for hour in list(filter_contract.get("setup_hour_utc") or [])}
+    if allowed_hours and _safe_int(diagnostics.get("setup_hour_utc"), -1) not in allowed_hours:
+        return False
+
+    min_volume_factor = filter_contract.get("min_volume_factor")
+    if min_volume_factor is not None and _safe_float(diagnostics.get("volume_factor")) < _safe_float(min_volume_factor):
+        return False
+
+    min_reclaim_body_atr = filter_contract.get("min_reclaim_body_atr")
+    if min_reclaim_body_atr is not None and _safe_float(diagnostics.get("reclaim_body_atr")) < _safe_float(min_reclaim_body_atr):
+        return False
+
+    min_risk_atr = filter_contract.get("min_risk_atr")
+    if min_risk_atr is not None and _safe_float(diagnostics.get("risk_atr")) < _safe_float(min_risk_atr):
+        return False
+
+    max_risk_atr = filter_contract.get("max_risk_atr")
+    if max_risk_atr is not None and _safe_float(diagnostics.get("risk_atr")) > _safe_float(max_risk_atr):
+        return False
+
+    max_entry_distance_atr = filter_contract.get("max_entry_distance_atr")
+    if max_entry_distance_atr is not None and _safe_float(diagnostics.get("entry_distance_atr")) > _safe_float(max_entry_distance_atr):
+        return False
+
+    return True
+
+
+def _filter_trades_by_signal_contracts(
+    *,
+    trades: list[Any],
+    canonical_symbol: str,
+    signal_contracts: list[dict[str, Any]],
+) -> list[Any]:
+    if not signal_contracts:
+        return list(trades)
+    selected = []
+    for trade in trades:
+        if any(_trade_matches_signal_contract(trade=trade, canonical_symbol=canonical_symbol, contract=contract) for contract in signal_contracts):
+            selected.append(trade)
+    return selected
+
+
 def _stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     closed = len(rows)
     if closed <= 0:
@@ -551,6 +605,9 @@ def _run_symbol(
     proxy_symbol: str,
     canonical_symbol: str,
     lookback_days: int,
+    exit_policy: Any | None = None,
+    entry_timing_model: str = "confirmed_5m_retest",
+    signal_contracts: list[dict[str, Any]] | None = None,
     include_trades: bool = False,
 ) -> dict[str, Any]:
     end_ts = datetime.now(UTC).replace(second=0, microsecond=0)
@@ -578,14 +635,31 @@ def _run_symbol(
         candles_1m=candles_1m,
         candles_5m=candles_5m,
         profile_name=session_impulse_retest_profile_for_symbol(canonical_symbol),
+        exit_policy=exit_policy,
     )
-    trades = engine.backtest()
+    normalized_entry_timing = str(entry_timing_model or "confirmed_5m_retest").strip().lower()
+    if normalized_entry_timing in {"intrabar", "intrabar_1m", "intrabar_1m_confirm_next_open"}:
+        normalized_entry_timing = "intrabar_1m_confirm_next_open"
+        trades = engine.intrabar_backtest()
+    else:
+        normalized_entry_timing = "confirmed_5m_retest"
+        trades = engine.backtest()
+    raw_trade_count = len(trades)
+    trades = _filter_trades_by_signal_contracts(
+        trades=trades,
+        canonical_symbol=canonical_symbol,
+        signal_contracts=list(signal_contracts or []),
+    )
     summary = summarize_micro_trades(trades)
     summary["decision"] = decision_for_micro_summary(summary)
     payload = {
         "proxy_symbol": proxy_symbol,
         "canonical_symbol": canonical_symbol,
         "profile_name": session_impulse_retest_profile_for_symbol(canonical_symbol),
+        "entry_timing_model": normalized_entry_timing,
+        "raw_trade_count_before_signal_contract": raw_trade_count,
+        "signal_contracts": list(signal_contracts or []),
+        "exit_policy": asdict(engine.exit_policy),
         "window": {
             "requested_start_ts": start_ts.isoformat(),
             "requested_end_ts": end_ts.isoformat(),

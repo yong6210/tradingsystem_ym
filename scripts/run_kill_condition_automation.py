@@ -14,6 +14,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
+from app.services.market_data import configured_usdt_universe_name
 from app.services.strategy_engine import StrategyEngine
 from scripts.operation_report_io import atomic_write_text
 
@@ -21,7 +22,7 @@ from scripts.operation_report_io import atomic_write_text
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run kill-condition automation review or explicit-arm live apply.")
     parser.add_argument("--symbol", default="BTCUSDT")
-    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
+    parser.add_argument("--universe", default=configured_usdt_universe_name())
     parser.add_argument("--family", default=None)
     parser.add_argument("--session-name", default=None)
     parser.add_argument("--days", type=int, default=30)

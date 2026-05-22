@@ -16,6 +16,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import get_settings
+from app.services.market_data import configured_usdt_universe_name
 from app.services.notification_dispatcher import NotificationDispatcher
 from scripts.operation_report_io import atomic_write_text
 
@@ -47,6 +48,10 @@ def _env_default(name: str, fallback: str) -> str:
     if value is None:
         return fallback
     return value
+
+
+def _default_universe() -> str:
+    return configured_usdt_universe_name(get_settings())
 
 
 def _env_flag(name: str) -> bool:
@@ -96,11 +101,18 @@ def parse_args() -> argparse.Namespace:
         description="Generate or read the latest operator session brief and send a concise handoff message when state changes."
     )
     parser.add_argument("--symbol", default=_env_default("OPERATOR_BRIEF_SYMBOL", "BTCUSDT"))
-    parser.add_argument("--universe", default=_env_default("OPERATOR_BRIEF_UNIVERSE", "usdt_reliable_balanced_31"))
+    parser.add_argument("--universe", default=_env_default("OPERATOR_BRIEF_UNIVERSE", _default_universe()))
     parser.add_argument("--days", type=int, default=int(_env_default("OPERATOR_BRIEF_DAYS", "7")))
     parser.add_argument("--portfolio-limit", type=int, default=int(_env_default("OPERATOR_BRIEF_PORTFOLIO_LIMIT", "5")))
     parser.add_argument("--intent-limit", type=int, default=int(_env_default("OPERATOR_BRIEF_INTENT_LIMIT", "5")))
     parser.add_argument("--reconcile-limit", type=int, default=int(_env_default("OPERATOR_BRIEF_RECONCILE_LIMIT", "5")))
+    parser.add_argument(
+        "--snapshot-api-base-url",
+        default=_env_default(
+            "OPERATOR_BRIEF_SNAPSHOT_API_BASE_URL",
+            _env_default("OPERATOR_SURFACE_API_BASE_URL", ""),
+        ),
+    )
     parser.add_argument(
         "--state-file",
         default=_env_default("OPERATOR_BRIEF_STATE_FILE", ""),
@@ -168,6 +180,9 @@ def _run_brief(args: argparse.Namespace) -> dict[str, Any]:
         "--reconcile-limit",
         str(args.reconcile_limit),
     ]
+    snapshot_api_base_url = str(getattr(args, "snapshot_api_base_url", "") or "").strip()
+    if snapshot_api_base_url:
+        command.extend(["--snapshot-api-base-url", snapshot_api_base_url])
     try:
         completed = subprocess.run(
             command,
@@ -314,6 +329,8 @@ def _alert_state(brief: dict[str, Any]) -> dict[str, Any]:
         "brief_mode": "",
         "brief_status": str(brief.get("brief_status") or ""),
         "headline": str(brief.get("headline") or ""),
+        "surface_source": str(snapshot.get("surface_source") or ""),
+        "api_base_url": str(snapshot.get("api_base_url") or ""),
         "deployment_alignment": str(snapshot.get("deployment_alignment") or ""),
         "playbook_alignment": str(snapshot.get("playbook_alignment") or ""),
         "top_operator_action": str(dashboard.get("top_operator_action") or ""),

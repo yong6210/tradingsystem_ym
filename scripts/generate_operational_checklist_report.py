@@ -11,13 +11,14 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.db.session import SessionLocal, init_db
+from app.services.market_data import configured_usdt_universe_name
 from app.services.strategy_engine import StrategyEngine
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate operational checklist report")
     parser.add_argument("--symbol", required=True)
-    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
+    parser.add_argument("--universe", default=configured_usdt_universe_name())
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--alert-test-lookback-hours", type=int, default=24)

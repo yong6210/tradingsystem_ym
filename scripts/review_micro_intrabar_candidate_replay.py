@@ -78,6 +78,10 @@ def _infer_intrabar_report_path(contract: dict[str, Any]) -> Path:
     subset_payload = _load_json(subset_path)
     source_report = str(subset_payload.get("source_report") or "").strip()
     if not source_report:
+        sources = list(dict(subset_payload.get("source") or {}).get("sources") or [])
+        if sources:
+            source_report = str(dict(sources[0]).get("path") or "").strip()
+    if not source_report:
         raise ValueError(f"subset report has no source_report: {subset_path}")
     return _resolve_path(source_report)
 

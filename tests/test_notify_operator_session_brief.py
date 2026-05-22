@@ -18,6 +18,8 @@ def _fake_brief() -> dict:
         "next_steps": ["step-a"],
         "snapshot": {
             "report_path": "reports/operations/operator_surface_divergence/snapshot.md",
+            "surface_source": "api",
+            "api_base_url": "http://127.0.0.1:8000",
             "deployment_alignment": "DIVERGED",
             "playbook_alignment": "DIVERGED",
             "approval_strip": {
@@ -208,6 +210,8 @@ def test_main_blocks_live_send_without_allow_flag(monkeypatch, tmp_path: Path, c
     assert "- accepted_candidate_focus: symbol=ETHUSDC | family=sweep_reversal | edge=watch_edge | split=early_limit/passive_limit | status=CONTEXT_REVIEW_SETUP" in payload["message"]
     assert "- blocked_candidate_focus: symbol=BTCUSDC | family=trend_continuation | edge=fragile_edge | split=reaction_confirmed/market | status=BLOCKED_SETUP | reason=portfolio_cap" in payload["message"]
     assert payload["current"]["kernel_verdict"] == "manual_review"
+    assert payload["current"]["surface_source"] == "api"
+    assert payload["current"]["api_base_url"] == "http://127.0.0.1:8000"
     assert payload["current"]["money_leak_r"] == 0.33
     assert payload["current"]["candidate_surface_priority"] == "context_only"
     assert payload["current"]["top_action_followup_command"].endswith(

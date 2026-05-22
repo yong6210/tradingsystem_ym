@@ -248,6 +248,9 @@ def _patch_live_contract(engine: StrategyEngine, *, allowed_symbols: list[str]) 
     engine.settings.auto_trading_live_balance_sync_enabled = False
     engine.settings.auto_trading_live_liquidity_gate_enabled = False
     engine.settings.auto_trading_live_liquidity_gate_min_tranche_target_fraction = 0.0
+    engine.settings.auto_trading_live_stop_mark_price_guard_enabled = False
+    engine.settings.auto_trading_live_protection_verify_after_attach_enabled = False
+    engine.settings.auto_trading_live_take_profit_verify_after_attach_enabled = False
     engine.settings.session_impulse_retest_shadow_only = False
     engine.settings.session_impulse_retest_partial_activation_ratio = 1.0
     engine.execution_coordinator.live_symbol_rules_loader = lambda symbol: {
@@ -867,7 +870,11 @@ def test_session_impulse_retest_live_filled_submit_ingests_immediate_entry_fill(
         fills = db.query(ExecutionFill).filter(ExecutionFill.plan_id == plan.plan_id).all()
         assert len(fills) == 1
         assert fills[0].stage == "ENTRY"
-        assert dict(fills[0].payload or {})["source"] == "binance_submit_response"
+        fill_payload = dict(fills[0].payload or {})
+        assert fill_payload["source"] == "binance_submit_response"
+        assert fills[0].fee > 0.0
+        assert fill_payload["fee_source"] == "estimated_from_config"
+        assert fill_payload["fee_bps"] == 4.0
 
 
 def test_session_impulse_retest_live_rejection_preserves_requested_live_flag() -> None:
@@ -1562,6 +1569,57 @@ def test_session_impulse_retest_auto_route_respects_recent_intent_cooldown() -> 
         assert payload["results"][0]["status"] == "skipped_recent_intent"
 
 
+def test_session_impulse_retest_auto_route_skips_duplicate_thesis_before_creating_intent() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        _patch_live_contract(engine, allowed_symbols=["BTCUSDC"])
+        active_plan = _micro_plan(symbol="BTCUSDC", plan_id="sir_BTCUSDC_active_thesis")
+        fresh_plan = _micro_plan(symbol="BTCUSDC", plan_id="sir_BTCUSDC_duplicate_thesis")
+        db.add_all([active_plan, fresh_plan])
+        db.add(
+            OrderIntent(
+                intent_id="intent_btc_active_thesis",
+                plan_id=active_plan.plan_id,
+                symbol="BTCUSDC",
+                strategy_family="session_impulse_retest",
+                execution_mode=ExecutionMode.MICRO_LIVE.value,
+                approval_state=ApprovalState.APPROVED_AUTO.value,
+                submit_decision=SubmitDecision.SUBMIT.value,
+                decision_reason_code="submit_ready",
+                decision_reason_message="ready",
+                thesis_fingerprint=engine.thesis.build_from_plan(active_plan),
+                dedupe_result={"status": "unique"},
+                session_guidance={},
+                quality_snapshot={"validation_grade": "A"},
+                approval_snapshot={"approval_state": ApprovalState.APPROVED_AUTO.value},
+                payload={"requested_execution_mode": ExecutionMode.MICRO_LIVE.value},
+            )
+        )
+        db.commit()
+
+        engine.create_order_intent = lambda **kwargs: (_ for _ in ()).throw(  # type: ignore[assignment]
+            AssertionError("duplicate thesis should be skipped before creating another intent")
+        )
+        engine.submit_order_intent = lambda **kwargs: (_ for _ in ()).throw(  # type: ignore[assignment]
+            AssertionError("duplicate thesis should not submit")
+        )
+
+        payload = engine._auto_route_session_impulse_retest_plan(
+            symbol="BTCUSDC",
+            plan=fresh_plan,
+            requested_mode=ExecutionMode.MICRO_LIVE,
+            now=datetime.now(timezone.utc),
+        )
+
+        assert payload["reason"] == "duplicate_active_thesis"
+        assert payload["intents_created"] == 0
+        assert payload["submit_calls"] == 0
+        assert payload["results"][0]["status"] == "skipped_duplicate_active_thesis"
+        assert payload["results"][0]["decision_reason_code"] == "duplicate_active_thesis"
+        assert len(engine.intent_repo.list_for_plan(fresh_plan.plan_id)) == 0
+
+
 def test_session_impulse_retest_auto_route_ignores_recent_intent_cooldown_for_different_mode() -> None:
     init_db()
     with SessionLocal() as db:
@@ -1678,7 +1736,7 @@ def test_strategy_engine_maybe_int_rejects_non_finite_values() -> None:
     assert StrategyEngine._maybe_int("3.9") == 3
 
 
-def test_sync_universe_suppresses_auto_route_when_ws_stream_is_active(tmp_path) -> None:
+def test_sync_universe_suppresses_empty_auto_route_when_ws_stream_is_active(tmp_path) -> None:
     init_db()
     with SessionLocal() as db:
         engine = StrategyEngine(db)
@@ -1699,7 +1757,7 @@ def test_sync_universe_suppresses_auto_route_when_ws_stream_is_active(tmp_path) 
         engine.market_data.backfill_symbol_timeframes = lambda **kwargs: {"ok": True}  # type: ignore[method-assign]
         engine.refresh_symbol = lambda symbol: {  # type: ignore[assignment]
             "symbol": symbol,
-            "session_impulse_retest_plan_ids": ["sir_NEARUSDC_S_duplicate_guard"],
+            "session_impulse_retest_plan_ids": [],
         }
         engine.auto_route_session_impulse_retest_plans = (  # type: ignore[assignment]
             lambda **kwargs: (_ for _ in ()).throw(AssertionError("loop worker must not auto-route while ws is active"))
@@ -1720,7 +1778,7 @@ def test_sync_universe_suppresses_auto_route_when_ws_stream_is_active(tmp_path) 
         assert payload["auto_route"]["route_owner"] == "ws_stream"
         assert payload["auto_route"]["suppression_scope"] == "sync_universe_duplicate_route_guard"
         assert payload["auto_route"]["blocking_live_route"] is False
-        assert payload["auto_route"]["plans_considered"] == 1
+        assert payload["auto_route"]["plans_considered"] == 0
         assert payload["auto_route"]["intents_created"] == 0
         assert payload["auto_route"]["submit_calls"] == 0
         audits = engine.session_impulse_retest_runtime_audits_recent(
@@ -1731,10 +1789,67 @@ def test_sync_universe_suppresses_auto_route_when_ws_stream_is_active(tmp_path) 
         )
         assert audits
         assert audits[0]["status"] == "ws_stream_active_route_suppressed"
-        assert audits[0]["payload"]["plans_considered"] == 1
+        assert audits[0]["payload"]["plans_considered"] == 0
         assert audits[0]["payload"]["route_owner"] == "ws_stream"
         assert audits[0]["payload"]["suppression_scope"] == "sync_universe_duplicate_route_guard"
         assert audits[0]["payload"]["blocking_live_route"] is False
+
+
+def test_sync_universe_routes_fresh_sir_plan_even_when_ws_stream_is_active(tmp_path) -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        _patch_live_contract(engine, allowed_symbols=["NEARUSDC"])
+        engine.settings.session_impulse_retest_allowed_symbols = "NEARUSDC"
+        engine.settings.runtime_worker_heartbeat_dir = str(tmp_path)
+        write_worker_heartbeat(
+            "ws",
+            settings=engine.settings,
+            status="ok",
+            details={
+                "phase": "streaming",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "processed_messages": 10,
+            },
+        )
+
+        routed_calls: list[dict[str, object]] = []
+        engine.market_data.backfill_symbol_timeframes = lambda **kwargs: {"ok": True}  # type: ignore[method-assign]
+        engine.refresh_symbol = lambda symbol: {  # type: ignore[assignment]
+            "symbol": symbol,
+            "session_impulse_retest_plan_ids": ["sir_NEARUSDC_S_candidate_fallback"],
+        }
+        engine.auto_route_session_impulse_retest_plans = (  # type: ignore[assignment]
+            lambda **kwargs: routed_calls.append(dict(kwargs))
+            or {
+                "symbol": kwargs["symbol"],
+                "enabled": True,
+                "reason": "submitted",
+                "plans_considered": len(kwargs["plan_ids"]),
+                "intents_created": 1,
+                "submit_calls": 1,
+            }
+        )
+        engine.auto_route_symbol = (  # type: ignore[assignment]
+            lambda **kwargs: (_ for _ in ()).throw(AssertionError("legacy fallback auto_route_symbol should not be used"))
+        )
+
+        payload = engine._sync_universe_symbol_local(
+            symbol="NEARUSDC",
+            limit_1m=120,
+            limit_5m=500,
+            limit_15m=500,
+        )
+
+        assert routed_calls == [
+            {"symbol": "NEARUSDC", "plan_ids": ["sir_NEARUSDC_S_candidate_fallback"]}
+        ]
+        assert payload["auto_route"]["reason"] == "submitted"
+        assert payload["auto_route"]["route_owner"] == "sync_universe_candidate_fallback"
+        assert payload["auto_route"]["suppression_bypassed"] is True
+        assert payload["auto_route"]["suppression_bypass_reason"] == "fresh_session_impulse_retest_plan_ids_present"
+        assert payload["auto_route"]["intents_created"] == 1
+        assert payload["auto_route"]["submit_calls"] == 1
 
 
 def test_session_impulse_retest_direct_plan_route_creates_and_submits_live_intent() -> None:
@@ -1779,6 +1894,57 @@ def test_session_impulse_retest_direct_plan_route_creates_and_submits_live_inten
         assert payload["reason"] == "submitted"
         assert created_calls == [(plan.plan_id, ExecutionMode.MICRO_LIVE)]
         assert submitted_calls == [("intent_direct_route_btc", True)]
+
+
+def test_session_impulse_retest_auto_route_rejects_plan_before_entry_time() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        _patch_live_contract(engine, allowed_symbols=["BTCUSDC"])
+        plan = _micro_plan(symbol="BTCUSDC", plan_id="sir_BTCUSDC_not_ready_route_test")
+        plan.valid_from = datetime.now(timezone.utc) + timedelta(minutes=1)
+        plan.valid_until = plan.valid_from + timedelta(minutes=12)
+        db.add(plan)
+        db.commit()
+
+        engine.create_order_intent = lambda **kwargs: (_ for _ in ()).throw(AssertionError("not-ready SIR plan must not create intent"))  # type: ignore[assignment]
+
+        payload = engine.auto_route_session_impulse_retest_plans(
+            symbol="BTCUSDC",
+            plan_ids=[plan.plan_id],
+        )
+
+        assert payload["reason"] == "no_matching_live_route_plan_ids"
+        assert payload["plans_considered"] == 0
+        assert payload["rejected_plan_counts"] == {"session_impulse_retest_entry_not_ready": 1}
+        assert payload["intents_created"] == 0
+        assert payload["submit_calls"] == 0
+
+
+def test_session_impulse_retest_auto_route_rejects_plan_after_entry_window() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        _patch_live_contract(engine, allowed_symbols=["BTCUSDC"])
+        engine.settings.session_impulse_retest_live_entry_route_window_seconds = 60
+        plan = _micro_plan(symbol="BTCUSDC", plan_id="sir_BTCUSDC_late_route_test")
+        plan.valid_from = datetime.now(timezone.utc) - timedelta(minutes=3)
+        plan.valid_until = datetime.now(timezone.utc) + timedelta(minutes=9)
+        db.add(plan)
+        db.commit()
+
+        engine.create_order_intent = lambda **kwargs: (_ for _ in ()).throw(AssertionError("late SIR plan must not create intent"))  # type: ignore[assignment]
+
+        payload = engine.auto_route_session_impulse_retest_plans(
+            symbol="BTCUSDC",
+            plan_ids=[plan.plan_id],
+        )
+
+        assert payload["reason"] == "no_matching_live_route_plan_ids"
+        assert payload["plans_considered"] == 0
+        assert payload["rejected_plan_counts"] == {"session_impulse_retest_entry_window_elapsed": 1}
+        assert payload["intents_created"] == 0
+        assert payload["submit_calls"] == 0
 
 
 def test_session_impulse_retest_empty_direct_route_does_not_scan_legacy_plans() -> None:
@@ -2085,6 +2251,44 @@ def test_session_impulse_retest_miss_detector_flags_missing_intent(tmp_path) -> 
         assert payload["miss_count"] == 1
         assert payload["misses"][0]["symbol"] == "XRPUSDC"
         assert payload["misses"][0]["miss_reason"] == "missing_intent"
+
+
+def test_session_impulse_retest_miss_detector_filters_disallowed_live_direction(tmp_path) -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        engine.settings.runtime_worker_heartbeat_dir = str(tmp_path)
+        engine.settings.session_impulse_retest_enabled = True
+        engine.settings.session_impulse_retest_allowed_symbols = "XRPUSDC"
+        engine.settings.auto_trading_allowed_symbols = "XRPUSDC"
+        engine.settings.auto_trading_micro_live_allowed_symbols = "XRPUSDC"
+        engine.settings.auto_trading_micro_live_direction_contract = "XRPUSDC:LONG"
+
+        replay_trade = SimpleNamespace(
+            entry_ts=datetime.now(timezone.utc) - timedelta(hours=1),
+            direction="short",
+            r_value=1.25,
+            exit_reason="target",
+        )
+        engine._session_impulse_retest_recent_replay_trades = lambda **kwargs: [replay_trade]  # type: ignore[assignment]
+
+        def fail_if_observed(**_kwargs) -> dict:
+            raise AssertionError("disallowed directions must not be counted as live expected trades")
+
+        engine._session_impulse_retest_runtime_plan_observation = fail_if_observed  # type: ignore[assignment]
+
+        payload = engine.detect_session_impulse_retest_recent_misses(
+            lookback_hours=24,
+            symbols=["XRPUSDC"],
+            write_report=False,
+        )
+
+        assert payload["expected_trade_count"] == 0
+        assert payload["direction_filtered_count"] == 1
+        assert payload["miss_count"] == 0
+        assert payload["by_symbol"]["XRPUSDC"]["expected_trades"] == 0
+        assert payload["by_symbol"]["XRPUSDC"]["direction_filtered"] == 1
+        assert payload["direction_filtered_samples"][0]["allowed_directions"] == ["LONG"]
 
 
 def test_session_impulse_retest_miss_detector_flags_unobserved_runtime_plan(tmp_path) -> None:

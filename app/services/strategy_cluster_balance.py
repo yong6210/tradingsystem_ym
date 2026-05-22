@@ -120,6 +120,31 @@ class StrategyClusterBalanceService:
             for family, bucket in sorted(counts.items())
         ]
 
+    def _current_live_contract_family_mix(self, portfolio_budget: dict[str, Any]) -> list[dict[str, Any]]:
+        live_families: list[str] = []
+        live_route_context = dict(portfolio_budget.get("live_route_context") or {})
+        for source in (
+            portfolio_budget.get("active_strategy_families"),
+            portfolio_budget.get("live_strategy_families"),
+            live_route_context.get("active_strategy_families"),
+        ):
+            for family in list(source or []):
+                normalized = str(family or "").strip().lower()
+                if normalized and normalized not in live_families:
+                    live_families.append(normalized)
+        return [
+            {
+                "raw_family": family,
+                "cluster": _CURRENT_LIVE_CONTRACT_CLUSTER,
+                "total_candidates": 0,
+                "accepted_candidates": 0,
+                "blocked_candidates": 0,
+                "alpha_research_candidates": 0,
+            }
+            for family in live_families
+            if self._cluster(family) == _CURRENT_LIVE_CONTRACT_CLUSTER
+        ]
+
     @staticmethod
     def _cluster_bucket(family_mix: list[dict[str, Any]], cluster: str) -> dict[str, Any]:
         for row in family_mix:
@@ -218,6 +243,8 @@ class StrategyClusterBalanceService:
             rows=row_list,
             portfolio_budget=portfolio_budget_payload,
         )
+        if not family_mix:
+            family_mix = self._current_live_contract_family_mix(portfolio_budget_payload)
         current_live_bucket = self._cluster_bucket(family_mix, _CURRENT_LIVE_CONTRACT_CLUSTER)
         legacy_ab_mix = [
             dict(row)

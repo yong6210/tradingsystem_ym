@@ -20,6 +20,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.db.models import OrderSubmission
 from app.db.session import SessionLocal, init_db
+from app.services.market_data import configured_usdt_universe_name
 from scripts.operation_report_io import atomic_write_text
 
 _REQUEST_RETRY_ATTEMPTS = 3
@@ -31,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Review whether contract pruning should be reopened after a live cycle.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--symbol", default="BTCUSDT")
-    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
+    parser.add_argument("--universe", default=configured_usdt_universe_name())
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--report-dir", default="reports/operations/pruning_reviews")
     parser.add_argument("--no-write-report", action="store_true")

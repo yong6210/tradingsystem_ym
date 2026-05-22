@@ -20,9 +20,9 @@
     <string>--base-url</string>
     <string>http://127.0.0.1:8000</string>
     <string>--universe</string>
-    <string>usdc_perp_top30</string>
+    <string>micro_live_usdt_11</string>
     <string>--limit</string>
-    <string>20</string>
+    <string>11</string>
     <string>--max-per-status</string>
     <string>3</string>
     <string>--channel</string>

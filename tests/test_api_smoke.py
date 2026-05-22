@@ -208,6 +208,19 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "capture_context" in execution_dashboard_payload["signal_funnel"]["operator_action_priority"]
     assert "experiment_context" in execution_dashboard_payload["signal_funnel"]["operator_action_priority"]
     assert "outcome_control_trace" in execution_dashboard_payload["signal_funnel"]
+
+    readiness = client.get("/execution/candidates/promotion-readiness?hours=24&limit=5")
+    assert readiness.status_code == 200
+    readiness_payload = readiness.json()
+    assert readiness_payload["schema_version"] == "live_candidate_promotion_readiness_v1"
+    assert "readiness" in readiness_payload
+    assert "readiness_scope" in readiness_payload
+
+    stage_board = client.get("/ops/stage-board")
+    assert stage_board.status_code == 200
+    stage_board_payload = stage_board.json()
+    assert "available" in stage_board_payload
+    assert "status" in stage_board_payload or stage_board_payload["available"] is True
     assert "edge_experiment_review" in execution_dashboard_payload["signal_funnel"]
     assert "edge_evolution_rule" in execution_dashboard_payload["signal_funnel"]
     assert "review_followup_ledger" in execution_dashboard_payload["signal_funnel"]
@@ -288,9 +301,9 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "Expanded Operating Context" in execution_operator_ui.text
     assert "kernel verdict가 monitor라서 expanded operating context를 기본 펼침 상태로 둡니다." in execution_operator_ui.text
     assert "kernel verdict가 hold/manual_review/watch라서 expanded operating context는 approve/align/act 확인 전까지 기본 접힘 상태로 둡니다." in execution_operator_ui.text
-    assert "A/B Strategy Posture" in execution_operator_ui.text
-    assert "A remains anchor인지, B continuation이 research-only인지 guarded activation인지, 현재 mix가 여전히 A 집중인지까지 한 번에 읽습니다." in execution_operator_ui.text
-    assert "현재 A/B mix" in execution_operator_ui.text
+    assert "Strategy Posture" in execution_operator_ui.text
+    assert "현재 라이브 계약이 SIR인지, 레거시 A/B 비교가 적용되는지, 후보군 균형과 보호 상태를 같이 읽습니다." in execution_operator_ui.text
+    assert "현재 strategy mix" in execution_operator_ui.text
     assert "Promotion Operating Stack" in execution_operator_ui.text
     assert "승격 review, remediation, clearance, reopen, semi-auto execution, history, research followthrough를 한 번에 읽습니다." in execution_operator_ui.text
     assert "Live Candidate Review" in execution_operator_ui.text
@@ -543,6 +556,10 @@ def test_health_and_bootstrap_flow(monkeypatch) -> None:
     assert "alpha_research_candidates" in portfolio_payload
     assert "multi_strategy_ab_summary" in portfolio_payload
     assert "strategy_cluster_balance_summary" in portfolio_payload
+
+    default_portfolio_budget = client.get("/portfolio/budget?limit=1&write_report=false&fast=true")
+    assert default_portfolio_budget.status_code == 200
+    assert default_portfolio_budget.json()["universe"].startswith("micro_live_usdt_")
     assert "capital_allocator_summary" in portfolio_payload
     focus_symbol = (portfolio_payload.get("edge_experiment_review") or {}).get("focus_symbol")
     if focus_symbol:

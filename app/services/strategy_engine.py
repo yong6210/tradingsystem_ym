@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 import json
 from math import isfinite
@@ -29,6 +29,7 @@ from app.core.enums import ExecutionFillStage, ExecutionMode, ExitReason, OrderL
 from app.db.models import (
     AlertSubscription,
     ExecutionFill,
+    OrderSubmission,
     Plan,
     Zone,
     ZoneOutcome,
@@ -107,7 +108,7 @@ from app.services.event_bus import EventBus
 from app.services.feature_calibration import FeatureCalibrationService
 from app.services.feature_importance import FeatureImportanceService
 from app.services.learning import LearningService
-from app.services.market_data import MarketDataService
+from app.services.market_data import MarketDataService, configured_usdt_universe_name
 from app.services.metrics import summarize_outcomes
 from app.services.micro_main_strategy_research import (
     SessionImpulseRetestExitPolicy,
@@ -448,6 +449,7 @@ class StrategyEngine:
             live_symbol_rules_loader=self.load_binance_symbol_trading_rules,
             live_liquidity_loader=self.load_binance_live_liquidity_snapshot,
             live_balance_loader=self.load_binance_futures_balances,
+            live_mark_price_loader=self.load_binance_mark_price_snapshot,
             live_account_protection_loader=self.load_binance_account_protection_snapshot,
             settings=self.settings,
         )
@@ -809,9 +811,12 @@ class StrategyEngine:
         runtime_started_at = self._session_impulse_retest_runtime_started_at()
         effective_window_start = max(cutoff, runtime_started_at) if runtime_started_at is not None else cutoff
         target_symbols = self._session_impulse_retest_miss_detector_symbols(symbols=symbols)
+        direction_contract = self._micro_live_direction_contract()
         misses: list[dict[str, Any]] = []
         by_symbol: dict[str, dict[str, Any]] = {}
         expected_trade_count = 0
+        direction_filtered_count = 0
+        direction_filtered_samples: list[dict[str, Any]] = []
         runtime_observed_count = 0
         before_current_runtime_start_count = 0
         observed_before_current_runtime_start_count = 0
@@ -867,6 +872,18 @@ class StrategyEngine:
                 "submissions": submission_delta,
             }
 
+        def direction_allowed(*, symbol: str, direction: str) -> bool:
+            normalized_symbol = str(symbol or "").strip().upper()
+            normalized_direction = str(direction or "").strip().upper()
+            allowed = {
+                str(item or "").strip().upper()
+                for item in list(direction_contract.get(normalized_symbol) or [])
+                if str(item or "").strip()
+            }
+            if not allowed:
+                return True
+            return bool(normalized_direction and normalized_direction in allowed)
+
         for symbol in target_symbols:
             replay_trades = self._session_impulse_retest_recent_replay_trades(
                 symbol=symbol,
@@ -874,7 +891,8 @@ class StrategyEngine:
                 end_ts=now,
             )
             symbol_summary = {
-                "expected_trades": len(replay_trades),
+                "expected_trades": 0,
+                "direction_filtered": 0,
                 "runtime_observed_trades": 0,
                 "misses": 0,
                 "before_current_runtime_start": 0,
@@ -884,10 +902,26 @@ class StrategyEngine:
                 "observed_non_submit_intents": 0,
                 "observed_submissions": 0,
             }
-            expected_trade_count += len(replay_trades)
             for trade in replay_trades:
                 entry_ts = self._to_utc(trade.entry_ts)
                 direction = str(getattr(trade, "direction", "") or "").lower()
+                if not direction_allowed(symbol=symbol, direction=direction):
+                    direction_filtered_count += 1
+                    symbol_summary["direction_filtered"] += 1
+                    if len(direction_filtered_samples) < 10:
+                        direction_filtered_samples.append(
+                            {
+                                "symbol": symbol,
+                                "direction": direction,
+                                "entry_ts": entry_ts.isoformat(),
+                                "allowed_directions": list(direction_contract.get(str(symbol).upper()) or []),
+                                "trade_r_value": round(float(getattr(trade, "r_value", 0.0) or 0.0), 4),
+                                "trade_exit_reason": str(getattr(trade, "exit_reason", "") or ""),
+                            }
+                        )
+                    continue
+                expected_trade_count += 1
+                symbol_summary["expected_trades"] += 1
                 if runtime_started_at is not None and entry_ts < runtime_started_at:
                     before_current_runtime_start_count += 1
                     symbol_summary["before_current_runtime_start"] += 1
@@ -1011,6 +1045,9 @@ class StrategyEngine:
             "runtime_started_at": runtime_started_at.isoformat() if runtime_started_at is not None else None,
             "window_end": now.isoformat(),
             "symbols": target_symbols,
+            "direction_contract": direction_contract,
+            "direction_filtered_count": direction_filtered_count,
+            "direction_filtered_samples": direction_filtered_samples,
             "expected_trade_count": expected_trade_count,
             "runtime_observed_count": runtime_observed_count,
             "before_current_runtime_start_count": before_current_runtime_start_count,
@@ -1319,9 +1356,18 @@ class StrategyEngine:
         present_plan_ids = {str(getattr(row, "plan_id", "") or "") for row in filtered_rows}
         get_plan = getattr(self.plan_repo, "get", None)
         if callable(get_plan):
+            active_exposure_states = {
+                PlanState.PLANNED.value,
+                PlanState.ARMED.value,
+                PlanState.TRIGGERED.value,
+                PlanState.ENTERED.value,
+                PlanState.PARTIAL_EXIT.value,
+            }
             for plan_id in sorted(recent_live_submission_plan_ids - present_plan_ids):
                 row = get_plan(plan_id)
                 if row is not None and _live_symbol_allowed(getattr(row, "symbol", "")):
+                    if str(getattr(row, "state", "") or "") not in active_exposure_states:
+                        continue
                     filtered_rows.append(row)
         return filtered_rows
 
@@ -2115,6 +2161,53 @@ class StrategyEngine:
             if item.strip()
         }
 
+    def _session_impulse_retest_entry_timing_model(self) -> str:
+        raw = str(getattr(self.settings, "session_impulse_retest_entry_timing_model", "") or "").strip().lower()
+        if raw in {"intrabar", "intrabar_1m", "intrabar_1m_confirm_next_open"}:
+            return "intrabar_1m_confirm_next_open"
+        return "confirmed_5m_retest"
+
+    def _session_impulse_retest_runtime_exit_policy(self) -> SessionImpulseRetestExitPolicy:
+        policy = self._session_impulse_retest_exit_policy()
+        if self._session_impulse_retest_entry_timing_model() == "intrabar_1m_confirm_next_open":
+            return replace(policy, entry_confirmation_delay_minutes=0)
+        return policy
+
+    def _session_impulse_retest_contract_rejection(self, *, symbol: str, signal: Any) -> str | None:
+        normalized_symbol = str(symbol or "").upper().strip()
+        directions = {str(item or "").upper() for item in self._micro_live_direction_contract().get(normalized_symbol, [])}
+        signal_direction = str(getattr(signal, "direction", "") or "").upper()
+        if directions and signal_direction and signal_direction not in directions:
+            return f"direction_contract_reject_{signal_direction.lower()}"
+
+        diagnostics = dict(getattr(signal, "diagnostics", None) or {})
+        if str(diagnostics.get("entry_timing_model") or "") != "intrabar_1m_confirm_next_open":
+            return None
+
+        raw_hours = (
+            getattr(self.settings, "session_impulse_retest_intrabar_long_setup_hours_utc", "")
+            if signal_direction == "LONG"
+            else getattr(self.settings, "session_impulse_retest_intrabar_short_setup_hours_utc", "")
+        )
+        allowed_hours = {
+            self._maybe_int(item)
+            for item in str(raw_hours or "").replace("|", ",").split(",")
+            if str(item or "").strip()
+        }
+        allowed_hours.discard(None)
+        setup_hour = self._maybe_int(diagnostics.get("setup_hour_utc"))
+        if allowed_hours and setup_hour not in allowed_hours:
+            return "intrabar_setup_hour_contract_reject"
+
+        min_body = (
+            self._maybe_float(getattr(self.settings, "session_impulse_retest_intrabar_long_min_reclaim_body_atr", 0.0))
+            if signal_direction == "LONG"
+            else self._maybe_float(getattr(self.settings, "session_impulse_retest_intrabar_short_min_reclaim_body_atr", 0.0))
+        ) or 0.0
+        if float(min_body) > 0.0 and float(diagnostics.get("reclaim_body_atr", 0.0) or 0.0) < float(min_body):
+            return "intrabar_reclaim_body_contract_reject"
+        return None
+
     def _session_impulse_retest_symbol_tracked(self, symbol: str | None) -> bool:
         normalized_symbol = str(symbol or "").upper().strip()
         if not normalized_symbol:
@@ -2130,7 +2223,7 @@ class StrategyEngine:
             default=True,
         )
         target_rr = max(
-            self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_target_rr", 2.5)) or 2.5,
+            self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_target_rr", 2.0)) or 2.0,
             0.1,
         )
         return SessionImpulseRetestExitPolicy(
@@ -2138,11 +2231,11 @@ class StrategyEngine:
                 getattr(
                     self.settings,
                     "session_impulse_retest_exit_policy_name",
-                    "structure_adaptive_floor_min_0_003_live_split",
+                    "legacy_full_2r",
                 )
-                or "structure_adaptive_floor_min_0_003_live_split"
+                or "legacy_full_2r"
             ),
-            stop_mode=str(getattr(self.settings, "session_impulse_retest_exit_stop_mode", "floor") or "floor").strip().lower(),
+            stop_mode=str(getattr(self.settings, "session_impulse_retest_exit_stop_mode", "legacy") or "legacy").strip().lower(),
             swing_lookback_bars=max(
                 self._maybe_int(getattr(self.settings, "session_impulse_retest_exit_structure_stop_swing_bars", 6))
                 or 6,
@@ -2154,17 +2247,24 @@ class StrategyEngine:
                 0.0,
             ),
             min_stop_pct=max(
-                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_min_stop_pct", 0.003)) or 0.0,
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_min_stop_pct", 0.0)) or 0.0,
                 0.0,
             ),
             min_risk_atr=max(
-                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_min_risk_atr", 0.35)) or 0.0,
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_min_risk_atr", 0.0)) or 0.0,
                 0.0,
             ),
             target_rr=target_rr,
             max_hold_minutes=max(
                 self._maybe_int(getattr(self.settings, "session_impulse_retest_exit_max_hold_minutes", 40)) or 40,
                 1,
+            ),
+            entry_confirmation_delay_minutes=max(
+                self._maybe_int(
+                    getattr(self.settings, "session_impulse_retest_exit_entry_confirmation_delay_minutes", 5)
+                )
+                or 0,
+                0,
             ),
             time_guard_10m_min_mfe_r=0.20 if time_guard_enabled else None,
             time_guard_20m_min_mfe_r=0.35 if time_guard_enabled else None,
@@ -2173,17 +2273,17 @@ class StrategyEngine:
                 0.0,
             ),
             tp1_fraction=max(
-                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_tp1_fraction", 0.35)) or 0.0,
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_tp1_fraction", 0.0)) or 0.0,
                 0.0,
             ),
             tp2_rr=target_rr,
             tp2_fraction=max(
-                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_tp2_fraction", 0.65)) or 0.0,
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_tp2_fraction", 0.0)) or 0.0,
                 0.0,
             ),
             adaptive_targets_enabled=self._safe_bool(
-                getattr(self.settings, "session_impulse_retest_exit_adaptive_targets_enabled", True),
-                default=True,
+                getattr(self.settings, "session_impulse_retest_exit_adaptive_targets_enabled", False),
+                default=False,
             ),
             adaptive_strong_target_rr=target_rr,
             adaptive_normal_target_rr=max(
@@ -2222,8 +2322,8 @@ class StrategyEngine:
                 0.0,
             ),
             structure_targets_enabled=self._safe_bool(
-                getattr(self.settings, "session_impulse_retest_exit_structure_targets_enabled", True),
-                default=True,
+                getattr(self.settings, "session_impulse_retest_exit_structure_targets_enabled", False),
+                default=False,
             ),
             structure_entry_max_distance_atr=max(
                 self._maybe_float(
@@ -2293,6 +2393,108 @@ class StrategyEngine:
                 )
                 or 0.0,
                 0.0,
+            ),
+            important_zone_exit_enabled=self._safe_bool(
+                getattr(self.settings, "session_impulse_retest_exit_important_zone_exit_enabled", False),
+                default=False,
+            ),
+            important_zone_stop_enabled=self._safe_bool(
+                getattr(self.settings, "session_impulse_retest_exit_important_zone_stop_enabled", True),
+                default=True,
+            ),
+            important_zone_target_enabled=self._safe_bool(
+                getattr(self.settings, "session_impulse_retest_exit_important_zone_target_enabled", True),
+                default=True,
+            ),
+            important_zone_stop_buffer_atr=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_important_zone_stop_buffer_atr", 0.08)
+                )
+                or 0.0,
+                0.0,
+            ),
+            important_zone_target_buffer_atr=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_important_zone_target_buffer_atr", 0.05)
+                )
+                or 0.0,
+                0.0,
+            ),
+            important_zone_min_anchor_score=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_important_zone_min_anchor_score", 0.0)
+                )
+                or 0.0,
+                0.0,
+            ),
+            important_zone_min_stop_ratio=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_important_zone_min_stop_ratio", 0.65)
+                )
+                or 0.0,
+                0.0,
+            ),
+            important_zone_max_stop_ratio=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_important_zone_max_stop_ratio", 1.60)
+                )
+                or 0.0,
+                0.0,
+            ),
+            important_zone_tp1_min_rr=max(
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_important_zone_tp1_min_rr", 0.75))
+                or 0.75,
+                0.1,
+            ),
+            important_zone_tp2_min_rr=max(
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_important_zone_tp2_min_rr", 1.50))
+                or 1.50,
+                0.1,
+            ),
+            important_zone_tp_max_rr=max(
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_important_zone_tp_max_rr", 3.20))
+                or 3.20,
+                0.1,
+            ),
+            important_zone_ideal_tp2_rr=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_important_zone_ideal_tp2_rr", 2.00)
+                )
+                or 2.00,
+                0.1,
+            ),
+            important_zone_tp1_fraction=max(
+                self._maybe_float(
+                    getattr(self.settings, "session_impulse_retest_exit_important_zone_tp1_fraction", 0.35)
+                )
+                or 0.0,
+                0.0,
+            ),
+            stop_after_partial_rr=self._maybe_float(
+                getattr(self.settings, "session_impulse_retest_exit_stop_after_partial_rr", None)
+            ),
+            adverse_volume_exit_enabled=self._safe_bool(
+                getattr(self.settings, "session_impulse_retest_exit_adverse_volume_enabled", False),
+                default=False,
+            ),
+            adverse_volume_exit_after_partial_only=self._safe_bool(
+                getattr(self.settings, "session_impulse_retest_exit_adverse_volume_after_partial_only", True),
+                default=True,
+            ),
+            adverse_volume_exit_min_factor=max(
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_adverse_volume_min_factor", 3.0))
+                or 0.0,
+                0.0,
+            ),
+            adverse_volume_exit_min_body_r=max(
+                self._maybe_float(getattr(self.settings, "session_impulse_retest_exit_adverse_volume_min_body_r", 0.35))
+                or 0.0,
+                0.0,
+            ),
+            adverse_volume_exit_lookback_bars=max(
+                self._maybe_int(getattr(self.settings, "session_impulse_retest_exit_adverse_volume_lookback_bars", 20))
+                or 20,
+                1,
             ),
         )
 
@@ -2424,8 +2626,13 @@ class StrategyEngine:
             candles_1m=candles_1m,
             candles_5m=candles_5m,
             profile_name=session_impulse_retest_profile_for_symbol(normalized_symbol),
-            exit_policy=self._session_impulse_retest_exit_policy(),
+            exit_policy=self._session_impulse_retest_runtime_exit_policy(),
         )
+        if self._session_impulse_retest_entry_timing_model() == "intrabar_1m_confirm_next_open":
+            return runtime.latest_intrabar_signal_diagnostics(
+                freshness_minutes=20,
+                live_next_open_proxy=True,
+            )
         return runtime.latest_signal_diagnostics(freshness_minutes=20)
 
     def _session_impulse_retest_runtime_plan(
@@ -2450,10 +2657,20 @@ class StrategyEngine:
             candles_1m=candles_1m,
             candles_5m=candles_5m,
             profile_name=session_impulse_retest_profile_for_symbol(normalized_symbol),
-            exit_policy=self._session_impulse_retest_exit_policy(),
+            exit_policy=self._session_impulse_retest_runtime_exit_policy(),
         )
-        signal = runtime.latest_signal(freshness_minutes=20)
+        entry_timing_model = self._session_impulse_retest_entry_timing_model()
+        if entry_timing_model == "intrabar_1m_confirm_next_open":
+            signal = runtime.latest_intrabar_signal(
+                freshness_minutes=20,
+                live_next_open_proxy=True,
+            )
+        else:
+            signal = runtime.latest_signal(freshness_minutes=20)
         if signal is None:
+            return None
+        contract_rejection = self._session_impulse_retest_contract_rejection(symbol=normalized_symbol, signal=signal)
+        if contract_rejection is not None:
             return None
         signal_diagnostics = dict(signal.diagnostics or {})
         shadow_filter = evaluate_session_impulse_retest_shadow_filters(diagnostics=signal_diagnostics)
@@ -2578,6 +2795,7 @@ class StrategyEngine:
             "strategy_grade": strategy_grade,
             "strategy_family_score": round(setup_score, 2),
             "strategy_family_reason": "session_impulse_retest_runtime_signal",
+            "session_impulse_retest_entry_timing_model": entry_timing_model,
             "strategy_family_confirm_only": True,
             "strategy_mode": self.plan_generator.strategy_mode.current_mode().value,
             "strategy_sizing": strategy_sizing,
@@ -3884,9 +4102,45 @@ class StrategyEngine:
             live=live,
             paper_scenario=paper_scenario,
         )
+        self._cancel_protection_siblings_after_emergency_flatten(row)
         self.db.commit()
         self.db.refresh(row)
         return self._submission_to_dict(row, fill_results=fill_results, idempotent_reuse=idempotent_reuse)
+
+    def _cancel_protection_siblings_after_emergency_flatten(self, row: OrderSubmission) -> dict[str, Any] | None:
+        attachments = _safe_dict(getattr(row, "attachments", None))
+        protection = _safe_dict(attachments.get("live_protection_orders"))
+        if str(protection.get("status") or "").upper() != "EMERGENCY_FLATTENED":
+            return None
+        emergency_flatten = _safe_dict(protection.get("emergency_flatten"))
+        if str(emergency_flatten.get("status") or "").upper() != "FILLED":
+            return None
+
+        plan_id = str(getattr(row, "plan_id", "") or "")
+        symbol = str(getattr(row, "symbol", "") or "")
+        if not plan_id or not symbol:
+            return None
+        current_client_order_id = str(emergency_flatten.get("client_order_id") or "")
+        if not current_client_order_id:
+            result = _safe_dict(emergency_flatten.get("result"))
+            current_client_order_id = str(result.get("client_order_id") or "")
+
+        cancel_result = self._cancel_live_protection_siblings(
+            plan_id=plan_id,
+            symbol=symbol,
+            current_client_order_id=current_client_order_id,
+        )
+        updated_attachments = {
+            **attachments,
+            "live_protection_sibling_cancel_after_emergency_flatten": cancel_result,
+        }
+        row.attachments = updated_attachments
+        row.raw = {
+            **_safe_dict(getattr(row, "raw", None)),
+            "live_protection_sibling_cancel_after_emergency_flatten": cancel_result,
+        }
+        self.db.add(row)
+        return cancel_result
 
     def _auto_route_requested_mode(self) -> ExecutionMode | None:
         if not self._safe_bool(self.settings.auto_trading_enabled):
@@ -3930,6 +4184,31 @@ class StrategyEngine:
             "decision_reason_code": str(getattr(latest_intent, "decision_reason_code", "") or ""),
             "cooldown_seconds": cooldown_seconds,
             "requested_mode": requested_mode.value,
+        }
+
+    def _auto_route_duplicate_active_thesis_precheck(
+        self,
+        *,
+        plan: Plan,
+        requested_mode: ExecutionMode,
+    ) -> dict[str, Any] | None:
+        try:
+            dedupe_result = self.order_intents._dedupe_result(plan)
+        except Exception:
+            return None
+        if str(dedupe_result.get("status") or "") != "duplicate_active_thesis":
+            return None
+        matched_plan_id = str(dedupe_result.get("matched_plan_id") or "").strip()
+        return {
+            "status": "skipped_duplicate_active_thesis",
+            "decision_reason_code": "duplicate_active_thesis",
+            "decision_reason_message": (
+                f"Duplicate thesis detected against active plan {matched_plan_id}."
+                if matched_plan_id
+                else "Duplicate active thesis already exists."
+            ),
+            "requested_mode": requested_mode.value,
+            "dedupe_result": self._session_impulse_retest_runtime_audit_json_safe(dedupe_result),
         }
 
     def _session_impulse_retest_runtime_audit_json_safe(self, value: Any) -> Any:
@@ -4016,6 +4295,8 @@ class StrategyEngine:
         intent_payload = first_result.get("intent") or {}
         if isinstance(intent_payload, dict):
             decision_code = str(intent_payload.get("decision_reason_code") or "").strip() or None
+        if decision_code is None and isinstance(first_result, dict):
+            decision_code = str(first_result.get("decision_reason_code") or "").strip() or None
         audit_error = self._commit_session_impulse_retest_runtime_audit(
             symbol=symbol,
             phase="auto_route",
@@ -4139,6 +4420,21 @@ class StrategyEngine:
             live_auto_route_allowed, live_auto_route_reason = self._session_impulse_retest_live_auto_route_allowed()
             if not live_auto_route_allowed:
                 return live_auto_route_reason
+            valid_from = getattr(plan, "valid_from", None)
+            if not isinstance(valid_from, datetime):
+                return "session_impulse_retest_entry_time_unavailable"
+            entry_ts = self._to_utc(valid_from)
+            if now < entry_ts:
+                return "session_impulse_retest_entry_not_ready"
+            max_entry_lag_seconds = max(
+                0,
+                self._maybe_int(
+                    getattr(self.settings, "session_impulse_retest_live_entry_route_window_seconds", 180)
+                )
+                or 0,
+            )
+            if max_entry_lag_seconds > 0 and now > entry_ts + timedelta(seconds=max_entry_lag_seconds):
+                return "session_impulse_retest_entry_window_elapsed"
 
         allowed_entry_models = self._auto_route_live_entry_models(requested_mode)
         entry_model = str(getattr(plan, "entry_model", "") or "").upper().strip()
@@ -4242,6 +4538,14 @@ class StrategyEngine:
             result_item["recent_intent"] = recent_intent
             return result_item, 0, 0
 
+        duplicate_precheck = self._auto_route_duplicate_active_thesis_precheck(
+            plan=plan,
+            requested_mode=requested_mode,
+        )
+        if duplicate_precheck is not None:
+            result_item.update(duplicate_precheck)
+            return result_item, 0, 0
+
         try:
             intent = self.create_order_intent(
                 plan_id=str(plan.plan_id),
@@ -4299,6 +4603,8 @@ class StrategyEngine:
             return "intent_creation_failed"
         if "intent_blocked" in statuses:
             return "intent_blocked"
+        if statuses and all(status == "skipped_duplicate_active_thesis" for status in statuses):
+            return "duplicate_active_thesis"
         if statuses and all(status == "skipped_recent_intent" for status in statuses):
             return "recent_intent_cooldown_active"
         return "no_live_route_candidate_plan"
@@ -5972,7 +6278,7 @@ class StrategyEngine:
         )
         review_followup_ledger_summary = summarize_split_review_followup_ledger(
             symbol=symbol or "",
-            universe=str(portfolio_summary.get("universe") or "usdt_reliable_balanced_31"),
+            universe=str(portfolio_summary.get("universe") or configured_usdt_universe_name(self.settings)),
         )
         edge_evolution_rule_summary = summarize_edge_evolution_rule(
             build_edge_evolution_rule(
@@ -6668,6 +6974,8 @@ class StrategyEngine:
         if not self._safe_bool(event.get("reduce_only")) and not protection_order:
             return None
         order_type = str(event.get("order_type") or "").upper()
+        if order_purpose == "live_protection:adverse_volume_exit":
+            return "adverse_volume_exit"
         if "TAKE_PROFIT" in order_type or order_purpose.startswith("live_protection:tp"):
             return "target_tp1"
         if "STOP" in order_type or order_purpose == "live_protection:stop_loss":
@@ -6887,6 +7195,28 @@ class StrategyEngine:
             "balances": self.market_data.binance.fetch_futures_balances(),
         }
 
+    def load_binance_mark_price_snapshot(self, *, symbol: str, position_side: str | None = None) -> dict[str, Any]:
+        normalized_symbol = str(symbol or "").upper()
+        expected_side = str(position_side or "").upper()
+        rows = [self.market_data.binance.normalize_position_risk_row(row) for row in self.market_data.binance.fetch_position_risk(normalized_symbol)]
+        matched = None
+        for row in rows:
+            row_side = str(row.get("position_side") or "").upper()
+            if expected_side and row_side == expected_side:
+                matched = row
+                break
+        if matched is None and rows:
+            matched = rows[0]
+        mark_price = self._maybe_float(_safe_dict(matched).get("mark_price")) if matched is not None else None
+        return {
+            "source": "binance_position_risk",
+            "symbol": normalized_symbol,
+            "position_side": expected_side,
+            "mark_price": float(mark_price or 0.0),
+            "position": _safe_dict(matched),
+            "row_count": len(rows),
+        }
+
     def load_binance_account_protection_snapshot(self) -> dict[str, Any]:
         from scripts.run_live_account_protection_audit import evaluate_account_protection
 
@@ -6969,6 +7299,52 @@ class StrategyEngine:
             else:
                 market_slippage_bps = max(0.0, (effective_reference - market_fill_avg_price) / effective_reference * 10_000.0)
 
+        market_slippage_allowed_notional = None
+        max_market_slippage_bps = self._maybe_float(
+            getattr(self.settings, "auto_trading_live_liquidity_gate_max_market_slippage_bps", 0.0)
+        ) or 0.0
+        if is_marketable_now and max_market_slippage_bps > 0.0 and effective_reference > 0.0:
+            target_qty = max(self._maybe_float(quantity) or 0.0, 0.0)
+            cap_qty = 0.0
+            cap_cost = 0.0
+            remaining_cap_qty = target_qty
+            if normalized_side == "BUY":
+                max_avg_price = effective_reference * (1.0 + max_market_slippage_bps / 10_000.0)
+                for level_price, level_qty in opposite_levels:
+                    if remaining_cap_qty <= 0.0:
+                        break
+                    take_qty = min(remaining_cap_qty, level_qty)
+                    if level_price <= max_avg_price:
+                        cap_qty += take_qty
+                        cap_cost += take_qty * level_price
+                        remaining_cap_qty -= take_qty
+                        continue
+                    numerator = max_avg_price * cap_qty - cap_cost
+                    denominator = level_price - max_avg_price
+                    partial_qty = max(0.0, min(take_qty, numerator / denominator if denominator > 0.0 else 0.0))
+                    cap_qty += partial_qty
+                    cap_cost += partial_qty * level_price
+                    break
+            else:
+                min_avg_price = effective_reference * (1.0 - max_market_slippage_bps / 10_000.0)
+                for level_price, level_qty in opposite_levels:
+                    if remaining_cap_qty <= 0.0:
+                        break
+                    take_qty = min(remaining_cap_qty, level_qty)
+                    if level_price >= min_avg_price:
+                        cap_qty += take_qty
+                        cap_cost += take_qty * level_price
+                        remaining_cap_qty -= take_qty
+                        continue
+                    numerator = cap_cost - min_avg_price * cap_qty
+                    denominator = min_avg_price - level_price
+                    partial_qty = max(0.0, min(take_qty, numerator / denominator if denominator > 0.0 else 0.0))
+                    cap_qty += partial_qty
+                    cap_cost += partial_qty * level_price
+                    break
+            if cap_qty > 0.0:
+                market_slippage_allowed_notional = cap_qty * effective_reference
+
         klines_1m = self.market_data.binance.fetch_klines(symbol=normalized_symbol, interval="1m", limit=6)
         quote_volumes = []
         now = datetime.now(timezone.utc)
@@ -7005,6 +7381,10 @@ class StrategyEngine:
             "opposite_depth_notional": round(opposite_depth_notional, 4),
             "market_fill_avg_price": round(float(market_fill_avg_price), 8) if market_fill_avg_price is not None else None,
             "market_slippage_bps": round(float(market_slippage_bps), 4) if market_slippage_bps is not None else None,
+            "market_slippage_allowed_notional": round(float(market_slippage_allowed_notional), 4)
+            if market_slippage_allowed_notional is not None
+            else None,
+            "market_slippage_cap_bps": round(float(max_market_slippage_bps), 4) if max_market_slippage_bps > 0.0 else None,
             "simulated_fill_coverage": round(simulated_qty / max(self._maybe_float(quantity) or 0.0, 1e-12), 6),
             "recent_1m_quote_volume": round(float(recent_1m_quote_volume), 4)
             if recent_1m_quote_volume is not None
@@ -7428,6 +7808,202 @@ class StrategyEngine:
         fills = self.fill_repo.list_for_plans(plan_ids=[str(plan.plan_id)], symbol=str(plan.symbol))
         return any(str(getattr(fill, "stage", "") or "") == ExecutionFillStage.PARTIAL_EXIT.value for fill in fills)
 
+    def _plan_entry_fill_ts(self, plan: Plan) -> datetime:
+        fills = self.fill_repo.list_for_plans(plan_ids=[str(plan.plan_id)], symbol=str(plan.symbol))
+        entry_fills = [
+            fill
+            for fill in fills
+            if str(getattr(fill, "stage", "") or "") == ExecutionFillStage.ENTRY.value
+            and getattr(fill, "fill_ts", None) is not None
+        ]
+        if entry_fills:
+            return min(self._to_utc(fill.fill_ts) for fill in entry_fills)
+        return self._to_utc(getattr(plan, "valid_from", None))
+
+    @staticmethod
+    def _plan_strategy_family(plan: Plan) -> str:
+        validity = _safe_dict(getattr(plan, "validity", None))
+        return str(validity.get("strategy_family") or "").strip().lower()
+
+    def _live_adverse_volume_exit_details(
+        self,
+        *,
+        plan: Plan,
+        position: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if self._plan_strategy_family(plan) != "session_impulse_retest":
+            return None
+        after_partial_only = self._safe_bool(
+            getattr(self.settings, "auto_trading_live_adverse_volume_exit_after_partial_only", True),
+            default=True,
+        )
+        if after_partial_only and not self._plan_has_partial_exit(plan):
+            return None
+
+        lookback = max(
+            self._maybe_int(getattr(self.settings, "auto_trading_live_adverse_volume_exit_lookback_bars", 20)) or 20,
+            1,
+        )
+        candles = [
+            row
+            for row in self.candle_repo.list_recent(
+                symbol=str(plan.symbol or "").upper(),
+                timeframe="1m",
+                limit=lookback + 1,
+            )
+            if self._safe_bool(getattr(row, "is_final", True), default=True)
+        ]
+        if len(candles) < lookback + 1:
+            return None
+        latest = candles[-1]
+        history = candles[-(lookback + 1) : -1]
+        latest_ts = self._to_utc(getattr(latest, "ts", None))
+        entry_ts = self._plan_entry_fill_ts(plan)
+        if latest_ts <= entry_ts:
+            return None
+
+        history_volumes = sorted(float(getattr(row, "v", 0.0) or 0.0) for row in history if float(getattr(row, "v", 0.0) or 0.0) > 0.0)
+        if not history_volumes:
+            return None
+        mid = len(history_volumes) // 2
+        median_volume = (
+            float(history_volumes[mid])
+            if len(history_volumes) % 2
+            else float((history_volumes[mid - 1] + history_volumes[mid]) / 2.0)
+        )
+        if median_volume <= 0.0:
+            return None
+
+        direction = str(plan.direction or "").lower()
+        if direction not in {"long", "short"}:
+            return None
+        entry_price = self._maybe_float(getattr(plan, "entry_price", None)) or 0.0
+        stop_price = self._maybe_float(getattr(plan, "sl", None)) or 0.0
+        risk_abs = abs(entry_price - stop_price)
+        if risk_abs <= 0.0:
+            return None
+
+        open_price = float(getattr(latest, "o", 0.0) or 0.0)
+        close_price = float(getattr(latest, "c", 0.0) or 0.0)
+        body = close_price - open_price
+        adverse_body_r = -body / risk_abs if direction == "long" else body / risk_abs
+        min_body_r = max(
+            self._maybe_float(getattr(self.settings, "auto_trading_live_adverse_volume_exit_min_body_r", 0.35)) or 0.0,
+            0.0,
+        )
+        if adverse_body_r < min_body_r:
+            return None
+
+        volume_factor = float(float(getattr(latest, "v", 0.0) or 0.0) / max(median_volume, 1e-9))
+        min_factor = max(
+            self._maybe_float(getattr(self.settings, "auto_trading_live_adverse_volume_exit_min_factor", 3.0)) or 0.0,
+            0.0,
+        )
+        if volume_factor < min_factor:
+            return None
+
+        close_r = (close_price - entry_price) / risk_abs if direction == "long" else (entry_price - close_price) / risk_abs
+        return {
+            "reason": "adverse_volume_exit",
+            "candle_ts": latest_ts.isoformat(),
+            "entry_ts": entry_ts.isoformat(),
+            "volume_factor": round(float(volume_factor), 6),
+            "min_volume_factor": round(float(min_factor), 6),
+            "adverse_body_r": round(float(adverse_body_r), 6),
+            "min_adverse_body_r": round(float(min_body_r), 6),
+            "close_r": round(float(close_r), 6),
+            "risk_abs": round(float(risk_abs), 8),
+            "open_price": round(float(open_price), 8),
+            "close_price": round(float(close_price), 8),
+            "position_amt": round(abs(self._maybe_float(position.get("position_amt")) or 0.0), 8),
+        }
+
+    def _submit_live_adverse_volume_exit(
+        self,
+        *,
+        plan: Plan,
+        position: dict[str, Any],
+        details: dict[str, Any],
+        now: datetime | None,
+    ) -> dict[str, Any]:
+        plan_symbol = str(plan.symbol or "").upper()
+        position_amt = abs(self._maybe_float(position.get("position_amt")) or 0.0)
+        step, min_quantity, _rules = self.execution_coordinator._live_protection_quantity_rules(plan_symbol)
+        quantity = self.execution_coordinator._round_down_to_step(position_amt, step=step)
+        if quantity < min_quantity:
+            return {
+                "plan_id": plan.plan_id,
+                "symbol": plan_symbol,
+                "status": "SKIPPED",
+                "reason": "adverse_volume_quantity_below_minimum",
+                "quantity": round(float(quantity), 8),
+                "min_quantity": round(float(min_quantity), 8),
+                **details,
+            }
+
+        close_side = self.execution_coordinator._live_close_side(plan)
+        position_side = str(position.get("position_side") or "").upper() or None
+        hedge_mode = self.execution_coordinator._is_hedge_position_side(position_side)
+        client_order_id = f"advvol_{uuid4().hex[:20]}"
+        try:
+            submit_result = self.submit_binance_order(
+                symbol=plan_symbol,
+                side=close_side,
+                order_type="MARKET",
+                quantity=float(quantity),
+                price=None,
+                stop_price=None,
+                time_in_force="",
+                reduce_only=False if hedge_mode else True,
+                position_side=position_side,
+                close_position=False,
+                client_order_id=client_order_id,
+                plan_id=plan.plan_id,
+                live=True,
+                new_order_resp_type="RESULT",
+                order_purpose="live_protection:adverse_volume_exit",
+                parent_client_order_id=str(plan.plan_id),
+            )
+        except Exception as exc:
+            self.db.rollback()
+            return {
+                "plan_id": plan.plan_id,
+                "symbol": plan_symbol,
+                "status": "ERROR",
+                "reason": "adverse_volume_market_exit_submit_failed",
+                "error": f"{exc.__class__.__name__}:{exc}",
+                **details,
+            }
+
+        cancel_result = self._cancel_live_protection_siblings(
+            plan_id=str(plan.plan_id),
+            symbol=plan_symbol,
+            current_client_order_id=client_order_id,
+        )
+        validity = _safe_dict(getattr(plan, "validity", None))
+        validity["live_position_manager"] = {
+            "last_action": "adverse_volume_market_exit_submitted",
+            "at": (self._to_utc(now) if now is not None else datetime.now(timezone.utc)).isoformat(),
+            "quantity": round(float(quantity), 8),
+            **details,
+        }
+        plan.validity = validity
+        self.db.add(plan)
+        self.db.commit()
+        return {
+            "plan_id": plan.plan_id,
+            "symbol": plan_symbol,
+            "status": "ADVERSE_VOLUME_MARKET_EXIT_SUBMITTED",
+            "quantity": float(quantity),
+            "close_side": close_side,
+            "position_side": position_side,
+            "hedge_mode": hedge_mode,
+            "client_order_id": client_order_id,
+            "submit_result": submit_result,
+            "cancel_result": cancel_result,
+            **details,
+        }
+
     def process_live_position_management(
         self,
         *,
@@ -7437,8 +8013,16 @@ class StrategyEngine:
     ) -> dict[str, Any]:
         if not self._safe_bool(getattr(self.settings, "auto_trading_live_position_manager_enabled", True), default=True):
             return {"status": "DISABLED", "reason": "position_manager_disabled", "actions": []}
-        if not self._safe_bool(getattr(self.settings, "auto_trading_live_breakeven_after_partial_enabled", False), default=False):
-            return {"status": "DISABLED", "reason": "breakeven_after_partial_disabled", "actions": []}
+        breakeven_enabled = self._safe_bool(
+            getattr(self.settings, "auto_trading_live_breakeven_after_partial_enabled", False),
+            default=False,
+        )
+        adverse_volume_enabled = self._safe_bool(
+            getattr(self.settings, "auto_trading_live_adverse_volume_exit_enabled", False),
+            default=False,
+        )
+        if not breakeven_enabled and not adverse_volume_enabled:
+            return {"status": "DISABLED", "reason": "position_management_rules_disabled", "actions": []}
         if not self._safe_bool(getattr(self.settings, "binance_trade_live_enabled", False)):
             return {"status": "DISABLED", "reason": "binance_live_orders_disabled", "actions": []}
 
@@ -7483,9 +8067,6 @@ class StrategyEngine:
         adjusted_count = 0
         for plan in plans:
             plan_symbol = str(plan.symbol or "").upper()
-            if not self._plan_has_partial_exit(plan):
-                actions.append({"plan_id": plan.plan_id, "symbol": plan_symbol, "status": "SKIPPED", "reason": "waiting_for_partial_exit"})
-                continue
             matching_positions = [
                 position for position in positions_by_symbol.get(plan_symbol, []) if self._position_matches_plan(plan=plan, position=position)
             ]
@@ -7493,6 +8074,25 @@ class StrategyEngine:
                 actions.append({"plan_id": plan.plan_id, "symbol": plan_symbol, "status": "SKIPPED", "reason": "no_matching_open_position"})
                 continue
             position = matching_positions[0]
+            if adverse_volume_enabled:
+                adverse_details = self._live_adverse_volume_exit_details(plan=plan, position=position)
+                if adverse_details is not None:
+                    adverse_action = self._submit_live_adverse_volume_exit(
+                        plan=plan,
+                        position=position,
+                        details=adverse_details,
+                        now=now,
+                    )
+                    actions.append(adverse_action)
+                    if adverse_action.get("status") == "ADVERSE_VOLUME_MARKET_EXIT_SUBMITTED":
+                        adjusted_count += 1
+                        continue
+            if not breakeven_enabled:
+                actions.append({"plan_id": plan.plan_id, "symbol": plan_symbol, "status": "SKIPPED", "reason": "breakeven_after_partial_disabled"})
+                continue
+            if not self._plan_has_partial_exit(plan):
+                actions.append({"plan_id": plan.plan_id, "symbol": plan_symbol, "status": "SKIPPED", "reason": "waiting_for_partial_exit"})
+                continue
             desired = self._desired_breakeven_stop(plan=plan, position=position)
             if desired is None:
                 actions.append({"plan_id": plan.plan_id, "symbol": plan_symbol, "status": "SKIPPED", "reason": "breakeven_stop_unavailable"})
@@ -7801,6 +8401,16 @@ class StrategyEngine:
         protection_management = None
         plan = self.plan_repo.get(plan_id) if plan_id else None
         stage = self._infer_fill_stage_from_binance_event(event=normalized, plan=plan, current_positions=position_rows)
+        commission_fee = max(self._maybe_float(normalized.get("commission")) or 0.0, 0.0)
+        commission_fee_payload = (
+            {
+                "fee": commission_fee,
+                "fee_source": "binance_user_stream_commission",
+                "commission_asset": str(normalized.get("commission_asset") or ""),
+            }
+            if commission_fee > 0.0
+            else {}
+        )
         duplicate_submit_fill = self._matching_submit_response_fill(
             plan=plan,
             order_id=self._maybe_int(normalized.get("order_id")),
@@ -7810,6 +8420,18 @@ class StrategyEngine:
         )
         if duplicate_submit_fill is not None:
             payload = _safe_dict(getattr(duplicate_submit_fill, "payload", None))
+            fee_updated = False
+            if commission_fee > 0.0 and float(getattr(duplicate_submit_fill, "fee", 0.0) or 0.0) <= 0.0:
+                duplicate_submit_fill.fee = commission_fee
+                duplicate_submit_fill.payload = {
+                    **payload,
+                    **commission_fee_payload,
+                    "fee_update_source": "binance_user_stream_duplicate_fill",
+                    "fee_update_trade_id": normalized.get("trade_id"),
+                }
+                self.db.add(duplicate_submit_fill)
+                payload = _safe_dict(duplicate_submit_fill.payload)
+                fee_updated = True
             self.db.commit()
             fill_ingest = {
                 "accepted": True,
@@ -7823,6 +8445,8 @@ class StrategyEngine:
                 "state_changed": False,
                 "reason": "submit_response_fill_already_recorded",
                 "exit_reason": payload.get("exit_reason"),
+                "fee": float(getattr(duplicate_submit_fill, "fee", 0.0) or 0.0),
+                "fee_updated": fee_updated,
             }
         elif plan is not None and stage is not None:
             fill_payload = {
@@ -7836,6 +8460,7 @@ class StrategyEngine:
                 "reduce_only": self._safe_bool(normalized.get("reduce_only")),
                 "position_side": normalized.get("position_side"),
                 "realized_pnl": normalized.get("realized_pnl"),
+                **commission_fee_payload,
                 "notes": {"binance_event_type": normalized.get("event_type")},
             }
             exit_reason = self._infer_exit_reason_from_binance_event(normalized)
@@ -7849,7 +8474,7 @@ class StrategyEngine:
                 fill_ts=self._to_utc(normalized.get("event_ts")),
                 price=self._maybe_float(normalized.get("last_fill_price")) or self._maybe_float(normalized.get("avg_price")) or 0.0,
                 qty=self._maybe_float(normalized.get("last_fill_qty")) or 0.0,
-                fee=0.0,
+                fee=commission_fee,
                 payload=fill_payload,
             )
             if (
@@ -9936,7 +10561,7 @@ class StrategyEngine:
         refresh = self.refresh_symbol(symbol)
         plan_ids = list(refresh.get("session_impulse_retest_plan_ids") or [])
         normalized_symbol = str(symbol or "").upper()
-        if self._ws_stream_auto_route_active():
+        if self._ws_stream_auto_route_active() and not plan_ids:
             requested_mode = self._auto_route_requested_mode()
             auto_route = {
                 "symbol": normalized_symbol,
@@ -9966,6 +10591,13 @@ class StrategyEngine:
                 symbol=symbol,
                 plan_ids=plan_ids,
             )
+            if plan_ids and self._ws_stream_auto_route_active():
+                auto_route = {
+                    **auto_route,
+                    "route_owner": "sync_universe_candidate_fallback",
+                    "suppression_bypassed": True,
+                    "suppression_bypass_reason": "fresh_session_impulse_retest_plan_ids_present",
+                }
         tp_market_fallback = self.process_live_tp_market_fallbacks(symbol=symbol)
         position_management = self.process_live_position_management(symbol=symbol)
         return {
@@ -10059,7 +10691,11 @@ class StrategyEngine:
                     or validation_report_cache_miss_payload(symbol)
                 )
             else:
-                validation_payload = self.recompute_learning(symbol, persist_runtime_validation_artifacts=False)
+                validation_payload = self.recompute_learning(
+                    symbol,
+                    persist_runtime_validation_artifacts=False,
+                    use_read_only_cache=False,
+                )
         alert_metrics = self.alert_metrics_report(days=days, write_report=False)
         outbox_status = self.outbox_status()
         strategy_metrics = self.metrics(symbol=symbol, version=self.settings.strategy_version)

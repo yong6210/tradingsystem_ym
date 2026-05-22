@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib import parse, request
+from urllib.error import HTTPError, URLError
 
 from fastapi.testclient import TestClient
 
@@ -16,6 +19,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.main import app
+from app.services.market_data import configured_usdt_universe_name
 from scripts.operation_report_io import atomic_write_text
 
 
@@ -42,12 +46,17 @@ def parse_args() -> argparse.Namespace:
         description="Collect a dry-run snapshot of dashboard/validation/checklist divergence plus operator UI section readiness."
     )
     parser.add_argument("--symbol", default="BTCUSDT")
-    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
+    parser.add_argument("--universe", default=configured_usdt_universe_name())
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--portfolio-limit", type=int, default=5)
     parser.add_argument("--intent-limit", type=int, default=5)
     parser.add_argument("--reconcile-limit", type=int, default=5)
     parser.add_argument("--full-dashboard", action="store_true")
+    parser.add_argument(
+        "--api-base-url",
+        default=os.environ.get("OPERATOR_SURFACE_API_BASE_URL", ""),
+        help="Read dashboard/checklist/validation/operator UI from a running API server instead of local TestClient.",
+    )
     parser.add_argument("--report-dir", default="reports/operations/operator_surface_divergence")
     parser.add_argument("--no-write-report", action="store_true")
     return parser.parse_args()
@@ -90,6 +99,44 @@ def _required_json(response: Any, method: str, path: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"{method} {path} returned non-object payload")
     return payload
+
+
+def _api_url(base_url: str, path: str, params: dict[str, Any]) -> str:
+    query = parse.urlencode({key: value for key, value in params.items() if value is not None})
+    return f"{base_url.rstrip('/')}{path}" + (f"?{query}" if query else "")
+
+
+def _api_json(base_url: str, method: str, path: str, params: dict[str, Any]) -> dict[str, Any]:
+    url = _api_url(base_url, path, params)
+    data = b"" if method.upper() == "POST" else None
+    req = request.Request(url, data=data, method=method.upper())
+    try:
+        with request.urlopen(req, timeout=20) as response:
+            body = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"{method} {path} failed with HTTP {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"{method} {path} failed against {base_url}: {exc.reason}") from exc
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{method} {path} returned invalid JSON: {body}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{method} {path} returned non-object payload")
+    return payload
+
+
+def _api_text(base_url: str, path: str, params: dict[str, Any]) -> str:
+    url = _api_url(base_url, path, params)
+    try:
+        with request.urlopen(url, timeout=20) as response:
+            return response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"GET {path} failed with HTTP {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"GET {path} failed against {base_url}: {exc.reason}") from exc
 
 
 def _section_readiness(html: str) -> dict[str, Any]:
@@ -603,55 +650,57 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
 def main() -> int:
     args = parse_args()
     generated_at = _now()
+    api_base_url = str(getattr(args, "api_base_url", "") or "").strip().rstrip("/")
 
-    with TestClient(app) as client:
-        dashboard = _required_json(
-            client.get(
+    dashboard_params = {
+        "symbol": args.symbol,
+        "universe": args.universe,
+        "portfolio_limit": args.portfolio_limit,
+        "intent_limit": args.intent_limit,
+        "reconcile_limit": args.reconcile_limit,
+        "days": args.days,
+        "fast": not bool(args.full_dashboard),
+    }
+    validation_params = {"symbol": args.symbol, "refresh": "false", "cache_fallback": "true"}
+    checklist_params = {
+        "symbol": args.symbol,
+        "universe": args.universe,
+        "limit": args.portfolio_limit,
+        "days": args.days,
+        "write_report": "false",
+    }
+    operator_ui_params = {"symbol": args.symbol, "universe": args.universe, "days": args.days}
+
+    if api_base_url:
+        surface_source = "api"
+        dashboard = _api_json(api_base_url, "GET", "/execution/operator-dashboard", dashboard_params)
+        validation = _api_json(api_base_url, "POST", "/validation/report", validation_params)
+        checklist = _api_json(api_base_url, "POST", "/operations/checklist", checklist_params)
+        operator_ui_html = _api_text(api_base_url, "/execution/operator-ui", operator_ui_params)
+    else:
+        surface_source = "local_testclient"
+        with TestClient(app) as client:
+            dashboard = _required_json(
+                client.get("/execution/operator-dashboard", params=dashboard_params),
+                "GET",
                 "/execution/operator-dashboard",
-                params={
-                    "symbol": args.symbol,
-                    "universe": args.universe,
-                    "portfolio_limit": args.portfolio_limit,
-                    "intent_limit": args.intent_limit,
-                    "reconcile_limit": args.reconcile_limit,
-                    "days": args.days,
-                    "fast": not bool(args.full_dashboard),
-                },
-            ),
-            "GET",
-            "/execution/operator-dashboard",
-        )
-        validation = _required_json(
-            client.post(
-                "/validation/report",
-                params={"symbol": args.symbol, "refresh": "false", "cache_fallback": "true"},
-            ),
-            "POST",
-            "/validation/report",
-        )
-        checklist = _required_json(
-            client.post(
-                "/operations/checklist",
-                params={
-                    "symbol": args.symbol,
-                    "universe": args.universe,
-                    "limit": args.portfolio_limit,
-                    "days": args.days,
-                    "write_report": "false",
-                },
-            ),
-            "POST",
-            "/operations/checklist",
-        )
-        operator_ui_response = client.get(
-            "/execution/operator-ui",
-            params={"symbol": args.symbol, "universe": args.universe, "days": args.days},
-        )
-        if operator_ui_response.status_code != 200:
-            raise RuntimeError(
-                f"GET /execution/operator-ui failed with HTTP {operator_ui_response.status_code}: {operator_ui_response.text}"
             )
-        operator_ui_html = operator_ui_response.text
+            validation = _required_json(
+                client.post("/validation/report", params=validation_params),
+                "POST",
+                "/validation/report",
+            )
+            checklist = _required_json(
+                client.post("/operations/checklist", params=checklist_params),
+                "POST",
+                "/operations/checklist",
+            )
+            operator_ui_response = client.get("/execution/operator-ui", params=operator_ui_params)
+            if operator_ui_response.status_code != 200:
+                raise RuntimeError(
+                    f"GET /execution/operator-ui failed with HTTP {operator_ui_response.status_code}: {operator_ui_response.text}"
+                )
+            operator_ui_html = operator_ui_response.text
 
     signal_funnel = dashboard.get("signal_funnel") or {}
     portfolio_summary = dashboard.get("portfolio_summary") or {}
@@ -803,6 +852,8 @@ def main() -> int:
 
     payload: dict[str, Any] = {
         "generated_at": generated_at.isoformat(),
+        "surface_source": surface_source,
+        "api_base_url": api_base_url,
         "symbol": args.symbol.upper(),
         "universe": args.universe,
         "days": args.days,

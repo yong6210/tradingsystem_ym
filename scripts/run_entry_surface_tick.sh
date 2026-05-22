@@ -27,8 +27,8 @@ OUTPUT_FILE="${ENTRY_SURFACE_OUTPUT_FILE:-$ENTRY_DIR/latest_entry_alert_run.json
 
 NOTIFY_ARGS=(
   --base-url "${ENTRY_SURFACE_BASE_URL:-http://127.0.0.1:8000}"
-  --universe "${ENTRY_SURFACE_UNIVERSE:-usdt_reliable_balanced_31}"
-  --limit "${ENTRY_SURFACE_LIMIT:-20}"
+  --universe "${ENTRY_SURFACE_UNIVERSE:-micro_live_usdt_11}"
+  --limit "${ENTRY_SURFACE_LIMIT:-11}"
   --max-per-status "${ENTRY_SURFACE_MAX_PER_STATUS:-3}"
   --channel "${ENTRY_SURFACE_CHANNEL:-discord}"
   --state-file "$STATE_FILE"

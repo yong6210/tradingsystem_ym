@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+from dataclasses import asdict
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -120,6 +121,7 @@ def _run_symbol(
     payload: dict[str, Any] = {
         "symbol": symbol,
         "profile_name": profile_name,
+        "exit_policy": asdict(engine.exit_policy),
         "window": {
             "requested_start_ts": cutoff.isoformat(),
             "requested_end_ts": end_ts.isoformat(),
@@ -191,6 +193,14 @@ def main() -> int:
         "days": max(int(args.days), 1),
         "data_source": "direct_usdc_runtime_candles",
         "symbols": symbols,
+        "exit_policy": next(
+            (
+                dict(result.get("exit_policy") or {})
+                for result in results.values()
+                if isinstance(result, dict) and isinstance(result.get("exit_policy"), dict)
+            ),
+            {},
+        ),
         "aggregate": {
             "closed": aggregate_closed,
             "total_r": round(aggregate_total_r, 4),

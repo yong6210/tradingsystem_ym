@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from app.core.config import CURRENT_MICRO_LIVE_USDT_SYMBOLS, get_settings
+from app.core.config import CURRENT_MICRO_LIVE_USDT_ACTIVE_SYMBOLS, CURRENT_MICRO_LIVE_USDT_SYMBOLS, get_settings
 from app.db.models import Candle
 from app.db.repositories import CandleRepository
 from app.integrations.binance_futures import BinanceFuturesClient
@@ -34,6 +34,22 @@ def configured_usdt_universe_symbols(settings: object | None = None) -> list[str
         if symbols:
             return symbols
     return []
+
+
+def configured_usdt_universe_name(settings: object | None = None) -> str:
+    symbols = configured_usdt_universe_symbols(settings)
+    if not symbols:
+        symbols = [item for item in CURRENT_MICRO_LIVE_USDT_ACTIVE_SYMBOLS.split(",") if item]
+    return f"micro_live_usdt_{len(symbols)}"
+
+
+def is_configured_usdt_universe_name(name: object) -> bool:
+    normalized = str(name or "").strip().lower()
+    if normalized == "usdt_reliable_balanced_31":
+        return True
+    if normalized in {"micro_live_usdt", "configured_micro_live_usdt", "usdt_micro_live_configured"}:
+        return True
+    return normalized.startswith("micro_live_usdt_") or normalized.startswith("configured_micro_live_usdt_")
 
 
 class DataQualityError(ValueError):
@@ -246,11 +262,11 @@ class MarketDataService:
         return self.binance.fetch_top_perp_symbols(quote_asset=quote, limit=limit)
 
     @staticmethod
-    def default_universe(name: str = "usdt_reliable_balanced_31") -> list[str]:
+    def default_universe(name: str = "micro_live_usdt_11") -> list[str]:
         normalized = str(name or "").strip().lower()
-        if normalized == "usdt_reliable_balanced_31":
+        if is_configured_usdt_universe_name(normalized):
             configured = configured_usdt_universe_symbols()
-            return configured or [item for item in CURRENT_MICRO_LIVE_USDT_SYMBOLS.split(",") if item]
+            return configured or [item for item in CURRENT_MICRO_LIVE_USDT_ACTIVE_SYMBOLS.split(",") if item]
         if normalized != "usdc_perp_top30":
             return []
         return [

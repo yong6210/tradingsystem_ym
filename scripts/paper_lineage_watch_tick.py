@@ -17,6 +17,7 @@ WATCH_SCRIPT = ROOT_DIR / "scripts" / "watch_paper_candidate_drill.py"
 EXIT_SCRIPT = ROOT_DIR / "scripts" / "run_paper_exit_monitor.py"
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "reports" / "operations" / "paper_candidate_watch"
 
+from app.services.market_data import configured_usdt_universe_name
 from scripts.operation_report_io import atomic_write_text
 
 
@@ -41,7 +42,10 @@ def parse_args() -> argparse.Namespace:
         "--families",
         default=os.environ.get("PAPER_LINEAGE_WATCH_FAMILIES", "sweep_reversal,trend_continuation"),
     )
-    parser.add_argument("--universe", default=os.environ.get("PAPER_LINEAGE_WATCH_UNIVERSE", "usdt_reliable_balanced_31"))
+    parser.add_argument(
+        "--universe",
+        default=os.environ.get("PAPER_LINEAGE_WATCH_UNIVERSE", configured_usdt_universe_name()),
+    )
     parser.add_argument("--symbol", default=os.environ.get("PAPER_LINEAGE_WATCH_SYMBOL"))
     parser.add_argument(
         "--candidate-limit",

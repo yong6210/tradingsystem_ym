@@ -5,7 +5,7 @@ import argparse
 import json
 import sys
 from collections import Counter
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,10 @@ if str(ROOT_DIR) not in sys.path:
 from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
 from app.services.live_order_lifecycle import LiveOrderLifecycleReporter
+from app.services.micro_main_strategy_research import (
+    SessionImpulseRetestResearch,
+    session_impulse_retest_profile_for_symbol,
+)
 from app.services.notification_dispatcher import NotificationDispatcher
 from app.services.runtime_worker_heartbeat import read_worker_heartbeat
 from app.services.strategy_engine import StrategyEngine
@@ -31,8 +35,14 @@ _SIR_WATCH_STATUSES = {
     "symbol_not_live_enabled_for_auto_route",
 }
 _SIR_ORDER_BLOCKING_STATUSES = {"intent_blocked", "intent_creation_failed", "submit_error"}
-_SIR_NON_BLOCKING_STATUSES = {"recent_intent_cooldown_active", "ws_stream_active_route_suppressed"}
+_SIR_NON_BLOCKING_STATUSES = {
+    "duplicate_active_thesis",
+    "recent_intent_cooldown_active",
+    "skipped_duplicate_active_thesis",
+    "ws_stream_active_route_suppressed",
+}
 _SIR_NO_CANDIDATE_STATUSES = {"no_fresh_candidates", "no_live_route_candidate_plan"}
+_KST = timezone(timedelta(hours=9))
 
 
 def _safe_bool(value: Any, default: bool = False) -> bool:
@@ -89,6 +99,15 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return int(default)
+
+
+def _maybe_float(value: Any) -> float | None:
+    if value in (None, "", "None"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _csv_set(value: Any) -> set[str]:
@@ -237,6 +256,132 @@ def _watchdog_scope_label(*, runtime_started_at: datetime | None, days: int) -> 
     return f"최근 {max(1, int(days))}일"
 
 
+def _as_utc(value: datetime | None) -> datetime:
+    parsed = value or datetime.now(UTC)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _iso_z(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _window_time_label(start: Any, end: Any) -> str:
+    start_dt = _parse_utc_ts(start)
+    end_dt = _parse_utc_ts(end)
+    if start_dt is None or end_dt is None:
+        return ""
+    start_kst = start_dt.astimezone(_KST)
+    end_kst = end_dt.astimezone(_KST)
+    if start_kst.date() == end_kst.date():
+        return f"{start_kst.strftime('%m-%d %H:%M')}-{end_kst.strftime('%H:%M')} KST"
+    return f"{start_kst.strftime('%m-%d %H:%M')}-{end_kst.strftime('%m-%d %H:%M')} KST"
+
+
+def _session_impulse_retest_signal_window_context(
+    *,
+    symbols: list[str] | set[str] | tuple[str, ...],
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    now = _as_utc(generated_at)
+    normalized_symbols = sorted({str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()})
+    profile_counts = Counter(
+        session_impulse_retest_profile_for_symbol(symbol)
+        for symbol in normalized_symbols
+    )
+    if not profile_counts:
+        return {}
+
+    defaults = SessionImpulseRetestResearch._PROFILE_DEFAULTS
+    profile_offsets: dict[str, dict[str, int]] = {}
+    for profile_name in sorted(profile_counts):
+        profile = dict(defaults.get(profile_name) or defaults.get("baseline") or {})
+        min_bars = max(0, _safe_int(profile.get("min_offset_bars"), default=0))
+        max_bars = max(min_bars, _safe_int(profile.get("max_offset_bars"), default=min_bars))
+        profile_offsets[profile_name] = {
+            "min_offset_bars_5m": min_bars,
+            "max_offset_bars_5m": max_bars,
+            "min_offset_minutes": min_bars * 5,
+            "max_offset_minutes": max_bars * 5,
+        }
+
+    anchor_hours = tuple(int(hour) for hour in SessionImpulseRetestResearch._session_anchor_hours())
+    windows: list[dict[str, Any]] = []
+    base_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    for day_offset in range(-1, 3):
+        day_start = base_midnight + timedelta(days=day_offset)
+        for anchor_hour in anchor_hours:
+            anchor = day_start + timedelta(hours=anchor_hour)
+            profile_windows: dict[str, dict[str, Any]] = {}
+            starts: list[datetime] = []
+            ends: list[datetime] = []
+            for profile_name, offsets in profile_offsets.items():
+                start = anchor + timedelta(minutes=int(offsets["min_offset_minutes"]))
+                end = anchor + timedelta(minutes=int(offsets["max_offset_minutes"]))
+                starts.append(start)
+                ends.append(end)
+                profile_windows[profile_name] = {
+                    "symbol_count": _safe_int(profile_counts.get(profile_name)),
+                    "start_utc": _iso_z(start),
+                    "end_utc": _iso_z(end),
+                    "label_kst": _window_time_label(start, end),
+                    **offsets,
+                }
+            start = min(starts)
+            end = max(ends)
+            if end < now:
+                continue
+            windows.append(
+                {
+                    "anchor_hour_utc": anchor_hour,
+                    "anchor_utc": _iso_z(anchor),
+                    "start_utc": _iso_z(start),
+                    "end_utc": _iso_z(end),
+                    "label_kst": _window_time_label(start, end),
+                    "is_current": start <= now <= end,
+                    "profile_windows": profile_windows,
+                }
+            )
+
+    windows.sort(key=lambda item: str(item.get("start_utc") or ""))
+    current_window = next((dict(item) for item in windows if _safe_bool(item.get("is_current"))), None)
+    next_window = next((dict(item) for item in windows if not _safe_bool(item.get("is_current"))), None)
+    return {
+        "source": "session_impulse_retest_research_profile_offsets",
+        "generated_at": _iso_z(now),
+        "anchor_hours_utc": list(anchor_hours),
+        "profile_counts": dict(profile_counts.most_common()),
+        "current_window": current_window or {},
+        "next_window": next_window or {},
+        "upcoming_windows": windows[:3],
+        "note": "approximate setup signal window; all strategy filters still must pass",
+    }
+
+
+def _signal_window_summary_text(schedule: dict[str, Any]) -> str:
+    if not schedule:
+        return ""
+    current_window = dict(schedule.get("current_window") or {})
+    if current_window:
+        label = _window_time_label(current_window.get("start_utc"), current_window.get("end_utc")) or str(
+            current_window.get("label_kst") or ""
+        )
+        return f"현재 관찰창 {label}".strip()
+    next_window = dict(schedule.get("next_window") or {})
+    if next_window:
+        label = _window_time_label(next_window.get("start_utc"), next_window.get("end_utc")) or str(
+            next_window.get("label_kst") or ""
+        )
+        return f"다음 관찰창 {label}".strip()
+    return ""
+
+
+def _signal_window_note(schedule: dict[str, Any]) -> str:
+    summary = _signal_window_summary_text(schedule)
+    return f"; {summary}" if summary else ""
+
+
 def _rows_since(rows: list[dict[str, Any]], start_at: datetime | None) -> list[dict[str, Any]]:
     if start_at is None:
         return list(rows)
@@ -271,12 +416,21 @@ def _counts_summary_text(counts: dict[str, Any], *, limit: int = 3) -> str:
 
 def _lookback_blocking_reason_counts(reason_counts: dict[str, Any]) -> dict[str, int]:
     blocking: dict[str, int] = {}
+    non_blocking_reasons = {
+        "FILLED",
+        "PARTIALLY_FILLED",
+        "ACKNOWLEDGED",
+        "SUBMITTED",
+        "LIVE_SUBMITTING",
+    }
     for raw_reason, raw_count in dict(reason_counts or {}).items():
         reason = str(raw_reason or "").strip()
         count = _safe_int(raw_count)
         if not reason or count <= 0:
             continue
         if reason == "before_runtime_start" or reason.startswith("before_runtime_start_"):
+            continue
+        if reason.upper() in non_blocking_reasons:
             continue
         blocking[reason] = count
     return blocking
@@ -404,6 +558,8 @@ def _session_impulse_retest_opportunity_context(*, hours: int) -> dict[str, Any]
         "runtime_started_at": report.get("runtime_started_at"),
         "coverage": dict(report.get("coverage") or {}),
         "contract": dict(report.get("contract") or {}),
+        "direction_filtered_count": _safe_int(report.get("direction_filtered_count")),
+        "direction_filtered_samples": list(report.get("direction_filtered_samples") or [])[:10],
         "summary": dict(report.get("summary") or {}),
         "lookback_summary": dict(report.get("lookback_summary") or {}),
     }
@@ -434,10 +590,17 @@ def _augment_no_order_evaluation(
     lookback_blocking_reasons = _lookback_blocking_reason_counts(lookback_reason_counts)
     lookback_blocked_or_skipped = _safe_int(lookback_status_counts.get("blocked_or_skipped"))
     lookback_hours = _safe_int(opportunity.get("lookback_hours"))
+    direction_filtered_count = _safe_int(opportunity.get("direction_filtered_count"))
     lookback_window_label = _lookback_hours_label(lookback_hours) or "lookback"
     coverage_text = _opportunity_coverage_text(dict(opportunity.get("coverage") or {}))
     coverage_clause = f",coverage={coverage_text}" if coverage_text else ""
     coverage_note = f" ({coverage_text}; 전체 {lookback_window_label} 아님)" if coverage_text else ""
+    direction_filter_clause = f",direction_filtered={direction_filtered_count}" if direction_filtered_count > 0 else ""
+    direction_filter_note = (
+        f"; 라이브 방향 계약으로 제외된 후보 {direction_filtered_count}건"
+        if direction_filtered_count > 0
+        else ""
+    )
     if active_expected_orders > 0:
         enriched["alert"] = True
         enriched["status"] = "ALERT"
@@ -452,6 +615,7 @@ def _augment_no_order_evaluation(
             f"{enriched.get('message')} "
             f"SIR_opportunity=lookback_hours={lookback_hours},"
             f"active_expected={active_expected_orders},lookback_expected={lookback_expected_orders}"
+            f"{direction_filter_clause}"
             f"{coverage_clause}"
         )
         return enriched
@@ -462,23 +626,40 @@ def _augment_no_order_evaluation(
     signal_reasons = dict(context.get("latest_signal_reason_counts") or {})
     signal_reason_text = _counts_summary_text(signal_reasons, limit=3)
     signal_reason_clause = f" signal_reasons={signal_reason_text}" if signal_reason_text != "none" else ""
+    signal_window_schedule = dict(context.get("signal_window_schedule") or {})
+    signal_window_text = _signal_window_summary_text(signal_window_schedule)
+    signal_window_clause = f" signal_window={signal_window_text}" if signal_window_text else ""
     current_signal_note = f"; 현재 신호 없음 이유: {signal_reason_text}" if signal_reason_text != "none" else ""
+    current_signal_note = f"{current_signal_note}{_signal_window_note(signal_window_schedule)}"
     if lookback_expected_orders > 0 and lookback_pre_restart_orders > 0 and not order_blocking and (
         lookback_blocked_or_skipped > 0 or lookback_blocking_reasons
     ):
         reason_summary = _counts_summary_text(lookback_blocking_reasons or lookback_reason_counts, limit=4)
-        enriched["alert"] = True
-        enriched["status"] = "ALERT"
-        enriched["severity"] = "WARN"
-        enriched["reason"] = "sir_pre_restart_blocked_opportunities"
-        enriched["historical_advisory"] = False
+        lookback_perf_total_r = _maybe_float(
+            dict(lookback_opportunity_summary.get("potential_performance") or {}).get("total_r")
+        )
+        non_positive_pre_restart_perf = lookback_perf_total_r is not None and lookback_perf_total_r <= 0.0
+        enriched["alert"] = not non_positive_pre_restart_perf
+        enriched["status"] = "OK" if non_positive_pre_restart_perf else "ALERT"
+        enriched["severity"] = "INFO" if non_positive_pre_restart_perf else "WARN"
+        enriched["reason"] = (
+            "sir_pre_restart_blocked_opportunities_non_positive_advisory"
+            if non_positive_pre_restart_perf
+            else "sir_pre_restart_blocked_opportunities"
+        )
+        enriched["historical_advisory"] = bool(non_positive_pre_restart_perf)
         enriched["historical_blocked_opportunity_count"] = lookback_blocked_or_skipped
         enriched["historical_blocked_reason_counts"] = lookback_blocking_reasons
-        enriched["candidate_generation_status"] = "pre_restart_blocked_opportunities"
+        enriched["candidate_generation_status"] = (
+            "pre_restart_blocked_opportunities_non_positive_advisory"
+            if non_positive_pre_restart_perf
+            else "pre_restart_blocked_opportunities"
+        )
         enriched["next_action_text"] = (
             f"재시작 전 {lookback_window_label} SIR 후보 중 제출 전 차단 이력 확인: "
-            f"{reason_summary or 'reason=none'}{coverage_note}; 현재 설정으로 같은 차단이 반복되는지 확인"
-            f"{current_signal_note}"
+            f"{reason_summary or 'reason=none'}{coverage_note}; "
+            f"{'백테스트상 해당 구간 총 R이 양수가 아니므로 현재 경고가 아닌 참고로 유지' if non_positive_pre_restart_perf else '현재 설정으로 같은 차단이 반복되는지 확인'}"
+            f"{current_signal_note}{direction_filter_note}"
         )
         previous_next_action = str(evaluation.get("next_action_text") or "")
         current_message = str(enriched.get("message") or "")
@@ -494,13 +675,14 @@ def _augment_no_order_evaluation(
             f"watch={_counts_summary_text(watch, limit=2)} "
             f"non_blocking={_counts_summary_text(non_blocking, limit=2)} "
             f"order_blocking={_counts_summary_text(order_blocking, limit=2)} "
-            f"{signal_reason_clause} "
+            f"{signal_reason_clause}{signal_window_clause} "
             f"SIR_opportunity=lookback_hours={lookback_hours},"
             f"active_expected={active_expected_orders},"
             f"lookback_expected={lookback_expected_orders},"
             f"pre_restart={lookback_pre_restart_orders},"
             f"blocked_or_skipped={lookback_blocked_or_skipped},"
             f"blocking_reasons={reason_summary or 'none'}"
+            f"{direction_filter_clause}"
             f"{coverage_clause}"
         )
         return enriched
@@ -515,7 +697,7 @@ def _augment_no_order_evaluation(
         enriched["next_action_text"] = (
             f"재시작 전 {lookback_window_label} SIR 백테스트조건 후보 {lookback_pre_restart_orders}건이 주문으로 못 간 이력 기록: "
             f"{reason_summary or 'reason=none'}{coverage_note}; 현재 런타임은 다음 fresh 후보 submit_ready 여부만 확인"
-            f"{current_signal_note}"
+            f"{current_signal_note}{direction_filter_note}"
         )
         previous_next_action = str(evaluation.get("next_action_text") or "")
         current_message = str(enriched.get("message") or "")
@@ -531,12 +713,13 @@ def _augment_no_order_evaluation(
             f"watch={_counts_summary_text(watch, limit=2)} "
             f"non_blocking={_counts_summary_text(non_blocking, limit=2)} "
             f"order_blocking={_counts_summary_text(order_blocking, limit=2)} "
-            f"{signal_reason_clause} "
+            f"{signal_reason_clause}{signal_window_clause} "
             f"SIR_opportunity=lookback_hours={lookback_hours},"
             f"active_expected={active_expected_orders},"
             f"lookback_expected={lookback_expected_orders},"
             f"pre_restart={lookback_pre_restart_orders},"
             f"lookback_reasons={reason_summary or 'none'}"
+            f"{direction_filter_clause}"
             f"{coverage_clause}"
         )
         return enriched
@@ -550,7 +733,10 @@ def _augment_no_order_evaluation(
     elif no_candidate:
         enriched["candidate_generation_status"] = "no_live_route_candidate"
         signal_text = f"; 신호 없음 이유: {signal_reason_text}" if signal_reason_text != "none" else ""
-        enriched["next_action_text"] = f"SIR fresh 후보 대기: {_counts_summary_text(no_candidate)}{signal_text}"
+        enriched["next_action_text"] = (
+            f"SIR fresh 후보 대기: {_counts_summary_text(no_candidate)}"
+            f"{signal_text}{_signal_window_note(signal_window_schedule)}"
+        )
     elif watch:
         enriched["candidate_generation_status"] = "watch_candidate_context"
         enriched["next_action_text"] = f"SIR 후보 생성 watch 확인: {_counts_summary_text(watch)}"
@@ -576,9 +762,10 @@ def _augment_no_order_evaluation(
         f"watch={_counts_summary_text(watch, limit=2)} "
         f"non_blocking={_counts_summary_text(non_blocking, limit=2)} "
         f"order_blocking={_counts_summary_text(order_blocking, limit=2)} "
-        f"{signal_reason_clause} "
+        f"{signal_reason_clause}{signal_window_clause} "
         f"SIR_opportunity=lookback_hours={lookback_hours},"
         f"active_expected={active_expected_orders},lookback_expected={lookback_expected_orders}"
+        f"{direction_filter_clause}"
         f"{coverage_clause}"
     )
     return enriched
@@ -718,6 +905,9 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
             f"order_blocking={_counts_summary_text(dict(candidate_context.get('order_blocking_status_counts') or {}), limit=2)}"
             f"{signal_text}"
         )
+        signal_window_text = _signal_window_summary_text(dict(candidate_context.get("signal_window_schedule") or {}))
+        if signal_window_text:
+            lines.append(f"신호창: {signal_window_text}")
     opportunity_context = dict(evaluation.get("session_impulse_retest_opportunity_context") or {})
     if opportunity_context:
         lookback_label = _lookback_hours_label(
@@ -729,10 +919,16 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
         active_perf = dict(active_summary.get("potential_performance") or {})
         lookback_perf = dict(lookback_summary.get("potential_performance") or {})
         pre_restart_count = _safe_int(lookback_summary.get("before_current_runtime_start_count"))
+        direction_filtered_count = _safe_int(opportunity_context.get("direction_filtered_count"))
         lookback_reason_text = _counts_summary_text(dict(lookback_summary.get("reason_counts") or {}), limit=3)
         pre_restart_text = (
             f", pre_restart={pre_restart_count}건"
             if pre_restart_count > 0
+            else ""
+        )
+        direction_filtered_text = (
+            f", direction_filtered={direction_filtered_count}건"
+            if direction_filtered_count > 0
             else ""
         )
         reason_text = (
@@ -747,6 +943,7 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
             f"lookback_expected={lookback_summary.get('expected_order_count', 0)}건/"
             f"{lookback_perf.get('total_r', 0)}R"
             f"{pre_restart_text}"
+            f"{direction_filtered_text}"
             f"{reason_text}"
         )
     lines.extend(
@@ -771,6 +968,7 @@ def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
     if not symbol_filter:
         symbol_filter = _csv_upper_set(getattr(settings, "auto_trading_allowed_symbols", ""))
     runtime_started_at = _ws_runtime_started_at()
+    generated_at = datetime.now(UTC)
     with SessionLocal() as db:
         reporter = LiveOrderLifecycleReporter(db)
         lookback_lifecycle = reporter.generate(
@@ -798,6 +996,13 @@ def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
             if "session_impulse_retest" in family_filter
             else _disabled_sir_candidate_context()
         )
+        if "session_impulse_retest" in family_filter:
+            signal_window_schedule = _session_impulse_retest_signal_window_context(
+                symbols=sorted(symbol_filter),
+                generated_at=generated_at,
+            )
+            if signal_window_schedule:
+                candidate_context["signal_window_schedule"] = signal_window_schedule
         opportunity_context = (
             _session_impulse_retest_opportunity_context(hours=max(1, int(days)) * 24)
             if "session_impulse_retest" in family_filter
@@ -811,7 +1016,6 @@ def build_payload(*, days: int, limit: int, min_intents: int) -> dict[str, Any]:
     )
     overall_status = str(evaluation.get("status") or ("ALERT" if _safe_bool(evaluation.get("alert")) else "OK")).upper()
     watchdog_scope = "runtime_since_ws_start" if runtime_started_at is not None else "lookback_window"
-    generated_at = datetime.now(UTC)
     runtime_age = _runtime_age_minutes(generated_at=generated_at, runtime_started_at=runtime_started_at)
     runtime_sampling_note = (
         "current runtime scope resets on WS worker restart; use lookback summaries for pre-restart order context"

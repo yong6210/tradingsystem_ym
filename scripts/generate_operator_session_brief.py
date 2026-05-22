@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -15,6 +16,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 SNAPSHOT_SCRIPT = ROOT_DIR / "scripts" / "collect_operator_surface_divergence_snapshot.py"
 
+from app.services.market_data import configured_usdt_universe_name
 from scripts.operation_report_io import atomic_write_text
 
 
@@ -37,11 +39,16 @@ def parse_args() -> argparse.Namespace:
         description="Generate a markdown operator session brief from the latest operator surface divergence snapshot."
     )
     parser.add_argument("--symbol", default="BTCUSDT")
-    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
+    parser.add_argument("--universe", default=configured_usdt_universe_name())
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--portfolio-limit", type=int, default=5)
     parser.add_argument("--intent-limit", type=int, default=5)
     parser.add_argument("--reconcile-limit", type=int, default=5)
+    parser.add_argument(
+        "--snapshot-api-base-url",
+        default=os.environ.get("OPERATOR_BRIEF_SNAPSHOT_API_BASE_URL", os.environ.get("OPERATOR_SURFACE_API_BASE_URL", "")),
+        help="Pass an API base URL to the operator surface snapshot collector.",
+    )
     parser.add_argument("--report-dir", default="reports/operations/operator_session_briefs")
     parser.add_argument("--no-write-report", action="store_true")
     return parser.parse_args()
@@ -81,6 +88,9 @@ def _run_snapshot(args: argparse.Namespace) -> dict[str, Any]:
         "--reconcile-limit",
         str(args.reconcile_limit),
     ]
+    snapshot_api_base_url = str(getattr(args, "snapshot_api_base_url", "") or "").strip()
+    if snapshot_api_base_url:
+        command.extend(["--api-base-url", snapshot_api_base_url])
     completed = subprocess.run(command, capture_output=True, text=True, cwd=str(ROOT_DIR), check=False)
     if completed.returncode != 0:
         stderr = completed.stderr.strip() or completed.stdout.strip()

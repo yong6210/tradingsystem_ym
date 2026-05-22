@@ -30,6 +30,35 @@ class OperationalChecklistService:
         self.settings = settings or get_settings()
         self.session_guidance = SessionGuidanceService(self.settings)
 
+    @staticmethod
+    def _csv_items(value: Any) -> list[str]:
+        return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+    def _is_current_micro_live_family(self, family: str) -> bool:
+        normalized = str(family or "").strip().lower()
+        if not normalized:
+            return False
+        mode = str(getattr(self.settings, "auto_trading_execution_mode", "") or "").strip().upper()
+        if mode not in {"MICRO_LIVE", "LIVE"}:
+            return False
+        live_families = {
+            item.lower()
+            for item in self._csv_items(getattr(self.settings, "auto_trading_micro_live_allowed_families", ""))
+        }
+        if not live_families:
+            live_families = {
+                item.lower()
+                for item in self._csv_items(getattr(self.settings, "auto_trading_allowed_families", ""))
+            }
+        return normalized in live_families
+
+    def _current_live_advisory_message(self, *, family: str, action: str) -> str:
+        return (
+            f"family={family} is already active in the current MICRO_LIVE route; "
+            f"{action} means keep the current route unchanged and do not expand risk, universe, or promotion scope "
+            "until more live outcomes accumulate."
+        )
+
     def _configured_leaf_channels(self) -> list[str]:
         channels: list[str] = []
         if self.settings.alert_telegram_bot_token and self.settings.alert_telegram_chat_id:
@@ -302,13 +331,19 @@ class OperationalChecklistService:
         validation_contract = validation_report_contract(validation_payload)
         status = str(report.get("status", "FAIL")).upper()
         summary = f"validation report status={status}"
+        live_mode_active = str(
+            getattr(self.settings, "auto_trading_execution_mode", "") or ""
+        ).strip().upper() in {"MICRO_LIVE", "LIVE"}
         if status == "PASS":
             item_status = "PASS"
             blocking = False
         elif status == "WARN":
             item_status = "WARN"
             blocking = False
-            summary = "validation is WARN; operator review required before live start"
+            if live_mode_active:
+                summary = "validation is WARN; operator review required before expanding live risk or rollout scope"
+            else:
+                summary = "validation is WARN; operator review required before live start"
         else:
             item_status = "FAIL"
             blocking = True
@@ -341,6 +376,7 @@ class OperationalChecklistService:
                 "status": status,
                 "path": report.get("path"),
                 "generated_at": report.get("generated_at"),
+                "live_mode_active": live_mode_active,
                 **validation_contract,
             },
         )
@@ -1390,6 +1426,8 @@ class OperationalChecklistService:
         current_mode = str(current_policy.get("max_execution_mode", "SHADOW") or "SHADOW").upper()
         live_enabled = NotificationDispatcher._safe_bool(current_policy.get("live_enabled", False))
         summary = str(summary_payload.get("summary", "") or "").strip()
+        family = str(summary_payload.get("family", "") or "")
+        current_live_family = self._is_current_micro_live_family(family)
 
         if not available:
             status = "PASS"
@@ -1402,7 +1440,13 @@ class OperationalChecklistService:
         elif recommendation in {"reduce", "research_only"}:
             status = "WARN"
             blocking = False
-            message = summary or "rollout recommendation suggests caution before expansion"
+            if recommendation == "research_only" and current_live_family:
+                message = self._current_live_advisory_message(
+                    family=family,
+                    action="rollout research-only language",
+                )
+            else:
+                message = summary or "rollout recommendation suggests caution before expansion"
         else:
             status = "PASS"
             blocking = False
@@ -1427,7 +1471,8 @@ class OperationalChecklistService:
             },
             evidence={
                 "available": available,
-                "family": str(summary_payload.get("family", "") or ""),
+                "family": family,
+                "current_live_family": current_live_family,
                 "recommendation": recommendation,
                 "confidence": str(summary_payload.get("confidence", "low") or "low"),
                 "maturity": str(summary_payload.get("maturity", "thin_sample") or "thin_sample"),
@@ -1610,13 +1655,21 @@ class OperationalChecklistService:
         )
         state = str(summary_payload.get("state", "defer") or "defer").lower()
         summary = str(summary_payload.get("summary", "") or "").strip()
+        family = str(summary_payload.get("family", "") or "")
+        current_live_family = self._is_current_micro_live_family(family)
 
         if not available:
             status = "PASS"
             message = "promotion governance unavailable; keep promotion review informational only"
         elif state == "defer":
             status = "WARN"
-            message = summary or "promotion review should be deferred while guardrails remain active"
+            if current_live_family:
+                message = self._current_live_advisory_message(
+                    family=family,
+                    action="deferred promotion governance",
+                )
+            else:
+                message = summary or "promotion review should be deferred while guardrails remain active"
         elif state == "promotable":
             status = "PASS"
             message = summary or "family can be reviewed as a controlled promotion candidate, not an auto-promotion"
@@ -1643,7 +1696,8 @@ class OperationalChecklistService:
             },
             evidence={
                 "available": available,
-                "family": str(summary_payload.get("family", "") or ""),
+                "family": family,
+                "current_live_family": current_live_family,
                 "state": state,
                 "promotion_bias": str(summary_payload.get("promotion_bias", "defer") or "defer"),
                 "target_posture": str(summary_payload.get("target_posture", "keep_current") or "keep_current"),
@@ -1662,13 +1716,21 @@ class OperationalChecklistService:
         )
         queue_state = str(summary_payload.get("queue_state", "empty_queue") or "empty_queue").lower()
         summary = str(summary_payload.get("summary", "") or "").strip()
+        family = str(summary_payload.get("headline_family", "") or "")
+        current_live_family = self._is_current_micro_live_family(family)
 
         if not available:
             status = "PASS"
             message = "promotion review queue unavailable; keep governance ordering informational only"
         elif queue_state == "defer_first_queue":
             status = "WARN"
-            message = summary or "review defer causes first before broader promotion review resumes"
+            if current_live_family:
+                message = self._current_live_advisory_message(
+                    family=family,
+                    action="promotion review queue defer language",
+                )
+            else:
+                message = summary or "review defer causes first before broader promotion review resumes"
         elif queue_state == "promotion_ready_queue":
             status = "PASS"
             message = summary or "review promotion-ready families first in controlled governance order"
@@ -1696,7 +1758,8 @@ class OperationalChecklistService:
             evidence={
                 "available": available,
                 "queue_state": queue_state,
-                "headline_family": str(summary_payload.get("headline_family", "") or ""),
+                "headline_family": family,
+                "current_live_family": current_live_family,
                 "top_review_action": str(summary_payload.get("top_review_action", "") or ""),
                 "reason_codes": list(summary_payload.get("reason_codes") or []),
                 "review_queue": [dict(item) for item in list(summary_payload.get("review_queue") or [])[:5]],
@@ -1908,13 +1971,21 @@ class OperationalChecklistService:
         )
         execution_stage = str(summary_payload.get("execution_stage", "advisory_only") or "advisory_only").lower()
         summary = str(summary_payload.get("summary", "") or "").strip()
+        target_family = str(summary_payload.get("target_family", "") or "")
+        current_live_family = self._is_current_micro_live_family(target_family)
 
         if not available:
             status = "PASS"
             message = "auto promotion rollout execution unavailable; keep execution candidate language informational only"
         elif execution_stage == "auto_execution_blocked":
             status = "WARN"
-            message = summary or "auto execution remains blocked while promotion or rollout guardrails stay active"
+            if current_live_family:
+                message = self._current_live_advisory_message(
+                    family=target_family,
+                    action="auto-promotion blocked language",
+                )
+            else:
+                message = summary or "auto execution remains blocked while promotion or rollout guardrails stay active"
         else:
             status = "PASS"
             message = summary or "auto promotion rollout execution remains compare-only with no direct write scope"
@@ -1941,7 +2012,8 @@ class OperationalChecklistService:
                 "execution_stage": execution_stage,
                 "execution_bias": str(summary_payload.get("execution_bias", "keep_manual") or "keep_manual"),
                 "action_domain": str(summary_payload.get("action_domain", "no_write_observe") or "no_write_observe"),
-                "target_family": str(summary_payload.get("target_family", "") or ""),
+                "target_family": target_family,
+                "current_live_family": current_live_family,
                 "target_posture": str(summary_payload.get("target_posture", "keep_current") or "keep_current"),
                 "write_scope": str(summary_payload.get("write_scope", "none") or "none"),
                 "dry_run_only": NotificationDispatcher._safe_bool(summary_payload.get("dry_run_only", False)),
@@ -2476,13 +2548,21 @@ class OperationalChecklistService:
         )
         loop_state = str(summary_payload.get("loop_state", "research_backlog") or "research_backlog").lower()
         summary = str(summary_payload.get("summary", "") or "").strip()
+        family = str(summary_payload.get("family", "") or "")
+        current_live_family = self._is_current_micro_live_family(family)
 
         if not available:
             status = "PASS"
             message = "research promotion operating loop unavailable; keep research-to-promotion linkage informational only"
         elif loop_state in {"research_backlog", "shadow_test_ready"}:
             status = "WARN"
-            message = summary or "research case still needs shadow-test follow-through before probation review"
+            if current_live_family:
+                message = self._current_live_advisory_message(
+                    family=family,
+                    action="research-promotion loop backlog language",
+                )
+            else:
+                message = summary or "research case still needs shadow-test follow-through before probation review"
         else:
             status = "PASS"
             message = summary or "research promotion operating loop remains compare-only while promotion path is reviewed"
@@ -2506,7 +2586,8 @@ class OperationalChecklistService:
             },
             evidence={
                 "available": available,
-                "family": str(summary_payload.get("family", "") or ""),
+                "family": family,
+                "current_live_family": current_live_family,
                 "loop_state": loop_state,
                 "loop_bias": str(summary_payload.get("loop_bias", "observe_only") or "observe_only"),
                 "target_stage": str(summary_payload.get("target_stage", "research") or "research"),
@@ -2528,13 +2609,21 @@ class OperationalChecklistService:
         )
         state = str(summary_payload.get("state", "not_ready") or "not_ready").lower()
         summary = str(summary_payload.get("summary", "") or "").strip()
+        family = str(summary_payload.get("family", "") or "")
+        current_live_family = self._is_current_micro_live_family(family)
 
         if not available:
             status = "PASS"
             message = "positive evidence expansion unavailable; keep expansion review informational only"
         elif state == "not_ready":
             status = "WARN"
-            message = summary or "family is not ready for controlled expansion review while guardrails remain active"
+            if current_live_family:
+                message = self._current_live_advisory_message(
+                    family=family,
+                    action="positive-expansion not-ready language",
+                )
+            else:
+                message = summary or "family is not ready for controlled expansion review while guardrails remain active"
         elif state == "expandable":
             status = "PASS"
             message = summary or "family can be reviewed as a controlled expansion candidate, not an auto-expand"
@@ -2560,7 +2649,8 @@ class OperationalChecklistService:
             },
             evidence={
                 "available": available,
-                "family": str(summary_payload.get("family", "") or ""),
+                "family": family,
+                "current_live_family": current_live_family,
                 "state": state,
                 "expansion_bias": str(summary_payload.get("expansion_bias", "hold") or "hold"),
                 "confidence": str(summary_payload.get("confidence", "low") or "low"),

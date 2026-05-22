@@ -19,10 +19,15 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.core.config import get_settings
 from app.core import operator_surface_contracts as osc
+from app.services.market_data import configured_usdt_universe_name
 from scripts.operation_report_io import atomic_write_text
 
 
 DEFAULT_STAGE_FILE = ROOT_DIR / "reports/operations/stage_monitor/current_stage.json"
+_DEFAULT_MAX_STAGE_AGE_MINUTES = max(
+    int(os.environ.get("RUNTIME_SIGNOFF_MAX_STAGE_AGE_MINUTES", "60")),
+    1,
+)
 _POST_PATCH_BASELINE_TEXT = os.environ.get("RUNTIME_MITIGATION_BASELINE_TS", "2026-04-10T00:00:00+09:00")
 _POST_PATCH_SAMPLE_GOAL = max(int(os.environ.get("RUNTIME_MITIGATION_BASELINE_GOAL", "20")), 1)
 _LIVE_ELIGIBLE_CONTRACT_SCOPE = str(
@@ -138,6 +143,26 @@ _LIVE_EXECUTION_BOOTSTRAP_MIN_CLOSED_TRADES = max(
     int(os.environ.get("RUNTIME_LIVE_EXECUTION_BOOTSTRAP_MIN_CLOSED_TRADES", "5")),
     1,
 )
+
+
+def _risk_adjusted_drawdown_limit_r(
+    *,
+    env_name: str,
+    default_r: float,
+    default_max_drawdown_pct: float,
+) -> float:
+    override = str(os.environ.get(env_name, "") or "").strip()
+    if override:
+        return float(override)
+    try:
+        risk_pct = float(getattr(get_settings(), "auto_trading_live_risk_per_trade_pct", 0.01) or 0.01)
+    except Exception:
+        risk_pct = 0.01
+    if risk_pct <= 0:
+        return float(default_r)
+    return max(float(default_r), float(default_max_drawdown_pct) / risk_pct)
+
+
 _POST_PATCH_MICRO_LIVE_MIN_CLOSED_TRADES = max(
     int(os.environ.get("RUNTIME_MICRO_LIVE_POST_PATCH_MIN_CLOSED_TRADES", "50")),
     1,
@@ -174,8 +199,10 @@ _LIVE_ELIGIBLE_MICRO_LIVE_MIN_CLOSED_TRADES = max(
     int(os.environ.get("RUNTIME_MICRO_LIVE_LIMIT_ONLY_MIN_CLOSED_TRADES", "15")),
     1,
 )
-_LIVE_ELIGIBLE_MICRO_LIVE_MAX_DRAWDOWN_R = float(
-    os.environ.get("RUNTIME_MICRO_LIVE_LIMIT_ONLY_MAX_DRAWDOWN_R", "4.5")
+_LIVE_ELIGIBLE_MICRO_LIVE_MAX_DRAWDOWN_R = _risk_adjusted_drawdown_limit_r(
+    env_name="RUNTIME_MICRO_LIVE_LIMIT_ONLY_MAX_DRAWDOWN_R",
+    default_r=4.5,
+    default_max_drawdown_pct=float(os.environ.get("RUNTIME_MICRO_LIVE_LIMIT_ONLY_MAX_DRAWDOWN_PCT", "0.05")),
 )
 _LIVE_ELIGIBLE_MICRO_LIVE_MIN_P5_R = float(
     os.environ.get("RUNTIME_MICRO_LIVE_LIMIT_ONLY_MIN_P5_R", "-1.05")
@@ -275,7 +302,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--symbol", default="BTCUSDT")
-    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
+    parser.add_argument("--universe", default=configured_usdt_universe_name())
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--stage-file", default=str(DEFAULT_STAGE_FILE))
     parser.add_argument("--report-dir", default="reports/operations/runtime_signoff_reviews")
@@ -458,6 +485,18 @@ def _build_runtime_reopen_gate_summary(
     }
 
 
+def _configured_execution_mode(settings: Any) -> str:
+    return str(getattr(settings, "auto_trading_execution_mode", "") or "").strip().upper()
+
+
+def _operator_intent_execution_mode(*, scope: str, configured_mode: str) -> str:
+    if scope == osc.RUNTIME_DECISION_SCOPE_MICRO_LIVE_ONLY:
+        return "MICRO_LIVE"
+    if scope == osc.RUNTIME_DECISION_SCOPE_MICRO_LIVE_OR_LIVE and configured_mode == "LIVE":
+        return "LIVE"
+    return "MICRO_LIVE"
+
+
 def _build_runtime_operator_signoff_summary(
     *,
     runtime_decision: dict[str, Any] | None,
@@ -466,7 +505,7 @@ def _build_runtime_operator_signoff_summary(
     runtime_reopen_gate_summary: dict[str, Any] | None = None,
     base_url: str = "http://127.0.0.1:8000",
     symbol: str = "BTCUSDT",
-    universe: str = "usdt_reliable_balanced_31",
+    universe: str = "",
     days: int = 30,
 ) -> dict[str, Any]:
     decision = dict(runtime_decision or {})
@@ -474,6 +513,8 @@ def _build_runtime_operator_signoff_summary(
     signoff = dict(runtime_signoff_summary or {})
     gate = dict(runtime_reopen_gate_summary or {})
     settings = get_settings()
+    universe = str(universe or configured_usdt_universe_name(settings))
+    configured_execution_mode = _configured_execution_mode(settings)
     action = str(decision.get("effective_action") or signoff.get("operator_recommendation") or "")
     scope = str(decision.get("allowed_reopen_scope") or osc.RUNTIME_DECISION_SCOPE_NONE)
     preflight_status = str(preflight.get("status") or "not_available")
@@ -500,7 +541,14 @@ def _build_runtime_operator_signoff_summary(
         priority_symbols = [item for item in priority_symbols if item in allowed_set]
     allowed_families = _csv_items(getattr(settings, "auto_trading_micro_live_allowed_families", ""))
     allowed_sessions = _csv_items(getattr(settings, "auto_trading_micro_live_allowed_sessions", ""))
-    intent_execution_mode = "MICRO_LIVE" if scope == osc.RUNTIME_DECISION_SCOPE_MICRO_LIVE_ONLY else "LIVE"
+    intent_execution_mode = _operator_intent_execution_mode(
+        scope=scope,
+        configured_mode=configured_execution_mode,
+    )
+    full_live_command_available = (
+        scope == osc.RUNTIME_DECISION_SCOPE_MICRO_LIVE_OR_LIVE
+        and configured_execution_mode == "LIVE"
+    )
     intent_command_template = (
         f"curl -s -X POST \"{base_url.rstrip('/')}/execution/order-intents\" "
         "-H \"Content-Type: application/json\" "
@@ -545,6 +593,8 @@ def _build_runtime_operator_signoff_summary(
             "effective_action": action,
             "allowed_scope": scope,
             "preflight_status": preflight_status,
+            "configured_execution_mode": configured_execution_mode,
+            "full_live_command_available": full_live_command_available,
             "required_review_codes": required_review_codes,
             "review_command": review_command,
             "signoff_review_command": signoff_review_command,
@@ -569,6 +619,8 @@ def _build_runtime_operator_signoff_summary(
             "effective_action": action,
             "allowed_scope": scope,
             "preflight_status": preflight_status,
+            "configured_execution_mode": configured_execution_mode,
+            "full_live_command_available": full_live_command_available,
             "required_review_codes": required_review_codes,
             "review_command": review_command,
             "signoff_review_command": signoff_review_command,
@@ -593,6 +645,8 @@ def _build_runtime_operator_signoff_summary(
             "effective_action": action,
             "allowed_scope": scope,
             "preflight_status": preflight_status,
+            "configured_execution_mode": configured_execution_mode,
+            "full_live_command_available": full_live_command_available,
             "required_review_codes": required_review_codes,
             "first_required_review_code": str(required_reviews[0].get("code") or "") if required_reviews else "",
             "review_command": review_command,
@@ -612,12 +666,22 @@ def _build_runtime_operator_signoff_summary(
         }
 
     if action == osc.RUNTIME_REOPEN_ACTION_CONDITIONAL_FULL_LIVE_SIGNOFF:
+        full_live_summary = (
+            "FULL_LIVE preflight is green; operator may sign off FULL_LIVE scope"
+            if full_live_command_available
+            else (
+                "FULL_LIVE evidence is green, but configured execution mode is not LIVE; "
+                "operator command remains MICRO_LIVE until the runtime is explicitly promoted"
+            )
+        )
         return {
             "active": True,
             "status": osc.RUNTIME_OPERATOR_SIGNOFF_STATUS_READY_FOR_MANUAL_FULL_LIVE_SIGNOFF,
             "effective_action": action,
             "allowed_scope": scope,
             "preflight_status": preflight_status,
+            "configured_execution_mode": configured_execution_mode,
+            "full_live_command_available": full_live_command_available,
             "required_review_codes": required_review_codes,
             "first_required_review_code": str(required_reviews[0].get("code") or "") if required_reviews else "",
             "review_command": review_command,
@@ -632,7 +696,7 @@ def _build_runtime_operator_signoff_summary(
             "allowed_sessions": allowed_sessions,
             "candidate_requirements_summary": candidate_requirements_summary,
             "submit_path_summary": submit_path_summary,
-            "summary": "FULL_LIVE preflight is green; operator may sign off FULL_LIVE scope",
+            "summary": full_live_summary,
             "next_step": osc.RUNTIME_OPERATOR_SIGNOFF_NEXT_STEP_REVIEW_AND_RECORD_FULL,
         }
 
@@ -642,6 +706,8 @@ def _build_runtime_operator_signoff_summary(
         "effective_action": action,
         "allowed_scope": scope,
         "preflight_status": preflight_status,
+        "configured_execution_mode": configured_execution_mode,
+        "full_live_command_available": full_live_command_available,
         "required_review_codes": required_review_codes,
         "first_required_review_code": str(required_reviews[0].get("code") or "") if required_reviews else "",
         "review_command": review_command,
@@ -678,6 +744,101 @@ def _read_stage(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"stage file is invalid: {path}")
     return payload
+
+
+def _missing_stage_snapshot(path: Path) -> dict[str, Any]:
+    return {
+        "runtime_reopen_status": {
+            "status": "stage_monitor_missing",
+            "ready": False,
+            "reason": f"stage monitor snapshot is missing: {path}",
+        },
+        "runtime_signoff_summary": {
+            "status": osc.RUNTIME_OPERATOR_SIGNOFF_STATUS_NOT_READY,
+            "operator_recommendation": osc.RUNTIME_REOPEN_ACTION_WAIT_UNTIL_RUNTIME_READY,
+            "operator_recommendation_reason": "stage monitor snapshot is missing; run stage_monitor_tick before sign-off",
+            "required_reviews": [
+                {
+                    "code": "stage_monitor_snapshot_missing",
+                    "summary": "Stage monitor current_stage.json is missing, so runtime sign-off cannot be evaluated.",
+                    "current_value": str(path),
+                    "clear_when": "stage_monitor_tick writes a fresh current_stage.json snapshot",
+                }
+            ],
+            "advisory_reviews": [],
+        },
+        "lineage_sample_summary": {
+            "closed_trade_count": 0,
+            "proof_goal_closed_trades": 0,
+        },
+        "risk_gate_summary": {
+            "status": "NOT_AVAILABLE",
+            "risk_state": "UNKNOWN",
+        },
+        "validation_approval_strip": {
+            "approve_value": "stage_monitor_missing",
+            "align_value": "not_available",
+            "act_value": "run_stage_monitor_tick_before_runtime_signoff",
+        },
+        "stage_monitor_missing": True,
+        "stage_file": str(path),
+    }
+
+
+def _stale_stage_snapshot(path: Path, stage: dict[str, Any], *, max_age_minutes: int = _DEFAULT_MAX_STAGE_AGE_MINUTES) -> dict[str, Any]:
+    generated_at = _parse_ts(stage.get("generated_at"))
+    age_minutes = None
+    if generated_at is not None:
+        age_minutes = round(max((_now() - generated_at).total_seconds(), 0.0) / 60.0, 2)
+    return {
+        "runtime_reopen_status": {
+            "status": "stage_monitor_stale",
+            "ready": False,
+            "reason": f"stage monitor snapshot is stale: {path}",
+        },
+        "runtime_signoff_summary": {
+            "status": osc.RUNTIME_OPERATOR_SIGNOFF_STATUS_NOT_READY,
+            "operator_recommendation": osc.RUNTIME_REOPEN_ACTION_WAIT_UNTIL_RUNTIME_READY,
+            "operator_recommendation_reason": "stage monitor snapshot is stale; refresh stage_monitor_tick before sign-off",
+            "required_reviews": [
+                {
+                    "code": "stage_monitor_snapshot_stale",
+                    "summary": "Stage monitor current_stage.json is too old, so runtime sign-off cannot be evaluated.",
+                    "current_value": str(path),
+                    "clear_when": "stage_monitor_tick writes a fresh current_stage.json snapshot",
+                    "generated_at": generated_at.isoformat() if generated_at else "",
+                    "age_minutes": age_minutes,
+                    "max_age_minutes": max(int(max_age_minutes), 1),
+                }
+            ],
+            "advisory_reviews": [],
+        },
+        "lineage_sample_summary": {
+            "closed_trade_count": 0,
+            "proof_goal_closed_trades": 0,
+        },
+        "risk_gate_summary": {
+            "status": "NOT_AVAILABLE",
+            "risk_state": "UNKNOWN",
+        },
+        "validation_approval_strip": {
+            "approve_value": "stage_monitor_stale",
+            "align_value": "not_available",
+            "act_value": "refresh_stage_monitor_before_runtime_signoff",
+        },
+        "stage_monitor_stale": True,
+        "stage_file": str(path),
+        "stage_generated_at": generated_at.isoformat() if generated_at else "",
+        "stage_age_minutes": age_minutes,
+        "stage_max_age_minutes": max(int(max_age_minutes), 1),
+    }
+
+
+def _stage_is_stale(stage: dict[str, Any], *, max_age_minutes: int = _DEFAULT_MAX_STAGE_AGE_MINUTES) -> bool:
+    generated_at = _parse_ts(stage.get("generated_at"))
+    if generated_at is None:
+        return True
+    return (_now() - generated_at).total_seconds() > max(int(max_age_minutes), 1) * 60
 
 
 def _runtime_signoff_command(*, symbol: str, universe: str, days: int) -> str:
@@ -2319,11 +2480,12 @@ def _refresh_focus_from_local_artifact(
     *,
     stage: dict[str, Any] | None = None,
     symbol: str = "BTCUSDT",
-    universe: str = "usdt_reliable_balanced_31",
+    universe: str = "",
     days: int = 30,
     artifact_path_override: str = "",
 ) -> dict[str, Any]:
     payload = dict(focus or {})
+    universe = str(universe or configured_usdt_universe_name())
     current_artifact_path = str(artifact_path_override or payload.get("artifact_path") or "").strip()
     latest_artifact_path = _find_latest_replay_artifact_path(current_artifact_path)
     artifact_path = _select_refresh_artifact_path(current_artifact_path, latest_artifact_path)
@@ -2579,7 +2741,7 @@ def _attach_approval_template_focus(
             downside_profile=downside,
             stage=stage,
             symbol=symbol,
-            universe=str(payload.get("universe") or stage.get("universe") or "usdt_reliable_balanced_31"),
+            universe=str(payload.get("universe") or stage.get("universe") or configured_usdt_universe_name()),
             days=int(payload.get("days") or stage.get("days") or 30),
         )
         if mitigation_review_summary:
@@ -2695,7 +2857,7 @@ def _attach_approval_template_focus(
             focus,
             stage=stage,
             symbol=symbol,
-            universe=str(payload.get("universe") or stage.get("universe") or "usdt_reliable_balanced_31"),
+            universe=str(payload.get("universe") or stage.get("universe") or configured_usdt_universe_name()),
             days=int(payload.get("days") or stage.get("days") or 30),
             artifact_path_override=str(focus.get("artifact_path") or ""),
         )
@@ -3328,7 +3490,13 @@ def _report_path_value(path: Path) -> str:
 
 def main() -> int:
     args = parse_args()
-    stage = _read_stage(_resolve_root_path(args.stage_file))
+    stage_path = _resolve_root_path(args.stage_file)
+    if not stage_path.exists():
+        stage = _missing_stage_snapshot(stage_path)
+    else:
+        stage = _read_stage(stage_path)
+        if _stage_is_stale(stage):
+            stage = _stale_stage_snapshot(stage_path, stage)
     payload = _build_payload(
         stage,
         symbol=args.symbol,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -7,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 
 from app.api.deps import get_engine
+from app.core.config import get_settings
 from app.schemas.api import (
     AlphaResearchOut,
     AlertMetricsOut,
@@ -59,6 +62,7 @@ from app.schemas.api import (
 from app.services.candidate_expectations import expectation_contract
 from app.services.deployment_contracts import validation_alert_contract, validation_alert_strip_summary
 from app.services.health_check import HealthCheckService
+from app.services.market_data import configured_usdt_universe_name
 from app.services.position_sizing import PositionSizingService
 from app.services.strategy_mode import StrategyModeService
 from app.services.strategy_engine import StrategyEngine
@@ -66,6 +70,10 @@ from app.services.validation_report import validation_report_cache_miss_payload
 from app.services.tradingview_pine_script import load_tradingview_pine_script
 
 router = APIRouter()
+
+
+def _default_universe_name() -> str:
+    return configured_usdt_universe_name(get_settings())
 
 
 def _raise_binance_trade_error(exc: Exception) -> None:
@@ -100,6 +108,30 @@ def health_live() -> dict:
 def health_ready() -> ReadyOut:
     snapshot = HealthCheckService().evaluate()
     return ReadyOut(status=snapshot.status, checks=snapshot.checks, details=snapshot.details)
+
+
+@router.get("/ops/stage-board")
+def ops_stage_board_latest() -> dict[str, Any]:
+    report_dir = Path("reports/operations/stage_monitor")
+    candidates = (
+        report_dir / "current_stage.json",
+        report_dir / "latest_stage_board.json",
+    )
+    for path in candidates:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            payload.setdefault("available", True)
+            payload.setdefault("source_path", str(path))
+            return payload
+    return {
+        "available": False,
+        "status": "not_available",
+        "source_path": "",
+        "message": "stage board snapshot has not been generated yet",
+    }
 
 
 @router.get("/zones", response_model=list[ZoneOut])
@@ -226,25 +258,25 @@ def get_top_plans(
 
 @router.get("/scanner/top", response_model=list[ScannerItemOut])
 def scanner_top(
-    universe: str = Query(default="usdt_reliable_balanced_31"),
+    universe: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
     fast: bool = Query(default=False),
     engine: StrategyEngine = Depends(get_engine),
 ) -> list[ScannerItemOut]:
-    rows = engine.scanner_top(universe=universe, limit=limit, fast=fast)
+    rows = engine.scanner_top(universe=str(universe or _default_universe_name()), limit=limit, fast=fast)
     return [ScannerItemOut(**row) for row in rows]
 
 
 @router.get("/portfolio/budget", response_model=PortfolioBudgetReportOut)
 def portfolio_budget(
-    universe: str = Query(default="usdt_reliable_balanced_31"),
+    universe: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
     write_report: bool = Query(default=True),
     fast: bool = Query(default=False),
     engine: StrategyEngine = Depends(get_engine),
 ) -> PortfolioBudgetReportOut:
     payload = engine.portfolio_budget_report(
-        universe=universe,
+        universe=str(universe or _default_universe_name()),
         limit=limit,
         write_report=write_report,
         outcome_symbol_limit=0 if fast else None,
@@ -296,7 +328,7 @@ def indicator_pine_script() -> PlainTextResponse:
 @router.post("/operations/checklist", response_model=OperationalChecklistOut)
 def operational_checklist(
     symbol: str,
-    universe: str = Query(default="usdt_reliable_balanced_31"),
+    universe: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
     days: int = Query(default=30, ge=1, le=365),
     alert_test_lookback_hours: int = Query(default=24, ge=1, le=168),
@@ -305,7 +337,7 @@ def operational_checklist(
 ) -> OperationalChecklistOut:
     payload = engine.operational_checklist(
         symbol=symbol,
-        universe=universe,
+        universe=str(universe or _default_universe_name()),
         limit=limit,
         days=days,
         alert_test_lookback_hours=alert_test_lookback_hours,
@@ -585,13 +617,13 @@ def validation_scalp_experiment(
 
 @router.get("/validation/alpha-research", response_model=AlphaResearchOut)
 def validation_alpha_research(
-    universe: str = Query(default="usdt_reliable_balanced_31"),
+    universe: str | None = Query(default=None),
     symbol: str | None = Query(default=None),
     write_report: bool = Query(default=True),
     engine: StrategyEngine = Depends(get_engine),
 ) -> AlphaResearchOut:
     payload = engine.alpha_research_report(
-        universe=universe,
+        universe=str(universe or _default_universe_name()),
         focus_symbol=symbol,
         write_report=write_report,
     )

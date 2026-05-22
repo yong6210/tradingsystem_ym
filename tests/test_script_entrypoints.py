@@ -56,6 +56,7 @@ import scripts.run_runtime_signoff_review as runtime_signoff
 import scripts.run_split_review_followup as split_review_followup
 import scripts.run_timescale_migrations as timescale_migrations
 import scripts.run_trend_continuation_scan as trend_scan
+import scripts.run_validation_report_refresh as validation_report_refresh
 import scripts.stage_monitor_tick as stage_monitor_tick
 import scripts.verify_timescale_runtime as verify_timescale_runtime
 import scripts.watch_paper_candidate_drill as paper_watch
@@ -75,6 +76,12 @@ def test_runtime_scripts_support_direct_help_from_other_cwd(tmp_path: Path) -> N
         ROOT_DIR / "scripts" / "run_micro_main_usdt_backtest.py",
         ROOT_DIR / "scripts" / "run_micro_main_usdt_portfolio_replay_from_backtest.py",
         ROOT_DIR / "scripts" / "run_micro_main_weighted_filter_backtest.py",
+        ROOT_DIR / "scripts" / "search_micro_intrabar_walkforward_symbol_filters.py",
+        ROOT_DIR / "scripts" / "run_micro_intrabar_walkforward_paper_contract.py",
+        ROOT_DIR / "scripts" / "review_micro_intrabar_candidate_portfolio_mix.py",
+        ROOT_DIR / "scripts" / "build_micro_intrabar_portfolio_mix_live_config_proposal.py",
+        ROOT_DIR / "scripts" / "run_micro_intrabar_portfolio_mix_config_dry_run.py",
+        ROOT_DIR / "scripts" / "run_sir_exit_shadow_review.py",
         ROOT_DIR / "scripts" / "run_live_account_protection_audit.py",
         ROOT_DIR / "scripts" / "run_live_leverage_cap_sync.py",
         ROOT_DIR / "scripts" / "run_live_reconciliation_watchdog.py",
@@ -82,6 +89,7 @@ def test_runtime_scripts_support_direct_help_from_other_cwd(tmp_path: Path) -> N
         ROOT_DIR / "scripts" / "run_session_impulse_retest_opportunity_report.py",
         ROOT_DIR / "scripts" / "run_micro_live_boot_check.py",
         ROOT_DIR / "scripts" / "run_micro_live_ops_heartbeat.py",
+        ROOT_DIR / "scripts" / "run_validation_report_refresh.py",
         ROOT_DIR / "scripts" / "install_micro_live_ops_launchd.py",
         ROOT_DIR / "scripts" / "run_runtime_signoff_review.py",
     ):
@@ -122,6 +130,7 @@ def test_script_display_paths_allow_absolute_outputs_outside_repo(tmp_path: Path
         micro_live_runtime_guard,
         micro_live_liquidity_universe,
         micro_live_synthetic_canary,
+        validation_report_refresh,
         paper_candidate_drill,
         post_live_pruning,
         post_unlock,
@@ -183,6 +192,34 @@ def test_script_timestamp_helpers_tolerate_invalid_legacy_values() -> None:
         futures_csv_backtest._parse_optional_ts("legacy-invalid-timestamp")
     with pytest.raises(ValueError, match="invalid --target-date"):
         micro_data_backfill._parse_target_date("legacy-invalid-date")
+
+
+def test_live_order_lifecycle_current_contract_filter_helpers() -> None:
+    settings = SimpleNamespace(
+        auto_trading_micro_live_allowed_symbols="btcusdt, ethusdt",
+        auto_trading_allowed_symbols="ADAUSDC",
+        auto_trading_micro_live_allowed_families="session_impulse_retest",
+        auto_trading_allowed_families="sweep_reversal",
+    )
+
+    symbols, families = live_order_lifecycle_report._current_contract_filters(settings)
+
+    assert symbols == ["BTCUSDT", "ETHUSDT"]
+    assert families == ["session_impulse_retest"]
+
+
+def test_live_order_lifecycle_current_contract_filter_falls_back_to_global() -> None:
+    settings = SimpleNamespace(
+        auto_trading_micro_live_allowed_symbols="",
+        auto_trading_allowed_symbols="adausdt,xrpusdt",
+        auto_trading_micro_live_allowed_families="",
+        auto_trading_allowed_families="session_impulse_retest,trend_continuation",
+    )
+
+    symbols, families = live_order_lifecycle_report._current_contract_filters(settings)
+
+    assert symbols == ["ADAUSDT", "XRPUSDT"]
+    assert families == ["session_impulse_retest", "trend_continuation"]
 
 
 def test_worker_safe_int_tolerates_malformed_heartbeat_stats() -> None:
@@ -351,6 +388,91 @@ def test_session_impulse_retest_opportunity_report_status_keeps_live_intent_trut
     ) == ("submitted", "FILLED")
 
 
+def test_session_impulse_retest_opportunity_report_status_prefers_filled_submission_over_later_reject() -> None:
+    filled = SimpleNamespace(
+        submit_status="FILLED",
+        state="FILLED",
+        submitted_at=datetime(2026, 5, 19, 6, 43, tzinfo=UTC),
+        raw={
+            "live_protection_orders": {
+                "status": "EMERGENCY_FLATTENED",
+                "reason": "stop_loss_attach_failed",
+            }
+        },
+    )
+    later_reject = SimpleNamespace(
+        submit_status="LIVE_LIQUIDITY_BLOCKED",
+        state="REJECTED",
+        submitted_at=datetime(2026, 5, 19, 6, 50, tzinfo=UTC),
+        raw={},
+    )
+
+    assert sir_opportunity_report._status_for(
+        observed=True,
+        intents=[],
+        submissions=[later_reject, filled],
+        before_runtime_start=True,
+    ) == ("submitted", "FILLED")
+    assert sir_opportunity_report._primary_submission([later_reject, filled]) is filled
+
+
+def test_session_impulse_retest_opportunity_report_row_payload_includes_compact_live_details() -> None:
+    row = SimpleNamespace(
+        submission_id="sub_1",
+        state="FILLED",
+        submit_status="FILLED",
+        message="filled",
+        created_at=datetime(2026, 5, 19, 6, 43, tzinfo=UTC),
+        submitted_at=datetime(2026, 5, 19, 6, 43, tzinfo=UTC),
+        attachments={
+            "live_order_sizing": {
+                "sizing_mode": "RISK_PCT",
+                "account_equity_usdt": 183.18,
+                "target_notional": 341.1,
+                "normalized_notional": 189.65,
+                "actual_risk_usdt": 0.36,
+                "liquidity_gate_decision": "SPLIT_PARTIAL_SUBMIT",
+            },
+            "live_liquidity_gate": {
+                "decision": "SPLIT_PARTIAL_SUBMIT",
+                "reason_codes": ["one_minute_participation_too_high"],
+                "allowed_notional": 189.74,
+                "thresholds": {"max_spread_bps": 8.0},
+                "derived": {"order_notional": 341.02, "one_minute_volume_participation": 0.0359},
+                "snapshot": {"spread_bps": 7.9968, "market_slippage_bps": 0.0},
+            },
+            "live_stop_precheck": {
+                "decision": "PASS",
+                "stop_price": 1.249,
+                "reference_price": 1.251,
+                "stop_cushion_bps": 15.9872,
+            },
+            "live_protection_orders": {
+                "status": "EMERGENCY_FLATTENED",
+                "reason": "stop_loss_attach_failed",
+                "errors": [{"role": "stop_loss", "type": "HTTPStatusError", "message": "400"}],
+                "emergency_flatten": {
+                    "status": "FILLED",
+                    "reason": "emergency_flatten_submitted",
+                    "quantity": 151.6,
+                    "result": {"status": "FILLED", "order_id": 123, "side": "SELL"},
+                },
+            },
+        },
+        raw={},
+    )
+
+    payload = sir_opportunity_report._row_payload(row)
+
+    assert payload["details"]["live_order_sizing"]["target_notional"] == 341.1
+    assert payload["details"]["live_liquidity_gate"]["reason_codes"] == ["one_minute_participation_too_high"]
+    assert payload["details"]["live_stop_precheck"]["stop_cushion_bps"] == 15.9872
+    protection = payload["details"]["live_protection_orders"]
+    assert protection["status"] == "EMERGENCY_FLATTENED"
+    assert protection["first_error"]["type"] == "HTTPStatusError"
+    assert protection["emergency_flatten"]["result"]["order_id"] == 123
+
+
 def test_session_impulse_retest_opportunity_summary_can_exclude_pre_runtime_rows() -> None:
     rows = [
         {
@@ -411,6 +533,75 @@ def test_session_impulse_retest_opportunity_coverage_marks_limited_local_candles
     assert coverage["coverage_limited"] is True
     assert coverage["min_local_1m_coverage_hours"] == 20.0
     assert coverage["full_requested_lookback_with_preload_available"] is False
+
+
+def test_session_impulse_retest_opportunity_report_filters_disallowed_live_direction(monkeypatch) -> None:
+    now = datetime(2026, 5, 17, 12, 0, tzinfo=UTC)
+    settings = SimpleNamespace(
+        auto_trading_live_risk_per_trade_pct=0.01,
+        auto_trading_live_account_equity_usdt=200.0,
+        auto_trading_micro_live_direction_contract="BTCUSDT:LONG",
+        auto_trading_micro_live_allowed_sessions="london,new_york",
+        auto_trading_execution_mode="MICRO_LIVE",
+    )
+
+    class FakeSession:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    class FakeRepo:
+        def list_for_plan(self, plan_id: str, limit: int = 20) -> list[object]:
+            del plan_id, limit
+            return []
+
+    class FakeEngine:
+        intent_repo = FakeRepo()
+        submission_repo = FakeRepo()
+
+        def _session_impulse_retest_miss_detector_symbols(self, *, symbols: list[str] | None = None) -> list[str]:
+            return symbols or ["BTCUSDT"]
+
+        def _session_impulse_retest_runtime_started_at(self) -> None:
+            return None
+
+        def _session_impulse_retest_recent_replay_trades(self, **_kwargs: object) -> list[SimpleNamespace]:
+            return [
+                SimpleNamespace(entry_ts=now - timedelta(minutes=20), direction="short", r_value=1.0),
+                SimpleNamespace(entry_ts=now - timedelta(minutes=10), direction="long", r_value=2.0),
+            ]
+
+        def _to_utc(self, value: datetime) -> datetime:
+            return value
+
+        def _session_impulse_retest_plan_id_for_entry(
+            self,
+            *,
+            symbol: str,
+            direction: str,
+            entry_ts: datetime,
+        ) -> str:
+            return f"sir_{symbol}_{direction}_{entry_ts:%Y%m%dT%H%M}"
+
+        def _session_impulse_retest_runtime_plan_observation(self, **_kwargs: object) -> dict[str, object]:
+            return {"seen": False, "reason": "runtime_plan_not_observed"}
+
+    monkeypatch.setattr(sir_opportunity_report, "get_settings", lambda: settings)
+    monkeypatch.setattr(sir_opportunity_report, "SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(sir_opportunity_report, "StrategyEngine", lambda _db: FakeEngine())
+    monkeypatch.setattr(sir_opportunity_report, "_matching_plan_ids", lambda _db, _plan_id: [])
+    monkeypatch.setattr(sir_opportunity_report, "_candle_coverage_for_symbols", lambda *_args, **_kwargs: {})
+
+    payload = sir_opportunity_report.build_report(lookback_hours=24, symbols=["BTCUSDT"])
+
+    assert payload["contract"]["direction_contract"] == {"BTCUSDT": ["LONG"]}
+    assert payload["direction_filtered_count"] == 1
+    assert payload["direction_filtered_samples"][0]["direction"] == "short"
+    assert payload["summary"]["expected_order_count"] == 1
+    assert payload["summary"]["potential_performance"]["total_r"] == 2.0
+    assert payload["opportunities"][0]["direction"] == "long"
 
 
 def test_session_impulse_retest_runtime_audit_summary_separates_sir_from_legacy_generation() -> None:
@@ -542,8 +733,12 @@ def test_live_replay_parity_maps_dead_session_guidance_before_inactive_name() ->
 
 def test_worker_boot_check_is_required_only_for_live_modes(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = run_worker.get_settings()
+    monkeypatch.setattr(settings, "auto_trading_close_only", False)
     monkeypatch.setattr(settings, "auto_trading_execution_mode", "MICRO_LIVE")
     assert run_worker._live_mode_requires_boot_check() is True
+    monkeypatch.setattr(settings, "auto_trading_close_only", True)
+    assert run_worker._live_mode_requires_boot_check() is False
+    monkeypatch.setattr(settings, "auto_trading_close_only", False)
     monkeypatch.setattr(settings, "auto_trading_execution_mode", "SHADOW")
     assert run_worker._live_mode_requires_boot_check() is False
 
@@ -619,6 +814,8 @@ def test_worker_completed_heartbeat_preserves_stream_diagnostics(monkeypatch: py
         "auto_route_submit_calls": 1,
         "tp_market_fallback_calls": 0,
         "tp_market_fallback_submitted": 0,
+        "position_management_calls": 0,
+        "position_management_adjusted": 0,
         "reconnects": 0,
         "ingest_errors": 0,
         "skipped_non_final_candles": 0,
@@ -626,11 +823,13 @@ def test_worker_completed_heartbeat_preserves_stream_diagnostics(monkeypatch: py
         "refresh_errors": 5,
         "auto_route_errors": 6,
         "tp_market_fallback_errors": 0,
+        "position_management_errors": 0,
         "progress_callback_errors": 3,
         "last_ingest_error": "",
         "last_refresh_error": "",
         "last_auto_route_error": "",
         "last_tp_market_fallback_error": "",
+        "last_position_management_error": "",
         "last_progress_callback_error": "RuntimeError: boom",
         "last_ingest_success_at": "",
         "last_ingest_error_at": "",
@@ -640,6 +839,8 @@ def test_worker_completed_heartbeat_preserves_stream_diagnostics(monkeypatch: py
         "last_auto_route_error_at": "",
         "last_tp_market_fallback_success_at": "",
         "last_tp_market_fallback_error_at": "",
+        "last_position_management_success_at": "",
+        "last_position_management_error_at": "",
         "last_progress_callback_success_at": "",
         "last_progress_callback_error_at": "",
         "last_stream_error": "ConnectionClosed: test",

@@ -150,7 +150,7 @@ def build_jobs(*, label_prefix: str, python_bin: str, env_file: str = "") -> lis
                 "--no-fail-exit",
                 "--quiet",
             ],
-            start_interval=30 * 60,
+            start_interval=5 * 60,
         ),
         LaunchdJob(
             name="reconciliation_watchdog",
@@ -237,7 +237,7 @@ def build_jobs(*, label_prefix: str, python_bin: str, env_file: str = "") -> lis
                 "--hours",
                 "24",
                 "--limit",
-                "12",
+                "11",
                 "--since-ws-start",
                 "--quiet",
             ],
@@ -248,6 +248,12 @@ def build_jobs(*, label_prefix: str, python_bin: str, env_file: str = "") -> lis
             label=f"{prefix}.ops-heartbeat",
             args=[py, _script("run_micro_live_ops_heartbeat.py"), "--notify", "--no-fail-exit", "--quiet"],
             start_interval=15 * 60,
+        ),
+        LaunchdJob(
+            name="validation_report_refresh",
+            label=f"{prefix}.validation-report-refresh",
+            args=[py, _script("run_validation_report_refresh.py"), "--no-fail-exit", "--quiet"],
+            start_interval=4 * 60 * 60,
         ),
         LaunchdJob(
             name="binance_rule_drift",
@@ -318,11 +324,27 @@ def build_jobs(*, label_prefix: str, python_bin: str, env_file: str = "") -> lis
 def _program_arguments(*, args: list[str], working_dir: Path, env_file: str) -> list[str]:
     # Settings loads ROOT_DIR/.env through pydantic; shell-sourcing it would
     # misparse unquoted values such as LONG|SHORT direction contracts.
-    return list(args)
+    root_scripts = (ROOT_DIR / "scripts").resolve()
+    working_scripts = (working_dir / "scripts").resolve()
+    normalized: list[str] = []
+    for arg in args:
+        raw = str(arg)
+        try:
+            path = Path(raw).expanduser().resolve()
+        except OSError:
+            normalized.append(raw)
+            continue
+        try:
+            relative = path.relative_to(root_scripts)
+        except ValueError:
+            normalized.append(raw)
+            continue
+        normalized.append(str(working_scripts / relative))
+    return normalized
 
 
 def plist_payload(*, job: LaunchdJob, working_dir: Path, env_file: str) -> dict[str, Any]:
-    logs_dir = ROOT_DIR / "reports/operations/launchd/logs"
+    logs_dir = working_dir / "reports/operations/launchd/logs"
     payload: dict[str, Any] = {
         "Label": job.label,
         "ProgramArguments": _program_arguments(args=job.args, working_dir=working_dir, env_file=env_file),
@@ -369,7 +391,7 @@ def _copy_file_atomic(source: Path, target: Path) -> None:
 
 def write_plists(*, output_dir: Path, jobs: list[LaunchdJob], working_dir: Path, env_file: str) -> list[dict[str, Any]]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    (ROOT_DIR / "reports/operations/launchd/logs").mkdir(parents=True, exist_ok=True)
+    (working_dir / "reports/operations/launchd/logs").mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     for job in jobs:
         path = output_dir / f"{job.label}.plist"

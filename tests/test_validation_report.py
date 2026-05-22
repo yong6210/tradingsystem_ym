@@ -233,7 +233,10 @@ def test_validation_report_generation(monkeypatch) -> None:
             "active_manual_override": False,
             "manual_override_reason": "",
             "arm_required": True,
-            "summary": "Current evidence is weak enough that close-only review should happen before new entries continue.",
+            "summary": (
+                "Current evidence is weak enough to review close-only rules before expanding live entries; "
+                "this is advisory and does not automatically block the current live route."
+            ),
             "reason_codes": [
                 "kill_condition:close_only_review",
                 "risk_gate:closed",
@@ -2240,11 +2243,11 @@ def test_validation_report_generation(monkeypatch) -> None:
     assert result["operator_action_priority_summary"]["capture_context"]["family_focus"]["key"] == "trend_continuation"
     assert result["operator_action_priority_summary"]["experiment_context"]["entry_timing_target"]["symbol"] == "BTCUSDC"
     assert result["operator_action_priority_summary"]["experiment_context"]["entry_timing_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_entry_timing_split_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 30 --action run_entry_timing_split_review"
     )
     assert result["operator_action_priority_summary"]["experiment_context"]["execution_style_target"]["symbol"] == "BTCUSDC"
     assert result["operator_action_priority_summary"]["experiment_context"]["execution_style_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_execution_style_split_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 30 --action run_execution_style_split_review"
     )
     assert result["operator_action_priority_summary"]["advisory_only"] is True
     assert len(result["operator_action_priority_summary"]["next_actions"]) == 1
@@ -2532,7 +2535,10 @@ def test_validation_report_generation(monkeypatch) -> None:
     assert result["deployment_approval_summary"]["topline_message"].startswith("NO_GO:")
     assert (
         result["deployment_approval_summary"]["topline_summary_line"]
-        == "winner=runtime_proxy/runtime_validation_proxy_v1; worst=shock_concentration/FAIL/replay_output; promotion=stay_on_prototype"
+        == (
+            "validation_lineage=runtime_proxy/runtime_validation_proxy_v1; "
+            "worst=shock_concentration/FAIL/replay_output; recommended_action=stay_on_prototype"
+        )
     )
     assert result["deployment_approval_summary"]["playbook_go_no_go"] == "NO_GO"
     assert (
@@ -2608,8 +2614,8 @@ def test_validation_report_generation(monkeypatch) -> None:
     assert "topline_code: proxy_selected_trial_against_replay_backed_worst_scenario" in body
     assert "topline_message: NO_GO:" in body
     assert (
-        "topline_summary_line: winner=runtime_proxy/runtime_validation_proxy_v1; "
-        "worst=shock_concentration/FAIL/replay_output; promotion=stay_on_prototype"
+        "topline_summary_line: validation_lineage=runtime_proxy/runtime_validation_proxy_v1; "
+        "worst=shock_concentration/FAIL/replay_output; recommended_action=stay_on_prototype"
     ) in body
     assert "playbook_go_no_go: NO_GO" in body
     assert "playbook_code: no_go_proxy_selected_trial_against_replay_backed_worst_scenario" in body

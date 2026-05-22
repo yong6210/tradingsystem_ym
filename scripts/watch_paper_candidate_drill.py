@@ -18,6 +18,7 @@ DRILL_SCRIPT = ROOT_DIR / "scripts" / "run_paper_candidate_drill.py"
 _TRANSIENT_FAILURE_RETRY_ATTEMPTS = 3
 _TRANSIENT_FAILURE_RETRY_BASE_DELAY_SECONDS = 1.0
 
+from app.services.market_data import configured_usdt_universe_name
 from scripts.operation_report_io import atomic_write_text
 
 
@@ -28,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval-seconds", type=int, default=900, help="Polling interval between drill attempts.")
     parser.add_argument("--max-attempts", type=int, default=8, help="Maximum drill attempts before giving up.")
     parser.add_argument("--families", default="trend_continuation,sweep_reversal")
-    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
+    parser.add_argument("--universe", default=configured_usdt_universe_name())
     parser.add_argument("--candidate-limit", type=int, default=100)
     parser.add_argument("--symbol", default=None)
     parser.add_argument("--limit-symbols", type=int, default=30)

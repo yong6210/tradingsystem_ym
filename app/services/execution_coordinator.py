@@ -4,7 +4,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from datetime import datetime, timezone
+import json
 from math import isfinite
+import time
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -175,6 +177,7 @@ class ExecutionCoordinator:
         live_symbol_rules_loader: Callable[[str], dict[str, Any] | None] | None = None,
         live_liquidity_loader: Callable[..., dict[str, Any] | None] | None = None,
         live_balance_loader: Callable[[], Any] | None = None,
+        live_mark_price_loader: Callable[..., dict[str, Any] | None] | None = None,
         live_account_protection_loader: Callable[[], dict[str, Any] | None] | None = None,
         settings: Settings | None = None,
         paper_adapter: PaperExecutionAdapter | None = None,
@@ -188,6 +191,7 @@ class ExecutionCoordinator:
         self.live_symbol_rules_loader = live_symbol_rules_loader
         self.live_liquidity_loader = live_liquidity_loader
         self.live_balance_loader = live_balance_loader
+        self.live_mark_price_loader = live_mark_price_loader
         self.live_account_protection_loader = live_account_protection_loader
         self.settings = settings or get_settings()
         self.paper_adapter = paper_adapter or PaperExecutionAdapter()
@@ -198,8 +202,22 @@ class ExecutionCoordinator:
         return f"intent-{intent_id[-16:]}"
 
     @staticmethod
+    def _json_safe(value: Any) -> Any:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, Mapping):
+            return {str(key): ExecutionCoordinator._json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [ExecutionCoordinator._json_safe(item) for item in value]
+        try:
+            json.dumps(value)
+        except TypeError:
+            return str(value)
+        return value
+
+    @staticmethod
     def _safe_dict(value: Any) -> dict[str, Any]:
-        return dict(value) if isinstance(value, Mapping) else {}
+        return ExecutionCoordinator._json_safe(dict(value)) if isinstance(value, Mapping) else {}
 
     @staticmethod
     def _submission_blocks_plan_reentry(row: OrderSubmission | None) -> bool:
@@ -478,6 +496,88 @@ class ExecutionCoordinator:
                 "tick_size": round(tick_size, 8),
                 "price_rules_source": str((symbol_rules or {}).get("source") or "binance_exchange_info"),
                 "normalized_limit_price": round(float(normalized_price), 8),
+            }
+        )
+        return float(normalized_price), details
+
+    def _normalize_live_stop_price(
+        self,
+        *,
+        plan: Plan,
+        requested_price: float | None,
+    ) -> tuple[float | None, dict[str, Any]]:
+        if requested_price is None:
+            return None, {}
+
+        symbol = str(getattr(plan, "symbol", "") or "").upper()
+        details: dict[str, Any] = {
+            "price_role": "stop_loss",
+            "requested_stop_price": round(float(requested_price), 8),
+        }
+        symbol_rules, symbol_rules_error = self._live_symbol_rules(symbol)
+        if symbol_rules_error:
+            details["price_rules_loader_error"] = symbol_rules_error
+        tick_size = self._float_or((symbol_rules or {}).get("tick_size"), 0.0)
+        if tick_size <= 0.0:
+            details["price_rules_source"] = str((symbol_rules or {}).get("source") or "settings_passthrough")
+            details["normalized_stop_price"] = round(float(requested_price), 8)
+            return float(requested_price), details
+
+        direction = str(getattr(plan, "direction", "") or "").lower()
+        if direction == "short":
+            normalized_price = self._round_up_to_step(float(requested_price), step=tick_size)
+            rounding_mode = "round_up_for_short_stop"
+        else:
+            normalized_price = self._round_down_to_step(float(requested_price), step=tick_size)
+            rounding_mode = "round_down_for_long_stop"
+        details.update(
+            {
+                "direction": direction,
+                "tick_size": round(tick_size, 8),
+                "price_rules_source": str((symbol_rules or {}).get("source") or "binance_exchange_info"),
+                "stop_rounding_mode": rounding_mode,
+                "normalized_stop_price": round(float(normalized_price), 8),
+            }
+        )
+        return float(normalized_price), details
+
+    def _normalize_live_take_profit_price(
+        self,
+        *,
+        plan: Plan,
+        requested_price: float | None,
+    ) -> tuple[float | None, dict[str, Any]]:
+        if requested_price is None:
+            return None, {}
+
+        symbol = str(getattr(plan, "symbol", "") or "").upper()
+        details: dict[str, Any] = {
+            "price_role": "take_profit",
+            "requested_take_profit_price": round(float(requested_price), 8),
+        }
+        symbol_rules, symbol_rules_error = self._live_symbol_rules(symbol)
+        if symbol_rules_error:
+            details["price_rules_loader_error"] = symbol_rules_error
+        tick_size = self._float_or((symbol_rules or {}).get("tick_size"), 0.0)
+        if tick_size <= 0.0:
+            details["price_rules_source"] = str((symbol_rules or {}).get("source") or "settings_passthrough")
+            details["normalized_take_profit_price"] = round(float(requested_price), 8)
+            return float(requested_price), details
+
+        direction = str(getattr(plan, "direction", "") or "").lower()
+        if direction == "short":
+            normalized_price = self._round_up_to_step(float(requested_price), step=tick_size)
+            rounding_mode = "round_up_for_short_take_profit"
+        else:
+            normalized_price = self._round_down_to_step(float(requested_price), step=tick_size)
+            rounding_mode = "round_down_for_long_take_profit"
+        details.update(
+            {
+                "direction": direction,
+                "tick_size": round(tick_size, 8),
+                "price_rules_source": str((symbol_rules or {}).get("source") or "binance_exchange_info"),
+                "take_profit_rounding_mode": rounding_mode,
+                "normalized_take_profit_price": round(float(normalized_price), 8),
             }
         )
         return float(normalized_price), details
@@ -835,6 +935,14 @@ class ExecutionCoordinator:
             and market_slippage_bps > thresholds["max_market_slippage_bps"]
         ):
             split_codes.append("market_slippage_too_high")
+            slippage_allowed_notional = self._maybe_float(snapshot_payload.get("market_slippage_allowed_notional"))
+            if slippage_allowed_notional is not None and slippage_allowed_notional > 0.0:
+                notional_caps.append(
+                    {
+                        "source": "market_slippage",
+                        "allowed_notional": slippage_allowed_notional,
+                    }
+                )
 
         if volume_1m is not None and volume_1m > 0.0:
             participation_1m = order_notional / volume_1m
@@ -964,6 +1072,10 @@ class ExecutionCoordinator:
             self._float_or(getattr(self.settings, "auto_trading_live_stop_precheck_min_cushion_bps", 5.0), 5.0),
             0.0,
         )
+        min_tick_cushion = max(
+            self._int_or(getattr(self.settings, "auto_trading_live_stop_precheck_min_tick_cushion", 0), 0),
+            0,
+        )
         details: dict[str, Any] = {
             "enabled": bool(enabled),
             "decision": "PASS",
@@ -972,6 +1084,7 @@ class ExecutionCoordinator:
             "reference_price": round(float(reference_price or 0.0), 8),
             "stop_price": round(float(stop_price or 0.0), 8),
             "min_cushion_bps": round(min_cushion_bps, 4),
+            "min_tick_cushion": int(min_tick_cushion),
         }
         if not enabled:
             details["reason"] = "disabled"
@@ -1005,12 +1118,42 @@ class ExecutionCoordinator:
                 }
             )
             return details
+        symbol_rules, symbol_rules_error = self._live_symbol_rules(str(getattr(plan, "symbol", "") or "").upper())
+        if symbol_rules_error:
+            details["tick_rules_loader_error"] = symbol_rules_error
+        tick_size = self._float_or((symbol_rules or {}).get("tick_size"), 0.0)
+        if tick_size > 0.0:
+            stop_cushion_ticks = abs(reference_price - float(stop_price)) / tick_size
+            details["tick_size"] = round(float(tick_size), 8)
+            details["stop_cushion_ticks"] = round(float(stop_cushion_ticks), 4)
+            details["tick_rules_source"] = str((symbol_rules or {}).get("source") or "binance_exchange_info")
+            if min_tick_cushion > 0 and stop_cushion_ticks + 1e-9 < float(min_tick_cushion):
+                normalized_context = str(context or "").lower()
+                if normalized_context == "actual_fill":
+                    too_close_reason = "stop_too_close_to_actual_fill_tick_cushion"
+                elif normalized_context == "mark_price":
+                    too_close_reason = "stop_too_close_to_mark_price_tick_cushion"
+                else:
+                    too_close_reason = "stop_too_close_to_estimated_fill_tick_cushion"
+                details.update(
+                    {
+                        "decision": "BLOCK",
+                        "reason_codes": [too_close_reason],
+                        "message": (
+                            "Live order blocked because the stop is too close to the reference price "
+                            f"({stop_cushion_ticks:.2f} ticks < {min_tick_cushion} ticks)."
+                        ),
+                    }
+                )
+                return details
         if cushion_bps < min_cushion_bps:
-            too_close_reason = (
-                "stop_too_close_to_actual_fill"
-                if str(context or "").lower() == "actual_fill"
-                else "stop_too_close_to_estimated_fill"
-            )
+            normalized_context = str(context or "").lower()
+            if normalized_context == "actual_fill":
+                too_close_reason = "stop_too_close_to_actual_fill"
+            elif normalized_context == "mark_price":
+                too_close_reason = "stop_too_close_to_mark_price"
+            else:
+                too_close_reason = "stop_too_close_to_estimated_fill"
             details.update(
                 {
                     "decision": "BLOCK",
@@ -1035,6 +1178,7 @@ class ExecutionCoordinator:
         normalized_live_price: float | None,
         liquidity_gate: dict[str, Any],
         live_sizing: dict[str, Any],
+        position_side: str | None = None,
     ) -> dict[str, Any]:
         enabled = self._safe_bool(getattr(self.settings, "auto_trading_live_stop_precheck_enabled", True), default=True)
         fail_closed = self._safe_bool(
@@ -1056,9 +1200,8 @@ class ExecutionCoordinator:
             return details
 
         close_side = self._live_close_side(plan)
-        stop_price, stop_price_details = self._normalize_live_limit_price(
-            symbol=str(plan.symbol or "").upper(),
-            side=close_side,
+        stop_price, stop_price_details = self._normalize_live_stop_price(
+            plan=plan,
             requested_price=self._maybe_float(getattr(plan, "sl", None)),
         )
         details.update(
@@ -1098,13 +1241,94 @@ class ExecutionCoordinator:
             )
             return details
 
-        guard = self._live_stop_distance_guard(
+        estimated_guard = self._live_stop_distance_guard(
             plan=plan,
             stop_price=float(stop_price),
             reference_price=reference_price,
             context="estimated_fill",
         )
-        return {**details, **guard}
+        precheck = {**details, **estimated_guard}
+        if str(estimated_guard.get("decision") or "PASS").upper() != "PASS":
+            return precheck
+
+        mark_price_guard = self._live_stop_mark_price_guard(
+            plan=plan,
+            stop_price=float(stop_price),
+            position_side=position_side,
+            working_type=str(getattr(self.settings, "auto_trading_live_stop_working_type", "MARK_PRICE") or "MARK_PRICE").upper(),
+        )
+        precheck["mark_price_stop_guard"] = mark_price_guard
+        if str(mark_price_guard.get("decision") or "PASS").upper() != "PASS":
+            return {
+                **precheck,
+                **mark_price_guard,
+                "estimated_stop_guard": estimated_guard,
+                "reason": str(mark_price_guard.get("reason") or "mark_price_stop_guard_blocked"),
+                "message": str(mark_price_guard.get("message") or "Live entry blocked because the stop is too close to mark price."),
+            }
+        return precheck
+
+    def _live_stop_mark_price_guard(
+        self,
+        *,
+        plan: Plan,
+        stop_price: float,
+        position_side: str | None,
+        working_type: str,
+    ) -> dict[str, Any]:
+        enabled = self._safe_bool(
+            getattr(self.settings, "auto_trading_live_stop_mark_price_guard_enabled", True),
+            default=True,
+        )
+        details: dict[str, Any] = {
+            "enabled": bool(enabled),
+            "decision": "PASS",
+            "reason": "ok",
+            "working_type": str(working_type or "").upper(),
+            "symbol": str(getattr(plan, "symbol", "") or "").upper(),
+            "position_side": self._expected_live_position_side(plan=plan, position_side=position_side),
+        }
+        if not enabled:
+            details["reason"] = "disabled"
+            return details
+        if str(working_type or "").upper() != "MARK_PRICE":
+            details["reason"] = "working_type_not_mark_price"
+            return details
+        if self.live_mark_price_loader is None:
+            details["reason"] = "mark_price_loader_missing"
+            return details
+
+        try:
+            snapshot = self.live_mark_price_loader(
+                symbol=details["symbol"],
+                position_side=details["position_side"],
+            )
+        except Exception as exc:  # pragma: no cover - defensive live-submit guard
+            details.update(
+                {
+                    "reason": "mark_price_loader_error",
+                    "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                }
+            )
+            return details
+
+        snapshot_dict = self._safe_dict(snapshot)
+        mark_price = (
+            self._maybe_float(snapshot_dict.get("mark_price"))
+            or self._maybe_float(self._safe_dict(snapshot_dict.get("position")).get("mark_price"))
+        )
+        details["snapshot"] = snapshot_dict
+        if mark_price is None or mark_price <= 0.0:
+            details["reason"] = "mark_price_unavailable"
+            return details
+
+        guard = self._live_stop_distance_guard(
+            plan=plan,
+            stop_price=float(stop_price),
+            reference_price=float(mark_price),
+            context="mark_price",
+        )
+        return {**details, **guard, "reference_price_source": "mark_price"}
 
     def _live_submit_fill_payload(
         self,
@@ -1156,6 +1380,13 @@ class ExecutionCoordinator:
             "reduce_only": self._safe_bool(live_result.get("reduce_only")),
             "notes": {"submit_path": "execution_coordinator_live_submit"},
         }
+        fill_payload.update(
+            self._estimated_live_fill_fee_payload(
+                live_result=live_result,
+                fill_price=float(fill_price),
+                fill_qty=float(executed_qty),
+            )
+        )
         return fill_id, float(fill_price), float(executed_qty), fill_payload
 
     @staticmethod
@@ -1165,6 +1396,13 @@ class ExecutionCoordinator:
     @staticmethod
     def _is_hedge_position_side(position_side: str | None) -> bool:
         return str(position_side or "").upper() in {"LONG", "SHORT"}
+
+    @staticmethod
+    def _expected_live_position_side(*, plan: Plan, position_side: str | None) -> str:
+        normalized_side = str(position_side or "").upper()
+        if normalized_side in {"LONG", "SHORT"}:
+            return normalized_side
+        return "LONG" if str(getattr(plan, "direction", "") or "").lower() == "long" else "SHORT"
 
     @staticmethod
     def _protection_client_order_id(role: str) -> str:
@@ -1221,9 +1459,8 @@ class ExecutionCoordinator:
                     }
                 )
                 continue
-            normalized_price, price_details = self._normalize_live_limit_price(
-                symbol=str(plan.symbol or "").upper(),
-                side=self._live_close_side(plan),
+            normalized_price, price_details = self._normalize_live_take_profit_price(
+                plan=plan,
                 requested_price=price,
             )
             if normalized_price is None or normalized_price <= 0.0:
@@ -1292,7 +1529,198 @@ class ExecutionCoordinator:
             "reduce_only": self._safe_bool(live_result.get("reduce_only")),
             "notes": dict(notes or {}),
         }
+        fill_payload.update(
+            self._estimated_live_fill_fee_payload(
+                live_result=live_result,
+                fill_price=float(fill_price),
+                fill_qty=float(executed_qty),
+            )
+        )
         return fill_anchor, float(fill_price), float(executed_qty), fill_payload
+
+    def _estimated_live_fill_fee_payload(
+        self,
+        *,
+        live_result: dict[str, Any],
+        fill_price: float,
+        fill_qty: float,
+    ) -> dict[str, Any]:
+        raw = self._safe_dict(live_result.get("raw"))
+        notional = (
+            self._maybe_float(live_result.get("cum_quote"))
+            or self._maybe_float(raw.get("cumQuote"))
+            or self._maybe_float(raw.get("cum_quote"))
+            or max(float(fill_price), 0.0) * max(float(fill_qty), 0.0)
+        )
+        if notional <= 0.0:
+            return {
+                "fee": 0.0,
+                "fee_source": "estimated_fee_unavailable",
+                "fee_notional": 0.0,
+            }
+        order_type = str(live_result.get("order_type") or raw.get("type") or "").upper()
+        fee_bps = (
+            self._float_or(getattr(self.settings, "maker_fee_bps", 2.0), 2.0)
+            if order_type == "LIMIT"
+            else self._float_or(getattr(self.settings, "taker_fee_bps", 4.0), 4.0)
+        )
+        fee = float(notional) * max(float(fee_bps), 0.0) / 10_000.0
+        return {
+            "fee": round(fee, 8),
+            "fee_source": "estimated_from_config",
+            "fee_bps": round(float(fee_bps), 6),
+            "fee_notional": round(float(notional), 8),
+            "fee_side": "one_way",
+        }
+
+    def _verify_live_protection_after_attach(
+        self,
+        *,
+        plan: Plan,
+        position_side: str | None,
+        live: bool,
+        parent_client_order_id: str,
+        protection_kind: str,
+    ) -> dict[str, Any]:
+        normalized_kind = str(protection_kind or "").strip().lower()
+        take_profit_kind = normalized_kind in {"take_profit", "tp", "target"}
+        flag_name = "has_take_profit" if take_profit_kind else "has_stop"
+        missing_issue_type = "missing_take_profit_protection" if take_profit_kind else "missing_stop_protection"
+        confirmed_reason = "take_profit_protection_confirmed" if take_profit_kind else "stop_protection_confirmed"
+        missing_reason = "matched_position_missing_take_profit" if take_profit_kind else "matched_position_missing_stop"
+        issue_reason = "confirmed_missing_take_profit_protection" if take_profit_kind else "confirmed_missing_stop_protection"
+        enabled_attr = (
+            "auto_trading_live_take_profit_verify_after_attach_enabled"
+            if take_profit_kind
+            else "auto_trading_live_protection_verify_after_attach_enabled"
+        )
+        enabled = self._safe_bool(
+            getattr(self.settings, enabled_attr, True),
+            default=True,
+        )
+        fail_closed = self._safe_bool(
+            getattr(self.settings, "auto_trading_live_protection_verify_fail_closed", True),
+            default=True,
+        )
+        attempts = max(int(self._float_or(getattr(self.settings, "auto_trading_live_protection_verify_attempts", 3), 3)), 1)
+        sleep_seconds = max(
+            self._float_or(getattr(self.settings, "auto_trading_live_protection_verify_sleep_seconds", 0.5), 0.5),
+            0.0,
+        )
+        symbol = str(getattr(plan, "symbol", "") or "").upper()
+        expected_side = self._expected_live_position_side(plan=plan, position_side=position_side)
+        details: dict[str, Any] = {
+            "enabled": bool(enabled),
+            "decision": "PASS",
+            "reason": "disabled" if not enabled else "ok",
+            "fail_closed": bool(fail_closed),
+            "protection_kind": "take_profit" if take_profit_kind else "stop",
+            "symbol": symbol,
+            "position_side": expected_side,
+            "attempts": attempts,
+            "sleep_seconds": round(sleep_seconds, 4),
+            "parent_client_order_id": parent_client_order_id,
+        }
+        if not enabled:
+            return details
+        if not live:
+            details.update({"decision": "SKIP", "reason": "not_live"})
+            return details
+        if self.live_account_protection_loader is None:
+            details.update(
+                {
+                    "decision": "BLOCK" if fail_closed else "SKIP",
+                    "reason": "account_protection_loader_missing",
+                }
+            )
+            return details
+
+        last_error: dict[str, str] | None = None
+        last_payload_summary: dict[str, Any] = {}
+        for attempt in range(1, attempts + 1):
+            details["attempt"] = attempt
+            try:
+                payload = self.live_account_protection_loader()
+            except Exception as exc:  # pragma: no cover - defensive live-submit guard
+                last_error = {"type": exc.__class__.__name__, "message": str(exc)}
+                details["last_error"] = last_error
+            else:
+                payload_dict = self._safe_dict(payload)
+                issues = [self._safe_dict(item) for item in list(payload_dict.get("issues") or [])]
+                positions = [self._safe_dict(item) for item in list(payload_dict.get("positions") or [])]
+                last_payload_summary = {
+                    "overall_status": str(payload_dict.get("overall_status") or ""),
+                    "severity": str(payload_dict.get("severity") or ""),
+                    "fail_count": int(self._float_or(payload_dict.get("fail_count"))),
+                    "warn_count": int(self._float_or(payload_dict.get("warn_count"))),
+                    "open_position_count": int(self._float_or(payload_dict.get("open_position_count"))),
+                    "open_order_count": int(self._float_or(payload_dict.get("open_order_count"))),
+                }
+                details["last_payload_summary"] = last_payload_summary
+
+                for issue in issues:
+                    issue_symbol = str(issue.get("symbol") or "").upper()
+                    issue_side = str(issue.get("position_side") or "").upper()
+                    issue_type = str(issue.get("type") or "").lower()
+                    if issue_symbol == symbol and issue_side in {"", expected_side} and issue_type == missing_issue_type:
+                        details.update(
+                            {
+                                "decision": "BLOCK",
+                                "reason": issue_reason,
+                                "issue": issue,
+                            }
+                        )
+                        return details
+
+                matched_position = None
+                for position in positions:
+                    position_symbol = str(position.get("symbol") or "").upper()
+                    position_side_value = str(position.get("position_side") or position.get("side") or "").upper()
+                    if position_symbol == symbol and position_side_value == expected_side:
+                        matched_position = position
+                        break
+
+                if matched_position is None:
+                    details.update(
+                        {
+                            "decision": "PASS",
+                            "reason": "no_matching_open_position",
+                        }
+                    )
+                    return details
+
+                if self._safe_bool(matched_position.get(flag_name), default=False):
+                    details.update(
+                        {
+                            "decision": "PASS",
+                            "reason": confirmed_reason,
+                            "position": matched_position,
+                        }
+                    )
+                    return details
+
+                details.update(
+                    {
+                        "decision": "BLOCK",
+                        "reason": missing_reason,
+                        "position": matched_position,
+                    }
+                )
+                return details
+
+            if attempt < attempts and sleep_seconds > 0.0:
+                time.sleep(sleep_seconds)
+
+        details.update(
+            {
+                "decision": "BLOCK" if fail_closed else "SKIP",
+                "reason": "verification_error" if last_error else "verification_inconclusive",
+                "last_payload_summary": last_payload_summary,
+            }
+        )
+        if last_error:
+            details["last_error"] = last_error
+        return details
 
     def _emergency_flatten_after_protection_failure(
         self,
@@ -1390,7 +1818,7 @@ class ExecutionCoordinator:
                 fill_ts=datetime.now(timezone.utc),
                 price=fill_price,
                 qty=fill_qty,
-                fee=0.0,
+                fee=self._float_or(payload.get("fee"), 0.0),
                 payload=payload,
             )
 
@@ -1437,22 +1865,47 @@ class ExecutionCoordinator:
         close_side = self._live_close_side(plan)
         live_position_side = position_side or self._binance_live_position_side(plan=plan, side=close_side)
         hedge_mode = self._is_hedge_position_side(live_position_side)
-        stop_price, stop_price_details = self._normalize_live_limit_price(
-            symbol=symbol,
-            side=close_side,
+        stop_price, stop_price_details = self._normalize_live_stop_price(
+            plan=plan,
             requested_price=self._maybe_float(getattr(plan, "sl", None)),
         )
-        if stop_price is None or stop_price <= 0.0:
-            return {
-                "status": "FAILED",
-                "reason": "stop_price_missing",
-                "orders": [],
-                "errors": [{"role": "stop_loss", "message": "Live protection requires a positive stop price."}],
-                "parent_client_order_id": parent_client_order_id,
-            }
-
         orders: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
+        if stop_price is None or stop_price <= 0.0:
+            errors.append(
+                {
+                    "role": "stop_loss",
+                    "type": "StopPriceMissing",
+                    "message": "Live protection requires a positive stop price.",
+                    "details": stop_price_details,
+                }
+            )
+            emergency_flatten = self._emergency_flatten_after_protection_failure(
+                plan=plan,
+                entry_quantity=float(quantity),
+                close_side=close_side,
+                position_side=live_position_side,
+                hedge_mode=hedge_mode,
+                parent_client_order_id=parent_client_order_id,
+                failure_reason="stop_price_missing",
+                errors=errors,
+                live=live,
+            )
+            flattened = (
+                str(emergency_flatten.get("status") or "").upper() == "FILLED"
+                and not self._safe_bool(emergency_flatten.get("requires_reconciliation"), default=True)
+            )
+            return {
+                "status": "EMERGENCY_FLATTENED" if flattened else "FAILED",
+                "reason": "stop_price_missing",
+                "orders": [],
+                "errors": errors,
+                "emergency_flatten": emergency_flatten,
+                "parent_client_order_id": parent_client_order_id,
+                "requires_reconciliation": not flattened,
+            }
+
+        working_type = str(getattr(self.settings, "auto_trading_live_stop_working_type", "MARK_PRICE") or "MARK_PRICE").upper()
         entry_reference_price = self._maybe_float(entry_price)
         if entry_reference_price is not None and entry_reference_price > 0.0:
             actual_fill_stop_guard = self._live_stop_distance_guard(
@@ -1496,7 +1949,47 @@ class ExecutionCoordinator:
                     "requires_reconciliation": not flattened,
                 }
 
-        working_type = str(getattr(self.settings, "auto_trading_live_stop_working_type", "MARK_PRICE") or "MARK_PRICE").upper()
+        mark_price_stop_guard = self._live_stop_mark_price_guard(
+            plan=plan,
+            stop_price=float(stop_price),
+            position_side=live_position_side,
+            working_type=working_type,
+        )
+        if str(mark_price_stop_guard.get("decision") or "PASS").upper() != "PASS":
+            errors.append(
+                {
+                    "role": "stop_loss",
+                    "type": "StopMarkPriceGuardBlocked",
+                    "message": str(mark_price_stop_guard.get("message") or "Stop is too close to mark price."),
+                    "details": mark_price_stop_guard,
+                }
+            )
+            emergency_flatten = self._emergency_flatten_after_protection_failure(
+                plan=plan,
+                entry_quantity=float(quantity),
+                close_side=close_side,
+                position_side=live_position_side,
+                hedge_mode=hedge_mode,
+                parent_client_order_id=parent_client_order_id,
+                failure_reason="mark_price_stop_distance_guard_blocked",
+                errors=errors,
+                live=live,
+            )
+            flattened = (
+                str(emergency_flatten.get("status") or "").upper() == "FILLED"
+                and not self._safe_bool(emergency_flatten.get("requires_reconciliation"), default=True)
+            )
+            return {
+                "status": "EMERGENCY_FLATTENED" if flattened else "FAILED",
+                "reason": "mark_price_stop_distance_guard_blocked",
+                "orders": orders,
+                "errors": errors,
+                "mark_price_stop_guard": mark_price_stop_guard,
+                "emergency_flatten": emergency_flatten,
+                "parent_client_order_id": parent_client_order_id,
+                "requires_reconciliation": not flattened,
+            }
+
         stop_order = {
             "role": "stop_loss",
             "client_order_id": self._protection_client_order_id("sl"),
@@ -1558,8 +2051,55 @@ class ExecutionCoordinator:
                 "requires_reconciliation": not flattened,
             }
 
+        stop_verification = self._verify_live_protection_after_attach(
+            plan=plan,
+            position_side=live_position_side,
+            live=live,
+            parent_client_order_id=parent_client_order_id,
+            protection_kind="stop",
+        )
+        if str(stop_verification.get("decision") or "PASS").upper() == "BLOCK":
+            errors.append(
+                {
+                    "role": "stop_loss",
+                    "type": "StopProtectionVerificationFailed",
+                    "message": "Live stop protection was not confirmed after stop-order ACK.",
+                    "details": stop_verification,
+                }
+            )
+            emergency_flatten = self._emergency_flatten_after_protection_failure(
+                plan=plan,
+                entry_quantity=float(quantity),
+                close_side=close_side,
+                position_side=live_position_side,
+                hedge_mode=hedge_mode,
+                parent_client_order_id=parent_client_order_id,
+                failure_reason="stop_loss_verify_failed",
+                errors=errors,
+                live=live,
+            )
+            flattened = (
+                str(emergency_flatten.get("status") or "").upper() == "FILLED"
+                and not self._safe_bool(emergency_flatten.get("requires_reconciliation"), default=True)
+            )
+            return {
+                "status": "EMERGENCY_FLATTENED" if flattened else "FAILED",
+                "reason": "stop_loss_verify_failed",
+                "orders": orders,
+                "errors": errors,
+                "stop_verification": stop_verification,
+                "emergency_flatten": emergency_flatten,
+                "parent_client_order_id": parent_client_order_id,
+                "requires_reconciliation": not flattened,
+            }
+
         tp_enabled = self._safe_bool(getattr(self.settings, "auto_trading_live_tp_limit_attach_enabled", True), default=True)
         skipped_targets: list[dict[str, Any]] = []
+        tp_verification: dict[str, Any] = {
+            "enabled": False,
+            "decision": "SKIP",
+            "reason": "tp_limit_attach_disabled" if not tp_enabled else "no_tp_order_submitted",
+        }
         if tp_enabled:
             tp_targets, skipped_targets = self._live_tp_targets(plan=plan, entry_quantity=float(quantity))
             for target in tp_targets:
@@ -1599,6 +2139,25 @@ class ExecutionCoordinator:
                 except Exception as exc:
                     errors.append({"role": str(target["label"]), "type": exc.__class__.__name__, "message": str(exc)})
 
+            attached_tp_order_count = sum(1 for order in orders if str(order.get("role") or "").startswith("tp"))
+            if attached_tp_order_count > 0:
+                tp_verification = self._verify_live_protection_after_attach(
+                    plan=plan,
+                    position_side=live_position_side,
+                    live=live,
+                    parent_client_order_id=parent_client_order_id,
+                    protection_kind="take_profit",
+                )
+                if str(tp_verification.get("decision") or "PASS").upper() == "BLOCK":
+                    errors.append(
+                        {
+                            "role": "take_profit",
+                            "type": "TakeProfitProtectionVerificationFailed",
+                            "message": "Live take-profit protection was not confirmed after take-profit order ACK.",
+                            "details": tp_verification,
+                        }
+                    )
+
         status = "ATTACHED" if not errors else "PARTIAL"
         return {
             "status": status,
@@ -1609,6 +2168,8 @@ class ExecutionCoordinator:
             "position_side": live_position_side,
             "close_side": close_side,
             "tp_limit_attach_enabled": tp_enabled,
+            "stop_verification": stop_verification,
+            "tp_verification": tp_verification,
             "requires_reconciliation": bool(errors),
         }
 
@@ -2177,6 +2738,7 @@ class ExecutionCoordinator:
             normalized_live_price=normalized_live_price,
             liquidity_gate=liquidity_gate,
             live_sizing=live_sizing,
+            position_side=live_position_side,
         )
         if str(stop_precheck.get("decision") or "PASS").upper() != "PASS":
             row = self._rejection_submission(
@@ -2367,7 +2929,7 @@ class ExecutionCoordinator:
                     fill_ts=datetime.now(timezone.utc),
                     price=fill_price,
                     qty=fill_qty,
-                    fee=0.0,
+                    fee=self._float_or(fill_payload.get("fee"), 0.0),
                     payload=fill_payload,
                 )
             )

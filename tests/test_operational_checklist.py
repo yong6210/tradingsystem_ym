@@ -481,7 +481,10 @@ def test_operational_checklist_generates_report_and_statuses(tmp_path: Path) -> 
                     "active_manual_override": False,
                     "manual_override_reason": "",
                     "arm_required": True,
-                    "summary": "Current evidence is weak enough that close-only review should happen before new entries continue.",
+                    "summary": (
+                        "Current evidence is weak enough to review close-only rules before expanding live entries; "
+                        "this is advisory and does not automatically block the current live route."
+                    ),
                     "reason_codes": [
                         "kill_condition:close_only_review",
                         "risk_gate:closed",
@@ -1266,6 +1269,83 @@ def test_operational_checklist_generates_report_and_statuses(tmp_path: Path) -> 
     assert portfolio_item["evidence"]["playbook_action"] == "continue_candidate_review_under_portfolio_caps"
 
 
+def test_operational_checklist_labels_current_live_family_warnings_as_expansion_advisory() -> None:
+    settings = Settings(
+        alert_discord_webhook_url="https://discord.example/webhook",
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_families="session_impulse_retest",
+    )
+    service = OperationalChecklistService(alert_repo=_AlertRepoStub([]), settings=settings)
+    validation_payload = {
+        "validation_report": {
+            "rollout_recommendation_available": True,
+            "rollout_recommendation_summary": {
+                "available": True,
+                "family": "session_impulse_retest",
+                "recommendation": "research_only",
+                "summary": "legacy compare-only wording should not be shown for the current live family",
+            },
+            "promotion_governance_available": True,
+            "promotion_governance_summary": {
+                "available": True,
+                "family": "session_impulse_retest",
+                "state": "defer",
+                "summary": "legacy promotion defer wording should not be shown for the current live family",
+            },
+            "promotion_review_queue_available": True,
+            "promotion_review_queue_summary": {
+                "available": True,
+                "headline_family": "session_impulse_retest",
+                "queue_state": "defer_first_queue",
+                "summary": "legacy review queue wording should not be shown for the current live family",
+            },
+            "auto_promotion_rollout_execution_available": True,
+            "auto_promotion_rollout_execution_summary": {
+                "available": True,
+                "target_family": "session_impulse_retest",
+                "execution_stage": "auto_execution_blocked",
+                "summary": "legacy auto execution blocked wording should not be shown for the current live family",
+            },
+            "research_promotion_operating_loop_available": True,
+            "research_promotion_operating_loop_summary": {
+                "available": True,
+                "family": "session_impulse_retest",
+                "loop_state": "research_backlog",
+                "summary": "legacy research backlog wording should not be shown for the current live family",
+            },
+            "positive_evidence_expansion_available": True,
+            "positive_evidence_expansion_summary": {
+                "available": True,
+                "family": "session_impulse_retest",
+                "state": "not_ready",
+                "summary": "legacy positive expansion wording should not be shown for the current live family",
+            },
+        }
+    }
+
+    items = [
+        service._rollout_recommendation_item(validation_payload=validation_payload),
+        service._promotion_governance_item(validation_payload=validation_payload),
+        service._promotion_review_queue_item(validation_payload=validation_payload),
+        service._auto_promotion_rollout_execution_item(validation_payload=validation_payload),
+        service._research_promotion_operating_loop_item(validation_payload=validation_payload),
+        service._positive_evidence_expansion_item(validation_payload=validation_payload),
+    ]
+
+    for item in items:
+        assert item["status"] == "WARN"
+        assert item["blocking"] is False
+        assert item["evidence"]["current_live_family"] is True
+        assert "already active in the current MICRO_LIVE route" in item["summary"]
+        assert "do not expand risk, universe, or promotion scope" in item["summary"]
+
+    validation_item = service._validation_item(validation_payload={"validation_report": {"status": "WARN"}})
+    assert validation_item["summary"] == (
+        "validation is WARN; operator review required before expanding live risk or rollout scope"
+    )
+    assert validation_item["evidence"]["live_mode_active"] is True
+
+
 def test_operational_checklist_marks_missing_alert_test_as_manual() -> None:
     settings = Settings(alert_discord_webhook_url="https://discord.example/webhook")
     service = OperationalChecklistService(alert_repo=_AlertRepoStub([]), settings=settings)
@@ -1732,14 +1812,20 @@ def test_operational_checklist_uses_validation_top_level_deployment_contract() -
             "approval_topline_status": "PASS",
             "approval_topline_code": "approval_template_aligned",
             "approval_topline_message": (
-                "GO: GO: approval template is aligned with replay-backed downside and the current threshold-lineage winner. "
-                "winner=true_threshold/v2; worst=stressed_cost/PASS/stressed_cost; promotion=promote_true_market_runner."
+                "GO: GO: approval template is aligned with the configured replay-backed validation evidence. "
+                "validation_lineage=true_threshold/v2; worst=stressed_cost/PASS/stressed_cost; "
+                "recommended_action=promote_true_market_runner."
             ),
             "playbook_go_no_go": "GO",
             "playbook_code": "go_approval_template_aligned",
             "playbook_action": "proceed_with_configured_rollout",
-            "playbook_message": "GO: approval template is aligned with replay-backed downside and the current threshold-lineage winner.",
-            "approval_topline_summary_line": "winner=true_threshold/v2; worst=stressed_cost/PASS/stressed_cost; promotion=promote_true_market_runner",
+            "playbook_message": (
+                "GO: approval template is aligned with the configured replay-backed validation evidence."
+            ),
+            "approval_topline_summary_line": (
+                "validation_lineage=true_threshold/v2; worst=stressed_cost/PASS/stressed_cost; "
+                "recommended_action=promote_true_market_runner"
+            ),
             "validation_alert": None,
             "strategy_v2_pbo_dsr_design": {"design_ready": True, "available": False},
         },
@@ -1789,7 +1875,7 @@ def test_operational_checklist_uses_validation_top_level_deployment_contract() -
     assert validation_item["evidence"]["playbook_go_no_go"] == "GO"
     assert validation_item["evidence"]["playbook_code"] == "go_approval_template_aligned"
     assert validation_item["evidence"]["playbook_action"] == "proceed_with_configured_rollout"
-    assert validation_item["evidence"]["approval_topline_summary_line"].startswith("winner=true_threshold/")
+    assert validation_item["evidence"]["approval_topline_summary_line"].startswith("validation_lineage=true_threshold/")
 
 
 def test_operational_checklist_surfaces_portfolio_deployment_language_evidence() -> None:

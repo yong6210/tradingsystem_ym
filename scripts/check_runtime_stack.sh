@@ -85,11 +85,31 @@ done
 echo
 echo "== candle freshness =="
 (cd "$PYTHON_ROOT" && PYTHONPATH="$PYTHON_ROOT" "$PYTHON_BIN" - <<'PY'
+from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.db.repositories import CandleRepository
+
+
+def _csv_symbols(raw: str) -> list[str]:
+    values: list[str] = []
+    for item in str(raw or "").split(","):
+        symbol = item.strip().upper()
+        if symbol and symbol not in values:
+            values.append(symbol)
+    return values
+
+
+settings = get_settings()
+symbols = _csv_symbols(getattr(settings, "auto_trading_micro_live_allowed_symbols", ""))
+if not symbols:
+    symbols = _csv_symbols(getattr(settings, "auto_trading_allowed_symbols", ""))
+if not symbols:
+    symbols = ["BTCUSDT"]
+
+print("symbols", ",".join(symbols))
 with SessionLocal() as db:
     repo = CandleRepository(db)
-    for sym in ["BTCUSDT", "SOLUSDT", "XRPUSDT"]:
+    for sym in symbols:
         row1 = repo.get_last_candle(sym, "1m")
         row5 = repo.get_last_candle(sym, "5m")
         print(sym, "1m", row1.ts.isoformat() if row1 else None, "5m", row5.ts.isoformat() if row5 else None)
@@ -288,17 +308,29 @@ def _diagnose_live_route(
         )
     if auto_route_statuses.get("recent_intent_cooldown_active", 0) > 0:
         return ("WAIT", "recent_intent_cooldown_active", "auto-route is intentionally cooling down a recent intent")
+    no_matching_plan_count = (
+        auto_route_statuses.get("no_matching_session_impulse_retest_plan_ids", 0)
+        + auto_route_statuses.get("no_matching_live_route_plan_ids", 0)
+    )
+    no_fresh_candidate_count = (
+        auto_route_statuses.get("no_session_impulse_retest_plan", 0)
+        + auto_route_statuses.get("no_live_route_candidate_plan", 0)
+        + refresh_statuses.get("no_fresh_candidates", 0)
+    )
+    fresh_signal_count = refresh_statuses.get("signal_generated", 0)
+    if no_matching_plan_count > 0 and fresh_signal_count > 0:
+        return ("WAIT", "no_matching_plan_for_signal", "fresh signal/audit existed but no currently routable plan id matched")
     if (
-        auto_route_statuses.get("no_matching_session_impulse_retest_plan_ids", 0) > 0
-        or auto_route_statuses.get("no_matching_live_route_plan_ids", 0) > 0
+        no_fresh_candidate_count > 0
     ):
+        no_matching_note = (
+            "; transient no-matching audit also observed, but no fresh signal is active"
+            if no_matching_plan_count > 0
+            else ""
+        )
+        return ("WAIT", "no_fresh_live_signal", f"runtime is healthy; current market has no fresh routable signal{no_matching_note}")
+    if no_matching_plan_count > 0:
         return ("WAIT", "no_matching_plan_for_signal", "signal/audit existed but no currently routable plan id matched")
-    if (
-        auto_route_statuses.get("no_session_impulse_retest_plan", 0) > 0
-        or auto_route_statuses.get("no_live_route_candidate_plan", 0) > 0
-        or refresh_statuses.get("no_fresh_candidates", 0) > 0
-    ):
-        return ("WAIT", "no_fresh_live_signal", "runtime is healthy; current market has no fresh routable signal")
     if auto_route_statuses.get("live_route_contract_empty", 0) > 0:
         return ("BLOCKED", "live_route_contract_empty", "auto-route has no configured live strategy-family contract")
     if refresh_statuses.get("signal_generated", 0) > 0 and not auto_route_statuses:

@@ -5,6 +5,7 @@ import argparse
 import gc
 import json
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.core.config import CURRENT_MICRO_LIVE_USDT_SYMBOLS, get_settings
 from app.services.report_io import atomic_write_text
+from scripts.run_micro_main_entry_fixed_exit_search import _csv_contract_paths, _load_signal_contracts
+from scripts.run_micro_main_exit_policy_search import build_exit_policies
 from scripts.run_micro_main_usdt_proxy_backtest import _build_loss_analysis, _run_symbol
 
 
@@ -24,6 +27,18 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run direct USDT candle backtest for the micro main strategy.")
     parser.add_argument("--symbols", default=CURRENT_MICRO_LIVE_USDT_SYMBOLS)
     parser.add_argument("--days", type=int, default=1825)
+    parser.add_argument("--exit-policy-name", default="")
+    parser.add_argument(
+        "--entry-timing-model",
+        default="confirmed_5m_retest",
+        choices=["confirmed_5m_retest", "intrabar_1m_confirm_next_open"],
+    )
+    parser.add_argument(
+        "--contract-path",
+        action="append",
+        default=[],
+        help="Paper/live signal filter contract path. Can be repeated or comma-separated.",
+    )
     parser.add_argument("--include-trades", action="store_true")
     parser.add_argument("--write-report", action="store_true")
     parser.add_argument("--write-loss-analysis", action="store_true")
@@ -44,11 +59,32 @@ def _trade_rows(results: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _first_exit_policy(results: dict[str, Any]) -> dict[str, Any]:
+    for item in results.values():
+        if not isinstance(item, dict):
+            continue
+        policy = item.get("exit_policy")
+        if isinstance(policy, dict) and policy:
+            return dict(policy)
+    return {}
+
+
 def main() -> int:
     args = _parse_args()
     settings = get_settings()
     generated_at = datetime.now(UTC)
     symbols = [item.strip().upper() for item in str(args.symbols or "").split(",") if item.strip()]
+    exit_policy_name = str(args.exit_policy_name or "").strip()
+    entry_timing_model = str(args.entry_timing_model or "confirmed_5m_retest").strip().lower()
+    exit_policy = None
+    if exit_policy_name:
+        policies = {policy.name: policy for policy in build_exit_policies()}
+        exit_policy = policies.get(exit_policy_name)
+        if exit_policy is None:
+            raise SystemExit(f"unknown exit policy: {exit_policy_name}")
+    if exit_policy is not None and entry_timing_model == "intrabar_1m_confirm_next_open":
+        exit_policy = replace(exit_policy, entry_confirmation_delay_minutes=0)
+    signal_contracts = _load_signal_contracts(_csv_contract_paths(list(args.contract_path or [])))
     results: dict[str, Any] = {}
     aggregate_closed = 0
     aggregate_total_r = 0.0
@@ -71,6 +107,9 @@ def main() -> int:
                     proxy_symbol=symbol,
                     canonical_symbol=symbol,
                     lookback_days=int(args.days),
+                    exit_policy=exit_policy,
+                    entry_timing_model=entry_timing_model,
+                    signal_contracts=signal_contracts,
                     include_trades=bool(args.include_trades or args.write_loss_analysis),
                 )
             except Exception as exc:
@@ -107,6 +146,10 @@ def main() -> int:
                     "generated_at": generated_at.isoformat(),
                     "days": int(args.days),
                     "symbols": symbols,
+                    "entry_timing_model": entry_timing_model,
+                    "signal_contracts": signal_contracts,
+                    "exit_policy_name_requested": exit_policy_name or None,
+                    "exit_policy": _first_exit_policy(results),
                     "results": results,
                     "aggregate": {
                         "closed": aggregate_closed,
@@ -131,6 +174,10 @@ def main() -> int:
         "generated_at": generated_at.isoformat(),
         "days": int(args.days),
         "symbols": symbols,
+        "entry_timing_model": entry_timing_model,
+        "signal_contracts": signal_contracts,
+        "exit_policy_name_requested": exit_policy_name or None,
+        "exit_policy": _first_exit_policy(results),
         "results": results,
         "aggregate": {
             "closed": aggregate_closed,

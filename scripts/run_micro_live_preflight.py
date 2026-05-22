@@ -18,6 +18,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.core.config import get_settings
 from app.core import operator_surface_contracts as osc
+from app.services.market_data import configured_usdt_universe_name, is_configured_usdt_universe_name
 from app.services.micro_main_universe_policy import build_micro_main_universe_policy_snapshot
 from scripts import run_live_account_protection_audit
 from scripts.operation_report_io import atomic_write_text
@@ -26,6 +27,9 @@ _REQUEST_RETRY_ATTEMPTS = 3
 _REQUEST_RETRY_BASE_DELAY_SECONDS = 0.5
 _REQUEST_TIMEOUT_SECONDS = 20.0
 _RECENT_SURFACE_TIMINGS: list[dict[str, Any]] = []
+DEFAULT_PORTFOLIO_MIX_BACKTEST_REPORT = (
+    ROOT_DIR / "reports/operations/micro_intrabar_long_short_portfolio_mix_review_drop_arb/latest.json"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,7 +72,12 @@ def _apply_preflight_arg_defaults(args: argparse.Namespace, settings: Any) -> ar
             or "BTCUSDT"
         )
     if not str(getattr(args, "universe", "") or "").strip():
-        args.universe = str(getattr(settings, "universe_name", "") or "").strip() or "usdt_reliable_balanced_31"
+        configured_name = configured_usdt_universe_name(settings)
+        settings_universe = str(getattr(settings, "universe_name", "") or "").strip()
+        if not settings_universe or is_configured_usdt_universe_name(settings_universe):
+            args.universe = configured_name
+        else:
+            args.universe = settings_universe
     return args
 
 
@@ -525,28 +534,186 @@ def _proxy_symbol_to_live_symbol(symbol: Any) -> str:
     return text
 
 
-def _backtest_symbol_to_contract_symbol(symbol: Any, payload: dict[str, Any]) -> str:
+def _backtest_symbol_to_contract_symbol(symbol: Any, payload: dict[str, Any], *, proxy_symbol: bool = False) -> str:
     text = str(symbol or "").strip().upper()
-    if str(payload.get("source") or "").strip() == "micro_main_usdt_backtest":
-        return text
-    return _proxy_symbol_to_live_symbol(text)
+    source = str(payload.get("source") or "").strip()
+    if source == "micro_main_usdt_proxy_backtest" or proxy_symbol:
+        return _proxy_symbol_to_live_symbol(text)
+    return text
 
 
 def _backtest_contract_symbols(payload: dict[str, Any]) -> set[str]:
     raw_symbols = payload.get("symbols")
+    proxy_symbols = False
     if not isinstance(raw_symbols, list) or not raw_symbols:
         raw_symbols = payload.get("proxy_symbols")
+        proxy_symbols = True
+    if not isinstance(raw_symbols, list) or not raw_symbols:
+        raw_symbols = payload.get("combined_symbols")
+        proxy_symbols = False
     if not isinstance(raw_symbols, list) or not raw_symbols:
         results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
         raw_symbols = list(results.keys()) if isinstance(results, dict) else []
-    return {_backtest_symbol_to_contract_symbol(symbol, payload) for symbol in raw_symbols if str(symbol or "").strip()}
+    return {
+        _backtest_symbol_to_contract_symbol(symbol, payload, proxy_symbol=proxy_symbols)
+        for symbol in raw_symbols
+        if str(symbol or "").strip()
+    }
+
+
+def _backtest_expected_direction_contract(payload: dict[str, Any], expected_symbols: set[str]) -> dict[str, set[str]]:
+    signal_contracts = payload.get("signal_contracts")
+    if isinstance(signal_contracts, list) and signal_contracts:
+        expected: dict[str, set[str]] = {}
+        for item in signal_contracts:
+            if not isinstance(item, dict):
+                continue
+            direction = str(dict(item.get("filter_contract") or {}).get("direction") or "").strip().upper()
+            if direction not in {"LONG", "SHORT"}:
+                continue
+            for raw_symbol in list(item.get("symbols") or []):
+                symbol = str(raw_symbol or "").strip().upper()
+                if symbol in expected_symbols:
+                    expected.setdefault(symbol, set()).add(direction)
+        if expected:
+            return expected
+    if str(payload.get("schema_version") or "") != "micro_intrabar_candidate_portfolio_mix_review_v1":
+        return {symbol: {"LONG", "SHORT"} for symbol in expected_symbols}
+    expected: dict[str, set[str]] = {}
+    for item in list(payload.get("per_contract") or []):
+        if not isinstance(item, dict):
+            continue
+        direction = str(dict(item.get("filter_contract") or {}).get("direction") or "").strip().upper()
+        if direction not in {"LONG", "SHORT"}:
+            continue
+        for raw_symbol in list(item.get("symbols") or []):
+            symbol = str(raw_symbol or "").strip().upper()
+            if symbol in expected_symbols:
+                expected.setdefault(symbol, set()).add(direction)
+    return expected or {symbol: {"LONG", "SHORT"} for symbol in expected_symbols}
 
 
 def _backtest_report_days(payload: dict[str, Any]) -> int:
     try:
-        return max(0, int(float(payload.get("days") or 0)))
+        raw_days = payload.get("days")
+        if raw_days is None and isinstance(payload.get("settings"), dict):
+            raw_days = dict(payload.get("settings") or {}).get("days")
+        return max(0, int(float(raw_days or 0)))
     except (TypeError, ValueError):
         return 0
+
+
+def _backtest_exit_policy(payload: dict[str, Any]) -> dict[str, Any]:
+    top_level = payload.get("exit_policy")
+    if isinstance(top_level, dict) and top_level:
+        return dict(top_level)
+    if str(payload.get("schema_version") or "") == "micro_intrabar_candidate_portfolio_mix_review_v1":
+        return {"entry_confirmation_delay_minutes": 5}
+    results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
+    for item in results.values():
+        if not isinstance(item, dict):
+            continue
+        policy = item.get("exit_policy")
+        if isinstance(policy, dict) and policy:
+            return dict(policy)
+    return {}
+
+
+def _backtest_exit_policy_names(payload: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    top_level = payload.get("exit_policy")
+    if isinstance(top_level, dict):
+        name = str(top_level.get("name") or "").strip()
+        if name:
+            names.add(name)
+    if str(payload.get("schema_version") or "") == "micro_intrabar_candidate_portfolio_mix_review_v1":
+        for item in list(payload.get("per_contract") or []):
+            if not isinstance(item, dict):
+                continue
+            for key in ("exit_policy_name", "live_exit_policy_name"):
+                name = str(item.get(key) or "").strip()
+                if name:
+                    names.add(name)
+        return names
+    results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
+    for item in results.values():
+        if not isinstance(item, dict):
+            continue
+        policy = item.get("exit_policy")
+        if isinstance(policy, dict):
+            name = str(policy.get("name") or "").strip()
+            if name:
+                names.add(name)
+    return names
+
+
+def _runtime_entry_confirmation_delay_minutes(settings: Any) -> int:
+    entry_timing = str(getattr(settings, "session_impulse_retest_entry_timing_model", "") or "").strip().lower()
+    if entry_timing in {"intrabar", "intrabar_1m", "intrabar_1m_confirm_next_open"}:
+        return 0
+    return max(
+        _int(getattr(settings, "session_impulse_retest_exit_entry_confirmation_delay_minutes", 5), default=5),
+        0,
+    )
+
+
+def _runtime_entry_timing_model(settings: Any) -> str:
+    entry_timing = str(getattr(settings, "session_impulse_retest_entry_timing_model", "") or "").strip().lower()
+    if entry_timing in {"intrabar", "intrabar_1m", "intrabar_1m_confirm_next_open"}:
+        return "intrabar_1m_confirm_next_open"
+    return "confirmed_5m_retest"
+
+
+def _backtest_entry_timing_model(payload: dict[str, Any]) -> str:
+    entry_timing = str(payload.get("entry_timing_model") or "").strip().lower()
+    if not entry_timing and isinstance(payload.get("scope"), dict):
+        entry_timing = str(dict(payload.get("scope") or {}).get("entry_timing_model") or "").strip().lower()
+    if entry_timing in {"intrabar", "intrabar_1m", "intrabar_1m_confirm_next_open"}:
+        return "intrabar_1m_confirm_next_open"
+    if entry_timing:
+        return entry_timing
+    return "confirmed_5m_retest"
+
+
+def _backtest_aggregate(payload: dict[str, Any]) -> dict[str, Any]:
+    aggregate = payload.get("aggregate")
+    if isinstance(aggregate, dict) and aggregate:
+        return dict(aggregate)
+    combined_summary = dict(dict(payload.get("combined") or {}).get("summary") or {})
+    if combined_summary:
+        closed = _int(combined_summary.get("closed"), default=0)
+        total_r = _float(combined_summary.get("total_r"), default=0.0)
+        return {
+            "closed": closed,
+            "total_r": round(float(total_r), 4),
+            "ev_r": round(
+                _float(
+                    combined_summary.get("ev_r"),
+                    default=(float(total_r) / max(int(closed), 1) if closed else 0.0),
+                ),
+                4,
+            ),
+        }
+    results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
+    closed = 0
+    total_r = 0.0
+    found = False
+    for item in results.values():
+        if not isinstance(item, dict):
+            continue
+        summary = item.get("summary")
+        if not isinstance(summary, dict):
+            continue
+        found = True
+        closed += _int(summary.get("closed"), default=0)
+        total_r += _float(summary.get("total_r"), default=0.0)
+    if not found:
+        return {}
+    return {
+        "closed": closed,
+        "total_r": round(float(total_r), 4),
+        "ev_r": round(float(total_r) / max(int(closed), 1), 4),
+    }
 
 
 def _window_days(window: dict[str, Any], start_key: str, end_key: str) -> float | None:
@@ -568,6 +735,7 @@ def _backtest_effective_days_range(payload: dict[str, Any], expected_symbols: se
         symbol = _backtest_symbol_to_contract_symbol(
             raw_entry.get("canonical_symbol") or raw_entry.get("symbol") or raw_entry.get("proxy_symbol") or key,
             payload,
+            proxy_symbol=bool(raw_entry.get("proxy_symbol")) and not raw_entry.get("canonical_symbol"),
         )
         if expected_symbols and symbol not in expected_symbols:
             continue
@@ -588,8 +756,14 @@ def _backtest_effective_days_range(payload: dict[str, Any], expected_symbols: se
 
 def _backtest_report_source_priority(path: Path) -> int:
     if path.name.startswith("micro_main_usdt_backtest_"):
+        return 4
+    if path.name.startswith("micro_main_usdc_backtest_"):
+        return 3
+    if path.name.startswith("micro_main_usdt_proxy_backtest_"):
         return 2
-    return 1 if path.name.startswith("micro_main_usdc_backtest_") else 0
+    if "micro_intrabar_long_short_portfolio_mix_review" in path.as_posix():
+        return 1
+    return 0
 
 
 def _micro_main_backtest_report_dirs(settings: Any) -> list[Path]:
@@ -635,6 +809,20 @@ def _micro_main_backtest_candidates(settings: Any) -> list[Path]:
                     candidates.append(path)
             except OSError:
                 continue
+    portfolio_mix_path = Path(
+        str(
+            getattr(
+                settings,
+                "auto_trading_replay_validation_bridge_portfolio_mix_report_path",
+                str(DEFAULT_PORTFOLIO_MIX_BACKTEST_REPORT),
+            )
+            or str(DEFAULT_PORTFOLIO_MIX_BACKTEST_REPORT)
+        )
+    ).expanduser()
+    if not portfolio_mix_path.is_absolute():
+        portfolio_mix_path = ROOT_DIR / portfolio_mix_path
+    if portfolio_mix_path.is_file():
+        candidates.append(portfolio_mix_path)
     return sorted(set(candidates))
 
 
@@ -675,6 +863,10 @@ def _micro_live_backtest_contract_alignment_check(
             ),
         }
     payload = _read_json_file(report_path)
+    schema_version = str(payload.get("schema_version") or "")
+    source_alignment_failures: list[str] = []
+    if schema_version == "micro_intrabar_candidate_portfolio_mix_review_v1":
+        source_alignment_failures.append("portfolio_mix_report_is_not_runtime_signal_replay")
     expected_symbols = _backtest_contract_symbols(payload)
     effective_min_days, effective_max_days = _backtest_effective_days_range(payload, expected_symbols)
     expected_families = {"session_impulse_retest"}
@@ -689,11 +881,52 @@ def _micro_live_backtest_contract_alignment_check(
     unexpected_entry_models = sorted(live_entry_models - expected_entry_models)
     missing_sessions = sorted(expected_sessions - live_sessions)
     unexpected_sessions = sorted(live_sessions - expected_sessions)
+    expected_direction_contract = _backtest_expected_direction_contract(payload, expected_symbols)
     missing_direction_symbols = sorted(
         symbol
-        for symbol in expected_symbols
-        if not {"LONG", "SHORT"}.issubset(direction_contract.get(symbol, set()))
+        for symbol, expected_directions in expected_direction_contract.items()
+        if not expected_directions.issubset(direction_contract.get(symbol, set()))
     )
+    runtime_entry_delay = _runtime_entry_confirmation_delay_minutes(settings)
+    runtime_entry_timing = _runtime_entry_timing_model(settings)
+    backtest_entry_timing = _backtest_entry_timing_model(payload)
+    entry_timing_mismatch: list[str] = []
+    if backtest_entry_timing != runtime_entry_timing:
+        entry_timing_mismatch.append(f"backtest_{backtest_entry_timing}_runtime_{runtime_entry_timing}")
+    backtest_exit_policy = _backtest_exit_policy(payload)
+    backtest_exit_policy_names = _backtest_exit_policy_names(payload)
+    runtime_exit_policy_name = str(getattr(settings, "session_impulse_retest_exit_policy_name", "") or "").strip()
+    exit_policy_mismatch: list[str] = []
+    if runtime_exit_policy_name:
+        if not backtest_exit_policy_names:
+            exit_policy_mismatch.append("missing_backtest_exit_policy_name")
+        elif runtime_exit_policy_name not in backtest_exit_policy_names:
+            exit_policy_mismatch.append(
+                f"runtime_{runtime_exit_policy_name}_not_in_backtest_{'|'.join(sorted(backtest_exit_policy_names))}"
+            )
+    raw_backtest_entry_delay = backtest_exit_policy.get("entry_confirmation_delay_minutes")
+    entry_delay_mismatch: list[str] = []
+    if raw_backtest_entry_delay is None:
+        entry_delay_mismatch.append("missing_backtest_entry_confirmation_delay")
+        backtest_entry_delay_text = "missing"
+    else:
+        backtest_entry_delay = max(_int(raw_backtest_entry_delay, default=-1), 0)
+        backtest_entry_delay_text = str(backtest_entry_delay)
+        if backtest_entry_delay != runtime_entry_delay:
+            entry_delay_mismatch.append(f"backtest_{backtest_entry_delay}_runtime_{runtime_entry_delay}")
+    aggregate = _backtest_aggregate(payload)
+    aggregate_closed = _int(aggregate.get("closed"), default=0)
+    aggregate_ev = _float(aggregate.get("ev_r"), default=0.0)
+    min_closed = max(_int(getattr(settings, "auto_trading_replay_validation_bridge_min_trades", 80), default=80), 1)
+    min_ev = _float(getattr(settings, "auto_trading_replay_validation_bridge_min_ev_r", 0.10), default=0.10)
+    performance_failures: list[str] = []
+    if not aggregate:
+        performance_failures.append("aggregate_missing")
+    else:
+        if aggregate_closed < min_closed:
+            performance_failures.append(f"closed_{aggregate_closed}_below_{min_closed}")
+        if aggregate_ev < min_ev:
+            performance_failures.append(f"ev_{aggregate_ev}_below_{min_ev}")
 
     aligned = not any(
         [
@@ -706,6 +939,11 @@ def _micro_live_backtest_contract_alignment_check(
             missing_sessions,
             unexpected_sessions,
             missing_direction_symbols,
+            entry_timing_mismatch,
+            entry_delay_mismatch,
+            exit_policy_mismatch,
+            source_alignment_failures,
+            performance_failures,
         ]
     )
     return {
@@ -726,7 +964,18 @@ def _micro_live_backtest_contract_alignment_check(
             f"unexpected_entry_models={','.join(unexpected_entry_models) if unexpected_entry_models else 'none'}; "
             f"missing_sessions={','.join(missing_sessions) if missing_sessions else 'none'}; "
             f"unexpected_sessions={','.join(unexpected_sessions) if unexpected_sessions else 'none'}; "
-            f"missing_long_short_direction={','.join(missing_direction_symbols) if missing_direction_symbols else 'none'}"
+            f"missing_long_short_direction={','.join(missing_direction_symbols) if missing_direction_symbols else 'none'}; "
+            f"entry_timing_model=backtest:{backtest_entry_timing}/runtime:{runtime_entry_timing}; "
+            f"entry_timing_mismatch={','.join(entry_timing_mismatch) if entry_timing_mismatch else 'none'}; "
+            f"entry_confirmation_delay_minutes=backtest:{backtest_entry_delay_text}/runtime:{runtime_entry_delay}; "
+            f"entry_delay_mismatch={','.join(entry_delay_mismatch) if entry_delay_mismatch else 'none'}; "
+            f"exit_policy_names={','.join(sorted(backtest_exit_policy_names)) if backtest_exit_policy_names else 'missing'}; "
+            f"runtime_exit_policy={runtime_exit_policy_name or 'unset'}; "
+            f"exit_policy_mismatch={','.join(exit_policy_mismatch) if exit_policy_mismatch else 'none'}; "
+            f"source_alignment_failures={','.join(source_alignment_failures) if source_alignment_failures else 'none'}; "
+            f"aggregate_closed={aggregate_closed}; aggregate_ev_r={round(float(aggregate_ev), 4)}; "
+            f"performance_floor=closed>={min_closed},ev>={round(float(min_ev), 4)}; "
+            f"performance_failures={','.join(performance_failures) if performance_failures else 'none'}"
         ),
     }
 
@@ -991,7 +1240,197 @@ def _live_account_protection_check() -> dict[str, Any]:
     }
 
 
-def _micro_live_config_drift_checks(*, check_binance_rules: bool = False) -> list[dict[str, Any]]:
+def _active_non_live_plan_residue_check(*, live_symbols: set[str], live_families: set[str]) -> dict[str, Any]:
+    try:
+        from sqlalchemy import select
+
+        from app.core.enums import PlanState
+        from app.db.models import Plan
+        from app.db.session import SessionLocal
+    except Exception as exc:
+        return {
+            "name": "active_non_live_plan_residue",
+            "status": "FAIL",
+            "severity": "blocking",
+            "message": f"failed to import DB plan residue checker: {exc.__class__.__name__}:{exc}",
+        }
+
+    active_states = [
+        PlanState.PLANNED.value,
+        PlanState.ARMED.value,
+        PlanState.TRIGGERED.value,
+        PlanState.ENTERED.value,
+        PlanState.PARTIAL_EXIT.value,
+    ]
+    now = _now()
+    try:
+        with SessionLocal() as db:
+            rows = list(
+                db.scalars(
+                    select(Plan)
+                    .where(
+                        Plan.timeframe == "5m",
+                        Plan.state.in_(active_states),
+                        Plan.valid_until > now,
+                    )
+                    .order_by(Plan.valid_from.desc())
+                    .limit(500)
+                )
+            )
+    except Exception as exc:
+        return {
+            "name": "active_non_live_plan_residue",
+            "status": "FAIL",
+            "severity": "blocking",
+            "message": f"failed to query active plan residue: {exc.__class__.__name__}:{exc}",
+        }
+
+    residue: list[str] = []
+    for row in rows:
+        symbol = str(getattr(row, "symbol", "") or "").upper().strip()
+        validity = row.validity if isinstance(row.validity, dict) else {}
+        family = str(validity.get("strategy_family") or "legacy_zone_plan").lower().strip()
+        if symbol in live_symbols and family in live_families:
+            continue
+        residue.append(f"{getattr(row, 'plan_id', '')}:{symbol}:{family}:{getattr(row, 'state', '')}")
+
+    return {
+        "name": "active_non_live_plan_residue",
+        "status": _status(not residue),
+        "severity": "blocking",
+        "message": (
+            f"active_plan_count={len(rows)}; non_live_or_non_family={len(residue)}; "
+            f"samples={','.join(residue[:5]) if residue else 'none'}"
+        ),
+    }
+
+
+def _live_protection_config_check(settings: Any) -> dict[str, Any]:
+    observed = {
+        "protection_orders": _bool(getattr(settings, "auto_trading_live_protection_orders_enabled", False)),
+        "stop_working_type": str(getattr(settings, "auto_trading_live_stop_working_type", "") or "").strip().upper(),
+        "stop_precheck": _bool(getattr(settings, "auto_trading_live_stop_precheck_enabled", False)),
+        "stop_precheck_fail_closed": _bool(
+            getattr(settings, "auto_trading_live_stop_precheck_fail_closed", False)
+        ),
+        "stop_precheck_min_tick_cushion": _int(
+            getattr(settings, "auto_trading_live_stop_precheck_min_tick_cushion", 0),
+            default=0,
+        ),
+        "stop_mark_price_guard": _bool(
+            getattr(settings, "auto_trading_live_stop_mark_price_guard_enabled", False)
+        ),
+        "protection_failure_flatten": _bool(
+            getattr(settings, "auto_trading_live_protection_failure_flatten_enabled", False)
+        ),
+        "sl_verify_after_attach": _bool(
+            getattr(settings, "auto_trading_live_protection_verify_after_attach_enabled", False)
+        ),
+        "sl_verify_fail_closed": _bool(
+            getattr(settings, "auto_trading_live_protection_verify_fail_closed", False)
+        ),
+        "sl_verify_attempts": _int(getattr(settings, "auto_trading_live_protection_verify_attempts", 0), default=0),
+        "tp_limit_attach": _bool(getattr(settings, "auto_trading_live_tp_limit_attach_enabled", False)),
+        "tp_verify_after_attach": _bool(
+            getattr(settings, "auto_trading_live_take_profit_verify_after_attach_enabled", False)
+        ),
+        "missing_stop_watchdog_flatten": _bool(
+            getattr(settings, "auto_trading_live_missing_stop_watchdog_flatten_enabled", False)
+        ),
+        "missing_stop_watchdog_cancel_orders": _bool(
+            getattr(settings, "auto_trading_live_missing_stop_watchdog_cancel_open_orders", False)
+        ),
+        "unexpected_open_order_watchdog_cancel": _bool(
+            getattr(settings, "auto_trading_live_unexpected_open_order_watchdog_cancel_enabled", False)
+        ),
+    }
+    required_true = {
+        "protection_orders": "AUTO_TRADING_LIVE_PROTECTION_ORDERS_ENABLED",
+        "stop_precheck": "AUTO_TRADING_LIVE_STOP_PRECHECK_ENABLED",
+        "stop_precheck_fail_closed": "AUTO_TRADING_LIVE_STOP_PRECHECK_FAIL_CLOSED",
+        "stop_mark_price_guard": "AUTO_TRADING_LIVE_STOP_MARK_PRICE_GUARD_ENABLED",
+        "protection_failure_flatten": "AUTO_TRADING_LIVE_PROTECTION_FAILURE_FLATTEN_ENABLED",
+        "sl_verify_after_attach": "AUTO_TRADING_LIVE_PROTECTION_VERIFY_AFTER_ATTACH_ENABLED",
+        "sl_verify_fail_closed": "AUTO_TRADING_LIVE_PROTECTION_VERIFY_FAIL_CLOSED",
+        "tp_limit_attach": "AUTO_TRADING_LIVE_TP_LIMIT_ATTACH_ENABLED",
+        "tp_verify_after_attach": "AUTO_TRADING_LIVE_TAKE_PROFIT_VERIFY_AFTER_ATTACH_ENABLED",
+        "missing_stop_watchdog_flatten": "AUTO_TRADING_LIVE_MISSING_STOP_WATCHDOG_FLATTEN_ENABLED",
+        "missing_stop_watchdog_cancel_orders": "AUTO_TRADING_LIVE_MISSING_STOP_WATCHDOG_CANCEL_OPEN_ORDERS",
+        "unexpected_open_order_watchdog_cancel": (
+            "AUTO_TRADING_LIVE_UNEXPECTED_OPEN_ORDER_WATCHDOG_CANCEL_ENABLED"
+        ),
+    }
+    mismatches = [env_name for key, env_name in required_true.items() if not bool(observed[key])]
+    if str(observed["stop_working_type"]) != "MARK_PRICE":
+        mismatches.append(f"AUTO_TRADING_LIVE_STOP_WORKING_TYPE={observed['stop_working_type'] or 'unset'}")
+    if int(observed["stop_precheck_min_tick_cushion"]) < 1:
+        mismatches.append(
+            f"AUTO_TRADING_LIVE_STOP_PRECHECK_MIN_TICK_CUSHION={observed['stop_precheck_min_tick_cushion']}"
+        )
+    if int(observed["sl_verify_attempts"]) < 1:
+        mismatches.append(f"AUTO_TRADING_LIVE_PROTECTION_VERIFY_ATTEMPTS={observed['sl_verify_attempts']}")
+    return {
+        "name": "live_protection_config",
+        "status": _status(not mismatches),
+        "severity": "blocking",
+        "message": (
+            "mandatory live protection switches; "
+            f"observed={observed}; mismatches={','.join(mismatches) if mismatches else 'none'}"
+        ),
+        "observed": observed,
+        "mismatches": mismatches,
+    }
+
+
+def _rollout_policy_live_scope_check(
+    *,
+    settings: Any,
+    mode: str,
+    live_families: set[str],
+    dashboard_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    policies = [dict(item) for item in list((dashboard_payload or {}).get("rollout_policies") or []) if isinstance(item, dict)]
+    if not policies:
+        return {
+            "name": "rollout_policy_live_scope_alignment",
+            "status": "PASS",
+            "severity": "blocking",
+            "message": "rollout policies unavailable on dashboard; live family allowlist remains primary order authority",
+        }
+
+    execution_mode = str(mode or "MICRO_LIVE").strip().upper()
+    active_rank = _EXECUTION_MODE_RANK.get(execution_mode, _EXECUTION_MODE_RANK.get("MICRO_LIVE", 2))
+    live_allowed = set(live_families)
+    if not live_allowed:
+        live_allowed = _csv_set(getattr(settings, "auto_trading_allowed_families", ""), lower=True)
+
+    out_of_scope: list[str] = []
+    for policy in policies:
+        family = str(policy.get("strategy_family") or "").strip().lower()
+        if not family:
+            continue
+        policy_mode = str(policy.get("max_execution_mode") or "SHADOW").strip().upper()
+        policy_rank = _EXECUTION_MODE_RANK.get(policy_mode, -1)
+        live_enabled = _bool(policy.get("live_enabled"), default=False)
+        if live_enabled and policy_rank >= active_rank and live_allowed and family not in live_allowed:
+            out_of_scope.append(f"{family}:{policy_mode}")
+
+    return {
+        "name": "rollout_policy_live_scope_alignment",
+        "status": _status(not out_of_scope),
+        "severity": "blocking",
+        "message": (
+            f"live_allowed_families={','.join(sorted(live_allowed)) if live_allowed else 'none'}; "
+            f"out_of_scope_live_policies={','.join(sorted(out_of_scope)) if out_of_scope else 'none'}"
+        ),
+    }
+
+
+def _micro_live_config_drift_checks(
+    *,
+    check_binance_rules: bool = False,
+    dashboard_payload: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     settings = get_settings()
     mode = str(getattr(settings, "auto_trading_execution_mode", "") or "").strip().upper()
     live_mode = mode in {"MICRO_LIVE", "LIVE"}
@@ -1043,6 +1482,14 @@ def _micro_live_config_drift_checks(*, check_binance_rules: bool = False) -> lis
                 f"missing_from_global={','.join(missing_families) if missing_families else 'none'}"
             ),
         }
+    )
+    checks.append(
+        _rollout_policy_live_scope_check(
+            settings=settings,
+            mode=mode,
+            live_families=live_families,
+            dashboard_payload=dashboard_payload,
+        )
     )
     if direction_contract:
         missing_direction_symbols = sorted(symbol for symbol in live_symbols if symbol not in direction_contract)
@@ -1162,7 +1609,9 @@ def _micro_live_config_drift_checks(*, check_binance_rules: bool = False) -> lis
             ),
         }
     )
+    checks.append(_live_protection_config_check(settings))
     checks.append(_live_account_protection_check())
+    checks.append(_active_non_live_plan_residue_check(live_symbols=live_symbols, live_families=live_families))
     if check_binance_rules:
         checks.extend(_binance_rule_checks(live_symbols))
     return checks
@@ -1929,7 +2378,10 @@ def main() -> int:
             "message": f"latest_validation_alert={_bool(latest_validation_alert)}",
         }
     )
-    config_drift_checks = _micro_live_config_drift_checks(check_binance_rules=bool(getattr(args, "check_binance_rules", False)))
+    config_drift_checks = _micro_live_config_drift_checks(
+        check_binance_rules=bool(getattr(args, "check_binance_rules", False)),
+        dashboard_payload=dashboard,
+    )
     checks.extend(config_drift_checks)
     checks.append(
         _candidate_availability_check(

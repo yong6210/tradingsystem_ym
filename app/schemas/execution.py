@@ -284,7 +284,7 @@ class SafetyStateResponse(ORMModel):
 
 class KillConditionAutomationApplyRequest(ORMModel):
     symbol: str | None = Field(default=None, max_length=30)
-    universe: str = Field(default="usdt_reliable_balanced_31", max_length=80)
+    universe: str = Field(default="", max_length=80)
     family: str | None = Field(default=None, max_length=50)
     session_name: str | None = Field(default=None, max_length=50)
     days: int = Field(default=30, ge=1, le=365)

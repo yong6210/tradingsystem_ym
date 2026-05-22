@@ -17,6 +17,10 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.core.config import get_settings
 from app.integrations.binance_futures import BinanceFuturesClient
+from app.services.live_route_contract import parse_direction_contract
+from app.services.micro_main_universe_policy import micro_main_universe_entry
+from app.services.position_sizing import PositionSizingInput, PositionSizingService
+from app.services.strategy_mode import StrategyModeService
 from scripts.operation_report_io import atomic_write_text, display_path, parse_report_generated_at, write_latest_aliases
 from scripts.run_micro_live_preflight import _micro_live_config_drift_checks
 from scripts.run_micro_live_synthetic_canary import run_canary
@@ -27,7 +31,11 @@ def parse_args() -> argparse.Namespace:
         description="Dry-run the MICRO_LIVE sizing and liquidity path across the configured live universe."
     )
     parser.add_argument("--symbols", default="", help="Optional comma-separated symbols. Empty uses current MICRO_LIVE universe.")
-    parser.add_argument("--directions", default="long,short", help="Comma-separated directions: long,short.")
+    parser.add_argument(
+        "--directions",
+        default="contract",
+        help="Comma-separated directions: long,short. Use contract to follow AUTO_TRADING_MICRO_LIVE_DIRECTION_CONTRACT.",
+    )
     parser.add_argument("--entry-model", choices=["LIMIT", "CONFIRM"], default="CONFIRM")
     parser.add_argument("--stop-bps", type=float, default=50.0)
     parser.add_argument("--sleep-seconds", type=float, default=0.35, help="Delay between public API checks to avoid rate limits.")
@@ -66,12 +74,63 @@ def _csv_list(raw: Any) -> list[str]:
 
 
 def _directions(raw: Any) -> list[str]:
+    if str(raw or "").strip().lower() in {"contract", "direction_contract", "live_contract"}:
+        return []
     values: list[str] = []
     for item in str(raw or "").split(","):
         normalized = item.strip().lower()
         if normalized in {"long", "short"} and normalized not in values:
             values.append(normalized)
-    return values or ["long", "short"]
+    return values
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _live_route_risk_r(settings: Any, *, symbol: str, direction: str, entry_model: str) -> float:
+    normalized_symbol = str(symbol or "").strip().upper()
+    normalized_direction = str(direction or "").strip().lower()
+    policy_entry = dict(micro_main_universe_entry(normalized_symbol) or {})
+    tier = str(policy_entry.get("tier") or "secondary").lower()
+    strategy_grade = "A" if tier == "core" else "B"
+    universe_risk_multiplier = _safe_float(policy_entry.get("risk_multiplier"), 0.5)
+    base_sizing = PositionSizingService(settings).evaluate(
+        PositionSizingInput(
+            strategy_family="session_impulse_retest",
+            strategy_grade=strategy_grade,
+            regime="trend",
+            reaction_classification="acceptance_confirmed",
+            confirm_only=True,
+            entry_model=str(entry_model or "CONFIRM").upper(),
+            active_thesis_clusters=0,
+            transition_state="none",
+            symbol=normalized_symbol,
+            direction=normalized_direction,
+        )
+    )
+    sizing = dict(base_sizing)
+    sizing["final_risk_r"] = round(_safe_float(base_sizing.get("final_risk_r")) * universe_risk_multiplier, 4)
+    sizing = StrategyModeService(settings).apply_to_sizing(sizing, mode=StrategyModeService(settings).current_mode())
+    return max(_safe_float(sizing.get("final_risk_r")), 0.0)
+
+
+def _symbol_direction_map(settings: Any, *, symbols: list[str], requested_directions: list[str]) -> dict[str, list[str]]:
+    if requested_directions:
+        return {symbol: list(requested_directions) for symbol in symbols}
+    contract = parse_direction_contract(getattr(settings, "auto_trading_micro_live_direction_contract", ""))
+    out: dict[str, list[str]] = {}
+    for symbol in symbols:
+        contracted = [
+            str(direction or "").strip().lower()
+            for direction in list(contract.get(symbol.upper()) or [])
+            if str(direction or "").strip().lower() in {"long", "short"}
+        ]
+        out[symbol] = list(dict.fromkeys(contracted)) or ["long", "short"]
+    return out
 
 
 def _live_symbols(settings: Any, explicit_symbols: str = "") -> list[str]:
@@ -96,6 +155,7 @@ def _canary_row(
     direction: str,
     entry_model: str,
     stop_bps: float,
+    risk_r: float,
     use_network: bool,
     max_retries: int,
     retry_sleep_seconds: float,
@@ -112,6 +172,7 @@ def _canary_row(
                 entry_model=entry_model,
                 entry_price=0.0,
                 stop_bps=stop_bps,
+                risk_r=risk_r,
                 use_network=use_network,
                 use_private_balance=False,
                 balance_snapshot=balance_snapshot,
@@ -130,6 +191,7 @@ def _canary_row(
                 "target_notional": sizing.get("target_notional"),
                 "normalized_notional": sizing.get("normalized_notional"),
                 "actual_risk_pct": sizing.get("actual_risk_pct"),
+                "risk_r": risk_r,
                 "submitted_fraction": tranche.get("submitted_target_fraction")
                 or sizing.get("liquidity_tranche_submitted_fraction"),
                 "partial_error": gate.get("partial_submit_error"),
@@ -149,6 +211,7 @@ def _canary_row(
         "target_notional": None,
         "normalized_notional": None,
         "actual_risk_pct": None,
+        "risk_r": risk_r,
         "submitted_fraction": None,
         "partial_error": last_error,
         "attempt": attempts,
@@ -174,9 +237,15 @@ def _direction_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _symbol_direction_statuses(*, symbols: list[str], directions: list[str], rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _symbol_direction_statuses(
+    *,
+    symbols: list[str],
+    directions_by_symbol: dict[str, list[str]],
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
     by_symbol: dict[str, Any] = {}
     for symbol in symbols:
+        directions = list(directions_by_symbol.get(symbol) or ["long", "short"])
         symbol_rows = [row for row in rows if row.get("symbol") == symbol]
         direction_rows = {
             str(row.get("direction")): {
@@ -211,7 +280,7 @@ def _symbol_direction_statuses(*, symbols: list[str], directions: list[str], row
 def build_payload(
     *,
     symbols: str = "",
-    directions: str = "long,short",
+    directions: str = "contract",
     entry_model: str = "CONFIRM",
     stop_bps: float = 50.0,
     sleep_seconds: float = 0.35,
@@ -224,7 +293,13 @@ def build_payload(
 ) -> dict[str, Any]:
     settings = get_settings()
     symbol_list = _live_symbols(settings, symbols)
-    direction_list = _directions(directions)
+    requested_direction_list = _directions(directions)
+    directions_by_symbol = _symbol_direction_map(
+        settings,
+        symbols=symbol_list,
+        requested_directions=requested_direction_list,
+    )
+    direction_list = sorted({direction for values in directions_by_symbol.values() for direction in values})
     balance_snapshot: Any | None = None
     balance_error = ""
     if use_network and use_private_balance:
@@ -234,16 +309,23 @@ def build_payload(
             balance_error = f"{exc.__class__.__name__}:{exc}"
     config_checks = _micro_live_config_drift_checks(check_binance_rules=False)
     rows: list[dict[str, Any]] = []
-    for direction in direction_list:
-        for index, symbol in enumerate(symbol_list):
+    for symbol in symbol_list:
+        for direction in directions_by_symbol.get(symbol, []):
             if rows and sleep_seconds > 0.0:
                 time.sleep(max(float(sleep_seconds), 0.0))
+            risk_r = _live_route_risk_r(
+                settings,
+                symbol=symbol,
+                direction=direction,
+                entry_model=str(entry_model or "CONFIRM").upper(),
+            )
             rows.append(
                 _canary_row(
                     symbol=symbol,
                     direction=direction,
                     entry_model=str(entry_model or "CONFIRM").upper(),
                     stop_bps=float(stop_bps or 50.0),
+                    risk_r=risk_r,
                     use_network=bool(use_network),
                     max_retries=max_retries,
                     retry_sleep_seconds=retry_sleep_seconds,
@@ -272,7 +354,7 @@ def build_payload(
     symbols_without_direction_pass = [symbol for symbol in symbol_list if symbol not in set(symbols_with_any_pass)]
     symbol_direction_statuses = _symbol_direction_statuses(
         symbols=symbol_list,
-        directions=direction_list,
+        directions_by_symbol=directions_by_symbol,
         rows=rows,
     )
     error_count = sum(1 for row in rows if str(row.get("status")) == "ERROR")
@@ -311,7 +393,9 @@ def build_payload(
         "stop_bps": float(stop_bps or 50.0),
         "symbol_count": len(symbol_list),
         "symbols": symbol_list,
-        "direction_count": len(direction_list),
+        "direction_mode": "explicit" if requested_direction_list else "contract",
+        "direction_count": sum(len(values) for values in directions_by_symbol.values()),
+        "symbol_directions": directions_by_symbol,
         "check_count": check_count,
         "pass_count": pass_count,
         "fail_count": check_count - pass_count,
@@ -352,6 +436,7 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         f"- overall_status: {payload.get('overall_status')}",
         f"- no_live_order_sent: {payload.get('no_live_order_sent')}",
         f"- symbols: {payload.get('symbol_count')}",
+        f"- direction_mode: {payload.get('direction_mode')}",
         f"- checks: {payload.get('pass_count')}/{payload.get('check_count')} pass",
         f"- executable_symbols: {payload.get('executable_symbol_count')}",
         f"- fully_executable_symbols: {payload.get('fully_executable_symbol_count')}",

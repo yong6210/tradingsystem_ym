@@ -29,10 +29,11 @@ CHANNEL_SLUG="${CHANNEL_SLUG//-/_}"
 LATEST_RUN_PATH="${OPERATOR_BRIEF_LATEST_RUN_FILE:-$BRIEF_DIR/latest_operator_session_brief_${MODE_SLUG}.json}"
 STATE_PATH="${OPERATOR_BRIEF_STATE_FILE:-$BRIEF_DIR/last_alert_state_${MODE_SLUG}_${CHANNEL_SLUG}.json}"
 LOCK_PATH="${OPERATOR_BRIEF_LOCK_FILE:-$BRIEF_DIR/operator_session_brief_${MODE_SLUG}.lock}"
+SNAPSHOT_API_BASE_URL="${OPERATOR_BRIEF_SNAPSHOT_API_BASE_URL:-http://127.0.0.1:8000}"
 
 NOTIFY_ARGS=(
   --symbol "${OPERATOR_BRIEF_SYMBOL:-BTCUSDT}"
-  --universe "${OPERATOR_BRIEF_UNIVERSE:-usdt_reliable_balanced_31}"
+  --universe "${OPERATOR_BRIEF_UNIVERSE:-micro_live_usdt_11}"
   --days "${OPERATOR_BRIEF_DAYS:-7}"
   --portfolio-limit "${OPERATOR_BRIEF_PORTFOLIO_LIMIT:-5}"
   --intent-limit "${OPERATOR_BRIEF_INTENT_LIMIT:-5}"
@@ -45,6 +46,9 @@ NOTIFY_ARGS=(
   --run-timeout-seconds "${OPERATOR_BRIEF_RUN_TIMEOUT_SECONDS:-90}"
 )
 
+if [[ -n "$SNAPSHOT_API_BASE_URL" ]]; then
+  NOTIFY_ARGS+=(--snapshot-api-base-url "$SNAPSHOT_API_BASE_URL")
+fi
 if [[ -n "${OPERATOR_BRIEF_DISCORD_WEBHOOK_URL:-}" ]]; then
   NOTIFY_ARGS+=(--webhook-url "$OPERATOR_BRIEF_DISCORD_WEBHOOK_URL")
 fi

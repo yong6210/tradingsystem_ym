@@ -19,6 +19,8 @@
   <dict>
     <key>OPERATOR_BRIEF_MODE</key>
     <string>shift-end</string>
+    <key>OPERATOR_BRIEF_SNAPSHOT_API_BASE_URL</key>
+    <string>http://127.0.0.1:8000</string>
   </dict>
 
   <key>StartInterval</key>

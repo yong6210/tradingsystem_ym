@@ -141,19 +141,19 @@ Use them as chart-side awareness only. Final server-side execution approval stil
 4. Confirm actual tradable candidates with:
 
 ```bash
-curl -s "http://127.0.0.1:8000/scanner/top?universe=usdc_perp_top30&limit=10" | jq
+curl -s "http://127.0.0.1:8000/scanner/top?universe=micro_live_usdt_11&limit=11" | jq
 ```
 
 5. Confirm the concrete plan with:
 
 ```bash
-curl -s "http://127.0.0.1:8000/plans/top?symbol=BTCUSDC&tf=5m&limit=5&refresh=true" | jq
+curl -s "http://127.0.0.1:8000/plans/top?symbol=BTCUSDT&tf=5m&limit=5&refresh=true" | jq
 ```
 
 6. Read the runtime/portfolio truth summary with:
 
 ```bash
-curl -s "http://127.0.0.1:8000/indicators/summary?symbol=BTCUSDC&refresh=true" | jq '.operator_summary'
+curl -s "http://127.0.0.1:8000/indicators/summary?symbol=BTCUSDT&refresh=true" | jq '.operator_summary'
 ```
 
 7. Preview the execution contract and current approval with:
@@ -166,8 +166,8 @@ curl -s -X POST "http://127.0.0.1:8000/execution/approve-plan" -H "content-type:
 8. Use validation and ops gates before trusting live execution:
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8000/validation/report?symbol=BTCUSDC" | jq
-curl -s -X POST "http://127.0.0.1:8000/operations/checklist?symbol=BTCUSDC" | jq
+curl -s -X POST "http://127.0.0.1:8000/validation/report?symbol=BTCUSDT" | jq
+curl -s -X POST "http://127.0.0.1:8000/operations/checklist?symbol=BTCUSDT&universe=micro_live_usdt_11" | jq
 ```
 
 ## TradingView -> Server Read Order

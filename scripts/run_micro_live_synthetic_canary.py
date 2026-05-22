@@ -24,9 +24,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Dry-run MICRO_LIVE submit path through sizing and liquidity checks.")
     parser.add_argument("--symbol", default="")
     parser.add_argument("--direction", choices=["long", "short"], default="long")
-    parser.add_argument("--entry-model", choices=["LIMIT", "CONFIRM"], default="LIMIT")
+    parser.add_argument(
+        "--entry-model",
+        choices=["LIMIT", "CONFIRM"],
+        default="",
+        help="Override entry model. Empty uses the first configured MICRO_LIVE entry model.",
+    )
     parser.add_argument("--entry-price", type=float, default=0.0)
     parser.add_argument("--stop-bps", type=float, default=50.0)
+    parser.add_argument("--risk-r", type=float, default=1.0, help="Recommended live risk multiplier used by sizing.")
     parser.add_argument("--report-dir", default="reports/operations/micro_live_synthetic_canary")
     parser.add_argument("--no-write-report", action="store_true")
     parser.add_argument("--no-network", action="store_true", help="Use settings/default rule and synthetic liquidity loaders only.")
@@ -78,6 +84,18 @@ def _first_live_symbol(settings: Any, explicit_symbol: str = "") -> str:
         if not allowed_symbol_set or priority_symbol in allowed_symbol_set:
             return priority_symbol
     return allowed_symbols[0] if allowed_symbols else "BTCUSDT"
+
+
+def _first_live_entry_model(settings: Any, explicit_entry_model: str = "") -> str:
+    explicit = str(explicit_entry_model or "").strip().upper()
+    if explicit:
+        return explicit
+    allowed_entry_models = [
+        item.strip().upper()
+        for item in str(getattr(settings, "auto_trading_micro_live_allowed_entry_models", "") or "").split(",")
+        if item.strip()
+    ]
+    return allowed_entry_models[0] if allowed_entry_models else "CONFIRM"
 
 
 def _public_mid_price(client: BinanceFuturesClient, symbol: str) -> float:
@@ -251,6 +269,7 @@ def run_canary(
     entry_model: str,
     entry_price: float,
     stop_bps: float,
+    risk_r: float = 1.0,
     use_network: bool,
     use_private_balance: bool = True,
     balance_snapshot: Any | None = None,
@@ -258,6 +277,7 @@ def run_canary(
 ) -> dict[str, Any]:
     settings = get_settings()
     normalized_symbol = _first_live_symbol(settings, symbol)
+    normalized_entry_model = _first_live_entry_model(settings, entry_model)
     client = BinanceFuturesClient() if use_network else None
     reference_price = float(entry_price or 0.0)
     if reference_price <= 0.0 and client is not None:
@@ -268,11 +288,12 @@ def run_canary(
     normalized_direction = str(direction or "long").lower()
     stop_distance = reference_price * max(float(stop_bps or 0.0), 1.0) / 10_000.0
     stop_price = reference_price - stop_distance if normalized_direction == "long" else reference_price + stop_distance
+    recommended_risk_r = max(_safe_float(risk_r, 1.0), 0.0)
     plan = SimpleNamespace(
         plan_id="synthetic_micro_live_canary_plan",
         symbol=normalized_symbol,
         direction=normalized_direction,
-        entry_model=str(entry_model or "LIMIT").upper(),
+        entry_model=normalized_entry_model,
         entry_price=reference_price,
         sl=stop_price,
     )
@@ -285,7 +306,12 @@ def run_canary(
                 "stop_price": stop_price,
             }
         },
-        quality_snapshot={"recommended_risk_r": 1.0},
+        quality_snapshot={
+            "recommended_risk_r": recommended_risk_r,
+            "base_recommended_risk_r": recommended_risk_r,
+            "allocated_risk_r": recommended_risk_r,
+            "risk_sizing_r": recommended_risk_r,
+        },
         dedupe_result={},
     )
     rules_loader = _public_symbol_rules_loader(client) if client is not None else _settings_symbol_rules_loader(settings)
@@ -313,7 +339,7 @@ def run_canary(
     normalized_price, price_details = coordinator._normalize_live_limit_price(
         symbol=normalized_symbol,
         side=side,
-        requested_price=reference_price if str(entry_model).upper() == "LIMIT" else None,
+        requested_price=reference_price if normalized_entry_model == "LIMIT" else None,
     )
     liquidity_gate: dict[str, Any] = {}
     liquidity_error = ""
@@ -322,7 +348,7 @@ def run_canary(
             liquidity_gate = coordinator._live_liquidity_gate(
                 symbol=normalized_symbol,
                 side=side,
-                order_type="LIMIT" if str(entry_model).upper() == "LIMIT" else "MARKET",
+                order_type="LIMIT" if normalized_entry_model == "LIMIT" else "MARKET",
                 quantity=live_quantity,
                 price=normalized_price,
                 reference_price=normalized_price or reference_price,
@@ -365,7 +391,7 @@ def run_canary(
         },
         {
             "name": "limit_price_normalization",
-            "status": "PASS" if str(entry_model).upper() != "LIMIT" or (normalized_price is not None and normalized_price > 0.0) else "FAIL",
+            "status": "PASS" if normalized_entry_model != "LIMIT" or (normalized_price is not None and normalized_price > 0.0) else "FAIL",
             "message": json.dumps(price_details, sort_keys=True),
         },
         {
@@ -388,9 +414,10 @@ def run_canary(
         "no_live_order_sent": True,
         "symbol": normalized_symbol,
         "direction": normalized_direction,
-        "entry_model": str(entry_model).upper(),
+        "entry_model": normalized_entry_model,
         "reference_price": round(reference_price, 8),
         "stop_price": round(stop_price, 8),
+        "risk_r": round(recommended_risk_r, 6),
         "use_network": bool(use_network),
         "use_private_balance": bool(use_private_balance and client is not None),
         "balance_source": balance_source,
@@ -431,6 +458,7 @@ def main() -> int:
         entry_model=str(args.entry_model),
         entry_price=float(args.entry_price or 0.0),
         stop_bps=float(args.stop_bps or 50.0),
+        risk_r=float(args.risk_r if args.risk_r is not None else 1.0),
         use_network=not bool(args.no_network),
         use_private_balance=not bool(args.no_private_balance),
     )

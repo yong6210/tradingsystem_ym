@@ -25,13 +25,19 @@ from scripts.operation_report_io import atomic_write_text, display_path, parse_r
 _OPEN_SUBMISSION_STATES = {"CREATED", "SUBMITTED", "ACKNOWLEDGED", "PARTIALLY_FILLED"}
 _TERMINAL_LEDGER_STATES = {"FILLED", "CANCELED", "CANCELLED", "REJECTED", "EXPIRED"}
 _ERROR_SUBMIT_STATES = {"REJECTED", "ERROR", "FAILED", "LIVE_SUBMIT_ERROR"}
-_SAFETY_REJECTION_SUBMIT_STATUSES = {"LIVE_LIQUIDITY_BLOCKED", "LIVE_LIQUIDITY_SPLIT_REQUIRED"}
+_SAFETY_REJECTION_SUBMIT_STATUSES = {
+    "LIVE_ACCOUNT_PROTECTION_BLOCKED",
+    "LIVE_LIQUIDITY_BLOCKED",
+    "LIVE_LIQUIDITY_SPLIT_REQUIRED",
+    "LIVE_STOP_PRECHECK_BLOCKED",
+}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Watch live order reconciliation gaps before they become silent execution failures.")
     parser.add_argument("--days", type=int, default=3)
     parser.add_argument("--symbols", default="")
+    parser.add_argument("--all-contracts", action="store_true", help="Include old/out-of-current-contract live history.")
     parser.add_argument("--limit", type=int, default=500)
     parser.add_argument("--stale-minutes", type=int, default=0, help="Defaults to AUTO_TRADING_RECONCILIATION_USER_STREAM_STALE_SECONDS.")
     parser.add_argument("--event-lookback-minutes", type=int, default=60)
@@ -64,6 +70,13 @@ def _resolve_root_path(raw_path: str) -> Path:
 
 def _csv_symbols(raw: str) -> set[str]:
     return {item.strip().upper() for item in str(raw or "").split(",") if item.strip()}
+
+
+def _current_contract_symbols(settings: Any) -> set[str]:
+    symbols = _csv_symbols(getattr(settings, "auto_trading_micro_live_allowed_symbols", ""))
+    if symbols:
+        return symbols
+    return _csv_symbols(getattr(settings, "auto_trading_allowed_symbols", ""))
 
 
 def _as_utc(value: Any) -> datetime | None:
@@ -283,6 +296,8 @@ def evaluate_reconciliation_watchdog(
         stale = reference_ts is not None and reference_ts <= normalized_now - stale_delta
         if state in _ERROR_SUBMIT_STATES or submit_status in _ERROR_SUBMIT_STATES:
             safety_rejection = submit_status in _SAFETY_REJECTION_SUBMIT_STATUSES
+            if safety_rejection and (reference_ts is None or reference_ts < normalized_now - event_delta):
+                continue
             issues.append(
                 _issue(
                     "live_submission_safety_rejected" if safety_rejection else "live_submission_error",
@@ -346,6 +361,12 @@ def evaluate_reconciliation_watchdog(
                 and not _safe_bool(row.get("reduce_only"))
                 and matching_open_position(row) is None
             ):
+                plan_id = str(row.get("plan_id") or "")
+                has_matching_open_plan = bool(plan_id) and any(
+                    str(plan.get("plan_id") or "") == plan_id for plan in local_open_plans
+                )
+                if not has_matching_open_plan:
+                    continue
                 issues.append(
                     _issue(
                         "filled_entry_without_position_snapshot",
@@ -540,7 +561,15 @@ def _default_stale_minutes(explicit: int) -> int:
     return max(1, int(round(seconds / 60.0)))
 
 
-def build_payload(*, days: int, symbols: set[str], limit: int, stale_minutes: int, event_lookback_minutes: int) -> dict[str, Any]:
+def build_payload(
+    *,
+    days: int,
+    symbols: set[str],
+    limit: int,
+    stale_minutes: int,
+    event_lookback_minutes: int,
+    contract_filter_mode: str = "custom",
+) -> dict[str, Any]:
     state = _fetch_state(symbols=symbols, days=days, limit=limit)
     now = datetime.now(UTC)
     evaluation = evaluate_reconciliation_watchdog(
@@ -557,6 +586,11 @@ def build_payload(*, days: int, symbols: set[str], limit: int, stale_minutes: in
         "generated_at": now.isoformat().replace("+00:00", "Z"),
         "window_days": max(1, int(days)),
         "symbols": sorted(symbols),
+        "contract_filter": {
+            "mode": str(contract_filter_mode or "custom"),
+            "symbols": sorted(symbols),
+            "all_contracts": str(contract_filter_mode or "") == "all_contracts",
+        },
         "overall_status": evaluation["status"],
         "evaluation": evaluation,
     }
@@ -570,6 +604,7 @@ def _write_report(path: Path, payload: dict[str, Any], *, atomic: bool = False) 
         "",
         f"- generated_at: {payload.get('generated_at')}",
         f"- status: {payload.get('overall_status')}",
+        f"- contract_filter: {dict(payload.get('contract_filter') or {}).get('mode', 'custom')}",
         f"- severity: {evaluation.get('severity')}",
         f"- reason: {evaluation.get('reason')}",
         f"- message: {evaluation.get('message')}",
@@ -622,7 +657,16 @@ def _watchdog_message(payload: dict[str, Any]) -> str:
 
 def main() -> int:
     args = parse_args()
-    symbols = _csv_symbols(str(args.symbols or ""))
+    explicit_symbols = _csv_symbols(str(args.symbols or ""))
+    if bool(args.all_contracts):
+        symbols = explicit_symbols
+        contract_filter_mode = "all_contracts" if not symbols else "explicit_symbols"
+    elif explicit_symbols:
+        symbols = explicit_symbols
+        contract_filter_mode = "explicit_symbols"
+    else:
+        symbols = _current_contract_symbols(get_settings())
+        contract_filter_mode = "current_live_contract"
     stale_minutes = _default_stale_minutes(int(args.stale_minutes or 0))
     payload = build_payload(
         days=max(1, int(args.days)),
@@ -630,6 +674,7 @@ def main() -> int:
         limit=max(1, int(args.limit)),
         stale_minutes=stale_minutes,
         event_lookback_minutes=max(1, int(args.event_lookback_minutes)),
+        contract_filter_mode=contract_filter_mode,
     )
     if not args.no_write_report:
         generated = parse_report_generated_at(payload.get("generated_at"))

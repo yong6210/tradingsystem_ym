@@ -13,6 +13,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.db.session import SessionLocal, init_db
+from app.services.market_data import configured_usdt_universe_name
 from app.services.strategy_engine import StrategyEngine
 from scripts.operation_report_io import atomic_write_text
 
@@ -36,7 +37,7 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run auto-trading incident drill scenarios")
     parser.add_argument("--symbol", default="BTCUSDT")
-    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
+    parser.add_argument("--universe", default=configured_usdt_universe_name())
     parser.add_argument("--family", default="trend_continuation")
     parser.add_argument(
         "--scenario",

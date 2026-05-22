@@ -57,6 +57,35 @@ def _csv_upper_set(value: Any) -> set[str]:
     return {item.strip().upper() for item in str(value or "").split(",") if item.strip()}
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return parsed if parsed == parsed else float(default)
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+            return False
+    return bool(value)
+
+
 def _parse_utc_ts(value: Any) -> datetime | None:
     text = str(value or "").strip()
     if not text:
@@ -141,6 +170,204 @@ def _live_candle_depth_check(
         ),
         "deficient_count": len(deficits),
         "deficits": deficits[:20],
+    }
+
+
+def _live_leverage_cap_sync_report_check(*, max_age_minutes: int = 90) -> dict[str, Any]:
+    path = ROOT_DIR / "reports/operations/live_leverage_cap_sync/latest.json"
+    if not path.exists():
+        return {
+            "name": "live_leverage_cap_sync_report",
+            "status": "FAIL",
+            "severity": "blocking",
+            "message": f"missing latest leverage sync report: {_display_path(path)}",
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "name": "live_leverage_cap_sync_report",
+            "status": "FAIL",
+            "severity": "blocking",
+            "message": f"invalid latest leverage sync report: {exc.__class__.__name__}",
+        }
+    try:
+        generated_at = parse_report_generated_at(payload.get("generated_at"))
+    except Exception as exc:
+        return {
+            "name": "live_leverage_cap_sync_report",
+            "status": "FAIL",
+            "severity": "blocking",
+            "message": f"latest leverage sync report has invalid generated_at: {exc.__class__.__name__}",
+        }
+    age_minutes = max(0.0, (datetime.now(UTC) - generated_at).total_seconds() / 60.0)
+    overall_status = str(payload.get("overall_status") or "").upper()
+    pending_count = int(payload.get("pending_count") or 0)
+    fail_count = int(payload.get("fail_count") or 0)
+    target_leverage = int(payload.get("target_leverage") or 0)
+    configured_cap = int(payload.get("configured_leverage_cap") or 0)
+    stale = age_minutes > max(1, int(max_age_minutes))
+    unhealthy = overall_status not in {"OK", "PASS"} or pending_count > 0 or fail_count > 0 or target_leverage != configured_cap
+    status = "FAIL" if stale or unhealthy else "PASS"
+    return {
+        "name": "live_leverage_cap_sync_report",
+        "status": status,
+        "severity": "blocking",
+        "message": (
+            f"status={overall_status or 'unset'}; age_minutes={age_minutes:.1f}; "
+            f"target={target_leverage}; configured_cap={configured_cap}; "
+            f"pending={pending_count}; fail={fail_count}; stale={stale}"
+        ),
+        "age_minutes": round(age_minutes, 2),
+        "pending_count": pending_count,
+        "fail_count": fail_count,
+        "target_leverage": target_leverage,
+        "configured_leverage_cap": configured_cap,
+    }
+
+
+def _session_impulse_retest_exit_contract_check(settings: Any) -> dict[str, Any]:
+    observed = {
+        "policy": str(getattr(settings, "session_impulse_retest_exit_policy_name", "") or ""),
+        "stop_mode": str(getattr(settings, "session_impulse_retest_exit_stop_mode", "") or ""),
+        "target_rr": _safe_float(getattr(settings, "session_impulse_retest_exit_target_rr", 0.0)),
+        "tp1_fraction": _safe_float(getattr(settings, "session_impulse_retest_exit_tp1_fraction", 0.0)),
+        "tp2_fraction": _safe_float(getattr(settings, "session_impulse_retest_exit_tp2_fraction", 0.0)),
+        "min_stop_pct": _safe_float(getattr(settings, "session_impulse_retest_exit_min_stop_pct", 0.0)),
+        "min_risk_atr": _safe_float(getattr(settings, "session_impulse_retest_exit_min_risk_atr", 0.0)),
+        "adaptive_targets": _safe_bool(
+            getattr(settings, "session_impulse_retest_exit_adaptive_targets_enabled", False)
+        ),
+        "structure_targets": _safe_bool(
+            getattr(settings, "session_impulse_retest_exit_structure_targets_enabled", False)
+        ),
+        "swing_lookback_bars": _safe_int(getattr(settings, "session_impulse_retest_exit_structure_stop_swing_bars", 0)),
+        "stop_buffer_atr": _safe_float(getattr(settings, "session_impulse_retest_exit_structure_stop_buffer_atr", 0.0)),
+        "structure_target_buffer_atr": _safe_float(
+            getattr(settings, "session_impulse_retest_exit_structure_target_buffer_atr", 0.0)
+        ),
+        "structure_tp1_min_rr": _safe_float(getattr(settings, "session_impulse_retest_exit_structure_tp1_min_rr", 0.0)),
+        "structure_tp2_min_rr": _safe_float(getattr(settings, "session_impulse_retest_exit_structure_tp2_min_rr", 0.0)),
+        "structure_tp_max_rr": _safe_float(getattr(settings, "session_impulse_retest_exit_structure_tp_max_rr", 0.0)),
+        "important_zone_exit": _safe_bool(
+            getattr(settings, "session_impulse_retest_exit_important_zone_exit_enabled", False)
+        ),
+        "important_zone_stop": _safe_bool(
+            getattr(settings, "session_impulse_retest_exit_important_zone_stop_enabled", True),
+            default=True,
+        ),
+        "important_zone_target": _safe_bool(
+            getattr(settings, "session_impulse_retest_exit_important_zone_target_enabled", True),
+            default=True,
+        ),
+        "important_zone_stop_buffer_atr": _safe_float(
+            getattr(settings, "session_impulse_retest_exit_important_zone_stop_buffer_atr", 0.08)
+        ),
+        "important_zone_target_buffer_atr": _safe_float(
+            getattr(settings, "session_impulse_retest_exit_important_zone_target_buffer_atr", 0.05)
+        ),
+        "stop_after_partial_rr": _safe_float(getattr(settings, "session_impulse_retest_exit_stop_after_partial_rr", 0.0)),
+        "adverse_volume_enabled": _safe_bool(
+            getattr(settings, "session_impulse_retest_exit_adverse_volume_enabled", False)
+        ),
+        "adverse_volume_after_partial_only": _safe_bool(
+            getattr(settings, "session_impulse_retest_exit_adverse_volume_after_partial_only", True),
+            default=True,
+        ),
+        "adverse_volume_min_factor": _safe_float(
+            getattr(settings, "session_impulse_retest_exit_adverse_volume_min_factor", 3.0)
+        ),
+        "adverse_volume_min_body_r": _safe_float(
+            getattr(settings, "session_impulse_retest_exit_adverse_volume_min_body_r", 0.35)
+        ),
+        "adverse_volume_lookback_bars": _safe_int(
+            getattr(settings, "session_impulse_retest_exit_adverse_volume_lookback_bars", 20)
+        ),
+        "live_breakeven_after_partial": _safe_bool(
+            getattr(settings, "auto_trading_live_breakeven_after_partial_enabled", False)
+        ),
+        "live_breakeven_offset_bps": _safe_float(getattr(settings, "auto_trading_live_breakeven_offset_bps", 1.0)),
+        "live_breakeven_min_improvement_bps": _safe_float(
+            getattr(settings, "auto_trading_live_breakeven_min_improvement_bps", 1.0)
+        ),
+        "live_adverse_volume_exit": _safe_bool(getattr(settings, "auto_trading_live_adverse_volume_exit_enabled", False)),
+        "live_adverse_volume_after_partial_only": _safe_bool(
+            getattr(settings, "auto_trading_live_adverse_volume_exit_after_partial_only", True),
+            default=True,
+        ),
+    }
+    mismatches: list[str] = []
+    expected_name = "unknown"
+
+    def _expect_float(key: str, expected: float, *, tolerance: float = 1e-9) -> None:
+        if abs(float(observed[key]) - float(expected)) > tolerance:
+            mismatches.append(f"{key}={observed[key]}")
+
+    def _expect_int(key: str, expected: int) -> None:
+        if int(observed[key]) != int(expected):
+            mismatches.append(f"{key}={observed[key]}")
+
+    def _expect_bool(key: str, expected: bool) -> None:
+        if bool(observed[key]) is not bool(expected):
+            mismatches.append(f"{key}={str(observed[key]).lower()}")
+
+    if observed["policy"] == "legacy_full_2r":
+        expected_name = "legacy_full_2r/legacy/full_2R/no_split/no_structure"
+        if observed["stop_mode"] != "legacy":
+            mismatches.append(f"stop_mode={observed['stop_mode']}")
+        _expect_float("target_rr", 2.0)
+        for key in ("tp1_fraction", "tp2_fraction", "min_stop_pct", "min_risk_atr"):
+            _expect_float(key, 0.0)
+        _expect_bool("adaptive_targets", False)
+        _expect_bool("structure_targets", False)
+        _expect_bool("important_zone_exit", False)
+        _expect_bool("adverse_volume_enabled", False)
+        _expect_bool("live_adverse_volume_exit", False)
+    elif observed["policy"] == "structure_buffered_swing6_stop0.12_tpbuf0.08_pm_stop0.00r_advvol_any":
+        expected_name = "structure_buffered_swing6_stop0.12_tpbuf0.08_pm_stop0.00r_advvol_any"
+        if observed["stop_mode"] != "structure_floor":
+            mismatches.append(f"stop_mode={observed['stop_mode']}")
+        _expect_float("target_rr", 2.5)
+        _expect_float("tp1_fraction", 0.35)
+        _expect_float("tp2_fraction", 0.65)
+        _expect_float("min_stop_pct", 0.003)
+        _expect_float("min_risk_atr", 0.35)
+        _expect_bool("adaptive_targets", True)
+        _expect_bool("structure_targets", True)
+        _expect_bool("important_zone_exit", False)
+        _expect_bool("important_zone_stop", True)
+        _expect_bool("important_zone_target", True)
+        _expect_int("swing_lookback_bars", 6)
+        _expect_float("stop_buffer_atr", 0.12)
+        _expect_float("structure_target_buffer_atr", 0.08)
+        _expect_float("structure_tp1_min_rr", 0.8)
+        _expect_float("structure_tp2_min_rr", 1.6)
+        _expect_float("structure_tp_max_rr", 3.2)
+        _expect_float("stop_after_partial_rr", 0.0)
+        _expect_bool("adverse_volume_enabled", True)
+        _expect_bool("adverse_volume_after_partial_only", False)
+        _expect_float("adverse_volume_min_factor", 3.0)
+        _expect_float("adverse_volume_min_body_r", 0.35)
+        _expect_int("adverse_volume_lookback_bars", 20)
+        _expect_bool("live_breakeven_after_partial", True)
+        _expect_float("live_breakeven_offset_bps", 0.0)
+        _expect_float("live_breakeven_min_improvement_bps", 0.0)
+        _expect_bool("live_adverse_volume_exit", True)
+        _expect_bool("live_adverse_volume_after_partial_only", False)
+    else:
+        mismatches.append(f"policy={observed['policy']}")
+
+    status = "PASS" if not mismatches else "FAIL"
+    return {
+        "name": "session_impulse_retest_exit_contract",
+        "status": status,
+        "severity": "blocking",
+        "message": (
+            f"expected={expected_name}; "
+            f"observed={observed}; mismatches={','.join(mismatches) if mismatches else 'none'}"
+        ),
+        "observed": observed,
+        "mismatches": mismatches,
     }
 
 
@@ -245,6 +472,9 @@ def build_payload(*, days: int, limit: int, check_binance_rules: bool) -> dict[s
         symbol_filter = _csv_upper_set(getattr(settings, "auto_trading_allowed_symbols", ""))
     runtime_started_at = _ws_runtime_started_at()
     checks = _micro_live_config_drift_checks(check_binance_rules=check_binance_rules)
+    if "session_impulse_retest" in family_filter:
+        checks.append(_session_impulse_retest_exit_contract_check(settings))
+    checks.append(_live_leverage_cap_sync_report_check())
     init_db()
     with SessionLocal() as db:
         checks.append(_live_candle_depth_check(CandleRepository(db), symbols=sorted(symbol_filter)))

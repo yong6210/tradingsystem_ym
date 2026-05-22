@@ -98,7 +98,7 @@ class ExecutionDegradationAdvisoryService:
     @staticmethod
     def _recommended_action_for_status(status: str) -> str:
         if status == "manual_review":
-            return "require_manual_review_before_new_live_entries"
+            return "review_execution_quality_before_live_expansion"
         if status == "watch":
             return "review_execution_drag_and_hold_size"
         return "continue_runtime_monitoring"

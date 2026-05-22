@@ -372,3 +372,133 @@ def test_main_uses_cached_fast_surfaces_for_session_brief(monkeypatch, capsys) -
         "days": 7,
         "write_report": "false",
     }
+
+
+def test_main_can_read_surfaces_from_running_api(monkeypatch, capsys) -> None:
+    calls: list[tuple[str, str, dict]] = []
+
+    dashboard = {
+        "execution_mode": "MICRO_LIVE",
+        "new_entries_allowed": True,
+        "deployment_go_no_go": "GO",
+        "playbook_action": "continue_runtime_monitoring",
+        "approval_strip_summary": {
+            "approve_value": "approval usable",
+            "align_value": "aligned",
+            "act_value": "continue_runtime_monitoring",
+            "act_priority_level": "monitor",
+        },
+        "signal_funnel": {
+            "operator_action_priority": {
+                "top_action": "continue_runtime_monitoring",
+                "priority_level": "monitor",
+                "next_actions": [],
+            },
+            "alpha_research_recommended_action": {},
+            "alpha_research_top_shadow_experiment": {},
+            "hard_block_summary": {},
+            "rollout_block_summary": {},
+            "score_to_outcome_funnel": {"money_funnel": {}},
+            "outcome_attribution": {},
+            "edge_experiment_review": {},
+            "edge_evolution_rule": {},
+            "review_followup_ledger": {},
+            "outcome_control_trace": {},
+            "rollout_recommendation": {},
+            "family_bottlenecks": [],
+            "regime_bottlenecks": [],
+            "session_bottlenecks": [],
+        },
+        "portfolio_summary": {"accepted_candidates": [], "blocked_candidates": []},
+        "recent_intents": [],
+        "open_orders": [],
+        "open_positions": [],
+    }
+    validation = {
+        "deployment_go_no_go": "GO",
+        "deployment_code": "cached",
+        "deployment_message": "cached validation",
+        "playbook_action": "continue_runtime_monitoring",
+        "approval_topline_status": "GO",
+        "validation_report": {
+            "approval_strip_summary": {
+                "approve_value": "approval usable",
+                "align_value": "aligned",
+                "act_value": "continue_runtime_monitoring",
+                "act_priority_level": "monitor",
+            }
+        },
+    }
+    checklist = {
+        "deployment_go_no_go": "GO",
+        "deployment_code": "cached",
+        "deployment_message": "cached checklist",
+        "playbook_action": "continue_runtime_monitoring",
+        "overall_status": "GO",
+        "blocking_failures": 0,
+        "manual_actions": 0,
+        "warnings": 0,
+        "approval_strip_summary": {
+            "approve_value": "approval usable",
+            "align_value": "aligned",
+            "act_value": "continue_runtime_monitoring",
+            "act_priority_level": "monitor",
+        },
+    }
+
+    def _api_json(base_url, method, path, params):  # noqa: ANN001
+        calls.append((method, path, dict(params or {})))
+        assert base_url == "http://127.0.0.1:8000"
+        if path == "/execution/operator-dashboard":
+            return dashboard
+        if path == "/validation/report":
+            return validation
+        if path == "/operations/checklist":
+            return checklist
+        raise AssertionError(f"unexpected API path {path}")
+
+    def _api_text(base_url, path, params):  # noqa: ANN001
+        calls.append(("GET", path, dict(params or {})))
+        assert base_url == "http://127.0.0.1:8000"
+        assert path == "/execution/operator-ui"
+        return "\n".join(snapshot_script.EXPECTED_OPERATOR_UI_SECTIONS)
+
+    class _Client:
+        def __init__(self, app):  # noqa: ANN001
+            raise AssertionError("TestClient should not be used when api_base_url is provided")
+
+    monkeypatch.setattr(snapshot_script, "_api_json", _api_json)
+    monkeypatch.setattr(snapshot_script, "_api_text", _api_text)
+    monkeypatch.setattr(snapshot_script, "TestClient", _Client)
+    monkeypatch.setattr(
+        snapshot_script,
+        "parse_args",
+        lambda: SimpleNamespace(
+            symbol="BTCUSDT",
+            universe="micro_live_usdt_11",
+            days=7,
+            portfolio_limit=5,
+            intent_limit=5,
+            reconcile_limit=5,
+            full_dashboard=False,
+            api_base_url="http://127.0.0.1:8000",
+            report_dir="reports/operations/operator_surface_divergence",
+            no_write_report=True,
+        ),
+    )
+
+    assert snapshot_script.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["surface_source"] == "api"
+    assert payload["api_base_url"] == "http://127.0.0.1:8000"
+    assert payload["dashboard_summary"]["new_entries_allowed"] is True
+    assert ("GET", "/execution/operator-dashboard", {
+        "symbol": "BTCUSDT",
+        "universe": "micro_live_usdt_11",
+        "portfolio_limit": 5,
+        "intent_limit": 5,
+        "reconcile_limit": 5,
+        "days": 7,
+        "fast": True,
+    }) in calls

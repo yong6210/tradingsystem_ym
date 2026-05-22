@@ -1,6 +1,8 @@
 # Operator UI Home Inspection Checklist
 
-최종 갱신: 2026-03-24
+최종 갱신: 2026-05-19
+
+현재 운영 예시는 `USDT 11심볼 + session_impulse_retest` 기준이다. 예전 `BTCUSDC / usdc_perp_top30` 예시는 현재 live 계약이 아니다.
 
 ## 1. 목적
 - `GET /execution/operator-ui` 홈 화면을 브라우저에서 같은 순서로 읽게 만든다.
@@ -9,30 +11,30 @@
 
 ## 2. 사전 준비
 ```bash
-open "http://127.0.0.1:8000/execution/operator-ui?symbol=BTCUSDC&universe=usdc_perp_top30&days=7"
+open "http://127.0.0.1:8000/execution/operator-ui?symbol=BTCUSDT&universe=micro_live_usdt_11&days=7"
 ```
 
 dry-run divergence snapshot:
 ```bash
 ./.venv/bin/python scripts/collect_operator_surface_divergence_snapshot.py \
-  --symbol BTCUSDC \
-  --universe usdc_perp_top30 \
+  --symbol BTCUSDT \
+  --universe micro_live_usdt_11 \
   --days 7
 ```
 
 handoff brief 생성:
 ```bash
 ./.venv/bin/python scripts/generate_operator_session_brief.py \
-  --symbol BTCUSDC \
-  --universe usdc_perp_top30 \
+  --symbol BTCUSDT \
+  --universe micro_live_usdt_11 \
   --days 7
 ```
 
 handoff message dry-run:
 ```bash
 ./.venv/bin/python scripts/notify_operator_session_brief.py \
-  --symbol BTCUSDC \
-  --universe usdc_perp_top30 \
+  --symbol BTCUSDT \
+  --universe micro_live_usdt_11 \
   --days 7 \
   --channel system \
   --brief-mode shift-start \
@@ -42,8 +44,8 @@ handoff message dry-run:
 shift-end handoff message dry-run:
 ```bash
 ./.venv/bin/python scripts/notify_operator_session_brief.py \
-  --symbol BTCUSDC \
-  --universe usdc_perp_top30 \
+  --symbol BTCUSDT \
+  --universe micro_live_usdt_11 \
   --days 7 \
   --channel system \
   --brief-mode shift-end \

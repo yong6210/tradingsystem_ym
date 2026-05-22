@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import plistlib
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,51 @@ notify_entry_surface = _load_module(
     "notify_entry_surface_test_module",
     ROOT_DIR / "scripts/notify_entry_surface.py",
 )
+
+
+def test_entry_surface_launchd_uses_live_usdt_universe() -> None:
+    with (ROOT_DIR / "launchd/com.yumin.trading.entry-surface.plist").open("rb") as handle:
+        payload = plistlib.load(handle)
+
+    args = list(payload["ProgramArguments"])
+    universe = args[args.index("--universe") + 1]
+
+    assert universe == "micro_live_usdt_11"
+
+
+def test_operator_session_brief_wrapper_uses_live_usdt_universe() -> None:
+    source = (ROOT_DIR / "scripts/run_operator_session_brief_tick.sh").read_text(encoding="utf-8")
+
+    assert 'OPERATOR_BRIEF_UNIVERSE:-micro_live_usdt_11' in source
+    assert 'OPERATOR_BRIEF_UNIVERSE:-micro_live_usdt_12' not in source
+    assert 'SNAPSHOT_API_BASE_URL="${OPERATOR_BRIEF_SNAPSHOT_API_BASE_URL:-http://127.0.0.1:8000}"' in source
+    assert "NOTIFY_ARGS+=(--snapshot-api-base-url \"$SNAPSHOT_API_BASE_URL\")" in source
+
+
+def test_operator_brief_launchd_uses_runtime_api_surface() -> None:
+    for name, mode in (
+        ("com.yumin.trading.operator-brief-shift-start.plist", "shift-start"),
+        ("com.yumin.trading.operator-brief-shift-end.plist", "shift-end"),
+    ):
+        with (ROOT_DIR / "launchd" / name).open("rb") as handle:
+            payload = plistlib.load(handle)
+
+        env = dict(payload["EnvironmentVariables"])
+        assert env["OPERATOR_BRIEF_MODE"] == mode
+        assert env["OPERATOR_BRIEF_SNAPSHOT_API_BASE_URL"] == "http://127.0.0.1:8000"
+
+
+def test_paper_lineage_helpers_use_configured_usdt_universe_default() -> None:
+    for script in (
+        ROOT_DIR / "scripts/run_paper_candidate_drill.py",
+        ROOT_DIR / "scripts/watch_paper_candidate_drill.py",
+        ROOT_DIR / "scripts/paper_lineage_watch_tick.py",
+    ):
+        source = script.read_text(encoding="utf-8")
+
+        assert "configured_usdt_universe_name" in source
+        assert 'default="usdt_reliable_balanced_31"' not in source
+        assert 'PAPER_LINEAGE_WATCH_UNIVERSE", "usdt_reliable_balanced_31"' not in source
 
 
 def _budget_payload(*, deployment_go_no_go: str = "GO") -> dict:

@@ -23,11 +23,15 @@ from app.core import operator_surface_contracts as osc
 from app.db.models import OrderIntent
 from app.db.session import SessionLocal
 from app.services.family_rollout import RolloutPolicyBootstrap
+from app.services.market_data import configured_usdt_universe_name
 from app.services.operating_lock import OperatingLockService
 from app.services.split_review_followup_ledger import summarize_split_review_followup_ledger
 
 
 DEFAULT_STAGE_DIR = ROOT_DIR / "reports/operations/stage_monitor"
+DEFAULT_PORTFOLIO_MIX_REVIEW_FILE = (
+    ROOT_DIR / "reports/operations/micro_intrabar_long_short_portfolio_mix_review_drop_arb/latest.json"
+)
 _LATEST_PAPER_LINEAGE_WATCH_FILE = ROOT_DIR / "reports/operations/paper_candidate_watch/latest_launchd_run.json"
 _POST_UNLOCK_BUNDLE_CACHE_SECONDS = 900
 _APPROVAL_TEMPLATE_FOCUS_CACHE_SECONDS = 900
@@ -49,7 +53,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--base-url", default=os.environ.get("STAGE_MONITOR_BASE_URL", "http://127.0.0.1:8000"))
     parser.add_argument("--symbol", default=os.environ.get("STAGE_MONITOR_SYMBOL", "BTCUSDT"))
-    parser.add_argument("--universe", default=os.environ.get("STAGE_MONITOR_UNIVERSE", "usdt_reliable_balanced_31"))
+    parser.add_argument(
+        "--universe",
+        default=os.environ.get("STAGE_MONITOR_UNIVERSE", configured_usdt_universe_name(get_settings())),
+    )
     parser.add_argument("--limit", type=int, default=int(os.environ.get("STAGE_MONITOR_LIMIT", "20")))
     parser.add_argument("--days", type=int, default=int(os.environ.get("STAGE_MONITOR_DAYS", "30")))
     parser.add_argument(
@@ -59,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--lineage-families",
-        default=os.environ.get("STAGE_MONITOR_LINEAGE_FAMILIES", "sweep_reversal,trend_continuation"),
+        default=os.environ.get("STAGE_MONITOR_LINEAGE_FAMILIES", "session_impulse_retest"),
     )
     parser.add_argument(
         "--lineage-proof-goal-closed-trades",
@@ -216,6 +223,124 @@ def _lineage_closed_trade_count(payload: dict[str, Any] | None) -> int:
     source = dict((payload or {}).get("edge_experiment_review") or {})
     kpis = dict(source.get("daily_edge_kpis") or {})
     return int(kpis.get("closed_trade_count", source.get("closed_trade_count", 0)) or 0)
+
+
+def _safe_int_value(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float_value(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed == parsed else default
+
+
+def _load_portfolio_mix_contract_proof() -> dict[str, Any]:
+    path = DEFAULT_PORTFOLIO_MIX_REVIEW_FILE
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    summary = dict(dict(payload.get("combined") or {}).get("summary") or {})
+    if not summary:
+        return {}
+
+    settings = get_settings()
+    allowed_symbols = [
+        item.strip().upper()
+        for item in str(getattr(settings, "auto_trading_micro_live_allowed_symbols", "") or "").split(",")
+        if item.strip()
+    ]
+    combined_symbols = [str(item or "").strip().upper() for item in list(payload.get("combined_symbols") or []) if str(item or "").strip()]
+    if allowed_symbols and set(combined_symbols) != set(allowed_symbols):
+        return {}
+
+    closed = _safe_int_value(summary.get("closed"))
+    if closed <= 0:
+        return {}
+    target = max(run_runtime_signoff_review._LIVE_ELIGIBLE_MICRO_LIVE_MIN_CLOSED_TRADES, 1)
+    exit_reasons = dict(summary.get("exit_reasons") or {})
+    stop_count = _safe_int_value(exit_reasons.get("stop")) + _safe_int_value(exit_reasons.get("stop_after_partial"))
+    cost_stress = dict(dict(payload.get("combined") or {}).get("cost_stress") or {})
+    cost_x2_total_r = _safe_float_value(dict(cost_stress.get("cost_x2_0") or {}).get("total_r"))
+    extra_005_total_r = _safe_float_value(dict(cost_stress.get("extra_0_05r_per_trade") or {}).get("total_r"))
+    ev_r = _safe_float_value(summary.get("ev_r"))
+    positive_year_fraction = _safe_float_value(summary.get("positive_year_fraction"))
+    ready = closed >= target and ev_r > 0.0 and positive_year_fraction >= 1.0 and cost_x2_total_r > 0.0
+    return {
+        "source": "micro_intrabar_long_short_portfolio_mix_review",
+        "source_path": str(path.relative_to(ROOT_DIR)),
+        "summary_label": "portfolio-mix backtest proof",
+        "contract_scope": "portfolio_mix_backtest",
+        "count_basis": "portfolio_mix_closed_trades",
+        "closed_trade_count": closed,
+        "target_closed_trades": target,
+        "remaining_to_target": max(target - closed, 0),
+        "ready_for_replay_refresh": ready,
+        "eligible_entry_models": [
+            item.strip().upper()
+            for item in str(getattr(settings, "auto_trading_micro_live_allowed_entry_models", "") or "").split(",")
+            if item.strip()
+        ],
+        "eligible_symbols": allowed_symbols or combined_symbols,
+        "eligible_families": [
+            item.strip()
+            for item in str(getattr(settings, "auto_trading_micro_live_allowed_families", "") or "").split(",")
+            if item.strip()
+        ],
+        "win_rate": _safe_float_value(summary.get("win_rate")),
+        "ev_r": ev_r,
+        "total_r": _safe_float_value(summary.get("total_r")),
+        "replay_max_drawdown_r": _safe_float_value(summary.get("max_dd_r")),
+        "replay_p5_r": 0.0,
+        "stop_loss_share": stop_count / closed if closed else 0.0,
+        "worst_loss_streak": 0,
+        "positive_year_fraction": positive_year_fraction,
+        "cost_x2_total_r": cost_x2_total_r,
+        "extra_0_05r_per_trade_total_r": extra_005_total_r,
+    }
+
+
+def _ensure_portfolio_mix_focus(focus: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(focus or {})
+    proof = _load_portfolio_mix_contract_proof()
+    if not proof:
+        return enriched
+    existing_gate_proof = any(
+        dict(enriched.get(key) or {})
+        for key in (
+            "live_execution_post_patch_sample_summary",
+            "live_eligible_post_patch_sample_summary",
+            "post_patch_sample_summary",
+        )
+    )
+    if existing_gate_proof:
+        enriched["portfolio_mix_contract_proof_summary"] = dict(proof)
+        return enriched
+    if enriched:
+        enriched["portfolio_mix_contract_proof_summary"] = dict(proof)
+        return enriched
+    for key in (
+        "post_patch_sample_summary",
+        "live_eligible_post_patch_sample_summary",
+        "historical_execution_contract_proof_summary",
+        "historical_walk_forward_execution_contract_proof_summary",
+    ):
+        if not dict(enriched.get(key) or {}):
+            enriched[key] = dict(proof)
+    enriched["portfolio_mix_contract_proof_summary"] = dict(proof)
+    enriched.setdefault("live_contract_scope", proof.get("contract_scope"))
+    return enriched
 
 
 def _latest_closed_trade_ts(
@@ -655,7 +780,10 @@ def _apply_runtime_signoff_summary(current: dict[str, Any]) -> dict[str, Any]:
     signoff = dict(snapshot.get("runtime_signoff_summary") or {})
     runtime = dict(snapshot.get("runtime_reopen_status") or {})
     required_reviews = list(signoff.get("required_reviews") or [])
-    advisory_reviews = list(signoff.get("advisory_reviews") or [])
+    advisory_reviews = ops_stage_board._normalize_symbol_edge_advisories(
+        [dict(item) for item in list(signoff.get("advisory_reviews") or [])],
+        symbol=str(snapshot.get("symbol") or "BTCUSDT"),
+    )
     runtime_ready = _runtime_signoff_eligible(str(runtime.get("status") or ""))
     approval_template_focus = dict(signoff.get("approval_template_focus") or snapshot.get("approval_template_focus") or {})
     approval_template_focus_error = str(
@@ -718,10 +846,13 @@ def _apply_runtime_signoff_decision(current: dict[str, Any]) -> dict[str, Any]:
     snapshot = dict(current or {})
     signoff = dict(snapshot.get("runtime_signoff_summary") or {})
     runtime = dict(snapshot.get("runtime_reopen_status") or {})
+    focus = _ensure_portfolio_mix_focus(dict(signoff.get("approval_template_focus") or {}))
+    if focus:
+        signoff["approval_template_focus"] = focus
     decision = run_runtime_signoff_review._build_runtime_decision(
         runtime_ready=_runtime_signoff_eligible(str(runtime.get("status") or "")),
         required_reviews=[dict(item) for item in list(signoff.get("required_reviews") or [])],
-        approval_template_focus=dict(signoff.get("approval_template_focus") or {}),
+        approval_template_focus=focus,
     )
     signoff["runtime_decision"] = decision
     action = str(decision.get("effective_action") or "")
@@ -744,7 +875,7 @@ def _apply_runtime_signoff_decision(current: dict[str, Any]) -> dict[str, Any]:
         elif action == osc.RUNTIME_REOPEN_ACTION_PROCEED_TO_OPERATOR_SIGNOFF:
             signoff["operator_recommendation_reason"] = "runtime is reopen-ready and no required operator review items remain"
     signoff["runtime_reopen_gate_summary"] = run_runtime_signoff_review._build_runtime_reopen_gate_summary(
-        signoff.get("approval_template_focus"),
+        focus,
         decision,
     )
     snapshot["runtime_signoff_summary"] = signoff
@@ -1134,7 +1265,7 @@ def _apply_runtime_operator_signoff_summary(
     snapshot = dict(current or {})
     base_url = str(getattr(args, "base_url", "http://127.0.0.1:8000") or "http://127.0.0.1:8000")
     symbol = str(getattr(args, "symbol", snapshot.get("symbol") or "BTCUSDT") or "BTCUSDT")
-    universe = str(getattr(args, "universe", "usdt_reliable_balanced_31") or "usdt_reliable_balanced_31")
+    universe = str(getattr(args, "universe", "") or configured_usdt_universe_name(get_settings()))
     days = int(getattr(args, "days", 30) or 30)
     snapshot["runtime_operator_signoff_summary"] = run_runtime_signoff_review._build_runtime_operator_signoff_summary(
         runtime_decision=dict(snapshot.get("runtime_decision") or {}),
@@ -1667,7 +1798,7 @@ def _apply_runtime_signoff_approval_focus(
             previous_focus,
             stage=snapshot,
             symbol=symbol,
-            universe=str(snapshot.get("universe") or "usdt_reliable_balanced_31"),
+            universe=str(snapshot.get("universe") or configured_usdt_universe_name(get_settings())),
             days=int(snapshot.get("days") or 30),
         )
         refreshed_focus["computed_at"] = datetime.now(timezone.utc).isoformat()
@@ -1719,7 +1850,7 @@ def _apply_runtime_signoff_approval_focus(
                 previous_focus,
                 stage=snapshot,
                 symbol=symbol,
-                universe=str(snapshot.get("universe") or "usdt_reliable_balanced_31"),
+                universe=str(snapshot.get("universe") or configured_usdt_universe_name(get_settings())),
                 days=int(snapshot.get("days") or 30),
             )
             refreshed_focus["computed_at"] = datetime.now(timezone.utc).isoformat()

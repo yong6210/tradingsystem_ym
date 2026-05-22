@@ -180,6 +180,132 @@ def test_micro_live_config_drift_checks_flag_missing_direction_contract_symbol(m
     assert by_name["ws_universe_contains_live_symbols"]["status"] == "PASS"
 
 
+def test_micro_live_config_drift_checks_flag_live_rollout_policy_outside_family_allowlist(monkeypatch) -> None:
+    settings = run_micro_live_preflight.get_settings()
+    monkeypatch.setattr(settings, "auto_trading_execution_mode", "MICRO_LIVE")
+    monkeypatch.setattr(settings, "auto_trading_allowed_families", "session_impulse_retest,sweep_reversal")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "session_impulse_retest")
+    dashboard_payload = {
+        "rollout_policies": [
+            {
+                "strategy_family": "session_impulse_retest",
+                "live_enabled": True,
+                "max_execution_mode": "MICRO_LIVE",
+            },
+            {
+                "strategy_family": "sweep_reversal",
+                "live_enabled": True,
+                "max_execution_mode": "MICRO_LIVE",
+            },
+        ]
+    }
+
+    checks = run_micro_live_preflight._micro_live_config_drift_checks(dashboard_payload=dashboard_payload)
+    scope_check = {item["name"]: item for item in checks}["rollout_policy_live_scope_alignment"]
+
+    assert scope_check["status"] == "FAIL"
+    assert "live_allowed_families=session_impulse_retest" in scope_check["message"]
+    assert "out_of_scope_live_policies=sweep_reversal:MICRO_LIVE" in scope_check["message"]
+
+
+def test_active_non_live_plan_residue_check_flags_active_test_plan() -> None:
+    from datetime import timedelta
+
+    from app.core.enums import PlanState
+    from app.db.models import Plan
+    from app.db.session import SessionLocal, init_db
+
+    init_db()
+    with SessionLocal() as db:
+        now = datetime.now(UTC)
+        db.add(
+            Plan(
+                plan_id="TESTUSDC_residue_plan",
+                zone_id="TESTUSDC_residue_zone",
+                symbol="TESTUSDC",
+                timeframe="5m",
+                direction="long",
+                entry_model="LIMIT",
+                entry_price=100.0,
+                entry_condition="test",
+                sl=99.0,
+                tp1=101.0,
+                tp2=102.0,
+                tp3=103.0,
+                split={},
+                rr_min=1.0,
+                rr_base=2.0,
+                rr_opt=3.0,
+                ev=0.1,
+                cost_est=0.01,
+                confidence=0.8,
+                validity={"strategy_family": "sweep_reversal"},
+                state=PlanState.ARMED.value,
+                valid_from=now - timedelta(minutes=1),
+                valid_until=now + timedelta(hours=1),
+            )
+        )
+        db.commit()
+
+    check = run_micro_live_preflight._active_non_live_plan_residue_check(
+        live_symbols={"BTCUSDT"},
+        live_families={"session_impulse_retest"},
+    )
+
+    assert check["status"] == "FAIL"
+    assert check["name"] == "active_non_live_plan_residue"
+    assert "TESTUSDC_residue_plan:TESTUSDC:sweep_reversal:ARMED" in check["message"]
+
+
+def test_active_non_live_plan_residue_check_passes_for_current_live_plan() -> None:
+    from datetime import timedelta
+
+    from app.core.enums import PlanState
+    from app.db.models import Plan
+    from app.db.session import SessionLocal, init_db
+
+    init_db()
+    with SessionLocal() as db:
+        now = datetime.now(UTC)
+        db.add(
+            Plan(
+                plan_id="sir_BTCUSDT_residue_pass",
+                zone_id="sir_BTCUSDT_residue_zone",
+                symbol="BTCUSDT",
+                timeframe="5m",
+                direction="long",
+                entry_model="CONFIRM",
+                entry_price=100.0,
+                entry_condition="test",
+                sl=99.0,
+                tp1=101.0,
+                tp2=102.0,
+                tp3=103.0,
+                split={},
+                rr_min=1.0,
+                rr_base=2.0,
+                rr_opt=3.0,
+                ev=0.1,
+                cost_est=0.01,
+                confidence=0.8,
+                validity={"strategy_family": "session_impulse_retest"},
+                state=PlanState.ARMED.value,
+                valid_from=now - timedelta(minutes=1),
+                valid_until=now + timedelta(hours=1),
+            )
+        )
+        db.commit()
+
+    check = run_micro_live_preflight._active_non_live_plan_residue_check(
+        live_symbols={"BTCUSDT"},
+        live_families={"session_impulse_retest"},
+    )
+
+    assert check["status"] == "PASS"
+    assert "active_plan_count=1" in check["message"]
+    assert "non_live_or_non_family=0" in check["message"]
+
+
 def test_micro_live_config_drift_checks_align_current_backtest_contract(monkeypatch, tmp_path) -> None:
     settings = run_micro_live_preflight.get_settings()
     heartbeat_dir = tmp_path / "heartbeats"
@@ -191,7 +317,14 @@ def test_micro_live_config_drift_checks_align_current_backtest_contract(monkeypa
     report_dir = tmp_path / "backtests"
     report_dir.mkdir()
     (report_dir / "micro_main_usdt_proxy_backtest_20260516T000000Z.json").write_text(
-        json.dumps({"proxy_symbols": ["BTCUSDT", "ETHUSDT"], "results": {}}),
+        json.dumps(
+                {
+                    "proxy_symbols": ["BTCUSDT", "ETHUSDT"],
+                    "exit_policy": {"name": "legacy_full_2r", "entry_confirmation_delay_minutes": 5},
+                    "aggregate": {"closed": 120, "ev_r": 0.42},
+                    "results": {},
+                }
+        ),
         encoding="utf-8",
     )
 
@@ -212,6 +345,9 @@ def test_micro_live_config_drift_checks_align_current_backtest_contract(monkeypa
     monkeypatch.setattr(settings, "session_impulse_retest_enabled", True)
     monkeypatch.setattr(settings, "session_impulse_retest_shadow_only", False)
     monkeypatch.setattr(settings, "session_impulse_retest_allowed_symbols", "BTCUSDC,ETHUSDC")
+    monkeypatch.setattr(settings, "session_impulse_retest_entry_timing_model", "confirmed_5m_retest")
+    monkeypatch.setattr(settings, "session_impulse_retest_exit_policy_name", "legacy_full_2r")
+    monkeypatch.setattr(settings, "session_impulse_retest_exit_entry_confirmation_delay_minutes", 5)
 
     checks = run_micro_live_preflight._micro_live_config_drift_checks()
     alignment = {item["name"]: item for item in checks}["micro_live_backtest_contract_alignment"]
@@ -221,6 +357,7 @@ def test_micro_live_config_drift_checks_align_current_backtest_contract(monkeypa
     assert "requested_days=0" in alignment["message"]
     assert "missing_symbols=none" in alignment["message"]
     assert "missing_entry_models=none" in alignment["message"]
+    assert "entry_delay_mismatch=none" in alignment["message"]
 
 
 def test_micro_live_config_drift_checks_use_latest_matching_live_backtest_contract(monkeypatch, tmp_path) -> None:
@@ -235,7 +372,14 @@ def test_micro_live_config_drift_checks_use_latest_matching_live_backtest_contra
     report_dir.mkdir()
     matching_path = report_dir / "micro_main_usdt_proxy_backtest_20260515T175711Z.json"
     matching_path.write_text(
-        json.dumps({"proxy_symbols": ["BTCUSDT", "ETHUSDT"], "results": {}}),
+        json.dumps(
+                {
+                    "proxy_symbols": ["BTCUSDT", "ETHUSDT"],
+                    "exit_policy": {"name": "legacy_full_2r", "entry_confirmation_delay_minutes": 5},
+                    "aggregate": {"closed": 120, "ev_r": 0.42},
+                    "results": {},
+                }
+        ),
         encoding="utf-8",
     )
     (report_dir / "micro_main_usdt_proxy_backtest_20260516T095759Z.json").write_text(
@@ -260,6 +404,9 @@ def test_micro_live_config_drift_checks_use_latest_matching_live_backtest_contra
     monkeypatch.setattr(settings, "session_impulse_retest_enabled", True)
     monkeypatch.setattr(settings, "session_impulse_retest_shadow_only", False)
     monkeypatch.setattr(settings, "session_impulse_retest_allowed_symbols", "BTCUSDC,ETHUSDC")
+    monkeypatch.setattr(settings, "session_impulse_retest_entry_timing_model", "confirmed_5m_retest")
+    monkeypatch.setattr(settings, "session_impulse_retest_exit_policy_name", "legacy_full_2r")
+    monkeypatch.setattr(settings, "session_impulse_retest_exit_entry_confirmation_delay_minutes", 5)
 
     checks = run_micro_live_preflight._micro_live_config_drift_checks()
     alignment = {item["name"]: item for item in checks}["micro_live_backtest_contract_alignment"]
@@ -267,6 +414,109 @@ def test_micro_live_config_drift_checks_use_latest_matching_live_backtest_contra
     assert alignment["status"] == "PASS"
     assert "20260515T175711Z" in alignment["message"]
     assert "expected_symbols=2" in alignment["message"]
+
+
+def test_micro_live_config_drift_checks_fail_backtest_entry_delay_mismatch(monkeypatch, tmp_path) -> None:
+    settings = run_micro_live_preflight.get_settings()
+    heartbeat_dir = tmp_path / "heartbeats"
+    heartbeat_dir.mkdir()
+    (heartbeat_dir / "ws.json").write_text(
+        json.dumps({"details": {"symbols": ["BTCUSDC"]}}),
+        encoding="utf-8",
+    )
+    report_dir = tmp_path / "backtests"
+    report_dir.mkdir()
+    (report_dir / "micro_main_usdt_proxy_backtest_20260516T000000Z.json").write_text(
+        json.dumps(
+            {
+                "proxy_symbols": ["BTCUSDT"],
+                "exit_policy": {"entry_confirmation_delay_minutes": 0},
+                "aggregate": {"closed": 120, "ev_r": 0.42},
+                "results": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(settings, "runtime_worker_heartbeat_dir", str(heartbeat_dir))
+    monkeypatch.setattr(settings, "auto_trading_replay_validation_bridge_backtest_dir", str(report_dir))
+    monkeypatch.setattr(settings, "auto_trading_execution_mode", "MICRO_LIVE")
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_allowed_symbols", "BTCUSDC")
+    monkeypatch.setattr(settings, "auto_trading_allowed_families", "session_impulse_retest")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", "BTCUSDC")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "session_impulse_retest")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_entry_models", "CONFIRM")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_sessions", "dead_session,london,new_york")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_direction_contract", "BTCUSDC:LONG|SHORT")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_event_blackout_path", "")
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_fail_closed", True)
+    monkeypatch.setattr(settings, "session_impulse_retest_enabled", True)
+    monkeypatch.setattr(settings, "session_impulse_retest_shadow_only", False)
+    monkeypatch.setattr(settings, "session_impulse_retest_allowed_symbols", "BTCUSDC")
+    monkeypatch.setattr(settings, "session_impulse_retest_entry_timing_model", "confirmed_5m_retest")
+    monkeypatch.setattr(settings, "session_impulse_retest_exit_entry_confirmation_delay_minutes", 5)
+
+    checks = run_micro_live_preflight._micro_live_config_drift_checks()
+    alignment = {item["name"]: item for item in checks}["micro_live_backtest_contract_alignment"]
+
+    assert alignment["status"] == "FAIL"
+    assert "entry_confirmation_delay_minutes=backtest:0/runtime:5" in alignment["message"]
+    assert "entry_delay_mismatch=backtest_0_runtime_5" in alignment["message"]
+
+
+def test_micro_live_config_drift_checks_fail_negative_backtest_performance(monkeypatch, tmp_path) -> None:
+    settings = run_micro_live_preflight.get_settings()
+    heartbeat_dir = tmp_path / "heartbeats"
+    heartbeat_dir.mkdir()
+    (heartbeat_dir / "ws.json").write_text(
+        json.dumps({"details": {"symbols": ["BTCUSDT"]}}),
+        encoding="utf-8",
+    )
+    report_dir = tmp_path / "backtests"
+    report_dir.mkdir()
+    (report_dir / "micro_main_usdt_backtest_20260516T000000Z.json").write_text(
+        json.dumps(
+            {
+                "source": "micro_main_usdt_backtest",
+                "symbols": ["BTCUSDT"],
+                "exit_policy": {"entry_confirmation_delay_minutes": 5},
+                "aggregate": {"closed": 819, "ev_r": -0.4279},
+                "results": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(settings, "runtime_worker_heartbeat_dir", str(heartbeat_dir))
+    monkeypatch.setattr(settings, "auto_trading_replay_validation_bridge_backtest_dir", str(report_dir))
+    monkeypatch.setattr(settings, "auto_trading_replay_validation_bridge_min_trades", 80)
+    monkeypatch.setattr(settings, "auto_trading_replay_validation_bridge_min_ev_r", 0.10)
+    monkeypatch.setattr(settings, "auto_trading_execution_mode", "MICRO_LIVE")
+    monkeypatch.setattr(settings, "binance_trade_live_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_allowed_symbols", "BTCUSDT")
+    monkeypatch.setattr(settings, "auto_trading_allowed_families", "session_impulse_retest")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_symbols", "BTCUSDT")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_families", "session_impulse_retest")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_entry_models", "CONFIRM")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_allowed_sessions", "dead_session,london,new_york")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_direction_contract", "BTCUSDT:LONG|SHORT")
+    monkeypatch.setattr(settings, "auto_trading_micro_live_event_blackout_path", "")
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_enabled", True)
+    monkeypatch.setattr(settings, "auto_trading_live_liquidity_gate_fail_closed", True)
+    monkeypatch.setattr(settings, "session_impulse_retest_enabled", True)
+    monkeypatch.setattr(settings, "session_impulse_retest_shadow_only", False)
+    monkeypatch.setattr(settings, "session_impulse_retest_allowed_symbols", "BTCUSDT")
+    monkeypatch.setattr(settings, "session_impulse_retest_exit_entry_confirmation_delay_minutes", 5)
+
+    checks = run_micro_live_preflight._micro_live_config_drift_checks()
+    alignment = {item["name"]: item for item in checks}["micro_live_backtest_contract_alignment"]
+
+    assert alignment["status"] == "FAIL"
+    assert "aggregate_closed=819" in alignment["message"]
+    assert "aggregate_ev_r=-0.4279" in alignment["message"]
+    assert "performance_failures=ev_-0.4279_below_0.1" in alignment["message"]
 
 
 def test_micro_live_backtest_contract_prefers_longer_matching_report(tmp_path) -> None:
@@ -342,6 +592,150 @@ def test_micro_live_backtest_contract_accepts_direct_usdt_report(tmp_path) -> No
     assert selected == usdt_path
 
 
+def test_micro_live_backtest_contract_rejects_portfolio_mix_as_runtime_replay(tmp_path) -> None:
+    report_dir = tmp_path / "backtests"
+    report_dir.mkdir()
+    portfolio_path = tmp_path / "portfolio_mix_latest.json"
+    portfolio_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "micro_intrabar_candidate_portfolio_mix_review_v1",
+                "combined_symbols": ["ADAUSDT", "BTCUSDT"],
+                "settings": {"days": 1825},
+                "combined": {"summary": {"closed": 120, "total_r": 24.0, "ev_r": 0.2}},
+                "per_contract": [
+                    {
+                        "symbols": ["ADAUSDT"],
+                        "filter_contract": {"direction": "long"},
+                        "exit_policy_name": "structure_live",
+                    },
+                    {
+                        "symbols": ["BTCUSDT"],
+                        "filter_contract": {"direction": "short"},
+                        "exit_policy_name": "structure_live",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = SimpleNamespace(
+        auto_trading_replay_validation_bridge_backtest_dir=str(report_dir),
+        auto_trading_replay_validation_bridge_portfolio_mix_report_path=str(portfolio_path),
+        session_impulse_retest_exit_entry_confirmation_delay_minutes=5,
+        session_impulse_retest_exit_policy_name="structure_live",
+        auto_trading_replay_validation_bridge_min_trades=80,
+        auto_trading_replay_validation_bridge_min_ev_r=0.10,
+    )
+
+    selected = run_micro_live_preflight._latest_micro_main_backtest_report(
+        settings,
+        live_symbols={"ADAUSDT", "BTCUSDT"},
+    )
+    check = run_micro_live_preflight._micro_live_backtest_contract_alignment_check(
+        settings=settings,
+        live_symbols={"ADAUSDT", "BTCUSDT"},
+        live_families={"session_impulse_retest"},
+        live_entry_models={"CONFIRM"},
+        live_sessions={"dead_session", "london", "new_york"},
+        direction_contract={"ADAUSDT": {"LONG"}, "BTCUSDT": {"SHORT"}},
+    )
+
+    assert selected == portfolio_path
+    assert check["status"] == "FAIL"
+    assert "expected_symbols=2" in check["message"]
+    assert "requested_days=1825" in check["message"]
+    assert "missing_long_short_direction=none" in check["message"]
+    assert "aggregate_closed=120" in check["message"]
+    assert "aggregate_ev_r=0.2" in check["message"]
+    assert "exit_policy_mismatch=none" in check["message"]
+    assert "source_alignment_failures=portfolio_mix_report_is_not_runtime_signal_replay" in check["message"]
+
+
+def test_micro_live_backtest_contract_accepts_direct_intrabar_runtime_replay(tmp_path) -> None:
+    report_dir = tmp_path / "backtests"
+    report_dir.mkdir()
+    (report_dir / "micro_main_usdt_backtest_20260520T000000Z.json").write_text(
+        json.dumps(
+            {
+                "source": "micro_main_usdt_backtest",
+                "days": 1825,
+                "symbols": ["ADAUSDT", "BTCUSDT"],
+                "entry_timing_model": "intrabar_1m_confirm_next_open",
+                "signal_contracts": [
+                    {"symbols": ["ADAUSDT"], "filter_contract": {"direction": "long"}},
+                    {"symbols": ["BTCUSDT"], "filter_contract": {"direction": "short"}},
+                ],
+                "exit_policy": {"name": "structure_live", "entry_confirmation_delay_minutes": 0},
+                "aggregate": {"closed": 120, "total_r": 24.0, "ev_r": 0.2},
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = SimpleNamespace(
+        auto_trading_replay_validation_bridge_backtest_dir=str(report_dir),
+        auto_trading_replay_validation_bridge_portfolio_mix_report_path=str(tmp_path / "missing.json"),
+        session_impulse_retest_entry_timing_model="intrabar_1m_confirm_next_open",
+        session_impulse_retest_exit_entry_confirmation_delay_minutes=5,
+        session_impulse_retest_exit_policy_name="structure_live",
+        auto_trading_replay_validation_bridge_min_trades=80,
+        auto_trading_replay_validation_bridge_min_ev_r=0.10,
+    )
+
+    check = run_micro_live_preflight._micro_live_backtest_contract_alignment_check(
+        settings=settings,
+        live_symbols={"ADAUSDT", "BTCUSDT"},
+        live_families={"session_impulse_retest"},
+        live_entry_models={"CONFIRM"},
+        live_sessions={"dead_session", "london", "new_york"},
+        direction_contract={"ADAUSDT": {"LONG"}, "BTCUSDT": {"SHORT"}},
+    )
+
+    assert check["status"] == "PASS"
+    assert "entry_timing_model=backtest:intrabar_1m_confirm_next_open/runtime:intrabar_1m_confirm_next_open" in check["message"]
+    assert "entry_confirmation_delay_minutes=backtest:0/runtime:0" in check["message"]
+    assert "missing_long_short_direction=none" in check["message"]
+
+
+def test_micro_live_backtest_contract_blocks_portfolio_mix_without_exit_policy_name(tmp_path) -> None:
+    report_dir = tmp_path / "backtests"
+    report_dir.mkdir()
+    portfolio_path = tmp_path / "portfolio_mix_latest.json"
+    portfolio_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "micro_intrabar_candidate_portfolio_mix_review_v1",
+                "combined_symbols": ["ADAUSDT"],
+                "settings": {"days": 1825},
+                "combined": {"summary": {"closed": 120, "total_r": 24.0, "ev_r": 0.2}},
+                "per_contract": [{"symbols": ["ADAUSDT"], "filter_contract": {"direction": "long"}}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = SimpleNamespace(
+        auto_trading_replay_validation_bridge_backtest_dir=str(report_dir),
+        auto_trading_replay_validation_bridge_portfolio_mix_report_path=str(portfolio_path),
+        session_impulse_retest_exit_entry_confirmation_delay_minutes=5,
+        session_impulse_retest_exit_policy_name="structure_live",
+        auto_trading_replay_validation_bridge_min_trades=80,
+        auto_trading_replay_validation_bridge_min_ev_r=0.10,
+    )
+
+    check = run_micro_live_preflight._micro_live_backtest_contract_alignment_check(
+        settings=settings,
+        live_symbols={"ADAUSDT"},
+        live_families={"session_impulse_retest"},
+        live_entry_models={"CONFIRM"},
+        live_sessions={"dead_session", "london", "new_york"},
+        direction_contract={"ADAUSDT": {"LONG"}},
+    )
+
+    assert check["status"] == "FAIL"
+    assert "exit_policy_names=missing" in check["message"]
+    assert "exit_policy_mismatch=missing_backtest_exit_policy_name" in check["message"]
+
+
 def test_micro_live_backtest_contract_alignment_reports_effective_days(monkeypatch, tmp_path) -> None:
     settings = run_micro_live_preflight.get_settings()
     heartbeat_dir = tmp_path / "heartbeats"
@@ -354,9 +748,11 @@ def test_micro_live_backtest_contract_alignment_reports_effective_days(monkeypat
     report_dir.mkdir()
     (report_dir / "micro_main_usdc_backtest_20260516T000000Z.json").write_text(
         json.dumps(
-            {
-                "days": 1825,
-                "symbols": ["BTCUSDC"],
+                {
+                    "days": 1825,
+                    "symbols": ["BTCUSDC"],
+                    "exit_policy": {"name": "legacy_full_2r", "entry_confirmation_delay_minutes": 5},
+                    "aggregate": {"closed": 120, "ev_r": 0.42},
                 "results": {
                     "BTCUSDC": {
                         "symbol": "BTCUSDC",
@@ -388,6 +784,9 @@ def test_micro_live_backtest_contract_alignment_reports_effective_days(monkeypat
     monkeypatch.setattr(settings, "session_impulse_retest_enabled", True)
     monkeypatch.setattr(settings, "session_impulse_retest_shadow_only", False)
     monkeypatch.setattr(settings, "session_impulse_retest_allowed_symbols", "BTCUSDC")
+    monkeypatch.setattr(settings, "session_impulse_retest_entry_timing_model", "confirmed_5m_retest")
+    monkeypatch.setattr(settings, "session_impulse_retest_exit_policy_name", "legacy_full_2r")
+    monkeypatch.setattr(settings, "session_impulse_retest_exit_entry_confirmation_delay_minutes", 5)
 
     checks = run_micro_live_preflight._micro_live_config_drift_checks()
     alignment = {item["name"]: item for item in checks}["micro_live_backtest_contract_alignment"]
@@ -791,7 +1190,7 @@ def test_preflight_arg_defaults_follow_current_runtime_settings() -> None:
     resolved = run_micro_live_preflight._apply_preflight_arg_defaults(args, settings)
 
     assert resolved.symbol == "BTCUSDT"
-    assert resolved.universe == "usdt_reliable_balanced_31"
+    assert resolved.universe == "micro_live_usdt_2"
 
 
 def test_main_emits_approval_surfaces_and_ready_status(monkeypatch, capsys) -> None:

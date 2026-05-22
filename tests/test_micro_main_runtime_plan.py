@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from app.core.config import Settings
 from app.db.models import Candle
 from app.db.session import SessionLocal, init_db
 from app.services import strategy_engine as strategy_engine_module
@@ -29,6 +30,74 @@ def _candles(symbol: str, timeframe: str, step_minutes: int, count: int, start: 
             )
         )
     return rows
+
+
+def test_session_impulse_retest_default_exit_policy_matches_live_baseline(monkeypatch) -> None:
+    for key in (
+        "SESSION_IMPULSE_RETEST_EXIT_POLICY_NAME",
+        "SESSION_IMPULSE_RETEST_EXIT_STOP_MODE",
+        "SESSION_IMPULSE_RETEST_EXIT_MIN_STOP_PCT",
+        "SESSION_IMPULSE_RETEST_EXIT_MIN_RISK_ATR",
+        "SESSION_IMPULSE_RETEST_EXIT_TARGET_RR",
+        "SESSION_IMPULSE_RETEST_EXIT_ENTRY_CONFIRMATION_DELAY_MINUTES",
+        "SESSION_IMPULSE_RETEST_EXIT_TP1_FRACTION",
+        "SESSION_IMPULSE_RETEST_EXIT_TP2_FRACTION",
+        "SESSION_IMPULSE_RETEST_EXIT_ADAPTIVE_TARGETS_ENABLED",
+        "SESSION_IMPULSE_RETEST_EXIT_STRUCTURE_TARGETS_ENABLED",
+        "SESSION_IMPULSE_RETEST_EXIT_IMPORTANT_ZONE_EXIT_ENABLED",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.session_impulse_retest_exit_policy_name == "structure_buffered_swing6_stop0.12_tpbuf0.08_pm_stop0.00r_advvol_any"
+    assert settings.session_impulse_retest_exit_stop_mode == "structure_floor"
+    assert settings.session_impulse_retest_exit_min_stop_pct == 0.0
+    assert settings.session_impulse_retest_exit_min_risk_atr == 0.0
+    assert settings.session_impulse_retest_exit_target_rr == 2.5
+    assert settings.session_impulse_retest_exit_entry_confirmation_delay_minutes == 5
+    assert settings.session_impulse_retest_exit_tp1_fraction == 0.35
+    assert settings.session_impulse_retest_exit_tp2_fraction == 0.65
+    assert settings.session_impulse_retest_exit_adaptive_targets_enabled is False
+    assert settings.session_impulse_retest_exit_structure_targets_enabled is False
+    assert settings.session_impulse_retest_exit_important_zone_exit_enabled is False
+    assert settings.session_impulse_retest_exit_important_zone_stop_enabled is True
+    assert settings.session_impulse_retest_exit_important_zone_target_enabled is True
+
+
+def test_session_impulse_retest_exit_policy_maps_important_zone_settings() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        engine.settings.session_impulse_retest_exit_important_zone_exit_enabled = True
+        engine.settings.session_impulse_retest_exit_important_zone_stop_enabled = True
+        engine.settings.session_impulse_retest_exit_important_zone_target_enabled = True
+        engine.settings.session_impulse_retest_exit_important_zone_stop_buffer_atr = 0.11
+        engine.settings.session_impulse_retest_exit_important_zone_target_buffer_atr = 0.07
+        engine.settings.session_impulse_retest_exit_important_zone_min_anchor_score = 0.30
+        engine.settings.session_impulse_retest_exit_important_zone_min_stop_ratio = 0.70
+        engine.settings.session_impulse_retest_exit_important_zone_max_stop_ratio = 1.40
+        engine.settings.session_impulse_retest_exit_important_zone_tp1_min_rr = 0.85
+        engine.settings.session_impulse_retest_exit_important_zone_tp2_min_rr = 1.55
+        engine.settings.session_impulse_retest_exit_important_zone_tp_max_rr = 2.90
+        engine.settings.session_impulse_retest_exit_important_zone_ideal_tp2_rr = 1.95
+        engine.settings.session_impulse_retest_exit_important_zone_tp1_fraction = 0.40
+
+        policy = engine._session_impulse_retest_exit_policy()
+
+    assert policy.important_zone_exit_enabled is True
+    assert policy.important_zone_stop_enabled is True
+    assert policy.important_zone_target_enabled is True
+    assert policy.important_zone_stop_buffer_atr == 0.11
+    assert policy.important_zone_target_buffer_atr == 0.07
+    assert policy.important_zone_min_anchor_score == 0.30
+    assert policy.important_zone_min_stop_ratio == 0.70
+    assert policy.important_zone_max_stop_ratio == 1.40
+    assert policy.important_zone_tp1_min_rr == 0.85
+    assert policy.important_zone_tp2_min_rr == 1.55
+    assert policy.important_zone_tp_max_rr == 2.90
+    assert policy.important_zone_ideal_tp2_rr == 1.95
+    assert policy.important_zone_tp1_fraction == 0.40
 
 
 def test_session_impulse_retest_runtime_plan_builds_when_signal_is_fresh(monkeypatch) -> None:
@@ -60,6 +129,7 @@ def test_session_impulse_retest_runtime_plan_builds_when_signal_is_fresh(monkeyp
     with SessionLocal() as db:
         engine = StrategyEngine(db)
         engine.settings.session_impulse_retest_allowed_symbols = "BTCUSDC"
+        engine.settings.session_impulse_retest_entry_timing_model = "confirmed_5m_retest"
         plan = engine._session_impulse_retest_runtime_plan(
             symbol="BTCUSDC",
             candles_1m=candles_1m,
@@ -80,6 +150,63 @@ def test_session_impulse_retest_runtime_plan_builds_when_signal_is_fresh(monkeyp
         assert shadow_filter["blocking_live"] is False
         assert shadow_filter["decision"] == "would_block"
         assert plan.validity["session_impulse_retest_signal"]["diagnostics"]["reclaim_body_atr"] == 0.24
+
+
+def test_session_impulse_retest_runtime_plan_can_use_intrabar_signal(monkeypatch) -> None:
+    init_db()
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    candles_1m = _candles("ADAUSDT", "1m", 1, 1200, start)
+    candles_5m = _candles("ADAUSDT", "5m", 5, 300, start)
+    last_ts = candles_1m[-1].ts
+    fake_signal = MicroSignal(
+        family="session_impulse_retest",
+        direction="long",
+        signal_ts=last_ts,
+        setup_ts=last_ts.replace(minute=0),
+        entry_ts=last_ts + timedelta(minutes=1),
+        entry_price=120.0,
+        stop_price=119.0,
+        target_price=122.0,
+        max_hold_minutes=25,
+        regime_hint="session_open_intrabar",
+        diagnostics={
+            "entry_timing_model": "intrabar_1m_confirm_next_open",
+            "setup_hour_utc": 14,
+            "reclaim_body_atr": 0.31,
+            "volume_factor": 1.2,
+        },
+    )
+
+    monkeypatch.setattr(
+        strategy_engine_module.SessionImpulseRetestResearch,
+        "latest_intrabar_signal",
+        lambda self, freshness_minutes=20, live_next_open_proxy=False: fake_signal,
+    )
+    monkeypatch.setattr(
+        strategy_engine_module.SessionImpulseRetestResearch,
+        "latest_signal",
+        lambda self, freshness_minutes=20: (_ for _ in ()).throw(AssertionError("should use intrabar signal")),
+    )
+
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        engine.settings.session_impulse_retest_allowed_symbols = "ADAUSDT"
+        engine.settings.session_impulse_retest_entry_timing_model = "intrabar_1m_confirm_next_open"
+        engine.settings.auto_trading_micro_live_direction_contract = "ADAUSDT:LONG"
+        engine.settings.session_impulse_retest_intrabar_long_setup_hours_utc = "14"
+        engine.settings.session_impulse_retest_intrabar_long_min_reclaim_body_atr = 0.25
+        engine.settings.session_impulse_retest_exit_entry_confirmation_delay_minutes = 5
+        plan = engine._session_impulse_retest_runtime_plan(
+            symbol="ADAUSDT",
+            candles_1m=candles_1m,
+            candles_5m=candles_5m,
+            active_thesis_clusters=0,
+        )
+
+        assert plan is not None
+        assert plan.validity["session_impulse_retest_entry_timing_model"] == "intrabar_1m_confirm_next_open"
+        assert plan.validity["session_impulse_retest_exit_policy"]["entry_confirmation_delay_minutes"] == 0
+        assert plan.valid_from == fake_signal.entry_ts
 
 
 def test_session_impulse_retest_runtime_plan_applies_usdt_universe_risk_multiplier(monkeypatch) -> None:
@@ -110,6 +237,7 @@ def test_session_impulse_retest_runtime_plan_applies_usdt_universe_risk_multipli
     with SessionLocal() as db:
         engine = StrategyEngine(db)
         engine.settings.session_impulse_retest_allowed_symbols = "BTCUSDT"
+        engine.settings.session_impulse_retest_entry_timing_model = "confirmed_5m_retest"
         engine.settings.session_impulse_retest_exit_min_stop_pct = 0.003
         engine.settings.session_impulse_retest_exit_adaptive_targets_enabled = True
         plan = engine._session_impulse_retest_runtime_plan(
@@ -164,6 +292,7 @@ def test_session_impulse_retest_runtime_plan_uses_exit_policy_levels(monkeypatch
     with SessionLocal() as db:
         engine = StrategyEngine(db)
         engine.settings.session_impulse_retest_allowed_symbols = "BTCUSDT"
+        engine.settings.session_impulse_retest_entry_timing_model = "confirmed_5m_retest"
         engine.settings.session_impulse_retest_exit_min_stop_pct = 0.003
         engine.settings.session_impulse_retest_exit_adaptive_targets_enabled = True
         plan = engine._session_impulse_retest_runtime_plan(
@@ -216,6 +345,7 @@ def test_session_impulse_retest_runtime_plan_uses_full_target_when_policy_has_no
     with SessionLocal() as db:
         engine = StrategyEngine(db)
         engine.settings.session_impulse_retest_allowed_symbols = "BTCUSDT"
+        engine.settings.session_impulse_retest_entry_timing_model = "confirmed_5m_retest"
         engine.settings.session_impulse_retest_exit_policy_name = "legacy_full_2r"
         engine.settings.session_impulse_retest_exit_stop_mode = "legacy"
         engine.settings.session_impulse_retest_exit_target_rr = 2.0
@@ -268,6 +398,7 @@ def test_session_impulse_retest_runtime_plan_applies_saturday_risk_haircut(monke
     with SessionLocal() as db:
         engine = StrategyEngine(db)
         engine.settings.session_impulse_retest_allowed_symbols = "BTCUSDC"
+        engine.settings.session_impulse_retest_entry_timing_model = "confirmed_5m_retest"
         engine.settings.session_impulse_retest_saturday_risk_multiplier = 0.75
         plan = engine._session_impulse_retest_runtime_plan(
             symbol="BTCUSDC",

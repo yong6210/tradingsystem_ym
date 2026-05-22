@@ -311,6 +311,31 @@ class MultiStrategyABExpansionService:
             )
         return family_mix
 
+    def _current_live_contract_family_mix(self, portfolio_budget: dict[str, Any]) -> list[dict[str, Any]]:
+        live_families: list[str] = []
+        live_route_context = dict(portfolio_budget.get("live_route_context") or {})
+        for source in (
+            portfolio_budget.get("active_strategy_families"),
+            portfolio_budget.get("live_strategy_families"),
+            live_route_context.get("active_strategy_families"),
+        ):
+            for family in list(source or []):
+                normalized = str(family or "").strip().lower()
+                if normalized and normalized not in live_families:
+                    live_families.append(normalized)
+        return [
+            {
+                "raw_family": family,
+                "cluster": _CURRENT_LIVE_CONTRACT_CLUSTER,
+                "total_candidates": 0,
+                "accepted_candidates": 0,
+                "blocked_candidates": 0,
+                "alpha_research_candidates": 0,
+            }
+            for family in live_families
+            if self._cluster(family) == _CURRENT_LIVE_CONTRACT_CLUSTER
+        ]
+
     def generate(
         self,
         *,
@@ -323,6 +348,8 @@ class MultiStrategyABExpansionService:
     ) -> dict[str, Any]:
         budget_payload = self._dict(portfolio_budget)
         family_mix = self._family_mix(portfolio_budget=budget_payload, scanner_rows=scanner_rows)
+        if not family_mix:
+            family_mix = self._current_live_contract_family_mix(budget_payload)
         mode = self._normalize_mode(
             budget_payload.get("strategy_mode")
             or ((list(scanner_rows or [])[:1] or [{}])[0]).get("strategy_mode")

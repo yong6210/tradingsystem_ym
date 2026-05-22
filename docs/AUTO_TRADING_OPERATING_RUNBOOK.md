@@ -83,7 +83,7 @@ TradingView를 triage에 함께 쓴다면, mirror-only 사용법과 chart-side o
 - `operator_action_priority.dedupe_suppressed_actions`가 비어 있지 않으면, review packet은 추천 자체가 없어진 게 아니라 ledger history 때문에 잠시 억제된 것이다. `fresh READY packet`, 직전 `NO_TARGET`, 최근 3회 연속 동일 packet` 중 어느 경우인지 같이 확인한다.
 - `operator_action_priority.experiment_execution_policy.mode == single_active_experiment`면 split 실험은 항상 하나만 active로 해석한다. 동시에 `entry_timing`과 `execution_style`를 둘 다 열지 않는다.
 - `operator_action_priority.deferred_experiment_actions`가 비어 있지 않으면 실험 후보가 사라진 게 아니라 다음 sample target까지 보류된 것이다.
-- split review target이 있으면 `./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDC --days 7 --action auto`로 review packet부터 만든다.
+- split review target이 있으면 `./.venv/bin/python scripts/run_split_review_followup.py --symbol BTCUSDT --days 7 --action auto`로 review packet부터 만든다.
 - `review_followup_ledger.last_status`가 `NO_TARGET` 또는 `NO_REVIEW_ACTION_AVAILABLE`면 새 실험보다 target contract와 command carryover부터 고친다.
 - `review_followup_ledger.last_decision_status`는 packet 생성 이후 사람이 붙인 후속 판단이다. `last_status`보다 늦게 들어온 신호일 수 있으니 둘이 다르면 `last_effective_status`를 최종 상태로 읽는다.
 - `edge_evolution_rule.recommendation_strength == confirmed` 또는 `escalated`면 최근 packet 이후 새 closes가 같은 방향으로 누적됐다는 뜻이다. 이때만 `promote / reduce / kill-review` 해석을 강화한다.
@@ -329,7 +329,7 @@ Live 후보 승격 상태 확인:
 
 ```bash
 ./scripts/run_live_candidate_promotion_readiness.py --compact --no-write-report
-./scripts/run_live_candidate_promotion_readiness.py --symbol ADAUSDC --compact --no-write-report
+./scripts/run_live_candidate_promotion_readiness.py --symbol ADAUSDT --compact --no-write-report
 ```
 
 해석 계약은 [LIVE_CANDIDATE_READINESS_CONTRACT.md](/Users/yumin/Documents/trading/docs/LIVE_CANDIDATE_READINESS_CONTRACT.md)를 따른다.
@@ -338,15 +338,15 @@ Live 후보 승격 상태 확인:
 
 `/execution/operator-ui`는 이 live 후보 섹션을 dashboard `fast=true` 경로에서 먼저 렌더한다. validation/checklist/scanner 같은 무거운 보조 surface가 느리면 해당 섹션만 `source_unavailable` fallback으로 표시하고, live candidate readiness 전체 화면을 loading 상태로 묶지 않는다.
 
-심볼을 선택한 화면에서는 선택 심볼 readiness와 전역 `live_candidate_promotion_readiness_global`을 같이 읽는다. 예를 들어 `BTCUSDC`가 `WAIT`여도 전역 headline이 `BLOCKED / validation_do_not_deploy`이면 승격 판단은 전역 차단을 우선한다.
+심볼을 선택한 화면에서는 선택 심볼 readiness와 전역 `live_candidate_promotion_readiness_global`을 같이 읽는다. 예를 들어 `BTCUSDT`가 `WAIT`여도 전역 headline이 `BLOCKED / validation_do_not_deploy`이면 승격 판단은 전역 차단을 우선한다.
 
 ### 4.2. 운영 요약
 ```bash
-curl -s "http://127.0.0.1:8000/execution/operator-dashboard?universe=usdc_perp_top30&portfolio_limit=10&intent_limit=10&reconcile_limit=10&days=7" | jq
+curl -s "http://127.0.0.1:8000/execution/operator-dashboard?universe=micro_live_usdt_11&portfolio_limit=10&intent_limit=10&reconcile_limit=10&days=7" | jq
 ```
 
 ```bash
-open "http://127.0.0.1:8000/execution/operator-ui?symbol=BTCUSDC&universe=usdc_perp_top30&days=7"
+open "http://127.0.0.1:8000/execution/operator-ui?symbol=BTCUSDT&universe=micro_live_usdt_11&days=7"
 ```
 
 반드시 확인:
@@ -361,7 +361,7 @@ open "http://127.0.0.1:8000/execution/operator-ui?symbol=BTCUSDC&universe=usdc_p
 
 ### 4.3. 승인/배포 체크
 ```bash
-curl -s -X POST "http://127.0.0.1:8000/validation/report?symbol=BTCUSDC" | jq '{
+curl -s -X POST "http://127.0.0.1:8000/validation/report?symbol=BTCUSDT" | jq '{
   deployment_go_no_go,
   deployment_code,
   deployment_message,
@@ -369,7 +369,7 @@ curl -s -X POST "http://127.0.0.1:8000/validation/report?symbol=BTCUSDC" | jq '{
   playbook_action
 }'
 
-curl -s -X POST "http://127.0.0.1:8000/operations/checklist?symbol=BTCUSDC" | jq '{
+curl -s -X POST "http://127.0.0.1:8000/operations/checklist?symbol=BTCUSDT" | jq '{
   deployment_go_no_go,
   deployment_code,
   deployment_message,
@@ -385,24 +385,24 @@ curl -s -X POST "http://127.0.0.1:8000/operations/checklist?symbol=BTCUSDC" | jq
 surface divergence를 다시 수집할 때:
 ```bash
 ./.venv/bin/python scripts/collect_operator_surface_divergence_snapshot.py \
-  --symbol BTCUSDC \
-  --universe usdc_perp_top30 \
+  --symbol BTCUSDT \
+  --universe micro_live_usdt_11 \
   --days 7
 ```
 
 운영 handoff용 brief를 남길 때:
 ```bash
 ./.venv/bin/python scripts/generate_operator_session_brief.py \
-  --symbol BTCUSDC \
-  --universe usdc_perp_top30 \
+  --symbol BTCUSDT \
+  --universe micro_live_usdt_11 \
   --days 7
 ```
 
 brief를 Discord handoff message로 바꿔 볼 때:
 ```bash
 ./.venv/bin/python scripts/notify_operator_session_brief.py \
-  --symbol BTCUSDC \
-  --universe usdc_perp_top30 \
+  --symbol BTCUSDT \
+  --universe micro_live_usdt_11 \
   --days 7 \
   --channel system \
   --brief-mode shift-start \
@@ -412,8 +412,8 @@ brief를 Discord handoff message로 바꿔 볼 때:
 장 종료 handoff는:
 ```bash
 ./.venv/bin/python scripts/notify_operator_session_brief.py \
-  --symbol BTCUSDC \
-  --universe usdc_perp_top30 \
+  --symbol BTCUSDT \
+  --universe micro_live_usdt_11 \
   --days 7 \
   --channel system \
   --brief-mode shift-end \
@@ -454,7 +454,7 @@ launchctl setenv OPERATOR_BRIEF_ALLOW_LIVE_SEND 1
 ## 5. 후보 검토 절차
 ### 5.1. 스캐너
 ```bash
-curl -s "http://127.0.0.1:8000/scanner/top?universe=usdc_perp_top30&limit=10" | jq
+curl -s "http://127.0.0.1:8000/scanner/top?universe=micro_live_usdt_11&limit=10" | jq
 ```
 
 우선순위:
@@ -466,7 +466,7 @@ curl -s "http://127.0.0.1:8000/scanner/top?universe=usdc_perp_top30&limit=10" | 
 
 ### 5.2. 계획 상세
 ```bash
-curl -s "http://127.0.0.1:8000/plans/top?symbol=BTCUSDC&tf=5m&limit=5&refresh=true" | jq
+curl -s "http://127.0.0.1:8000/plans/top?symbol=BTCUSDT&tf=5m&limit=5&refresh=true" | jq
 ```
 
 보는 항목:
@@ -539,7 +539,7 @@ curl -s "http://127.0.0.1:8000/plans/top?symbol=BTCUSDC&tf=5m&limit=5&refresh=tr
 완성도 하드닝 기준은 [MICRO_LIVE Near-100 Hardening Plan](/Users/yumin/Documents/trading/docs/MICRO_LIVE_NEAR_100_HARDENING_PLAN.md)을 따른다. 여기서 `100%에 가까움`은 무손실이 아니라 fail-closed, auditability, stable latest report, alert delivery confirmation, replay/live 증거 분리를 뜻한다.
 
 ```bash
-./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDC --days 7
+./.venv/bin/python scripts/run_micro_live_preflight.py --symbol BTCUSDT --days 7
 ./.venv/bin/python scripts/run_micro_live_runtime_guard.py --days 30
 ./.venv/bin/python scripts/run_micro_live_synthetic_canary.py --no-network
 ./.venv/bin/python scripts/run_live_order_lifecycle_report.py --days 30
@@ -556,30 +556,30 @@ curl -s "http://127.0.0.1:8000/plans/top?symbol=BTCUSDC&tf=5m&limit=5&refresh=tr
 
 용도:
 - `run_micro_live_preflight.py`: API surface, validation, checklist, scanner, alert 상태를 한 번에 읽는다. Validation이 `GO`이고 checklist의 `blocking_failures=0`, `manual_actions=0`이면, checklist가 advisory warning 때문에 `approve=manual review first`를 표시하더라도 preflight는 이를 hard `NOT_READY`로 보지 않는다. 이 경우는 “자동 주문 경로 차단”이 아니라 운영 관찰 경고이며, checklist check message에는 `classification=advisory_only_checklist_warning_not_order_blocking`이 붙어야 한다. Validation 자체가 manual review/no-go이거나 checklist에 blocking/manual item이 있으면 계속 `NOT_READY`다.
-- `run_micro_live_runtime_guard.py`: `.env` allowlist, worker universe, SIR live rollout window, macro blackout horizon, fail-closed liquidity gate, recent live intent funnel을 빠르게 확인한다. `micro_live_backtest_contract_alignment`는 현재 MICRO_LIVE 심볼/패밀리/entry model/session/direction 계약이 `session_impulse_retest` 16심볼 백테스트 계약과 같은지 직접 비교한다. 이 항목이 `FAIL`이면 일반 allowlist 정합성이 맞아 보여도 백테스트와 다른 live route이므로 먼저 계약을 복구한다. `session_impulse_retest_live_rollout_window`는 raw `rollout_priority`가 아니라 core 심볼끼리의 순위로 `SESSION_IMPULSE_RETEST_CORE_LIVE_SLOTS`를 해석한다. blocking check 실패는 `FAIL`, warning check 실패는 `WATCH`로 top-level에 드러나야 하며, 내부 check의 `FAIL`이 top-level `PASS` 밑에 숨으면 안 된다.
+- `run_micro_live_runtime_guard.py`: `.env` allowlist, worker universe, SIR live rollout window, macro blackout horizon, fail-closed liquidity gate, recent live intent funnel을 빠르게 확인한다. `micro_live_backtest_contract_alignment`는 현재 MICRO_LIVE 심볼/패밀리/entry model/session/direction 계약이 `session_impulse_retest` USDT 11심볼 live 계약과 같은지 직접 비교한다. 이 항목이 `FAIL`이면 일반 allowlist 정합성이 맞아 보여도 백테스트와 다른 live route이므로 먼저 계약을 복구한다. `session_impulse_retest_live_rollout_window`는 raw `rollout_priority`가 아니라 core 심볼끼리의 순위로 `SESSION_IMPULSE_RETEST_CORE_LIVE_SLOTS`를 해석한다. blocking check 실패는 `FAIL`, warning check 실패는 `WATCH`로 top-level에 드러나야 하며, 내부 check의 `FAIL`이 top-level `PASS` 밑에 숨으면 안 된다.
 - `run_micro_live_synthetic_canary.py`: 실제 주문 없이 stop-distance sizing과 liquidity gate submit 경로를 dry-run한다.
 - `run_live_order_lifecycle_report.py`: intent, submission, fill, Binance ledger를 연결해 `no signal / approval blocked / submit skipped / submitted without fill / rejected-error / open / closed`를 분리한다.
 - `run_live_candidate_promotion_readiness.py`: live 후보 승격 상태를 current runtime 기준으로 요약한다. 24h/12-row scheduled refresh가 몇 초 이상 걸리거나 launchd에 오래 남으면 runtime DB의 `ix_sir_runtime_audits_observed_symbol_phase_status`, `ix_order_intents_family_created_funnel`, `ix_order_submissions_live_submitted_funnel` 존재 여부를 먼저 확인한다.
 - `run_micro_live_no_order_watchdog.py`: live intent가 쌓였는데 live submission이 없는 구간을 감지한다. WS worker가 재시작된 뒤에는 active alert 판단을 `runtime_started_at` 이후로 제한해 예전 차단 이력을 새 runtime 장애처럼 띄우지 않는다. 대신 `runtime_age_minutes`와 `runtime_sampling_note`를 같이 써서 현재 판단 창이 재시작 후 몇 분/몇 시간짜리인지 바로 보이게 한다. `lookback_lifecycle_summary`에는 전체 `--days` 구간 intent/submission/context를 같이 담아 “현재 런타임은 깨끗함”과 “최근 3일에는 어떤 intent가 있었는가”를 분리해서 본다. live intent count는 `distinct_plan_count`와 `duplicate_plan_intent_count`를 함께 읽는다. 같은 plan이 cooldown 뒤 반복 차단된 intent는 제출 누락 진단에는 중요하지만, 백테스트의 별도 기대 주문으로 세면 안 된다. live intent가 0이면 `candidate_generation_context`에 `session_impulse_retest` runtime audit 요약을 붙여, 후보 자체가 없었는지(`no_live_route_candidate_plan`), WS 중복 route 억제인지(`ws_stream_active_route_suppressed`), 실제 order-blocking audit가 있는지를 같은 리포트에서 확인한다. 또한 `session_impulse_retest_opportunity_context`에 현재 SIR 백테스트 조건 재생 요약을 붙인다. `summary.expected_order_count`는 runtime 재시작 이후 기대 주문이고, `lookback_summary.expected_order_count`는 전체 `--days` 구간 기대 주문이다. 메시지의 `백테스트조건(최근 N일/시간)`과 `SIR_opportunity=lookback_hours=...`를 먼저 보고, post-restart 1일 quick refresh와 수동 3일/7일 점검을 섞어 읽지 않는다. runtime 이후 기대 주문이 있는데 live intent가 0이면 `sir_backtest_opportunity_without_live_intent` WARN으로 올려, “백테스트 조건이면 주문이어야 하는데 live plan/intent가 누락된 상태”를 별도 모순으로 잡는다. 반대로 기대 주문이 모두 재시작 전 차단 이력이면 `sir_pre_restart_expected_orders_advisory`를 `OK/INFO`와 `historical_advisory=true`로 표시해 현재 submit 장애와 구분하고 반복 알림은 보내지 않는다. 알림은 `micro_live_no_order_watchdog` 타입으로 `intent/제출/런타임/후보/백테스트조건/원인/상세/다음`만 짧게 보내며, `WATCH` 상태는 `[모니터링] MICRO_LIVE 주문 흐름 관찰` 제목으로 보낸다. 알림을 보낼 때만 `--notify`를 붙인다. timestamp 리포트와 함께 `latest.md/latest.json`을 쓰고, 알림 cooldown state는 실제 전송 성공 후에만 기록한다.
 - `run_session_impulse_retest_miss_detector.py`: current WS `started_at` 전 후보는 live replay-observation 대상으로 과대계상하지 않는다. 단, 예상 `plan_id`에 이미 `order_intents` 또는 `order_submissions`가 있으면 pre-runtime 후보라도 `runtime_observed_count`에 포함한다. 이렇게 하면 재시작 때문에 오래된 후보를 현재 장애로 오해하지 않으면서도, 2026-05-14 BTC처럼 실제 intent까지 갔던 주문 후보가 단순 `skipped_before_runtime_start`로 숨지 않는다. 또한 `observed_submit_ready_intent_count`, `observed_non_submit_intent_count`, `observed_submission_count`, `observed_non_submit_reason_counts`를 같이 보여줘 “후보를 봤다”와 “실제로 제출 가능한 intent였다”를 분리한다.
 - WS worker는 Binance kline stream의 final candle만 SQLite에 commit한다. Non-final updates는 `processed_messages`와 `skipped_non_final_candles` telemetry에만 반영한다. 주문 후보 refresh/auto-route는 final candle에서만 실행되므로, non-final DB 쓰기가 없어도 entry 조건은 바뀌지 않는다.
-- `run_micro_live_ops_heartbeat.py`: scheduled guard들의 fresh/content 상태를 묶는다. 워크스페이스에서 수동 실행해도 기본적으로 durable runtime의 `runtime_src/reports`를 `report_root`로 읽는다. 특정 리포트 루트를 직접 감사해야 할 때만 `TRADING_OPS_HEARTBEAT_REPORT_ROOT` 또는 `TRADING_OPERATIONS_REPORT_ROOT`를 지정한다. `FAIL/WATCH`만 운영 알림 대상이며, `historical_advisory=true`나 `lookback_advisory=true`는 `advisory_count`와 `참고` 라인에 남기되 top-level `PASS`를 깨지 않는다. 즉 “현재 조치할 장애”와 “과거/룩백에서 관찰된 흐름 차이”를 분리한다.
-- validation payload cache는 운영 preflight의 read-only approval surface에 쓰인다. 기본 TTL은 6시간이다. 이 값은 주문 승인 logic을 완화하기 위한 것이 아니라, 무거운 `validation/report` 재계산이 매 15분마다 비어 preflight를 `validation unavailable`로 흔드는 것을 막기 위한 운영 캐시다.
+- `run_micro_live_ops_heartbeat.py`: scheduled guard들의 fresh/content 상태를 묶는다. 워크스페이스에서 수동 실행해도 기본적으로 durable runtime의 `runtime_src/reports`를 `report_root`로 읽는다. 특정 리포트 루트를 직접 감사해야 할 때만 `TRADING_OPS_HEARTBEAT_REPORT_ROOT` 또는 `TRADING_OPERATIONS_REPORT_ROOT`를 지정한다. `FAIL/WATCH`만 운영 알림 대상이며, `historical_advisory=true`나 `lookback_advisory=true`는 `advisory_count`와 `참고` 라인에 남기되 top-level `PASS`를 깨지 않는다. 또한 예전 `com.yumin.real.bybitbot`/`com.yumin.real.retrain` launchd label이나 `pybit`/`bot.main` 계열 stale process가 다시 살아나면 `competing_trading_runtime` hard failure로 올린다. 즉 “현재 조치할 장애”와 “과거/룩백에서 관찰된 흐름 차이”를 분리한다.
+- validation payload cache는 운영 preflight의 read-only approval surface에 쓰인다. 기본 TTL은 6시간이다. 이 값은 주문 승인 logic을 완화하기 위한 것이 아니라, 무거운 `validation/report` 재계산이 매 15분마다 비어 preflight를 `validation unavailable`로 흔드는 것을 막기 위한 운영 캐시다. `run_validation_report_refresh.py` launchd 작업이 4시간마다 이 캐시를 미리 채운다.
 - `run_live_reconciliation_watchdog.py`: stale open submission, ledger terminal mismatch, user-stream stale, fresh critical reconciliation event를 감지한다. 알림은 `live_reconciliation_watchdog` 타입을 사용하고, 알림을 보낼 때만 `--notify`를 붙인다.
 - `process_alert_retry_queue.py`: Discord/API 장애로 발송 실패한 알림을 재처리한다. trading alert는 시간 민감하므로 queued 상태가 `alert_retry_queue_max_age_seconds` 기본값 `86400`초를 넘으면 재발송하지 않고 `expired/stale_retry_task_expired`로 닫는다. 이렇게 해야 며칠 전 `validation_warn`나 miss 알림이 나중에 살아나 현재 주문 상태처럼 보이는 일을 막는다.
-- `run_micro_live_boot_check.py`: worker 시작 전 runtime guard, reconciliation watchdog, synthetic canary, failure-contract drill을 한 번에 묶어 확인한다. 실제 주문은 보내지 않는다. 현재 MICRO_LIVE 계약에서는 synthetic canary summary가 `symbol=BTCUSDC entry_model=CONFIRM no_live_order_sent=True`로 나와야 한다. 수동 synthetic canary는 `--symbol`/`--entry-model`을 명시할 수 있지만, boot check 자체는 legacy `LIMIT` route로 silently fallback하면 안 된다.
-- `run_live_replay_parity_audit.py --all-live-symbols`: 현재 16개 live symbol 전체의 replay 기대 빈도 대비 live intent 빈도를 한 번에 보고, 심볼별 `flow_diagnosis.stage`로 signal/plan 생성 공백, approval 차단, intent->submission 공백, exchange reject/error를 분리한다. WS worker `started_at`이 있으면 active headline은 `runtime_since_ws_start`이고, 재시작 전 `--days` 전체 결과는 `lookback_evaluation_summary`로만 남긴다. 과거 window를 headline으로 보고 싶으면 `--lookback-only`를 쓴다. 런타임 이후 기대 후보가 2건 미만이고 live intent/submission이 없으면 flow shortfall 경고가 아니라 fresh 후보 대기로 본다. 이때 현재 flow stage는 `runtime_evidence_floor_wait`이고 `recommended_action`은 추가 조치 없음으로 읽는다. lookback이 `WATCH/ALERT`여도 현재 runtime이 판단 evidence floor 미만이면 headline은 `PASS`로 유지하고 `lookback_advisory=true`로만 남긴다. 후보 빈도는 충분하지만 모든 intent가 승인 차단이면 `PASS`가 아니라 `WATCH`로 본다. `blocked=0`이어도 `by_decision=SKIP_SHADOW_ONLY`이고 `top_block_reasons`가 있으면 주문 flow는 제출 불가였던 것으로 보고 `WATCH`로 본다. 짧은 non-runtime 심볼별 창에서 replay 기대 후보가 2건 미만이면 flow shortfall은 `ALERT`가 아니라 `WATCH`로 두고, aggregate flow와 반복 여부를 함께 본다. 포트폴리오 `WATCH` reason은 thin live flow(`portfolio_symbol_live_flow_watch_thin_window`), order gate 대기(`portfolio_symbol_order_flow_blocked_or_waiting`), 혼합(`portfolio_symbol_live_flow_and_order_gate_watch`)으로 나눠 읽는다. timestamp 리포트와 함께 `latest.md/latest.json`도 쓴다.
+- `run_micro_live_boot_check.py`: worker 시작 전 runtime guard, reconciliation watchdog, synthetic canary, failure-contract drill을 한 번에 묶어 확인한다. 실제 주문은 보내지 않는다. 현재 MICRO_LIVE 계약에서는 synthetic canary summary가 `symbol=BTCUSDT entry_model=CONFIRM no_live_order_sent=True`로 나와야 한다. 수동 synthetic canary는 `--symbol`/`--entry-model`을 명시할 수 있지만, boot check 자체는 legacy `LIMIT` route로 silently fallback하면 안 된다.
+- `run_live_replay_parity_audit.py --all-live-symbols`: 현재 USDT 11개 live symbol 전체의 replay 기대 빈도 대비 live intent 빈도를 한 번에 보고, 심볼별 `flow_diagnosis.stage`로 signal/plan 생성 공백, approval 차단, intent->submission 공백, exchange reject/error를 분리한다. WS worker `started_at`이 있으면 active headline은 `runtime_since_ws_start`이고, 재시작 전 `--days` 전체 결과는 `lookback_evaluation_summary`로만 남긴다. 과거 window를 headline으로 보고 싶으면 `--lookback-only`를 쓴다. 런타임 이후 기대 후보가 2건 미만이고 live intent/submission이 없으면 flow shortfall 경고가 아니라 fresh 후보 대기로 본다. 이때 현재 flow stage는 `runtime_evidence_floor_wait`이고 `recommended_action`은 추가 조치 없음으로 읽는다. lookback이 `WATCH/ALERT`여도 현재 runtime이 판단 evidence floor 미만이면 headline은 `PASS`로 유지하고 `lookback_advisory=true`로만 남긴다. 후보 빈도는 충분하지만 모든 intent가 승인 차단이면 `PASS`가 아니라 `WATCH`로 본다. `blocked=0`이어도 `by_decision=SKIP_SHADOW_ONLY`이고 `top_block_reasons`가 있으면 주문 flow는 제출 불가였던 것으로 보고 `WATCH`로 본다. 짧은 non-runtime 심볼별 창에서 replay 기대 후보가 2건 미만이면 flow shortfall은 `ALERT`가 아니라 `WATCH`로 두고, aggregate flow와 반복 여부를 함께 본다. 포트폴리오 `WATCH` reason은 thin live flow(`portfolio_symbol_live_flow_watch_thin_window`), order gate 대기(`portfolio_symbol_order_flow_blocked_or_waiting`), 혼합(`portfolio_symbol_live_flow_and_order_gate_watch`)으로 나눠 읽는다. timestamp 리포트와 함께 `latest.md/latest.json`도 쓴다.
 - `run_replay_validation_bridge.py --all-live-symbols`: replay cache가 보수적 bridge 기준을 넘는지 audit-only로 확인한다. 평균 EV뿐 아니라 `ev_r_lower_95`가 음수가 아닌지 보고, `direction/strategy_family/entry_model`별 material slice가 약하면 `ELIGIBLE_FOR_MANUAL_BRIDGE_REVIEW_WITH_SLICE_WARNINGS`로 낮춘다. timestamp 리포트와 함께 `latest.md/latest.json`도 쓴다. 이 스크립트는 live approval을 변경하지 않는다.
 - `run_micro_live_safety_drag_audit.py`: 현재 `.env` MICRO_LIVE 계약과 재현 가능한 safety gate를 `session_impulse_retest` 백테스트 trade list에 적용해 진입 수/총 R/EV drag를 계산한다. 계약 필터, position cap, family cluster window, same-direction exposure, loss cooldown, Saturday risk multiplier를 분리해 본다. liquidity depth/spread/slippage는 historical orderbook snapshot이 백테스트 artifact에 없으면 이 리포트에서 정확히 계산하지 않고, synthetic canary와 live submission snapshot으로 별도 추적한다.
 - `run_micro_live_safety_grid_search.py`: live-canary deployable 범위의 pacing 조합을 같은 백테스트 trade list에 전수 적용해 `recommended`, `recommended_cap2`, `raw_top_20`을 분리한다. raw top은 safety off/unlimited exposure가 섞일 수 있으므로 진단용이고, 실제 적용 후보는 `deployable_filter`를 통과한 `recommended`만 본다. 같은 timestamp 후보 순서는 `run_micro_live_safety_drag_audit.py`와 동일하게 보존해야 하므로 별도 재정렬을 넣지 않는다.
 - `run_session_impulse_retest_runtime_audit_report.py`: DB에 남은 `session_impulse_retest` refresh/auto_route audit row를 요약한다. 기본 headline은 WS worker `started_at` 이후 `runtime_since_ws_start` scope이고, 전체 `--hours` 결과는 `lookback_summary`로만 남긴다. 과거 window를 headline으로 보고 싶으면 `--lookback-only`를 쓴다. `signal_generated`, `no_fresh_candidates`, `intent_blocked`, `submitted`, `ws_stream_active_route_suppressed`, `intent_creation_failed`, `submit_error`를 한 리포트에서 본다. 상단의 `order_blocking_status_counts`는 실제 주문 차단/제출 실패 쪽이고, `non_blocking_status_counts`는 WS duplicate-route suppression 같은 비차단 context이며, `no_candidate_status_counts`는 fresh 후보 없음이다. timestamp 리포트와 함께 `latest.md/latest.json`도 쓴다.
-- `run_micro_live_ops_heartbeat.py`: launchd/수동 스케줄이 실제로 최신 리포트를 계속 만들고 있는지 확인한다. 가능한 리포트는 내부 `overall_status/status/evaluation.status`까지 읽어서, 최신 파일이어도 `ALERT/WATCH/DRIFT/FAIL`이면 heartbeat에 노출한다. live/replay parity도 감시 대상이므로 replay 대비 live flow 괴리가 `WATCH/ALERT`로 남으면 운영 heartbeat에 같이 드러난다. runtime-scoped 리포트(`runtime_guard`, `no_order_watchdog`, `boot_check`, `live_candidate_promotion_readiness`, `live_replay_parity`, `session_impulse_retest_runtime_audit`, `entry_surface`)는 파일 age만 보지 않고 현재 WS worker `started_at` 이후 생성됐는지도 확인한다. 리포트가 방금 만든 것처럼 보여도 current runtime 시작 전이면 `WATCH/report_before_current_runtime_start`로 올려, 재시작 전 truth를 현재 상태로 읽지 않게 한다. entry surface의 `latest_entry_alert_run.json`도 감시 대상이므로 stale file, snapshot missing, `/portfolio/budget` timeout 같은 `source_request_failed`가 최신 상태로 남으면 heartbeat가 FAIL로 드러낸다. 이전 tick이 아직 실행 중인 `entry_surface_tick_already_running`은 WATCH로 남긴다. 정상적인 `no_alertable_rows`도 heartbeat `status_detail`에 `operator_action_summary.state`, `next_action`, top route mismatch reason을 붙여 `context_only_outside_live_route` 같은 정상 대기 상태를 바로 읽을 수 있게 한다. 이때 하위 리포트의 `evaluation.reason/status_detail/message`를 heartbeat의 `report_reason/status_detail`로 승격하므로, `live_replay_parity=WATCH`는 `portfolio_symbol_live_flow_and_order_gate_watch`처럼 실제 확인 이유를 같이 보여야 한다. Discord 운영 알림은 `micro_live_ops_heartbeat` 타입으로 보내며 `상태`, `긴급`, `주의` 라인을 우선 노출하므로 generic `확인 필요`만 보이고 원인을 못 보는 상태가 되면 안 된다. `fail=0`인 WATCH-only heartbeat는 `[모니터링] ... 운영 관찰`로 표시하고 `WATCH는 자동 관찰; 반복/악화 시 해당 리포트 확인`으로 안내한다. failure-contract drill 최신성도 같이 감시해 드릴이 stale 되면 운영 heartbeat에서 바로 보이게 한다. 리포트 job은 `state.json` 같은 상태 파일이 아니라 실제 report 파일을 보고, 읽어야 하는 status가 없으면 failure로 처리한다. macro blackout 계약은 파일 존재만 보지 않고 `windows`의 future horizon도 직접 검증한다. 이때 glob 최신 파일보다 `.env`의 `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH`를 우선해 live approval이 실제로 쓰는 계약을 감사한다. blackout 파일 mtime이 오래됐지만 horizon이 충분하면 `WATCH`, horizon 부족/만료는 hard failure로 본다. 알림 메시지는 `긴급(FAIL)`과 `주의(WATCH)`를 분리해 보여주고, 같은 issue 조합은 cooldown으로 반복 발송을 억제한다. 단, cooldown state는 실제 전송 성공이 확인된 뒤에만 기록한다. timestamp 리포트와 함께 `latest.md/latest.json`도 써서 운영 화면이나 수동 확인은 고정 경로를 볼 수 있고, timestamp/latest/state 쓰기는 atomic replace로 처리한다.
+- `run_micro_live_ops_heartbeat.py`: launchd/수동 스케줄이 실제로 최신 리포트를 계속 만들고 있는지 확인한다. 가능한 리포트는 내부 `overall_status/status/evaluation.status`까지 읽어서, 최신 파일이어도 `ALERT/WATCH/DRIFT/FAIL`이면 heartbeat에 노출한다. live/replay parity도 감시 대상이므로 replay 대비 live flow 괴리가 `WATCH/ALERT`로 남으면 운영 heartbeat에 같이 드러난다. runtime-scoped 리포트(`runtime_guard`, `no_order_watchdog`, `boot_check`, `live_candidate_promotion_readiness`, `live_replay_parity`, `session_impulse_retest_runtime_audit`, `entry_surface`)는 파일 age만 보지 않고 현재 WS worker `started_at` 이후 생성됐는지도 확인한다. 리포트가 방금 만든 것처럼 보여도 current runtime 시작 전이면 `WATCH/report_before_current_runtime_start`로 올려, 재시작 전 truth를 현재 상태로 읽지 않게 한다. entry surface의 `latest_entry_alert_run.json`도 감시 대상이므로 stale file, snapshot missing, `/portfolio/budget` timeout 같은 `source_request_failed`가 최신 상태로 남으면 heartbeat가 FAIL로 드러낸다. 이전 tick이 아직 실행 중인 `entry_surface_tick_already_running`은 WATCH로 남긴다. 정상적인 `no_alertable_rows`도 heartbeat `status_detail`에 `operator_action_summary.state`, `next_action`, top route mismatch reason을 붙여 `context_only_outside_live_route` 같은 정상 대기 상태를 바로 읽을 수 있게 한다. 이때 하위 리포트의 `evaluation.reason/status_detail/message`를 heartbeat의 `report_reason/status_detail`로 승격하므로, `live_replay_parity=WATCH`는 `portfolio_symbol_live_flow_and_order_gate_watch`처럼 실제 확인 이유를 같이 보여야 한다. `competing_trading_runtime` direct check는 예전 Bybit/real 봇 launchd label과 stale process pattern을 직접 확인하고, 발견되면 리포트 파일 freshness와 무관하게 hard failure로 띄운다. Discord 운영 알림은 `micro_live_ops_heartbeat` 타입으로 보내며 `상태`, `긴급`, `주의` 라인을 우선 노출하므로 generic `확인 필요`만 보이고 원인을 못 보는 상태가 되면 안 된다. `fail=0`인 WATCH-only heartbeat는 `[모니터링] ... 운영 관찰`로 표시하고 `WATCH는 자동 관찰; 반복/악화 시 해당 리포트 확인`으로 안내한다. failure-contract drill 최신성도 같이 감시해 드릴이 stale 되면 운영 heartbeat에서 바로 보이게 한다. 리포트 job은 `state.json` 같은 상태 파일이 아니라 실제 report 파일을 보고, 읽어야 하는 status가 없으면 failure로 처리한다. macro blackout 계약은 파일 존재만 보지 않고 `windows`의 future horizon도 직접 검증한다. 이때 glob 최신 파일보다 `.env`의 `AUTO_TRADING_MICRO_LIVE_EVENT_BLACKOUT_PATH`를 우선해 live approval이 실제로 쓰는 계약을 감사한다. blackout 파일 mtime이 오래됐지만 horizon이 충분하면 `WATCH`, horizon 부족/만료는 hard failure로 본다. 알림 메시지는 `긴급(FAIL)`과 `주의(WATCH)`를 분리해 보여주고, 같은 issue 조합은 cooldown으로 반복 발송을 억제한다. 단, cooldown state는 실제 전송 성공이 확인된 뒤에만 기록한다. timestamp 리포트와 함께 `latest.md/latest.json`도 써서 운영 화면이나 수동 확인은 고정 경로를 볼 수 있고, timestamp/latest/state 쓰기는 atomic replace로 처리한다.
 - `run_micro_live_failure_drill.py`: 실제 주문/실 DB/control switch를 건드리지 않는 failure-contract drill이다. missing/stale/malformed report, 짧은 macro horizon, 알림 전송 실패, stale submission, submit-ready gap, runtime audit hard failure가 `PASS`로 숨지 않는지 한 번에 확인하고 timestamp/latest 리포트를 atomic replace로 남긴다.
 
 운영 launchd는 runtime 배포본 기준으로 설치되어 있다. 따라서 자동 스케줄이 생성하는 MICRO_LIVE 운영 truth는 보통 `~/Library/Application Support/trading/runtime_src/reports/operations/...` 아래의 `latest.md/latest.json`과 `launchd/logs/*.log`다. workspace의 `reports/operations/...`는 수동 실행이나 개발 검증 결과일 수 있으므로, live 운영 상태를 판단할 때는 runtime_src 리포트를 우선 본다. entry surface launchd도 runtime_src의 `scripts/notify_entry_surface.py`를 직접 실행하고 `runtime_src/reports/operations/entry_surface/latest_entry_alert_run.json`을 쓴다. macOS launchd가 Documents 아래 bash wrapper를 실행할 때 권한 이슈가 날 수 있어서, entry surface launchd는 runtime_src Python 직접 호출에 `--quiet`, `--lock-file`, `--output-file`을 명시한다. 주기 실행 guard와 entry surface launchd는 quiet 모드로 설치해 stdout 로그 폭증을 막고, 운영 truth는 stdout이 아니라 `latest.md/latest.json` 또는 `latest_entry_alert_run.json`에 남긴다.
 
 entry surface의 `BLOCKED_SETUP`은 전체 portfolio blocked context이고, 실제 주문 후보 차단은 `blocked_live_order_candidates` 또는 `blocked_setup_breakdown.live_routable`로 판단한다. `blocked_context_only_setups`는 current live route 밖의 blocked context라서 주문 submit 실패로 읽지 않는다.
-`route_mismatch_summary`는 context-only row가 live route 밖으로 빠진 이유를 reason/family/entry model/symbol별로 집계한다. 현재 runtime 계약은 `session_impulse_retest + CONFIRM + 16개 MICRO_LIVE 심볼 + dead_session/london/new_york`이고, `.env.example`도 이 계약과 맞춰 둔다.
+`route_mismatch_summary`는 context-only row가 live route 밖으로 빠진 이유를 reason/family/entry model/symbol별로 집계한다. 현재 runtime 계약은 `session_impulse_retest + CONFIRM + USDT 11심볼 + dead_session/london/new_york`이고, `.env.example`도 이 계약과 맞춰 둔다.
 entry surface의 `counts/source_counts`는 전체 source row 수이고, `display_counts`는 `--max-per-status`로 잘려 실제 message에 표시된 row 수다. `truncated_entry_counts`가 0보다 크면 compact display에 일부 row가 생략된 것이므로, 주문 후보 유무는 `live_order_candidates/blocked_live_order_candidates` 같은 source count를 기준으로 판단한다.
 entry surface의 `operator_action_summary`는 operator가 먼저 읽어야 하는 상태다. `live_order_candidate_present`면 intent/submission/fill을 확인하고, `live_order_candidate_blocked`면 validation/portfolio/risk blocker를 확인한다. `context_only_outside_live_route`면 후보처럼 보이는 surface 활동이 현재 live route 밖이라는 뜻이므로 주문 미발생을 정상으로 읽고, live route를 바꾸려면 의도적으로 계약을 변경해야 한다. `no_surface_candidates`는 fresh 후보 대기 상태다.
 entry surface의 saved result는 Discord가 나가지 않는 `no_alertable_rows`에서도 top-level `generated_at/status/overall_status/status_detail`와 rendered `message`를 보존한다. `live_order_candidates=0`이고 `operator_action_summary.state=context_only_outside_live_route`이면 `status=PASS`로 읽는다. `live_order_candidate_present` 또는 `live_order_candidate_blocked`이면 `status=WATCH`로 남겨 intent/submission/fill 또는 blocker 확인 대상으로 둔다. 따라서 최신 artifact 하나만 열어도 headline, route mismatch, operator action, counts/display/truncated context를 같은 형식으로 확인할 수 있다.
@@ -595,7 +595,7 @@ blackout horizon이 runtime guard에서 막히면 먼저 계약 파일을 갱신
 ```bash
 ./.venv/bin/python scripts/build_micro_live_event_blackouts.py \
   --years 2026,2027 \
-  --symbols BTCUSDC \
+  --symbols BTCUSDT \
   --families sweep_reversal \
   --entry-models LIMIT \
   --output reports/validation/contracts/micro_live_event_blackouts_major_us_macro_auto.json
@@ -661,11 +661,11 @@ curl -s -X POST "http://127.0.0.1:8000/execution/submit" \
 - `live=true`는 `BINANCE_TRADE_LIVE_ENABLED=true`와 approval/rollout/safety 조건이 모두 맞을 때만 사용
 - `MICRO_LIVE` 진입 전 확인 기준은 `runtime_decision_band == AMBER_CONDITIONAL`, `runtime_effective_action == conditional_micro_live_signoff`, `runtime_allowed_reopen_scope == MICRO_LIVE_ONLY`다.
 - `MICRO_LIVE` 직전 surface는 `runtime_preflight_summary.status == READY_FOR_MICRO_LIVE`와 `runtime_operator_signoff_summary.status == ready_for_manual_micro_live_signoff`를 같이 보여줘야 한다. 이 단계 의미는 “기술 gate는 통과했고, 운영자가 MICRO_LIVE만 수동 서명할 수 있다”이다.
-- 현재 기본 `MICRO_LIVE` 계약은 `session_impulse_retest + CONFIRM + 16개 USDC perpetual 심볼(BTC/ETH/SOL/LINK/BNB/XRP/ADA/AVAX/BCH/LTC/NEAR/1000PEPE/ARB/1000SHIB/FIL/DOGE) + dead_session/london/new_york`이다. legacy `sweep_reversal`, `SWEEP_CONFIRM`, live 심볼 밖 row는 context-only로 읽는다.
+- 현재 기본 `MICRO_LIVE` 계약은 `session_impulse_retest + CONFIRM + 31개 USDT perpetual 심볼 + dead_session/london/new_york`이다. legacy `sweep_reversal`, `SWEEP_CONFIRM`, live 심볼 밖 row는 context-only로 읽는다.
 - `trend_continuation + LIMIT`는 별도 `trend proof lane`으로만 추적한다. 이 lane은 상승장/추세장 proof를 따로 쌓는 용도고, proof가 쌓이기 전까지는 live submit 계약에 포함하지 않는다.
-- `historical execution contract proof`는 현재 `BTCUSDC + sweep_reversal + LIMIT` 계약의 장기 closed-plan context를 advisory-only로 보여준다. 빠르게 참고할 수 있지만 live gate source로 직접 쓰지 않는다.
+- `historical execution contract proof`는 legacy `BTCUSDC + sweep_reversal + LIMIT` 계약의 장기 closed-plan context를 advisory-only로 보여준다. 빠르게 참고할 수 있지만 live gate source로 직접 쓰지 않는다.
 - `historical walk-forward execution proof`는 같은 계약을 과거 5m/15m 캔들에 대해 candle-by-candle로 순차 재생한 advisory lane이다. `simulation_start_ts`, `simulation_end_ts`, `latest_source_ts`를 같이 보고 시뮬레이션 구간이 실제로 어디까지 반영됐는지 확인한다.
-- `historical walk-forward strategy proof`는 현재 `BTCUSDC` 중심 raw candle strategy-level replay lane이다. 이 lane은 과거에 저장된 plan row가 아니라 과거 캔들에서 신호를 직접 재생성해서 large-sample 전략 적합성을 보는 용도다. live execution gate와는 별도 advisory evidence로만 해석한다.
+- `historical walk-forward strategy proof`는 legacy BTCUSDC 중심 raw candle strategy-level replay lane이다. 이 lane은 과거에 저장된 plan row가 아니라 과거 캔들에서 신호를 직접 재생성해서 large-sample 전략 적합성을 보는 용도다. live execution gate와는 별도 advisory evidence로만 해석한다.
 - `MICRO_LIVE`는 `live_eligible_post_patch_closed_trade_count >= 15`, `live_eligible_post_patch_sample_summary.replay_max_drawdown_r < 4.5`, `live_eligible_post_patch_sample_summary.replay_p5_r >= -1.05`, `live_eligible_post_patch_sample_summary.stop_loss_share < 0.45`, `live_eligible_post_patch_sample_summary.worst_loss_streak < 5`를 동시에 만족할 때만 검토한다.
 - `actual execution subset`이 `5 distinct plans`를 넘기기 전까지는 gate proof가 bootstrap 단계다. 이 구간에선 `runtime_live_contract_scope.proof_source`가 가리키는 `live_eligible_post_patch_sample_summary`를 gate truth로 쓴다.
 - live submit approval은 최근 알트 reversal cluster를 같이 본다. `live_family_cluster_window_cap_reached`가 뜨면 같은 family 신규 진입을 동시 다발로 받지 말고, `live_family_loss_cooldown_active`가 뜨면 최근 family 손실 파동이 가라앉을 때까지 신규 live entry를 멈춘다.
@@ -680,7 +680,7 @@ curl -s -X POST "http://127.0.0.1:8000/execution/submit" \
 ## 7. 제출 후 모니터링
 ### 7.1. operator dashboard
 ```bash
-curl -s "http://127.0.0.1:8000/execution/operator-dashboard?symbol=BTCUSDC&days=7" | jq
+curl -s "http://127.0.0.1:8000/execution/operator-dashboard?symbol=BTCUSDT&days=7" | jq
 ```
 
 확인:
@@ -695,12 +695,12 @@ curl -s "http://127.0.0.1:8000/execution/operator-dashboard?symbol=BTCUSDC&days=
 
 ### 7.2. 실행 품질
 ```bash
-curl -s "http://127.0.0.1:8000/execution/quality?symbol=BTCUSDC&days=30&write_report=false" | jq
+curl -s "http://127.0.0.1:8000/execution/quality?symbol=BTCUSDT&days=30&write_report=false" | jq
 ```
 
 ### 7.3. 포트폴리오 상태
 ```bash
-curl -s "http://127.0.0.1:8000/portfolio/budget?universe=usdc_perp_top30&limit=20&write_report=false&fast=true" | jq
+curl -s "http://127.0.0.1:8000/portfolio/budget?universe=micro_live_usdt_11&limit=20&write_report=false&fast=true" | jq
 ```
 
 `/portfolio/budget`는 entry surface와 `/execution/operator-dashboard`의 upstream이다. 이 endpoint가 느리면 주문 worker가 정상이어도 preflight/entry-surface 운영 리포트가 timeout으로 보일 수 있다. Runtime DB의 `plans` 테이블에는 `ix_plans_time_state_valid_from`와 `ix_plans_symbol_time_state_ev`가 있어야 한다. 누락 시:
@@ -716,7 +716,7 @@ sqlite3 "$HOME/Library/Application Support/trading/data/trading.db" \
 ```bash
 curl -s -X POST "http://127.0.0.1:8000/execution/reconcile?auto_resolve=true&apply_lock=true" \
   -H "Content-Type: application/json" \
-  -d '{"symbol":"BTCUSDC"}' | jq
+  -d '{"symbol":"BTCUSDT"}' | jq
 ```
 
 규칙:
@@ -728,8 +728,8 @@ proposal-only dry-run:
 
 ```bash
 ./.venv/bin/python scripts/run_kill_condition_automation.py \
-  --symbol BTCUSDC \
-  --universe usdc_perp_top30 \
+  --symbol BTCUSDT \
+  --universe micro_live_usdt_11 \
   --days 7
 ```
 
@@ -756,7 +756,7 @@ curl -s -X POST "http://127.0.0.1:8000/execution/control/kill-switch" \
 4. 필요한 경우 `GET /alerts/metrics`로 validation alert / retry queue / channel SLO 확인
 5. 첫 실제 live 세션 종료 후 pruning 재평가:
 ```bash
-./.venv/bin/python scripts/run_post_live_pruning_review.py --symbol BTCUSDC --days 7
+./.venv/bin/python scripts/run_post_live_pruning_review.py --symbol BTCUSDT --days 7
 ```
    생성되는 pruning review는 `Approval Surfaces` 섹션에서 `dashboard / validation / checklist`를 같은 `approve -> align -> act` vocabulary로 다시 요약하고, `Edge Experiment` 섹션에서 현재 split-test focus를 advisory-only로 함께 보여준다.
 
@@ -766,7 +766,7 @@ curl -s -X POST "http://127.0.0.1:8000/execution/control/kill-switch" \
 - mismatch, stale stream, missing stop 같은 runtime 이상은 “나중에 보기”가 아니라 즉시 lock/close-only 판단 대상이다.
 - live 문제를 paper에서 재현 가능하게 유지하는 것이 운영 안정성의 핵심이다.
 - 테스트는 항상 temp DB에서 돌아야 한다. `pytest`와 drill/watch 스크립트는 `DATABASE_URL`을 존중해야 하고, 실 [trading.db](/Users/yumin/Documents/trading/trading.db)를 테스트로 오염시키면 안 된다.
-- `legacy` 전체 replay와 full `post-patch` close-fill cohort는 advisory truth로 유지한다. 실제 live go/no-go는 현재 `session_impulse_retest + CONFIRM + 16-symbol MICRO_LIVE` route와 safety/grid audit을 별도로 본다.
+- `legacy` 전체 replay와 full `post-patch` close-fill cohort는 advisory truth로 유지한다. 실제 live go/no-go는 현재 `session_impulse_retest + CONFIRM + 31-symbol USDT MICRO_LIVE` route와 safety/grid audit을 별도로 본다.
 - `BTCUSDC + sweep_reversal + LIMIT`는 benchmark/legacy lens이며 현재 live allowlist가 아니다.
 - `trend_continuation + LIMIT`는 운영 계약이 아니라 `trend proof lane`이다. lane count가 작을 때는 장 적합성 진단용으로만 본다.
 - historical proof lane은 advisory context다. 이 값이 좋아도 live fill quality, order queue, reconciliation, liquidity, runtime parity를 대체하지 않는다.

@@ -24,6 +24,12 @@ DEFAULT_EXPANSION_REVIEW_PATH = ROOT_DIR / "reports/operations/micro_intrabar_ca
 DEFAULT_EXPANSION_SHADOW_REVIEW_PATH = ROOT_DIR / "reports/operations/micro_intrabar_expansion_shadow_review/latest.json"
 DEFAULT_EXIT_POLICY_UPGRADE_REVIEW_PATH = ROOT_DIR / "reports/operations/micro_intrabar_exit_policy_upgrade_review/latest.json"
 DEFAULT_FILTER_UPGRADE_REVIEW_PATH = ROOT_DIR / "reports/operations/micro_intrabar_filter_upgrade_review/latest.json"
+DEFAULT_PORTFOLIO_MIX_REVIEW_PATH = (
+    ROOT_DIR / "reports/operations/micro_intrabar_long_short_portfolio_mix_review_drop_arb/latest.json"
+)
+DEFAULT_CONFIG_PROPOSAL_PATH = ROOT_DIR / "reports/operations/micro_intrabar_portfolio_mix_live_config_proposal/latest.json"
+DEFAULT_CONFIG_DRY_RUN_PATH = ROOT_DIR / "reports/operations/micro_intrabar_portfolio_mix_config_dry_run/latest.json"
+DEFAULT_RUNTIME_GUARD_PATH = ROOT_DIR / "reports/operations/micro_live_runtime_guard/latest.json"
 DEFAULT_SAFETY_URL = "http://127.0.0.1:8000/execution/safety-state"
 
 
@@ -36,6 +42,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--expansion-shadow-review-path", default=str(DEFAULT_EXPANSION_SHADOW_REVIEW_PATH))
     parser.add_argument("--exit-policy-upgrade-review-path", default=str(DEFAULT_EXIT_POLICY_UPGRADE_REVIEW_PATH))
     parser.add_argument("--filter-upgrade-review-path", default=str(DEFAULT_FILTER_UPGRADE_REVIEW_PATH))
+    parser.add_argument("--portfolio-mix-review-path", default=str(DEFAULT_PORTFOLIO_MIX_REVIEW_PATH))
+    parser.add_argument("--config-proposal-path", default=str(DEFAULT_CONFIG_PROPOSAL_PATH))
+    parser.add_argument("--config-dry-run-path", default=str(DEFAULT_CONFIG_DRY_RUN_PATH))
+    parser.add_argument("--runtime-guard-path", default=str(DEFAULT_RUNTIME_GUARD_PATH))
     parser.add_argument("--safety-url", default=DEFAULT_SAFETY_URL)
     parser.add_argument("--skip-safety-fetch", action="store_true")
     parser.add_argument("--report-dir", default="reports/operations/micro_intrabar_candidate_governance")
@@ -156,6 +166,211 @@ def _contract_assessment(contract: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _runtime_guard_assessment(
+    runtime_guard: dict[str, Any] | None,
+    *,
+    error: str | None = None,
+    required: bool = False,
+) -> dict[str, Any]:
+    if runtime_guard is None:
+        return {
+            "available": False,
+            "error": error,
+            "hard_blockers": ["runtime_guard_unavailable"] if required else [],
+            "overall_status": None,
+            "operational_status": None,
+            "blocking_failures": [],
+        }
+    overall_status = str(runtime_guard.get("overall_status") or "").upper()
+    operational_status = str(runtime_guard.get("operational_status") or "").upper()
+    blocking_failures = [dict(item) for item in list(runtime_guard.get("blocking_failures") or []) if isinstance(item, dict)]
+    hard_blockers: list[str] = []
+    if overall_status != "PASS" or operational_status not in {"PASS", "OK"} or blocking_failures:
+        hard_blockers.append("runtime_guard_not_passing")
+    return {
+        "available": True,
+        "error": None,
+        "hard_blockers": hard_blockers,
+        "overall_status": overall_status,
+        "operational_status": operational_status,
+        "blocking_failure_count": len(blocking_failures),
+        "blocking_failures": [
+            {
+                "name": item.get("name"),
+                "message": item.get("message"),
+            }
+            for item in blocking_failures[:8]
+        ],
+    }
+
+
+def _portfolio_mix_assessment(
+    portfolio_mix: dict[str, Any] | None,
+    *,
+    error: str | None = None,
+    required: bool = False,
+) -> dict[str, Any]:
+    if portfolio_mix is None:
+        return {
+            "available": False,
+            "error": error,
+            "hard_blockers": ["portfolio_mix_review_unavailable"] if required else [],
+            "warnings": [],
+        }
+    hard_blockers: list[str] = []
+    warnings: list[str] = []
+    recommended_state = str(portfolio_mix.get("recommended_state") or "")
+    if recommended_state != "PORTFOLIO_MIX_PAPER_WATCH":
+        hard_blockers.append("portfolio_mix_not_supportive")
+    if str(portfolio_mix.get("live_action") or "") != "KEEP_CLOSE_ONLY":
+        hard_blockers.append("portfolio_mix_live_action_not_close_only")
+    if _safe_bool(portfolio_mix.get("live_ready")):
+        hard_blockers.append("portfolio_mix_live_ready_true")
+    if _safe_bool(portfolio_mix.get("order_submission_allowed")):
+        hard_blockers.append("portfolio_mix_order_submission_allowed")
+    if _safe_int(portfolio_mix.get("combined_symbol_count")) < 4:
+        warnings.append("portfolio_mix_symbol_count_thin")
+    summary = dict(dict(portfolio_mix.get("combined") or {}).get("summary") or {})
+    cost_stress = dict(dict(portfolio_mix.get("combined") or {}).get("cost_stress") or {})
+    recommended_scenarios = [
+        dict(item)
+        for item in list(portfolio_mix.get("recommended_portfolio_replay_scenarios") or [])
+        if isinstance(item, dict)
+    ]
+    return {
+        "available": True,
+        "error": None,
+        "hard_blockers": hard_blockers,
+        "warnings": warnings,
+        "recommended_state": recommended_state,
+        "reasons": portfolio_mix.get("reasons") or [],
+        "live_action": portfolio_mix.get("live_action"),
+        "live_ready": portfolio_mix.get("live_ready"),
+        "order_submission_allowed": portfolio_mix.get("order_submission_allowed"),
+        "combined_symbol_count": portfolio_mix.get("combined_symbol_count"),
+        "combined_symbols": portfolio_mix.get("combined_symbols") or [],
+        "summary": {
+            "closed": summary.get("closed"),
+            "total_r": summary.get("total_r"),
+            "ev_r": summary.get("ev_r"),
+            "max_dd_r": summary.get("max_dd_r"),
+            "positive_year_fraction": summary.get("positive_year_fraction"),
+        },
+        "cost_stress": {
+            "extra_0_05r_per_trade_total_r": dict(cost_stress.get("extra_0_05r_per_trade") or {}).get("total_r"),
+            "cost_x2_total_r": dict(cost_stress.get("cost_x2_0") or {}).get("total_r"),
+        },
+        "recommended_portfolio_replay_scenarios": recommended_scenarios,
+        "operator_summary": portfolio_mix.get("operator_summary") or {},
+    }
+
+
+def _config_proposal_assessment(
+    config_proposal: dict[str, Any] | None,
+    *,
+    error: str | None = None,
+    required: bool = False,
+) -> dict[str, Any]:
+    if config_proposal is None:
+        return {
+            "available": False,
+            "error": error,
+            "hard_blockers": ["config_proposal_unavailable"] if required else [],
+            "warnings": [],
+        }
+    hard_blockers: list[str] = []
+    recommended_state = str(config_proposal.get("recommended_state") or "")
+    if recommended_state != "CONFIG_PROPOSAL_READY_FOR_MANUAL_REVIEW":
+        hard_blockers.append("live_config_proposal_not_ready")
+    if str(config_proposal.get("live_action") or "") != "KEEP_CLOSE_ONLY":
+        hard_blockers.append("config_proposal_live_action_not_close_only")
+    if _safe_bool(config_proposal.get("live_ready")) or _safe_bool(config_proposal.get("order_submission_allowed")):
+        hard_blockers.append("config_proposal_has_live_authority")
+    return {
+        "available": True,
+        "error": None,
+        "hard_blockers": hard_blockers,
+        "warnings": [],
+        "recommended_state": recommended_state,
+        "proposal_blockers": config_proposal.get("proposal_blockers") or [],
+        "runtime_support_gaps": config_proposal.get("runtime_support_gaps") or [],
+        "symbol_count": config_proposal.get("symbol_count"),
+        "exit_policy_name": config_proposal.get("exit_policy_name"),
+        "recommended_max_concurrent_positions": config_proposal.get("recommended_max_concurrent_positions"),
+        "order_submission_allowed": config_proposal.get("order_submission_allowed"),
+    }
+
+
+def _config_dry_run_assessment(
+    config_dry_run: dict[str, Any] | None,
+    *,
+    error: str | None = None,
+    required: bool = False,
+) -> dict[str, Any]:
+    if config_dry_run is None:
+        return {
+            "available": False,
+            "error": error,
+            "hard_blockers": ["config_dry_run_unavailable"] if required else [],
+            "warnings": [],
+        }
+    hard_blockers: list[str] = []
+    warnings: list[str] = []
+    recommended_state = str(config_dry_run.get("recommended_state") or "")
+    blocking_failures = [
+        dict(item) for item in list(config_dry_run.get("blocking_failures") or []) if isinstance(item, dict)
+    ]
+    warning_failures = [
+        dict(item) for item in list(config_dry_run.get("warning_failures") or []) if isinstance(item, dict)
+    ]
+    checks = [dict(item) for item in list(config_dry_run.get("checks") or []) if isinstance(item, dict)]
+    if recommended_state != "DRY_RUN_PASS_NO_LIVE_AUTHORITY" or blocking_failures:
+        hard_blockers.append("config_dry_run_not_passing")
+    if str(config_dry_run.get("live_action") or "") != "KEEP_CLOSE_ONLY":
+        hard_blockers.append("config_dry_run_live_action_not_close_only")
+    if _safe_bool(config_dry_run.get("live_ready")) or _safe_bool(config_dry_run.get("order_submission_allowed")):
+        hard_blockers.append("config_dry_run_has_live_authority")
+    if warning_failures:
+        warnings.append("config_dry_run_warning_failures_present")
+    return {
+        "available": True,
+        "error": None,
+        "hard_blockers": hard_blockers,
+        "warnings": warnings,
+        "recommended_state": recommended_state,
+        "live_action": config_dry_run.get("live_action"),
+        "live_ready": config_dry_run.get("live_ready"),
+        "order_submission_allowed": config_dry_run.get("order_submission_allowed"),
+        "symbol_count": config_dry_run.get("symbol_count"),
+        "exit_policy_name": config_dry_run.get("exit_policy_name"),
+        "blocking_failure_count": len(blocking_failures),
+        "warning_failure_count": len(warning_failures),
+        "blocking_failures": [
+            {
+                "name": item.get("name"),
+                "message": item.get("message"),
+            }
+            for item in blocking_failures[:8]
+        ],
+        "warning_failures": [
+            {
+                "name": item.get("name"),
+                "message": item.get("message"),
+            }
+            for item in warning_failures[:8]
+        ],
+        "checks": [
+            {
+                "name": item.get("name"),
+                "status": item.get("status"),
+                "severity": item.get("severity"),
+                "message": item.get("message"),
+            }
+            for item in checks
+        ],
+    }
+
+
 def _summarize_expansion_report_reviews(expansion_review: dict[str, Any] | None) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
     for item in list((expansion_review or {}).get("report_reviews") or []):
@@ -231,11 +446,52 @@ def _decision(
     expansion_shadow_review: dict[str, Any] | None,
     exit_policy_upgrade_review: dict[str, Any] | None,
     filter_upgrade_review: dict[str, Any] | None,
+    portfolio_mix_review: dict[str, Any] | None,
+    config_proposal_review: dict[str, Any] | None,
+    config_dry_run_review: dict[str, Any] | None,
+    runtime_guard_review: dict[str, Any] | None,
     safety_assessment: dict[str, Any],
+    portfolio_mix_required: bool = False,
+    config_proposal_required: bool = False,
+    config_dry_run_required: bool = False,
+    runtime_guard_required: bool = False,
 ) -> tuple[str, list[str]]:
     hard_blockers: list[str] = []
     hard_blockers.extend(str(item) for item in list(contract_assessment.get("hard_blockers") or []))
-    hard_blockers.extend(str(item) for item in list(safety_assessment.get("hard_blockers") or []))
+    portfolio_mix_status = _portfolio_mix_assessment(portfolio_mix_review, required=portfolio_mix_required)
+    config_proposal_status = _config_proposal_assessment(
+        config_proposal_review,
+        required=config_proposal_required,
+    )
+    config_dry_run_status = _config_dry_run_assessment(config_dry_run_review, required=config_dry_run_required)
+    runtime_guard_status = _runtime_guard_assessment(runtime_guard_review, required=runtime_guard_required)
+    runtime_active_supported = _runtime_active_supported(
+        safety_assessment=safety_assessment,
+        portfolio_mix_status=portfolio_mix_status,
+        config_proposal_status=config_proposal_status,
+        config_dry_run_status=config_dry_run_status,
+        runtime_guard_status=runtime_guard_status,
+    )
+    safety_blockers = [str(item) for item in list(safety_assessment.get("hard_blockers") or [])]
+    if runtime_active_supported:
+        safety_blockers = [item for item in safety_blockers if item != "new_entries_unexpectedly_allowed"]
+    hard_blockers.extend(safety_blockers)
+    hard_blockers.extend(
+        str(item)
+        for item in list(portfolio_mix_status.get("hard_blockers") or [])
+    )
+    hard_blockers.extend(
+        str(item)
+        for item in list(config_proposal_status.get("hard_blockers") or [])
+    )
+    hard_blockers.extend(
+        str(item)
+        for item in list(config_dry_run_status.get("hard_blockers") or [])
+    )
+    hard_blockers.extend(
+        str(item)
+        for item in list(runtime_guard_status.get("hard_blockers") or [])
+    )
     replay_state = str(replay_review.get("recommended_state") or "")
     watch_state = str(watch_review.get("recommended_state") or "")
     expansion_state = str((expansion_review or {}).get("recommended_state") or "")
@@ -254,9 +510,43 @@ def _decision(
         hard_blockers.append("expansion_shadow_sample_ready_requires_manual_review")
     if hard_blockers:
         return "GOVERNANCE_HOLD", hard_blockers
+    if runtime_active_supported:
+        return "RUNTIME_ACTIVE_OBSERVE", ["runtime_active_with_passing_governance_surfaces"]
     if watch_state == "PAPER_SAMPLE_REVIEW_READY":
         return "PAPER_SAMPLE_REVIEW_READY_NO_LIVE", ["paper_sample_gate_met_but_live_still_disabled"]
     return "CONTINUE_PAPER_WATCH_AND_REPLAY", ["watch_sample_not_ready_live_disabled"]
+
+
+def _runtime_active_supported(
+    *,
+    safety_assessment: dict[str, Any],
+    portfolio_mix_status: dict[str, Any],
+    config_proposal_status: dict[str, Any],
+    config_dry_run_status: dict[str, Any],
+    runtime_guard_status: dict[str, Any],
+) -> bool:
+    return (
+        _safe_bool(safety_assessment.get("new_entry_allowed"))
+        and not str(safety_assessment.get("blocking_reason_code") or "").strip()
+        and bool(portfolio_mix_status.get("available"))
+        and bool(config_proposal_status.get("available"))
+        and bool(config_dry_run_status.get("available"))
+        and bool(runtime_guard_status.get("available"))
+        and not list(portfolio_mix_status.get("hard_blockers") or [])
+        and not list(config_proposal_status.get("hard_blockers") or [])
+        and not list(config_dry_run_status.get("hard_blockers") or [])
+        and not list(runtime_guard_status.get("hard_blockers") or [])
+    )
+
+
+def _operator_action(state: str) -> str:
+    if state == "RUNTIME_ACTIVE_OBSERVE":
+        return "Runtime is active and supporting governance surfaces pass; observe live flow and protection state."
+    if state == "CONTINUE_PAPER_WATCH_AND_REPLAY":
+        return "Keep live entries disabled; continue paper watch and replay review."
+    if state == "PAPER_SAMPLE_REVIEW_READY_NO_LIVE":
+        return "Paper sample gate is ready, but live entries remain disabled until manual promotion review."
+    return "Hold and inspect blockers before any further promotion."
 
 
 def build_payload(
@@ -267,6 +557,10 @@ def build_payload(
     expansion_shadow_review_path: Path | None = None,
     exit_policy_upgrade_review_path: Path | None = None,
     filter_upgrade_review_path: Path | None = None,
+    portfolio_mix_review_path: Path | None = None,
+    config_proposal_path: Path | None = None,
+    runtime_guard_path: Path | None = None,
+    config_dry_run_path: Path | None = None,
     *,
     safety_payload: dict[str, Any] | None = None,
     safety_error: str | None = None,
@@ -304,8 +598,56 @@ def build_payload(
             filter_upgrade_review = _load_json(filter_upgrade_review_path)
         except (OSError, json.JSONDecodeError) as exc:
             filter_upgrade_error = str(exc)
+    portfolio_mix_review: dict[str, Any] | None = None
+    portfolio_mix_error: str | None = None
+    if portfolio_mix_review_path is not None:
+        try:
+            portfolio_mix_review = _load_json(portfolio_mix_review_path)
+        except (OSError, json.JSONDecodeError) as exc:
+            portfolio_mix_error = str(exc)
+    config_proposal_review: dict[str, Any] | None = None
+    config_proposal_error: str | None = None
+    if config_proposal_path is not None:
+        try:
+            config_proposal_review = _load_json(config_proposal_path)
+        except (OSError, json.JSONDecodeError) as exc:
+            config_proposal_error = str(exc)
+    config_dry_run_review: dict[str, Any] | None = None
+    config_dry_run_error: str | None = None
+    if config_dry_run_path is not None:
+        try:
+            config_dry_run_review = _load_json(config_dry_run_path)
+        except (OSError, json.JSONDecodeError) as exc:
+            config_dry_run_error = str(exc)
+    runtime_guard_review: dict[str, Any] | None = None
+    runtime_guard_error: str | None = None
+    if runtime_guard_path is not None:
+        try:
+            runtime_guard_review = _load_json(runtime_guard_path)
+        except (OSError, json.JSONDecodeError) as exc:
+            runtime_guard_error = str(exc)
     contract_status = _contract_assessment(contract)
     safety_status = _safety_assessment(safety_payload, error=safety_error)
+    portfolio_mix_status = _portfolio_mix_assessment(
+        portfolio_mix_review,
+        error=portfolio_mix_error,
+        required=portfolio_mix_review_path is not None,
+    )
+    config_proposal_status = _config_proposal_assessment(
+        config_proposal_review,
+        error=config_proposal_error,
+        required=config_proposal_path is not None,
+    )
+    config_dry_run_status = _config_dry_run_assessment(
+        config_dry_run_review,
+        error=config_dry_run_error,
+        required=config_dry_run_path is not None,
+    )
+    runtime_guard_status = _runtime_guard_assessment(
+        runtime_guard_review,
+        error=runtime_guard_error,
+        required=runtime_guard_path is not None,
+    )
     state, reasons = _decision(
         contract_assessment=contract_status,
         watch_review=watch_review,
@@ -314,8 +656,30 @@ def build_payload(
         expansion_shadow_review=expansion_shadow_review,
         exit_policy_upgrade_review=exit_policy_upgrade_review,
         filter_upgrade_review=filter_upgrade_review,
+        portfolio_mix_review=portfolio_mix_review,
+        config_proposal_review=config_proposal_review,
+        config_dry_run_review=config_dry_run_review,
+        runtime_guard_review=runtime_guard_review,
+        portfolio_mix_required=portfolio_mix_review_path is not None,
+        config_proposal_required=config_proposal_path is not None,
+        config_dry_run_required=config_dry_run_path is not None,
+        runtime_guard_required=runtime_guard_path is not None,
         safety_assessment=safety_status,
     )
+    runtime_active_supported = _runtime_active_supported(
+        safety_assessment=safety_status,
+        portfolio_mix_status=portfolio_mix_status,
+        config_proposal_status=config_proposal_status,
+        config_dry_run_status=config_dry_run_status,
+        runtime_guard_status=runtime_guard_status,
+    )
+    runtime_entries_allowed = state == "RUNTIME_ACTIVE_OBSERVE" and runtime_active_supported
+    safety_status = dict(safety_status)
+    safety_status["runtime_active_expected"] = runtime_entries_allowed
+    if runtime_entries_allowed:
+        safety_status["hard_blockers"] = [
+            item for item in list(safety_status.get("hard_blockers") or []) if item != "new_entries_unexpectedly_allowed"
+        ]
     return {
         "schema_version": "micro_intrabar_candidate_governance_v1",
         "generated_at": generated_at.isoformat(),
@@ -355,10 +719,36 @@ def build_payload(
             if filter_upgrade_review_path is not None
             else None
         ),
+        "portfolio_mix_review_path": (
+            str(
+                portfolio_mix_review_path.relative_to(ROOT_DIR)
+                if portfolio_mix_review_path.is_relative_to(ROOT_DIR)
+                else portfolio_mix_review_path
+            )
+            if portfolio_mix_review_path is not None
+            else None
+        ),
+        "config_proposal_path": (
+            str(config_proposal_path.relative_to(ROOT_DIR) if config_proposal_path.is_relative_to(ROOT_DIR) else config_proposal_path)
+            if config_proposal_path is not None
+            else None
+        ),
+        "config_dry_run_path": (
+            str(config_dry_run_path.relative_to(ROOT_DIR) if config_dry_run_path.is_relative_to(ROOT_DIR) else config_dry_run_path)
+            if config_dry_run_path is not None
+            else None
+        ),
+        "runtime_guard_path": (
+            str(runtime_guard_path.relative_to(ROOT_DIR) if runtime_guard_path.is_relative_to(ROOT_DIR) else runtime_guard_path)
+            if runtime_guard_path is not None
+            else None
+        ),
         "recommended_state": state,
         "reasons": reasons,
-        "live_action": "KEEP_CLOSE_ONLY",
-        "live_ready": False,
+        "live_action": "OBSERVE_ACTIVE_RUNTIME" if runtime_entries_allowed else "KEEP_CLOSE_ONLY",
+        "live_ready": runtime_entries_allowed,
+        "runtime_entries_allowed": runtime_entries_allowed,
+        "governance_order_submission_allowed": False,
         "contract_assessment": contract_status,
         "watch_assessment": {
             "recommended_state": watch_review.get("recommended_state"),
@@ -418,14 +808,15 @@ def build_payload(
             "candidate": (filter_upgrade_review or {}).get("candidate") or {},
             "baseline": (filter_upgrade_review or {}).get("baseline") or {},
         },
+        "portfolio_mix_assessment": portfolio_mix_status,
+        "config_proposal_assessment": config_proposal_status,
+        "config_dry_run_assessment": config_dry_run_status,
+        "runtime_guard_assessment": runtime_guard_status,
         "safety_assessment": safety_status,
         "operator_summary": {
-            "action": (
-                "Keep live entries disabled; continue paper watch and replay review."
-                if state == "CONTINUE_PAPER_WATCH_AND_REPLAY"
-                else "Hold and inspect blockers before any further promotion."
-            ),
-            "order_submission_allowed": False,
+            "action": _operator_action(state),
+            "order_submission_allowed": runtime_entries_allowed,
+            "governance_order_submission_allowed": False,
         },
     }
 
@@ -437,6 +828,11 @@ def _render_markdown(payload: dict[str, Any]) -> str:
     expansion_shadow = dict(payload.get("expansion_shadow_watch_assessment") or {})
     exit_upgrade = dict(payload.get("exit_policy_upgrade_assessment") or {})
     filter_upgrade = dict(payload.get("filter_upgrade_assessment") or {})
+    portfolio_mix = dict(payload.get("portfolio_mix_assessment") or {})
+    portfolio_summary = dict(portfolio_mix.get("summary") or {})
+    config_proposal = dict(payload.get("config_proposal_assessment") or {})
+    config_dry_run = dict(payload.get("config_dry_run_assessment") or {})
+    runtime_guard = dict(payload.get("runtime_guard_assessment") or {})
     safety = dict(payload.get("safety_assessment") or {})
     unique = dict(watch.get("unique_candidate_summary") or {})
     base_signal_rejections = dict(watch.get("base_signal_rejection_summary") or {})
@@ -450,6 +846,8 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         f"- recommended_state: {payload.get('recommended_state')}",
         f"- reasons: {payload.get('reasons')}",
         f"- live_action: {payload.get('live_action')}",
+        f"- runtime_entries_allowed: {payload.get('runtime_entries_allowed')}",
+        f"- governance_order_submission_allowed: {payload.get('governance_order_submission_allowed')}",
         f"- order_submission_allowed: {dict(payload.get('operator_summary') or {}).get('order_submission_allowed')}",
         f"- unique_candidate_signals: {unique.get('count')}",
         f"- rejected_base_signals: {base_signal_rejections.get('rejected_count')}",
@@ -459,6 +857,21 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         f"- exit_policy_candidate: {exit_upgrade.get('candidate_exit_policy')}",
         f"- filter_upgrade_state: {filter_upgrade.get('recommended_state')}",
         f"- filter_candidate: {filter_upgrade.get('candidate_filter_policy')}",
+        f"- portfolio_mix_state: {portfolio_mix.get('recommended_state')}",
+        f"- portfolio_mix_symbols: {portfolio_mix.get('combined_symbol_count')}",
+        (
+            "- portfolio_mix_summary: "
+            f"trades={portfolio_summary.get('closed')} total_r={portfolio_summary.get('total_r')} "
+            f"ev={portfolio_summary.get('ev_r')} max_dd={portfolio_summary.get('max_dd_r')}"
+        ),
+        f"- portfolio_mix_order_submission_allowed: {portfolio_mix.get('order_submission_allowed')}",
+        f"- config_proposal_state: {config_proposal.get('recommended_state')}",
+        f"- config_proposal_runtime_gaps: {config_proposal.get('runtime_support_gaps')}",
+        f"- config_dry_run_state: {config_dry_run.get('recommended_state')}",
+        f"- config_dry_run_blocking_failures: {config_dry_run.get('blocking_failure_count')}",
+        f"- config_dry_run_warning_failures: {config_dry_run.get('warning_failure_count')}",
+        f"- runtime_guard_status: {runtime_guard.get('overall_status')}",
+        f"- runtime_guard_blocking_failures: {runtime_guard.get('blocking_failure_count')}",
         f"- expansion_state: {expansion.get('recommended_state')}",
         f"- expansion_shadow_watchlist: {','.join(list(expansion.get('shadow_watchlist_symbols') or []))}",
         f"- expansion_shadow_review_state: {expansion_shadow.get('recommended_state')}",
@@ -488,6 +901,10 @@ def main() -> int:
         _resolve_path(args.expansion_shadow_review_path) if str(args.expansion_shadow_review_path or "").strip() else None,
         _resolve_path(args.exit_policy_upgrade_review_path) if str(args.exit_policy_upgrade_review_path or "").strip() else None,
         _resolve_path(args.filter_upgrade_review_path) if str(args.filter_upgrade_review_path or "").strip() else None,
+        _resolve_path(args.portfolio_mix_review_path) if str(args.portfolio_mix_review_path or "").strip() else None,
+        _resolve_path(args.config_proposal_path) if str(args.config_proposal_path or "").strip() else None,
+        _resolve_path(args.runtime_guard_path) if str(args.runtime_guard_path or "").strip() else None,
+        config_dry_run_path=_resolve_path(args.config_dry_run_path) if str(args.config_dry_run_path or "").strip() else None,
         safety_payload=safety_payload,
         safety_error=safety_error,
         generated_at=generated_at,

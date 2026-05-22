@@ -18,6 +18,7 @@ if str(ROOT_DIR) not in sys.path:
 from scripts import run_runtime_signoff_review
 from scripts.operation_report_io import atomic_write_text
 from app.core import operator_surface_contracts as osc
+from app.services.market_data import configured_usdt_universe_name
 
 DEFAULT_STAGE_FILE = ROOT_DIR / "reports/operations/stage_monitor/current_stage.json"
 _REQUEST_RETRY_ATTEMPTS = 5
@@ -37,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--symbol", default="BTCUSDT")
-    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
+    parser.add_argument("--universe", default=configured_usdt_universe_name())
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument(
@@ -194,6 +195,19 @@ def _active_close_only(dashboard: dict[str, Any]) -> bool:
     if not isinstance(locks, list):
         return False
     return any(str(item.get("reason_code") or "") == "close_only_active" for item in locks if isinstance(item, dict))
+
+
+def _config_close_only_active(dashboard: dict[str, Any]) -> bool:
+    safety_state = dashboard.get("safety_state")
+    safety = safety_state if isinstance(safety_state, dict) else {}
+    return _safe_bool(
+        dashboard.get("config_close_only_active", safety.get("config_close_only_active")),
+        default=False,
+    )
+
+
+def _effective_close_only(dashboard: dict[str, Any]) -> bool:
+    return _active_close_only(dashboard) or _config_close_only_active(dashboard)
 
 
 def _safe_bool(value: Any, default: bool = False) -> bool:
@@ -1452,11 +1466,34 @@ def _runtime_reopen_status_line(item: dict[str, Any] | None) -> str:
     )
 
 
+def _normalize_symbol_edge_advisories(items: list[dict[str, Any]], *, symbol: str) -> list[dict[str, Any]]:
+    symbol_label = str(symbol or "BTCUSDT").strip().upper() or "BTCUSDT"
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        row = dict(item or {})
+        if str(row.get("code") or "") == "symbol_edge_thin":
+            current_value = str(row.get("current_value") or "")
+            sample = current_value.split("=", 1)[1] if "=" in current_value else ""
+            if not sample:
+                summary = str(row.get("summary") or "")
+                sample = summary.rsplit(" at ", 1)[1] if " at " in summary else ""
+            row["summary"] = (
+                f"{symbol_label} symbol proof is still thin at {sample}"
+                if sample
+                else f"{symbol_label} symbol proof is still thin"
+            )
+            row["current_value"] = f"{symbol_label.lower()}_symbol_sample={sample}" if sample else ""
+            row["clear_when"] = f"{symbol_label} symbol proof reaches its target or is explicitly treated as advisory-only"
+        normalized.append(row)
+    return normalized
+
+
 def _runtime_signoff_summary(
     *,
     validation_report: dict[str, Any] | None,
     checklist: dict[str, Any] | None,
     runtime_reopen_status: dict[str, Any] | None,
+    symbol: str = "BTCUSDT",
 ) -> dict[str, Any]:
     runtime = dict(runtime_reopen_status or {})
     validation = dict(validation_report or {})
@@ -1555,12 +1592,13 @@ def _runtime_signoff_summary(
     closed_trade_count = int(edge_review.get("closed_trade_count") or edge_kpis.get("closed_trade_count") or 0)
     goal_closed_trades = int(edge_review.get("edge_proof_goal_closed_trades") or 0)
     if goal_closed_trades > 0 and closed_trade_count < goal_closed_trades:
+        symbol_label = str(symbol or "BTCUSDT").strip().upper() or "BTCUSDT"
         _append_unique(
             advisory_reviews,
             "symbol_edge_thin",
-            f"BTCUSDC symbol proof is still thin at {closed_trade_count}/{goal_closed_trades}",
-            current_value=f"btc_symbol_sample={closed_trade_count}/{goal_closed_trades}",
-            clear_when="BTCUSDC symbol proof reaches its target or is explicitly treated as advisory-only",
+            f"{symbol_label} symbol proof is still thin at {closed_trade_count}/{goal_closed_trades}",
+            current_value=f"{symbol_label.lower()}_symbol_sample={closed_trade_count}/{goal_closed_trades}",
+            clear_when=f"{symbol_label} symbol proof reaches its target or is explicitly treated as advisory-only",
         )
 
     runtime_ready = run_runtime_signoff_review._runtime_signoff_eligible_status(runtime.get("status"))
@@ -2587,7 +2625,7 @@ def _stage_from_payload(
     )
     eligible_closed_trades = int(sample_counts.get("eligible_closed_trades") or 0)
     trial_runs_written = int(sample_counts.get("trial_runs_written") or 0)
-    close_only_active = _active_close_only(dashboard)
+    close_only_active = _effective_close_only(dashboard)
 
     if (
         not _safe_bool(dashboard.get("new_entries_allowed"), default=True)
@@ -2613,7 +2651,7 @@ def _stage_message_fields(
 ) -> dict[str, str]:
     deployment = validation_report.get("deployment_approval_summary") or {}
     playbook_go_no_go = str(deployment.get("playbook_go_no_go") or "").upper()
-    close_only_active = _active_close_only(dashboard)
+    close_only_active = _effective_close_only(dashboard)
     execution_status = str(
         ((validation_report.get("execution_degradation_advisory_summary") or {}).get("status") or "")
     ).lower()
@@ -2737,13 +2775,14 @@ def _build_stage_payload(
     dashboard: dict[str, Any],
     *,
     symbol: str = "BTCUSDT",
-    universe: str = "usdt_reliable_balanced_31",
+    universe: str = "",
     days: int = 30,
     lineage_sample_scope: str = "symbol_edge_proof",
     lineage_families: str = "sweep_reversal",
     lineage_proof_goal_closed_trades: int = 100,
     lineage_sample_days: int = 180,
 ) -> dict[str, Any]:
+    universe = str(universe or configured_usdt_universe_name())
     deployment = validation_report.get("deployment_approval_summary") or {}
     trial_writer_summary = validation_report.get("strategy_v2_pbo_dsr_trial_writer_summary") or {}
     sample_counts = trial_writer_summary.get("sample_counts") or {}
@@ -2794,8 +2833,13 @@ def _build_stage_payload(
     stage = _stage_from_payload(validation_report, checklist, dashboard)
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "symbol": symbol,
+        "universe": universe,
+        "days": days,
         "stage": stage,
-        "close_only_active": _active_close_only(dashboard),
+        "close_only_active": _effective_close_only(dashboard),
+        "runtime_close_only_active": _active_close_only(dashboard),
+        "config_close_only_active": _config_close_only_active(dashboard),
         "playbook_go_no_go": deployment.get("playbook_go_no_go"),
         "deployment_go_no_go": deployment.get("deployment_go_no_go"),
         "checklist_status": checklist.get("overall_status"),
@@ -2879,6 +2923,7 @@ def _build_stage_payload(
         validation_report=validation_report,
         checklist=checklist,
         runtime_reopen_status=payload.get("runtime_reopen_status"),
+        symbol=symbol,
     )
     payload["runtime_live_cluster_guard_summary"] = _runtime_live_cluster_guard_summary(dashboard)
     payload["runtime_reopen_gate_summary"] = dict(
@@ -3031,7 +3076,12 @@ def _project_runtime_signoff_fields(payload: dict[str, Any]) -> dict[str, Any]:
     trend_proof_post_patch = dict(focus.get("trend_proof_post_patch_sample_summary") or {})
     historical_walk_forward_trend = dict(focus.get("historical_walk_forward_trend_proof_summary") or {})
     required_reviews = [dict(item) for item in list(signoff.get("required_reviews") or [])]
-    advisory_reviews = [dict(item) for item in list(signoff.get("advisory_reviews") or [])]
+    advisory_reviews = _normalize_symbol_edge_advisories(
+        [dict(item) for item in list(signoff.get("advisory_reviews") or [])],
+        symbol=str(current.get("symbol") or "BTCUSDT"),
+    )
+    signoff["advisory_reviews"] = advisory_reviews
+    current["runtime_signoff_summary"] = signoff
 
     if focus:
         current["approval_template_focus"] = focus

@@ -28,6 +28,7 @@ from app.services.live_route_contract import (
     attach_live_route_status,
     live_route_contract_from_settings,
 )
+from app.services.market_data import configured_usdt_universe_name
 from app.services.notification_dispatcher import NotificationDispatcher
 from scripts.operation_report_io import atomic_write_text
 
@@ -99,7 +100,7 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
+    parser.add_argument("--universe", default="")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--symbol", default="")
     parser.add_argument("--max-per-status", type=int, default=3)
@@ -1108,6 +1109,8 @@ def _result_count_fields(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> int:
     args = parse_args()
+    if not str(getattr(args, "universe", "") or "").strip():
+        args.universe = configured_usdt_universe_name(get_settings())
     now = datetime.now(UTC)
     quiet = bool(getattr(args, "quiet", False))
     state_file = _resolve_root_path(args.state_file).resolve()

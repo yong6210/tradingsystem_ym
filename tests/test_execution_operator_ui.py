@@ -43,9 +43,9 @@ def test_execution_operator_ui_includes_shadow_experiment_panel() -> None:
     assert "Experiment Routing" in html
     assert "kernel verdict가 monitor라서 expanded operating context를 기본 펼침 상태로 둡니다." in html
     assert "kernel verdict가 hold/manual_review/watch라서 expanded operating context는 approve/align/act 확인 전까지 기본 접힘 상태로 둡니다." in html
-    assert "A/B Strategy Posture" in html
-    assert "A remains anchor인지, B continuation이 research-only인지 guarded activation인지, 현재 mix가 여전히 A 집중인지까지 한 번에 읽습니다." in html
-    assert "현재 A/B mix" in html
+    assert "Strategy Posture" in html
+    assert "현재 라이브 계약이 SIR인지, 레거시 A/B 비교가 적용되는지, 후보군 균형과 보호 상태를 같이 읽습니다." in html
+    assert "현재 strategy mix" in html
     assert "Promotion Operating Stack" in html
     assert "승격 review, remediation, clearance, reopen, semi-auto execution, history, research followthrough를 한 번에 읽습니다." in html
     assert "Live Candidate Review" in html

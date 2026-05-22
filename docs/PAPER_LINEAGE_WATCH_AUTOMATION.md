@@ -5,9 +5,9 @@ It wraps `watch_paper_candidate_drill.py` in a single-tick process so `NO_ELIGIB
 The same tick now also runs `run_paper_exit_monitor.py`, so previously entered `PAPER` positions can emit `PARTIAL_EXIT` / `CLOSED` fills when TP, SL, or expiry conditions are reached.
 
 Current defaults:
-- family scope: `sweep_reversal`, `trend_continuation`
+- family scope: legacy paper lineage only, currently `sweep_reversal`, `trend_continuation`
 - symbol pin: none
-- universe: `usdc_perp_top30`
+- universe: legacy paper lineage universe, not the current MICRO_LIVE USDT 11 route
 - cadence: every 15 minutes
 - behavior: if an eligible candidate appears, submit it via `PAPER`
 - close handling: after each watch tick, evaluate open `PAPER` lineage positions for TP/SL/expiry exits

@@ -1,10 +1,14 @@
-# Trading Engine v1 자동매매 전환 상세 체크리스트 (Living)
+# Trading Engine v1 자동매매 전환 상세 체크리스트 (Historical Backlog)
 
-최종 갱신: 2026-05-10
-현재 기준선: 2026-05-10 MICRO_LIVE runtime guard and lifecycle observability sync
+최종 갱신: 2026-05-19
+현재 기준선: historical transition backlog, not the current live operating contract
+
+> 현재 live 운영 기준은 이 문서가 아니라 [MICRO_LIVE_CURRENT_STATE.md](/Users/yumin/Documents/trading/docs/MICRO_LIVE_CURRENT_STATE.md)와 [AUTO_TRADING_OPERATING_RUNBOOK.md](/Users/yumin/Documents/trading/docs/AUTO_TRADING_OPERATING_RUNBOOK.md)를 따른다.
+> 이 문서 안의 `BTCUSDC`, `usdc_perp_top30`, `sweep_reversal + LIMIT` 예시는 과거 전환 단계의 기록이다.
+> 현재 live 계약은 `USDT 11심볼 + session_impulse_retest + CONFIRM + structure-buffered exits`이다.
 
 ## 운영 규칙
-- 이 문서는 자동매매 전환과 Pine-Server contract 정렬의 active backlog source-of-truth다.
+- 이 문서는 자동매매 전환과 Pine-Server contract 정렬의 historical backlog다. 현재 주문 운영 source-of-truth로 쓰지 않는다.
 - 앞으로 신규 항목은 한 줄 체크박스가 아니라 아래 4가지를 반드시 포함한다: `목적`, `구현 방식`, `완료 기준`, `검증`.
 - 기존 `docs/CHECKLIST.md`는 상위 진행 현황과 기준선만 유지하고, 실제 실행 순서는 이 문서를 따른다.
 - 이번 체크리스트의 기본 원칙은 `기존 전략 판단 계약을 깨지 않고`, `실주문 가능 schema/approval/intent/reconciliation/safety`를 순차적으로 붙이는 것이다.

@@ -176,6 +176,26 @@ sync_micro_main_backtest_reports() {
   done
 }
 
+sync_micro_intrabar_candidate_reports() {
+  local report_dir path dst src_dir dst_dir
+
+  for report_dir in \
+    micro_intrabar_long_short_portfolio_mix_review \
+    micro_intrabar_portfolio_mix_live_config_proposal \
+    micro_intrabar_portfolio_mix_config_dry_run; do
+    src_dir="$WORKSPACE_ROOT/reports/operations/$report_dir"
+    dst_dir="$REPORTS_DIR/operations/$report_dir"
+    [[ -d "$src_dir" ]] || continue
+    mkdir -p "$dst_dir"
+    while IFS= read -r path; do
+      dst="$dst_dir/$(basename "$path")"
+      if [[ ! -f "$dst" ]] || ! cmp -s "$path" "$dst"; then
+        cp -p "$path" "$dst"
+      fi
+    done < <(find "$src_dir" -maxdepth 1 -type f \( -name '*.json' -o -name '*.md' \) 2>/dev/null | sort)
+  done
+}
+
 post_restart_refresh_reports() {
   truthy_value "$POST_RESTART_REFRESH_REPORTS" || return 0
 
@@ -214,6 +234,9 @@ post_restart_refresh_reports() {
     run_report_refresh live_candidate_promotion_readiness \
       "$PYTHON_BIN" "$TMP_ROOT/scripts/run_live_candidate_promotion_readiness.py" \
       --hours 24 --limit 12 --since-ws-start --heartbeat-dir "$HEARTBEAT_DIR" --quiet
+    run_report_refresh validation_report_refresh \
+      "$PYTHON_BIN" "$TMP_ROOT/scripts/run_validation_report_refresh.py" \
+      --no-fail-exit --quiet
     run_report_refresh live_replay_parity \
       "$PYTHON_BIN" "$TMP_ROOT/scripts/run_live_replay_parity_audit.py" \
       --all-live-symbols --days 3 --since-ws-start --heartbeat-dir "$HEARTBEAT_DIR" --no-fail-exit --quiet
@@ -298,6 +321,7 @@ if [[ "$needs_refresh" -eq 1 ]]; then
   refresh_tmp_source
 fi
 sync_micro_main_backtest_reports
+sync_micro_intrabar_candidate_reports
 
 if [[ ! -f "$TMP_ROOT/scripts/run_worker.py" || ! -f "$TMP_ROOT/scripts/spawn_detached_process.py" ]]; then
   echo "runtime source is incomplete: $TMP_ROOT" >&2

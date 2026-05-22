@@ -21,6 +21,10 @@ from urllib.request import Request, urlopen
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+from app.services.market_data import configured_usdt_universe_name
+from scripts.operation_report_io import atomic_write_text
+
 _REQUEST_RETRY_ATTEMPTS = 5
 _REQUEST_RETRY_BASE_DELAY_SECONDS = 1.0
 _REQUEST_TIMEOUT_SECONDS = 90
@@ -39,8 +43,6 @@ _ENTRY_VARIANT_PREFERENCE = {
     "confirm": 2,
     "unknown": 3,
 }
-
-from scripts.operation_report_io import atomic_write_text
 
 
 def _database_url() -> str:
@@ -102,7 +104,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--symbol", default=None, help="Optional symbol pin. If omitted, pick the best eligible candidate.")
-    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
+    parser.add_argument("--universe", default=configured_usdt_universe_name())
     parser.add_argument("--families", default="trend_continuation,sweep_reversal")
     parser.add_argument("--candidate-limit", type=int, default=100)
     parser.add_argument("--include-manual-review", action="store_true")

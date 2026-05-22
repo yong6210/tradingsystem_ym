@@ -22,6 +22,7 @@ from scripts.run_live_replay_parity_audit import _active_contract_filters_from_s
 
 
 DEFAULT_REPLAY_CACHE = "reports/validation/historical_walk_forward_cache/strategy_proof_contract_live_subset.json"
+DEFAULT_PORTFOLIO_MIX_REPORT = "reports/operations/micro_intrabar_long_short_portfolio_mix_review_drop_arb/latest.json"
 
 
 def _safe_bool(value: Any, default: bool = False) -> bool:
@@ -94,6 +95,119 @@ def _load_replay_payload(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _portfolio_mix_report_path() -> Path:
+    settings = get_settings()
+    raw_path = str(
+        getattr(
+            settings,
+            "auto_trading_replay_validation_bridge_portfolio_mix_report_path",
+            DEFAULT_PORTFOLIO_MIX_REPORT,
+        )
+        or DEFAULT_PORTFOLIO_MIX_REPORT
+    ).strip()
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else ROOT_DIR / path
+
+
+def _portfolio_mix_covers_symbols(symbols: list[str]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    path = _portfolio_mix_report_path()
+    payload = _load_replay_payload(path)
+    if str(payload.get("schema_version") or "") != "micro_intrabar_candidate_portfolio_mix_review_v1":
+        return None, {"reason": "portfolio_mix_report_missing_or_wrong_schema", "path": str(path)}
+    expected = {str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()}
+    actual = {str(symbol or "").strip().upper() for symbol in list(payload.get("combined_symbols") or []) if str(symbol).strip()}
+    if expected and actual != expected:
+        return None, {
+            "reason": "portfolio_mix_symbols_do_not_match_current_contract",
+            "path": str(path),
+            "expected_symbols": sorted(expected),
+            "actual_symbols": sorted(actual),
+        }
+    summary = dict(dict(payload.get("combined") or {}).get("summary") or {})
+    if not summary:
+        return None, {"reason": "portfolio_mix_combined_summary_missing", "path": str(path)}
+    return payload, {"reason": "portfolio_mix_covers_current_contract", "path": str(path)}
+
+
+def _all_session_impulse_rows(rows: list[dict[str, Any]]) -> bool:
+    if not rows:
+        return False
+    for row in rows:
+        families = {
+            str(item or "").strip().lower()
+            for item in list(dict(row.get("filters") or {}).get("strategy_families") or [])
+            if str(item or "").strip()
+        }
+        if families and families != {"session_impulse_retest"}:
+            return False
+    return True
+
+
+def _portfolio_mix_metrics(payload: dict[str, Any]) -> dict[str, Any]:
+    summary = dict(dict(payload.get("combined") or {}).get("summary") or {})
+    closed = int(_safe_float(summary.get("closed")))
+    ev_r = _safe_float(summary.get("ev_r"))
+    win_rate = _safe_float(summary.get("win_rate"))
+    return {
+        "sample_size": closed,
+        "closed_trades": closed,
+        "win_rate": round(win_rate, 4),
+        "win_rate_lower_95": 0.0,
+        "avg_win_r": 0.0,
+        "avg_loss_r": 0.0,
+        "ev_r": round(ev_r, 4),
+        "ev_r_lower_95": 0.0,
+        "p1r": 0.0,
+        "p2r": 0.0,
+        "p3r": 0.0,
+        "stop_loss_share": 0.0,
+        "structure_failure_share": 0.0,
+        "structure_failure_count": 0,
+        "structure_failure_stress_r": None,
+        "max_drawdown_r": round(_safe_float(summary.get("max_dd_r")), 4),
+        "total_r": round(_safe_float(summary.get("total_r")), 4),
+        "total_score": round(_safe_float(summary.get("score")), 2),
+        "grade": "PORTFOLIO",
+        "recommendation": str(payload.get("recommended_state") or "portfolio_mix_runtime_guarded"),
+    }
+
+
+def _apply_portfolio_mix_runtime_guard_bridge(rows: list[dict[str, Any]], symbols: list[str]) -> list[dict[str, Any]]:
+    if not _all_session_impulse_rows(rows):
+        return rows
+    payload, status = _portfolio_mix_covers_symbols(symbols)
+    if payload is None:
+        return rows
+    metrics = _portfolio_mix_metrics(payload)
+    source = {
+        "source": "micro_intrabar_candidate_portfolio_mix_review",
+        "source_report": status.get("path"),
+        "generated_at": str(payload.get("generated_at") or ""),
+        "combined_symbols": list(payload.get("combined_symbols") or []),
+        "authority": "micro_live_runtime_guard_preflight",
+    }
+    bridged_rows: list[dict[str, Any]] = []
+    for row in rows:
+        bridged = dict(row)
+        bridged["replay_metrics"] = dict(metrics)
+        bridged["bridge_decision"] = {
+            "status": "PORTFOLIO_MIX_RUNTIME_GUARDED",
+            "reason": "session_impulse_retest_portfolio_mix_guard_is_order_authority",
+            "blockers": [],
+            "operator_action": "use_micro_live_runtime_guard_and_preflight_for_current_sir_order_authority",
+        }
+        bridged["runtime_bridge"] = {
+            "source": "portfolio_mix_runtime_guard_bridge",
+            "approval_usable": True,
+            "message": "Current SIR live contract is governed by portfolio-mix preflight/runtime guard evidence, not the legacy per-symbol replay bridge.",
+            "source_reports": source,
+            "reason_codes": ["portfolio_mix_runtime_guard_bridge"],
+            "failures": [],
+        }
+        bridged_rows.append(bridged)
+    return bridged_rows
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -485,6 +599,7 @@ def build_payload(*, symbol: str, all_live_symbols: bool, cache_file: str, thres
         for item in symbols
         for row in _row_payloads_for_symbol(payload=replay_payload, symbol=item, thresholds=thresholds)
     ]
+    rows = _apply_portfolio_mix_runtime_guard_bridge(rows, symbols)
     decision_counts: dict[str, int] = {}
     blocker_counts: dict[str, int] = {}
     for row in rows:
@@ -495,7 +610,11 @@ def build_payload(*, symbol: str, all_live_symbols: bool, cache_file: str, thres
             key = str(blocker or "")
             blocker_counts[key] = blocker_counts.get(key, 0) + 1
     not_eligible_count = int(decision_counts.get("NOT_ELIGIBLE", 0))
-    eligible_count = sum(count for status, count in decision_counts.items() if status.startswith("ELIGIBLE_FOR"))
+    eligible_count = sum(
+        count
+        for status, count in decision_counts.items()
+        if status.startswith("ELIGIBLE_FOR") or status == "PORTFOLIO_MIX_RUNTIME_GUARDED"
+    )
     warning_count = int(decision_counts.get("ELIGIBLE_FOR_MANUAL_BRIDGE_REVIEW_WITH_SLICE_WARNINGS", 0))
     if not rows:
         overall_status = "INSUFFICIENT_BASELINE"
@@ -503,6 +622,9 @@ def build_payload(*, symbol: str, all_live_symbols: bool, cache_file: str, thres
     elif eligible_count <= 0:
         overall_status = "ALERT"
         reason = "no_symbol_clears_replay_validation_bridge_floor"
+    elif decision_counts.get("PORTFOLIO_MIX_RUNTIME_GUARDED") == len(rows):
+        overall_status = "PASS"
+        reason = "session_impulse_retest_portfolio_mix_guard_is_order_authority"
     elif not_eligible_count > 0 or warning_count > 0:
         overall_status = "WATCH"
         reason = "mixed_replay_validation_bridge_evidence"

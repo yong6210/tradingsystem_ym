@@ -222,7 +222,7 @@ def test_alert_metrics_report_aggregates_leaf_channels_and_system_fanout() -> No
                 "hold_live_rollout_and_keep_prototype_path"
             )
             assert payload["latest_validation_alert"]["approval_topline_summary_line"].startswith(
-                "winner=runtime_proxy/"
+                "validation_lineage=runtime_proxy/"
             )
             assert payload["retry_queue"]["counts"]["queued"] == 1
             assert payload["retry_queue"]["counts"]["dead_letter"] == 1

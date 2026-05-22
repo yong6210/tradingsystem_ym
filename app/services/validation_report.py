@@ -10,6 +10,7 @@ from app.services.edge_experiment_review import (
     summarize_edge_experiment_review,
 )
 from app.services.edge_evolution_rule import build_edge_evolution_rule, summarize_edge_evolution_rule
+from app.services.market_data import configured_usdt_universe_name
 from app.services.outcome_attribution import build_outcome_attribution, summarize_outcome_attribution
 from app.services.outcome_control_trace import (
     build_outcome_control_trace,
@@ -207,7 +208,7 @@ class ValidationReportService:
                 "playbook_code": "go_approval_template_aligned",
                 "playbook_action": "proceed_with_configured_rollout",
                 "playbook_message": (
-                    "GO: approval template is aligned with replay-backed downside and the current threshold-lineage winner."
+                    "GO: approval template is aligned with the configured replay-backed validation evidence."
                 ),
             }
         if topline_status == "REVIEW":
@@ -289,11 +290,11 @@ class ValidationReportService:
             align_reason = " | ".join(
                 part
                 for part in [
-                    template.get("topline_summary_line"),
-                    template.get("template_reason"),
+                    f"template_status={template_status}",
+                    f"replay_alignment={replay_alignment_status}",
                 ]
                 if part
-            ) or "validation approval template is aligned"
+            ) or "validation approval template is aligned with configured evidence"
         else:
             align_value = "not_available"
             align_reason = " | ".join(
@@ -415,9 +416,9 @@ class ValidationReportService:
             stress_replay_recommendation.get("true_runner_promotion_action", "keep_current_path")
         )
         topline_summary_line = (
-            f"winner={threshold_lineage_winner_type}/{threshold_lineage_winner_source}; "
+            f"validation_lineage={threshold_lineage_winner_type}/{threshold_lineage_winner_source}; "
             f"worst={replay_derived_worst_scenario}/{replay_derived_worst_scenario_status}/{replay_derived_worst_scenario_source}; "
-            f"promotion={true_runner_promotion_action}"
+            f"recommended_action={true_runner_promotion_action}"
         )
         if replay_alignment_status == "WARN":
             topline_status = "REVIEW"
@@ -1447,7 +1448,7 @@ class ValidationReportService:
         operator_action_priority_payload = self._normalize_operator_action_priority_payload(
             operator_action_priority,
             symbol=symbol,
-            universe=str(getattr(self.settings, "universe_name", "usdt_reliable_balanced_31") or "usdt_reliable_balanced_31"),
+            universe=str(getattr(self.settings, "universe_name", "") or configured_usdt_universe_name(self.settings)),
             days=max(int(score_to_outcome_payload.get("report_window_days", 0) or 0), 1) if score_to_outcome_payload else 7,
         )
         operator_action_priority_lines: list[str] = []
@@ -2427,7 +2428,7 @@ class ValidationReportService:
         edge_experiment_summary = summarize_edge_experiment_review(edge_experiment_review)
         review_followup_ledger_summary = summarize_split_review_followup_ledger(
             symbol=symbol,
-            universe=str(getattr(self.settings, "universe_name", "usdt_reliable_balanced_31") or "usdt_reliable_balanced_31"),
+            universe=str(getattr(self.settings, "universe_name", "") or configured_usdt_universe_name(self.settings)),
         )
         edge_experiment_lines: list[str] = []
         if edge_experiment_summary:

@@ -260,11 +260,11 @@ def test_stage_payload_reports_blocked_state(monkeypatch):
     assert payload["entry_timing_review_target"]["symbol"] == "BTCUSDC"
     assert payload["entry_timing_review_target"]["action"] == "run_entry_timing_split_review"
     assert payload["entry_timing_review_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_entry_timing_split_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 30 --action run_entry_timing_split_review"
     )
     assert payload["execution_style_review_target"]["symbol"] == "BTCUSDC"
     assert payload["execution_style_review_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe usdt_reliable_balanced_31 --days 30 --action run_execution_style_split_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 30 --action run_execution_style_split_review"
     )
     assert payload["representative_candidates"]["accepted"]["symbol"] == "BTCUSDC"
     assert payload["representative_candidates"]["blocked"]["symbol"] == "ETHUSDC"
@@ -382,16 +382,16 @@ def test_stage_payload_predicts_post_unlock_stage_when_risk_gate_is_only_blocker
     assert payload["post_unlock_review_summary"]["expected_stage_after_unlock"] == "2_LINEAGE_READY"
     assert payload["post_unlock_review_summary"]["next_review_step"] == "wait_for_operating_lock_to_clear"
     assert payload["post_unlock_review_summary"]["bundle_review_command"].endswith(
-        "scripts/run_post_unlock_review.py --symbol BTCUSDT --universe usdt_reliable_balanced_31 --days 30"
+        "scripts/run_post_unlock_review.py --symbol BTCUSDT --universe micro_live_usdt_12 --days 30"
     )
     assert payload["post_unlock_bundle_result"]["status"] == "waiting_for_review_window"
     assert payload["runtime_reopen_status"]["status"] == "waiting_for_operating_lock"
     assert payload["runtime_reopen_status"]["ready"] is False
     assert payload["post_unlock_review_summary"]["primary_review_command"].endswith(
-        "scripts/run_micro_live_preflight.py --symbol BTCUSDT --universe usdt_reliable_balanced_31 --days 30"
+        "scripts/run_micro_live_preflight.py --symbol BTCUSDT --universe micro_live_usdt_12 --days 30"
     )
     assert payload["post_unlock_review_summary"]["secondary_review_command"].endswith(
-        "scripts/run_post_live_pruning_review.py --symbol BTCUSDT --universe usdt_reliable_balanced_31 --days 30"
+        "scripts/run_post_live_pruning_review.py --symbol BTCUSDT --universe micro_live_usdt_12 --days 30"
     )
 
 
@@ -1105,7 +1105,7 @@ def test_ops_stage_board_runtime_actionable_summary_marks_recent_contract_match_
                 "latest_reason_code": "paper lineage override bypassed thesis duplicate block for eligible A-grade PAPER sampling.",
                 "latest_entry_type": "confirm",
                 "latest_entry_model": "CONFIRM",
-                "latest_submit_ready_symbol": "ETHUSDT",
+                "latest_submit_ready_symbol": "BTCUSDT",
                 "latest_submit_ready_family": "session_impulse_retest",
                 "latest_submit_ready_direction": "LONG",
                 "latest_submit_ready_execution_mode": "PAPER",
@@ -1122,18 +1122,18 @@ def test_ops_stage_board_runtime_actionable_summary_marks_recent_contract_match_
     summary = payload["runtime_actionable_live_candidate_summary"]
     assert summary["status"] == "recent_paper_intent_requires_micro_live_promotion"
     assert summary["reason_code"] == "paper_intent_requires_micro_live_promotion"
-    assert summary["recent_intent_symbol"] == "ETHUSDT"
+    assert summary["recent_intent_symbol"] == "BTCUSDT"
     assert summary["recent_intent_family"] == "session_impulse_retest"
     assert summary["recent_intent_entry_type"] == "CONFIRM"
-    assert summary["recent_submit_ready_symbol"] == "ETHUSDT"
+    assert summary["recent_submit_ready_symbol"] == "BTCUSDT"
     assert summary["recent_submit_ready_family"] == "session_impulse_retest"
     assert summary["recent_submit_ready_direction"] == "LONG"
     assert summary["recent_submit_ready_created_at"] == "2026-04-15 14:48:09.972149"
     assert summary["recent_contract_match_count"] == 44
     assert summary["next_trigger"] == "operator_creates_micro_live_intent_for_allowed_candidate"
-    assert "latest surfaced intent ETHUSDT/session_impulse_retest/PAPER is approved but was created by the PAPER drill" in summary["summary"]
+    assert "latest surfaced intent BTCUSDT/session_impulse_retest/PAPER is approved but was created by the PAPER drill" in summary["summary"]
     assert "last submit_ready" in summary["summary"]
-    assert "ETHUSDT/session_impulse_retest/LONG at 2026-04-15 14:48:09.972149" in summary["summary"]
+    assert "BTCUSDT/session_impulse_retest/LONG at 2026-04-15 14:48:09.972149" in summary["summary"]
     assert "nearest surfaced candidate ARBUSDT/legacy_zone_plan remains blocked" in summary["summary"]
 
 
@@ -2172,6 +2172,7 @@ def test_collect_events_initial_snapshot_only_on_first_run():
 
 def test_render_message_uses_approval_surface_lines() -> None:
     current = {
+        "symbol": "BTCUSDC",
         "stage": "2_LINEAGE_READY",
         "lineage_gate_ready": True,
         "candidate_gate_ready": True,
@@ -2551,6 +2552,39 @@ def test_render_message_uses_approval_surface_lines() -> None:
     assert "준비 게이트: lineage=True, candidate=True, sample=False" in message
     assert "열린 샘플: 없음" in message
     assert "다음 액션: continue_candidate_review_under_portfolio_caps" in message
+
+
+def test_render_message_uses_current_symbol_for_edge_proof_line() -> None:
+    current = {
+        "symbol": "BTCUSDT",
+        "stage": "2_LINEAGE_READY",
+        "dashboard_approval_strip": {"approve_value": "approval usable"},
+        "validation_approval_strip": {"approve_value": "approval usable"},
+        "checklist_approval_strip": {"approve_value": "approval usable"},
+        "runtime_reopen_status": {"status": "waiting_for_review_window", "ready": False},
+        "runtime_signoff_summary": {
+            "operator_recommendation": "wait_until_runtime_ready",
+            "runtime_decision": {
+                "band": "GREY_WAIT",
+                "effective_action": "wait_until_runtime_ready",
+                "allowed_reopen_scope": "none",
+            },
+        },
+        "lineage_sample_summary": {
+            "closed_trade_count": 0,
+            "proof_goal_closed_trades": 100,
+        },
+        "edge_experiment_review": {
+            "edge_proof_goal_closed_trades": 100,
+            "daily_edge_kpis": {"closed_trade_count": 7},
+            "edge_proof_posture": {"state": "sample_building"},
+        },
+    }
+
+    message = notify_stage_change._render_message(current, [])
+
+    assert "BTCUSDT 운영검증: 7/100 / 상태=sample_building" in message
+    assert "BTCUSDC 운영검증" not in message
 
 
 def test_collect_events_reports_runtime_mitigation_actionable_with_command() -> None:

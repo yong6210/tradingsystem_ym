@@ -28,9 +28,9 @@ bash /Users/yumin/Documents/trading/scripts/run_operator_session_brief_tick.sh
 ## Environment Variables
 
 - `OPERATOR_BRIEF_SYMBOL`
-  - default: `BTCUSDC`
+  - default: `BTCUSDT`
 - `OPERATOR_BRIEF_UNIVERSE`
-  - default: `usdc_perp_top30`
+  - default: `micro_live_usdt_11`
 - `OPERATOR_BRIEF_DAYS`
   - default: `7`
 - `OPERATOR_BRIEF_PORTFOLIO_LIMIT`

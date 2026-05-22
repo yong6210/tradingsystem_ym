@@ -17,6 +17,7 @@ if str(ROOT_DIR) not in sys.path:
     # Keep the documented `python scripts/...` entrypoint working without extra PYTHONPATH setup.
     sys.path.insert(0, str(ROOT_DIR))
 
+from app.services.market_data import configured_usdt_universe_name
 from app.services.split_review_followup_ledger import (
     record_split_review_followup_ledger_entry,
     record_split_review_followup_ledger_transition,
@@ -93,7 +94,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--symbol", default="BTCUSDT")
-    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
+    parser.add_argument("--universe", default=configured_usdt_universe_name())
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument(
         "--action",

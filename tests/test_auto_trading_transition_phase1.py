@@ -641,16 +641,20 @@ def test_auto_trading_settings_defaults_and_preview_approval_api_paths() -> None
     assert settings.auto_trading_allowed_families == ""
     assert settings.auto_trading_micro_live_allowed_families == "session_impulse_retest"
     assert settings.auto_trading_micro_live_allowed_entry_models == "CONFIRM"
-    assert settings.auto_trading_micro_live_max_concurrent_positions == 3
+    assert settings.auto_trading_micro_live_max_concurrent_positions == 2
     assert settings.auto_trading_micro_live_max_daily_new_entries == 0
     assert settings.session_impulse_retest_enabled is True
     assert settings.session_impulse_retest_shadow_only is False
-    assert settings.session_impulse_retest_core_live_slots == 31
+    assert settings.session_impulse_retest_core_live_slots == 29
     assert settings.session_impulse_retest_partial_activation_ratio == 1.0
-    assert "DOGEUSDT" in settings.session_impulse_retest_allowed_symbols
-    assert "HBARUSDT" in settings.session_impulse_retest_allowed_symbols
+    assert settings.universe_name == "micro_live_usdt_11"
+    assert "BTCUSDT" in settings.session_impulse_retest_allowed_symbols
+    assert "LINKUSDT" in settings.session_impulse_retest_allowed_symbols
     assert "ZECUSDT" in settings.session_impulse_retest_allowed_symbols
-    assert "UNIUSDT" in settings.session_impulse_retest_allowed_symbols
+    assert "ARBUSDT" not in settings.session_impulse_retest_allowed_symbols
+    assert "DOGEUSDT" not in settings.session_impulse_retest_allowed_symbols
+    assert settings.session_impulse_retest_exit_policy_name.startswith("structure_buffered_swing6")
+    assert settings.session_impulse_retest_exit_stop_mode == "structure_floor"
 
     now = datetime.now(timezone.utc).replace(microsecond=0)
     test_symbol = f"REPOTEST{int(now.timestamp())}USDC"

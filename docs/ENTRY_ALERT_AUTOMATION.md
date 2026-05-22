@@ -73,7 +73,7 @@ bash /Users/yumin/Documents/trading/scripts/run_entry_surface_tick.sh
 - `ENTRY_SURFACE_BASE_URL`
   - default: `http://127.0.0.1:8000`
 - `ENTRY_SURFACE_UNIVERSE`
-  - default: `usdc_perp_top30`
+  - default: `micro_live_usdt_11`
 - `ENTRY_SURFACE_LIMIT`
   - default: `20`
 - `ENTRY_SURFACE_MAX_PER_STATUS`
@@ -85,7 +85,7 @@ bash /Users/yumin/Documents/trading/scripts/run_entry_surface_tick.sh
   - default: `discord`
   - allowed: `discord`, `system`
 - `ENTRY_SURFACE_SYMBOL`
-  - optional symbol pin, for example `BTCUSDC`
+  - optional symbol pin, for example `BTCUSDT`
 - `ENTRY_SURFACE_STATE_FILE`
   - optional override for the dedupe state file
 - `ENTRY_SURFACE_LOCK_FILE`
@@ -137,7 +137,7 @@ ENTRY_SURFACE_DRY_RUN=1 /bin/bash /Users/yumin/Documents/trading/scripts/run_ent
 Pin one symbol only:
 
 ```bash
-ENTRY_SURFACE_SYMBOL=BTCUSDC /bin/bash /Users/yumin/Documents/trading/scripts/run_entry_surface_tick.sh
+ENTRY_SURFACE_SYMBOL=BTCUSDT /bin/bash /Users/yumin/Documents/trading/scripts/run_entry_surface_tick.sh
 ```
 
 Force one send even if the state is unchanged:

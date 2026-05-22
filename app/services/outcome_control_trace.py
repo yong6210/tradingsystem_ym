@@ -98,6 +98,13 @@ def _safe_bool(value: Any, default: bool = False) -> bool:
     return bool(default)
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def _trace_summary(approval: dict[str, Any], sizing: dict[str, Any], portfolio: dict[str, Any]) -> str:
     approval_text = "approval unchanged"
     if str(approval.get("penalty_tier") or "") == "downgrade_to_manual":
@@ -135,6 +142,11 @@ def build_outcome_control_trace(
         return None
 
     degradation_status = str(execution_degradation.get("status") or "healthy").lower()
+    degradation_sample = dict(execution_degradation.get("sample_context") or {})
+    material_degradation_sample = any(
+        _safe_int(degradation_sample.get(key), default=0) > 0
+        for key in ("plans_matured", "fill_events_total", "closed_plans")
+    )
     decomposition = dict(score_to_outcome.get("decomposition") or {})
     historical = dict(score_to_outcome.get("historical_execution_outcomes") or {})
     adverse_mode_rows = _adverse_mode_rows(mode_payload)
@@ -172,7 +184,7 @@ def build_outcome_control_trace(
     else:
         approval_status = "watch"
         approval_tier = "reason_only"
-        if degradation_status == "manual_review" or (family_negative and adverse_mode_rows):
+        if (degradation_status == "manual_review" and material_degradation_sample) or (family_negative and adverse_mode_rows):
             approval_status = "manual_review"
             approval_tier = "downgrade_to_manual"
         approval_penalty = {

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pytest
+import httpx
 
-from app.integrations.binance_futures import BinanceFuturesClient
+from app.integrations.binance_futures import BinanceFuturesClient, BinanceFuturesHTTPError
 
 
 def test_binance_client_tolerates_malformed_constructor_numeric_values() -> None:
@@ -16,6 +17,29 @@ def test_binance_client_parses_string_false_live_trade_flag() -> None:
     client = BinanceFuturesClient(live_trade_enabled="false")
 
     assert client.live_trade_enabled is False
+
+
+def test_http_error_message_preserves_binance_reason_without_signed_query() -> None:
+    response = httpx.Response(
+        400,
+        json={"code": -2021, "msg": "Order would immediately trigger."},
+        request=httpx.Request(
+            "POST",
+            "https://fapi.binance.com/fapi/v1/order?timestamp=1779172989091&signature=secret",
+        ),
+    )
+
+    with pytest.raises(BinanceFuturesHTTPError) as exc_info:
+        BinanceFuturesClient._raise_for_status(response, path="/fapi/v1/order")
+
+    exc = exc_info.value
+    message = str(exc)
+    assert exc.status_code == 400
+    assert exc.code == -2021
+    assert exc.path == "/fapi/v1/order"
+    assert "Order would immediately trigger" in message
+    assert "signature" not in message
+    assert "timestamp" not in message
 
 
 def test_parse_kline_row() -> None:

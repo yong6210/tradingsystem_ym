@@ -532,6 +532,53 @@ def test_operational_checklist_reuses_cached_validation_payload_when_available()
         assert captured["validation_payload"] == {"validation_report": {"cached": True}, "execution_quality": {"cached": "eq"}}
 
 
+def test_operational_checklist_write_report_refreshes_validation_payload() -> None:
+    init_db()
+    with SessionLocal() as db:
+        engine = StrategyEngine(db)
+        captured: dict[str, object] = {}
+
+        def _fresh_recompute(*args, **kwargs):
+            captured["recompute_args"] = args
+            captured["recompute_kwargs"] = kwargs
+            return {
+                "validation_report": {"cached": False},
+                "execution_quality": {"cached": "fresh_eq"},
+            }
+
+        engine._load_cached_validation_payload = lambda symbol: {  # type: ignore[assignment]
+            "validation_report": {"cached": True},
+            "execution_quality": {"cached": "stale_eq"},
+        }
+        engine.recompute_learning = _fresh_recompute  # type: ignore[assignment]
+        engine.alert_metrics_report = lambda **kwargs: {"alerts": 1}  # type: ignore[assignment]
+        engine.outbox_status = lambda: {"pending": 0}  # type: ignore[assignment]
+        engine.metrics = lambda **kwargs: {"sample_size": 10}  # type: ignore[assignment]
+        engine.portfolio_budget_report = lambda **kwargs: {"playbook_action": "hold"}  # type: ignore[assignment]
+        engine.execution_quality_report = lambda **kwargs: {"report": "fresh"}  # type: ignore[assignment]
+        engine.operational_checklist_service.generate = (  # type: ignore[assignment]
+            lambda **kwargs: captured.update(kwargs) or {"overall_status": "PASS"}
+        )
+
+        payload = engine.operational_checklist(
+            symbol="BTCUSDT",
+            universe="usdt_reliable_balanced_31",
+            limit=31,
+            days=30,
+            alert_test_lookback_hours=24,
+            write_report=True,
+        )
+
+        assert payload["overall_status"] == "PASS"
+        assert captured["validation_payload"] == {
+            "validation_report": {"cached": False},
+            "execution_quality": {"cached": "fresh_eq"},
+        }
+        assert captured["recompute_args"] == ("BTCUSDT",)
+        assert captured["recompute_kwargs"]["persist_runtime_validation_artifacts"] is False
+        assert captured["recompute_kwargs"]["use_read_only_cache"] is False
+
+
 def test_stress_replay_assessment_uses_replay_attached_stress_validation() -> None:
     class _StressValidationStub:
         def generate(self, **kwargs) -> dict:
@@ -1324,6 +1371,59 @@ def test_current_exposure_rows_ignore_out_of_current_live_universe_during_micro_
 
     rows = engine._current_exposure_rows()
     assert rows == [current_live_row, current_submission_row]
+
+
+def test_current_exposure_rows_does_not_resurrect_closed_recent_live_submission() -> None:
+    engine = object.__new__(StrategyEngine)
+    engine.settings = SimpleNamespace(
+        auto_trading_execution_mode="MICRO_LIVE",
+        auto_trading_micro_live_allowed_symbols="BTCUSDT,ETHUSDT",
+        portfolio_overlay_include_planned_exposure=False,
+    )
+    closed_live_row = SimpleNamespace(
+        plan_id="closed_recent_live_plan",
+        symbol="BTCUSDT",
+        state=PlanState.CLOSED.value,
+        validity={},
+    )
+    active_live_row = SimpleNamespace(
+        plan_id="active_recent_live_plan",
+        symbol="ETHUSDT",
+        state=PlanState.ARMED.value,
+        validity={},
+    )
+    plans_by_id = {
+        closed_live_row.plan_id: closed_live_row,
+        active_live_row.plan_id: active_live_row,
+    }
+
+    engine.plan_repo = SimpleNamespace(
+        list_exposure_candidates=lambda **kwargs: [],
+        get=lambda plan_id: plans_by_id.get(plan_id),
+    )
+    engine.submission_repo = SimpleNamespace(
+        list_recent=lambda **kwargs: [
+            SimpleNamespace(
+                plan_id=closed_live_row.plan_id,
+                symbol=closed_live_row.symbol,
+                adapter="binance",
+                state="FILLED",
+                requested_live=True,
+                execution_mode="MICRO_LIVE",
+            ),
+            SimpleNamespace(
+                plan_id=active_live_row.plan_id,
+                symbol=active_live_row.symbol,
+                adapter="binance",
+                state="FILLED",
+                requested_live=True,
+                execution_mode="MICRO_LIVE",
+            ),
+        ]
+    )
+
+    rows = engine._current_exposure_rows()
+    assert rows == [active_live_row]
 
 
 def test_active_contract_transition_edge_variant_shadow_uses_generation_diagnostics_snapshot() -> None:

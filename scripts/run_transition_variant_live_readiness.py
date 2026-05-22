@@ -14,6 +14,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
+from app.services.market_data import configured_usdt_universe_name
 from app.services.strategy_engine import StrategyEngine
 from app.services.transition_variant_live_readiness import (
     evaluate_transition_variant_live_readiness,
@@ -25,7 +26,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Summarize transition edge variant live readiness.")
     parser.add_argument("--symbols", default="BTCUSDT,ETHUSDT")
     parser.add_argument("--days", type=int, default=7)
-    parser.add_argument("--universe", default="usdt_reliable_balanced_31")
+    parser.add_argument("--universe", default=configured_usdt_universe_name())
     parser.add_argument("--write-report", action="store_true")
     return parser.parse_args()
 

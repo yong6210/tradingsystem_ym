@@ -1142,16 +1142,56 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
           advisory_only: true,
         });
       }
+      function materialExecutionSample(payload) {
+        const sample = payload?.sample_context || {};
+        return ['plans_matured', 'fill_events_total', 'closed_plans'].some((key) => Number(sample[key] || 0) > 0);
+      }
+      function executionDegradationPriority(payload) {
+        const status = String(payload?.status || '').toLowerCase();
+        const hasSample = materialExecutionSample(payload || {});
+        if (status === 'manual_review') return hasSample ? 'urgent' : 'monitor';
+        if (status === 'watch') return hasSample ? 'watch' : 'monitor';
+        return 'monitor';
+      }
+      function playbookPriority(action, reason) {
+        const normalized = String(action || '').toLowerCase();
+        const reasonText = String(reason || '').toLowerCase();
+        if (!normalized) return 'monitor';
+        const monitorActions = new Set([
+          'continue_candidate_review_under_portfolio_caps',
+          'proceed_with_configured_rollout',
+          'continue_runtime_monitoring',
+          'wait_for_fresh_promotable_candidate',
+          'wait_for_live_candidate',
+        ]);
+        if (
+          monitorActions.has(normalized)
+          || normalized.startsWith('continue_')
+          || normalized.startsWith('proceed_')
+          || normalized.startsWith('wait_')
+        ) return 'monitor';
+        if (
+          normalized.startsWith('clear_')
+          || normalized.startsWith('hold_')
+          || normalized.startsWith('stop_')
+          || normalized.startsWith('disable_')
+          || normalized.startsWith('lock_')
+          || normalized.startsWith('kill_')
+          || reasonText.includes('no_go')
+        ) return 'urgent';
+        if (reasonText.includes('manual_review') || normalized.includes('review')) return 'watch';
+        return 'monitor';
+      }
 
       if (playbookAction) {
-        pushAction(playbookAction, playbookReason, 'urgent', 'playbook', 'playbook');
+        pushAction(playbookAction, playbookReason, playbookPriority(playbookAction, playbookReason), 'playbook', 'playbook');
       }
 
       if (degradation?.status === 'manual_review') {
         pushAction(
           degradation?.recommended_action || 'review_execution_drag_before_expansion',
           degradation?.summary || 'global execution degradation requires manual review',
-          'urgent',
+          executionDegradationPriority(degradation),
           'execution_degradation',
           'execution_review'
         );
@@ -1159,7 +1199,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         pushAction(
           degradation?.recommended_action || 'review_execution_drag_and_hold_size',
           degradation?.summary || 'global execution quality is drifting',
-          'watch',
+          executionDegradationPriority(degradation),
           'execution_degradation',
           'execution_review'
         );
@@ -1885,13 +1925,13 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
         <div class="panel">
           <div class="section-header">
             <div>
-              <h2>A/B Strategy Posture</h2>
-              <div class="meta">A remains anchor인지, B continuation이 research-only인지 guarded activation인지, 현재 mix가 여전히 A 집중인지까지 한 번에 읽습니다.</div>
+              <h2>Strategy Posture</h2>
+              <div class="meta">현재 라이브 계약이 SIR인지, 레거시 A/B 비교가 적용되는지, 후보군 균형과 보호 상태를 같이 읽습니다.</div>
             </div>
           </div>
           <div class="desk-strip">
             ${badge('Mode', multiStrategy?.mode || clusterBalance?.mode || 'n/a')}
-            ${badge('A Anchor', multiStrategy?.raw_family_anchor || 'n/a')}
+            ${badge('Live Family', multiStrategy?.raw_family_anchor || 'n/a')}
             ${badge('B 상태', bActivation?.activation_state || 'n/a')}
             ${badge('Mix', clusterBalance?.balance_state || 'n/a')}
             ${badge('대표 후보 Cluster', candidateCluster)}
@@ -1902,11 +1942,11 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
             ${renderSummaryBox('B Activation', bActivation?.activation_state || 'n/a', bActivation?.summary || 'B continuation activation summary unavailable')}
             ${renderSummaryBox('Cluster Balance', clusterBalance?.balance_state || 'n/a', clusterBalance?.summary || 'strategy cluster balance summary unavailable')}
             ${renderSummaryBox('Target Mix', clusterBalance?.target_mix || 'n/a', clusterBalance?.balance_bias || 'balance bias unavailable')}
-            ${renderSummaryBox('대표 후보 A/B 해석', candidatePostureState || 'n/a', candidatePostureSummary)}
+            ${renderSummaryBox('대표 후보 전략 해석', candidatePostureState || 'n/a', candidatePostureSummary)}
           </div>
           <div class="hint-card">
-            <div class="title">현재 A/B mix</div>
-            <div class="body">${esc(clusterBalance?.summary || multiStrategy?.summary || '현재 A/B runtime mix summary가 없습니다.')}</div>
+            <div class="title">현재 strategy mix</div>
+            <div class="body">${esc(clusterBalance?.summary || multiStrategy?.summary || '현재 strategy runtime mix summary가 없습니다.')}</div>
           </div>
           ${renderTable(
             familyMix,
@@ -3945,7 +3985,7 @@ def build_execution_operator_ui(*, symbol: str | None, universe: str, days: int)
 
     async function refresh() {
       const symbol = $('symbol').value.trim();
-      const universe = $('universe').value.trim() || 'usdt_reliable_balanced_31';
+      const universe = $('universe').value.trim() || '__DEFAULT_UNIVERSE__';
       const days = Math.max(parseInt($('days').value || '7', 10), 1);
       $('status').textContent = '운영 화면 데이터를 불러오는 중...';
       const dashboardUrl = `/execution/operator-dashboard?symbol=${encodeURIComponent(symbol)}&universe=${encodeURIComponent(universe)}&portfolio_limit=10&intent_limit=10&reconcile_limit=10&days=${days}&fast=true`;
