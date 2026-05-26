@@ -503,6 +503,11 @@ def _build_configs(args: argparse.Namespace, intervals: list[str]) -> list[Rotat
             "liquid_relative_ls",
             "liquid_highmom_long",
             "liquid_highmom_ls",
+            "lowvol_long_top",
+            "lowvol_btc_cash_long",
+            "residual_lowvol_btc_cash_long_6535",
+            "residual_lowvol_btc_cash_long_5050",
+            "residual_lowvol_btc_cash_long_3565",
             "liquid_reversal_ls",
             "illiquid_reversal_ls",
             "illiquid_momentum_ls",
@@ -693,7 +698,24 @@ def _build_configs(args: argparse.Namespace, intervals: list[str]) -> list[Rotat
 
 def _build_features(frame: MarketFrame, configs: list[RotationPortfolioConfig]) -> FeatureBundle:
     lookbacks = sorted({config.lookback_bars for config in configs if config.interval == frame.interval})
+    for config in configs:
+        if config.interval != frame.interval:
+            continue
+        for hours in _multi_horizon_hours_from_mode(config.mode):
+            bars = _hours_to_bars(config.interval, hours)
+            if bars not in lookbacks:
+                lookbacks.append(bars)
+    lookbacks = sorted(lookbacks)
     trend_lengths = sorted({config.trend_bars for config in configs if config.interval == frame.interval and config.trend_bars > 0})
+    for config in configs:
+        if config.interval != frame.interval:
+            continue
+        pair = _btc_ema_pair_from_mode(config.mode)
+        if pair:
+            for length in pair:
+                if length not in trend_lengths:
+                    trend_lengths.append(length)
+    trend_lengths = sorted(trend_lengths)
     vol_lengths = sorted({config.vol_bars for config in configs if config.interval == frame.interval})
 
     momentum: dict[int, dict[str, list[float]]] = {}
@@ -728,7 +750,13 @@ def _multi_horizon_hours_from_mode(mode: str) -> list[int]:
     marker = "_mh"
     if marker not in mode:
         return []
-    raw = mode.rsplit(marker, 1)[-1]
+    suffix = mode.rsplit(marker, 1)[-1]
+    digits: list[str] = []
+    for ch in suffix:
+        if not ch.isdigit():
+            break
+        digits.append(ch)
+    raw = "".join(digits)
     if not raw.isdigit() or len(raw) % 3 != 0:
         return []
     horizons: list[int] = []
@@ -782,6 +810,117 @@ def _market_threshold_from_mode(mode: str) -> float:
     if "_mktgt10" in mode:
         return 0.10
     return 0.0
+
+
+def _breadth_threshold_from_mode(mode: str) -> float:
+    marker = "_breadthgt"
+    if marker not in mode:
+        return math.nan
+    start = mode.find(marker) + len(marker)
+    end = start
+    while end < len(mode) and (mode[end].isdigit() or mode[end] in {".", "p"}):
+        end += 1
+    try:
+        return max(min(float(mode[start:end].replace("p", ".")) / 100.0, 1.0), 0.0)
+    except ValueError:
+        return math.nan
+
+
+def _cooldown_momentum_threshold_from_mode(mode: str) -> float:
+    marker = "_cool"
+    if marker not in mode:
+        return math.nan
+    start = mode.find(marker) + len(marker)
+    end = start
+    while end < len(mode) and (mode[end].isdigit() or mode[end] in {".", "p"}):
+        end += 1
+    try:
+        return max(float(mode[start:end].replace("p", ".")) / 100.0, 0.0)
+    except ValueError:
+        return math.nan
+
+
+def _long_fraction_from_mode(mode: str, default: float = 0.50) -> float:
+    marker = "_ls"
+    if marker not in mode:
+        return default
+    raw = mode.rsplit(marker, 1)[-1][:4]
+    if len(raw) != 4 or not raw.isdigit():
+        return default
+    long_part = int(raw[:2])
+    short_part = int(raw[2:])
+    total = long_part + short_part
+    if total <= 0:
+        return default
+    return min(max(long_part / total, 0.0), 1.0)
+
+
+def _bear_long_fraction_from_mode(mode: str, default: float = 0.50) -> float:
+    marker = "_bear"
+    if marker not in mode:
+        return default
+    raw = mode.rsplit(marker, 1)[-1][:4]
+    if len(raw) != 4 or not raw.isdigit():
+        return default
+    long_part = int(raw[:2])
+    short_part = int(raw[2:])
+    total = long_part + short_part
+    if total <= 0:
+        return default
+    return min(max(long_part / total, 0.0), 1.0)
+
+
+def _bull_threshold_from_mode(mode: str) -> float:
+    marker = "_bullgt"
+    if marker not in mode:
+        return 0.0
+    start = mode.find(marker) + len(marker)
+    end = start
+    while end < len(mode) and (mode[end].isdigit() or mode[end] in {".", "p"}):
+        end += 1
+    try:
+        return max(float(mode[start:end].replace("p", ".")) / 100.0, 0.0)
+    except ValueError:
+        return 0.0
+
+
+def _btc_ema_pair_from_mode(mode: str) -> tuple[int, int] | None:
+    marker = "_btcema"
+    if marker not in mode:
+        return None
+    raw = mode.rsplit(marker, 1)[-1]
+    token = []
+    for ch in raw:
+        if ch.isdigit() or ch.lower() == "x":
+            token.append(ch.lower())
+        else:
+            break
+    text = "".join(token)
+    if "x" not in text:
+        return None
+    fast_raw, slow_raw = text.split("x", 1)
+    try:
+        fast = int(fast_raw)
+        slow = int(slow_raw)
+    except ValueError:
+        return None
+    if fast <= 0 or slow <= 0 or fast >= slow:
+        return None
+    return fast, slow
+
+
+def _regime_long_fraction_from_mode(mode: str, market_momentum: float, default: float = 0.50) -> float:
+    has_bull = "_bull6040" in mode or "_bull5545" in mode
+    if not has_bull and "_bear" not in mode:
+        return _long_fraction_from_mode(mode, default)
+    base_long_fraction = _long_fraction_from_mode(mode, default)
+    if not math.isfinite(market_momentum) or market_momentum < _bull_threshold_from_mode(mode):
+        return _bear_long_fraction_from_mode(mode, default)
+    if "_bull6040" in mode:
+        return 0.60
+    if "_bull5545" in mode:
+        return 0.55
+    return base_long_fraction
 
 
 def _weighted_assign(
@@ -1104,6 +1243,16 @@ def _target_weights(
         rows = [row for row in rows if row[0] in selected_symbols]
 
     market_momentum = mom_by_symbol[market_symbol][signal_idx] if market_symbol in mom_by_symbol else math.nan
+    btc_ema_pair = _btc_ema_pair_from_mode(config.mode)
+    if btc_ema_pair and market_symbol in frame.closes:
+        fast_len, slow_len = btc_ema_pair
+        fast_series = features.ema.get(fast_len, {}).get(market_symbol, [])
+        slow_series = features.ema.get(slow_len, {}).get(market_symbol, [])
+        if signal_idx < len(fast_series) and signal_idx < len(slow_series):
+            fast_value = fast_series[signal_idx]
+            slow_value = slow_series[signal_idx]
+            if math.isfinite(fast_value) and math.isfinite(slow_value) and slow_value > 0.0:
+                market_momentum = fast_value / slow_value - 1.0
 
     if config.mode in {
         "sharpe_ls",
@@ -1145,6 +1294,9 @@ def _target_weights(
     ) or config.mode in {
         "residual_long_top",
         "residual_ls",
+        "residual_lowvol_btc_cash_long_6535",
+        "residual_lowvol_btc_cash_long_5050",
+        "residual_lowvol_btc_cash_long_3565",
         "residual70_funding30",
         "residual70_funding30_btc_cash",
         "residual70_funding30_btc_cash_mktgt02",
@@ -1372,11 +1524,36 @@ def _target_weights(
             weights[market_symbol] = -gross
         return weights
 
-    if config.mode.startswith("residual80_funding20_btc_short") and "_blend_" in config.mode:
+    if (
+        config.mode.startswith(
+            (
+                "residual70_funding30_btc_short",
+                "residual75_funding25_btc_short",
+                "residual80_funding20_btc_short",
+                "residual85_funding15_btc_short",
+                "residual90_funding10_btc_short",
+            )
+        )
+        and "_blend_" in config.mode
+    ):
         if not math.isfinite(market_momentum):
             return weights
         short_btc_fraction = _short_btc_fraction_from_mode(config.mode)
-        if market_momentum < 0.0:
+        breadth_threshold = _breadth_threshold_from_mode(config.mode)
+        if math.isfinite(breadth_threshold):
+            eligible_count = len(rows)
+            positive_count = sum(
+                1
+                for _, momentum, _, up, _ in rows
+                if up and math.isfinite(momentum) and momentum > 0.0
+            )
+            breadth = positive_count / eligible_count if eligible_count > 0 else math.nan
+            if not math.isfinite(breadth) or breadth < breadth_threshold:
+                if short_btc_fraction > 0.0:
+                    weights[market_symbol] = -gross * short_btc_fraction
+                return weights
+        market_threshold = _market_threshold_from_mode(config.mode)
+        if market_momentum < market_threshold:
             if short_btc_fraction > 0.0:
                 weights[market_symbol] = -gross * short_btc_fraction
             return weights
@@ -1384,7 +1561,15 @@ def _target_weights(
             "ex_icp_near_ltc": {"ICPUSDT", "NEARUSDT", "LTCUSDT"},
             "ex_icp_near_link": {"ICPUSDT", "NEARUSDT", "LINKUSDT"},
         }
-        if config.mode.endswith("_6040"):
+        cooldown_threshold = _cooldown_momentum_threshold_from_mode(config.mode)
+        cooldown_excluded = {
+            symbol
+            for symbol, momentum, _, _, _ in rows
+            if math.isfinite(cooldown_threshold)
+            and math.isfinite(momentum)
+            and momentum > cooldown_threshold
+        }
+        if "_6040" in config.mode:
             component_specs = (("ex_icp_near_ltc", 0.60), ("ex_icp_near_link", 0.40))
         else:
             component_specs = (("ex_icp_near_ltc", 0.50), ("ex_icp_near_link", 0.50))
@@ -1392,9 +1577,9 @@ def _target_weights(
             component = residual_funding_weights(
                 component_k=k,
                 component_gross=gross * component_fraction,
-                residual_fraction=0.80,
-                long_fraction=0.50,
-                exclude_symbols=exclusion_sets[set_name],
+                residual_fraction=_residual_fraction_from_mode(config.mode),
+                long_fraction=_regime_long_fraction_from_mode(config.mode, market_momentum, 0.50),
+                exclude_symbols=exclusion_sets[set_name] | cooldown_excluded,
             )
             for symbol, value in component.items():
                 weights[symbol] = weights.get(symbol, 0.0) + value
@@ -1413,13 +1598,13 @@ def _target_weights(
             "ex_icp_near_link": {"ICPUSDT", "NEARUSDT", "LINKUSDT"},
         }
         secondary_set = "ex_icp_near_link" if "_ex_icp_near_link_" in config.mode else "ex_bottom5"
-        if config.mode.endswith("_7525"):
+        if "_7525" in config.mode:
             component_specs = (("ex_icp_near_ltc", 0.75), (secondary_set, 0.25))
-        elif config.mode.endswith("_6040"):
+        elif "_6040" in config.mode:
             component_specs = (("ex_icp_near_ltc", 0.60), (secondary_set, 0.40))
-        elif config.mode.endswith("_4060"):
+        elif "_4060" in config.mode:
             component_specs = (("ex_icp_near_ltc", 0.40), (secondary_set, 0.60))
-        elif config.mode.endswith("_2575"):
+        elif "_2575" in config.mode:
             component_specs = (("ex_icp_near_ltc", 0.25), (secondary_set, 0.75))
         elif "_ex_icp_near_link_" in config.mode:
             component_specs = (("ex_icp_near_ltc", 0.50), (secondary_set, 0.50))
@@ -1430,7 +1615,7 @@ def _target_weights(
                 component_k=k,
                 component_gross=gross * component_fraction,
                 residual_fraction=_residual_fraction_from_mode(config.mode),
-                long_fraction=0.50,
+                long_fraction=_regime_long_fraction_from_mode(config.mode, market_momentum, 0.50),
                 exclude_symbols=exclusion_sets[set_name],
             )
             for symbol, value in component.items():
@@ -1706,6 +1891,62 @@ def _target_weights(
             for symbol, value in component.items():
                 weights[symbol] = weights.get(symbol, 0.0) + value
         return {symbol: value for symbol, value in weights.items() if abs(value) > 1e-12}
+
+    if config.mode in {"lowvol_long_top", "lowvol_btc_cash_long"}:
+        if config.mode == "lowvol_btc_cash_long" and (
+            not math.isfinite(market_momentum) or market_momentum < 0.0
+        ):
+            return weights
+        low_vol_rows = sorted(rows, key=lambda row: row[2])
+        longs = [
+            (symbol, 1.0 / max(vol, 1e-5), vol)
+            for symbol, _, vol, up, _ in low_vol_rows
+            if up
+        ][:k]
+        _weighted_assign(weights, longs, side=1, gross=gross, vol_weight=config.vol_weight)
+        return weights
+
+    if config.mode.startswith("residual_lowvol_btc_cash_long_"):
+        if not math.isfinite(market_momentum) or market_momentum < 0.0:
+            return weights
+        candidates = [
+            (symbol, score, vol)
+            for symbol, score, vol, up, _ in rank_rows
+            if up and math.isfinite(score) and score > 0.0
+        ]
+        if not candidates:
+            return weights
+        denom = max(len(candidates) - 1, 1)
+        residual_ranks = {
+            symbol: 1.0 - rank / denom
+            for rank, (symbol, _, _) in enumerate(
+                sorted(candidates, key=lambda row: row[1], reverse=True)
+            )
+        }
+        lowvol_ranks = {
+            symbol: 1.0 - rank / denom
+            for rank, (symbol, _, _) in enumerate(sorted(candidates, key=lambda row: row[2]))
+        }
+        residual_weight = 0.65
+        if config.mode.endswith("_5050"):
+            residual_weight = 0.50
+        elif config.mode.endswith("_3565"):
+            residual_weight = 0.35
+        scored = sorted(
+            (
+                (
+                    symbol,
+                    residual_weight * residual_ranks[symbol]
+                    + (1.0 - residual_weight) * lowvol_ranks[symbol],
+                    vol,
+                )
+                for symbol, _, vol in candidates
+            ),
+            key=lambda row: row[1],
+            reverse=True,
+        )
+        _weighted_assign(weights, scored[:k], side=1, gross=gross, vol_weight=config.vol_weight)
+        return weights
 
     if config.mode in {"long_top", "liquid_long_top", "residual_long_top", "channel_long_top"}:
         longs = [(symbol, score, vol) for symbol, score, vol, up, _ in desc if score > 0.0 and up][:k]
