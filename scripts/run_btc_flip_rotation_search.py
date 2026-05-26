@@ -29,6 +29,7 @@ Direction = Literal["long", "short"]
 Signal = Literal["long", "short", "flat", "keep"]
 
 _INTERVAL_MS = {
+    "1m": 60 * 1000,
     "5m": 5 * 60 * 1000,
     "15m": 15 * 60 * 1000,
     "30m": 30 * 60 * 1000,
