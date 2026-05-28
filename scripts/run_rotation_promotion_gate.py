@@ -61,6 +61,25 @@ def _relpath(path: Path) -> str:
 
 def _candidate_metrics(report: dict[str, Any]) -> dict[str, Any]:
     walk_forward = dict(report.get("walk_forward") or {})
+    aggregate = dict(report.get("aggregate") or {})
+    if aggregate:
+        ending_x = _as_float(aggregate.get("ending_equity_multiple"))
+        period_step_dd = _as_float(aggregate.get("max_drawdown_on_period_steps_pct"))
+        selected_period_dd = _as_float(aggregate.get("max_selected_period_drawdown_pct"))
+        dd_values = [value for value in (period_step_dd, selected_period_dd) if math.isfinite(value)]
+        return {
+            "report_type": "bar_resim_walk_forward",
+            "model": "causal_selector",
+            "min_x": ending_x,
+            "geo": ending_x,
+            "max_dd_pct": max(dd_values) if dd_values else math.nan,
+            "max_drawdown_on_period_steps_pct": period_step_dd,
+            "max_selected_period_drawdown_pct": selected_period_dd,
+            "annualized_return_pct": _as_float(aggregate.get("annualized_return_pct")),
+            "positive_fraction": _as_float(aggregate.get("positive_period_fraction")),
+            "scenario_count": int(aggregate.get("test_period_count") or 0),
+            "limitations": list(dict(report.get("method") or {}).get("limitations") or []),
+        }
     if walk_forward:
         ending_x = _as_float(walk_forward.get("ending_equity_multiple"))
         period_step_dd = _as_float(walk_forward.get("max_drawdown_on_period_steps_pct"))
@@ -137,7 +156,22 @@ def _audit_summary(path: Path, report: dict[str, Any]) -> dict[str, Any]:
 
 def _walkforward_summary(path: Path, report: dict[str, Any]) -> dict[str, Any]:
     walk_forward = dict(report.get("walk_forward") or {})
+    aggregate = dict(report.get("aggregate") or {})
     method = dict(report.get("method") or {})
+    if aggregate:
+        return {
+            "path": _relpath(path),
+            "period": aggregate.get("period"),
+            "selector_mode": aggregate.get("selector_mode"),
+            "test_period_count": aggregate.get("test_period_count"),
+            "ending_equity_multiple": aggregate.get("ending_equity_multiple"),
+            "total_return_pct": aggregate.get("total_return_pct"),
+            "annualized_return_pct": aggregate.get("annualized_return_pct"),
+            "max_drawdown_on_period_steps_pct": aggregate.get("max_drawdown_on_period_steps_pct"),
+            "max_selected_period_drawdown_pct": aggregate.get("max_selected_period_drawdown_pct"),
+            "positive_fraction": aggregate.get("positive_period_fraction"),
+            "limitations": list(method.get("limitations") or []),
+        }
     return {
         "path": _relpath(path),
         "period": walk_forward.get("period"),

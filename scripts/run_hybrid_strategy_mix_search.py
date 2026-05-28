@@ -1226,6 +1226,7 @@ def _summary(
     market_gate_count: int,
     market_gate_momentum_sum: float,
     market_gate_breadth_sum: float,
+    final_weights: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     years = max(rot._year_fraction(first_exec_ts, last_period_ts), 1e-9)
     total_return = equity - 1.0
@@ -1254,6 +1255,7 @@ def _summary(
         decision = "WATCH"
     else:
         decision = "REJECT_WEAK"
+    final_weights = final_weights or {}
     return {
         "model_id": model_id,
         "decision": decision,
@@ -1324,6 +1326,14 @@ def _summary(
             symbol: round(value / max(period_count, 1), 4)
             for symbol, value in sorted(symbol_abs_exposure_sum.items(), key=lambda item: item[1], reverse=True)[:10]
             if abs(value) > 1e-12
+        },
+        "final_gross_exposure": round(sum(abs(value) for value in final_weights.values()), 4),
+        "final_net_exposure": round(sum(final_weights.values()), 4),
+        "final_short_exposure": round(sum(abs(value) for value in final_weights.values() if value < 0.0), 4),
+        "final_top_weights": {
+            symbol: round(value, 6)
+            for symbol, value in sorted(final_weights.items(), key=lambda item: abs(item[1]), reverse=True)[:20]
+            if abs(value) > 1e-9
         },
         "score": round(score, 8),
     }
@@ -1717,6 +1727,7 @@ def _backtest_mix(
         market_gate_count=market_gate_count,
         market_gate_momentum_sum=market_gate_momentum_sum,
         market_gate_breadth_sum=market_gate_breadth_sum,
+        final_weights=combined_weights,
     )
     if adaptive_policy is not None:
         summary["adaptive_policy"] = adaptive_policy
