@@ -94,6 +94,7 @@ class Tranche:
     role: str
     zone_score: int
     zone_id: str
+    zone_context: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +105,9 @@ class RemovedLot:
     exit_price: float
     role: str
     pnl_usd_units: float
+    zone_score: int = 0
+    zone_id: str = ""
+    zone_context: str = ""
 
 
 class PositionBook:
@@ -169,6 +173,7 @@ class PositionBook:
         role: str,
         zone_score: int,
         zone_id: str,
+        zone_context: str = "",
     ) -> None:
         if qty <= 1e-12:
             return
@@ -186,6 +191,7 @@ class PositionBook:
                 role=role,
                 zone_score=int(zone_score),
                 zone_id=str(zone_id),
+                zone_context=str(zone_context),
             )
         )
 
@@ -232,6 +238,9 @@ class PositionBook:
                     exit_price=float(price),
                     role=lot.role,
                     pnl_usd_units=pnl,
+                    zone_score=lot.zone_score,
+                    zone_id=lot.zone_id,
+                    zone_context=lot.zone_context,
                 )
             )
             lot.qty -= take

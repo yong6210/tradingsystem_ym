@@ -26,7 +26,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--period", choices=("year", "quarter", "month"), default="year")
     parser.add_argument("--min-train-years", type=int, default=2)
     parser.add_argument("--min-train-periods", type=int, default=0)
+    parser.add_argument("--train-window-periods", type=int, default=0)
+    parser.add_argument(
+        "--selector-mode",
+        choices=("balanced", "calmar", "consistency", "minimax"),
+        default="balanced",
+    )
     parser.add_argument("--max-train-worst-year-pct", type=float, default=0.0)
+    parser.add_argument("--max-train-period-dd-pct", type=float, default=100.0)
+    parser.add_argument("--min-train-positive-fraction", type=float, default=0.0)
     parser.add_argument("--max-full-sample-dd-pct", type=float, default=100.0)
     parser.add_argument("--report-dir", default="reports/validation/multi_asset_rotation_walkforward")
     parser.add_argument("--write-report", action="store_true")
@@ -165,19 +173,28 @@ def _train_score(
     train_years: list[str],
     *,
     max_train_worst_year_pct: float,
+    max_train_period_dd_pct: float,
+    min_train_positive_fraction: float,
+    selector_mode: str,
 ) -> float:
     values = [yearly_returns_pct[year] / 100.0 for year in train_years if year in yearly_returns_pct]
     if len(values) != len(train_years):
         return -math.inf
     equity = 1.0
+    peak = 1.0
+    max_dd = 0.0
     logs: list[float] = []
     for value in values:
         if value <= -0.999:
             return -math.inf
         equity *= 1.0 + value
+        peak = max(peak, equity)
+        max_dd = max(max_dd, 1.0 - equity / max(peak, 1e-12))
         logs.append(math.log1p(value))
     worst_pct = min(values) * 100.0
     if worst_pct < max_train_worst_year_pct:
+        return -math.inf
+    if max_dd * 100.0 > max_train_period_dd_pct:
         return -math.inf
     mean_log = sum(logs) / len(logs)
     if len(logs) >= 2:
@@ -186,8 +203,20 @@ def _train_score(
     else:
         volatility_penalty = 0.0
     positive_fraction = sum(1 for value in values if value > 0.0) / len(values)
+    if positive_fraction < min_train_positive_fraction:
+        return -math.inf
     drawdown_penalty = max(0.0, -worst_pct) / 100.0
-    return math.log(max(equity, 1e-12)) * max(positive_fraction, 0.25) - 0.50 * volatility_penalty - drawdown_penalty
+    total_log = math.log(max(equity, 1e-12))
+    downside_logs = [min(value, 0.0) for value in logs]
+    downside_penalty = math.sqrt(sum(value * value for value in downside_logs) / len(downside_logs))
+    mode = str(selector_mode or "balanced")
+    if mode == "calmar":
+        return (mean_log / max(max_dd, 0.03)) + 0.20 * positive_fraction - 0.35 * downside_penalty
+    if mode == "consistency":
+        return mean_log + 0.35 * positive_fraction - 0.75 * volatility_penalty - 0.90 * downside_penalty - 0.50 * max_dd
+    if mode == "minimax":
+        return worst_pct / 100.0 + 0.35 * mean_log + 0.20 * positive_fraction - 0.20 * max_dd
+    return total_log * max(positive_fraction, 0.25) - 0.50 * volatility_penalty - drawdown_penalty
 
 
 def _max_drawdown(equity_curve: list[float]) -> float:
@@ -204,12 +233,21 @@ def _walk_forward(
     *,
     period: str,
     min_train_periods: int,
+    train_window_periods: int,
     max_train_worst_year_pct: float,
+    max_train_period_dd_pct: float,
+    min_train_positive_fraction: float,
+    selector_mode: str,
 ) -> dict[str, Any]:
     period_field = {
         "year": "by_year_return_pct",
         "quarter": "by_quarter_return_pct",
         "month": "by_month_return_pct",
+    }[period]
+    period_dd_field = {
+        "year": "by_year_max_drawdown_pct",
+        "quarter": "by_quarter_max_drawdown_pct",
+        "month": "by_month_max_drawdown_pct",
     }[period]
     years = sorted(
         {
@@ -238,8 +276,12 @@ def _walk_forward(
     equity = 1.0
     equity_curve = [equity]
     selections: list[dict[str, Any]] = []
+    selected_period_dd_values: list[float] = []
     for test_idx in range(min_train_periods, len(years)):
-        train_years = years[:test_idx]
+        if train_window_periods > 0:
+            train_years = years[max(0, test_idx - train_window_periods):test_idx]
+        else:
+            train_years = years[:test_idx]
         test_year = years[test_idx]
         ranked: list[tuple[float, str]] = []
         for candidate_id, yearly in candidate_returns.items():
@@ -249,6 +291,9 @@ def _walk_forward(
                 yearly,
                 train_years,
                 max_train_worst_year_pct=max_train_worst_year_pct,
+                max_train_period_dd_pct=max_train_period_dd_pct,
+                min_train_positive_fraction=min_train_positive_fraction,
+                selector_mode=selector_mode,
             )
             if math.isfinite(score):
                 ranked.append((score, candidate_id))
@@ -263,6 +308,12 @@ def _walk_forward(
         equity_curve.append(equity)
         row = candidate_lookup[candidate_id]
         summary = dict(row.get("summary") or {})
+        selected_period_dd_pct = _as_float(
+            dict(summary.get(period_dd_field) or {}).get(test_year),
+            math.nan,
+        )
+        if math.isfinite(selected_period_dd_pct):
+            selected_period_dd_values.append(selected_period_dd_pct)
         model_id = str(summary.get("model_id") or dict(row.get("config") or {}).get("model_id") or "")
         selections.append(
             {
@@ -271,8 +322,12 @@ def _walk_forward(
                 "selected_model_id": model_id,
                 "mode": dict(row.get("config") or {}).get("mode"),
                 "train_years": train_years,
+                "selector_mode": selector_mode,
                 "train_score": round(max(ranked, key=lambda item: item[0])[0], 8),
                 "test_return_pct": round(test_return_pct, 4),
+                "selected_period_max_drawdown_pct": round(selected_period_dd_pct, 4)
+                if math.isfinite(selected_period_dd_pct)
+                else None,
                 "full_sample_total_return_pct": summary.get("total_return_pct"),
                 "full_sample_max_drawdown_pct": summary.get("max_drawdown_pct"),
                 "source_reports": row.get("source_reports", []),
@@ -300,6 +355,9 @@ def _walk_forward(
         "annualized_return_pct": round(cagr * 100.0, 4),
         "max_drawdown_on_period_steps_pct": round(max_dd * 100.0, 4),
         "max_drawdown_on_annual_steps_pct": round(max_dd * 100.0, 4),
+        "max_selected_period_drawdown_pct": round(max(selected_period_dd_values), 4)
+        if selected_period_dd_values
+        else None,
         "positive_year_fraction": round(positive_year_fraction, 4),
         "ending_equity_multiple": round(equity, 6),
         "selections": selections,
@@ -329,8 +387,12 @@ def main() -> int:
         "method": {
             "selector": "yearly causal train-score selector using only prior yearly returns",
             "selector_period": str(args.period),
+            "selector_mode": str(args.selector_mode),
             "min_train_periods": int(min_train_periods),
+            "train_window_periods": int(args.train_window_periods or 0),
             "max_train_worst_year_pct": float(args.max_train_worst_year_pct),
+            "max_train_period_dd_pct": float(args.max_train_period_dd_pct),
+            "min_train_positive_fraction": float(args.min_train_positive_fraction),
             "max_full_sample_dd_pct": float(args.max_full_sample_dd_pct),
             "limitations": [
                 "uses yearly return fields from prior backtest reports",
@@ -342,7 +404,11 @@ def main() -> int:
             candidates,
             period=str(args.period),
             min_train_periods=max(min_train_periods, 1),
+            train_window_periods=max(int(args.train_window_periods or 0), 0),
             max_train_worst_year_pct=float(args.max_train_worst_year_pct),
+            max_train_period_dd_pct=float(args.max_train_period_dd_pct),
+            min_train_positive_fraction=float(args.min_train_positive_fraction),
+            selector_mode=str(args.selector_mode),
         ),
         "top_full_sample_candidates": sorted(
             candidates,

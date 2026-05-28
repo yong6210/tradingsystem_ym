@@ -15,6 +15,7 @@ from app.services.common import clamp
 from app.services.context_engine import ContextSnapshot
 from app.services.execution_router import EntryDecision, EntryModelRouter
 from app.services.live_route_contract import row_session_name
+from app.services.nanyotti_method_view import NanyottiMethodViewService
 from app.services.position_sizing import PositionSizingInput, PositionSizingService
 from app.services.session_guidance import SessionGuidanceService
 from app.services.strategy_family_router import StrategyFamilyDecision, StrategyFamilyRouter
@@ -58,6 +59,7 @@ class PlanGenerator:
         self.thesis = ThesisFingerprintService()
         self.sizing = PositionSizingService(self.settings)
         self.session_guidance = SessionGuidanceService(self.settings)
+        self.nanyotti_method_view = NanyottiMethodViewService()
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -2087,6 +2089,19 @@ class PlanGenerator:
                 sl=sl,
                 location_reference=location_reference,
             )
+            nanyotti_method_view = self.nanyotti_method_view.evaluate(
+                context=context,
+                zone=zone,
+                direction=direction,
+                entry_price=entry,
+                sl=sl,
+                strategy_family=str(strategy_family.family),
+                strategy_grade=strategy_family.grade if strategy_family.available else None,
+                reaction_classification=reaction.classification,
+                runtime_signal_telemetry=runtime_signal_telemetry,
+                location_reference=location_reference,
+                regime_label=zone_profile.name,
+            )
             thesis_cluster_id = self.thesis.thesis_cluster_id(thesis_fingerprint)
             confirm_only = self._safe_bool(strategy_family.confirm_only) or (
                 not strategy_family.available and decision.model == EntryModel.CONFIRM
@@ -2117,6 +2132,27 @@ class PlanGenerator:
             if runtime_signal_shadow_tilt is not None:
                 strategy_sizing = dict(strategy_sizing)
                 strategy_sizing["runtime_signal_shadow_tilt"] = runtime_signal_shadow_tilt
+            nanyotti_method_sizing_overlay = None
+            if self._safe_bool(self.settings.nanyotti_rotation_method_sizing_overlay_enabled, default=True):
+                nanyotti_method_sizing_overlay = self.nanyotti_method_view.build_sizing_overlay(
+                    method_view=nanyotti_method_view,
+                    base_recommended_risk_r=float(strategy_sizing.get("final_risk_r", 0.0) or 0.0),
+                    expected_ev_r=float(ev),
+                    apply_live=self._safe_bool(
+                        self.settings.nanyotti_rotation_method_sizing_overlay_apply_live,
+                        default=False,
+                    ),
+                )
+                strategy_sizing = dict(strategy_sizing)
+                strategy_sizing["nanyotti_method_sizing_overlay"] = nanyotti_method_sizing_overlay
+                if self._safe_bool(nanyotti_method_sizing_overlay.get("apply_live")):
+                    strategy_sizing["final_risk_r"] = float(nanyotti_method_sizing_overlay["live_recommended_risk_r"])
+                    strategy_sizing["blocked"] = bool(float(strategy_sizing["final_risk_r"]) <= 0.0)
+                    if strategy_sizing["blocked"]:
+                        strategy_sizing["blocked_reason"] = "nanyotti_method_overlay_zero_risk"
+                    notes = dict(strategy_sizing.get("notes") or {})
+                    notes["nanyotti_method"] = "nanyotti_method_overlay_applied_live"
+                    strategy_sizing["notes"] = notes
             strategy_sizing = self.strategy_mode.apply_to_sizing(strategy_sizing, mode=mode_policy.mode)
             expected_ev_at_recommended_size_r = float(strategy_sizing.get("final_risk_r", 0.0) or 0.0) * float(ev)
             expected_summary = (
@@ -2243,6 +2279,9 @@ class PlanGenerator:
                 validity["runtime_signal_telemetry"] = runtime_signal_telemetry
             if runtime_signal_shadow_tilt is not None:
                 validity["runtime_signal_shadow_tilt"] = runtime_signal_shadow_tilt
+            validity["nanyotti_method_view"] = nanyotti_method_view
+            if nanyotti_method_sizing_overlay is not None:
+                validity["nanyotti_method_sizing_overlay"] = nanyotti_method_sizing_overlay
             validity.update(
                 self._fast_failure_validity(
                     symbol=symbol,

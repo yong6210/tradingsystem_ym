@@ -95,7 +95,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--symbols", default=SYMBOLS_36)
     parser.add_argument("--days", type=int, default=1825)
     parser.add_argument("--interval", default="4h")
-    parser.add_argument("--drop-last-bars", type=int, default=0)
+    parser.add_argument("--drop-last-bars", type=int, default=1)
     parser.add_argument("--cache-dir", default="reports/validation/multi_asset_rotation_search/cache_refresh_20260521T2035")
     parser.add_argument("--funding-cache-dir", default="reports/validation/multi_asset_rotation_search/funding_cache")
     parser.add_argument("--exchange-rules-cache", default="reports/validation/multi_asset_rotation_search/exchange_rules_cache/exchange_info.json")
@@ -111,12 +111,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--drawdown-ramp-full-pct", type=float, default=0.0)
     parser.add_argument("--drawdown-ramp-risk-scale", type=float, default=1.0)
     parser.add_argument("--vol-target-annual-pct", type=float, default=60.0)
+    parser.add_argument("--downside-vol-target-annual-pct", type=float, default=0.0)
     parser.add_argument("--vol-lookback-hours", type=int, default=720)
     parser.add_argument("--vol-min-scale", type=float, default=0.0)
-    parser.add_argument("--vol-max-scale", type=float, default=1.25)
+    parser.add_argument("--vol-max-scale", type=float, default=1.0)
     parser.add_argument("--dispersion-lookback-rebalances", type=int, default=250)
     parser.add_argument("--dispersion-guard-quantile", type=float, default=0.8)
-    parser.add_argument("--dispersion-risk-scale", type=float, default=1.25)
+    parser.add_argument("--dispersion-risk-scale", type=float, default=1.0)
     parser.add_argument("--entry-grade-mode", choices=("off", "signal_quantile", "regime_quantile"), default="off")
     parser.add_argument("--entry-grade-lookback-rebalances", type=int, default=250)
     parser.add_argument("--entry-grade-low-quantile", type=float, default=0.25)
@@ -518,21 +519,26 @@ def _empty_summary(
     sleeves: list[mixbt.Sleeve],
     values: dict[str, Any],
 ) -> dict[str, Any]:
+    payload = dict(values)
+    by_month_start = dict(payload.pop("by_month_start", {}) or {})
+    by_month_end = dict(payload.pop("by_month_end", {}) or {})
+    by_quarter_start = dict(payload.pop("by_quarter_start", {}) or {})
+    by_quarter_end = dict(payload.pop("by_quarter_end", {}) or {})
     return mixbt._summary(
         model_id=model_id,
         frame=frame,
         sleeves=sleeves,
-        by_month_start={},
-        by_month_end={},
-        by_quarter_start={},
-        by_quarter_end={},
+        by_month_start=by_month_start,
+        by_month_end=by_month_end,
+        by_quarter_start=by_quarter_start,
+        by_quarter_end=by_quarter_end,
         direction_periods=Counter(),
         symbol_contribution_sum={symbol: 0.0 for symbol in frame.symbols},
         symbol_abs_exposure_sum={symbol: 0.0 for symbol in frame.symbols},
         symbol_long_periods=Counter(),
         symbol_short_periods=Counter(),
         rebalance_samples=[],
-        **values,
+        **payload,
     )
 
 
@@ -768,6 +774,10 @@ def backtest_async_mix(
     first_exec_ts = last_period_ts = None
     by_year_start: dict[str, float] = {}
     by_year_end: dict[str, float] = {}
+    by_month_start: dict[str, float] = {}
+    by_month_end: dict[str, float] = {}
+    by_quarter_start: dict[str, float] = {}
+    by_quarter_end: dict[str, float] = {}
     realized_returns: deque[float] = deque(maxlen=rot._hours_to_bars(sleeves[0].config.interval, max(int(args.vol_lookback_hours), 1)))
     sleeve_anchor = {id(sleeve): first_exec_idx for sleeve in sleeves}
     entry_grade_histories = {
@@ -867,6 +877,11 @@ def backtest_async_mix(
                 realized_vol = math.sqrt(max(variance, 0.0)) * math.sqrt(365.25 * 24.0 / max(rot._interval_hours(sleeve.config.interval), 1e-9))
                 if realized_vol > 1e-9:
                     risk_scale *= min(max((args.vol_target_annual_pct / 100.0) / realized_vol, args.vol_min_scale), args.vol_max_scale)
+            if args.downside_vol_target_annual_pct > 0.0 and len(realized_returns) >= max(10, realized_returns.maxlen // 2):
+                downside_variance = sum(min(value, 0.0) * min(value, 0.0) for value in realized_returns) / len(realized_returns)
+                downside_vol = math.sqrt(max(downside_variance, 0.0)) * math.sqrt(365.25 * 24.0 / max(rot._interval_hours(sleeve.config.interval), 1e-9))
+                if downside_vol > 1e-9:
+                    risk_scale *= min(max((args.downside_vol_target_annual_pct / 100.0) / downside_vol, args.vol_min_scale), args.vol_max_scale)
             dispersion = rot._cross_sectional_momentum_dispersion(frame, features, sleeve.config, signal_idx)
             history = sleeve.dispersion_history if sleeve.dispersion_history is not None else deque()
             if history.maxlen and math.isfinite(dispersion) and len(history) >= max(10, history.maxlen // 2) and args.dispersion_guard_quantile > 0.0:
@@ -1057,9 +1072,15 @@ def backtest_async_mix(
         if gross_exposure > 1e-9:
             active_periods += 1
         year = str(frame.ts[exec_idx + 1].year)
+        month = frame.ts[exec_idx + 1].strftime("%Y-%m")
+        quarter = f"{frame.ts[exec_idx + 1].year}Q{((frame.ts[exec_idx + 1].month - 1) // 3) + 1}"
         by_year_start.setdefault(year, equity)
+        by_month_start.setdefault(month, equity)
+        by_quarter_start.setdefault(quarter, equity)
         equity = 1e-9 if net_return <= -0.999 else equity * (1.0 + net_return)
         by_year_end[year] = equity
+        by_month_end[month] = equity
+        by_quarter_end[quarter] = equity
         peak = max(peak, equity)
         min_equity = min(min_equity, equity)
         max_dd = max(max_dd, 1.0 - equity / max(peak, 1e-12))
@@ -1122,6 +1143,10 @@ def backtest_async_mix(
             "market_stress_avg_btcema": market_stress_btcema_sum / max(market_stress_btcema_count, 1),
             "by_year_start": by_year_start,
             "by_year_end": by_year_end,
+            "by_month_start": by_month_start,
+            "by_month_end": by_month_end,
+            "by_quarter_start": by_quarter_start,
+            "by_quarter_end": by_quarter_end,
         },
     )
 
@@ -1331,6 +1356,8 @@ def main() -> int:
                                 "market_stress_active_fraction": summary.get("market_stress_active_fraction"),
                                 "market_stress_avg_scale": summary.get("market_stress_avg_scale"),
                                 "by_year_return_pct": summary.get("by_year_return_pct"),
+                                "by_quarter_return_pct": summary.get("by_quarter_return_pct"),
+                                "by_month_return_pct": summary.get("by_month_return_pct"),
                             }
                         )
                     result = {

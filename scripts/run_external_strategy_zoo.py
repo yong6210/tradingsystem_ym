@@ -1106,6 +1106,10 @@ def _backtest_config(
     direction_counts: Counter[str] = Counter()
     by_year_start: dict[str, float] = {}
     by_year_end: dict[str, float] = {}
+    by_quarter_start: dict[str, float] = {}
+    by_quarter_end: dict[str, float] = {}
+    by_month_start: dict[str, float] = {}
+    by_month_end: dict[str, float] = {}
     symbol_contribution_sum = {symbol: 0.0 for symbol in frame.symbols}
     symbol_abs_exposure_sum = {symbol: 0.0 for symbol in frame.symbols}
     rebalance_samples: list[dict[str, Any]] = []
@@ -1257,13 +1261,20 @@ def _backtest_config(
             direction_counts["net_short"] += 1
         else:
             direction_counts["market_neutral_or_flat"] += 1
-        year = str(frame.ts[exec_idx + 1].year)
+        period_ts = frame.ts[exec_idx + 1]
+        year = str(period_ts.year)
+        quarter = f"{period_ts.year}Q{((period_ts.month - 1) // 3) + 1}"
+        month = f"{period_ts.year}-{period_ts.month:02d}"
         by_year_start.setdefault(year, equity)
+        by_quarter_start.setdefault(quarter, equity)
+        by_month_start.setdefault(month, equity)
         if net_return <= -0.999:
             equity = 1e-9
         else:
             equity *= 1.0 + net_return
         by_year_end[year] = equity
+        by_quarter_end[quarter] = equity
+        by_month_end[month] = equity
         peak = max(peak, equity)
         min_equity = min(min_equity, equity)
         max_dd = max(max_dd, 1.0 - equity / max(peak, 1e-12))
@@ -1283,6 +1294,14 @@ def _backtest_config(
     by_year_return = {
         year: by_year_end[year] / max(by_year_start.get(year, 1.0), 1e-12) - 1.0
         for year in sorted(by_year_end)
+    }
+    by_quarter_return = {
+        quarter: by_quarter_end[quarter] / max(by_quarter_start.get(quarter, 1.0), 1e-12) - 1.0
+        for quarter in sorted(by_quarter_end)
+    }
+    by_month_return = {
+        month: by_month_end[month] / max(by_month_start.get(month, 1.0), 1e-12) - 1.0
+        for month in sorted(by_month_end)
     }
     positive_years = sum(1 for value in by_year_return.values() if value > 0.0)
     positive_year_fraction = positive_years / max(len(by_year_return), 1)
@@ -1340,6 +1359,10 @@ def _backtest_config(
         "year_count": len(by_year_return),
         "positive_year_fraction": round(positive_year_fraction, 4),
         "by_year_return_pct": {year: round(value * 100.0, 4) for year, value in by_year_return.items()},
+        "by_quarter_return_pct": {
+            quarter: round(value * 100.0, 4) for quarter, value in by_quarter_return.items()
+        },
+        "by_month_return_pct": {month: round(value * 100.0, 4) for month, value in by_month_return.items()},
         "best_year_pct": round(max(by_year_return.values()) * 100.0, 4) if by_year_return else 0.0,
         "worst_year_pct": round(min(by_year_return.values()) * 100.0, 4) if by_year_return else 0.0,
         "direction_period_counts": dict(sorted(direction_counts.items())),

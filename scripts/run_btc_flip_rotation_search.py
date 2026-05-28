@@ -100,6 +100,7 @@ class FeatureSet:
         self._ema_spread_atr_cache: dict[tuple[int, int], list[float]] = {}
         self._high_cache: dict[int, list[float]] = {}
         self._low_cache: dict[int, list[float]] = {}
+        self._volume_mean_cache: dict[int, list[float]] = {}
         self._mean_std_cache: dict[int, tuple[list[float], list[float]]] = {}
         self._rsi_cache: dict[int, list[float]] = {}
 
@@ -163,6 +164,23 @@ class FeatureSet:
                 q.pop()
             q.append(idx)
         self._low_cache[lookback] = out
+        return out
+
+    def rolling_volume_mean_prev(self, lookback: int) -> list[float]:
+        lookback = max(int(lookback), 1)
+        cached = self._volume_mean_cache.get(lookback)
+        if cached is not None:
+            return cached
+        out = [0.0] * len(self.v)
+        q: deque[float] = deque()
+        total = 0.0
+        for idx, value in enumerate(self.v):
+            out[idx] = total / len(q) if q else float(value)
+            q.append(float(value))
+            total += float(value)
+            if len(q) > lookback:
+                total -= q.popleft()
+        self._volume_mean_cache[lookback] = out
         return out
 
     def rolling_mean_std(self, length: int) -> tuple[list[float], list[float]]:

@@ -6,6 +6,7 @@ def test_strategy_blueprints_include_current_anchor_and_overlay() -> None:
     assert "sweep_reversal" in keys
     assert "transition_edge_overlay" in keys
     assert "capital_preservation_no_trade" in keys
+    assert "nanyotti_rotation_method_overlay" in keys
 
 
 def test_strategy_blueprints_transition_matrix_contains_current_families() -> None:

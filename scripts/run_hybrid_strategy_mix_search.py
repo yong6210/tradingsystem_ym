@@ -133,6 +133,7 @@ def _parse_args() -> argparse.Namespace:
             "adaptive",
             "adaptive_overlay",
             "finalists",
+            "vwap_family",
             "weak_sleeve",
             "weak_sleeve_finalists",
             "all",
@@ -188,6 +189,13 @@ def _external_config(name: str, interval: str) -> ext.ExternalStrategyConfig:
         "vwap2_k6": ("vwap_breakout_xs", 1200, 72, 72, 720, 24, 6, 2.0, True, 1440),
         "vwap15_k4": ("vwap_breakout_xs", 1200, 72, 72, 720, 24, 4, 1.5, True, 1440),
         "vwap12_k4": ("vwap_breakout_xs", 1200, 72, 72, 720, 24, 4, 1.2, True, 1440),
+        "vwap_g3_lb720_k1": ("vwap_breakout_xs", 720, 336, 168, 336, 24, 1, 3.0, False, 1440),
+        "vwap_g3_lb720_k2": ("vwap_breakout_xs", 720, 336, 168, 336, 24, 2, 3.0, False, 1440),
+        "vwap_g3_lb1200_k1": ("vwap_breakout_xs", 1200, 336, 168, 336, 24, 1, 3.0, False, 1440),
+        "vwap_g3_lb1200_k2": ("vwap_breakout_xs", 1200, 336, 168, 336, 24, 2, 3.0, False, 1440),
+        "vwap_g2_lb720_k1": ("vwap_breakout_xs", 720, 336, 168, 336, 24, 1, 2.0, False, 1440),
+        "vwap_g2_lb1200_k2": ("vwap_breakout_xs", 1200, 336, 168, 336, 24, 2, 2.0, False, 1440),
+        "donchian_g15_lb1200_k6": ("donchian_xs_long", 1200, 168, 168, 336, 24, 6, 1.5, True, 1440),
         "score15_k4": ("scorecard_breakout", 1200, 72, 168, 1200, 24, 4, 1.5, True, 1440),
         "score12_k4": ("scorecard_breakout", 1200, 72, 168, 720, 24, 4, 1.2, True, 1440),
         "score15_k6": ("scorecard_breakout", 1200, 72, 168, 720, 24, 6, 1.5, True, 1440),
@@ -587,6 +595,44 @@ def _cost_aware_candidate_mixes(interval: str) -> list[list[SleeveSpec]]:
                             _make_spec(names[3], fourth, interval),
                         ])
 
+    return _dedupe_mixes(mixes)
+
+
+def _vwap_family_candidate_mixes(interval: str) -> list[list[SleeveSpec]]:
+    mixes: list[list[SleeveSpec]] = []
+    g3_core = (
+        "vwap_g3_lb720_k1",
+        "vwap_g3_lb720_k2",
+        "vwap_g3_lb1200_k1",
+        "vwap_g3_lb1200_k2",
+    )
+    g2_core = ("vwap_g2_lb720_k1", "vwap_g2_lb1200_k2")
+    stabilizers = ("donchian_g15_lb1200_k6", "score15_k4")
+
+    for name in g3_core + g2_core + stabilizers:
+        mixes.append([_make_spec(name, 1.0, interval)])
+
+    mixes.append([_make_spec("vwap_g3_lb720_k1", 0.50, interval), _make_spec("vwap_g3_lb1200_k2", 0.50, interval)])
+    mixes.append([_make_spec("vwap_g3_lb720_k1", 0.50, interval), _make_spec("vwap_g3_lb720_k2", 0.50, interval)])
+    mixes.append([_make_spec("vwap_g3_lb1200_k1", 0.50, interval), _make_spec("vwap_g3_lb1200_k2", 0.50, interval)])
+    mixes.append([_make_spec("vwap_g2_lb720_k1", 0.50, interval), _make_spec("vwap_g2_lb1200_k2", 0.50, interval)])
+    mixes.append([_make_spec(name, 0.25, interval) for name in g3_core])
+    mixes.append([
+        _make_spec("vwap_g3_lb720_k1", 0.35, interval),
+        _make_spec("vwap_g3_lb1200_k2", 0.35, interval),
+        _make_spec("donchian_g15_lb1200_k6", 0.30, interval),
+    ])
+    mixes.append([
+        _make_spec("vwap_g3_lb720_k1", 0.30, interval),
+        _make_spec("vwap_g3_lb1200_k2", 0.30, interval),
+        _make_spec("donchian_g15_lb1200_k6", 0.20, interval),
+        _make_spec("score15_k4", 0.20, interval),
+    ])
+    mixes.append([
+        _make_spec("vwap_g2_lb720_k1", 0.35, interval),
+        _make_spec("vwap_g2_lb1200_k2", 0.35, interval),
+        _make_spec("donchian_g15_lb1200_k6", 0.30, interval),
+    ])
     return _dedupe_mixes(mixes)
 
 
@@ -1161,6 +1207,13 @@ def _summary(
     short_sum: float,
     by_year_start: dict[str, float],
     by_year_end: dict[str, float],
+    by_year_max_dd: dict[str, float],
+    by_quarter_start: dict[str, float],
+    by_quarter_end: dict[str, float],
+    by_quarter_max_dd: dict[str, float],
+    by_month_start: dict[str, float],
+    by_month_end: dict[str, float],
+    by_month_max_dd: dict[str, float],
     direction_counts: Counter[str],
     symbol_contribution_sum: dict[str, float],
     symbol_abs_exposure_sum: dict[str, float],
@@ -1178,6 +1231,8 @@ def _summary(
     total_return = equity - 1.0
     cagr = equity ** (1.0 / years) - 1.0 if equity > 0.0 else -1.0
     by_year = _period_returns(by_year_start, by_year_end)
+    by_quarter = _period_returns(by_quarter_start, by_quarter_end)
+    by_month = _period_returns(by_month_start, by_month_end)
     positive_year_fraction = sum(1 for value in by_year.values() if value > 0.0) / max(len(by_year), 1)
     calmar = cagr / max(max_dd, 1e-9) if max_dd > 0.0 else 0.0
     score = 0.0
@@ -1241,6 +1296,19 @@ def _summary(
         "funding_pnl_pct_simple_sum": round(funding_pnl * 100.0, 4),
         "positive_year_fraction": round(positive_year_fraction, 4),
         "by_year_return_pct": {year: round(value * 100.0, 4) for year, value in by_year.items()},
+        "by_year_max_drawdown_pct": {
+            year: round(value * 100.0, 4) for year, value in sorted(by_year_max_dd.items())
+        },
+        "by_quarter_return_pct": {
+            quarter: round(value * 100.0, 4) for quarter, value in by_quarter.items()
+        },
+        "by_quarter_max_drawdown_pct": {
+            quarter: round(value * 100.0, 4) for quarter, value in sorted(by_quarter_max_dd.items())
+        },
+        "by_month_return_pct": {month: round(value * 100.0, 4) for month, value in by_month.items()},
+        "by_month_max_drawdown_pct": {
+            month: round(value * 100.0, 4) for month, value in sorted(by_month_max_dd.items())
+        },
         "best_year_pct": round(max(by_year.values()) * 100.0, 4) if by_year else 0.0,
         "worst_year_pct": round(min(by_year.values()) * 100.0, 4) if by_year else 0.0,
         "direction_period_counts": dict(sorted(direction_counts.items())),
@@ -1312,6 +1380,13 @@ def _backtest_mix(
             short_sum=0.0,
             by_year_start={},
             by_year_end={},
+            by_year_max_dd={},
+            by_quarter_start={},
+            by_quarter_end={},
+            by_quarter_max_dd={},
+            by_month_start={},
+            by_month_end={},
+            by_month_max_dd={},
             direction_counts=Counter(),
             symbol_contribution_sum={symbol: 0.0 for symbol in frame.symbols},
             symbol_abs_exposure_sum={symbol: 0.0 for symbol in frame.symbols},
@@ -1343,6 +1418,16 @@ def _backtest_mix(
     last_period_ts: datetime | None = None
     by_year_start: dict[str, float] = {}
     by_year_end: dict[str, float] = {}
+    by_year_peak: dict[str, float] = {}
+    by_year_max_dd: dict[str, float] = {}
+    by_quarter_start: dict[str, float] = {}
+    by_quarter_end: dict[str, float] = {}
+    by_quarter_peak: dict[str, float] = {}
+    by_quarter_max_dd: dict[str, float] = {}
+    by_month_start: dict[str, float] = {}
+    by_month_end: dict[str, float] = {}
+    by_month_peak: dict[str, float] = {}
+    by_month_max_dd: dict[str, float] = {}
     direction_counts: Counter[str] = Counter()
     symbol_contribution_sum = {symbol: 0.0 for symbol in frame.symbols}
     symbol_abs_exposure_sum = {symbol: 0.0 for symbol in frame.symbols}
@@ -1557,10 +1642,29 @@ def _backtest_mix(
             direction_counts["net_short"] += 1
         else:
             direction_counts["market_neutral_or_flat"] += 1
-        year = str(frame.ts[exec_idx + 1].year)
+        period_ts = frame.ts[exec_idx + 1]
+        year = str(period_ts.year)
+        quarter = f"{period_ts.year}Q{((period_ts.month - 1) // 3) + 1}"
+        month = f"{period_ts.year}-{period_ts.month:02d}"
         by_year_start.setdefault(year, equity)
+        by_quarter_start.setdefault(quarter, equity)
+        by_month_start.setdefault(month, equity)
+        by_year_peak.setdefault(year, equity)
+        by_quarter_peak.setdefault(quarter, equity)
+        by_month_peak.setdefault(month, equity)
         equity = 1e-9 if net_return <= -0.999 else equity * (1.0 + net_return)
         by_year_end[year] = equity
+        by_quarter_end[quarter] = equity
+        by_month_end[month] = equity
+        by_year_peak[year] = max(by_year_peak[year], equity)
+        by_quarter_peak[quarter] = max(by_quarter_peak[quarter], equity)
+        by_month_peak[month] = max(by_month_peak[month], equity)
+        by_year_max_dd[year] = max(by_year_max_dd.get(year, 0.0), 1.0 - equity / max(by_year_peak[year], 1e-12))
+        by_quarter_max_dd[quarter] = max(
+            by_quarter_max_dd.get(quarter, 0.0),
+            1.0 - equity / max(by_quarter_peak[quarter], 1e-12),
+        )
+        by_month_max_dd[month] = max(by_month_max_dd.get(month, 0.0), 1.0 - equity / max(by_month_peak[month], 1e-12))
         peak = max(peak, equity)
         min_equity = min(min_equity, equity)
         max_dd = max(max_dd, 1.0 - equity / max(peak, 1e-12))
@@ -1594,6 +1698,13 @@ def _backtest_mix(
         short_sum=short_sum,
         by_year_start=by_year_start,
         by_year_end=by_year_end,
+        by_year_max_dd=by_year_max_dd,
+        by_quarter_start=by_quarter_start,
+        by_quarter_end=by_quarter_end,
+        by_quarter_max_dd=by_quarter_max_dd,
+        by_month_start=by_month_start,
+        by_month_end=by_month_end,
+        by_month_max_dd=by_month_max_dd,
         direction_counts=direction_counts,
         symbol_contribution_sum=symbol_contribution_sum,
         symbol_abs_exposure_sum=symbol_abs_exposure_sum,
@@ -1658,6 +1769,8 @@ def main() -> int:
         mixes = _adaptive_candidate_mixes(args.interval, profile_prefix="ov")
     elif args.candidate_set == "finalists":
         mixes = _finalist_candidate_mixes(args.interval)
+    elif args.candidate_set == "vwap_family":
+        mixes = _vwap_family_candidate_mixes(args.interval)
     elif args.candidate_set == "weak_sleeve":
         mixes = _weak_sleeve_candidate_mixes(args.interval)
     elif args.candidate_set == "weak_sleeve_finalists":
@@ -1670,6 +1783,7 @@ def main() -> int:
             + _cost_aware_candidate_mixes(args.interval)
             + _adaptive_candidate_mixes(args.interval)
             + _finalist_candidate_mixes(args.interval)
+            + _vwap_family_candidate_mixes(args.interval)
             + _weak_sleeve_candidate_mixes(args.interval)
             + _weak_sleeve_finalist_mixes(args.interval)
         )

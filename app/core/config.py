@@ -432,6 +432,9 @@ class Settings(BaseSettings):
     sizing_thesis_factor_one_active: float = 0.6
     sizing_thesis_factor_two_or_more: float = 0.0
     sizing_btc_sweep_reversal_long_factor: float = 0.85
+    nanyotti_rotation_method_enabled: bool = True
+    nanyotti_rotation_method_sizing_overlay_enabled: bool = True
+    nanyotti_rotation_method_sizing_overlay_apply_live: bool = False
     btc_sweep_reversal_limit_runtime_signal_shadow_tilt_enabled: bool = True
     btc_sweep_reversal_limit_runtime_signal_shadow_tilt_long_weaken_close_vs_ema_fast_atr: float = -0.6978
     btc_sweep_reversal_limit_runtime_signal_shadow_tilt_long_size_factor: float = 0.75

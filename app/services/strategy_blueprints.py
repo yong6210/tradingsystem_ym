@@ -199,6 +199,21 @@ STRATEGY_BLUEPRINTS: tuple[StrategyBlueprint, ...] = (
         current_status="Already implicit in many guards; should remain explicit in routing decisions.",
         next_validation_step="Keep as an explicit regime in future routing dashboards.",
     ),
+    StrategyBlueprint(
+        key="nanyotti_rotation_method_overlay",
+        display_name="Guard / Rotation Method Position-Control Overlay",
+        regimes=("trend", "transition", "range", "volatility_expansion"),
+        lifecycle="shadow",
+        thesis="Apply the Telegram-derived rotation method as a position-control contract: trend rescue, location quality, repair math, one-way defense, and switch discipline.",
+        trigger_event="Every generated plan receives a method view; no independent entry signal is created.",
+        confirmation="nanyotti_method_view writes market_state, scenario_plan, repair_decision, execution_policy, switch_policy, and shadow sizing overlay.",
+        preferred_entry_models=(),
+        exit_style="Reduce battle inventory on reaction; block trapped-average adds; switch only after new structure.",
+        risk_role="Risk overlay and no-trade discipline, not standalone alpha.",
+        thesis_collision_policy="Never additive; it can only reduce, block, or annotate the underlying strategy thesis until promoted.",
+        current_status="Shadow policy implemented in plan validity and strategy_sizing metadata.",
+        next_validation_step="Run future-blind backtests using method entry_quality and sizing overlay before any live application.",
+    ),
 )
 
 
