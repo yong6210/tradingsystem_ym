@@ -938,6 +938,7 @@ Start with `docs/STRATEGY_V2_BLUEPRINT.md` for the strategy lens, then `docs/STR
 - `docs/STRATEGY_V2_THESIS_FINGERPRINT_SPEC.md`
 - `docs/STRATEGY_V2_EXIT_EVENT_SCHEMA.md`
 - `docs/STRATEGY_V2_PBO_DSR_DESIGN.md`
+- `docs/INTRADAY_COMPOUND_SCALPER_RESEARCH.md`
 
 ### Operations
 

@@ -125,6 +125,9 @@ class MarketStateConfig:
     one_way_trim_context_window_bars: int = 288
     one_way_trim_context_cooldown_bars: int = 288
     one_way_trim_context_full_exit: bool = False
+    one_way_loss_fuse_min_adverse_reaction: float = 0.0
+    one_way_loss_fuse_cooldown_bars: int = 0
+    one_way_loss_fuse_size_mult: float = 1.0
     one_way_trim_full_exit_min_one_way_score: float = 0.0
     one_way_trim_full_exit_min_score_diff: int = 0
     trend_idle_probe_units: float = 0.0
@@ -132,8 +135,18 @@ class MarketStateConfig:
     trend_idle_min_reason_stack: int = 2
     trend_idle_cooldown_bars: int = 96
     trend_idle_max_extension_atr: float = 2.0
+    near_miss_probe_units: float = 0.0
+    near_miss_probe_min_score: int = 5
+    near_miss_probe_min_score_edge: int = 1
+    near_miss_probe_min_reason_stack: int = 1
+    near_miss_probe_cooldown_bars: int = 72
+    near_miss_probe_max_extension_atr: float = 1.75
+    near_miss_probe_failure_guard_count: int = 0
+    near_miss_probe_failure_guard_window_bars: int = 1440
+    near_miss_probe_failure_cooldown_bars: int = 0
     equity_circuit_breaker_drawdown_pct: float = 0.0
     equity_circuit_breaker_pause_bars: int = 0
+    equity_circuit_rearm_drawdown_pct: float = 0.0
     equity_soft_circuit_drawdown_pct: float = 0.0
     equity_soft_circuit_cooldown_bars: int = 0
     equity_soft_circuit_size_mult: float = 1.0
@@ -148,11 +161,27 @@ class MarketStateConfig:
     one_way_impulse_min_score_diff: int = 3
     one_way_impulse_cooldown_bars: int = 48
     one_way_impulse_max_extension_atr: float = 2.75
+    scenario_flip_units: float = 0.0
+    scenario_flip_min_score_edge: int = 1
+    scenario_flip_min_adverse_reaction: float = 0.45
+    scenario_flip_min_one_way_score: float = 1.85
+    scenario_flip_cooldown_bars: int = 24
+    scenario_flip_max_extension_atr: float = 2.75
+    winner_pyramid_units: float = 0.0
+    winner_pyramid_min_profit_reaction: float = 0.55
+    winner_pyramid_min_score: int = 6
+    winner_pyramid_min_reason_stack: int = 2
+    winner_pyramid_cooldown_bars: int = 24
+    winner_pyramid_max_units: float = 0.0
+    winner_pyramid_max_extension_atr: float = 2.75
     base_entry_max_extension_atr: float = 0.0
+    base_entry_max_extension_side: str = "both"
     base_entry_reduce_extension_atr: float = 0.0
     base_entry_reduce_size_mult: float = 1.0
     base_entry_reduce_promote_reaction: float = 0.0
     base_entry_reduce_max_trend_strength: float = 0.0
+    base_entry_reduce_min_trend_strength: float = 0.0
+    base_entry_reduce_side: str = "both"
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,9 +244,15 @@ class RotationMemory:
         self.one_way_trim_cluster_cooldown_until_idx = -1
         self.one_way_trim_context_indices: dict[str, list[int]] = {}
         self.one_way_trim_context_cooldown_until_idx: dict[str, int] = {}
+        self.one_way_loss_fuse_until_idx = -1
         self.last_one_way_reversal_switch_idx = -10**9
         self.last_one_way_impulse_probe_idx = -10**9
         self.last_trend_idle_probe_idx = -10**9
+        self.last_near_miss_probe_idx = -10**9
+        self.near_miss_probe_failure_indices: list[int] = []
+        self.near_miss_probe_failure_cooldown_until_idx = -1
+        self.last_scenario_flip_idx = -10**9
+        self.last_winner_pyramid_idx = -10**9
         self.last_defensive_trim_idx = -10**9
 
     def state(self, key: str, idx: int, retire_bars: int) -> str:
@@ -319,6 +354,44 @@ class RotationMemory:
         key = _context_quarantine_key(context)
         return bool(key) and idx <= self.one_way_trim_context_cooldown_until_idx.get(key, -1)
 
+    def trigger_one_way_loss_fuse(self, idx: int, *, cooldown_bars: int) -> None:
+        if cooldown_bars <= 0:
+            return
+        self.one_way_loss_fuse_until_idx = max(
+            self.one_way_loss_fuse_until_idx,
+            idx + int(cooldown_bars),
+        )
+
+    def in_one_way_loss_fuse(self, idx: int) -> bool:
+        return idx <= self.one_way_loss_fuse_until_idx
+
+    def record_near_miss_probe_failure(
+        self,
+        idx: int,
+        *,
+        guard_count: int,
+        window_bars: int,
+        cooldown_bars: int,
+    ) -> bool:
+        if guard_count <= 0 or cooldown_bars <= 0:
+            return False
+        cutoff = idx - max(1, int(window_bars))
+        self.near_miss_probe_failure_indices = [
+            item for item in self.near_miss_probe_failure_indices if item >= cutoff
+        ]
+        self.near_miss_probe_failure_indices.append(idx)
+        if len(self.near_miss_probe_failure_indices) < int(guard_count):
+            return False
+        self.near_miss_probe_failure_cooldown_until_idx = max(
+            self.near_miss_probe_failure_cooldown_until_idx,
+            idx + int(cooldown_bars),
+        )
+        self.near_miss_probe_failure_indices = []
+        return True
+
+    def in_near_miss_probe_failure_cooldown(self, idx: int) -> bool:
+        return idx <= self.near_miss_probe_failure_cooldown_until_idx
+
 
 CONTEXT_REACTION_TARGET_USD = 370.0
 CONTEXTUAL_SHORT_BASE_BLOCK_KST_HOURS = (5, 19, 23)
@@ -373,6 +446,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--one-way-trim-context-window-bars", type=int, default=288)
     parser.add_argument("--one-way-trim-context-cooldown-bars", type=int, default=288)
     parser.add_argument("--one-way-trim-context-full-exit", action="store_true")
+    parser.add_argument(
+        "--one-way-loss-fuse-min-adverse-reaction",
+        type=float,
+        default=0.0,
+        help=(
+            "Trigger a temporary base-entry size reduction after a one-way forced trim loses at least "
+            "this reaction multiple."
+        ),
+    )
+    parser.add_argument("--one-way-loss-fuse-cooldown-bars", type=int, default=0)
+    parser.add_argument("--one-way-loss-fuse-size-mult", type=float, default=1.0)
     parser.add_argument("--one-way-trim-full-exit-min-one-way-score", type=float, default=0.0)
     parser.add_argument("--one-way-trim-full-exit-min-score-diff", type=int, default=0)
     parser.add_argument("--trend-idle-probe-units", type=float, default=0.0)
@@ -380,8 +464,26 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--trend-idle-min-reason-stack", type=int, default=2)
     parser.add_argument("--trend-idle-cooldown-bars", type=int, default=96)
     parser.add_argument("--trend-idle-max-extension-atr", type=float, default=2.0)
+    parser.add_argument("--near-miss-probe-units", type=float, default=0.0)
+    parser.add_argument("--near-miss-probe-min-score", type=int, default=5)
+    parser.add_argument("--near-miss-probe-min-score-edge", type=int, default=1)
+    parser.add_argument("--near-miss-probe-min-reason-stack", type=int, default=1)
+    parser.add_argument("--near-miss-probe-cooldown-bars", type=int, default=72)
+    parser.add_argument("--near-miss-probe-max-extension-atr", type=float, default=1.75)
+    parser.add_argument("--near-miss-probe-failure-guard-count", type=int, default=0)
+    parser.add_argument("--near-miss-probe-failure-guard-window-bars", type=int, default=1440)
+    parser.add_argument("--near-miss-probe-failure-cooldown-bars", type=int, default=0)
     parser.add_argument("--equity-circuit-breaker-drawdown-pct", type=float, default=0.0)
     parser.add_argument("--equity-circuit-breaker-pause-bars", type=int, default=0)
+    parser.add_argument(
+        "--equity-circuit-rearm-drawdown-pct",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional drawdown threshold that re-arms a hard equity circuit after it has fired. "
+            "When set, repeated flat-period re-triggers are blocked until drawdown recovers to this level."
+        ),
+    )
     parser.add_argument("--equity-soft-circuit-drawdown-pct", type=float, default=0.0)
     parser.add_argument("--equity-soft-circuit-cooldown-bars", type=int, default=0)
     parser.add_argument("--equity-soft-circuit-size-mult", type=float, default=1.0)
@@ -396,11 +498,30 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--one-way-impulse-min-score-diff", type=int, default=3)
     parser.add_argument("--one-way-impulse-cooldown-bars", type=int, default=48)
     parser.add_argument("--one-way-impulse-max-extension-atr", type=float, default=2.75)
+    parser.add_argument("--scenario-flip-units", type=float, default=0.0)
+    parser.add_argument("--scenario-flip-min-score-edge", type=int, default=1)
+    parser.add_argument("--scenario-flip-min-adverse-reaction", type=float, default=0.45)
+    parser.add_argument("--scenario-flip-min-one-way-score", type=float, default=1.85)
+    parser.add_argument("--scenario-flip-cooldown-bars", type=int, default=24)
+    parser.add_argument("--scenario-flip-max-extension-atr", type=float, default=2.75)
+    parser.add_argument("--winner-pyramid-units", type=float, default=0.0)
+    parser.add_argument("--winner-pyramid-min-profit-reaction", type=float, default=0.55)
+    parser.add_argument("--winner-pyramid-min-score", type=int, default=6)
+    parser.add_argument("--winner-pyramid-min-reason-stack", type=int, default=2)
+    parser.add_argument("--winner-pyramid-cooldown-bars", type=int, default=24)
+    parser.add_argument("--winner-pyramid-max-units", type=float, default=0.0)
+    parser.add_argument("--winner-pyramid-max-extension-atr", type=float, default=2.75)
     parser.add_argument(
         "--base-entry-max-extension-atr",
         type=float,
         default=0.0,
         help="Optional cap for with-trend base entries that are already extended from the execution EMA.",
+    )
+    parser.add_argument(
+        "--base-entry-max-extension-side",
+        choices=("both", "long", "short"),
+        default="both",
+        help="Side filter for --base-entry-max-extension-atr.",
     )
     parser.add_argument(
         "--base-entry-reduce-extension-atr",
@@ -425,6 +546,18 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Only shrink late with-trend base entries when HTF trend strength is at or below this value.",
+    )
+    parser.add_argument(
+        "--base-entry-reduce-min-trend-strength",
+        type=float,
+        default=0.0,
+        help="Only shrink late with-trend base entries when HTF trend strength is at or above this value.",
+    )
+    parser.add_argument(
+        "--base-entry-reduce-side",
+        choices=("both", "long", "short"),
+        default="both",
+        help="Side filter for late with-trend base-entry size reduction.",
     )
     parser.add_argument("--defensive-trim-cooldown-bars", type=int, default=12960)
     parser.add_argument("--reaction-trim-trigger", type=float, default=0.55)
@@ -555,7 +688,7 @@ def _context_quarantine_key(context: str) -> str:
     parts = [part for part in str(context or "").split("|") if part]
     if not parts:
         return ""
-    if parts[-1] == "late_base_reduce":
+    while parts and parts[-1] in {"late_base_reduce", "loss_fuse_reduce"}:
         parts = parts[:-1]
     return "|".join(parts)
 
@@ -1138,6 +1271,7 @@ def _zone_plan(
             long_stage == "base"
             and long_score >= short_score
             and market.bias == 1
+            and config.base_entry_max_extension_side in {"both", "long"}
             and extension_atr > base_extension_cap
         ):
             no_trade_reasons.append("MC57_late_extended_long_base")
@@ -1145,6 +1279,7 @@ def _zone_plan(
             short_stage == "base"
             and short_score >= long_score
             and market.bias == -1
+            and config.base_entry_max_extension_side in {"both", "short"}
             and extension_atr > base_extension_cap
         ):
             no_trade_reasons.append("MC58_late_extended_short_base")
@@ -1222,6 +1357,20 @@ def _entry_size_multiplier(config: MarketStateConfig, market: MarketState, side:
     if market.one_way_side == -side:
         multiplier *= config.one_way_against_size_mult
     return _clamp(multiplier, 0.10, 1.0)
+
+
+def _has_hard_no_trade_reasons(no_trade_reasons: tuple[str, ...]) -> bool:
+    return any(
+        reason.startswith("MC48")
+        or reason
+        in {
+            "MC04_bad_rr_center",
+            "MC27_time_event_chase_risk",
+            "MC31_unconfirmed_breakout_volume",
+            "MC32_quiet_tape",
+        }
+        for reason in no_trade_reasons
+    )
 
 
 def _recovery_price(book: PositionBook) -> float:
@@ -1876,6 +2025,11 @@ def _apply_decision(
 ) -> None:
     ts = features.ts[exec_idx]
     entry_risk_mult = _clamp(risk_size_mult, 0.0, 1.0)
+    one_way_loss_fuse_size_mult = (
+        _clamp(config.one_way_loss_fuse_size_mult, 0.0, 1.0)
+        if memory.in_one_way_loss_fuse(exec_idx)
+        else 1.0
+    )
     atr = max(features.atr[sig_idx], 1e-12)
     close = features.c[sig_idx]
     expected_reaction = zone.expected_reaction_usd
@@ -2009,25 +2163,39 @@ def _apply_decision(
             if (
                 role == "base"
                 and config.base_entry_reduce_extension_atr > 0.0
+                and config.base_entry_reduce_side in {"both", _side_label(zone.side)}
                 and market.bias == zone.side
                 and zone.chase_extension_atr > max(0.1, float(config.base_entry_reduce_extension_atr))
                 and (
                     config.base_entry_reduce_max_trend_strength <= 0.0
                     or market.trend_strength <= config.base_entry_reduce_max_trend_strength
                 )
+                and (
+                    config.base_entry_reduce_min_trend_strength <= 0.0
+                    or market.trend_strength >= config.base_entry_reduce_min_trend_strength
+                )
             ):
                 late_base_size_mult = _clamp(config.base_entry_reduce_size_mult, 0.0, 1.0)
             late_base_reduced = late_base_size_mult < 1.0 - 1e-12
+            loss_fuse_reduced = role == "base" and one_way_loss_fuse_size_mult < 1.0 - 1e-12
             qty = min(
-                base_qty * _entry_size_multiplier(config, market, zone.side) * late_base_size_mult * entry_risk_mult,
+                base_qty
+                * _entry_size_multiplier(config, market, zone.side)
+                * late_base_size_mult
+                * (one_way_loss_fuse_size_mult if role == "base" else 1.0)
+                * entry_risk_mult,
                 config.max_possible_units,
             )
             if qty <= 1e-12:
+                if loss_fuse_reduced:
+                    counters["one_way_loss_fuse_base_blocks"] += 1
                 return
             reasons = zone.long_reasons if zone.side > 0 else zone.short_reasons
             zone_context = _zone_context_key(side=zone.side, role=role, market=market, zone=zone)
             if late_base_reduced:
                 zone_context += "|late_base_reduce"
+            if loss_fuse_reduced:
+                zone_context += "|loss_fuse_reduce"
             if memory.in_one_way_trim_context_cooldown(zone_context, exec_idx):
                 counters["one_way_trim_context_entry_blocks"] += 1
                 return
@@ -2045,6 +2213,8 @@ def _apply_decision(
             memory.touch(zone.active_zone_key, exec_idx)
             memory.failed_rescue_count = 0
             counters[f"{role}_adds"] += 1
+            if loss_fuse_reduced:
+                counters["one_way_loss_fuse_base_reduced_adds"] += 1
             if role == "battle":
                 counters["battle_primary_adds"] += 1
             _record_event(
@@ -2072,8 +2242,114 @@ def _apply_decision(
                     "trend_strength": round(market.trend_strength, 4),
                     "execution_context": zone.execution_context,
                     "late_base_size_mult": round(late_base_size_mult, 4),
+                    "one_way_loss_fuse_size_mult": round(
+                        one_way_loss_fuse_size_mult if role == "base" else 1.0,
+                        4,
+                    ),
                 },
             )
+        if book.side == 0 and config.near_miss_probe_units > 1e-12:
+            soft_no_trade_reasons = {"MC12_low_confluence", "MC04_no_clear_first_touch"}
+            blockers = set(zone.no_trade_reasons)
+            near_miss_side = 0
+            score_edge = 0
+            if zone.long_score > zone.short_score:
+                near_miss_side = 1
+                score_edge = zone.long_score - zone.short_score
+            elif zone.short_score > zone.long_score:
+                near_miss_side = -1
+                score_edge = zone.short_score - zone.long_score
+            elif config.near_miss_probe_min_score_edge <= 0 and market.bias:
+                near_miss_side = market.bias
+                score_edge = 0
+            near_miss_score = zone.long_score if near_miss_side > 0 else zone.short_score if near_miss_side < 0 else 0
+            near_miss_reason_stack = (
+                zone.long_reason_stack
+                if near_miss_side > 0
+                else zone.short_reason_stack
+                if near_miss_side < 0
+                else 0
+            )
+            near_miss_reasons = (
+                zone.long_reasons if near_miss_side > 0 else zone.short_reasons if near_miss_side < 0 else tuple()
+            )
+            near_miss_zone_key = (
+                zone.long_zone_key if near_miss_side > 0 else zone.short_zone_key if near_miss_side < 0 else ""
+            )
+            near_miss_zone_state = memory.state(near_miss_zone_key, exec_idx, config.zone_retire_bars)
+            near_miss_ready = (
+                bool(blockers)
+                and blockers.issubset(soft_no_trade_reasons)
+                and near_miss_side != 0
+                and near_miss_score >= config.near_miss_probe_min_score
+                and score_edge >= config.near_miss_probe_min_score_edge
+                and near_miss_reason_stack >= config.near_miss_probe_min_reason_stack
+                and near_miss_zone_state != "retired"
+                and _scenario_allows_side(config, market, near_miss_side)
+                and market.bias in {0, near_miss_side}
+                and market.one_way_side != -near_miss_side
+                and not market.bad_rr
+                and not memory.in_cooldown(near_miss_side, exec_idx)
+                and not memory.in_near_miss_probe_failure_cooldown(exec_idx)
+                and zone.chase_extension_atr <= config.near_miss_probe_max_extension_atr
+                and exec_idx - memory.last_near_miss_probe_idx > config.near_miss_probe_cooldown_bars
+                and _kst_hour(ts) not in config.blocked_kst_entry_hours
+            )
+            if near_miss_ready:
+                qty = min(
+                    config.near_miss_probe_units
+                    * _entry_size_multiplier(config, market, near_miss_side)
+                    * entry_risk_mult,
+                    config.max_possible_units,
+                )
+                if qty > 1e-12:
+                    zone_context = _zone_context_key(side=near_miss_side, role="probe", market=market, zone=zone)
+                    zone_context += "|near_miss"
+                    if memory.in_one_way_trim_context_cooldown(zone_context, exec_idx):
+                        counters["one_way_trim_context_entry_blocks"] += 1
+                        return
+                    _add_lot(
+                        book=book,
+                        side=near_miss_side,
+                        qty=qty,
+                        price=exec_price,
+                        exec_idx=exec_idx,
+                        role="probe",
+                        zone_score=near_miss_score,
+                        zone_reasons=near_miss_reasons,
+                        zone_context=zone_context,
+                    )
+                    memory.touch(near_miss_zone_key, exec_idx)
+                    memory.failed_rescue_count = 0
+                    memory.last_near_miss_probe_idx = exec_idx
+                    counters["probe_adds"] += 1
+                    counters["near_miss_probe_adds"] += 1
+                    _record_event(
+                        events,
+                        ts=ts,
+                        action="add",
+                        side=near_miss_side,
+                        qty=qty,
+                        price=exec_price,
+                        reason="near_miss_probe_entry",
+                        equity=equity,
+                        extra={
+                            "role": "probe",
+                            "zone_score": near_miss_score,
+                            "score_edge": score_edge,
+                            "reason_stack": near_miss_reason_stack,
+                            "zone_key": near_miss_zone_key,
+                            "zone_state": near_miss_zone_state,
+                            "side_alignment": _side_alignment(market, near_miss_side),
+                            "regime": market.regime,
+                            "market": ",".join(market.reasons[:4]),
+                            "zone": ",".join(near_miss_reasons[:4]),
+                            "soft_no_trade": ",".join(zone.no_trade_reasons),
+                            "zone_context": zone_context,
+                            "chase_extension_atr": round(zone.chase_extension_atr, 4),
+                            "execution_context": zone.execution_context,
+                        },
+                    )
         if book.side == 0 and config.trend_idle_probe_units > 1e-12:
             idle_reason_stack = zone.long_reason_stack if zone.side > 0 else zone.short_reason_stack if zone.side < 0 else 0
             idle_reasons = zone.long_reasons if zone.side > 0 else zone.short_reasons if zone.side < 0 else tuple()
@@ -2156,17 +2432,7 @@ def _apply_decision(
                 impulse_reasons = market.reasons
             impulse_has_chase_break = any(reason.startswith("trend_chase") for reason in impulse_reasons)
             impulse_zone_key = zone.long_zone_key if impulse_side > 0 else zone.short_zone_key if impulse_side < 0 else ""
-            hard_no_trade = any(
-                reason.startswith("MC48")
-                or reason
-                in {
-                    "MC04_bad_rr_center",
-                    "MC27_time_event_chase_risk",
-                    "MC31_unconfirmed_breakout_volume",
-                    "MC32_quiet_tape",
-                }
-                for reason in zone.no_trade_reasons
-            )
+            hard_no_trade = _has_hard_no_trade_reasons(zone.no_trade_reasons)
             impulse_ready = (
                 impulse_side != 0
                 and market.bias == impulse_side
@@ -2259,6 +2525,96 @@ def _apply_decision(
     one_way_against = market.one_way_side == opposite_side
     min_cut_units = _min_cut_units(config)
     defensive_trim_ready = exec_idx - memory.last_defensive_trim_idx > config.defensive_trim_cooldown_bars
+    hard_no_trade = _has_hard_no_trade_reasons(zone.no_trade_reasons)
+
+    opposite_one_way_flip = (
+        market.one_way_side == opposite_side
+        and market.one_way_score >= max(0.0, float(config.scenario_flip_min_one_way_score))
+    )
+    opposite_bias_flip = market.bias == opposite_side
+    scenario_flip_ready = (
+        config.scenario_flip_units > 1e-12
+        and config.switch_enabled
+        and (opposite_one_way_flip or opposite_bias_flip)
+        and (_scenario_allows_side(config, market, opposite_side) or opposite_one_way_flip)
+        and adverse_usd >= expected_reaction * max(0.0, float(config.scenario_flip_min_adverse_reaction))
+        and opposite_score >= max(config.entry_score, same_score + config.scenario_flip_min_score_edge)
+        and zone.chase_extension_atr <= max(0.1, float(config.scenario_flip_max_extension_atr))
+        and not market.bad_rr
+        and not hard_no_trade
+        and not memory.in_cooldown(opposite_side, exec_idx)
+        and exec_idx - memory.last_scenario_flip_idx > config.scenario_flip_cooldown_bars
+        and memory.state(opposite_zone_key, exec_idx, config.zone_retire_bars) != "retired"
+    )
+    if scenario_flip_ready:
+        reasons = zone.short_reasons if opposite_side < 0 else zone.long_reasons
+        zone_context = _zone_context_key(side=opposite_side, role="probe", market=market, zone=zone)
+        if memory.in_one_way_trim_context_cooldown(zone_context, exec_idx):
+            counters["scenario_failure_flip_context_blocks"] += 1
+        else:
+            old_qty = book.qty
+            removed = book.remove(qty=book.qty, price=exec_price, role_priority=("battle", "chase", "base", "probe"))
+            _exit_removed_lots(
+                events=events,
+                removed=removed,
+                ts=ts,
+                action="remove",
+                reason="scenario_failure_forced_flip_exit",
+                equity=equity,
+            )
+            memory.invalidate(same_zone_key, exec_idx)
+            memory.cooldown(side, exec_idx, max(1, config.cooldown_after_loss_bars // 2))
+            memory.last_scenario_flip_idx = exec_idx
+            counters["scenario_failure_flips"] += 1
+            switch_qty = min(
+                config.scenario_flip_units
+                * _entry_size_multiplier(config, market, opposite_side)
+                * entry_risk_mult,
+                config.max_possible_units,
+            )
+            if switch_qty > 1e-12:
+                _add_lot(
+                    book=book,
+                    side=opposite_side,
+                    qty=switch_qty,
+                    price=exec_price,
+                    exec_idx=exec_idx,
+                    role="probe",
+                    zone_score=opposite_score,
+                    zone_reasons=reasons,
+                    zone_context=zone_context,
+                )
+                memory.touch(opposite_zone_key, exec_idx)
+                memory.failed_rescue_count = 0
+                counters["switches"] += 1
+                counters["probe_adds"] += 1
+                counters["scenario_failure_flip_entries"] += 1
+                _record_event(
+                    events,
+                    ts=ts,
+                    action="add",
+                    side=opposite_side,
+                    qty=switch_qty,
+                    price=exec_price,
+                    reason="scenario_failure_flip_switch_entry",
+                    equity=equity,
+                    extra={
+                        "role": "probe",
+                        "old_qty": round(old_qty, 4),
+                        "zone_score": opposite_score,
+                        "same_score": same_score,
+                        "score_edge": opposite_score - same_score,
+                        "one_way_score": round(market.one_way_score, 4),
+                        "adverse_reaction": round(adverse_usd / max(expected_reaction, 1e-12), 4),
+                        "repair_efficiency": round(repair_eff, 4),
+                        "zone_context": zone_context,
+                        "side_alignment": _side_alignment(market, opposite_side),
+                        "regime": market.regime,
+                    },
+                )
+            else:
+                counters["switch_flat_only"] += 1
+            return
 
     one_way_trim_ready = (
         one_way_against
@@ -2356,6 +2712,39 @@ def _apply_decision(
                     equity=equity,
                 )
                 counters["one_way_trim_context_quarantine_exits"] += 1
+        if (
+            config.one_way_loss_fuse_min_adverse_reaction > 0.0
+            and config.one_way_loss_fuse_cooldown_bars > 0
+            and config.one_way_loss_fuse_size_mult < 1.0 - 1e-12
+            and adverse_usd
+            >= max(expected_reaction, 1e-12) * max(0.0, float(config.one_way_loss_fuse_min_adverse_reaction))
+        ):
+            fuse_was_active = memory.in_one_way_loss_fuse(exec_idx)
+            memory.trigger_one_way_loss_fuse(
+                exec_idx,
+                cooldown_bars=config.one_way_loss_fuse_cooldown_bars,
+            )
+            counters["one_way_loss_fuse_triggers"] += 1
+            if not fuse_was_active:
+                counters["one_way_loss_fuse_activations"] += 1
+            _record_event(
+                events,
+                ts=ts,
+                action="risk",
+                side=side,
+                qty=0.0,
+                price=exec_price,
+                reason="one_way_loss_fuse_trigger",
+                equity=equity,
+                extra={
+                    "adverse_usd": round(adverse_usd, 4),
+                    "expected_reaction": round(expected_reaction, 4),
+                    "min_adverse_reaction": round(config.one_way_loss_fuse_min_adverse_reaction, 4),
+                    "cooldown_bars": int(config.one_way_loss_fuse_cooldown_bars),
+                    "size_mult": round(_clamp(config.one_way_loss_fuse_size_mult, 0.0, 1.0), 4),
+                    "was_active": bool(fuse_was_active),
+                },
+            )
         if config.one_way_trim_retire_same_zone:
             memory.invalidate(same_zone_key, exec_idx)
         if config.one_way_trim_same_side_cooldown_bars > 0:
@@ -2368,10 +2757,20 @@ def _apply_decision(
         if reversal_candidate and book.side == 0 and not switch_ready:
             counters["one_way_trim_cluster_switch_blocks"] += 1
         if switch_ready:
+            enhanced_scenario_flip_switch = (
+                config.scenario_flip_units > config.one_way_reversal_switch_units + 1e-12
+                and opposite_one_way_flip
+                and adverse_usd >= expected_reaction * max(0.0, float(config.scenario_flip_min_adverse_reaction))
+                and zone.chase_extension_atr <= max(0.1, float(config.scenario_flip_max_extension_atr))
+                and exec_idx - memory.last_scenario_flip_idx > config.scenario_flip_cooldown_bars
+            )
+            switch_units = (
+                config.scenario_flip_units
+                if enhanced_scenario_flip_switch
+                else config.one_way_reversal_switch_units
+            )
             switch_qty = min(
-                config.one_way_reversal_switch_units
-                * _entry_size_multiplier(config, market, opposite_side)
-                * entry_risk_mult,
+                switch_units * _entry_size_multiplier(config, market, opposite_side) * entry_risk_mult,
                 config.max_possible_units,
             )
             if switch_qty > 1e-12:
@@ -2393,6 +2792,10 @@ def _apply_decision(
                 memory.last_one_way_reversal_switch_idx = exec_idx
                 counters["switches"] += 1
                 counters["one_way_reversal_switches"] += 1
+                if enhanced_scenario_flip_switch:
+                    memory.last_scenario_flip_idx = exec_idx
+                    counters["scenario_failure_flips"] += 1
+                    counters["scenario_failure_flip_entries"] += 1
                 _record_event(
                     events,
                     ts=ts,
@@ -2400,7 +2803,11 @@ def _apply_decision(
                     side=opposite_side,
                     qty=switch_qty,
                     price=exec_price,
-                    reason="one_way_forced_trim_reversal_switch",
+                    reason=(
+                        "scenario_failure_flip_switch_entry"
+                        if enhanced_scenario_flip_switch
+                        else "one_way_forced_trim_reversal_switch"
+                    ),
                     equity=equity,
                     extra={
                         "role": "probe",
@@ -2410,6 +2817,7 @@ def _apply_decision(
                         "one_way_score": round(market.one_way_score, 4),
                         "repair_efficiency": round(repair_eff, 4),
                         "zone_context": zone_context,
+                        "switch_units": round(switch_units, 4),
                     },
                 )
         return
@@ -2486,6 +2894,8 @@ def _apply_decision(
             memory.react(same_zone_key, exec_idx)
             memory.failed_rescue_count = 0
             counters["probe_reaction_exits"] += 1
+            if any("near_miss" in str(lot.zone_context) for lot in removed):
+                counters["near_miss_probe_reaction_exits"] += 1
             return
         if probe_adverse >= expected_reaction * config.probe_stop_reaction or (
             probe_age >= config.probe_max_bars and probe_favorable < 0.0
@@ -2502,6 +2912,15 @@ def _apply_decision(
             memory.failed_rescue_count += 1
             memory.cooldown(side, exec_idx, config.cooldown_after_loss_bars)
             counters["probe_failed_fast_exits"] += 1
+            if any("near_miss" in str(lot.zone_context) for lot in removed):
+                counters["near_miss_probe_failed_fast_exits"] += 1
+                if memory.record_near_miss_probe_failure(
+                    exec_idx,
+                    guard_count=config.near_miss_probe_failure_guard_count,
+                    window_bars=config.near_miss_probe_failure_guard_window_bars,
+                    cooldown_bars=config.near_miss_probe_failure_cooldown_bars,
+                ):
+                    counters["near_miss_probe_failure_cooldown_triggers"] += 1
             if book.side == 0:
                 memory.invalidate(same_zone_key, exec_idx)
             return
@@ -2533,9 +2952,15 @@ def _apply_decision(
             and memory.state(same_zone_key, exec_idx, config.zone_retire_bars) != "retired"
         )
         if promotion_ready:
-            qty = min(promotion_missing, config.base_add_units * (1.0 - reduced_mult) * entry_risk_mult, capacity)
+            qty = min(
+                promotion_missing,
+                config.base_add_units * (1.0 - reduced_mult) * entry_risk_mult * one_way_loss_fuse_size_mult,
+                capacity,
+            )
             if qty > 1e-12:
                 zone_context = _zone_context_key(side=side, role="base", market=market, zone=zone)
+                if one_way_loss_fuse_size_mult < 1.0 - 1e-12:
+                    zone_context += "|loss_fuse_reduce"
                 _add_lot(
                     book=book,
                     side=side,
@@ -2551,6 +2976,8 @@ def _apply_decision(
                 memory.failed_rescue_count = 0
                 counters["base_adds"] += 1
                 counters["late_base_promotion_adds"] += 1
+                if one_way_loss_fuse_size_mult < 1.0 - 1e-12:
+                    counters["one_way_loss_fuse_base_reduced_adds"] += 1
                 _record_event(
                     events,
                     ts=ts,
@@ -2578,12 +3005,96 @@ def _apply_decision(
                         "promote_reaction": round(config.base_entry_reduce_promote_reaction, 4),
                         "chase_extension_atr": round(zone.chase_extension_atr, 4),
                         "execution_context": zone.execution_context,
+                        "one_way_loss_fuse_size_mult": round(one_way_loss_fuse_size_mult, 4),
+                    },
+                )
+                return
+
+    winner_target_units = (
+        min(config.winner_pyramid_max_units, config.max_possible_units)
+        if config.winner_pyramid_max_units > 1e-12
+        else config.max_possible_units
+    )
+    winner_capacity = min(capacity, max(winner_target_units - book.qty, 0.0))
+    favorable_from_avg = side * (close - avg)
+    favorable_from_last_entry = side * (close - last_entry)
+    winner_trend_alive = market.bias == side or (
+        market.one_way_side == side and market.one_way_score >= max(0.0, float(config.chase_min_one_way_score))
+    )
+    winner_pyramid_ready = (
+        config.winner_pyramid_units > 1e-12
+        and winner_capacity > 1e-12
+        and winner_trend_alive
+        and favorable_from_avg >= expected_reaction * max(0.0, float(config.winner_pyramid_min_profit_reaction))
+        and favorable_from_last_entry >= expected_reaction * 0.10
+        and same_score >= config.winner_pyramid_min_score
+        and same_reason_stack >= config.winner_pyramid_min_reason_stack
+        and scenario_allows_current
+        and not one_way_against
+        and not market.bad_rr
+        and not hard_no_trade
+        and zone.chase_extension_atr <= max(0.1, float(config.winner_pyramid_max_extension_atr))
+        and not memory.in_cooldown(side, exec_idx)
+        and exec_idx - memory.last_winner_pyramid_idx > config.winner_pyramid_cooldown_bars
+        and memory.state(same_zone_key, exec_idx, config.zone_retire_bars) != "retired"
+    )
+    if winner_pyramid_ready:
+        qty = min(
+            config.winner_pyramid_units * _entry_size_multiplier(config, market, side) * entry_risk_mult,
+            winner_capacity,
+        )
+        if qty > 1e-12:
+            zone_context = _zone_context_key(side=side, role="chase", market=market, zone=zone)
+            if memory.in_one_way_trim_context_cooldown(zone_context, exec_idx):
+                counters["winner_pyramid_context_blocks"] += 1
+            else:
+                _add_lot(
+                    book=book,
+                    side=side,
+                    qty=qty,
+                    price=exec_price,
+                    exec_idx=exec_idx,
+                    role="chase",
+                    zone_score=same_score,
+                    zone_reasons=same_reasons,
+                    zone_context=zone_context,
+                )
+                memory.touch(same_zone_key, exec_idx)
+                memory.failed_rescue_count = 0
+                memory.last_winner_pyramid_idx = exec_idx
+                counters["chase_adds"] += 1
+                counters["winner_pyramid_adds"] += 1
+                _record_event(
+                    events,
+                    ts=ts,
+                    action="add",
+                    side=side,
+                    qty=qty,
+                    price=exec_price,
+                    reason="winner_pyramid_add",
+                    equity=equity,
+                    extra={
+                        "role": "chase",
+                        "zone_score": same_score,
+                        "reason_stack": same_reason_stack,
+                        "zone_key": same_zone_key,
+                        "side_alignment": _side_alignment(market, side),
+                        "regime": market.regime,
+                        "market": ",".join(market.reasons[:4]),
+                        "zone": ",".join(same_reasons[:4]),
+                        "zone_context": zone_context,
+                        "favorable_reaction": round(favorable_from_avg / max(expected_reaction, 1e-12), 4),
+                        "favorable_from_last_reaction": round(
+                            favorable_from_last_entry / max(expected_reaction, 1e-12),
+                            4,
+                        ),
+                        "chase_extension_atr": round(zone.chase_extension_atr, 4),
+                        "target_units": round(winner_target_units, 4),
                     },
                 )
                 return
 
     reaction_roles_qty = _role_qty(book, "battle") + _role_qty(book, "chase") + _role_qty(book, "base")
-    favorable_from_last_entry = side * (close - last_entry)
     near_recovery_band = abs(recovery - close) <= expected_reaction * config.reaction_avg_band
     if (
         reaction_roles_qty > 1e-12
@@ -2769,12 +3280,17 @@ def _apply_decision(
         and memory.state(same_zone_key, exec_idx, config.zone_retire_bars) != "retired"
     ):
         qty = min(
-            config.base_add_units * _entry_size_multiplier(config, market, side) * entry_risk_mult,
+            config.base_add_units
+            * _entry_size_multiplier(config, market, side)
+            * one_way_loss_fuse_size_mult
+            * entry_risk_mult,
             config.base_max_units - book.qty,
             capacity,
         )
         if qty > 1e-12:
             zone_context = _zone_context_key(side=side, role="base", market=market, zone=zone)
+            if one_way_loss_fuse_size_mult < 1.0 - 1e-12:
+                zone_context += "|loss_fuse_reduce"
             _add_lot(
                 book=book,
                 side=side,
@@ -2788,6 +3304,8 @@ def _apply_decision(
             )
             memory.touch(same_zone_key, exec_idx)
             counters["base_adds"] += 1
+            if one_way_loss_fuse_size_mult < 1.0 - 1e-12:
+                counters["one_way_loss_fuse_base_reduced_adds"] += 1
             _record_event(
                 events,
                 ts=ts,
@@ -2804,6 +3322,7 @@ def _apply_decision(
                     "zone_key": same_zone_key,
                     "side_alignment": _side_alignment(market, side),
                     "zone_context": zone_context,
+                    "one_way_loss_fuse_size_mult": round(one_way_loss_fuse_size_mult, 4),
                 },
             )
             return
@@ -3021,6 +3540,7 @@ def backtest_config(
     modeled_carry_cost_fraction_sum = 0.0
     regime_stats: dict[str, dict[str, Any]] = {}
     equity_circuit_pause_until_idx = -1
+    equity_circuit_armed = True
     equity_soft_circuit_cooldown_until_idx = -1
     equity_soft_circuit_force_exit_pending = False
 
@@ -3226,14 +3746,37 @@ def backtest_config(
         min_equity = min(min_equity, equity)
         gross_min_equity = min(gross_min_equity, gross_equity)
         if peak > 0.0:
-            max_drawdown = max(max_drawdown, 1.0 - equity / peak)
+            drawdown = 1.0 - equity / peak
+            max_drawdown = max(max_drawdown, drawdown)
+            circuit_rearm_drawdown = max(float(config.equity_circuit_rearm_drawdown_pct), 0.0) / 100.0
+            circuit_rearm_enabled = circuit_rearm_drawdown > 0.0
+            if circuit_rearm_enabled and not equity_circuit_armed and drawdown <= circuit_rearm_drawdown:
+                equity_circuit_armed = True
+                counters["equity_circuit_breaker_rearmed"] += 1
+                _record_event(
+                    events,
+                    ts=features.ts[exec_idx],
+                    action="risk",
+                    side=book.side,
+                    qty=book.qty,
+                    price=exec_price,
+                    reason="equity_circuit_breaker_rearmed",
+                    equity=equity,
+                    extra={
+                        "drawdown_pct": round(drawdown * 100.0, 4),
+                        "rearm_drawdown_pct": round(circuit_rearm_drawdown * 100.0, 4),
+                    },
+                )
             if (
                 config.equity_circuit_breaker_drawdown_pct > 0.0
                 and config.equity_circuit_breaker_pause_bars > 0
-                and 1.0 - equity / peak >= config.equity_circuit_breaker_drawdown_pct / 100.0
+                and drawdown >= config.equity_circuit_breaker_drawdown_pct / 100.0
                 and exec_idx > equity_circuit_pause_until_idx
+                and (not circuit_rearm_enabled or equity_circuit_armed)
             ):
                 equity_circuit_pause_until_idx = exec_idx + config.equity_circuit_breaker_pause_bars
+                if circuit_rearm_enabled:
+                    equity_circuit_armed = False
                 counters["equity_circuit_breaker_triggers"] += 1
                 _record_event(
                     events,
@@ -3245,8 +3788,9 @@ def backtest_config(
                     reason="equity_circuit_breaker_trigger",
                     equity=equity,
                     extra={
-                        "drawdown_pct": round((1.0 - equity / peak) * 100.0, 4),
+                        "drawdown_pct": round(drawdown * 100.0, 4),
                         "pause_bars": int(config.equity_circuit_breaker_pause_bars),
+                        "rearm_drawdown_pct": round(circuit_rearm_drawdown * 100.0, 4),
                     },
                 )
             if (
@@ -3256,7 +3800,7 @@ def backtest_config(
                     config.equity_soft_circuit_force_flat
                     or config.equity_soft_circuit_size_mult < 1.0 - 1e-12
                 )
-                and 1.0 - equity / peak >= config.equity_soft_circuit_drawdown_pct / 100.0
+                and drawdown >= config.equity_soft_circuit_drawdown_pct / 100.0
                 and exec_idx > equity_soft_circuit_cooldown_until_idx
             ):
                 equity_soft_circuit_cooldown_until_idx = exec_idx + config.equity_soft_circuit_cooldown_bars
@@ -3429,6 +3973,9 @@ def build_configs(
     one_way_trim_context_window_bars: int,
     one_way_trim_context_cooldown_bars: int,
     one_way_trim_context_full_exit: bool,
+    one_way_loss_fuse_min_adverse_reaction: float,
+    one_way_loss_fuse_cooldown_bars: int,
+    one_way_loss_fuse_size_mult: float,
     one_way_trim_full_exit_min_one_way_score: float,
     one_way_trim_full_exit_min_score_diff: int,
     trend_idle_probe_units: float,
@@ -3436,8 +3983,18 @@ def build_configs(
     trend_idle_min_reason_stack: int,
     trend_idle_cooldown_bars: int,
     trend_idle_max_extension_atr: float,
+    near_miss_probe_units: float,
+    near_miss_probe_min_score: int,
+    near_miss_probe_min_score_edge: int,
+    near_miss_probe_min_reason_stack: int,
+    near_miss_probe_cooldown_bars: int,
+    near_miss_probe_max_extension_atr: float,
+    near_miss_probe_failure_guard_count: int,
+    near_miss_probe_failure_guard_window_bars: int,
+    near_miss_probe_failure_cooldown_bars: int,
     equity_circuit_breaker_drawdown_pct: float,
     equity_circuit_breaker_pause_bars: int,
+    equity_circuit_rearm_drawdown_pct: float,
     equity_soft_circuit_drawdown_pct: float,
     equity_soft_circuit_cooldown_bars: int,
     equity_soft_circuit_size_mult: float,
@@ -3452,11 +4009,27 @@ def build_configs(
     one_way_impulse_min_score_diff: int,
     one_way_impulse_cooldown_bars: int,
     one_way_impulse_max_extension_atr: float,
+    scenario_flip_units: float,
+    scenario_flip_min_score_edge: int,
+    scenario_flip_min_adverse_reaction: float,
+    scenario_flip_min_one_way_score: float,
+    scenario_flip_cooldown_bars: int,
+    scenario_flip_max_extension_atr: float,
+    winner_pyramid_units: float,
+    winner_pyramid_min_profit_reaction: float,
+    winner_pyramid_min_score: int,
+    winner_pyramid_min_reason_stack: int,
+    winner_pyramid_cooldown_bars: int,
+    winner_pyramid_max_units: float,
+    winner_pyramid_max_extension_atr: float,
     base_entry_max_extension_atr: float,
+    base_entry_max_extension_side: str,
     base_entry_reduce_extension_atr: float,
     base_entry_reduce_size_mult: float,
     base_entry_reduce_promote_reaction: float,
     base_entry_reduce_max_trend_strength: float,
+    base_entry_reduce_min_trend_strength: float,
+    base_entry_reduce_side: str,
     defensive_trim_cooldown_bars: int,
     reaction_trim_trigger: float,
     reaction_avg_band: float,
@@ -3478,6 +4051,26 @@ def build_configs(
             f":owImpCool{max(0, int(one_way_impulse_cooldown_bars))}"
             f":owImpExt{max(0.1, float(one_way_impulse_max_extension_atr)):g}"
         )
+    btc_rotation_suffix = ""
+    if scenario_flip_units > 1e-12:
+        btc_rotation_suffix += (
+            f":scnFlip{max(0.0, float(scenario_flip_units)):g}"
+            f":scnFlipEdge{int(scenario_flip_min_score_edge)}"
+            f":scnFlipAdv{max(0.0, float(scenario_flip_min_adverse_reaction)):g}"
+            f":scnFlipOw{max(0.0, float(scenario_flip_min_one_way_score)):g}"
+            f":scnFlipCool{max(0, int(scenario_flip_cooldown_bars))}"
+            f":scnFlipExt{max(0.1, float(scenario_flip_max_extension_atr)):g}"
+        )
+    if winner_pyramid_units > 1e-12:
+        btc_rotation_suffix += (
+            f":winPyr{max(0.0, float(winner_pyramid_units)):g}"
+            f":winPyrReact{max(0.0, float(winner_pyramid_min_profit_reaction)):g}"
+            f":winPyrScore{int(winner_pyramid_min_score)}"
+            f":winPyrStack{max(0, int(winner_pyramid_min_reason_stack))}"
+            f":winPyrCool{max(0, int(winner_pyramid_cooldown_bars))}"
+            f":winPyrMax{max(0.0, float(winner_pyramid_max_units)):g}"
+            f":winPyrExt{max(0.1, float(winner_pyramid_max_extension_atr)):g}"
+        )
     trim_memory_suffix = ""
     if one_way_trim_retire_same_zone:
         trim_memory_suffix += ":owRetire1"
@@ -3497,6 +4090,16 @@ def build_configs(
         )
         if one_way_trim_context_full_exit:
             trim_memory_suffix += ":owCtxQExit1"
+    if (
+        one_way_loss_fuse_min_adverse_reaction > 0.0
+        and one_way_loss_fuse_cooldown_bars > 0
+        and one_way_loss_fuse_size_mult < 1.0
+    ):
+        trim_memory_suffix += (
+            f":owLossFuse{max(0.0, float(one_way_loss_fuse_min_adverse_reaction)):g}"
+            f"c{max(1, int(one_way_loss_fuse_cooldown_bars))}"
+            f"m{_clamp(one_way_loss_fuse_size_mult, 0.0, 1.0):g}"
+        )
     if one_way_trim_full_exit_min_one_way_score > 0.0:
         trim_memory_suffix += (
             f":owFullExit{max(0.0, float(one_way_trim_full_exit_min_one_way_score)):g}"
@@ -3511,12 +4114,30 @@ def build_configs(
             f":idleCool{max(0, int(trend_idle_cooldown_bars))}"
             f":idleExt{max(0.1, float(trend_idle_max_extension_atr)):g}"
         )
+    near_miss_suffix = ""
+    if near_miss_probe_units > 1e-12:
+        near_miss_suffix = (
+            f":nearMiss{max(0.0, float(near_miss_probe_units)):g}"
+            f":nearMissScore{int(near_miss_probe_min_score)}"
+            f":nearMissEdge{int(near_miss_probe_min_score_edge)}"
+            f":nearMissStack{max(0, int(near_miss_probe_min_reason_stack))}"
+            f":nearMissCool{max(0, int(near_miss_probe_cooldown_bars))}"
+            f":nearMissExt{max(0.1, float(near_miss_probe_max_extension_atr)):g}"
+        )
+        if near_miss_probe_failure_guard_count > 0 and near_miss_probe_failure_cooldown_bars > 0:
+            near_miss_suffix += (
+                f":nearMissFail{max(1, int(near_miss_probe_failure_guard_count))}"
+                f"x{max(1, int(near_miss_probe_failure_guard_window_bars))}"
+                f"c{max(1, int(near_miss_probe_failure_cooldown_bars))}"
+            )
     circuit_suffix = ""
     if equity_circuit_breaker_drawdown_pct > 0.0 and equity_circuit_breaker_pause_bars > 0:
         circuit_suffix = (
             f":eqCb{max(0.0, float(equity_circuit_breaker_drawdown_pct)):g}"
             f"x{max(1, int(equity_circuit_breaker_pause_bars))}"
         )
+        if equity_circuit_rearm_drawdown_pct > 0.0:
+            circuit_suffix += f":eqCbRearm{max(0.0, float(equity_circuit_rearm_drawdown_pct)):g}"
     soft_circuit_suffix = ""
     if equity_soft_circuit_drawdown_pct > 0.0 and equity_soft_circuit_cooldown_bars > 0:
         soft_circuit_suffix = (
@@ -3529,6 +4150,8 @@ def build_configs(
     base_extension_suffix = ""
     if base_entry_max_extension_atr > 0.0:
         base_extension_suffix = f":baseExt{max(0.1, float(base_entry_max_extension_atr)):g}"
+        if base_entry_max_extension_side != "both":
+            base_extension_suffix += f":baseExtSide{base_entry_max_extension_side}"
     base_reduce_suffix = ""
     if base_entry_reduce_extension_atr > 0.0 and base_entry_reduce_size_mult < 1.0:
         base_reduce_suffix = (
@@ -3539,6 +4162,10 @@ def build_configs(
             base_reduce_suffix += f":basePromote{max(0.0, float(base_entry_reduce_promote_reaction)):g}"
         if base_entry_reduce_max_trend_strength > 0.0:
             base_reduce_suffix += f":baseReduceMaxTrend{max(0.0, float(base_entry_reduce_max_trend_strength)):g}"
+        if base_entry_reduce_min_trend_strength > 0.0:
+            base_reduce_suffix += f":baseReduceMinTrend{max(0.0, float(base_entry_reduce_min_trend_strength)):g}"
+        if base_entry_reduce_side != "both":
+            base_reduce_suffix += f":baseReduceSide{base_entry_reduce_side}"
     for zone_lookback in (48, 96):
         for entry_score in (5, 6):
             for battle_score in (7, 8):
@@ -3588,9 +4215,11 @@ def build_configs(
                                                     f"owLongTrim{ONE_WAY_LONG_TRIM_FRACTION:g}:"
                                                     f"ctxReact{CONTEXT_REACTION_TARGET_USD:g}:ctxF18"
                                                     f"{trend_idle_suffix}"
+                                                    f"{near_miss_suffix}"
                                                     f"{circuit_suffix}"
                                                     f"{soft_circuit_suffix}"
                                                     f"{impulse_suffix}"
+                                                    f"{btc_rotation_suffix}"
                                                     f"{base_extension_suffix}"
                                                     f"{base_reduce_suffix}"
                                                 )
@@ -3702,6 +4331,19 @@ def build_configs(
                                                     one_way_trim_context_full_exit=bool(
                                                         one_way_trim_context_full_exit
                                                     ),
+                                                    one_way_loss_fuse_min_adverse_reaction=max(
+                                                        0.0,
+                                                        float(one_way_loss_fuse_min_adverse_reaction),
+                                                    ),
+                                                    one_way_loss_fuse_cooldown_bars=max(
+                                                        0,
+                                                        int(one_way_loss_fuse_cooldown_bars),
+                                                    ),
+                                                    one_way_loss_fuse_size_mult=_clamp(
+                                                        one_way_loss_fuse_size_mult,
+                                                        0.0,
+                                                        1.0,
+                                                    ),
                                                     one_way_trim_full_exit_min_one_way_score=max(
                                                         0.0,
                                                         float(one_way_trim_full_exit_min_one_way_score),
@@ -3724,6 +4366,39 @@ def build_configs(
                                                         0.1,
                                                         float(trend_idle_max_extension_atr),
                                                     ),
+                                                    near_miss_probe_units=min(
+                                                        max(0.0, float(near_miss_probe_units)),
+                                                        max_possible_units,
+                                                    ),
+                                                    near_miss_probe_min_score=int(near_miss_probe_min_score),
+                                                    near_miss_probe_min_score_edge=max(
+                                                        0,
+                                                        int(near_miss_probe_min_score_edge),
+                                                    ),
+                                                    near_miss_probe_min_reason_stack=max(
+                                                        0,
+                                                        int(near_miss_probe_min_reason_stack),
+                                                    ),
+                                                    near_miss_probe_cooldown_bars=max(
+                                                        0,
+                                                        int(near_miss_probe_cooldown_bars),
+                                                    ),
+                                                    near_miss_probe_max_extension_atr=max(
+                                                        0.1,
+                                                        float(near_miss_probe_max_extension_atr),
+                                                    ),
+                                                    near_miss_probe_failure_guard_count=max(
+                                                        0,
+                                                        int(near_miss_probe_failure_guard_count),
+                                                    ),
+                                                    near_miss_probe_failure_guard_window_bars=max(
+                                                        1,
+                                                        int(near_miss_probe_failure_guard_window_bars),
+                                                    ),
+                                                    near_miss_probe_failure_cooldown_bars=max(
+                                                        0,
+                                                        int(near_miss_probe_failure_cooldown_bars),
+                                                    ),
                                                     equity_circuit_breaker_drawdown_pct=max(
                                                         0.0,
                                                         float(equity_circuit_breaker_drawdown_pct),
@@ -3731,6 +4406,10 @@ def build_configs(
                                                     equity_circuit_breaker_pause_bars=max(
                                                         0,
                                                         int(equity_circuit_breaker_pause_bars),
+                                                    ),
+                                                    equity_circuit_rearm_drawdown_pct=max(
+                                                        0.0,
+                                                        float(equity_circuit_rearm_drawdown_pct),
                                                     ),
                                                     equity_soft_circuit_drawdown_pct=max(
                                                         0.0,
@@ -3781,9 +4460,60 @@ def build_configs(
                                                         0.1,
                                                         float(one_way_impulse_max_extension_atr),
                                                     ),
+                                                    scenario_flip_units=min(
+                                                        max(0.0, float(scenario_flip_units)),
+                                                        max_possible_units,
+                                                    ),
+                                                    scenario_flip_min_score_edge=int(scenario_flip_min_score_edge),
+                                                    scenario_flip_min_adverse_reaction=max(
+                                                        0.0,
+                                                        float(scenario_flip_min_adverse_reaction),
+                                                    ),
+                                                    scenario_flip_min_one_way_score=max(
+                                                        0.0,
+                                                        float(scenario_flip_min_one_way_score),
+                                                    ),
+                                                    scenario_flip_cooldown_bars=max(
+                                                        0,
+                                                        int(scenario_flip_cooldown_bars),
+                                                    ),
+                                                    scenario_flip_max_extension_atr=max(
+                                                        0.1,
+                                                        float(scenario_flip_max_extension_atr),
+                                                    ),
+                                                    winner_pyramid_units=min(
+                                                        max(0.0, float(winner_pyramid_units)),
+                                                        max_possible_units,
+                                                    ),
+                                                    winner_pyramid_min_profit_reaction=max(
+                                                        0.0,
+                                                        float(winner_pyramid_min_profit_reaction),
+                                                    ),
+                                                    winner_pyramid_min_score=int(winner_pyramid_min_score),
+                                                    winner_pyramid_min_reason_stack=max(
+                                                        0,
+                                                        int(winner_pyramid_min_reason_stack),
+                                                    ),
+                                                    winner_pyramid_cooldown_bars=max(
+                                                        0,
+                                                        int(winner_pyramid_cooldown_bars),
+                                                    ),
+                                                    winner_pyramid_max_units=max(
+                                                        0.0,
+                                                        float(winner_pyramid_max_units),
+                                                    ),
+                                                    winner_pyramid_max_extension_atr=max(
+                                                        0.1,
+                                                        float(winner_pyramid_max_extension_atr),
+                                                    ),
                                                     base_entry_max_extension_atr=max(
                                                         0.0,
                                                         float(base_entry_max_extension_atr),
+                                                    ),
+                                                    base_entry_max_extension_side=(
+                                                        base_entry_max_extension_side
+                                                        if base_entry_max_extension_side in {"both", "long", "short"}
+                                                        else "both"
                                                     ),
                                                     base_entry_reduce_extension_atr=max(
                                                         0.0,
@@ -3801,6 +4531,15 @@ def build_configs(
                                                     base_entry_reduce_max_trend_strength=max(
                                                         0.0,
                                                         float(base_entry_reduce_max_trend_strength),
+                                                    ),
+                                                    base_entry_reduce_min_trend_strength=max(
+                                                        0.0,
+                                                        float(base_entry_reduce_min_trend_strength),
+                                                    ),
+                                                    base_entry_reduce_side=(
+                                                        base_entry_reduce_side
+                                                        if base_entry_reduce_side in {"both", "long", "short"}
+                                                        else "both"
                                                     ),
                                                     defensive_trim_cooldown_bars=max(0, int(defensive_trim_cooldown_bars)),
                                                     cooldown_after_loss_bars=12 if profile_name == "balanced" else 48,
@@ -4086,6 +4825,12 @@ def main() -> None:
         one_way_trim_context_window_bars=max(1, int(args.one_way_trim_context_window_bars)),
         one_way_trim_context_cooldown_bars=max(0, int(args.one_way_trim_context_cooldown_bars)),
         one_way_trim_context_full_exit=bool(args.one_way_trim_context_full_exit),
+        one_way_loss_fuse_min_adverse_reaction=max(
+            0.0,
+            float(args.one_way_loss_fuse_min_adverse_reaction),
+        ),
+        one_way_loss_fuse_cooldown_bars=max(0, int(args.one_way_loss_fuse_cooldown_bars)),
+        one_way_loss_fuse_size_mult=_clamp(args.one_way_loss_fuse_size_mult, 0.0, 1.0),
         one_way_trim_full_exit_min_one_way_score=max(0.0, float(args.one_way_trim_full_exit_min_one_way_score)),
         one_way_trim_full_exit_min_score_diff=max(0, int(args.one_way_trim_full_exit_min_score_diff)),
         trend_idle_probe_units=max(0.0, float(args.trend_idle_probe_units)),
@@ -4093,8 +4838,21 @@ def main() -> None:
         trend_idle_min_reason_stack=max(0, int(args.trend_idle_min_reason_stack)),
         trend_idle_cooldown_bars=max(0, int(args.trend_idle_cooldown_bars)),
         trend_idle_max_extension_atr=max(0.1, float(args.trend_idle_max_extension_atr)),
+        near_miss_probe_units=max(0.0, float(args.near_miss_probe_units)),
+        near_miss_probe_min_score=int(args.near_miss_probe_min_score),
+        near_miss_probe_min_score_edge=max(0, int(args.near_miss_probe_min_score_edge)),
+        near_miss_probe_min_reason_stack=max(0, int(args.near_miss_probe_min_reason_stack)),
+        near_miss_probe_cooldown_bars=max(0, int(args.near_miss_probe_cooldown_bars)),
+        near_miss_probe_max_extension_atr=max(0.1, float(args.near_miss_probe_max_extension_atr)),
+        near_miss_probe_failure_guard_count=max(0, int(args.near_miss_probe_failure_guard_count)),
+        near_miss_probe_failure_guard_window_bars=max(
+            1,
+            int(args.near_miss_probe_failure_guard_window_bars),
+        ),
+        near_miss_probe_failure_cooldown_bars=max(0, int(args.near_miss_probe_failure_cooldown_bars)),
         equity_circuit_breaker_drawdown_pct=max(0.0, float(args.equity_circuit_breaker_drawdown_pct)),
         equity_circuit_breaker_pause_bars=max(0, int(args.equity_circuit_breaker_pause_bars)),
+        equity_circuit_rearm_drawdown_pct=max(0.0, float(args.equity_circuit_rearm_drawdown_pct)),
         equity_soft_circuit_drawdown_pct=max(0.0, float(args.equity_soft_circuit_drawdown_pct)),
         equity_soft_circuit_cooldown_bars=max(0, int(args.equity_soft_circuit_cooldown_bars)),
         equity_soft_circuit_size_mult=_clamp(args.equity_soft_circuit_size_mult, 0.0, 1.0),
@@ -4109,11 +4867,33 @@ def main() -> None:
         one_way_impulse_min_score_diff=max(0, int(args.one_way_impulse_min_score_diff)),
         one_way_impulse_cooldown_bars=max(0, int(args.one_way_impulse_cooldown_bars)),
         one_way_impulse_max_extension_atr=max(0.1, float(args.one_way_impulse_max_extension_atr)),
+        scenario_flip_units=max(0.0, float(args.scenario_flip_units)),
+        scenario_flip_min_score_edge=int(args.scenario_flip_min_score_edge),
+        scenario_flip_min_adverse_reaction=max(0.0, float(args.scenario_flip_min_adverse_reaction)),
+        scenario_flip_min_one_way_score=max(0.0, float(args.scenario_flip_min_one_way_score)),
+        scenario_flip_cooldown_bars=max(0, int(args.scenario_flip_cooldown_bars)),
+        scenario_flip_max_extension_atr=max(0.1, float(args.scenario_flip_max_extension_atr)),
+        winner_pyramid_units=max(0.0, float(args.winner_pyramid_units)),
+        winner_pyramid_min_profit_reaction=max(0.0, float(args.winner_pyramid_min_profit_reaction)),
+        winner_pyramid_min_score=int(args.winner_pyramid_min_score),
+        winner_pyramid_min_reason_stack=max(0, int(args.winner_pyramid_min_reason_stack)),
+        winner_pyramid_cooldown_bars=max(0, int(args.winner_pyramid_cooldown_bars)),
+        winner_pyramid_max_units=max(0.0, float(args.winner_pyramid_max_units)),
+        winner_pyramid_max_extension_atr=max(0.1, float(args.winner_pyramid_max_extension_atr)),
         base_entry_max_extension_atr=max(0.0, float(args.base_entry_max_extension_atr)),
+        base_entry_max_extension_side=(
+            args.base_entry_max_extension_side
+            if args.base_entry_max_extension_side in {"both", "long", "short"}
+            else "both"
+        ),
         base_entry_reduce_extension_atr=max(0.0, float(args.base_entry_reduce_extension_atr)),
         base_entry_reduce_size_mult=_clamp(args.base_entry_reduce_size_mult, 0.0, 1.0),
         base_entry_reduce_promote_reaction=max(0.0, float(args.base_entry_reduce_promote_reaction)),
         base_entry_reduce_max_trend_strength=max(0.0, float(args.base_entry_reduce_max_trend_strength)),
+        base_entry_reduce_min_trend_strength=max(0.0, float(args.base_entry_reduce_min_trend_strength)),
+        base_entry_reduce_side=(
+            args.base_entry_reduce_side if args.base_entry_reduce_side in {"both", "long", "short"} else "both"
+        ),
         defensive_trim_cooldown_bars=max(0, int(args.defensive_trim_cooldown_bars)),
         reaction_trim_trigger=max(0.05, float(args.reaction_trim_trigger)),
         reaction_avg_band=max(0.05, float(args.reaction_avg_band)),

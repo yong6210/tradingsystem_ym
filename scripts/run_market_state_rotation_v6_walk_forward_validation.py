@@ -54,6 +54,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--top-n", type=int, default=8)
     parser.add_argument("--fold-offset", type=int, default=0)
     parser.add_argument("--fold-limit", type=int, default=0)
+    parser.add_argument(
+        "--warm-fold-offset-selection-state",
+        action="store_true",
+        help=(
+            "When --fold-offset is used, still run skipped earlier folds internally so history-based "
+            "selection penalties match a full walk-forward run. Skipped warmup folds are not written "
+            "to the report."
+        ),
+    )
     parser.add_argument("--fee-bps-per-side", type=float, default=4.0)
     parser.add_argument("--slippage-bps-per-side", type=float, default=1.0)
     parser.add_argument("--funding-bps-per-8h", type=float, default=0.0)
@@ -69,13 +78,41 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--one-way-trim-context-window-bars", type=int, default=None)
     parser.add_argument("--one-way-trim-context-cooldown-bars", type=int, default=None)
     parser.add_argument("--one-way-trim-context-full-exit", action="store_true")
+    parser.add_argument("--one-way-loss-fuse-min-adverse-reaction", type=float, default=None)
+    parser.add_argument("--one-way-loss-fuse-cooldown-bars", type=int, default=None)
+    parser.add_argument("--one-way-loss-fuse-size-mult", type=float, default=None)
     parser.add_argument(
         "--one-way-trim-context-after-selection",
         action="store_true",
         help="Select alpha candidates without context quarantine, then apply it only as a test-time risk overlay.",
     )
+    parser.add_argument(
+        "--one-way-trim-context-after-selection-require-base-reduce",
+        action="store_true",
+        help=(
+            "When context quarantine is applied after selection, only enable it on folds where the "
+            "after-selection base-entry reduction overlay was also applied."
+        ),
+    )
+    parser.add_argument(
+        "--one-way-loss-fuse-after-selection",
+        action="store_true",
+        help="Select alpha candidates without one-way loss fuse, then apply it only as a test-time risk overlay.",
+    )
+    parser.add_argument("--one-way-loss-fuse-after-selection-min-train-return-pct", type=float, default=None)
+    parser.add_argument("--one-way-loss-fuse-after-selection-max-train-return-pct", type=float, default=None)
+    parser.add_argument("--one-way-loss-fuse-after-selection-min-train-drawdown-pct", type=float, default=None)
+    parser.add_argument("--one-way-loss-fuse-after-selection-max-train-drawdown-pct", type=float, default=None)
+    parser.add_argument("--one-way-loss-fuse-after-selection-min-one-way-trim-per-add", type=float, default=0.0)
+    parser.add_argument("--one-way-loss-fuse-after-selection-max-one-way-trim-per-add", type=float, default=0.0)
     parser.add_argument("--one-way-trim-full-exit-min-one-way-score", type=float, default=None)
     parser.add_argument("--one-way-trim-full-exit-min-score-diff", type=int, default=None)
+    parser.add_argument("--defensive-trim-cooldown-bars", type=int, default=None)
+    parser.add_argument(
+        "--include-no-defensive-trim-cooldown-candidates",
+        action="store_true",
+        help="When defensive trim cooldown is overridden, also keep otherwise identical source-cooldown candidates.",
+    )
     parser.add_argument(
         "--one-way-trim-full-exit-after-selection",
         action="store_true",
@@ -86,12 +123,36 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--trend-idle-min-reason-stack", type=int, default=None)
     parser.add_argument("--trend-idle-cooldown-bars", type=int, default=None)
     parser.add_argument("--trend-idle-max-extension-atr", type=float, default=None)
+    parser.add_argument("--near-miss-probe-units", type=float, default=None)
+    parser.add_argument("--near-miss-probe-min-score", type=int, default=None)
+    parser.add_argument("--near-miss-probe-min-score-edge", type=int, default=None)
+    parser.add_argument("--near-miss-probe-min-reason-stack", type=int, default=None)
+    parser.add_argument("--near-miss-probe-cooldown-bars", type=int, default=None)
+    parser.add_argument("--near-miss-probe-max-extension-atr", type=float, default=None)
+    parser.add_argument("--near-miss-probe-failure-guard-count", type=int, default=None)
+    parser.add_argument("--near-miss-probe-failure-guard-window-bars", type=int, default=None)
+    parser.add_argument("--near-miss-probe-failure-cooldown-bars", type=int, default=None)
+    parser.add_argument(
+        "--trend-idle-after-selection",
+        action="store_true",
+        help="Select alpha candidates without trend-idle probes, then apply them only as a test-time overlay.",
+    )
+    parser.add_argument("--trend-idle-after-selection-min-train-return-pct", type=float, default=None)
+    parser.add_argument("--trend-idle-after-selection-max-train-return-pct", type=float, default=None)
+    parser.add_argument("--trend-idle-after-selection-min-train-drawdown-pct", type=float, default=None)
+    parser.add_argument("--trend-idle-after-selection-max-train-drawdown-pct", type=float, default=None)
     parser.add_argument("--equity-circuit-breaker-drawdown-pct", type=float, default=None)
     parser.add_argument("--equity-circuit-breaker-pause-bars", type=int, default=None)
+    parser.add_argument("--equity-circuit-rearm-drawdown-pct", type=float, default=None)
     parser.add_argument(
         "--equity-circuit-breaker-after-selection",
         action="store_true",
         help="Select alpha candidates without the circuit breaker, then apply it only as a test-time risk overlay.",
+    )
+    parser.add_argument(
+        "--include-no-equity-circuit-candidates",
+        action="store_true",
+        help="When hard circuit overrides are enabled in selection, also keep otherwise identical candidates without them.",
     )
     parser.add_argument("--equity-soft-circuit-drawdown-pct", type=float, default=None)
     parser.add_argument("--equity-soft-circuit-cooldown-bars", type=int, default=None)
@@ -102,25 +163,111 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Select alpha candidates without the soft circuit, then apply it only as a test-time risk overlay.",
     )
+    parser.add_argument("--equity-soft-circuit-after-selection-min-train-return-pct", type=float, default=None)
+    parser.add_argument("--equity-soft-circuit-after-selection-max-train-return-pct", type=float, default=None)
+    parser.add_argument("--equity-soft-circuit-after-selection-min-train-drawdown-pct", type=float, default=None)
+    parser.add_argument("--equity-soft-circuit-after-selection-max-train-drawdown-pct", type=float, default=None)
+    parser.add_argument("--equity-soft-circuit-after-selection-min-one-way-trim-per-add", type=float, default=0.0)
+    parser.add_argument("--equity-soft-circuit-after-selection-max-one-way-trim-per-add", type=float, default=0.0)
+    parser.add_argument("--equity-soft-circuit-after-selection-require-base-reduce", action="store_true")
     parser.add_argument("--one-way-reversal-switch-units", type=float, default=None)
     parser.add_argument("--one-way-reversal-min-score-edge", type=int, default=None)
     parser.add_argument("--one-way-reversal-cooldown-bars", type=int, default=None)
     parser.add_argument("--one-way-reversal-allow-scenario-override", action="store_true")
     parser.add_argument("--one-way-reversal-allow-score-override", action="store_true")
+    parser.add_argument(
+        "--one-way-reversal-after-selection",
+        action="store_true",
+        help=(
+            "Select candidates with the normal one-way reversal settings, then conditionally override "
+            "the reversal switch size on the OOS window."
+        ),
+    )
+    parser.add_argument("--one-way-reversal-after-selection-switch-units", type=float, default=None)
+    parser.add_argument("--one-way-reversal-after-selection-min-train-return-pct", type=float, default=None)
+    parser.add_argument("--one-way-reversal-after-selection-max-train-return-pct", type=float, default=None)
+    parser.add_argument("--one-way-reversal-after-selection-min-train-drawdown-pct", type=float, default=None)
+    parser.add_argument("--one-way-reversal-after-selection-max-train-drawdown-pct", type=float, default=None)
+    parser.add_argument("--one-way-reversal-after-selection-min-one-way-trim-per-add", type=float, default=0.0)
+    parser.add_argument("--one-way-reversal-after-selection-max-one-way-trim-per-add", type=float, default=0.0)
+    parser.add_argument("--one-way-reversal-after-selection-alt-min-train-return-pct", type=float, default=None)
+    parser.add_argument("--one-way-reversal-after-selection-alt-max-train-return-pct", type=float, default=None)
+    parser.add_argument("--one-way-reversal-after-selection-alt-min-train-drawdown-pct", type=float, default=None)
+    parser.add_argument("--one-way-reversal-after-selection-alt-max-train-drawdown-pct", type=float, default=None)
+    parser.add_argument("--one-way-reversal-after-selection-alt-min-train-cost-drag-pct", type=float, default=None)
+    parser.add_argument("--one-way-reversal-after-selection-alt-max-train-cost-drag-pct", type=float, default=None)
+    parser.add_argument("--one-way-reversal-after-selection-alt-min-one-way-trim-per-add", type=float, default=0.0)
+    parser.add_argument("--one-way-reversal-after-selection-alt-max-one-way-trim-per-add", type=float, default=0.0)
+    parser.add_argument("--one-way-reversal-after-selection-alt-min-turnover-per-add", type=float, default=0.0)
+    parser.add_argument("--one-way-reversal-after-selection-alt-max-turnover-per-add", type=float, default=0.0)
+    parser.add_argument("--one-way-reversal-after-selection-alt-min-reaction-trim-per-remove", type=float, default=0.0)
+    parser.add_argument("--one-way-reversal-after-selection-alt-max-reaction-trim-per-remove", type=float, default=0.0)
     parser.add_argument("--one-way-impulse-probe-units", type=float, default=None)
     parser.add_argument("--one-way-impulse-min-one-way-score", type=float, default=None)
     parser.add_argument("--one-way-impulse-min-score-diff", type=int, default=None)
     parser.add_argument("--one-way-impulse-cooldown-bars", type=int, default=None)
     parser.add_argument("--one-way-impulse-max-extension-atr", type=float, default=None)
+    parser.add_argument("--scenario-flip-units", type=float, default=None)
+    parser.add_argument("--scenario-flip-min-score-edge", type=int, default=None)
+    parser.add_argument("--scenario-flip-min-adverse-reaction", type=float, default=None)
+    parser.add_argument("--scenario-flip-min-one-way-score", type=float, default=None)
+    parser.add_argument("--scenario-flip-cooldown-bars", type=int, default=None)
+    parser.add_argument("--scenario-flip-max-extension-atr", type=float, default=None)
+    parser.add_argument("--winner-pyramid-units", type=float, default=None)
+    parser.add_argument("--winner-pyramid-min-profit-reaction", type=float, default=None)
+    parser.add_argument("--winner-pyramid-min-score", type=int, default=None)
+    parser.add_argument("--winner-pyramid-min-reason-stack", type=int, default=None)
+    parser.add_argument("--winner-pyramid-cooldown-bars", type=int, default=None)
+    parser.add_argument("--winner-pyramid-max-units", type=float, default=None)
+    parser.add_argument("--winner-pyramid-max-extension-atr", type=float, default=None)
     parser.add_argument("--base-entry-max-extension-atr", type=float, default=None)
+    parser.add_argument("--base-entry-max-extension-side", choices=("both", "long", "short"), default="")
     parser.add_argument("--base-entry-reduce-extension-atr", type=float, default=None)
     parser.add_argument("--base-entry-reduce-size-mult", type=float, default=None)
     parser.add_argument("--base-entry-reduce-promote-reaction", type=float, default=None)
     parser.add_argument("--base-entry-reduce-max-trend-strength", type=float, default=None)
+    parser.add_argument("--base-entry-reduce-min-trend-strength", type=float, default=None)
+    parser.add_argument("--base-entry-reduce-side", choices=("both", "long", "short"), default="")
     parser.add_argument(
         "--base-entry-reduce-after-selection",
         action="store_true",
         help="Select alpha candidates without late-base reduction, then apply it only as a test-time risk overlay.",
+    )
+    parser.add_argument(
+        "--base-entry-reduce-after-selection-max-train-return-pct",
+        type=float,
+        default=None,
+        help=(
+            "When set with --base-entry-reduce-after-selection, apply the overlay only if the selected "
+            "train return is at or below this value."
+        ),
+    )
+    parser.add_argument(
+        "--base-entry-reduce-after-selection-min-train-return-pct",
+        type=float,
+        default=None,
+        help=(
+            "When set with --base-entry-reduce-after-selection, apply the overlay only if the selected "
+            "train return is at or above this value."
+        ),
+    )
+    parser.add_argument(
+        "--base-entry-reduce-after-selection-max-train-drawdown-pct",
+        type=float,
+        default=None,
+        help=(
+            "When set with --base-entry-reduce-after-selection, apply the overlay only if the selected "
+            "train max drawdown is at or below this value."
+        ),
+    )
+    parser.add_argument(
+        "--base-entry-reduce-after-selection-min-one-way-trim-per-add",
+        type=float,
+        default=0.0,
+        help=(
+            "When set with --base-entry-reduce-after-selection, apply the overlay only if the selected "
+            "train one-way forced trim/add ratio is at or above this value."
+        ),
     )
     parser.add_argument(
         "--include-no-impulse-candidates",
@@ -128,10 +275,36 @@ def _parse_args() -> argparse.Namespace:
         help="When impulse overrides are enabled, also keep otherwise identical candidates without impulse probes.",
     )
     parser.add_argument(
+        "--include-no-btc-rotation-candidates",
+        action="store_true",
+        help="When BTC-only flip/pyramid overrides are enabled, also keep otherwise identical candidates without them.",
+    )
+    parser.add_argument(
+        "--include-no-base-reduce-candidates",
+        action="store_true",
+        help="When late-base reduction overrides are enabled, also keep otherwise identical candidates without them.",
+    )
+    parser.add_argument(
+        "--include-no-one-way-loss-fuse-candidates",
+        action="store_true",
+        help="When one-way loss fuse overrides are enabled, also keep otherwise identical candidates without them.",
+    )
+    parser.add_argument(
+        "--include-no-near-miss-probe-candidates",
+        action="store_true",
+        help="When near-miss probe overrides are enabled, also keep otherwise identical candidates without them.",
+    )
+    parser.add_argument(
         "--impulse-selection-score-penalty",
         type=float,
         default=0.0,
         help="Optional train-selection penalty for impulse-probe candidates; use only as a promotion gate.",
+    )
+    parser.add_argument(
+        "--btc-rotation-selection-score-penalty",
+        type=float,
+        default=0.0,
+        help="Optional train-selection penalty for BTC-only scenario-flip or winner-pyramid candidates.",
     )
     parser.add_argument(
         "--selection-flag-penalty",
@@ -148,10 +321,131 @@ def _parse_args() -> argparse.Namespace:
             "Use this to reduce over-trust in unusually high in-sample scores."
         ),
     )
+    parser.add_argument(
+        "--selection-mdd-soft-threshold-pct",
+        type=float,
+        default=0.0,
+        help="Optional train-window MDD threshold for extra candidate-selection penalty.",
+    )
+    parser.add_argument(
+        "--selection-mdd-soft-penalty",
+        type=float,
+        default=0.0,
+        help="Penalty per one percentage point of train-window MDD above the soft threshold.",
+    )
+    parser.add_argument(
+        "--selection-cost-soft-threshold-pct",
+        type=float,
+        default=0.0,
+        help="Optional train-window estimated cost-drag threshold for extra candidate-selection penalty.",
+    )
+    parser.add_argument(
+        "--selection-cost-soft-penalty",
+        type=float,
+        default=0.0,
+        help="Penalty per one percentage point of train-window cost drag above the soft threshold.",
+    )
+    parser.add_argument(
+        "--selection-one-way-trim-ratio-threshold",
+        type=float,
+        default=0.0,
+        help="Optional one-way forced-trim/add ratio threshold for extra candidate-selection penalty.",
+    )
+    parser.add_argument(
+        "--selection-one-way-trim-ratio-penalty",
+        type=float,
+        default=0.0,
+        help="Penalty per 1.00 ratio point above the one-way forced-trim/add threshold.",
+    )
+    parser.add_argument(
+        "--selection-turnover-per-add-threshold",
+        type=float,
+        default=0.0,
+        help="Optional turnover-events/add threshold for extra candidate-selection penalty.",
+    )
+    parser.add_argument(
+        "--selection-turnover-per-add-penalty",
+        type=float,
+        default=0.0,
+        help="Penalty per 1.00 ratio point above the turnover-events/add threshold.",
+    )
+    parser.add_argument(
+        "--selection-structural-flag-min-train-return-pct",
+        type=float,
+        default=0.0,
+        help=(
+            "Apply an extra selection penalty only to train candidates at or above this return "
+            "threshold when they have structural fragility flags."
+        ),
+    )
+    parser.add_argument(
+        "--selection-structural-flag-penalty",
+        type=float,
+        default=0.0,
+        help="Extra selection penalty per structural fragility flag on qualifying high-return train candidates.",
+    )
+    parser.add_argument(
+        "--selection-high-train-flag-min-return-pct",
+        type=float,
+        default=0.0,
+        help=(
+            "Apply an extra per-flag selection penalty only when the train return is at or above "
+            "this threshold. This dampens fragile high in-sample winners without penalizing "
+            "moderate-return setups."
+        ),
+    )
+    parser.add_argument(
+        "--selection-high-train-flag-penalty",
+        type=float,
+        default=0.0,
+        help="Extra selection penalty per distribution flag on qualifying high-return train candidates.",
+    )
+    parser.add_argument(
+        "--selection-recent-efficiency-lookback",
+        type=int,
+        default=0,
+        help=(
+            "Optional number of previous completed folds used to penalize the same candidate family "
+            "when high train returns have not translated into OOS returns."
+        ),
+    )
+    parser.add_argument(
+        "--selection-recent-efficiency-min-samples",
+        type=int,
+        default=2,
+        help="Minimum matched completed folds required before applying the recent-efficiency penalty.",
+    )
+    parser.add_argument(
+        "--selection-recent-efficiency-min-train-return-pct",
+        type=float,
+        default=100.0,
+        help="Minimum train return for a completed fold or candidate to participate in the efficiency guard.",
+    )
+    parser.add_argument(
+        "--selection-recent-efficiency-threshold",
+        type=float,
+        default=0.0,
+        help="Minimum recent OOS/train return ratio expected from a candidate family before penalty.",
+    )
+    parser.add_argument(
+        "--selection-recent-efficiency-penalty",
+        type=float,
+        default=0.0,
+        help="Fixed candidate-selection penalty when the recent-efficiency guard is triggered.",
+    )
     parser.add_argument("--min-periods", type=int, default=5000)
     parser.add_argument("--cache-dir", default="")
     parser.add_argument("--base-url", default="")
     parser.add_argument("--sleep-seconds", type=float, default=0.03)
+    parser.add_argument(
+        "--test-top-train-candidates",
+        type=int,
+        default=0,
+        help=(
+            "Diagnostic only. Also evaluate the top N train-ranked candidates on the OOS window "
+            "with the same after-selection overlays, so selection misses can be separated from bad regimes."
+        ),
+    )
     parser.add_argument("--write-report", action="store_true")
     return parser.parse_args()
 
@@ -198,11 +492,16 @@ def _apply_config_overrides(
     args: argparse.Namespace,
     *,
     include_impulse: bool = True,
+    include_trend_idle: bool = True,
     include_equity_circuit: bool = True,
     include_equity_soft_circuit: bool = True,
     include_full_exit: bool = True,
+    include_defensive_trim_cooldown: bool = True,
+    include_near_miss: bool = True,
     include_base_reduce: bool = True,
     include_context_quarantine: bool = True,
+    include_loss_fuse: bool = True,
+    include_btc_rotation: bool = True,
 ) -> MarketStateConfig:
     updates: dict[str, Any] = {}
     suffix_parts: list[str] = []
@@ -248,6 +547,18 @@ def _apply_config_overrides(
     if include_context_quarantine and bool(args.one_way_trim_context_full_exit):
         updates["one_way_trim_context_full_exit"] = True
         suffix_parts.append("wfOwTrimCtxQExit1")
+    if include_loss_fuse and args.one_way_loss_fuse_min_adverse_reaction is not None:
+        value = max(0.0, float(args.one_way_loss_fuse_min_adverse_reaction))
+        updates["one_way_loss_fuse_min_adverse_reaction"] = value
+        suffix_parts.append(f"wfOwLossFuse{value:g}")
+    if include_loss_fuse and args.one_way_loss_fuse_cooldown_bars is not None:
+        value = max(0, int(args.one_way_loss_fuse_cooldown_bars))
+        updates["one_way_loss_fuse_cooldown_bars"] = value
+        suffix_parts.append(f"wfOwLossFuseCool{value}")
+    if include_loss_fuse and args.one_way_loss_fuse_size_mult is not None:
+        value = min(max(float(args.one_way_loss_fuse_size_mult), 0.0), 1.0)
+        updates["one_way_loss_fuse_size_mult"] = value
+        suffix_parts.append(f"wfOwLossFuseMult{value:g}")
     if include_full_exit and args.one_way_trim_full_exit_min_one_way_score is not None:
         value = max(0.0, float(args.one_way_trim_full_exit_min_one_way_score))
         updates["one_way_trim_full_exit_min_one_way_score"] = value
@@ -256,26 +567,66 @@ def _apply_config_overrides(
         value = max(0, int(args.one_way_trim_full_exit_min_score_diff))
         updates["one_way_trim_full_exit_min_score_diff"] = value
         suffix_parts.append(f"wfOwTrimFullExitDiff{value}")
-    if args.trend_idle_probe_units is not None:
+    if include_defensive_trim_cooldown and args.defensive_trim_cooldown_bars is not None:
+        value = max(0, int(args.defensive_trim_cooldown_bars))
+        updates["defensive_trim_cooldown_bars"] = value
+        suffix_parts.append(f"wfDefCool{value}")
+    if include_trend_idle and args.trend_idle_probe_units is not None:
         value = max(0.0, float(args.trend_idle_probe_units))
         updates["trend_idle_probe_units"] = min(value, config.max_possible_units)
         suffix_parts.append(f"wfIdleProbe{value:g}")
-    if args.trend_idle_min_score is not None:
+    if include_trend_idle and args.trend_idle_min_score is not None:
         value = int(args.trend_idle_min_score)
         updates["trend_idle_min_score"] = value
         suffix_parts.append(f"wfIdleScore{value}")
-    if args.trend_idle_min_reason_stack is not None:
+    if include_trend_idle and args.trend_idle_min_reason_stack is not None:
         value = max(0, int(args.trend_idle_min_reason_stack))
         updates["trend_idle_min_reason_stack"] = value
         suffix_parts.append(f"wfIdleStack{value}")
-    if args.trend_idle_cooldown_bars is not None:
+    if include_trend_idle and args.trend_idle_cooldown_bars is not None:
         value = max(0, int(args.trend_idle_cooldown_bars))
         updates["trend_idle_cooldown_bars"] = value
         suffix_parts.append(f"wfIdleCool{value}")
-    if args.trend_idle_max_extension_atr is not None:
+    if include_trend_idle and args.trend_idle_max_extension_atr is not None:
         value = max(0.1, float(args.trend_idle_max_extension_atr))
         updates["trend_idle_max_extension_atr"] = value
         suffix_parts.append(f"wfIdleExt{value:g}")
+    if include_near_miss and args.near_miss_probe_units is not None:
+        value = max(0.0, float(args.near_miss_probe_units))
+        updates["near_miss_probe_units"] = min(value, config.max_possible_units)
+        suffix_parts.append(f"wfNearMiss{value:g}")
+    if include_near_miss and args.near_miss_probe_min_score is not None:
+        value = int(args.near_miss_probe_min_score)
+        updates["near_miss_probe_min_score"] = value
+        suffix_parts.append(f"wfNearMissScore{value}")
+    if include_near_miss and args.near_miss_probe_min_score_edge is not None:
+        value = max(0, int(args.near_miss_probe_min_score_edge))
+        updates["near_miss_probe_min_score_edge"] = value
+        suffix_parts.append(f"wfNearMissEdge{value}")
+    if include_near_miss and args.near_miss_probe_min_reason_stack is not None:
+        value = max(0, int(args.near_miss_probe_min_reason_stack))
+        updates["near_miss_probe_min_reason_stack"] = value
+        suffix_parts.append(f"wfNearMissStack{value}")
+    if include_near_miss and args.near_miss_probe_cooldown_bars is not None:
+        value = max(0, int(args.near_miss_probe_cooldown_bars))
+        updates["near_miss_probe_cooldown_bars"] = value
+        suffix_parts.append(f"wfNearMissCool{value}")
+    if include_near_miss and args.near_miss_probe_max_extension_atr is not None:
+        value = max(0.1, float(args.near_miss_probe_max_extension_atr))
+        updates["near_miss_probe_max_extension_atr"] = value
+        suffix_parts.append(f"wfNearMissExt{value:g}")
+    if include_near_miss and args.near_miss_probe_failure_guard_count is not None:
+        value = max(0, int(args.near_miss_probe_failure_guard_count))
+        updates["near_miss_probe_failure_guard_count"] = value
+        suffix_parts.append(f"wfNearMissFail{value}")
+    if include_near_miss and args.near_miss_probe_failure_guard_window_bars is not None:
+        value = max(1, int(args.near_miss_probe_failure_guard_window_bars))
+        updates["near_miss_probe_failure_guard_window_bars"] = value
+        suffix_parts.append(f"wfNearMissFailWin{value}")
+    if include_near_miss and args.near_miss_probe_failure_cooldown_bars is not None:
+        value = max(0, int(args.near_miss_probe_failure_cooldown_bars))
+        updates["near_miss_probe_failure_cooldown_bars"] = value
+        suffix_parts.append(f"wfNearMissFailCool{value}")
     if include_equity_circuit and args.equity_circuit_breaker_drawdown_pct is not None:
         value = max(0.0, float(args.equity_circuit_breaker_drawdown_pct))
         updates["equity_circuit_breaker_drawdown_pct"] = value
@@ -284,6 +635,10 @@ def _apply_config_overrides(
         value = max(0, int(args.equity_circuit_breaker_pause_bars))
         updates["equity_circuit_breaker_pause_bars"] = value
         suffix_parts.append(f"wfEqCbPause{value}")
+    if include_equity_circuit and args.equity_circuit_rearm_drawdown_pct is not None:
+        value = max(0.0, float(args.equity_circuit_rearm_drawdown_pct))
+        updates["equity_circuit_rearm_drawdown_pct"] = value
+        suffix_parts.append(f"wfEqCbRearm{value:g}")
     if include_equity_soft_circuit and args.equity_soft_circuit_drawdown_pct is not None:
         value = max(0.0, float(args.equity_soft_circuit_drawdown_pct))
         updates["equity_soft_circuit_drawdown_pct"] = value
@@ -338,11 +693,66 @@ def _apply_config_overrides(
             value = max(0.1, float(args.one_way_impulse_max_extension_atr))
             updates["one_way_impulse_max_extension_atr"] = value
             suffix_parts.append(f"wfOwImpExt{value:g}")
+    if include_btc_rotation and args.scenario_flip_units is not None:
+        value = max(0.0, float(args.scenario_flip_units))
+        updates["scenario_flip_units"] = min(value, config.max_possible_units)
+        suffix_parts.append(f"wfScnFlip{value:g}")
+    if include_btc_rotation and args.scenario_flip_min_score_edge is not None:
+        value = int(args.scenario_flip_min_score_edge)
+        updates["scenario_flip_min_score_edge"] = value
+        suffix_parts.append(f"wfScnFlipEdge{value}")
+    if include_btc_rotation and args.scenario_flip_min_adverse_reaction is not None:
+        value = max(0.0, float(args.scenario_flip_min_adverse_reaction))
+        updates["scenario_flip_min_adverse_reaction"] = value
+        suffix_parts.append(f"wfScnFlipAdv{value:g}")
+    if include_btc_rotation and args.scenario_flip_min_one_way_score is not None:
+        value = max(0.0, float(args.scenario_flip_min_one_way_score))
+        updates["scenario_flip_min_one_way_score"] = value
+        suffix_parts.append(f"wfScnFlipOw{value:g}")
+    if include_btc_rotation and args.scenario_flip_cooldown_bars is not None:
+        value = max(0, int(args.scenario_flip_cooldown_bars))
+        updates["scenario_flip_cooldown_bars"] = value
+        suffix_parts.append(f"wfScnFlipCool{value}")
+    if include_btc_rotation and args.scenario_flip_max_extension_atr is not None:
+        value = max(0.1, float(args.scenario_flip_max_extension_atr))
+        updates["scenario_flip_max_extension_atr"] = value
+        suffix_parts.append(f"wfScnFlipExt{value:g}")
+    if include_btc_rotation and args.winner_pyramid_units is not None:
+        value = max(0.0, float(args.winner_pyramid_units))
+        updates["winner_pyramid_units"] = min(value, config.max_possible_units)
+        suffix_parts.append(f"wfWinPyr{value:g}")
+    if include_btc_rotation and args.winner_pyramid_min_profit_reaction is not None:
+        value = max(0.0, float(args.winner_pyramid_min_profit_reaction))
+        updates["winner_pyramid_min_profit_reaction"] = value
+        suffix_parts.append(f"wfWinPyrReact{value:g}")
+    if include_btc_rotation and args.winner_pyramid_min_score is not None:
+        value = int(args.winner_pyramid_min_score)
+        updates["winner_pyramid_min_score"] = value
+        suffix_parts.append(f"wfWinPyrScore{value}")
+    if include_btc_rotation and args.winner_pyramid_min_reason_stack is not None:
+        value = max(0, int(args.winner_pyramid_min_reason_stack))
+        updates["winner_pyramid_min_reason_stack"] = value
+        suffix_parts.append(f"wfWinPyrStack{value}")
+    if include_btc_rotation and args.winner_pyramid_cooldown_bars is not None:
+        value = max(0, int(args.winner_pyramid_cooldown_bars))
+        updates["winner_pyramid_cooldown_bars"] = value
+        suffix_parts.append(f"wfWinPyrCool{value}")
+    if include_btc_rotation and args.winner_pyramid_max_units is not None:
+        value = max(0.0, float(args.winner_pyramid_max_units))
+        updates["winner_pyramid_max_units"] = value
+        suffix_parts.append(f"wfWinPyrMax{value:g}")
+    if include_btc_rotation and args.winner_pyramid_max_extension_atr is not None:
+        value = max(0.1, float(args.winner_pyramid_max_extension_atr))
+        updates["winner_pyramid_max_extension_atr"] = value
+        suffix_parts.append(f"wfWinPyrExt{value:g}")
     if include_base_reduce:
         if args.base_entry_max_extension_atr is not None:
             value = max(0.0, float(args.base_entry_max_extension_atr))
             updates["base_entry_max_extension_atr"] = value
             suffix_parts.append(f"wfBaseExt{value:g}")
+        if args.base_entry_max_extension_side:
+            updates["base_entry_max_extension_side"] = str(args.base_entry_max_extension_side)
+            suffix_parts.append(f"wfBaseExtSide{args.base_entry_max_extension_side}")
         if args.base_entry_reduce_extension_atr is not None:
             value = max(0.0, float(args.base_entry_reduce_extension_atr))
             updates["base_entry_reduce_extension_atr"] = value
@@ -359,6 +769,13 @@ def _apply_config_overrides(
             value = max(0.0, float(args.base_entry_reduce_max_trend_strength))
             updates["base_entry_reduce_max_trend_strength"] = value
             suffix_parts.append(f"wfBaseReduceMaxTrend{value:g}")
+        if args.base_entry_reduce_min_trend_strength is not None:
+            value = max(0.0, float(args.base_entry_reduce_min_trend_strength))
+            updates["base_entry_reduce_min_trend_strength"] = value
+            suffix_parts.append(f"wfBaseReduceMinTrend{value:g}")
+        if args.base_entry_reduce_side:
+            updates["base_entry_reduce_side"] = str(args.base_entry_reduce_side)
+            suffix_parts.append(f"wfBaseReduceSide{args.base_entry_reduce_side}")
     if not updates:
         return config
     updates["model_id"] = config.model_id + ":" + ":".join(suffix_parts)
@@ -376,6 +793,10 @@ def _apply_equity_circuit_overlay(config: MarketStateConfig, args: argparse.Name
         value = max(0, int(args.equity_circuit_breaker_pause_bars))
         updates["equity_circuit_breaker_pause_bars"] = value
         suffix_parts.append(f"wfEqCbPause{value}")
+    if args.equity_circuit_rearm_drawdown_pct is not None:
+        value = max(0.0, float(args.equity_circuit_rearm_drawdown_pct))
+        updates["equity_circuit_rearm_drawdown_pct"] = value
+        suffix_parts.append(f"wfEqCbRearm{value:g}")
     if not updates:
         return config
     updates["model_id"] = config.model_id + ":" + ":".join(suffix_parts)
@@ -423,6 +844,229 @@ def _apply_full_exit_overlay(config: MarketStateConfig, args: argparse.Namespace
     return replace(config, **updates)
 
 
+def _apply_trend_idle_overlay(config: MarketStateConfig, args: argparse.Namespace) -> MarketStateConfig:
+    updates: dict[str, Any] = {}
+    suffix_parts: list[str] = []
+    if args.trend_idle_probe_units is not None:
+        value = max(0.0, float(args.trend_idle_probe_units))
+        updates["trend_idle_probe_units"] = min(value, config.max_possible_units)
+        suffix_parts.append(f"wfIdleProbe{value:g}")
+    if args.trend_idle_min_score is not None:
+        value = int(args.trend_idle_min_score)
+        updates["trend_idle_min_score"] = value
+        suffix_parts.append(f"wfIdleScore{value}")
+    if args.trend_idle_min_reason_stack is not None:
+        value = max(0, int(args.trend_idle_min_reason_stack))
+        updates["trend_idle_min_reason_stack"] = value
+        suffix_parts.append(f"wfIdleStack{value}")
+    if args.trend_idle_cooldown_bars is not None:
+        value = max(0, int(args.trend_idle_cooldown_bars))
+        updates["trend_idle_cooldown_bars"] = value
+        suffix_parts.append(f"wfIdleCool{value}")
+    if args.trend_idle_max_extension_atr is not None:
+        value = max(0.1, float(args.trend_idle_max_extension_atr))
+        updates["trend_idle_max_extension_atr"] = value
+        suffix_parts.append(f"wfIdleExt{value:g}")
+    if not updates:
+        return config
+    updates["model_id"] = config.model_id + ":" + ":".join(suffix_parts)
+    return replace(config, **updates)
+
+
+def _trend_idle_after_selection_allowed(train_result: dict[str, Any], args: argparse.Namespace) -> bool:
+    train_return = float(train_result.get("total_return_pct") or 0.0)
+    min_train_return = args.trend_idle_after_selection_min_train_return_pct
+    if min_train_return is not None and train_return < float(min_train_return):
+        return False
+    max_train_return = args.trend_idle_after_selection_max_train_return_pct
+    if max_train_return is not None and train_return > float(max_train_return):
+        return False
+    train_drawdown = float(train_result.get("max_drawdown_pct") or 0.0)
+    min_train_drawdown = args.trend_idle_after_selection_min_train_drawdown_pct
+    if min_train_drawdown is not None and train_drawdown < float(min_train_drawdown):
+        return False
+    max_train_drawdown = args.trend_idle_after_selection_max_train_drawdown_pct
+    if max_train_drawdown is not None and train_drawdown > float(max_train_drawdown):
+        return False
+    return True
+
+
+def _apply_one_way_reversal_after_selection_overlay(
+    config: MarketStateConfig,
+    args: argparse.Namespace,
+) -> MarketStateConfig:
+    updates: dict[str, Any] = {}
+    suffix_parts: list[str] = []
+    if args.one_way_reversal_after_selection_switch_units is not None:
+        value = max(0.0, float(args.one_way_reversal_after_selection_switch_units))
+        updates["one_way_reversal_switch_units"] = min(value, config.max_possible_units)
+        suffix_parts.append(f"wfOwRevAS{value:g}")
+    if not updates:
+        return config
+    updates["model_id"] = config.model_id + ":" + ":".join(suffix_parts)
+    return replace(config, **updates)
+
+
+def _range_allowed(value: float, min_value: float | None, max_value: float | None) -> bool:
+    if min_value is not None and value < float(min_value):
+        return False
+    if max_value is not None and value > float(max_value):
+        return False
+    return True
+
+
+def _positive_range_allowed(value: float, min_value: float, max_value: float) -> bool:
+    if min_value > 0.0 and value < min_value:
+        return False
+    if max_value > 0.0 and value > max_value:
+        return False
+    return True
+
+
+def _train_ratio(train_result: dict[str, Any], key: str) -> float:
+    diagnostics = dict(train_result.get("event_diagnostics") or {})
+    ratios = dict(diagnostics.get("ratios") or {})
+    return float(ratios.get(key) or 0.0)
+
+
+def _equity_soft_circuit_after_selection_allowed(
+    train_result: dict[str, Any],
+    args: argparse.Namespace,
+) -> bool:
+    if bool(args.equity_soft_circuit_after_selection_require_base_reduce) and not _base_reduce_after_selection_allowed(
+        train_result,
+        args,
+    ):
+        return False
+    train_return = float(train_result.get("total_return_pct") or 0.0)
+    if not _range_allowed(
+        train_return,
+        args.equity_soft_circuit_after_selection_min_train_return_pct,
+        args.equity_soft_circuit_after_selection_max_train_return_pct,
+    ):
+        return False
+    train_drawdown = float(train_result.get("max_drawdown_pct") or 0.0)
+    if not _range_allowed(
+        train_drawdown,
+        args.equity_soft_circuit_after_selection_min_train_drawdown_pct,
+        args.equity_soft_circuit_after_selection_max_train_drawdown_pct,
+    ):
+        return False
+    trim_ratio = _train_ratio(train_result, "one_way_forced_trim_per_add")
+    if not _positive_range_allowed(
+        trim_ratio,
+        max(0.0, float(args.equity_soft_circuit_after_selection_min_one_way_trim_per_add)),
+        max(0.0, float(args.equity_soft_circuit_after_selection_max_one_way_trim_per_add)),
+    ):
+        return False
+    return True
+
+
+def _one_way_reversal_after_selection_alt_allowed(
+    train_result: dict[str, Any],
+    args: argparse.Namespace,
+) -> bool:
+    alt_gate_enabled = any(
+        value is not None
+        for value in (
+            args.one_way_reversal_after_selection_alt_min_train_return_pct,
+            args.one_way_reversal_after_selection_alt_max_train_return_pct,
+            args.one_way_reversal_after_selection_alt_min_train_drawdown_pct,
+            args.one_way_reversal_after_selection_alt_max_train_drawdown_pct,
+            args.one_way_reversal_after_selection_alt_min_train_cost_drag_pct,
+            args.one_way_reversal_after_selection_alt_max_train_cost_drag_pct,
+        )
+    ) or any(
+        max(0.0, float(value)) > 0.0
+        for value in (
+            args.one_way_reversal_after_selection_alt_min_one_way_trim_per_add,
+            args.one_way_reversal_after_selection_alt_max_one_way_trim_per_add,
+            args.one_way_reversal_after_selection_alt_min_turnover_per_add,
+            args.one_way_reversal_after_selection_alt_max_turnover_per_add,
+            args.one_way_reversal_after_selection_alt_min_reaction_trim_per_remove,
+            args.one_way_reversal_after_selection_alt_max_reaction_trim_per_remove,
+        )
+    )
+    if not alt_gate_enabled:
+        return False
+    train_return = float(train_result.get("total_return_pct") or 0.0)
+    if not _range_allowed(
+        train_return,
+        args.one_way_reversal_after_selection_alt_min_train_return_pct,
+        args.one_way_reversal_after_selection_alt_max_train_return_pct,
+    ):
+        return False
+    train_drawdown = float(train_result.get("max_drawdown_pct") or 0.0)
+    if not _range_allowed(
+        train_drawdown,
+        args.one_way_reversal_after_selection_alt_min_train_drawdown_pct,
+        args.one_way_reversal_after_selection_alt_max_train_drawdown_pct,
+    ):
+        return False
+    train_cost_drag = float(train_result.get("estimated_cost_drag_pct") or 0.0)
+    if not _range_allowed(
+        train_cost_drag,
+        args.one_way_reversal_after_selection_alt_min_train_cost_drag_pct,
+        args.one_way_reversal_after_selection_alt_max_train_cost_drag_pct,
+    ):
+        return False
+    trim_ratio = _train_ratio(train_result, "one_way_forced_trim_per_add")
+    if not _positive_range_allowed(
+        trim_ratio,
+        max(0.0, float(args.one_way_reversal_after_selection_alt_min_one_way_trim_per_add)),
+        max(0.0, float(args.one_way_reversal_after_selection_alt_max_one_way_trim_per_add)),
+    ):
+        return False
+    turnover_ratio = _train_ratio(train_result, "turnover_events_per_add")
+    if not _positive_range_allowed(
+        turnover_ratio,
+        max(0.0, float(args.one_way_reversal_after_selection_alt_min_turnover_per_add)),
+        max(0.0, float(args.one_way_reversal_after_selection_alt_max_turnover_per_add)),
+    ):
+        return False
+    reaction_trim_ratio = _train_ratio(train_result, "reaction_trim_per_remove")
+    if not _positive_range_allowed(
+        reaction_trim_ratio,
+        max(0.0, float(args.one_way_reversal_after_selection_alt_min_reaction_trim_per_remove)),
+        max(0.0, float(args.one_way_reversal_after_selection_alt_max_reaction_trim_per_remove)),
+    ):
+        return False
+    return True
+
+
+def _one_way_reversal_after_selection_allowed(
+    train_result: dict[str, Any],
+    args: argparse.Namespace,
+) -> bool:
+    primary_allowed = True
+    train_return = float(train_result.get("total_return_pct") or 0.0)
+    min_train_return = args.one_way_reversal_after_selection_min_train_return_pct
+    if min_train_return is not None and train_return < float(min_train_return):
+        primary_allowed = False
+    max_train_return = args.one_way_reversal_after_selection_max_train_return_pct
+    if max_train_return is not None and train_return > float(max_train_return):
+        primary_allowed = False
+    train_drawdown = float(train_result.get("max_drawdown_pct") or 0.0)
+    min_train_drawdown = args.one_way_reversal_after_selection_min_train_drawdown_pct
+    if min_train_drawdown is not None and train_drawdown < float(min_train_drawdown):
+        primary_allowed = False
+    max_train_drawdown = args.one_way_reversal_after_selection_max_train_drawdown_pct
+    if max_train_drawdown is not None and train_drawdown > float(max_train_drawdown):
+        primary_allowed = False
+    diagnostics = dict(train_result.get("event_diagnostics") or {})
+    ratios = dict(diagnostics.get("ratios") or {})
+    trim_ratio = float(ratios.get("one_way_forced_trim_per_add") or 0.0)
+    min_trim_ratio = max(0.0, float(args.one_way_reversal_after_selection_min_one_way_trim_per_add))
+    if min_trim_ratio > 0.0 and trim_ratio < min_trim_ratio:
+        primary_allowed = False
+    max_trim_ratio = max(0.0, float(args.one_way_reversal_after_selection_max_one_way_trim_per_add))
+    if max_trim_ratio > 0.0 and trim_ratio > max_trim_ratio:
+        primary_allowed = False
+    if primary_allowed:
+        return True
+    return _one_way_reversal_after_selection_alt_allowed(train_result, args)
+
+
 def _apply_base_reduce_overlay(config: MarketStateConfig, args: argparse.Namespace) -> MarketStateConfig:
     updates: dict[str, Any] = {}
     suffix_parts: list[str] = []
@@ -430,6 +1074,9 @@ def _apply_base_reduce_overlay(config: MarketStateConfig, args: argparse.Namespa
         value = max(0.0, float(args.base_entry_max_extension_atr))
         updates["base_entry_max_extension_atr"] = value
         suffix_parts.append(f"wfBaseExt{value:g}")
+    if args.base_entry_max_extension_side:
+        updates["base_entry_max_extension_side"] = str(args.base_entry_max_extension_side)
+        suffix_parts.append(f"wfBaseExtSide{args.base_entry_max_extension_side}")
     if args.base_entry_reduce_extension_atr is not None:
         value = max(0.0, float(args.base_entry_reduce_extension_atr))
         updates["base_entry_reduce_extension_atr"] = value
@@ -446,10 +1093,39 @@ def _apply_base_reduce_overlay(config: MarketStateConfig, args: argparse.Namespa
         value = max(0.0, float(args.base_entry_reduce_max_trend_strength))
         updates["base_entry_reduce_max_trend_strength"] = value
         suffix_parts.append(f"wfBaseReduceMaxTrend{value:g}")
+    if args.base_entry_reduce_min_trend_strength is not None:
+        value = max(0.0, float(args.base_entry_reduce_min_trend_strength))
+        updates["base_entry_reduce_min_trend_strength"] = value
+        suffix_parts.append(f"wfBaseReduceMinTrend{value:g}")
+    if args.base_entry_reduce_side:
+        updates["base_entry_reduce_side"] = str(args.base_entry_reduce_side)
+        suffix_parts.append(f"wfBaseReduceSide{args.base_entry_reduce_side}")
     if not updates:
         return config
     updates["model_id"] = config.model_id + ":" + ":".join(suffix_parts)
     return replace(config, **updates)
+
+
+def _base_reduce_after_selection_allowed(train_result: dict[str, Any], args: argparse.Namespace) -> bool:
+    min_train_return = args.base_entry_reduce_after_selection_min_train_return_pct
+    if min_train_return is not None and float(train_result.get("total_return_pct") or 0.0) < float(min_train_return):
+        return False
+    max_train_return = args.base_entry_reduce_after_selection_max_train_return_pct
+    if max_train_return is not None and float(train_result.get("total_return_pct") or 0.0) > float(max_train_return):
+        return False
+    max_train_drawdown = args.base_entry_reduce_after_selection_max_train_drawdown_pct
+    if max_train_drawdown is not None and float(train_result.get("max_drawdown_pct") or 100.0) > float(
+        max_train_drawdown
+    ):
+        return False
+    min_trim_ratio = max(0.0, float(args.base_entry_reduce_after_selection_min_one_way_trim_per_add))
+    if min_trim_ratio > 0.0:
+        diagnostics = dict(train_result.get("event_diagnostics") or {})
+        ratios = dict(diagnostics.get("ratios") or {})
+        trim_ratio = float(ratios.get("one_way_forced_trim_per_add") or 0.0)
+        if trim_ratio < min_trim_ratio:
+            return False
+    return True
 
 
 def _apply_context_quarantine_overlay(config: MarketStateConfig, args: argparse.Namespace) -> MarketStateConfig:
@@ -474,6 +1150,108 @@ def _apply_context_quarantine_overlay(config: MarketStateConfig, args: argparse.
         return config
     updates["model_id"] = config.model_id + ":" + ":".join(suffix_parts)
     return replace(config, **updates)
+
+
+def _apply_one_way_loss_fuse_overlay(config: MarketStateConfig, args: argparse.Namespace) -> MarketStateConfig:
+    updates: dict[str, Any] = {}
+    suffix_parts: list[str] = []
+    if args.one_way_loss_fuse_min_adverse_reaction is not None:
+        value = max(0.0, float(args.one_way_loss_fuse_min_adverse_reaction))
+        updates["one_way_loss_fuse_min_adverse_reaction"] = value
+        suffix_parts.append(f"wfOwLossFuse{value:g}")
+    if args.one_way_loss_fuse_cooldown_bars is not None:
+        value = max(0, int(args.one_way_loss_fuse_cooldown_bars))
+        updates["one_way_loss_fuse_cooldown_bars"] = value
+        suffix_parts.append(f"wfOwLossFuseCool{value}")
+    if args.one_way_loss_fuse_size_mult is not None:
+        value = min(max(float(args.one_way_loss_fuse_size_mult), 0.0), 1.0)
+        updates["one_way_loss_fuse_size_mult"] = value
+        suffix_parts.append(f"wfOwLossFuseMult{value:g}")
+    if not updates:
+        return config
+    updates["model_id"] = config.model_id + ":" + ":".join(suffix_parts)
+    return replace(config, **updates)
+
+
+def _one_way_loss_fuse_after_selection_allowed(train_result: dict[str, Any], args: argparse.Namespace) -> bool:
+    train_return = float(train_result.get("total_return_pct") or 0.0)
+    min_train_return = args.one_way_loss_fuse_after_selection_min_train_return_pct
+    if min_train_return is not None and train_return < float(min_train_return):
+        return False
+    max_train_return = args.one_way_loss_fuse_after_selection_max_train_return_pct
+    if max_train_return is not None and train_return > float(max_train_return):
+        return False
+    train_drawdown = float(train_result.get("max_drawdown_pct") or 0.0)
+    min_train_drawdown = args.one_way_loss_fuse_after_selection_min_train_drawdown_pct
+    if min_train_drawdown is not None and train_drawdown < float(min_train_drawdown):
+        return False
+    max_train_drawdown = args.one_way_loss_fuse_after_selection_max_train_drawdown_pct
+    if max_train_drawdown is not None and train_drawdown > float(max_train_drawdown):
+        return False
+    diagnostics = dict(train_result.get("event_diagnostics") or {})
+    ratios = dict(diagnostics.get("ratios") or {})
+    trim_ratio = float(ratios.get("one_way_forced_trim_per_add") or 0.0)
+    min_trim_ratio = max(0.0, float(args.one_way_loss_fuse_after_selection_min_one_way_trim_per_add))
+    if min_trim_ratio > 0.0 and trim_ratio < min_trim_ratio:
+        return False
+    max_trim_ratio = max(0.0, float(args.one_way_loss_fuse_after_selection_max_one_way_trim_per_add))
+    if max_trim_ratio > 0.0 and trim_ratio > max_trim_ratio:
+        return False
+    return True
+
+
+def _apply_after_selection_overlays(
+    config: MarketStateConfig,
+    train_result: dict[str, Any],
+    args: argparse.Namespace,
+) -> tuple[MarketStateConfig, list[str], list[str]]:
+    overlays_applied: list[str] = []
+    overlays_skipped: list[str] = []
+    if bool(args.equity_circuit_breaker_after_selection):
+        config = _apply_equity_circuit_overlay(config, args)
+        overlays_applied.append("equity_circuit")
+    if bool(args.equity_soft_circuit_after_selection):
+        if _equity_soft_circuit_after_selection_allowed(train_result, args):
+            config = _apply_equity_soft_circuit_overlay(config, args)
+            overlays_applied.append("equity_soft_circuit")
+        else:
+            overlays_skipped.append("equity_soft_circuit")
+    if bool(args.one_way_trim_full_exit_after_selection):
+        config = _apply_full_exit_overlay(config, args)
+        overlays_applied.append("one_way_trim_full_exit")
+    if bool(args.one_way_reversal_after_selection):
+        if _one_way_reversal_after_selection_allowed(train_result, args):
+            config = _apply_one_way_reversal_after_selection_overlay(config, args)
+            overlays_applied.append("one_way_reversal")
+        else:
+            overlays_skipped.append("one_way_reversal")
+    if bool(args.trend_idle_after_selection):
+        if _trend_idle_after_selection_allowed(train_result, args):
+            config = _apply_trend_idle_overlay(config, args)
+            overlays_applied.append("trend_idle")
+        else:
+            overlays_skipped.append("trend_idle")
+    if bool(args.base_entry_reduce_after_selection):
+        if _base_reduce_after_selection_allowed(train_result, args):
+            config = _apply_base_reduce_overlay(config, args)
+            overlays_applied.append("base_reduce")
+        else:
+            overlays_skipped.append("base_reduce")
+    if bool(args.one_way_trim_context_after_selection):
+        if bool(args.one_way_trim_context_after_selection_require_base_reduce) and (
+            "base_reduce" not in overlays_applied
+        ):
+            overlays_skipped.append("one_way_trim_context")
+        else:
+            config = _apply_context_quarantine_overlay(config, args)
+            overlays_applied.append("one_way_trim_context")
+    if bool(args.one_way_loss_fuse_after_selection):
+        if _one_way_loss_fuse_after_selection_allowed(train_result, args):
+            config = _apply_one_way_loss_fuse_overlay(config, args)
+            overlays_applied.append("one_way_loss_fuse")
+        else:
+            overlays_skipped.append("one_way_loss_fuse")
+    return config, overlays_applied, overlays_skipped
 
 
 def _slice_between(bars: list[Bar], start: datetime, end: datetime) -> list[Bar]:
@@ -506,33 +1284,154 @@ def _window_feature_sets(
     return features, scenario_features, scenario_maps, meta
 
 
+def _soft_excess_penalty(value: float, threshold: float, penalty: float) -> float:
+    if threshold <= 0.0 or penalty <= 0.0:
+        return 0.0
+    return max(value - threshold, 0.0) * penalty
+
+
 def _selection_score(
     result: dict[str, Any],
     *,
     impulse_score_penalty: float = 0.0,
+    btc_rotation_score_penalty: float = 0.0,
     flag_penalty: float = 0.10,
     score_cap: float = 0.0,
+    mdd_soft_threshold_pct: float = 0.0,
+    mdd_soft_penalty: float = 0.0,
+    cost_soft_threshold_pct: float = 0.0,
+    cost_soft_penalty: float = 0.0,
+    one_way_trim_ratio_threshold: float = 0.0,
+    one_way_trim_ratio_penalty: float = 0.0,
+    turnover_per_add_threshold: float = 0.0,
+    turnover_per_add_penalty: float = 0.0,
+    structural_flag_min_train_return_pct: float = 0.0,
+    structural_flag_penalty: float = 0.0,
+    high_train_flag_min_return_pct: float = 0.0,
+    high_train_flag_penalty: float = 0.0,
 ) -> float:
     diagnostics = dict(result.get("event_diagnostics") or {})
     flags = diagnostics.get("flags") or []
+    ratios = dict(diagnostics.get("ratios") or {})
     mdd = float(result.get("max_drawdown_pct") or 100.0)
     cost_drag = float(result.get("estimated_cost_drag_pct") or 0.0)
+    one_way_trim_ratio = float(ratios.get("one_way_forced_trim_per_add") or 0.0)
+    turnover_per_add = float(ratios.get("turnover_events_per_add") or 0.0)
     config = dict(result.get("config") or {})
     impulse_penalty = (
         max(float(impulse_score_penalty), 0.0)
         if float(config.get("one_way_impulse_probe_units") or 0.0) > 0.0
         else 0.0
     )
+    btc_rotation_penalty = (
+        max(float(btc_rotation_score_penalty), 0.0)
+        if (
+            float(config.get("scenario_flip_units") or 0.0) > 0.0
+            or float(config.get("winner_pyramid_units") or 0.0) > 0.0
+        )
+        else 0.0
+    )
     base_score = float(result.get("score") or -1e9)
     if float(score_cap) > 0.0:
         base_score = min(base_score, float(score_cap))
+    structural_flags = {
+        "side_imbalance",
+        "one_way_forced_trim_overuse",
+        "high_turnover_per_add",
+    }
+    train_return = float(result.get("total_return_pct") or 0.0)
+    structural_penalty = 0.0
+    if (
+        float(structural_flag_penalty) > 0.0
+        and train_return >= float(structural_flag_min_train_return_pct)
+    ):
+        structural_penalty = max(float(structural_flag_penalty), 0.0) * sum(
+            1 for flag in flags if str(flag) in structural_flags
+        )
+    high_train_flag_penalty_total = 0.0
+    if (
+        float(high_train_flag_penalty) > 0.0
+        and train_return >= float(high_train_flag_min_return_pct)
+    ):
+        high_train_flag_penalty_total = max(float(high_train_flag_penalty), 0.0) * len(flags)
     return (
         base_score
         - max(float(flag_penalty), 0.0) * len(flags)
         - 0.005 * max(mdd - 35.0, 0.0)
         - 0.0005 * max(cost_drag - 250.0, 0.0)
+        - _soft_excess_penalty(mdd, float(mdd_soft_threshold_pct), float(mdd_soft_penalty))
+        - _soft_excess_penalty(cost_drag, float(cost_soft_threshold_pct), float(cost_soft_penalty))
+        - _soft_excess_penalty(
+            one_way_trim_ratio,
+            float(one_way_trim_ratio_threshold),
+            float(one_way_trim_ratio_penalty),
+        )
+        - _soft_excess_penalty(
+            turnover_per_add,
+            float(turnover_per_add_threshold),
+            float(turnover_per_add_penalty),
+        )
+        - structural_penalty
+        - high_train_flag_penalty_total
         - impulse_penalty
+        - btc_rotation_penalty
     )
+
+
+def _selection_recent_efficiency_key(config_payload: dict[str, Any]) -> tuple[str, float, str]:
+    defensive_cooldown = int(config_payload.get("defensive_trim_cooldown_bars") or 0)
+    cooldown_bucket = "fast_defense" if 0 < defensive_cooldown <= 24 else "source_defense"
+    return (
+        str(config_payload.get("profile_name") or ""),
+        round(float(config_payload.get("max_possible_units") or 0.0), 4),
+        cooldown_bucket,
+    )
+
+
+def _apply_recent_efficiency_penalty(
+    result: dict[str, Any],
+    completed_folds: list[dict[str, Any]],
+    *,
+    lookback: int,
+    min_samples: int,
+    min_train_return_pct: float,
+    efficiency_threshold: float,
+    penalty: float,
+) -> None:
+    if int(lookback) <= 0 or float(penalty) <= 0.0 or float(efficiency_threshold) <= 0.0:
+        return
+    candidate_train_return = float(result.get("total_return_pct") or 0.0)
+    if candidate_train_return < float(min_train_return_pct):
+        return
+    config_payload = dict(result.get("config") or {})
+    key = _selection_recent_efficiency_key(config_payload)
+    recent = completed_folds[-max(1, int(lookback)) :]
+    matched: list[tuple[float, float]] = []
+    for fold in recent:
+        train_result = dict(fold.get("selected_train_result") or {})
+        test_result = dict(fold.get("test_result") or {})
+        train_config = dict(train_result.get("config") or {})
+        if _selection_recent_efficiency_key(train_config) != key:
+            continue
+        train_return = float(train_result.get("total_return_pct") or 0.0)
+        if train_return < float(min_train_return_pct):
+            continue
+        matched.append((train_return, float(test_result.get("total_return_pct") or 0.0)))
+    if len(matched) < max(1, int(min_samples)):
+        return
+    train_sum = sum(train for train, _ in matched)
+    if train_sum <= 0.0:
+        return
+    efficiency = sum(test for _, test in matched) / train_sum
+    if efficiency >= float(efficiency_threshold):
+        return
+    raw_score = float(result.get("walk_forward_selection_score") or -1e9)
+    applied_penalty = max(float(penalty), 0.0)
+    result["walk_forward_selection_score_before_recent_efficiency"] = round(raw_score, 6)
+    result["walk_forward_selection_recent_efficiency_ratio"] = round(efficiency, 6)
+    result["walk_forward_selection_recent_efficiency_samples"] = len(matched)
+    result["walk_forward_selection_recent_efficiency_penalty"] = round(applied_penalty, 6)
+    result["walk_forward_selection_score"] = round(raw_score - applied_penalty, 6)
 
 
 def _run_config(
@@ -573,6 +1472,7 @@ def _aggregate_folds(folds: list[dict[str, Any]]) -> dict[str, Any]:
     selected_max_units_counter: Counter[str] = Counter()
     test_health_counter: Counter[str] = Counter()
     flag_counter: Counter[str] = Counter()
+    event_counter: Counter[str] = Counter()
     regime_totals: dict[str, dict[str, Any]] = {}
     for fold in folds:
         result = fold.get("test_result")
@@ -591,6 +1491,7 @@ def _aggregate_folds(folds: list[dict[str, Any]]) -> dict[str, Any]:
         selected_hold_counter[str(selected_config.get("max_hold_bars", "unknown"))] += 1
         selected_max_units_counter[str(selected_config.get("max_possible_units", "unknown"))] += 1
         diagnostics = dict(result.get("event_diagnostics") or {})
+        event_counter.update({str(k): int(v) for k, v in dict(result.get("event_counts") or {}).items()})
         test_health_counter[str(diagnostics.get("health") or "unknown")] += 1
         for flag in diagnostics.get("flags") or []:
             flag_counter[str(flag)] += 1
@@ -655,6 +1556,7 @@ def _aggregate_folds(folds: list[dict[str, Any]]) -> dict[str, Any]:
         "selected_max_units_counts": _counter_payload(selected_max_units_counter),
         "test_health_counts": _counter_payload(test_health_counter),
         "test_flag_counts": _counter_payload(flag_counter),
+        "test_event_counts": _counter_payload(event_counter),
         "test_regime_performance": regime_performance,
     }
 
@@ -687,6 +1589,7 @@ def _write_markdown(report: dict[str, Any], path: Path) -> None:
         f"- Selected max-unit counts: `{json.dumps(aggregate.get('selected_max_units_counts', {}), ensure_ascii=False)}`",
         f"- Test health counts: `{json.dumps(aggregate.get('test_health_counts', {}), ensure_ascii=False)}`",
         f"- Test flag counts: `{json.dumps(aggregate.get('test_flag_counts', {}), ensure_ascii=False)}`",
+        f"- Test event counts: `{json.dumps(aggregate.get('test_event_counts', {}), ensure_ascii=False)}`",
         "",
         "## OOS Regime Performance",
         "",
@@ -735,35 +1638,92 @@ def main() -> None:
     include_equity_circuit_in_selection = not bool(args.equity_circuit_breaker_after_selection)
     include_equity_soft_circuit_in_selection = not bool(args.equity_soft_circuit_after_selection)
     include_full_exit_in_selection = not bool(args.one_way_trim_full_exit_after_selection)
+    include_trend_idle_in_selection = not bool(args.trend_idle_after_selection)
     include_base_reduce_in_selection = not bool(args.base_entry_reduce_after_selection)
     include_context_quarantine_in_selection = not bool(args.one_way_trim_context_after_selection)
-    if bool(args.include_no_impulse_candidates):
-        configs.extend(
-            _apply_config_overrides(
-                config,
-                args,
-                include_impulse=False,
-                include_equity_circuit=include_equity_circuit_in_selection,
-                include_equity_soft_circuit=include_equity_soft_circuit_in_selection,
-                include_full_exit=include_full_exit_in_selection,
-                include_base_reduce=include_base_reduce_in_selection,
-                include_context_quarantine=include_context_quarantine_in_selection,
-            )
-            for config in source_configs
+    include_loss_fuse_in_selection = not bool(args.one_way_loss_fuse_after_selection)
+
+    def add_candidate_family(*, include_defensive_trim_cooldown: bool) -> None:
+        equity_choices = [include_equity_circuit_in_selection]
+        if bool(args.include_no_equity_circuit_candidates) and include_equity_circuit_in_selection:
+            equity_choices.insert(0, False)
+        impulse_choices = [True]
+        if bool(args.include_no_impulse_candidates):
+            impulse_choices.insert(0, False)
+        btc_rotation_choices = [True]
+        if bool(args.include_no_btc_rotation_candidates):
+            btc_rotation_choices.insert(0, False)
+        base_reduce_choices = [include_base_reduce_in_selection]
+        base_reduce_requested = (
+            args.base_entry_max_extension_atr is not None
+            or bool(args.base_entry_max_extension_side)
+            or args.base_entry_reduce_extension_atr is not None
+            or args.base_entry_reduce_size_mult is not None
+            or args.base_entry_reduce_promote_reaction is not None
+            or args.base_entry_reduce_max_trend_strength is not None
+            or args.base_entry_reduce_min_trend_strength is not None
+            or bool(args.base_entry_reduce_side)
         )
-    configs.extend(
-        _apply_config_overrides(
-            config,
-            args,
-            include_impulse=True,
-            include_equity_circuit=include_equity_circuit_in_selection,
-            include_equity_soft_circuit=include_equity_soft_circuit_in_selection,
-            include_full_exit=include_full_exit_in_selection,
-            include_base_reduce=include_base_reduce_in_selection,
-            include_context_quarantine=include_context_quarantine_in_selection,
+        if (
+            bool(args.include_no_base_reduce_candidates)
+            and include_base_reduce_in_selection
+            and base_reduce_requested
+        ):
+            base_reduce_choices.insert(0, False)
+        loss_fuse_choices = [include_loss_fuse_in_selection]
+        loss_fuse_requested = (
+            args.one_way_loss_fuse_min_adverse_reaction is not None
+            or args.one_way_loss_fuse_cooldown_bars is not None
+            or args.one_way_loss_fuse_size_mult is not None
         )
-        for config in source_configs
-    )
+        if (
+            bool(args.include_no_one_way_loss_fuse_candidates)
+            and include_loss_fuse_in_selection
+            and loss_fuse_requested
+        ):
+            loss_fuse_choices.insert(0, False)
+        near_miss_choices = [True]
+        near_miss_requested = (
+            args.near_miss_probe_units is not None
+            or args.near_miss_probe_min_score is not None
+            or args.near_miss_probe_min_score_edge is not None
+            or args.near_miss_probe_min_reason_stack is not None
+            or args.near_miss_probe_cooldown_bars is not None
+            or args.near_miss_probe_max_extension_atr is not None
+            or args.near_miss_probe_failure_guard_count is not None
+            or args.near_miss_probe_failure_guard_window_bars is not None
+            or args.near_miss_probe_failure_cooldown_bars is not None
+        )
+        if bool(args.include_no_near_miss_probe_candidates) and near_miss_requested:
+            near_miss_choices.insert(0, False)
+        for include_equity_circuit in equity_choices:
+            for include_btc_rotation in btc_rotation_choices:
+                for include_impulse in impulse_choices:
+                    for include_base_reduce in base_reduce_choices:
+                        for include_loss_fuse in loss_fuse_choices:
+                            for include_near_miss in near_miss_choices:
+                                configs.extend(
+                                    _apply_config_overrides(
+                                        config,
+                                        args,
+                                        include_impulse=include_impulse,
+                                        include_trend_idle=include_trend_idle_in_selection,
+                                        include_equity_circuit=include_equity_circuit,
+                                        include_equity_soft_circuit=include_equity_soft_circuit_in_selection,
+                                        include_full_exit=include_full_exit_in_selection,
+                                        include_defensive_trim_cooldown=include_defensive_trim_cooldown,
+                                        include_near_miss=include_near_miss,
+                                        include_base_reduce=include_base_reduce,
+                                        include_context_quarantine=include_context_quarantine_in_selection,
+                                        include_loss_fuse=include_loss_fuse,
+                                        include_btc_rotation=include_btc_rotation,
+                                    )
+                                    for config in source_configs
+                                )
+
+    if bool(args.include_no_defensive_trim_cooldown_candidates) and args.defensive_trim_cooldown_bars is not None:
+        add_candidate_family(include_defensive_trim_cooldown=False)
+    add_candidate_family(include_defensive_trim_cooldown=True)
     deduped_configs: list[MarketStateConfig] = []
     seen_config_keys: set[str] = set()
     for config in configs:
@@ -814,6 +1774,7 @@ def main() -> None:
     test_delta = timedelta(days=max(int(args.test_days), 1))
     step_delta = timedelta(days=max(int(args.step_days), 1))
     folds: list[dict[str, Any]] = []
+    selection_history_folds: list[dict[str, Any]] = []
     fold_idx = 0
     valid_fold_idx = 0
     fold_offset = max(0, int(args.fold_offset))
@@ -841,12 +1802,14 @@ def main() -> None:
             fold_start += step_delta
             continue
         valid_fold_idx += 1
-        if valid_fold_idx <= fold_offset:
+        is_reported_fold = valid_fold_idx > fold_offset
+        if not is_reported_fold and not bool(args.warm_fold_offset_selection_state):
             fold_start += step_delta
             continue
 
         train_results: list[dict[str, Any]] = []
-        print(f"walk-forward fold {valid_fold_idx} training {len(configs)} candidates", flush=True)
+        warm_note = " warming" if not is_reported_fold else ""
+        print(f"walk-forward fold {valid_fold_idx}{warm_note} training {len(configs)} candidates", flush=True)
         for config_idx, config in enumerate(configs, start=1):
             result = _run_config(
                 symbol=symbol,
@@ -863,10 +1826,36 @@ def main() -> None:
                     _selection_score(
                         result,
                         impulse_score_penalty=float(args.impulse_selection_score_penalty),
+                        btc_rotation_score_penalty=float(args.btc_rotation_selection_score_penalty),
                         flag_penalty=float(args.selection_flag_penalty),
                         score_cap=float(args.selection_score_cap),
+                        mdd_soft_threshold_pct=float(args.selection_mdd_soft_threshold_pct),
+                        mdd_soft_penalty=float(args.selection_mdd_soft_penalty),
+                        cost_soft_threshold_pct=float(args.selection_cost_soft_threshold_pct),
+                        cost_soft_penalty=float(args.selection_cost_soft_penalty),
+                        one_way_trim_ratio_threshold=float(args.selection_one_way_trim_ratio_threshold),
+                        one_way_trim_ratio_penalty=float(args.selection_one_way_trim_ratio_penalty),
+                        turnover_per_add_threshold=float(args.selection_turnover_per_add_threshold),
+                        turnover_per_add_penalty=float(args.selection_turnover_per_add_penalty),
+                        structural_flag_min_train_return_pct=float(
+                            args.selection_structural_flag_min_train_return_pct
+                        ),
+                        structural_flag_penalty=float(args.selection_structural_flag_penalty),
+                        high_train_flag_min_return_pct=float(
+                            args.selection_high_train_flag_min_return_pct
+                        ),
+                        high_train_flag_penalty=float(args.selection_high_train_flag_penalty),
                     ),
                     6,
+                )
+                _apply_recent_efficiency_penalty(
+                    result,
+                    selection_history_folds,
+                    lookback=int(args.selection_recent_efficiency_lookback),
+                    min_samples=int(args.selection_recent_efficiency_min_samples),
+                    min_train_return_pct=float(args.selection_recent_efficiency_min_train_return_pct),
+                    efficiency_threshold=float(args.selection_recent_efficiency_threshold),
+                    penalty=float(args.selection_recent_efficiency_penalty),
                 )
                 train_results.append(result)
             print(f"walk-forward fold {valid_fold_idx} trained {config_idx}/{len(configs)}", flush=True)
@@ -883,16 +1872,11 @@ def main() -> None:
         )
         selected_train = train_results[0]
         selected_config = MarketStateConfig(**selected_train["config"])
-        if bool(args.equity_circuit_breaker_after_selection):
-            selected_config = _apply_equity_circuit_overlay(selected_config, args)
-        if bool(args.equity_soft_circuit_after_selection):
-            selected_config = _apply_equity_soft_circuit_overlay(selected_config, args)
-        if bool(args.one_way_trim_full_exit_after_selection):
-            selected_config = _apply_full_exit_overlay(selected_config, args)
-        if bool(args.base_entry_reduce_after_selection):
-            selected_config = _apply_base_reduce_overlay(selected_config, args)
-        if bool(args.one_way_trim_context_after_selection):
-            selected_config = _apply_context_quarantine_overlay(selected_config, args)
+        selected_config, overlays_applied, overlays_skipped = _apply_after_selection_overlays(
+            selected_config,
+            selected_train,
+            args,
+        )
         print(f"walk-forward fold {valid_fold_idx} testing selected candidate", flush=True)
         test_result = _run_config(
             symbol=symbol,
@@ -904,25 +1888,74 @@ def main() -> None:
             carry_rate_per_bar=carry_rate_per_bar,
             min_periods=int(args.min_periods),
         )
-        folds.append(
-            {
-                "fold": valid_fold_idx,
-                "chunk_fold": len(folds) + 1,
-                "train_start": train_start.date().isoformat(),
-                "train_end": train_end.date().isoformat(),
-                "test_start": test_start.date().isoformat(),
-                "test_end": test_end.date().isoformat(),
-                "train_meta": train_meta,
-                "test_meta": test_meta,
-                "selected_model_id": selected_config.model_id,
-                "selected_train_result": selected_train,
-                "test_result": test_result,
-                "train_top_results": train_results[:5],
-            }
+        train_top_test_results: list[dict[str, Any]] = []
+        top_test_count = (
+            min(max(0, int(args.test_top_train_candidates)), len(train_results))
+            if is_reported_fold
+            else 0
         )
-        print(f"walk-forward fold {valid_fold_idx} selected {selected_config.model_id}", flush=True)
-        if int(args.fold_limit) > 0 and len(folds) >= int(args.fold_limit):
-            break
+        for rank, train_candidate in enumerate(train_results[:top_test_count], start=1):
+            candidate_config = MarketStateConfig(**train_candidate["config"])
+            candidate_config, candidate_applied, candidate_skipped = _apply_after_selection_overlays(
+                candidate_config,
+                train_candidate,
+                args,
+            )
+            candidate_test = test_result if rank == 1 else _run_config(
+                symbol=symbol,
+                features=test_features,
+                scenario_features=test_scenario_features,
+                scenario_maps=test_maps,
+                config=candidate_config,
+                cost_rate=cost_rate,
+                carry_rate_per_bar=carry_rate_per_bar,
+                min_periods=int(args.min_periods),
+            )
+            train_diagnostics = dict(train_candidate.get("event_diagnostics") or {})
+            test_diagnostics = dict((candidate_test or {}).get("event_diagnostics") or {})
+            train_top_test_results.append(
+                {
+                    "rank": rank,
+                    "is_selected": rank == 1,
+                    "model_id": candidate_config.model_id,
+                    "after_selection_overlays_applied": candidate_applied,
+                    "after_selection_overlays_skipped": candidate_skipped,
+                    "train_selection_score": train_candidate.get("walk_forward_selection_score"),
+                    "train_return_pct": train_candidate.get("total_return_pct"),
+                    "train_max_drawdown_pct": train_candidate.get("max_drawdown_pct"),
+                    "train_flags": train_diagnostics.get("flags") or [],
+                    "test_return_pct": (candidate_test or {}).get("total_return_pct"),
+                    "test_max_drawdown_pct": (candidate_test or {}).get("max_drawdown_pct"),
+                    "test_trade_like_events": (candidate_test or {}).get("trade_like_events"),
+                    "test_flags": test_diagnostics.get("flags") or [],
+                    "test_result": candidate_test,
+                }
+            )
+        fold_record = {
+            "fold": valid_fold_idx,
+            "chunk_fold": len(folds) + 1 if is_reported_fold else 0,
+            "train_start": train_start.date().isoformat(),
+            "train_end": train_end.date().isoformat(),
+            "test_start": test_start.date().isoformat(),
+            "test_end": test_end.date().isoformat(),
+            "train_meta": train_meta,
+            "test_meta": test_meta,
+            "selected_model_id": selected_config.model_id,
+            "after_selection_overlays_applied": overlays_applied,
+            "after_selection_overlays_skipped": overlays_skipped,
+            "selected_train_result": selected_train,
+            "test_result": test_result,
+            "train_top_results": train_results[:5],
+            "train_top_test_results": train_top_test_results,
+        }
+        selection_history_folds.append(fold_record)
+        if is_reported_fold:
+            folds.append(fold_record)
+            print(f"walk-forward fold {valid_fold_idx} selected {selected_config.model_id}", flush=True)
+            if int(args.fold_limit) > 0 and len(folds) >= int(args.fold_limit):
+                break
+        else:
+            print(f"walk-forward fold {valid_fold_idx} warmed {selected_config.model_id}", flush=True)
         fold_start += step_delta
 
     report = {
@@ -959,42 +1992,232 @@ def main() -> None:
             "one_way_trim_context_cooldown_bars": args.one_way_trim_context_cooldown_bars,
             "one_way_trim_context_full_exit": bool(args.one_way_trim_context_full_exit),
             "one_way_trim_context_after_selection": bool(args.one_way_trim_context_after_selection),
+            "one_way_trim_context_after_selection_require_base_reduce": bool(
+                args.one_way_trim_context_after_selection_require_base_reduce
+            ),
+            "one_way_loss_fuse_min_adverse_reaction": args.one_way_loss_fuse_min_adverse_reaction,
+            "one_way_loss_fuse_cooldown_bars": args.one_way_loss_fuse_cooldown_bars,
+            "one_way_loss_fuse_size_mult": args.one_way_loss_fuse_size_mult,
+            "one_way_loss_fuse_after_selection": bool(args.one_way_loss_fuse_after_selection),
+            "one_way_loss_fuse_after_selection_min_train_return_pct": (
+                args.one_way_loss_fuse_after_selection_min_train_return_pct
+            ),
+            "one_way_loss_fuse_after_selection_max_train_return_pct": (
+                args.one_way_loss_fuse_after_selection_max_train_return_pct
+            ),
+            "one_way_loss_fuse_after_selection_min_train_drawdown_pct": (
+                args.one_way_loss_fuse_after_selection_min_train_drawdown_pct
+            ),
+            "one_way_loss_fuse_after_selection_max_train_drawdown_pct": (
+                args.one_way_loss_fuse_after_selection_max_train_drawdown_pct
+            ),
+            "one_way_loss_fuse_after_selection_min_one_way_trim_per_add": float(
+                args.one_way_loss_fuse_after_selection_min_one_way_trim_per_add
+            ),
+            "one_way_loss_fuse_after_selection_max_one_way_trim_per_add": float(
+                args.one_way_loss_fuse_after_selection_max_one_way_trim_per_add
+            ),
             "one_way_trim_full_exit_min_one_way_score": args.one_way_trim_full_exit_min_one_way_score,
             "one_way_trim_full_exit_min_score_diff": args.one_way_trim_full_exit_min_score_diff,
+            "defensive_trim_cooldown_bars": args.defensive_trim_cooldown_bars,
+            "include_no_defensive_trim_cooldown_candidates": bool(
+                args.include_no_defensive_trim_cooldown_candidates
+            ),
             "one_way_trim_full_exit_after_selection": bool(args.one_way_trim_full_exit_after_selection),
             "trend_idle_probe_units": args.trend_idle_probe_units,
             "trend_idle_min_score": args.trend_idle_min_score,
             "trend_idle_min_reason_stack": args.trend_idle_min_reason_stack,
             "trend_idle_cooldown_bars": args.trend_idle_cooldown_bars,
             "trend_idle_max_extension_atr": args.trend_idle_max_extension_atr,
+            "near_miss_probe_units": args.near_miss_probe_units,
+            "near_miss_probe_min_score": args.near_miss_probe_min_score,
+            "near_miss_probe_min_score_edge": args.near_miss_probe_min_score_edge,
+            "near_miss_probe_min_reason_stack": args.near_miss_probe_min_reason_stack,
+            "near_miss_probe_cooldown_bars": args.near_miss_probe_cooldown_bars,
+            "near_miss_probe_max_extension_atr": args.near_miss_probe_max_extension_atr,
+            "near_miss_probe_failure_guard_count": args.near_miss_probe_failure_guard_count,
+            "near_miss_probe_failure_guard_window_bars": args.near_miss_probe_failure_guard_window_bars,
+            "near_miss_probe_failure_cooldown_bars": args.near_miss_probe_failure_cooldown_bars,
+            "include_no_near_miss_probe_candidates": bool(args.include_no_near_miss_probe_candidates),
+            "trend_idle_after_selection": bool(args.trend_idle_after_selection),
+            "trend_idle_after_selection_min_train_return_pct": (
+                args.trend_idle_after_selection_min_train_return_pct
+            ),
+            "trend_idle_after_selection_max_train_return_pct": (
+                args.trend_idle_after_selection_max_train_return_pct
+            ),
+            "trend_idle_after_selection_min_train_drawdown_pct": (
+                args.trend_idle_after_selection_min_train_drawdown_pct
+            ),
+            "trend_idle_after_selection_max_train_drawdown_pct": (
+                args.trend_idle_after_selection_max_train_drawdown_pct
+            ),
             "equity_circuit_breaker_drawdown_pct": args.equity_circuit_breaker_drawdown_pct,
             "equity_circuit_breaker_pause_bars": args.equity_circuit_breaker_pause_bars,
+            "equity_circuit_rearm_drawdown_pct": args.equity_circuit_rearm_drawdown_pct,
             "equity_circuit_breaker_after_selection": bool(args.equity_circuit_breaker_after_selection),
+            "include_no_equity_circuit_candidates": bool(args.include_no_equity_circuit_candidates),
             "equity_soft_circuit_drawdown_pct": args.equity_soft_circuit_drawdown_pct,
             "equity_soft_circuit_cooldown_bars": args.equity_soft_circuit_cooldown_bars,
             "equity_soft_circuit_size_mult": args.equity_soft_circuit_size_mult,
             "equity_soft_circuit_force_flat": bool(args.equity_soft_circuit_force_flat),
             "equity_soft_circuit_after_selection": bool(args.equity_soft_circuit_after_selection),
+            "equity_soft_circuit_after_selection_min_train_return_pct": (
+                args.equity_soft_circuit_after_selection_min_train_return_pct
+            ),
+            "equity_soft_circuit_after_selection_max_train_return_pct": (
+                args.equity_soft_circuit_after_selection_max_train_return_pct
+            ),
+            "equity_soft_circuit_after_selection_min_train_drawdown_pct": (
+                args.equity_soft_circuit_after_selection_min_train_drawdown_pct
+            ),
+            "equity_soft_circuit_after_selection_max_train_drawdown_pct": (
+                args.equity_soft_circuit_after_selection_max_train_drawdown_pct
+            ),
+            "equity_soft_circuit_after_selection_min_one_way_trim_per_add": float(
+                args.equity_soft_circuit_after_selection_min_one_way_trim_per_add
+            ),
+            "equity_soft_circuit_after_selection_max_one_way_trim_per_add": float(
+                args.equity_soft_circuit_after_selection_max_one_way_trim_per_add
+            ),
+            "equity_soft_circuit_after_selection_require_base_reduce": bool(
+                args.equity_soft_circuit_after_selection_require_base_reduce
+            ),
             "one_way_reversal_switch_units": args.one_way_reversal_switch_units,
             "one_way_reversal_min_score_edge": args.one_way_reversal_min_score_edge,
             "one_way_reversal_cooldown_bars": args.one_way_reversal_cooldown_bars,
             "one_way_reversal_allow_scenario_override": bool(args.one_way_reversal_allow_scenario_override),
             "one_way_reversal_allow_score_override": bool(args.one_way_reversal_allow_score_override),
+            "one_way_reversal_after_selection": bool(args.one_way_reversal_after_selection),
+            "one_way_reversal_after_selection_switch_units": (
+                args.one_way_reversal_after_selection_switch_units
+            ),
+            "one_way_reversal_after_selection_min_train_return_pct": (
+                args.one_way_reversal_after_selection_min_train_return_pct
+            ),
+            "one_way_reversal_after_selection_max_train_return_pct": (
+                args.one_way_reversal_after_selection_max_train_return_pct
+            ),
+            "one_way_reversal_after_selection_min_train_drawdown_pct": (
+                args.one_way_reversal_after_selection_min_train_drawdown_pct
+            ),
+            "one_way_reversal_after_selection_max_train_drawdown_pct": (
+                args.one_way_reversal_after_selection_max_train_drawdown_pct
+            ),
+            "one_way_reversal_after_selection_min_one_way_trim_per_add": float(
+                args.one_way_reversal_after_selection_min_one_way_trim_per_add
+            ),
+            "one_way_reversal_after_selection_max_one_way_trim_per_add": float(
+                args.one_way_reversal_after_selection_max_one_way_trim_per_add
+            ),
+            "one_way_reversal_after_selection_alt_min_train_return_pct": (
+                args.one_way_reversal_after_selection_alt_min_train_return_pct
+            ),
+            "one_way_reversal_after_selection_alt_max_train_return_pct": (
+                args.one_way_reversal_after_selection_alt_max_train_return_pct
+            ),
+            "one_way_reversal_after_selection_alt_min_train_drawdown_pct": (
+                args.one_way_reversal_after_selection_alt_min_train_drawdown_pct
+            ),
+            "one_way_reversal_after_selection_alt_max_train_drawdown_pct": (
+                args.one_way_reversal_after_selection_alt_max_train_drawdown_pct
+            ),
+            "one_way_reversal_after_selection_alt_min_train_cost_drag_pct": (
+                args.one_way_reversal_after_selection_alt_min_train_cost_drag_pct
+            ),
+            "one_way_reversal_after_selection_alt_max_train_cost_drag_pct": (
+                args.one_way_reversal_after_selection_alt_max_train_cost_drag_pct
+            ),
+            "one_way_reversal_after_selection_alt_min_one_way_trim_per_add": float(
+                args.one_way_reversal_after_selection_alt_min_one_way_trim_per_add
+            ),
+            "one_way_reversal_after_selection_alt_max_one_way_trim_per_add": float(
+                args.one_way_reversal_after_selection_alt_max_one_way_trim_per_add
+            ),
+            "one_way_reversal_after_selection_alt_min_turnover_per_add": float(
+                args.one_way_reversal_after_selection_alt_min_turnover_per_add
+            ),
+            "one_way_reversal_after_selection_alt_max_turnover_per_add": float(
+                args.one_way_reversal_after_selection_alt_max_turnover_per_add
+            ),
+            "one_way_reversal_after_selection_alt_min_reaction_trim_per_remove": float(
+                args.one_way_reversal_after_selection_alt_min_reaction_trim_per_remove
+            ),
+            "one_way_reversal_after_selection_alt_max_reaction_trim_per_remove": float(
+                args.one_way_reversal_after_selection_alt_max_reaction_trim_per_remove
+            ),
             "one_way_impulse_probe_units": args.one_way_impulse_probe_units,
             "one_way_impulse_min_one_way_score": args.one_way_impulse_min_one_way_score,
             "one_way_impulse_min_score_diff": args.one_way_impulse_min_score_diff,
             "one_way_impulse_cooldown_bars": args.one_way_impulse_cooldown_bars,
             "one_way_impulse_max_extension_atr": args.one_way_impulse_max_extension_atr,
+            "scenario_flip_units": args.scenario_flip_units,
+            "scenario_flip_min_score_edge": args.scenario_flip_min_score_edge,
+            "scenario_flip_min_adverse_reaction": args.scenario_flip_min_adverse_reaction,
+            "scenario_flip_min_one_way_score": args.scenario_flip_min_one_way_score,
+            "scenario_flip_cooldown_bars": args.scenario_flip_cooldown_bars,
+            "scenario_flip_max_extension_atr": args.scenario_flip_max_extension_atr,
+            "winner_pyramid_units": args.winner_pyramid_units,
+            "winner_pyramid_min_profit_reaction": args.winner_pyramid_min_profit_reaction,
+            "winner_pyramid_min_score": args.winner_pyramid_min_score,
+            "winner_pyramid_min_reason_stack": args.winner_pyramid_min_reason_stack,
+            "winner_pyramid_cooldown_bars": args.winner_pyramid_cooldown_bars,
+            "winner_pyramid_max_units": args.winner_pyramid_max_units,
+            "winner_pyramid_max_extension_atr": args.winner_pyramid_max_extension_atr,
             "base_entry_max_extension_atr": args.base_entry_max_extension_atr,
+            "base_entry_max_extension_side": args.base_entry_max_extension_side or None,
             "base_entry_reduce_extension_atr": args.base_entry_reduce_extension_atr,
             "base_entry_reduce_size_mult": args.base_entry_reduce_size_mult,
             "base_entry_reduce_promote_reaction": args.base_entry_reduce_promote_reaction,
             "base_entry_reduce_max_trend_strength": args.base_entry_reduce_max_trend_strength,
+            "base_entry_reduce_min_trend_strength": args.base_entry_reduce_min_trend_strength,
+            "base_entry_reduce_side": args.base_entry_reduce_side or None,
             "base_entry_reduce_after_selection": bool(args.base_entry_reduce_after_selection),
+            "base_entry_reduce_after_selection_max_train_return_pct": (
+                args.base_entry_reduce_after_selection_max_train_return_pct
+            ),
+            "base_entry_reduce_after_selection_min_train_return_pct": (
+                args.base_entry_reduce_after_selection_min_train_return_pct
+            ),
+            "base_entry_reduce_after_selection_max_train_drawdown_pct": (
+                args.base_entry_reduce_after_selection_max_train_drawdown_pct
+            ),
+            "base_entry_reduce_after_selection_min_one_way_trim_per_add": float(
+                args.base_entry_reduce_after_selection_min_one_way_trim_per_add
+            ),
             "include_no_impulse_candidates": bool(args.include_no_impulse_candidates),
+            "include_no_btc_rotation_candidates": bool(args.include_no_btc_rotation_candidates),
+            "include_no_base_reduce_candidates": bool(args.include_no_base_reduce_candidates),
+            "include_no_one_way_loss_fuse_candidates": bool(args.include_no_one_way_loss_fuse_candidates),
             "impulse_selection_score_penalty": float(args.impulse_selection_score_penalty),
+            "btc_rotation_selection_score_penalty": float(args.btc_rotation_selection_score_penalty),
             "selection_flag_penalty": float(args.selection_flag_penalty),
             "selection_score_cap": float(args.selection_score_cap),
+            "selection_mdd_soft_threshold_pct": float(args.selection_mdd_soft_threshold_pct),
+            "selection_mdd_soft_penalty": float(args.selection_mdd_soft_penalty),
+            "selection_cost_soft_threshold_pct": float(args.selection_cost_soft_threshold_pct),
+            "selection_cost_soft_penalty": float(args.selection_cost_soft_penalty),
+            "selection_one_way_trim_ratio_threshold": float(args.selection_one_way_trim_ratio_threshold),
+            "selection_one_way_trim_ratio_penalty": float(args.selection_one_way_trim_ratio_penalty),
+            "selection_turnover_per_add_threshold": float(args.selection_turnover_per_add_threshold),
+            "selection_turnover_per_add_penalty": float(args.selection_turnover_per_add_penalty),
+            "selection_structural_flag_min_train_return_pct": float(
+                args.selection_structural_flag_min_train_return_pct
+            ),
+            "selection_structural_flag_penalty": float(args.selection_structural_flag_penalty),
+            "selection_high_train_flag_min_return_pct": float(
+                args.selection_high_train_flag_min_return_pct
+            ),
+            "selection_high_train_flag_penalty": float(args.selection_high_train_flag_penalty),
+            "selection_recent_efficiency_lookback": int(args.selection_recent_efficiency_lookback),
+            "selection_recent_efficiency_min_samples": int(args.selection_recent_efficiency_min_samples),
+            "selection_recent_efficiency_min_train_return_pct": float(
+                args.selection_recent_efficiency_min_train_return_pct
+            ),
+            "selection_recent_efficiency_threshold": float(args.selection_recent_efficiency_threshold),
+            "selection_recent_efficiency_penalty": float(args.selection_recent_efficiency_penalty),
+            "test_top_train_candidates": int(args.test_top_train_candidates),
+            "warm_fold_offset_selection_state": bool(args.warm_fold_offset_selection_state),
         },
         "aggregate": _aggregate_folds(folds),
         "folds": folds,
