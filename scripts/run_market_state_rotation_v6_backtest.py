@@ -151,6 +151,7 @@ class MarketStateConfig:
     equity_soft_circuit_cooldown_bars: int = 0
     equity_soft_circuit_size_mult: float = 1.0
     equity_soft_circuit_force_flat: bool = False
+    equity_soft_circuit_prearm_bars: int = 0
     one_way_reversal_switch_units: float = 0.0
     one_way_reversal_min_score_edge: int = 2
     one_way_reversal_cooldown_bars: int = 24
@@ -182,6 +183,10 @@ class MarketStateConfig:
     base_entry_reduce_max_trend_strength: float = 0.0
     base_entry_reduce_min_trend_strength: float = 0.0
     base_entry_reduce_side: str = "both"
+    fragile_regime_entry_size_mult: float = 1.0
+    fragile_regime_entry_regimes: tuple[str, ...] = ()
+    fragile_regime_inventory_trim_fraction: float = 0.0
+    fragile_regime_inventory_trim_regimes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,6 +493,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--equity-soft-circuit-cooldown-bars", type=int, default=0)
     parser.add_argument("--equity-soft-circuit-size-mult", type=float, default=1.0)
     parser.add_argument("--equity-soft-circuit-force-flat", action="store_true")
+    parser.add_argument(
+        "--equity-soft-circuit-prearm-bars",
+        type=int,
+        default=0,
+        help=(
+            "Start the backtest with the soft-circuit size multiplier already active for this many "
+            "bars. This is useful when a walk-forward fold qualifies for soft-circuit protection "
+            "before the OOS window starts."
+        ),
+    )
     parser.add_argument("--one-way-reversal-switch-units", type=float, default=0.0)
     parser.add_argument("--one-way-reversal-min-score-edge", type=int, default=2)
     parser.add_argument("--one-way-reversal-cooldown-bars", type=int, default=24)
@@ -559,6 +574,31 @@ def _parse_args() -> argparse.Namespace:
         default="both",
         help="Side filter for late with-trend base-entry size reduction.",
     )
+    parser.add_argument(
+        "--fragile-regime-entry-size-mult",
+        type=float,
+        default=1.0,
+        help="Optional entry size multiplier in selected fragile regimes.",
+    )
+    parser.add_argument(
+        "--fragile-regime-entry-regimes",
+        default="",
+        help=(
+            "Comma-separated regimes where --fragile-regime-entry-size-mult applies, for example "
+            "one_way_long,one_way_short,range_or_transition."
+        ),
+    )
+    parser.add_argument(
+        "--fragile-regime-inventory-trim-fraction",
+        type=float,
+        default=0.0,
+        help="Optional fraction of open inventory to cut when the market first enters selected fragile regimes.",
+    )
+    parser.add_argument(
+        "--fragile-regime-inventory-trim-regimes",
+        default="",
+        help="Comma-separated regimes where transition inventory trims apply.",
+    )
     parser.add_argument("--defensive-trim-cooldown-bars", type=int, default=12960)
     parser.add_argument("--reaction-trim-trigger", type=float, default=0.55)
     parser.add_argument("--reaction-avg-band", type=float, default=0.95)
@@ -616,6 +656,20 @@ def _parse_kst_hours(raw: str, fallback: tuple[int, ...]) -> tuple[int, ...]:
     return tuple(values) if values else fallback
 
 
+def _parse_regimes(raw: str) -> tuple[str, ...]:
+    allowed = {
+        "bad_rr_center",
+        "downtrend",
+        "mixed",
+        "one_way_long",
+        "one_way_short",
+        "range_or_transition",
+        "uptrend",
+    }
+    regimes = [item for item in _csv(raw) if item in allowed]
+    return tuple(dict.fromkeys(regimes))
+
+
 def _format_kst_hours(hours: tuple[int, ...]) -> str:
     return "-".join(str(hour) for hour in hours) if hours else "none"
 
@@ -634,6 +688,14 @@ def _side_label(side: int) -> str:
 
 def _clamp(value: float, low: float, high: float) -> float:
     return min(max(float(value), float(low)), float(high))
+
+
+def _fragile_regime_entry_multiplier(config: MarketStateConfig, market: MarketState) -> float:
+    if not config.fragile_regime_entry_regimes:
+        return 1.0
+    if market.regime not in set(config.fragile_regime_entry_regimes):
+        return 1.0
+    return _clamp(config.fragile_regime_entry_size_mult, 0.0, 1.0)
 
 
 def _unit_cut_qty(qty: float, fraction: float, *, minimum: float = 1.0) -> float:
@@ -1777,9 +1839,19 @@ def _event_diagnostics(
     concentration_min_adds = int(thresholds["concentration_min_add_events"])
     side_imbalance_min_directional_adds = int(thresholds["side_imbalance_min_directional_adds"])
     enough_orders_for_coverage = add_total >= int(thresholds["expected_add_events"])
+    soft_circuit_cooldown_share = counters.get("equity_soft_circuit_cooldown_bars", 0) / max(exposure_bars, 1)
+    risk_off_idle = (
+        add_total < int(thresholds["expected_add_events"])
+        and exposure_bars > 0
+        and bool(getattr(config, "equity_soft_circuit_force_flat", False))
+        and float(getattr(config, "equity_soft_circuit_size_mult", 1.0) or 0.0) <= 1e-12
+        and int(getattr(config, "equity_soft_circuit_prearm_bars", 0) or 0) > 0
+        and soft_circuit_cooldown_share >= 0.90
+        and exposure_flat_share >= 0.95
+    )
 
     flags: list[str] = []
-    if add_total < int(thresholds["expected_add_events"]):
+    if add_total < int(thresholds["expected_add_events"]) and not risk_off_idle:
         flags.append("too_few_orders")
     if add_total > int(thresholds["overtrading_add_events"]):
         flags.append("overtrading")
@@ -1852,6 +1924,8 @@ def _event_diagnostics(
     return {
         "health": health,
         "flags": flags,
+        "sample_mode": "risk_off_idle" if risk_off_idle else "active",
+        "risk_off_cooldown_share": round(soft_circuit_cooldown_share, 4),
         "diagnostic_thresholds": thresholds,
         "add_events": add_total,
         "remove_events": remove_total,
@@ -2024,7 +2098,8 @@ def _apply_decision(
     risk_size_mult: float = 1.0,
 ) -> None:
     ts = features.ts[exec_idx]
-    entry_risk_mult = _clamp(risk_size_mult, 0.0, 1.0)
+    fragile_regime_entry_mult = _fragile_regime_entry_multiplier(config, market)
+    entry_risk_mult = _clamp(risk_size_mult, 0.0, 1.0) * fragile_regime_entry_mult
     one_way_loss_fuse_size_mult = (
         _clamp(config.one_way_loss_fuse_size_mult, 0.0, 1.0)
         if memory.in_one_way_loss_fuse(exec_idx)
@@ -3541,8 +3616,13 @@ def backtest_config(
     regime_stats: dict[str, dict[str, Any]] = {}
     equity_circuit_pause_until_idx = -1
     equity_circuit_armed = True
-    equity_soft_circuit_cooldown_until_idx = -1
+    equity_soft_circuit_cooldown_until_idx = (
+        warmup + max(0, int(config.equity_soft_circuit_prearm_bars))
+        if config.equity_soft_circuit_prearm_bars > 0
+        else -1
+    )
     equity_soft_circuit_force_exit_pending = False
+    previous_regime = ""
 
     for exec_idx in range(warmup + 1, len(features.bars) - 1):
         sig_idx = exec_idx - 1
@@ -3613,21 +3693,52 @@ def backtest_config(
                 )
                 counters["equity_soft_circuit_force_exits"] += 1
         else:
-            _apply_decision(
-                book=book,
-                features=features,
-                sig_idx=sig_idx,
-                exec_idx=exec_idx,
-                exec_price=exec_price,
-                config=config,
-                market=market,
-                zone=zone,
-                events=events,
-                equity=equity,
-                counters=counters,
-                memory=memory,
-                risk_size_mult=soft_risk_size_mult,
-            )
+            fragile_inventory_trimmed = False
+            if (
+                book.side != 0
+                and config.fragile_regime_inventory_trim_regimes
+                and market.regime in set(config.fragile_regime_inventory_trim_regimes)
+                and market.regime != previous_regime
+                and config.fragile_regime_inventory_trim_fraction > 0.0
+            ):
+                trim_fraction = _clamp(config.fragile_regime_inventory_trim_fraction, 0.0, 1.0)
+                trim_qty = (
+                    book.qty
+                    if trim_fraction >= 1.0 - 1e-12
+                    else _unit_cut_qty(book.qty, trim_fraction, minimum=1.0)
+                )
+                if trim_qty > 1e-12:
+                    removed = book.remove(
+                        qty=trim_qty,
+                        price=exec_price,
+                        role_priority=("chase", "battle", "base", "probe"),
+                    )
+                    _exit_removed_lots(
+                        events=events,
+                        removed=removed,
+                        ts=features.ts[exec_idx],
+                        action="remove",
+                        reason="fragile_regime_transition_trim",
+                        equity=equity,
+                    )
+                    counters["fragile_regime_transition_trims"] += 1
+                    fragile_inventory_trimmed = True
+            if not fragile_inventory_trimmed:
+                _apply_decision(
+                    book=book,
+                    features=features,
+                    sig_idx=sig_idx,
+                    exec_idx=exec_idx,
+                    exec_price=exec_price,
+                    config=config,
+                    market=market,
+                    zone=zone,
+                    events=events,
+                    equity=equity,
+                    counters=counters,
+                    memory=memory,
+                    risk_size_mult=soft_risk_size_mult,
+                )
 
         new_weight = _book_weight(config, book)
         turnover = abs(new_weight - old_weight)
@@ -3837,6 +3948,7 @@ def backtest_config(
         if equity <= 0.02:
             counters["account_ruin_events"] += 1
             break
+        previous_regime = market.regime
 
     if book.side != 0:
         removed = book.remove(qty=book.qty, price=features.c[-1], role_priority=("battle", "chase", "base", "probe"))
@@ -3999,6 +4111,7 @@ def build_configs(
     equity_soft_circuit_cooldown_bars: int,
     equity_soft_circuit_size_mult: float,
     equity_soft_circuit_force_flat: bool,
+    equity_soft_circuit_prearm_bars: int,
     one_way_reversal_switch_units: float,
     one_way_reversal_min_score_edge: int,
     one_way_reversal_cooldown_bars: int,
@@ -4030,6 +4143,10 @@ def build_configs(
     base_entry_reduce_max_trend_strength: float,
     base_entry_reduce_min_trend_strength: float,
     base_entry_reduce_side: str,
+    fragile_regime_entry_size_mult: float,
+    fragile_regime_entry_regimes: tuple[str, ...],
+    fragile_regime_inventory_trim_fraction: float,
+    fragile_regime_inventory_trim_regimes: tuple[str, ...],
     defensive_trim_cooldown_bars: int,
     reaction_trim_trigger: float,
     reaction_avg_band: float,
@@ -4147,6 +4264,8 @@ def build_configs(
         )
         if equity_soft_circuit_force_flat:
             soft_circuit_suffix += ":eqSoftFlat1"
+        if equity_soft_circuit_prearm_bars > 0:
+            soft_circuit_suffix += f":eqSoftPre{max(1, int(equity_soft_circuit_prearm_bars))}"
     base_extension_suffix = ""
     if base_entry_max_extension_atr > 0.0:
         base_extension_suffix = f":baseExt{max(0.1, float(base_entry_max_extension_atr)):g}"
@@ -4166,6 +4285,26 @@ def build_configs(
             base_reduce_suffix += f":baseReduceMinTrend{max(0.0, float(base_entry_reduce_min_trend_strength)):g}"
         if base_entry_reduce_side != "both":
             base_reduce_suffix += f":baseReduceSide{base_entry_reduce_side}"
+    fragile_regime_suffix = ""
+    if fragile_regime_entry_regimes and fragile_regime_entry_size_mult < 1.0:
+        regime_code = "-".join(
+            regime.replace("range_or_transition", "range").replace("one_way_", "ow")
+            for regime in fragile_regime_entry_regimes
+        )
+        fragile_regime_suffix = (
+            f":fragReg{_clamp(fragile_regime_entry_size_mult, 0.0, 1.0):g}"
+            f":fragRegSet{regime_code}"
+        )
+    fragile_inventory_suffix = ""
+    if fragile_regime_inventory_trim_regimes and fragile_regime_inventory_trim_fraction > 0.0:
+        regime_code = "-".join(
+            regime.replace("range_or_transition", "range").replace("one_way_", "ow")
+            for regime in fragile_regime_inventory_trim_regimes
+        )
+        fragile_inventory_suffix = (
+            f":fragInvTrim{_clamp(fragile_regime_inventory_trim_fraction, 0.0, 1.0):g}"
+            f":fragInvSet{regime_code}"
+        )
     for zone_lookback in (48, 96):
         for entry_score in (5, 6):
             for battle_score in (7, 8):
@@ -4222,6 +4361,8 @@ def build_configs(
                                                     f"{btc_rotation_suffix}"
                                                     f"{base_extension_suffix}"
                                                     f"{base_reduce_suffix}"
+                                                    f"{fragile_regime_suffix}"
+                                                    f"{fragile_inventory_suffix}"
                                                 )
                                                     if model_id in seen_model_ids:
                                                         continue
@@ -4425,6 +4566,10 @@ def build_configs(
                                                         1.0,
                                                     ),
                                                     equity_soft_circuit_force_flat=bool(equity_soft_circuit_force_flat),
+                                                    equity_soft_circuit_prearm_bars=max(
+                                                        0,
+                                                        int(equity_soft_circuit_prearm_bars),
+                                                    ),
                                                     one_way_reversal_switch_units=min(
                                                         max(0.0, float(one_way_reversal_switch_units)),
                                                         max_possible_units,
@@ -4540,6 +4685,20 @@ def build_configs(
                                                         base_entry_reduce_side
                                                         if base_entry_reduce_side in {"both", "long", "short"}
                                                         else "both"
+                                                    ),
+                                                    fragile_regime_entry_size_mult=_clamp(
+                                                        fragile_regime_entry_size_mult,
+                                                        0.0,
+                                                        1.0,
+                                                    ),
+                                                    fragile_regime_entry_regimes=fragile_regime_entry_regimes,
+                                                    fragile_regime_inventory_trim_fraction=_clamp(
+                                                        fragile_regime_inventory_trim_fraction,
+                                                        0.0,
+                                                        1.0,
+                                                    ),
+                                                    fragile_regime_inventory_trim_regimes=(
+                                                        fragile_regime_inventory_trim_regimes
                                                     ),
                                                     defensive_trim_cooldown_bars=max(0, int(defensive_trim_cooldown_bars)),
                                                     cooldown_after_loss_bars=12 if profile_name == "balanced" else 48,
@@ -4857,6 +5016,7 @@ def main() -> None:
         equity_soft_circuit_cooldown_bars=max(0, int(args.equity_soft_circuit_cooldown_bars)),
         equity_soft_circuit_size_mult=_clamp(args.equity_soft_circuit_size_mult, 0.0, 1.0),
         equity_soft_circuit_force_flat=bool(args.equity_soft_circuit_force_flat),
+        equity_soft_circuit_prearm_bars=max(0, int(args.equity_soft_circuit_prearm_bars)),
         one_way_reversal_switch_units=max(0.0, float(args.one_way_reversal_switch_units)),
         one_way_reversal_min_score_edge=int(args.one_way_reversal_min_score_edge),
         one_way_reversal_cooldown_bars=max(0, int(args.one_way_reversal_cooldown_bars)),
@@ -4894,6 +5054,14 @@ def main() -> None:
         base_entry_reduce_side=(
             args.base_entry_reduce_side if args.base_entry_reduce_side in {"both", "long", "short"} else "both"
         ),
+        fragile_regime_entry_size_mult=_clamp(args.fragile_regime_entry_size_mult, 0.0, 1.0),
+        fragile_regime_entry_regimes=_parse_regimes(args.fragile_regime_entry_regimes),
+        fragile_regime_inventory_trim_fraction=_clamp(
+            args.fragile_regime_inventory_trim_fraction,
+            0.0,
+            1.0,
+        ),
+        fragile_regime_inventory_trim_regimes=_parse_regimes(args.fragile_regime_inventory_trim_regimes),
         defensive_trim_cooldown_bars=max(0, int(args.defensive_trim_cooldown_bars)),
         reaction_trim_trigger=max(0.05, float(args.reaction_trim_trigger)),
         reaction_avg_band=max(0.05, float(args.reaction_avg_band)),
