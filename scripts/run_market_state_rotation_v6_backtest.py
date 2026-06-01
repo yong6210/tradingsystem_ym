@@ -1701,10 +1701,14 @@ def _diagnostic_thresholds(*, total_months: int, add_total: int) -> dict[str, An
         "overtrading_add_events": 1500,
         "side_imbalance_min_directional_adds": int(max(12, expected_add_events)),
         "side_imbalance_share": 0.85 if short_sample else 0.70,
+        "role_concentration_min_add_events": int(max(12, expected_add_events)),
+        "role_concentration_share": 0.90 if short_sample else 0.80,
+        "role_concentration_borderline_share": 0.85 if short_sample else 0.75,
         "poor_month_coverage_min_months": 4,
         "poor_month_coverage_active_month_share": 0.65,
         "poor_month_coverage_min_active_months": int(max(3, math.ceil(months * 0.65))),
-        "month_concentration_share": 0.45 if short_sample else 0.25,
+        "month_concentration_share": 0.50 if short_sample else 0.25,
+        "month_concentration_borderline_share": 0.45 if short_sample else 0.25,
         "day_concentration_share": 0.14 if short_sample else 0.08,
         "kst_hour_concentration_share": 0.24 if short_sample else 0.18,
         "repair_stop_per_add": 0.30,
@@ -1815,6 +1819,17 @@ def _event_diagnostics(
     directional_adds = long_adds + short_adds
     long_add_share = long_adds / directional_adds if directional_adds else 0.0
     short_add_share = short_adds / directional_adds if directional_adds else 0.0
+    total_role_adds = sum(add_by_role.values())
+    known_add_by_role = Counter(
+        {role: count for role, count in add_by_role.items() if role not in {"", "unknown"}}
+    )
+    role_adds = sum(known_add_by_role.values())
+    dominant_add_role, dominant_add_role_count = (
+        max(known_add_by_role.items(), key=lambda item: (int(item[1]), str(item[0])))
+        if known_add_by_role
+        else ("none", 0)
+    )
+    max_role_add_share = dominant_add_role_count / role_adds if role_adds else 0.0
     active_months = len(add_by_month)
     active_days = len(add_by_day)
     max_month_share = _max_share(add_by_month)
@@ -1838,20 +1853,44 @@ def _event_diagnostics(
     thresholds = _diagnostic_thresholds(total_months=total_months, add_total=add_total)
     concentration_min_adds = int(thresholds["concentration_min_add_events"])
     side_imbalance_min_directional_adds = int(thresholds["side_imbalance_min_directional_adds"])
-    enough_orders_for_coverage = add_total >= int(thresholds["expected_add_events"])
+    role_concentration_min_add_events = int(thresholds["role_concentration_min_add_events"])
+    expected_add_events = int(thresholds["expected_add_events"])
+    enough_orders_for_coverage = add_total >= expected_add_events
     soft_circuit_cooldown_share = counters.get("equity_soft_circuit_cooldown_bars", 0) / max(exposure_bars, 1)
+    soft_circuit_force_flat = bool(getattr(config, "equity_soft_circuit_force_flat", False))
+    soft_circuit_zero_size = float(getattr(config, "equity_soft_circuit_size_mult", 1.0) or 0.0) <= 1e-12
+    soft_circuit_prearmed = int(getattr(config, "equity_soft_circuit_prearm_bars", 0) or 0) > 0
+    soft_circuit_diagnostic = (
+        exposure_bars > 0
+        and soft_circuit_force_flat
+        and soft_circuit_zero_size
+        and soft_circuit_prearmed
+    )
+    risk_off_active_share = _clamp(1.0 - soft_circuit_cooldown_share, 0.0, 1.0)
+    risk_adjusted_expected_add_events = expected_add_events
+    if soft_circuit_diagnostic and soft_circuit_cooldown_share >= 0.50:
+        risk_adjusted_expected_add_events = max(1, math.ceil(expected_add_events * risk_off_active_share * 0.60))
+    thresholds["risk_adjusted_expected_add_events"] = int(risk_adjusted_expected_add_events)
+    thresholds["risk_off_active_share"] = round(risk_off_active_share, 4)
+    thresholds["risk_off_adjustment_min_cooldown_share"] = 0.50
+    thresholds["risk_off_adjustment_active_expected_mult"] = 0.60
     risk_off_idle = (
-        add_total < int(thresholds["expected_add_events"])
-        and exposure_bars > 0
-        and bool(getattr(config, "equity_soft_circuit_force_flat", False))
-        and float(getattr(config, "equity_soft_circuit_size_mult", 1.0) or 0.0) <= 1e-12
-        and int(getattr(config, "equity_soft_circuit_prearm_bars", 0) or 0) > 0
+        add_total < expected_add_events
+        and soft_circuit_diagnostic
         and soft_circuit_cooldown_share >= 0.90
         and exposure_flat_share >= 0.95
     )
+    risk_off_partial = (
+        not risk_off_idle
+        and add_total < expected_add_events
+        and soft_circuit_diagnostic
+        and soft_circuit_cooldown_share >= 0.50
+        and add_total >= risk_adjusted_expected_add_events
+    )
 
+    borderline_flags: list[str] = []
     flags: list[str] = []
-    if add_total < int(thresholds["expected_add_events"]) and not risk_off_idle:
+    if add_total < expected_add_events and not (risk_off_idle or risk_off_partial):
         flags.append("too_few_orders")
     if add_total > int(thresholds["overtrading_add_events"]):
         flags.append("overtrading")
@@ -1860,6 +1899,16 @@ def _event_diagnostics(
         and max(long_add_share, short_add_share) >= float(thresholds["side_imbalance_share"])
     ):
         flags.append("side_imbalance")
+    if (
+        role_adds >= role_concentration_min_add_events
+        and max_role_add_share >= float(thresholds["role_concentration_share"])
+    ):
+        flags.append("role_concentration")
+    elif (
+        role_adds >= role_concentration_min_add_events
+        and max_role_add_share >= float(thresholds["role_concentration_borderline_share"])
+    ):
+        borderline_flags.append("role_concentration")
     if (
         total_months >= int(thresholds["poor_month_coverage_min_months"])
         and enough_orders_for_coverage
@@ -1872,14 +1921,22 @@ def _event_diagnostics(
         and max_month_share >= float(thresholds["month_concentration_share"])
     ):
         flags.append("month_concentration")
+    elif (
+        total_months >= int(thresholds["poor_month_coverage_min_months"])
+        and add_total >= concentration_min_adds
+        and max_month_share >= float(thresholds["month_concentration_borderline_share"])
+    ):
+        borderline_flags.append("month_concentration")
     if add_total >= concentration_min_adds and max_day_share >= float(thresholds["day_concentration_share"]):
         flags.append("day_concentration")
     if add_total >= concentration_min_adds and max_hour_share >= float(thresholds["kst_hour_concentration_share"]):
         flags.append("kst_hour_concentration")
     if repair_stop_ratio >= float(thresholds["repair_stop_per_add"]):
         flags.append("repair_stop_overuse")
-    if one_way_trim_ratio >= float(thresholds["one_way_forced_trim_per_add"]):
+    if one_way_trim_ratio > float(thresholds["one_way_forced_trim_per_add"]) + 1e-12:
         flags.append("one_way_forced_trim_overuse")
+    elif one_way_trim_ratio >= float(thresholds["one_way_forced_trim_per_add"]):
+        borderline_flags.append("one_way_forced_trim_overuse")
     if (
         profit_trim_ratio + reaction_trim_ratio <= float(thresholds["profit_or_reaction_trim_underuse"])
         and remove_total >= int(thresholds["profit_trim_underuse_min_removes"])
@@ -1924,7 +1981,14 @@ def _event_diagnostics(
     return {
         "health": health,
         "flags": flags,
-        "sample_mode": "risk_off_idle" if risk_off_idle else "active",
+        "borderline_flags": borderline_flags,
+        "sample_mode": (
+            "risk_off_idle"
+            if risk_off_idle
+            else "risk_off_partial"
+            if risk_off_partial
+            else "active"
+        ),
         "risk_off_cooldown_share": round(soft_circuit_cooldown_share, 4),
         "diagnostic_thresholds": thresholds,
         "add_events": add_total,
@@ -1932,6 +1996,12 @@ def _event_diagnostics(
         "add_by_side": _counter_payload(add_by_side),
         "add_side_share": {"long": round(long_add_share, 4), "short": round(short_add_share, 4)},
         "add_by_role": _counter_payload(add_by_role),
+        "add_role_share": {
+            role: round(count / max(total_role_adds, 1), 4)
+            for role, count in sorted(add_by_role.items())
+        },
+        "dominant_add_role": str(dominant_add_role),
+        "max_role_add_share": round(max_role_add_share, 4),
         "add_by_reason": _counter_payload(add_by_reason),
         "add_by_zone_category": _counter_payload(add_by_zone_category),
         "add_by_entry_context": _counter_payload(add_by_entry_context),
