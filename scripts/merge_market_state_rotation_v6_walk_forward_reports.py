@@ -13,7 +13,11 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.services.report_io import atomic_write_text
-from scripts.run_market_state_rotation_v6_walk_forward_validation import _aggregate_folds, _write_markdown
+from scripts.run_market_state_rotation_v6_walk_forward_validation import (
+    _aggregate_folds,
+    _source_replay_diagnostics,
+    _write_markdown,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -44,6 +48,17 @@ def _infer_source_top_n(report: dict[str, Any]) -> int | None:
     return candidate_count_int
 
 
+def _load_source_report(path_value: Any) -> dict[str, Any] | None:
+    if not path_value:
+        return None
+    path = Path(str(path_value))
+    if not path.is_absolute():
+        path = ROOT_DIR / path
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
 def main() -> None:
     args = _parse_args()
     chunks = [json.loads(Path(path).read_text()) for path in args.reports]
@@ -63,6 +78,7 @@ def main() -> None:
         original_fold = fold.get("fold")
         fold["fold"] = idx
         fold["merged_original_fold"] = original_fold
+    source_report = _load_source_report(base.get("source_report"))
 
     report = {
         **base,
@@ -72,6 +88,11 @@ def main() -> None:
         "fold_offset": 0,
         "fold_limit": 0,
         "aggregate": _aggregate_folds(folds),
+        "source_replay_diagnostics": (
+            _source_replay_diagnostics(source_report, folds)
+            if source_report is not None
+            else dict(base.get("source_replay_diagnostics") or {})
+        ),
         "folds": folds,
     }
 

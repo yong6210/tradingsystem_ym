@@ -151,7 +151,15 @@ class MarketStateConfig:
     equity_soft_circuit_cooldown_bars: int = 0
     equity_soft_circuit_size_mult: float = 1.0
     equity_soft_circuit_force_flat: bool = False
+    equity_soft_circuit_inventory_trim_fraction: float = 0.0
     equity_soft_circuit_prearm_bars: int = 0
+    equity_soft_circuit_recovery_probe_units: float = 0.0
+    equity_soft_circuit_recovery_min_one_way_score: float = 3.5
+    equity_soft_circuit_recovery_min_score_diff: int = 5
+    equity_soft_circuit_recovery_max_extension_atr: float = 2.0
+    equity_soft_circuit_recovery_failure_guard_count: int = 0
+    equity_soft_circuit_recovery_failure_guard_window_bars: int = 1440
+    equity_soft_circuit_recovery_failure_cooldown_bars: int = 0
     one_way_reversal_switch_units: float = 0.0
     one_way_reversal_min_score_edge: int = 2
     one_way_reversal_cooldown_bars: int = 24
@@ -187,6 +195,10 @@ class MarketStateConfig:
     fragile_regime_entry_regimes: tuple[str, ...] = ()
     fragile_regime_inventory_trim_fraction: float = 0.0
     fragile_regime_inventory_trim_regimes: tuple[str, ...] = ()
+    event_risk_base_reduce_size_mult: float = 1.0
+    event_risk_base_reduce_min_extension_atr: float = 0.0
+    event_risk_base_reduce_side: str = "both"
+    event_risk_base_reduce_contexts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +268,8 @@ class RotationMemory:
         self.last_near_miss_probe_idx = -10**9
         self.near_miss_probe_failure_indices: list[int] = []
         self.near_miss_probe_failure_cooldown_until_idx = -1
+        self.equity_soft_circuit_recovery_failure_indices: list[int] = []
+        self.equity_soft_circuit_recovery_failure_cooldown_until_idx = -1
         self.last_scenario_flip_idx = -10**9
         self.last_winner_pyramid_idx = -10**9
         self.last_defensive_trim_idx = -10**9
@@ -397,6 +411,33 @@ class RotationMemory:
     def in_near_miss_probe_failure_cooldown(self, idx: int) -> bool:
         return idx <= self.near_miss_probe_failure_cooldown_until_idx
 
+    def record_equity_soft_circuit_recovery_failure(
+        self,
+        idx: int,
+        *,
+        guard_count: int,
+        window_bars: int,
+        cooldown_bars: int,
+    ) -> bool:
+        if guard_count <= 0 or cooldown_bars <= 0:
+            return False
+        cutoff = idx - max(1, int(window_bars))
+        self.equity_soft_circuit_recovery_failure_indices = [
+            item for item in self.equity_soft_circuit_recovery_failure_indices if item >= cutoff
+        ]
+        self.equity_soft_circuit_recovery_failure_indices.append(idx)
+        if len(self.equity_soft_circuit_recovery_failure_indices) < int(guard_count):
+            return False
+        self.equity_soft_circuit_recovery_failure_cooldown_until_idx = max(
+            self.equity_soft_circuit_recovery_failure_cooldown_until_idx,
+            idx + int(cooldown_bars),
+        )
+        self.equity_soft_circuit_recovery_failure_indices = []
+        return True
+
+    def in_equity_soft_circuit_recovery_failure_cooldown(self, idx: int) -> bool:
+        return idx <= self.equity_soft_circuit_recovery_failure_cooldown_until_idx
+
 
 CONTEXT_REACTION_TARGET_USD = 370.0
 CONTEXTUAL_SHORT_BASE_BLOCK_KST_HOURS = (5, 19, 23)
@@ -494,6 +535,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--equity-soft-circuit-size-mult", type=float, default=1.0)
     parser.add_argument("--equity-soft-circuit-force-flat", action="store_true")
     parser.add_argument(
+        "--equity-soft-circuit-inventory-trim-fraction",
+        type=float,
+        default=0.0,
+        help=(
+            "When a soft equity circuit triggers without force-flat, trim this fraction of the "
+            "current inventory at the next bar open while the entry sizer is cooled down."
+        ),
+    )
+    parser.add_argument(
         "--equity-soft-circuit-prearm-bars",
         type=int,
         default=0,
@@ -502,6 +552,28 @@ def _parse_args() -> argparse.Namespace:
             "bars. This is useful when a walk-forward fold qualifies for soft-circuit protection "
             "before the OOS window starts."
         ),
+    )
+    parser.add_argument("--equity-soft-circuit-recovery-probe-units", type=float, default=0.0)
+    parser.add_argument("--equity-soft-circuit-recovery-min-one-way-score", type=float, default=3.5)
+    parser.add_argument("--equity-soft-circuit-recovery-min-score-diff", type=int, default=5)
+    parser.add_argument("--equity-soft-circuit-recovery-max-extension-atr", type=float, default=2.0)
+    parser.add_argument(
+        "--equity-soft-circuit-recovery-failure-guard-count",
+        type=int,
+        default=0,
+        help="Trigger a soft-circuit recovery probe cooldown after this many failed recovery probes.",
+    )
+    parser.add_argument(
+        "--equity-soft-circuit-recovery-failure-guard-window-bars",
+        type=int,
+        default=1440,
+        help="Lookback window for counting failed soft-circuit recovery probes.",
+    )
+    parser.add_argument(
+        "--equity-soft-circuit-recovery-failure-cooldown-bars",
+        type=int,
+        default=0,
+        help="Cooldown bars applied after the soft-circuit recovery failure guard triggers.",
     )
     parser.add_argument("--one-way-reversal-switch-units", type=float, default=0.0)
     parser.add_argument("--one-way-reversal-min-score-edge", type=int, default=2)
@@ -599,6 +671,29 @@ def _parse_args() -> argparse.Namespace:
         default="",
         help="Comma-separated regimes where transition inventory trims apply.",
     )
+    parser.add_argument(
+        "--event-risk-base-reduce-size-mult",
+        type=float,
+        default=1.0,
+        help="Size multiplier for base entries in selected execution-risk contexts.",
+    )
+    parser.add_argument(
+        "--event-risk-base-reduce-min-extension-atr",
+        type=float,
+        default=0.0,
+        help="Only shrink event-risk base entries when EMA extension is at least this ATR multiple.",
+    )
+    parser.add_argument(
+        "--event-risk-base-reduce-side",
+        choices=("both", "long", "short"),
+        default="both",
+        help="Side filter for event-risk base-entry reduction.",
+    )
+    parser.add_argument(
+        "--event-risk-base-reduce-contexts",
+        default="",
+        help='Comma-separated execution contexts to shrink, for example "hour_open".',
+    )
     parser.add_argument("--defensive-trim-cooldown-bars", type=int, default=12960)
     parser.add_argument("--reaction-trim-trigger", type=float, default=0.55)
     parser.add_argument("--reaction-avg-band", type=float, default=0.95)
@@ -670,8 +765,18 @@ def _parse_regimes(raw: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(regimes))
 
 
+def _parse_event_risk_contexts(raw: str) -> tuple[str, ...]:
+    allowed = {"normal", "hour_open"}
+    contexts = [item for item in _csv(raw) if item in allowed]
+    return tuple(dict.fromkeys(contexts))
+
+
 def _format_kst_hours(hours: tuple[int, ...]) -> str:
     return "-".join(str(hour) for hour in hours) if hours else "none"
+
+
+def _format_event_risk_contexts(contexts: tuple[str, ...]) -> str:
+    return "-".join(contexts) if contexts else "none"
 
 
 def _kst_hour(ts: datetime) -> int:
@@ -698,6 +803,25 @@ def _fragile_regime_entry_multiplier(config: MarketStateConfig, market: MarketSt
     return _clamp(config.fragile_regime_entry_size_mult, 0.0, 1.0)
 
 
+def _event_risk_base_size_multiplier(config: MarketStateConfig, zone: ZonePlan, side: int, role: str) -> float:
+    if role != "base":
+        return 1.0
+    contexts = tuple(str(item) for item in getattr(config, "event_risk_base_reduce_contexts", ()) or ())
+    if not contexts:
+        return 1.0
+    if str(zone.execution_context or "") not in set(contexts):
+        return 1.0
+    if getattr(config, "event_risk_base_reduce_side", "both") not in {"both", _side_label(side)}:
+        return 1.0
+    min_extension = max(0.0, float(getattr(config, "event_risk_base_reduce_min_extension_atr", 0.0) or 0.0))
+    if min_extension > 0.0 and float(zone.chase_extension_atr) < min_extension:
+        return 1.0
+    raw_mult = getattr(config, "event_risk_base_reduce_size_mult", 1.0)
+    if raw_mult is None:
+        raw_mult = 1.0
+    return _clamp(float(raw_mult), 0.0, 1.0)
+
+
 def _unit_cut_qty(qty: float, fraction: float, *, minimum: float = 1.0) -> float:
     if qty <= minimum + 1e-12:
         return qty
@@ -707,6 +831,14 @@ def _unit_cut_qty(qty: float, fraction: float, *, minimum: float = 1.0) -> float
 
 def _min_cut_units(config: MarketStateConfig) -> float:
     return max(config.probe_units, min(config.base_add_units, 0.25))
+
+
+def _one_way_full_exit_ready(config: MarketStateConfig, market: MarketState) -> bool:
+    return (
+        config.one_way_trim_full_exit_min_one_way_score > 0.0
+        and market.one_way_score >= config.one_way_trim_full_exit_min_one_way_score
+        and abs(market.score_diff) >= config.one_way_trim_full_exit_min_score_diff
+    )
 
 
 def _role_qty(book: PositionBook, role: str) -> float:
@@ -750,7 +882,7 @@ def _context_quarantine_key(context: str) -> str:
     parts = [part for part in str(context or "").split("|") if part]
     if not parts:
         return ""
-    while parts and parts[-1] in {"late_base_reduce", "loss_fuse_reduce"}:
+    while parts and parts[-1] in {"late_base_reduce", "loss_fuse_reduce", "soft_recovery"}:
         parts = parts[:-1]
     return "|".join(parts)
 
@@ -792,6 +924,21 @@ def _book_weight(config: MarketStateConfig, book: PositionBook) -> float:
         return 0.0
     unit_weight = config.max_account_exposure / max(config.max_possible_units, 1e-12)
     return book.side * book.qty * unit_weight
+
+
+def _book_open_role_payloads(book: PositionBook) -> tuple[dict[str, int], dict[str, float]]:
+    lot_count_by_role: Counter[str] = Counter()
+    qty_by_role: Counter[str] = Counter()
+    for lot in book.tranches:
+        if lot.qty <= 1e-12:
+            continue
+        role = str(lot.role or "unknown")
+        lot_count_by_role[role] += 1
+        qty_by_role[role] += float(lot.qty)
+    return (
+        _counter_payload(lot_count_by_role),
+        {key: round(float(value), 6) for key, value in sorted(qty_by_role.items())},
+    )
 
 
 def _liquidation_price(config: MarketStateConfig, side: int, avg_entry: float) -> float:
@@ -1500,6 +1647,33 @@ def _record_event(
     events.append(item)
 
 
+def _drawdown_bar_event_payload(events: list[dict[str, Any]], *, limit: int = 8) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    if len(events) > limit:
+        payload.append({"omitted_events": len(events) - limit})
+    for event in events[-limit:]:
+        item: dict[str, Any] = {
+            "action": event.get("action"),
+            "side": event.get("side"),
+            "qty": event.get("qty"),
+            "price": event.get("price"),
+            "reason": event.get("reason"),
+        }
+        for key in (
+            "role",
+            "entry",
+            "pnl_usd_units",
+            "zone_score",
+            "entry_zone_score",
+            "soft_circuit_recovery",
+            "drawdown_pct",
+        ):
+            if key in event:
+                item[key] = event[key]
+        payload.append(item)
+    return payload
+
+
 def _event_cost_multiplier(event: dict[str, Any]) -> float:
     action = str(event.get("action") or "")
     role = str(event.get("role") or "")
@@ -1534,6 +1708,7 @@ def _event_trade_cost(
     new_events: list[dict[str, Any]],
     cost_rate: float,
     counters: Counter[str],
+    cost_breakdown: dict[str, Counter[str]] | None = None,
 ) -> float:
     unit_weight = config.max_account_exposure / max(config.max_possible_units, 1e-12)
     total = 0.0
@@ -1545,12 +1720,23 @@ def _event_trade_cost(
         if qty <= 1e-12:
             continue
         multiplier = _event_cost_multiplier(event)
-        total += qty * unit_weight * cost_rate * multiplier
+        event_cost = qty * unit_weight * cost_rate * multiplier
+        total += event_cost
         counters["costed_order_events"] += 1
         if multiplier <= 0.50:
             counters["passive_cost_events"] += 1
         else:
             counters["aggressive_cost_events"] += 1
+        if cost_breakdown is not None and event_cost > 0.0:
+            reason = str(event.get("reason") or "unknown")
+            role = str(event.get("role") or "unknown")
+            side = str(event.get("side") or "unknown")
+            cost_breakdown["by_action"][action] += event_cost
+            cost_breakdown["by_reason"][reason] += event_cost
+            cost_breakdown["by_role"][role] += event_cost
+            cost_breakdown["by_side"][side] += event_cost
+            cost_breakdown["by_action_reason"][f"{action}:{reason}"] += event_cost
+            cost_breakdown["by_action_role"][f"{action}:{role}"] += event_cost
     return total
 
 
@@ -1620,6 +1806,23 @@ def _top_numeric_payload(counter: Counter[str], *, limit: int = 12, reverse: boo
     return {key: round(float(value), 4) for key, value in items[:limit]}
 
 
+def _top_prefixed_counter_payload(counters: Counter[str], prefix: str, *, limit: int = 12) -> dict[str, int]:
+    values = Counter(
+        {
+            key[len(prefix) :]: int(value)
+            for key, value in counters.items()
+            if key.startswith(prefix) and int(value) > 0
+        }
+    )
+    items = sorted(values.items(), key=lambda item: (-int(item[1]), item[0]))
+    return {key: int(value) for key, value in items[:limit]}
+
+
+def _top_cost_pct_payload(counter: Counter[str], *, limit: int = 12) -> dict[str, float]:
+    items = sorted(counter.items(), key=lambda item: (float(item[1]), item[0]), reverse=True)
+    return {key: round(float(value) * 100.0, 4) for key, value in items[:limit]}
+
+
 def _avg_payload(total: Counter[str], count: Counter[str], *, limit: int = 12, reverse: bool = True) -> dict[str, float]:
     values = Counter(
         {
@@ -1666,6 +1869,58 @@ def _zone_context_key(*, side: int, role: str, market: MarketState, zone: ZonePl
     )
 
 
+def _no_trade_candidate_side(*, market: MarketState, zone: ZonePlan) -> int:
+    if zone.long_score > zone.short_score:
+        return 1
+    if zone.short_score > zone.long_score:
+        return -1
+    if zone.long_score == zone.short_score and zone.long_score > 0 and market.bias:
+        return market.bias
+    return 0
+
+
+def _no_trade_candidate_score(zone: ZonePlan, side: int) -> int:
+    if side > 0:
+        return int(zone.long_score)
+    if side < 0:
+        return int(zone.short_score)
+    return int(max(zone.long_score, zone.short_score))
+
+
+def _no_trade_candidate_reason_stack(zone: ZonePlan, side: int) -> int:
+    if side > 0:
+        return int(zone.long_reason_stack)
+    if side < 0:
+        return int(zone.short_reason_stack)
+    return int(max(zone.long_reason_stack, zone.short_reason_stack))
+
+
+def _no_trade_context_key(*, reason: str, side: int, market: MarketState, zone: ZonePlan) -> str:
+    score = _no_trade_candidate_score(zone, side)
+    reason_stack = _no_trade_candidate_reason_stack(zone, side)
+    score_edge = abs(int(zone.long_score) - int(zone.short_score))
+    extension_bucket = _context_bucket(zone.chase_extension_atr, (0.75, 1.50, 2.50, 4.00))
+    breakout_bucket = _context_bucket(zone.chase_breakout_atr, (0.10, 0.50, 1.00, 1.50))
+    score_bucket = _context_bucket(score, (3.0, 5.0, 7.0, 9.0))
+    edge_bucket = _context_bucket(score_edge, (1.0, 2.0, 4.0, 6.0))
+    stack_bucket = _context_bucket(reason_stack, (1.0, 2.0, 3.0, 4.0))
+    alignment = "neutral" if side == 0 else _side_alignment(market, side)
+    return "|".join(
+        (
+            str(reason or "unknown"),
+            _side_label(side),
+            alignment,
+            str(market.regime or "unknown"),
+            str(zone.execution_context or "unknown"),
+            f"score_{score_bucket}",
+            f"edge_{edge_bucket}",
+            f"stack_{stack_bucket}",
+            f"ext_{extension_bucket}",
+            f"break_{breakout_bucket}",
+        )
+    )
+
+
 def _max_share(counter: Counter[str]) -> float:
     total = sum(counter.values())
     if total <= 0:
@@ -1688,6 +1943,255 @@ def _max_consecutive_add_side(add_events: list[dict[str, Any]]) -> int:
     return max_run
 
 
+_TREND_ALIGNED_REGIMES_BY_SIDE = {
+    "long": {"uptrend", "one_way_long"},
+    "short": {"downtrend", "one_way_short"},
+}
+_KNOWN_MARKET_REGIMES = {
+    "bad_rr_center",
+    "downtrend",
+    "mixed",
+    "one_way_long",
+    "one_way_short",
+    "range_or_transition",
+    "uptrend",
+}
+
+
+def _event_entry_regime(event: dict[str, Any]) -> str:
+    raw_regime = str(event.get("regime") or "")
+    if raw_regime in _KNOWN_MARKET_REGIMES:
+        return raw_regime
+    for key in ("zone_context", "entry_zone_context"):
+        for part in str(event.get(key) or "").split("|"):
+            if part in _KNOWN_MARKET_REGIMES:
+                return part
+    return raw_regime or "unknown"
+
+
+def _side_imbalance_context(
+    *,
+    add_events: list[dict[str, Any]],
+    add_by_side: Counter[str],
+    pnl_by_side: Counter[str],
+    directional_adds: int,
+    side_imbalance_min_directional_adds: int,
+    side_imbalance_share: float,
+    trend_aligned_min_share: float,
+) -> dict[str, Any]:
+    long_adds = int(add_by_side.get("long", 0))
+    short_adds = int(add_by_side.get("short", 0))
+    if directional_adds <= 0:
+        return {
+            "status": "no_directional_adds",
+            "flag_suppressed": False,
+            "dominant_side": "none",
+            "dominant_side_adds": 0,
+            "directional_adds": 0,
+            "dominant_side_share": 0.0,
+            "dominant_side_trend_aligned_adds": 0,
+            "dominant_side_trend_aligned_share": 0.0,
+            "dominant_side_realized_pnl_usd_units": 0.0,
+            "opposite_side_realized_pnl_usd_units": 0.0,
+            "total_side_realized_pnl_usd_units": 0.0,
+            "dominant_side_add_by_regime": {},
+        }
+
+    dominant_side = "long" if long_adds >= short_adds else "short"
+    opposite_side = "short" if dominant_side == "long" else "long"
+    dominant_side_adds = int(add_by_side.get(dominant_side, 0))
+    dominant_side_share = dominant_side_adds / max(directional_adds, 1)
+    dominant_add_by_regime: Counter[str] = Counter(
+        _event_entry_regime(event)
+        for event in add_events
+        if str(event.get("side") or "unknown") == dominant_side
+    )
+    aligned_regimes = _TREND_ALIGNED_REGIMES_BY_SIDE.get(dominant_side, set())
+    aligned_adds = sum(dominant_add_by_regime.get(regime, 0) for regime in aligned_regimes)
+    aligned_share = aligned_adds / max(dominant_side_adds, 1)
+    dominant_side_pnl = float(pnl_by_side.get(dominant_side, 0.0))
+    opposite_side_pnl = float(pnl_by_side.get(opposite_side, 0.0))
+    total_side_pnl = float(pnl_by_side.get("long", 0.0) + pnl_by_side.get("short", 0.0))
+    imbalance_triggered = (
+        directional_adds >= side_imbalance_min_directional_adds
+        and dominant_side_share >= side_imbalance_share
+    )
+    trend_aligned = (
+        imbalance_triggered
+        and aligned_share >= trend_aligned_min_share
+        and dominant_side_pnl > 0.0
+        and total_side_pnl > 0.0
+    )
+    status = "trend_aligned" if trend_aligned else "imbalanced" if imbalance_triggered else "balanced"
+
+    return {
+        "status": status,
+        "flag_suppressed": bool(trend_aligned),
+        "dominant_side": dominant_side,
+        "dominant_side_adds": dominant_side_adds,
+        "directional_adds": int(directional_adds),
+        "dominant_side_share": round(dominant_side_share, 4),
+        "dominant_side_trend_aligned_adds": int(aligned_adds),
+        "dominant_side_trend_aligned_share": round(aligned_share, 4),
+        "dominant_side_realized_pnl_usd_units": round(dominant_side_pnl, 4),
+        "opposite_side_realized_pnl_usd_units": round(opposite_side_pnl, 4),
+        "total_side_realized_pnl_usd_units": round(total_side_pnl, 4),
+        "dominant_side_add_by_regime": _counter_payload(dominant_add_by_regime),
+    }
+
+
+def _month_concentration_context(
+    *,
+    add_by_month: Counter[str],
+    add_total: int,
+    active_months: int,
+    total_months: int,
+    concentration_min_adds: int,
+    month_concentration_share: float,
+    month_concentration_borderline_share: float,
+    full_coverage_relief_gap: float,
+    sample_tier: str,
+) -> dict[str, Any]:
+    dominant_month, dominant_month_adds = (
+        max(add_by_month.items(), key=lambda item: (int(item[1]), str(item[0])))
+        if add_by_month
+        else ("none", 0)
+    )
+    dominant_month_share = int(dominant_month_adds) / max(add_total, 1)
+    hard = (
+        total_months >= 4
+        and add_total >= concentration_min_adds
+        and dominant_month_share >= month_concentration_share
+    )
+    borderline = (
+        not hard
+        and total_months >= 4
+        and add_total >= concentration_min_adds
+        and dominant_month_share >= month_concentration_borderline_share
+    )
+    full_coverage = active_months >= min(max(int(total_months), 1), 4)
+    broadly_active_relief = (
+        borderline
+        and sample_tier == "short"
+        and full_coverage
+        and dominant_month_share <= month_concentration_share - full_coverage_relief_gap
+    )
+    status = (
+        "hard"
+        if hard
+        else "borderline_broadly_active"
+        if broadly_active_relief
+        else "borderline"
+        if borderline
+        else "balanced"
+    )
+    return {
+        "status": status,
+        "flag_suppressed": bool(broadly_active_relief),
+        "dominant_month": str(dominant_month),
+        "dominant_month_adds": int(dominant_month_adds),
+        "dominant_month_share": round(dominant_month_share, 4),
+        "active_months": int(active_months),
+        "total_months": int(total_months),
+        "full_coverage": bool(full_coverage),
+        "monthly_adds": _counter_payload(add_by_month),
+    }
+
+
+def _role_concentration_context(
+    *,
+    known_add_by_role: Counter[str],
+    pnl_by_role: Counter[str],
+    role_adds: int,
+    role_concentration_min_add_events: int,
+    role_concentration_share: float,
+    role_concentration_borderline_share: float,
+    profitable_mix_relief_gap: float,
+) -> dict[str, Any]:
+    dominant_role, dominant_role_adds = (
+        max(known_add_by_role.items(), key=lambda item: (int(item[1]), str(item[0])))
+        if known_add_by_role
+        else ("none", 0)
+    )
+    dominant_role_share = int(dominant_role_adds) / max(role_adds, 1)
+    dominant_role_pnl = float(pnl_by_role.get(dominant_role, 0.0))
+    total_role_pnl = float(sum(pnl_by_role.values()))
+    hard = (
+        role_adds >= role_concentration_min_add_events
+        and dominant_role_share >= role_concentration_share
+    )
+    borderline = (
+        not hard
+        and role_adds >= role_concentration_min_add_events
+        and dominant_role_share >= role_concentration_borderline_share
+    )
+    profitable_mix_relief = (
+        borderline
+        and len(known_add_by_role) >= 2
+        and dominant_role_share <= role_concentration_share - profitable_mix_relief_gap
+        and dominant_role_pnl > 0.0
+        and total_role_pnl > 0.0
+    )
+    status = (
+        "hard"
+        if hard
+        else "borderline_profitable_mix"
+        if profitable_mix_relief
+        else "borderline"
+        if borderline
+        else "balanced"
+    )
+    return {
+        "status": status,
+        "flag_suppressed": bool(profitable_mix_relief),
+        "dominant_role": str(dominant_role),
+        "dominant_role_adds": int(dominant_role_adds),
+        "dominant_role_share": round(dominant_role_share, 4),
+        "known_role_count": int(len(known_add_by_role)),
+        "role_adds": int(role_adds),
+        "dominant_role_realized_pnl_usd_units": round(dominant_role_pnl, 4),
+        "total_role_realized_pnl_usd_units": round(total_role_pnl, 4),
+        "add_by_role": _counter_payload(known_add_by_role),
+    }
+
+
+def _capacity_structure_context(
+    *,
+    config: MarketStateConfig,
+    add_total: int,
+    add_by_role: Counter[str],
+    battle_add_ratio: float,
+    battle_capacity_saturated: bool,
+) -> dict[str, Any]:
+    max_possible_units = max(0.0, float(getattr(config, "max_possible_units", 0.0) or 0.0))
+    base_add_units = max(0.0, float(getattr(config, "base_add_units", 0.0) or 0.0))
+    base_max_units = max(0.0, float(getattr(config, "base_max_units", 0.0) or 0.0))
+    max_account_exposure = max(0.0, float(getattr(config, "max_account_exposure", 0.0) or 0.0))
+    capacity_after_first_base = max(max_possible_units - base_add_units, 0.0)
+    unit_exposure = max_account_exposure / max(max_possible_units, 1e-12)
+    base_add_share = int(add_by_role.get("base", 0)) / max(int(add_total), 1)
+    scale_in_capacity = max_possible_units > base_add_units + 1e-12
+    if battle_capacity_saturated and battle_add_ratio <= 0.015:
+        status = "battle_capacity_saturated"
+    elif not scale_in_capacity:
+        status = "single_unit_full_entry"
+    else:
+        status = "scale_in_capacity_available"
+    return {
+        "status": status,
+        "scale_in_capacity_available": bool(scale_in_capacity),
+        "max_possible_units": round(max_possible_units, 6),
+        "base_add_units": round(base_add_units, 6),
+        "base_max_units": round(base_max_units, 6),
+        "capacity_after_first_base_units": round(capacity_after_first_base, 6),
+        "max_account_exposure": round(max_account_exposure, 6),
+        "unit_account_exposure": round(unit_exposure, 6),
+        "base_add_account_exposure": round(base_add_units * unit_exposure, 6),
+        "base_add_share": round(base_add_share, 4),
+        "battle_add_ratio": round(float(battle_add_ratio), 4),
+    }
+
+
 def _diagnostic_thresholds(*, total_months: int, add_total: int) -> dict[str, Any]:
     months = max(int(total_months), 1)
     adds = max(int(add_total), 0)
@@ -1701,6 +2205,7 @@ def _diagnostic_thresholds(*, total_months: int, add_total: int) -> dict[str, An
         "overtrading_add_events": 1500,
         "side_imbalance_min_directional_adds": int(max(12, expected_add_events)),
         "side_imbalance_share": 0.85 if short_sample else 0.70,
+        "side_imbalance_trend_aligned_min_share": 0.70,
         "role_concentration_min_add_events": int(max(12, expected_add_events)),
         "role_concentration_share": 0.90 if short_sample else 0.80,
         "role_concentration_borderline_share": 0.85 if short_sample else 0.75,
@@ -1709,8 +2214,10 @@ def _diagnostic_thresholds(*, total_months: int, add_total: int) -> dict[str, An
         "poor_month_coverage_min_active_months": int(max(3, math.ceil(months * 0.65))),
         "month_concentration_share": 0.50 if short_sample else 0.25,
         "month_concentration_borderline_share": 0.45 if short_sample else 0.25,
+        "month_concentration_borderline_full_coverage_relief_gap": 0.01,
         "day_concentration_share": 0.14 if short_sample else 0.08,
         "kst_hour_concentration_share": 0.24 if short_sample else 0.18,
+        "role_concentration_borderline_profitable_relief_gap": 0.02,
         "repair_stop_per_add": 0.30,
         "one_way_forced_trim_per_add": 0.50 if short_sample else 0.25,
         "turnover_events_per_add": 3.25 if short_sample else 2.50,
@@ -1853,8 +2360,45 @@ def _event_diagnostics(
     thresholds = _diagnostic_thresholds(total_months=total_months, add_total=add_total)
     concentration_min_adds = int(thresholds["concentration_min_add_events"])
     side_imbalance_min_directional_adds = int(thresholds["side_imbalance_min_directional_adds"])
+    side_imbalance_share = float(thresholds["side_imbalance_share"])
     role_concentration_min_add_events = int(thresholds["role_concentration_min_add_events"])
     expected_add_events = int(thresholds["expected_add_events"])
+    side_imbalance_context = _side_imbalance_context(
+        add_events=add_events,
+        add_by_side=add_by_side,
+        pnl_by_side=pnl_by_side,
+        directional_adds=directional_adds,
+        side_imbalance_min_directional_adds=side_imbalance_min_directional_adds,
+        side_imbalance_share=side_imbalance_share,
+        trend_aligned_min_share=float(thresholds["side_imbalance_trend_aligned_min_share"]),
+    )
+    month_concentration_context = _month_concentration_context(
+        add_by_month=add_by_month,
+        add_total=add_total,
+        active_months=active_months,
+        total_months=total_months,
+        concentration_min_adds=concentration_min_adds,
+        month_concentration_share=float(thresholds["month_concentration_share"]),
+        month_concentration_borderline_share=float(thresholds["month_concentration_borderline_share"]),
+        full_coverage_relief_gap=float(thresholds["month_concentration_borderline_full_coverage_relief_gap"]),
+        sample_tier=str(thresholds["sample_tier"]),
+    )
+    role_concentration_context = _role_concentration_context(
+        known_add_by_role=known_add_by_role,
+        pnl_by_role=pnl_by_role,
+        role_adds=role_adds,
+        role_concentration_min_add_events=role_concentration_min_add_events,
+        role_concentration_share=float(thresholds["role_concentration_share"]),
+        role_concentration_borderline_share=float(thresholds["role_concentration_borderline_share"]),
+        profitable_mix_relief_gap=float(thresholds["role_concentration_borderline_profitable_relief_gap"]),
+    )
+    capacity_structure_context = _capacity_structure_context(
+        config=config,
+        add_total=add_total,
+        add_by_role=add_by_role,
+        battle_add_ratio=battle_add_ratio,
+        battle_capacity_saturated=battle_capacity_saturated,
+    )
     enough_orders_for_coverage = add_total >= expected_add_events
     soft_circuit_cooldown_share = counters.get("equity_soft_circuit_cooldown_bars", 0) / max(exposure_bars, 1)
     soft_circuit_force_flat = bool(getattr(config, "equity_soft_circuit_force_flat", False))
@@ -1896,18 +2440,13 @@ def _event_diagnostics(
         flags.append("overtrading")
     if (
         directional_adds >= side_imbalance_min_directional_adds
-        and max(long_add_share, short_add_share) >= float(thresholds["side_imbalance_share"])
+        and max(long_add_share, short_add_share) >= side_imbalance_share
+        and side_imbalance_context.get("status") != "trend_aligned"
     ):
         flags.append("side_imbalance")
-    if (
-        role_adds >= role_concentration_min_add_events
-        and max_role_add_share >= float(thresholds["role_concentration_share"])
-    ):
+    if role_concentration_context.get("status") == "hard":
         flags.append("role_concentration")
-    elif (
-        role_adds >= role_concentration_min_add_events
-        and max_role_add_share >= float(thresholds["role_concentration_borderline_share"])
-    ):
+    elif role_concentration_context.get("status") == "borderline":
         borderline_flags.append("role_concentration")
     if (
         total_months >= int(thresholds["poor_month_coverage_min_months"])
@@ -1915,17 +2454,9 @@ def _event_diagnostics(
         and active_months < int(thresholds["poor_month_coverage_min_active_months"])
     ):
         flags.append("poor_month_coverage")
-    if (
-        total_months >= int(thresholds["poor_month_coverage_min_months"])
-        and add_total >= concentration_min_adds
-        and max_month_share >= float(thresholds["month_concentration_share"])
-    ):
+    if month_concentration_context.get("status") == "hard":
         flags.append("month_concentration")
-    elif (
-        total_months >= int(thresholds["poor_month_coverage_min_months"])
-        and add_total >= concentration_min_adds
-        and max_month_share >= float(thresholds["month_concentration_borderline_share"])
-    ):
+    elif month_concentration_context.get("status") == "borderline":
         borderline_flags.append("month_concentration")
     if add_total >= concentration_min_adds and max_day_share >= float(thresholds["day_concentration_share"]):
         flags.append("day_concentration")
@@ -1991,8 +2522,23 @@ def _event_diagnostics(
         ),
         "risk_off_cooldown_share": round(soft_circuit_cooldown_share, 4),
         "diagnostic_thresholds": thresholds,
+        "side_imbalance_context": side_imbalance_context,
+        "month_concentration_context": month_concentration_context,
+        "role_concentration_context": role_concentration_context,
+        "capacity_structure_context": capacity_structure_context,
         "add_events": add_total,
         "remove_events": remove_total,
+        "top_no_trade_contexts": _top_prefixed_counter_payload(counters, "no_trade_context::", limit=12),
+        "no_trade_reason_side_counts": _top_prefixed_counter_payload(
+            counters,
+            "no_trade_reason_side::",
+            limit=24,
+        ),
+        "no_trade_reason_regime_counts": _top_prefixed_counter_payload(
+            counters,
+            "no_trade_reason_regime::",
+            limit=24,
+        ),
         "add_by_side": _counter_payload(add_by_side),
         "add_side_share": {"long": round(long_add_share, 4), "short": round(short_add_share, 4)},
         "add_by_role": _counter_payload(add_by_role),
@@ -2166,6 +2712,7 @@ def _apply_decision(
     counters: Counter[str],
     memory: RotationMemory,
     risk_size_mult: float = 1.0,
+    soft_circuit_active: bool = False,
 ) -> None:
     ts = features.ts[exec_idx]
     fragile_regime_entry_mult = _fragile_regime_entry_multiplier(config, market)
@@ -2322,11 +2869,14 @@ def _apply_decision(
             ):
                 late_base_size_mult = _clamp(config.base_entry_reduce_size_mult, 0.0, 1.0)
             late_base_reduced = late_base_size_mult < 1.0 - 1e-12
+            event_base_size_mult = _event_risk_base_size_multiplier(config, zone, zone.side, role)
+            event_base_reduced = event_base_size_mult < 1.0 - 1e-12
             loss_fuse_reduced = role == "base" and one_way_loss_fuse_size_mult < 1.0 - 1e-12
             qty = min(
                 base_qty
                 * _entry_size_multiplier(config, market, zone.side)
                 * late_base_size_mult
+                * event_base_size_mult
                 * (one_way_loss_fuse_size_mult if role == "base" else 1.0)
                 * entry_risk_mult,
                 config.max_possible_units,
@@ -2334,11 +2884,15 @@ def _apply_decision(
             if qty <= 1e-12:
                 if loss_fuse_reduced:
                     counters["one_way_loss_fuse_base_blocks"] += 1
+                if event_base_reduced:
+                    counters["event_risk_base_reduce_blocks"] += 1
                 return
             reasons = zone.long_reasons if zone.side > 0 else zone.short_reasons
             zone_context = _zone_context_key(side=zone.side, role=role, market=market, zone=zone)
             if late_base_reduced:
                 zone_context += "|late_base_reduce"
+            if event_base_reduced:
+                zone_context += "|event_risk_base_reduce"
             if loss_fuse_reduced:
                 zone_context += "|loss_fuse_reduce"
             if memory.in_one_way_trim_context_cooldown(zone_context, exec_idx):
@@ -2360,6 +2914,8 @@ def _apply_decision(
             counters[f"{role}_adds"] += 1
             if loss_fuse_reduced:
                 counters["one_way_loss_fuse_base_reduced_adds"] += 1
+            if event_base_reduced:
+                counters["event_risk_base_reduced_adds"] += 1
             if role == "battle":
                 counters["battle_primary_adds"] += 1
             _record_event(
@@ -2387,6 +2943,7 @@ def _apply_decision(
                     "trend_strength": round(market.trend_strength, 4),
                     "execution_context": zone.execution_context,
                     "late_base_size_mult": round(late_base_size_mult, 4),
+                    "event_risk_base_size_mult": round(event_base_size_mult, 4),
                     "one_way_loss_fuse_size_mult": round(
                         one_way_loss_fuse_size_mult if role == "base" else 1.0,
                         4,
@@ -2564,7 +3121,14 @@ def _apply_decision(
                             "execution_context": zone.execution_context,
                         },
                     )
-        if book.side == 0 and config.one_way_impulse_probe_units > 1e-12:
+        recovery_probe_units = (
+            max(0.0, float(config.equity_soft_circuit_recovery_probe_units))
+            if soft_circuit_active and entry_risk_mult <= 1e-12
+            else 0.0
+        )
+        if book.side == 0 and (
+            config.one_way_impulse_probe_units > 1e-12 or recovery_probe_units > 1e-12
+        ):
             impulse_side = market.one_way_side
             impulse_score = zone.long_score if impulse_side > 0 else zone.short_score if impulse_side < 0 else 0
             impulse_reason_stack = (
@@ -2578,25 +3142,52 @@ def _apply_decision(
             impulse_has_chase_break = any(reason.startswith("trend_chase") for reason in impulse_reasons)
             impulse_zone_key = zone.long_zone_key if impulse_side > 0 else zone.short_zone_key if impulse_side < 0 else ""
             hard_no_trade = _has_hard_no_trade_reasons(zone.no_trade_reasons)
+            impulse_units = max(0.0, float(config.one_way_impulse_probe_units))
+            impulse_min_one_way_score = max(0.0, float(config.one_way_impulse_min_one_way_score))
+            impulse_min_score_diff = max(0, int(config.one_way_impulse_min_score_diff))
+            impulse_max_extension_atr = max(0.1, float(config.one_way_impulse_max_extension_atr))
+            impulse_entry_risk_mult = entry_risk_mult
+            impulse_reason = "one_way_impulse_probe_entry"
+            recovery_ready_mode = recovery_probe_units > 1e-12
+            if recovery_ready_mode:
+                impulse_units = recovery_probe_units
+                impulse_min_one_way_score = max(
+                    impulse_min_one_way_score,
+                    max(0.0, float(config.equity_soft_circuit_recovery_min_one_way_score)),
+                )
+                impulse_min_score_diff = max(
+                    impulse_min_score_diff,
+                    max(0, int(config.equity_soft_circuit_recovery_min_score_diff)),
+                )
+                impulse_max_extension_atr = max(
+                    0.1,
+                    float(config.equity_soft_circuit_recovery_max_extension_atr),
+                )
+                impulse_entry_risk_mult = fragile_regime_entry_mult
+                impulse_reason = "equity_soft_circuit_recovery_probe_entry"
             impulse_ready = (
                 impulse_side != 0
                 and market.bias == impulse_side
-                and market.one_way_score >= config.one_way_impulse_min_one_way_score
-                and abs(market.score_diff) >= config.one_way_impulse_min_score_diff
+                and market.one_way_score >= impulse_min_one_way_score
+                and abs(market.score_diff) >= impulse_min_score_diff
                 and impulse_has_chase_break
                 and impulse_score >= config.entry_score
                 and impulse_reason_stack >= max(2, config.min_reason_stack - 1)
-                and zone.chase_extension_atr <= config.one_way_impulse_max_extension_atr
+                and zone.chase_extension_atr <= impulse_max_extension_atr
                 and not market.bad_rr
                 and not hard_no_trade
                 and not memory.in_cooldown(impulse_side, exec_idx)
+                and not (
+                    recovery_ready_mode
+                    and memory.in_equity_soft_circuit_recovery_failure_cooldown(exec_idx)
+                )
                 and exec_idx - memory.last_one_way_impulse_probe_idx > config.one_way_impulse_cooldown_bars
                 and memory.state(impulse_zone_key, exec_idx, config.zone_retire_bars) != "retired"
                 and _kst_hour(ts) not in config.blocked_kst_entry_hours
             )
             if impulse_ready:
                 qty = min(
-                    config.one_way_impulse_probe_units * _entry_size_multiplier(config, market, impulse_side) * entry_risk_mult,
+                    impulse_units * _entry_size_multiplier(config, market, impulse_side) * impulse_entry_risk_mult,
                     config.max_possible_units,
                 )
                 if qty > 1e-12:
@@ -2604,6 +3195,9 @@ def _apply_decision(
                     if memory.in_one_way_trim_context_cooldown(zone_context, exec_idx):
                         counters["one_way_trim_context_entry_blocks"] += 1
                         return
+                    lot_zone_context = zone_context
+                    if recovery_ready_mode:
+                        lot_zone_context += "|soft_recovery"
                     _add_lot(
                         book=book,
                         side=impulse_side,
@@ -2613,13 +3207,16 @@ def _apply_decision(
                         role="probe",
                         zone_score=impulse_score,
                         zone_reasons=impulse_reasons,
-                        zone_context=zone_context,
+                        zone_context=lot_zone_context,
                     )
                     memory.touch(impulse_zone_key, exec_idx)
                     memory.failed_rescue_count = 0
                     memory.last_one_way_impulse_probe_idx = exec_idx
                     counters["probe_adds"] += 1
-                    counters["one_way_impulse_probe_adds"] += 1
+                    if recovery_ready_mode:
+                        counters["equity_soft_circuit_recovery_probe_adds"] += 1
+                    else:
+                        counters["one_way_impulse_probe_adds"] += 1
                     _record_event(
                         events,
                         ts=ts,
@@ -2627,7 +3224,7 @@ def _apply_decision(
                         side=impulse_side,
                         qty=qty,
                         price=exec_price,
-                        reason="one_way_impulse_probe_entry",
+                        reason=impulse_reason,
                         equity=equity,
                         extra={
                             "role": "probe",
@@ -2640,9 +3237,10 @@ def _apply_decision(
                             "regime": market.regime,
                             "market": ",".join(market.reasons[:4]),
                             "zone": ",".join(impulse_reasons[:4]),
-                            "zone_context": zone_context,
+                            "zone_context": lot_zone_context,
                             "chase_extension_atr": round(zone.chase_extension_atr, 4),
                             "execution_context": zone.execution_context,
+                            "soft_circuit_recovery": recovery_ready_mode,
                         },
                     )
         return
@@ -2764,14 +3362,15 @@ def _apply_decision(
     one_way_trim_ready = (
         one_way_against
         and adverse_usd >= expected_reaction * config.one_way_trim_min_adverse_reaction
-        and exec_idx - memory.last_one_way_trim_idx > config.one_way_trim_cooldown_bars
     )
-    if one_way_trim_ready and book.qty > min_cut_units:
-        full_exit_forced_trim = (
-            config.one_way_trim_full_exit_min_one_way_score > 0.0
-            and market.one_way_score >= config.one_way_trim_full_exit_min_one_way_score
-            and market.score_diff * opposite_side >= config.one_way_trim_full_exit_min_score_diff
-        )
+    full_exit_forced_trim = (
+        one_way_trim_ready
+        and _one_way_full_exit_ready(config, market)
+    )
+    trim_cooldown_ready = exec_idx - memory.last_one_way_trim_idx > config.one_way_trim_cooldown_bars
+    if one_way_trim_ready and (trim_cooldown_ready or full_exit_forced_trim) and (
+        book.qty > min_cut_units or full_exit_forced_trim
+    ):
         fraction = 1.0 if full_exit_forced_trim else _one_way_forced_trim_fraction(side, repair_eff)
         reversal_blockers: list[str] = []
         if config.one_way_reversal_switch_units <= 1e-12:
@@ -3041,6 +3640,8 @@ def _apply_decision(
             counters["probe_reaction_exits"] += 1
             if any("near_miss" in str(lot.zone_context) for lot in removed):
                 counters["near_miss_probe_reaction_exits"] += 1
+            if any("soft_recovery" in str(lot.zone_context) for lot in removed):
+                counters["equity_soft_circuit_recovery_probe_reaction_exits"] += 1
             return
         if probe_adverse >= expected_reaction * config.probe_stop_reaction or (
             probe_age >= config.probe_max_bars and probe_favorable < 0.0
@@ -3066,6 +3667,15 @@ def _apply_decision(
                     cooldown_bars=config.near_miss_probe_failure_cooldown_bars,
                 ):
                     counters["near_miss_probe_failure_cooldown_triggers"] += 1
+            if any("soft_recovery" in str(lot.zone_context) for lot in removed):
+                counters["equity_soft_circuit_recovery_probe_failed_fast_exits"] += 1
+                if memory.record_equity_soft_circuit_recovery_failure(
+                    exec_idx,
+                    guard_count=config.equity_soft_circuit_recovery_failure_guard_count,
+                    window_bars=config.equity_soft_circuit_recovery_failure_guard_window_bars,
+                    cooldown_bars=config.equity_soft_circuit_recovery_failure_cooldown_bars,
+                ):
+                    counters["equity_soft_circuit_recovery_failure_cooldown_triggers"] += 1
             if book.side == 0:
                 memory.invalidate(same_zone_key, exec_idx)
             return
@@ -3424,9 +4034,12 @@ def _apply_decision(
         and capacity > 1e-12
         and memory.state(same_zone_key, exec_idx, config.zone_retire_bars) != "retired"
     ):
+        event_base_size_mult = _event_risk_base_size_multiplier(config, zone, side, "base")
+        event_base_reduced = event_base_size_mult < 1.0 - 1e-12
         qty = min(
             config.base_add_units
             * _entry_size_multiplier(config, market, side)
+            * event_base_size_mult
             * one_way_loss_fuse_size_mult
             * entry_risk_mult,
             config.base_max_units - book.qty,
@@ -3434,6 +4047,8 @@ def _apply_decision(
         )
         if qty > 1e-12:
             zone_context = _zone_context_key(side=side, role="base", market=market, zone=zone)
+            if event_base_reduced:
+                zone_context += "|event_risk_base_reduce"
             if one_way_loss_fuse_size_mult < 1.0 - 1e-12:
                 zone_context += "|loss_fuse_reduce"
             _add_lot(
@@ -3451,6 +4066,8 @@ def _apply_decision(
             counters["base_adds"] += 1
             if one_way_loss_fuse_size_mult < 1.0 - 1e-12:
                 counters["one_way_loss_fuse_base_reduced_adds"] += 1
+            if event_base_reduced:
+                counters["event_risk_base_reduced_adds"] += 1
             _record_event(
                 events,
                 ts=ts,
@@ -3467,10 +4084,13 @@ def _apply_decision(
                     "zone_key": same_zone_key,
                     "side_alignment": _side_alignment(market, side),
                     "zone_context": zone_context,
+                    "event_risk_base_size_mult": round(event_base_size_mult, 4),
                     "one_way_loss_fuse_size_mult": round(one_way_loss_fuse_size_mult, 4),
                 },
             )
             return
+        if event_base_reduced:
+            counters["event_risk_base_reduce_blocks"] += 1
 
     if _role_qty(book, "battle") > 0.0:
         battle_age = max(exec_idx - lot.entry_idx for lot in book.tranches if lot.role == "battle")
@@ -3667,8 +4287,13 @@ def backtest_config(
     gross_equity = 1.0
     peak = 1.0
     gross_peak = 1.0
+    peak_ts = features.ts[warmup] if warmup < len(features.ts) else features.ts[0]
+    peak_idx = warmup
     max_drawdown = 0.0
     gross_max_drawdown = 0.0
+    max_drawdown_detail: dict[str, Any] = {}
+    max_drawdown_recovery_peak_equity = 0.0
+    max_drawdown_trough_idx = -1
     min_equity = equity
     gross_min_equity = gross_equity
     book = PositionBook()
@@ -3683,6 +4308,7 @@ def backtest_config(
     exposure_side_bars: Counter[str] = Counter()
     modeled_trade_cost_fraction_sum = 0.0
     modeled_carry_cost_fraction_sum = 0.0
+    cost_breakdown: dict[str, Counter[str]] = defaultdict(Counter)
     regime_stats: dict[str, dict[str, Any]] = {}
     equity_circuit_pause_until_idx = -1
     equity_circuit_armed = True
@@ -3692,6 +4318,7 @@ def backtest_config(
         else -1
     )
     equity_soft_circuit_force_exit_pending = False
+    equity_soft_circuit_inventory_trim_pending_fraction = 0.0
     previous_regime = ""
 
     for exec_idx in range(warmup + 1, len(features.bars) - 1):
@@ -3715,8 +4342,20 @@ def backtest_config(
         if market.bad_rr:
             counters["bad_rr_bars"] += 1
         if zone.no_trade_reasons:
+            no_trade_side = _no_trade_candidate_side(market=market, zone=zone)
             for reason in zone.no_trade_reasons:
                 counters[f"no_trade_{reason}"] += 1
+                counters[
+                    "no_trade_context::"
+                    + _no_trade_context_key(
+                        reason=reason,
+                        side=no_trade_side,
+                        market=market,
+                        zone=zone,
+                    )
+                ] += 1
+                counters[f"no_trade_reason_side::{reason}|{_side_label(no_trade_side)}"] += 1
+                counters[f"no_trade_reason_regime::{reason}|{market.regime}"] += 1
         if market.one_way_side:
             counters[f"one_way_{_side_label(market.one_way_side)}_bars"] += 1
 
@@ -3762,6 +4401,27 @@ def backtest_config(
                     equity=equity,
                 )
                 counters["equity_soft_circuit_force_exits"] += 1
+        elif equity_soft_circuit_inventory_trim_pending_fraction > 1e-12:
+            trim_fraction = _clamp(equity_soft_circuit_inventory_trim_pending_fraction, 0.0, 1.0)
+            equity_soft_circuit_inventory_trim_pending_fraction = 0.0
+            counters["equity_soft_circuit_inventory_trim_bars"] += 1
+            if book.side != 0 and trim_fraction > 1e-12:
+                trim_qty = min(book.qty, max(0.0, book.qty * trim_fraction))
+                if trim_qty > 1e-12:
+                    removed = book.remove(
+                        qty=trim_qty,
+                        price=exec_price,
+                        role_priority=("battle", "chase", "base", "probe"),
+                    )
+                    _exit_removed_lots(
+                        events=events,
+                        removed=removed,
+                        ts=features.ts[exec_idx],
+                        action="remove",
+                        reason="equity_soft_circuit_inventory_trim",
+                        equity=equity,
+                    )
+                    counters["equity_soft_circuit_inventory_trims"] += 1
         else:
             fragile_inventory_trimmed = False
             if (
@@ -3808,6 +4468,7 @@ def backtest_config(
                     counters=counters,
                     memory=memory,
                     risk_size_mult=soft_risk_size_mult,
+                    soft_circuit_active=soft_circuit_active,
                 )
 
         new_weight = _book_weight(config, book)
@@ -3821,6 +4482,7 @@ def backtest_config(
             new_events=new_trade_events,
             cost_rate=cost_rate,
             counters=counters,
+            cost_breakdown=cost_breakdown,
         )
         if trade_cost <= 1e-18 and turnover > 0.0:
             trade_cost = turnover * cost_rate
@@ -3922,13 +4584,54 @@ def backtest_config(
             month_equity[month] = {"start": equity, "end": equity}
         month_equity[month]["end"] = equity
 
-        peak = max(peak, equity)
+        if equity > peak:
+            peak = equity
+            peak_ts = features.ts[exec_idx]
+            peak_idx = exec_idx
         gross_peak = max(gross_peak, gross_equity)
         min_equity = min(min_equity, equity)
         gross_min_equity = min(gross_min_equity, gross_equity)
         if peak > 0.0:
             drawdown = 1.0 - equity / peak
-            max_drawdown = max(max_drawdown, drawdown)
+            if drawdown > max_drawdown + 1e-12:
+                lot_count_by_role, qty_by_role = _book_open_role_payloads(book)
+                max_drawdown = drawdown
+                max_drawdown_detail = {
+                    "drawdown_pct": round(drawdown * 100.0, 4),
+                    "peak_ts": peak_ts.isoformat(),
+                    "trough_ts": features.ts[exec_idx].isoformat(),
+                    "peak_to_trough_bars": max(exec_idx - peak_idx, 0),
+                    "peak_to_trough_hours": round(
+                        max(exec_idx - peak_idx, 0) * _INTERVAL_MS[config.exec_interval] / 3_600_000.0,
+                        4,
+                    ),
+                    "peak_equity": round(float(peak), 8),
+                    "trough_equity": round(float(equity), 8),
+                    "trough_price": round(float(exec_price), 2),
+                    "trough_side": _side_label(book.side),
+                    "trough_weight": round(float(new_weight), 4),
+                    "trough_qty": round(float(book.qty), 6),
+                    "trough_avg_entry": round(float(book.avg_entry), 2) if book.side != 0 else 0.0,
+                    "trough_regime": market.regime,
+                    "trough_one_way_side": _side_label(market.one_way_side),
+                    "trough_one_way_score": round(float(market.one_way_score), 4),
+                    "trough_score_diff": int(market.score_diff),
+                    "trough_zone_side": _side_label(zone.side),
+                    "trough_zone_score": int(zone.score),
+                    "trough_zone_mode": zone.mode,
+                    "trough_zone_stage": zone.stage,
+                    "trough_no_trade_reasons": list(zone.no_trade_reasons),
+                    "trough_open_lot_count_by_role": lot_count_by_role,
+                    "trough_open_qty_by_role": qty_by_role,
+                    "trough_bar_event_count": len(new_trade_events),
+                    "trough_bar_events": _drawdown_bar_event_payload(new_trade_events),
+                    "recovered_peak": False,
+                    "recovered_peak_ts": None,
+                    "trough_to_recovery_bars": None,
+                    "trough_to_recovery_hours": None,
+                }
+                max_drawdown_recovery_peak_equity = peak
+                max_drawdown_trough_idx = exec_idx
             circuit_rearm_drawdown = max(float(config.equity_circuit_rearm_drawdown_pct), 0.0) / 100.0
             circuit_rearm_enabled = circuit_rearm_drawdown > 0.0
             if circuit_rearm_enabled and not equity_circuit_armed and drawdown <= circuit_rearm_drawdown:
@@ -3986,6 +4689,14 @@ def backtest_config(
             ):
                 equity_soft_circuit_cooldown_until_idx = exec_idx + config.equity_soft_circuit_cooldown_bars
                 equity_soft_circuit_force_exit_pending = bool(config.equity_soft_circuit_force_flat)
+                if equity_soft_circuit_force_exit_pending:
+                    equity_soft_circuit_inventory_trim_pending_fraction = 0.0
+                else:
+                    equity_soft_circuit_inventory_trim_pending_fraction = _clamp(
+                        config.equity_soft_circuit_inventory_trim_fraction,
+                        0.0,
+                        1.0,
+                    )
                 counters["equity_soft_circuit_triggers"] += 1
                 _record_event(
                     events,
@@ -4001,8 +4712,27 @@ def backtest_config(
                         "cooldown_bars": int(config.equity_soft_circuit_cooldown_bars),
                         "size_mult": round(_clamp(config.equity_soft_circuit_size_mult, 0.0, 1.0), 4),
                         "force_flat": bool(config.equity_soft_circuit_force_flat),
+                        "inventory_trim_fraction": round(
+                            _clamp(config.equity_soft_circuit_inventory_trim_fraction, 0.0, 1.0),
+                            4,
+                        ),
                     },
                 )
+        if (
+            max_drawdown_detail
+            and not bool(max_drawdown_detail.get("recovered_peak"))
+            and max_drawdown_trough_idx >= 0
+            and exec_idx > max_drawdown_trough_idx
+            and equity >= max_drawdown_recovery_peak_equity - 1e-12
+        ):
+            recovery_bars = max(exec_idx - max_drawdown_trough_idx, 0)
+            max_drawdown_detail["recovered_peak"] = True
+            max_drawdown_detail["recovered_peak_ts"] = features.ts[exec_idx].isoformat()
+            max_drawdown_detail["trough_to_recovery_bars"] = recovery_bars
+            max_drawdown_detail["trough_to_recovery_hours"] = round(
+                recovery_bars * _INTERVAL_MS[config.exec_interval] / 3_600_000.0,
+                4,
+            )
         if gross_peak > 0.0:
             gross_max_drawdown = max(gross_max_drawdown, 1.0 - gross_equity / gross_peak)
         exposure_sum += abs(new_weight)
@@ -4081,6 +4811,16 @@ def backtest_config(
         total_months=int(monthly["months"]),
         config=config,
     )
+    cost_diagnostics = {
+        "modeled_trade_cost_pct": round(modeled_trade_cost_fraction_sum * 100.0, 4),
+        "modeled_carry_cost_pct": round(modeled_carry_cost_fraction_sum * 100.0, 4),
+        "by_action_pct": _top_cost_pct_payload(cost_breakdown["by_action"]),
+        "by_side_pct": _top_cost_pct_payload(cost_breakdown["by_side"]),
+        "by_role_pct": _top_cost_pct_payload(cost_breakdown["by_role"]),
+        "by_reason_pct": _top_cost_pct_payload(cost_breakdown["by_reason"]),
+        "by_action_reason_pct": _top_cost_pct_payload(cost_breakdown["by_action_reason"]),
+        "by_action_role_pct": _top_cost_pct_payload(cost_breakdown["by_action_role"]),
+    }
     regime_performance = {
         regime: {
             "bars": int(stats["bars"]),
@@ -4112,6 +4852,7 @@ def backtest_config(
         "cagr_pct": round(cagr * 100.0, 4),
         "gross_cagr_pct_before_costs": round(gross_cagr * 100.0, 4),
         "max_drawdown_pct": round(max_drawdown * 100.0, 4),
+        "max_drawdown_detail": max_drawdown_detail,
         "gross_max_drawdown_pct_before_costs": round(gross_max_drawdown * 100.0, 4),
         "modeled_trade_cost_fraction_sum": round(modeled_trade_cost_fraction_sum, 8),
         "modeled_carry_cost_fraction_sum": round(modeled_carry_cost_fraction_sum, 8),
@@ -4129,6 +4870,7 @@ def backtest_config(
         "monthly": monthly,
         "regime_performance": regime_performance,
         "event_diagnostics": event_diagnostics,
+        "cost_diagnostics": cost_diagnostics,
         "config": asdict(config),
         "sample_events": sample_events,
     }
@@ -4181,7 +4923,15 @@ def build_configs(
     equity_soft_circuit_cooldown_bars: int,
     equity_soft_circuit_size_mult: float,
     equity_soft_circuit_force_flat: bool,
+    equity_soft_circuit_inventory_trim_fraction: float,
     equity_soft_circuit_prearm_bars: int,
+    equity_soft_circuit_recovery_probe_units: float,
+    equity_soft_circuit_recovery_min_one_way_score: float,
+    equity_soft_circuit_recovery_min_score_diff: int,
+    equity_soft_circuit_recovery_max_extension_atr: float,
+    equity_soft_circuit_recovery_failure_guard_count: int,
+    equity_soft_circuit_recovery_failure_guard_window_bars: int,
+    equity_soft_circuit_recovery_failure_cooldown_bars: int,
     one_way_reversal_switch_units: float,
     one_way_reversal_min_score_edge: int,
     one_way_reversal_cooldown_bars: int,
@@ -4217,6 +4967,10 @@ def build_configs(
     fragile_regime_entry_regimes: tuple[str, ...],
     fragile_regime_inventory_trim_fraction: float,
     fragile_regime_inventory_trim_regimes: tuple[str, ...],
+    event_risk_base_reduce_size_mult: float,
+    event_risk_base_reduce_min_extension_atr: float,
+    event_risk_base_reduce_side: str,
+    event_risk_base_reduce_contexts: tuple[str, ...],
     defensive_trim_cooldown_bars: int,
     reaction_trim_trigger: float,
     reaction_avg_band: float,
@@ -4334,8 +5088,28 @@ def build_configs(
         )
         if equity_soft_circuit_force_flat:
             soft_circuit_suffix += ":eqSoftFlat1"
+        if equity_soft_circuit_inventory_trim_fraction > 0.0:
+            soft_circuit_suffix += (
+                f":eqSoftInvTrim{_clamp(equity_soft_circuit_inventory_trim_fraction, 0.0, 1.0):g}"
+            )
         if equity_soft_circuit_prearm_bars > 0:
             soft_circuit_suffix += f":eqSoftPre{max(1, int(equity_soft_circuit_prearm_bars))}"
+    if equity_soft_circuit_recovery_probe_units > 1e-12:
+        soft_circuit_suffix += (
+            f":eqSoftRec{max(0.0, float(equity_soft_circuit_recovery_probe_units)):g}"
+            f"ow{max(0.0, float(equity_soft_circuit_recovery_min_one_way_score)):g}"
+            f"d{max(0, int(equity_soft_circuit_recovery_min_score_diff))}"
+            f"e{max(0.1, float(equity_soft_circuit_recovery_max_extension_atr)):g}"
+        )
+    if (
+        equity_soft_circuit_recovery_failure_guard_count > 0
+        and equity_soft_circuit_recovery_failure_cooldown_bars > 0
+    ):
+        soft_circuit_suffix += (
+            f":eqSoftRecFail{max(1, int(equity_soft_circuit_recovery_failure_guard_count))}"
+            f"x{max(1, int(equity_soft_circuit_recovery_failure_guard_window_bars))}"
+            f"c{max(1, int(equity_soft_circuit_recovery_failure_cooldown_bars))}"
+        )
     base_extension_suffix = ""
     if base_entry_max_extension_atr > 0.0:
         base_extension_suffix = f":baseExt{max(0.1, float(base_entry_max_extension_atr)):g}"
@@ -4375,6 +5149,15 @@ def build_configs(
             f":fragInvTrim{_clamp(fragile_regime_inventory_trim_fraction, 0.0, 1.0):g}"
             f":fragInvSet{regime_code}"
         )
+    event_risk_base_suffix = ""
+    if event_risk_base_reduce_contexts and event_risk_base_reduce_size_mult < 1.0:
+        event_risk_base_suffix = (
+            f":eventBaseRisk{_format_event_risk_contexts(event_risk_base_reduce_contexts)}"
+            f":eventBaseMinExt{max(0.0, float(event_risk_base_reduce_min_extension_atr)):g}"
+            f":eventBaseMult{_clamp(event_risk_base_reduce_size_mult, 0.0, 1.0):g}"
+        )
+        if event_risk_base_reduce_side != "both":
+            event_risk_base_suffix += f":eventBaseSide{event_risk_base_reduce_side}"
     for zone_lookback in (48, 96):
         for entry_score in (5, 6):
             for battle_score in (7, 8):
@@ -4433,6 +5216,7 @@ def build_configs(
                                                     f"{base_reduce_suffix}"
                                                     f"{fragile_regime_suffix}"
                                                     f"{fragile_inventory_suffix}"
+                                                    f"{event_risk_base_suffix}"
                                                 )
                                                     if model_id in seen_model_ids:
                                                         continue
@@ -4636,9 +5420,42 @@ def build_configs(
                                                         1.0,
                                                     ),
                                                     equity_soft_circuit_force_flat=bool(equity_soft_circuit_force_flat),
+                                                    equity_soft_circuit_inventory_trim_fraction=_clamp(
+                                                        equity_soft_circuit_inventory_trim_fraction,
+                                                        0.0,
+                                                        1.0,
+                                                    ),
                                                     equity_soft_circuit_prearm_bars=max(
                                                         0,
                                                         int(equity_soft_circuit_prearm_bars),
+                                                    ),
+                                                    equity_soft_circuit_recovery_probe_units=min(
+                                                        max(0.0, float(equity_soft_circuit_recovery_probe_units)),
+                                                        max_possible_units,
+                                                    ),
+                                                    equity_soft_circuit_recovery_min_one_way_score=max(
+                                                        0.0,
+                                                        float(equity_soft_circuit_recovery_min_one_way_score),
+                                                    ),
+                                                    equity_soft_circuit_recovery_min_score_diff=max(
+                                                        0,
+                                                        int(equity_soft_circuit_recovery_min_score_diff),
+                                                    ),
+                                                    equity_soft_circuit_recovery_max_extension_atr=max(
+                                                        0.1,
+                                                        float(equity_soft_circuit_recovery_max_extension_atr),
+                                                    ),
+                                                    equity_soft_circuit_recovery_failure_guard_count=max(
+                                                        0,
+                                                        int(equity_soft_circuit_recovery_failure_guard_count),
+                                                    ),
+                                                    equity_soft_circuit_recovery_failure_guard_window_bars=max(
+                                                        1,
+                                                        int(equity_soft_circuit_recovery_failure_guard_window_bars),
+                                                    ),
+                                                    equity_soft_circuit_recovery_failure_cooldown_bars=max(
+                                                        0,
+                                                        int(equity_soft_circuit_recovery_failure_cooldown_bars),
                                                     ),
                                                     one_way_reversal_switch_units=min(
                                                         max(0.0, float(one_way_reversal_switch_units)),
@@ -4769,6 +5586,23 @@ def build_configs(
                                                     ),
                                                     fragile_regime_inventory_trim_regimes=(
                                                         fragile_regime_inventory_trim_regimes
+                                                    ),
+                                                    event_risk_base_reduce_size_mult=_clamp(
+                                                        event_risk_base_reduce_size_mult,
+                                                        0.0,
+                                                        1.0,
+                                                    ),
+                                                    event_risk_base_reduce_min_extension_atr=max(
+                                                        0.0,
+                                                        float(event_risk_base_reduce_min_extension_atr),
+                                                    ),
+                                                    event_risk_base_reduce_side=(
+                                                        event_risk_base_reduce_side
+                                                        if event_risk_base_reduce_side in {"both", "long", "short"}
+                                                        else "both"
+                                                    ),
+                                                    event_risk_base_reduce_contexts=(
+                                                        event_risk_base_reduce_contexts
                                                     ),
                                                     defensive_trim_cooldown_bars=max(0, int(defensive_trim_cooldown_bars)),
                                                     cooldown_after_loss_bars=12 if profile_name == "balanced" else 48,
@@ -5034,6 +5868,7 @@ def main() -> None:
     battle_units_options = _parse_float_csv(args.battle_units, [3.0, 5.0])
     probe_units_options = _parse_nonnegative_float_csv(args.probe_units, [0.0, 0.1, 0.25])
     blocked_kst_entry_hours = _parse_kst_hours(args.blocked_kst_entry_hours, (4, 9, 13, 16))
+    event_risk_base_reduce_contexts = _parse_event_risk_contexts(args.event_risk_base_reduce_contexts)
     configs = build_configs(
         exec_interval=args.exec_interval,
         exchange_leverage=float(args.exchange_leverage),
@@ -5086,7 +5921,40 @@ def main() -> None:
         equity_soft_circuit_cooldown_bars=max(0, int(args.equity_soft_circuit_cooldown_bars)),
         equity_soft_circuit_size_mult=_clamp(args.equity_soft_circuit_size_mult, 0.0, 1.0),
         equity_soft_circuit_force_flat=bool(args.equity_soft_circuit_force_flat),
+        equity_soft_circuit_inventory_trim_fraction=_clamp(
+            args.equity_soft_circuit_inventory_trim_fraction,
+            0.0,
+            1.0,
+        ),
         equity_soft_circuit_prearm_bars=max(0, int(args.equity_soft_circuit_prearm_bars)),
+        equity_soft_circuit_recovery_probe_units=max(
+            0.0,
+            float(args.equity_soft_circuit_recovery_probe_units),
+        ),
+        equity_soft_circuit_recovery_min_one_way_score=max(
+            0.0,
+            float(args.equity_soft_circuit_recovery_min_one_way_score),
+        ),
+        equity_soft_circuit_recovery_min_score_diff=max(
+            0,
+            int(args.equity_soft_circuit_recovery_min_score_diff),
+        ),
+        equity_soft_circuit_recovery_max_extension_atr=max(
+            0.1,
+            float(args.equity_soft_circuit_recovery_max_extension_atr),
+        ),
+        equity_soft_circuit_recovery_failure_guard_count=max(
+            0,
+            int(args.equity_soft_circuit_recovery_failure_guard_count),
+        ),
+        equity_soft_circuit_recovery_failure_guard_window_bars=max(
+            1,
+            int(args.equity_soft_circuit_recovery_failure_guard_window_bars),
+        ),
+        equity_soft_circuit_recovery_failure_cooldown_bars=max(
+            0,
+            int(args.equity_soft_circuit_recovery_failure_cooldown_bars),
+        ),
         one_way_reversal_switch_units=max(0.0, float(args.one_way_reversal_switch_units)),
         one_way_reversal_min_score_edge=int(args.one_way_reversal_min_score_edge),
         one_way_reversal_cooldown_bars=max(0, int(args.one_way_reversal_cooldown_bars)),
@@ -5132,6 +6000,14 @@ def main() -> None:
             1.0,
         ),
         fragile_regime_inventory_trim_regimes=_parse_regimes(args.fragile_regime_inventory_trim_regimes),
+        event_risk_base_reduce_size_mult=_clamp(args.event_risk_base_reduce_size_mult, 0.0, 1.0),
+        event_risk_base_reduce_min_extension_atr=max(0.0, float(args.event_risk_base_reduce_min_extension_atr)),
+        event_risk_base_reduce_side=(
+            args.event_risk_base_reduce_side
+            if args.event_risk_base_reduce_side in {"both", "long", "short"}
+            else "both"
+        ),
+        event_risk_base_reduce_contexts=event_risk_base_reduce_contexts,
         defensive_trim_cooldown_bars=max(0, int(args.defensive_trim_cooldown_bars)),
         reaction_trim_trigger=max(0.05, float(args.reaction_trim_trigger)),
         reaction_avg_band=max(0.05, float(args.reaction_avg_band)),

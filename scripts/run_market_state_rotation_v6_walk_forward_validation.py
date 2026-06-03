@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import sys
 from collections import Counter
 from dataclasses import asdict, replace
@@ -25,6 +26,7 @@ from scripts.run_market_state_rotation_v6_backtest import (
     MarketStateConfig,
     _carry_rate_per_bar,
     _counter_payload,
+    _parse_event_risk_contexts,
     _stdout_result_summary,
     backtest_config,
 )
@@ -230,7 +232,239 @@ def _near_miss_probe_override_payload(args: argparse.Namespace, prefix: str) -> 
     }
 
 
-def _parse_args() -> argparse.Namespace:
+def _provided_near_miss_recipe_change(args: argparse.Namespace, prefix: str) -> dict[str, Any]:
+    field_specs = (
+        ("probe_units", "near_miss_probe_units"),
+        ("probe_min_score", "near_miss_probe_min_score"),
+        ("probe_min_score_edge", "near_miss_probe_min_score_edge"),
+        ("probe_min_reason_stack", "near_miss_probe_min_reason_stack"),
+        ("probe_cooldown_bars", "near_miss_probe_cooldown_bars"),
+        ("probe_max_extension_atr", "near_miss_probe_max_extension_atr"),
+        ("probe_failure_guard_count", "near_miss_probe_failure_guard_count"),
+        ("probe_failure_guard_window_bars", "near_miss_probe_failure_guard_window_bars"),
+        ("probe_failure_cooldown_bars", "near_miss_probe_failure_cooldown_bars"),
+    )
+    change: dict[str, Any] = {}
+    for attr_suffix, config_field in field_specs:
+        value = getattr(args, f"{prefix}_{attr_suffix}", None)
+        if value is None:
+            continue
+        change[config_field] = value
+    return change
+
+
+def _near_miss_recipe_override_suffix(label: str, change: dict[str, Any]) -> str:
+    if "near_miss_probe_units" in change:
+        return f"{label}Probe{max(0.0, float(change['near_miss_probe_units'])):g}"
+    return f"{label}Cfg"
+
+
+def _cli_provided_dests(
+    parser: argparse.ArgumentParser,
+    argv: list[str],
+) -> set[str]:
+    option_dests: dict[str, str] = {}
+    for action in parser._actions:
+        for option in action.option_strings:
+            option_dests[option] = action.dest
+    provided: set[str] = set()
+    for token in argv:
+        if not token.startswith("-"):
+            continue
+        option = token.split("=", 1)[0]
+        dest = option_dests.get(option)
+        if dest:
+            provided.add(dest)
+    return provided
+
+
+def _source_replay_inheritable_field(name: str) -> bool:
+    return bool(name)
+
+
+def _source_replay_should_skip_inherited_confirmation_mode(
+    name: str,
+    provided_dests: set[str],
+) -> bool:
+    if name != "after_selection_confirmation_mode":
+        return False
+    if name in provided_dests:
+        return False
+    confirmation_dests = {
+        "after_selection_train_confirmation",
+        "after_selection_confirmation_ablation_mode",
+        "after_selection_confirm_min_score_delta",
+        "after_selection_confirm_min_return_delta_pct",
+        "after_selection_confirm_max_drawdown_delta_pct",
+        "after_selection_confirm_max_cost_delta_pct",
+        "after_selection_confirm_min_return_per_cost_delta",
+        "after_selection_confirm_overlays",
+    }
+    return bool(confirmation_dests & provided_dests)
+
+
+def _inherit_source_replay_selection_policy(
+    args: argparse.Namespace,
+    config_overrides: dict[str, Any],
+) -> list[str]:
+    parser_defaults = dict(getattr(args, "_parser_defaults", {}) or {})
+    provided_dests = set(getattr(args, "_provided_cli_dests", set()) or set())
+    inherited: list[str] = []
+    clamped: set[str] = set(getattr(args, "_source_replay_clamped_selection_policy_fields", set()) or set())
+    for name, value in sorted(config_overrides.items()):
+        if not _source_replay_inheritable_field(str(name)):
+            continue
+        if _source_replay_should_skip_inherited_confirmation_mode(str(name), provided_dests):
+            continue
+        if value is None or name in provided_dests or not hasattr(args, str(name)):
+            continue
+        if str(name) in parser_defaults and getattr(args, str(name)) != parser_defaults[str(name)]:
+            continue
+        inherited_value = value
+        if str(name) == "near_miss_after_selection_min_train_return_pct":
+            default_value = parser_defaults.get(str(name))
+            try:
+                if (
+                    default_value is not None
+                    and float(default_value) >= 0.0
+                    and float(value) < float(default_value)
+                ):
+                    inherited_value = float(default_value)
+                    clamped.add(str(name))
+            except (TypeError, ValueError):
+                pass
+        setattr(args, str(name), inherited_value)
+        inherited.append(str(name))
+    args._source_replay_clamped_selection_policy_fields = sorted(clamped)
+    return inherited
+
+
+def _stabilize_source_replay_ratio_gates(
+    args: argparse.Namespace,
+    inherited_fields: list[str],
+    *,
+    source_report: dict[str, Any] | None = None,
+    tolerance: float = 0.01,
+) -> list[str]:
+    """Loosen only inherited ratio gates enough to absorb deterministic replay drift."""
+    if source_report and "source_replay_stabilized_ratio_gate_fields" in source_report:
+        return []
+    if tolerance <= 0.0:
+        return []
+    adjusted: list[str] = []
+    provided_dests = set(getattr(args, "_provided_cli_dests", set()) or set())
+    for name in sorted(set(inherited_fields)):
+        if name in provided_dests or not hasattr(args, name):
+            continue
+        if name.endswith("_min_one_way_trim_per_add") or name.endswith("_min_turnover_per_add"):
+            current = getattr(args, name)
+            if current is None:
+                continue
+            value = max(0.0, float(current) - tolerance)
+        else:
+            continue
+        if abs(float(current) - value) <= 1e-12:
+            continue
+        setattr(args, name, value)
+        adjusted.append(name)
+    return adjusted
+
+
+def _inherit_source_replay_window_policy(
+    args: argparse.Namespace,
+    source_report: dict[str, Any],
+) -> list[str]:
+    parser_defaults = dict(getattr(args, "_parser_defaults", {}) or {})
+    provided_dests = set(getattr(args, "_provided_cli_dests", set()) or set())
+    inherited: list[str] = []
+    for name in (
+        "load_days",
+        "train_days",
+        "test_days",
+        "step_days",
+        "fold_anchor_hour_utc",
+        "fold_anchor_minute_utc",
+        "fold_start_at",
+    ):
+        value = source_report.get(name)
+        if value is None and name == "fold_start_at":
+            source_folds = source_report.get("folds") or []
+            if source_folds and isinstance(source_folds[0], dict):
+                value = source_folds[0].get("train_start_at") or source_folds[0].get("train_start")
+        if value is None or name in provided_dests or not hasattr(args, name):
+            continue
+        if name in parser_defaults and getattr(args, name) != parser_defaults[name]:
+            continue
+        setattr(args, name, value)
+        inherited.append(name)
+    return inherited
+
+
+def _source_replay_should_auto_warm_selection_state(
+    args: argparse.Namespace,
+    *,
+    inherited_fields: list[str],
+    fold_offset: int,
+) -> bool:
+    if fold_offset <= 0:
+        return False
+    if bool(getattr(args, "warm_fold_offset_selection_state", False)):
+        return False
+    if bool(getattr(args, "disable_source_replay_auto_warm_selection_state", False)):
+        return False
+    if not any(field.startswith("selection_recent_efficiency_") for field in inherited_fields):
+        return False
+    return (
+        int(getattr(args, "selection_recent_efficiency_lookback", 0) or 0) > 0
+        and float(getattr(args, "selection_recent_efficiency_penalty", 0.0) or 0.0) > 0.0
+    )
+
+
+_HIGH_RETURN_SOFT_SIZER_RELAX_PATTERN = re.compile(r":wfEqSoftRelax(?P<drawdown>[0-9]+(?:\.[0-9]+)?)M")
+
+
+def _source_replay_high_return_soft_sizer_relax_drawdown_pct(
+    report: dict[str, Any],
+) -> float | None:
+    values: Counter[str] = Counter()
+    for fold in report.get("folds") or []:
+        if not isinstance(fold, dict):
+            continue
+        overlays = {str(item) for item in fold.get("after_selection_overlays_applied") or []}
+        if "high_return_soft_sizer_relax" not in overlays:
+            continue
+        model_id = str(fold.get("selected_model_id") or "")
+        match = _HIGH_RETURN_SOFT_SIZER_RELAX_PATTERN.search(model_id)
+        if match:
+            values[match.group("drawdown")] += 1
+    if not values:
+        return None
+    drawdown, _ = max(values.items(), key=lambda item: (int(item[1]), item[0]))
+    try:
+        return float(drawdown)
+    except ValueError:
+        return None
+
+
+def _inherit_source_replay_model_encoded_policy(
+    args: argparse.Namespace,
+    source_report: dict[str, Any],
+) -> list[str]:
+    parser_defaults = dict(getattr(args, "_parser_defaults", {}) or {})
+    provided_dests = set(getattr(args, "_provided_cli_dests", set()) or set())
+    inherited: list[str] = []
+    field = "high_return_soft_sizer_relax_drawdown_pct"
+    value = _source_replay_high_return_soft_sizer_relax_drawdown_pct(source_report)
+    if value is None or field in provided_dests or not hasattr(args, field):
+        return inherited
+    if field in parser_defaults and getattr(args, field) != parser_defaults[field]:
+        return inherited
+    setattr(args, field, value)
+    inherited.append(field)
+    return inherited
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Walk-forward validation for market-state rotation v6. "
@@ -265,12 +499,37 @@ def _parse_args() -> argparse.Namespace:
         help="UTC minute used with --fold-anchor-hour-utc. Ignored when no anchor hour is provided.",
     )
     parser.add_argument(
+        "--fold-start-at",
+        default="",
+        help=(
+            "Optional exact UTC timestamp for the first fold train start. Source replay inherits "
+            "the first source fold start by default to keep rolling load windows reproducible."
+        ),
+    )
+    parser.add_argument(
         "--warm-fold-offset-selection-state",
         action="store_true",
         help=(
             "When --fold-offset is used, still run skipped earlier folds internally so history-based "
             "selection penalties match a full walk-forward run. Skipped warmup folds are not written "
             "to the report."
+        ),
+    )
+    parser.add_argument(
+        "--disable-source-replay-auto-warm-selection-state",
+        action="store_true",
+        help=(
+            "Disable automatic warm-up of skipped folds when a source report's recent-efficiency "
+            "selection policy is inherited. This is faster but can intentionally diverge from the "
+            "source report's full walk-forward selection state."
+        ),
+    )
+    parser.add_argument(
+        "--source-replay-fail-on-unresolved-material-drift",
+        action="store_true",
+        help=(
+            "Exit non-zero after writing reports when source replay diagnostics show unresolved "
+            "material return, drawdown, cost, or lineage drift. Use this for promotion candidates."
         ),
     )
     parser.add_argument("--fee-bps-per-side", type=float, default=4.0)
@@ -448,7 +707,15 @@ def _parse_args() -> argparse.Namespace:
             "to the selected OOS config."
         ),
     )
-    parser.add_argument("--near-miss-after-selection-min-train-return-pct", type=float, default=None)
+    parser.add_argument(
+        "--near-miss-after-selection-min-train-return-pct",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum selected-train return required before near-miss probes can be added after selection. "
+            "Source replay clamps older looser values up to this default unless the CLI overrides it."
+        ),
+    )
     parser.add_argument("--near-miss-after-selection-max-train-return-pct", type=float, default=None)
     parser.add_argument("--near-miss-after-selection-min-train-drawdown-pct", type=float, default=None)
     parser.add_argument("--near-miss-after-selection-max-train-drawdown-pct", type=float, default=None)
@@ -728,6 +995,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--base-entry-reduce-max-trend-strength", type=float, default=None)
     parser.add_argument("--base-entry-reduce-min-trend-strength", type=float, default=None)
     parser.add_argument("--base-entry-reduce-side", choices=("both", "long", "short"), default="")
+    parser.add_argument("--event-risk-base-reduce-size-mult", type=float, default=None)
+    parser.add_argument("--event-risk-base-reduce-min-extension-atr", type=float, default=None)
+    parser.add_argument("--event-risk-base-reduce-side", choices=("both", "long", "short"), default="")
+    parser.add_argument("--event-risk-base-reduce-contexts", default="")
     parser.add_argument(
         "--base-entry-reduce-after-selection",
         action="store_true",
@@ -1008,6 +1279,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--exposure-rebalance-after-selection-max-possible-units", type=float, default=None)
     parser.add_argument("--exposure-rebalance-after-selection-base-max-units", type=float, default=None)
+    parser.add_argument("--exposure-rebalance-after-selection-base-add-units", type=float, default=None)
     parser.add_argument("--exposure-rebalance-after-selection-battle-units", type=float, default=None)
     parser.add_argument("--exposure-rebalance-after-selection-min-source-max-units", type=float, default=None)
     parser.add_argument("--exposure-rebalance-after-selection-max-source-max-units", type=float, default=None)
@@ -1409,8 +1681,373 @@ def _parse_args() -> argparse.Namespace:
             "with the same after-selection overlays, so selection misses can be separated from bad regimes."
         ),
     )
+    parser.add_argument(
+        "--high-return-soft-sizer-relax-drawdown-pct",
+        type=float,
+        default=11.0,
+        help=(
+            "Drawdown trigger used by the model-encoded high_return_soft_sizer_relax replay recipe. "
+            "Source replay auto-inherits a value encoded in source fold model IDs unless this is set explicitly."
+        ),
+    )
+    parser.add_argument(
+        "--high-return-soft-sizer-relax-size-mult",
+        type=float,
+        default=0.25,
+        help="Size multiplier used by the model-encoded high_return_soft_sizer_relax replay recipe.",
+    )
+    parser.add_argument(
+        "--high-return-soft-sizer-relax-cooldown-bars",
+        type=int,
+        default=2880,
+        help="Cooldown bars used by the model-encoded high_return_soft_sizer_relax replay recipe.",
+    )
+    parser.add_argument(
+        "--high-return-soft-sizer-tight-replay-note",
+        default=None,
+        help=(
+            "Enable an optional tighter high-return soft-sizer replay recipe. This is intended "
+            "for risk-tight profiles and remains disabled by default."
+        ),
+    )
+    parser.add_argument(
+        "--high-return-soft-sizer-tight-drawdown-pct",
+        type=float,
+        default=9.0,
+        help="Drawdown trigger used by the optional tight high-return soft-sizer replay recipe.",
+    )
+    parser.add_argument(
+        "--high-return-soft-sizer-tight-size-mult",
+        type=float,
+        default=0.10,
+        help="Size multiplier used by the optional tight high-return soft-sizer replay recipe.",
+    )
+    parser.add_argument(
+        "--high-return-soft-sizer-tight-cooldown-bars",
+        type=int,
+        default=2880,
+        help="Cooldown bars used by the optional tight high-return soft-sizer replay recipe.",
+    )
+    parser.add_argument(
+        "--low-activity-reengage-probe-replay-note",
+        default=None,
+        help="Enable the low-activity reengage probe replay recipe with this note.",
+    )
+    parser.add_argument(
+        "--base-heavy-probe-rebalance-replay-note",
+        default=None,
+        help="Enable the base-heavy probe rebalance replay recipe with this note.",
+    )
+    parser.add_argument(
+        "--event-risk-base-throttle-replay-note",
+        default=None,
+        help="Enable the experimental event-risk base-entry throttle replay recipe with this note.",
+    )
+    parser.add_argument(
+        "--event-risk-base-tight-repair-replay-note",
+        default=None,
+        help=(
+            "Enable a narrow repair-tight event-risk base throttle replay recipe with this note. "
+            "This stacks only after the event-risk throttle and tight repair recipes have applied."
+        ),
+    )
+    parser.add_argument(
+        "--event-risk-distribution-base-off-replay-note",
+        default=None,
+        help=(
+            "Enable the distribution-balanced event-risk base-off replay recipe with this note. "
+            "This stacks only after event-risk throttle and distribution balance have applied."
+        ),
+    )
+    parser.add_argument(
+        "--deep-drawdown-reversal-scale-replay-note",
+        default=None,
+        help=(
+            "Enable the deep-drawdown reversal scale replay recipe with this note. "
+            "This raises reversal switch size only for the validated high-drawdown fold state."
+        ),
+    )
+    parser.add_argument(
+        "--high-cost-runner-reversal-scale-replay-note",
+        default=None,
+        help=(
+            "Enable the high-cost runner reversal scale replay recipe with this note. "
+            "This raises reversal switch size only after the validated high-cost runner repair."
+        ),
+    )
+    parser.add_argument(
+        "--high-cost-runner-tight-repair-replay-note",
+        default=None,
+        help=(
+            "Enable the high-cost runner tight-repair replay recipe with this note. "
+            "This tightens repair cut only after the validated high-cost runner reversal scale."
+        ),
+    )
+    parser.add_argument(
+        "--high-cost-near-zero-react-replay-note",
+        default=None,
+        help=(
+            "Enable the high-cost runner recipe that disables the tiny near-miss probe and "
+            "uses a slightly faster reaction trim. This is intended for return-seeking profiles."
+        ),
+    )
+    parser.add_argument(
+        "--soft-circuit-recovery-mid-probe-units",
+        type=float,
+        default=0.60,
+        help="Probe units used by the model-encoded soft_circuit_recovery_mid replay recipe.",
+    )
+    parser.add_argument(
+        "--soft-circuit-recovery-mid-min-one-way-score",
+        type=float,
+        default=3.5,
+        help="Minimum one-way score used by the model-encoded soft_circuit_recovery_mid replay recipe.",
+    )
+    parser.add_argument(
+        "--soft-circuit-recovery-mid-min-score-diff",
+        type=int,
+        default=5,
+        help="Minimum score difference used by the model-encoded soft_circuit_recovery_mid replay recipe.",
+    )
+    parser.add_argument(
+        "--soft-circuit-recovery-mid-max-extension-atr",
+        type=float,
+        default=3.5,
+        help="Maximum extension ATR used by the model-encoded soft_circuit_recovery_mid replay recipe.",
+    )
+    parser.add_argument(
+        "--soft-circuit-recovery-mid-failure-guard-count",
+        type=int,
+        default=0,
+        help="Failure count that triggers the soft_circuit_recovery_mid probe cooldown.",
+    )
+    parser.add_argument(
+        "--soft-circuit-recovery-mid-failure-guard-window-bars",
+        type=int,
+        default=1440,
+        help="Lookback bars for the soft_circuit_recovery_mid failed-probe guard.",
+    )
+    parser.add_argument(
+        "--soft-circuit-recovery-mid-failure-cooldown-bars",
+        type=int,
+        default=0,
+        help="Cooldown bars applied after the soft_circuit_recovery_mid failed-probe guard triggers.",
+    )
+    parser.add_argument(
+        "--soft-circuit-recovery-low-activity-probe-units",
+        type=float,
+        default=0.25,
+        help="Probe units used by the low-activity soft-circuit recovery replay recipe.",
+    )
+    parser.add_argument(
+        "--soft-circuit-recovery-low-activity-min-one-way-score",
+        type=float,
+        default=3.0,
+        help="Minimum one-way score for the low-activity soft-circuit recovery replay recipe.",
+    )
+    parser.add_argument(
+        "--soft-circuit-recovery-low-activity-min-score-diff",
+        type=int,
+        default=4,
+        help="Minimum score difference for the low-activity soft-circuit recovery replay recipe.",
+    )
+    parser.add_argument(
+        "--soft-circuit-recovery-low-activity-max-extension-atr",
+        type=float,
+        default=3.5,
+        help="Maximum extension ATR for the low-activity soft-circuit recovery replay recipe.",
+    )
+    parser.add_argument(
+        "--soft-circuit-recovery-low-activity-failure-guard-count",
+        type=int,
+        default=1,
+        help="Failure count that triggers the low-activity soft-circuit recovery cooldown.",
+    )
+    parser.add_argument(
+        "--soft-circuit-recovery-low-activity-failure-guard-window-bars",
+        type=int,
+        default=1440,
+        help="Lookback bars for low-activity soft-circuit recovery failures.",
+    )
+    parser.add_argument(
+        "--soft-circuit-recovery-low-activity-failure-cooldown-bars",
+        type=int,
+        default=4320,
+        help="Cooldown bars applied after the low-activity soft-circuit recovery failure guard triggers.",
+    )
+    parser.add_argument(
+        "--soft-circuit-low-activity-cooldown-replay-note",
+        default=None,
+        help=(
+            "Enable the low-activity soft-circuit cooldown compression replay recipe with this note. "
+            "This stacks only after the low-activity soft-circuit recovery recipe has applied."
+        ),
+    )
+    parser.add_argument(
+        "--soft-circuit-low-activity-near-miss-replay-note",
+        default=None,
+        help=(
+            "Enable the low-activity soft-circuit near-miss reengagement replay recipe with this note. "
+            "This stacks only after the low-activity soft-circuit recovery/cooldown repair."
+        ),
+    )
+    parser.add_argument(
+        "--soft-circuit-low-activity-cooldown-bars",
+        type=int,
+        default=4320,
+        help="Soft-circuit cooldown bars used by the low-activity cooldown compression replay recipe.",
+    )
+    parser.add_argument(
+        "--low-return-soft-inventory-trim-fraction",
+        type=float,
+        default=0.20,
+        help="Inventory trim fraction used by the low-return soft-circuit replay recipe.",
+    )
+    parser.add_argument(
+        "--low-return-selective-impulse-replay-note",
+        default=None,
+        help=(
+            "Enable a targeted low-return impulse-probe recipe that upgrades the dust-sized "
+            "role-balance probe only when the one-way score is stricter."
+        ),
+    )
+    parser.add_argument(
+        "--low-return-selective-impulse-probe-units",
+        type=float,
+        default=0.20,
+        help="Probe units used by the targeted low-return selective impulse recipe.",
+    )
+    parser.add_argument(
+        "--low-return-selective-impulse-min-one-way-score",
+        type=float,
+        default=4.0,
+        help="Minimum one-way score used by the targeted low-return selective impulse recipe.",
+    )
+    parser.add_argument(
+        "--low-return-selective-impulse-min-score-diff",
+        type=int,
+        default=5,
+        help="Minimum score difference used by the targeted low-return selective impulse recipe.",
+    )
+    parser.add_argument(
+        "--low-return-reaction-band-replay-note",
+        default=None,
+        help=(
+            "Enable a targeted low-return reaction-band recipe that gives profitable "
+            "reaction trims a wider average-price band after the selective impulse repair."
+        ),
+    )
+    parser.add_argument(
+        "--low-return-reaction-avg-band",
+        type=float,
+        default=1.15,
+        help="reaction_avg_band used by the targeted low-return reaction-band recipe.",
+    )
+    parser.add_argument(
+        "--fast-defense-one-way-delay-replay-note",
+        default=None,
+        help=(
+            "Enable a replay recipe that delays one-way forced trims only after a fast defensive "
+            "state already shortened defensive trim cooldowns."
+        ),
+    )
+    parser.add_argument(
+        "--fast-defense-one-way-delay-min-adverse-reaction",
+        type=float,
+        default=0.50,
+        help="one_way_trim_min_adverse_reaction used by the fast-defense one-way delay recipe.",
+    )
+    parser.add_argument(
+        "--fast-defense-one-way-delay-max-defensive-cooldown-bars",
+        type=int,
+        default=100,
+        help="Maximum source defensive trim cooldown for the fast-defense one-way delay recipe.",
+    )
     parser.add_argument("--write-report", action="store_true")
-    return parser.parse_args()
+    parser.set_defaults(
+        midfold_reaction_hold_recipes=None,
+        selective_reaction_repair_clean_recipes=None,
+        trim_cooldown_recipes=None,
+        risk_off_micro_sizer_recipe=None,
+        balanced_structure_replay_note=None,
+        high_cost_repair_cut_05_replay_note=None,
+        high_cost_near_zero_react_replay_note=None,
+        role_balance_impulse_micro_replay_note=None,
+        role_border_impulse_micro_replay_note=None,
+        low_activity_reengage_probe_replay_note=None,
+        base_heavy_probe_rebalance_replay_note=None,
+        event_risk_base_throttle_replay_note=None,
+        event_risk_base_tight_repair_replay_note=(
+            "Tighten only the repair-tuned event-risk base throttle state whose OOS hour-open "
+            "short reduction improved return and cost without raising drawdown."
+        ),
+        event_risk_reaction_soft_hold_replay_note=(
+            "Delay reaction trimming only after the tight event-risk repair state, while using "
+            "a soft-circuit inventory trim to keep the extra hold risk below the current OOS max drawdown."
+        ),
+        event_risk_soft_hold_near_miss_replay_note=(
+            "Re-enable a small near-miss probe only after the event-risk soft-hold state whose "
+            "OOS probe reengagement improved return and cost without raising drawdown."
+        ),
+        negative_train_distribution_probe_replay_note=(
+            "Use a dust-sized near-miss probe only for the negative-train, high-drawdown state "
+            "where it repaired OOS side/role concentration without changing drawdown."
+        ),
+        compressed_trend_distribution_probe_replay_note=(
+            "Use a dust-sized near-miss probe only after compressed-trend reaction tuning where "
+            "the larger role-balance probe is blocked but OOS role concentration can be repaired."
+        ),
+        event_risk_distribution_base_off_replay_note=(
+            "Turn off event-risk base entries only after the distribution-balanced event-risk state "
+            "where a partial short throttle still leaked cost without reducing OOS drawdown."
+        ),
+        deep_drawdown_reversal_scale_replay_note=(
+            "Scale one-way reversal only for the deep-drawdown train state whose OOS reversal "
+            "follow-through improved return before forced-trim overuse appeared."
+        ),
+        high_cost_runner_reversal_scale_replay_note=(
+            "Scale one-way reversal only after the high-cost runner repair whose OOS reversal "
+            "follow-through improved return without raising the fold drawdown."
+        ),
+        high_cost_runner_tight_repair_replay_note=(
+            "Tighten repair cut only after the high-cost runner reversal-scale state where the "
+            "extra repair discipline improved OOS return without raising drawdown."
+        ),
+        low_return_soft_inventory_trim_replay_note=(
+            "Use a partial soft-circuit inventory trim only for the high-return train state whose "
+            "OOS base inventory kept return positive but leaked cost and late drawdown."
+        ),
+        deep_soft_reaction_delay_replay_note=(
+            "Delay reaction trimming only for the deep-drawdown, high forced-trim train state "
+            "where early reaction exits worsened the OOS equity trough."
+        ),
+        forced_trim_near_miss_tiny_replay_note=(
+            "Use a smaller near-miss probe only for the high forced-trim, low-return train state "
+            "where the default probe size did not improve OOS drawdown."
+        ),
+        high_return_soft_sizer_relax_replay_note=(
+            "Relax the soft equity sizer only slightly for a high-return, downtrend-dependent train state "
+            "where too much relaxation raised OOS drawdown more than the extra trend profit justified."
+        ),
+        soft_circuit_recovery_mid_replay_note=(
+            "Enable a narrow soft-circuit recovery probe only for the mid-return, "
+            "risk-off train state where force-flat protection was too inactive."
+        ),
+        soft_circuit_recovery_low_activity_replay_note=(
+            "Re-engage a tiny soft-circuit recovery probe only for the low-activity, "
+            "force-flat train state where OOS protection became almost fully inactive."
+        ),
+        soft_circuit_low_activity_cooldown_replay_note=None,
+        soft_circuit_low_activity_near_miss_replay_note=(
+            "Use a larger near-miss reengagement probe only for the low-activity soft-circuit state "
+            "where OOS drawdown stayed flat and two extra entries improved return."
+        ),
+    )
+    default_args = parser.parse_args([])
+    parsed = parser.parse_args(argv)
+    parsed._parser_defaults = vars(default_args)
+    parsed._provided_cli_dests = _cli_provided_dests(parser, list(sys.argv[1:] if argv is None else argv))
+    return parsed
 
 
 def _material_config_key(config: MarketStateConfig) -> str:
@@ -1422,16 +2059,44 @@ def _material_config_key(config: MarketStateConfig) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
-def _configs_from_source(report: dict[str, Any], *, top_n: int) -> list[MarketStateConfig]:
+def _configs_from_source(
+    report: dict[str, Any],
+    *,
+    top_n: int,
+    include_walk_forward_test_results: bool = False,
+) -> list[MarketStateConfig]:
     candidates: list[dict[str, Any]] = []
-    for key in ("best_by_method_score", "best_by_raw_return"):
-        result = report.get(key)
+
+    def append_result(result: Any) -> None:
         if isinstance(result, dict) and isinstance(result.get("config"), dict):
             candidates.append(result)
+
+    for key in ("best_by_method_score", "best_by_raw_return"):
+        append_result(report.get(key))
     for section in ("top_results", "top_results_by_return", "all_results"):
         for result in report.get(section) or []:
-            if isinstance(result, dict) and isinstance(result.get("config"), dict):
-                candidates.append(result)
+            append_result(result)
+
+    # Walk-forward reports are often used as iterative replay sources. Their
+    # candidate lineage lives inside fold records rather than top-level scan
+    # result sections. Harvest every fold's selected train config before lower
+    # ranked train fallbacks, so source-top N represents the chronological
+    # selected lineage instead of one fold's local candidate neighborhood.
+    # Test-side fold results are excluded by default because they may already
+    # include after-selection overlays or OOS evaluation-only variants; feeding
+    # them back as base candidates can stack those overlays during the next run.
+    walk_forward_folds = [fold for fold in report.get("folds") or [] if isinstance(fold, dict)]
+    for fold in walk_forward_folds:
+        append_result(fold.get("selected_train_result"))
+    for fold in walk_forward_folds:
+        for result in fold.get("train_top_results") or []:
+            append_result(result)
+    if include_walk_forward_test_results:
+        for fold in walk_forward_folds:
+            append_result(fold.get("test_result"))
+            for result in fold.get("train_top_test_results") or []:
+                append_result(result)
+                append_result(dict(result).get("test_result") if isinstance(result, dict) else None)
 
     configs: list[MarketStateConfig] = []
     seen: set[str] = set()
@@ -1448,6 +2113,42 @@ def _configs_from_source(report: dict[str, Any], *, top_n: int) -> list[MarketSt
         if len(configs) >= max(1, int(top_n)):
             break
     return configs
+
+
+def _configs_from_source_fold(
+    report: dict[str, Any],
+    *,
+    fold: int,
+    top_n: int,
+    include_walk_forward_test_results: bool = False,
+) -> list[MarketStateConfig]:
+    for fold_record in report.get("folds") or []:
+        if not isinstance(fold_record, dict):
+            continue
+        if int(fold_record.get("fold") or 0) != int(fold):
+            continue
+        test_result = fold_record.get("test_result") if include_walk_forward_test_results else None
+        train_top_test_results = (
+            fold_record.get("train_top_test_results") or []
+            if include_walk_forward_test_results
+            else []
+        )
+        fold_report = {
+            "folds": [
+                {
+                    "selected_train_result": fold_record.get("selected_train_result"),
+                    "train_top_results": fold_record.get("train_top_results") or [],
+                    "test_result": test_result,
+                    "train_top_test_results": train_top_test_results,
+                }
+            ]
+        }
+        return _configs_from_source(
+            fold_report,
+            top_n=top_n,
+            include_walk_forward_test_results=include_walk_forward_test_results,
+        )
+    return []
 
 
 def _apply_config_overrides(
@@ -1625,20 +2326,28 @@ def _apply_config_overrides(
         suffix_parts.append(f"wfEqSoftPre{value}")
     if args.one_way_reversal_switch_units is not None:
         value = max(0.0, float(args.one_way_reversal_switch_units))
-        updates["one_way_reversal_switch_units"] = min(value, config.max_possible_units)
-        suffix_parts.append(f"wfOwRev{value:g}")
+        effective_value = min(value, config.max_possible_units)
+        if abs(float(config.one_way_reversal_switch_units) - effective_value) > 1e-12:
+            updates["one_way_reversal_switch_units"] = effective_value
+            suffix_parts.append(f"wfOwRev{value:g}")
     if args.one_way_reversal_min_score_edge is not None:
         value = int(args.one_way_reversal_min_score_edge)
-        updates["one_way_reversal_min_score_edge"] = value
-        suffix_parts.append(f"wfOwRevEdge{value}")
+        if int(config.one_way_reversal_min_score_edge) != value:
+            updates["one_way_reversal_min_score_edge"] = value
+            suffix_parts.append(f"wfOwRevEdge{value}")
     if args.one_way_reversal_cooldown_bars is not None:
         value = max(0, int(args.one_way_reversal_cooldown_bars))
-        updates["one_way_reversal_cooldown_bars"] = value
-        suffix_parts.append(f"wfOwRevCool{value}")
-    if bool(args.one_way_reversal_allow_scenario_override):
+        if int(config.one_way_reversal_cooldown_bars) != value:
+            updates["one_way_reversal_cooldown_bars"] = value
+            suffix_parts.append(f"wfOwRevCool{value}")
+    if bool(args.one_way_reversal_allow_scenario_override) and not bool(
+        config.one_way_reversal_allow_scenario_override
+    ):
         updates["one_way_reversal_allow_scenario_override"] = True
         suffix_parts.append("wfOwRevScn1")
-    if bool(args.one_way_reversal_allow_score_override):
+    if bool(args.one_way_reversal_allow_score_override) and not bool(
+        config.one_way_reversal_allow_score_override
+    ):
         updates["one_way_reversal_allow_score_override"] = True
         suffix_parts.append("wfOwRevScore1")
     if include_impulse:
@@ -1745,6 +2454,21 @@ def _apply_config_overrides(
         if args.base_entry_reduce_side:
             updates["base_entry_reduce_side"] = str(args.base_entry_reduce_side)
             suffix_parts.append(f"wfBaseReduceSide{args.base_entry_reduce_side}")
+    if args.event_risk_base_reduce_size_mult is not None:
+        value = min(max(float(args.event_risk_base_reduce_size_mult), 0.0), 1.0)
+        updates["event_risk_base_reduce_size_mult"] = value
+        suffix_parts.append(f"wfEventBaseMult{value:g}")
+    if args.event_risk_base_reduce_min_extension_atr is not None:
+        value = max(0.0, float(args.event_risk_base_reduce_min_extension_atr))
+        updates["event_risk_base_reduce_min_extension_atr"] = value
+        suffix_parts.append(f"wfEventBaseMinExt{value:g}")
+    if args.event_risk_base_reduce_side:
+        updates["event_risk_base_reduce_side"] = str(args.event_risk_base_reduce_side)
+        suffix_parts.append(f"wfEventBaseSide{args.event_risk_base_reduce_side}")
+    event_contexts = _parse_event_risk_contexts(str(args.event_risk_base_reduce_contexts))
+    if event_contexts:
+        updates["event_risk_base_reduce_contexts"] = event_contexts
+        suffix_parts.append(f"wfEventBaseCtx{'-'.join(event_contexts)}")
     if include_fragile_regime_entry:
         regimes = _parse_fragile_regimes(args.fragile_regime_entry_regimes)
         if regimes and args.fragile_regime_entry_size_mult is not None:
@@ -2020,8 +2744,10 @@ def _apply_one_way_reversal_after_selection_overlay(
     configured_units = args.one_way_reversal_after_selection_switch_units if switch_units is None else switch_units
     if configured_units is not None:
         value = max(0.0, float(configured_units))
-        updates["one_way_reversal_switch_units"] = min(value, config.max_possible_units)
-        suffix_parts.append(f"{suffix_label}{value:g}")
+        effective_value = min(value, config.max_possible_units)
+        if abs(float(config.one_way_reversal_switch_units) - effective_value) > 1e-12:
+            updates["one_way_reversal_switch_units"] = effective_value
+            suffix_parts.append(f"{suffix_label}{value:g}")
     if not updates:
         return config
     updates["model_id"] = config.model_id + ":" + ":".join(suffix_parts)
@@ -2140,6 +2866,1231 @@ def _train_ratio(train_result: dict[str, Any], key: str) -> float:
     diagnostics = dict(train_result.get("event_diagnostics") or {})
     ratios = dict(diagnostics.get("ratios") or {})
     return float(ratios.get(key) or 0.0)
+
+
+def _legacy_source_config_ranges_allowed(source_config: dict[str, Any], gate: dict[str, Any]) -> bool:
+    for field_name, raw_bounds in dict(gate.get("source_config_ranges") or {}).items():
+        if not isinstance(raw_bounds, dict):
+            return False
+        if field_name not in source_config:
+            return False
+        try:
+            value = float(source_config.get(field_name))
+        except (TypeError, ValueError):
+            return False
+        if not _range_allowed(value, raw_bounds.get("min"), raw_bounds.get("max")):
+            return False
+    return True
+
+
+def _legacy_recipe_allowed(train_result: dict[str, Any], recipe: dict[str, Any]) -> bool:
+    gate = dict(recipe.get("gate") or {})
+    source_config = dict(train_result.get("config") or {})
+    source_max_units = float(source_config.get("max_possible_units") or 0.0)
+    if not _range_allowed(
+        source_max_units,
+        gate.get("min_source_max_units"),
+        gate.get("max_source_max_units"),
+    ):
+        return False
+    if not _legacy_source_config_ranges_allowed(source_config, gate):
+        return False
+    train_return = float(train_result.get("total_return_pct") or 0.0)
+    if not _range_allowed(
+        train_return,
+        gate.get("min_train_return_pct"),
+        gate.get("max_train_return_pct"),
+    ):
+        return False
+    train_drawdown = float(train_result.get("max_drawdown_pct") or 0.0)
+    if not _range_allowed(
+        train_drawdown,
+        gate.get("min_train_drawdown_pct"),
+        gate.get("max_train_drawdown_pct"),
+    ):
+        return False
+    train_cost_drag = float(train_result.get("estimated_cost_drag_pct") or 0.0)
+    if not _range_allowed(
+        train_cost_drag,
+        gate.get("min_train_cost_drag_pct"),
+        gate.get("max_train_cost_drag_pct"),
+    ):
+        return False
+    trim_ratio = _train_ratio(train_result, "one_way_forced_trim_per_add")
+    if not _positive_range_allowed(
+        trim_ratio,
+        max(0.0, float(gate.get("min_one_way_trim_per_add") or 0.0)),
+        max(0.0, float(gate.get("max_one_way_trim_per_add") or 0.0)),
+    ):
+        return False
+    turnover_ratio = _train_ratio(train_result, "turnover_events_per_add")
+    if not _positive_range_allowed(
+        turnover_ratio,
+        max(0.0, float(gate.get("min_turnover_per_add") or 0.0)),
+        max(0.0, float(gate.get("max_turnover_per_add") or 0.0)),
+    ):
+        return False
+    return True
+
+
+def _legacy_recipe_value(field_name: str, value: Any, config: MarketStateConfig) -> Any:
+    if field_name in {
+        "max_hold_bars",
+        "one_way_trim_cooldown_bars",
+        "one_way_impulse_min_score_diff",
+        "one_way_impulse_cooldown_bars",
+        "equity_soft_circuit_recovery_min_score_diff",
+        "equity_soft_circuit_cooldown_bars",
+        "near_miss_probe_min_score",
+        "near_miss_probe_min_score_edge",
+        "near_miss_probe_min_reason_stack",
+        "near_miss_probe_cooldown_bars",
+        "near_miss_probe_failure_guard_count",
+        "near_miss_probe_failure_guard_window_bars",
+        "near_miss_probe_failure_cooldown_bars",
+    }:
+        return max(0, int(value))
+    if field_name in {
+        "max_possible_units",
+        "base_max_units",
+        "base_add_units",
+        "battle_units",
+        "trend_core_units",
+        "one_way_reversal_switch_units",
+        "one_way_impulse_probe_units",
+        "equity_soft_circuit_recovery_probe_units",
+        "near_miss_probe_units",
+    }:
+        upper_bound = float(value) if field_name == "max_possible_units" else float(config.max_possible_units)
+        return min(max(float(value), 0.0), upper_bound)
+    if field_name in {
+        "base_entry_reduce_size_mult",
+        "equity_soft_circuit_size_mult",
+        "equity_soft_circuit_inventory_trim_fraction",
+        "event_risk_base_reduce_size_mult",
+    }:
+        return min(max(float(value), 0.0), 1.0)
+    if field_name in {
+        "reaction_trim_trigger",
+        "repair_cut",
+        "repair_stop",
+        "base_entry_reduce_extension_atr",
+        "base_entry_reduce_promote_reaction",
+        "event_risk_base_reduce_min_extension_atr",
+        "equity_soft_circuit_drawdown_pct",
+        "one_way_impulse_min_one_way_score",
+        "one_way_impulse_max_extension_atr",
+        "equity_soft_circuit_recovery_min_one_way_score",
+        "equity_soft_circuit_recovery_max_extension_atr",
+        "near_miss_probe_max_extension_atr",
+        "one_way_trim_min_adverse_reaction",
+    }:
+        return max(0.0, float(value))
+    if field_name == "event_risk_base_reduce_contexts":
+        if isinstance(value, (list, tuple)):
+            return tuple(dict.fromkeys(str(item) for item in value if str(item) in {"normal", "hour_open"}))
+        return _parse_event_risk_contexts(str(value))
+    if field_name == "event_risk_base_reduce_side":
+        return str(value) if str(value) in {"both", "long", "short"} else "both"
+    return value
+
+
+def _apply_legacy_recipe_overlay(config: MarketStateConfig, recipe: dict[str, Any]) -> MarketStateConfig:
+    change = dict(recipe.get("change") or {})
+    if not change:
+        return config
+    config_fields = set(getattr(config, "__dataclass_fields__", {}))
+    updates: dict[str, Any] = {}
+    for field_name, raw_value in change.items():
+        if field_name not in config_fields:
+            continue
+        value = _legacy_recipe_value(field_name, raw_value, config)
+        current_value = getattr(config, field_name)
+        if isinstance(current_value, float) or isinstance(value, float):
+            if abs(float(current_value) - float(value)) <= 1e-12:
+                continue
+        elif current_value == value:
+            continue
+        updates[field_name] = value
+    if not updates:
+        return config
+    suffix = str(recipe.get("suffix") or recipe.get("name") or "wfLegacyRecipe")
+    updates["model_id"] = config.model_id if suffix in config.model_id.split(":") else f"{config.model_id}:{suffix}"
+    return replace(config, **updates)
+
+
+def _legacy_recipe_blockers(recipe: dict[str, Any], overlays_applied: list[str]) -> list[str]:
+    applied = {str(name) for name in overlays_applied}
+    return [
+        str(name)
+        for name in recipe.get("blocked_by_applied") or []
+        if str(name) in applied
+    ]
+
+
+def _legacy_recipe_missing_required(recipe: dict[str, Any], overlays_applied: list[str]) -> list[str]:
+    applied = {str(name) for name in overlays_applied}
+    return [
+        str(name)
+        for name in recipe.get("required_applied") or []
+        if str(name) not in applied
+    ]
+
+
+def _legacy_after_selection_recipes(args: argparse.Namespace) -> list[dict[str, Any]]:
+    recipes: list[dict[str, Any]] = []
+    for attr_name in (
+        "selective_reaction_repair_clean_recipes",
+        "midfold_reaction_hold_recipes",
+        "trim_cooldown_recipes",
+    ):
+        for recipe in getattr(args, attr_name, None) or []:
+            if isinstance(recipe, dict):
+                recipes.append(recipe)
+    risk_off_recipe = getattr(args, "risk_off_micro_sizer_recipe", None)
+    if isinstance(risk_off_recipe, dict):
+        recipes.append(risk_off_recipe)
+    if getattr(args, "soft_circuit_recovery_mid_replay_note", None):
+        probe_units = max(
+            0.0,
+            float(getattr(args, "soft_circuit_recovery_mid_probe_units", 0.60)),
+        )
+        min_one_way_score = max(
+            0.0,
+            float(getattr(args, "soft_circuit_recovery_mid_min_one_way_score", 3.5)),
+        )
+        min_score_diff = max(
+            0,
+            int(getattr(args, "soft_circuit_recovery_mid_min_score_diff", 5)),
+        )
+        max_extension_atr = max(
+            0.0,
+            float(getattr(args, "soft_circuit_recovery_mid_max_extension_atr", 3.5)),
+        )
+        failure_guard_count = max(
+            0,
+            int(getattr(args, "soft_circuit_recovery_mid_failure_guard_count", 0)),
+        )
+        failure_guard_window = max(
+            1,
+            int(getattr(args, "soft_circuit_recovery_mid_failure_guard_window_bars", 1440)),
+        )
+        failure_cooldown = max(
+            0,
+            int(getattr(args, "soft_circuit_recovery_mid_failure_cooldown_bars", 0)),
+        )
+        change = {
+            "equity_soft_circuit_recovery_probe_units": probe_units,
+            "equity_soft_circuit_recovery_min_one_way_score": min_one_way_score,
+            "equity_soft_circuit_recovery_min_score_diff": min_score_diff,
+            "equity_soft_circuit_recovery_max_extension_atr": max_extension_atr,
+        }
+        if failure_guard_count > 0 and failure_cooldown > 0:
+            change.update(
+                {
+                    "equity_soft_circuit_recovery_failure_guard_count": failure_guard_count,
+                    "equity_soft_circuit_recovery_failure_guard_window_bars": failure_guard_window,
+                    "equity_soft_circuit_recovery_failure_cooldown_bars": failure_cooldown,
+                }
+            )
+        failure_suffix = (
+            f"Fail{failure_guard_count}x{failure_guard_window}c{failure_cooldown}"
+            if failure_guard_count > 0 and failure_cooldown > 0
+            else ""
+        )
+        recipes.append(
+            {
+                "name": "soft_circuit_recovery_mid",
+                "suffix": (
+                    f"wfSoftRec{probe_units:g}Ow{min_one_way_score:g}"
+                    f"D{min_score_diff:g}Ext{max_extension_atr:g}{failure_suffix}"
+                ),
+                "change": change,
+                "gate": {
+                    "min_source_max_units": 1.5,
+                    "max_source_max_units": 1.5,
+                    "min_train_return_pct": 36.0,
+                    "max_train_return_pct": 40.0,
+                    "min_train_drawdown_pct": 19.0,
+                    "max_train_drawdown_pct": 21.0,
+                    "min_train_cost_drag_pct": 22.0,
+                    "max_train_cost_drag_pct": 25.0,
+                    "min_one_way_trim_per_add": 0.49,
+                    "max_one_way_trim_per_add": 0.51,
+                    "min_turnover_per_add": 2.35,
+                    "max_turnover_per_add": 2.40,
+                },
+            }
+        )
+    if getattr(args, "soft_circuit_recovery_low_activity_replay_note", None):
+        probe_units = max(
+            0.0,
+            float(getattr(args, "soft_circuit_recovery_low_activity_probe_units", 0.25)),
+        )
+        min_one_way_score = max(
+            0.0,
+            float(getattr(args, "soft_circuit_recovery_low_activity_min_one_way_score", 3.0)),
+        )
+        min_score_diff = max(
+            0,
+            int(getattr(args, "soft_circuit_recovery_low_activity_min_score_diff", 4)),
+        )
+        max_extension_atr = max(
+            0.0,
+            float(getattr(args, "soft_circuit_recovery_low_activity_max_extension_atr", 3.5)),
+        )
+        failure_guard_count = max(
+            0,
+            int(getattr(args, "soft_circuit_recovery_low_activity_failure_guard_count", 1)),
+        )
+        failure_guard_window = max(
+            1,
+            int(getattr(args, "soft_circuit_recovery_low_activity_failure_guard_window_bars", 1440)),
+        )
+        failure_cooldown = max(
+            0,
+            int(getattr(args, "soft_circuit_recovery_low_activity_failure_cooldown_bars", 4320)),
+        )
+        change = {
+            "equity_soft_circuit_recovery_probe_units": probe_units,
+            "equity_soft_circuit_recovery_min_one_way_score": min_one_way_score,
+            "equity_soft_circuit_recovery_min_score_diff": min_score_diff,
+            "equity_soft_circuit_recovery_max_extension_atr": max_extension_atr,
+        }
+        if failure_guard_count > 0 and failure_cooldown > 0:
+            change.update(
+                {
+                    "equity_soft_circuit_recovery_failure_guard_count": failure_guard_count,
+                    "equity_soft_circuit_recovery_failure_guard_window_bars": failure_guard_window,
+                    "equity_soft_circuit_recovery_failure_cooldown_bars": failure_cooldown,
+                }
+            )
+        failure_suffix = (
+            f"Fail{failure_guard_count}x{failure_guard_window}c{failure_cooldown}"
+            if failure_guard_count > 0 and failure_cooldown > 0
+            else ""
+        )
+        recipes.append(
+            {
+                "name": "soft_circuit_recovery_low_activity",
+                "suffix": (
+                    f"wfSoftRecLow{probe_units:g}Ow{min_one_way_score:g}"
+                    f"D{min_score_diff:g}Ext{max_extension_atr:g}{failure_suffix}"
+                ),
+                "change": change,
+                "required_applied": ["equity_soft_circuit"],
+                "gate": {
+                    "min_source_max_units": 1.5,
+                    "max_source_max_units": 1.5,
+                    "min_train_return_pct": 18.0,
+                    "max_train_return_pct": 24.0,
+                    "min_train_drawdown_pct": 21.0,
+                    "max_train_drawdown_pct": 23.0,
+                    "min_train_cost_drag_pct": 13.0,
+                    "max_train_cost_drag_pct": 16.0,
+                    "min_one_way_trim_per_add": 0.53,
+                    "max_one_way_trim_per_add": 0.56,
+                    "min_turnover_per_add": 2.0,
+                    "max_turnover_per_add": 2.1,
+                },
+            }
+        )
+    if getattr(args, "soft_circuit_low_activity_cooldown_replay_note", None):
+        cooldown_bars = max(
+            0,
+            int(getattr(args, "soft_circuit_low_activity_cooldown_bars", 4320)),
+        )
+        recipes.append(
+            {
+                "name": "soft_circuit_low_activity_cooldown",
+                "suffix": f"wfEqSoftCool{cooldown_bars}",
+                "change": {"equity_soft_circuit_cooldown_bars": cooldown_bars},
+                "required_applied": ["soft_circuit_recovery_low_activity"],
+                "gate": {
+                    "min_source_max_units": 1.5,
+                    "max_source_max_units": 1.5,
+                    "min_train_return_pct": 18.0,
+                    "max_train_return_pct": 24.0,
+                    "min_train_drawdown_pct": 21.0,
+                    "max_train_drawdown_pct": 23.0,
+                    "min_train_cost_drag_pct": 13.0,
+                    "max_train_cost_drag_pct": 16.0,
+                    "min_one_way_trim_per_add": 0.53,
+                    "max_one_way_trim_per_add": 0.56,
+                    "min_turnover_per_add": 2.0,
+                    "max_turnover_per_add": 2.1,
+                },
+            }
+        )
+    if getattr(args, "soft_circuit_low_activity_near_miss_replay_note", None):
+        recipes.append(
+            {
+                "name": "soft_circuit_low_activity_near_miss",
+                "suffix": "wfSoftLowNear0.2",
+                "change": {"near_miss_probe_units": 0.20},
+                "required_applied": [
+                    "soft_circuit_recovery_low_activity",
+                    "soft_circuit_low_activity_cooldown",
+                ],
+                "gate": {
+                    "min_source_max_units": 1.5,
+                    "max_source_max_units": 1.5,
+                    "min_train_return_pct": 18.0,
+                    "max_train_return_pct": 22.0,
+                    "min_train_drawdown_pct": 21.0,
+                    "max_train_drawdown_pct": 23.0,
+                    "min_train_cost_drag_pct": 13.0,
+                    "max_train_cost_drag_pct": 15.0,
+                    "min_one_way_trim_per_add": 0.53,
+                    "max_one_way_trim_per_add": 0.56,
+                    "min_turnover_per_add": 2.03,
+                    "max_turnover_per_add": 2.06,
+                },
+            }
+        )
+    if getattr(args, "high_return_soft_sizer_relax_replay_note", None):
+        relax_drawdown = max(
+            0.0,
+            float(getattr(args, "high_return_soft_sizer_relax_drawdown_pct", 11.0)),
+        )
+        relax_size_mult = max(
+            0.0,
+            float(getattr(args, "high_return_soft_sizer_relax_size_mult", 0.25)),
+        )
+        relax_cooldown = max(
+            0,
+            int(getattr(args, "high_return_soft_sizer_relax_cooldown_bars", 2880)),
+        )
+        size_suffix = f"{int(round(relax_size_mult * 100)):03d}"
+        recipes.append(
+            {
+                "name": "high_return_soft_sizer_relax",
+                "suffix": f"wfEqSoftRelax{relax_drawdown:g}M{size_suffix}",
+                "change": {
+                    "equity_soft_circuit_drawdown_pct": relax_drawdown,
+                    "equity_soft_circuit_size_mult": relax_size_mult,
+                    "equity_soft_circuit_cooldown_bars": relax_cooldown,
+                    "equity_soft_circuit_force_flat": False,
+                },
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 68.0,
+                    "max_train_return_pct": 75.0,
+                    "min_train_drawdown_pct": 11.0,
+                    "max_train_drawdown_pct": 13.0,
+                    "min_train_cost_drag_pct": 32.0,
+                    "max_train_cost_drag_pct": 36.0,
+                    "min_one_way_trim_per_add": 0.35,
+                    "max_one_way_trim_per_add": 0.39,
+                    "min_turnover_per_add": 2.10,
+                    "max_turnover_per_add": 2.20,
+                },
+            }
+        )
+    if getattr(args, "high_return_soft_sizer_tight_replay_note", None):
+        tight_drawdown = max(
+            0.0,
+            float(getattr(args, "high_return_soft_sizer_tight_drawdown_pct", 9.0)),
+        )
+        tight_size_mult = max(
+            0.0,
+            float(getattr(args, "high_return_soft_sizer_tight_size_mult", 0.10)),
+        )
+        tight_cooldown = max(
+            0,
+            int(getattr(args, "high_return_soft_sizer_tight_cooldown_bars", 2880)),
+        )
+        tight_size_suffix = f"{int(round(tight_size_mult * 100)):03d}"
+        recipes.append(
+            {
+                "name": "high_return_soft_sizer_relax",
+                "suffix": f"wfEqSoftRelaxTight{tight_drawdown:g}M{tight_size_suffix}",
+                "change": {
+                    "equity_soft_circuit_drawdown_pct": tight_drawdown,
+                    "equity_soft_circuit_size_mult": tight_size_mult,
+                    "equity_soft_circuit_cooldown_bars": tight_cooldown,
+                    "equity_soft_circuit_force_flat": False,
+                },
+                "required_applied": ["high_return_soft_sizer_relax"],
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 68.0,
+                    "max_train_return_pct": 75.0,
+                    "min_train_drawdown_pct": 11.0,
+                    "max_train_drawdown_pct": 13.0,
+                    "min_train_cost_drag_pct": 32.0,
+                    "max_train_cost_drag_pct": 36.0,
+                    "min_one_way_trim_per_add": 0.35,
+                    "max_one_way_trim_per_add": 0.39,
+                    "min_turnover_per_add": 2.10,
+                    "max_turnover_per_add": 2.20,
+                },
+            }
+        )
+    if getattr(args, "deep_soft_reaction_delay_replay_note", None):
+        recipes.append(
+            {
+                "name": "deep_soft_reaction_delay",
+                "suffix": "wfDeepSoftReact1",
+                "change": {"reaction_trim_trigger": 1.0},
+                "blocked_by_applied": ["trim_cooldown_deep_soft"],
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 42.0,
+                    "max_train_return_pct": 45.0,
+                    "min_train_drawdown_pct": 31.0,
+                    "max_train_drawdown_pct": 33.0,
+                    "min_train_cost_drag_pct": 37.0,
+                    "max_train_cost_drag_pct": 40.0,
+                    "min_one_way_trim_per_add": 0.39,
+                    "max_one_way_trim_per_add": 0.41,
+                    "min_turnover_per_add": 2.13,
+                    "max_turnover_per_add": 2.16,
+                },
+            }
+        )
+    if getattr(args, "forced_trim_near_miss_tiny_replay_note", None):
+        recipes.append(
+            {
+                "name": "forced_trim_near_miss_tiny",
+                "suffix": "wfNearMissTiny0.001",
+                "change": {"near_miss_probe_units": 0.001},
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 13.0,
+                    "max_train_return_pct": 16.0,
+                    "min_train_drawdown_pct": 30.0,
+                    "max_train_drawdown_pct": 32.0,
+                    "min_train_cost_drag_pct": 20.0,
+                    "max_train_cost_drag_pct": 23.0,
+                    "min_one_way_trim_per_add": 0.53,
+                    "max_one_way_trim_per_add": 0.56,
+                    "min_turnover_per_add": 2.00,
+                    "max_turnover_per_add": 2.04,
+                },
+            }
+        )
+    if getattr(args, "deep_drawdown_reversal_scale_replay_note", None):
+        recipes.append(
+            {
+                "name": "deep_drawdown_reversal_scale",
+                "suffix": "wfDeepOwRev0.7",
+                "change": {"one_way_reversal_switch_units": 0.70},
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 60.0,
+                    "max_train_return_pct": 63.0,
+                    "min_train_drawdown_pct": 30.0,
+                    "max_train_drawdown_pct": 32.0,
+                    "min_train_cost_drag_pct": 35.0,
+                    "max_train_cost_drag_pct": 38.0,
+                    "min_one_way_trim_per_add": 0.54,
+                    "max_one_way_trim_per_add": 0.56,
+                    "min_turnover_per_add": 2.17,
+                    "max_turnover_per_add": 2.20,
+                },
+            }
+        )
+    if getattr(args, "low_activity_reengage_probe_replay_note", None):
+        recipes.append(
+            {
+                "name": "low_activity_reengage_probe",
+                "suffix": "wfLowActNear0.0025",
+                "change": {
+                    "near_miss_probe_units": 0.0025,
+                    "near_miss_probe_min_score": 4,
+                    "near_miss_probe_min_score_edge": 0,
+                    "near_miss_probe_min_reason_stack": 1,
+                    "near_miss_probe_cooldown_bars": 36,
+                    "near_miss_probe_max_extension_atr": 2.25,
+                    "near_miss_probe_failure_guard_count": 2,
+                    "near_miss_probe_failure_guard_window_bars": 1440,
+                    "near_miss_probe_failure_cooldown_bars": 2880,
+                },
+                "gate": {
+                    "min_source_max_units": 1.5,
+                    "max_source_max_units": 1.5,
+                    "min_train_return_pct": 18.0,
+                    "max_train_return_pct": 40.0,
+                    "min_train_drawdown_pct": 19.0,
+                    "max_train_drawdown_pct": 23.0,
+                    "min_train_cost_drag_pct": 13.0,
+                    "max_train_cost_drag_pct": 25.0,
+                    "min_one_way_trim_per_add": 0.49,
+                    "max_one_way_trim_per_add": 0.56,
+                    "min_turnover_per_add": 2.0,
+                    "max_turnover_per_add": 2.4,
+                },
+            }
+        )
+    if getattr(args, "base_heavy_probe_rebalance_replay_note", None):
+        recipes.append(
+            {
+                "name": "base_heavy_probe_rebalance",
+                "suffix": "wfBaseHeavyNear0.0015Imp0.0001",
+                "change": {
+                    "near_miss_probe_units": 0.0015,
+                    "near_miss_probe_min_score": 4,
+                    "near_miss_probe_min_score_edge": 0,
+                    "near_miss_probe_min_reason_stack": 1,
+                    "near_miss_probe_cooldown_bars": 48,
+                    "near_miss_probe_max_extension_atr": 2.0,
+                    "near_miss_probe_failure_guard_count": 2,
+                    "near_miss_probe_failure_guard_window_bars": 1440,
+                    "near_miss_probe_failure_cooldown_bars": 4320,
+                    "one_way_impulse_probe_units": 0.0001,
+                    "one_way_impulse_min_one_way_score": 3.5,
+                    "one_way_impulse_min_score_diff": 5,
+                    "one_way_impulse_cooldown_bars": 48,
+                    "one_way_impulse_max_extension_atr": 2.5,
+                },
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 160.0,
+                    "max_train_return_pct": 245.0,
+                    "min_train_drawdown_pct": 14.0,
+                    "max_train_drawdown_pct": 21.0,
+                    "min_train_cost_drag_pct": 65.0,
+                    "max_train_cost_drag_pct": 85.0,
+                    "min_one_way_trim_per_add": 0.30,
+                    "max_one_way_trim_per_add": 0.39,
+                    "min_turnover_per_add": 2.40,
+                    "max_turnover_per_add": 2.48,
+                },
+            }
+        )
+    if getattr(args, "event_risk_base_throttle_replay_note", None):
+        recipes.append(
+            {
+                "name": "event_risk_base_throttle",
+                "suffix": "wfEventBaseHourShortExt2.5M025",
+                "change": {
+                    "event_risk_base_reduce_size_mult": 0.25,
+                    "event_risk_base_reduce_min_extension_atr": 2.5,
+                    "event_risk_base_reduce_side": "short",
+                    "event_risk_base_reduce_contexts": ("hour_open",),
+                },
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 160.0,
+                    "max_train_return_pct": 245.0,
+                    "min_train_drawdown_pct": 14.0,
+                    "max_train_drawdown_pct": 21.0,
+                    "min_train_cost_drag_pct": 65.0,
+                    "max_train_cost_drag_pct": 85.0,
+                    "min_one_way_trim_per_add": 0.30,
+                    "max_one_way_trim_per_add": 0.39,
+                    "min_turnover_per_add": 2.40,
+                    "max_turnover_per_add": 2.49,
+                },
+            }
+        )
+    if getattr(args, "event_risk_base_tight_repair_replay_note", None):
+        recipes.append(
+            {
+                "name": "event_risk_base_tight_repair",
+                "suffix": "wfEventBaseTightM010",
+                "change": {
+                    "event_risk_base_reduce_size_mult": 0.10,
+                },
+                "required_applied": [
+                    "event_risk_base_throttle",
+                    "repair_tune_tight",
+                ],
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 235.0,
+                    "max_train_return_pct": 245.0,
+                    "min_train_drawdown_pct": 14.0,
+                    "max_train_drawdown_pct": 16.0,
+                    "min_train_cost_drag_pct": 73.0,
+                    "max_train_cost_drag_pct": 77.0,
+                    "min_one_way_trim_per_add": 0.32,
+                    "max_one_way_trim_per_add": 0.34,
+                    "min_turnover_per_add": 2.44,
+                    "max_turnover_per_add": 2.47,
+                },
+            }
+        )
+    if getattr(args, "event_risk_reaction_soft_hold_replay_note", None):
+        recipes.append(
+            {
+                "name": "event_risk_reaction_soft_hold",
+                "suffix": "wfEventReactSoft8Inv050M005",
+                "change": {
+                    "reaction_trim_trigger": 1.0,
+                    "event_risk_base_reduce_size_mult": 0.05,
+                    "equity_soft_circuit_drawdown_pct": 8.0,
+                    "equity_soft_circuit_cooldown_bars": 2880,
+                    "equity_soft_circuit_size_mult": 0.25,
+                    "equity_soft_circuit_force_flat": False,
+                    "equity_soft_circuit_inventory_trim_fraction": 0.50,
+                },
+                "required_applied": ["event_risk_base_tight_repair"],
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 235.0,
+                    "max_train_return_pct": 245.0,
+                    "min_train_drawdown_pct": 14.0,
+                    "max_train_drawdown_pct": 16.0,
+                    "min_train_cost_drag_pct": 73.0,
+                    "max_train_cost_drag_pct": 77.0,
+                    "min_one_way_trim_per_add": 0.32,
+                    "max_one_way_trim_per_add": 0.34,
+                    "min_turnover_per_add": 2.44,
+                    "max_turnover_per_add": 2.47,
+                },
+            }
+        )
+    if getattr(args, "event_risk_soft_hold_near_miss_replay_note", None):
+        recipes.append(
+            {
+                "name": "event_risk_soft_hold_near_miss",
+                "suffix": "wfEventSoftNear0.0025",
+                "change": {
+                    "near_miss_probe_units": 0.0025,
+                    "near_miss_probe_min_score": 4,
+                    "near_miss_probe_min_score_edge": 0,
+                },
+                "required_applied": ["event_risk_reaction_soft_hold"],
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 235.0,
+                    "max_train_return_pct": 245.0,
+                    "min_train_drawdown_pct": 14.0,
+                    "max_train_drawdown_pct": 16.0,
+                    "min_train_cost_drag_pct": 73.0,
+                    "max_train_cost_drag_pct": 77.0,
+                    "min_one_way_trim_per_add": 0.32,
+                    "max_one_way_trim_per_add": 0.34,
+                    "min_turnover_per_add": 2.44,
+                    "max_turnover_per_add": 2.47,
+                },
+            }
+        )
+    if getattr(args, "negative_train_distribution_probe_replay_note", None):
+        recipes.append(
+            {
+                "name": "negative_train_distribution_probe",
+                "suffix": "wfNegTrainDistNear1e-05",
+                "change": {
+                    "near_miss_probe_units": 0.00001,
+                    "near_miss_probe_min_score": 4,
+                    "near_miss_probe_min_score_edge": 0,
+                    "near_miss_probe_min_reason_stack": 1,
+                    "near_miss_probe_cooldown_bars": 36,
+                    "near_miss_probe_max_extension_atr": 2.0,
+                    "near_miss_probe_failure_guard_count": 2,
+                    "near_miss_probe_failure_guard_window_bars": 1440,
+                    "near_miss_probe_failure_cooldown_bars": 4320,
+                },
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": -2.0,
+                    "max_train_return_pct": 0.0,
+                    "min_train_drawdown_pct": 29.0,
+                    "max_train_drawdown_pct": 31.0,
+                    "min_train_cost_drag_pct": 18.0,
+                    "max_train_cost_drag_pct": 21.0,
+                    "min_one_way_trim_per_add": 0.50,
+                    "max_one_way_trim_per_add": 0.54,
+                    "min_turnover_per_add": 2.03,
+                    "max_turnover_per_add": 2.06,
+                },
+            }
+        )
+    if getattr(args, "compressed_trend_distribution_probe_replay_note", None):
+        recipes.append(
+            {
+                "name": "compressed_trend_distribution_probe",
+                "suffix": "wfCompressedDistNear1e-05",
+                "change": {
+                    "near_miss_probe_units": 0.00001,
+                    "near_miss_probe_min_score": 4,
+                    "near_miss_probe_min_score_edge": 0,
+                    "near_miss_probe_min_reason_stack": 1,
+                    "near_miss_probe_cooldown_bars": 36,
+                    "near_miss_probe_max_extension_atr": 2.0,
+                    "near_miss_probe_failure_guard_count": 2,
+                    "near_miss_probe_failure_guard_window_bars": 1440,
+                    "near_miss_probe_failure_cooldown_bars": 4320,
+                },
+                "required_applied": ["reaction_tune_compressed_trend"],
+                "gate": {
+                    "min_source_max_units": 1.5,
+                    "max_source_max_units": 1.5,
+                    "min_train_return_pct": 18.0,
+                    "max_train_return_pct": 22.0,
+                    "min_train_drawdown_pct": 13.0,
+                    "max_train_drawdown_pct": 15.0,
+                    "min_train_cost_drag_pct": 18.0,
+                    "max_train_cost_drag_pct": 21.0,
+                    "min_one_way_trim_per_add": 0.42,
+                    "max_one_way_trim_per_add": 0.45,
+                    "min_turnover_per_add": 2.50,
+                    "max_turnover_per_add": 2.60,
+                },
+            }
+        )
+    if getattr(args, "balanced_structure_replay_note", None):
+        recipes.extend(
+            [
+                {
+                    "name": "distribution_balance",
+                    "suffix": "wfDistributionBalance0.00025",
+                    "change": {
+                        "near_miss_probe_units": 0.00025,
+                        "near_miss_probe_min_score": 4,
+                        "near_miss_probe_min_score_edge": 0,
+                        "near_miss_probe_cooldown_bars": 36,
+                        "near_miss_probe_max_extension_atr": 2.0,
+                        "near_miss_probe_failure_guard_count": 2,
+                        "near_miss_probe_failure_guard_window_bars": 1440,
+                        "near_miss_probe_failure_cooldown_bars": 4320,
+                    },
+                    "gate": {
+                        "min_source_max_units": 1.0,
+                        "max_source_max_units": 1.0,
+                        "min_train_return_pct": 165.0,
+                        "max_train_return_pct": 170.0,
+                        "min_train_drawdown_pct": 20.0,
+                        "max_train_drawdown_pct": 21.0,
+                        "min_train_cost_drag_pct": 65.0,
+                        "max_train_cost_drag_pct": 68.0,
+                        "min_one_way_trim_per_add": 0.37,
+                        "max_one_way_trim_per_add": 0.39,
+                        "min_turnover_per_add": 2.46,
+                        "max_turnover_per_add": 2.49,
+                    },
+                },
+                {
+                    "name": "role_balance_near_miss",
+                    "suffix": "wfRoleBalanceNear0.0025",
+                    "change": {
+                        "near_miss_probe_units": 0.0025,
+                        "near_miss_probe_min_score": 4,
+                        "near_miss_probe_min_score_edge": 0,
+                        "near_miss_probe_cooldown_bars": 36,
+                        "near_miss_probe_max_extension_atr": 2.0,
+                        "near_miss_probe_failure_guard_count": 2,
+                        "near_miss_probe_failure_guard_window_bars": 1440,
+                        "near_miss_probe_failure_cooldown_bars": 4320,
+                    },
+                    "blocked_by_applied": ["reaction_tune_compressed_trend"],
+                    "gate": {
+                        "min_source_max_units": 1.5,
+                        "max_source_max_units": 1.5,
+                        "min_train_return_pct": 18.0,
+                        "max_train_return_pct": 22.0,
+                        "min_train_drawdown_pct": 13.0,
+                        "max_train_drawdown_pct": 15.0,
+                        "min_train_cost_drag_pct": 18.0,
+                        "max_train_cost_drag_pct": 21.0,
+                        "min_one_way_trim_per_add": 0.42,
+                        "max_one_way_trim_per_add": 0.45,
+                        "min_turnover_per_add": 2.50,
+                        "max_turnover_per_add": 2.60,
+                    },
+                },
+                {
+                    "name": "high_cost_trim_2880",
+                    "suffix": "wfHighCostBalanceTrim2880",
+                    "change": {"one_way_trim_cooldown_bars": 2880},
+                    "gate": {
+                        "min_source_max_units": 1.0,
+                        "max_source_max_units": 1.0,
+                        "min_train_return_pct": 45.0,
+                        "max_train_return_pct": 60.0,
+                        "min_train_drawdown_pct": 19.0,
+                        "max_train_drawdown_pct": 22.0,
+                        "min_train_cost_drag_pct": 40.0,
+                        "max_train_cost_drag_pct": 48.0,
+                        "min_one_way_trim_per_add": 0.35,
+                        "max_one_way_trim_per_add": 0.40,
+                        "min_turnover_per_add": 2.40,
+                        "max_turnover_per_add": 2.50,
+                    },
+                },
+                {
+                    "name": "high_cost_balance_near_miss",
+                    "suffix": "wfHighCostBalanceNear0.00025",
+                    "change": {
+                        "near_miss_probe_units": 0.00025,
+                        "near_miss_probe_min_score": 4,
+                        "near_miss_probe_min_score_edge": 0,
+                        "near_miss_probe_cooldown_bars": 36,
+                        "near_miss_probe_max_extension_atr": 2.0,
+                        "near_miss_probe_failure_guard_count": 2,
+                        "near_miss_probe_failure_guard_window_bars": 1440,
+                        "near_miss_probe_failure_cooldown_bars": 4320,
+                    },
+                    "gate": {
+                        "min_source_max_units": 1.0,
+                        "max_source_max_units": 1.0,
+                        "min_train_return_pct": 45.0,
+                        "max_train_return_pct": 60.0,
+                        "min_train_drawdown_pct": 19.0,
+                        "max_train_drawdown_pct": 22.0,
+                        "min_train_cost_drag_pct": 40.0,
+                        "max_train_cost_drag_pct": 48.0,
+                        "min_one_way_trim_per_add": 0.35,
+                        "max_one_way_trim_per_add": 0.40,
+                        "min_turnover_per_add": 2.40,
+                        "max_turnover_per_add": 2.50,
+                    },
+                },
+            ]
+        )
+        distribution_override_change = _provided_near_miss_recipe_change(
+            args,
+            "distribution_balance",
+        )
+        if distribution_override_change:
+            recipes.append(
+                {
+                    "name": "distribution_balance_probe_override",
+                    "suffix": _near_miss_recipe_override_suffix(
+                        "wfDistributionBalance",
+                        distribution_override_change,
+                    ),
+                    "change": distribution_override_change,
+                    "required_applied": ["distribution_balance"],
+                }
+            )
+    if getattr(args, "event_risk_distribution_base_off_replay_note", None):
+        recipes.append(
+            {
+                "name": "event_risk_distribution_base_off",
+                "suffix": "wfEventDistBaseM000",
+                "change": {"event_risk_base_reduce_size_mult": 0.0},
+                "required_applied": [
+                    "event_risk_base_throttle",
+                    "distribution_balance",
+                ],
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 165.0,
+                    "max_train_return_pct": 170.0,
+                    "min_train_drawdown_pct": 20.0,
+                    "max_train_drawdown_pct": 21.0,
+                    "min_train_cost_drag_pct": 65.0,
+                    "max_train_cost_drag_pct": 68.0,
+                    "min_one_way_trim_per_add": 0.37,
+                    "max_one_way_trim_per_add": 0.39,
+                    "min_turnover_per_add": 2.46,
+                    "max_turnover_per_add": 2.49,
+                },
+            }
+        )
+    if getattr(args, "high_cost_repair_cut_05_replay_note", None):
+        recipes.append(
+            {
+                "name": "high_cost_repair_cut_05",
+                "suffix": "wfHighCostRepairCut0.5",
+                "change": {"repair_cut": 0.5},
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 45.0,
+                    "max_train_return_pct": 60.0,
+                    "min_train_drawdown_pct": 19.0,
+                    "max_train_drawdown_pct": 22.0,
+                    "min_train_cost_drag_pct": 40.0,
+                    "max_train_cost_drag_pct": 48.0,
+                    "min_one_way_trim_per_add": 0.35,
+                    "max_one_way_trim_per_add": 0.40,
+                    "min_turnover_per_add": 2.40,
+                    "max_turnover_per_add": 2.50,
+                },
+            }
+        )
+    if getattr(args, "high_cost_near_zero_react_replay_note", None):
+        recipes.append(
+            {
+                "name": "high_cost_near_zero_react",
+                "suffix": "wfHighCostNear0React0.56",
+                "change": {
+                    "near_miss_probe_units": 0.0,
+                    "reaction_trim_trigger": 0.56,
+                },
+                "required_applied": ["high_cost_balance_near_miss"],
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 45.0,
+                    "max_train_return_pct": 60.0,
+                    "min_train_drawdown_pct": 19.0,
+                    "max_train_drawdown_pct": 22.0,
+                    "min_train_cost_drag_pct": 40.0,
+                    "max_train_cost_drag_pct": 48.0,
+                    "min_one_way_trim_per_add": 0.35,
+                    "max_one_way_trim_per_add": 0.40,
+                    "min_turnover_per_add": 2.40,
+                    "max_turnover_per_add": 2.50,
+                },
+            }
+        )
+    if getattr(args, "high_cost_runner_reversal_scale_replay_note", None):
+        recipes.append(
+            {
+                "name": "high_cost_runner_reversal_scale",
+                "suffix": "wfHighCostOwRev1",
+                "change": {"one_way_reversal_switch_units": 1.0},
+                "required_applied": ["high_cost_near_zero_react"],
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 45.0,
+                    "max_train_return_pct": 60.0,
+                    "min_train_drawdown_pct": 19.0,
+                    "max_train_drawdown_pct": 22.0,
+                    "min_train_cost_drag_pct": 40.0,
+                    "max_train_cost_drag_pct": 48.0,
+                    "min_one_way_trim_per_add": 0.35,
+                    "max_one_way_trim_per_add": 0.40,
+                    "min_turnover_per_add": 2.40,
+                    "max_turnover_per_add": 2.50,
+                },
+            }
+        )
+    if getattr(args, "high_cost_runner_tight_repair_replay_note", None):
+        recipes.append(
+            {
+                "name": "high_cost_runner_tight_repair",
+                "suffix": "wfHighCostRepairCut0.4",
+                "change": {"repair_cut": 0.4},
+                "required_applied": ["high_cost_runner_reversal_scale"],
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 45.0,
+                    "max_train_return_pct": 60.0,
+                    "min_train_drawdown_pct": 19.0,
+                    "max_train_drawdown_pct": 22.0,
+                    "min_train_cost_drag_pct": 40.0,
+                    "max_train_cost_drag_pct": 48.0,
+                    "min_one_way_trim_per_add": 0.35,
+                    "max_one_way_trim_per_add": 0.40,
+                    "min_turnover_per_add": 2.40,
+                    "max_turnover_per_add": 2.50,
+                },
+            }
+        )
+    if getattr(args, "role_border_impulse_micro_replay_note", None):
+        recipes.append(
+            {
+                "name": "role_border_impulse_micro",
+                "suffix": "wfRoleBorderImpulse0.00005",
+                "change": {
+                    "one_way_impulse_probe_units": 0.00005,
+                    "one_way_impulse_min_one_way_score": 3.5,
+                    "one_way_impulse_min_score_diff": 5,
+                },
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 65.0,
+                    "max_train_return_pct": 80.0,
+                    "min_train_drawdown_pct": 11.0,
+                    "max_train_drawdown_pct": 13.0,
+                    "min_train_cost_drag_pct": 30.0,
+                    "max_train_cost_drag_pct": 40.0,
+                    "min_one_way_trim_per_add": 0.34,
+                    "max_one_way_trim_per_add": 0.39,
+                    "min_turnover_per_add": 2.10,
+                    "max_turnover_per_add": 2.20,
+                },
+            }
+        )
+    if getattr(args, "role_balance_impulse_micro_replay_note", None):
+        recipes.append(
+            {
+                "name": "role_balance_impulse_micro",
+                "suffix": "wfRoleBalanceImpulse0.0001",
+                "change": {
+                    "one_way_impulse_probe_units": 0.0001,
+                    "one_way_impulse_min_one_way_score": 3.5,
+                    "one_way_impulse_min_score_diff": 5,
+                },
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 215.0,
+                    "max_train_return_pct": 225.0,
+                    "min_train_drawdown_pct": 14.0,
+                    "max_train_drawdown_pct": 16.0,
+                    "min_train_cost_drag_pct": 75.0,
+                    "max_train_cost_drag_pct": 85.0,
+                    "min_one_way_trim_per_add": 0.30,
+                    "max_one_way_trim_per_add": 0.32,
+                    "min_turnover_per_add": 2.39,
+                    "max_turnover_per_add": 2.45,
+                },
+            }
+        )
+    if getattr(args, "low_return_soft_inventory_trim_replay_note", None):
+        inventory_trim_fraction = min(
+            max(float(getattr(args, "low_return_soft_inventory_trim_fraction", 0.20)), 0.0),
+            1.0,
+        )
+        trim_suffix = f"{int(round(inventory_trim_fraction * 100)):03d}"
+        recipes.append(
+            {
+                "name": "low_return_soft_inventory_trim",
+                "suffix": f"wfEqSoftInvTrim8F{trim_suffix}",
+                "change": {
+                    "equity_soft_circuit_drawdown_pct": 8.0,
+                    "equity_soft_circuit_cooldown_bars": 2880,
+                    "equity_soft_circuit_size_mult": 0.25,
+                    "equity_soft_circuit_force_flat": False,
+                    "equity_soft_circuit_inventory_trim_fraction": inventory_trim_fraction,
+                },
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 215.0,
+                    "max_train_return_pct": 225.0,
+                    "min_train_drawdown_pct": 14.0,
+                    "max_train_drawdown_pct": 16.0,
+                    "min_train_cost_drag_pct": 75.0,
+                    "max_train_cost_drag_pct": 85.0,
+                    "min_one_way_trim_per_add": 0.30,
+                    "max_one_way_trim_per_add": 0.32,
+                    "min_turnover_per_add": 2.39,
+                    "max_turnover_per_add": 2.45,
+                },
+            }
+        )
+    if getattr(args, "low_return_selective_impulse_replay_note", None):
+        selective_probe_units = max(
+            0.0,
+            float(getattr(args, "low_return_selective_impulse_probe_units", 0.20)),
+        )
+        selective_min_one_way_score = max(
+            0.0,
+            float(getattr(args, "low_return_selective_impulse_min_one_way_score", 4.0)),
+        )
+        selective_min_score_diff = max(
+            0,
+            int(getattr(args, "low_return_selective_impulse_min_score_diff", 5)),
+        )
+        recipes.append(
+            {
+                "name": "low_return_selective_impulse_probe",
+                "suffix": (
+                    f"wfLowRetOwImp{selective_probe_units:g}"
+                    f"Score{selective_min_one_way_score:g}D{selective_min_score_diff}"
+                ),
+                "required_applied": [
+                    "role_balance_impulse_micro",
+                    "low_return_soft_inventory_trim",
+                ],
+                "change": {
+                    "one_way_impulse_probe_units": selective_probe_units,
+                    "one_way_impulse_min_one_way_score": selective_min_one_way_score,
+                    "one_way_impulse_min_score_diff": selective_min_score_diff,
+                },
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 215.0,
+                    "max_train_return_pct": 225.0,
+                    "min_train_drawdown_pct": 14.0,
+                    "max_train_drawdown_pct": 16.0,
+                    "min_train_cost_drag_pct": 75.0,
+                    "max_train_cost_drag_pct": 85.0,
+                    "min_one_way_trim_per_add": 0.30,
+                    "max_one_way_trim_per_add": 0.32,
+                    "min_turnover_per_add": 2.39,
+                    "max_turnover_per_add": 2.45,
+                },
+            }
+        )
+    if getattr(args, "low_return_reaction_band_replay_note", None):
+        low_return_reaction_avg_band = max(
+            0.05,
+            float(getattr(args, "low_return_reaction_avg_band", 1.15)),
+        )
+        recipes.append(
+            {
+                "name": "low_return_reaction_band",
+                "suffix": f"wfLowRetReactBand{low_return_reaction_avg_band:g}",
+                "required_applied": [
+                    "role_balance_impulse_micro",
+                    "low_return_soft_inventory_trim",
+                    "low_return_selective_impulse_probe",
+                ],
+                "change": {
+                    "reaction_avg_band": low_return_reaction_avg_band,
+                },
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "min_train_return_pct": 215.0,
+                    "max_train_return_pct": 225.0,
+                    "min_train_drawdown_pct": 14.0,
+                    "max_train_drawdown_pct": 16.0,
+                    "min_train_cost_drag_pct": 75.0,
+                    "max_train_cost_drag_pct": 85.0,
+                    "min_one_way_trim_per_add": 0.30,
+                    "max_one_way_trim_per_add": 0.32,
+                    "min_turnover_per_add": 2.39,
+                    "max_turnover_per_add": 2.45,
+                },
+            }
+        )
+    if getattr(args, "fast_defense_one_way_delay_replay_note", None):
+        min_adverse_reaction = max(
+            0.0,
+            float(getattr(args, "fast_defense_one_way_delay_min_adverse_reaction", 0.50)),
+        )
+        max_defensive_cooldown = max(
+            0,
+            int(getattr(args, "fast_defense_one_way_delay_max_defensive_cooldown_bars", 100)),
+        )
+        recipes.append(
+            {
+                "name": "fast_defense_one_way_delay",
+                "suffix": f"wfFastDefOwMin{min_adverse_reaction:g}",
+                "required_applied": ["low_return_soft_inventory_trim"],
+                "change": {
+                    "one_way_trim_min_adverse_reaction": min_adverse_reaction,
+                },
+                "gate": {
+                    "min_source_max_units": 1.0,
+                    "max_source_max_units": 1.0,
+                    "source_config_ranges": {
+                        "defensive_trim_cooldown_bars": {
+                            "min": 0.0,
+                            "max": float(max_defensive_cooldown),
+                        },
+                    },
+                    "min_train_return_pct": 215.0,
+                    "max_train_return_pct": 225.0,
+                    "min_train_drawdown_pct": 14.0,
+                    "max_train_drawdown_pct": 16.0,
+                    "min_train_cost_drag_pct": 75.0,
+                    "max_train_cost_drag_pct": 85.0,
+                    "min_one_way_trim_per_add": 0.30,
+                    "max_one_way_trim_per_add": 0.32,
+                    "min_turnover_per_add": 2.39,
+                    "max_turnover_per_add": 2.45,
+                },
+            }
+        )
+    return recipes
 
 
 def _train_max_role_add_share(train_result: dict[str, Any]) -> float:
@@ -3068,6 +5019,10 @@ def _apply_exposure_rebalance_overlay(config: MarketStateConfig, args: argparse.
         value = min(max(0.01, float(args.exposure_rebalance_after_selection_base_max_units)), effective_max_units)
         updates["base_max_units"] = value
         suffix_parts.append(f"wfExpBaseMax{value:g}")
+    if args.exposure_rebalance_after_selection_base_add_units is not None:
+        value = min(max(0.01, float(args.exposure_rebalance_after_selection_base_add_units)), effective_max_units)
+        updates["base_add_units"] = value
+        suffix_parts.append(f"wfExpBaseAdd{value:g}")
     if args.exposure_rebalance_after_selection_battle_units is not None:
         value = min(max(0.0, float(args.exposure_rebalance_after_selection_battle_units)), effective_max_units)
         updates["battle_units"] = value
@@ -3128,6 +5083,14 @@ def _apply_after_selection_overlays(
             return False
         overlays_skipped.append(f"{name}:{reason}")
         return True
+
+    def apply_changed_overlay(name: str, updated_config: MarketStateConfig) -> None:
+        nonlocal config
+        if _material_config_key(updated_config) == _material_config_key(config):
+            overlays_skipped.append(f"{name}:no_material_change")
+            return
+        config = updated_config
+        overlays_applied.append(name)
 
     if bool(args.equity_circuit_breaker_after_selection):
         if is_blocked("equity_circuit"):
@@ -3195,21 +5158,25 @@ def _apply_after_selection_overlays(
         if is_blocked("one_way_reversal"):
             pass
         elif _one_way_reversal_after_selection_allowed(train_result, args):
-            config = _apply_one_way_reversal_after_selection_overlay(config, args)
-            overlays_applied.append("one_way_reversal")
+            apply_changed_overlay(
+                "one_way_reversal",
+                _apply_one_way_reversal_after_selection_overlay(config, args),
+            )
         else:
             overlays_skipped.append("one_way_reversal")
         if args.one_way_reversal_after_selection_weak_switch_units is not None:
             if is_blocked("one_way_reversal_weak"):
                 pass
             elif _one_way_reversal_after_selection_weak_allowed(train_result, args):
-                config = _apply_one_way_reversal_after_selection_overlay(
-                    config,
-                    args,
-                    switch_units=args.one_way_reversal_after_selection_weak_switch_units,
-                    suffix_label="wfOwRevWeak",
+                apply_changed_overlay(
+                    "one_way_reversal_weak",
+                    _apply_one_way_reversal_after_selection_overlay(
+                        config,
+                        args,
+                        switch_units=args.one_way_reversal_after_selection_weak_switch_units,
+                        suffix_label="wfOwRevWeak",
+                    ),
                 )
-                overlays_applied.append("one_way_reversal_weak")
             else:
                 overlays_skipped.append("one_way_reversal_weak")
     for overlay_name, arg_prefix, suffix_label in (
@@ -3222,13 +5189,15 @@ def _apply_after_selection_overlays(
             elif getattr(args, f"{arg_prefix}_switch_units") is None:
                 overlays_skipped.append(overlay_name)
             elif _train_state_after_selection_allowed(train_result, args, prefix=arg_prefix):
-                config = _apply_one_way_reversal_after_selection_overlay(
-                    config,
-                    args,
-                    switch_units=getattr(args, f"{arg_prefix}_switch_units"),
-                    suffix_label=suffix_label,
+                apply_changed_overlay(
+                    overlay_name,
+                    _apply_one_way_reversal_after_selection_overlay(
+                        config,
+                        args,
+                        switch_units=getattr(args, f"{arg_prefix}_switch_units"),
+                        suffix_label=suffix_label,
+                    ),
                 )
-                overlays_applied.append(overlay_name)
             else:
                 overlays_skipped.append(overlay_name)
     if bool(args.one_way_reversal_suppress_after_selection):
@@ -3239,13 +5208,15 @@ def _apply_after_selection_overlays(
             args,
             prefix="one_way_reversal_suppress_after_selection",
         ):
-            config = _apply_one_way_reversal_after_selection_overlay(
-                config,
-                args,
-                switch_units=0.0,
-                suffix_label="wfOwRevSuppress",
+            apply_changed_overlay(
+                "one_way_reversal_suppress",
+                _apply_one_way_reversal_after_selection_overlay(
+                    config,
+                    args,
+                    switch_units=0.0,
+                    suffix_label="wfOwRevSuppress",
+                ),
             )
-            overlays_applied.append("one_way_reversal_suppress")
         else:
             overlays_skipped.append("one_way_reversal_suppress")
     if bool(args.one_way_impulse_after_selection):
@@ -3758,6 +5729,25 @@ def _apply_after_selection_overlays(
             overlays_applied.append("one_way_loss_fuse")
         else:
             overlays_skipped.append("one_way_loss_fuse")
+    for recipe in _legacy_after_selection_recipes(args):
+        overlay_name = str(recipe.get("name") or "legacy_recipe")
+        if is_blocked(overlay_name):
+            continue
+        blockers = _legacy_recipe_blockers(recipe, overlays_applied)
+        if blockers:
+            overlays_skipped.append(f"{overlay_name}:blocked_by_applied={','.join(blockers)}")
+            continue
+        missing_required = _legacy_recipe_missing_required(recipe, overlays_applied)
+        if missing_required:
+            overlays_skipped.append(f"{overlay_name}:missing_required={','.join(missing_required)}")
+            continue
+        if not _legacy_recipe_allowed(train_result, recipe):
+            overlays_skipped.append(overlay_name)
+            continue
+        apply_changed_overlay(
+            overlay_name,
+            _apply_legacy_recipe_overlay(config, recipe),
+        )
     return config, overlays_applied, overlays_skipped
 
 
@@ -3811,6 +5801,26 @@ def _anchored_fold_start(first_ts: datetime, anchor_hour_utc: int | None, anchor
     if anchored < first_ts:
         anchored += timedelta(days=1)
     return anchored
+
+
+def _parse_fold_start_at(raw: str | None) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"invalid fold start timestamp: {text}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _load_days_covering_fold_start(fold_start_at: datetime | None) -> int:
+    if fold_start_at is None:
+        return 0
+    age_days = (datetime.now(UTC) - fold_start_at).total_seconds() / 86_400.0
+    return max(0, int(math.ceil(age_days)) + 2)
 
 
 def _selection_score(
@@ -4464,9 +6474,16 @@ def _after_selection_confirmation_targets(
         for item in str(args.after_selection_confirm_overlays or "").split(",")
         if item.strip()
     }
-    if not configured:
-        return list(overlays_applied)
-    return [name for name in overlays_applied if name in configured]
+    targets: list[str] = []
+    seen: set[str] = set()
+    for name in overlays_applied:
+        if configured and name not in configured:
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        targets.append(name)
+    return targets
 
 
 def _after_selection_confirmation_should_enforce(args: argparse.Namespace) -> bool:
@@ -4655,7 +6672,7 @@ def _top_no_trade_reasons(result: dict[str, Any], *, limit: int = 3) -> list[dic
     no_trade_items = [
         (str(key).removeprefix("no_trade_"), int(value))
         for key, value in event_counts.items()
-        if str(key).startswith("no_trade_") and int(value or 0) > 0
+        if str(key).startswith("no_trade_") and "::" not in str(key) and int(value or 0) > 0
     ]
     return [
         {"reason": reason, "count": count}
@@ -4683,6 +6700,7 @@ def _fold_risk_brief(fold: dict[str, Any]) -> dict[str, Any]:
     risk_adjusted_expected_add_events = int(
         diagnostic_thresholds.get("risk_adjusted_expected_add_events") or expected_add_events
     )
+    capacity_context = dict(diagnostics.get("capacity_structure_context") or {})
     sample_mode = str(diagnostics.get("sample_mode") or "active")
     effective_expected_add_events = (
         risk_adjusted_expected_add_events
@@ -4736,6 +6754,15 @@ def _fold_risk_brief(fold: dict[str, Any]) -> dict[str, Any]:
         "dominant_add_role": str(diagnostics.get("dominant_add_role") or "none"),
         "max_role_add_share": round(float(diagnostics.get("max_role_add_share") or 0.0), 4),
         "base_add_share": round(_train_role_share({"event_diagnostics": diagnostics}, "base"), 4),
+        "capacity_status": str(capacity_context.get("status") or "unknown"),
+        "scale_in_capacity_available": (
+            bool(capacity_context.get("scale_in_capacity_available"))
+            if capacity_context
+            else None
+        ),
+        "capacity_after_first_base_units": capacity_context.get("capacity_after_first_base_units"),
+        "unit_account_exposure": capacity_context.get("unit_account_exposure"),
+        "base_add_account_exposure": capacity_context.get("base_add_account_exposure"),
         "top_no_trade_reasons": _top_no_trade_reasons(result),
         "equity_soft_circuit_cooldown_bars": soft_circuit_cooldown_bars,
         "equity_soft_circuit_cooldown_share": (
@@ -4778,6 +6805,11 @@ def _fold_risk_tags(
         and float(brief.get("base_add_share") or 0.0) >= 0.80
     ):
         tags.append("base_dominance")
+    capacity_status = str(brief.get("capacity_status") or "")
+    if capacity_status == "battle_capacity_saturated":
+        tags.append("battle_capacity_saturated")
+    elif brief.get("scale_in_capacity_available") is False:
+        tags.append("single_unit_full_entry")
     if str(brief.get("confirmation") or "").startswith("would_reject:"):
         tags.append("confirmation_warning")
     if brief.get("flags"):
@@ -4826,6 +6858,9 @@ def _aggregate_weak_fold_diagnostics(folds: list[dict[str, Any]], *, limit: int 
         for brief in briefs
         if float(brief.get("equity_soft_circuit_cooldown_share") or 0.0) >= 0.50
     ]
+    capacity_status_counter: Counter[str] = Counter(
+        str(brief.get("capacity_status") or "unknown") for brief in briefs
+    )
     role_concentration_folds = [
         brief
         for brief in briefs
@@ -4859,6 +6894,16 @@ def _aggregate_weak_fold_diagnostics(folds: list[dict[str, Any]], *, limit: int 
         "confirmation_warning_count": len(confirmation_warning_folds),
         "role_concentration_count": len(role_concentration_folds),
         "base_dominance_count": len(base_dominance_folds),
+        "no_scale_in_capacity_count": sum(
+            1 for brief in briefs if brief.get("scale_in_capacity_available") is False
+        ),
+        "single_unit_full_entry_count": sum(
+            1 for brief in briefs if str(brief.get("capacity_status") or "") == "single_unit_full_entry"
+        ),
+        "battle_capacity_saturated_count": sum(
+            1 for brief in briefs if str(brief.get("capacity_status") or "") == "battle_capacity_saturated"
+        ),
+        "capacity_status_counts": _counter_payload(capacity_status_counter),
         "low_activity_count": len(low_activity_folds),
         "soft_circuit_dominated_count": len(soft_circuit_dominated_folds),
         "top_no_trade_reason_counts": _counter_payload(no_trade_reason_counter),
@@ -5605,6 +7650,243 @@ def _aggregate_top_train_candidate_overlay_audit(
     return audit
 
 
+def _aggregate_improvement_backlog_diagnostics(
+    folds: list[dict[str, Any]],
+    *,
+    low_return_threshold_pct: float = 15.0,
+    material_upside_pct: float = 1.0,
+    selection_regret_threshold_pct: float = 1.0,
+    high_drawdown_threshold_pct: float = 10.0,
+    high_cost_threshold_pct: float = 20.0,
+    risk_reduction_threshold_pct: float = 0.5,
+    cost_reduction_threshold_pct: float = 1.0,
+    max_return_giveback_pct: float = 5.0,
+    limit: int = 8,
+) -> dict[str, Any]:
+    audited_count = 0
+    low_return_candidate_ceiling: list[dict[str, Any]] = []
+    clean_selection_misses: list[dict[str, Any]] = []
+    risky_or_marginal_oracle_misses: list[dict[str, Any]] = []
+    risk_compression_tradeoffs: list[dict[str, Any]] = []
+    cost_compression_tradeoffs: list[dict[str, Any]] = []
+
+    for fold in folds:
+        candidates = [dict(item or {}) for item in fold.get("train_top_test_results") or []]
+        candidates = [
+            item
+            for item in candidates
+            if item.get("test_return_pct") is not None or item.get("test_result")
+        ]
+        if len(candidates) <= 1:
+            continue
+        audited_count += 1
+        selected = next((item for item in candidates if bool(item.get("is_selected"))), candidates[0])
+        selected_return = _candidate_test_return(selected)
+        selected_drawdown = _candidate_test_drawdown(selected)
+        selected_cost = _candidate_test_cost(selected)
+        selected_flag_count = len(_candidate_test_flags(selected))
+        best = max(
+            candidates,
+            key=lambda item: (
+                _candidate_test_return(item),
+                -_candidate_test_drawdown(item),
+                -_candidate_test_cost(item),
+            ),
+        )
+        best_return = _candidate_test_return(best)
+        best_drawdown = _candidate_test_drawdown(best)
+        best_cost = _candidate_test_cost(best)
+        best_flag_count = len(_candidate_test_flags(best))
+        return_upside = round(best_return - selected_return, 4)
+        base_row = {
+            "fold": int(fold.get("fold") or 0),
+            "test_start": fold.get("test_start"),
+            "test_end": fold.get("test_end"),
+            "candidate_count": len(candidates),
+            "selected_return_pct": round(selected_return, 4),
+            "selected_max_drawdown_pct": round(selected_drawdown, 4),
+            "selected_cost_drag_pct": round(selected_cost, 4),
+            "best_candidate": _candidate_brief(best),
+            "best_return_upside_pct": return_upside,
+        }
+        if selected_return < float(low_return_threshold_pct) and return_upside <= float(
+            material_upside_pct
+        ):
+            low_return_candidate_ceiling.append(
+                {
+                    **base_row,
+                    "diagnosis": "candidate_generation_ceiling",
+                }
+            )
+        if return_upside >= float(selection_regret_threshold_pct):
+            best_is_cleaner_or_equal = (
+                best_cost <= selected_cost + 0.0001
+                and best_drawdown <= selected_drawdown + 0.0001
+                and best_flag_count <= selected_flag_count
+            )
+            if best_is_cleaner_or_equal:
+                clean_selection_misses.append(
+                    {
+                        **base_row,
+                        "diagnosis": "clean_selection_miss",
+                    }
+                )
+            else:
+                risky_or_marginal_oracle_misses.append(
+                    {
+                        **base_row,
+                        "diagnosis": "risky_or_marginal_oracle",
+                        "best_cost_delta_pct": round(best_cost - selected_cost, 4),
+                        "best_drawdown_delta_pct": round(best_drawdown - selected_drawdown, 4),
+                        "best_flag_delta": best_flag_count - selected_flag_count,
+                    }
+                )
+
+        if selected_drawdown >= float(high_drawdown_threshold_pct):
+            risk_candidates = [
+                item
+                for item in candidates
+                if (
+                    selected_drawdown - _candidate_test_drawdown(item)
+                    >= float(risk_reduction_threshold_pct)
+                    and selected_return - _candidate_test_return(item)
+                    <= float(max_return_giveback_pct)
+                )
+            ]
+            if risk_candidates:
+                risk_choice = max(
+                    risk_candidates,
+                    key=lambda item: (
+                        selected_drawdown - _candidate_test_drawdown(item),
+                        _candidate_test_return(item),
+                        -_candidate_test_cost(item),
+                    ),
+                )
+                risk_compression_tradeoffs.append(
+                    {
+                        **base_row,
+                        "diagnosis": "risk_compression_tradeoff",
+                        "tradeoff_candidate": _candidate_brief(risk_choice),
+                        "drawdown_reduction_pct": round(
+                            selected_drawdown - _candidate_test_drawdown(risk_choice),
+                            4,
+                        ),
+                        "return_giveback_pct": round(
+                            selected_return - _candidate_test_return(risk_choice),
+                            4,
+                        ),
+                        "cost_reduction_pct": round(
+                            selected_cost - _candidate_test_cost(risk_choice),
+                            4,
+                        ),
+                    }
+                )
+
+        if selected_cost >= float(high_cost_threshold_pct):
+            cost_candidates = [
+                item
+                for item in candidates
+                if (
+                    selected_cost - _candidate_test_cost(item)
+                    >= float(cost_reduction_threshold_pct)
+                    and selected_return - _candidate_test_return(item)
+                    <= float(max_return_giveback_pct)
+                )
+            ]
+            if cost_candidates:
+                cost_choice = max(
+                    cost_candidates,
+                    key=lambda item: (
+                        selected_cost - _candidate_test_cost(item),
+                        _candidate_test_return(item),
+                        -_candidate_test_drawdown(item),
+                    ),
+                )
+                cost_compression_tradeoffs.append(
+                    {
+                        **base_row,
+                        "diagnosis": "cost_compression_tradeoff",
+                        "tradeoff_candidate": _candidate_brief(cost_choice),
+                        "cost_reduction_pct": round(
+                            selected_cost - _candidate_test_cost(cost_choice),
+                            4,
+                        ),
+                        "return_giveback_pct": round(
+                            selected_return - _candidate_test_return(cost_choice),
+                            4,
+                        ),
+                        "drawdown_reduction_pct": round(
+                            selected_drawdown - _candidate_test_drawdown(cost_choice),
+                            4,
+                        ),
+                    }
+                )
+
+    next_step = "collect_top_candidate_audit"
+    if audited_count:
+        if clean_selection_misses:
+            next_step = "tune_selection_policy"
+        elif low_return_candidate_ceiling:
+            next_step = "expand_candidate_family"
+        elif risk_compression_tradeoffs or cost_compression_tradeoffs:
+            next_step = "tune_risk_cost_compression"
+        else:
+            next_step = "stress_test_current_system"
+
+    def limited_rows(
+        rows: list[dict[str, Any]],
+        *,
+        key: str,
+        descending: bool = True,
+    ) -> list[dict[str, Any]]:
+        sign = -1.0 if descending else 1.0
+        return sorted(
+            rows,
+            key=lambda item: (sign * float(item.get(key) or 0.0), int(item.get("fold") or 0)),
+        )[:limit]
+
+    return {
+        "audited_fold_count": audited_count,
+        "thresholds": {
+            "low_return_threshold_pct": float(low_return_threshold_pct),
+            "material_upside_pct": float(material_upside_pct),
+            "selection_regret_threshold_pct": float(selection_regret_threshold_pct),
+            "high_drawdown_threshold_pct": float(high_drawdown_threshold_pct),
+            "high_cost_threshold_pct": float(high_cost_threshold_pct),
+            "risk_reduction_threshold_pct": float(risk_reduction_threshold_pct),
+            "cost_reduction_threshold_pct": float(cost_reduction_threshold_pct),
+            "max_return_giveback_pct": float(max_return_giveback_pct),
+        },
+        "next_step": next_step,
+        "clean_selection_miss_count": len(clean_selection_misses),
+        "risky_or_marginal_oracle_miss_count": len(risky_or_marginal_oracle_misses),
+        "low_return_candidate_ceiling_count": len(low_return_candidate_ceiling),
+        "risk_compression_tradeoff_count": len(risk_compression_tradeoffs),
+        "cost_compression_tradeoff_count": len(cost_compression_tradeoffs),
+        "low_return_candidate_ceiling_folds": limited_rows(
+            low_return_candidate_ceiling,
+            key="selected_return_pct",
+            descending=False,
+        ),
+        "clean_selection_miss_folds": limited_rows(
+            clean_selection_misses,
+            key="best_return_upside_pct",
+        ),
+        "risky_or_marginal_oracle_miss_folds": limited_rows(
+            risky_or_marginal_oracle_misses,
+            key="best_return_upside_pct",
+        ),
+        "risk_compression_tradeoff_folds": limited_rows(
+            risk_compression_tradeoffs,
+            key="drawdown_reduction_pct",
+        ),
+        "cost_compression_tradeoff_folds": limited_rows(
+            cost_compression_tradeoffs,
+            key="cost_reduction_pct",
+        ),
+    }
+
+
 def _selected_config_for_fold(fold: dict[str, Any]) -> dict[str, Any]:
     result = dict(fold.get("test_result") or {})
     train_selected = dict(fold.get("selected_train_result") or {})
@@ -5682,6 +7964,11 @@ def _stable_json_sha256(payload: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _top_float_payload(counter: Counter[str], *, limit: int = 12) -> dict[str, float]:
+    items = sorted(counter.items(), key=lambda item: (float(item[1]), str(item[0])), reverse=True)
+    return {str(key): round(float(value), 4) for key, value in items[:limit]}
+
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -5726,6 +8013,454 @@ def _report_provenance(
     }
 
 
+def _source_replay_result_metric(result: dict[str, Any], name: str) -> float | None:
+    value = result.get(name)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _source_replay_metric_delta(
+    replay_result: dict[str, Any],
+    source_result: dict[str, Any],
+    name: str,
+) -> float | None:
+    replay_value = _source_replay_result_metric(replay_result, name)
+    source_value = _source_replay_result_metric(source_result, name)
+    if replay_value is None or source_value is None:
+        return None
+    return round(replay_value - source_value, 4)
+
+
+def _source_replay_accepted_risk_tradeoff(
+    *,
+    return_delta: float | None,
+    drawdown_delta: float | None,
+    cost_delta: float | None,
+) -> bool:
+    if drawdown_delta is None or float(drawdown_delta) > -1.0:
+        return False
+    if return_delta is not None and float(return_delta) < -0.25:
+        return False
+    if cost_delta is not None and float(cost_delta) > 1.0:
+        return False
+    return True
+
+
+def _source_replay_drift_quality(
+    *,
+    return_delta: float | None,
+    drawdown_delta: float | None,
+    cost_delta: float | None,
+    material_reasons: list[str],
+) -> str:
+    if not material_reasons:
+        return "matched_or_immaterial"
+    if _source_replay_accepted_risk_tradeoff(
+        return_delta=return_delta,
+        drawdown_delta=drawdown_delta,
+        cost_delta=cost_delta,
+    ):
+        return "accepted_risk_reduction"
+    if return_delta is not None and float(return_delta) > 0.25:
+        return "return_improving"
+    if drawdown_delta is not None and float(drawdown_delta) > 0.25:
+        return "risk_worsening"
+    if cost_delta is not None and float(cost_delta) > 0.25:
+        return "cost_worsening"
+    if return_delta is not None and float(return_delta) < -0.25:
+        return "return_worsening"
+    return "material_drift"
+
+
+def _source_replay_lineage_status(
+    *,
+    selected_model_match: bool,
+    overlay_match: bool,
+    material_reasons: list[str],
+    drift_quality: str,
+) -> str:
+    if drift_quality == "accepted_risk_reduction":
+        return "accepted_risk_reduction"
+    if drift_quality == "return_improving":
+        return "return_improving"
+    if material_reasons:
+        if not selected_model_match or not overlay_match:
+            return "unresolved_material_drift"
+        return "unresolved_metric_drift"
+    if not selected_model_match:
+        if not overlay_match:
+            return "immaterial_overlay_variant"
+        return "immaterial_model_id_variant"
+    if not overlay_match:
+        return "immaterial_overlay_variant"
+    return "matched_or_immaterial"
+
+
+_SOURCE_REPLAY_NOOP_OVERLAY_MODEL_PREFIXES = {
+    "event_risk_base_throttle": ("wfEventBase",),
+}
+
+
+def _source_replay_result_event_count(
+    result: dict[str, Any],
+    name: str,
+) -> int:
+    counts = dict(result.get("event_counts") or {})
+    value = counts.get(name)
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _source_replay_noop_overlays(fold: dict[str, Any]) -> set[str]:
+    overlays = {str(item) for item in fold.get("after_selection_overlays_applied") or []}
+    test_result = dict(fold.get("test_result") or {})
+    noops: set[str] = set()
+    if (
+        "event_risk_base_throttle" in overlays
+        and _source_replay_result_event_count(test_result, "event_risk_base_reduced_adds") <= 0
+    ):
+        noops.add("event_risk_base_throttle")
+    return noops
+
+
+def _source_replay_effective_overlays(
+    overlays: list[str],
+    ignored_overlays: set[str],
+) -> list[str]:
+    return [overlay for overlay in overlays if overlay not in ignored_overlays]
+
+
+def _source_replay_effective_model_id(
+    model_id: str,
+    ignored_overlays: set[str],
+) -> str:
+    if not model_id or not ignored_overlays:
+        return model_id
+    ignored_prefixes: tuple[str, ...] = tuple(
+        prefix
+        for overlay in ignored_overlays
+        for prefix in _SOURCE_REPLAY_NOOP_OVERLAY_MODEL_PREFIXES.get(overlay, ())
+    )
+    if not ignored_prefixes:
+        return model_id
+    return ":".join(
+        part for part in model_id.split(":") if not part.startswith(ignored_prefixes)
+    )
+
+
+def _source_replay_fold_drift(
+    replay_fold: dict[str, Any],
+    source_fold: dict[str, Any],
+    *,
+    metric_tolerance_pct: float = 0.0001,
+    material_metric_tolerance_pct: float = 0.25,
+) -> dict[str, Any]:
+    replay_test = dict(replay_fold.get("test_result") or {})
+    source_test = dict(source_fold.get("test_result") or {})
+    replay_overlays = [str(item) for item in replay_fold.get("after_selection_overlays_applied") or []]
+    source_overlays = [str(item) for item in source_fold.get("after_selection_overlays_applied") or []]
+    replay_model_id = str(replay_fold.get("selected_model_id") or "")
+    source_model_id = str(source_fold.get("selected_model_id") or "")
+    ignored_noop_overlays = _source_replay_noop_overlays(replay_fold) | _source_replay_noop_overlays(
+        source_fold
+    )
+    effective_replay_overlays = _source_replay_effective_overlays(
+        replay_overlays,
+        ignored_noop_overlays,
+    )
+    effective_source_overlays = _source_replay_effective_overlays(
+        source_overlays,
+        ignored_noop_overlays,
+    )
+    effective_replay_model_id = _source_replay_effective_model_id(
+        replay_model_id,
+        ignored_noop_overlays,
+    )
+    effective_source_model_id = _source_replay_effective_model_id(
+        source_model_id,
+        ignored_noop_overlays,
+    )
+    return_delta = _source_replay_metric_delta(replay_test, source_test, "total_return_pct")
+    drawdown_delta = _source_replay_metric_delta(replay_test, source_test, "max_drawdown_pct")
+    cost_delta = _source_replay_metric_delta(replay_test, source_test, "estimated_cost_drag_pct")
+    replay_events = replay_test.get("trade_like_events")
+    source_events = source_test.get("trade_like_events")
+    event_delta = None
+    if replay_events is not None and source_events is not None:
+        event_delta = int(replay_events) - int(source_events)
+    reasons: list[str] = []
+    if effective_replay_model_id != effective_source_model_id:
+        reasons.append("model_id")
+    if effective_replay_overlays != effective_source_overlays:
+        reasons.append("overlays")
+    for reason, delta in (
+        ("return", return_delta),
+        ("drawdown", drawdown_delta),
+        ("cost", cost_delta),
+    ):
+        if delta is not None and abs(float(delta)) > metric_tolerance_pct:
+            reasons.append(reason)
+    if event_delta not in (None, 0):
+        reasons.append("trade_like_events")
+    material_reasons = [
+        reason
+        for reason, delta in (
+            ("return", return_delta),
+            ("drawdown", drawdown_delta),
+            ("cost", cost_delta),
+        )
+        if delta is not None and abs(float(delta)) >= material_metric_tolerance_pct
+    ]
+    accepted_risk_tradeoff = _source_replay_accepted_risk_tradeoff(
+        return_delta=return_delta,
+        drawdown_delta=drawdown_delta,
+        cost_delta=cost_delta,
+    )
+    drift_quality = _source_replay_drift_quality(
+        return_delta=return_delta,
+        drawdown_delta=drawdown_delta,
+        cost_delta=cost_delta,
+        material_reasons=material_reasons,
+    )
+    selected_model_match = effective_replay_model_id == effective_source_model_id
+    overlay_match = effective_replay_overlays == effective_source_overlays
+    lineage_status = _source_replay_lineage_status(
+        selected_model_match=selected_model_match,
+        overlay_match=overlay_match,
+        material_reasons=material_reasons,
+        drift_quality=drift_quality,
+    )
+    return {
+        "fold": int(replay_fold.get("fold") or 0),
+        "test_start": replay_fold.get("test_start_at") or replay_fold.get("test_start"),
+        "test_end": replay_fold.get("test_end_at") or replay_fold.get("test_end"),
+        "selected_model_id": replay_model_id,
+        "source_selected_model_id": source_model_id,
+        "effective_selected_model_id": effective_replay_model_id,
+        "effective_source_selected_model_id": effective_source_model_id,
+        "selected_model_match": selected_model_match,
+        "after_selection_overlays_applied": replay_overlays,
+        "source_after_selection_overlays_applied": source_overlays,
+        "effective_after_selection_overlays_applied": effective_replay_overlays,
+        "effective_source_after_selection_overlays_applied": effective_source_overlays,
+        "overlay_match": overlay_match,
+        "ignored_noop_overlays": sorted(ignored_noop_overlays),
+        "return_pct": _source_replay_result_metric(replay_test, "total_return_pct"),
+        "source_return_pct": _source_replay_result_metric(source_test, "total_return_pct"),
+        "return_delta_pct": return_delta,
+        "max_drawdown_pct": _source_replay_result_metric(replay_test, "max_drawdown_pct"),
+        "source_max_drawdown_pct": _source_replay_result_metric(source_test, "max_drawdown_pct"),
+        "drawdown_delta_pct": drawdown_delta,
+        "cost_drag_pct": _source_replay_result_metric(replay_test, "estimated_cost_drag_pct"),
+        "source_cost_drag_pct": _source_replay_result_metric(source_test, "estimated_cost_drag_pct"),
+        "cost_delta_pct": cost_delta,
+        "trade_like_events": int(replay_events) if replay_events is not None else None,
+        "source_trade_like_events": int(source_events) if source_events is not None else None,
+        "trade_like_events_delta": event_delta,
+        "mismatch_reasons": reasons,
+        "material_mismatch_reasons": material_reasons,
+        "accepted_risk_tradeoff": accepted_risk_tradeoff,
+        "drift_quality": drift_quality,
+        "lineage_status": lineage_status,
+    }
+
+
+def _source_replay_diagnostics(
+    source_report: dict[str, Any],
+    folds: list[dict[str, Any]],
+    *,
+    limit: int = 8,
+) -> dict[str, Any]:
+    source_folds = {
+        int(fold.get("fold") or 0): fold
+        for fold in source_report.get("folds") or []
+        if isinstance(fold, dict) and int(fold.get("fold") or 0) > 0
+    }
+    if not source_folds or not folds:
+        return {}
+    drifts: list[dict[str, Any]] = []
+    missing_source_folds: list[int] = []
+    for fold in folds:
+        fold_number = int(fold.get("fold") or 0)
+        source_fold = source_folds.get(fold_number)
+        if not source_fold:
+            missing_source_folds.append(fold_number)
+            continue
+        drifts.append(_source_replay_fold_drift(fold, source_fold))
+    if not drifts:
+        return {
+            "compared_fold_count": 0,
+            "missing_source_fold_count": len(missing_source_folds),
+            "missing_source_folds": missing_source_folds,
+            "folds": [],
+        }
+
+    def non_null_values(name: str) -> list[float]:
+        return [float(item[name]) for item in drifts if item.get(name) is not None]
+
+    return_deltas = non_null_values("return_delta_pct")
+    drawdown_deltas = non_null_values("drawdown_delta_pct")
+    cost_deltas = non_null_values("cost_delta_pct")
+    event_deltas = [
+        int(item["trade_like_events_delta"])
+        for item in drifts
+        if item.get("trade_like_events_delta") is not None
+    ]
+    model_mismatches = [item for item in drifts if not bool(item.get("selected_model_match"))]
+    overlay_mismatches = [item for item in drifts if not bool(item.get("overlay_match"))]
+    metric_mismatches = [item for item in drifts if item.get("mismatch_reasons")]
+    material_mismatches = [item for item in drifts if item.get("material_mismatch_reasons")]
+    accepted_risk_tradeoffs = [
+        item for item in material_mismatches if bool(item.get("accepted_risk_tradeoff"))
+    ]
+    unresolved_material_mismatches = [
+        item for item in material_mismatches if not bool(item.get("accepted_risk_tradeoff"))
+    ]
+    immaterial_model_mismatches = [
+        item
+        for item in model_mismatches
+        if str(item.get("lineage_status") or "")
+        in {"immaterial_model_id_variant", "immaterial_overlay_variant"}
+    ]
+    accepted_model_mismatches = [
+        item
+        for item in model_mismatches
+        if str(item.get("lineage_status") or "") == "accepted_risk_reduction"
+    ]
+    beneficial_model_mismatches = [
+        item for item in model_mismatches if str(item.get("lineage_status") or "") == "return_improving"
+    ]
+    unresolved_model_mismatches = [
+        item
+        for item in model_mismatches
+        if str(item.get("lineage_status") or "").startswith("unresolved_")
+    ]
+
+    def largest_by_abs(name: str) -> list[dict[str, Any]]:
+        return sorted(
+            drifts,
+            key=lambda item: (-abs(float(item.get(name) or 0.0)), int(item.get("fold") or 0)),
+        )[:limit]
+
+    return {
+        "compared_fold_count": len(drifts),
+        "missing_source_fold_count": len(missing_source_folds),
+        "missing_source_folds": missing_source_folds,
+        "selected_model_match_count": len(drifts) - len(model_mismatches),
+        "selected_model_mismatch_count": len(model_mismatches),
+        "selected_model_immaterial_mismatch_count": len(immaterial_model_mismatches),
+        "selected_model_accepted_risk_tradeoff_count": len(accepted_model_mismatches),
+        "selected_model_beneficial_mismatch_count": len(beneficial_model_mismatches),
+        "selected_model_unresolved_mismatch_count": len(unresolved_model_mismatches),
+        "overlay_match_count": len(drifts) - len(overlay_mismatches),
+        "overlay_mismatch_count": len(overlay_mismatches),
+        "metric_mismatch_count": len(metric_mismatches),
+        "material_metric_mismatch_count": len(material_mismatches),
+        "accepted_risk_tradeoff_count": len(accepted_risk_tradeoffs),
+        "unresolved_material_metric_mismatch_count": len(unresolved_material_mismatches),
+        "avg_return_delta_pct": round(mean(return_deltas), 4) if return_deltas else 0.0,
+        "max_abs_return_delta_pct": (
+            round(max(abs(value) for value in return_deltas), 4) if return_deltas else 0.0
+        ),
+        "avg_drawdown_delta_pct": round(mean(drawdown_deltas), 4) if drawdown_deltas else 0.0,
+        "max_abs_drawdown_delta_pct": (
+            round(max(abs(value) for value in drawdown_deltas), 4) if drawdown_deltas else 0.0
+        ),
+        "avg_cost_delta_pct": round(mean(cost_deltas), 4) if cost_deltas else 0.0,
+        "max_abs_cost_delta_pct": (
+            round(max(abs(value) for value in cost_deltas), 4) if cost_deltas else 0.0
+        ),
+        "total_cost_delta_pct": round(sum(cost_deltas), 4) if cost_deltas else 0.0,
+        "total_trade_like_events_delta": sum(event_deltas) if event_deltas else 0,
+        "mismatch_reason_counts": _counter_payload(
+            Counter(reason for item in drifts for reason in item.get("mismatch_reasons") or [])
+        ),
+        "material_mismatch_reason_counts": _counter_payload(
+            Counter(reason for item in drifts for reason in item.get("material_mismatch_reasons") or [])
+        ),
+        "drift_quality_counts": _counter_payload(
+            Counter(str(item.get("drift_quality") or "unknown") for item in drifts)
+        ),
+        "lineage_status_counts": _counter_payload(
+            Counter(str(item.get("lineage_status") or "unknown") for item in drifts)
+        ),
+        "model_mismatch_status_counts": _counter_payload(
+            Counter(str(item.get("lineage_status") or "unknown") for item in model_mismatches)
+        ),
+        "largest_return_drift_folds": largest_by_abs("return_delta_pct"),
+        "largest_drawdown_drift_folds": largest_by_abs("drawdown_delta_pct"),
+        "largest_cost_drift_folds": largest_by_abs("cost_delta_pct"),
+        "accepted_risk_tradeoff_folds": accepted_risk_tradeoffs[:limit],
+        "unresolved_material_mismatch_folds": unresolved_material_mismatches[:limit],
+        "immaterial_model_mismatch_folds": immaterial_model_mismatches[:limit],
+        "accepted_model_mismatch_folds": accepted_model_mismatches[:limit],
+        "beneficial_model_mismatch_folds": beneficial_model_mismatches[:limit],
+        "unresolved_model_mismatch_folds": unresolved_model_mismatches[:limit],
+        "model_mismatch_folds": model_mismatches[:limit],
+        "overlay_mismatch_folds": overlay_mismatches[:limit],
+        "folds": drifts,
+    }
+
+
+def _source_replay_lineage_guard(
+    diagnostics: dict[str, Any],
+    *,
+    fail_on_unresolved_material: bool,
+) -> dict[str, Any]:
+    if not diagnostics:
+        return {
+            "status": "not_applicable",
+            "failed": False,
+            "fail_on_unresolved_material": bool(fail_on_unresolved_material),
+            "message": "No source replay diagnostics were available.",
+        }
+    unresolved_material = int(diagnostics.get("unresolved_material_metric_mismatch_count") or 0)
+    unresolved_model = int(diagnostics.get("selected_model_unresolved_mismatch_count") or 0)
+    compared = int(diagnostics.get("compared_fold_count") or 0)
+    unresolved_material_folds = [
+        int(item.get("fold") or 0)
+        for item in list(diagnostics.get("unresolved_material_mismatch_folds") or [])
+        if isinstance(item, dict) and int(item.get("fold") or 0) > 0
+    ]
+    failed = bool(fail_on_unresolved_material and unresolved_material > 0)
+    status = "fail" if failed else ("watch" if unresolved_material > 0 else "pass")
+    if failed:
+        message = (
+            "Source replay lineage guard failed: unresolved material drift exists "
+            f"({unresolved_material}/{compared} compared folds; "
+            f"model_unresolved={unresolved_model}; folds={unresolved_material_folds})."
+        )
+    elif unresolved_material > 0:
+        message = (
+            "Source replay lineage guard is in watch mode: unresolved material drift exists "
+            f"({unresolved_material}/{compared} compared folds; "
+            f"model_unresolved={unresolved_model}; folds={unresolved_material_folds})."
+        )
+    else:
+        message = (
+            "Source replay lineage guard passed: no unresolved material drift was detected "
+            f"across {compared} compared folds."
+        )
+    return {
+        "status": status,
+        "failed": failed,
+        "fail_on_unresolved_material": bool(fail_on_unresolved_material),
+        "compared_fold_count": compared,
+        "unresolved_material_metric_mismatch_count": unresolved_material,
+        "selected_model_unresolved_mismatch_count": unresolved_model,
+        "unresolved_material_folds": unresolved_material_folds,
+        "message": message,
+    }
+
+
 def _aggregate_folds(folds: list[dict[str, Any]]) -> dict[str, Any]:
     tests = [fold["test_result"] for fold in folds if fold.get("test_result")]
     if not tests:
@@ -5754,6 +8489,18 @@ def _aggregate_folds(folds: list[dict[str, Any]]) -> dict[str, Any]:
     battle_add_counts: list[int] = []
     add_side_counter: Counter[str] = Counter()
     add_role_counter: Counter[str] = Counter()
+    cost_by_action_counter: Counter[str] = Counter()
+    cost_by_side_counter: Counter[str] = Counter()
+    cost_by_role_counter: Counter[str] = Counter()
+    cost_by_reason_counter: Counter[str] = Counter()
+    cost_by_action_reason_counter: Counter[str] = Counter()
+    high_drawdown_recovery_hours: list[float] = []
+    all_drawdown_recovery_hours: list[float] = []
+    recovered_drawdown_count = 0
+    high_drawdown_recovered_count = 0
+    high_drawdown_slow_recovery_count = 0
+    high_drawdown_unrecovered_count = 0
+    drawdown_recovery_rows: list[dict[str, Any]] = []
     flag_totals: dict[str, dict[str, Any]] = {}
     regime_totals: dict[str, dict[str, Any]] = {}
     selected_reaction_usd_totals: dict[str, dict[str, Any]] = {}
@@ -5804,6 +8551,47 @@ def _aggregate_folds(folds: list[dict[str, Any]]) -> dict[str, Any]:
         add_role_counter.update(
             {str(key): int(value) for key, value in dict(diagnostics.get("add_by_role") or {}).items()}
         )
+        cost_diagnostics = dict(result.get("cost_diagnostics") or {})
+        for key, value in dict(cost_diagnostics.get("by_action_pct") or {}).items():
+            cost_by_action_counter[str(key)] += float(value or 0.0)
+        for key, value in dict(cost_diagnostics.get("by_side_pct") or {}).items():
+            cost_by_side_counter[str(key)] += float(value or 0.0)
+        for key, value in dict(cost_diagnostics.get("by_role_pct") or {}).items():
+            cost_by_role_counter[str(key)] += float(value or 0.0)
+        for key, value in dict(cost_diagnostics.get("by_reason_pct") or {}).items():
+            cost_by_reason_counter[str(key)] += float(value or 0.0)
+        for key, value in dict(cost_diagnostics.get("by_action_reason_pct") or {}).items():
+            cost_by_action_reason_counter[str(key)] += float(value or 0.0)
+        drawdown_detail = dict(result.get("max_drawdown_detail") or {})
+        recovered_peak = bool(drawdown_detail.get("recovered_peak"))
+        if recovered_peak:
+            recovered_drawdown_count += 1
+        recovery_hours_raw = drawdown_detail.get("trough_to_recovery_hours")
+        recovery_hours = float(recovery_hours_raw) if recovery_hours_raw is not None else None
+        if recovery_hours is not None:
+            all_drawdown_recovery_hours.append(recovery_hours)
+        if fold_drawdown >= 10.0:
+            if recovered_peak:
+                high_drawdown_recovered_count += 1
+            else:
+                high_drawdown_unrecovered_count += 1
+            if recovery_hours is not None:
+                high_drawdown_recovery_hours.append(recovery_hours)
+                if recovery_hours >= 168.0:
+                    high_drawdown_slow_recovery_count += 1
+            drawdown_recovery_rows.append(
+                {
+                    "fold": int(fold.get("fold") or 0),
+                    "return_pct": round(fold_return, 4),
+                    "drawdown_pct": round(fold_drawdown, 4),
+                    "peak_ts": drawdown_detail.get("peak_ts"),
+                    "trough_ts": drawdown_detail.get("trough_ts"),
+                    "trough_side": drawdown_detail.get("trough_side"),
+                    "trough_regime": drawdown_detail.get("trough_regime"),
+                    "recovered_peak": recovered_peak,
+                    "recovery_hours": round(recovery_hours, 4) if recovery_hours is not None else None,
+                }
+            )
         test_health_counter[str(diagnostics.get("health") or "unknown")] += 1
         risk_brief = _fold_risk_brief(fold)
         risk_tags = _fold_risk_tags(
@@ -5998,6 +8786,37 @@ def _aggregate_folds(folds: list[dict[str, Any]]) -> dict[str, Any]:
             "dominant_add_role": str(dominant_add_role),
             "dominant_add_role_share": round(dominant_add_role_share, 4),
         },
+        "test_cost_attribution": {
+            "total_modeled_trade_cost_pct": round(
+                sum(float(value) for value in cost_by_action_counter.values()),
+                4,
+            ),
+            "by_action_pct": _top_float_payload(cost_by_action_counter),
+            "by_side_pct": _top_float_payload(cost_by_side_counter),
+            "by_role_pct": _top_float_payload(cost_by_role_counter),
+            "by_reason_pct": _top_float_payload(cost_by_reason_counter),
+            "by_action_reason_pct": _top_float_payload(cost_by_action_reason_counter),
+        },
+        "drawdown_recovery_diagnostics": {
+            "recovered_drawdown_count": int(recovered_drawdown_count),
+            "high_drawdown_count": int(len(drawdown_recovery_rows)),
+            "high_drawdown_recovered_count": int(high_drawdown_recovered_count),
+            "high_drawdown_unrecovered_count": int(high_drawdown_unrecovered_count),
+            "high_drawdown_slow_recovery_count": int(high_drawdown_slow_recovery_count),
+            "avg_drawdown_recovery_hours": (
+                round(mean(all_drawdown_recovery_hours), 4) if all_drawdown_recovery_hours else None
+            ),
+            "avg_high_drawdown_recovery_hours": (
+                round(mean(high_drawdown_recovery_hours), 4) if high_drawdown_recovery_hours else None
+            ),
+            "max_high_drawdown_recovery_hours": (
+                round(max(high_drawdown_recovery_hours), 4) if high_drawdown_recovery_hours else None
+            ),
+            "high_drawdown_folds": sorted(
+                drawdown_recovery_rows,
+                key=lambda item: (-float(item.get("drawdown_pct") or 0.0), int(item.get("fold") or 0)),
+            ),
+        },
         "unique_selected_model_count": len(selected_counter),
         "selected_model_counts": _counter_payload(selected_counter),
         "selected_profile_counts": _counter_payload(selected_profile_counter),
@@ -6035,6 +8854,7 @@ def _aggregate_folds(folds: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "top_train_candidate_audit": _aggregate_top_train_candidate_audit(folds),
         "top_train_candidate_overlay_audit": _aggregate_top_train_candidate_overlay_audit(folds),
+        "improvement_backlog_diagnostics": _aggregate_improvement_backlog_diagnostics(folds),
         "regime_drift_diagnostics": _aggregate_regime_drift_diagnostics(folds),
         "weak_fold_diagnostics": _aggregate_weak_fold_diagnostics(folds),
     }
@@ -6055,11 +8875,18 @@ def _write_markdown(report: dict[str, Any], path: Path) -> None:
     selected_risk_shape_performance = dict(
         aggregate.get("selected_risk_shape_performance") or {}
     )
+    test_cost_attribution = dict(aggregate.get("test_cost_attribution") or {})
+    drawdown_recovery_diagnostics = dict(
+        aggregate.get("drawdown_recovery_diagnostics") or {}
+    )
     top_candidate_audit = dict(aggregate.get("top_train_candidate_audit") or {})
     top_candidate_overlay_audit = dict(
         aggregate.get("top_train_candidate_overlay_audit") or {}
     )
+    improvement_backlog = dict(aggregate.get("improvement_backlog_diagnostics") or {})
     regime_drift_diagnostics = dict(aggregate.get("regime_drift_diagnostics") or {})
+    source_replay_diagnostics = dict(report.get("source_replay_diagnostics") or {})
+    source_replay_lineage_guard = dict(report.get("source_replay_lineage_guard") or {})
 
     def top_counter_items(payload: dict[str, Any], limit: int = 20) -> dict[str, int]:
         items = sorted(
@@ -6140,6 +8967,45 @@ def _write_markdown(report: dict[str, Any], path: Path) -> None:
                 f"`{item.get('test_dominant_regime')}:{item.get('test_dominant_share')}` | "
                 f"`{item.get('largest_shift_regime')}:{item.get('largest_shift')}` | "
                 f"`{dependency.get('dominant_regime')}:{dependency.get('dominant_regime_return_share')}` |"
+            )
+        return rows
+
+    def cost_attribution_rows(section: str, payload: dict[str, Any]) -> list[str]:
+        rows = [
+            f"| {section} | modeled cost % |",
+            "|---|---:|",
+        ]
+        for key, value in dict(payload or {}).items():
+            rows.append(f"| `{key}` | {value} |")
+        return rows
+
+    def drawdown_recovery_rows(items: list[dict[str, Any]]) -> list[str]:
+        rows = [
+            "| fold | return % | max DD % | peak | trough | recovered | recovery hours | trough regime | trough side |",
+            "|---:|---:|---:|---|---|---:|---:|---|---|",
+        ]
+        for item in items:
+            rows.append(
+                f"| {item.get('fold')} | {item.get('return_pct')} | {item.get('drawdown_pct')} | "
+                f"{item.get('peak_ts') or ''} | {item.get('trough_ts') or ''} | "
+                f"{item.get('recovered_peak')} | {item.get('recovery_hours')} | "
+                f"`{item.get('trough_regime') or ''}` | `{item.get('trough_side') or ''}` |"
+            )
+        return rows
+
+    def source_replay_drift_rows(items: list[dict[str, Any]]) -> list[str]:
+        rows = [
+            "| fold | return delta % | DD delta % | cost delta % | event delta | model match | overlay match | accepted | quality | lineage status | reasons |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
+        ]
+        for item in items:
+            reasons = ",".join(str(reason) for reason in item.get("mismatch_reasons") or []) or "none"
+            rows.append(
+                f"| {item.get('fold')} | {item.get('return_delta_pct')} | "
+                f"{item.get('drawdown_delta_pct')} | {item.get('cost_delta_pct')} | "
+                f"{item.get('trade_like_events_delta')} | {item.get('selected_model_match')} | "
+                f"{item.get('overlay_match')} | {item.get('accepted_risk_tradeoff')} | "
+                f"`{item.get('drift_quality')}` | `{item.get('lineage_status')}` | `{reasons}` |"
             )
         return rows
 
@@ -6227,6 +9093,22 @@ def _write_markdown(report: dict[str, Any], path: Path) -> None:
             "- OOS add distribution diagnostics: "
             f"`{json.dumps(aggregate.get('test_add_distribution_diagnostics', {}), ensure_ascii=False)}`"
         ),
+        (
+            "- OOS modeled cost attribution: "
+            f"`total={test_cost_attribution.get('total_modeled_trade_cost_pct', 0)}%, "
+            f"by_role={json.dumps(test_cost_attribution.get('by_role_pct', {}), ensure_ascii=False)}, "
+            f"by_reason={json.dumps(test_cost_attribution.get('by_reason_pct', {}), ensure_ascii=False)}`"
+        ),
+        (
+            "- OOS drawdown recovery: "
+            f"`recovered={drawdown_recovery_diagnostics.get('recovered_drawdown_count', 0)}, "
+            f"high_dd={drawdown_recovery_diagnostics.get('high_drawdown_count', 0)}, "
+            f"high_dd_recovered={drawdown_recovery_diagnostics.get('high_drawdown_recovered_count', 0)}, "
+            f"high_dd_unrecovered={drawdown_recovery_diagnostics.get('high_drawdown_unrecovered_count', 0)}, "
+            f"high_dd_slow={drawdown_recovery_diagnostics.get('high_drawdown_slow_recovery_count', 0)}, "
+            f"avg_high_recovery_h={drawdown_recovery_diagnostics.get('avg_high_drawdown_recovery_hours')}, "
+            f"max_high_recovery_h={drawdown_recovery_diagnostics.get('max_high_drawdown_recovery_hours')}`"
+        ),
         f"- Unique selected models: `{aggregate.get('unique_selected_model_count')}`",
         f"- Selected profile counts: `{json.dumps(aggregate.get('selected_profile_counts', {}), ensure_ascii=False)}`",
         f"- Selected hold counts: `{json.dumps(aggregate.get('selected_hold_counts', {}), ensure_ascii=False)}`",
@@ -6286,6 +9168,9 @@ def _write_markdown(report: dict[str, Any], path: Path) -> None:
             f"high_cost={dict(aggregate.get('weak_fold_diagnostics') or {}).get('high_cost_count', 0)}, "
             f"role_concentration={dict(aggregate.get('weak_fold_diagnostics') or {}).get('role_concentration_count', 0)}, "
             f"base_dominance={dict(aggregate.get('weak_fold_diagnostics') or {}).get('base_dominance_count', 0)}, "
+            f"no_scale={dict(aggregate.get('weak_fold_diagnostics') or {}).get('no_scale_in_capacity_count', 0)}, "
+            f"single_unit={dict(aggregate.get('weak_fold_diagnostics') or {}).get('single_unit_full_entry_count', 0)}, "
+            f"battle_capacity={dict(aggregate.get('weak_fold_diagnostics') or {}).get('battle_capacity_saturated_count', 0)}, "
             f"confirmation_warnings={dict(aggregate.get('weak_fold_diagnostics') or {}).get('confirmation_warning_count', 0)}`"
         ),
         (
@@ -6301,16 +9186,134 @@ def _write_markdown(report: dict[str, Any], path: Path) -> None:
             f"records={sum(int(dict(stats or {}).get('candidate_count') or 0) for stats in top_candidate_overlay_audit.values())}`"
         ),
         (
+            "- Improvement backlog: "
+            f"`next={improvement_backlog.get('next_step', 'none')}, "
+            f"selection_miss={improvement_backlog.get('clean_selection_miss_count', 0)}, "
+            f"candidate_ceiling={improvement_backlog.get('low_return_candidate_ceiling_count', 0)}, "
+            f"risk_compression={improvement_backlog.get('risk_compression_tradeoff_count', 0)}, "
+            f"cost_compression={improvement_backlog.get('cost_compression_tradeoff_count', 0)}`"
+        ),
+        (
             "- Regime drift diagnostics: "
             f"`avg_drift={regime_drift_diagnostics.get('avg_regime_share_drift', 0)}, "
             f"max_drift={regime_drift_diagnostics.get('max_regime_share_drift', 0)}, "
             f"high_drift={regime_drift_diagnostics.get('high_drift_count', 0)}, "
             f"high_dependency={regime_drift_diagnostics.get('high_dependency_count', 0)}`"
         ),
+        (
+            "- Source replay drift: "
+            f"`compared={source_replay_diagnostics.get('compared_fold_count', 0)}, "
+            f"model_mismatch={source_replay_diagnostics.get('selected_model_mismatch_count', 0)}, "
+            f"model_unresolved={source_replay_diagnostics.get('selected_model_unresolved_mismatch_count', 0)}, "
+            f"model_immaterial={source_replay_diagnostics.get('selected_model_immaterial_mismatch_count', 0)}, "
+            f"model_accepted={source_replay_diagnostics.get('selected_model_accepted_risk_tradeoff_count', 0)}, "
+            f"overlay_mismatch={source_replay_diagnostics.get('overlay_mismatch_count', 0)}, "
+            f"material_metric_mismatch={source_replay_diagnostics.get('material_metric_mismatch_count', 0)}, "
+            f"accepted_risk_tradeoff={source_replay_diagnostics.get('accepted_risk_tradeoff_count', 0)}, "
+            f"unresolved_material={source_replay_diagnostics.get('unresolved_material_metric_mismatch_count', 0)}, "
+            f"max_abs_return_delta={source_replay_diagnostics.get('max_abs_return_delta_pct', 0)}%, "
+            f"max_abs_dd_delta={source_replay_diagnostics.get('max_abs_drawdown_delta_pct', 0)}%`"
+        ),
+        (
+            "- Source replay guard: "
+            f"`status={source_replay_lineage_guard.get('status', 'not_applicable')}, "
+            f"strict={source_replay_lineage_guard.get('fail_on_unresolved_material', False)}, "
+            f"unresolved_material="
+            f"{source_replay_lineage_guard.get('unresolved_material_metric_mismatch_count', 0)}, "
+            f"model_unresolved="
+            f"{source_replay_lineage_guard.get('selected_model_unresolved_mismatch_count', 0)}, "
+            f"folds={source_replay_lineage_guard.get('unresolved_material_folds', [])}`"
+        ),
         "",
-        "## After-Selection Confirmation",
+        "## Source Replay Drift",
         "",
     ]
+    if source_replay_diagnostics:
+        lines.extend(
+            [
+                (
+                    "- Guard: "
+                    f"`status={source_replay_lineage_guard.get('status', 'not_applicable')}, "
+                    f"strict={source_replay_lineage_guard.get('fail_on_unresolved_material', False)}, "
+                    f"message={source_replay_lineage_guard.get('message', '')}`"
+                ),
+                (
+                    "- Summary: "
+                    f"`avg_return_delta={source_replay_diagnostics.get('avg_return_delta_pct')}%, "
+                    f"avg_dd_delta={source_replay_diagnostics.get('avg_drawdown_delta_pct')}%, "
+                    f"avg_cost_delta={source_replay_diagnostics.get('avg_cost_delta_pct')}%, "
+                    f"total_cost_delta={source_replay_diagnostics.get('total_cost_delta_pct')}%, "
+                    f"event_delta={source_replay_diagnostics.get('total_trade_like_events_delta')}`"
+                ),
+                (
+                    "- Mismatch reasons: "
+                    f"`{json.dumps(source_replay_diagnostics.get('mismatch_reason_counts', {}), ensure_ascii=False)}`"
+                ),
+                (
+                    "- Drift quality: "
+                    f"`{json.dumps(source_replay_diagnostics.get('drift_quality_counts', {}), ensure_ascii=False)}`"
+                ),
+                (
+                    "- Lineage status: "
+                    f"`{json.dumps(source_replay_diagnostics.get('lineage_status_counts', {}), ensure_ascii=False)}`"
+                ),
+                (
+                    "- Model mismatch status: "
+                    f"`{json.dumps(source_replay_diagnostics.get('model_mismatch_status_counts', {}), ensure_ascii=False)}`"
+                ),
+                "",
+                "### Largest Return Drift Folds",
+                "",
+            ]
+        )
+        lines.extend(
+            source_replay_drift_rows(
+                list(source_replay_diagnostics.get("largest_return_drift_folds") or [])
+            )
+        )
+        lines.extend(["", "### Largest Drawdown Drift Folds", ""])
+        lines.extend(
+            source_replay_drift_rows(
+                list(source_replay_diagnostics.get("largest_drawdown_drift_folds") or [])
+            )
+        )
+        if source_replay_diagnostics.get("accepted_risk_tradeoff_folds"):
+            lines.extend(["", "### Accepted Risk Tradeoff Folds", ""])
+            lines.extend(
+                source_replay_drift_rows(
+                    list(source_replay_diagnostics.get("accepted_risk_tradeoff_folds") or [])
+                )
+            )
+        if source_replay_diagnostics.get("unresolved_model_mismatch_folds"):
+            lines.extend(["", "### Unresolved Model Drift Folds", ""])
+            lines.extend(
+                source_replay_drift_rows(
+                    list(source_replay_diagnostics.get("unresolved_model_mismatch_folds") or [])
+                )
+            )
+        if source_replay_diagnostics.get("immaterial_model_mismatch_folds"):
+            lines.extend(["", "### Immaterial Model Mismatch Folds", ""])
+            lines.extend(
+                source_replay_drift_rows(
+                    list(source_replay_diagnostics.get("immaterial_model_mismatch_folds") or [])
+                )
+            )
+        if source_replay_diagnostics.get("unresolved_material_mismatch_folds"):
+            lines.extend(["", "### Unresolved Material Drift Folds", ""])
+            lines.extend(
+                source_replay_drift_rows(
+                    list(source_replay_diagnostics.get("unresolved_material_mismatch_folds") or [])
+                )
+            )
+        lines.append("")
+    else:
+        lines.extend(["No source replay drift diagnostics.", ""])
+    lines.extend(
+        [
+            "## After-Selection Confirmation",
+            "",
+        ]
+    )
     if after_selection_confirmation:
         lines.extend(
             [
@@ -6484,6 +9487,80 @@ def _write_markdown(report: dict[str, Any], path: Path) -> None:
         lines.append("")
     else:
         lines.extend(["No top-train candidate audit records.", ""])
+    lines.extend(["## Improvement Backlog Diagnostics", ""])
+    if improvement_backlog:
+        lines.extend(
+            [
+                (
+                    "- Summary: "
+                    f"`audited={improvement_backlog.get('audited_fold_count')}, "
+                    f"next={improvement_backlog.get('next_step')}, "
+                    f"clean_selection_miss={improvement_backlog.get('clean_selection_miss_count')}, "
+                    f"risky_or_marginal_oracle={improvement_backlog.get('risky_or_marginal_oracle_miss_count')}, "
+                    f"candidate_ceiling={improvement_backlog.get('low_return_candidate_ceiling_count')}, "
+                    f"risk_compression={improvement_backlog.get('risk_compression_tradeoff_count')}, "
+                    f"cost_compression={improvement_backlog.get('cost_compression_tradeoff_count')}`"
+                ),
+                (
+                    "- Thresholds: "
+                    f"`{json.dumps(improvement_backlog.get('thresholds', {}), ensure_ascii=False)}`"
+                ),
+                "",
+            ]
+        )
+
+        def backlog_rows(items: list[dict[str, Any]], *, include_tradeoff: bool = False) -> list[str]:
+            rows = [
+                "| fold | test | selected return % | selected DD % | selected cost % | best/upside % | best rank | diagnosis | tradeoff |",
+                "|---:|---|---:|---:|---:|---:|---:|---|---|",
+            ]
+            for item in items:
+                best = dict(item.get("best_candidate") or {})
+                tradeoff = ""
+                if include_tradeoff:
+                    candidate = dict(item.get("tradeoff_candidate") or {})
+                    tradeoff = (
+                        f"rank={candidate.get('rank')}, "
+                        f"giveback={item.get('return_giveback_pct')}%, "
+                        f"dd_reduction={item.get('drawdown_reduction_pct')}%, "
+                        f"cost_reduction={item.get('cost_reduction_pct')}%"
+                    )
+                rows.append(
+                    f"| {item.get('fold')} | {item.get('test_start')} to {item.get('test_end')} | "
+                    f"{item.get('selected_return_pct')} | {item.get('selected_max_drawdown_pct')} | "
+                    f"{item.get('selected_cost_drag_pct')} | "
+                    f"{best.get('test_return_pct')}/{item.get('best_return_upside_pct')} | "
+                    f"{best.get('rank')} | `{item.get('diagnosis')}` | `{tradeoff or 'none'}` |"
+                )
+            return rows
+
+        ceiling_folds = list(improvement_backlog.get("low_return_candidate_ceiling_folds") or [])
+        if ceiling_folds:
+            lines.extend(["### Low-Return Candidate Ceiling Folds", ""])
+            lines.extend(backlog_rows(ceiling_folds))
+            lines.append("")
+        selection_folds = list(improvement_backlog.get("clean_selection_miss_folds") or [])
+        if selection_folds:
+            lines.extend(["### Clean Selection Miss Folds", ""])
+            lines.extend(backlog_rows(selection_folds))
+            lines.append("")
+        marginal_folds = list(improvement_backlog.get("risky_or_marginal_oracle_miss_folds") or [])
+        if marginal_folds:
+            lines.extend(["### Risky Or Marginal Oracle Folds", ""])
+            lines.extend(backlog_rows(marginal_folds))
+            lines.append("")
+        risk_folds = list(improvement_backlog.get("risk_compression_tradeoff_folds") or [])
+        if risk_folds:
+            lines.extend(["### Risk Compression Tradeoff Folds", ""])
+            lines.extend(backlog_rows(risk_folds, include_tradeoff=True))
+            lines.append("")
+        cost_folds = list(improvement_backlog.get("cost_compression_tradeoff_folds") or [])
+        if cost_folds:
+            lines.extend(["### Cost Compression Tradeoff Folds", ""])
+            lines.extend(backlog_rows(cost_folds, include_tradeoff=True))
+            lines.append("")
+    else:
+        lines.extend(["No improvement backlog diagnostics.", ""])
     lines.extend(["## Top-Train Candidate Overlay Audit", ""])
     if top_candidate_overlay_audit:
         lines.extend(
@@ -6544,6 +9621,62 @@ def _write_markdown(report: dict[str, Any], path: Path) -> None:
         lines.append("")
     else:
         lines.extend(["No regime drift diagnostics.", ""])
+    lines.extend(["## OOS Cost Attribution", ""])
+    if test_cost_attribution and test_cost_attribution.get("total_modeled_trade_cost_pct"):
+        lines.extend(
+            [
+                (
+                    "- Total modeled trade cost: "
+                    f"`{test_cost_attribution.get('total_modeled_trade_cost_pct')}%`"
+                ),
+                "",
+                "### By Action",
+                "",
+            ]
+        )
+        lines.extend(cost_attribution_rows("action", dict(test_cost_attribution.get("by_action_pct") or {})))
+        lines.extend(["", "### By Side", ""])
+        lines.extend(cost_attribution_rows("side", dict(test_cost_attribution.get("by_side_pct") or {})))
+        lines.extend(["", "### By Role", ""])
+        lines.extend(cost_attribution_rows("role", dict(test_cost_attribution.get("by_role_pct") or {})))
+        lines.extend(["", "### By Reason", ""])
+        lines.extend(cost_attribution_rows("reason", dict(test_cost_attribution.get("by_reason_pct") or {})))
+        lines.extend(["", "### By Action/Reason", ""])
+        lines.extend(
+            cost_attribution_rows(
+                "action/reason",
+                dict(test_cost_attribution.get("by_action_reason_pct") or {}),
+            )
+        )
+        lines.append("")
+    else:
+        lines.extend(["No modeled cost attribution records.", ""])
+    lines.extend(["## Drawdown Recovery Diagnostics", ""])
+    if drawdown_recovery_diagnostics:
+        lines.extend(
+            [
+                (
+                    "- Summary: "
+                    f"`recovered={drawdown_recovery_diagnostics.get('recovered_drawdown_count')}, "
+                    f"high_dd={drawdown_recovery_diagnostics.get('high_drawdown_count')}, "
+                    f"high_dd_recovered={drawdown_recovery_diagnostics.get('high_drawdown_recovered_count')}, "
+                    f"high_dd_unrecovered={drawdown_recovery_diagnostics.get('high_drawdown_unrecovered_count')}, "
+                    f"high_dd_slow={drawdown_recovery_diagnostics.get('high_drawdown_slow_recovery_count')}, "
+                    f"avg_recovery_h={drawdown_recovery_diagnostics.get('avg_drawdown_recovery_hours')}, "
+                    f"avg_high_recovery_h={drawdown_recovery_diagnostics.get('avg_high_drawdown_recovery_hours')}, "
+                    f"max_high_recovery_h={drawdown_recovery_diagnostics.get('max_high_drawdown_recovery_hours')}`"
+                ),
+                "",
+            ]
+        )
+        high_drawdown_folds = list(drawdown_recovery_diagnostics.get("high_drawdown_folds") or [])
+        if high_drawdown_folds:
+            lines.extend(drawdown_recovery_rows(high_drawdown_folds))
+            lines.append("")
+        else:
+            lines.extend(["No high-drawdown fold records.", ""])
+    else:
+        lines.extend(["No drawdown recovery records.", ""])
     weak_fold_diagnostics = dict(aggregate.get("weak_fold_diagnostics") or {})
     lines.extend(["## Weak Fold Diagnostics", ""])
     if weak_fold_diagnostics:
@@ -6565,6 +9698,9 @@ def _write_markdown(report: dict[str, Any], path: Path) -> None:
                     f"high_overlay={weak_fold_diagnostics.get('high_overlay_count')}, "
                     f"role_concentration={weak_fold_diagnostics.get('role_concentration_count')}, "
                     f"base_dominance={weak_fold_diagnostics.get('base_dominance_count')}, "
+                    f"no_scale={weak_fold_diagnostics.get('no_scale_in_capacity_count')}, "
+                    f"single_unit={weak_fold_diagnostics.get('single_unit_full_entry_count')}, "
+                    f"battle_capacity={weak_fold_diagnostics.get('battle_capacity_saturated_count')}, "
                     f"low_activity={weak_fold_diagnostics.get('low_activity_count')}, "
                     f"soft_circuit_dominated={weak_fold_diagnostics.get('soft_circuit_dominated_count')}, "
                     f"confirmation_warnings={weak_fold_diagnostics.get('confirmation_warning_count')}`"
@@ -6576,6 +9712,10 @@ def _write_markdown(report: dict[str, Any], path: Path) -> None:
                 (
                     "- Risk tags: "
                     f"`{json.dumps(weak_fold_diagnostics.get('risk_tag_counts', {}), ensure_ascii=False)}`"
+                ),
+                (
+                    "- Capacity statuses: "
+                    f"`{json.dumps(weak_fold_diagnostics.get('capacity_status_counts', {}), ensure_ascii=False)}`"
                 ),
                 "",
                 "### Lowest Return Folds",
@@ -6664,6 +9804,24 @@ def main() -> None:
     source_path = Path(args.source_report)
     source_report = json.loads(source_path.read_text())
     source_args = dict(source_report.get("args") or {})
+    source_config_overrides = dict(source_report.get("config_overrides") or {})
+    inherited_source_replay_fields = _inherit_source_replay_selection_policy(
+        args,
+        source_config_overrides,
+    )
+    inherited_source_replay_window_fields = _inherit_source_replay_window_policy(
+        args,
+        source_report,
+    )
+    stabilized_source_replay_ratio_gate_fields = _stabilize_source_replay_ratio_gates(
+        args,
+        inherited_source_replay_fields,
+        source_report=source_report,
+    )
+    inherited_source_replay_model_encoded_fields = _inherit_source_replay_model_encoded_policy(
+        args,
+        source_report,
+    )
     symbol = args.symbol or str(source_args.get("symbol") or "BTCUSDT")
     exec_interval = args.exec_interval or str(source_args.get("exec_interval") or "5m")
     scenario_intervals = _csv(args.scenario_intervals or str(source_args.get("scenario_intervals") or "1h,4h"))
@@ -6674,7 +9832,6 @@ def main() -> None:
             raise SystemExit(f"unsupported scenario interval: {interval}")
 
     source_configs = _configs_from_source(source_report, top_n=max(1, int(args.top_n)))
-    configs: list[MarketStateConfig] = []
     include_equity_circuit_in_selection = not bool(args.equity_circuit_breaker_after_selection)
     include_equity_soft_circuit_in_selection = not bool(args.equity_soft_circuit_after_selection)
     include_full_exit_in_selection = not bool(args.one_way_trim_full_exit_after_selection)
@@ -6688,7 +9845,12 @@ def main() -> None:
         args.fragile_regime_inventory_trim_after_selection
     )
 
-    def add_candidate_family(*, include_defensive_trim_cooldown: bool) -> None:
+    def add_candidate_family(
+        *,
+        include_defensive_trim_cooldown: bool,
+        base_source_configs: list[MarketStateConfig],
+        target_configs: list[MarketStateConfig],
+    ) -> None:
         equity_choices = [include_equity_circuit_in_selection]
         if bool(args.include_no_equity_circuit_candidates) and include_equity_circuit_in_selection:
             equity_choices.insert(0, False)
@@ -6747,7 +9909,7 @@ def main() -> None:
                     for include_base_reduce in base_reduce_choices:
                         for include_loss_fuse in loss_fuse_choices:
                             for include_near_miss in near_miss_choices:
-                                configs.extend(
+                                target_configs.extend(
                                     _apply_config_overrides(
                                         config,
                                         args,
@@ -6767,31 +9929,55 @@ def main() -> None:
                                             include_fragile_regime_inventory_trim_in_selection
                                         ),
                                     )
-                                    for config in source_configs
+                                    for config in base_source_configs
                                 )
 
-    if bool(args.include_no_defensive_trim_cooldown_candidates) and args.defensive_trim_cooldown_bars is not None:
-        add_candidate_family(include_defensive_trim_cooldown=False)
-    add_candidate_family(include_defensive_trim_cooldown=True)
-    deduped_configs: list[MarketStateConfig] = []
-    seen_config_keys: set[str] = set()
-    for config in configs:
-        key = _material_config_key(config)
-        if key in seen_config_keys:
-            continue
-        seen_config_keys.add(key)
-        deduped_configs.append(config)
-    configs = deduped_configs
+    def build_candidate_configs(base_source_configs: list[MarketStateConfig]) -> list[MarketStateConfig]:
+        built_configs: list[MarketStateConfig] = []
+        if (
+            bool(args.include_no_defensive_trim_cooldown_candidates)
+            and args.defensive_trim_cooldown_bars is not None
+        ):
+            add_candidate_family(
+                include_defensive_trim_cooldown=False,
+                base_source_configs=base_source_configs,
+                target_configs=built_configs,
+            )
+        add_candidate_family(
+            include_defensive_trim_cooldown=True,
+            base_source_configs=base_source_configs,
+            target_configs=built_configs,
+        )
+        deduped_configs: list[MarketStateConfig] = []
+        seen_config_keys: set[str] = set()
+        for config in built_configs:
+            key = _material_config_key(config)
+            if key in seen_config_keys:
+                continue
+            seen_config_keys.add(key)
+            deduped_configs.append(config)
+        return deduped_configs
+
+    configs = build_candidate_configs(source_configs)
     if not configs:
         raise SystemExit(f"no candidate configs found in {source_path}")
 
     settings = get_settings()
     base_url = str(args.base_url or source_args.get("base_url") or settings.binance_rest_base_url or "https://fapi.binance.com").rstrip("/")
     cache_dir = Path(args.cache_dir or source_args.get("cache_dir") or "reports/validation/btc_flip_rotation_search/cache")
+    try:
+        fold_start_override = _parse_fold_start_at(getattr(args, "fold_start_at", ""))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    effective_load_days = max(
+        int(args.load_days),
+        _load_days_covering_fold_start(fold_start_override),
+    )
+    args.load_days = effective_load_days
     exec_bars_all = _load_bars(
         symbol=symbol,
         interval=exec_interval,
-        days=max(int(args.load_days), int(args.train_days) + int(args.test_days) + 5),
+        days=max(effective_load_days, int(args.train_days) + int(args.test_days) + 5),
         cache_dir=cache_dir,
         base_url=base_url,
         sleep_seconds=float(args.sleep_seconds),
@@ -6800,7 +9986,7 @@ def main() -> None:
         interval: _load_bars(
             symbol=symbol,
             interval=interval,
-            days=max(int(args.load_days), int(args.train_days) + int(args.test_days) + 5),
+            days=max(effective_load_days, int(args.train_days) + int(args.test_days) + 5),
             cache_dir=cache_dir,
             base_url=base_url,
             sleep_seconds=float(args.sleep_seconds),
@@ -6818,14 +10004,30 @@ def main() -> None:
     )
 
     try:
-        fold_start = _anchored_fold_start(
-            exec_bars_all[0].ts,
-            args.fold_anchor_hour_utc,
-            args.fold_anchor_minute_utc,
+        fold_start = (
+            fold_start_override
+            if fold_start_override is not None
+            else _anchored_fold_start(
+                exec_bars_all[0].ts,
+                args.fold_anchor_hour_utc,
+                args.fold_anchor_minute_utc,
+            )
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     last_ts = exec_bars_all[-1].ts.astimezone(UTC)
+    first_loaded_ts = exec_bars_all[0].ts.astimezone(UTC)
+    if fold_start < first_loaded_ts:
+        raise SystemExit(
+            "fold start is before the loaded execution bars; increase --load-days "
+            f"(fold_start_at={fold_start.isoformat()}, first_loaded={first_loaded_ts.isoformat()})"
+        )
+    if fold_start >= last_ts:
+        raise SystemExit(
+            "fold start is after the loaded execution bars "
+            f"(fold_start_at={fold_start.isoformat()}, last_loaded={last_ts.isoformat()})"
+        )
+    initial_fold_start = fold_start
     train_delta = timedelta(days=max(int(args.train_days), 1))
     test_delta = timedelta(days=max(int(args.test_days), 1))
     step_delta = timedelta(days=max(int(args.step_days), 1))
@@ -6834,6 +10036,11 @@ def main() -> None:
     fold_idx = 0
     valid_fold_idx = 0
     fold_offset = max(0, int(args.fold_offset))
+    source_replay_auto_warm_selection_state = _source_replay_should_auto_warm_selection_state(
+        args,
+        inherited_fields=inherited_source_replay_fields,
+        fold_offset=fold_offset,
+    )
     while fold_start + train_delta + test_delta <= last_ts:
         fold_idx += 1
         train_start = fold_start
@@ -6859,14 +10066,28 @@ def main() -> None:
             continue
         valid_fold_idx += 1
         is_reported_fold = valid_fold_idx > fold_offset
-        if not is_reported_fold and not bool(args.warm_fold_offset_selection_state):
+        if not is_reported_fold and not (
+            bool(args.warm_fold_offset_selection_state) or source_replay_auto_warm_selection_state
+        ):
             fold_start += step_delta
             continue
 
+        fold_source_configs = _configs_from_source_fold(
+            source_report,
+            fold=valid_fold_idx,
+            top_n=max(1, int(args.top_n)),
+        )
+        fold_configs = build_candidate_configs(fold_source_configs) if fold_source_configs else configs
+        if not fold_configs:
+            fold_start += step_delta
+            continue
         train_results: list[dict[str, Any]] = []
         warm_note = " warming" if not is_reported_fold else ""
-        print(f"walk-forward fold {valid_fold_idx}{warm_note} training {len(configs)} candidates", flush=True)
-        for config_idx, config in enumerate(configs, start=1):
+        print(
+            f"walk-forward fold {valid_fold_idx}{warm_note} training {len(fold_configs)} candidates",
+            flush=True,
+        )
+        for config_idx, config in enumerate(fold_configs, start=1):
             result = _run_config(
                 symbol=symbol,
                 features=train_features,
@@ -6890,7 +10111,7 @@ def main() -> None:
                     penalty=float(args.selection_recent_efficiency_penalty),
                 )
                 train_results.append(result)
-            print(f"walk-forward fold {valid_fold_idx} trained {config_idx}/{len(configs)}", flush=True)
+            print(f"walk-forward fold {valid_fold_idx} trained {config_idx}/{len(fold_configs)}", flush=True)
         if not train_results:
             fold_start += step_delta
             continue
@@ -7155,11 +10376,21 @@ def main() -> None:
         "source_top_n": int(args.top_n),
         "fold_offset": fold_offset,
         "fold_limit": int(args.fold_limit),
+        "fold_start_at": initial_fold_start.isoformat(),
         "fold_anchor_hour_utc": args.fold_anchor_hour_utc,
         "fold_anchor_minute_utc": (
             int(args.fold_anchor_minute_utc) if args.fold_anchor_hour_utc is not None else None
         ),
         "candidate_count": len(configs),
+        "source_replay_inherited_selection_policy_fields": inherited_source_replay_fields,
+        "source_replay_inherited_config_override_fields": inherited_source_replay_fields,
+        "source_replay_inherited_window_policy_fields": inherited_source_replay_window_fields,
+        "source_replay_stabilized_ratio_gate_fields": stabilized_source_replay_ratio_gate_fields,
+        "source_replay_clamped_selection_policy_fields": (
+            getattr(args, "_source_replay_clamped_selection_policy_fields", [])
+        ),
+        "source_replay_inherited_model_encoded_fields": inherited_source_replay_model_encoded_fields,
+        "source_replay_auto_warm_selection_state": source_replay_auto_warm_selection_state,
         "cost_model": {
             "fee_bps_per_side": float(args.fee_bps_per_side),
             "slippage_bps_per_side": float(args.slippage_bps_per_side),
@@ -7168,6 +10399,239 @@ def main() -> None:
             "carry_rate_per_bar": carry_rate_per_bar,
         },
         "config_overrides": {
+            "midfold_reaction_hold_recipes": getattr(args, "midfold_reaction_hold_recipes", None),
+            "selective_reaction_repair_clean_recipes": getattr(
+                args,
+                "selective_reaction_repair_clean_recipes",
+                None,
+            ),
+            "trim_cooldown_recipes": getattr(args, "trim_cooldown_recipes", None),
+            "risk_off_micro_sizer_recipe": getattr(args, "risk_off_micro_sizer_recipe", None),
+            "balanced_structure_replay_note": getattr(args, "balanced_structure_replay_note", None),
+            "high_cost_repair_cut_05_replay_note": getattr(
+                args,
+                "high_cost_repair_cut_05_replay_note",
+                None,
+            ),
+            "high_cost_near_zero_react_replay_note": getattr(
+                args,
+                "high_cost_near_zero_react_replay_note",
+                None,
+            ),
+            "role_balance_impulse_micro_replay_note": getattr(
+                args,
+                "role_balance_impulse_micro_replay_note",
+                None,
+            ),
+            "role_border_impulse_micro_replay_note": getattr(
+                args,
+                "role_border_impulse_micro_replay_note",
+                None,
+            ),
+            "low_activity_reengage_probe_replay_note": getattr(
+                args,
+                "low_activity_reengage_probe_replay_note",
+                None,
+            ),
+            "base_heavy_probe_rebalance_replay_note": getattr(
+                args,
+                "base_heavy_probe_rebalance_replay_note",
+                None,
+            ),
+            "event_risk_base_throttle_replay_note": getattr(
+                args,
+                "event_risk_base_throttle_replay_note",
+                None,
+            ),
+            "event_risk_base_tight_repair_replay_note": getattr(
+                args,
+                "event_risk_base_tight_repair_replay_note",
+                None,
+            ),
+            "event_risk_reaction_soft_hold_replay_note": getattr(
+                args,
+                "event_risk_reaction_soft_hold_replay_note",
+                None,
+            ),
+            "event_risk_soft_hold_near_miss_replay_note": getattr(
+                args,
+                "event_risk_soft_hold_near_miss_replay_note",
+                None,
+            ),
+            "negative_train_distribution_probe_replay_note": getattr(
+                args,
+                "negative_train_distribution_probe_replay_note",
+                None,
+            ),
+            "compressed_trend_distribution_probe_replay_note": getattr(
+                args,
+                "compressed_trend_distribution_probe_replay_note",
+                None,
+            ),
+            "event_risk_distribution_base_off_replay_note": getattr(
+                args,
+                "event_risk_distribution_base_off_replay_note",
+                None,
+            ),
+            "deep_drawdown_reversal_scale_replay_note": getattr(
+                args,
+                "deep_drawdown_reversal_scale_replay_note",
+                None,
+            ),
+            "high_cost_runner_reversal_scale_replay_note": getattr(
+                args,
+                "high_cost_runner_reversal_scale_replay_note",
+                None,
+            ),
+            "high_cost_runner_tight_repair_replay_note": getattr(
+                args,
+                "high_cost_runner_tight_repair_replay_note",
+                None,
+            ),
+            "low_return_soft_inventory_trim_replay_note": getattr(
+                args,
+                "low_return_soft_inventory_trim_replay_note",
+                None,
+            ),
+            "low_return_soft_inventory_trim_fraction": float(
+                args.low_return_soft_inventory_trim_fraction
+            ),
+            "low_return_selective_impulse_replay_note": getattr(
+                args,
+                "low_return_selective_impulse_replay_note",
+                None,
+            ),
+            "low_return_selective_impulse_probe_units": float(
+                args.low_return_selective_impulse_probe_units
+            ),
+            "low_return_selective_impulse_min_one_way_score": float(
+                args.low_return_selective_impulse_min_one_way_score
+            ),
+            "low_return_selective_impulse_min_score_diff": int(
+                args.low_return_selective_impulse_min_score_diff
+            ),
+            "low_return_reaction_band_replay_note": getattr(
+                args,
+                "low_return_reaction_band_replay_note",
+                None,
+            ),
+            "low_return_reaction_avg_band": float(
+                args.low_return_reaction_avg_band
+            ),
+            "fast_defense_one_way_delay_replay_note": getattr(
+                args,
+                "fast_defense_one_way_delay_replay_note",
+                None,
+            ),
+            "fast_defense_one_way_delay_min_adverse_reaction": float(
+                args.fast_defense_one_way_delay_min_adverse_reaction
+            ),
+            "fast_defense_one_way_delay_max_defensive_cooldown_bars": int(
+                args.fast_defense_one_way_delay_max_defensive_cooldown_bars
+            ),
+            "deep_soft_reaction_delay_replay_note": getattr(
+                args,
+                "deep_soft_reaction_delay_replay_note",
+                None,
+            ),
+            "forced_trim_near_miss_tiny_replay_note": getattr(
+                args,
+                "forced_trim_near_miss_tiny_replay_note",
+                None,
+            ),
+            "soft_circuit_recovery_mid_replay_note": getattr(
+                args,
+                "soft_circuit_recovery_mid_replay_note",
+                None,
+            ),
+            "soft_circuit_recovery_mid_probe_units": float(
+                args.soft_circuit_recovery_mid_probe_units
+            ),
+            "soft_circuit_recovery_mid_min_one_way_score": float(
+                args.soft_circuit_recovery_mid_min_one_way_score
+            ),
+            "soft_circuit_recovery_mid_min_score_diff": int(
+                args.soft_circuit_recovery_mid_min_score_diff
+            ),
+            "soft_circuit_recovery_mid_max_extension_atr": float(
+                args.soft_circuit_recovery_mid_max_extension_atr
+            ),
+            "soft_circuit_recovery_mid_failure_guard_count": int(
+                args.soft_circuit_recovery_mid_failure_guard_count
+            ),
+            "soft_circuit_recovery_mid_failure_guard_window_bars": int(
+                args.soft_circuit_recovery_mid_failure_guard_window_bars
+            ),
+            "soft_circuit_recovery_mid_failure_cooldown_bars": int(
+                args.soft_circuit_recovery_mid_failure_cooldown_bars
+            ),
+            "soft_circuit_recovery_low_activity_replay_note": getattr(
+                args,
+                "soft_circuit_recovery_low_activity_replay_note",
+                None,
+            ),
+            "soft_circuit_recovery_low_activity_probe_units": float(
+                args.soft_circuit_recovery_low_activity_probe_units
+            ),
+            "soft_circuit_recovery_low_activity_min_one_way_score": float(
+                args.soft_circuit_recovery_low_activity_min_one_way_score
+            ),
+            "soft_circuit_recovery_low_activity_min_score_diff": int(
+                args.soft_circuit_recovery_low_activity_min_score_diff
+            ),
+            "soft_circuit_recovery_low_activity_max_extension_atr": float(
+                args.soft_circuit_recovery_low_activity_max_extension_atr
+            ),
+            "soft_circuit_recovery_low_activity_failure_guard_count": int(
+                args.soft_circuit_recovery_low_activity_failure_guard_count
+            ),
+            "soft_circuit_recovery_low_activity_failure_guard_window_bars": int(
+                args.soft_circuit_recovery_low_activity_failure_guard_window_bars
+            ),
+            "soft_circuit_recovery_low_activity_failure_cooldown_bars": int(
+                args.soft_circuit_recovery_low_activity_failure_cooldown_bars
+            ),
+            "soft_circuit_low_activity_cooldown_replay_note": getattr(
+                args,
+                "soft_circuit_low_activity_cooldown_replay_note",
+                None,
+            ),
+            "soft_circuit_low_activity_near_miss_replay_note": getattr(
+                args,
+                "soft_circuit_low_activity_near_miss_replay_note",
+                None,
+            ),
+            "soft_circuit_low_activity_cooldown_bars": int(
+                args.soft_circuit_low_activity_cooldown_bars
+            ),
+            "high_return_soft_sizer_relax_replay_note": getattr(
+                args,
+                "high_return_soft_sizer_relax_replay_note",
+                None,
+            ),
+            "high_return_soft_sizer_relax_drawdown_pct": float(
+                args.high_return_soft_sizer_relax_drawdown_pct
+            ),
+            "high_return_soft_sizer_relax_size_mult": float(
+                args.high_return_soft_sizer_relax_size_mult
+            ),
+            "high_return_soft_sizer_relax_cooldown_bars": int(
+                args.high_return_soft_sizer_relax_cooldown_bars
+            ),
+            "high_return_soft_sizer_tight_replay_note": getattr(
+                args,
+                "high_return_soft_sizer_tight_replay_note",
+                None,
+            ),
+            "high_return_soft_sizer_tight_drawdown_pct": float(
+                args.high_return_soft_sizer_tight_drawdown_pct
+            ),
+            "high_return_soft_sizer_tight_size_mult": float(
+                args.high_return_soft_sizer_tight_size_mult
+            ),
+            "high_return_soft_sizer_tight_cooldown_bars": int(
+                args.high_return_soft_sizer_tight_cooldown_bars
+            ),
             "after_selection_train_confirmation": bool(args.after_selection_train_confirmation),
             "after_selection_confirmation_mode": args.after_selection_confirmation_mode,
             "after_selection_confirmation_ablation_mode": (
@@ -7620,6 +11084,10 @@ def main() -> None:
             "base_entry_reduce_max_trend_strength": args.base_entry_reduce_max_trend_strength,
             "base_entry_reduce_min_trend_strength": args.base_entry_reduce_min_trend_strength,
             "base_entry_reduce_side": args.base_entry_reduce_side or None,
+            "event_risk_base_reduce_size_mult": args.event_risk_base_reduce_size_mult,
+            "event_risk_base_reduce_min_extension_atr": args.event_risk_base_reduce_min_extension_atr,
+            "event_risk_base_reduce_side": args.event_risk_base_reduce_side or None,
+            "event_risk_base_reduce_contexts": args.event_risk_base_reduce_contexts or None,
             "base_entry_reduce_after_selection": bool(args.base_entry_reduce_after_selection),
             "base_entry_reduce_after_selection_max_train_return_pct": (
                 args.base_entry_reduce_after_selection_max_train_return_pct
@@ -7869,6 +11337,9 @@ def main() -> None:
             "exposure_rebalance_after_selection_base_max_units": (
                 args.exposure_rebalance_after_selection_base_max_units
             ),
+            "exposure_rebalance_after_selection_base_add_units": (
+                args.exposure_rebalance_after_selection_base_add_units
+            ),
             "exposure_rebalance_after_selection_battle_units": (
                 args.exposure_rebalance_after_selection_battle_units
             ),
@@ -8109,15 +11580,27 @@ def main() -> None:
             "selection_recent_efficiency_threshold": float(args.selection_recent_efficiency_threshold),
             "selection_recent_efficiency_penalty": float(args.selection_recent_efficiency_penalty),
             "test_top_train_candidates": int(args.test_top_train_candidates),
+            "load_days": int(args.load_days),
+            "fold_start_at": initial_fold_start.isoformat(),
             "fold_anchor_hour_utc": args.fold_anchor_hour_utc,
             "fold_anchor_minute_utc": (
                 int(args.fold_anchor_minute_utc) if args.fold_anchor_hour_utc is not None else None
             ),
             "warm_fold_offset_selection_state": bool(args.warm_fold_offset_selection_state),
+            "source_replay_fail_on_unresolved_material_drift": bool(
+                args.source_replay_fail_on_unresolved_material_drift
+            ),
         },
         "aggregate": _aggregate_folds(folds),
         "folds": folds,
     }
+    source_replay_diagnostics = _source_replay_diagnostics(source_report, folds)
+    source_replay_lineage_guard = _source_replay_lineage_guard(
+        source_replay_diagnostics,
+        fail_on_unresolved_material=bool(args.source_replay_fail_on_unresolved_material_drift),
+    )
+    report["source_replay_diagnostics"] = source_replay_diagnostics
+    report["source_replay_lineage_guard"] = source_replay_lineage_guard
     report["provenance"] = _report_provenance(
         source_path=source_path,
         source_report=source_report,
@@ -8140,6 +11623,9 @@ def main() -> None:
         print(f"wrote {json_path}")
         print(f"wrote {latest_json}")
         print(f"wrote {summary_md}")
+
+    if source_replay_lineage_guard.get("failed"):
+        raise SystemExit(str(source_replay_lineage_guard.get("message") or "Source replay guard failed."))
 
     print(
         json.dumps(
