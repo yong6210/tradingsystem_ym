@@ -1,14 +1,24 @@
 from collections import Counter
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from scripts.run_market_state_rotation_v6_backtest import (
     RotationMemory,
     _book_open_role_payloads,
+    _calendar_rolling_stats,
     _drawdown_bar_event_payload,
     _event_risk_base_size_multiplier,
     _event_trade_cost,
     _event_diagnostics,
+    _hard_time_exit_fraction,
+    _hard_time_exit_trend_defer_ready,
+    _inventory_throttle_multiplier,
     _one_way_full_exit_ready,
+    _reaction_trim_trigger,
+    _router_entry_size_multiplier,
+    _router_mode,
+    _scaled_unit_cut_qty,
+    _trend_hold_context,
 )
 
 
@@ -19,6 +29,23 @@ def _diagnostic_config(**overrides):
         "equity_soft_circuit_force_flat": False,
         "equity_soft_circuit_size_mult": 1.0,
         "equity_soft_circuit_prearm_bars": 0,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _router_config(**overrides):
+    values = {
+        "regime_router_enabled": True,
+        "router_trend_reaction_size_mult": 1.0,
+        "router_one_way_chase_size_mult": 0.75,
+        "router_one_way_counter_size_mult": 0.0,
+        "router_range_probe_size_mult": 0.25,
+        "router_range_base_size_mult": 0.0,
+        "router_exhaustion_reversal_size_mult": 0.35,
+        "router_exhaustion_min_score_edge": 2,
+        "router_exhaustion_min_extension_atr": 1.5,
+        "router_risk_off_size_mult": 0.0,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -72,6 +99,78 @@ def test_drawdown_bar_event_payload_keeps_recent_core_fields() -> None:
     ]
 
 
+def test_router_mode_labels_one_way_chase_and_blocks_countertrend_size() -> None:
+    config = _router_config()
+    market = SimpleNamespace(
+        bad_rr=False,
+        regime="one_way_long",
+        one_way_side=1,
+        one_way_score=3.0,
+        bias=1,
+        trend_strength=0.8,
+        score_diff=5,
+    )
+    zone = SimpleNamespace(
+        side=1,
+        long_score=7,
+        short_score=3,
+        chase_extension_atr=2.0,
+    )
+
+    mode = _router_mode(config, market, zone)
+
+    assert mode == "one_way_chase"
+    assert _router_entry_size_multiplier(config, route_mode=mode, market=market, side=1, role="chase") == 0.75
+    assert _router_entry_size_multiplier(config, route_mode=mode, market=market, side=-1, role="base") == 0.0
+
+
+def test_router_mode_detects_exhaustion_reversal_candidate() -> None:
+    config = _router_config(router_exhaustion_min_score_edge=2, router_exhaustion_min_extension_atr=1.5)
+    market = SimpleNamespace(
+        bad_rr=False,
+        regime="one_way_long",
+        one_way_side=1,
+        one_way_score=4.0,
+        bias=1,
+        trend_strength=1.0,
+        score_diff=6,
+    )
+    zone = SimpleNamespace(
+        side=-1,
+        long_score=4,
+        short_score=7,
+        chase_extension_atr=1.8,
+    )
+
+    mode = _router_mode(config, market, zone)
+
+    assert mode == "exhaustion_reversal"
+    assert _router_entry_size_multiplier(config, route_mode=mode, market=market, side=-1, role="probe") == 0.35
+
+
+def test_router_mode_separates_range_and_risk_off_sizing() -> None:
+    config = _router_config()
+    market = SimpleNamespace(
+        bad_rr=True,
+        regime="bad_rr_center",
+        one_way_side=0,
+        one_way_score=0.0,
+        bias=0,
+        trend_strength=0.1,
+        score_diff=0,
+    )
+    zone = SimpleNamespace(side=0, long_score=3, short_score=3, chase_extension_atr=0.5)
+
+    range_mode = _router_mode(config, market, zone)
+    risk_mode = _router_mode(config, market, zone, soft_circuit_active=True)
+
+    assert range_mode == "range_transition"
+    assert _router_entry_size_multiplier(config, route_mode=range_mode, market=market, side=1, role="probe") == 0.25
+    assert _router_entry_size_multiplier(config, route_mode=range_mode, market=market, side=1, role="base") == 0.0
+    assert risk_mode == "risk_off"
+    assert _router_entry_size_multiplier(config, route_mode=risk_mode, market=market, side=1, role="probe") == 0.0
+
+
 def test_one_way_full_exit_uses_absolute_score_diff() -> None:
     config = SimpleNamespace(
         one_way_trim_full_exit_min_one_way_score=7.5,
@@ -89,6 +188,89 @@ def test_one_way_full_exit_uses_absolute_score_diff() -> None:
     assert not _one_way_full_exit_ready(
         config,
         SimpleNamespace(one_way_score=7.4, score_diff=-5),
+    )
+
+
+def test_scaled_unit_cut_qty_throttles_cut_fraction_with_minimum() -> None:
+    assert _scaled_unit_cut_qty(10.0, 0.5, 1.0, minimum=1.0) == 5.0
+    assert _scaled_unit_cut_qty(10.0, 0.5, 0.5, minimum=1.0) == 2.0
+    assert _scaled_unit_cut_qty(10.0, 0.1, 0.5, minimum=1.0) == 1.0
+    assert _scaled_unit_cut_qty(0.5, 0.5, 0.5, minimum=1.0) == 0.5
+    assert _scaled_unit_cut_qty(0.5, 1.5, 1.0, minimum=0.25) == 0.5
+
+
+def test_inventory_throttle_keeps_single_unit_exits_atomic() -> None:
+    config = SimpleNamespace(
+        max_possible_units=1.0,
+        base_add_units=1.0,
+        probe_units=0.0,
+        hard_time_exit_fraction=0.5,
+    )
+
+    assert _inventory_throttle_multiplier(config, 1.0, 0.5) == 1.0
+    assert _hard_time_exit_fraction(config, 1.0) == 1.0
+    assert _inventory_throttle_multiplier(config, 1.005, 0.5) == 1.0
+    assert _hard_time_exit_fraction(config, 1.005) == 1.0
+
+    scalable_config = SimpleNamespace(
+        max_possible_units=2.0,
+        base_add_units=1.0,
+        probe_units=0.0,
+        hard_time_exit_fraction=0.5,
+    )
+    assert _inventory_throttle_multiplier(scalable_config, 2.0, 0.5) == 0.5
+    assert _hard_time_exit_fraction(scalable_config, 2.0) == 0.5
+
+
+def test_trend_hold_context_delays_reaction_trim_only_when_aligned() -> None:
+    config = _diagnostic_config(
+        reaction_trim_trigger=0.55,
+        reaction_trim_trend_hold_trigger_mult=1.5,
+        trend_hold_min_trend_strength=0.35,
+        trend_hold_min_one_way_score=2.0,
+    )
+
+    aligned_trend = SimpleNamespace(bias=1, trend_strength=0.5, one_way_side=0, one_way_score=0.0)
+    aligned_one_way = SimpleNamespace(bias=0, trend_strength=0.0, one_way_side=1, one_way_score=2.1)
+    opposite = SimpleNamespace(bias=-1, trend_strength=0.5, one_way_side=-1, one_way_score=3.0)
+
+    assert _trend_hold_context(config, aligned_trend, 1)
+    assert _trend_hold_context(config, aligned_one_way, 1)
+    assert not _trend_hold_context(config, opposite, 1)
+    assert round(_reaction_trim_trigger(config, aligned_trend, 1), 4) == 0.825
+    assert _reaction_trim_trigger(config, opposite, 1) == 0.55
+
+
+def test_hard_time_exit_trend_defer_respects_grace_and_profit_buffer() -> None:
+    config = _diagnostic_config(
+        max_hold_bars=52,
+        hard_time_exit_trend_defer_bars=12,
+        hard_time_exit_trend_defer_min_favorable_reaction=0.10,
+        trend_hold_min_trend_strength=0.35,
+        trend_hold_min_one_way_score=2.0,
+    )
+    market = SimpleNamespace(bias=1, trend_strength=0.5, one_way_side=0, one_way_score=0.0)
+
+    assert _hard_time_exit_trend_defer_ready(
+        config,
+        market,
+        1,
+        age_bars=52,
+        favorable_reaction=0.10,
+    )
+    assert not _hard_time_exit_trend_defer_ready(
+        config,
+        market,
+        1,
+        age_bars=64,
+        favorable_reaction=0.10,
+    )
+    assert not _hard_time_exit_trend_defer_ready(
+        config,
+        market,
+        1,
+        age_bars=52,
+        favorable_reaction=0.05,
     )
 
 
@@ -300,6 +482,68 @@ def test_event_diagnostics_reports_no_trade_context_hotspots() -> None:
         "MC12_low_confluence|uptrend": 11,
         "MC04_no_clear_first_touch|mixed": 7,
     }
+
+
+def test_event_diagnostics_reports_kst_hour_realized_pnl() -> None:
+    diagnostics = _event_diagnostics(
+        events=[
+            {
+                "action": "remove",
+                "side": "long",
+                "role": "base",
+                "reason": "profit_trim",
+                "qty": 1.0,
+                "pnl_usd_units": 12.0,
+                "ts": "2025-06-01T15:00:00+00:00",
+            },
+            {
+                "action": "remove",
+                "side": "short",
+                "role": "probe",
+                "reason": "hard_intraday_time_exit",
+                "qty": 1.0,
+                "pnl_usd_units": -3.0,
+                "ts": "2025-06-01T16:00:00+00:00",
+            },
+            {
+                "action": "remove",
+                "side": "long",
+                "role": "base",
+                "reason": "profit_trim",
+                "qty": 1.0,
+                "pnl_usd_units": 6.0,
+                "ts": "2025-06-02T15:30:00+00:00",
+            },
+        ],
+        counters=Counter(),
+        exposure_side_bars=Counter({"long": 100}),
+        exposure_bars=100,
+        total_months=1,
+        config=_diagnostic_config(),
+    )
+
+    assert diagnostics["remove_by_utc_hour"] == {"15": 2, "16": 1}
+    assert diagnostics["remove_by_kst_hour"] == {"00": 2, "01": 1}
+    assert diagnostics["realized_pnl_usd_units_by_kst_hour"] == {"00": 18.0, "01": -3.0}
+    assert diagnostics["realized_pnl_usd_units_per_remove_by_kst_hour"] == {"01": -3.0, "00": 9.0}
+
+
+def test_calendar_rolling_stats_reports_exact_30_60_90_day_windows() -> None:
+    day_equity = {}
+    start = datetime(2025, 1, 1)
+    for idx in range(100):
+        day = (start + timedelta(days=idx)).strftime("%Y-%m-%d")
+        start_equity = 1.0 + idx * 0.01
+        day_equity[day] = {"start": start_equity, "end": start_equity + 0.01}
+
+    stats = _calendar_rolling_stats(day_equity)
+
+    assert stats["daily_count"] == 100
+    assert stats["windows"]["30d"]["count"] == 71
+    assert stats["windows"]["60d"]["count"] == 41
+    assert stats["windows"]["90d"]["count"] == 11
+    assert stats["windows"]["30d"]["worst_window"]["start_day"] == "2025-03-12"
+    assert stats["windows"]["90d"]["worst_window"]["end_day"] == "2025-04-10"
 
 
 def test_partial_risk_off_uses_active_window_order_coverage() -> None:

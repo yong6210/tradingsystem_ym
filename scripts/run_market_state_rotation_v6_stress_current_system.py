@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -649,6 +650,114 @@ def _stress_floor_gap(
     }
 
 
+def _cost_cut_capacity_for_reason(
+    reason: str,
+    *,
+    tradeoff_tags: set[str],
+    root_causes: set[str],
+) -> tuple[float, int, str]:
+    if "probe" in reason:
+        if "probe_alpha_leak" in tradeoff_tags and "probe_leak_tiny_vs_base_alpha" not in tradeoff_tags:
+            return 0.75, 1, "negative probe leak can be suppressed before touching base alpha"
+        return 0.35, 4, "probe cost cut is capped because probe loss is small or mixed"
+    if reason == "hard_intraday_time_exit":
+        return 0.50, 2, "time-exit flow can be made more selective or more passive"
+    if reason == "one_way_against_forced_trim":
+        return 0.50, 2, "one-way forced trims are a direct stress-floor target"
+    if reason == "v6_reaction_inventory_trim":
+        if "reaction_trim_part_of_alpha_engine" in tradeoff_tags:
+            return 0.25, 5, "reaction trim participates in high-return alpha, so only small cuts are allowed"
+        return 0.35, 3, "reaction trim turnover can be tightened without blocking base entries"
+    if reason in {"loss_rotation_repair_trim", "repair_efficiency_stop_trim"}:
+        return 0.25, 4, "repair exits are risk controls, so cuts must stay conservative"
+    if reason == "base_entry":
+        if "base_entry_cost_is_alpha_engine" in tradeoff_tags:
+            return 0.25, 6, "base entries are alpha-positive, so cut only marginal base contexts"
+        if "base_negative_context_pockets" in root_causes:
+            return 0.50, 3, "base has negative context pockets that can be filtered selectively"
+        return 0.35, 4, "base entry cost can be reduced only by selectivity, not a blanket cut"
+    if "chase" in reason:
+        if "chase_context_adds_alpha" in tradeoff_tags:
+            return 0.10, 7, "chase context is positive alpha and should mostly be preserved"
+        return 0.30, 5, "chase cost is cut only after cheaper fixes"
+    return 0.20, 5, "generic turnover cut candidate"
+
+
+def _targeted_cost_reduction_plan(row: dict[str, Any]) -> dict[str, Any]:
+    floor = dict(row.get("stress_floor") or {})
+    cost_multiplier = _float(row.get("trade_cost_multiplier"), 1.0)
+    gross_gap = _float(floor.get("gross_return_gain_needed_pct"))
+    needed = gross_gap / cost_multiplier if cost_multiplier > 0.0 else _float(
+        floor.get("baseline_cost_reduction_needed_pct")
+    )
+    stressed_return = _float(row.get("stressed_return_pct"))
+    if needed <= 0.0:
+        return {
+            "needed_baseline_cost_cut_pct": 0.0,
+            "planned_baseline_cost_cut_pct": 0.0,
+            "projected_stressed_return_pct": _pct(stressed_return),
+            "target_reached": True,
+            "steps": [],
+        }
+    tradeoff_tags = {str(item) for item in row.get("tradeoff_tags") or []}
+    root_causes = {str(item) for item in row.get("root_causes") or []}
+    candidates: list[dict[str, Any]] = []
+    for item in row.get("top_cost_reasons") or []:
+        if not isinstance(item, dict):
+            continue
+        reason = str(item.get("name") or "")
+        cost_pct = _float(item.get("value"))
+        if not reason or cost_pct <= 0.0:
+            continue
+        max_share, priority, rationale = _cost_cut_capacity_for_reason(
+            reason,
+            tradeoff_tags=tradeoff_tags,
+            root_causes=root_causes,
+        )
+        candidates.append(
+            {
+                "reason": reason,
+                "available_cost_pct": _pct(cost_pct),
+                "max_cut_share": round(max_share, 4),
+                "max_baseline_cost_cut_pct": _pct(cost_pct * max_share),
+                "priority": priority,
+                "rationale": rationale,
+            }
+        )
+    candidates.sort(key=lambda item: (int(item["priority"]), -_float(item["max_baseline_cost_cut_pct"])))
+
+    remaining = needed
+    planned = 0.0
+    steps: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if remaining <= 1e-12:
+            break
+        max_cut = _float(candidate.get("max_baseline_cost_cut_pct"))
+        cut = min(max_cut, remaining)
+        if cut <= 0.0:
+            continue
+        available = _float(candidate.get("available_cost_pct"))
+        steps.append(
+            {
+                **candidate,
+                "planned_baseline_cost_cut_pct": _pct(cut),
+                "planned_cut_share_of_reason": round(cut / available, 4) if available > 0.0 else None,
+                "projected_stressed_return_gain_pct": _pct(cut * cost_multiplier),
+            }
+        )
+        planned += cut
+        remaining -= cut
+    projected = stressed_return + planned * cost_multiplier
+    return {
+        "needed_baseline_cost_cut_pct": _pct(needed),
+        "planned_baseline_cost_cut_pct": _pct(planned),
+        "remaining_baseline_cost_cut_pct": _pct(max(needed - planned, 0.0)),
+        "projected_stressed_return_pct": _pct(projected),
+        "target_reached": planned + 1e-9 >= needed,
+        "steps": steps,
+    }
+
+
 def _stress_fold(
     fold: dict[str, Any],
     scenario: StressScenario,
@@ -692,7 +801,7 @@ def _stress_fold(
         dd_proxy=dd_proxy,
         breakeven_cost_multiplier=breakeven_cost_multiplier,
     )
-    return {
+    row = {
         "fold": int(fold.get("fold") or 0),
         "test_start": fold.get("test_start"),
         "test_end": fold.get("test_end"),
@@ -718,6 +827,292 @@ def _stress_fold(
         "remediation_hints": diagnostics.get("remediation_hints") or [],
         "top_cost_reasons": diagnostics.get("cost_structure", {}).get("top_by_reason_pct", [])[:3],
         "source_diagnostics": diagnostics,
+    }
+    row["targeted_cost_reduction_plan"] = _targeted_cost_reduction_plan(row)
+    return row
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    text = str(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _scenario_cost_rate(scenario: StressScenario, *, base_cost_bps_per_side: float) -> float:
+    if scenario.trade_cost_multiplier is not None:
+        cost_bps = base_cost_bps_per_side * max(float(scenario.trade_cost_multiplier), 0.0)
+    else:
+        cost_bps = max(float(scenario.fee_bps_per_side or 0.0), 0.0) + max(
+            float(scenario.slippage_bps_per_side or 0.0),
+            0.0,
+        )
+    return max(cost_bps, 0.0) / 10_000.0
+
+
+def _replay_load_days(
+    source_report: dict[str, Any],
+    *,
+    requested_load_days: int | None,
+    earliest_start: datetime | None,
+) -> int:
+    if requested_load_days is not None and requested_load_days > 0:
+        return int(requested_load_days)
+    source_args = dict(source_report.get("args") or {})
+    overrides = dict(source_report.get("config_overrides") or {})
+    load_days = int(overrides.get("load_days") or source_args.get("load_days") or 1830)
+    if earliest_start is not None:
+        age_days = int((datetime.now(UTC) - earliest_start).total_seconds() / 86_400.0) + 7
+        load_days = max(load_days, age_days)
+    return load_days
+
+
+def _attach_replayed_selected_oos_metrics(
+    scenario_payload: dict[str, Any],
+    source_report: dict[str, Any],
+    *,
+    scenario_list: list[StressScenario],
+    base_cost_bps_per_side: float,
+    cache_dir: str | None,
+    base_url: str | None,
+    load_days: int | None,
+    min_periods: int,
+    sleep_seconds: float,
+) -> dict[str, Any]:
+    # Imported lazily so the fast report path stays lightweight and unit tests do
+    # not need the data-loading stack unless replay is explicitly requested.
+    if str(ROOT_DIR) not in sys.path:
+        sys.path.insert(0, str(ROOT_DIR))
+    import scripts.run_market_state_rotation_v6_walk_forward_validation as wf
+
+    source_args = dict(source_report.get("args") or {})
+    symbol = str(source_args.get("symbol") or source_report.get("symbol") or "BTCUSDT")
+    exec_interval = str(source_args.get("exec_interval") or source_report.get("exec_interval") or "5m")
+    scenario_intervals = wf._csv(
+        str(source_args.get("scenario_intervals") or "")
+        or ",".join(
+            str(item)
+            for item in dict(
+                dict((source_report.get("folds") or [{}])[0]).get("test_meta") or {}
+            ).get("scenario_rows", {"1h": 0, "4h": 0})
+        )
+        or "1h,4h"
+    )
+    if not scenario_intervals:
+        scenario_intervals = ["1h", "4h"]
+
+    starts = [
+        _parse_dt((fold.get("test_meta") or {}).get("exec_start") or fold.get("test_start_at"))
+        for fold in source_report.get("folds") or []
+    ]
+    starts = [item for item in starts if item is not None]
+    effective_load_days = _replay_load_days(
+        source_report,
+        requested_load_days=load_days,
+        earliest_start=min(starts) if starts else None,
+    )
+    settings = wf.get_settings()
+    resolved_base_url = str(
+        base_url
+        or source_args.get("base_url")
+        or settings.binance_rest_base_url
+        or "https://fapi.binance.com"
+    ).rstrip("/")
+    resolved_cache_dir = Path(
+        cache_dir
+        or source_args.get("cache_dir")
+        or "reports/validation/btc_flip_rotation_search/cache"
+    )
+    if not resolved_cache_dir.is_absolute():
+        resolved_cache_dir = ROOT_DIR / resolved_cache_dir
+
+    exec_bars_all = wf._load_bars(
+        symbol=symbol,
+        interval=exec_interval,
+        days=effective_load_days,
+        cache_dir=resolved_cache_dir,
+        base_url=resolved_base_url,
+        sleep_seconds=sleep_seconds,
+    )
+    scenario_bars_all = {
+        interval: wf._load_bars(
+            symbol=symbol,
+            interval=interval,
+            days=effective_load_days,
+            cache_dir=resolved_cache_dir,
+            base_url=resolved_base_url,
+            sleep_seconds=sleep_seconds,
+        )
+        for interval in scenario_intervals
+    }
+    folds_by_id = {int(fold.get("fold") or 0): dict(fold or {}) for fold in source_report.get("folds") or []}
+    replay_summary: dict[str, Any] = {
+        "enabled": True,
+        "method": "selected_config_oos_rerun_with_stressed_costs",
+        "symbol": symbol,
+        "exec_interval": exec_interval,
+        "scenario_intervals": scenario_intervals,
+        "load_days": effective_load_days,
+        "min_periods": int(min_periods),
+        "cache_dir": str(resolved_cache_dir),
+        "scenario_count": len(scenario_list),
+        "fold_count": len(folds_by_id),
+        "failed_replay_count": 0,
+        "failures": [],
+    }
+    for scenario in scenario_list:
+        payload = scenario_payload.get(scenario.name)
+        if not isinstance(payload, dict):
+            continue
+        rows = list(payload.get("folds") or [])
+        scenario_cost_rate = _scenario_cost_rate(
+            scenario,
+            base_cost_bps_per_side=base_cost_bps_per_side,
+        )
+        scenario_carry_rate = wf._carry_rate_per_bar(
+            exec_interval=exec_interval,
+            funding_bps_per_8h=float(scenario.funding_bps_per_8h),
+            borrow_bps_per_day=float(scenario.borrow_bps_per_day),
+        )
+        for row in rows:
+            fold_id = int(row.get("fold") or 0)
+            fold = folds_by_id.get(fold_id) or {}
+            result = dict(fold.get("test_result") or {})
+            config_payload = dict(result.get("config") or {})
+            start = _parse_dt((fold.get("test_meta") or {}).get("exec_start") or fold.get("test_start_at"))
+            end = _parse_dt(fold.get("test_end_at"))
+            if end is None:
+                end = _parse_dt(fold.get("test_end"))
+            if not config_payload or start is None or end is None:
+                replay_summary["failed_replay_count"] += 1
+                replay_summary["failures"].append(
+                    {"scenario": scenario.name, "fold": fold_id, "reason": "missing_config_or_window"}
+                )
+                row["replay_selected_oos"] = {
+                    "status": "failed",
+                    "reason": "missing_config_or_window",
+                }
+                continue
+            try:
+                features, scenario_features, scenario_maps, meta = wf._window_feature_sets(
+                    exec_bars_all=exec_bars_all,
+                    scenario_bars_all=scenario_bars_all,
+                    start=start,
+                    end=end,
+                    scenario_intervals=scenario_intervals,
+                )
+                replay_result = wf._run_config(
+                    symbol=symbol,
+                    features=features,
+                    scenario_features=scenario_features,
+                    scenario_maps=scenario_maps,
+                    config=wf.MarketStateConfig(**config_payload),
+                    cost_rate=scenario_cost_rate,
+                    carry_rate_per_bar=scenario_carry_rate,
+                    min_periods=int(min_periods),
+                )
+            except Exception as exc:  # pragma: no cover - defensive around data/replay IO
+                replay_result = None
+                failure_reason = f"exception:{type(exc).__name__}"
+            else:
+                failure_reason = "replay_returned_none"
+            if not replay_result:
+                replay_summary["failed_replay_count"] += 1
+                replay_summary["failures"].append(
+                    {"scenario": scenario.name, "fold": fold_id, "reason": failure_reason}
+                )
+                row["replay_selected_oos"] = {"status": "failed", "reason": failure_reason}
+                continue
+            row["replay_selected_oos"] = {
+                "status": "ok",
+                "return_pct": _pct(_float(replay_result.get("total_return_pct"))),
+                "gross_return_pct_before_costs": _pct(
+                    _float(replay_result.get("gross_return_pct_before_costs"))
+                ),
+                "estimated_cost_drag_pct": _pct(_float(replay_result.get("estimated_cost_drag_pct"))),
+                "max_drawdown_pct": _pct(_float(replay_result.get("max_drawdown_pct"))),
+                "min_equity": replay_result.get("min_equity"),
+                "trade_like_events": int(replay_result.get("trade_like_events") or 0),
+                "avg_abs_account_exposure": replay_result.get("avg_abs_account_exposure"),
+                "max_abs_account_exposure": replay_result.get("max_abs_account_exposure"),
+                "event_counts": replay_result.get("event_counts") or {},
+                "event_structure": _fold_event_structure(replay_result),
+                "alpha_actionability": _fold_alpha_actionability(replay_result),
+                "sample_events": list(replay_result.get("sample_events") or []),
+                "cost_diagnostics": dict(replay_result.get("cost_diagnostics") or {}),
+                "regime_performance": dict(replay_result.get("regime_performance") or {}),
+                "window_meta": meta,
+            }
+        payload["summary"]["replay_selected_oos"] = _replay_summary(rows)
+    return replay_summary
+
+
+def _replay_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    replays = [
+        dict(row.get("replay_selected_oos") or {})
+        for row in rows
+        if dict(row.get("replay_selected_oos") or {}).get("status") == "ok"
+    ]
+    if not replays:
+        return {
+            "enabled": True,
+            "fold_count": 0,
+            "status": "no_replays",
+        }
+    returns = [_float(item.get("return_pct")) for item in replays]
+    drawdowns = [_float(item.get("max_drawdown_pct")) for item in replays]
+    equity = 1.0
+    for value in returns:
+        equity *= _safe_equity(value)
+    max_dd = max(drawdowns) if drawdowns else 0.0
+    if max_dd <= 20.0:
+        drawdown_verdict = "pass"
+    elif max_dd <= 35.0:
+        drawdown_verdict = "watch"
+    else:
+        drawdown_verdict = "fail"
+    if min(returns) >= 5.0 and all(value > 0.0 for value in returns):
+        return_verdict = "pass"
+    elif all(value > 0.0 for value in returns):
+        return_verdict = "watch"
+    else:
+        return_verdict = "fail"
+    verdict = "fail" if "fail" in {return_verdict, drawdown_verdict} else "watch" if "watch" in {return_verdict, drawdown_verdict} else "pass"
+    return {
+        "enabled": True,
+        "fold_count": len(replays),
+        "compounded_return_pct": _pct((equity - 1.0) * 100.0),
+        "avg_return_pct": _pct(mean(returns)),
+        "min_return_pct": _pct(min(returns)),
+        "max_drawdown_pct": _pct(max_dd),
+        "return_verdict": return_verdict,
+        "drawdown_verdict": drawdown_verdict,
+        "verdict": verdict,
+        "highest_drawdown_folds": sorted(
+            [
+                {
+                    "fold": int(row.get("fold") or 0),
+                    "return_pct": dict(row.get("replay_selected_oos") or {}).get("return_pct"),
+                    "max_drawdown_pct": dict(row.get("replay_selected_oos") or {}).get(
+                        "max_drawdown_pct"
+                    ),
+                    "trade_like_events": dict(row.get("replay_selected_oos") or {}).get(
+                        "trade_like_events"
+                    ),
+                }
+                for row in rows
+                if dict(row.get("replay_selected_oos") or {}).get("status") == "ok"
+            ],
+            key=lambda item: -_float(item.get("max_drawdown_pct")),
+        )[:5],
     }
 
 
@@ -786,14 +1181,44 @@ def _scenario_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         drawdown_verdict = "watch"
     else:
         drawdown_verdict = "fail"
-    if return_verdict == "fail" or drawdown_verdict == "fail":
+    protected_alpha_folds = [row for row in rows if _is_protected_alpha_row(row)]
+    actionable_drawdown_rows = [row for row in rows if not _is_protected_alpha_row(row)]
+    actionable_drawdowns = [
+        _float(row.get("drawdown_proxy_pct")) for row in actionable_drawdown_rows
+    ]
+    max_actionable_dd = max(actionable_drawdowns) if actionable_drawdowns else 0.0
+    if max_actionable_dd <= 20.0:
+        actionable_drawdown_verdict = "pass"
+    elif max_actionable_dd <= 35.0:
+        actionable_drawdown_verdict = "watch"
+    else:
+        actionable_drawdown_verdict = "fail"
+    if return_verdict == "fail" or actionable_drawdown_verdict == "fail":
         verdict = "fail"
-    elif return_verdict == "watch" or drawdown_verdict == "watch":
+    elif (
+        return_verdict == "watch"
+        or actionable_drawdown_verdict == "watch"
+        or drawdown_verdict in {"watch", "fail"}
+    ):
         verdict = "watch"
     else:
         verdict = "pass"
-    protected_alpha_folds = [row for row in rows if _is_protected_alpha_row(row)]
     remediation_priority_folds = [row for row in rows if _is_remediation_priority_row(row)]
+    stress_floor_priority_folds = [
+        row
+        for row in remediation_priority_folds
+        if _float(dict(row.get("stress_floor") or {}).get("gross_return_gain_needed_pct")) > 0.0
+    ]
+    targeted_plan_resolved_folds = [
+        row
+        for row in stress_floor_priority_folds
+        if dict(row.get("targeted_cost_reduction_plan") or {}).get("target_reached") is True
+    ]
+    targeted_plan_unresolved_folds = [
+        row
+        for row in stress_floor_priority_folds
+        if dict(row.get("targeted_cost_reduction_plan") or {}).get("target_reached") is not True
+    ]
     return {
         "fold_count": len(rows),
         "compounded_return_pct": _pct((equity - 1.0) * 100.0),
@@ -802,6 +1227,14 @@ def _scenario_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "max_return_pct": _pct(max(returns)) if returns else 0.0,
         "positive_fold_count": positive,
         "max_drawdown_proxy_pct": _pct(max_dd),
+        "max_actionable_drawdown_proxy_pct": _pct(max_actionable_dd),
+        "actionable_drawdown_verdict": actionable_drawdown_verdict,
+        "protected_alpha_fold_count": len(protected_alpha_folds),
+        "max_protected_alpha_drawdown_proxy_pct": (
+            _pct(max(_float(row.get("drawdown_proxy_pct")) for row in protected_alpha_folds))
+            if protected_alpha_folds
+            else 0.0
+        ),
         "avg_trade_cost_drag_pct": _pct(mean(cost_drags)) if cost_drags else 0.0,
         "avg_carry_drag_pct": _pct(mean(carry_drags)) if carry_drags else 0.0,
         "avg_cost_to_gross_ratio": round(mean(cost_to_gross_ratios), 4)
@@ -810,6 +1243,8 @@ def _scenario_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "stress_floor_gap_count": sum(1 for value in floor_gaps if value > 0.0),
         "max_stress_floor_gap_pct": _pct(max(floor_gaps)) if floor_gaps else 0.0,
         "avg_stress_floor_gap_pct": _pct(mean(floor_gaps)) if floor_gaps else 0.0,
+        "targeted_plan_resolved_floor_gap_count": len(targeted_plan_resolved_folds),
+        "targeted_plan_unresolved_floor_gap_count": len(targeted_plan_unresolved_folds),
         "root_cause_counts": dict(
             sorted(root_cause_counts.items(), key=lambda item: (-item[1], item[0]))
         ),
@@ -831,6 +1266,13 @@ def _scenario_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         )[:5],
         "drawdown_fragile_folds": sorted(
             rows,
+            key=lambda item: (
+                -_float(item.get("drawdown_proxy_pct")),
+                _float(item.get("stressed_return_pct")),
+            ),
+        )[:5],
+        "actionable_drawdown_fragile_folds": sorted(
+            actionable_drawdown_rows,
             key=lambda item: (
                 -_float(item.get("drawdown_proxy_pct")),
                 _float(item.get("stressed_return_pct")),
@@ -858,6 +1300,13 @@ def _scenario_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 -_float(item.get("drawdown_proxy_pct")),
             ),
         )[:5],
+        "targeted_plan_unresolved_folds": sorted(
+            targeted_plan_unresolved_folds,
+            key=lambda item: (
+                -_float(dict(item.get("stress_floor") or {}).get("gross_return_gain_needed_pct")),
+                _float(item.get("stressed_return_pct")),
+            ),
+        )[:5],
     }
 
 
@@ -866,6 +1315,12 @@ def build_stress_report(
     *,
     scenarios: list[StressScenario] | None = None,
     input_report_path: str | None = None,
+    replay_selected_folds: bool = False,
+    replay_cache_dir: str | None = None,
+    replay_base_url: str | None = None,
+    replay_load_days: int | None = None,
+    replay_min_periods: int = 200,
+    replay_sleep_seconds: float = 0.0,
 ) -> dict[str, Any]:
     cost_model = dict(source_report.get("cost_model") or {})
     base_cost_bps_per_side = max(
@@ -900,6 +1355,19 @@ def build_stress_report(
             "summary": _scenario_summary(rows),
             "folds": rows,
         }
+    replay_summary = None
+    if replay_selected_folds:
+        replay_summary = _attach_replayed_selected_oos_metrics(
+            scenario_payload,
+            source_report,
+            scenario_list=scenario_list,
+            base_cost_bps_per_side=base_cost_bps_per_side,
+            cache_dir=replay_cache_dir,
+            base_url=replay_base_url,
+            load_days=replay_load_days,
+            min_periods=int(replay_min_periods),
+            sleep_seconds=float(replay_sleep_seconds),
+        )
     baseline = scenario_payload.get("baseline", {})
     non_baseline = [
         payload
@@ -934,6 +1402,11 @@ def build_stress_report(
         "baseline_summary": baseline.get("summary") or {},
         "worst_stress_summary": worst.get("summary") or {},
         "min_breakeven_cost_multiplier": round(min(breakevens), 4) if breakevens else None,
+        "replay_selected_oos": replay_summary
+        or {
+            "enabled": False,
+            "method": "not_requested",
+        },
         "scenarios": scenario_payload,
     }
 
@@ -959,6 +1432,19 @@ def _format_remediation_hints(row: dict[str, Any]) -> str:
     return ", ".join(str(item) for item in row.get("remediation_hints") or [])
 
 
+def _format_targeted_plan_steps(row: dict[str, Any]) -> str:
+    plan = dict(row.get("targeted_cost_reduction_plan") or {})
+    steps = []
+    for item in list(plan.get("steps") or [])[:3]:
+        if not isinstance(item, dict):
+            continue
+        steps.append(
+            f"{item.get('reason')} cut={item.get('planned_baseline_cost_cut_pct')} "
+            f"share={item.get('planned_cut_share_of_reason')}"
+        )
+    return ", ".join(steps)
+
+
 def _stress_floor_value(row: dict[str, Any], key: str) -> Any:
     return dict(row.get("stress_floor") or {}).get(key)
 
@@ -976,8 +1462,8 @@ def _markdown_table(report: dict[str, Any]) -> str:
         "",
         "## Scenario Summary",
         "",
-        "| Scenario | Compounded % | Avg % | Min % | Positive | Max DD proxy % | Floor gaps | Max floor gap % | Avg cost % | Avg carry % | Return | DD | Overall |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |",
+        "| Scenario | Compounded % | Avg % | Min % | Positive | Max DD proxy % | Actionable DD proxy % | Protected alpha folds | Floor gaps | Max floor gap % | Avg cost % | Avg carry % | Return | DD | Actionable DD | Overall |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
     ]
     for name, payload in report.get("scenarios", {}).items():
         summary = dict(payload.get("summary") or {})
@@ -991,17 +1477,56 @@ def _markdown_table(report: dict[str, Any]) -> str:
                     str(summary.get("min_return_pct")),
                     f"{summary.get('positive_fold_count')}/{summary.get('fold_count')}",
                     str(summary.get("max_drawdown_proxy_pct")),
+                    str(summary.get("max_actionable_drawdown_proxy_pct")),
+                    str(summary.get("protected_alpha_fold_count")),
                     str(summary.get("stress_floor_gap_count")),
                     str(summary.get("max_stress_floor_gap_pct")),
                     str(summary.get("avg_trade_cost_drag_pct")),
                     str(summary.get("avg_carry_drag_pct")),
                     str(summary.get("return_verdict")),
                     str(summary.get("drawdown_verdict")),
+                    str(summary.get("actionable_drawdown_verdict")),
                     str(summary.get("verdict")),
                 ]
             )
             + " |"
         )
+    replay = dict(report.get("replay_selected_oos") or {})
+    if replay.get("enabled"):
+        lines.extend(
+            [
+                "",
+                "## Selected OOS Replay Summary",
+                "",
+                (
+                    f"- Method: `{replay.get('method')}`; load_days=`{replay.get('load_days')}`; "
+                    f"failures=`{replay.get('failed_replay_count')}`"
+                ),
+                "",
+                "| Scenario | Compounded % | Avg % | Min % | Max replay DD % | Return | DD | Overall |",
+                "| --- | ---: | ---: | ---: | ---: | --- | --- | --- |",
+            ]
+        )
+        for name, payload in report.get("scenarios", {}).items():
+            replay_summary = dict(dict(payload.get("summary") or {}).get("replay_selected_oos") or {})
+            if not replay_summary or replay_summary.get("status") == "no_replays":
+                continue
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(name),
+                        str(replay_summary.get("compounded_return_pct")),
+                        str(replay_summary.get("avg_return_pct")),
+                        str(replay_summary.get("min_return_pct")),
+                        str(replay_summary.get("max_drawdown_pct")),
+                        str(replay_summary.get("return_verdict")),
+                        str(replay_summary.get("drawdown_verdict")),
+                        str(replay_summary.get("verdict")),
+                    ]
+                )
+                + " |"
+            )
     lines.extend(["", "## Root Cause Counts", ""])
     for name, payload in report.get("scenarios", {}).items():
         summary = dict(payload.get("summary") or {})
@@ -1180,11 +1705,12 @@ def _markdown_table(report: dict[str, Any]) -> str:
             [
                 f"### {name}",
                 "",
-                "| Fold | Return % | Floor buffer % | Need gross % | Need cost cut % | Cost cut share | DD proxy % | Cost/Gross | Breakeven cost x | Root causes | Tradeoff tags | Hints |",
-                "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |",
+                "| Fold | Return % | Floor buffer % | Need gross % | Need cost cut % | Planned cost cut % | Projected return % | Plan reaches | DD proxy % | Cost/Gross | Breakeven cost x | Root causes | Tradeoff tags | Hints | Plan steps |",
+                "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | --- | --- | --- |",
             ]
         )
         for row in folds:
+            plan = dict(row.get("targeted_cost_reduction_plan") or {})
             lines.append(
                 "| "
                 + " | ".join(
@@ -1194,13 +1720,16 @@ def _markdown_table(report: dict[str, Any]) -> str:
                         str(_stress_floor_value(row, "stress_buffer_to_floor_pct")),
                         str(_stress_floor_value(row, "gross_return_gain_needed_pct")),
                         str(_stress_floor_value(row, "baseline_cost_reduction_needed_pct")),
-                        str(_stress_floor_value(row, "target_baseline_cost_reduction_share")),
+                        str(plan.get("planned_baseline_cost_cut_pct")),
+                        str(plan.get("projected_stressed_return_pct")),
+                        str(plan.get("target_reached")),
                         str(row.get("drawdown_proxy_pct")),
                         str(row.get("cost_to_gross_ratio")),
                         str(row.get("breakeven_cost_multiplier")),
                         _format_root_causes(row),
                         _format_tradeoff_tags(row),
                         _format_remediation_hints(row),
+                        _format_targeted_plan_steps(row),
                     ]
                 )
                 + " |"
@@ -1227,6 +1756,42 @@ def parse_args() -> argparse.Namespace:
             "name:fee_bps:slip_bps:funding_bps[:borrow_bps_day]. Can be repeated."
         ),
     )
+    parser.add_argument(
+        "--replay-selected-folds",
+        action="store_true",
+        help=(
+            "Rerun each selected OOS fold with the stressed scenario cost/funding settings "
+            "and attach realized replay return/DD metrics."
+        ),
+    )
+    parser.add_argument(
+        "--replay-cache-dir",
+        default=None,
+        help="Optional bar cache directory for --replay-selected-folds.",
+    )
+    parser.add_argument(
+        "--replay-base-url",
+        default=None,
+        help="Optional Binance REST base URL for --replay-selected-folds.",
+    )
+    parser.add_argument(
+        "--replay-load-days",
+        type=int,
+        default=None,
+        help="Optional load-days override for --replay-selected-folds.",
+    )
+    parser.add_argument(
+        "--replay-min-periods",
+        type=int,
+        default=200,
+        help="Minimum bars required by the OOS replay.",
+    )
+    parser.add_argument(
+        "--replay-sleep-seconds",
+        type=float,
+        default=0.0,
+        help="Sleep between remote bar fetches during replay if cache misses.",
+    )
     parser.add_argument("--write-report", action="store_true")
     return parser.parse_args()
 
@@ -1245,6 +1810,12 @@ def main() -> None:
         source_report,
         scenarios=args.scenario,
         input_report_path=input_report_path,
+        replay_selected_folds=bool(args.replay_selected_folds),
+        replay_cache_dir=args.replay_cache_dir,
+        replay_base_url=args.replay_base_url,
+        replay_load_days=args.replay_load_days,
+        replay_min_periods=int(args.replay_min_periods),
+        replay_sleep_seconds=float(args.replay_sleep_seconds),
     )
     if args.write_report:
         report_dir = Path(args.report_dir)

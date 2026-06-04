@@ -154,6 +154,59 @@ def test_stress_report_quantifies_floor_gap_when_cost_stress_is_too_high() -> No
     assert summary["max_stress_floor_gap_pct"] == 1.0
 
 
+def test_stress_report_builds_targeted_cost_reduction_plan_before_base_alpha_cut() -> None:
+    source = {
+        "symbol": "BTCUSDT",
+        "exec_interval": "5m",
+        "cost_model": {"fee_bps_per_side": 4.0, "slippage_bps_per_side": 1.0},
+        "folds": [
+            _fold(
+                13,
+                gross=24.0,
+                net=17.0,
+                cost=7.0,
+                drawdown=8.0,
+                cost_diagnostics={
+                    "by_reason_pct": {
+                        "base_entry": 2.5,
+                        "v6_reaction_inventory_trim": 1.5,
+                        "hard_intraday_time_exit": 1.0,
+                    },
+                },
+                event_diagnostics={
+                    "add_by_role": {"base": 5},
+                    "realized_pnl_usd_units_by_role": {"base": 100.0},
+                    "realized_pnl_usd_units_by_entry_context": {
+                        "base|long|with_trend|uptrend|normal|ext_0-0.75|break_0-0.1": 100.0,
+                    },
+                },
+            )
+        ],
+    }
+
+    report = build_stress_report(
+        source,
+        scenarios=[StressScenario("cost_x3", trade_cost_multiplier=3.0)],
+    )
+
+    row = report["scenarios"]["cost_x3"]["folds"][0]
+    plan = row["targeted_cost_reduction_plan"]
+    summary = report["scenarios"]["cost_x3"]["summary"]
+
+    assert row["stressed_return_pct"] == 3.0
+    assert plan["target_reached"] is True
+    assert plan["needed_baseline_cost_cut_pct"] == 0.6667
+    assert plan["planned_baseline_cost_cut_pct"] == 0.6667
+    assert plan["projected_stressed_return_pct"] == 5.0
+    assert [step["reason"] for step in plan["steps"]] == [
+        "hard_intraday_time_exit",
+        "v6_reaction_inventory_trim",
+    ]
+    assert "base_entry_cost_is_alpha_engine" in row["tradeoff_tags"]
+    assert summary["targeted_plan_resolved_floor_gap_count"] == 1
+    assert summary["targeted_plan_unresolved_floor_gap_count"] == 0
+
+
 def test_stress_report_attaches_fragility_root_cause_diagnostics() -> None:
     source = {
         "symbol": "BTCUSDT",
@@ -259,8 +312,56 @@ def test_stress_report_marks_high_cost_alpha_engine_tradeoff() -> None:
     assert summary["remediation_hint_counts"][
         "test_selective_capacity_extension_with_dd_guard"
     ] == 1
+    assert summary["protected_alpha_fold_count"] == 1
+    assert summary["max_actionable_drawdown_proxy_pct"] == 0.0
+    assert summary["actionable_drawdown_verdict"] == "pass"
+    assert summary["drawdown_verdict"] == "fail"
+    assert summary["verdict"] == "watch"
+    assert summary["max_protected_alpha_drawdown_proxy_pct"] == row["drawdown_proxy_pct"]
     assert summary["protected_alpha_folds"][0]["fold"] == 15
     assert summary["remediation_priority_folds"] == []
+
+
+def test_stress_report_keeps_actionable_drawdown_when_non_alpha_fold_is_fragile() -> None:
+    source = {
+        "symbol": "BTCUSDT",
+        "exec_interval": "5m",
+        "cost_model": {"fee_bps_per_side": 4.0, "slippage_bps_per_side": 1.0},
+        "folds": [
+            _fold(
+                15,
+                gross=240.0,
+                net=200.0,
+                cost=40.0,
+                drawdown=10.0,
+                cost_diagnostics={"by_reason_pct": {"base_entry": 4.0}},
+            ),
+            _fold(
+                2,
+                gross=50.0,
+                net=40.0,
+                cost=10.0,
+                drawdown=20.0,
+            ),
+        ],
+    }
+
+    report = build_stress_report(
+        source,
+        scenarios=[StressScenario("cost_x3", trade_cost_multiplier=3.0)],
+    )
+
+    rows = report["scenarios"]["cost_x3"]["folds"]
+    summary = report["scenarios"]["cost_x3"]["summary"]
+    actionable_row = next(row for row in rows if row["fold"] == 2)
+
+    assert summary["max_drawdown_proxy_pct"] == 90.0
+    assert summary["max_actionable_drawdown_proxy_pct"] == actionable_row["drawdown_proxy_pct"]
+    assert summary["actionable_drawdown_verdict"] == "fail"
+    assert summary["verdict"] == "fail"
+    assert summary["protected_alpha_fold_count"] == 1
+    assert summary["actionable_drawdown_fragile_folds"][0]["fold"] == 2
+    assert summary["remediation_priority_folds"][0]["fold"] == 2
 
 
 def test_stress_report_distinguishes_base_alpha_cost_from_probe_leak() -> None:

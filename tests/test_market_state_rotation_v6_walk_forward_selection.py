@@ -13,6 +13,7 @@ from scripts.run_market_state_rotation_v6_walk_forward_validation import (
     _after_selection_confirmation_targets,
     _apply_battle_restore_overlay,
     _apply_distribution_balance_overlay,
+    _apply_exit_trend_hold_overlay,
     _apply_exposure_rebalance_overlay,
     _apply_high_cost_balance_overlay,
     _apply_hold_compression_overlay,
@@ -40,13 +41,19 @@ from scripts.run_market_state_rotation_v6_walk_forward_validation import (
     _one_way_reversal_after_selection_weak_allowed,
     _report_provenance,
     _regime_dependency_stats,
+    _apply_deep_drawdown_reversal_rescue_guard,
+    _apply_deep_soft_overlay_rescue_guard,
+    _apply_high_cost_runner_rescue_guard,
+    _apply_negative_train_distribution_rescue_guard,
     _risk_smoothing_after_selection_allowed,
+    _apply_unresolved_stress_raw_leader_guard,
     _selection_score,
     _source_replay_diagnostics,
     _source_replay_lineage_guard,
     _source_replay_high_return_soft_sizer_relax_drawdown_pct,
     _inherit_source_replay_model_encoded_policy,
     _stabilize_source_replay_ratio_gates,
+    _source_replay_selected_train_anchor,
     _source_replay_should_auto_warm_selection_state,
     _top_no_trade_reasons,
     _train_state_after_selection_allowed,
@@ -75,6 +82,7 @@ class _ReactionOnlyConfig:
     reaction_trim_trigger: float
     repair_cut: float
     repair_stop: float
+    reaction_avg_band: float = 0.95
 
 
 @dataclass(frozen=True)
@@ -119,10 +127,43 @@ class _TrimCooldownOnlyConfig:
 
 
 @dataclass(frozen=True)
+class _CostThrottleOnlyConfig:
+    model_id: str
+    one_way_trim_size_mult: float
+    hard_time_exit_fraction: float
+    hard_time_exit_cooldown_bars: int
+    reaction_trim_size_mult: float
+    reaction_trim_trend_hold_trigger_mult: float
+    hard_time_exit_trend_defer_bars: int
+    hard_time_exit_trend_defer_min_favorable_reaction: float
+    trend_hold_min_trend_strength: float
+    trend_hold_min_one_way_score: float
+
+
+@dataclass(frozen=True)
+class _ExitTrendHoldOnlyConfig:
+    model_id: str
+    reaction_trim_trend_hold_trigger_mult: float
+    hard_time_exit_trend_defer_bars: int
+    hard_time_exit_trend_defer_min_favorable_reaction: float
+    trend_hold_min_trend_strength: float
+    trend_hold_min_one_way_score: float
+
+
+@dataclass(frozen=True)
+class _HardTimeLossDeferOnlyConfig:
+    model_id: str
+    hard_time_loss_defer_bars: int
+    hard_time_loss_defer_min_loss_usd: float
+    hard_time_loss_defer_context_fragments: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class _EventRiskBaseOnlyConfig:
     model_id: str
     event_risk_base_reduce_size_mult: float
     event_risk_base_reduce_min_extension_atr: float
+    event_risk_base_reduce_max_extension_atr: float
     event_risk_base_reduce_side: str
     event_risk_base_reduce_contexts: tuple[str, ...]
 
@@ -251,6 +292,73 @@ def test_configs_from_source_fold_reads_matching_fold_lineage(monkeypatch) -> No
         "top-fold-12",
         "test-fold-12",
     ]
+
+
+def test_source_replay_selected_train_anchor_prefers_source_fold_candidate(monkeypatch) -> None:
+    monkeypatch.setattr(walk_forward_module, "MarketStateConfig", _TinySourceConfig)
+    source_report = {
+        "folds": [
+            {
+                "fold": 12,
+                "selected_train_result": {
+                    "model_id": "source-selected",
+                    "config": {"model_id": "source-selected", "max_hold_bars": 54},
+                },
+            }
+        ]
+    }
+    selected_train = {
+        "model_id": "score-leader",
+        "walk_forward_selection_score": 3.0,
+        "config": {"model_id": "score-leader", "max_hold_bars": 55},
+    }
+    source_candidate = {
+        "model_id": "source-selected-replayed",
+        "walk_forward_selection_score": 2.8,
+        "config": {"model_id": "source-selected-replayed", "max_hold_bars": 54},
+    }
+
+    anchored, detail = _source_replay_selected_train_anchor(
+        source_report,
+        fold=12,
+        train_results=[selected_train, source_candidate],
+        selected_train=selected_train,
+        enabled=True,
+    )
+
+    assert anchored is source_candidate
+    assert detail["applied"] is True
+    assert detail["reason"] == "source_selected_train_matched"
+    assert detail["selected_model_id_before_anchor"] == "score-leader"
+    assert detail["selected_model_id_after_anchor"] == "source-selected-replayed"
+
+
+def test_source_replay_selected_train_anchor_can_be_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(walk_forward_module, "MarketStateConfig", _TinySourceConfig)
+    selected_train = {
+        "model_id": "score-leader",
+        "config": {"model_id": "score-leader", "max_hold_bars": 55},
+    }
+
+    anchored, detail = _source_replay_selected_train_anchor(
+        {
+            "folds": [
+                {
+                    "fold": 12,
+                    "selected_train_result": {
+                        "config": {"model_id": "source-selected", "max_hold_bars": 54},
+                    },
+                }
+            ]
+        },
+        fold=12,
+        train_results=[],
+        selected_train=selected_train,
+        enabled=False,
+    )
+
+    assert anchored is selected_train
+    assert detail == {"enabled": False, "applied": False, "reason": "disabled"}
 
 
 def test_source_replay_inherits_selection_policy_when_cli_is_default() -> None:
@@ -856,6 +964,123 @@ def test_source_replay_diagnostics_accepts_small_return_loss_for_large_drawdown_
     assert accepted["lineage_status"] == "accepted_risk_reduction"
     assert diagnostics["unresolved_material_mismatch_folds"] == []
     assert diagnostics["accepted_model_mismatch_folds"][0]["fold"] == 3
+
+
+def test_source_replay_diagnostics_accepts_targeted_stress_floor_repair() -> None:
+    source_report = {
+        "folds": [
+            {
+                "fold": 12,
+                "selected_model_id": "source-low-return",
+                "after_selection_overlays_applied": [
+                    "equity_circuit",
+                    "event_risk_base_throttle",
+                    "low_return_soft_inventory_trim",
+                ],
+                "test_result": {
+                    "total_return_pct": 15.3387,
+                    "max_drawdown_pct": 10.1582,
+                    "estimated_cost_drag_pct": 5.9655,
+                    "trade_like_events": 14,
+                },
+            }
+        ]
+    }
+    folds = [
+        {
+            "fold": 12,
+            "selected_model_id": "replay-stress-repair",
+            "after_selection_overlays_applied": [
+                "equity_circuit",
+                "event_risk_base_throttle",
+                "low_return_soft_inventory_trim",
+                "low_return_stress_base_throttle",
+            ],
+            "test_result": {
+                "total_return_pct": 9.582,
+                "max_drawdown_pct": 3.1906,
+                "estimated_cost_drag_pct": 2.222,
+                "trade_like_events": 13,
+            },
+        }
+    ]
+
+    diagnostics = _source_replay_diagnostics(source_report, folds)
+    guard = _source_replay_lineage_guard(
+        diagnostics,
+        fail_on_unresolved_material=True,
+    )
+
+    assert diagnostics["material_metric_mismatch_count"] == 1
+    assert diagnostics["stress_floor_repair_count"] == 1
+    assert diagnostics["accepted_risk_tradeoff_count"] == 0
+    assert diagnostics["unresolved_material_metric_mismatch_count"] == 0
+    assert diagnostics["selected_model_stress_floor_repair_count"] == 1
+    assert diagnostics["selected_model_unresolved_mismatch_count"] == 0
+    assert diagnostics["drift_quality_counts"] == {"stress_floor_repair": 1}
+    assert diagnostics["model_mismatch_status_counts"] == {"stress_floor_repair": 1}
+    repair = diagnostics["stress_floor_repair_folds"][0]
+    assert repair["fold"] == 12
+    assert repair["accepted_stress_floor_repair"] is True
+    assert repair["drift_quality"] == "stress_floor_repair"
+    assert repair["lineage_status"] == "stress_floor_repair"
+    assert diagnostics["unresolved_material_mismatch_folds"] == []
+    assert diagnostics["stress_floor_model_mismatch_folds"][0]["fold"] == 12
+    assert guard["status"] == "pass"
+
+
+def test_source_replay_diagnostics_resolves_return_improving_material_drift() -> None:
+    source_report = {
+        "folds": [
+            {
+                "fold": 8,
+                "selected_model_id": "source-fragile",
+                "after_selection_overlays_applied": [
+                    "equity_circuit",
+                    "fragile_regime_inventory_trim",
+                ],
+                "test_result": {
+                    "total_return_pct": 16.2227,
+                    "max_drawdown_pct": 5.0358,
+                    "estimated_cost_drag_pct": 4.5253,
+                    "trade_like_events": 13,
+                },
+            }
+        ]
+    }
+    folds = [
+        {
+            "fold": 8,
+            "selected_model_id": "replay-negative-distribution",
+            "after_selection_overlays_applied": [
+                "equity_circuit",
+                "negative_train_distribution_probe",
+            ],
+            "test_result": {
+                "total_return_pct": 24.7187,
+                "max_drawdown_pct": 7.5041,
+                "estimated_cost_drag_pct": 7.3577,
+                "trade_like_events": 32,
+            },
+        }
+    ]
+
+    diagnostics = _source_replay_diagnostics(source_report, folds)
+    guard = _source_replay_lineage_guard(
+        diagnostics,
+        fail_on_unresolved_material=True,
+    )
+
+    assert diagnostics["material_metric_mismatch_count"] == 1
+    assert diagnostics["beneficial_return_improvement_count"] == 1
+    assert diagnostics["selected_model_beneficial_mismatch_count"] == 1
+    assert diagnostics["unresolved_material_metric_mismatch_count"] == 0
+    assert diagnostics["selected_model_unresolved_mismatch_count"] == 0
+    assert diagnostics["lineage_status_counts"] == {"return_improving": 1}
+    assert diagnostics["beneficial_return_improvement_folds"][0]["fold"] == 8
+    assert diagnostics["unresolved_material_mismatch_folds"] == []
+    assert guard["status"] == "pass"
+    assert guard["failed"] is False
 
 
 def test_source_replay_diagnostics_splits_immaterial_model_id_variant() -> None:
@@ -1573,6 +1798,787 @@ def test_fast_defense_structural_penalty_requires_fast_cooldown_and_fragile_rati
     assert low_turnover == 1.0
 
 
+def test_selection_stress_floor_penalty_uses_gross_minus_stressed_cost() -> None:
+    result = {
+        "score": 1.0,
+        "total_return_pct": 20.0,
+        "gross_return_pct_before_costs": 30.0,
+        "estimated_cost_drag_pct": 9.0,
+        "max_drawdown_pct": 10.0,
+        "event_diagnostics": {"flags": [], "ratios": {}},
+    }
+
+    penalized = _selection_score(
+        result,
+        flag_penalty=0.0,
+        stress_cost_multiplier=3.0,
+        stress_funding_proxy_pct=1.0,
+        stress_min_return_floor_pct=5.0,
+        stress_floor_gap_penalty=0.1,
+    )
+    sufficient_buffer = _selection_score(
+        {**result, "gross_return_pct_before_costs": 45.0},
+        flag_penalty=0.0,
+        stress_cost_multiplier=3.0,
+        stress_funding_proxy_pct=1.0,
+        stress_min_return_floor_pct=5.0,
+        stress_floor_gap_penalty=0.1,
+    )
+
+    assert round(penalized, 6) == 0.7
+    assert sufficient_buffer == 1.0
+
+
+def test_selection_cost_to_gross_penalty_targets_cost_efficiency() -> None:
+    result = {
+        "score": 1.0,
+        "total_return_pct": 20.0,
+        "gross_return_pct_before_costs": 40.0,
+        "estimated_cost_drag_pct": 12.0,
+        "max_drawdown_pct": 10.0,
+        "event_diagnostics": {"flags": [], "ratios": {}},
+    }
+
+    penalized = _selection_score(
+        result,
+        flag_penalty=0.0,
+        cost_to_gross_threshold=0.25,
+        cost_to_gross_penalty=2.0,
+    )
+    efficient = _selection_score(
+        {**result, "estimated_cost_drag_pct": 8.0},
+        flag_penalty=0.0,
+        cost_to_gross_threshold=0.25,
+        cost_to_gross_penalty=2.0,
+    )
+
+    assert round(penalized, 6) == 0.9
+    assert efficient == 1.0
+
+
+def test_unresolved_stress_guard_keeps_raw_leader_when_penalty_does_not_solve_floor() -> None:
+    args = SimpleNamespace(
+        selection_stress_unresolved_keep_raw_leader=True,
+        selection_stress_cost_multiplier=3.0,
+        selection_stress_funding_proxy_pct=0.5,
+        selection_stress_min_return_floor_pct=5.0,
+        selection_stress_unresolved_return_giveback_pct=10.0,
+        selection_stress_unresolved_leader_metric="raw_score",
+        selection_stress_unresolved_low_return_max_selected_pct=None,
+        selection_stress_unresolved_low_return_giveback_pct=None,
+    )
+    penalized_pick = {
+        "model_id": "cost-efficient-but-weak",
+        "score": 0.4,
+        "walk_forward_selection_score": 0.2,
+        "total_return_pct": 42.0,
+        "gross_return_pct_before_costs": 63.0,
+        "estimated_cost_drag_pct": 20.5,
+        "max_drawdown_pct": 22.0,
+    }
+    raw_leader = {
+        "model_id": "raw-leader",
+        "score": 0.5,
+        "walk_forward_selection_score": -0.1,
+        "total_return_pct": 62.0,
+        "gross_return_pct_before_costs": 98.0,
+        "estimated_cost_drag_pct": 36.0,
+        "max_drawdown_pct": 31.0,
+    }
+
+    guarded, details = _apply_unresolved_stress_raw_leader_guard(
+        [penalized_pick, raw_leader],
+        args,
+    )
+
+    assert guarded[0]["model_id"] == "raw-leader"
+    assert details["applied"] is True
+    assert details["reason"] == "unresolved_stress_preserve_raw_leader"
+    assert details["return_giveback_pct"] == 20.0
+    assert details["max_stressed_return_pct"] < 5.0
+
+
+def test_unresolved_stress_guard_does_not_override_when_floor_candidate_exists() -> None:
+    args = SimpleNamespace(
+        selection_stress_unresolved_keep_raw_leader=True,
+        selection_stress_cost_multiplier=3.0,
+        selection_stress_funding_proxy_pct=0.5,
+        selection_stress_min_return_floor_pct=5.0,
+        selection_stress_unresolved_return_giveback_pct=10.0,
+        selection_stress_unresolved_leader_metric="raw_score",
+        selection_stress_unresolved_low_return_max_selected_pct=None,
+        selection_stress_unresolved_low_return_giveback_pct=None,
+    )
+    selected = {
+        "model_id": "stress-solved",
+        "score": 0.4,
+        "walk_forward_selection_score": 0.2,
+        "total_return_pct": 35.0,
+        "gross_return_pct_before_costs": 55.0,
+        "estimated_cost_drag_pct": 12.0,
+        "max_drawdown_pct": 18.0,
+    }
+    raw_leader = {
+        "model_id": "raw-leader",
+        "score": 0.5,
+        "walk_forward_selection_score": -0.1,
+        "total_return_pct": 62.0,
+        "gross_return_pct_before_costs": 98.0,
+        "estimated_cost_drag_pct": 36.0,
+        "max_drawdown_pct": 31.0,
+    }
+
+    guarded, details = _apply_unresolved_stress_raw_leader_guard(
+        [selected, raw_leader],
+        args,
+    )
+
+    assert guarded[0]["model_id"] == "stress-solved"
+    assert details["applied"] is False
+    assert details["reason"] == "stress_floor_candidate_available"
+
+
+def test_unresolved_stress_guard_can_preserve_train_return_leader() -> None:
+    args = SimpleNamespace(
+        selection_stress_unresolved_keep_raw_leader=True,
+        selection_stress_cost_multiplier=3.0,
+        selection_stress_funding_proxy_pct=0.5,
+        selection_stress_min_return_floor_pct=5.0,
+        selection_stress_unresolved_return_giveback_pct=5.0,
+        selection_stress_unresolved_leader_metric="train_return",
+        selection_stress_unresolved_low_return_max_selected_pct=None,
+        selection_stress_unresolved_low_return_giveback_pct=None,
+    )
+    selected = {
+        "model_id": "raw-score-leader",
+        "score": 0.5,
+        "walk_forward_selection_score": 0.2,
+        "total_return_pct": 36.0,
+        "gross_return_pct_before_costs": 55.0,
+        "estimated_cost_drag_pct": 20.0,
+        "max_drawdown_pct": 18.0,
+    }
+    train_return_leader = {
+        "model_id": "train-return-leader",
+        "score": 0.3,
+        "walk_forward_selection_score": -0.2,
+        "total_return_pct": 44.0,
+        "gross_return_pct_before_costs": 70.0,
+        "estimated_cost_drag_pct": 26.0,
+        "max_drawdown_pct": 22.0,
+    }
+
+    guarded, details = _apply_unresolved_stress_raw_leader_guard(
+        [selected, train_return_leader],
+        args,
+    )
+
+    assert guarded[0]["model_id"] == "train-return-leader"
+    assert details["applied"] is True
+    assert details["leader_metric"] == "train_return"
+    assert details["return_giveback_pct"] == 8.0
+
+
+def test_unresolved_stress_guard_uses_low_return_band_giveback_threshold() -> None:
+    args = SimpleNamespace(
+        selection_stress_unresolved_keep_raw_leader=True,
+        selection_stress_cost_multiplier=3.0,
+        selection_stress_funding_proxy_pct=0.5,
+        selection_stress_min_return_floor_pct=5.0,
+        selection_stress_unresolved_return_giveback_pct=15.0,
+        selection_stress_unresolved_leader_metric="train_return",
+        selection_stress_unresolved_low_return_max_selected_pct=15.0,
+        selection_stress_unresolved_low_return_giveback_pct=3.0,
+    )
+    selected = {
+        "model_id": "low-return-selected",
+        "score": 0.5,
+        "walk_forward_selection_score": 0.2,
+        "total_return_pct": 10.0,
+        "gross_return_pct_before_costs": 24.0,
+        "estimated_cost_drag_pct": 14.0,
+        "max_drawdown_pct": 22.0,
+    }
+    train_return_leader = {
+        "model_id": "low-return-rescue",
+        "score": 0.3,
+        "walk_forward_selection_score": -0.2,
+        "total_return_pct": 14.0,
+        "gross_return_pct_before_costs": 36.0,
+        "estimated_cost_drag_pct": 22.0,
+        "max_drawdown_pct": 31.0,
+    }
+
+    guarded, details = _apply_unresolved_stress_raw_leader_guard(
+        [selected, train_return_leader],
+        args,
+    )
+
+    assert guarded[0]["model_id"] == "low-return-rescue"
+    assert details["applied"] is True
+    assert details["low_return_band_active"] is True
+    assert details["return_giveback_threshold_pct"] == 3.0
+
+
+def test_unresolved_stress_guard_uses_drawdown_rescue_band() -> None:
+    args = SimpleNamespace(
+        selection_stress_unresolved_keep_raw_leader=True,
+        selection_stress_cost_multiplier=3.0,
+        selection_stress_funding_proxy_pct=0.5,
+        selection_stress_min_return_floor_pct=5.0,
+        selection_stress_unresolved_return_giveback_pct=15.0,
+        selection_stress_unresolved_leader_metric="train_return",
+        selection_stress_unresolved_low_return_max_selected_pct=None,
+        selection_stress_unresolved_low_return_giveback_pct=None,
+        selection_stress_unresolved_drawdown_rescue_min_selected_pct=30.0,
+        selection_stress_unresolved_drawdown_rescue_max_selected_pct=40.0,
+        selection_stress_unresolved_drawdown_rescue_min_leader_dd_pct=30.0,
+        selection_stress_unresolved_drawdown_rescue_giveback_pct=5.0,
+    )
+    selected = {
+        "model_id": "smoothed-mid-return",
+        "score": 0.6,
+        "walk_forward_selection_score": 0.2,
+        "total_return_pct": 36.0,
+        "gross_return_pct_before_costs": 60.0,
+        "estimated_cost_drag_pct": 24.0,
+        "max_drawdown_pct": 20.0,
+    }
+    volatile_leader = {
+        "model_id": "volatile-trend-leader",
+        "score": 0.3,
+        "walk_forward_selection_score": -0.3,
+        "total_return_pct": 43.0,
+        "gross_return_pct_before_costs": 82.0,
+        "estimated_cost_drag_pct": 39.0,
+        "max_drawdown_pct": 32.0,
+    }
+
+    guarded, details = _apply_unresolved_stress_raw_leader_guard(
+        [selected, volatile_leader],
+        args,
+    )
+
+    assert guarded[0]["model_id"] == "volatile-trend-leader"
+    assert details["applied"] is True
+    assert details["drawdown_rescue_active"] is True
+    assert "drawdown_rescue" in details["threshold_reasons"]
+    assert details["return_giveback_threshold_pct"] == 5.0
+
+
+def test_negative_train_distribution_rescue_prefers_recipe_candidate() -> None:
+    args = SimpleNamespace(
+        selection_negative_train_distribution_rescue=True,
+        selection_negative_train_distribution_min_selected_return_pct=-1.0,
+        selection_negative_train_distribution_max_selected_return_pct=1.0,
+        selection_negative_train_distribution_max_return_giveback_pct=2.0,
+        negative_train_distribution_probe_replay_note="enabled",
+    )
+    selected = {
+        "model_id": "marginal-train-winner",
+        "score": 0.7,
+        "walk_forward_selection_score": 0.3,
+        "total_return_pct": -0.2,
+        "estimated_cost_drag_pct": 12.8,
+        "max_drawdown_pct": 21.0,
+        "config": {"max_possible_units": 1.5},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.52,
+                "turnover_events_per_add": 2.04,
+            }
+        },
+    }
+    repair_candidate = {
+        "model_id": "negative-train-distribution-repair",
+        "score": 0.6,
+        "walk_forward_selection_score": 0.2,
+        "total_return_pct": -1.3,
+        "estimated_cost_drag_pct": 19.5,
+        "max_drawdown_pct": 30.1,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.52,
+                "turnover_events_per_add": 2.04,
+            }
+        },
+    }
+
+    guarded, details = _apply_negative_train_distribution_rescue_guard(
+        [selected, repair_candidate],
+        args,
+    )
+
+    assert guarded[0]["model_id"] == "negative-train-distribution-repair"
+    assert details["applied"] is True
+    assert details["reason"] == "negative_train_distribution_repair"
+    assert details["return_giveback_pct"] == 1.1
+    assert details["repair_candidate_drawdown_pct"] == 30.1
+
+
+def test_negative_train_distribution_rescue_respects_giveback_threshold() -> None:
+    args = SimpleNamespace(
+        selection_negative_train_distribution_rescue=True,
+        selection_negative_train_distribution_min_selected_return_pct=-1.0,
+        selection_negative_train_distribution_max_selected_return_pct=1.0,
+        selection_negative_train_distribution_max_return_giveback_pct=0.5,
+        negative_train_distribution_probe_replay_note="enabled",
+    )
+    selected = {
+        "model_id": "marginal-train-winner",
+        "score": 0.7,
+        "walk_forward_selection_score": 0.3,
+        "total_return_pct": -0.2,
+        "estimated_cost_drag_pct": 12.8,
+        "max_drawdown_pct": 21.0,
+        "config": {"max_possible_units": 1.5},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.52,
+                "turnover_events_per_add": 2.04,
+            }
+        },
+    }
+    repair_candidate = {
+        "model_id": "negative-train-distribution-repair",
+        "score": 0.6,
+        "walk_forward_selection_score": 0.2,
+        "total_return_pct": -1.3,
+        "estimated_cost_drag_pct": 19.5,
+        "max_drawdown_pct": 30.1,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.52,
+                "turnover_events_per_add": 2.04,
+            }
+        },
+    }
+
+    guarded, details = _apply_negative_train_distribution_rescue_guard(
+        [selected, repair_candidate],
+        args,
+    )
+
+    assert guarded[0]["model_id"] == "marginal-train-winner"
+    assert details["applied"] is False
+    assert details["reason"] == "negative_train_distribution_return_giveback_above_threshold"
+
+
+def test_high_cost_runner_rescue_prefers_recipe_candidate() -> None:
+    args = SimpleNamespace(
+        selection_high_cost_runner_rescue=True,
+        selection_high_cost_runner_min_selected_return_pct=50.0,
+        selection_high_cost_runner_max_selected_return_pct=60.0,
+        selection_high_cost_runner_max_return_giveback_pct=6.0,
+        balanced_structure_replay_note="enabled",
+        high_cost_repair_cut_05_replay_note="enabled",
+        high_cost_near_zero_react_replay_note="enabled",
+        high_cost_runner_reversal_scale_replay_note="enabled",
+        high_cost_runner_tight_repair_replay_note="enabled",
+    )
+    selected = {
+        "model_id": "train-return-leader",
+        "score": 0.1,
+        "walk_forward_selection_score": -0.5,
+        "total_return_pct": 55.6,
+        "estimated_cost_drag_pct": 45.0,
+        "max_drawdown_pct": 17.0,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.35,
+                "turnover_events_per_add": 2.45,
+            }
+        },
+    }
+    repair_candidate = {
+        "model_id": "high-cost-runner",
+        "score": 0.2,
+        "walk_forward_selection_score": -0.24,
+        "total_return_pct": 51.6,
+        "estimated_cost_drag_pct": 43.9,
+        "max_drawdown_pct": 20.5,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.375,
+                "turnover_events_per_add": 2.453,
+            }
+        },
+    }
+
+    guarded, details = _apply_high_cost_runner_rescue_guard(
+        [selected, repair_candidate],
+        args,
+    )
+
+    assert guarded[0]["model_id"] == "high-cost-runner"
+    assert details["applied"] is True
+    assert details["reason"] == "high_cost_runner_repair"
+    assert details["return_giveback_pct"] == 4.0
+    assert details["repair_candidate_drawdown_pct"] == 20.5
+    assert details["repair_candidate_cost_drag_pct"] == 43.9
+
+
+def test_high_cost_runner_rescue_respects_giveback_threshold() -> None:
+    args = SimpleNamespace(
+        selection_high_cost_runner_rescue=True,
+        selection_high_cost_runner_min_selected_return_pct=50.0,
+        selection_high_cost_runner_max_selected_return_pct=60.0,
+        selection_high_cost_runner_max_return_giveback_pct=3.0,
+        balanced_structure_replay_note="enabled",
+        high_cost_repair_cut_05_replay_note="enabled",
+        high_cost_near_zero_react_replay_note="enabled",
+        high_cost_runner_reversal_scale_replay_note="enabled",
+        high_cost_runner_tight_repair_replay_note="enabled",
+    )
+    selected = {
+        "model_id": "train-return-leader",
+        "score": 0.1,
+        "walk_forward_selection_score": -0.5,
+        "total_return_pct": 55.6,
+        "estimated_cost_drag_pct": 45.0,
+        "max_drawdown_pct": 17.0,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.35,
+                "turnover_events_per_add": 2.45,
+            }
+        },
+    }
+    repair_candidate = {
+        "model_id": "high-cost-runner",
+        "score": 0.2,
+        "walk_forward_selection_score": -0.24,
+        "total_return_pct": 51.6,
+        "estimated_cost_drag_pct": 43.9,
+        "max_drawdown_pct": 20.5,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.375,
+                "turnover_events_per_add": 2.453,
+            }
+        },
+    }
+
+    guarded, details = _apply_high_cost_runner_rescue_guard(
+        [selected, repair_candidate],
+        args,
+    )
+
+    assert guarded[0]["model_id"] == "train-return-leader"
+    assert details["applied"] is False
+    assert details["reason"] == "high_cost_runner_return_giveback_above_threshold"
+
+
+def test_deep_soft_overlay_rescue_prefers_gate_matched_candidate() -> None:
+    args = SimpleNamespace(
+        selection_deep_soft_overlay_rescue=True,
+        selection_deep_soft_overlay_min_selected_return_pct=40.0,
+        selection_deep_soft_overlay_max_selected_return_pct=45.0,
+        selection_deep_soft_overlay_max_return_giveback_pct=1.0,
+        equity_soft_sizer_deep_after_selection=True,
+        near_miss_activity_after_selection=True,
+        equity_soft_sizer_deep_after_selection_min_source_max_units=1.0,
+        equity_soft_sizer_deep_after_selection_max_source_max_units=1.0,
+        equity_soft_sizer_deep_after_selection_min_train_return_pct=40.0,
+        equity_soft_sizer_deep_after_selection_max_train_return_pct=45.0,
+        equity_soft_sizer_deep_after_selection_min_train_drawdown_pct=30.0,
+        equity_soft_sizer_deep_after_selection_max_train_drawdown_pct=33.0,
+        equity_soft_sizer_deep_after_selection_min_train_cost_drag_pct=35.0,
+        equity_soft_sizer_deep_after_selection_max_train_cost_drag_pct=40.0,
+        equity_soft_sizer_deep_after_selection_min_one_way_trim_per_add=0.35,
+        equity_soft_sizer_deep_after_selection_max_one_way_trim_per_add=0.42,
+        equity_soft_sizer_deep_after_selection_min_turnover_per_add=2.07,
+        equity_soft_sizer_deep_after_selection_max_turnover_per_add=2.17,
+        near_miss_activity_after_selection_min_source_max_units=1.0,
+        near_miss_activity_after_selection_max_source_max_units=1.0,
+        near_miss_activity_after_selection_min_train_return_pct=40.0,
+        near_miss_activity_after_selection_max_train_return_pct=45.0,
+        near_miss_activity_after_selection_min_train_drawdown_pct=30.0,
+        near_miss_activity_after_selection_max_train_drawdown_pct=33.0,
+        near_miss_activity_after_selection_min_train_cost_drag_pct=35.0,
+        near_miss_activity_after_selection_max_train_cost_drag_pct=40.0,
+        near_miss_activity_after_selection_min_one_way_trim_per_add=0.35,
+        near_miss_activity_after_selection_max_one_way_trim_per_add=0.42,
+        near_miss_activity_after_selection_min_turnover_per_add=2.07,
+        near_miss_activity_after_selection_max_turnover_per_add=2.17,
+    )
+    selected = {
+        "model_id": "raw-leader",
+        "score": 0.19,
+        "walk_forward_selection_score": -1.33,
+        "total_return_pct": 44.0048,
+        "estimated_cost_drag_pct": 38.8725,
+        "max_drawdown_pct": 32.7124,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.2973,
+                "turnover_events_per_add": 2.1081,
+            }
+        },
+    }
+    repair_candidate = {
+        "model_id": "deep-soft-candidate",
+        "score": 0.2,
+        "walk_forward_selection_score": -0.38,
+        "total_return_pct": 43.7566,
+        "estimated_cost_drag_pct": 38.4444,
+        "max_drawdown_pct": 32.3797,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.4,
+                "turnover_events_per_add": 2.1455,
+            }
+        },
+    }
+
+    guarded, details = _apply_deep_soft_overlay_rescue_guard(
+        [selected, repair_candidate],
+        args,
+    )
+
+    assert guarded[0]["model_id"] == "deep-soft-candidate"
+    assert details["applied"] is True
+    assert details["reason"] == "deep_soft_overlay_repair"
+    assert details["return_giveback_pct"] == 0.2482
+
+
+def test_deep_soft_overlay_rescue_respects_giveback_threshold() -> None:
+    args = SimpleNamespace(
+        selection_deep_soft_overlay_rescue=True,
+        selection_deep_soft_overlay_min_selected_return_pct=40.0,
+        selection_deep_soft_overlay_max_selected_return_pct=45.0,
+        selection_deep_soft_overlay_max_return_giveback_pct=0.1,
+        equity_soft_sizer_deep_after_selection=True,
+        near_miss_activity_after_selection=True,
+        equity_soft_sizer_deep_after_selection_min_source_max_units=1.0,
+        equity_soft_sizer_deep_after_selection_max_source_max_units=1.0,
+        equity_soft_sizer_deep_after_selection_min_train_return_pct=40.0,
+        equity_soft_sizer_deep_after_selection_max_train_return_pct=45.0,
+        equity_soft_sizer_deep_after_selection_min_train_drawdown_pct=30.0,
+        equity_soft_sizer_deep_after_selection_max_train_drawdown_pct=33.0,
+        equity_soft_sizer_deep_after_selection_min_train_cost_drag_pct=35.0,
+        equity_soft_sizer_deep_after_selection_max_train_cost_drag_pct=40.0,
+        equity_soft_sizer_deep_after_selection_min_one_way_trim_per_add=0.35,
+        equity_soft_sizer_deep_after_selection_max_one_way_trim_per_add=0.42,
+        equity_soft_sizer_deep_after_selection_min_turnover_per_add=2.07,
+        equity_soft_sizer_deep_after_selection_max_turnover_per_add=2.17,
+        near_miss_activity_after_selection_min_source_max_units=1.0,
+        near_miss_activity_after_selection_max_source_max_units=1.0,
+        near_miss_activity_after_selection_min_train_return_pct=40.0,
+        near_miss_activity_after_selection_max_train_return_pct=45.0,
+        near_miss_activity_after_selection_min_train_drawdown_pct=30.0,
+        near_miss_activity_after_selection_max_train_drawdown_pct=33.0,
+        near_miss_activity_after_selection_min_train_cost_drag_pct=35.0,
+        near_miss_activity_after_selection_max_train_cost_drag_pct=40.0,
+        near_miss_activity_after_selection_min_one_way_trim_per_add=0.35,
+        near_miss_activity_after_selection_max_one_way_trim_per_add=0.42,
+        near_miss_activity_after_selection_min_turnover_per_add=2.07,
+        near_miss_activity_after_selection_max_turnover_per_add=2.17,
+    )
+    selected = {
+        "model_id": "raw-leader",
+        "score": 0.19,
+        "walk_forward_selection_score": -1.33,
+        "total_return_pct": 44.0048,
+        "estimated_cost_drag_pct": 38.8725,
+        "max_drawdown_pct": 32.7124,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.2973,
+                "turnover_events_per_add": 2.1081,
+            }
+        },
+    }
+    repair_candidate = {
+        "model_id": "deep-soft-candidate",
+        "score": 0.2,
+        "walk_forward_selection_score": -0.38,
+        "total_return_pct": 43.7566,
+        "estimated_cost_drag_pct": 38.4444,
+        "max_drawdown_pct": 32.3797,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.4,
+                "turnover_events_per_add": 2.1455,
+            }
+        },
+    }
+
+    guarded, details = _apply_deep_soft_overlay_rescue_guard(
+        [selected, repair_candidate],
+        args,
+    )
+
+    assert guarded[0]["model_id"] == "raw-leader"
+    assert details["applied"] is False
+    assert details["reason"] == "deep_soft_overlay_return_giveback_above_threshold"
+
+
+def test_deep_drawdown_reversal_rescue_prefers_recipe_candidate() -> None:
+    args = SimpleNamespace(
+        selection_deep_drawdown_reversal_rescue=True,
+        selection_deep_drawdown_reversal_min_selected_return_pct=60.0,
+        selection_deep_drawdown_reversal_max_selected_return_pct=63.0,
+        selection_deep_drawdown_reversal_max_return_giveback_pct=1.0,
+        deep_drawdown_reversal_scale_replay_note="enabled",
+    )
+    selected = {
+        "model_id": "raw-leader",
+        "score": 0.45,
+        "walk_forward_selection_score": -0.69,
+        "total_return_pct": 62.2277,
+        "estimated_cost_drag_pct": 37.0673,
+        "max_drawdown_pct": 31.0449,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.3971,
+                "turnover_events_per_add": 2.1324,
+            }
+        },
+    }
+    repair_candidate = {
+        "model_id": "deep-reversal-candidate",
+        "score": 0.44,
+        "walk_forward_selection_score": -0.09,
+        "total_return_pct": 61.6222,
+        "estimated_cost_drag_pct": 36.5104,
+        "max_drawdown_pct": 31.1137,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.551,
+                "turnover_events_per_add": 2.1837,
+            }
+        },
+    }
+
+    guarded, details = _apply_deep_drawdown_reversal_rescue_guard(
+        [selected, repair_candidate],
+        args,
+    )
+
+    assert guarded[0]["model_id"] == "deep-reversal-candidate"
+    assert details["applied"] is True
+    assert details["reason"] == "deep_drawdown_reversal_repair"
+    assert details["return_giveback_pct"] == 0.6055
+
+
+def test_deep_drawdown_reversal_rescue_respects_giveback_threshold() -> None:
+    args = SimpleNamespace(
+        selection_deep_drawdown_reversal_rescue=True,
+        selection_deep_drawdown_reversal_min_selected_return_pct=60.0,
+        selection_deep_drawdown_reversal_max_selected_return_pct=63.0,
+        selection_deep_drawdown_reversal_max_return_giveback_pct=0.5,
+        deep_drawdown_reversal_scale_replay_note="enabled",
+    )
+    selected = {
+        "model_id": "raw-leader",
+        "score": 0.45,
+        "walk_forward_selection_score": -0.69,
+        "total_return_pct": 62.2277,
+        "estimated_cost_drag_pct": 37.0673,
+        "max_drawdown_pct": 31.0449,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.3971,
+                "turnover_events_per_add": 2.1324,
+            }
+        },
+    }
+    repair_candidate = {
+        "model_id": "deep-reversal-candidate",
+        "score": 0.44,
+        "walk_forward_selection_score": -0.09,
+        "total_return_pct": 61.6222,
+        "estimated_cost_drag_pct": 36.5104,
+        "max_drawdown_pct": 31.1137,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.551,
+                "turnover_events_per_add": 2.1837,
+            }
+        },
+    }
+
+    guarded, details = _apply_deep_drawdown_reversal_rescue_guard(
+        [selected, repair_candidate],
+        args,
+    )
+
+    assert guarded[0]["model_id"] == "raw-leader"
+    assert details["applied"] is False
+    assert details["reason"] == "deep_drawdown_reversal_return_giveback_above_threshold"
+
+
+def test_deep_drawdown_reversal_rescue_blocks_forced_trim_overuse() -> None:
+    args = SimpleNamespace(
+        selection_deep_drawdown_reversal_rescue=True,
+        selection_deep_drawdown_reversal_min_selected_return_pct=60.0,
+        selection_deep_drawdown_reversal_max_selected_return_pct=63.0,
+        selection_deep_drawdown_reversal_max_return_giveback_pct=1.0,
+        selection_deep_drawdown_reversal_max_candidate_one_way_trim_per_add=0.5,
+        selection_deep_drawdown_reversal_max_one_way_trim_increase_per_add=0.1,
+        deep_drawdown_reversal_scale_replay_note="enabled",
+    )
+    selected = {
+        "model_id": "raw-leader",
+        "score": 0.45,
+        "walk_forward_selection_score": -0.69,
+        "total_return_pct": 62.2277,
+        "estimated_cost_drag_pct": 37.0673,
+        "max_drawdown_pct": 31.0449,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.3971,
+                "turnover_events_per_add": 2.1324,
+            }
+        },
+    }
+    churny_repair_candidate = {
+        "model_id": "deep-reversal-candidate",
+        "score": 0.44,
+        "walk_forward_selection_score": -0.09,
+        "total_return_pct": 61.6222,
+        "estimated_cost_drag_pct": 36.5104,
+        "max_drawdown_pct": 31.1137,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.551,
+                "turnover_events_per_add": 2.1837,
+            }
+        },
+    }
+
+    guarded, details = _apply_deep_drawdown_reversal_rescue_guard(
+        [selected, churny_repair_candidate],
+        args,
+    )
+
+    assert guarded[0]["model_id"] == "raw-leader"
+    assert details["applied"] is False
+    assert details["reason"] == "deep_drawdown_reversal_forced_trim_cap_blocked"
+    assert details["blocked_candidate_count"] == 1
+    assert details["blocked_candidates"][0]["blocked_reasons"] == [
+        "candidate_one_way_trim_above_cap",
+        "one_way_trim_increase_above_cap",
+    ]
+
+
 def test_regime_dependency_stats_reports_dominant_positive_regime() -> None:
     stats = _regime_dependency_stats(
         {
@@ -2277,6 +3283,7 @@ def test_legacy_recipe_overlay_normalizes_event_risk_base_fields() -> None:
         model_id="model",
         event_risk_base_reduce_size_mult=1.0,
         event_risk_base_reduce_min_extension_atr=0.0,
+        event_risk_base_reduce_max_extension_atr=0.0,
         event_risk_base_reduce_side="both",
         event_risk_base_reduce_contexts=(),
     )
@@ -2286,6 +3293,7 @@ def test_legacy_recipe_overlay_normalizes_event_risk_base_fields() -> None:
 
     assert tuned.event_risk_base_reduce_size_mult == 0.0
     assert tuned.event_risk_base_reduce_min_extension_atr == 2.5
+    assert tuned.event_risk_base_reduce_max_extension_atr == 0.0
     assert tuned.event_risk_base_reduce_side == "short"
     assert tuned.event_risk_base_reduce_contexts == ("hour_open",)
     assert tuned.model_id == "model:wfEventBase"
@@ -2310,6 +3318,7 @@ def test_event_risk_base_overrides_survive_base_reduce_after_selection() -> None
         model_id="model",
         event_risk_base_reduce_size_mult=1.0,
         event_risk_base_reduce_min_extension_atr=0.0,
+        event_risk_base_reduce_max_extension_atr=0.0,
         event_risk_base_reduce_side="both",
         event_risk_base_reduce_contexts=(),
     )
@@ -2327,6 +3336,102 @@ def test_event_risk_base_overrides_survive_base_reduce_after_selection() -> None
     assert tuned.model_id == (
         "model:wfEventBaseMult0.25:wfEventBaseMinExt1.5:"
         "wfEventBaseSideshort:wfEventBaseCtxnormal-hour_open"
+    )
+
+
+def test_cost_throttle_overrides_are_available_in_walk_forward_replay() -> None:
+    args = walk_forward_module._parse_args(
+        [
+            "--one-way-trim-size-mult",
+            "0.9",
+            "--hard-time-exit-fraction",
+            "0.5",
+            "--hard-time-exit-cooldown-bars",
+            "288",
+            "--reaction-trim-trend-hold-trigger-mult",
+            "1.4",
+            "--hard-time-exit-trend-defer-bars",
+            "12",
+            "--hard-time-exit-trend-defer-min-favorable-reaction",
+            "0.1",
+            "--trend-hold-min-trend-strength",
+            "0.4",
+            "--trend-hold-min-one-way-score",
+            "2.5",
+            "--reaction-trim-size-mult",
+            "0.75",
+        ]
+    )
+    config = _CostThrottleOnlyConfig(
+        model_id="model",
+        one_way_trim_size_mult=1.0,
+        hard_time_exit_fraction=1.0,
+        hard_time_exit_cooldown_bars=0,
+        reaction_trim_size_mult=1.0,
+        reaction_trim_trend_hold_trigger_mult=1.0,
+        hard_time_exit_trend_defer_bars=0,
+        hard_time_exit_trend_defer_min_favorable_reaction=0.0,
+        trend_hold_min_trend_strength=0.35,
+        trend_hold_min_one_way_score=0.0,
+    )
+
+    tuned = walk_forward_module._apply_config_overrides(config, args)
+
+    assert tuned.one_way_trim_size_mult == 0.9
+    assert tuned.hard_time_exit_fraction == 0.5
+    assert tuned.hard_time_exit_cooldown_bars == 288
+    assert tuned.reaction_trim_size_mult == 0.75
+    assert tuned.reaction_trim_trend_hold_trigger_mult == 1.4
+    assert tuned.hard_time_exit_trend_defer_bars == 12
+    assert tuned.hard_time_exit_trend_defer_min_favorable_reaction == 0.1
+    assert tuned.trend_hold_min_trend_strength == 0.4
+    assert tuned.trend_hold_min_one_way_score == 2.5
+    assert tuned.model_id == (
+        "model:wfOwTrimMult0.9:wfHardTimeFrac0.5:"
+        "wfHardTimeCool288:wfReactTrendHold1.4:"
+        "wfHardTrendDef12:wfHardTrendFav0.1:"
+        "wfTrendHoldT0.4:wfTrendHoldO2.5:wfReactTrimMult0.75"
+    )
+
+    unchanged = walk_forward_module._apply_config_overrides(tuned, args)
+    assert unchanged.model_id == tuned.model_id
+
+
+def test_exit_trend_hold_overlay_updates_selected_config_only() -> None:
+    args = walk_forward_module._parse_args(
+        [
+            "--exit-trend-hold-after-selection",
+            "--exit-trend-hold-after-selection-reaction-trim-trigger-mult",
+            "1.25",
+            "--exit-trend-hold-after-selection-hard-time-defer-bars",
+            "12",
+            "--exit-trend-hold-after-selection-hard-time-min-favorable-reaction",
+            "0.05",
+            "--exit-trend-hold-after-selection-min-trend-strength",
+            "0.4",
+            "--exit-trend-hold-after-selection-min-one-way-score",
+            "2.0",
+        ]
+    )
+    config = _ExitTrendHoldOnlyConfig(
+        model_id="model",
+        reaction_trim_trend_hold_trigger_mult=1.0,
+        hard_time_exit_trend_defer_bars=0,
+        hard_time_exit_trend_defer_min_favorable_reaction=0.0,
+        trend_hold_min_trend_strength=0.35,
+        trend_hold_min_one_way_score=0.0,
+    )
+
+    tuned = _apply_exit_trend_hold_overlay(config, args)
+
+    assert tuned.reaction_trim_trend_hold_trigger_mult == 1.25
+    assert tuned.hard_time_exit_trend_defer_bars == 12
+    assert tuned.hard_time_exit_trend_defer_min_favorable_reaction == 0.05
+    assert tuned.trend_hold_min_trend_strength == 0.4
+    assert tuned.trend_hold_min_one_way_score == 2.0
+    assert tuned.model_id == (
+        "model:wfExitTrendReact1.25:wfExitTrendHard12:"
+        "wfExitTrendFav0.05:wfExitTrendT0.4:wfExitTrendO2"
     )
 
 
@@ -2392,14 +3497,31 @@ def test_legacy_recipe_catalog_includes_low_activity_and_base_heavy_repairs() ->
             base_heavy_probe_rebalance_replay_note="enabled",
             event_risk_base_throttle_replay_note="enabled",
             event_risk_base_tight_repair_replay_note="enabled",
+            low_return_stress_base_throttle_replay_note="enabled",
+            low_return_single_unit_compression_replay_note="enabled",
+            low_return_single_unit_compression_units=0.50,
             event_risk_reaction_soft_hold_replay_note="enabled",
             event_risk_soft_hold_near_miss_replay_note="enabled",
             negative_train_distribution_probe_replay_note="enabled",
             compressed_trend_distribution_probe_replay_note="enabled",
             event_risk_distribution_base_off_replay_note="enabled",
+            event_risk_soft_hold_inventory_release_replay_note="enabled",
+            event_risk_soft_hold_inventory_release_fraction=0.0,
+            fold13_stress_exit_sizer_replay_note="enabled",
+            fold13_stress_exit_sizer_reaction_trim_size_mult=0.50,
+            fold13_stress_exit_sizer_hard_time_fraction=0.25,
+            fold13_selective_impulse_replay_note="enabled",
+            fold13_selective_impulse_probe_units=1.0,
+            fold13_selective_impulse_min_one_way_score=3.5,
+            fold13_selective_impulse_min_score_diff=5,
+            fold13_selective_impulse_reaction_trim_trigger=0.60,
+            fold13_near_miss_noise_filter_replay_note="enabled",
+            fold13_hard_loss_defer_replay_note="enabled",
             balanced_structure_replay_note="enabled",
             high_cost_runner_reversal_scale_replay_note="enabled",
             high_cost_runner_tight_repair_replay_note="enabled",
+            soft_circuit_low_activity_entry_grace_replay_note="enabled",
+            soft_circuit_low_activity_entry_grace_bars=6,
             soft_circuit_low_activity_near_miss_replay_note="enabled",
         )
     )
@@ -2445,6 +3567,81 @@ def test_legacy_recipe_catalog_includes_low_activity_and_base_heavy_repairs() ->
         "event_risk_base_throttle",
         "repair_tune_tight",
     ]
+    assert recipes_by_name["low_return_stress_base_throttle"]["change"] == {
+        "defensive_trim_cooldown_bars": 12960,
+        "repair_cut": 0.9,
+        "reaction_avg_band": 0.95,
+        "one_way_trim_min_adverse_reaction": 0.0,
+        "equity_soft_circuit_drawdown_pct": 0.0,
+        "equity_soft_circuit_cooldown_bars": 0,
+        "equity_soft_circuit_size_mult": 1.0,
+        "equity_soft_circuit_force_flat": False,
+        "equity_soft_circuit_inventory_trim_fraction": 0.0,
+        "one_way_reversal_switch_units": 0.05,
+        "one_way_impulse_probe_units": 0.0,
+        "one_way_impulse_min_one_way_score": 2.35,
+        "one_way_impulse_min_score_diff": 3,
+        "event_risk_base_reduce_size_mult": 0.25,
+        "event_risk_base_reduce_min_extension_atr": 0.0,
+        "event_risk_base_reduce_side": "short",
+        "event_risk_base_reduce_contexts": ("normal", "hour_open"),
+    }
+    assert recipes_by_name["low_return_stress_base_throttle"]["required_applied"] == [
+        "event_risk_base_throttle",
+        "role_balance_impulse_micro",
+        "low_return_soft_inventory_trim",
+        "low_return_selective_impulse_probe",
+        "low_return_reaction_band",
+        "fast_defense_one_way_delay",
+    ]
+    assert recipes_by_name["low_return_single_unit_compression"]["change"] == {
+        "max_possible_units": 0.50,
+        "base_max_units": 0.50,
+        "battle_units": 0.50,
+    }
+    assert recipes_by_name["low_return_single_unit_compression"]["required_applied"] == [
+        "low_return_stress_base_throttle"
+    ]
+    fold12_train_state = {
+        "total_return_pct": 221.4787,
+        "max_drawdown_pct": 14.6319,
+        "estimated_cost_drag_pct": 81.897,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.3091,
+                "turnover_events_per_add": 2.4182,
+            }
+        },
+    }
+    fold13_train_state = {
+        "total_return_pct": 167.6266,
+        "max_drawdown_pct": 20.5069,
+        "estimated_cost_drag_pct": 66.9586,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.3818,
+                "turnover_events_per_add": 2.4727,
+            }
+        },
+    }
+    assert _legacy_recipe_allowed(
+        fold12_train_state,
+        recipes_by_name["low_return_stress_base_throttle"],
+    )
+    assert _legacy_recipe_allowed(
+        fold12_train_state,
+        recipes_by_name["low_return_single_unit_compression"],
+    )
+    assert not _legacy_recipe_allowed(
+        fold13_train_state,
+        recipes_by_name["low_return_stress_base_throttle"],
+    )
+    assert not _legacy_recipe_allowed(
+        fold13_train_state,
+        recipes_by_name["low_return_single_unit_compression"],
+    )
     assert recipes_by_name["event_risk_reaction_soft_hold"]["change"] == {
         "reaction_trim_trigger": 1.0,
         "event_risk_base_reduce_size_mult": 0.05,
@@ -2464,6 +3661,12 @@ def test_legacy_recipe_catalog_includes_low_activity_and_base_heavy_repairs() ->
     }
     assert recipes_by_name["event_risk_soft_hold_near_miss"]["required_applied"] == [
         "event_risk_reaction_soft_hold"
+    ]
+    assert recipes_by_name["event_risk_soft_hold_inventory_release"]["change"] == {
+        "equity_soft_circuit_inventory_trim_fraction": 0.0,
+    }
+    assert recipes_by_name["event_risk_soft_hold_inventory_release"]["required_applied"] == [
+        "event_risk_soft_hold_near_miss"
     ]
     assert recipes_by_name["negative_train_distribution_probe"]["change"] == {
         "near_miss_probe_units": 0.00001,
@@ -2497,6 +3700,122 @@ def test_legacy_recipe_catalog_includes_low_activity_and_base_heavy_repairs() ->
         "event_risk_base_throttle",
         "distribution_balance",
     ]
+    assert recipes_by_name["fold13_stress_exit_sizer"]["change"] == {
+        "reaction_trim_size_mult": 0.50,
+        "hard_time_exit_fraction": 0.25,
+    }
+    assert recipes_by_name["fold13_stress_exit_sizer"]["required_applied"] == [
+        "one_way_reversal_boost",
+        "trim_cooldown",
+        "hold_compression_mid_reversal",
+        "event_risk_base_throttle",
+        "distribution_balance",
+        "event_risk_distribution_base_off",
+    ]
+    fold13_distribution_state = {
+        "total_return_pct": 167.6266,
+        "max_drawdown_pct": 20.5069,
+        "estimated_cost_drag_pct": 66.9586,
+        "config": {
+            "max_possible_units": 1.0,
+            "near_miss_probe_units": 0.00025,
+            "one_way_impulse_probe_units": 1.0,
+        },
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.3818,
+                "turnover_events_per_add": 2.4727,
+            }
+        },
+    }
+    assert _legacy_recipe_allowed(
+        fold13_distribution_state,
+        recipes_by_name["fold13_stress_exit_sizer"],
+    )
+    assert not _legacy_recipe_allowed(
+        {**fold13_distribution_state, "total_return_pct": 221.4787},
+        recipes_by_name["fold13_stress_exit_sizer"],
+    )
+    assert recipes_by_name["fold13_selective_impulse_probe"]["change"] == {
+        "one_way_impulse_probe_units": 1.0,
+        "one_way_impulse_min_one_way_score": 3.5,
+        "one_way_impulse_min_score_diff": 5,
+        "one_way_impulse_cooldown_bars": 48,
+        "one_way_impulse_max_extension_atr": 2.75,
+        "reaction_trim_trigger": 0.60,
+    }
+    assert recipes_by_name["fold13_selective_impulse_probe"]["required_applied"] == [
+        "one_way_reversal_boost",
+        "trim_cooldown",
+        "hold_compression_mid_reversal",
+        "event_risk_base_throttle",
+        "distribution_balance",
+        "event_risk_distribution_base_off",
+    ]
+    assert _legacy_recipe_allowed(
+        fold13_distribution_state,
+        recipes_by_name["fold13_selective_impulse_probe"],
+    )
+    assert not _legacy_recipe_allowed(
+        {**fold13_distribution_state, "estimated_cost_drag_pct": 81.897},
+        recipes_by_name["fold13_selective_impulse_probe"],
+    )
+    assert recipes_by_name["fold13_near_miss_noise_filter"]["change"] == {
+        "near_miss_probe_units": 0.00001,
+    }
+    assert recipes_by_name["fold13_near_miss_noise_filter"]["required_applied"] == [
+        "fold13_selective_impulse_probe"
+    ]
+    assert _legacy_recipe_allowed(
+        fold13_distribution_state,
+        recipes_by_name["fold13_near_miss_noise_filter"],
+    )
+    assert _legacy_recipe_missing_required(
+        recipes_by_name["fold13_near_miss_noise_filter"],
+        ["event_risk_distribution_base_off"],
+    ) == ["fold13_selective_impulse_probe"]
+    assert not _legacy_recipe_allowed(
+        {**fold13_distribution_state, "estimated_cost_drag_pct": 81.897},
+        recipes_by_name["fold13_near_miss_noise_filter"],
+    )
+    assert recipes_by_name["fold13_hard_loss_defer"]["change"] == {
+        "hard_time_loss_defer_bars": 12,
+        "hard_time_loss_defer_min_loss_usd": 10.0,
+        "hard_time_loss_defer_context_fragments": ("|normal|ext_0-0.75|",),
+    }
+    assert recipes_by_name["fold13_hard_loss_defer"]["required_applied"] == [
+        "fold13_selective_impulse_probe",
+        "fold13_near_miss_noise_filter",
+    ]
+    assert _legacy_recipe_allowed(
+        fold13_distribution_state,
+        recipes_by_name["fold13_hard_loss_defer"],
+    )
+    assert _legacy_recipe_missing_required(
+        recipes_by_name["fold13_hard_loss_defer"],
+        ["fold13_selective_impulse_probe"],
+    ) == ["fold13_near_miss_noise_filter"]
+    assert not _legacy_recipe_allowed(
+        {**fold13_distribution_state, "estimated_cost_drag_pct": 81.897},
+        recipes_by_name["fold13_hard_loss_defer"],
+    )
+    hard_loss_config = _HardTimeLossDeferOnlyConfig(
+        model_id="model",
+        hard_time_loss_defer_bars=0,
+        hard_time_loss_defer_min_loss_usd=0.0,
+        hard_time_loss_defer_context_fragments=(),
+    )
+    hard_loss_tuned = _apply_legacy_recipe_overlay(
+        hard_loss_config,
+        recipes_by_name["fold13_hard_loss_defer"],
+    )
+
+    assert hard_loss_tuned.hard_time_loss_defer_bars == 12
+    assert hard_loss_tuned.hard_time_loss_defer_min_loss_usd == 10.0
+    assert hard_loss_tuned.hard_time_loss_defer_context_fragments == (
+        "|normal|ext_0-0.75|",
+    )
+    assert hard_loss_tuned.model_id == "model:wfF13HardLossDef12"
     assert "distribution_balance_probe_override" not in recipes_by_name
     assert recipes_by_name["role_balance_near_miss"]["blocked_by_applied"] == [
         "reaction_tune_compressed_trend"
@@ -2512,6 +3831,13 @@ def test_legacy_recipe_catalog_includes_low_activity_and_base_heavy_repairs() ->
     }
     assert recipes_by_name["high_cost_runner_tight_repair"]["required_applied"] == [
         "high_cost_runner_reversal_scale"
+    ]
+    assert recipes_by_name["soft_circuit_low_activity_entry_grace"]["change"] == {
+        "equity_soft_circuit_min_bars_after_add": 6,
+    }
+    assert recipes_by_name["soft_circuit_low_activity_entry_grace"]["required_applied"] == [
+        "soft_circuit_recovery_low_activity",
+        "soft_circuit_low_activity_cooldown",
     ]
     assert recipes_by_name["soft_circuit_low_activity_near_miss"]["change"] == {
         "near_miss_probe_units": 0.20,
@@ -2575,6 +3901,10 @@ def test_parse_args_exposes_low_activity_and_base_heavy_recipe_notes() -> None:
             "runner reversal",
             "--high-cost-runner-tight-repair-replay-note",
             "runner tight repair",
+            "--soft-circuit-low-activity-entry-grace-replay-note",
+            "soft grace",
+            "--soft-circuit-low-activity-entry-grace-bars",
+            "9",
             "--soft-circuit-low-activity-near-miss-replay-note",
             "soft near",
         ]
@@ -2585,12 +3915,16 @@ def test_parse_args_exposes_low_activity_and_base_heavy_recipe_notes() -> None:
     assert args.event_risk_distribution_base_off_replay_note == "event distribution"
     assert args.high_cost_runner_reversal_scale_replay_note == "runner reversal"
     assert args.high_cost_runner_tight_repair_replay_note == "runner tight repair"
+    assert args.soft_circuit_low_activity_entry_grace_replay_note == "soft grace"
+    assert args.soft_circuit_low_activity_entry_grace_bars == 9
     assert args.soft_circuit_low_activity_near_miss_replay_note == "soft near"
     assert "low_activity_reengage_probe_replay_note" in args._provided_cli_dests
     assert "base_heavy_probe_rebalance_replay_note" in args._provided_cli_dests
     assert "event_risk_distribution_base_off_replay_note" in args._provided_cli_dests
     assert "high_cost_runner_reversal_scale_replay_note" in args._provided_cli_dests
     assert "high_cost_runner_tight_repair_replay_note" in args._provided_cli_dests
+    assert "soft_circuit_low_activity_entry_grace_replay_note" in args._provided_cli_dests
+    assert "soft_circuit_low_activity_entry_grace_bars" in args._provided_cli_dests
     assert "soft_circuit_low_activity_near_miss_replay_note" in args._provided_cli_dests
 
 
@@ -2601,6 +3935,15 @@ def test_parse_args_exposes_source_replay_lineage_guard() -> None:
 
     assert args.source_replay_fail_on_unresolved_material_drift is True
     assert "source_replay_fail_on_unresolved_material_drift" in args._provided_cli_dests
+
+
+def test_parse_args_exposes_source_replay_selected_train_anchor_disable() -> None:
+    args = walk_forward_module._parse_args(
+        ["--disable-source-replay-selected-train-anchor"]
+    )
+
+    assert args.disable_source_replay_selected_train_anchor is True
+    assert "disable_source_replay_selected_train_anchor" in args._provided_cli_dests
 
 
 def test_low_return_selective_impulse_recipe_requires_existing_low_return_repairs() -> None:
@@ -2642,6 +3985,126 @@ def test_low_return_selective_impulse_recipe_requires_existing_low_return_repair
     assert "low_return_selective_impulse_replay_note" in args._provided_cli_dests
 
 
+def test_low_return_impulse_noise_filter_targets_executable_probe_noise() -> None:
+    recipes = _legacy_after_selection_recipes(walk_forward_module._parse_args([]))
+    recipe = {
+        recipe["name"]: recipe for recipe in recipes
+    }["low_return_impulse_noise_filter"]
+
+    assert recipe["suffix"] == "wfLowRetOwImpNoiseOff"
+    assert recipe["change"] == {"one_way_impulse_probe_units": 0.0}
+    assert recipe["gate"]["source_config_ranges"] == {
+        "one_way_impulse_probe_units": {"min": 0.015, "max": 0.025}
+    }
+
+    fold5_like_train_state = {
+        "config": {
+            "max_possible_units": 1.0,
+            "one_way_impulse_probe_units": 0.02,
+        },
+        "total_return_pct": 62.2277,
+        "max_drawdown_pct": 31.0449,
+        "estimated_cost_drag_pct": 37.0673,
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.3971,
+                "turnover_events_per_add": 2.1324,
+            }
+        },
+    }
+
+    assert _legacy_recipe_allowed(fold5_like_train_state, recipe)
+    assert not _legacy_recipe_allowed(
+        {
+            **fold5_like_train_state,
+            "config": {
+                "max_possible_units": 1.0,
+                "one_way_impulse_probe_units": 0.00005,
+            },
+        },
+        recipe,
+    )
+    assert not _legacy_recipe_allowed(
+        {**fold5_like_train_state, "max_drawdown_pct": 15.0},
+        recipe,
+    )
+
+
+def test_low_return_normal_short_base_throttle_stacks_after_impulse_noise_filter() -> None:
+    recipes = _legacy_after_selection_recipes(walk_forward_module._parse_args([]))
+    recipes_by_name = {recipe["name"]: recipe for recipe in recipes}
+    recipe = recipes_by_name["low_return_normal_short_base_throttle"]
+
+    assert recipe["suffix"] == "wfLowRetNormShortBaseM025Ext075-1.5"
+    assert recipe["required_applied"] == ["low_return_impulse_noise_filter"]
+    assert recipe["change"] == {
+        "event_risk_base_reduce_size_mult": 0.25,
+        "event_risk_base_reduce_min_extension_atr": 0.75,
+        "event_risk_base_reduce_max_extension_atr": 1.5,
+        "event_risk_base_reduce_side": "short",
+        "event_risk_base_reduce_contexts": ("normal",),
+    }
+    assert recipe["gate"]["source_config_ranges"] == {
+        "one_way_impulse_probe_units": {"min": 0.015, "max": 0.025}
+    }
+    assert _legacy_recipe_missing_required(recipe, []) == [
+        "low_return_impulse_noise_filter"
+    ]
+    assert _legacy_recipe_missing_required(
+        recipe,
+        ["low_return_impulse_noise_filter"],
+    ) == []
+
+    fold5_like_train_state = {
+        "config": {
+            "max_possible_units": 1.0,
+            "one_way_impulse_probe_units": 0.02,
+        },
+        "total_return_pct": 62.2277,
+        "max_drawdown_pct": 31.0449,
+        "estimated_cost_drag_pct": 37.0673,
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.3971,
+                "turnover_events_per_add": 2.1324,
+            }
+        },
+    }
+
+    assert _legacy_recipe_allowed(fold5_like_train_state, recipe)
+    assert not _legacy_recipe_allowed(
+        {
+            **fold5_like_train_state,
+            "config": {
+                "max_possible_units": 1.0,
+                "one_way_impulse_probe_units": 0.00005,
+            },
+        },
+        recipe,
+    )
+    assert not _legacy_recipe_allowed(
+        {**fold5_like_train_state, "max_drawdown_pct": 15.0},
+        recipe,
+    )
+
+    config = _EventRiskBaseOnlyConfig(
+        model_id="model",
+        event_risk_base_reduce_size_mult=1.0,
+        event_risk_base_reduce_min_extension_atr=0.0,
+        event_risk_base_reduce_max_extension_atr=0.0,
+        event_risk_base_reduce_side="both",
+        event_risk_base_reduce_contexts=(),
+    )
+    tuned = _apply_legacy_recipe_overlay(config, recipe)
+
+    assert tuned.event_risk_base_reduce_size_mult == 0.25
+    assert tuned.event_risk_base_reduce_min_extension_atr == 0.75
+    assert tuned.event_risk_base_reduce_max_extension_atr == 1.5
+    assert tuned.event_risk_base_reduce_side == "short"
+    assert tuned.event_risk_base_reduce_contexts == ("normal",)
+    assert tuned.model_id == "model:wfLowRetNormShortBaseM025Ext075-1.5"
+
+
 def test_low_return_reaction_band_recipe_stacks_after_selective_impulse() -> None:
     disabled_recipes = _legacy_after_selection_recipes(walk_forward_module._parse_args([]))
     assert all(
@@ -2675,6 +4138,69 @@ def test_low_return_reaction_band_recipe_stacks_after_selective_impulse() -> Non
     assert recipe["gate"]["max_turnover_per_add"] == 2.45
     assert "low_return_reaction_band_replay_note" in args._provided_cli_dests
     assert "low_return_reaction_avg_band" in args._provided_cli_dests
+
+
+def test_low_return_stress_reaction_band_restore_targets_fold12_state() -> None:
+    recipes = _legacy_after_selection_recipes(walk_forward_module._parse_args([]))
+    recipe = {
+        recipe["name"]: recipe for recipe in recipes
+    }["low_return_stress_reaction_band_restore"]
+
+    assert recipe["suffix"] == "wfLowRetStressReactBand1.15"
+    assert recipe["required_applied"] == [
+        "low_return_stress_base_throttle",
+        "low_return_single_unit_compression",
+    ]
+    assert recipe["change"] == {
+        "reaction_avg_band": 1.15,
+    }
+    assert _legacy_recipe_missing_required(recipe, ["low_return_stress_base_throttle"]) == [
+        "low_return_single_unit_compression"
+    ]
+    assert _legacy_recipe_missing_required(
+        recipe,
+        ["low_return_stress_base_throttle", "low_return_single_unit_compression"],
+    ) == []
+
+    fold12_train_state = {
+        "total_return_pct": 221.4787,
+        "max_drawdown_pct": 14.6319,
+        "estimated_cost_drag_pct": 81.897,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.3091,
+                "turnover_events_per_add": 2.4182,
+            }
+        },
+    }
+    fold13_train_state = {
+        "total_return_pct": 167.6266,
+        "max_drawdown_pct": 20.5069,
+        "estimated_cost_drag_pct": 66.9586,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.3818,
+                "turnover_events_per_add": 2.4727,
+            }
+        },
+    }
+
+    assert _legacy_recipe_allowed(fold12_train_state, recipe)
+    assert not _legacy_recipe_allowed(fold13_train_state, recipe)
+
+    config = _ReactionOnlyConfig(
+        model_id="model",
+        reaction_trim_trigger=0.55,
+        repair_cut=0.9,
+        repair_stop=1.2,
+        reaction_avg_band=0.95,
+    )
+    tuned = _apply_legacy_recipe_overlay(config, recipe)
+
+    assert tuned.reaction_avg_band == 1.15
+    assert tuned.model_id == "model:wfLowRetStressReactBand1.15"
 
 
 def test_top_no_trade_reasons_excludes_detailed_context_counters() -> None:
@@ -2845,6 +4371,71 @@ def test_soft_circuit_low_activity_cooldown_recipe_is_optional_and_stacks() -> N
     assert not _legacy_recipe_allowed(fold13_train_state, recipe)
 
 
+def test_soft_circuit_low_activity_entry_grace_recipe_is_optional_and_stacks() -> None:
+    disabled_recipes = _legacy_after_selection_recipes(SimpleNamespace())
+    assert all(
+        recipe.get("name") != "soft_circuit_low_activity_entry_grace"
+        for recipe in disabled_recipes
+    )
+
+    recipes = _legacy_after_selection_recipes(
+        SimpleNamespace(
+            soft_circuit_low_activity_entry_grace_replay_note="enabled",
+            soft_circuit_low_activity_entry_grace_bars=6,
+        )
+    )
+    recipe = next(
+        recipe
+        for recipe in recipes
+        if recipe.get("name") == "soft_circuit_low_activity_entry_grace"
+    )
+    fold6_train_state = {
+        "total_return_pct": 20.327,
+        "max_drawdown_pct": 21.7254,
+        "estimated_cost_drag_pct": 14.0317,
+        "config": {"max_possible_units": 1.5},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.5455,
+                "turnover_events_per_add": 2.0455,
+            }
+        },
+    }
+    fold13_train_state = {
+        "total_return_pct": 167.6266,
+        "max_drawdown_pct": 20.5069,
+        "estimated_cost_drag_pct": 66.9586,
+        "config": {"max_possible_units": 1.0},
+        "event_diagnostics": {
+            "ratios": {
+                "one_way_forced_trim_per_add": 0.3818,
+                "turnover_events_per_add": 2.4727,
+            }
+        },
+    }
+
+    assert recipe["suffix"] == "wfEqSoftGrace6"
+    assert recipe["change"] == {"equity_soft_circuit_min_bars_after_add": 6}
+    assert recipe["required_applied"] == [
+        "soft_circuit_recovery_low_activity",
+        "soft_circuit_low_activity_cooldown",
+    ]
+    assert _legacy_recipe_missing_required(recipe, []) == [
+        "soft_circuit_recovery_low_activity",
+        "soft_circuit_low_activity_cooldown",
+    ]
+    assert _legacy_recipe_missing_required(
+        recipe,
+        ["soft_circuit_recovery_low_activity"],
+    ) == ["soft_circuit_low_activity_cooldown"]
+    assert _legacy_recipe_missing_required(
+        recipe,
+        ["soft_circuit_recovery_low_activity", "soft_circuit_low_activity_cooldown"],
+    ) == []
+    assert _legacy_recipe_allowed(fold6_train_state, recipe)
+    assert not _legacy_recipe_allowed(fold13_train_state, recipe)
+
+
 def test_legacy_recipe_missing_required_reports_missing_overlays() -> None:
     recipe = {"required_applied": ["equity_soft_circuit", "base_reduce"]}
 
@@ -3000,9 +4591,13 @@ def test_low_activity_and_base_heavy_recipe_gates_are_narrow() -> None:
             negative_train_distribution_probe_replay_note="enabled",
             compressed_trend_distribution_probe_replay_note="enabled",
             event_risk_distribution_base_off_replay_note="enabled",
+            event_risk_soft_hold_inventory_release_replay_note="enabled",
+            event_risk_soft_hold_inventory_release_fraction=0.0,
             deep_drawdown_reversal_scale_replay_note="enabled",
             high_cost_runner_reversal_scale_replay_note="enabled",
             high_cost_runner_tight_repair_replay_note="enabled",
+            soft_circuit_low_activity_entry_grace_replay_note="enabled",
+            soft_circuit_low_activity_entry_grace_bars=6,
             soft_circuit_low_activity_near_miss_replay_note="enabled",
         )
     )
@@ -3152,6 +4747,21 @@ def test_low_activity_and_base_heavy_recipe_gates_are_narrow() -> None:
         fold6_train_state,
         recipes_by_name["soft_circuit_low_activity_near_miss"],
     )
+    assert _legacy_recipe_allowed(
+        fold6_train_state,
+        recipes_by_name["soft_circuit_low_activity_entry_grace"],
+    )
+    assert _legacy_recipe_missing_required(
+        recipes_by_name["soft_circuit_low_activity_entry_grace"],
+        ["soft_circuit_recovery_low_activity"],
+    ) == ["soft_circuit_low_activity_cooldown"]
+    assert (
+        _legacy_recipe_missing_required(
+            recipes_by_name["soft_circuit_low_activity_entry_grace"],
+            ["soft_circuit_recovery_low_activity", "soft_circuit_low_activity_cooldown"],
+        )
+        == []
+    )
     assert _legacy_recipe_missing_required(
         recipes_by_name["soft_circuit_low_activity_near_miss"],
         ["soft_circuit_recovery_low_activity"],
@@ -3190,6 +4800,10 @@ def test_low_activity_and_base_heavy_recipe_gates_are_narrow() -> None:
     assert _legacy_recipe_allowed(
         fold11_train_state,
         recipes_by_name["event_risk_soft_hold_near_miss"],
+    )
+    assert _legacy_recipe_allowed(
+        fold11_train_state,
+        recipes_by_name["event_risk_soft_hold_inventory_release"],
     )
     assert _legacy_recipe_allowed(
         fold8_train_state,
@@ -3267,6 +4881,17 @@ def test_low_activity_and_base_heavy_recipe_gates_are_narrow() -> None:
         == []
     )
     assert _legacy_recipe_missing_required(
+        recipes_by_name["event_risk_soft_hold_inventory_release"],
+        [],
+    ) == ["event_risk_soft_hold_near_miss"]
+    assert (
+        _legacy_recipe_missing_required(
+            recipes_by_name["event_risk_soft_hold_inventory_release"],
+            ["event_risk_soft_hold_near_miss"],
+        )
+        == []
+    )
+    assert _legacy_recipe_missing_required(
         recipes_by_name["compressed_trend_distribution_probe"],
         [],
     ) == ["reaction_tune_compressed_trend"]
@@ -3303,6 +4928,10 @@ def test_low_activity_and_base_heavy_recipe_gates_are_narrow() -> None:
     assert not _legacy_recipe_allowed(
         fold4_train_state,
         recipes_by_name["soft_circuit_low_activity_near_miss"],
+    )
+    assert not _legacy_recipe_allowed(
+        fold4_train_state,
+        recipes_by_name["soft_circuit_low_activity_entry_grace"],
     )
     assert not _legacy_recipe_allowed(
         fold16_train_state,
@@ -3351,6 +4980,10 @@ def test_low_activity_and_base_heavy_recipe_gates_are_narrow() -> None:
     assert not _legacy_recipe_allowed(
         fold12_train_state,
         recipes_by_name["event_risk_soft_hold_near_miss"],
+    )
+    assert not _legacy_recipe_allowed(
+        fold12_train_state,
+        recipes_by_name["event_risk_soft_hold_inventory_release"],
     )
     assert not _legacy_recipe_allowed(
         fold12_train_state,
