@@ -23,7 +23,10 @@ from scripts.run_micro_intrabar_paper_candidate_contract import (
     FILTER_CONTRACTS,
 )
 from scripts.run_micro_main_exit_policy_search import build_exit_policies
-from scripts.run_micro_main_intrabar_research import IntrabarSessionImpulseRetestResearch, intrabar_exit_policy
+from scripts.run_micro_main_intrabar_research import (
+    SessionImpulseRetestResearch as IntrabarSessionImpulseRetestResearch,
+    intrabar_exit_policy,
+)
 from scripts.run_micro_main_usdt_proxy_backtest import _fetch_1m_klines, _resample_to_5m
 
 

@@ -260,11 +260,11 @@ def test_stage_payload_reports_blocked_state(monkeypatch):
     assert payload["entry_timing_review_target"]["symbol"] == "BTCUSDC"
     assert payload["entry_timing_review_target"]["action"] == "run_entry_timing_split_review"
     assert payload["entry_timing_review_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 30 --action run_entry_timing_split_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_11 --days 30 --action run_entry_timing_split_review"
     )
     assert payload["execution_style_review_target"]["symbol"] == "BTCUSDC"
     assert payload["execution_style_review_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 30 --action run_execution_style_split_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_11 --days 30 --action run_execution_style_split_review"
     )
     assert payload["representative_candidates"]["accepted"]["symbol"] == "BTCUSDC"
     assert payload["representative_candidates"]["blocked"]["symbol"] == "ETHUSDC"
@@ -382,16 +382,16 @@ def test_stage_payload_predicts_post_unlock_stage_when_risk_gate_is_only_blocker
     assert payload["post_unlock_review_summary"]["expected_stage_after_unlock"] == "2_LINEAGE_READY"
     assert payload["post_unlock_review_summary"]["next_review_step"] == "wait_for_operating_lock_to_clear"
     assert payload["post_unlock_review_summary"]["bundle_review_command"].endswith(
-        "scripts/run_post_unlock_review.py --symbol BTCUSDT --universe micro_live_usdt_12 --days 30"
+        "scripts/run_post_unlock_review.py --symbol BTCUSDT --universe micro_live_usdt_11 --days 30"
     )
     assert payload["post_unlock_bundle_result"]["status"] == "waiting_for_review_window"
     assert payload["runtime_reopen_status"]["status"] == "waiting_for_operating_lock"
     assert payload["runtime_reopen_status"]["ready"] is False
     assert payload["post_unlock_review_summary"]["primary_review_command"].endswith(
-        "scripts/run_micro_live_preflight.py --symbol BTCUSDT --universe micro_live_usdt_12 --days 30"
+        "scripts/run_micro_live_preflight.py --symbol BTCUSDT --universe micro_live_usdt_11 --days 30"
     )
     assert payload["post_unlock_review_summary"]["secondary_review_command"].endswith(
-        "scripts/run_post_live_pruning_review.py --symbol BTCUSDT --universe micro_live_usdt_12 --days 30"
+        "scripts/run_post_live_pruning_review.py --symbol BTCUSDT --universe micro_live_usdt_11 --days 30"
     )
 
 

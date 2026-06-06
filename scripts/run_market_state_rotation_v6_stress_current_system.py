@@ -330,6 +330,27 @@ def _fold_cost_structure(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _fold_abstain_reason(fold: dict[str, Any], result: dict[str, Any]) -> str | None:
+    decision = fold.get("low_confidence_abstain")
+    if isinstance(decision, dict):
+        return str(decision.get("reason") or decision.get("name") or "low_confidence_abstain")
+    if decision:
+        return "low_confidence_abstain"
+
+    if result.get("walk_forward_abstain"):
+        return str(result.get("walk_forward_abstain_reason") or "walk_forward_abstain")
+
+    overlays = {str(item) for item in fold.get("after_selection_overlays_applied") or []}
+    if "low_confidence_abstain" in overlays:
+        return "low_confidence_abstain"
+
+    event_diagnostics = dict(result.get("event_diagnostics") or {})
+    flags = {str(item) for item in event_diagnostics.get("flags") or []}
+    if "walk_forward_abstain" in flags:
+        return str(result.get("walk_forward_abstain_reason") or "walk_forward_abstain")
+    return None
+
+
 def _fold_root_causes(
     *,
     gross_return: float,
@@ -765,6 +786,7 @@ def _stress_fold(
     base_cost_bps_per_side: float,
 ) -> dict[str, Any]:
     result = dict(fold.get("test_result") or {})
+    abstain_reason = _fold_abstain_reason(fold, result)
     gross_return = _float(result.get("gross_return_pct_before_costs"))
     baseline_return = _float(result.get("total_return_pct"))
     baseline_dd = _float(result.get("max_drawdown_pct"))
@@ -791,7 +813,11 @@ def _stress_fold(
         gross_return=gross_return,
         carry_drag=carry_drag,
         cost_multiplier=cost_multiplier,
+        floor_return_pct=0.0 if abstain_reason else 5.0,
     )
+    if abstain_reason:
+        floor_gap["excluded_from_return_floor"] = True
+        floor_gap["abstain_reason"] = abstain_reason
     diagnostics = _fold_source_diagnostics(
         fold,
         result,
@@ -801,10 +827,21 @@ def _stress_fold(
         dd_proxy=dd_proxy,
         breakeven_cost_multiplier=breakeven_cost_multiplier,
     )
+    if abstain_reason:
+        diagnostics = {
+            **diagnostics,
+            "abstained": True,
+            "abstain_reason": abstain_reason,
+            "root_causes": ["walk_forward_abstain"],
+            "tradeoff_tags": ["risk_off_abstain"],
+            "remediation_hints": [],
+        }
     row = {
         "fold": int(fold.get("fold") or 0),
         "test_start": fold.get("test_start"),
         "test_end": fold.get("test_end"),
+        "abstained": bool(abstain_reason),
+        "abstain_reason": abstain_reason,
         "baseline_return_pct": _pct(baseline_return),
         "gross_return_pct": _pct(gross_return),
         "baseline_cost_drag_pct": _pct(baseline_cost),
@@ -886,6 +923,7 @@ def _attach_replayed_selected_oos_metrics(
     load_days: int | None,
     min_periods: int,
     sleep_seconds: float,
+    compact: bool = False,
 ) -> dict[str, Any]:
     # Imported lazily so the fast report path stays lightweight and unit tests do
     # not need the data-loading stack unless replay is explicitly requested.
@@ -1043,15 +1081,19 @@ def _attach_replayed_selected_oos_metrics(
                 "trade_like_events": int(replay_result.get("trade_like_events") or 0),
                 "avg_abs_account_exposure": replay_result.get("avg_abs_account_exposure"),
                 "max_abs_account_exposure": replay_result.get("max_abs_account_exposure"),
-                "event_counts": replay_result.get("event_counts") or {},
                 "event_structure": _fold_event_structure(replay_result),
                 "alpha_actionability": _fold_alpha_actionability(replay_result),
-                "sample_events": list(replay_result.get("sample_events") or []),
                 "cost_diagnostics": dict(replay_result.get("cost_diagnostics") or {}),
                 "regime_performance": dict(replay_result.get("regime_performance") or {}),
                 "window_meta": meta,
             }
+            if not compact:
+                row["replay_selected_oos"]["event_counts"] = replay_result.get("event_counts") or {}
+                row["replay_selected_oos"]["sample_events"] = list(
+                    replay_result.get("sample_events") or []
+                )
         payload["summary"]["replay_selected_oos"] = _replay_summary(rows)
+        payload["summary"]["replay_buffer_diagnostics"] = _replay_buffer_diagnostics(rows)
     return replay_summary
 
 
@@ -1116,7 +1158,431 @@ def _replay_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _replay_worst_regimes(regime_performance: Any, *, limit: int = 3) -> list[dict[str, Any]]:
+    if not isinstance(regime_performance, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for name, payload in regime_performance.items():
+        if not isinstance(payload, dict):
+            continue
+        rows.append(
+            {
+                "regime": str(name),
+                "return_pct": _pct(_float(payload.get("return_pct"))),
+                "max_drawdown_pct": _pct(_float(payload.get("max_drawdown_pct"))),
+                "add_events": int(payload.get("add_events") or 0),
+                "remove_events": int(payload.get("remove_events") or 0),
+            }
+        )
+    return sorted(rows, key=lambda item: _float(item.get("return_pct")))[:limit]
+
+
+def _replay_deployment_watchpoints(
+    replay: dict[str, Any],
+    *,
+    deployment_return_floor_pct: float,
+) -> list[str]:
+    ret = _float(replay.get("return_pct"))
+    gross = _float(replay.get("gross_return_pct_before_costs"))
+    cost = _float(replay.get("estimated_cost_drag_pct"))
+    drawdown = _float(replay.get("max_drawdown_pct"))
+    events = int(replay.get("trade_like_events") or 0)
+    buffer_to_deploy = ret - deployment_return_floor_pct
+    watchpoints: list[str] = []
+    if buffer_to_deploy <= 2.0:
+        watchpoints.append("thin_deployment_return_buffer_le_2pct")
+    if events < 10:
+        watchpoints.append("low_replay_event_count_lt_10")
+    if gross > 0.0 and cost / gross >= 0.45:
+        watchpoints.append("high_cost_to_gross_ge_45pct")
+    if drawdown >= 15.0:
+        watchpoints.append("replay_drawdown_near_limit_ge_15pct")
+    return watchpoints
+
+
+def _compact_replay_weak_fold(
+    row: dict[str, Any],
+    *,
+    stress_return_floor_pct: float,
+    deployment_return_floor_pct: float,
+) -> dict[str, Any]:
+    replay = dict(row.get("replay_selected_oos") or {})
+    ret = _float(replay.get("return_pct"))
+    diagnostics = dict(replay.get("cost_diagnostics") or {})
+    watchpoints = _replay_deployment_watchpoints(
+        replay,
+        deployment_return_floor_pct=deployment_return_floor_pct,
+    )
+    return {
+        "fold": int(row.get("fold") or 0),
+        "return_pct": _pct(ret),
+        "gross_return_pct_before_costs": replay.get("gross_return_pct_before_costs"),
+        "estimated_cost_drag_pct": replay.get("estimated_cost_drag_pct"),
+        "max_drawdown_pct": replay.get("max_drawdown_pct"),
+        "trade_like_events": replay.get("trade_like_events"),
+        "buffer_to_stress_floor_pct": _pct(ret - stress_return_floor_pct),
+        "buffer_to_deployment_floor_pct": _pct(ret - deployment_return_floor_pct),
+        "top_cost_reasons": _top_numeric_items(diagnostics.get("by_reason_pct")),
+        "worst_regimes": _replay_worst_regimes(replay.get("regime_performance")),
+        "deployment_watchpoints": watchpoints,
+        "deployment_watchpoint_count": len(watchpoints),
+        "deployment_gate": "watch" if watchpoints else "pass",
+    }
+
+
+def _replay_buffer_diagnostics(
+    rows: list[dict[str, Any]],
+    *,
+    stress_return_floor_pct: float = 5.0,
+    deployment_return_floor_pct: float = 10.0,
+    drawdown_pass_floor_pct: float = 20.0,
+    drawdown_watch_floor_pct: float = 35.0,
+) -> dict[str, Any]:
+    replay_rows = [
+        row
+        for row in rows
+        if dict(row.get("replay_selected_oos") or {}).get("status") == "ok"
+    ]
+    if not replay_rows:
+        return {
+            "enabled": True,
+            "status": "no_replays",
+            "method": "selected_oos_replay_min_buffer",
+        }
+
+    returns = [_float(dict(row.get("replay_selected_oos") or {}).get("return_pct")) for row in replay_rows]
+    drawdowns = [
+        _float(dict(row.get("replay_selected_oos") or {}).get("max_drawdown_pct"))
+        for row in replay_rows
+    ]
+    min_return = min(returns)
+    max_drawdown = max(drawdowns) if drawdowns else 0.0
+    low_buffer_rows = [
+        row
+        for row in replay_rows
+        if _float(dict(row.get("replay_selected_oos") or {}).get("return_pct"))
+        < deployment_return_floor_pct
+    ]
+    stress_floor_breach_rows = [
+        row
+        for row in replay_rows
+        if _float(dict(row.get("replay_selected_oos") or {}).get("return_pct"))
+        < stress_return_floor_pct
+    ]
+
+    if stress_floor_breach_rows or min_return <= 0.0:
+        return_verdict = "fail"
+    elif low_buffer_rows:
+        return_verdict = "watch"
+    else:
+        return_verdict = "pass"
+    if max_drawdown <= drawdown_pass_floor_pct:
+        drawdown_verdict = "pass"
+    elif max_drawdown <= drawdown_watch_floor_pct:
+        drawdown_verdict = "watch"
+    else:
+        drawdown_verdict = "fail"
+    deployment_verdict = (
+        "fail"
+        if "fail" in {return_verdict, drawdown_verdict}
+        else "watch"
+        if "watch" in {return_verdict, drawdown_verdict}
+        else "pass"
+    )
+
+    reason_totals: dict[str, float] = {}
+    watchpoint_counts: dict[str, int] = {}
+    for row in low_buffer_rows:
+        replay = dict(row.get("replay_selected_oos") or {})
+        diagnostics = dict(replay.get("cost_diagnostics") or {})
+        reasons = diagnostics.get("by_reason_pct")
+        if not isinstance(reasons, dict):
+            continue
+        for reason, value in reasons.items():
+            numeric = _float(value)
+            if numeric == 0.0:
+                continue
+            key = str(reason)
+            reason_totals[key] = reason_totals.get(key, 0.0) + numeric
+    compact_rows = [
+        _compact_replay_weak_fold(
+            row,
+            stress_return_floor_pct=stress_return_floor_pct,
+            deployment_return_floor_pct=deployment_return_floor_pct,
+        )
+        for row in replay_rows
+    ]
+    for compact_row in compact_rows:
+        for watchpoint in compact_row.get("deployment_watchpoints") or []:
+            key = str(watchpoint)
+            watchpoint_counts[key] = watchpoint_counts.get(key, 0) + 1
+
+    return {
+        "enabled": True,
+        "status": "ok",
+        "method": "selected_oos_replay_min_buffer",
+        "stress_return_floor_pct": _pct(stress_return_floor_pct),
+        "deployment_return_floor_pct": _pct(deployment_return_floor_pct),
+        "drawdown_pass_floor_pct": _pct(drawdown_pass_floor_pct),
+        "drawdown_watch_floor_pct": _pct(drawdown_watch_floor_pct),
+        "fold_count": len(replay_rows),
+        "low_buffer_fold_count": len(low_buffer_rows),
+        "stress_floor_breach_count": len(stress_floor_breach_rows),
+        "min_return_pct": _pct(min_return),
+        "max_drawdown_pct": _pct(max_drawdown),
+        "return_buffer_verdict": return_verdict,
+        "drawdown_buffer_verdict": drawdown_verdict,
+        "deployment_readiness_verdict": deployment_verdict,
+        "highest_weak_fold_cost_reasons": _top_numeric_items(reason_totals, limit=8),
+        "deployment_watchpoint_counts": dict(
+            sorted(watchpoint_counts.items(), key=lambda item: (-item[1], item[0]))
+        ),
+        "lowest_return_folds": sorted(
+            compact_rows,
+            key=lambda item: _float(item.get("return_pct")),
+        )[:6],
+        "highest_drawdown_folds": sorted(
+            compact_rows,
+            key=lambda item: -_float(item.get("max_drawdown_pct")),
+        )[:6],
+    }
+
+
+def _proxy_replay_gap_diagnostics(
+    summary: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    replay = dict(summary.get("replay_selected_oos") or {})
+    if not replay.get("enabled") or replay.get("status") == "no_replays":
+        return {
+            "enabled": bool(replay.get("enabled")),
+            "status": "no_replays",
+            "method": "proxy_vs_selected_oos_replay",
+        }
+
+    proxy_verdict = str(summary.get("verdict") or "unknown")
+    replay_verdict = str(replay.get("verdict") or "unknown")
+    deployment_verdict = str(summary.get("replay_deployment_readiness_verdict") or "unknown")
+    proxy_dd = _float(summary.get("max_drawdown_proxy_pct"))
+    replay_dd = _float(replay.get("max_drawdown_pct"))
+    proxy_min_return = _float(summary.get("min_return_pct"))
+    replay_min_return = _float(replay.get("min_return_pct"))
+    dd_gap = proxy_dd - replay_dd
+    return_gap = replay_min_return - proxy_min_return
+
+    gap_rows: list[dict[str, Any]] = []
+    protected_gap_count = 0
+    for row in rows:
+        replay_row = dict(row.get("replay_selected_oos") or {})
+        if replay_row.get("status") != "ok":
+            continue
+        tags = [str(item) for item in row.get("tradeoff_tags") or []]
+        is_protected_gap = "dd_proxy_from_cost_stress_not_return_failure" in tags
+        if is_protected_gap:
+            protected_gap_count += 1
+        gap_rows.append(
+            {
+                "fold": int(row.get("fold") or 0),
+                "proxy_return_pct": row.get("stressed_return_pct"),
+                "replay_return_pct": replay_row.get("return_pct"),
+                "return_gap_pct": _pct(
+                    _float(replay_row.get("return_pct")) - _float(row.get("stressed_return_pct"))
+                ),
+                "proxy_drawdown_pct": row.get("drawdown_proxy_pct"),
+                "replay_drawdown_pct": replay_row.get("max_drawdown_pct"),
+                "drawdown_gap_pct": _pct(
+                    _float(row.get("drawdown_proxy_pct"))
+                    - _float(replay_row.get("max_drawdown_pct"))
+                ),
+                "proxy_cost_pct": row.get("baseline_cost_drag_pct"),
+                "replay_cost_pct": replay_row.get("estimated_cost_drag_pct"),
+                "trade_like_events": replay_row.get("trade_like_events"),
+                "tradeoff_tags": tags,
+                "top_cost_reasons": _top_numeric_items(
+                    dict(replay_row.get("cost_diagnostics") or {}).get("by_reason_pct")
+                ),
+            }
+        )
+
+    if proxy_verdict in {"watch", "fail"} and replay_verdict == "pass":
+        status = "proxy_conservative_replay_pass"
+        action = "keep_proxy_as_watch_flag_but_gate_deployment_on_replay_and_live_execution_checks"
+    elif proxy_verdict == "pass" and replay_verdict in {"watch", "fail"}:
+        status = "proxy_understates_replay_risk"
+        action = "block_deployment_until_replay_risk_is_fixed"
+    elif proxy_verdict in {"watch", "fail"} and replay_verdict in {"watch", "fail"}:
+        status = "confirmed_replay_risk"
+        action = "fix_strategy_or_cost_model_before_deployment"
+    else:
+        status = "aligned"
+        action = "continue_standard_validation"
+
+    return {
+        "enabled": True,
+        "status": status,
+        "method": "proxy_vs_selected_oos_replay",
+        "proxy_verdict": proxy_verdict,
+        "replay_adjusted_verdict": replay_verdict,
+        "replay_deployment_readiness_verdict": deployment_verdict,
+        "proxy_max_drawdown_pct": summary.get("max_drawdown_proxy_pct"),
+        "replay_max_drawdown_pct": replay.get("max_drawdown_pct"),
+        "drawdown_gap_pct": _pct(dd_gap),
+        "proxy_min_return_pct": summary.get("min_return_pct"),
+        "replay_min_return_pct": replay.get("min_return_pct"),
+        "min_return_gap_pct": _pct(return_gap),
+        "protected_alpha_gap_fold_count": protected_gap_count,
+        "action": action,
+        "largest_drawdown_gap_folds": sorted(
+            gap_rows,
+            key=lambda item: _float(item.get("drawdown_gap_pct")),
+            reverse=True,
+        )[:6],
+    }
+
+
+def _apply_replay_adjusted_verdicts(
+    scenario_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    replay_summaries: list[dict[str, Any]] = []
+    for name, payload in scenario_payload.items():
+        if not isinstance(payload, dict):
+            continue
+        summary = dict(payload.get("summary") or {})
+        replay = dict(summary.get("replay_selected_oos") or {})
+        if not replay.get("enabled") or replay.get("status") == "no_replays":
+            continue
+        buffer = dict(summary.get("replay_buffer_diagnostics") or {})
+        summary["proxy_verdict"] = summary.get("verdict")
+        summary["replay_adjusted_return_verdict"] = replay.get("return_verdict")
+        summary["replay_adjusted_drawdown_verdict"] = replay.get("drawdown_verdict")
+        summary["replay_adjusted_verdict"] = replay.get("verdict")
+        summary["replay_adjusted_compounded_return_pct"] = replay.get("compounded_return_pct")
+        summary["replay_adjusted_min_return_pct"] = replay.get("min_return_pct")
+        summary["replay_adjusted_max_drawdown_pct"] = replay.get("max_drawdown_pct")
+        summary["replay_deployment_readiness_verdict"] = buffer.get(
+            "deployment_readiness_verdict"
+        )
+        summary["replay_low_buffer_fold_count"] = buffer.get("low_buffer_fold_count")
+        summary["replay_stress_floor_breach_count"] = buffer.get("stress_floor_breach_count")
+        summary["replay_deployment_return_floor_pct"] = buffer.get(
+            "deployment_return_floor_pct"
+        )
+        summary["proxy_replay_gap_diagnostics"] = _proxy_replay_gap_diagnostics(
+            summary,
+            list(payload.get("folds") or []),
+        )
+        payload["summary"] = summary
+        replay_summaries.append(
+            {
+                "scenario": str(name),
+                "proxy_verdict": summary.get("proxy_verdict"),
+                "proxy_compounded_return_pct": summary.get("compounded_return_pct"),
+                "proxy_min_return_pct": summary.get("min_return_pct"),
+                "proxy_max_drawdown_pct": summary.get("max_drawdown_proxy_pct"),
+                "replay_adjusted_return_verdict": summary.get(
+                    "replay_adjusted_return_verdict"
+                ),
+                "replay_adjusted_drawdown_verdict": summary.get(
+                    "replay_adjusted_drawdown_verdict"
+                ),
+                "replay_adjusted_verdict": summary.get("replay_adjusted_verdict"),
+                "replay_adjusted_compounded_return_pct": summary.get(
+                    "replay_adjusted_compounded_return_pct"
+                ),
+                "replay_adjusted_min_return_pct": summary.get(
+                    "replay_adjusted_min_return_pct"
+                ),
+                "replay_adjusted_max_drawdown_pct": summary.get(
+                    "replay_adjusted_max_drawdown_pct"
+                ),
+                "replay_deployment_readiness_verdict": summary.get(
+                    "replay_deployment_readiness_verdict"
+                ),
+                "replay_low_buffer_fold_count": summary.get("replay_low_buffer_fold_count"),
+                "replay_stress_floor_breach_count": summary.get(
+                    "replay_stress_floor_breach_count"
+                ),
+                "replay_deployment_return_floor_pct": summary.get(
+                    "replay_deployment_return_floor_pct"
+                ),
+            }
+        )
+    if not replay_summaries:
+        return None
+    return min(
+        replay_summaries,
+        key=lambda item: _float(item.get("replay_adjusted_compounded_return_pct")),
+    )
+
+
+def _execution_readiness_checklist(report: dict[str, Any]) -> dict[str, Any]:
+    replay_worst = dict(report.get("replay_adjusted_worst_stress_summary") or {})
+    scenarios = dict(report.get("scenarios") or {})
+    worst_name = str(replay_worst.get("scenario") or "")
+    worst_summary = dict(dict(scenarios.get(worst_name) or {}).get("summary") or {})
+    gap = dict(worst_summary.get("proxy_replay_gap_diagnostics") or {})
+    buffer = dict(worst_summary.get("replay_buffer_diagnostics") or {})
+    watchpoint_counts = dict(buffer.get("deployment_watchpoint_counts") or {})
+    replay_readiness = str(replay_worst.get("replay_deployment_readiness_verdict") or "unavailable")
+    stress_breaches = int(replay_worst.get("replay_stress_floor_breach_count") or 0)
+    low_buffer = int(replay_worst.get("replay_low_buffer_fold_count") or 0)
+
+    items = [
+        {
+            "name": "replay_stress_floor",
+            "status": "pass" if replay_readiness == "pass" and stress_breaches == 0 else "block",
+            "evidence": {
+                "replay_deployment_readiness_verdict": replay_readiness,
+                "stress_floor_breach_count": stress_breaches,
+                "low_buffer_fold_count": low_buffer,
+            },
+        },
+        {
+            "name": "proxy_replay_gap_review",
+            "status": "watch" if gap.get("status") not in {None, "", "aligned"} else "pass",
+            "evidence": {
+                "status": gap.get("status"),
+                "drawdown_gap_pct": gap.get("drawdown_gap_pct"),
+                "action": gap.get("action"),
+            },
+        },
+        {
+            "name": "weak_fold_watchpoints",
+            "status": "watch" if watchpoint_counts else "pass",
+            "evidence": watchpoint_counts,
+        },
+        {
+            "name": "live_fill_slippage_calibration",
+            "status": "required",
+            "evidence": "collect shadow orders vs actual top-of-book/mark fills before live sizing",
+        },
+        {
+            "name": "order_safety_controls",
+            "status": "required",
+            "evidence": "verify kill switch, max daily loss, position sync, partial-fill handling, and exchange reject handling",
+        },
+    ]
+    blocking = any(item["status"] == "block" for item in items)
+    required = any(item["status"] == "required" for item in items)
+    watch = any(item["status"] == "watch" for item in items)
+    if blocking:
+        overall = "not_ready"
+    elif required:
+        overall = "shadow_only"
+    elif watch:
+        overall = "paper_only"
+    else:
+        overall = "paper_ready"
+    return {
+        "overall_status": overall,
+        "worst_replay_scenario": worst_name or None,
+        "items": items,
+    }
+
+
 def _is_protected_alpha_row(row: dict[str, Any]) -> bool:
+    if row.get("abstained"):
+        return False
     tags = set(row.get("tradeoff_tags") or [])
     if "high_cost_high_alpha_engine" in tags:
         return True
@@ -1124,6 +1590,8 @@ def _is_protected_alpha_row(row: dict[str, Any]) -> bool:
 
 
 def _is_remediation_priority_row(row: dict[str, Any]) -> bool:
+    if row.get("abstained"):
+        return False
     tags = set(row.get("tradeoff_tags") or [])
     if "high_cost_high_alpha_engine" in tags:
         return False
@@ -1158,7 +1626,8 @@ def _scenario_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if row.get("cost_to_gross_ratio") is not None:
             cost_to_gross_ratios.append(_float(row.get("cost_to_gross_ratio")))
         floor = dict(row.get("stress_floor") or {})
-        floor_gaps.append(max(_float(floor.get("gross_return_gain_needed_pct")), 0.0))
+        if not row.get("abstained"):
+            floor_gaps.append(max(_float(floor.get("gross_return_gain_needed_pct")), 0.0))
         for cause in row.get("root_causes") or []:
             root_cause_counts[str(cause)] = root_cause_counts.get(str(cause), 0) + 1
         for tag in row.get("tradeoff_tags") or []:
@@ -1166,12 +1635,19 @@ def _scenario_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for hint in row.get("remediation_hints") or []:
             remediation_hint_counts[str(hint)] = remediation_hint_counts.get(str(hint), 0) + 1
         equity *= _safe_equity(ret)
+    active_rows = [row for row in rows if not row.get("abstained")]
+    abstained_rows = [row for row in rows if row.get("abstained")]
+    active_returns = [_float(row.get("stressed_return_pct")) for row in active_rows]
     positive = sum(1 for value in returns if value > 0.0)
+    active_positive = sum(1 for value in active_returns if value > 0.0)
     min_return = min(returns) if returns else 0.0
+    active_min_return = min(active_returns) if active_returns else 0.0
     max_dd = max(drawdowns) if drawdowns else 0.0
-    if positive == len(returns) and min_return >= 5.0:
+    if not active_returns:
+        return_verdict = "watch"
+    elif active_positive == len(active_returns) and active_min_return >= 5.0:
         return_verdict = "pass"
-    elif positive == len(returns) and min_return > 0.0:
+    elif active_positive == len(active_returns) and active_min_return > 0.0:
         return_verdict = "watch"
     else:
         return_verdict = "fail"
@@ -1181,8 +1657,8 @@ def _scenario_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         drawdown_verdict = "watch"
     else:
         drawdown_verdict = "fail"
-    protected_alpha_folds = [row for row in rows if _is_protected_alpha_row(row)]
-    actionable_drawdown_rows = [row for row in rows if not _is_protected_alpha_row(row)]
+    protected_alpha_folds = [row for row in active_rows if _is_protected_alpha_row(row)]
+    actionable_drawdown_rows = [row for row in active_rows if not _is_protected_alpha_row(row)]
     actionable_drawdowns = [
         _float(row.get("drawdown_proxy_pct")) for row in actionable_drawdown_rows
     ]
@@ -1203,7 +1679,7 @@ def _scenario_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         verdict = "watch"
     else:
         verdict = "pass"
-    remediation_priority_folds = [row for row in rows if _is_remediation_priority_row(row)]
+    remediation_priority_folds = [row for row in active_rows if _is_remediation_priority_row(row)]
     stress_floor_priority_folds = [
         row
         for row in remediation_priority_folds
@@ -1221,11 +1697,16 @@ def _scenario_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     return {
         "fold_count": len(rows),
+        "active_fold_count": len(active_rows),
+        "abstained_fold_count": len(abstained_rows),
         "compounded_return_pct": _pct((equity - 1.0) * 100.0),
         "avg_return_pct": _pct(mean(returns)) if returns else 0.0,
         "min_return_pct": _pct(min_return),
         "max_return_pct": _pct(max(returns)) if returns else 0.0,
         "positive_fold_count": positive,
+        "active_avg_return_pct": _pct(mean(active_returns)) if active_returns else 0.0,
+        "active_min_return_pct": _pct(active_min_return),
+        "active_positive_fold_count": active_positive,
         "max_drawdown_proxy_pct": _pct(max_dd),
         "max_actionable_drawdown_proxy_pct": _pct(max_actionable_dd),
         "actionable_drawdown_verdict": actionable_drawdown_verdict,
@@ -1258,14 +1739,14 @@ def _scenario_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "drawdown_verdict": drawdown_verdict,
         "verdict": verdict,
         "fragile_folds": sorted(
-            rows,
+            active_rows,
             key=lambda item: (
                 _float(item.get("stressed_return_pct")),
                 -_float(item.get("drawdown_proxy_pct")),
             ),
         )[:5],
         "drawdown_fragile_folds": sorted(
-            rows,
+            active_rows,
             key=lambda item: (
                 -_float(item.get("drawdown_proxy_pct")),
                 _float(item.get("stressed_return_pct")),
@@ -1279,7 +1760,7 @@ def _scenario_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
             ),
         )[:5],
         "cost_fragile_folds": sorted(
-            rows,
+            active_rows,
             key=lambda item: (
                 -_float(item.get("baseline_cost_drag_pct")),
                 _float(item.get("breakeven_cost_multiplier"), 999.0),
@@ -1307,6 +1788,7 @@ def _scenario_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 _float(item.get("stressed_return_pct")),
             ),
         )[:5],
+        "abstained_folds": sorted(abstained_rows, key=lambda item: int(item.get("fold") or 0)),
     }
 
 
@@ -1321,6 +1803,7 @@ def build_stress_report(
     replay_load_days: int | None = None,
     replay_min_periods: int = 200,
     replay_sleep_seconds: float = 0.0,
+    replay_compact: bool = False,
 ) -> dict[str, Any]:
     cost_model = dict(source_report.get("cost_model") or {})
     base_cost_bps_per_side = max(
@@ -1367,7 +1850,11 @@ def build_stress_report(
             load_days=replay_load_days,
             min_periods=int(replay_min_periods),
             sleep_seconds=float(replay_sleep_seconds),
+            compact=bool(replay_compact),
         )
+    replay_adjusted_worst = (
+        _apply_replay_adjusted_verdicts(scenario_payload) if replay_summary else None
+    )
     baseline = scenario_payload.get("baseline", {})
     non_baseline = [
         payload
@@ -1384,7 +1871,7 @@ def build_stress_report(
         for row in payload.get("folds") or []
         if row.get("breakeven_cost_multiplier") is not None
     ]
-    return {
+    report = {
         "created_at": datetime.now(UTC).isoformat(),
         "input_report": input_report_path,
         "source_report": source_report.get("source_report"),
@@ -1401,6 +1888,11 @@ def build_stress_report(
         "base_cost_bps_per_side": base_cost_bps_per_side,
         "baseline_summary": baseline.get("summary") or {},
         "worst_stress_summary": worst.get("summary") or {},
+        "replay_adjusted_worst_stress_summary": replay_adjusted_worst
+        or {
+            "enabled": False,
+            "method": "not_requested",
+        },
         "min_breakeven_cost_multiplier": round(min(breakevens), 4) if breakevens else None,
         "replay_selected_oos": replay_summary
         or {
@@ -1409,6 +1901,8 @@ def build_stress_report(
         },
         "scenarios": scenario_payload,
     }
+    report["execution_readiness_checklist"] = _execution_readiness_checklist(report)
+    return report
 
 
 def _format_top_cost_reasons(row: dict[str, Any]) -> str:
@@ -1417,6 +1911,15 @@ def _format_top_cost_reasons(row: dict[str, Any]) -> str:
         if not isinstance(item, dict):
             continue
         parts.append(f"{item.get('name')}={item.get('value')}")
+    return ", ".join(parts)
+
+
+def _format_worst_regimes(row: dict[str, Any]) -> str:
+    parts = []
+    for item in row.get("worst_regimes") or []:
+        if not isinstance(item, dict):
+            continue
+        parts.append(f"{item.get('regime')}={item.get('return_pct')}")
     return ", ".join(parts)
 
 
@@ -1460,11 +1963,48 @@ def _markdown_table(report: dict[str, Any]) -> str:
         f"- Base per-side fee+slippage bps: `{report.get('base_cost_bps_per_side')}`",
         f"- Min fold breakeven cost multiplier: `{report.get('min_breakeven_cost_multiplier')}`",
         "",
+    ]
+    readiness = dict(report.get("execution_readiness_checklist") or {})
+    if readiness:
+        lines.extend(
+            [
+                "## Execution Readiness",
+                "",
+                f"- Overall status: `{readiness.get('overall_status')}`",
+                f"- Worst replay scenario: `{readiness.get('worst_replay_scenario')}`",
+                "",
+                "| Check | Status | Evidence |",
+                "| --- | --- | --- |",
+            ]
+        )
+        for item in readiness.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            evidence = item.get("evidence")
+            if isinstance(evidence, dict):
+                evidence_text = ", ".join(f"{key}={value}" for key, value in evidence.items())
+            else:
+                evidence_text = str(evidence)
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(item.get("name")),
+                        str(item.get("status")),
+                        evidence_text,
+                    ]
+                )
+                + " |"
+            )
+        lines.append("")
+    lines.extend(
+        [
         "## Scenario Summary",
         "",
-        "| Scenario | Compounded % | Avg % | Min % | Positive | Max DD proxy % | Actionable DD proxy % | Protected alpha folds | Floor gaps | Max floor gap % | Avg cost % | Avg carry % | Return | DD | Actionable DD | Overall |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
-    ]
+        "| Scenario | Compounded % | Avg % | Min % | Positive | Active | Abstain | Max DD proxy % | Actionable DD proxy % | Protected alpha folds | Floor gaps | Max floor gap % | Avg cost % | Avg carry % | Return | DD | Actionable DD | Overall |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
+        ]
+    )
     for name, payload in report.get("scenarios", {}).items():
         summary = dict(payload.get("summary") or {})
         lines.append(
@@ -1476,6 +2016,8 @@ def _markdown_table(report: dict[str, Any]) -> str:
                     str(summary.get("avg_return_pct")),
                     str(summary.get("min_return_pct")),
                     f"{summary.get('positive_fold_count')}/{summary.get('fold_count')}",
+                    f"{summary.get('active_positive_fold_count')}/{summary.get('active_fold_count')}",
+                    str(summary.get("abstained_fold_count")),
                     str(summary.get("max_drawdown_proxy_pct")),
                     str(summary.get("max_actionable_drawdown_proxy_pct")),
                     str(summary.get("protected_alpha_fold_count")),
@@ -1493,6 +2035,7 @@ def _markdown_table(report: dict[str, Any]) -> str:
         )
     replay = dict(report.get("replay_selected_oos") or {})
     if replay.get("enabled"):
+        replay_adjusted = dict(report.get("replay_adjusted_worst_stress_summary") or {})
         lines.extend(
             [
                 "",
@@ -1502,13 +2045,29 @@ def _markdown_table(report: dict[str, Any]) -> str:
                     f"- Method: `{replay.get('method')}`; load_days=`{replay.get('load_days')}`; "
                     f"failures=`{replay.get('failed_replay_count')}`"
                 ),
+                (
+                    f"- Replay-adjusted worst verdict: `{replay_adjusted.get('replay_adjusted_verdict')}`; "
+                    f"min=`{replay_adjusted.get('replay_adjusted_min_return_pct')}`; "
+                    f"max DD=`{replay_adjusted.get('replay_adjusted_max_drawdown_pct')}`"
+                    if replay_adjusted.get("replay_adjusted_verdict")
+                    else "- Replay-adjusted worst verdict: `unavailable`"
+                ),
+                (
+                    f"- Replay deployment readiness: `{replay_adjusted.get('replay_deployment_readiness_verdict')}`; "
+                    f"floor=`{replay_adjusted.get('replay_deployment_return_floor_pct')}`; "
+                    f"low-buffer folds=`{replay_adjusted.get('replay_low_buffer_fold_count')}`; "
+                    f"stress breaches=`{replay_adjusted.get('replay_stress_floor_breach_count')}`"
+                    if replay_adjusted.get("replay_deployment_readiness_verdict")
+                    else "- Replay deployment readiness: `unavailable`"
+                ),
                 "",
-                "| Scenario | Compounded % | Avg % | Min % | Max replay DD % | Return | DD | Overall |",
-                "| --- | ---: | ---: | ---: | ---: | --- | --- | --- |",
+                "| Scenario | Compounded % | Avg % | Min % | Max replay DD % | Return | DD | Overall | Deploy | Low buffer |",
+                "| --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- | ---: |",
             ]
         )
         for name, payload in report.get("scenarios", {}).items():
-            replay_summary = dict(dict(payload.get("summary") or {}).get("replay_selected_oos") or {})
+            summary = dict(payload.get("summary") or {})
+            replay_summary = dict(summary.get("replay_selected_oos") or {})
             if not replay_summary or replay_summary.get("status") == "no_replays":
                 continue
             lines.append(
@@ -1523,10 +2082,97 @@ def _markdown_table(report: dict[str, Any]) -> str:
                         str(replay_summary.get("return_verdict")),
                         str(replay_summary.get("drawdown_verdict")),
                         str(replay_summary.get("verdict")),
+                        str(summary.get("replay_deployment_readiness_verdict")),
+                        str(summary.get("replay_low_buffer_fold_count")),
                     ]
                 )
                 + " |"
             )
+        lines.extend(["", "## Selected OOS Replay Weak Folds", ""])
+        for name, payload in report.get("scenarios", {}).items():
+            summary = dict(payload.get("summary") or {})
+            diagnostics = dict(summary.get("replay_buffer_diagnostics") or {})
+            folds = list(diagnostics.get("lowest_return_folds") or [])
+            if not folds:
+                continue
+            lines.extend(
+                [
+                    f"### {name}",
+                    "",
+                    "| Fold | Replay % | Stress buffer % | Deploy buffer % | Replay DD % | Cost % | Gross % | Events | Gate | Watchpoints | Top cost reasons | Weak regimes |",
+                    "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
+                ]
+            )
+            for row in folds:
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            str(row.get("fold")),
+                            str(row.get("return_pct")),
+                            str(row.get("buffer_to_stress_floor_pct")),
+                            str(row.get("buffer_to_deployment_floor_pct")),
+                            str(row.get("max_drawdown_pct")),
+                            str(row.get("estimated_cost_drag_pct")),
+                            str(row.get("gross_return_pct_before_costs")),
+                            str(row.get("trade_like_events")),
+                            str(row.get("deployment_gate")),
+                            ", ".join(str(item) for item in row.get("deployment_watchpoints") or []),
+                            _format_top_cost_reasons(row),
+                            _format_worst_regimes(row),
+                        ]
+                    )
+                    + " |"
+                )
+        lines.extend(["", "## Proxy vs Replay Gap", ""])
+        for name, payload in report.get("scenarios", {}).items():
+            summary = dict(payload.get("summary") or {})
+            diagnostics = dict(summary.get("proxy_replay_gap_diagnostics") or {})
+            if not diagnostics or diagnostics.get("status") == "no_replays":
+                continue
+            lines.extend(
+                [
+                    f"### {name}",
+                    "",
+                    (
+                        f"- Status: `{diagnostics.get('status')}`; "
+                        f"action=`{diagnostics.get('action')}`"
+                    ),
+                    (
+                        f"- Proxy verdict: `{diagnostics.get('proxy_verdict')}`; "
+                        f"replay verdict: `{diagnostics.get('replay_adjusted_verdict')}`; "
+                        f"deployment=`{diagnostics.get('replay_deployment_readiness_verdict')}`"
+                    ),
+                    (
+                        f"- DD gap: `{diagnostics.get('drawdown_gap_pct')}`; "
+                        f"min-return gap: `{diagnostics.get('min_return_gap_pct')}`; "
+                        f"protected-alpha gap folds=`{diagnostics.get('protected_alpha_gap_fold_count')}`"
+                    ),
+                    "",
+                    "| Fold | Proxy % | Replay % | Return gap % | Proxy DD % | Replay DD % | DD gap % | Replay cost % | Events | Tags | Top replay cost reasons |",
+                    "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+                ]
+            )
+            for row in diagnostics.get("largest_drawdown_gap_folds") or []:
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            str(row.get("fold")),
+                            str(row.get("proxy_return_pct")),
+                            str(row.get("replay_return_pct")),
+                            str(row.get("return_gap_pct")),
+                            str(row.get("proxy_drawdown_pct")),
+                            str(row.get("replay_drawdown_pct")),
+                            str(row.get("drawdown_gap_pct")),
+                            str(row.get("replay_cost_pct")),
+                            str(row.get("trade_like_events")),
+                            ", ".join(str(item) for item in row.get("tradeoff_tags") or []),
+                            _format_top_cost_reasons(row),
+                        ]
+                    )
+                    + " |"
+                )
     lines.extend(["", "## Root Cause Counts", ""])
     for name, payload in report.get("scenarios", {}).items():
         summary = dict(payload.get("summary") or {})
@@ -1738,6 +2384,48 @@ def _markdown_table(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _compact_stdout_report(report: dict[str, Any]) -> dict[str, Any]:
+    worst = dict(report.get("worst_stress_summary") or {})
+    replay_worst = dict(report.get("replay_adjusted_worst_stress_summary") or {})
+    scenarios: dict[str, Any] = {}
+    for name, payload in report.get("scenarios", {}).items():
+        if not isinstance(payload, dict):
+            continue
+        summary = dict(payload.get("summary") or {})
+        replay = dict(summary.get("replay_selected_oos") or {})
+        buffer = dict(summary.get("replay_buffer_diagnostics") or {})
+        scenarios[str(name)] = {
+            "compounded_return_pct": summary.get("compounded_return_pct"),
+            "min_return_pct": summary.get("min_return_pct"),
+            "max_drawdown_proxy_pct": summary.get("max_drawdown_proxy_pct"),
+            "verdict": summary.get("verdict"),
+            "replay_compounded_return_pct": replay.get("compounded_return_pct"),
+            "replay_min_return_pct": replay.get("min_return_pct"),
+            "replay_max_drawdown_pct": replay.get("max_drawdown_pct"),
+            "replay_verdict": replay.get("verdict"),
+            "replay_deployment_readiness_verdict": buffer.get(
+                "deployment_readiness_verdict"
+            ),
+            "replay_low_buffer_fold_count": buffer.get("low_buffer_fold_count"),
+            "replay_stress_floor_breach_count": buffer.get("stress_floor_breach_count"),
+            "replay_lowest_return_folds": list(buffer.get("lowest_return_folds") or [])[:4],
+        }
+    return {
+        "created_at": report.get("created_at"),
+        "input_report": report.get("input_report"),
+        "symbol": report.get("symbol"),
+        "exec_interval": report.get("exec_interval"),
+        "worst_stress_summary": {
+            "compounded_return_pct": worst.get("compounded_return_pct"),
+            "min_return_pct": worst.get("min_return_pct"),
+            "max_drawdown_proxy_pct": worst.get("max_drawdown_proxy_pct"),
+            "verdict": worst.get("verdict"),
+        },
+        "replay_adjusted_worst_stress_summary": replay_worst,
+        "scenarios": scenarios,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Fast selected-model stress report for market-state rotation v6 walk-forward output."
@@ -1792,6 +2480,16 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Sleep between remote bar fetches during replay if cache misses.",
     )
+    parser.add_argument(
+        "--replay-compact",
+        action="store_true",
+        help="Omit heavy replay event_counts/sample_events while keeping cost/regime diagnostics.",
+    )
+    parser.add_argument(
+        "--stdout-summary-only",
+        action="store_true",
+        help="Print a compact summary to stdout instead of the full stress report.",
+    )
     parser.add_argument("--write-report", action="store_true")
     return parser.parse_args()
 
@@ -1816,6 +2514,7 @@ def main() -> None:
         replay_load_days=args.replay_load_days,
         replay_min_periods=int(args.replay_min_periods),
         replay_sleep_seconds=float(args.replay_sleep_seconds),
+        replay_compact=bool(args.replay_compact),
     )
     if args.write_report:
         report_dir = Path(args.report_dir)
@@ -1828,7 +2527,8 @@ def main() -> None:
         md_path.write_text(_markdown_table(report))
         print(f"wrote {json_path.relative_to(ROOT_DIR)}")
         print(f"wrote {md_path.relative_to(ROOT_DIR)}")
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    stdout_payload = _compact_stdout_report(report) if args.stdout_summary_only else report
+    print(json.dumps(stdout_payload, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

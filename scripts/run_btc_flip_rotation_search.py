@@ -278,6 +278,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--report-dir", default="reports/validation/btc_flip_rotation_search")
     parser.add_argument("--base-url", default="")
     parser.add_argument("--sleep-seconds", type=float, default=0.03)
+    parser.add_argument("--max-cache-age-minutes", type=float, default=None)
+    parser.add_argument("--data-refresh-only", action="store_true")
     parser.add_argument("--write-report", action="store_true")
     return parser.parse_args()
 
@@ -434,18 +436,22 @@ def _load_bars(
     cache_dir: Path,
     base_url: str,
     sleep_seconds: float,
+    max_cache_age_minutes: float | None = None,
 ) -> list[Bar]:
     cache_dir.mkdir(parents=True, exist_ok=True)
     end_ts = datetime.now(UTC).replace(second=0, microsecond=0)
     start_ts = end_ts - timedelta(days=max(int(days), 1))
     cache_path = cache_dir / f"{symbol}_{interval}_{int(days)}d.json"
+    cache_max_age = timedelta(hours=12)
+    if max_cache_age_minutes is not None:
+        cache_max_age = timedelta(minutes=max(float(max_cache_age_minutes), 0.0))
     if cache_path.exists():
         try:
             payload = json.loads(cache_path.read_text(encoding="utf-8"))
             cached_end = datetime.fromisoformat(str(payload.get("end_ts")).replace("Z", "+00:00"))
             if cached_end.tzinfo is None:
                 cached_end = cached_end.replace(tzinfo=UTC)
-            if cached_end >= end_ts - timedelta(hours=12):
+            if cached_end >= end_ts - cache_max_age:
                 return [
                     Bar(
                         ts=datetime.fromisoformat(str(row["ts"]).replace("Z", "+00:00")).astimezone(UTC),
@@ -895,6 +901,7 @@ def main() -> int:
             cache_dir=cache_dir,
             base_url=base_url,
             sleep_seconds=float(args.sleep_seconds),
+            max_cache_age_minutes=args.max_cache_age_minutes,
         )
         features_by_interval[interval] = FeatureSet(bars)
         data_status[interval] = {
@@ -902,6 +909,33 @@ def main() -> int:
             "first_ts": bars[0].ts.isoformat() if bars else None,
             "last_ts": bars[-1].ts.isoformat() if bars else None,
         }
+    if args.data_refresh_only:
+        output = {
+            "schema_version": "btc_flip_rotation_data_refresh_v1",
+            "generated_at": generated_at.isoformat(),
+            "authority": "data_cache_refresh_only_no_strategy_selection_change",
+            "scope": {
+                "symbol": symbol,
+                "days": days,
+                "intervals": intervals,
+                "cache_dir": str(cache_dir.relative_to(ROOT_DIR)) if cache_dir.is_relative_to(ROOT_DIR) else str(cache_dir),
+                "max_cache_age_minutes": args.max_cache_age_minutes,
+            },
+            "data_status": data_status,
+            "latest_strategy_report_not_modified": True,
+            "no_live_order_sent": True,
+        }
+        if args.write_report:
+            report_dir = ROOT_DIR / str(args.report_dir)
+            report_dir.mkdir(parents=True, exist_ok=True)
+            out_path = report_dir / f"btc_flip_rotation_data_refresh_{generated_at.strftime('%Y%m%dT%H%M%SZ')}.json"
+            latest_path = report_dir / "data_refresh_latest.json"
+            output["report_path"] = str(out_path.relative_to(ROOT_DIR))
+            output["latest_report_path"] = str(latest_path.relative_to(ROOT_DIR))
+            atomic_write_text(out_path, json.dumps(output, ensure_ascii=False, indent=2, default=str))
+            atomic_write_text(latest_path, json.dumps(output, ensure_ascii=False, indent=2, default=str))
+        print(json.dumps(output, ensure_ascii=False, indent=2, default=str))
+        return 0
 
     configs = build_configs(intervals)
     if int(args.max_models or 0) > 0:

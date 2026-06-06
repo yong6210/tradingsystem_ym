@@ -203,6 +203,11 @@ def test_live_order_lifecycle_report_links_intent_submission_fill_and_ledger() -
     assert row["lifecycle_status"] == "closed"
     assert row["binance_ledger_status"] == "FILLED"
     assert row["binance_test_order"] is False
+    assert row["ack_latency_ms"] == pytest.approx(0.0)
+    assert row["fill_latency_ms"] == pytest.approx(60_000.0)
+    assert row["entry_first_fill_at"] == entry_fill.fill_ts.isoformat()
+    assert row["entry_last_fill_at"] == entry_fill.fill_ts.isoformat()
+    assert row["exit_last_fill_at"] == close_fill.fill_ts.isoformat()
 
 
 def test_live_order_lifecycle_does_not_attach_entry_fill_to_rejected_duplicate_submission() -> None:

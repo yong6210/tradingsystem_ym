@@ -441,7 +441,10 @@ class NotificationDispatcher:
             contract["approval_playbook_action"] or payload.get("playbook_action") or ""
         ).strip()
         approval_topline_summary_line = str(
-            contract["approval_topline_summary_line"] or payload.get("topline_summary_line") or ""
+            payload.get("approval_topline_summary_line")
+            or payload.get("topline_summary_line")
+            or contract["approval_topline_summary_line"]
+            or ""
         ).strip()
         has_approval_contract = any(
             (

@@ -702,9 +702,15 @@ class PlanRepository:
         timeframe: str = "5m",
         days: int = 90,
         limit: int = 5000,
+        now: datetime | None = None,
     ) -> list[Plan]:
-        now = datetime.now(timezone.utc)
-        cutoff = now - timedelta(days=max(1, days))
+        if now is None:
+            current = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            current = now.replace(tzinfo=timezone.utc)
+        else:
+            current = now.astimezone(timezone.utc)
+        cutoff = current - timedelta(days=max(1, days))
         stmt = (
             select(Plan)
             .where(

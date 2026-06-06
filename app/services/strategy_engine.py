@@ -8028,7 +8028,7 @@ class StrategyEngine:
 
         normalized_symbol = str(symbol or "").upper()
         candidate_plans = (
-            self.plan_repo.list_recent(symbol=normalized_symbol, days=14, limit=max(1, int(limit)))
+            self.plan_repo.list_recent(symbol=normalized_symbol, days=14, limit=max(1, int(limit)), now=now)
             if normalized_symbol
             else self.plan_repo.list_recent_global(days=14, states=[PlanState.ENTERED.value, PlanState.PARTIAL_EXIT.value], limit=max(1, int(limit)))
         )

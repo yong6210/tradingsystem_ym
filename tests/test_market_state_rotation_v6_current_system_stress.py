@@ -1,6 +1,9 @@
 from scripts.run_market_state_rotation_v6_stress_current_system import (
     StressScenario,
+    _apply_replay_adjusted_verdicts,
     _markdown_table,
+    _proxy_replay_gap_diagnostics,
+    _replay_buffer_diagnostics,
     build_stress_report,
 )
 
@@ -78,6 +81,174 @@ def test_stress_report_scales_selected_fold_cost_drag() -> None:
     assert report["min_breakeven_cost_multiplier"] == 3.0
 
 
+def test_replay_adjusted_verdict_preserves_proxy_verdict() -> None:
+    scenarios = {
+        "cost_x3": {
+            "summary": {
+                "compounded_return_pct": 100.0,
+                "verdict": "watch",
+                "replay_selected_oos": {
+                    "enabled": True,
+                    "compounded_return_pct": 120.0,
+                    "min_return_pct": 7.0,
+                    "max_drawdown_pct": 15.0,
+                    "return_verdict": "pass",
+                    "drawdown_verdict": "pass",
+                    "verdict": "pass",
+                },
+                "replay_buffer_diagnostics": {
+                    "deployment_readiness_verdict": "watch",
+                    "low_buffer_fold_count": 1,
+                    "stress_floor_breach_count": 0,
+                    "deployment_return_floor_pct": 10.0,
+                },
+            }
+        }
+    }
+
+    worst = _apply_replay_adjusted_verdicts(scenarios)
+    summary = scenarios["cost_x3"]["summary"]
+
+    assert worst["scenario"] == "cost_x3"
+    assert worst["proxy_verdict"] == "watch"
+    assert worst["replay_adjusted_verdict"] == "pass"
+    assert summary["proxy_verdict"] == "watch"
+    assert summary["replay_adjusted_verdict"] == "pass"
+    assert summary["replay_adjusted_min_return_pct"] == 7.0
+    assert summary["replay_adjusted_max_drawdown_pct"] == 15.0
+    assert summary["replay_deployment_readiness_verdict"] == "watch"
+    assert summary["replay_low_buffer_fold_count"] == 1
+    assert summary["proxy_replay_gap_diagnostics"]["status"] == "proxy_conservative_replay_pass"
+
+
+def test_proxy_replay_gap_diagnostics_explains_conservative_proxy_watch() -> None:
+    summary = {
+        "verdict": "watch",
+        "max_drawdown_proxy_pct": 84.0,
+        "min_return_pct": 9.5,
+        "replay_deployment_readiness_verdict": "pass",
+        "replay_selected_oos": {
+            "enabled": True,
+            "verdict": "pass",
+            "max_drawdown_pct": 15.0,
+            "min_return_pct": 11.0,
+        },
+    }
+    rows = [
+        {
+            "fold": 9,
+            "stressed_return_pct": 120.0,
+            "drawdown_proxy_pct": 84.0,
+            "baseline_cost_drag_pct": 12.0,
+            "tradeoff_tags": ["dd_proxy_from_cost_stress_not_return_failure"],
+            "replay_selected_oos": {
+                "status": "ok",
+                "return_pct": 130.0,
+                "max_drawdown_pct": 14.0,
+                "estimated_cost_drag_pct": 30.0,
+                "trade_like_events": 20,
+                "cost_diagnostics": {
+                    "by_reason_pct": {
+                        "base_entry": 6.0,
+                    }
+                },
+            },
+        },
+        {
+            "fold": 13,
+            "stressed_return_pct": 9.5,
+            "drawdown_proxy_pct": 28.0,
+            "baseline_cost_drag_pct": 8.0,
+            "tradeoff_tags": [],
+            "replay_selected_oos": {
+                "status": "ok",
+                "return_pct": 11.0,
+                "max_drawdown_pct": 10.0,
+                "estimated_cost_drag_pct": 26.0,
+                "trade_like_events": 30,
+            },
+        },
+    ]
+
+    diagnostics = _proxy_replay_gap_diagnostics(summary, rows)
+
+    assert diagnostics["status"] == "proxy_conservative_replay_pass"
+    assert diagnostics["action"] == "keep_proxy_as_watch_flag_but_gate_deployment_on_replay_and_live_execution_checks"
+    assert diagnostics["drawdown_gap_pct"] == 69.0
+    assert diagnostics["min_return_gap_pct"] == 1.5
+    assert diagnostics["protected_alpha_gap_fold_count"] == 1
+    assert diagnostics["largest_drawdown_gap_folds"][0]["fold"] == 9
+    assert diagnostics["largest_drawdown_gap_folds"][0]["drawdown_gap_pct"] == 70.0
+    assert diagnostics["largest_drawdown_gap_folds"][0]["top_cost_reasons"][0] == {
+        "name": "base_entry",
+        "value": 6.0,
+    }
+
+
+def test_replay_buffer_diagnostics_marks_low_deployment_margin() -> None:
+    rows = [
+        {
+            "fold": 13,
+            "replay_selected_oos": {
+                "status": "ok",
+                "return_pct": 7.2,
+                "gross_return_pct_before_costs": 34.0,
+                "estimated_cost_drag_pct": 27.0,
+                "max_drawdown_pct": 11.5,
+                "trade_like_events": 30,
+                "cost_diagnostics": {
+                    "by_reason_pct": {
+                        "base_entry": 7.5,
+                        "v6_reaction_inventory_trim": 6.0,
+                    }
+                },
+                "regime_performance": {
+                    "downtrend": {
+                        "return_pct": -1.0,
+                        "max_drawdown_pct": 4.0,
+                        "add_events": 3,
+                    }
+                },
+            },
+        },
+        {
+            "fold": 9,
+            "replay_selected_oos": {
+                "status": "ok",
+                "return_pct": 30.0,
+                "gross_return_pct_before_costs": 45.0,
+                "estimated_cost_drag_pct": 15.0,
+                "max_drawdown_pct": 14.0,
+                "trade_like_events": 20,
+                "cost_diagnostics": {"by_reason_pct": {"base_entry": 3.0}},
+            },
+        },
+    ]
+
+    diagnostics = _replay_buffer_diagnostics(rows)
+    weak = diagnostics["lowest_return_folds"][0]
+
+    assert diagnostics["deployment_readiness_verdict"] == "watch"
+    assert diagnostics["return_buffer_verdict"] == "watch"
+    assert diagnostics["drawdown_buffer_verdict"] == "pass"
+    assert diagnostics["low_buffer_fold_count"] == 1
+    assert diagnostics["stress_floor_breach_count"] == 0
+    assert weak["fold"] == 13
+    assert weak["buffer_to_stress_floor_pct"] == 2.2
+    assert weak["buffer_to_deployment_floor_pct"] == -2.8
+    assert weak["top_cost_reasons"][0] == {"name": "base_entry", "value": 7.5}
+    assert weak["worst_regimes"][0]["regime"] == "downtrend"
+    assert weak["deployment_gate"] == "watch"
+    assert weak["deployment_watchpoints"] == [
+        "thin_deployment_return_buffer_le_2pct",
+        "high_cost_to_gross_ge_45pct",
+    ]
+    assert diagnostics["deployment_watchpoint_counts"] == {
+        "high_cost_to_gross_ge_45pct": 1,
+        "thin_deployment_return_buffer_le_2pct": 1,
+    }
+
+
 def test_stress_report_marks_failed_when_cost_and_carry_break_a_fold() -> None:
     source = {
         "symbol": "BTCUSDT",
@@ -152,6 +323,49 @@ def test_stress_report_quantifies_floor_gap_when_cost_stress_is_too_high() -> No
     assert floor["target_baseline_cost_reduction_share"] == 0.0625
     assert summary["stress_floor_gap_count"] == 1
     assert summary["max_stress_floor_gap_pct"] == 1.0
+
+
+def test_stress_report_excludes_abstain_folds_from_return_floor_fragility() -> None:
+    abstain_fold = _fold(1, gross=0.0, net=0.0, cost=0.0, drawdown=0.0)
+    abstain_fold["after_selection_overlays_applied"] = ["low_confidence_abstain"]
+    abstain_fold["low_confidence_abstain"] = {"reason": "low_confidence"}
+    abstain_fold["test_result"]["trade_like_events"] = 0
+    abstain_fold["test_result"]["walk_forward_abstain"] = True
+    abstain_fold["test_result"]["walk_forward_abstain_reason"] = "low_confidence"
+    abstain_fold["test_result"]["event_diagnostics"] = {
+        "health": "abstain",
+        "flags": ["walk_forward_abstain"],
+    }
+    source = {
+        "symbol": "BTCUSDT",
+        "exec_interval": "5m",
+        "cost_model": {"fee_bps_per_side": 4.0, "slippage_bps_per_side": 1.0},
+        "folds": [
+            abstain_fold,
+            _fold(2, gross=10.0, net=8.0, cost=2.0, drawdown=4.0),
+        ],
+    }
+
+    report = build_stress_report(source, scenarios=[StressScenario("baseline", trade_cost_multiplier=1.0)])
+
+    rows = report["scenarios"]["baseline"]["folds"]
+    row = next(item for item in rows if item["fold"] == 1)
+    summary = report["scenarios"]["baseline"]["summary"]
+
+    assert row["abstained"] is True
+    assert row["abstain_reason"] == "low_confidence"
+    assert row["stress_floor"]["excluded_from_return_floor"] is True
+    assert "stress_breaks_positive_return" not in row["root_causes"]
+    assert row["root_causes"] == ["walk_forward_abstain"]
+    assert summary["fold_count"] == 2
+    assert summary["active_fold_count"] == 1
+    assert summary["abstained_fold_count"] == 1
+    assert summary["active_positive_fold_count"] == 1
+    assert summary["return_verdict"] == "pass"
+    assert summary["stress_floor_gap_count"] == 0
+    assert [item["fold"] for item in summary["abstained_folds"]] == [1]
+    assert 1 not in {item["fold"] for item in summary["fragile_folds"]}
+    assert 1 not in {item["fold"] for item in summary["remediation_priority_folds"]}
 
 
 def test_stress_report_builds_targeted_cost_reduction_plan_before_base_alpha_cut() -> None:
@@ -512,3 +726,149 @@ def test_stress_markdown_surfaces_root_causes_and_top_cost_reasons() -> None:
     assert "Need cost cut %" in markdown
     assert "thin_cost_buffer_lt_3_25x" in markdown
     assert "base_entry=2.25" in markdown
+
+
+def test_stress_markdown_surfaces_replay_deployment_buffer() -> None:
+    report = {
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "symbol": "BTCUSDT",
+        "exec_interval": "5m",
+        "method": "selected_oos_gross_minus_scaled_cost_proxy",
+        "base_cost_bps_per_side": 5.0,
+        "min_breakeven_cost_multiplier": 3.0,
+        "replay_selected_oos": {
+            "enabled": True,
+            "method": "selected_config_oos_rerun_with_stressed_costs",
+            "load_days": 365,
+            "failed_replay_count": 0,
+        },
+        "replay_adjusted_worst_stress_summary": {
+            "replay_adjusted_verdict": "pass",
+            "replay_adjusted_min_return_pct": 7.2,
+            "replay_adjusted_max_drawdown_pct": 15.0,
+            "replay_deployment_readiness_verdict": "watch",
+            "replay_deployment_return_floor_pct": 10.0,
+            "replay_low_buffer_fold_count": 1,
+            "replay_stress_floor_breach_count": 0,
+        },
+        "execution_readiness_checklist": {
+            "overall_status": "shadow_only",
+            "worst_replay_scenario": "cost_x3",
+            "items": [
+                {
+                    "name": "replay_stress_floor",
+                    "status": "pass",
+                    "evidence": {"stress_floor_breach_count": 0},
+                },
+                {
+                    "name": "live_fill_slippage_calibration",
+                    "status": "required",
+                    "evidence": "collect shadow orders first",
+                },
+            ],
+        },
+        "scenarios": {
+            "cost_x3": {
+                "summary": {
+                    "compounded_return_pct": 100.0,
+                    "avg_return_pct": 20.0,
+                    "min_return_pct": 5.0,
+                    "positive_fold_count": 1,
+                    "fold_count": 1,
+                    "active_positive_fold_count": 1,
+                    "active_fold_count": 1,
+                    "abstained_fold_count": 0,
+                    "max_drawdown_proxy_pct": 18.0,
+                    "max_actionable_drawdown_proxy_pct": 18.0,
+                    "protected_alpha_fold_count": 0,
+                    "stress_floor_gap_count": 0,
+                    "max_stress_floor_gap_pct": 0.0,
+                    "avg_trade_cost_drag_pct": 10.0,
+                    "avg_carry_drag_pct": 0.0,
+                    "return_verdict": "pass",
+                    "drawdown_verdict": "pass",
+                    "actionable_drawdown_verdict": "pass",
+                    "verdict": "pass",
+                    "replay_selected_oos": {
+                        "enabled": True,
+                        "compounded_return_pct": 120.0,
+                        "avg_return_pct": 7.2,
+                        "min_return_pct": 7.2,
+                        "max_drawdown_pct": 15.0,
+                        "return_verdict": "pass",
+                        "drawdown_verdict": "pass",
+                        "verdict": "pass",
+                    },
+                    "replay_deployment_readiness_verdict": "watch",
+                    "replay_low_buffer_fold_count": 1,
+                    "proxy_replay_gap_diagnostics": {
+                        "status": "proxy_conservative_replay_pass",
+                        "action": "keep_proxy_as_watch_flag_but_gate_deployment_on_replay_and_live_execution_checks",
+                        "proxy_verdict": "watch",
+                        "replay_adjusted_verdict": "pass",
+                        "replay_deployment_readiness_verdict": "watch",
+                        "drawdown_gap_pct": 54.0,
+                        "min_return_gap_pct": 2.2,
+                        "protected_alpha_gap_fold_count": 1,
+                        "largest_drawdown_gap_folds": [
+                            {
+                                "fold": 9,
+                                "proxy_return_pct": 100.0,
+                                "replay_return_pct": 120.0,
+                                "return_gap_pct": 20.0,
+                                "proxy_drawdown_pct": 69.0,
+                                "replay_drawdown_pct": 15.0,
+                                "drawdown_gap_pct": 54.0,
+                                "replay_cost_pct": 18.0,
+                                "trade_like_events": 20,
+                                "tradeoff_tags": [
+                                    "dd_proxy_from_cost_stress_not_return_failure"
+                                ],
+                                "top_cost_reasons": [
+                                    {"name": "base_entry", "value": 6.0}
+                                ],
+                            }
+                        ],
+                    },
+                    "replay_buffer_diagnostics": {
+                        "lowest_return_folds": [
+                            {
+                                "fold": 13,
+                                "return_pct": 7.2,
+                                "buffer_to_stress_floor_pct": 2.2,
+                                "buffer_to_deployment_floor_pct": -2.8,
+                                "max_drawdown_pct": 11.5,
+                                "estimated_cost_drag_pct": 27.0,
+                                "gross_return_pct_before_costs": 34.0,
+                                "trade_like_events": 30,
+                                "deployment_gate": "watch",
+                                "deployment_watchpoints": [
+                                    "thin_deployment_return_buffer_le_2pct",
+                                    "high_cost_to_gross_ge_45pct",
+                                ],
+                                "top_cost_reasons": [
+                                    {"name": "base_entry", "value": 7.5}
+                                ],
+                                "worst_regimes": [
+                                    {"regime": "downtrend", "return_pct": -1.0}
+                                ],
+                            }
+                        ]
+                    },
+                }
+            }
+        },
+    }
+
+    markdown = _markdown_table(report)
+
+    assert "## Execution Readiness" in markdown
+    assert "Overall status: `shadow_only`" in markdown
+    assert "Replay deployment readiness: `watch`" in markdown
+    assert "## Selected OOS Replay Weak Folds" in markdown
+    assert "base_entry=7.5" in markdown
+    assert "downtrend=-1.0" in markdown
+    assert "thin_deployment_return_buffer_le_2pct" in markdown
+    assert "## Proxy vs Replay Gap" in markdown
+    assert "proxy_conservative_replay_pass" in markdown
+    assert "DD gap: `54.0`" in markdown

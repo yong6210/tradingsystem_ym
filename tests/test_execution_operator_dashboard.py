@@ -2549,11 +2549,11 @@ def test_execution_operator_dashboard_groups_blocked_reasons_by_gate_type(monkey
     assert signal_funnel["operator_action_priority"]["capture_context"]["dominant_bottleneck"]["reason"] == "execution_fill_shortfall"
     assert signal_funnel["operator_action_priority"]["experiment_context"]["entry_timing_target"]["symbol"] == "BTCUSDC"
     assert signal_funnel["operator_action_priority"]["experiment_context"]["entry_timing_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 7 --action run_entry_timing_split_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_11 --days 7 --action run_entry_timing_split_review"
     )
     assert signal_funnel["operator_action_priority"]["experiment_context"]["execution_style_target"]["symbol"] == "BTCUSDC"
     assert signal_funnel["operator_action_priority"]["experiment_context"]["execution_style_target"]["followup_command"].endswith(
-        "--symbol BTCUSDC --universe micro_live_usdt_12 --days 7 --action run_execution_style_split_review"
+        "--symbol BTCUSDC --universe micro_live_usdt_11 --days 7 --action run_execution_style_split_review"
     )
     assert signal_funnel["operator_action_priority"]["experiment_context"]["accepted_candidate_focus"]["symbol"] == "BTCUSDC"
     assert signal_funnel["operator_action_priority"]["advisory_only"] is True

@@ -156,6 +156,10 @@ class MarketStateConfig:
     near_miss_probe_failure_guard_count: int = 0
     near_miss_probe_failure_guard_window_bars: int = 1440
     near_miss_probe_failure_cooldown_bars: int = 0
+    near_miss_probe_allowed_soft_reasons: tuple[str, ...] = ()
+    near_miss_probe_allowed_alignments: tuple[str, ...] = ()
+    near_miss_probe_allowed_execution_contexts: tuple[str, ...] = ()
+    near_miss_probe_allowed_regimes: tuple[str, ...] = ()
     equity_circuit_breaker_drawdown_pct: float = 0.0
     equity_circuit_breaker_pause_bars: int = 0
     equity_circuit_rearm_drawdown_pct: float = 0.0
@@ -204,6 +208,8 @@ class MarketStateConfig:
     base_entry_reduce_max_trend_strength: float = 0.0
     base_entry_reduce_min_trend_strength: float = 0.0
     base_entry_reduce_side: str = "both"
+    base_context_reduce_size_mult: float = 1.0
+    base_context_reduce_patterns: tuple[str, ...] = ()
     fragile_regime_entry_size_mult: float = 1.0
     fragile_regime_entry_regimes: tuple[str, ...] = ()
     fragile_regime_inventory_trim_fraction: float = 0.0
@@ -226,6 +232,7 @@ class MarketStateConfig:
     router_transition_trim_fraction: float = 0.0
     router_transition_trim_modes: tuple[str, ...] = ()
     router_transition_trim_against_only: bool = True
+    router_transition_trim_cooldown_bars: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +308,7 @@ class RotationMemory:
         self.last_winner_pyramid_idx = -10**9
         self.last_defensive_trim_idx = -10**9
         self.last_hard_time_exit_idx = -10**9
+        self.last_router_transition_trim_idx = -10**9
 
     def state(self, key: str, idx: int, retire_bars: int) -> str:
         if not key:
@@ -723,6 +731,20 @@ def _parse_args() -> argparse.Namespace:
         help="Side filter for late with-trend base-entry size reduction.",
     )
     parser.add_argument(
+        "--base-context-reduce-size-mult",
+        type=float,
+        default=1.0,
+        help="Size multiplier for exact base-context pattern matches.",
+    )
+    parser.add_argument(
+        "--base-context-reduce-patterns",
+        default="",
+        help=(
+            "Comma-separated base context patterns to shrink. Use seven pipe-separated tokens "
+            "role|side|alignment|regime|execution_context|ext_bucket|break_bucket; '*' is a wildcard."
+        ),
+    )
+    parser.add_argument(
         "--fragile-regime-entry-size-mult",
         type=float,
         default=1.0,
@@ -795,6 +817,12 @@ def _parse_args() -> argparse.Namespace:
         "--router-transition-trim-modes",
         default="",
         help="Comma-separated router modes where existing inventory is trimmed on mode transition.",
+    )
+    parser.add_argument(
+        "--router-transition-trim-cooldown-bars",
+        type=int,
+        default=0,
+        help="Minimum bars between router mode transition inventory trims. Default 0 keeps legacy behavior.",
     )
     parser.add_argument(
         "--router-transition-trim-all",
@@ -904,12 +932,32 @@ def _parse_event_risk_contexts(raw: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(contexts))
 
 
+def _parse_base_context_reduce_patterns(raw: str) -> tuple[str, ...]:
+    patterns: list[str] = []
+    for item in _csv(raw):
+        pattern = "|".join(part.strip() for part in item.split("|"))
+        tokens = pattern.split("|")
+        if len(tokens) != 7:
+            continue
+        if any(not token for token in tokens):
+            continue
+        if tokens[0] not in {"base", "*"}:
+            continue
+        if pattern not in patterns:
+            patterns.append(pattern)
+    return tuple(patterns)
+
+
 def _format_kst_hours(hours: tuple[int, ...]) -> str:
     return "-".join(str(hour) for hour in hours) if hours else "none"
 
 
 def _format_event_risk_contexts(contexts: tuple[str, ...]) -> str:
     return "-".join(contexts) if contexts else "none"
+
+
+def _format_base_context_patterns(patterns: tuple[str, ...]) -> str:
+    return "-".join(str(pattern).replace("|", "_").replace("*", "x") for pattern in patterns) or "none"
 
 
 def _kst_hour(ts: datetime) -> int:
@@ -953,6 +1001,28 @@ def _event_risk_base_size_multiplier(config: MarketStateConfig, zone: ZonePlan, 
     if max_extension > 0.0 and float(zone.chase_extension_atr) > max_extension:
         return 1.0
     raw_mult = getattr(config, "event_risk_base_reduce_size_mult", 1.0)
+    if raw_mult is None:
+        raw_mult = 1.0
+    return _clamp(float(raw_mult), 0.0, 1.0)
+
+
+def _base_context_pattern_matches(context_key: str, pattern: str) -> bool:
+    context_tokens = str(context_key or "").split("|")
+    pattern_tokens = str(pattern or "").split("|")
+    if len(context_tokens) != 7 or len(pattern_tokens) != 7:
+        return False
+    return all(pattern_token == "*" or pattern_token == context_token for pattern_token, context_token in zip(pattern_tokens, context_tokens))
+
+
+def _base_context_size_multiplier(config: MarketStateConfig, context_key: str, role: str) -> float:
+    if role != "base":
+        return 1.0
+    patterns = tuple(str(item) for item in getattr(config, "base_context_reduce_patterns", ()) or ())
+    if not patterns:
+        return 1.0
+    if not any(_base_context_pattern_matches(context_key, pattern) for pattern in patterns):
+        return 1.0
+    raw_mult = getattr(config, "base_context_reduce_size_mult", 1.0)
     if raw_mult is None:
         raw_mult = 1.0
     return _clamp(float(raw_mult), 0.0, 1.0)
@@ -2165,6 +2235,31 @@ def _zone_context_key(*, side: int, role: str, market: MarketState, zone: ZonePl
     )
 
 
+def _near_miss_context_allowed(
+    config: MarketStateConfig,
+    *,
+    blockers: set[str],
+    market: MarketState,
+    side: int,
+    zone: ZonePlan,
+) -> bool:
+    allowed_reasons = {str(item) for item in getattr(config, "near_miss_probe_allowed_soft_reasons", ()) or ()}
+    if allowed_reasons and (not blockers or not blockers.issubset(allowed_reasons)):
+        return False
+    allowed_alignments = {str(item) for item in getattr(config, "near_miss_probe_allowed_alignments", ()) or ()}
+    if allowed_alignments and _side_alignment(market, side) not in allowed_alignments:
+        return False
+    allowed_contexts = {
+        str(item) for item in getattr(config, "near_miss_probe_allowed_execution_contexts", ()) or ()
+    }
+    if allowed_contexts and str(zone.execution_context or "") not in allowed_contexts:
+        return False
+    allowed_regimes = {str(item) for item in getattr(config, "near_miss_probe_allowed_regimes", ()) or ()}
+    if allowed_regimes and str(market.regime or "") not in allowed_regimes:
+        return False
+    return True
+
+
 def _no_trade_candidate_side(*, market: MarketState, zone: ZonePlan) -> int:
     if zone.long_score > zone.short_score:
         return 1
@@ -2741,10 +2836,34 @@ def _event_diagnostics(
         and soft_circuit_cooldown_share >= 0.50
         and add_total >= risk_adjusted_expected_add_events
     )
+    low_activity_min_adds = max(1, math.ceil(expected_add_events * 0.75))
+    profitable_side_pnl = {
+        side: float(pnl_by_side.get(side, 0.0))
+        for side in ("long", "short")
+        if add_by_side.get(side, 0) > 0
+    }
+    profitable_low_activity = (
+        not (risk_off_idle or risk_off_partial)
+        and add_total < expected_add_events
+        and add_total >= low_activity_min_adds
+        and active_months >= min(max(total_months, 1), 3)
+        and long_adds > 0
+        and short_adds > 0
+        and sum(float(value) for value in pnl_by_side.values()) > 0.0
+        and bool(profitable_side_pnl)
+        and all(value > 0.0 for value in profitable_side_pnl.values())
+        and max_day_share < float(thresholds["day_concentration_share"])
+        and max_hour_share < float(thresholds["kst_hour_concentration_share"])
+        and max_month_share <= 0.60
+    )
+    thresholds["profitable_low_activity_min_add_events"] = int(low_activity_min_adds)
+    thresholds["profitable_low_activity_max_month_share"] = 0.60
 
     borderline_flags: list[str] = []
     flags: list[str] = []
-    if add_total < expected_add_events and not (risk_off_idle or risk_off_partial):
+    if add_total < expected_add_events and not (
+        risk_off_idle or risk_off_partial or profitable_low_activity
+    ):
         flags.append("too_few_orders")
     if add_total > int(thresholds["overtrading_add_events"]):
         flags.append("overtrading")
@@ -2828,8 +2947,21 @@ def _event_diagnostics(
             if risk_off_idle
             else "risk_off_partial"
             if risk_off_partial
+            else "profitable_low_activity"
+            if profitable_low_activity
             else "active"
         ),
+        "profitable_low_activity_context": {
+            "status": "suppressed" if profitable_low_activity else "inactive",
+            "min_add_events": int(low_activity_min_adds),
+            "active_months": int(active_months),
+            "max_month_add_share": round(max_month_share, 4),
+            "max_day_add_share": round(max_day_share, 4),
+            "max_kst_hour_add_share": round(max_hour_share, 4),
+            "realized_pnl_usd_units_by_active_side": {
+                side: round(value, 4) for side, value in profitable_side_pnl.items()
+            },
+        },
         "risk_off_cooldown_share": round(soft_circuit_cooldown_share, 4),
         "diagnostic_thresholds": thresholds,
         "side_imbalance_context": side_imbalance_context,
@@ -3212,12 +3344,16 @@ def _apply_decision(
             late_base_reduced = late_base_size_mult < 1.0 - 1e-12
             event_base_size_mult = _event_risk_base_size_multiplier(config, zone, zone.side, role)
             event_base_reduced = event_base_size_mult < 1.0 - 1e-12
+            zone_context = _zone_context_key(side=zone.side, role=role, market=market, zone=zone)
+            base_context_size_mult = _base_context_size_multiplier(config, zone_context, role)
+            base_context_reduced = base_context_size_mult < 1.0 - 1e-12
             loss_fuse_reduced = role == "base" and one_way_loss_fuse_size_mult < 1.0 - 1e-12
             qty = min(
                 base_qty
                 * _entry_size_multiplier(config, market, zone.side)
                 * late_base_size_mult
                 * event_base_size_mult
+                * base_context_size_mult
                 * (one_way_loss_fuse_size_mult if role == "base" else 1.0)
                 * route_mult(zone.side, role)
                 * entry_risk_mult,
@@ -3228,13 +3364,16 @@ def _apply_decision(
                     counters["one_way_loss_fuse_base_blocks"] += 1
                 if event_base_reduced:
                     counters["event_risk_base_reduce_blocks"] += 1
+                if base_context_reduced:
+                    counters["base_context_reduce_blocks"] += 1
                 return
             reasons = zone.long_reasons if zone.side > 0 else zone.short_reasons
-            zone_context = _zone_context_key(side=zone.side, role=role, market=market, zone=zone)
             if late_base_reduced:
                 zone_context += "|late_base_reduce"
             if event_base_reduced:
                 zone_context += "|event_risk_base_reduce"
+            if base_context_reduced:
+                zone_context += "|base_context_reduce"
             if loss_fuse_reduced:
                 zone_context += "|loss_fuse_reduce"
             if memory.in_one_way_trim_context_cooldown(zone_context, exec_idx):
@@ -3258,6 +3397,8 @@ def _apply_decision(
                 counters["one_way_loss_fuse_base_reduced_adds"] += 1
             if event_base_reduced:
                 counters["event_risk_base_reduced_adds"] += 1
+            if base_context_reduced:
+                counters["base_context_reduced_adds"] += 1
             if role == "battle":
                 counters["battle_primary_adds"] += 1
             _record_event(
@@ -3286,6 +3427,7 @@ def _apply_decision(
                     "execution_context": zone.execution_context,
                     "late_base_size_mult": round(late_base_size_mult, 4),
                     "event_risk_base_size_mult": round(event_base_size_mult, 4),
+                    "base_context_size_mult": round(base_context_size_mult, 4),
                     "one_way_loss_fuse_size_mult": round(
                         one_way_loss_fuse_size_mult if role == "base" else 1.0,
                         4,
@@ -3328,6 +3470,13 @@ def _apply_decision(
                 and near_miss_score >= config.near_miss_probe_min_score
                 and score_edge >= config.near_miss_probe_min_score_edge
                 and near_miss_reason_stack >= config.near_miss_probe_min_reason_stack
+                and _near_miss_context_allowed(
+                    config,
+                    blockers=blockers,
+                    market=market,
+                    side=near_miss_side,
+                    zone=zone,
+                )
                 and near_miss_zone_state != "retired"
                 and _scenario_allows_side(config, market, near_miss_side)
                 and market.bias in {0, near_miss_side}
@@ -4430,10 +4579,14 @@ def _apply_decision(
     ):
         event_base_size_mult = _event_risk_base_size_multiplier(config, zone, side, "base")
         event_base_reduced = event_base_size_mult < 1.0 - 1e-12
+        zone_context = _zone_context_key(side=side, role="base", market=market, zone=zone)
+        base_context_size_mult = _base_context_size_multiplier(config, zone_context, "base")
+        base_context_reduced = base_context_size_mult < 1.0 - 1e-12
         qty = min(
             config.base_add_units
             * _entry_size_multiplier(config, market, side)
             * event_base_size_mult
+            * base_context_size_mult
             * one_way_loss_fuse_size_mult
             * route_mult(side, "base")
             * entry_risk_mult,
@@ -4441,9 +4594,10 @@ def _apply_decision(
             capacity,
         )
         if qty > 1e-12:
-            zone_context = _zone_context_key(side=side, role="base", market=market, zone=zone)
             if event_base_reduced:
                 zone_context += "|event_risk_base_reduce"
+            if base_context_reduced:
+                zone_context += "|base_context_reduce"
             if one_way_loss_fuse_size_mult < 1.0 - 1e-12:
                 zone_context += "|loss_fuse_reduce"
             _add_lot(
@@ -4463,6 +4617,8 @@ def _apply_decision(
                 counters["one_way_loss_fuse_base_reduced_adds"] += 1
             if event_base_reduced:
                 counters["event_risk_base_reduced_adds"] += 1
+            if base_context_reduced:
+                counters["base_context_reduced_adds"] += 1
             _record_event(
                 events,
                 ts=ts,
@@ -4480,12 +4636,15 @@ def _apply_decision(
                     "side_alignment": _side_alignment(market, side),
                     "zone_context": zone_context,
                     "event_risk_base_size_mult": round(event_base_size_mult, 4),
+                    "base_context_size_mult": round(base_context_size_mult, 4),
                     "one_way_loss_fuse_size_mult": round(one_way_loss_fuse_size_mult, 4),
                 },
             )
             return
         if event_base_reduced:
             counters["event_risk_base_reduce_blocks"] += 1
+        if base_context_reduced:
+            counters["base_context_reduce_blocks"] += 1
 
     if _role_qty(book, "battle") > 0.0:
         battle_age = max(exec_idx - lot.entry_idx for lot in book.tranches if lot.role == "battle")
@@ -4836,6 +4995,7 @@ def backtest_config(
     cost_rate: float,
     min_periods: int,
     carry_rate_per_bar: float = 0.0,
+    recent_event_limit: int = 24,
 ) -> dict[str, Any] | None:
     warmup = max(config.zone_lookback + 60, config.exec_slow + 30, 260)
     if len(features.bars) < max(min_periods, warmup + 10):
@@ -5001,6 +5161,8 @@ def backtest_config(
                 and config.router_transition_trim_fraction > 0.0
                 and route_mode in router_trim_modes
                 and route_mode != previous_router_mode
+                and exec_idx - memory.last_router_transition_trim_idx
+                > max(0, int(config.router_transition_trim_cooldown_bars))
             ):
                 if route_mode == "one_way_chase":
                     against_new_mode = market.one_way_side == -book.side
@@ -5033,6 +5195,7 @@ def backtest_config(
                         )
                         counters["router_mode_transition_trims"] += 1
                         counters[f"router_mode_transition_trim_{route_mode}"] += 1
+                        memory.last_router_transition_trim_idx = exec_idx
                         router_inventory_trimmed = True
             fragile_inventory_trimmed = False
             if (
@@ -5405,6 +5568,7 @@ def backtest_config(
         sample_events = events
     else:
         sample_events = events[:12] + [{"omitted_events": len(events) - 24}] + events[-12:]
+    recent_events = events[-max(1, int(recent_event_limit)) :] if events else []
     event_diagnostics = _event_diagnostics(
         events=events,
         counters=counters,
@@ -5462,6 +5626,7 @@ def backtest_config(
         "cost_diagnostics": cost_diagnostics,
         "config": asdict(config),
         "sample_events": sample_events,
+        "recent_events": recent_events,
     }
 
 
@@ -5561,6 +5726,8 @@ def build_configs(
     base_entry_reduce_max_trend_strength: float,
     base_entry_reduce_min_trend_strength: float,
     base_entry_reduce_side: str,
+    base_context_reduce_size_mult: float,
+    base_context_reduce_patterns: tuple[str, ...],
     fragile_regime_entry_size_mult: float,
     fragile_regime_entry_regimes: tuple[str, ...],
     fragile_regime_inventory_trim_fraction: float,
@@ -5583,6 +5750,7 @@ def build_configs(
     router_transition_trim_fraction: float,
     router_transition_trim_modes: tuple[str, ...],
     router_transition_trim_against_only: bool,
+    router_transition_trim_cooldown_bars: int,
     defensive_trim_cooldown_bars: int,
     reaction_trim_trigger: float,
     reaction_trim_size_mult: float,
@@ -5773,6 +5941,12 @@ def build_configs(
             base_reduce_suffix += f":baseReduceMinTrend{max(0.0, float(base_entry_reduce_min_trend_strength)):g}"
         if base_entry_reduce_side != "both":
             base_reduce_suffix += f":baseReduceSide{base_entry_reduce_side}"
+    base_context_reduce_suffix = ""
+    if base_context_reduce_patterns and base_context_reduce_size_mult < 1.0:
+        base_context_reduce_suffix = (
+            f":baseCtxReduce{_clamp(base_context_reduce_size_mult, 0.0, 1.0):g}"
+            f":baseCtxSet{_format_base_context_patterns(base_context_reduce_patterns)}"
+        )
     fragile_regime_suffix = ""
     if fragile_regime_entry_regimes and fragile_regime_entry_size_mult < 1.0:
         regime_code = "-".join(
@@ -5826,6 +6000,8 @@ def build_configs(
                 f":rtTransModes{'-'.join(router_transition_trim_modes)}"
                 f":rtTransAgainst{int(bool(router_transition_trim_against_only))}"
             )
+            if router_transition_trim_cooldown_bars > 0:
+                router_suffix += f":rtTransCool{max(0, int(router_transition_trim_cooldown_bars))}"
     for zone_lookback in (48, 96):
         for entry_score in (5, 6):
             for battle_score in (7, 8):
@@ -5883,6 +6059,7 @@ def build_configs(
                                                     f"{btc_rotation_suffix}"
                                                     f"{base_extension_suffix}"
                                                     f"{base_reduce_suffix}"
+                                                    f"{base_context_reduce_suffix}"
                                                     f"{fragile_regime_suffix}"
                                                     f"{fragile_inventory_suffix}"
                                                     f"{event_risk_base_suffix}"
@@ -6287,6 +6464,14 @@ def build_configs(
                                                         if base_entry_reduce_side in {"both", "long", "short"}
                                                         else "both"
                                                     ),
+                                                    base_context_reduce_size_mult=_clamp(
+                                                        base_context_reduce_size_mult,
+                                                        0.0,
+                                                        1.0,
+                                                    ),
+                                                    base_context_reduce_patterns=(
+                                                        base_context_reduce_patterns
+                                                    ),
                                                     fragile_regime_entry_size_mult=_clamp(
                                                         fragile_regime_entry_size_mult,
                                                         0.0,
@@ -6375,6 +6560,10 @@ def build_configs(
                                                     router_transition_trim_against_only=bool(
                                                         router_transition_trim_against_only
                                                     ),
+                                                    router_transition_trim_cooldown_bars=max(
+                                                        0,
+                                                        int(router_transition_trim_cooldown_bars),
+                                                    ),
                                                     defensive_trim_cooldown_bars=max(0, int(defensive_trim_cooldown_bars)),
                                                     cooldown_after_loss_bars=12 if profile_name == "balanced" else 48,
                                                     max_failed_rescues_before_reduce_only=2,
@@ -6395,6 +6584,7 @@ def _load_feature_sets(args: argparse.Namespace) -> tuple[FeatureSet, dict[str, 
     base_url = str(args.base_url or settings.binance_rest_base_url or "https://fapi.binance.com").rstrip("/")
     cache_dir = Path(args.cache_dir)
     load_days = max(int(args.load_days), int(args.days))
+    max_cache_age_minutes = getattr(args, "max_cache_age_minutes", None)
 
     exec_bars = _load_bars(
         symbol=args.symbol,
@@ -6403,6 +6593,7 @@ def _load_feature_sets(args: argparse.Namespace) -> tuple[FeatureSet, dict[str, 
         cache_dir=cache_dir,
         base_url=base_url,
         sleep_seconds=float(args.sleep_seconds),
+        max_cache_age_minutes=max_cache_age_minutes,
     )
     exec_bars = _slice_last_days(exec_bars, int(args.days))
     features = FeatureSet(exec_bars)
@@ -6417,6 +6608,7 @@ def _load_feature_sets(args: argparse.Namespace) -> tuple[FeatureSet, dict[str, 
             cache_dir=cache_dir,
             base_url=base_url,
             sleep_seconds=float(args.sleep_seconds),
+            max_cache_age_minutes=max_cache_age_minutes,
         )
         if exec_bars:
             start_ms = exec_bars[0].open_ms - _INTERVAL_MS[interval] * 300
@@ -6431,6 +6623,7 @@ def _load_feature_sets(args: argparse.Namespace) -> tuple[FeatureSet, dict[str, 
         "exec_start": exec_bars[0].ts.isoformat() if exec_bars else None,
         "exec_end": exec_bars[-1].ts.isoformat() if exec_bars else None,
         "scenario_rows": {interval: len(fs.bars) for interval, fs in scenario_features.items()},
+        "max_cache_age_minutes": max_cache_age_minutes,
     }
     return features, scenario_features, scenario_maps, meta
 
@@ -6642,6 +6835,7 @@ def main() -> None:
     probe_units_options = _parse_nonnegative_float_csv(args.probe_units, [0.0, 0.1, 0.25])
     blocked_kst_entry_hours = _parse_kst_hours(args.blocked_kst_entry_hours, (4, 9, 13, 16))
     event_risk_base_reduce_contexts = _parse_event_risk_contexts(args.event_risk_base_reduce_contexts)
+    base_context_reduce_patterns = _parse_base_context_reduce_patterns(args.base_context_reduce_patterns)
     configs = build_configs(
         exec_interval=args.exec_interval,
         exchange_leverage=float(args.exchange_leverage),
@@ -6784,6 +6978,8 @@ def main() -> None:
         base_entry_reduce_side=(
             args.base_entry_reduce_side if args.base_entry_reduce_side in {"both", "long", "short"} else "both"
         ),
+        base_context_reduce_size_mult=_clamp(args.base_context_reduce_size_mult, 0.0, 1.0),
+        base_context_reduce_patterns=base_context_reduce_patterns,
         fragile_regime_entry_size_mult=_clamp(args.fragile_regime_entry_size_mult, 0.0, 1.0),
         fragile_regime_entry_regimes=_parse_regimes(args.fragile_regime_entry_regimes),
         fragile_regime_inventory_trim_fraction=_clamp(
@@ -6814,6 +7010,7 @@ def main() -> None:
         router_transition_trim_fraction=_clamp(args.router_transition_trim_fraction, 0.0, 1.0),
         router_transition_trim_modes=_parse_router_modes(args.router_transition_trim_modes),
         router_transition_trim_against_only=bool(args.router_transition_trim_against_only),
+        router_transition_trim_cooldown_bars=max(0, int(args.router_transition_trim_cooldown_bars)),
         defensive_trim_cooldown_bars=max(0, int(args.defensive_trim_cooldown_bars)),
         reaction_trim_trigger=max(0.05, float(args.reaction_trim_trigger)),
         reaction_trim_size_mult=_clamp(args.reaction_trim_size_mult, 0.05, 1.0),

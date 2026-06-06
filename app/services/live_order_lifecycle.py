@@ -113,6 +113,12 @@ class LiveOrderLifecycleReporter:
     def _iso(value: Any) -> str | None:
         return value.isoformat() if isinstance(value, datetime) else None
 
+    @classmethod
+    def _latency_ms(cls, start: Any, end: Any) -> float | None:
+        if not isinstance(start, datetime) or not isinstance(end, datetime):
+            return None
+        return round(max((cls._sort_ts(end) - cls._sort_ts(start)).total_seconds() * 1000.0, 0.0), 4)
+
     @staticmethod
     def _sort_ts(value: Any) -> datetime:
         if not isinstance(value, datetime):
@@ -469,6 +475,8 @@ class LiveOrderLifecycleReporter:
             fee_total = sum(self._safe_float(fill.fee) for fill in entry_fills + exit_fills)
             flat_reconciliation = flat_reconciliation_by_plan.get(submission.plan_id)
             latest_entry_ts = max((self._sort_ts(fill.fill_ts or fill.created_at) for fill in entry_fills), default=None)
+            first_entry_ts = min((self._sort_ts(fill.fill_ts or fill.created_at) for fill in entry_fills), default=None)
+            latest_exit_ts = max((self._sort_ts(fill.fill_ts or fill.created_at) for fill in exit_fills), default=None)
             exchange_flat_after_entry = (
                 flat_reconciliation is not None
                 and latest_entry_ts is not None
@@ -513,6 +521,11 @@ class LiveOrderLifecycleReporter:
                     "order_type": submission.order_type,
                     "submitted_at": self._iso(submission.submitted_at),
                     "acknowledged_at": self._iso(submission.acknowledged_at),
+                    "entry_first_fill_at": self._iso(first_entry_ts),
+                    "entry_last_fill_at": self._iso(latest_entry_ts),
+                    "exit_last_fill_at": self._iso(latest_exit_ts),
+                    "ack_latency_ms": self._latency_ms(submission.submitted_at, submission.acknowledged_at),
+                    "fill_latency_ms": self._latency_ms(submission.submitted_at, first_entry_ts),
                     "plan_direction": str(getattr(plan, "direction", "") or ""),
                     "plan_entry_price": self._safe_float(getattr(plan, "entry_price", 0.0)) if plan else None,
                     "plan_stop_price": self._safe_float(getattr(plan, "sl", 0.0)) if plan else None,
@@ -531,6 +544,8 @@ class LiveOrderLifecycleReporter:
                     "reconciliation_mismatch_type": str(getattr(reconciliation_event, "mismatch_type", "") or ""),
                     "reconciliation_created_at": self._iso(getattr(reconciliation_event, "created_at", None)),
                     "binance_ledger_status": str(getattr(ledger, "status", "") or ""),
+                    "binance_order_price": self._safe_float(getattr(ledger, "price", 0.0)) if ledger else None,
+                    "binance_orig_qty": self._safe_float(getattr(ledger, "orig_qty", 0.0)) if ledger else None,
                     "binance_executed_qty": self._safe_float(getattr(ledger, "executed_qty", 0.0)) if ledger else None,
                     "binance_live_enabled": self._safe_bool(getattr(ledger, "live_enabled", False)) if ledger else None,
                     "binance_test_order": self._safe_bool(getattr(ledger, "test_order", False)) if ledger else None,

@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 from scripts.run_market_state_rotation_v6_backtest import (
     RotationMemory,
+    _base_context_pattern_matches,
+    _base_context_size_multiplier,
     _book_open_role_payloads,
     _calendar_rolling_stats,
     _drawdown_bar_event_payload,
@@ -13,12 +15,14 @@ from scripts.run_market_state_rotation_v6_backtest import (
     _hard_time_exit_fraction,
     _hard_time_exit_trend_defer_ready,
     _inventory_throttle_multiplier,
+    _near_miss_context_allowed,
     _one_way_full_exit_ready,
     _reaction_trim_trigger,
     _router_entry_size_multiplier,
     _router_mode,
     _scaled_unit_cut_qty,
     _trend_hold_context,
+    _parse_base_context_reduce_patterns,
 )
 
 
@@ -65,6 +69,12 @@ def test_book_open_role_payloads_counts_active_tranches_by_role() -> None:
 
     assert lot_counts == {"base": 2, "probe": 1}
     assert qty_by_role == {"base": 1.25, "probe": 0.125}
+
+
+def test_rotation_memory_tracks_router_transition_trim_cooldown_state() -> None:
+    memory = RotationMemory()
+
+    assert memory.last_router_transition_trim_idx < -10**8
 
 
 def test_drawdown_bar_event_payload_keeps_recent_core_fields() -> None:
@@ -392,6 +402,73 @@ def test_event_risk_base_multiplier_targets_late_hour_open_short_base_only() -> 
     ) == 0.0
 
 
+def test_base_context_reduce_pattern_targets_exact_base_contexts() -> None:
+    pattern = "base|long|with_trend|uptrend|normal|ext_0.75-1.5|break_0-0.1"
+    assert _parse_base_context_reduce_patterns(pattern) == (pattern,)
+    assert _base_context_pattern_matches(pattern, pattern)
+    assert _base_context_pattern_matches(
+        "base|short|with_trend|downtrend|normal|ext_2.5-4|break_0-0.1",
+        "base|short|*|downtrend|normal|ext_2.5-4|break_0-0.1",
+    )
+    assert not _base_context_pattern_matches(
+        "base|long|with_trend|uptrend|normal|ext_0-0.75|break_0-0.1",
+        pattern,
+    )
+
+    config = SimpleNamespace(
+        base_context_reduce_patterns=(pattern,),
+        base_context_reduce_size_mult=0.0,
+    )
+    assert _base_context_size_multiplier(config, pattern, "base") == 0.0
+    assert _base_context_size_multiplier(config, pattern, "chase") == 1.0
+    assert (
+        _base_context_size_multiplier(
+            config,
+            "base|short|with_trend|downtrend|normal|ext_2.5-4|break_0-0.1",
+            "base",
+        )
+        == 1.0
+    )
+
+
+def test_near_miss_context_filter_targets_mc12_with_trend_normal_regime() -> None:
+    config = SimpleNamespace(
+        near_miss_probe_allowed_soft_reasons=("MC12_low_confluence",),
+        near_miss_probe_allowed_alignments=("with_trend",),
+        near_miss_probe_allowed_execution_contexts=("normal",),
+        near_miss_probe_allowed_regimes=("downtrend",),
+    )
+
+    assert _near_miss_context_allowed(
+        config,
+        blockers={"MC12_low_confluence"},
+        market=SimpleNamespace(bias=-1, regime="downtrend"),
+        side=-1,
+        zone=SimpleNamespace(execution_context="normal"),
+    )
+    assert not _near_miss_context_allowed(
+        config,
+        blockers={"MC04_no_clear_first_touch"},
+        market=SimpleNamespace(bias=-1, regime="downtrend"),
+        side=-1,
+        zone=SimpleNamespace(execution_context="normal"),
+    )
+    assert not _near_miss_context_allowed(
+        config,
+        blockers={"MC12_low_confluence"},
+        market=SimpleNamespace(bias=1, regime="downtrend"),
+        side=-1,
+        zone=SimpleNamespace(execution_context="normal"),
+    )
+    assert not _near_miss_context_allowed(
+        config,
+        blockers={"MC12_low_confluence"},
+        market=SimpleNamespace(bias=-1, regime="downtrend"),
+        side=-1,
+        zone=SimpleNamespace(execution_context="hour_open"),
+    )
+
+
 def test_risk_off_idle_does_not_count_as_too_few_orders() -> None:
     diagnostics = _event_diagnostics(
         events=[],
@@ -428,6 +505,87 @@ def test_ordinary_idle_still_reports_too_few_orders() -> None:
             equity_soft_circuit_size_mult=1.0,
             equity_soft_circuit_prearm_bars=0,
         ),
+    )
+
+    assert diagnostics["health"] == "watch"
+    assert diagnostics["flags"] == ["too_few_orders"]
+    assert diagnostics["sample_mode"] == "active"
+
+
+def test_profitable_low_activity_does_not_count_as_too_few_orders() -> None:
+    events = []
+    add_plan = [
+        ("2024-08-21T00:00:00+00:00", "long", 80.0),
+        ("2024-08-27T03:00:00+00:00", "short", 90.0),
+        ("2024-09-03T06:00:00+00:00", "short", 120.0),
+        ("2024-09-09T08:00:00+00:00", "long", 150.0),
+        ("2024-09-16T17:00:00+00:00", "short", 95.0),
+        ("2024-09-24T18:00:00+00:00", "short", 85.0),
+        ("2024-10-02T23:00:00+00:00", "long", 130.0),
+        ("2024-10-16T06:00:00+00:00", "short", 110.0),
+        ("2024-10-29T17:00:00+00:00", "short", 125.0),
+    ]
+    for ts, side, pnl in add_plan:
+        events.append({"action": "add", "side": side, "role": "base", "ts": ts})
+        events.append(
+            {
+                "action": "remove",
+                "side": side,
+                "role": "base",
+                "ts": ts,
+                "pnl_usd_units": pnl,
+            }
+        )
+
+    diagnostics = _event_diagnostics(
+        events=events,
+        counters=Counter({"reaction_inventory_trims": 6, "turnover_events": 22}),
+        exposure_side_bars=Counter({"flat": 900, "long": 60, "short": 40}),
+        exposure_bars=1000,
+        total_months=4,
+        config=_diagnostic_config(),
+    )
+
+    assert diagnostics["health"] == "ok"
+    assert diagnostics["flags"] == []
+    assert diagnostics["sample_mode"] == "profitable_low_activity"
+    assert diagnostics["profitable_low_activity_context"]["status"] == "suppressed"
+    assert diagnostics["diagnostic_thresholds"]["expected_add_events"] == 12
+    assert diagnostics["diagnostic_thresholds"]["profitable_low_activity_min_add_events"] == 9
+
+
+def test_losing_low_activity_still_reports_too_few_orders() -> None:
+    events = []
+    add_plan = [
+        ("2024-08-21T00:00:00+00:00", "long", -80.0),
+        ("2024-08-27T03:00:00+00:00", "short", 90.0),
+        ("2024-09-03T06:00:00+00:00", "short", 120.0),
+        ("2024-09-09T08:00:00+00:00", "long", -150.0),
+        ("2024-09-16T17:00:00+00:00", "short", 95.0),
+        ("2024-09-24T18:00:00+00:00", "short", 85.0),
+        ("2024-10-02T23:00:00+00:00", "long", -130.0),
+        ("2024-10-16T06:00:00+00:00", "short", 110.0),
+        ("2024-10-29T17:00:00+00:00", "short", 125.0),
+    ]
+    for ts, side, pnl in add_plan:
+        events.append({"action": "add", "side": side, "role": "base", "ts": ts})
+        events.append(
+            {
+                "action": "remove",
+                "side": side,
+                "role": "base",
+                "ts": ts,
+                "pnl_usd_units": pnl,
+            }
+        )
+
+    diagnostics = _event_diagnostics(
+        events=events,
+        counters=Counter({"reaction_inventory_trims": 6, "turnover_events": 22}),
+        exposure_side_bars=Counter({"flat": 900, "long": 60, "short": 40}),
+        exposure_bars=1000,
+        total_months=4,
+        config=_diagnostic_config(),
     )
 
     assert diagnostics["health"] == "watch"
