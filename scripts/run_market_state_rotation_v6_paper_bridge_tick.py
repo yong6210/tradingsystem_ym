@@ -469,6 +469,58 @@ def _plan_from_add_event(
     )
 
 
+def _execution_parity_preflight(snapshot: dict[str, Any]) -> dict[str, Any]:
+    event = dict(snapshot.get("latest_event") or {})
+    action = str(snapshot.get("bridge_action") or event.get("action") or "").strip().lower()
+    blockers: list[str] = []
+    snapshot_blockers = list(snapshot.get("blockers") or [])
+    if snapshot.get("overall_status") != "actionable":
+        blockers.append("snapshot_not_actionable")
+    if snapshot_blockers:
+        blockers.extend(f"snapshot_blocker:{item}" for item in snapshot_blockers)
+    if action not in {"add", "remove"}:
+        blockers.append("bridge_action_not_add_or_remove")
+    source_ts = _parse_dt(event.get("ts"))
+    if source_ts is None:
+        blockers.append("source_event_ts_missing_or_invalid")
+    side = str(event.get("side") or "").strip().lower()
+    if side not in {"long", "short"}:
+        blockers.append("source_event_side_missing_or_invalid")
+    if _safe_float(event.get("price")) <= 0.0:
+        blockers.append("source_event_price_missing_or_invalid")
+    if action == "add" and not dict(snapshot.get("plan_candidate") or {}):
+        blockers.append("add_plan_candidate_missing")
+    passed = not blockers
+    return {
+        "status": "ready" if passed else "blocked",
+        "passed": passed,
+        "blockers": blockers,
+        "expected_journal_action": action if action in {"add", "remove"} else None,
+        "expected_journal_side": side if side in {"long", "short"} else None,
+        "source_event_key": _event_key(event) if event else None,
+        "source_event_ts": source_ts.isoformat() if source_ts is not None else None,
+        "source_event_price": _safe_float(event.get("price")) if event else None,
+        "will_increment_execution_parity_journal_after_apply": passed,
+        "required_apply_outputs": [
+            "paper_order_submission_with_client_order_id",
+            "paper_execution_fill_with_qty_price_and_timestamp",
+            "lifecycle_row_with_source_event_and_slippage_bps",
+        ],
+        "journal_contract_fields": {
+            "timestamp": "execution fill timestamp",
+            "source_bar_ts": "latest_event.ts",
+            "actual_action": action if action in {"add", "remove"} else None,
+            "expected_action": action if action in {"add", "remove"} else None,
+            "actual_side": side if side in {"long", "short"} else None,
+            "expected_side": side if side in {"long", "short"} else None,
+            "decision_id": "paper submission client_order_id or intent_id",
+            "position_diff_units": "0.0 for complete paper fill qty",
+            "fee_slippage_bps": "entry_slippage_bps for add, exit_slippage_bps for remove",
+        },
+        "no_live_order_sent": True,
+    }
+
+
 def build_runtime_decision_snapshot(
     *,
     source_backtest_report: dict[str, Any],
@@ -896,6 +948,7 @@ def run_paper_bridge_tick(
         max_market_data_age_minutes=max_market_data_age_minutes,
         plan_valid_minutes=plan_valid_minutes,
     )
+    execution_parity_preflight = _execution_parity_preflight(snapshot)
     report: dict[str, Any] = {
         "created_at": datetime.now(UTC).isoformat(),
         "overall_status": "dry_run" if not apply_paper else "not_actionable",
@@ -903,6 +956,7 @@ def run_paper_bridge_tick(
         "no_live_order_sent": True,
         "source_backtest_report": _display_path(source_backtest_report_path),
         "snapshot": snapshot,
+        "execution_parity_preflight": execution_parity_preflight,
         "pre_apply_backup": None,
         "result": None,
         "non_negotiables": [
@@ -916,7 +970,18 @@ def run_paper_bridge_tick(
     if snapshot.get("overall_status") != "actionable":
         report["overall_status"] = "not_actionable"
     elif not apply_paper:
-        report["overall_status"] = "dry_run_actionable"
+        report["overall_status"] = (
+            "dry_run_actionable"
+            if execution_parity_preflight.get("passed") is True
+            else "dry_run_preflight_blocked"
+        )
+    elif execution_parity_preflight.get("passed") is not True:
+        report["overall_status"] = "execution_parity_preflight_failed"
+        report["result"] = {
+            "status": "blocked_before_db_write",
+            "reason": "execution_parity_preflight_failed",
+            "blockers": list(execution_parity_preflight.get("blockers") or []),
+        }
     else:
         backup_report: dict[str, Any]
         if pre_apply_backup_dir is None:

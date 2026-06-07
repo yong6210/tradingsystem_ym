@@ -42,7 +42,14 @@ def _cycle_report(
                 "base_url": "https://fapi.binance.com",
             },
             "event_cadence": {
+                "bridge_event_count": 50,
                 "add_event_count": 17,
+                "remove_event_count": 33,
+                "events_per_day": 0.4167,
+                "expected_days_per_event": 2.4,
+                "median_gap_hours": 24.0,
+                "latest_age_to_median_gap": 16.75,
+                "wait_state": "latest_signal_age_above_recent_median_gap",
                 "add_events_per_day": 0.1417,
                 "expected_days_per_add": 7.0588,
                 "latest_event_ts": "2026-05-19T10:55:00+00:00",
@@ -292,6 +299,13 @@ def test_historical_evidence_replay_replaces_quote_calendar_wait_without_future_
         "fresh_signal",
         "paper_shadow_fill_samples",
     ]
+    policy = substitution["time_substitution_policy"]
+    assert policy["research_shadow_quote_calendar_wait"]["substituted"] is True
+    assert policy["research_shadow_quote_calendar_wait"]["days_removed"] == 28
+    assert policy["research_shadow_quote_sample_hour_wait"]["substituted"] is True
+    assert policy["live_launch_current_evidence_wait"]["substitutable"] is False
+    assert policy["can_skip_research_quote_calendar_wait"] is True
+    assert policy["can_skip_live_current_evidence_wait"] is False
 
 
 def test_historical_lifecycle_replay_replaces_paper_shadow_fill_proxy(tmp_path) -> None:
@@ -873,6 +887,18 @@ def test_timeline_command_validation_flags_unsafe_or_unresolved_commands() -> No
     assert validation["no_live_order_sent"] is True
 
 
+def test_command_has_live_flags_detects_equals_variants_without_false_readiness_match() -> None:
+    assert evidence._command_has_live_flags(
+        ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py --enable-live=true"
+    ) is True
+    assert evidence._command_has_live_flags(
+        ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py --submit-live-order=false"
+    ) is True
+    assert evidence._command_has_live_flags(
+        ".venv/bin/python scripts/run_market_state_rotation_v6_live_readiness.py --live-readiness-report report.json"
+    ) is False
+
+
 def test_evidence_cycle_writes_collection_entry_and_drought_bundle(monkeypatch, tmp_path) -> None:
     def fake_collection_cycle(**kwargs):
         report_dir = Path(kwargs["report_dir"])
@@ -938,12 +964,15 @@ def test_evidence_cycle_writes_collection_entry_and_drought_bundle(monkeypatch, 
         "quote_calendar_days": 28,
         "quote_distinct_hours": 19,
         "paper_shadow_fill_samples": 100,
+        "execution_parity_samples": 20,
+        "execution_parity_contract": 1,
         "market_data_freshness": 0,
         "fresh_signal": 1,
     }
     assert [gate["gate"] for gate in report["readiness_progress"]["blocking_gates_ordered"]] == [
         "fresh_signal",
         "paper_shadow_fill_samples",
+        "execution_parity_journal",
         "quote_calendar_days",
         "quote_distinct_hours",
         "quote_samples",
@@ -961,6 +990,7 @@ def test_evidence_cycle_writes_collection_entry_and_drought_bundle(monkeypatch, 
         "quote_distinct_hours",
         "quote_samples",
         "paper_shadow_fill_samples",
+        "execution_parity_journal",
     ]
     assert report["execution_checklist"]["checklist_items"][0]["status"] == "passed"
     assert report["execution_checklist"]["checklist_items"][1]["status"] == "blocking"
@@ -1009,6 +1039,13 @@ def test_evidence_cycle_writes_collection_entry_and_drought_bundle(monkeypatch, 
     assert report["signal_wait_plan"]["signal_age_hours"] == 400.0
     assert report["signal_wait_plan"]["max_signal_age_minutes"] == 15.0
     assert report["signal_wait_plan"]["signal_stale_by_minutes"] == 23985.0
+    assert report["signal_wait_plan"]["expected_days_per_event"] == 2.4
+    assert report["signal_wait_plan"]["expected_event_interval_hours"] == 57.6
+    assert report["signal_wait_plan"]["median_gap_hours"] == 24.0
+    assert report["signal_wait_plan"]["latest_age_to_median_gap"] == 16.75
+    assert report["signal_wait_plan"]["event_wait_state"] == "latest_signal_age_above_recent_median_gap"
+    assert report["signal_wait_plan"]["bridge_event_count"] == 50
+    assert report["signal_wait_plan"]["remove_event_count"] == 33
     assert report["signal_wait_plan"]["latest_add_age_to_median_gap"] == 5.4
     assert report["signal_wait_plan"]["cadence_lag_level"] == (
         "severe_signal_drought_but_entry_quality_gate_still_blocks_relaxation"
@@ -1045,6 +1082,24 @@ def test_evidence_cycle_writes_collection_entry_and_drought_bundle(monkeypatch, 
     assert "do_not_enable_live_orders_from_collection_plan" in report["adaptive_collection_plan"]["non_negotiables"]
     assert report["paper_bridge_apply_gate"]["status"] == "blocked_waiting_for_fresh_signal"
     assert report["paper_bridge_apply_gate"]["can_request_paper_apply_now"] is False
+    assert report["collection_progress"]["execution_parity_journal_rows"] == 0
+    assert report["collection_progress"]["execution_parity_missing_samples"] == 20
+    assert report["execution_parity_collection_plan"]["status"] == "waiting_for_fresh_signal"
+    assert report["execution_parity_collection_plan"]["missing_samples"] == 20
+    assert report["execution_parity_collection_plan"]["estimated_future_paper_apply_events_needed"] == 20
+    assert report["execution_parity_collection_plan"]["estimated_events_needed_after_current_creditable_apply"] == 20
+    assert report["execution_parity_collection_plan"]["will_credit_current_apply_after_operator_review"] is False
+    assert report["execution_parity_collection_plan"]["accepted_actions"] == ["add", "remove"]
+    assert report["execution_parity_collection_plan"]["currently_creditable_actions"] == []
+    assert report["execution_parity_collection_plan"]["backtest_substitution_allowed"] is False
+    assert report["execution_parity_collection_plan"]["no_live_order_sent"] is True
+    assert report["execution_parity_journal"]["collection_plan"]["status"] == "collecting_samples"
+    assert report["execution_parity_journal"]["collection_plan"]["estimated_future_paper_apply_events_needed"] == 20
+    assert report["execution_parity_journal"]["collection_plan"]["accepted_actions"] == ["add", "remove"]
+    assert report["execution_parity_journal"]["contract_summary"]["blockers"] == [
+        "execution_journal_missing",
+        "insufficient_execution_sample_count",
+    ]
     assert report["entry_quality"]["eligible_probe_context_count"] == 0
     assert report["entry_quality"]["mc04_broad_relaxation_rejected"] is True
     assert "do_not_relax_current_low_quality_soft_contexts" in report["next_actions"]
@@ -1057,6 +1112,8 @@ def test_evidence_cycle_writes_collection_entry_and_drought_bundle(monkeypatch, 
     assert (report_dir / EVIDENCE_REPORT_NAME).exists()
     assert (report_dir / "entry_filter_sparsity_audit" / "market_state_rotation_v6_entry_filter_sparsity_audit.json").exists()
     assert (report_dir / "signal_drought_audit" / "market_state_rotation_v6_signal_drought_audit.json").exists()
+    assert (report_dir / "execution_parity_journal" / "market_state_rotation_v6_execution_parity_journal.json").exists()
+    assert (report_dir / "execution_parity_journal" / "market_state_rotation_v6_execution_parity_contract.json").exists()
 
 
 def test_evidence_cycle_attaches_historical_replay_gate_substitution(monkeypatch, tmp_path) -> None:
@@ -1311,9 +1368,13 @@ def test_evidence_cycle_loads_canary_risk_caps_json_without_enabling_orders(monk
     assert str(caps_path) in launch["operator_commands"]["paper_bridge_dry_run"]
     assert "--historical-evidence-replay" in launch["operator_commands"]["paper_bridge_dry_run"]
     assert "--historical-lifecycle-replay" in launch["operator_commands"]["paper_bridge_dry_run"]
+    assert "--refresh-market-data-before-run" in launch["operator_commands"]["paper_bridge_dry_run"]
+    assert "--max-signal-age-minutes 15" in launch["operator_commands"]["paper_bridge_dry_run"]
     assert "--report-dir" in launch["operator_commands"]["paper_bridge_dry_run"]
     assert "--historical-evidence-replay" in launch["operator_commands"]["paper_apply_only_after_fresh_signal"]
     assert "--historical-lifecycle-replay" in launch["operator_commands"]["paper_apply_only_after_fresh_signal"]
+    assert "--refresh-market-data-before-run" in launch["operator_commands"]["paper_apply_only_after_fresh_signal"]
+    assert "--max-signal-age-minutes 15" in launch["operator_commands"]["paper_apply_only_after_fresh_signal"]
     cap_gate = next(item for item in launch["stage_gates"] if item["gate"] == "tiny_canary_risk_caps_configured")
     assert cap_gate["passed"] is True
     safety_gate = next(item for item in launch["stage_gates"] if item["gate"] == "order_safety_controls_verified")
@@ -1432,16 +1493,28 @@ def test_evidence_cycle_marks_fresh_dry_run_actionable_as_paper_apply_request_av
     assert report["paper_bridge_apply_gate"]["status"] == "paper_apply_request_available"
     assert report["paper_bridge_apply_gate"]["can_request_paper_apply_now"] is True
     assert report["paper_bridge_apply_gate"]["required_pre_apply_backup"] is True
+    assert report["pre_apply_backup_plan"]["status"] == "ready_required_before_paper_apply"
+    assert report["pre_apply_backup_plan"]["backup_dir"] == evidence.DEFAULT_PRE_APPLY_BACKUP_DIR
+    assert "pre_apply_backup.quick_check == 'ok'" in report["pre_apply_backup_plan"]["verification_required_fields"]
     assert report["readiness_progress"]["paper_apply_readiness_pct"] == 100.0
     assert report["readiness_progress"]["strictest_deployment_gate"] == "paper_shadow_fill_samples"
     assert report["execution_checklist"]["current_phase"] == "paper_apply_operator_review_available"
     assert report["execution_checklist"]["paper_apply_allowed_now"] is True
     assert report["adaptive_collection_plan"]["primary_objective"] == "operator_review_then_apply_paper_bridge"
     assert report["adaptive_collection_plan"]["same_utc_hour_repeat_policy"]["allowed"] is False
+    assert "--max-signal-age-minutes 15" in report["adaptive_collection_plan"]["operator_commands"][
+        "paper_apply_only_if_gate_allows"
+    ]
     assert report["operator_action_plan"]["status"] == "paper_apply_review_available"
     assert report["operator_action_plan"]["top_action"]["action"] == "operator_review_paper_bridge_apply"
     assert report["operator_action_plan"]["top_action"]["run_now"] is True
     assert report["operator_action_plan"]["top_action"]["requires_operator_review"] is True
+    assert "--refresh-market-data-before-run" in report["operator_action_plan"]["top_action"]["command"]
+    assert "--max-signal-age-minutes 15" in report["operator_action_plan"]["top_action"]["command"]
+    assert report["operator_action_plan"]["top_action"]["pre_apply_backup_plan"]["status"] == (
+        "ready_required_before_paper_apply"
+    )
+    assert report["operator_action_plan"]["top_action"]["post_apply_required_review"] == "execution_parity_review"
     assert report["signal_wait_plan"]["status"] == "fresh_signal_available"
     assert report["signal_wait_plan"]["command"] is None
     assert not [
@@ -1452,8 +1525,91 @@ def test_evidence_cycle_marks_fresh_dry_run_actionable_as_paper_apply_request_av
     assert report["operator_runbook_plan"]["status"] == "run_required_action_now"
     assert report["operator_runbook_plan"]["next_operator_action"]["action"] == "operator_review_paper_bridge_apply"
     assert report["operator_runbook_plan"]["coordination_rule"] == "follow_top_operator_action"
+    assert report["execution_parity_collection_plan"]["status"] == "ready_to_credit_next_paper_apply"
+    assert report["execution_parity_collection_plan"]["currently_creditable_actions"] == ["remove"]
+    assert report["execution_parity_collection_plan"]["will_credit_current_apply_after_operator_review"] is True
+    assert report["execution_parity_collection_plan"]["projected_journal_rows_after_current_creditable_apply"] == 1
+    assert report["execution_parity_collection_plan"]["estimated_events_needed_after_current_creditable_apply"] == 19
+    assert report["launch_readiness"]["paper_bridge_handoff"]["pre_apply_backup_plan"]["status"] == (
+        "ready_required_before_paper_apply"
+    )
+    assert "--pre-apply-backup-dir" in report["launch_readiness"]["paper_bridge_handoff"]["apply_command"]
     assert "operator_may_rerun_with_apply_paper_bridge_after_review_and_backup" in report["next_actions"]
     assert "do_not_apply_paper_bridge_without_verified_pre_apply_backup" in report["non_negotiables"]
+
+
+def test_signal_wait_plan_caps_monitor_interval_to_fresh_signal_window() -> None:
+    plan = evidence._signal_wait_plan(
+        cycle_report={
+            "bridge": {
+                "freshness": {"signal_age_minutes": 120.0},
+                "event_cadence": {
+                    "expected_days_per_event": 2.0,
+                    "expected_days_per_add": 7.0,
+                    "latest_add_age_hours": 12.0,
+                    "median_add_gap_hours": 48.0,
+                    "latest_add_age_to_median_gap": 0.25,
+                    "add_wait_state": "within_recent_add_gap_distribution",
+                },
+            }
+        },
+        apply_gate={"fresh_signal": False},
+        generated_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        max_signal_age_minutes=15,
+    )
+
+    assert plan["cadence_lag_level"] == "within_recent_add_cadence"
+    assert plan["cadence_recommended_monitor_interval_minutes"] == 60
+    assert plan["recommended_monitor_interval_minutes"] == 15
+    assert plan["signal_freshness_capture_window_minutes"] == 15.0
+    assert plan["monitor_interval_capped_by_signal_freshness"] is True
+    assert plan["monitor_signal_age_alignment"] == "capped_to_fresh_signal_window"
+    assert plan["next_monitor_after_utc"] == "2026-01-01T12:15:00+00:00"
+    assert "--max-signal-age-minutes 15" in plan["command"]
+    assert plan["manual_signal_override_allowed"] is False
+    assert plan["no_live_order_sent"] is True
+
+
+def test_paper_apply_gate_blocks_fresh_signal_when_execution_parity_preflight_fails() -> None:
+    gate = evidence._paper_apply_gate(
+        {
+            "bridge": {
+                "overall_status": "dry_run_preflight_blocked",
+                "apply_paper": False,
+                "snapshot_blockers": [],
+                "bridge_action": "add",
+                "execution_parity_preflight": {
+                    "passed": False,
+                    "blockers": ["source_event_ts_missing_or_invalid"],
+                },
+            }
+        }
+    )
+
+    assert gate["status"] == "blocked_execution_parity_preflight"
+    assert gate["can_request_paper_apply_now"] is False
+    assert gate["fresh_signal"] is True
+    assert gate["execution_parity_preflight_passed"] is False
+    assert gate["next_step"] == "fix_execution_parity_preflight_fields_before_paper_apply"
+    plan = evidence._execution_parity_collection_plan(
+        collection_progress={
+            "execution_parity_journal_rows": 3,
+            "execution_parity_required_rows": 20,
+            "execution_parity_lifecycle_rows": 3,
+            "execution_parity_passed": False,
+            "execution_parity_blockers": ["insufficient_execution_sample_count"],
+        },
+        apply_gate=gate,
+        journal_report={"conversion": {"entry_rows_written": 2, "exit_rows_written": 1, "include_exit_rows": True}},
+    )
+    assert plan["status"] == "blocked_by_execution_parity_preflight"
+    assert plan["missing_samples"] == 17
+    assert plan["estimated_future_paper_apply_events_needed"] == 17
+    assert plan["estimated_events_needed_after_current_creditable_apply"] == 17
+    assert plan["will_credit_current_apply_after_operator_review"] is False
+    assert plan["accepted_actions"] == ["add", "remove"]
+    assert plan["currently_creditable_actions"] == []
+    assert plan["next_step"] == "fix_execution_parity_preflight_fields_before_paper_apply"
 
 
 def test_run_evidence_cycle_can_refresh_market_data_before_run(monkeypatch, tmp_path) -> None:
@@ -1632,10 +1788,13 @@ def test_evidence_cycle_compares_against_prior_evidence_cycle(monkeypatch, tmp_p
     assert report["readiness_trend"]["latest_delta"]["quote_calendar_days"] == 1
     assert report["readiness_trend"]["latest_delta"]["quote_distinct_hours"] == 1
     assert report["readiness_trend"]["latest_delta"]["paper_fill_rows"] == 0
+    assert report["readiness_trend"]["latest_delta"]["execution_parity_journal_rows"] == 0
     assert report["readiness_trend"]["latest_delta"]["quote_evidence_readiness_pct"] == 3.3334
     assert report["readiness_trend"]["cycles_to_quote_sample_completion_at_latest_delta"] == 26
     assert report["readiness_trend"]["cycles_to_paper_fill_completion_at_latest_delta"] is None
+    assert report["readiness_trend"]["cycles_to_execution_parity_completion_at_latest_delta"] is None
     assert "paper_shadow_fill_no_recent_progress" in report["readiness_trend"]["stagnation_flags"]
+    assert "execution_parity_journal_no_recent_progress" in report["readiness_trend"]["stagnation_flags"]
     assert "fresh_signal_waiting" in report["readiness_trend"]["stagnation_flags"]
     assert report["readiness_trend"]["previous_snapshot"]["current_phase"] == "prior_phase"
     assert report["adaptive_collection_plan"]["blockers_to_action"] == [

@@ -62,6 +62,16 @@ def test_launch_shadow_watch_repeats_no_live_evidence_cycles(monkeypatch, tmp_pa
                 "paper_fill_rows": 0,
             },
             "readiness_progress": {},
+            "execution_parity_collection_plan": {
+                "status": "waiting_for_fresh_signal",
+                "estimated_future_paper_apply_events_needed": 20,
+                "estimated_events_needed_after_current_creditable_apply": 20,
+                "will_credit_current_apply_after_operator_review": False,
+                "currently_creditable_actions": [],
+                "next_step": "wait_for_fresh_v6_add_or_remove_signal",
+                "non_substitutable": True,
+                "no_live_order_sent": True,
+            },
             "paper_bridge_apply_gate": {
                 "fresh_signal": False,
                 "can_request_paper_apply_now": False,
@@ -112,7 +122,12 @@ def test_launch_shadow_watch_repeats_no_live_evidence_cycles(monkeypatch, tmp_pa
 
     summary = watch.run_launch_shadow_watch(_args(tmp_path), sleep_fn=lambda seconds: sleeps.append(seconds))
 
-    assert summary["status"] == "target_observation_complete"
+    assert summary["status"] == "target_observation_complete_waiting_for_fresh_signal"
+    assert summary["target_observation_complete"] is True
+    assert summary["target_observation_status"]["launch_next_blocker"] == "current_fresh_signal"
+    assert summary["target_observation_status"]["reason"] == (
+        "runtime_observation_complete_but_realtime_fresh_signal_gate_still_waiting"
+    )
     assert summary["completed_iterations"] == 2
     assert summary["no_live_order_sent"] is True
     assert summary["progress"]["quote_observed_delta"] == 2
@@ -139,6 +154,12 @@ def test_launch_shadow_watch_repeats_no_live_evidence_cycles(monkeypatch, tmp_pa
     assert payload["latest_run"]["launch_readiness"]["next_blocker"]["gate"] == "current_fresh_signal"
     assert payload["latest_run"]["quote_cadence_preflight"]["decision"] == "capture_new_utc_hour_for_hour_gate"
     assert payload["progress"]["quote_observed_delta"] == 2
+    assert payload["progress"]["execution_parity_collection_status_latest"] == "waiting_for_fresh_signal"
+    assert payload["progress"]["execution_parity_events_needed_latest"] == 20
+    assert payload["progress"]["execution_parity_events_needed_after_current_apply_latest"] == 20
+    assert payload["progress"]["execution_parity_will_credit_current_apply_latest"] is False
+    assert payload["progress"]["execution_parity_creditable_actions_latest"] == []
+    assert payload["progress"]["execution_parity_non_substitutable_latest"] is True
     assert payload["baseline_collection_progress"]["quote_observed"] == 82
     assert payload["canary_risk_caps_config"]["status"] == "missing_optional_config_file"
     assert payload["blocker_resolution_plan"][0]["gate"] == "current_fresh_signal"
@@ -146,6 +167,10 @@ def test_launch_shadow_watch_repeats_no_live_evidence_cycles(monkeypatch, tmp_pa
     assert "launch_next_blocker: `current_fresh_signal`" in latest_md.read_text(encoding="utf-8")
     assert "quote_observed_delta: `2`" in latest_md.read_text(encoding="utf-8")
     assert "quote_cadence_decision: `capture_new_utc_hour_for_hour_gate`" in latest_md.read_text(encoding="utf-8")
+    assert "execution_parity_events_needed_latest: `20`" in latest_md.read_text(encoding="utf-8")
+    assert "execution_parity_events_needed_after_current_apply_latest: `20`" in latest_md.read_text(encoding="utf-8")
+    assert "operator_handoff_execution_parity_events_needed: `20`" in latest_md.read_text(encoding="utf-8")
+    assert "operator_handoff_execution_parity_will_credit_current_apply: `False`" in latest_md.read_text(encoding="utf-8")
     assert "## Blocker Resolution Plan" in latest_md.read_text(encoding="utf-8")
 
 
@@ -219,6 +244,7 @@ def test_blocker_plan_does_not_surface_paper_apply_command_before_fresh_signal()
             "collection_progress": {
                 "paper_fill_rows": 0,
             },
+            "evidence_report": "reports/validation/diagnostics/pre_apply/market_state_rotation_v6_evidence_cycle.json",
             "launch_readiness": {
                 "blocking_gates": [
                     {
@@ -231,6 +257,15 @@ def test_blocker_plan_does_not_surface_paper_apply_command_before_fresh_signal()
                     "paper_bridge_dry_run": "dry-run",
                     "paper_apply_only_after_fresh_signal": "paper-apply",
                 },
+            },
+            "execution_parity_collection_plan": {
+                "status": "ready_to_credit_next_paper_apply",
+                "estimated_future_paper_apply_events_needed": 20,
+                "estimated_events_needed_after_current_creditable_apply": 19,
+                "will_credit_current_apply_after_operator_review": True,
+                "currently_creditable_actions": ["remove"],
+                "accepted_actions": ["add", "remove"],
+                "non_substitutable": True,
             },
         },
         progress={},
@@ -264,6 +299,1187 @@ def test_blocker_plan_surfaces_paper_apply_command_only_when_gate_allows() -> No
                 "fresh_signal": True,
                 "can_request_paper_apply_now": True,
             },
+            "pre_apply_backup_plan": {
+                "status": "ready_required_before_paper_apply",
+                "backup_dir": "reports/db_recovery/market_state_rotation_v6_bridge_tick",
+                "verification_required_fields": [
+                    "pre_apply_backup.created == true",
+                    "pre_apply_backup.quick_check == 'ok'",
+                ],
+                "no_live_order_sent": True,
+            },
+            "collection_progress": {
+                "paper_fill_rows": 0,
+            },
+            "evidence_report": "reports/validation/diagnostics/pre_apply/market_state_rotation_v6_evidence_cycle.json",
+            "launch_readiness": {
+                "blocking_gates": [
+                    {
+                        "gate": "real_paper_lifecycle_rows",
+                        "blocker": "real_paper_lifecycle_rows_missing",
+                        "next_action": "apply_paper_bridge_only_after_fresh_signal_and_verified_backup",
+                    }
+                ],
+                "operator_commands": {
+                    "paper_bridge_dry_run": "dry-run",
+                    "paper_apply_only_after_fresh_signal": "paper-apply",
+                },
+            },
+            "execution_parity_collection_plan": {
+                "status": "ready_to_credit_next_paper_apply",
+                "estimated_future_paper_apply_events_needed": 20,
+                "estimated_events_needed_after_current_creditable_apply": 19,
+                "will_credit_current_apply_after_operator_review": True,
+                "currently_creditable_actions": ["remove"],
+                "accepted_actions": ["add", "remove"],
+                "non_substitutable": True,
+            },
+        },
+        progress={},
+        runtime_progress={},
+        risk_caps={},
+        microstructure_watch={},
+        operator_handoff={
+            "paper_apply_allowed_now": True,
+            "paper_handoff_status": "paper_apply_review_available",
+            "paper_dry_run_command": "dry-run",
+            "paper_apply_command": "paper-apply",
+            "paper_apply_operator_packet": {
+                "status": "ready_for_operator_review",
+                "pre_apply_backup_plan": {
+                    "status": "ready_required_before_paper_apply",
+                    "backup_dir": "reports/db_recovery/market_state_rotation_v6_bridge_tick",
+                },
+                "post_apply_execution_parity_review_command": (
+                    ".venv/bin/python scripts/run_market_state_rotation_v6_paper_apply_parity_review.py "
+                    "--before-evidence-report reports/pre.json "
+                    "--after-evidence-report <post_apply_evidence_report> "
+                    "--report-dir reports/validation/diagnostics/<paper_apply_parity_review_report_dir> "
+                    "--write-report"
+                ),
+                "no_live_order_sent": True,
+            },
+        },
+    )
+
+    item = plan[0]
+    assert item["gate"] == "real_paper_lifecycle_rows"
+    assert item["can_resolve_now"] is True
+    assert item["requires_operator_review"] is True
+    assert item["command"] == "paper-apply"
+    assert item["reason"] == "paper_bridge_apply_available_after_operator_review_and_verified_backup"
+    assert item["fresh_signal"] is True
+    assert item["can_request_paper_apply_now"] is True
+    assert item["execution_parity_will_credit_current_apply"] is True
+    assert item["execution_parity_events_needed"] == 20
+    assert item["execution_parity_events_needed_after_current_apply"] == 19
+    assert item["execution_parity_creditable_actions"] == ["remove"]
+    assert item["execution_parity_non_substitutable"] is True
+    assert item["pre_apply_evidence_report"] == (
+        "reports/validation/diagnostics/pre_apply/market_state_rotation_v6_evidence_cycle.json"
+    )
+    assert item["paper_apply_operator_packet"]["status"] == "ready_for_operator_review"
+    assert item["pre_apply_backup_plan"]["status"] == "ready_required_before_paper_apply"
+    assert "run_market_state_rotation_v6_paper_apply_parity_review.py" in item[
+        "post_apply_execution_parity_review_command"
+    ]
+    assert "--after-evidence-report <post_apply_evidence_report>" in item[
+        "post_apply_execution_parity_review_command"
+    ]
+    assert item["order_submission_allowed"] is False
+
+
+def test_operator_handoff_builds_pre_apply_operator_packet(tmp_path) -> None:
+    evidence_report = tmp_path / "market_state_rotation_v6_evidence_cycle.json"
+    evidence_report.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "no_live_order_sent": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    handoff = watch._operator_handoff(
+        latest={
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "evidence_report": str(evidence_report),
+            "paper_bridge_apply_gate": {
+                "fresh_signal": True,
+                "can_request_paper_apply_now": True,
+            },
+            "signal_wait_plan": {
+                "max_signal_age_minutes": 15,
+            },
+            "pre_apply_backup_plan": {
+                "status": "ready_required_before_paper_apply",
+                "backup_dir": "reports/db_recovery/market_state_rotation_v6_bridge_tick",
+                "verification_required_fields": [
+                    "pre_apply_backup.created == true",
+                    "pre_apply_backup.quick_check == 'ok'",
+                    "pre_apply_backup.backup_path is not empty",
+                ],
+                "no_live_order_sent": True,
+            },
+            "launch_readiness": {
+                "tiny_canary_evidence_ready": False,
+                "paper_bridge_handoff": {
+                    "status": "paper_apply_review_available",
+                    "dry_run_command": (
+                        ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+                        "--quote-samples-per-tick 0 --refresh-market-data-before-run "
+                        "--max-signal-age-minutes 15 "
+                        "--report-dir reports/dry"
+                    ),
+                    "apply_command": (
+                        ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+                        "--apply-paper-bridge --quote-samples-per-tick 0 --refresh-market-data-before-run "
+                        "--max-signal-age-minutes 15 "
+                        "--pre-apply-backup-dir reports/db_recovery/market_state_rotation_v6_bridge_tick "
+                        "--report-dir reports/apply"
+                    ),
+                    "apply_allowed_now": True,
+                },
+            },
+        },
+        progress={},
+        runtime_progress={},
+        risk_caps={"configured": True},
+        microstructure_watch={},
+    )
+
+    packet = handoff["paper_apply_operator_packet"]
+    assert packet["status"] == "ready_for_operator_review"
+    assert packet["packet_generated_at"] == "2026-01-01T00:00:00+00:00"
+    assert packet["operator_review_window_minutes"] == 15.0
+    assert packet["operator_review_deadline_utc"] == "2026-01-01T00:15:00+00:00"
+    assert packet["operator_review_deadline_active"] is True
+    assert packet["deadline_policy"] == "apply_command_expires_at_operator_review_deadline_rerun_dry_run_after_deadline"
+    assert "--refresh-market-data-before-run" in packet["rerun_command_after_deadline"]
+    assert "--max-signal-age-minutes 15" in packet["rerun_command_after_deadline"]
+    assert packet["command_safety"]["status"] == "PASS"
+    assert packet["command_safety"]["blockers"] == []
+    assert packet["pre_apply_evidence_report_status"]["status"] == "fresh"
+    assert packet["pre_apply_evidence_report_status"]["exists"] is True
+    assert packet["pre_apply_evidence_report_status"]["age_minutes"] == 0.0
+    assert "--apply-paper-bridge" in packet["apply_command_allowed_now"]
+    assert "--apply-paper-bridge" in packet["apply_command_when_gate_allows"]
+    assert packet["pre_apply_backup_plan"]["backup_dir"] == "reports/db_recovery/market_state_rotation_v6_bridge_tick"
+    assert "pre_apply_backup.quick_check == 'ok'" in packet["backup_verification_required_fields"]
+    assert "rerun_dry_run_if_operator_review_deadline_has_passed" in packet["operator_sequence"]
+    assert f"--before-evidence-report {evidence_report}" in packet[
+        "post_apply_execution_parity_review_command"
+    ]
+    assert packet["order_submission_allowed"] is False
+    assert packet["no_live_order_sent"] is True
+
+
+def test_operator_handoff_blocks_apply_when_operator_command_safety_fails() -> None:
+    handoff = watch._operator_handoff(
+        latest={
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "evidence_report": "reports/pre/market_state_rotation_v6_evidence_cycle.json",
+            "paper_bridge_apply_gate": {
+                "fresh_signal": True,
+                "can_request_paper_apply_now": True,
+            },
+            "signal_wait_plan": {
+                "max_signal_age_minutes": 15,
+            },
+            "launch_readiness": {
+                "tiny_canary_evidence_ready": False,
+                "paper_bridge_handoff": {
+                    "status": "paper_apply_review_available",
+                    "dry_run_command": "dry-run-without-refresh",
+                    "apply_command": "paper-apply-without-required-flags",
+                    "apply_allowed_now": True,
+                },
+            },
+        },
+        progress={},
+        runtime_progress={},
+        risk_caps={"configured": True},
+        microstructure_watch={},
+    )
+
+    packet = handoff["paper_apply_operator_packet"]
+    assert handoff["status"] == "blocked_by_operator_command_safety"
+    assert handoff["next_action"] == "paper_apply_operator_command_safety"
+    assert handoff["paper_apply_allowed_now"] is False
+    assert packet["status"] == "blocked_by_operator_command_safety"
+    assert packet["blocker"] == "paper_apply_operator_command_safety"
+    assert packet["apply_command_allowed_now"] is None
+    assert packet["operator_review_deadline_active"] is False
+    assert packet["command_safety"]["status"] == "FAIL"
+    assert "apply_command_must_use_apply_paper_bridge" in packet["command_safety"]["blockers"]
+    assert "apply_command_must_refresh_market_data_before_run" in packet["command_safety"]["blockers"]
+    assert "apply_command_must_use_max_signal_age_minutes" in packet["command_safety"]["blockers"]
+    assert "apply_command_must_write_report_dir" in packet["command_safety"]["blockers"]
+    assert "dry_run_command_must_write_report_dir" in packet["command_safety"]["blockers"]
+    assert "dry_run_command_must_use_quote_samples_per_tick_0" in packet["command_safety"]["blockers"]
+    assert "dry_run_command_must_use_max_signal_age_minutes" in packet["command_safety"]["blockers"]
+    assert packet["order_submission_allowed"] is False
+
+
+def test_operator_handoff_blocks_apply_when_pre_apply_evidence_report_is_stale(tmp_path) -> None:
+    evidence_report = tmp_path / "market_state_rotation_v6_evidence_cycle.json"
+    evidence_report.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "no_live_order_sent": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    handoff = watch._operator_handoff(
+        latest={
+            "generated_at": "2026-01-01T00:30:00+00:00",
+            "evidence_report": str(evidence_report),
+            "paper_bridge_apply_gate": {
+                "fresh_signal": True,
+                "can_request_paper_apply_now": True,
+            },
+            "signal_wait_plan": {
+                "max_signal_age_minutes": 15,
+            },
+            "launch_readiness": {
+                "tiny_canary_evidence_ready": False,
+                "paper_bridge_handoff": {
+                    "status": "paper_apply_review_available",
+                    "dry_run_command": (
+                        ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+                        "--quote-samples-per-tick 0 --refresh-market-data-before-run "
+                        "--max-signal-age-minutes 15 --report-dir reports/validation/diagnostics/dry"
+                    ),
+                    "apply_command": (
+                        ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+                        "--apply-paper-bridge --quote-samples-per-tick 0 --refresh-market-data-before-run "
+                        "--max-signal-age-minutes 15 "
+                        "--pre-apply-backup-dir reports/db_recovery/market_state_rotation_v6_bridge_tick "
+                        "--report-dir reports/validation/diagnostics/apply"
+                    ),
+                    "apply_allowed_now": True,
+                },
+            },
+        },
+        progress={},
+        runtime_progress={},
+        risk_caps={"configured": True},
+        microstructure_watch={},
+    )
+
+    packet = handoff["paper_apply_operator_packet"]
+    assert handoff["status"] == "blocked_by_pre_apply_evidence_report"
+    assert handoff["next_action"] == "pre_apply_evidence_report"
+    assert handoff["paper_apply_allowed_now"] is False
+    assert packet["status"] == "blocked_by_pre_apply_evidence_report"
+    assert packet["blocker"] == "pre_apply_evidence_report"
+    assert packet["apply_command_allowed_now"] is None
+    assert packet["operator_review_deadline_active"] is False
+    assert packet["deadline_policy"] == "pre_apply_evidence_report_failed_rerun_dry_run_before_apply"
+    assert packet["pre_apply_evidence_report_status"]["status"] == "pre_apply_evidence_report_stale_for_review_window"
+    assert packet["pre_apply_evidence_report_status"]["block_apply"] is True
+    assert packet["pre_apply_evidence_report_status"]["age_minutes"] == 30.0
+    assert packet["pre_apply_evidence_report_status"]["blockers"] == [
+        "pre_apply_evidence_report_stale_for_review_window"
+    ]
+    assert packet["command_safety"]["status"] == "PASS"
+    assert packet["order_submission_allowed"] is False
+    assert packet["no_live_order_sent"] is True
+
+
+def test_operator_handoff_surfaces_command_safety_preflight_before_fresh_signal() -> None:
+    handoff = watch._operator_handoff(
+        latest={
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "evidence_report": "reports/pre/market_state_rotation_v6_evidence_cycle.json",
+            "paper_bridge_apply_gate": {
+                "fresh_signal": False,
+                "can_request_paper_apply_now": False,
+            },
+            "launch_readiness": {
+                "tiny_canary_evidence_ready": False,
+                "paper_bridge_handoff": {
+                    "status": "blocked_waiting_for_fresh_signal",
+                    "dry_run_command": (
+                        ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+                        "--quote-samples-per-tick 0 --refresh-market-data-before-run "
+                        "--max-signal-age-minutes 15 "
+                        "--report-dir reports/validation/diagnostics/<paper_dry_run_report_dir>"
+                    ),
+                    "apply_command": (
+                        ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+                        "--apply-paper-bridge --quote-samples-per-tick 0 --refresh-market-data-before-run "
+                        "--max-signal-age-minutes 15 "
+                        "--pre-apply-backup-dir reports/db_recovery/market_state_rotation_v6_bridge_tick "
+                        "--report-dir reports/validation/diagnostics/<paper_apply_report_dir>"
+                    ),
+                    "apply_allowed_now": False,
+                },
+            },
+        },
+        progress={},
+        runtime_progress={},
+        risk_caps={"configured": True},
+        microstructure_watch={},
+    )
+
+    packet = handoff["paper_apply_operator_packet"]
+    assert handoff["status"] == "paper_apply_operator_command_safety_preflight_failed"
+    assert handoff["next_action"] == "fix_operator_command_safety_before_waiting_for_fresh_signal"
+    assert handoff["paper_apply_allowed_now"] is False
+    assert packet["status"] == "operator_command_safety_preflight_failed"
+    assert packet["blocker"] == "paper_apply_operator_command_safety"
+    assert packet["command_safety"]["status"] == "FAIL"
+    assert "dry_run_command_has_unresolved_placeholder" in packet["command_safety"]["blockers"]
+    assert "apply_command_has_unresolved_placeholder" in packet["command_safety"]["blockers"]
+    assert packet["operator_review_deadline_active"] is False
+    assert packet["apply_command_allowed_now"] is None
+    assert packet["order_submission_allowed"] is False
+    assert packet["no_live_order_sent"] is True
+
+
+def test_paper_apply_command_safety_blocks_missing_flag_values() -> None:
+    safety = watch._paper_apply_command_safety(
+        dry_run_command=(
+            ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+            "--quote-samples-per-tick 0 --refresh-market-data-before-run --report-dir --dry-extra"
+        ),
+        apply_command=(
+            ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+            "--apply-paper-bridge --quote-samples-per-tick 0 --refresh-market-data-before-run "
+            "--pre-apply-backup-dir --report-dir"
+        ),
+    )
+
+    assert safety["status"] == "FAIL"
+    assert "dry_run_command_report_dir_value_missing" in safety["blockers"]
+    assert "apply_command_pre_apply_backup_dir_value_missing" in safety["blockers"]
+    assert "apply_command_report_dir_value_missing" in safety["blockers"]
+    assert safety["order_submission_allowed"] is False
+    assert safety["no_live_order_sent"] is True
+
+
+def test_paper_apply_command_safety_requires_positive_max_signal_age() -> None:
+    safety = watch._paper_apply_command_safety(
+        dry_run_command=(
+            ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+            "--quote-samples-per-tick 0 --refresh-market-data-before-run "
+            "--max-signal-age-minutes 0 --report-dir reports/validation/diagnostics/dry"
+        ),
+        apply_command=(
+            ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+            "--apply-paper-bridge --quote-samples-per-tick 0 --refresh-market-data-before-run "
+            "--pre-apply-backup-dir reports/db_recovery/market_state_rotation_v6_bridge_tick "
+            "--report-dir reports/validation/diagnostics/apply"
+        ),
+    )
+
+    assert safety["status"] == "FAIL"
+    assert "dry_run_command_max_signal_age_minutes_must_be_positive_integer" in safety["blockers"]
+    assert "apply_command_must_use_max_signal_age_minutes" in safety["blockers"]
+    assert safety["order_submission_allowed"] is False
+    assert safety["no_live_order_sent"] is True
+
+
+def test_paper_apply_command_safety_blocks_live_flag_equals_variants() -> None:
+    safety = watch._paper_apply_command_safety(
+        dry_run_command=(
+            ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+            "--quote-samples-per-tick 0 --refresh-market-data-before-run "
+            "--max-signal-age-minutes 15 --report-dir reports/validation/diagnostics/dry "
+            "--enable-live=true"
+        ),
+        apply_command=(
+            ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+            "--apply-paper-bridge --quote-samples-per-tick 0 --refresh-market-data-before-run "
+            "--max-signal-age-minutes 15 "
+            "--pre-apply-backup-dir reports/db_recovery/market_state_rotation_v6_bridge_tick "
+            "--report-dir reports/validation/diagnostics/apply --submit-live-order=true"
+        ),
+    )
+
+    assert safety["status"] == "FAIL"
+    assert "live_order_flag_present_in_operator_command" in safety["blockers"]
+    assert safety["order_submission_allowed"] is False
+    assert safety["no_live_order_sent"] is True
+
+
+def test_paper_apply_command_safety_blocks_unresolved_placeholders() -> None:
+    safety = watch._paper_apply_command_safety(
+        dry_run_command=(
+            ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+            "--quote-samples-per-tick 0 --refresh-market-data-before-run "
+            "--max-signal-age-minutes 15 "
+            "--report-dir reports/validation/diagnostics/<paper_dry_run_report_dir>"
+        ),
+        apply_command=(
+            ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+            "--apply-paper-bridge --quote-samples-per-tick 0 --refresh-market-data-before-run "
+            "--max-signal-age-minutes 15 "
+            "--pre-apply-backup-dir reports/db_recovery/market_state_rotation_v6_bridge_tick "
+            "--report-dir reports/validation/diagnostics/<paper_apply_report_dir>"
+        ),
+    )
+
+    assert safety["status"] == "FAIL"
+    assert "dry_run_command_has_unresolved_placeholder" in safety["blockers"]
+    assert "apply_command_has_unresolved_placeholder" in safety["blockers"]
+    assert safety["order_submission_allowed"] is False
+    assert safety["no_live_order_sent"] is True
+
+
+def test_paper_apply_command_safety_warns_on_nonstandard_report_scopes_without_blocking() -> None:
+    safety = watch._paper_apply_command_safety(
+        dry_run_command=(
+            ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+            "--quote-samples-per-tick 0 --refresh-market-data-before-run "
+            "--max-signal-age-minutes 15 --report-dir reports/dry"
+        ),
+        apply_command=(
+            ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
+            "--apply-paper-bridge --quote-samples-per-tick 0 --refresh-market-data-before-run "
+            "--max-signal-age-minutes 15 "
+            "--pre-apply-backup-dir reports/recovery "
+            "--report-dir reports/apply"
+        ),
+    )
+
+    assert safety["status"] == "PASS"
+    assert safety["blockers"] == []
+    assert "dry_run_report_dir_outside_recommended_diagnostics_scope" in safety["warnings"]
+    assert "apply_report_dir_outside_recommended_diagnostics_scope" in safety["warnings"]
+    assert "apply_pre_apply_backup_dir_outside_recommended_recovery_scope" in safety["warnings"]
+    assert safety["dry_run_report_dir"] == "reports/dry"
+    assert safety["apply_report_dir"] == "reports/apply"
+    assert safety["apply_pre_apply_backup_dir"] == "reports/recovery"
+    assert safety["order_submission_allowed"] is False
+    assert safety["no_live_order_sent"] is True
+
+
+def test_safe_next_action_preserves_execution_parity_credit_forecast_for_paper_apply() -> None:
+    plan = watch._safe_next_action_plan(
+        blocker_resolution_plan=[
+            {
+                "gate": "real_paper_lifecycle_rows",
+                "can_resolve_now": True,
+                "dry_run_command": "dry-run",
+                "command": "paper-apply",
+                "reason": "paper_bridge_apply_available_after_operator_review_and_verified_backup",
+                "execution_parity_will_credit_current_apply": True,
+                "execution_parity_events_needed": 20,
+                "execution_parity_events_needed_after_current_apply": 19,
+                "execution_parity_creditable_actions": ["remove"],
+                "post_apply_execution_parity_review_command": (
+                    ".venv/bin/python scripts/run_market_state_rotation_v6_paper_apply_parity_review.py "
+                    "--before-evidence-report reports/pre.json "
+                    "--after-evidence-report <post_apply_evidence_report> "
+                    "--report-dir reports/validation/diagnostics/<paper_apply_parity_review_report_dir> "
+                    "--write-report"
+                ),
+                "paper_apply_operator_packet": {
+                    "status": "ready_for_operator_review",
+                    "pre_apply_backup_plan": {"status": "ready_required_before_paper_apply"},
+                    "operator_review_deadline_utc": "2026-01-01T00:15:00+00:00",
+                    "deadline_policy": "apply_command_expires_at_operator_review_deadline_rerun_dry_run_after_deadline",
+                    "post_apply_execution_parity_review_command": (
+                        ".venv/bin/python scripts/run_market_state_rotation_v6_paper_apply_parity_review.py "
+                        "--before-evidence-report reports/pre.json "
+                        "--after-evidence-report <post_apply_evidence_report> "
+                        "--report-dir reports/validation/diagnostics/<paper_apply_parity_review_report_dir> "
+                        "--write-report"
+                    ),
+                    "no_live_order_sent": True,
+                },
+                "no_live_order_sent": True,
+            }
+        ],
+        runtime_progress={},
+        microstructure_watch={},
+        operator_handoff={"paper_apply_allowed_now": True},
+        target_hours=24.0,
+        generated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    action = plan["primary_action"]
+    assert action["action_type"] == "operator_review_paper_bridge_apply"
+    assert action["execution_parity_will_credit_current_apply"] is True
+    assert action["execution_parity_events_needed"] == 20
+    assert action["execution_parity_events_needed_after_current_apply"] == 19
+    assert action["execution_parity_creditable_actions"] == ["remove"]
+    assert action["paper_apply_operator_packet"]["status"] == "ready_for_operator_review"
+    assert action["paper_apply_operator_packet"]["pre_apply_backup_plan"]["status"] == (
+        "ready_required_before_paper_apply"
+    )
+    assert action["paper_apply_operator_packet"]["operator_review_deadline_utc"] == "2026-01-01T00:15:00+00:00"
+    assert "run_market_state_rotation_v6_paper_apply_parity_review.py" in action[
+        "post_apply_execution_parity_review_command"
+    ]
+    assert "<paper_apply_parity_review_report_dir>" not in action["post_apply_execution_parity_review_command"]
+    assert "--after-evidence-report <post_apply_evidence_report>" in action[
+        "post_apply_execution_parity_review_command"
+    ]
+    assert action["order_submission_allowed"] is False
+
+
+def test_safe_next_action_reruns_dry_run_when_paper_apply_review_deadline_expired() -> None:
+    plan = watch._safe_next_action_plan(
+        blocker_resolution_plan=[
+            {
+                "gate": "real_paper_lifecycle_rows",
+                "can_resolve_now": True,
+                "dry_run_command": "dry-run",
+                "command": "paper-apply",
+                "reason": "paper_bridge_apply_available_after_operator_review_and_verified_backup",
+                "paper_apply_operator_packet": {
+                    "status": "ready_for_operator_review",
+                    "pre_apply_backup_plan": {"status": "ready_required_before_paper_apply"},
+                    "operator_review_deadline_utc": "2026-01-01T00:15:00+00:00",
+                    "deadline_policy": "apply_command_expires_at_operator_review_deadline_rerun_dry_run_after_deadline",
+                    "rerun_command_after_deadline": "dry-run",
+                    "apply_command_allowed_now": "paper-apply",
+                    "no_live_order_sent": True,
+                },
+                "no_live_order_sent": True,
+            }
+        ],
+        runtime_progress={},
+        microstructure_watch={},
+        operator_handoff={"paper_apply_allowed_now": True},
+        target_hours=24.0,
+        generated_at=datetime(2026, 1, 1, 0, 16, tzinfo=UTC),
+    )
+
+    action = plan["primary_action"]
+    assert action["action_type"] == "rerun_paper_bridge_dry_run_after_operator_review_deadline"
+    assert action["command"] == "dry-run"
+    assert action["follow_up_command_when_reviewed"] is None
+    assert action["paper_apply_operator_packet"]["status"] == "operator_review_deadline_expired"
+    assert action["paper_apply_operator_packet"]["apply_command_allowed_now"] is None
+    assert action["paper_apply_operator_packet"]["operator_review_deadline_expired"] is True
+    assert action["order_submission_allowed"] is False
+    assert action["no_live_order_sent"] is True
+
+
+def test_safe_next_action_prioritizes_operator_command_safety_failure() -> None:
+    plan = watch._safe_next_action_plan(
+        blocker_resolution_plan=[
+            {
+                "gate": "current_fresh_signal",
+                "command": "monitor-signal",
+                "reason": "must_wait_for_realtime_v6_add_or_remove_signal_do_not_force_entry",
+                "next_monitor_after_utc": "2026-01-01T00:00:00+00:00",
+                "no_live_order_sent": True,
+            }
+        ],
+        runtime_progress={},
+        microstructure_watch={},
+        operator_handoff={
+            "paper_apply_allowed_now": False,
+            "paper_apply_operator_packet": {
+                "status": "operator_command_safety_preflight_failed",
+                "command_safety": {
+                    "status": "FAIL",
+                    "blockers": ["dry_run_command_has_unresolved_placeholder"],
+                    "warnings": ["dry_run_report_dir_outside_recommended_diagnostics_scope"],
+                    "dry_run_report_dir": "reports/<dry>",
+                    "apply_report_dir": "reports/validation/diagnostics/apply",
+                    "apply_pre_apply_backup_dir": "reports/db_recovery/market_state_rotation_v6_bridge_tick",
+                    "no_live_order_sent": True,
+                },
+                "no_live_order_sent": True,
+            },
+        },
+        target_hours=24.0,
+        generated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    action = plan["primary_action"]
+    assert action["action_type"] == "fix_paper_apply_operator_command_safety"
+    assert action["target_gate"] == "paper_apply_operator_command_safety"
+    assert action["can_run_now"] is True
+    assert action["requires_operator_review"] is True
+    assert action["command"] is None
+    assert action["blockers"] == ["dry_run_command_has_unresolved_placeholder"]
+    assert action["warnings"] == ["dry_run_report_dir_outside_recommended_diagnostics_scope"]
+    assert action["paper_apply_operator_packet"]["status"] == "operator_command_safety_preflight_failed"
+    assert action["order_submission_allowed"] is False
+    assert action["no_live_order_sent"] is True
+
+
+def test_safe_next_action_prioritizes_stale_pre_apply_evidence_report() -> None:
+    plan = watch._safe_next_action_plan(
+        blocker_resolution_plan=[
+            {
+                "gate": "real_paper_lifecycle_rows",
+                "can_resolve_now": False,
+                "monitor_command": "monitor-signal",
+                "fresh_signal": True,
+                "reason": "fresh_signal_seen_but_paper_bridge_apply_gate_not_available",
+                "no_live_order_sent": True,
+            }
+        ],
+        runtime_progress={},
+        microstructure_watch={},
+        operator_handoff={
+            "paper_apply_allowed_now": False,
+            "paper_apply_operator_packet": {
+                "status": "blocked_by_pre_apply_evidence_report",
+                "rerun_command_after_deadline": "rerun-dry-run",
+                "pre_apply_evidence_report_status": {
+                    "status": "pre_apply_evidence_report_stale_for_review_window",
+                    "block_apply": True,
+                    "blockers": ["pre_apply_evidence_report_stale_for_review_window"],
+                    "no_live_order_sent": True,
+                },
+                "no_live_order_sent": True,
+            },
+        },
+        target_hours=24.0,
+        generated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    action = plan["primary_action"]
+    assert action["action_type"] == "rerun_paper_bridge_dry_run_for_fresh_pre_apply_evidence_report"
+    assert action["target_gate"] == "pre_apply_evidence_report"
+    assert action["command"] == "rerun-dry-run"
+    assert action["blockers"] == ["pre_apply_evidence_report_stale_for_review_window"]
+    assert action["pre_apply_evidence_report_status"]["status"] == (
+        "pre_apply_evidence_report_stale_for_review_window"
+    )
+    assert action["follow_up_command_when_reviewed"] is None
+    assert action["order_submission_allowed"] is False
+    assert action["no_live_order_sent"] is True
+
+
+def test_operator_handoff_blocks_repeated_remove_apply_after_no_open_plan() -> None:
+    handoff = watch._operator_handoff(
+        latest={
+            "paper_bridge_apply_gate": {
+                "bridge_action": "remove",
+                "can_request_paper_apply_now": True,
+            },
+            "launch_readiness": {
+                "paper_bridge_handoff": {
+                    "apply_allowed_now": True,
+                    "status": "paper_apply_review_available",
+                },
+                "operator_commands": {
+                    "paper_bridge_dry_run": "dry-run",
+                    "paper_apply_only_after_fresh_signal": "paper-apply",
+                },
+                "next_blocker": {"gate": "real_paper_lifecycle_rows"},
+            },
+            "execution_parity_collection_plan": {
+                "estimated_future_paper_apply_events_needed": 20,
+                "estimated_events_needed_after_current_creditable_apply": 19,
+                "will_credit_current_apply_after_operator_review": True,
+                "currently_creditable_actions": ["remove"],
+            },
+        },
+        progress={"fresh_signal_seen": True},
+        runtime_progress={},
+        risk_caps={"configured": True},
+        microstructure_watch={},
+        recent_paper_apply={
+            "status": "available",
+            "generated_at": "2026-01-01T12:00:00+00:00",
+            "bridge_action": "remove",
+            "bridge_status": "no_open_v6_paper_plan",
+            "source_report": "reports/recent.json",
+            "no_live_order_sent": True,
+        },
+        recent_paper_review={
+            "status": "available",
+            "generated_at": "2026-01-01T12:05:00+00:00",
+            "bridge_action": "remove",
+            "bridge_status": "dry_run_actionable",
+            "source_report": "reports/review.json",
+            "no_live_order_sent": True,
+        },
+    )
+
+    assert handoff["paper_apply_allowed_now"] is False
+    assert handoff["status"] == "paper_bridge_remove_apply_no_open_plan_waiting_for_add"
+    assert handoff["paper_apply_retry_blocker"]["blocked"] is True
+    assert handoff["paper_apply_retry_blocker"]["next_monitor_after_utc"] == "2026-01-01T12:20:00+00:00"
+    assert handoff["recent_paper_review"]["source_report"] == "reports/review.json"
+    assert handoff["execution_parity_events_needed"] == 20
+    assert handoff["execution_parity_events_needed_after_current_apply"] == 19
+    assert handoff["execution_parity_creditable_actions"] == ["remove"]
+    assert handoff["order_submission_allowed"] is False
+
+
+def test_operator_handoff_blocks_paper_apply_after_failed_parity_review() -> None:
+    handoff = watch._operator_handoff(
+        latest={
+            "paper_bridge_apply_gate": {
+                "bridge_action": "remove",
+                "can_request_paper_apply_now": True,
+            },
+            "launch_readiness": {
+                "paper_bridge_handoff": {
+                    "apply_allowed_now": True,
+                    "status": "paper_apply_review_available",
+                },
+                "operator_commands": {
+                    "paper_bridge_dry_run": "dry-run",
+                    "paper_apply_only_after_fresh_signal": "paper-apply",
+                },
+                "next_blocker": {"gate": "real_paper_lifecycle_rows"},
+            },
+            "execution_parity_collection_plan": {
+                "estimated_future_paper_apply_events_needed": 20,
+                "estimated_events_needed_after_current_creditable_apply": 19,
+                "will_credit_current_apply_after_operator_review": True,
+                "currently_creditable_actions": ["remove"],
+            },
+        },
+        progress={"fresh_signal_seen": True},
+        runtime_progress={},
+        risk_caps={"configured": True},
+        microstructure_watch={},
+        recent_paper_apply_parity_review={
+            "status": "paper_apply_parity_credit_missing",
+            "source_report": "reports/parity_review.json",
+            "blocks_next_paper_apply": True,
+            "blockers": ["expected_execution_parity_credit_missing"],
+            "next_actions": ["inspect_paper_bridge_apply_result_and_lifecycle_export"],
+            "recommended_command": (
+                ".venv/bin/python scripts/run_market_state_rotation_v6_paper_apply_parity_review.py "
+                "--before-evidence-report reports/pre.json "
+                "--after-evidence-report reports/apply.json "
+                "--report-dir reports/validation/diagnostics/<paper_apply_parity_review_report_dir> "
+                "--write-report"
+            ),
+            "no_live_order_sent": True,
+        },
+    )
+
+    assert handoff["paper_apply_allowed_now"] is False
+    assert handoff["status"] == "paper_apply_parity_review_blocking_next_apply"
+    assert handoff["paper_apply_parity_review_blocker"]["blocked"] is True
+    assert handoff["paper_apply_parity_review_blocker"]["source_report"] == "reports/parity_review.json"
+    assert handoff["paper_apply_parity_review_blocker"]["blockers"] == ["expected_execution_parity_credit_missing"]
+    assert "--after-evidence-report reports/apply.json" in handoff["paper_apply_parity_review_blocker"][
+        "recommended_command"
+    ]
+    assert handoff["order_submission_allowed"] is False
+
+
+def test_safe_next_action_prioritizes_failed_paper_apply_parity_review() -> None:
+    plan = watch._safe_next_action_plan(
+        blocker_resolution_plan=[
+            {
+                "gate": "real_paper_lifecycle_rows",
+                "fresh_signal": True,
+                "paper_apply_parity_review_blocked": True,
+                "paper_apply_parity_review_blocker": {
+                    "blocked": True,
+                    "status": "paper_apply_parity_credit_missing",
+                    "source_report": "reports/parity_review.json",
+                    "blockers": ["expected_execution_parity_credit_missing"],
+                    "next_actions": ["inspect_paper_bridge_apply_result_and_lifecycle_export"],
+                    "recommended_command": (
+                        ".venv/bin/python scripts/run_market_state_rotation_v6_paper_apply_parity_review.py "
+                        "--before-evidence-report reports/pre.json "
+                        "--after-evidence-report reports/apply.json "
+                        "--report-dir reports/validation/diagnostics/<paper_apply_parity_review_report_dir> "
+                        "--write-report"
+                    ),
+                },
+                "reason": "recent_paper_apply_parity_review_blocks_next_apply",
+            },
+            {
+                "gate": "shadow_runtime_24h_observed",
+                "reason": "requires_calendar_runtime_observation_not_backtest_substitution",
+            },
+        ],
+        runtime_progress={"remaining_hours": 16.0, "progress_pct": 33.0},
+        microstructure_watch={},
+        operator_handoff={"paper_apply_allowed_now": False},
+        target_hours=24.0,
+        generated_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+    )
+
+    action = plan["primary_action"]
+    assert action["action_type"] == "resolve_paper_apply_parity_review_blocker"
+    assert action["can_run_now"] is True
+    assert action["priority"] == 10
+    assert action["source_report"] == "reports/parity_review.json"
+    assert action["blockers"] == ["expected_execution_parity_credit_missing"]
+    assert action["next_actions"] == ["inspect_paper_bridge_apply_result_and_lifecycle_export"]
+    assert "run_market_state_rotation_v6_paper_apply_parity_review.py" in action["command"]
+    assert "--after-evidence-report reports/apply.json" in action["command"]
+    assert "<paper_apply_parity_review_report_dir>" not in action["command"]
+    assert action["order_submission_allowed"] is False
+
+
+def test_recent_paper_apply_parity_review_detects_blocking_report(tmp_path) -> None:
+    report_dir = tmp_path / "evidence" / "market_state_rotation_v6_paper_apply_parity_review_latest"
+    report_dir.mkdir(parents=True)
+    generated_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    (report_dir / "market_state_rotation_v6_paper_apply_parity_review.json").write_text(
+        json.dumps(
+            {
+                "generated_at": generated_at.isoformat(),
+                "status": "paper_apply_parity_credit_missing",
+                "no_live_order_sent": True,
+                "expected_credit_from_before_forecast": 1,
+                "actual_journal_row_delta": 0,
+                "new_journal_row_count": 0,
+                "credit_confirmed": False,
+                "blockers": ["expected_execution_parity_credit_missing"],
+                "next_actions": ["inspect_paper_bridge_apply_result_and_lifecycle_export"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    review = watch._recent_paper_apply_parity_review(
+        evidence_root=tmp_path / "evidence",
+        current_at=generated_at + timedelta(minutes=5),
+    )
+
+    assert review["status"] == "paper_apply_parity_credit_missing"
+    assert review["blocks_next_paper_apply"] is True
+    assert review["source_report"].endswith("market_state_rotation_v6_paper_apply_parity_review.json")
+    assert review["blockers"] == ["expected_execution_parity_credit_missing"]
+    assert review["next_actions"] == ["inspect_paper_bridge_apply_result_and_lifecycle_export"]
+    assert review["no_live_order_sent"] is True
+
+
+def test_recent_meta_router_promotion_gate_summarizes_latest_report(tmp_path) -> None:
+    report_dir = tmp_path / "evidence" / "market_state_rotation_v6_meta_router_promotion_gate"
+    report_dir.mkdir(parents=True)
+    generated_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    (report_dir / "market_state_rotation_v6_meta_router_promotion_gate.json").write_text(
+        json.dumps(
+            {
+                "generated_at": generated_at.isoformat(),
+                "status": "meta_router_promotion_gate_complete",
+                "no_live_order_sent": True,
+                "promotion_decision": "paper_ready_pending_execution_parity",
+                "decision_reasons": ["formal_wfo_passed", "paper_readiness_passed"],
+                "next_actions": ["collect_paper_execution_parity_rows_before_tiny_canary_or_full_live"],
+                "next_blocker": "live_or_paper_execution_parity_available",
+                "candidate": {
+                    "recipe_id": "one_way_trim_tax_light_formal",
+                    "decision": "promotion_candidate_after_formal_wfo",
+                    "compounded_return_pct": 25857.0416,
+                    "max_drawdown_pct": 14.9814,
+                    "avg_cost_drag_pct": 7.5657,
+                    "trade_like_events": 290,
+                },
+                "readiness": {
+                    "stage": "paper_only",
+                    "ready_for_paper": True,
+                    "ready_for_tiny_canary": False,
+                    "ready_for_full_live": False,
+                    "blockers": ["live_or_paper_execution_parity_available"],
+                    "warnings": ["role_add_concentration"],
+                    "execution_parity": {"available": True, "passed": False},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = watch._recent_meta_router_promotion_gate(
+        evidence_root=tmp_path / "evidence",
+        current_at=generated_at + timedelta(minutes=5),
+    )
+
+    assert report["status"] == "meta_router_promotion_gate_complete"
+    assert report["stale"] is False
+    assert report["promotion_decision"] == "paper_ready_pending_execution_parity"
+    assert report["next_blocker"] == "live_or_paper_execution_parity_available"
+    assert report["candidate"]["recipe_id"] == "one_way_trim_tax_light_formal"
+    assert report["readiness"]["ready_for_paper"] is True
+    assert report["readiness"]["ready_for_tiny_canary"] is False
+    assert report["blocks_live_promotion"] is True
+    assert report["order_submission_allowed"] is False
+    assert report["no_live_order_sent"] is True
+
+
+def test_recent_meta_router_promotion_gate_marks_stale_report(tmp_path) -> None:
+    report_dir = tmp_path / "evidence" / "market_state_rotation_v6_meta_router_promotion_gate"
+    report_dir.mkdir(parents=True)
+    generated_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    (report_dir / "market_state_rotation_v6_meta_router_promotion_gate.json").write_text(
+        json.dumps(
+            {
+                "generated_at": generated_at.isoformat(),
+                "status": "meta_router_promotion_gate_complete",
+                "no_live_order_sent": True,
+                "promotion_decision": "tiny_canary_gate_passed_manual_approval_required",
+                "candidate": {"recipe_id": "candidate"},
+                "readiness": {"ready_for_tiny_canary": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = watch._recent_meta_router_promotion_gate(
+        evidence_root=tmp_path / "evidence",
+        current_at=generated_at + timedelta(minutes=61),
+        max_age_minutes=60,
+    )
+
+    assert report["status"] == "stale"
+    assert report["stale"] is True
+    assert report["blocks_live_promotion"] is True
+    assert report["no_live_order_sent"] is True
+
+
+def test_safe_next_action_refreshes_stale_meta_router_promotion_gate() -> None:
+    plan = watch._safe_next_action_plan(
+        blocker_resolution_plan=[],
+        runtime_progress={},
+        microstructure_watch={},
+        operator_handoff={"paper_apply_allowed_now": False},
+        meta_router_promotion_gate={
+            "status": "stale",
+            "stale": True,
+            "source_report": "reports/promotion.json",
+            "promotion_decision": "paper_ready_pending_execution_parity",
+            "no_live_order_sent": True,
+        },
+        target_hours=24.0,
+        generated_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+    )
+
+    action = plan["primary_action"]
+    assert action["action_type"] == "refresh_meta_router_promotion_gate"
+    assert action["can_run_now"] is True
+    assert action["requires_operator_review"] is False
+    assert "run_market_state_rotation_v6_meta_router_promotion_gate.py" in action["command"]
+    assert action["promotion_gate_stale"] is True
+    assert action["promotion_gate_source"] == "reports/promotion.json"
+    assert action["order_submission_allowed"] is False
+    assert action["no_live_order_sent"] is True
+
+
+def test_safe_next_action_does_not_refresh_current_meta_router_promotion_gate() -> None:
+    plan = watch._safe_next_action_plan(
+        blocker_resolution_plan=[],
+        runtime_progress={},
+        microstructure_watch={},
+        operator_handoff={"paper_apply_allowed_now": False},
+        meta_router_promotion_gate={
+            "status": "meta_router_promotion_gate_complete",
+            "stale": False,
+            "promotion_decision": "paper_ready_pending_execution_parity",
+            "no_live_order_sent": True,
+        },
+        target_hours=24.0,
+        generated_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+    )
+
+    assert plan["primary_action"] is None
+    assert plan["action_count"] == 0
+    assert plan["status"] == "no_blocking_safe_action"
+
+
+def test_execution_parity_eta_plan_uses_signal_cadence_without_substitution() -> None:
+    plan = watch._execution_parity_eta_plan(
+        execution_parity_plan={
+            "required_samples": 20,
+            "eligible_journal_rows": 0,
+            "missing_samples": 20,
+            "estimated_future_paper_apply_events_needed": 20,
+            "estimated_events_needed_after_current_creditable_apply": 19,
+            "sample_credit_per_completed_paper_apply_event": 1,
+            "will_credit_current_apply_after_operator_review": True,
+            "currently_creditable_actions": ["remove"],
+            "next_creditable_event_types": ["add", "remove"],
+            "fresh_signal": True,
+            "paper_apply_available_now": True,
+            "non_substitutable": True,
+            "backtest_substitution_allowed": False,
+        },
+        signal_wait_plan={
+            "expected_days_per_add": 2.5,
+            "expected_add_interval_hours": 60.0,
+            "median_add_gap_hours": 48.0,
+            "latest_add_age_to_median_gap": 0.25,
+            "cadence_lag_level": "within_recent_add_cadence",
+        },
+        generated_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+    )
+
+    assert plan["status"] == "eta_from_add_only_signal_cadence"
+    assert plan["selected_eta_scenario"] == "conservative_add_only"
+    assert plan["selected_eta_reason"] == "fallback_to_add_only_cadence"
+    assert plan["cadence_source"] == "signal_wait_plan.expected_days_per_add"
+    assert plan["estimated_days_at_current_cadence"] == 50.0
+    assert plan["estimated_completion_utc"] == "2026-02-20T12:00:00+00:00"
+    assert plan["eta_scenarios"]["conservative_add_only"]["estimated_days"] == 50.0
+    assert plan["eta_scenarios"]["all_creditable_events"]["available"] is False
+    assert plan["estimated_events_needed_after_current_creditable_apply"] == 19
+    assert plan["will_credit_current_apply_after_operator_review"] is True
+    assert plan["currently_creditable_actions"] == ["remove"]
+    assert plan["non_substitutable"] is True
+    assert plan["backtest_substitution_allowed"] is False
+    assert "not by forced entries or backtest rows" in plan["caveat"]
+    assert plan["order_submission_allowed"] is False
+    assert plan["no_live_order_sent"] is True
+
+
+def test_execution_parity_eta_plan_uses_all_event_cadence_when_add_remove_credit() -> None:
+    plan = watch._execution_parity_eta_plan(
+        execution_parity_plan={
+            "required_samples": 20,
+            "eligible_journal_rows": 0,
+            "missing_samples": 20,
+            "estimated_future_paper_apply_events_needed": 20,
+            "estimated_events_needed_after_current_creditable_apply": 20,
+            "sample_credit_per_completed_paper_apply_event": 1,
+            "next_creditable_event_types": ["add", "remove"],
+            "non_substitutable": True,
+            "backtest_substitution_allowed": False,
+        },
+        signal_wait_plan={
+            "expected_days_per_event": 1.0,
+            "expected_event_interval_hours": 24.0,
+            "median_gap_hours": 18.0,
+            "expected_days_per_add": 2.5,
+            "expected_add_interval_hours": 60.0,
+            "median_add_gap_hours": 48.0,
+            "latest_age_to_median_gap": 0.5,
+            "latest_add_age_to_median_gap": 0.25,
+            "event_wait_state": "within_recent_signal_gap_distribution",
+            "cadence_lag_level": "within_recent_add_cadence",
+            "bridge_event_count": 80,
+            "add_event_count": 32,
+            "remove_event_count": 48,
+        },
+        generated_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+    )
+
+    assert plan["status"] == "eta_from_creditable_event_cadence"
+    assert plan["selected_eta_scenario"] == "all_creditable_events"
+    assert plan["selected_eta_reason"] == "accepted_actions_include_add_and_remove"
+    assert plan["cadence_source"] == "signal_wait_plan.expected_days_per_event"
+    assert plan["estimated_days_at_current_cadence"] == 20.0
+    assert plan["estimated_completion_utc"] == "2026-01-21T12:00:00+00:00"
+    assert plan["eta_scenarios"]["all_creditable_events"]["estimated_days"] == 20.0
+    assert plan["eta_scenarios"]["conservative_add_only"]["estimated_days"] == 50.0
+    assert plan["bridge_event_count"] == 80
+    assert plan["remove_event_count"] == 48
+    assert plan["non_substitutable"] is True
+    assert plan["order_submission_allowed"] is False
+    assert plan["no_live_order_sent"] is True
+
+
+def test_signal_monitor_cadence_alignment_passes_inside_fresh_window() -> None:
+    current = datetime(2026, 1, 1, 12, 15, tzinfo=UTC)
+    alignment = watch._signal_monitor_cadence_alignment(
+        previous_completed_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        current_completed_at=current,
+        signal_wait_plan={
+            "recommended_monitor_interval_minutes": 15,
+            "signal_freshness_capture_window_minutes": 15.0,
+            "monitor_interval_capped_by_signal_freshness": True,
+            "monitor_signal_age_alignment": "capped_to_fresh_signal_window",
+            "next_monitor_after_utc": current.isoformat(),
+        },
+    )
+
+    assert alignment["status"] == "aligned"
+    assert alignment["gap_minutes"] == 15.0
+    assert alignment["warning"] is None
+    assert alignment["recommended_monitor_interval_minutes"] == 15.0
+    assert alignment["monitor_interval_capped_by_signal_freshness"] is True
+    assert alignment["order_submission_allowed"] is False
+    assert alignment["no_live_order_sent"] is True
+
+
+def test_signal_monitor_cadence_alignment_warns_after_fresh_window_gap() -> None:
+    alignment = watch._signal_monitor_cadence_alignment(
+        previous_completed_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        current_completed_at=datetime(2026, 1, 1, 12, 20, 1, tzinfo=UTC),
+        signal_wait_plan={
+            "recommended_monitor_interval_minutes": 15,
+            "signal_freshness_capture_window_minutes": 15.0,
+            "monitor_interval_capped_by_signal_freshness": True,
+            "monitor_signal_age_alignment": "capped_to_fresh_signal_window",
+        },
+    )
+
+    assert alignment["status"] == "monitor_gap_exceeded"
+    assert alignment["gap_minutes"] == 20.017
+    assert alignment["warning"] == "signal_monitor_gap_exceeded_fresh_capture_cadence"
+    assert alignment["warning_threshold_minutes"] == 18.0
+    assert alignment["order_submission_allowed"] is False
+    assert alignment["no_live_order_sent"] is True
+
+
+def test_paper_apply_parity_review_state_blocks_when_missing_after_recent_apply() -> None:
+    state = watch._paper_apply_parity_review_state(
+        recent_paper_apply={
+            "status": "available",
+            "generated_at": "2026-01-01T12:05:00+00:00",
+            "source_report": "reports/apply.json",
+        },
+        recent_paper_review={
+            "status": "available",
+            "generated_at": "2026-01-01T12:00:00+00:00",
+            "source_report": "reports/pre.json",
+        },
+        recent_parity_review={"status": "unavailable"},
+    )
+
+    assert state["status"] == "missing_after_recent_paper_apply"
+    assert state["blocks_next_paper_apply"] is True
+    assert state["source_report"] == "reports/apply.json"
+    assert state["blockers"] == ["post_apply_parity_review_missing"]
+    assert state["next_actions"] == ["run_post_apply_parity_review_before_next_paper_apply"]
+    assert "--before-evidence-report reports/pre.json" in state["recommended_command"]
+    assert "--after-evidence-report reports/apply.json" in state["recommended_command"]
+    assert state["no_live_order_sent"] is True
+
+
+def test_paper_apply_parity_review_state_blocks_when_stale_after_recent_apply() -> None:
+    state = watch._paper_apply_parity_review_state(
+        recent_paper_apply={
+            "status": "available",
+            "generated_at": "2026-01-01T12:10:00+00:00",
+            "source_report": "reports/apply_latest.json",
+        },
+        recent_paper_review={
+            "status": "available",
+            "generated_at": "2026-01-01T12:00:00+00:00",
+            "source_report": "reports/pre_latest.json",
+        },
+        recent_parity_review={
+            "status": "paper_apply_parity_credit_confirmed",
+            "generated_at": "2026-01-01T12:06:00+00:00",
+            "source_report": "reports/parity_old.json",
+            "blocks_next_paper_apply": False,
+            "no_live_order_sent": True,
+        },
+    )
+
+    assert state["status"] == "stale_after_recent_paper_apply"
+    assert state["blocks_next_paper_apply"] is True
+    assert state["recent_parity_review_report"] == "reports/parity_old.json"
+    assert state["blockers"] == ["post_apply_parity_review_stale"]
+    assert state["next_actions"] == ["rerun_post_apply_parity_review_for_latest_paper_apply"]
+    assert "--after-evidence-report reports/apply_latest.json" in state["recommended_command"]
+    assert state["no_live_order_sent"] is True
+
+
+def test_blocker_plan_suppresses_repeated_remove_paper_apply_after_no_open_plan() -> None:
+    plan = watch._blocker_resolution_plan(
+        latest={
+            "paper_bridge_apply_gate": {
+                "bridge_action": "remove",
+                "fresh_signal": True,
+                "can_request_paper_apply_now": True,
+            },
             "collection_progress": {
                 "paper_fill_rows": 0,
             },
@@ -286,22 +1502,67 @@ def test_blocker_plan_surfaces_paper_apply_command_only_when_gate_allows() -> No
         risk_caps={},
         microstructure_watch={},
         operator_handoff={
-            "paper_apply_allowed_now": True,
+            "paper_apply_allowed_now": False,
             "paper_handoff_status": "paper_apply_review_available",
             "paper_dry_run_command": "dry-run",
             "paper_apply_command": "paper-apply",
+            "paper_apply_retry_blocker": {
+                "blocked": True,
+                "reason": "recent_remove_paper_apply_found_no_open_v6_paper_plan",
+                "source_report": "reports/recent.json",
+                "next_monitor_after_utc": "2026-01-01T12:15:00+00:00",
+            },
         },
     )
 
     item = plan[0]
     assert item["gate"] == "real_paper_lifecycle_rows"
-    assert item["can_resolve_now"] is True
-    assert item["requires_operator_review"] is True
-    assert item["command"] == "paper-apply"
-    assert item["reason"] == "paper_bridge_apply_available_after_operator_review_and_verified_backup"
+    assert item["can_resolve_now"] is False
+    assert item["command"] is None
+    assert item["monitor_command"] == "dry-run"
+    assert item["next_monitor_after_utc"] == "2026-01-01T12:15:00+00:00"
+    assert item["paper_apply_retry_blocked"] is True
+    assert item["paper_apply_retry_blocker"]["source_report"] == "reports/recent.json"
+    assert item["reason"] == "recent_remove_paper_apply_found_no_open_v6_paper_plan"
     assert item["fresh_signal"] is True
-    assert item["can_request_paper_apply_now"] is True
     assert item["order_submission_allowed"] is False
+
+
+def test_safe_next_action_schedules_next_add_signal_after_remove_apply_no_open_plan() -> None:
+    plan = watch._safe_next_action_plan(
+        blocker_resolution_plan=[
+            {
+                "gate": "real_paper_lifecycle_rows",
+                "fresh_signal": True,
+                "monitor_command": "dry-run-monitor",
+                "next_monitor_after_utc": "2026-01-01T12:15:00+00:00",
+                "paper_apply_retry_blocked": True,
+                "paper_apply_retry_blocker": {
+                    "blocked": True,
+                    "reason": "recent_remove_paper_apply_found_no_open_v6_paper_plan",
+                },
+                "reason": "recent_remove_paper_apply_found_no_open_v6_paper_plan",
+            },
+            {
+                "gate": "shadow_runtime_24h_observed",
+                "reason": "requires_calendar_runtime_observation_not_backtest_substitution",
+            },
+        ],
+        runtime_progress={"remaining_hours": 16.0, "progress_pct": 33.0},
+        microstructure_watch={},
+        operator_handoff={"paper_apply_allowed_now": False},
+        target_hours=24.0,
+        generated_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+    )
+
+    action = next(item for item in plan["actions"] if item["action_type"] == "paper_bridge_wait_for_next_add_signal")
+    assert action["can_run_now"] is False
+    assert action["execute_after_utc"] == "2026-01-01T12:15:00+00:00"
+    assert action["command"] == "dry-run-monitor"
+    assert action["priority"] == 20
+    assert action["paper_apply_retry_blocker"]["blocked"] is True
+    assert plan["next_scheduled_action"]["action_type"] == "paper_bridge_wait_for_next_add_signal"
+    assert plan["no_live_order_sent"] is True
 
 
 def test_safe_next_action_prioritizes_current_microstructure_capture() -> None:
@@ -441,6 +1702,50 @@ def test_safe_next_action_waits_for_next_quote_coverage_when_calendar_day_is_ear
     assert action["no_live_order_sent"] is True
 
 
+def test_safe_next_action_waits_for_hour_of_day_balance_before_next_calendar_day() -> None:
+    plan = watch._safe_next_action_plan(
+        blocker_resolution_plan=[
+            {
+                "gate": "real_microstructure_execution_evidence",
+                "can_resolve_now": False,
+                "reason": "requires_new_calendar_days_or_missing_utc_hour_windows",
+                "coverage_plan": {
+                    "next_quote_coverage_kind": "missing_hour_of_day_balance_bucket",
+                    "next_quote_coverage_at": "2026-06-06T13:00:00+00:00",
+                    "next_quote_coverage_kst_at": "2026-06-06T22:00:00+09:00",
+                    "next_calendar_day_at": "2026-06-07T00:00:00+00:00",
+                    "next_missing_utc_at": "2026-06-06T13:00:00+00:00",
+                    "next_missing_kst_at": "2026-06-06T22:00:00+09:00",
+                    "next_missing_utc_hour": "13",
+                    "wait_minutes": 59.0,
+                    "remaining_distinct_hours": 0,
+                    "remaining_distinct_hour_bucket_count": 0,
+                    "remaining_hour_of_day_bucket_count": 1,
+                    "remaining_calendar_days": 27,
+                },
+            },
+            {
+                "gate": "shadow_runtime_24h_observed",
+                "reason": "requires_calendar_runtime_observation_not_backtest_substitution",
+            },
+        ],
+        runtime_progress={"remaining_hours": 2.0, "progress_pct": 92.0},
+        microstructure_watch={},
+        operator_handoff={"paper_apply_allowed_now": False},
+        target_hours=24.0,
+        generated_at=datetime(2026, 6, 6, 12, 1, tzinfo=UTC),
+    )
+
+    action = plan["primary_action"]
+    assert action["action_type"] == "wait_for_next_microstructure_quote_window"
+    assert action["next_quote_coverage_kind"] == "missing_hour_of_day_balance_bucket"
+    assert action["execute_after_utc"] == "2026-06-06T13:00:00+00:00"
+    assert action["remaining_distinct_hour_bucket_count"] == 0
+    assert action["remaining_hour_of_day_bucket_count"] == 1
+    assert "--sleep-until-next-quote-coverage-window" in action["command"]
+    assert action["no_live_order_sent"] is True
+
+
 def test_safe_next_action_waits_until_signal_monitor_cadence() -> None:
     plan = watch._safe_next_action_plan(
         blocker_resolution_plan=[
@@ -520,13 +1825,20 @@ def test_safe_next_action_prioritizes_earlier_monitor_before_startable_quote_win
     assert plan["status"] == "waiting_for_earlier_scheduled_action_before_quote_window_wait"
     assert plan["primary_action"]["action_type"] == "monitor_fresh_signal"
     assert plan["primary_action"]["execute_after_utc"] == "2026-01-01T12:15:00+00:00"
-    assert plan["next_startable_wait_action"]["action_type"] == "wait_for_next_microstructure_quote_window"
-    assert plan["next_startable_wait_action"]["execute_after_utc"] == "2026-01-01T12:30:00+00:00"
-    assert "--max-pre-run-wait-seconds 10920" in plan["next_startable_wait_action"]["command"]
+    assert plan["next_startable_wait_action"] is None
+    assert plan["next_deferred_wait_action"]["action_type"] == "wait_for_next_microstructure_quote_window"
+    assert plan["next_deferred_wait_action"]["execute_after_utc"] == "2026-01-01T12:30:00+00:00"
+    assert plan["next_deferred_wait_action"]["can_start_now"] is False
+    assert plan["next_deferred_wait_action"]["start_recommended_now"] is False
+    assert plan["next_deferred_wait_action"]["deferred_by_earlier_scheduled_action"] is True
+    assert plan["next_deferred_wait_action"]["deferred_until_after_action_type"] == "monitor_fresh_signal"
+    assert plan["next_deferred_wait_action"]["deferred_until_after_utc"] == "2026-01-01T12:15:00+00:00"
+    assert "--max-pre-run-wait-seconds 10920" in plan["next_deferred_wait_action"]["command"]
     assert plan["pre_wait_scheduled_action_count"] == 1
     assert plan["pre_wait_scheduled_actions"][0]["action_type"] == "monitor_fresh_signal"
     assert any(item["action_type"] == "paper_bridge_wait_for_fresh_signal" for item in plan["actions"])
     assert plan["coordination_warnings"] == []
+    assert plan["startable_action_count"] == 1
     assert any(item["action_type"] == "continue_no_live_shadow_watch" for item in plan["actions"])
     assert plan["no_live_order_sent"] is True
 
@@ -668,6 +1980,191 @@ def test_microstructure_coverage_plan_prefers_next_utc_day_before_later_missing_
     assert plan["next_missing_utc_at"] == "2026-01-02T03:00:00+00:00"
     assert plan["next_quote_coverage_wait_minutes"] == 5.0
     assert plan["recommended_action"] == "wait_until_next_quote_coverage_window"
+
+
+def test_microstructure_coverage_plan_separates_distinct_hour_gate_from_hour_of_day_balance() -> None:
+    generated_at = datetime(2026, 1, 1, 10, 50, tzinfo=UTC)
+
+    plan = watch._microstructure_coverage_plan(
+        coverage={
+            "utc_hour_of_day_covered_count": 22,
+            "utc_hour_of_day_missing": ["12", "13"],
+            "latest_sample_age_hours": 4.8,
+        },
+        latest_collection={
+            "quote_observed": 362,
+            "quote_required": 300,
+            "quote_calendar_days": 3,
+            "quote_min_calendar_days": 30,
+            "quote_distinct_hours": 23,
+            "quote_min_distinct_hours": 24,
+        },
+        microstructure_watch={
+            "calendar_day_count": 3,
+            "min_calendar_days": 30,
+            "calendar_days": ["2026-01-01"],
+            "distinct_hour_count": 23,
+            "min_distinct_hours": 24,
+            "eligible_row_count": 362,
+            "required_quote_samples": 300,
+        },
+        generated_at=generated_at,
+        quote_capture_command="capture",
+    )
+
+    assert plan["remaining_distinct_hours"] == 1
+    assert plan["remaining_distinct_hour_bucket_count"] == 1
+    assert plan["remaining_missing_utc_hour_count"] == 2
+    assert plan["remaining_hour_of_day_bucket_count"] == 2
+    assert plan["hour_of_day_covered_count"] == 22
+    assert plan["next_missing_utc_hour"] == "12"
+    assert "distinct_hour_bucket_count counts unique UTC hour timestamps" in plan["coverage_accounting_note"]
+
+
+def test_microstructure_coverage_plan_estimates_calendar_completion_after_covered_current_day() -> None:
+    generated_at = datetime(2026, 6, 6, 10, 50, tzinfo=UTC)
+
+    plan = watch._microstructure_coverage_plan(
+        coverage={
+            "utc_hour_of_day_covered_count": 22,
+            "utc_hour_of_day_missing": ["12", "13"],
+        },
+        latest_collection={
+            "quote_observed": 362,
+            "quote_required": 300,
+            "quote_calendar_days": 3,
+            "quote_min_calendar_days": 30,
+            "quote_distinct_hours": 23,
+            "quote_min_distinct_hours": 24,
+        },
+        microstructure_watch={
+            "calendar_day_count": 3,
+            "min_calendar_days": 30,
+            "calendar_days": ["2026-06-04", "2026-06-05", "2026-06-06"],
+            "distinct_hour_count": 23,
+            "min_distinct_hours": 24,
+            "eligible_row_count": 362,
+            "required_quote_samples": 300,
+        },
+        generated_at=generated_at,
+        quote_capture_command="capture",
+    )
+
+    assert plan["remaining_calendar_days"] == 27
+    assert plan["next_calendar_day_at"] == "2026-06-07T00:00:00+00:00"
+    assert plan["earliest_calendar_completion_utc"] == "2026-07-03T00:00:00+00:00"
+    assert plan["earliest_calendar_completion_kst"] == "2026-07-03T09:00:00+09:00"
+    assert plan["calendar_completion_policy"] == "one_new_utc_calendar_date_per_day_for_actual_launch_gate"
+
+
+def test_microstructure_coverage_plan_estimates_calendar_completion_when_current_day_can_count_now() -> None:
+    generated_at = datetime(2026, 6, 6, 10, 50, tzinfo=UTC)
+
+    plan = watch._microstructure_coverage_plan(
+        coverage={
+            "utc_hour_of_day_covered_count": 22,
+            "utc_hour_of_day_missing": ["12", "13"],
+        },
+        latest_collection={
+            "quote_observed": 362,
+            "quote_required": 300,
+            "quote_calendar_days": 3,
+            "quote_min_calendar_days": 30,
+            "quote_distinct_hours": 23,
+            "quote_min_distinct_hours": 24,
+        },
+        microstructure_watch={
+            "calendar_day_count": 3,
+            "min_calendar_days": 30,
+            "calendar_days": ["2026-06-03", "2026-06-04", "2026-06-05"],
+            "distinct_hour_count": 23,
+            "min_distinct_hours": 24,
+            "eligible_row_count": 362,
+            "required_quote_samples": 300,
+        },
+        generated_at=generated_at,
+        quote_capture_command="capture",
+    )
+
+    assert plan["current_utc_date_missing"] is True
+    assert plan["next_calendar_day_at"] == "2026-06-06T10:50:00+00:00"
+    assert plan["earliest_calendar_completion_utc"] == "2026-07-02T00:00:00+00:00"
+    assert plan["earliest_calendar_completion_kst"] == "2026-07-02T09:00:00+09:00"
+
+
+def test_microstructure_coverage_plan_schedules_hour_of_day_balance_after_distinct_gate_passes() -> None:
+    generated_at = datetime(2026, 6, 6, 12, 1, tzinfo=UTC)
+
+    plan = watch._microstructure_coverage_plan(
+        coverage={
+            "utc_hour_of_day_covered_count": 23,
+            "utc_hour_of_day_missing": ["13"],
+        },
+        latest_collection={
+            "quote_observed": 366,
+            "quote_required": 300,
+            "quote_calendar_days": 3,
+            "quote_min_calendar_days": 30,
+            "quote_distinct_hours": 24,
+            "quote_min_distinct_hours": 24,
+        },
+        microstructure_watch={
+            "calendar_day_count": 3,
+            "min_calendar_days": 30,
+            "calendar_days": ["2026-06-04", "2026-06-05", "2026-06-06"],
+            "distinct_hour_count": 24,
+            "min_distinct_hours": 24,
+            "eligible_row_count": 366,
+            "required_quote_samples": 300,
+        },
+        generated_at=generated_at,
+        quote_capture_command="capture",
+    )
+
+    assert plan["remaining_distinct_hour_bucket_count"] == 0
+    assert plan["remaining_hour_of_day_bucket_count"] == 1
+    assert plan["hour_of_day_balance_needed"] is True
+    assert plan["next_quote_coverage_kind"] == "missing_hour_of_day_balance_bucket"
+    assert plan["next_quote_coverage_at"] == "2026-06-06T13:00:00+00:00"
+    assert plan["next_missing_utc_hour"] == "13"
+    assert plan["recommended_action"] == "wait_until_next_quote_coverage_window"
+
+
+def test_microstructure_coverage_plan_collects_current_hour_of_day_balance_now() -> None:
+    generated_at = datetime(2026, 6, 6, 13, 5, tzinfo=UTC)
+
+    plan = watch._microstructure_coverage_plan(
+        coverage={
+            "utc_hour_of_day_covered_count": 23,
+            "utc_hour_of_day_missing": ["13"],
+        },
+        latest_collection={
+            "quote_observed": 366,
+            "quote_required": 300,
+            "quote_calendar_days": 3,
+            "quote_min_calendar_days": 30,
+            "quote_distinct_hours": 24,
+            "quote_min_distinct_hours": 24,
+        },
+        microstructure_watch={
+            "calendar_day_count": 3,
+            "min_calendar_days": 30,
+            "calendar_days": ["2026-06-04", "2026-06-05", "2026-06-06"],
+            "distinct_hour_count": 24,
+            "min_distinct_hours": 24,
+            "eligible_row_count": 366,
+            "required_quote_samples": 300,
+        },
+        generated_at=generated_at,
+        quote_capture_command="capture",
+    )
+
+    assert plan["status"] == "current_hour_of_day_balance_open"
+    assert plan["current_utc_hour_missing"] is True
+    assert plan["remaining_distinct_hour_bucket_count"] == 0
+    assert plan["remaining_hour_of_day_bucket_count"] == 1
+    assert plan["can_collect_now"] is True
+    assert plan["recommended_action"] == "collect_current_hour_of_day_balance_now"
 
 
 def test_microstructure_coverage_plan_collects_current_utc_day_now() -> None:
@@ -1067,6 +2564,32 @@ def test_finalize_pre_run_quote_window_sleep_marks_missed_target_window() -> Non
     assert finalized["no_live_order_sent"] is True
 
 
+def test_pre_run_wait_force_quote_sample_for_hour_of_day_balance_window() -> None:
+    assert (
+        watch._pre_run_wait_force_quote_sample(
+            {
+                "status": "sleep_until_next_quote_coverage_window",
+                "actual_sleep_seconds": 305.0,
+                "target_quote_coverage_kind": "missing_hour_of_day_balance_bucket",
+                "target_window_missed": False,
+                "no_live_order_sent": True,
+            }
+        )
+        is True
+    )
+    assert (
+        watch._pre_run_wait_force_quote_sample(
+            {
+                "status": "sleep_until_next_quote_coverage_window",
+                "next_quote_coverage_kind": "missing_hour_of_day_balance_bucket",
+                "target_window_missed": True,
+                "no_live_order_sent": True,
+            }
+        )
+        is False
+    )
+
+
 def test_pre_run_quote_window_capture_outcome_marks_calendar_day_captured() -> None:
     outcome = watch._pre_run_quote_window_capture_outcome(
         pre_run_wait_plan={
@@ -1147,7 +2670,7 @@ def test_launch_shadow_watch_refreshes_market_data_after_quote_window_sleep(monk
     args = _args(tmp_path)
     args.iterations = 1
     args.sleep_until_next_missing_quote_window = True
-    args.max_pre_run_wait_seconds = 7200.0
+    args.max_pre_run_wait_seconds = 86400.0
     args.target_hours = 24.0
     report_dir = Path(args.report_dir)
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -1233,6 +2756,162 @@ def test_launch_shadow_watch_refreshes_market_data_after_quote_window_sleep(monk
     latest_md = (report_dir / "latest.md").read_text(encoding="utf-8")
     assert "pre_run_market_data_refresh_status: `refreshed`" in latest_md
     assert "pre_run_quote_window_capture_status: `target_hour_captured`" in latest_md
+
+
+def test_launch_shadow_watch_forces_quote_sample_after_hour_of_day_balance_wait(monkeypatch, tmp_path) -> None:
+    args = _args(tmp_path)
+    args.iterations = 1
+    args.sleep_until_next_missing_quote_window = True
+    args.max_pre_run_wait_seconds = 86400.0
+    args.target_hours = 24.0
+    args.disable_market_data_refresh_after_quote_window_sleep = True
+    report_dir = Path(args.report_dir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(UTC)
+    current_hour = f"{now.hour:02d}"
+    next_hour = f"{(now.hour + 1) % 24:02d}"
+    next_missing_utc_at = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)).isoformat()
+    (report_dir / "latest.json").write_text(
+        json.dumps(
+            {
+                "started_at": (now - timedelta(hours=1)).isoformat(),
+                "completed_at": (now - timedelta(minutes=5)).isoformat(),
+                "no_live_order_sent": True,
+                "microstructure_watch": {
+                    "coverage_plan": {
+                        "status": "waiting_for_next_quote_coverage_window",
+                        "can_collect_now": False,
+                        "missing_utc_hour_of_day": [next_hour],
+                        "next_missing_utc_hour": next_hour,
+                        "next_missing_utc_at": next_missing_utc_at,
+                        "next_quote_coverage_kind": "missing_hour_of_day_balance_bucket",
+                        "next_quote_coverage_at": next_missing_utc_at,
+                        "current_utc_hour": current_hour,
+                        "hour_of_day_balance_needed": True,
+                        "remaining_distinct_hour_bucket_count": 0,
+                        "remaining_hour_of_day_bucket_count": 1,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    evidence_calls = []
+
+    def fake_run_evidence_cycle(**kwargs):
+        evidence_calls.append(kwargs)
+        return {
+            "overall_status": "healthy_abstention_waiting_for_quality_signal",
+            "no_live_order_sent": True,
+            "collection_progress": {
+                "quote_observed": 368,
+                "quote_distinct_hours": 24,
+                "captured_quote_rows_this_cycle": 2,
+                "paper_fill_rows": 0,
+                "quote_coverage": {
+                    "utc_hour_of_day_covered": [next_hour],
+                    "utc_hour_of_day_missing": [],
+                },
+            },
+            "readiness_progress": {},
+            "paper_bridge_apply_gate": {"fresh_signal": False, "can_request_paper_apply_now": False},
+            "quote_cadence_preflight": {
+                "decision": "forced_quote_capture",
+                "force_quote_sample": kwargs["force_quote_sample"],
+            },
+            "market_data_refresh_plan": {"status": "fresh", "fresh_market_data": True},
+            "signal_wait_plan": {},
+            "launch_readiness": {"status": "research_ready_waiting_for_fresh_signal", "blocking_gates": []},
+            "historical_gate_substitution": {},
+            "canary_risk_caps_config": {},
+        }
+
+    monkeypatch.setattr(watch, "run_evidence_cycle", fake_run_evidence_cycle)
+
+    summary = watch.run_launch_shadow_watch(args, sleep_fn=lambda seconds: None)
+
+    assert len(evidence_calls) == 1
+    assert evidence_calls[0]["force_quote_sample"] is True
+    assert summary["latest_run"]["quote_cadence_preflight"]["force_quote_sample"] is True
+    assert summary["pre_run_quote_window_wait_plan"]["target_quote_coverage_kind"] == "missing_hour_of_day_balance_bucket"
+    assert summary["pre_run_quote_window_capture_outcome"]["status"] == "target_hour_captured"
+    assert summary["pre_run_quote_window_capture_outcome"]["target_quote_coverage_kind"] == "missing_hour_of_day_balance_bucket"
+    assert summary["no_live_order_sent"] is True
+
+
+def test_launch_shadow_watch_forces_quote_sample_after_calendar_day_wait(monkeypatch, tmp_path) -> None:
+    args = _args(tmp_path)
+    args.iterations = 1
+    args.sleep_until_next_missing_quote_window = True
+    args.max_pre_run_wait_seconds = 86400.0
+    args.target_hours = 24.0
+    args.disable_market_data_refresh_after_quote_window_sleep = True
+    report_dir = Path(args.report_dir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(UTC)
+    next_day = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    (report_dir / "latest.json").write_text(
+        json.dumps(
+            {
+                "started_at": (now - timedelta(hours=1)).isoformat(),
+                "completed_at": (now - timedelta(minutes=5)).isoformat(),
+                "no_live_order_sent": True,
+                "microstructure_watch": {
+                    "coverage_plan": {
+                        "status": "waiting_for_next_quote_coverage_window",
+                        "can_collect_now": False,
+                        "current_utc_date": now.date().isoformat(),
+                        "current_utc_date_missing": False,
+                        "covered_calendar_days": [now.date().isoformat()],
+                        "remaining_calendar_days": 1,
+                        "next_quote_coverage_kind": "next_utc_calendar_day",
+                        "next_quote_coverage_at": next_day.isoformat(),
+                        "next_quote_coverage_kst_at": next_day.astimezone(watch.KST).isoformat(),
+                        "calendar_day_count": 1,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    evidence_calls = []
+
+    def fake_run_evidence_cycle(**kwargs):
+        evidence_calls.append(kwargs)
+        return {
+            "overall_status": "healthy_abstention_waiting_for_quality_signal",
+            "no_live_order_sent": True,
+            "collection_progress": {
+                "quote_observed": 370,
+                "quote_calendar_days": 2,
+                "quote_distinct_hours": 24,
+                "captured_quote_rows_this_cycle": 2,
+                "paper_fill_rows": 0,
+            },
+            "readiness_progress": {},
+            "paper_bridge_apply_gate": {"fresh_signal": False, "can_request_paper_apply_now": False},
+            "quote_cadence_preflight": {
+                "decision": "forced_quote_capture",
+                "force_quote_sample": kwargs["force_quote_sample"],
+            },
+            "market_data_refresh_plan": {"status": "fresh", "fresh_market_data": True},
+            "signal_wait_plan": {},
+            "launch_readiness": {"status": "research_ready_waiting_for_fresh_signal", "blocking_gates": []},
+            "historical_gate_substitution": {},
+            "canary_risk_caps_config": {},
+        }
+
+    monkeypatch.setattr(watch, "run_evidence_cycle", fake_run_evidence_cycle)
+
+    summary = watch.run_launch_shadow_watch(args, sleep_fn=lambda seconds: None)
+
+    assert len(evidence_calls) == 1
+    assert evidence_calls[0]["force_quote_sample"] is True
+    assert summary["latest_run"]["quote_cadence_preflight"]["force_quote_sample"] is True
+    assert summary["pre_run_quote_window_wait_plan"]["target_quote_coverage_kind"] == "next_utc_calendar_day"
+    assert summary["pre_run_quote_window_capture_outcome"]["status"] == "target_calendar_day_captured"
+    assert summary["pre_run_quote_window_capture_outcome"]["target_quote_coverage_kind"] == "next_utc_calendar_day"
+    assert summary["no_live_order_sent"] is True
 
 
 def test_launch_shadow_watch_reuses_previous_started_at_for_heartbeat_accumulation(monkeypatch, tmp_path) -> None:
@@ -1427,6 +3106,140 @@ def test_continuous_runtime_start_clamps_start_before_operation_to_floor() -> No
     assert plan["continuous_started_at"] == floor_start
     assert plan["runtime_floor_recovered"] is True
     assert plan["runtime_start_clamped_to_operation_start"] is True
+
+
+def test_continuous_runtime_start_preserves_scheduled_signal_monitor_gap() -> None:
+    previous_completed_at = datetime(2026, 1, 1, 9, 38, 45, tzinfo=UTC)
+    current_at = datetime(2026, 1, 1, 10, 39, 14, tzinfo=UTC)
+    continuous_started_at = datetime(2025, 12, 31, 14, 13, 50, tzinfo=UTC)
+
+    plan = watch._continuous_runtime_start(
+        previous_payload={
+            "completed_at": previous_completed_at.isoformat(),
+            "runtime_observation": {
+                "continuous_started_at": continuous_started_at.isoformat(),
+                "gap_reset": False,
+            },
+            "safe_next_action_plan": {
+                "primary_action": {
+                    "action_type": "monitor_fresh_signal",
+                    "target_gate": "current_fresh_signal",
+                    "execute_after_utc": datetime(2026, 1, 1, 10, 38, 14, tzinfo=UTC).isoformat(),
+                    "order_submission_allowed": False,
+                    "no_live_order_sent": True,
+                }
+            },
+            "no_live_order_sent": True,
+        },
+        fallback_started_at=continuous_started_at,
+        current_at=current_at,
+        interval_seconds=0.0,
+        runtime_floor={
+            "status": "available",
+            "recovered_continuous_started_at": continuous_started_at.isoformat(),
+            "projected_observed_hours": 20.42,
+            "source_observed_hours": 19.41,
+            "no_live_order_sent": True,
+        },
+    )
+
+    assert plan["continuous_started_at"] == continuous_started_at
+    assert plan["gap_reset"] is False
+    assert plan["gap_warning"] is None
+    assert plan["watch_continuity"]["status"] == "continuous"
+    assert plan["watch_continuity"]["planned_gap_extension"]["status"] == "planned_gap_allowed"
+
+
+def test_continuous_runtime_start_preserves_quote_window_gap_after_earlier_signal_monitor_expires() -> None:
+    previous_completed_at = datetime(2026, 1, 1, 10, 44, 0, tzinfo=UTC)
+    current_at = datetime(2026, 1, 1, 12, 0, 30, tzinfo=UTC)
+    continuous_started_at = datetime(2025, 12, 31, 15, 13, 50, tzinfo=UTC)
+
+    plan = watch._continuous_runtime_start(
+        previous_payload={
+            "completed_at": previous_completed_at.isoformat(),
+            "runtime_observation": {
+                "continuous_started_at": continuous_started_at.isoformat(),
+                "gap_reset": False,
+            },
+            "safe_next_action_plan": {
+                "primary_action": {
+                    "action_type": "monitor_fresh_signal",
+                    "target_gate": "current_fresh_signal",
+                    "execute_after_utc": datetime(2026, 1, 1, 11, 44, 0, tzinfo=UTC).isoformat(),
+                    "order_submission_allowed": False,
+                    "no_live_order_sent": True,
+                },
+                "next_deferred_wait_action": {
+                    "action_type": "wait_for_next_microstructure_quote_window",
+                    "target_gate": "real_microstructure_execution_evidence",
+                    "execute_after_utc": datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC).isoformat(),
+                    "waits_until_execution_window": True,
+                    "deferred_by_earlier_scheduled_action": True,
+                    "order_submission_allowed": False,
+                    "no_live_order_sent": True,
+                },
+            },
+            "no_live_order_sent": True,
+        },
+        fallback_started_at=continuous_started_at,
+        current_at=current_at,
+        interval_seconds=0.0,
+        runtime_floor={
+            "status": "available",
+            "recovered_continuous_started_at": continuous_started_at.isoformat(),
+            "projected_observed_hours": 20.75,
+            "source_observed_hours": 19.5,
+            "no_live_order_sent": True,
+        },
+    )
+
+    assert plan["continuous_started_at"] == continuous_started_at
+    assert plan["gap_reset"] is False
+    assert plan["watch_continuity"]["status"] == "continuous"
+    assert plan["watch_continuity"]["planned_gap_extension"]["source"] == "next_deferred_wait_action"
+    assert plan["watch_continuity"]["planned_gap_extension"]["action_type"] == "wait_for_next_microstructure_quote_window"
+
+
+def test_continuous_runtime_start_resets_after_expired_scheduled_gap() -> None:
+    previous_completed_at = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+    current_at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    continuous_started_at = datetime(2025, 12, 31, 14, 0, tzinfo=UTC)
+
+    plan = watch._continuous_runtime_start(
+        previous_payload={
+            "completed_at": previous_completed_at.isoformat(),
+            "runtime_observation": {
+                "continuous_started_at": continuous_started_at.isoformat(),
+                "gap_reset": False,
+            },
+            "safe_next_action_plan": {
+                "primary_action": {
+                    "action_type": "monitor_fresh_signal",
+                    "target_gate": "current_fresh_signal",
+                    "execute_after_utc": datetime(2026, 1, 1, 10, 0, tzinfo=UTC).isoformat(),
+                    "order_submission_allowed": False,
+                    "no_live_order_sent": True,
+                }
+            },
+            "no_live_order_sent": True,
+        },
+        fallback_started_at=continuous_started_at,
+        current_at=current_at,
+        interval_seconds=0.0,
+        runtime_floor={
+            "status": "available",
+            "recovered_continuous_started_at": continuous_started_at.isoformat(),
+            "projected_observed_hours": 22.0,
+            "source_observed_hours": 19.0,
+            "no_live_order_sent": True,
+        },
+    )
+
+    assert plan["continuous_started_at"] == current_at
+    assert plan["gap_reset"] is True
+    assert plan["gap_warning"] == "watch_gap_exceeded_threshold"
+    assert plan["watch_continuity"]["planned_gap_extension"]["status"] == "planned_gap_expired"
 
 
 def test_continuous_runtime_start_does_not_recover_floor_after_gap_warning() -> None:

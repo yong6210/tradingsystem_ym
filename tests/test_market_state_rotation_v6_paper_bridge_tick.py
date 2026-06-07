@@ -16,11 +16,13 @@ from scripts.run_market_state_rotation_v6_paper_bridge_tick import (
     _apply_remove_snapshot,
     _create_sqlite_pre_apply_backup,
     _ensure_paper_rollout_policy,
+    _execution_parity_preflight,
     _freshness_status,
     _plan_from_add_event,
     _runtime_event_cadence,
     _top_no_trade_reasons,
     build_runtime_decision_snapshot,
+    run_paper_bridge_tick,
 )
 
 
@@ -295,6 +297,47 @@ def test_plan_from_add_event_maps_short_levels_and_v6_validity() -> None:
     assert plan.tp1 < plan.entry_price
     assert plan.validity["strategy_family"] == EXPECTED_STRATEGY_FAMILY
     assert plan.validity["recommended_risk_r"] == 0.0
+
+
+def test_execution_parity_preflight_marks_fresh_add_snapshot_ready() -> None:
+    now = datetime.now(UTC)
+    event = _add_event(now, side="long")
+    snapshot = {**_snapshot(event), "plan_candidate": {"plan_id": "candidate"}}
+
+    preflight = _execution_parity_preflight(snapshot)
+
+    assert preflight["status"] == "ready"
+    assert preflight["passed"] is True
+    assert preflight["expected_journal_action"] == "add"
+    assert preflight["expected_journal_side"] == "long"
+    assert preflight["will_increment_execution_parity_journal_after_apply"] is True
+    assert preflight["no_live_order_sent"] is True
+
+
+def test_paper_bridge_tick_blocks_apply_before_db_write_when_parity_preflight_fails(monkeypatch, tmp_path) -> None:
+    source_report = tmp_path / "source.json"
+    source_report.write_text('{"top_results": [{"config": {"model_id": "x"}}]}', encoding="utf-8")
+    now = datetime.now(UTC)
+    malformed_event = {**_add_event(now, side="long"), "ts": "", "price": 0.0}
+    monkeypatch.setattr(
+        bridge,
+        "build_runtime_decision_snapshot",
+        lambda **_kwargs: {**_snapshot(malformed_event), "plan_candidate": {"plan_id": "candidate"}},
+    )
+
+    report = run_paper_bridge_tick(
+        source_backtest_report_path=source_report,
+        apply_paper=True,
+        pre_apply_backup_dir=tmp_path / "backup",
+        require_pre_apply_backup=True,
+    )
+
+    assert report["overall_status"] == "execution_parity_preflight_failed"
+    assert report["result"]["status"] == "blocked_before_db_write"
+    assert "source_event_ts_missing_or_invalid" in report["execution_parity_preflight"]["blockers"]
+    assert "source_event_price_missing_or_invalid" in report["execution_parity_preflight"]["blockers"]
+    assert report["pre_apply_backup"] is None
+    assert report["no_live_order_sent"] is True
 
 
 def test_apply_add_snapshot_uses_existing_paper_lifecycle_without_live_orders() -> None:

@@ -170,7 +170,16 @@ def test_live_order_lifecycle_report_links_intent_submission_fill_and_ledger() -
             from_state="ENTERED",
             to_state="CLOSED",
             state_changed=True,
-            payload={"exit_reason": "target_tp1", "realized_r": 0.8},
+            payload={
+                "exit_reason": "target_tp1",
+                "realized_r": 0.8,
+                "source_event": {
+                    "ts": (now - timedelta(minutes=2)).isoformat(),
+                    "action": "remove",
+                    "side": "long",
+                    "price": 101.2,
+                },
+            },
             strategy_version="v1",
         )
         ledger = BinanceOrderLedger(
@@ -198,6 +207,10 @@ def test_live_order_lifecycle_report_links_intent_submission_fill_and_ledger() -
     assert payload["summary"]["submission_count"] == 1
     assert payload["summary"]["closed_count"] == 1
     assert payload["summary"]["avg_entry_slippage_bps"] == pytest.approx(20.0)
+    assert payload["summary"]["avg_exit_slippage_bps"] == pytest.approx(
+        (101.2 - 101.0) / 101.2 * 10_000.0,
+        abs=0.0001,
+    )
     assert payload["summary"]["avg_realized_r"] == pytest.approx(0.8)
     row = payload["rows"][0]
     assert row["lifecycle_status"] == "closed"
@@ -208,6 +221,8 @@ def test_live_order_lifecycle_report_links_intent_submission_fill_and_ledger() -
     assert row["entry_first_fill_at"] == entry_fill.fill_ts.isoformat()
     assert row["entry_last_fill_at"] == entry_fill.fill_ts.isoformat()
     assert row["exit_last_fill_at"] == close_fill.fill_ts.isoformat()
+    assert row["exit_source_event"]["action"] == "remove"
+    assert row["exit_slippage_bps"] == pytest.approx((101.2 - 101.0) / 101.2 * 10_000.0, abs=0.0001)
 
 
 def test_live_order_lifecycle_does_not_attach_entry_fill_to_rejected_duplicate_submission() -> None:

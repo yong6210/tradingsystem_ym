@@ -575,6 +575,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "material return, drawdown, cost, or lineage drift. Use this for promotion candidates."
         ),
     )
+    parser.add_argument(
+        "--source-replay-watch-unresolved-material-drift",
+        dest="source_replay_fail_on_unresolved_material_drift",
+        action="store_false",
+        default=False,
+        help=(
+            "Keep source replay drift in watch mode. Use this for shadow experiments that are "
+            "expected to change lineage and should still write a research report."
+        ),
+    )
     parser.add_argument("--fee-bps-per-side", type=float, default=4.0)
     parser.add_argument("--slippage-bps-per-side", type=float, default=1.0)
     parser.add_argument("--funding-bps-per-8h", type=float, default=0.0)
@@ -2979,11 +2989,57 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parsed
 
 
-def _material_config_key(config: MarketStateConfig) -> str:
+def _is_observe_only_router_config(config: MarketStateConfig) -> bool:
+    if not bool(getattr(config, "regime_router_enabled", False)):
+        return False
+    size_fields = (
+        "router_trend_reaction_size_mult",
+        "router_one_way_chase_size_mult",
+        "router_one_way_counter_size_mult",
+        "router_range_probe_size_mult",
+        "router_range_base_size_mult",
+        "router_exhaustion_reversal_size_mult",
+        "router_risk_off_size_mult",
+    )
+    if any(abs(float(getattr(config, field, 1.0) or 0.0) - 1.0) > 1e-12 for field in size_fields):
+        return False
+    return (
+        float(getattr(config, "router_transition_trim_fraction", 0.0) or 0.0) <= 1e-12
+        or not tuple(getattr(config, "router_transition_trim_modes", ()) or ())
+    )
+
+
+def _router_fields_are_source_replay_ignorable(config: MarketStateConfig) -> bool:
+    return (not bool(getattr(config, "regime_router_enabled", False))) or _is_observe_only_router_config(config)
+
+
+def _material_config_key(
+    config: MarketStateConfig,
+    *,
+    ignore_observe_only_router: bool = False,
+) -> str:
+    ignored = {"model_id", "max_battle_bars"}
+    if ignore_observe_only_router and _router_fields_are_source_replay_ignorable(config):
+        ignored |= {
+            "regime_router_enabled",
+            "router_trend_reaction_size_mult",
+            "router_one_way_chase_size_mult",
+            "router_one_way_counter_size_mult",
+            "router_range_probe_size_mult",
+            "router_range_base_size_mult",
+            "router_exhaustion_reversal_size_mult",
+            "router_exhaustion_min_score_edge",
+            "router_exhaustion_min_extension_atr",
+            "router_risk_off_size_mult",
+            "router_transition_trim_fraction",
+            "router_transition_trim_modes",
+            "router_transition_trim_against_only",
+            "router_transition_trim_cooldown_bars",
+        }
     payload = {
         key: value
         for key, value in asdict(config).items()
-        if key not in {"model_id", "max_battle_bars"}
+        if key not in ignored
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
@@ -3103,12 +3159,18 @@ def _source_replay_selected_train_anchor(
     if not source_selected_train or not isinstance(source_selected_train.get("config"), dict):
         return selected_train, {"enabled": True, "applied": False, "reason": "source_selected_train_missing"}
     try:
-        source_key = _material_config_key(MarketStateConfig(**source_selected_train["config"]))
+        source_key = _material_config_key(
+            MarketStateConfig(**source_selected_train["config"]),
+            ignore_observe_only_router=True,
+        )
     except TypeError:
         return selected_train, {"enabled": True, "applied": False, "reason": "source_selected_train_invalid"}
     selected_key = ""
     try:
-        selected_key = _material_config_key(MarketStateConfig(**selected_train["config"]))
+        selected_key = _material_config_key(
+            MarketStateConfig(**selected_train["config"]),
+            ignore_observe_only_router=True,
+        )
     except TypeError:
         selected_key = ""
     if selected_key == source_key:
@@ -3123,7 +3185,10 @@ def _source_replay_selected_train_anchor(
         if not isinstance(candidate.get("config"), dict):
             continue
         try:
-            candidate_key = _material_config_key(MarketStateConfig(**candidate["config"]))
+            candidate_key = _material_config_key(
+                MarketStateConfig(**candidate["config"]),
+                ignore_observe_only_router=True,
+            )
         except TypeError:
             continue
         if candidate_key != source_key:

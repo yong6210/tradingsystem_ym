@@ -183,6 +183,24 @@ class LiveOrderLifecycleReporter:
         return (entry_price - target) / target * 10_000.0
 
     @classmethod
+    def _exit_slippage_bps(
+        cls,
+        *,
+        plan: Plan | None,
+        exit_price: float | None,
+        exit_source_event: dict[str, Any],
+    ) -> float | None:
+        if plan is None or exit_price is None:
+            return None
+        target = cls._safe_float(exit_source_event.get("price"))
+        if target <= 0.0:
+            return None
+        direction = str(plan.direction or "").lower()
+        if direction == "short":
+            return (exit_price - target) / target * 10_000.0
+        return (target - exit_price) / target * 10_000.0
+
+    @classmethod
     def _computed_realized_r(
         cls,
         *,
@@ -453,6 +471,7 @@ class LiveOrderLifecycleReporter:
 
         rows: list[dict[str, Any]] = []
         slippage_values: list[float] = []
+        exit_slippage_values: list[float] = []
         realized_values: list[float] = []
         total_fee = 0.0
         status_counts: Counter[str] = Counter()
@@ -490,9 +509,27 @@ class LiveOrderLifecycleReporter:
                 exchange_flat_after_entry=exchange_flat_after_entry,
             )
             ledger = ledgers_by_client_order_id.get(submission.client_order_id)
+            plan_validity = self._safe_dict(getattr(plan, "validity", {}) if plan is not None else {})
+            plan_source_event = self._safe_dict(plan_validity.get("source_event"))
+            exit_source_event: dict[str, Any] = {}
+            for fill in reversed(exit_fills):
+                payload = self._safe_dict(fill.payload)
+                candidate_event = self._safe_dict(payload.get("source_event"))
+                if candidate_event:
+                    exit_source_event = candidate_event
+                    break
+            exit_slippage_bps = self._exit_slippage_bps(
+                plan=plan,
+                exit_price=exit_price,
+                exit_source_event=exit_source_event,
+            )
+            entry_fill_qty = sum(max(self._safe_float(fill.qty), 0.0) for fill in entry_fills)
+            exit_fill_qty = sum(max(self._safe_float(fill.qty), 0.0) for fill in exit_fills)
 
             if slippage_bps is not None:
                 slippage_values.append(float(slippage_bps))
+            if exit_slippage_bps is not None:
+                exit_slippage_values.append(float(exit_slippage_bps))
             if realized_r is not None:
                 realized_values.append(float(realized_r))
             total_fee += fee_total
@@ -529,12 +566,20 @@ class LiveOrderLifecycleReporter:
                     "plan_direction": str(getattr(plan, "direction", "") or ""),
                     "plan_entry_price": self._safe_float(getattr(plan, "entry_price", 0.0)) if plan else None,
                     "plan_stop_price": self._safe_float(getattr(plan, "sl", 0.0)) if plan else None,
+                    "plan_source_event": plan_source_event,
+                    "plan_source_event_key": str(plan_validity.get("source_event_key") or ""),
+                    "plan_source_event_ts": str(plan_validity.get("source_event_ts") or ""),
+                    "plan_source_model_id": str(plan_validity.get("source_model_id") or ""),
+                    "exit_source_event": exit_source_event,
                     "entry_fill_count": len(entry_fills),
                     "exit_fill_count": len(exit_fills),
                     "closed_fill_count": len(closed_fills),
+                    "entry_fill_qty": round(entry_fill_qty, 8),
+                    "exit_fill_qty": round(exit_fill_qty, 8),
                     "entry_avg_price": round(entry_price, 8) if entry_price is not None else None,
                     "exit_avg_price": round(exit_price, 8) if exit_price is not None else None,
                     "entry_slippage_bps": round(slippage_bps, 4) if slippage_bps is not None else None,
+                    "exit_slippage_bps": round(exit_slippage_bps, 4) if exit_slippage_bps is not None else None,
                     "realized_r": round(realized_r, 4) if realized_r is not None else None,
                     "exit_reason": self._exit_reason(closed_fills or exit_fills, plan),
                     "fee_total": round(fee_total, 8),
@@ -570,6 +615,11 @@ class LiveOrderLifecycleReporter:
                 "rejected_or_error_count": int(status_counts.get("rejected_or_error", 0)),
                 "total_fee": round(total_fee, 8),
                 "avg_entry_slippage_bps": round(sum(slippage_values) / len(slippage_values), 4) if slippage_values else None,
+                "avg_exit_slippage_bps": (
+                    round(sum(exit_slippage_values) / len(exit_slippage_values), 4)
+                    if exit_slippage_values
+                    else None
+                ),
                 "avg_realized_r": round(sum(realized_values) / len(realized_values), 4) if realized_values else None,
                 "by_lifecycle_status": dict(sorted(status_counts.items())),
                 "by_symbol": dict(symbol_counts.most_common()),

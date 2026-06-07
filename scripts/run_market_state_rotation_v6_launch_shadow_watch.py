@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import subprocess
 import sys
 import time
@@ -22,6 +23,7 @@ from scripts.run_market_state_rotation_v6_evidence_cycle import (
     DEFAULT_HISTORICAL_LIFECYCLE_REPLAY_SOURCE,
     DEFAULT_HISTORICAL_REPLAY_SOURCE,
     DEFAULT_MANUAL_EVIDENCE,
+    DEFAULT_PRE_APPLY_BACKUP_DIR,
     DEFAULT_SAMPLE_PATH,
     DEFAULT_SOURCE_BACKTEST_REPORT,
     DEFAULT_STRESS_REPORT,
@@ -150,14 +152,29 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
     microstructure_substitution = dict(launch_substitution.get("microstructure_time_coverage") or {})
     progress = dict(payload.get("progress") or {})
     runtime_progress = dict(payload.get("runtime_progress") or {})
+    target_observation_status = dict(payload.get("target_observation_status") or {})
     continuity = dict(payload.get("watch_continuity") or {})
+    signal_monitor_alignment = dict(payload.get("signal_monitor_cadence_alignment") or {})
     risk_caps = dict(payload.get("canary_risk_caps_config") or {})
     operator_handoff = dict(payload.get("operator_handoff") or {})
+    operator_packet = dict(operator_handoff.get("paper_apply_operator_packet") or {})
+    operator_packet_backup = dict(operator_packet.get("pre_apply_backup_plan") or {})
+    operator_packet_command_safety = dict(operator_packet.get("command_safety") or {})
+    operator_packet_pre_apply_evidence = dict(operator_packet.get("pre_apply_evidence_report_status") or {})
+    execution_parity_eta = dict(operator_handoff.get("execution_parity_eta_plan") or {})
+    eta_scenarios = dict(execution_parity_eta.get("eta_scenarios") or {})
+    eta_all_events = dict(eta_scenarios.get("all_creditable_events") or {})
+    eta_add_only = dict(eta_scenarios.get("conservative_add_only") or {})
+    recent_parity_review = dict(payload.get("recent_paper_apply_parity_review") or {})
+    promotion_gate = dict(payload.get("meta_router_promotion_gate") or {})
+    promotion_readiness = dict(promotion_gate.get("readiness") or {})
+    promotion_candidate = dict(promotion_gate.get("candidate") or {})
     blocker_plan = list(payload.get("blocker_resolution_plan") or [])
     safe_next_action = dict(payload.get("safe_next_action_plan") or {})
     primary_action = dict(safe_next_action.get("primary_action") or {})
     scheduled_action = dict(safe_next_action.get("next_scheduled_action") or {})
     startable_wait_action = dict(safe_next_action.get("next_startable_wait_action") or {})
+    deferred_wait_action = dict(safe_next_action.get("next_deferred_wait_action") or {})
     safety = dict(latest.get("launch_safety_controls") or {})
     preflight = dict(latest.get("quote_cadence_preflight") or {})
     pre_run_wait = dict(payload.get("pre_run_quote_window_wait_plan") or {})
@@ -172,6 +189,8 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- status: `{payload.get('status')}`",
         f"- no_live_order_sent: `{payload.get('no_live_order_sent')}`",
         f"- target_hours: `{payload.get('target_hours')}`",
+        f"- target_observation_runtime_reached: `{target_observation_status.get('runtime_target_reached')}`",
+        f"- target_observation_reason: `{target_observation_status.get('reason')}`",
         f"- observed_hours: `{payload.get('observed_hours')}`",
         f"- calendar_elapsed_hours: `{payload.get('calendar_elapsed_hours')}`",
         f"- runtime_remaining_hours: `{runtime_progress.get('remaining_hours')}`",
@@ -180,6 +199,10 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- runtime_continuous_started_at: `{dict(payload.get('runtime_observation') or {}).get('continuous_started_at')}`",
         f"- watch_continuity_status: `{continuity.get('status')}`",
         f"- watch_continuity_warning: `{continuity.get('warning')}`",
+        f"- signal_monitor_cadence_alignment_status: `{signal_monitor_alignment.get('status')}`",
+        f"- signal_monitor_cadence_alignment_warning: `{signal_monitor_alignment.get('warning')}`",
+        f"- signal_monitor_cadence_gap_minutes: `{signal_monitor_alignment.get('gap_minutes')}`",
+        f"- signal_monitor_cadence_recommended_minutes: `{signal_monitor_alignment.get('recommended_monitor_interval_minutes')}`",
         f"- pre_run_quote_window_wait_status: `{pre_run_wait.get('status')}`",
         f"- pre_run_quote_window_should_sleep: `{pre_run_wait.get('should_sleep')}`",
         f"- pre_run_quote_window_wait_seconds: `{pre_run_wait.get('wait_seconds')}`",
@@ -214,6 +237,19 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- launch_no_live_progressable_remaining_gates: `{launch_resolution.get('no_live_progressable_remaining_gates')}`",
         f"- launch_substituted_time_wait_removed_days: `{launch.get('substituted_time_wait_removed_days')}`",
         f"- launch_substituted_research_readiness_pct: `{launch.get('substituted_research_readiness_pct')}`",
+        f"- meta_router_promotion_status: `{promotion_gate.get('status')}`",
+        f"- meta_router_promotion_decision: `{promotion_gate.get('promotion_decision')}`",
+        f"- meta_router_promotion_next_blocker: `{promotion_gate.get('next_blocker')}`",
+        f"- meta_router_promotion_stale: `{promotion_gate.get('stale')}`",
+        f"- meta_router_promotion_source: `{promotion_gate.get('source_report')}`",
+        f"- meta_router_candidate: `{promotion_candidate.get('recipe_id')}`",
+        f"- meta_router_candidate_return_pct: `{promotion_candidate.get('compounded_return_pct')}`",
+        f"- meta_router_candidate_max_drawdown_pct: `{promotion_candidate.get('max_drawdown_pct')}`",
+        f"- meta_router_readiness_stage: `{promotion_readiness.get('stage')}`",
+        f"- meta_router_ready_for_paper: `{promotion_readiness.get('ready_for_paper')}`",
+        f"- meta_router_ready_for_tiny_canary: `{promotion_readiness.get('ready_for_tiny_canary')}`",
+        f"- meta_router_ready_for_full_live: `{promotion_readiness.get('ready_for_full_live')}`",
+        f"- meta_router_readiness_blockers: `{promotion_readiness.get('blockers')}`",
         f"- launch_research_ready: `{launch.get('research_ready')}`",
         f"- launch_shadow_ready: `{launch.get('shadow_ready')}`",
         f"- launch_tiny_canary_evidence_ready: `{launch.get('tiny_canary_evidence_ready')}`",
@@ -242,13 +278,18 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- microstructure_metric_blockers: `{microstructure.get('metric_blockers')}`",
         f"- microstructure_coverage_status: `{coverage_plan.get('status')}`",
         f"- microstructure_remaining_calendar_days: `{coverage_plan.get('remaining_calendar_days')}`",
+        f"- microstructure_earliest_calendar_completion_utc: `{coverage_plan.get('earliest_calendar_completion_utc')}`",
+        f"- microstructure_calendar_completion_policy: `{coverage_plan.get('calendar_completion_policy')}`",
         f"- microstructure_remaining_distinct_hours: `{coverage_plan.get('remaining_distinct_hours')}`",
+        f"- microstructure_remaining_distinct_hour_buckets: `{coverage_plan.get('remaining_distinct_hour_bucket_count')}`",
+        f"- microstructure_remaining_hour_of_day_buckets: `{coverage_plan.get('remaining_hour_of_day_bucket_count')}`",
         f"- microstructure_current_utc_date_missing: `{coverage_plan.get('current_utc_date_missing')}`",
         f"- microstructure_next_quote_coverage_kind: `{coverage_plan.get('next_quote_coverage_kind')}`",
         f"- microstructure_next_quote_coverage_at: `{coverage_plan.get('next_quote_coverage_at')}`",
         f"- microstructure_next_quote_coverage_kst_at: `{coverage_plan.get('next_quote_coverage_kst_at')}`",
         f"- microstructure_current_utc_hour_missing: `{coverage_plan.get('current_utc_hour_missing')}`",
         f"- microstructure_next_missing_utc_hour: `{coverage_plan.get('next_missing_utc_hour')}`",
+        f"- microstructure_missing_utc_hour_of_day: `{coverage_plan.get('missing_utc_hour_of_day')}`",
         f"- microstructure_next_missing_utc_at: `{coverage_plan.get('next_missing_utc_at')}`",
         f"- microstructure_next_missing_kst_at: `{coverage_plan.get('next_missing_kst_at')}`",
         f"- microstructure_wait_minutes: `{coverage_plan.get('wait_minutes')}`",
@@ -256,17 +297,59 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- operator_handoff_status: `{operator_handoff.get('status')}`",
         f"- operator_handoff_next_action: `{operator_handoff.get('next_action')}`",
         f"- operator_handoff_paper_apply_allowed_now: `{operator_handoff.get('paper_apply_allowed_now')}`",
+        f"- operator_handoff_paper_packet_status: `{operator_packet.get('status')}`",
+        f"- operator_handoff_pre_apply_evidence_status: `{operator_packet_pre_apply_evidence.get('status')}`",
+        f"- operator_handoff_pre_apply_evidence_age_minutes: `{operator_packet_pre_apply_evidence.get('age_minutes')}`",
+        f"- operator_handoff_pre_apply_evidence_blockers: `{operator_packet_pre_apply_evidence.get('blockers')}`",
+        f"- operator_handoff_pre_apply_backup_status: `{operator_packet_backup.get('status')}`",
+        f"- operator_handoff_pre_apply_backup_dir: `{operator_packet_backup.get('backup_dir')}`",
+        f"- operator_handoff_review_deadline_utc: `{operator_packet.get('operator_review_deadline_utc')}`",
+        f"- operator_handoff_review_deadline_policy: `{operator_packet.get('deadline_policy')}`",
+        f"- operator_handoff_command_safety_status: `{operator_packet_command_safety.get('status')}`",
+        f"- operator_handoff_command_safety_blockers: `{operator_packet_command_safety.get('blockers')}`",
+        f"- operator_handoff_command_safety_warnings: `{operator_packet_command_safety.get('warnings')}`",
+        f"- operator_handoff_command_safety_dry_run_report_dir: `{operator_packet_command_safety.get('dry_run_report_dir')}`",
+        f"- operator_handoff_command_safety_apply_report_dir: `{operator_packet_command_safety.get('apply_report_dir')}`",
+        f"- operator_handoff_command_safety_pre_apply_backup_dir: `{operator_packet_command_safety.get('apply_pre_apply_backup_dir')}`",
+        f"- operator_handoff_post_apply_review_required: `{operator_packet.get('post_apply_review_required')}`",
+        f"- operator_handoff_execution_parity_events_needed: `{operator_handoff.get('execution_parity_events_needed')}`",
+        f"- operator_handoff_execution_parity_events_after_current_apply: `{operator_handoff.get('execution_parity_events_needed_after_current_apply')}`",
+        f"- operator_handoff_execution_parity_will_credit_current_apply: `{operator_handoff.get('execution_parity_will_credit_current_apply')}`",
+        f"- operator_handoff_execution_parity_creditable_actions: `{operator_handoff.get('execution_parity_creditable_actions')}`",
+        f"- execution_parity_eta_status: `{execution_parity_eta.get('status')}`",
+        f"- execution_parity_eta_selected_scenario: `{execution_parity_eta.get('selected_eta_scenario')}`",
+        f"- execution_parity_eta_days_at_current_cadence: `{execution_parity_eta.get('estimated_days_at_current_cadence')}`",
+        f"- execution_parity_eta_completion_kst: `{execution_parity_eta.get('estimated_completion_kst')}`",
+        f"- execution_parity_eta_cadence_source: `{execution_parity_eta.get('cadence_source')}`",
+        f"- execution_parity_eta_all_event_days: `{eta_all_events.get('estimated_days')}`",
+        f"- execution_parity_eta_add_only_days: `{eta_add_only.get('estimated_days')}`",
+        f"- execution_parity_eta_caveat: `{execution_parity_eta.get('caveat')}`",
         f"- operator_handoff_canary_review_ready: `{operator_handoff.get('canary_review_ready')}`",
+        f"- recent_paper_apply_parity_review_status: `{recent_parity_review.get('status')}`",
+        f"- recent_paper_apply_parity_review_blocked: `{recent_parity_review.get('blocks_next_paper_apply')}`",
+        f"- recent_paper_apply_parity_review_source: `{recent_parity_review.get('source_report')}`",
+        f"- recent_paper_apply_parity_review_reason: `{recent_parity_review.get('reason')}`",
+        f"- recent_paper_apply_parity_review_blockers: `{recent_parity_review.get('blockers')}`",
+        f"- recent_paper_apply_parity_review_next_actions: `{recent_parity_review.get('next_actions')}`",
+        f"- recent_paper_apply_parity_review_recommended_command: `{recent_parity_review.get('recommended_command')}`",
         f"- safe_next_action_status: `{safe_next_action.get('status')}`",
         f"- safe_next_action_type: `{primary_action.get('action_type')}`",
         f"- safe_next_action_can_run_now: `{primary_action.get('can_run_now')}`",
         f"- safe_next_action_requires_operator_review: `{primary_action.get('requires_operator_review')}`",
         f"- safe_next_action_command: `{primary_action.get('command')}`",
+        f"- safe_next_action_recommended_monitor_interval_minutes: `{primary_action.get('recommended_monitor_interval_minutes')}`",
+        f"- safe_next_action_signal_freshness_capture_window_minutes: `{primary_action.get('signal_freshness_capture_window_minutes')}`",
+        f"- safe_next_action_monitor_interval_capped_by_freshness: `{primary_action.get('monitor_interval_capped_by_signal_freshness')}`",
+        f"- safe_next_action_monitor_signal_age_alignment: `{primary_action.get('monitor_signal_age_alignment')}`",
+        f"- safe_next_action_paper_packet_status: `{dict(primary_action.get('paper_apply_operator_packet') or {}).get('status')}`",
         f"- safe_next_scheduled_action_type: `{scheduled_action.get('action_type')}`",
         f"- safe_next_scheduled_execute_after_utc: `{scheduled_action.get('execute_after_utc')}`",
         f"- safe_next_scheduled_wait_minutes: `{scheduled_action.get('wait_minutes')}`",
         f"- safe_next_startable_wait_action_type: `{startable_wait_action.get('action_type')}`",
         f"- safe_next_startable_wait_execute_after_utc: `{startable_wait_action.get('execute_after_utc')}`",
+        f"- safe_next_deferred_wait_action_type: `{deferred_wait_action.get('action_type')}`",
+        f"- safe_next_deferred_wait_execute_after_utc: `{deferred_wait_action.get('execute_after_utc')}`",
+        f"- safe_next_deferred_wait_reason: `{deferred_wait_action.get('deferred_reason')}`",
         f"- safe_next_pre_wait_scheduled_action_count: `{safe_next_action.get('pre_wait_scheduled_action_count')}`",
         f"- safe_next_coordination_warnings: `{safe_next_action.get('coordination_warnings')}`",
         f"- launch_safety_controls_status: `{safety.get('overall_status')}`",
@@ -275,6 +358,16 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- fresh_signal_seen: `{progress.get('fresh_signal_seen')}`",
         f"- paper_apply_available_seen: `{progress.get('paper_apply_available_seen')}`",
         f"- tiny_canary_ready_seen: `{progress.get('tiny_canary_ready_seen')}`",
+        f"- execution_parity_journal_rows_latest: `{progress.get('execution_parity_journal_rows_latest')}`",
+        f"- execution_parity_journal_rows_delta: `{progress.get('execution_parity_journal_rows_delta')}`",
+        f"- execution_parity_missing_samples_latest: `{progress.get('execution_parity_missing_samples_latest')}`",
+        f"- execution_parity_passed_latest: `{progress.get('execution_parity_passed_latest')}`",
+        f"- execution_parity_collection_status_latest: `{progress.get('execution_parity_collection_status_latest')}`",
+        f"- execution_parity_events_needed_latest: `{progress.get('execution_parity_events_needed_latest')}`",
+        f"- execution_parity_events_needed_after_current_apply_latest: `{progress.get('execution_parity_events_needed_after_current_apply_latest')}`",
+        f"- execution_parity_will_credit_current_apply_latest: `{progress.get('execution_parity_will_credit_current_apply_latest')}`",
+        f"- execution_parity_creditable_actions_latest: `{progress.get('execution_parity_creditable_actions_latest')}`",
+        f"- execution_parity_next_step_latest: `{progress.get('execution_parity_next_step_latest')}`",
         f"- latest_evidence_report: `{latest.get('evidence_report')}`",
         "",
         "## Blocking Gates",
@@ -290,11 +383,13 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         )
     lines.extend(["", "## Safe Next Actions", ""])
     for item in list(safe_next_action.get("actions") or []):
+        packet = dict(item.get("paper_apply_operator_packet") or {})
         lines.append(
             f"- `{item.get('action_type')}` priority=`{item.get('priority')}` "
             f"can_run_now=`{item.get('can_run_now')}` can_start_now=`{item.get('can_start_now')}` "
             f"review=`{item.get('requires_operator_review')}` wait_minutes=`{item.get('wait_minutes')}` "
-            f"execute_after_utc=`{item.get('execute_after_utc')}` reason=`{item.get('reason')}`"
+            f"execute_after_utc=`{item.get('execute_after_utc')}` reason=`{item.get('reason')}` "
+            f"paper_packet=`{packet.get('status')}`"
         )
     _write_text(path, "\n".join(lines) + "\n")
 
@@ -389,10 +484,12 @@ def _run_once(
     generated_at: datetime,
     observed_hours: float,
     refresh_market_data_before_run: bool = True,
+    force_quote_sample: bool = False,
 ) -> dict[str, Any]:
     evidence_root = _resolve(args.evidence_report_root)
     evidence_dir = evidence_root / f"market_state_rotation_v6_launch_shadow_watch_{generated_at:%Y%m%d_%H%M%S}_i{iteration:03d}"
     manual_path = _resolve(args.manual_safety_evidence) if args.manual_safety_evidence else None
+    effective_force_quote_sample = bool(args.force_quote_sample) or bool(force_quote_sample)
     report = run_evidence_cycle(
         source_backtest_report_path=_resolve(args.source_backtest_report),
         stress_report_path=_resolve(args.stress_report),
@@ -402,7 +499,7 @@ def _run_once(
         report_dir=evidence_dir,
         quote_samples_per_tick=max(0, int(args.quote_samples_per_tick)),
         adaptive_quote_cadence=not bool(args.disable_adaptive_quote_cadence),
-        force_quote_sample=bool(args.force_quote_sample),
+        force_quote_sample=effective_force_quote_sample,
         historical_evidence_replay=True,
         refresh_market_data_before_run=bool(refresh_market_data_before_run),
         historical_replay_source_path=_resolve(args.historical_replay_source),
@@ -427,7 +524,10 @@ def _run_once(
         "no_live_order_sent": report.get("no_live_order_sent") is True,
         "collection_progress": dict(report.get("collection_progress") or {}),
         "readiness_progress": dict(report.get("readiness_progress") or {}),
+        "execution_parity_journal": dict(report.get("execution_parity_journal") or {}),
+        "execution_parity_collection_plan": dict(report.get("execution_parity_collection_plan") or {}),
         "paper_bridge_apply_gate": dict(report.get("paper_bridge_apply_gate") or {}),
+        "pre_apply_backup_plan": dict(report.get("pre_apply_backup_plan") or {}),
         "quote_cadence_preflight": dict(report.get("quote_cadence_preflight") or {}),
         "pre_run_market_data_refresh": dict(report.get("pre_run_market_data_refresh") or {}),
         "market_data_refresh_plan": dict(report.get("market_data_refresh_plan") or {}),
@@ -448,6 +548,7 @@ def _watch_progress(runs: list[dict[str, Any]], *, baseline_collection: dict[str
         }
     first_collection = dict(baseline_collection or runs[0].get("collection_progress") or {})
     latest_collection = dict(runs[-1].get("collection_progress") or {})
+    latest_parity_plan = dict(runs[-1].get("execution_parity_collection_plan") or {})
     launch_statuses = [str(dict(run.get("launch_readiness") or {}).get("status") or "") for run in runs]
     next_blockers = [
         str(dict(dict(run.get("launch_readiness") or {}).get("next_blocker") or {}).get("gate") or "")
@@ -473,6 +574,10 @@ def _watch_progress(runs: list[dict[str, Any]], *, baseline_collection: dict[str
 
     quote_delta = _int_value(latest_collection, "quote_observed") - _int_value(first_collection, "quote_observed")
     hour_delta = _int_value(latest_collection, "quote_distinct_hours") - _int_value(first_collection, "quote_distinct_hours")
+    execution_parity_delta = _int_value(latest_collection, "execution_parity_journal_rows") - _int_value(
+        first_collection,
+        "execution_parity_journal_rows",
+    )
     return {
         "launch_statuses_seen": sorted(set(item for item in launch_statuses if item)),
         "next_blockers_seen": sorted(set(item for item in next_blockers if item)),
@@ -488,6 +593,30 @@ def _watch_progress(runs: list[dict[str, Any]], *, baseline_collection: dict[str
         "quote_distinct_hours_delta": hour_delta,
         "quote_hour_progress_state": "progressing" if hour_delta > 0 else "no_new_utc_hour_since_watch_baseline",
         "paper_fill_rows_latest": _int_value(latest_collection, "paper_fill_rows"),
+        "execution_parity_journal_rows_latest": _int_value(latest_collection, "execution_parity_journal_rows"),
+        "execution_parity_journal_rows_delta": execution_parity_delta,
+        "execution_parity_missing_samples_latest": _int_value(latest_collection, "execution_parity_missing_samples"),
+        "execution_parity_passed_latest": latest_collection.get("execution_parity_passed") is True,
+        "execution_parity_progress_state": (
+            "progressing" if execution_parity_delta > 0 else "no_new_execution_parity_rows_since_watch_baseline"
+        ),
+        "execution_parity_collection_status_latest": latest_parity_plan.get("status"),
+        "execution_parity_events_needed_latest": _int_value(
+            latest_parity_plan,
+            "estimated_future_paper_apply_events_needed",
+        ),
+        "execution_parity_events_needed_after_current_apply_latest": _int_value(
+            latest_parity_plan,
+            "estimated_events_needed_after_current_creditable_apply",
+        ),
+        "execution_parity_will_credit_current_apply_latest": (
+            latest_parity_plan.get("will_credit_current_apply_after_operator_review") is True
+        ),
+        "execution_parity_creditable_actions_latest": list(
+            latest_parity_plan.get("currently_creditable_actions") or []
+        ),
+        "execution_parity_next_step_latest": latest_parity_plan.get("next_step"),
+        "execution_parity_non_substitutable_latest": latest_parity_plan.get("non_substitutable") is True,
     }
 
 
@@ -621,6 +750,31 @@ def _pre_run_quote_window_capture_outcome(
     }
 
 
+def _pre_run_wait_force_quote_sample(pre_run_wait_plan: dict[str, Any] | None) -> bool:
+    plan = dict(pre_run_wait_plan or {})
+    if not plan or plan.get("target_window_missed") is True:
+        return False
+
+    status = str(plan.get("status") or "")
+    waited_or_open = plan.get("actual_sleep_seconds") is not None or status in {
+        "current_quote_window_open",
+        "next_quote_coverage_window_reached_or_previous_plan_stale",
+    }
+    if not waited_or_open:
+        return False
+
+    target_kind = str(plan.get("target_quote_coverage_kind") or plan.get("next_quote_coverage_kind") or "")
+    coverage_status = str(plan.get("coverage_status") or "")
+    reason = str(plan.get("reason") or "")
+    return (
+        target_kind in {"missing_hour_of_day_balance_bucket", "current_utc_calendar_day", "next_utc_calendar_day"}
+        or coverage_status == "current_hour_of_day_balance_open"
+        or coverage_status == "current_utc_calendar_day_open"
+        or reason == "current_hour_of_day_balance_can_advance_microstructure_coverage"
+        or reason == "current_utc_calendar_day_can_advance_microstructure_coverage"
+    )
+
+
 def _recent_quote_rows(rows: list[dict[str, Any]], *, generated_at: datetime, recent_hours: float) -> list[dict[str, Any]]:
     cutoff = generated_at - timedelta(hours=max(0.0, float(recent_hours or 0.0)))
     recent: list[dict[str, Any]] = []
@@ -700,6 +854,10 @@ def _microstructure_coverage_plan(
     remaining_calendar_days = max(min_calendar_days - calendar_day_count, 0)
     remaining_distinct_hours = max(min_distinct_hours - distinct_hour_count, 0)
     remaining_quote_samples = max(required_rows - eligible_rows, 0)
+    hour_of_day_covered_count = _int_or_default(coverage.get("utc_hour_of_day_covered_count"), 0)
+    min_hour_of_day_buckets = 24
+    remaining_hour_of_day_buckets = max(min_hour_of_day_buckets - hour_of_day_covered_count, 0)
+    hour_of_day_balance_needed = remaining_hour_of_day_buckets > 0 and remaining_distinct_hours <= 0
     current_hour_missing = current_hour in set(missing_hours)
     current_date_missing = remaining_calendar_days > 0 and current_utc_date not in covered_calendar_days
     if remaining_calendar_days > 0:
@@ -712,9 +870,26 @@ def _microstructure_coverage_plan(
     else:
         next_calendar_utc = None
         calendar_wait_minutes = None
+    if remaining_calendar_days <= 0:
+        earliest_calendar_completion_utc = None
+    elif current_date_missing:
+        if remaining_calendar_days <= 1:
+            earliest_calendar_completion_utc = generated_at
+        else:
+            first_future_day = (generated_at + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            earliest_calendar_completion_utc = first_future_day + timedelta(days=remaining_calendar_days - 2)
+    else:
+        earliest_calendar_completion_utc = (
+            next_calendar_utc + timedelta(days=remaining_calendar_days - 1)
+            if next_calendar_utc is not None
+            else None
+        )
     coverage_candidates: list[tuple[datetime, str]] = []
-    if next_utc is not None and remaining_distinct_hours > 0:
-        coverage_candidates.append((next_utc, "missing_utc_hour_bucket"))
+    if next_utc is not None:
+        if remaining_distinct_hours > 0:
+            coverage_candidates.append((next_utc, "missing_utc_hour_bucket"))
+        elif hour_of_day_balance_needed:
+            coverage_candidates.append((next_utc, "missing_hour_of_day_balance_bucket"))
     if next_calendar_utc is not None and remaining_calendar_days > 0:
         coverage_candidates.append(
             (
@@ -743,8 +918,12 @@ def _microstructure_coverage_plan(
         recommended_action = "none"
         can_collect_now = False
     elif current_hour_missing:
-        status = "current_missing_utc_hour_open"
-        recommended_action = "collect_current_missing_utc_hour_now"
+        if hour_of_day_balance_needed:
+            status = "current_hour_of_day_balance_open"
+            recommended_action = "collect_current_hour_of_day_balance_now"
+        else:
+            status = "current_missing_utc_hour_open"
+            recommended_action = "collect_current_missing_utc_hour_now"
         can_collect_now = bool(quote_capture_command)
     else:
         status = "waiting_for_next_quote_coverage_window"
@@ -765,12 +944,25 @@ def _microstructure_coverage_plan(
         "next_calendar_day_at": next_calendar_utc.isoformat() if next_calendar_utc is not None else None,
         "next_calendar_kst_at": next_calendar_utc.astimezone(KST).isoformat() if next_calendar_utc is not None else None,
         "next_calendar_wait_minutes": calendar_wait_minutes,
+        "earliest_calendar_completion_utc": (
+            earliest_calendar_completion_utc.isoformat() if earliest_calendar_completion_utc is not None else None
+        ),
+        "earliest_calendar_completion_kst": (
+            earliest_calendar_completion_utc.astimezone(KST).isoformat()
+            if earliest_calendar_completion_utc is not None
+            else None
+        ),
+        "calendar_completion_policy": "one_new_utc_calendar_date_per_day_for_actual_launch_gate",
         "next_missing_utc_hour": f"{next_hour:02d}" if next_hour is not None else None,
         "next_missing_utc_at": next_utc.isoformat() if next_utc is not None else None,
         "next_missing_kst_at": next_utc.astimezone(KST).isoformat() if next_utc is not None else None,
         "wait_minutes": wait_minutes,
         "missing_utc_hour_of_day": [f"{hour:02d}" for hour in missing_hours],
         "remaining_missing_utc_hour_count": len(missing_hours),
+        "hour_of_day_covered_count": hour_of_day_covered_count,
+        "min_hour_of_day_bucket_count": min_hour_of_day_buckets,
+        "remaining_hour_of_day_bucket_count": remaining_hour_of_day_buckets,
+        "hour_of_day_balance_needed": hour_of_day_balance_needed,
         "calendar_day_count": calendar_day_count,
         "min_calendar_days": min_calendar_days,
         "covered_calendar_days": sorted(covered_calendar_days),
@@ -778,6 +970,13 @@ def _microstructure_coverage_plan(
         "distinct_hour_count": distinct_hour_count,
         "min_distinct_hours": min_distinct_hours,
         "remaining_distinct_hours": remaining_distinct_hours,
+        "distinct_hour_bucket_count": distinct_hour_count,
+        "min_distinct_hour_bucket_count": min_distinct_hours,
+        "remaining_distinct_hour_bucket_count": remaining_distinct_hours,
+        "coverage_accounting_note": (
+            "distinct_hour_bucket_count counts unique UTC hour timestamps for the launch gate; "
+            "hour_of_day buckets show 00-23 distribution balance for collection scheduling."
+        ),
         "eligible_quote_samples": eligible_rows,
         "required_quote_samples": required_rows,
         "remaining_quote_samples": remaining_quote_samples,
@@ -989,9 +1188,18 @@ def _pre_run_quote_window_wait_plan(
         current_date_missing_now = False
     else:
         current_date_missing_now = remaining_calendar_days > 0
+    next_kind = str(coverage_plan.get("next_quote_coverage_kind") or "missing_utc_hour_bucket")
+    next_at = _parse_dt(coverage_plan.get("next_quote_coverage_at") or coverage_plan.get("next_missing_utc_at"))
     if coverage_plan.get("can_collect_now") is True or current_hour_missing_now or current_date_missing_now:
         if coverage_plan.get("can_collect_now") is True:
-            reason = "quote_sample_count_can_advance_now"
+            if coverage_plan.get("status") == "current_hour_of_day_balance_open":
+                reason = "current_hour_of_day_balance_can_advance_microstructure_coverage"
+            elif current_date_missing_now:
+                reason = "current_utc_calendar_day_can_advance_microstructure_coverage"
+            elif current_hour_missing_now:
+                reason = "current_utc_hour_can_advance_microstructure_coverage"
+            else:
+                reason = "quote_sample_count_can_advance_now"
         elif current_date_missing_now:
             reason = "current_utc_calendar_day_can_advance_microstructure_coverage"
         else:
@@ -1005,11 +1213,15 @@ def _pre_run_quote_window_wait_plan(
             "current_utc_date_missing": current_date_missing_now,
             "current_utc_hour": current_hour,
             "current_utc_hour_missing": current_hour_missing_now,
+            "next_quote_coverage_kind": next_kind,
+            "next_quote_coverage_at": next_at.isoformat() if next_at is not None else coverage_plan.get("next_quote_coverage_at"),
+            "next_quote_coverage_kst_at": next_at.astimezone(KST).isoformat() if next_at is not None else coverage_plan.get("next_quote_coverage_kst_at"),
+            "next_missing_utc_at": coverage_plan.get("next_missing_utc_at"),
+            "next_missing_kst_at": coverage_plan.get("next_missing_kst_at"),
+            "next_missing_utc_hour": coverage_plan.get("next_missing_utc_hour"),
             "coverage_status": coverage_plan.get("status"),
             "no_live_order_sent": True,
         }
-    next_kind = str(coverage_plan.get("next_quote_coverage_kind") or "missing_utc_hour_bucket")
-    next_at = _parse_dt(coverage_plan.get("next_quote_coverage_at") or coverage_plan.get("next_missing_utc_at"))
     if next_at is None:
         return {
             "status": "next_quote_window_unknown",
@@ -1168,6 +1380,597 @@ def _pre_run_quote_window_wait_incident_log(
     return incidents[-limit:]
 
 
+def _execution_parity_eta_plan(
+    *,
+    execution_parity_plan: dict[str, Any],
+    signal_wait_plan: dict[str, Any],
+    generated_at: datetime,
+) -> dict[str, Any]:
+    required = _int_or_default(execution_parity_plan.get("required_samples"), 0)
+    missing = _int_or_default(execution_parity_plan.get("missing_samples"), 0)
+    events_needed = _int_or_default(execution_parity_plan.get("estimated_future_paper_apply_events_needed"), missing)
+    events_after_current = _int_or_default(
+        execution_parity_plan.get("estimated_events_needed_after_current_creditable_apply"),
+        events_needed,
+    )
+    if missing <= 0 or events_needed <= 0:
+        return {
+            "status": "execution_parity_complete",
+            "required_samples": required,
+            "missing_samples": 0,
+            "estimated_future_paper_apply_events_needed": 0,
+            "estimated_completion_utc": generated_at.astimezone(UTC).isoformat(),
+            "estimated_completion_kst": generated_at.astimezone(KST).isoformat(),
+            "non_substitutable": execution_parity_plan.get("non_substitutable") is True,
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+
+    expected_days_per_event = _number_or_none(signal_wait_plan.get("expected_days_per_event"))
+    expected_event_interval_hours = _number_or_none(signal_wait_plan.get("expected_event_interval_hours"))
+    median_gap_hours = _number_or_none(signal_wait_plan.get("median_gap_hours"))
+    expected_days_per_add = _number_or_none(signal_wait_plan.get("expected_days_per_add"))
+    expected_add_interval_hours = _number_or_none(signal_wait_plan.get("expected_add_interval_hours"))
+    median_add_gap_hours = _number_or_none(signal_wait_plan.get("median_add_gap_hours"))
+    next_creditable_events = list(execution_parity_plan.get("next_creditable_event_types") or [])
+
+    def _scenario(name: str, cadence_hours: float | None, cadence_source: str, *, description: str) -> dict[str, Any]:
+        row: dict[str, Any] = {
+            "name": name,
+            "cadence_source": cadence_source,
+            "cadence_hours": round(float(cadence_hours), 4) if cadence_hours is not None else None,
+            "description": description,
+            "available": cadence_hours is not None and cadence_hours > 0,
+        }
+        if cadence_hours is not None and cadence_hours > 0:
+            estimated_hours = max(float(events_needed) * float(cadence_hours), 0.0)
+            completion = generated_at.astimezone(UTC) + timedelta(hours=estimated_hours)
+            row.update(
+                {
+                    "estimated_hours": round(estimated_hours, 3),
+                    "estimated_days": round(estimated_hours / 24.0, 3),
+                    "estimated_completion_utc": completion.isoformat(),
+                    "estimated_completion_kst": completion.astimezone(KST).isoformat(),
+                }
+            )
+        return row
+
+    all_event_hours: float | None
+    all_event_source: str
+    if expected_days_per_event and expected_days_per_event > 0:
+        all_event_hours = expected_days_per_event * 24.0
+        all_event_source = "signal_wait_plan.expected_days_per_event"
+    elif expected_event_interval_hours and expected_event_interval_hours > 0:
+        all_event_hours = expected_event_interval_hours
+        all_event_source = "signal_wait_plan.expected_event_interval_hours"
+    elif median_gap_hours and median_gap_hours > 0:
+        all_event_hours = median_gap_hours
+        all_event_source = "signal_wait_plan.median_gap_hours"
+    else:
+        all_event_hours = None
+        all_event_source = "unknown"
+
+    add_only_hours: float | None
+    add_only_source: str
+    if expected_days_per_add and expected_days_per_add > 0:
+        add_only_hours = expected_days_per_add * 24.0
+        add_only_source = "signal_wait_plan.expected_days_per_add"
+    elif expected_add_interval_hours and expected_add_interval_hours > 0:
+        add_only_hours = expected_add_interval_hours
+        add_only_source = "signal_wait_plan.expected_add_interval_hours"
+    elif median_add_gap_hours and median_add_gap_hours > 0:
+        add_only_hours = median_add_gap_hours
+        add_only_source = "signal_wait_plan.median_add_gap_hours"
+    else:
+        add_only_hours = None
+        add_only_source = "unknown"
+
+    all_creditable = {"add", "remove"}.issubset({str(item) for item in next_creditable_events})
+    scenarios = {
+        "all_creditable_events": _scenario(
+            "all_creditable_events",
+            all_event_hours,
+            all_event_source,
+            description="Uses all fresh add/remove bridge events because both actions can credit execution parity.",
+        ),
+        "conservative_add_only": _scenario(
+            "conservative_add_only",
+            add_only_hours,
+            add_only_source,
+            description="Uses only add cadence as a conservative fallback when remove cadence is ignored.",
+        ),
+    }
+    if all_creditable and scenarios["all_creditable_events"]["available"]:
+        selected = scenarios["all_creditable_events"]
+        selected_reason = "accepted_actions_include_add_and_remove"
+    else:
+        selected = scenarios["conservative_add_only"]
+        selected_reason = "fallback_to_add_only_cadence"
+    cadence_hours = _number_or_none(selected.get("cadence_hours"))
+    cadence_source = str(selected.get("cadence_source") or "unknown")
+
+    estimate: dict[str, Any] = {
+        "status": (
+            "eta_unavailable_without_signal_cadence"
+            if cadence_hours is None
+            else (
+                "eta_from_creditable_event_cadence"
+                if selected.get("name") == "all_creditable_events"
+                else "eta_from_add_only_signal_cadence"
+            )
+        ),
+        "required_samples": required,
+        "eligible_journal_rows": _int_or_default(execution_parity_plan.get("eligible_journal_rows"), 0),
+        "missing_samples": missing,
+        "estimated_future_paper_apply_events_needed": events_needed,
+        "estimated_events_needed_after_current_creditable_apply": events_after_current,
+        "sample_credit_per_completed_paper_apply_event": execution_parity_plan.get(
+            "sample_credit_per_completed_paper_apply_event"
+        ),
+        "cadence_source": cadence_source,
+        "selected_eta_scenario": selected.get("name"),
+        "selected_eta_reason": selected_reason,
+        "eta_scenarios": scenarios,
+        "expected_days_per_event": expected_days_per_event,
+        "expected_event_interval_hours": expected_event_interval_hours,
+        "median_gap_hours": median_gap_hours,
+        "latest_age_to_median_gap": signal_wait_plan.get("latest_age_to_median_gap"),
+        "event_wait_state": signal_wait_plan.get("event_wait_state"),
+        "bridge_event_count": signal_wait_plan.get("bridge_event_count"),
+        "add_event_count": signal_wait_plan.get("add_event_count"),
+        "remove_event_count": signal_wait_plan.get("remove_event_count"),
+        "expected_days_per_add": expected_days_per_add,
+        "expected_add_interval_hours": expected_add_interval_hours,
+        "median_add_gap_hours": median_add_gap_hours,
+        "latest_add_age_to_median_gap": signal_wait_plan.get("latest_add_age_to_median_gap"),
+        "cadence_lag_level": signal_wait_plan.get("cadence_lag_level"),
+        "fresh_signal": execution_parity_plan.get("fresh_signal") is True,
+        "paper_apply_available_now": execution_parity_plan.get("paper_apply_available_now") is True,
+        "will_credit_current_apply_after_operator_review": (
+            execution_parity_plan.get("will_credit_current_apply_after_operator_review") is True
+        ),
+        "currently_creditable_actions": list(execution_parity_plan.get("currently_creditable_actions") or []),
+        "next_creditable_event_types": list(execution_parity_plan.get("next_creditable_event_types") or []),
+        "non_substitutable": execution_parity_plan.get("non_substitutable") is True,
+        "backtest_substitution_allowed": execution_parity_plan.get("backtest_substitution_allowed") is True,
+        "caveat": (
+            "Cadence ETA is only an operator planning estimate; execution parity can only be credited by "
+            "future fresh signals followed by reviewed paper apply rows, not by forced entries or backtest rows."
+        ),
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+    if cadence_hours is not None:
+        estimated_hours = max(float(events_needed) * float(cadence_hours), 0.0)
+        completion = generated_at.astimezone(UTC) + timedelta(hours=estimated_hours)
+        estimate.update(
+            {
+                "estimated_hours_at_current_cadence": round(estimated_hours, 3),
+                "estimated_days_at_current_cadence": round(estimated_hours / 24.0, 3),
+                "estimated_completion_utc": completion.isoformat(),
+                "estimated_completion_kst": completion.astimezone(KST).isoformat(),
+            }
+        )
+    return estimate
+
+
+def _post_apply_execution_parity_review_command(before_evidence_report: Any) -> str:
+    before_report = str(before_evidence_report or "<pre_apply_evidence_report>").strip()
+    return (
+        ".venv/bin/python scripts/run_market_state_rotation_v6_paper_apply_parity_review.py "
+        f"--before-evidence-report {before_report} "
+        "--after-evidence-report <post_apply_evidence_report> "
+        "--report-dir reports/validation/diagnostics/<paper_apply_parity_review_report_dir> "
+        "--write-report"
+    )
+
+
+def _command_tokens(command: Any) -> list[str]:
+    text = str(command or "").strip()
+    if not text:
+        return []
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
+
+
+def _has_quote_samples(tokens: list[str], expected: str) -> bool:
+    for idx, token in enumerate(tokens[:-1]):
+        if token == "--quote-samples-per-tick":
+            return tokens[idx + 1] == expected
+    return False
+
+
+def _flag_has_value(tokens: list[str], flag: str) -> bool:
+    for idx, token in enumerate(tokens[:-1]):
+        if token != flag:
+            continue
+        value = str(tokens[idx + 1] or "").strip()
+        if value and not value.startswith("--"):
+            return True
+    return False
+
+
+def _flag_value(tokens: list[str], flag: str) -> str | None:
+    for idx, token in enumerate(tokens[:-1]):
+        if token != flag:
+            continue
+        value = str(tokens[idx + 1] or "").strip()
+        if value and not value.startswith("--"):
+            return value
+    return None
+
+
+def _has_unresolved_placeholder(tokens: list[str]) -> bool:
+    return any("<" in str(token) or ">" in str(token) for token in tokens)
+
+
+def _path_scope_warning(*, value: str | None, expected_prefix: str, warning: str) -> str | None:
+    if not value:
+        return None
+    normalized = str(value).strip().lstrip("./")
+    expected = expected_prefix.strip().rstrip("/")
+    if normalized == expected or normalized.startswith(f"{expected}/"):
+        return None
+    return warning
+
+
+def _flag_positive_int_value(tokens: list[str], flag: str) -> bool:
+    value = _flag_value(tokens, flag)
+    if value is None:
+        return False
+    try:
+        return int(value) > 0
+    except ValueError:
+        return False
+
+
+def _is_forbidden_live_flag(token: Any, live_flags: set[str]) -> bool:
+    base = str(token or "").strip().split("=", 1)[0]
+    return base in live_flags or base.startswith("--live-order") or base.startswith("--submit-live")
+
+
+def _pre_apply_evidence_report_status(
+    *,
+    report_path: Any,
+    packet_generated_at: datetime | None,
+    review_window_minutes: float,
+) -> dict[str, Any]:
+    text = str(report_path or "").strip()
+    base = {
+        "report_path": text or None,
+        "packet_generated_at": packet_generated_at.isoformat() if packet_generated_at is not None else None,
+        "max_age_minutes": round(float(review_window_minutes), 4),
+        "exists": False,
+        "fresh": False,
+        "block_apply": True,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+    if not text:
+        return {**base, "status": "missing_pre_apply_evidence_report_path", "blockers": ["pre_apply_evidence_report_path_missing"]}
+    if "<" in text or ">" in text:
+        return {**base, "status": "unresolved_pre_apply_evidence_report_placeholder", "blockers": ["pre_apply_evidence_report_has_unresolved_placeholder"]}
+    resolved = Path(text)
+    if not resolved.is_absolute():
+        resolved = ROOT_DIR / resolved
+    display_path = _display_path(resolved)
+    if not resolved.exists():
+        return {
+            **base,
+            "status": "pre_apply_evidence_report_file_missing",
+            "report_path": display_path,
+            "blockers": ["pre_apply_evidence_report_file_missing"],
+        }
+    try:
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            **base,
+            "status": "pre_apply_evidence_report_unreadable",
+            "report_path": display_path,
+            "exists": True,
+            "error": str(exc),
+            "blockers": ["pre_apply_evidence_report_unreadable"],
+        }
+    if not isinstance(payload, dict):
+        return {
+            **base,
+            "status": "pre_apply_evidence_report_payload_not_object",
+            "report_path": display_path,
+            "exists": True,
+            "blockers": ["pre_apply_evidence_report_payload_not_object"],
+        }
+    report_generated_at = _parse_dt(payload.get("generated_at"))
+    if report_generated_at is None or packet_generated_at is None:
+        return {
+            **base,
+            "status": "pre_apply_evidence_report_timestamp_unavailable",
+            "report_path": display_path,
+            "exists": True,
+            "report_generated_at": report_generated_at.isoformat() if report_generated_at is not None else None,
+            "report_no_live_order_sent": payload.get("no_live_order_sent"),
+            "blockers": ["pre_apply_evidence_report_timestamp_unavailable"],
+        }
+    if payload.get("no_live_order_sent") is not True:
+        return {
+            **base,
+            "status": "pre_apply_evidence_report_no_live_safety_unconfirmed",
+            "report_path": display_path,
+            "exists": True,
+            "report_generated_at": report_generated_at.isoformat(),
+            "report_no_live_order_sent": payload.get("no_live_order_sent"),
+            "blockers": ["pre_apply_evidence_report_no_live_order_sent_not_true"],
+        }
+    age_minutes = max((packet_generated_at.astimezone(UTC) - report_generated_at.astimezone(UTC)).total_seconds(), 0.0) / 60.0
+    max_age = max(0.0, float(review_window_minutes or 0.0))
+    if max_age > 0.0 and age_minutes > max_age:
+        return {
+            **base,
+            "status": "pre_apply_evidence_report_stale_for_review_window",
+            "report_path": display_path,
+            "exists": True,
+            "report_generated_at": report_generated_at.isoformat(),
+            "report_no_live_order_sent": True,
+            "age_minutes": round(age_minutes, 4),
+            "blockers": ["pre_apply_evidence_report_stale_for_review_window"],
+        }
+    return {
+        **base,
+        "status": "fresh",
+        "report_path": display_path,
+        "exists": True,
+        "fresh": True,
+        "block_apply": False,
+        "report_generated_at": report_generated_at.isoformat(),
+        "report_no_live_order_sent": True,
+        "age_minutes": round(age_minutes, 4),
+        "blockers": [],
+    }
+
+
+def _paper_apply_command_safety(*, dry_run_command: Any, apply_command: Any) -> dict[str, Any]:
+    dry_tokens = _command_tokens(dry_run_command)
+    apply_tokens = _command_tokens(apply_command)
+    blockers: list[str] = []
+    warnings: list[str] = []
+    live_flags = {
+        "--allow-live-orders",
+        "--enable-live",
+        "--enable-live-orders",
+        "--live",
+        "--live-order",
+        "--live-trading",
+        "--submit-live-order",
+    }
+    if not dry_tokens:
+        blockers.append("dry_run_command_missing")
+    if not apply_tokens:
+        blockers.append("apply_command_missing")
+    if dry_tokens and _has_unresolved_placeholder(dry_tokens):
+        blockers.append("dry_run_command_has_unresolved_placeholder")
+    if apply_tokens and _has_unresolved_placeholder(apply_tokens):
+        blockers.append("apply_command_has_unresolved_placeholder")
+    if "--apply-paper-bridge" in dry_tokens:
+        blockers.append("dry_run_command_must_not_apply_paper_bridge")
+    if apply_tokens and "--apply-paper-bridge" not in apply_tokens:
+        blockers.append("apply_command_must_use_apply_paper_bridge")
+    if apply_tokens and "--pre-apply-backup-dir" not in apply_tokens:
+        blockers.append("apply_command_must_use_pre_apply_backup_dir")
+    elif apply_tokens and not _flag_has_value(apply_tokens, "--pre-apply-backup-dir"):
+        blockers.append("apply_command_pre_apply_backup_dir_value_missing")
+    if apply_tokens and "--refresh-market-data-before-run" not in apply_tokens:
+        blockers.append("apply_command_must_refresh_market_data_before_run")
+    if dry_tokens and "--refresh-market-data-before-run" not in dry_tokens:
+        blockers.append("dry_run_command_must_refresh_market_data_before_run")
+    if apply_tokens and "--max-signal-age-minutes" not in apply_tokens:
+        blockers.append("apply_command_must_use_max_signal_age_minutes")
+    elif apply_tokens and not _flag_has_value(apply_tokens, "--max-signal-age-minutes"):
+        blockers.append("apply_command_max_signal_age_minutes_value_missing")
+    elif apply_tokens and not _flag_positive_int_value(apply_tokens, "--max-signal-age-minutes"):
+        blockers.append("apply_command_max_signal_age_minutes_must_be_positive_integer")
+    if dry_tokens and "--max-signal-age-minutes" not in dry_tokens:
+        blockers.append("dry_run_command_must_use_max_signal_age_minutes")
+    elif dry_tokens and not _flag_has_value(dry_tokens, "--max-signal-age-minutes"):
+        blockers.append("dry_run_command_max_signal_age_minutes_value_missing")
+    elif dry_tokens and not _flag_positive_int_value(dry_tokens, "--max-signal-age-minutes"):
+        blockers.append("dry_run_command_max_signal_age_minutes_must_be_positive_integer")
+    if apply_tokens and "--report-dir" not in apply_tokens:
+        blockers.append("apply_command_must_write_report_dir")
+    elif apply_tokens and not _flag_has_value(apply_tokens, "--report-dir"):
+        blockers.append("apply_command_report_dir_value_missing")
+    if dry_tokens and "--report-dir" not in dry_tokens:
+        blockers.append("dry_run_command_must_write_report_dir")
+    elif dry_tokens and not _flag_has_value(dry_tokens, "--report-dir"):
+        blockers.append("dry_run_command_report_dir_value_missing")
+    if dry_tokens and not _has_quote_samples(dry_tokens, "0"):
+        blockers.append("dry_run_command_must_use_quote_samples_per_tick_0")
+    if apply_tokens and not _has_quote_samples(apply_tokens, "0"):
+        blockers.append("apply_command_must_use_quote_samples_per_tick_0")
+    if any(_is_forbidden_live_flag(token, live_flags) for token in [*dry_tokens, *apply_tokens]):
+        blockers.append("live_order_flag_present_in_operator_command")
+    dry_report_dir = _flag_value(dry_tokens, "--report-dir")
+    apply_report_dir = _flag_value(apply_tokens, "--report-dir")
+    apply_backup_dir = _flag_value(apply_tokens, "--pre-apply-backup-dir")
+    for warning in (
+        _path_scope_warning(
+            value=dry_report_dir,
+            expected_prefix="reports/validation/diagnostics",
+            warning="dry_run_report_dir_outside_recommended_diagnostics_scope",
+        ),
+        _path_scope_warning(
+            value=apply_report_dir,
+            expected_prefix="reports/validation/diagnostics",
+            warning="apply_report_dir_outside_recommended_diagnostics_scope",
+        ),
+        _path_scope_warning(
+            value=apply_backup_dir,
+            expected_prefix="reports/db_recovery",
+            warning="apply_pre_apply_backup_dir_outside_recommended_recovery_scope",
+        ),
+    ):
+        if warning is not None:
+            warnings.append(warning)
+    return {
+        "status": "PASS" if not blockers else "FAIL",
+        "blockers": blockers,
+        "warnings": warnings,
+        "dry_run_command_checked": bool(dry_tokens),
+        "apply_command_checked": bool(apply_tokens),
+        "dry_run_report_dir": dry_report_dir,
+        "apply_report_dir": apply_report_dir,
+        "apply_pre_apply_backup_dir": apply_backup_dir,
+        "recommended_report_dir_prefix": "reports/validation/diagnostics",
+        "recommended_pre_apply_backup_dir_prefix": "reports/db_recovery",
+        "required_apply_flags": [
+            "--apply-paper-bridge",
+            "--quote-samples-per-tick 0",
+            "--refresh-market-data-before-run",
+            "--max-signal-age-minutes",
+            "--pre-apply-backup-dir",
+            "--report-dir",
+        ],
+        "required_dry_run_flags": [
+            "--quote-samples-per-tick 0",
+            "--refresh-market-data-before-run",
+            "--max-signal-age-minutes",
+            "--report-dir",
+        ],
+        "forbidden_flags": sorted(live_flags),
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+
+
+def _paper_apply_operator_packet(
+    *,
+    latest: dict[str, Any],
+    dry_run_command: Any,
+    apply_command: Any,
+    apply_allowed_now: bool,
+    retry_blocker: dict[str, Any],
+    parity_review_blocker: dict[str, Any],
+) -> dict[str, Any]:
+    launch = dict(latest.get("launch_readiness") or {})
+    handoff = dict(launch.get("paper_bridge_handoff") or {})
+    apply_gate = dict(latest.get("paper_bridge_apply_gate") or {})
+    signal_wait = dict(latest.get("signal_wait_plan") or {})
+    packet_generated_at = _parse_dt(latest.get("generated_at"))
+    review_window_minutes = _number_or_none(
+        signal_wait.get("max_signal_age_minutes") or signal_wait.get("signal_freshness_capture_window_minutes")
+    )
+    if review_window_minutes is None or review_window_minutes <= 0:
+        review_window_minutes = 15.0
+    review_deadline = (
+        packet_generated_at + timedelta(minutes=float(review_window_minutes))
+        if packet_generated_at is not None and apply_allowed_now
+        else None
+    )
+    before_report = latest.get("evidence_report")
+    pre_apply_evidence_status = _pre_apply_evidence_report_status(
+        report_path=before_report,
+        packet_generated_at=packet_generated_at,
+        review_window_minutes=float(review_window_minutes),
+    )
+    command_safety = _paper_apply_command_safety(
+        dry_run_command=dry_run_command,
+        apply_command=apply_command,
+    )
+    backup_plan = dict(latest.get("pre_apply_backup_plan") or handoff.get("pre_apply_backup_plan") or {})
+    if not backup_plan:
+        backup_plan = {
+            "status": "plan_missing_using_default_backup_dir",
+            "required": True,
+            "backup_dir": DEFAULT_PRE_APPLY_BACKUP_DIR,
+            "verification_required": True,
+            "verification_required_fields": [
+                "pre_apply_backup.created == true",
+                "pre_apply_backup.quick_check == 'ok'",
+                "pre_apply_backup.backup_path is not empty",
+            ],
+            "no_live_order_sent": True,
+        }
+    if command_safety.get("status") != "PASS" and apply_allowed_now:
+        status = "blocked_by_operator_command_safety"
+        blocker = "paper_apply_operator_command_safety"
+        apply_allowed_now = False
+        review_deadline = None
+    elif pre_apply_evidence_status.get("block_apply") is True and apply_allowed_now:
+        status = "blocked_by_pre_apply_evidence_report"
+        blocker = "pre_apply_evidence_report"
+        apply_allowed_now = False
+        review_deadline = None
+    elif command_safety.get("status") != "PASS" and any(
+        "run_market_state_rotation_v6_evidence_cycle.py" in str(command or "")
+        for command in (dry_run_command, apply_command)
+    ):
+        status = "operator_command_safety_preflight_failed"
+        blocker = "paper_apply_operator_command_safety"
+        apply_allowed_now = False
+        review_deadline = None
+    elif parity_review_blocker.get("blocked") is True:
+        status = "blocked_by_post_apply_parity_review"
+        blocker = "paper_apply_parity_review_blocker"
+    elif retry_blocker.get("blocked") is True:
+        status = "blocked_by_retry_guard"
+        blocker = "paper_apply_retry_blocker"
+    elif apply_allowed_now:
+        status = "ready_for_operator_review"
+        blocker = None
+    elif apply_gate.get("fresh_signal") is not True:
+        status = "armed_waiting_for_fresh_signal"
+        blocker = "current_fresh_signal"
+    else:
+        status = "blocked_until_apply_gate_available"
+        blocker = "paper_bridge_apply_gate"
+    return {
+        "status": status,
+        "blocker": blocker,
+        "pre_apply_evidence_report": before_report,
+        "pre_apply_evidence_report_status": pre_apply_evidence_status,
+        "packet_generated_at": packet_generated_at.isoformat() if packet_generated_at is not None else None,
+        "operator_review_window_minutes": round(float(review_window_minutes), 4),
+        "operator_review_deadline_utc": review_deadline.isoformat() if review_deadline is not None else None,
+        "operator_review_deadline_kst": review_deadline.astimezone(KST).isoformat()
+        if review_deadline is not None
+        else None,
+        "operator_review_deadline_active": review_deadline is not None,
+        "deadline_policy": (
+            "operator_command_safety_failed_rerun_dry_run_before_apply"
+            if command_safety.get("status") != "PASS"
+            else "pre_apply_evidence_report_failed_rerun_dry_run_before_apply"
+            if status == "blocked_by_pre_apply_evidence_report"
+            else "apply_command_expires_at_operator_review_deadline_rerun_dry_run_after_deadline"
+            if review_deadline is not None
+            else "deadline_arms_when_fresh_signal_and_apply_gate_open"
+        ),
+        "rerun_command_after_deadline": dry_run_command,
+        "dry_run_command": dry_run_command,
+        "apply_command_allowed_now": apply_command if apply_allowed_now else None,
+        "apply_command_when_gate_allows": apply_command,
+        "command_safety": command_safety,
+        "post_apply_execution_parity_review_command": _post_apply_execution_parity_review_command(before_report),
+        "pre_apply_backup_plan": backup_plan,
+        "verified_pre_apply_backup_required": True,
+        "backup_verification_required_fields": list(backup_plan.get("verification_required_fields") or []),
+        "post_apply_review_required": True,
+        "operator_sequence": [
+            "review_current_dry_run_report_and_confirm_bridge_status_dry_run_actionable",
+            "confirm_pre_apply_evidence_report_exists_is_fresh_and_no_live_order_sent_true",
+            "confirm_current_fresh_signal_and_paper_apply_gate_are_open",
+            "rerun_dry_run_if_operator_review_deadline_has_passed",
+            "run_apply_command_only_if_apply_command_allowed_now_is_present",
+            "verify_pre_apply_backup_created_quick_check_ok_and_backup_path_present",
+            "run_post_apply_execution_parity_review_before_next_paper_apply",
+        ],
+        "paper_apply_retry_blocker": retry_blocker,
+        "paper_apply_parity_review_blocker": parity_review_blocker,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+
+
 def _operator_handoff(
     *,
     latest: dict[str, Any],
@@ -1175,18 +1978,40 @@ def _operator_handoff(
     runtime_progress: dict[str, Any],
     risk_caps: dict[str, Any],
     microstructure_watch: dict[str, Any],
+    recent_paper_apply: dict[str, Any] | None = None,
+    recent_paper_review: dict[str, Any] | None = None,
+    recent_paper_apply_parity_review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     launch = dict(latest.get("launch_readiness") or {})
     commands = dict(launch.get("operator_commands") or {})
     handoff = dict(launch.get("paper_bridge_handoff") or {})
+    execution_parity_plan = dict(latest.get("execution_parity_collection_plan") or {})
+    signal_wait_plan = dict(latest.get("signal_wait_plan") or {})
     next_blocker = dict(launch.get("next_blocker") or {})
     can_request_paper_apply = handoff.get("apply_allowed_now") is True
+    paper_apply_retry_blocker = _paper_apply_retry_blocker(
+        latest,
+        dict(recent_paper_apply or {}),
+        dict(recent_paper_review or {}),
+    )
+    if paper_apply_retry_blocker.get("blocked") is True:
+        can_request_paper_apply = False
+    parity_review = dict(recent_paper_apply_parity_review or {})
+    parity_review_blocks_apply = parity_review.get("blocks_next_paper_apply") is True
+    if parity_review_blocks_apply:
+        can_request_paper_apply = False
     risk_caps_configured = risk_caps.get("configured") is True
     runtime_complete = runtime_progress.get("status") == "target_complete"
     microstructure_clear = microstructure_watch.get("status") == "microstructure_gates_passed"
     if can_request_paper_apply:
         status = "paper_bridge_operator_review_available"
         next_action = "operator_review_paper_bridge_dry_run_then_apply_with_verified_backup"
+    elif parity_review_blocks_apply:
+        status = "paper_apply_parity_review_blocking_next_apply"
+        next_action = "resolve_recent_paper_apply_parity_review_before_reapplying_paper_bridge"
+    elif paper_apply_retry_blocker.get("blocked") is True:
+        status = "paper_bridge_remove_apply_no_open_plan_waiting_for_add"
+        next_action = "wait_for_next_add_signal_or_existing_open_paper_plan_before_reapplying_remove"
     elif progress.get("fresh_signal_seen") is True:
         status = "fresh_signal_seen_but_paper_apply_not_yet_available"
         next_action = "inspect_paper_bridge_apply_gate_before_any_apply"
@@ -1203,14 +2028,64 @@ def _operator_handoff(
             for item in list(launch.get("blocking_gates") or [])
             if item.get("passed") is not True and item.get("gate")
         ]
+    paper_dry_run_command = handoff.get("dry_run_command") or commands.get("paper_bridge_dry_run")
+    paper_apply_command = handoff.get("apply_command") or commands.get("paper_apply_only_after_fresh_signal")
+    parity_review_blocker = {
+        "blocked": parity_review_blocks_apply,
+        "status": parity_review.get("status"),
+        "source_report": parity_review.get("source_report"),
+        "blockers": list(parity_review.get("blockers") or []),
+        "next_actions": list(parity_review.get("next_actions") or []),
+        "recommended_command": parity_review.get("recommended_command"),
+        "no_live_order_sent": True,
+    }
+    paper_apply_operator_packet = _paper_apply_operator_packet(
+        latest=latest,
+        dry_run_command=paper_dry_run_command,
+        apply_command=paper_apply_command,
+        apply_allowed_now=can_request_paper_apply,
+        retry_blocker=paper_apply_retry_blocker,
+        parity_review_blocker=parity_review_blocker,
+    )
+    if can_request_paper_apply and paper_apply_operator_packet.get("status") != "ready_for_operator_review":
+        can_request_paper_apply = False
+        status = str(paper_apply_operator_packet.get("status") or "paper_apply_operator_packet_blocked")
+        next_action = str(
+            paper_apply_operator_packet.get("blocker")
+            or "resolve_paper_apply_operator_packet_before_apply"
+        )
+    elif paper_apply_operator_packet.get("status") == "operator_command_safety_preflight_failed":
+        status = "paper_apply_operator_command_safety_preflight_failed"
+        next_action = "fix_operator_command_safety_before_waiting_for_fresh_signal"
     return {
         "status": status,
         "next_action": next_action,
         "next_blocker": next_blocker.get("gate"),
         "paper_apply_allowed_now": can_request_paper_apply,
+        "paper_apply_retry_blocker": paper_apply_retry_blocker,
+        "recent_paper_apply": dict(recent_paper_apply or {}),
+        "recent_paper_review": dict(recent_paper_review or {}),
+        "recent_paper_apply_parity_review": parity_review,
+        "paper_apply_parity_review_blocker": parity_review_blocker,
+        "paper_apply_operator_packet": paper_apply_operator_packet,
+        "pre_apply_backup_plan": dict(paper_apply_operator_packet.get("pre_apply_backup_plan") or {}),
         "paper_handoff_status": handoff.get("status"),
-        "paper_dry_run_command": handoff.get("dry_run_command") or commands.get("paper_bridge_dry_run"),
-        "paper_apply_command": handoff.get("apply_command") or commands.get("paper_apply_only_after_fresh_signal"),
+        "execution_parity_collection_plan": execution_parity_plan,
+        "execution_parity_eta_plan": _execution_parity_eta_plan(
+            execution_parity_plan=execution_parity_plan,
+            signal_wait_plan=signal_wait_plan,
+            generated_at=_parse_dt(latest.get("generated_at")) or datetime.now(UTC),
+        ),
+        "execution_parity_will_credit_current_apply": (
+            execution_parity_plan.get("will_credit_current_apply_after_operator_review") is True
+        ),
+        "execution_parity_events_needed": execution_parity_plan.get("estimated_future_paper_apply_events_needed"),
+        "execution_parity_events_needed_after_current_apply": execution_parity_plan.get(
+            "estimated_events_needed_after_current_creditable_apply"
+        ),
+        "execution_parity_creditable_actions": list(execution_parity_plan.get("currently_creditable_actions") or []),
+        "paper_dry_run_command": paper_dry_run_command,
+        "paper_apply_command": paper_apply_command,
         "quote_capture_command": commands.get("microstructure_quote_capture"),
         "risk_caps_configured": risk_caps_configured,
         "risk_caps_status": risk_caps.get("status"),
@@ -1242,6 +2117,11 @@ def _blocker_resolution_plan(
     market_data = dict(latest.get("market_data_refresh_plan") or {})
     safety = dict(latest.get("launch_safety_controls") or {})
     apply_gate = dict(latest.get("paper_bridge_apply_gate") or {})
+    execution_parity_plan = dict(
+        latest.get("execution_parity_collection_plan")
+        or operator_handoff.get("execution_parity_collection_plan")
+        or {}
+    )
     latest_collection = dict(latest.get("collection_progress") or {})
     commands = dict(launch.get("operator_commands") or {})
     plans: list[dict[str, Any]] = []
@@ -1276,15 +2156,51 @@ def _blocker_resolution_plan(
                     "reason": "must_wait_for_realtime_v6_add_or_remove_signal_do_not_force_entry",
                     "next_monitor_after_utc": signal_wait.get("next_monitor_after_utc"),
                     "next_monitor_after_kst": signal_wait.get("next_monitor_after_kst"),
+                    "cadence_recommended_monitor_interval_minutes": signal_wait.get(
+                        "cadence_recommended_monitor_interval_minutes"
+                    ),
                     "recommended_monitor_interval_minutes": signal_wait.get("recommended_monitor_interval_minutes"),
+                    "signal_freshness_capture_window_minutes": signal_wait.get(
+                        "signal_freshness_capture_window_minutes"
+                    ),
+                    "monitor_interval_capped_by_signal_freshness": signal_wait.get(
+                        "monitor_interval_capped_by_signal_freshness"
+                    )
+                    is True,
+                    "monitor_signal_age_alignment": signal_wait.get("monitor_signal_age_alignment"),
                     "cadence_lag_level": signal_wait.get("cadence_lag_level"),
                 }
             )
         elif gate_name == "real_paper_lifecycle_rows":
             can_apply_paper_now = operator_handoff.get("paper_apply_allowed_now") is True
+            paper_apply_retry_blocker = dict(operator_handoff.get("paper_apply_retry_blocker") or {})
+            parity_review_blocker = dict(operator_handoff.get("paper_apply_parity_review_blocker") or {})
+            paper_apply_operator_packet = dict(operator_handoff.get("paper_apply_operator_packet") or {})
             fresh_signal = apply_gate.get("fresh_signal") is True
+            monitor_command = (
+                signal_wait.get("command")
+                or commands.get("signal_monitor")
+                or operator_handoff.get("paper_dry_run_command")
+            )
+            next_monitor_after_utc = (
+                paper_apply_retry_blocker.get("next_monitor_after_utc")
+                if paper_apply_retry_blocker.get("blocked") is True
+                else signal_wait.get("next_monitor_after_utc")
+            )
+            next_monitor_after_kst = (
+                paper_apply_retry_blocker.get("next_monitor_after_kst")
+                if paper_apply_retry_blocker.get("blocked") is True
+                else signal_wait.get("next_monitor_after_kst")
+            )
             if can_apply_paper_now:
                 reason = "paper_bridge_apply_available_after_operator_review_and_verified_backup"
+            elif parity_review_blocker.get("blocked") is True:
+                reason = "recent_paper_apply_parity_review_blocks_next_apply"
+            elif paper_apply_retry_blocker.get("blocked") is True:
+                reason = str(
+                    paper_apply_retry_blocker.get("reason")
+                    or "recent_remove_paper_apply_found_no_open_v6_paper_plan"
+                )
             elif fresh_signal:
                 reason = "fresh_signal_seen_but_paper_bridge_apply_gate_not_available"
             else:
@@ -1295,16 +2211,42 @@ def _blocker_resolution_plan(
                     "requires_operator_review": True,
                     "command": operator_handoff.get("paper_apply_command") if can_apply_paper_now else None,
                     "dry_run_command": operator_handoff.get("paper_dry_run_command"),
-                    "monitor_command": signal_wait.get("command") or commands.get("signal_monitor"),
-                    "next_monitor_after_utc": signal_wait.get("next_monitor_after_utc"),
-                    "next_monitor_after_kst": signal_wait.get("next_monitor_after_kst"),
+                    "monitor_command": monitor_command,
+                    "next_monitor_after_utc": next_monitor_after_utc,
+                    "next_monitor_after_kst": next_monitor_after_kst,
                     "recommended_monitor_interval_minutes": signal_wait.get("recommended_monitor_interval_minutes"),
                     "paper_apply_command_when_gate_allows": operator_handoff.get("paper_apply_command"),
                     "reason": reason,
                     "fresh_signal": fresh_signal,
                     "can_request_paper_apply_now": apply_gate.get("can_request_paper_apply_now") is True,
+                    "paper_apply_retry_blocked": paper_apply_retry_blocker.get("blocked") is True,
+                    "paper_apply_retry_blocker": paper_apply_retry_blocker,
+                    "paper_apply_parity_review_blocked": parity_review_blocker.get("blocked") is True,
+                    "paper_apply_parity_review_blocker": parity_review_blocker,
                     "paper_handoff_status": operator_handoff.get("paper_handoff_status"),
                     "paper_fill_rows": latest_collection.get("paper_fill_rows"),
+                    "pre_apply_evidence_report": latest.get("evidence_report"),
+                    "pre_apply_backup_plan": dict(paper_apply_operator_packet.get("pre_apply_backup_plan") or {}),
+                    "paper_apply_operator_packet": paper_apply_operator_packet,
+                    "post_apply_execution_parity_review_command": paper_apply_operator_packet.get(
+                        "post_apply_execution_parity_review_command"
+                    )
+                    or _post_apply_execution_parity_review_command(latest.get("evidence_report")),
+                    "execution_parity_collection_status": execution_parity_plan.get("status"),
+                    "execution_parity_will_credit_current_apply": (
+                        execution_parity_plan.get("will_credit_current_apply_after_operator_review") is True
+                    ),
+                    "execution_parity_events_needed": execution_parity_plan.get(
+                        "estimated_future_paper_apply_events_needed"
+                    ),
+                    "execution_parity_events_needed_after_current_apply": execution_parity_plan.get(
+                        "estimated_events_needed_after_current_creditable_apply"
+                    ),
+                    "execution_parity_creditable_actions": list(
+                        execution_parity_plan.get("currently_creditable_actions") or []
+                    ),
+                    "execution_parity_accepted_actions": list(execution_parity_plan.get("accepted_actions") or []),
+                    "execution_parity_non_substitutable": execution_parity_plan.get("non_substitutable") is True,
                     "verified_pre_apply_backup_required": True,
                     "order_submission_allowed": False,
                 }
@@ -1320,6 +2262,7 @@ def _blocker_resolution_plan(
             immediate_quote_capture = "quote_samples_missing" in set(sample_blockers)
             time_coverage_blocked = bool({"calendar_days_missing", "distinct_hours_missing"} & set(sample_blockers))
             current_missing_hour_open = coverage_plan.get("current_utc_hour_missing") is True
+            current_hour_balance_open = coverage_plan.get("status") == "current_hour_of_day_balance_open"
             current_utc_date_open = coverage_plan.get("current_utc_date_missing") is True
             can_capture_now = bool(
                 (
@@ -1335,6 +2278,8 @@ def _blocker_resolution_plan(
                     "reason": (
                         "collect_additional_quote_samples_now"
                         if immediate_quote_capture
+                        else "collect_current_hour_of_day_balance_now"
+                        if current_hour_balance_open
                         else "collect_current_missing_utc_hour_now"
                         if time_coverage_blocked and current_missing_hour_open
                         else "collect_current_utc_calendar_day_now"
@@ -1360,7 +2305,13 @@ def _blocker_resolution_plan(
                     "next_missing_kst_at": coverage_plan.get("next_missing_kst_at"),
                     "wait_minutes": coverage_plan.get("wait_minutes"),
                     "remaining_calendar_days": coverage_plan.get("remaining_calendar_days"),
+                    "earliest_calendar_completion_utc": coverage_plan.get("earliest_calendar_completion_utc"),
+                    "earliest_calendar_completion_kst": coverage_plan.get("earliest_calendar_completion_kst"),
+                    "calendar_completion_policy": coverage_plan.get("calendar_completion_policy"),
                     "remaining_distinct_hours": coverage_plan.get("remaining_distinct_hours"),
+                    "remaining_distinct_hour_bucket_count": coverage_plan.get("remaining_distinct_hour_bucket_count"),
+                    "remaining_hour_of_day_bucket_count": coverage_plan.get("remaining_hour_of_day_bucket_count"),
+                    "hour_of_day_covered_count": coverage_plan.get("hour_of_day_covered_count"),
                     "remaining_quote_samples": coverage_plan.get("remaining_quote_samples"),
                 }
             )
@@ -1433,10 +2384,32 @@ def _materialize_action_command(command: Any, *, generated_at: datetime, action_
         "<missed_quote_window_recompute_report_dir>": suffix,
         "<manual_safety_drills_report_dir>": suffix,
         "<safety_controls_report_dir>": suffix,
+        "<paper_apply_parity_review_report_dir>": suffix,
     }
     for placeholder, value in replacements.items():
         text = text.replace(placeholder, value)
     return text
+
+
+def _materialize_operator_packet(packet: dict[str, Any], *, generated_at: datetime) -> dict[str, Any]:
+    if not packet:
+        return {}
+    out = dict(packet)
+    out["post_apply_execution_parity_review_command"] = _materialize_action_command(
+        out.get("post_apply_execution_parity_review_command"),
+        generated_at=generated_at,
+        action_type="paper_apply_parity_review",
+    )
+    deadline = _parse_dt(out.get("operator_review_deadline_utc"))
+    deadline_expired = deadline is not None and generated_at.astimezone(UTC) >= deadline.astimezone(UTC)
+    out["operator_review_deadline_expired"] = deadline_expired
+    if deadline_expired:
+        out["original_status_before_deadline_expiry"] = out.get("status")
+        out["status"] = "operator_review_deadline_expired"
+        out["blocker"] = "operator_review_deadline_expired"
+        out["apply_command_allowed_now"] = None
+        out["deadline_policy"] = "operator_review_deadline_expired_rerun_dry_run_before_apply"
+    return out
 
 
 def _action_due_state(scheduled_at: Any, *, generated_at: datetime) -> dict[str, Any]:
@@ -1464,11 +2437,56 @@ def _safe_next_action_plan(
     runtime_progress: dict[str, Any],
     microstructure_watch: dict[str, Any],
     operator_handoff: dict[str, Any],
+    meta_router_promotion_gate: dict[str, Any] | None = None,
     target_hours: float,
     generated_at: datetime,
 ) -> dict[str, Any]:
     by_gate = {str(item.get("gate") or ""): dict(item) for item in blocker_resolution_plan}
     actions: list[dict[str, Any]] = []
+    operator_packet = _materialize_operator_packet(
+        dict(operator_handoff.get("paper_apply_operator_packet") or {}),
+        generated_at=generated_at,
+    )
+    operator_packet_command_safety = dict(operator_packet.get("command_safety") or {})
+    operator_packet_pre_apply_evidence = dict(operator_packet.get("pre_apply_evidence_report_status") or {})
+    if operator_packet_command_safety.get("status") == "FAIL":
+        actions.append(
+            {
+                "priority": 8,
+                "action_type": "fix_paper_apply_operator_command_safety",
+                "target_gate": "paper_apply_operator_command_safety",
+                "can_run_now": True,
+                "requires_operator_review": True,
+                "command": None,
+                "reason": "operator_command_safety_failed_before_paper_apply",
+                "blockers": list(operator_packet_command_safety.get("blockers") or []),
+                "warnings": list(operator_packet_command_safety.get("warnings") or []),
+                "dry_run_report_dir": operator_packet_command_safety.get("dry_run_report_dir"),
+                "apply_report_dir": operator_packet_command_safety.get("apply_report_dir"),
+                "pre_apply_backup_dir": operator_packet_command_safety.get("apply_pre_apply_backup_dir"),
+                "paper_apply_operator_packet": operator_packet,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        )
+    if operator_packet.get("status") == "blocked_by_pre_apply_evidence_report":
+        actions.append(
+            {
+                "priority": 9,
+                "action_type": "rerun_paper_bridge_dry_run_for_fresh_pre_apply_evidence_report",
+                "target_gate": "pre_apply_evidence_report",
+                "can_run_now": True,
+                "requires_operator_review": False,
+                "command": operator_packet.get("rerun_command_after_deadline") or operator_packet.get("dry_run_command"),
+                "reason": "pre_apply_evidence_report_not_fresh_for_paper_apply",
+                "blockers": list(operator_packet_pre_apply_evidence.get("blockers") or []),
+                "pre_apply_evidence_report_status": operator_packet_pre_apply_evidence,
+                "paper_apply_operator_packet": operator_packet,
+                "follow_up_command_when_reviewed": None,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        )
 
     micro = by_gate.get("real_microstructure_execution_evidence")
     if micro:
@@ -1531,7 +2549,12 @@ def _safe_next_action_plan(
                     "next_missing_kst_at": coverage_plan.get("next_missing_kst_at"),
                     "wait_minutes": coverage_plan.get("wait_minutes"),
                     "remaining_distinct_hours": coverage_plan.get("remaining_distinct_hours"),
+                    "remaining_distinct_hour_bucket_count": coverage_plan.get("remaining_distinct_hour_bucket_count"),
+                    "remaining_hour_of_day_bucket_count": coverage_plan.get("remaining_hour_of_day_bucket_count"),
                     "remaining_calendar_days": coverage_plan.get("remaining_calendar_days"),
+                    "earliest_calendar_completion_utc": coverage_plan.get("earliest_calendar_completion_utc"),
+                    "earliest_calendar_completion_kst": coverage_plan.get("earliest_calendar_completion_kst"),
+                    "calendar_completion_policy": coverage_plan.get("calendar_completion_policy"),
                     "order_submission_allowed": False,
                     "no_live_order_sent": True,
                 }
@@ -1561,7 +2584,16 @@ def _safe_next_action_plan(
                 "execute_after_utc": due["execute_after_utc"],
                 "execute_after_kst": due["execute_after_kst"],
                 "wait_minutes": due["wait_minutes"],
+                "cadence_recommended_monitor_interval_minutes": signal.get(
+                    "cadence_recommended_monitor_interval_minutes"
+                ),
                 "recommended_monitor_interval_minutes": signal.get("recommended_monitor_interval_minutes"),
+                "signal_freshness_capture_window_minutes": signal.get("signal_freshness_capture_window_minutes"),
+                "monitor_interval_capped_by_signal_freshness": signal.get(
+                    "monitor_interval_capped_by_signal_freshness"
+                )
+                is True,
+                "monitor_signal_age_alignment": signal.get("monitor_signal_age_alignment"),
                 "cadence_lag_level": signal.get("cadence_lag_level"),
                 "order_submission_allowed": False,
                 "no_live_order_sent": True,
@@ -1570,7 +2602,30 @@ def _safe_next_action_plan(
 
     paper = by_gate.get("real_paper_lifecycle_rows")
     if paper:
-        if paper.get("can_resolve_now") is True:
+        paper_operator_packet = _materialize_operator_packet(
+            dict(paper.get("paper_apply_operator_packet") or {}),
+            generated_at=generated_at,
+        )
+        paper_deadline_expired = paper_operator_packet.get("operator_review_deadline_expired") is True
+        if paper.get("can_resolve_now") is True and paper_deadline_expired:
+            actions.append(
+                {
+                    "priority": 10,
+                    "action_type": "rerun_paper_bridge_dry_run_after_operator_review_deadline",
+                    "target_gate": "real_paper_lifecycle_rows",
+                    "can_run_now": True,
+                    "requires_operator_review": True,
+                    "command": paper_operator_packet.get("rerun_command_after_deadline") or paper.get("dry_run_command"),
+                    "follow_up_command_when_reviewed": None,
+                    "reason": paper_operator_packet.get("deadline_policy"),
+                    "paper_apply_operator_packet": paper_operator_packet,
+                    "pre_apply_backup_plan": dict(paper_operator_packet.get("pre_apply_backup_plan") or {}),
+                    "verified_pre_apply_backup_required": True,
+                    "order_submission_allowed": False,
+                    "no_live_order_sent": True,
+                }
+            )
+        elif paper.get("can_resolve_now") is True:
             actions.append(
                 {
                     "priority": 10,
@@ -1580,8 +2635,24 @@ def _safe_next_action_plan(
                     "requires_operator_review": True,
                     "command": paper.get("dry_run_command") or paper.get("command"),
                     "follow_up_command_when_reviewed": paper.get("command"),
+                    "post_apply_execution_parity_review_command": _materialize_action_command(
+                        paper.get("post_apply_execution_parity_review_command"),
+                        generated_at=generated_at,
+                        action_type="paper_apply_parity_review",
+                    ),
                     "reason": paper.get("reason"),
+                    "paper_apply_operator_packet": paper_operator_packet,
+                    "pre_apply_backup_plan": dict(paper_operator_packet.get("pre_apply_backup_plan") or {}),
                     "verified_pre_apply_backup_required": True,
+                    "execution_parity_will_credit_current_apply": paper.get(
+                        "execution_parity_will_credit_current_apply"
+                    )
+                    is True,
+                    "execution_parity_events_needed": paper.get("execution_parity_events_needed"),
+                    "execution_parity_events_needed_after_current_apply": paper.get(
+                        "execution_parity_events_needed_after_current_apply"
+                    ),
+                    "execution_parity_creditable_actions": list(paper.get("execution_parity_creditable_actions") or []),
                     "order_submission_allowed": False,
                     "no_live_order_sent": True,
                 }
@@ -1593,24 +2664,88 @@ def _safe_next_action_plan(
                 action_type="paper_bridge_wait_for_fresh_signal",
             )
             due = _action_due_state(paper.get("next_monitor_after_utc"), generated_at=generated_at)
+            retry_blocked = paper.get("paper_apply_retry_blocked") is True
+            parity_review_blocked = paper.get("paper_apply_parity_review_blocked") is True
+            parity_review_blocker = dict(paper.get("paper_apply_parity_review_blocker") or {})
             actions.append(
                 {
-                    "priority": 60,
-                    "action_type": "paper_bridge_wait_for_fresh_signal",
+                    "priority": 10 if parity_review_blocked else (20 if retry_blocked else 60),
+                    "action_type": (
+                        "resolve_paper_apply_parity_review_blocker"
+                        if parity_review_blocked
+                        else (
+                        "paper_bridge_wait_for_next_add_signal"
+                        if retry_blocked
+                        else "paper_bridge_wait_for_fresh_signal"
+                        )
+                    ),
                     "target_gate": "real_paper_lifecycle_rows",
-                    "can_run_now": False if paper.get("fresh_signal") is not True else due["can_run_now"],
+                    "can_run_now": True
+                    if parity_review_blocked
+                    else (False if paper.get("fresh_signal") is not True else due["can_run_now"]),
                     "requires_operator_review": True,
-                    "command": command,
+                    "command": _materialize_action_command(
+                        parity_review_blocker.get("recommended_command"),
+                        generated_at=generated_at,
+                        action_type="paper_apply_parity_review",
+                    )
+                    if parity_review_blocked
+                    else command,
                     "paper_apply_command_when_gate_allows": paper.get("paper_apply_command_when_gate_allows"),
-                    "reason": paper.get("reason"),
-                    "execute_after_utc": due["execute_after_utc"],
-                    "execute_after_kst": due["execute_after_kst"],
-                    "wait_minutes": due["wait_minutes"],
+                    "paper_apply_operator_packet": paper_operator_packet,
+                    "pre_apply_backup_plan": dict(paper_operator_packet.get("pre_apply_backup_plan") or {}),
+                    "paper_apply_retry_blocker": paper.get("paper_apply_retry_blocker"),
+                    "paper_apply_parity_review_blocker": parity_review_blocker,
+                    "execution_parity_events_needed": paper.get("execution_parity_events_needed"),
+                    "execution_parity_events_needed_after_current_apply": paper.get(
+                        "execution_parity_events_needed_after_current_apply"
+                    ),
+                    "execution_parity_creditable_actions": list(paper.get("execution_parity_creditable_actions") or []),
+                    "reason": parity_review_blocker.get("status") if parity_review_blocked else paper.get("reason"),
+                    "source_report": parity_review_blocker.get("source_report") if parity_review_blocked else None,
+                    "blockers": list(parity_review_blocker.get("blockers") or []) if parity_review_blocked else [],
+                    "next_actions": list(parity_review_blocker.get("next_actions") or []) if parity_review_blocked else [],
+                    "execute_after_utc": None if parity_review_blocked else due["execute_after_utc"],
+                    "execute_after_kst": None if parity_review_blocked else due["execute_after_kst"],
+                    "wait_minutes": 0.0 if parity_review_blocked else due["wait_minutes"],
                     "recommended_monitor_interval_minutes": paper.get("recommended_monitor_interval_minutes"),
                     "order_submission_allowed": False,
                     "no_live_order_sent": True,
                 }
             )
+
+    promotion_gate = dict(meta_router_promotion_gate or {})
+    promotion_needs_refresh = meta_router_promotion_gate is not None and (
+        not promotion_gate
+        or promotion_gate.get("status") in {None, "", "unavailable", "stale"}
+        or promotion_gate.get("stale") is True
+        or promotion_gate.get("no_live_order_sent") is not True
+    )
+    if promotion_needs_refresh:
+        actions.append(
+            {
+                "priority": 25,
+                "action_type": "refresh_meta_router_promotion_gate",
+                "target_gate": "meta_router_promotion_gate",
+                "can_run_now": True,
+                "requires_operator_review": False,
+                "command": (
+                    ".venv/bin/python scripts/run_market_state_rotation_v6_meta_router_promotion_gate.py "
+                    "--write-report"
+                ),
+                "reason": (
+                    "promotion_gate_missing_or_stale"
+                    if promotion_gate.get("no_live_order_sent", True) is True
+                    else "promotion_gate_report_failed_no_live_order_safety_check"
+                ),
+                "promotion_gate_status": promotion_gate.get("status"),
+                "promotion_gate_stale": promotion_gate.get("stale"),
+                "promotion_gate_source": promotion_gate.get("source_report"),
+                "promotion_decision": promotion_gate.get("promotion_decision"),
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        )
 
     caps = by_gate.get("tiny_canary_risk_caps_configured")
     if caps and caps.get("quick_audit_command"):
@@ -1688,6 +2823,7 @@ def _safe_next_action_plan(
     primary_execute_after = _parse_dt(dict(primary or {}).get("execute_after_utc"))
     pre_wait_scheduled_actions: list[dict[str, Any]] = []
     coordination_warnings: list[str] = []
+    deferred_wait_action: dict[str, Any] | None = None
     if primary and primary.get("waits_until_execution_window") is True and primary_execute_after is not None:
         pre_wait_scheduled_actions = [
             item
@@ -1703,9 +2839,26 @@ def _safe_next_action_plan(
             coordination_warnings.append(
                 "startable_quote_window_wait_sleeps_past_earlier_scheduled_signal_or_review_actions"
             )
+            deferred_wait_action = primary
+            first_pre_wait_action = pre_wait_scheduled_actions[0]
+            deferred_wait_action.update(
+                {
+                    "can_start_now": False,
+                    "start_recommended_now": False,
+                    "deferred_by_earlier_scheduled_action": True,
+                    "deferred_reason": "earlier_scheduled_action_must_run_before_quote_window_wait",
+                    "deferred_until_after_action_type": first_pre_wait_action.get("action_type"),
+                    "deferred_until_after_utc": first_pre_wait_action.get("execute_after_utc"),
+                    "deferred_until_after_kst": first_pre_wait_action.get("execute_after_kst"),
+                }
+            )
             primary = pre_wait_scheduled_actions[0]
             status = "waiting_for_earlier_scheduled_action_before_quote_window_wait"
             coordination_warnings = []
+            startable = [item for item in actions if item.get("can_start_now") is True]
+            startable_waits = [
+                item for item in startable if item.get("waits_until_execution_window") is True and item.get("command")
+            ]
     return {
         "status": status,
         "primary_action": primary,
@@ -1714,6 +2867,7 @@ def _safe_next_action_plan(
         "action_count": len(actions),
         "next_scheduled_action": scheduled[0] if scheduled else None,
         "next_startable_wait_action": startable_waits[0] if startable_waits else None,
+        "next_deferred_wait_action": deferred_wait_action,
         "pre_wait_scheduled_actions": pre_wait_scheduled_actions,
         "pre_wait_scheduled_action_count": len(pre_wait_scheduled_actions),
         "coordination_warnings": coordination_warnings,
@@ -1724,11 +2878,93 @@ def _safe_next_action_plan(
     }
 
 
+def _planned_gap_extension(
+    *,
+    previous_payload: dict[str, Any] | None,
+    previous_completed_at: datetime | None,
+    current_completed_at: datetime,
+    gap_seconds: float,
+    base_warning_threshold_seconds: float,
+    grace_seconds: float = 900.0,
+) -> dict[str, Any]:
+    if previous_completed_at is None:
+        return {"status": "no_previous_watch_summary", "no_live_order_sent": True}
+    payload = dict(previous_payload or {})
+    safe_next = dict(payload.get("safe_next_action_plan") or {})
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    for key in ("primary_action", "next_scheduled_action", "next_startable_wait_action", "next_deferred_wait_action"):
+        item = safe_next.get(key)
+        if isinstance(item, dict):
+            candidates.append((key, item))
+    for key in ("pre_wait_scheduled_actions", "actions"):
+        for item in list(safe_next.get(key) or []):
+            if isinstance(item, dict):
+                candidates.append((key, item))
+    previous = previous_completed_at.astimezone(UTC)
+    current = current_completed_at.astimezone(UTC)
+    grace = max(0.0, float(grace_seconds or 0.0))
+    best_cover: dict[str, Any] | None = None
+    nearest: dict[str, Any] | None = None
+    seen: set[tuple[str, str, str]] = set()
+    for source, item in candidates:
+        execute_after = _parse_dt(item.get("execute_after_utc"))
+        if execute_after is None:
+            continue
+        scheduled = execute_after.astimezone(UTC)
+        action_type = str(item.get("action_type") or "")
+        command = str(item.get("command") or "")
+        key = (source, action_type, scheduled.isoformat())
+        if key in seen:
+            continue
+        seen.add(key)
+        if scheduled < previous - timedelta(seconds=60):
+            continue
+        planned_threshold = max(
+            base_warning_threshold_seconds,
+            (scheduled - previous).total_seconds() + grace,
+        )
+        detail = {
+            "status": "planned_gap_allowed" if gap_seconds <= planned_threshold else "planned_gap_expired",
+            "source": source,
+            "action_type": action_type or None,
+            "target_gate": item.get("target_gate"),
+            "execute_after_utc": scheduled.isoformat(),
+            "execute_after_kst": scheduled.astimezone(KST).isoformat(),
+            "grace_seconds": round(grace, 3),
+            "planned_warning_threshold_seconds": round(planned_threshold, 3),
+            "scheduled_lag_seconds": round((current - scheduled).total_seconds(), 3),
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+        if gap_seconds <= planned_threshold:
+            if best_cover is None or planned_threshold < float(
+                best_cover.get("planned_warning_threshold_seconds") or 0.0
+            ):
+                best_cover = detail
+        elif nearest is None or scheduled < (
+            _parse_dt(nearest.get("execute_after_utc")) or datetime.max.replace(tzinfo=UTC)
+        ):
+            nearest = detail
+        if command:
+            detail["command"] = command
+    if best_cover is not None:
+        return best_cover
+    if nearest is not None:
+        return nearest
+    return {
+        "status": "no_planned_gap_action",
+        "grace_seconds": round(grace, 3),
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+
+
 def _watch_continuity(
     *,
     previous_completed_at: datetime | None,
     current_completed_at: datetime,
     interval_seconds: float,
+    previous_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if previous_completed_at is None:
         return {
@@ -1736,10 +2972,30 @@ def _watch_continuity(
             "gap_seconds": None,
             "expected_interval_seconds": max(0.0, float(interval_seconds or 0.0)),
             "warning": None,
+            "planned_gap_extension": {"status": "no_previous_watch_summary", "no_live_order_sent": True},
         }
     gap_seconds = max((current_completed_at - previous_completed_at).total_seconds(), 0.0)
     expected = max(0.0, float(interval_seconds or 0.0))
     warning_threshold = max(expected * 2.0 + 60.0, 3600.0)
+    planned_gap: dict[str, Any] = {
+        "status": "not_needed",
+        "reason": "gap_within_base_warning_threshold",
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+    if gap_seconds > warning_threshold:
+        planned_gap = _planned_gap_extension(
+            previous_payload=previous_payload,
+            previous_completed_at=previous_completed_at,
+            current_completed_at=current_completed_at,
+            gap_seconds=gap_seconds,
+            base_warning_threshold_seconds=warning_threshold,
+        )
+        if planned_gap.get("status") == "planned_gap_allowed":
+            warning_threshold = max(
+                warning_threshold,
+                float(planned_gap.get("planned_warning_threshold_seconds") or 0.0),
+            )
     warning = "watch_gap_exceeded_threshold" if gap_seconds > warning_threshold else None
     return {
         "status": "gap_warning" if warning else "continuous",
@@ -1747,6 +3003,60 @@ def _watch_continuity(
         "expected_interval_seconds": expected,
         "warning_threshold_seconds": round(warning_threshold, 3),
         "warning": warning,
+        "planned_gap_extension": planned_gap,
+    }
+
+
+def _signal_monitor_cadence_alignment(
+    *,
+    previous_completed_at: datetime | None,
+    current_completed_at: datetime,
+    signal_wait_plan: dict[str, Any],
+) -> dict[str, Any]:
+    plan = dict(signal_wait_plan or {})
+    recommended_minutes = _number_or_none(plan.get("recommended_monitor_interval_minutes"))
+    freshness_window_minutes = _number_or_none(plan.get("signal_freshness_capture_window_minutes"))
+    if previous_completed_at is None:
+        return {
+            "status": "no_previous_watch_summary",
+            "recommended_monitor_interval_minutes": recommended_minutes,
+            "signal_freshness_capture_window_minutes": freshness_window_minutes,
+            "gap_minutes": None,
+            "warning": None,
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+    if recommended_minutes is None or recommended_minutes <= 0:
+        return {
+            "status": "not_applicable",
+            "reason": "no_scheduled_signal_monitor_interval",
+            "recommended_monitor_interval_minutes": recommended_minutes,
+            "signal_freshness_capture_window_minutes": freshness_window_minutes,
+            "gap_minutes": None,
+            "warning": None,
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+    gap_seconds = max((current_completed_at.astimezone(UTC) - previous_completed_at.astimezone(UTC)).total_seconds(), 0.0)
+    recommended_seconds = max(float(recommended_minutes) * 60.0, 1.0)
+    grace_seconds = max(120.0, recommended_seconds * 0.2)
+    warning_threshold_seconds = recommended_seconds + grace_seconds
+    gap_exceeded = gap_seconds > warning_threshold_seconds
+    return {
+        "status": "monitor_gap_exceeded" if gap_exceeded else "aligned",
+        "recommended_monitor_interval_minutes": recommended_minutes,
+        "signal_freshness_capture_window_minutes": freshness_window_minutes,
+        "gap_seconds": round(gap_seconds, 3),
+        "gap_minutes": round(gap_seconds / 60.0, 3),
+        "warning_threshold_seconds": round(warning_threshold_seconds, 3),
+        "warning_threshold_minutes": round(warning_threshold_seconds / 60.0, 3),
+        "warning": "signal_monitor_gap_exceeded_fresh_capture_cadence" if gap_exceeded else None,
+        "monitor_interval_capped_by_signal_freshness": plan.get("monitor_interval_capped_by_signal_freshness") is True,
+        "monitor_signal_age_alignment": plan.get("monitor_signal_age_alignment"),
+        "next_monitor_after_utc": plan.get("next_monitor_after_utc"),
+        "next_monitor_after_kst": plan.get("next_monitor_after_kst"),
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
     }
 
 
@@ -1814,6 +3124,350 @@ def _historical_shadow_runtime_floor(
     return best
 
 
+def _recent_paper_apply_result(
+    *,
+    evidence_root: Path,
+    current_at: datetime,
+    max_age_minutes: float = 60.0,
+) -> dict[str, Any]:
+    current = current_at.astimezone(UTC)
+    root = _resolve(evidence_root)
+    latest: dict[str, Any] = {}
+    for report_dir in root.glob("*paper_apply*"):
+        path = report_dir / EVIDENCE_REPORT_NAME
+        if not path.exists():
+            continue
+        payload = _read_json(path)
+        generated_at = _parse_dt(payload.get("generated_at"))
+        if generated_at is None:
+            continue
+        generated = generated_at.astimezone(UTC)
+        age_minutes = (current - generated).total_seconds() / 60.0
+        if age_minutes < -0.1 or age_minutes > max(0.0, float(max_age_minutes or 0.0)):
+            continue
+        apply_gate = dict(payload.get("paper_bridge_apply_gate") or {})
+        if apply_gate.get("apply_requested") is not True:
+            continue
+        existing_generated = _parse_dt(latest.get("generated_at"))
+        if existing_generated is not None and generated <= existing_generated.astimezone(UTC):
+            continue
+        latest = {
+            "status": "available",
+            "generated_at": generated.isoformat(),
+            "age_minutes": round(age_minutes, 3),
+            "source_report": _display_path(path),
+            "no_live_order_sent": payload.get("no_live_order_sent") is True,
+            "overall_status": payload.get("overall_status"),
+            "launch_status": dict(payload.get("launch_readiness") or {}).get("status"),
+            "bridge_status": apply_gate.get("bridge_status"),
+            "bridge_action": apply_gate.get("bridge_action"),
+            "apply_requested": True,
+            "paper_fill_rows": dict(payload.get("collection_progress") or {}).get("paper_fill_rows"),
+        }
+    if not latest:
+        return {
+            "status": "unavailable",
+            "reason": "no_recent_paper_apply_report",
+            "max_age_minutes": max(0.0, float(max_age_minutes or 0.0)),
+            "no_live_order_sent": True,
+        }
+    return latest
+
+
+def _recent_paper_bridge_review(
+    *,
+    evidence_root: Path,
+    current_at: datetime,
+    max_age_minutes: float = 60.0,
+) -> dict[str, Any]:
+    current = current_at.astimezone(UTC)
+    root = _resolve(evidence_root)
+    latest: dict[str, Any] = {}
+    for report_dir in root.glob("*paper*"):
+        path = report_dir / EVIDENCE_REPORT_NAME
+        if not path.exists():
+            continue
+        payload = _read_json(path)
+        generated_at = _parse_dt(payload.get("generated_at"))
+        if generated_at is None:
+            continue
+        generated = generated_at.astimezone(UTC)
+        age_minutes = (current - generated).total_seconds() / 60.0
+        if age_minutes < -0.1 or age_minutes > max(0.0, float(max_age_minutes or 0.0)):
+            continue
+        apply_gate = dict(payload.get("paper_bridge_apply_gate") or {})
+        if apply_gate.get("fresh_signal") is not True or not apply_gate.get("bridge_action"):
+            continue
+        existing_generated = _parse_dt(latest.get("generated_at"))
+        if existing_generated is not None and generated <= existing_generated.astimezone(UTC):
+            continue
+        latest = {
+            "status": "available",
+            "generated_at": generated.isoformat(),
+            "age_minutes": round(age_minutes, 3),
+            "source_report": _display_path(path),
+            "no_live_order_sent": payload.get("no_live_order_sent") is True,
+            "overall_status": payload.get("overall_status"),
+            "launch_status": dict(payload.get("launch_readiness") or {}).get("status"),
+            "bridge_status": apply_gate.get("bridge_status"),
+            "bridge_action": apply_gate.get("bridge_action"),
+            "apply_requested": apply_gate.get("apply_requested") is True,
+            "paper_fill_rows": dict(payload.get("collection_progress") or {}).get("paper_fill_rows"),
+        }
+    if not latest:
+        return {
+            "status": "unavailable",
+            "reason": "no_recent_paper_bridge_review_report",
+            "max_age_minutes": max(0.0, float(max_age_minutes or 0.0)),
+            "no_live_order_sent": True,
+        }
+    return latest
+
+
+def _recent_paper_apply_parity_review(
+    *,
+    evidence_root: Path,
+    current_at: datetime,
+    max_age_minutes: float = 240.0,
+) -> dict[str, Any]:
+    current = current_at.astimezone(UTC)
+    root = _resolve(evidence_root)
+    latest: dict[str, Any] = {}
+    blocking_statuses = {
+        "paper_apply_parity_credit_missing",
+        "unexpected_execution_parity_credit_review_required",
+        "blocked_live_order_flag_detected",
+    }
+    for path in root.glob("**/market_state_rotation_v6_paper_apply_parity_review.json"):
+        payload = _read_json(path)
+        generated_at = _parse_dt(payload.get("generated_at"))
+        if generated_at is None:
+            continue
+        generated = generated_at.astimezone(UTC)
+        age_minutes = (current - generated).total_seconds() / 60.0
+        if age_minutes < -0.1 or age_minutes > max(0.0, float(max_age_minutes or 0.0)):
+            continue
+        existing_generated = _parse_dt(latest.get("generated_at"))
+        if existing_generated is not None and generated <= existing_generated.astimezone(UTC):
+            continue
+        status = str(payload.get("status") or "")
+        latest = {
+            "status": status,
+            "generated_at": generated.isoformat(),
+            "age_minutes": round(age_minutes, 3),
+            "source_report": _display_path(path),
+            "no_live_order_sent": payload.get("no_live_order_sent") is True,
+            "blocks_next_paper_apply": status in blocking_statuses or payload.get("no_live_order_sent") is not True,
+            "expected_credit_from_before_forecast": payload.get("expected_credit_from_before_forecast"),
+            "actual_journal_row_delta": payload.get("actual_journal_row_delta"),
+            "new_journal_row_count": payload.get("new_journal_row_count"),
+            "credit_confirmed": payload.get("credit_confirmed") is True,
+            "blockers": list(payload.get("blockers") or []),
+            "next_actions": list(payload.get("next_actions") or []),
+        }
+    if not latest:
+        return {
+            "status": "unavailable",
+            "reason": "no_recent_paper_apply_parity_review_report",
+            "max_age_minutes": max(0.0, float(max_age_minutes or 0.0)),
+            "blocks_next_paper_apply": False,
+            "no_live_order_sent": True,
+        }
+    return latest
+
+
+def _recent_meta_router_promotion_gate(
+    *,
+    evidence_root: Path,
+    current_at: datetime,
+    max_age_minutes: float = 1440.0,
+) -> dict[str, Any]:
+    current = current_at.astimezone(UTC)
+    root = _resolve(evidence_root)
+    latest_payload: dict[str, Any] = {}
+    latest_path: Path | None = None
+    latest_generated: datetime | None = None
+    for path in root.glob("**/market_state_rotation_v6_meta_router_promotion_gate.json"):
+        payload = _read_json(path)
+        generated_at = _parse_dt(payload.get("generated_at"))
+        if generated_at is None:
+            continue
+        generated = generated_at.astimezone(UTC)
+        if latest_generated is not None and generated <= latest_generated:
+            continue
+        latest_payload = payload
+        latest_path = path
+        latest_generated = generated
+
+    if latest_generated is None or latest_path is None:
+        return {
+            "status": "unavailable",
+            "reason": "no_meta_router_promotion_gate_report",
+            "max_age_minutes": max(0.0, float(max_age_minutes or 0.0)),
+            "stale": True,
+            "blocks_live_promotion": True,
+            "no_live_order_sent": True,
+        }
+
+    age_minutes = (current - latest_generated).total_seconds() / 60.0
+    stale = age_minutes < -0.1 or age_minutes > max(0.0, float(max_age_minutes or 0.0))
+    readiness = dict(latest_payload.get("readiness") or {})
+    candidate = dict(latest_payload.get("candidate") or {})
+    decision = str(latest_payload.get("promotion_decision") or "")
+    live_pass_decisions = {
+        "tiny_canary_gate_passed_manual_approval_required",
+        "full_live_gate_passed_manual_approval_required",
+    }
+    return {
+        "status": "stale" if stale else latest_payload.get("status"),
+        "generated_at": latest_generated.isoformat(),
+        "age_minutes": round(age_minutes, 3),
+        "source_report": _display_path(latest_path),
+        "stale": stale,
+        "promotion_decision": decision,
+        "decision_reasons": list(latest_payload.get("decision_reasons") or []),
+        "next_actions": list(latest_payload.get("next_actions") or []),
+        "next_blocker": latest_payload.get("next_blocker"),
+        "candidate": {
+            "recipe_id": candidate.get("recipe_id"),
+            "decision": candidate.get("decision"),
+            "compounded_return_pct": candidate.get("compounded_return_pct"),
+            "max_drawdown_pct": candidate.get("max_drawdown_pct"),
+            "avg_cost_drag_pct": candidate.get("avg_cost_drag_pct"),
+            "trade_like_events": candidate.get("trade_like_events"),
+            "router_modes": dict(candidate.get("router_modes") or {}),
+        },
+        "readiness": {
+            "stage": readiness.get("stage"),
+            "ready_for_paper": readiness.get("ready_for_paper") is True,
+            "ready_for_tiny_canary": readiness.get("ready_for_tiny_canary") is True,
+            "ready_for_full_live": readiness.get("ready_for_full_live") is True,
+            "blockers": list(readiness.get("blockers") or []),
+            "warnings": list(readiness.get("warnings") or []),
+            "deployment_limits": dict(readiness.get("deployment_limits") or {}),
+            "execution_parity": dict(readiness.get("execution_parity") or {}),
+            "time_substitution_policy": dict(readiness.get("time_substitution_policy") or {}),
+            "upgrade_backlog": dict(readiness.get("upgrade_backlog") or {}),
+        },
+        "blocks_live_promotion": (
+            stale
+            or latest_payload.get("no_live_order_sent") is not True
+            or decision not in live_pass_decisions
+        ),
+        "order_submission_allowed": False,
+        "no_live_order_sent": latest_payload.get("no_live_order_sent") is True,
+    }
+
+
+def _paper_apply_parity_review_state(
+    *,
+    recent_paper_apply: dict[str, Any],
+    recent_paper_review: dict[str, Any],
+    recent_parity_review: dict[str, Any],
+) -> dict[str, Any]:
+    apply_report = dict(recent_paper_apply or {})
+    bridge_review = dict(recent_paper_review or {})
+    parity = dict(recent_parity_review or {})
+    apply_generated = _parse_dt(apply_report.get("generated_at"))
+    parity_generated = _parse_dt(parity.get("generated_at"))
+    if apply_report.get("status") == "available" and parity_generated is None:
+        source_report = apply_report.get("source_report")
+        before_report = bridge_review.get("source_report") or "<pre_apply_evidence_report>"
+        return {
+            "status": "missing_after_recent_paper_apply",
+            "blocks_next_paper_apply": True,
+            "reason": "recent_paper_apply_requires_post_apply_parity_review",
+            "source_report": source_report,
+            "recent_paper_apply_report": source_report,
+            "recent_paper_bridge_review_report": bridge_review.get("source_report"),
+            "recommended_command": (
+                ".venv/bin/python scripts/run_market_state_rotation_v6_paper_apply_parity_review.py "
+                f"--before-evidence-report {before_report} "
+                f"--after-evidence-report {source_report or '<post_apply_evidence_report>'} "
+                "--report-dir reports/validation/diagnostics/<paper_apply_parity_review_report_dir> "
+                "--write-report"
+            ),
+            "blockers": ["post_apply_parity_review_missing"],
+            "next_actions": ["run_post_apply_parity_review_before_next_paper_apply"],
+            "no_live_order_sent": True,
+        }
+    if (
+        apply_generated is not None
+        and parity_generated is not None
+        and apply_generated.astimezone(UTC) > parity_generated.astimezone(UTC)
+    ):
+        source_report = apply_report.get("source_report")
+        before_report = bridge_review.get("source_report") or "<pre_apply_evidence_report>"
+        return {
+            "status": "stale_after_recent_paper_apply",
+            "blocks_next_paper_apply": True,
+            "reason": "latest_paper_apply_is_newer_than_latest_parity_review",
+            "source_report": source_report,
+            "recent_paper_apply_report": source_report,
+            "recent_paper_apply_generated_at": apply_report.get("generated_at"),
+            "recent_parity_review_report": parity.get("source_report"),
+            "recent_parity_review_generated_at": parity.get("generated_at"),
+            "recommended_command": (
+                ".venv/bin/python scripts/run_market_state_rotation_v6_paper_apply_parity_review.py "
+                f"--before-evidence-report {before_report} "
+                f"--after-evidence-report {source_report or '<post_apply_evidence_report>'} "
+                "--report-dir reports/validation/diagnostics/<paper_apply_parity_review_report_dir> "
+                "--write-report"
+            ),
+            "blockers": ["post_apply_parity_review_stale"],
+            "next_actions": ["rerun_post_apply_parity_review_for_latest_paper_apply"],
+            "no_live_order_sent": True,
+        }
+    return {
+        "status": parity.get("status") or "unavailable",
+        "blocks_next_paper_apply": parity.get("blocks_next_paper_apply") is True,
+        "reason": parity.get("reason"),
+        "source_report": parity.get("source_report"),
+        "blockers": list(parity.get("blockers") or []),
+        "next_actions": list(parity.get("next_actions") or []),
+        "no_live_order_sent": parity.get("no_live_order_sent", True) is True,
+    }
+
+
+def _paper_apply_retry_blocker(
+    latest: dict[str, Any],
+    recent_paper_apply: dict[str, Any],
+    recent_paper_review: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    apply_gate = dict(latest.get("paper_bridge_apply_gate") or {})
+    recent = dict(recent_paper_apply or {})
+    if (
+        apply_gate.get("can_request_paper_apply_now") is True
+        and str(apply_gate.get("bridge_action") or "").lower() == "remove"
+        and str(recent.get("bridge_action") or "").lower() == "remove"
+        and str(recent.get("bridge_status") or "").lower() == "no_open_v6_paper_plan"
+        and recent.get("no_live_order_sent") is True
+    ):
+        review = dict(recent_paper_review or {})
+        recent_generated_at = _parse_dt(review.get("generated_at")) or _parse_dt(recent.get("generated_at"))
+        next_monitor_after = (
+            recent_generated_at.astimezone(UTC) + timedelta(minutes=15)
+            if recent_generated_at is not None
+            else None
+        )
+        return {
+            "blocked": True,
+            "reason": "recent_remove_paper_apply_found_no_open_v6_paper_plan",
+            "source_report": recent.get("source_report"),
+            "generated_at": recent.get("generated_at"),
+            "age_minutes": recent.get("age_minutes"),
+            "bridge_status": recent.get("bridge_status"),
+            "bridge_action": recent.get("bridge_action"),
+            "next_monitor_after_utc": next_monitor_after.isoformat() if next_monitor_after is not None else None,
+            "next_monitor_after_kst": next_monitor_after.astimezone(KST).isoformat()
+            if next_monitor_after is not None
+            else None,
+            "next_action": "wait_for_next_add_signal_or_existing_open_paper_plan_before_reapplying_remove",
+            "no_live_order_sent": True,
+        }
+    return {"blocked": False, "no_live_order_sent": True}
+
+
 def _continuous_runtime_start(
     *,
     previous_payload: dict[str, Any],
@@ -1830,6 +3484,7 @@ def _continuous_runtime_start(
         previous_completed_at=previous_completed_at,
         current_completed_at=current_at,
         interval_seconds=interval_seconds,
+        previous_payload=previous_payload,
     )
     gap_reset = continuity.get("status") == "gap_warning"
     continuous_started_at = current_at if gap_reset else candidate
@@ -1878,6 +3533,7 @@ def _continuous_runtime_start(
         "gap_seconds": continuity.get("gap_seconds"),
         "gap_warning": continuity.get("warning"),
         "warning_threshold_seconds": continuity.get("warning_threshold_seconds"),
+        "watch_continuity": continuity,
         "runtime_floor_recovered": runtime_floor_recovered,
         "runtime_start_clamped_to_operation_start": runtime_start_clamped,
         "runtime_floor": floor,
@@ -1896,6 +3552,10 @@ def _build_watch_summary(
     previous_completed_at: datetime | None = None,
     interval_seconds: float = 0.0,
     microstructure_watch: dict[str, Any] | None = None,
+    recent_paper_apply: dict[str, Any] | None = None,
+    recent_paper_review: dict[str, Any] | None = None,
+    recent_paper_apply_parity_review: dict[str, Any] | None = None,
+    recent_meta_router_promotion_gate: dict[str, Any] | None = None,
     pre_run_wait_plan: dict[str, Any] | None = None,
     pre_run_wait_incident_log: list[dict[str, Any]] | None = None,
     pre_run_market_data_refresh: dict[str, Any] | None = None,
@@ -1907,23 +3567,41 @@ def _build_watch_summary(
     latest = runs[-1] if runs else {}
     live_violation_count = sum(1 for run in runs if run.get("no_live_order_sent") is not True)
     target_reached = observed_hours >= max(float(target_hours or 0.0), 0.0)
-    status = "target_observation_complete" if target_reached and live_violation_count == 0 else "watch_in_progress"
+    progress = _watch_progress(runs, baseline_collection=baseline_collection)
+    launch = dict(latest.get("launch_readiness") or {})
+    launch_next_blocker = dict(launch.get("next_blocker") or {})
+    launch_next_blocker_gate = str(launch_next_blocker.get("gate") or "").strip()
     if live_violation_count > 0:
         status = "blocked_live_order_violation_detected"
-    progress = _watch_progress(runs, baseline_collection=baseline_collection)
-    if progress.get("paper_apply_available_seen") is True:
+    elif progress.get("paper_apply_available_seen") is True:
         status = "fresh_signal_seen_paper_apply_review_available"
     elif progress.get("fresh_signal_seen") is True:
         status = "fresh_signal_seen_continue_paper_bridge_review"
+    elif target_reached and launch_next_blocker_gate == "current_fresh_signal":
+        status = "target_observation_complete_waiting_for_fresh_signal"
+    elif target_reached and launch_next_blocker_gate:
+        status = f"target_observation_complete_blocked_by_{launch_next_blocker_gate}"
+    elif target_reached:
+        status = "target_observation_complete"
+    else:
+        status = "watch_in_progress"
     risk_caps = dict(latest.get("canary_risk_caps_config") or {})
     runtime = _runtime_progress(observed_hours=observed_hours, target_hours=float(target_hours or 0.0))
     micro = dict(microstructure_watch or {})
+    parity_review_state = _paper_apply_parity_review_state(
+        recent_paper_apply=dict(recent_paper_apply or {}),
+        recent_paper_review=dict(recent_paper_review or {}),
+        recent_parity_review=dict(recent_paper_apply_parity_review or {}),
+    )
     operator_handoff = _operator_handoff(
         latest=latest,
         progress=progress,
         runtime_progress=runtime,
         risk_caps=risk_caps,
         microstructure_watch=micro,
+        recent_paper_apply=recent_paper_apply,
+        recent_paper_review=recent_paper_review,
+        recent_paper_apply_parity_review=parity_review_state,
     )
     micro["coverage_plan"] = _microstructure_coverage_plan(
         coverage=dict(micro.get("coverage") or {}),
@@ -1945,6 +3623,7 @@ def _build_watch_summary(
         runtime_progress=runtime,
         microstructure_watch=micro,
         operator_handoff=operator_handoff,
+        meta_router_promotion_gate=dict(recent_meta_router_promotion_gate or {}),
         target_hours=float(target_hours or 0.0),
         generated_at=completed_at,
     )
@@ -1952,6 +3631,11 @@ def _build_watch_summary(
     pre_run_capture_outcome = _pre_run_quote_window_capture_outcome(
         pre_run_wait_plan=pre_run_wait_plan,
         latest_collection=dict(latest.get("collection_progress") or {}),
+    )
+    signal_monitor_cadence_alignment = _signal_monitor_cadence_alignment(
+        previous_completed_at=previous_completed_at,
+        current_completed_at=completed_at,
+        signal_wait_plan=dict(latest.get("signal_wait_plan") or {}),
     )
     return {
         "status": status,
@@ -1977,11 +3661,13 @@ def _build_watch_summary(
             "runtime_floor": dict(runtime_start_plan or {}).get("runtime_floor"),
             "no_live_order_sent": True,
         },
-        "watch_continuity": _watch_continuity(
+        "watch_continuity": dict(runtime_start_plan or {}).get("watch_continuity")
+        or _watch_continuity(
             previous_completed_at=previous_completed_at,
             current_completed_at=completed_at,
             interval_seconds=interval_seconds,
         ),
+        "signal_monitor_cadence_alignment": signal_monitor_cadence_alignment,
         "pre_run_quote_window_wait_plan": dict(pre_run_wait_plan or {}),
         "pre_run_quote_window_capture_outcome": pre_run_capture_outcome,
         "pre_run_quote_window_wait_incident_log": incident_log,
@@ -1989,6 +3675,22 @@ def _build_watch_summary(
         "pre_run_market_data_refresh": dict(pre_run_market_data_refresh or {}),
         "completed_iterations": len(runs),
         "target_observation_complete": target_reached,
+        "target_observation_status": {
+            "runtime_target_reached": target_reached,
+            "launch_status": launch.get("status"),
+            "launch_next_blocker": launch_next_blocker_gate or None,
+            "status": status,
+            "reason": (
+                "runtime_observation_complete_but_realtime_fresh_signal_gate_still_waiting"
+                if status == "target_observation_complete_waiting_for_fresh_signal"
+                else "runtime_observation_complete_but_launch_gate_still_blocked"
+                if status.startswith("target_observation_complete_blocked_by_")
+                else "runtime_observation_complete"
+                if status == "target_observation_complete"
+                else status
+            ),
+            "no_live_order_sent": live_violation_count == 0,
+        },
         "live_violation_count": live_violation_count,
         "no_live_order_sent": live_violation_count == 0,
         "latest_run": latest,
@@ -1997,6 +3699,11 @@ def _build_watch_summary(
         "microstructure_watch": micro,
         "canary_risk_caps_config": risk_caps,
         "operator_handoff": operator_handoff,
+        "execution_parity_eta_plan": dict(operator_handoff.get("execution_parity_eta_plan") or {}),
+        "recent_paper_apply_result": dict(recent_paper_apply or {}),
+        "recent_paper_bridge_review": dict(recent_paper_review or {}),
+        "recent_paper_apply_parity_review": parity_review_state,
+        "meta_router_promotion_gate": dict(recent_meta_router_promotion_gate or {}),
         "blocker_resolution_plan": blocker_resolution_plan,
         "safe_next_action_plan": safe_next_action_plan,
         "launch_week_plan": _launch_week_plan(latest),
@@ -2068,6 +3775,7 @@ def run_launch_shadow_watch(
     iterations = max(1, int(args.iterations))
     refresh_before_evidence_run = not bool(getattr(args, "disable_market_data_refresh_before_evidence_run", False))
     pre_run_refresh_succeeded = pre_run_market_data_refresh.get("status") == "refreshed"
+    pre_run_force_quote_sample = _pre_run_wait_force_quote_sample(pre_run_wait_plan)
     for idx in range(1, iterations + 1):
         generated_at = datetime.now(UTC)
         observed_hours = max((generated_at - continuous_started_at).total_seconds(), 0.0) / 3600.0
@@ -2079,6 +3787,7 @@ def run_launch_shadow_watch(
                 observed_hours=observed_hours,
                 refresh_market_data_before_run=refresh_before_evidence_run
                 and not (idx == 1 and pre_run_refresh_succeeded),
+                force_quote_sample=pre_run_force_quote_sample and idx == 1,
             )
         )
         if not baseline_collection:
@@ -2090,6 +3799,22 @@ def run_launch_shadow_watch(
             previous_payload=previous_payload,
             recent_hours=max(0.0, float(args.microstructure_recent_hours)),
         )
+        recent_paper_apply = _recent_paper_apply_result(
+            evidence_root=evidence_root,
+            current_at=datetime.now(UTC),
+        )
+        recent_paper_review = _recent_paper_bridge_review(
+            evidence_root=evidence_root,
+            current_at=datetime.now(UTC),
+        )
+        recent_paper_apply_parity_review = _recent_paper_apply_parity_review(
+            evidence_root=evidence_root,
+            current_at=datetime.now(UTC),
+        )
+        recent_meta_router_promotion_gate = _recent_meta_router_promotion_gate(
+            evidence_root=evidence_root,
+            current_at=datetime.now(UTC),
+        )
         summary = _build_watch_summary(
             started_at=started_at,
             completed_at=datetime.now(UTC),
@@ -2100,6 +3825,10 @@ def run_launch_shadow_watch(
             previous_completed_at=previous_completed_at,
             interval_seconds=max(0.0, float(args.interval_seconds)),
             microstructure_watch=microstructure_watch,
+            recent_paper_apply=recent_paper_apply,
+            recent_paper_review=recent_paper_review,
+            recent_paper_apply_parity_review=recent_paper_apply_parity_review,
+            recent_meta_router_promotion_gate=recent_meta_router_promotion_gate,
             pre_run_wait_plan=pre_run_wait_plan,
             pre_run_wait_incident_log=pre_run_wait_incident_log,
             pre_run_market_data_refresh=pre_run_market_data_refresh,
@@ -2119,6 +3848,22 @@ def run_launch_shadow_watch(
         previous_completed_at=previous_completed_at,
         interval_seconds=max(0.0, float(args.interval_seconds)),
         microstructure_watch=microstructure_watch,
+        recent_paper_apply=_recent_paper_apply_result(
+            evidence_root=evidence_root,
+            current_at=datetime.now(UTC),
+        ),
+        recent_paper_review=_recent_paper_bridge_review(
+            evidence_root=evidence_root,
+            current_at=datetime.now(UTC),
+        ),
+        recent_paper_apply_parity_review=_recent_paper_apply_parity_review(
+            evidence_root=evidence_root,
+            current_at=datetime.now(UTC),
+        ),
+        recent_meta_router_promotion_gate=_recent_meta_router_promotion_gate(
+            evidence_root=evidence_root,
+            current_at=datetime.now(UTC),
+        ),
         pre_run_wait_plan=pre_run_wait_plan,
         pre_run_wait_incident_log=pre_run_wait_incident_log,
         pre_run_market_data_refresh=pre_run_market_data_refresh,

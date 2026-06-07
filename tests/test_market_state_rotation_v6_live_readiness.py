@@ -209,6 +209,49 @@ def test_live_readiness_accepts_backtest_evidence_but_still_requires_execution_p
     assert report["stage_blockers"]["tiny_canary"] == ["live_or_paper_execution_parity_available"]
     assert report["remediation_plan"][0]["blocker"] == "live_or_paper_execution_parity_available"
     assert report["remediation_plan"][0]["nested_blockers"] == ["execution_parity_report_missing"]
+    assert report["time_substitution_policy"]["status"] == "research_time_wait_substituted"
+    assert report["time_substitution_policy"]["research_30d_calendar_wait"]["substituted"] is True
+    assert report["time_substitution_policy"]["live_current_30d_calendar_wait"]["substitutable"] is False
+    assert report["upgrade_backlog"]["items"][0]["id"] == "research_30d_wait_replacement"
+    assert report["upgrade_backlog"]["items"][0]["status"] == "resolved_for_research"
+    assert any(item["id"] == "paper_execution_parity" for item in report["upgrade_backlog"]["items"])
+
+
+def test_live_readiness_upgrade_backlog_surfaces_stress_root_causes() -> None:
+    stress = _stress_report()
+    stress["baseline_summary"] = {
+        "compounded_return_pct": 1000.0,
+        "avg_trade_cost_drag_pct": 7.5,
+        "avg_cost_to_gross_ratio": 0.14,
+        "max_drawdown_proxy_pct": 14.9,
+        "actionable_drawdown_verdict": "pass",
+        "root_cause_counts": {
+            "probe_realized_pnl_negative": 8,
+            "base_negative_context_pockets": 7,
+            "one_way_against_forced_trim_cost_ge_0_75pct": 6,
+            "single_unit_capacity_saturated": 12,
+            "base_entry_cost_ge_2pct": 4,
+        },
+        "tradeoff_tag_counts": {
+            "wide_cost_buffer": 15,
+            "probe_alpha_leak": 8,
+            "selective_base_context_pruning_candidate": 7,
+        },
+        "remediation_hint_counts": {
+            "test_negative_base_context_filter_only": 7,
+            "test_probe_suppression_before_base_cuts": 6,
+        },
+    }
+
+    report = build_readiness_report(_walk_report(include_evidence=True), stress)
+    backlog_ids = {item["id"] for item in report["upgrade_backlog"]["items"]}
+
+    assert report["stress_diagnostics"]["root_cause_counts"]["probe_realized_pnl_negative"] == 8
+    assert "cost_funding_slippage_hardening" in backlog_ids
+    assert "probe_alpha_leak_pruning" in backlog_ids
+    assert "base_negative_context_pruning" in backlog_ids
+    assert "one_way_forced_trim_cost_repair" in backlog_ids
+    assert "single_unit_capacity_review" in backlog_ids
 
 
 def test_live_readiness_accepts_passing_execution_parity_report() -> None:

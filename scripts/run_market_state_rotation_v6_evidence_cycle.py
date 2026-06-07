@@ -32,6 +32,10 @@ from scripts.run_market_state_rotation_v6_collection_tick import (
     DEFAULT_WALK_FORWARD_REPORT,
 )
 from scripts.run_market_state_rotation_v6_entry_filter_sparsity_audit import build_entry_filter_sparsity_audit
+from scripts.run_market_state_rotation_v6_execution_parity_journal import (
+    DEFAULT_JOURNAL_NAME as EXECUTION_PARITY_JOURNAL_NAME,
+    build_execution_parity_journal_report,
+)
 from scripts.run_market_state_rotation_v6_paper_bridge_tick import (
     DEFAULT_PRE_APPLY_BACKUP_DIR,
     DEFAULT_SOURCE_BACKTEST_REPORT,
@@ -67,6 +71,15 @@ def _display_path(path: Path) -> str:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default) + "\n", encoding="utf-8")
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False, sort_keys=True, default=_json_default) for row in rows)
+        + ("\n" if rows else ""),
+        encoding="utf-8",
+    )
 
 
 def _write_text(path: Path, text: str) -> None:
@@ -429,6 +442,8 @@ def _paper_apply_gate(cycle_report: dict[str, Any]) -> dict[str, Any]:
     bridge = dict(cycle_report.get("bridge") or {})
     blockers = set(str(item) for item in bridge.get("snapshot_blockers") or [])
     bridge_status = str(bridge.get("overall_status") or "")
+    execution_parity_preflight = dict(bridge.get("execution_parity_preflight") or {})
+    preflight_passed = execution_parity_preflight.get("passed") is True or not execution_parity_preflight
     apply_requested = bridge.get("apply_paper") is True
     fresh_market_data = "market_data_stale" not in blockers
     fresh_signal = "signal_stale" not in blockers and "no_recent_v6_trade_event" not in blockers
@@ -440,6 +455,10 @@ def _paper_apply_gate(cycle_report: dict[str, Any]) -> dict[str, Any]:
         status = "blocked_waiting_for_fresh_signal"
         can_request_apply = False
         next_step = "wait_for_fresh_v6_add_or_remove_signal"
+    elif not preflight_passed:
+        status = "blocked_execution_parity_preflight"
+        can_request_apply = False
+        next_step = "fix_execution_parity_preflight_fields_before_paper_apply"
     elif not apply_requested and bridge_status == "dry_run_actionable":
         status = "paper_apply_request_available"
         can_request_apply = True
@@ -460,9 +479,47 @@ def _paper_apply_gate(cycle_report: dict[str, Any]) -> dict[str, Any]:
         "can_request_paper_apply_now": can_request_apply,
         "fresh_market_data": fresh_market_data,
         "fresh_signal": fresh_signal,
+        "execution_parity_preflight_passed": preflight_passed,
+        "execution_parity_preflight": execution_parity_preflight,
         "snapshot_blockers": list(bridge.get("snapshot_blockers") or []),
         "required_pre_apply_backup": True,
         "next_step": next_step,
+    }
+
+
+def _pre_apply_backup_plan(*, apply_gate: dict[str, Any], pre_apply_backup_dir: Path | None) -> dict[str, Any]:
+    backup_dir = _display_path(pre_apply_backup_dir) if pre_apply_backup_dir is not None else None
+    apply_available = apply_gate.get("can_request_paper_apply_now") is True
+    fresh_signal = apply_gate.get("fresh_signal") is True
+    if apply_available:
+        status = "ready_required_before_paper_apply"
+        next_action = "operator_must_confirm_sqlite_backup_created_and_quick_check_ok_before_apply"
+    elif not fresh_signal:
+        status = "armed_waiting_for_fresh_signal"
+        next_action = "keep_backup_plan_attached_to_signal_monitor_until_apply_gate_opens"
+    else:
+        status = "blocked_until_paper_apply_gate_available"
+        next_action = "inspect_paper_bridge_apply_gate_before_apply"
+    return {
+        "status": status,
+        "required": apply_gate.get("required_pre_apply_backup") is not False,
+        "backup_dir": backup_dir,
+        "backup_dir_configured": backup_dir is not None,
+        "created_by": "scripts/run_market_state_rotation_v6_paper_bridge_tick.py",
+        "created_during": "run_market_state_rotation_v6_evidence_cycle.py --apply-paper-bridge",
+        "verification_required": True,
+        "verification_required_fields": [
+            "pre_apply_backup.created == true",
+            "pre_apply_backup.quick_check == 'ok'",
+            "pre_apply_backup.backup_path is not empty",
+        ],
+        "fail_closed_status": "pre_apply_backup_failed",
+        "paper_apply_gate_status": apply_gate.get("status"),
+        "paper_apply_allowed_now": apply_available,
+        "fresh_signal": fresh_signal,
+        "next_action": next_action,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
     }
 
 
@@ -513,6 +570,144 @@ def _collection_progress(cycle_report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _execution_parity_collection_progress(journal_report: dict[str, Any] | None) -> dict[str, Any]:
+    if not journal_report:
+        return {
+            "execution_parity_status": "not_collected",
+            "execution_parity_lifecycle_rows": 0,
+            "execution_parity_journal_rows": 0,
+            "execution_parity_required_rows": 20,
+            "execution_parity_missing_samples": 20,
+            "execution_parity_passed": False,
+            "execution_parity_blockers": ["execution_parity_journal_report_missing"],
+        }
+    conversion = dict(journal_report.get("conversion") or {})
+    summary = dict(journal_report.get("contract_summary") or {})
+    required = int(summary.get("min_sample_count") or 20)
+    rows = int(conversion.get("journal_row_count") or summary.get("sample_count") or 0)
+    return {
+        "execution_parity_status": journal_report.get("status"),
+        "execution_parity_lifecycle_rows": int(conversion.get("lifecycle_row_count") or 0),
+        "execution_parity_journal_rows": rows,
+        "execution_parity_required_rows": required,
+        "execution_parity_missing_samples": max(required - rows, 0),
+        "execution_parity_passed": bool(summary.get("passed")),
+        "execution_parity_blockers": list(summary.get("blockers") or []),
+    }
+
+
+def _execution_parity_collection_plan(
+    *,
+    collection_progress: dict[str, Any],
+    apply_gate: dict[str, Any],
+    journal_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    conversion = dict(dict(journal_report or {}).get("conversion") or {})
+    required = max(1, _int_field(collection_progress, "execution_parity_required_rows", 20))
+    journal_rows = max(0, _int_field(collection_progress, "execution_parity_journal_rows", 0))
+    lifecycle_rows = max(0, _int_field(collection_progress, "execution_parity_lifecycle_rows", 0))
+    missing = max(required - journal_rows, 0)
+    entry_rows = max(0, _int_field(conversion, "entry_rows_written", 0))
+    exit_rows = max(0, _int_field(conversion, "exit_rows_written", 0))
+    include_exit_rows = conversion.get("include_exit_rows") is True
+    accepted_actions = ["add", "remove"] if include_exit_rows else ["add"]
+    bridge_action = str(apply_gate.get("bridge_action") or "").strip().lower()
+    fresh_market_data = apply_gate.get("fresh_market_data") is True
+    fresh_signal = apply_gate.get("fresh_signal") is True
+    preflight_passed = apply_gate.get("execution_parity_preflight_passed") is True
+    paper_apply_available = apply_gate.get("can_request_paper_apply_now") is True
+    apply_requested = apply_gate.get("apply_requested") is True
+    currently_creditable_actions = (
+        [bridge_action]
+        if paper_apply_available and bridge_action in set(accepted_actions)
+        else []
+    )
+    will_credit_current_apply = bool(currently_creditable_actions) and missing > 0
+    credited_sample_count_after_next_apply = journal_rows + (1 if will_credit_current_apply else 0)
+    events_needed_after_next_credit = max(missing - (1 if will_credit_current_apply else 0), 0)
+    if missing <= 0 and collection_progress.get("execution_parity_passed") is True:
+        status = "passed"
+        next_step = "rerun_live_readiness_with_execution_parity_contract"
+    elif not fresh_market_data:
+        status = "blocked_by_market_data_freshness"
+        next_step = "refresh_market_data_before_waiting_for_creditable_signal"
+    elif not fresh_signal:
+        status = "waiting_for_fresh_signal"
+        next_step = "wait_for_fresh_v6_add_or_remove_signal"
+    elif not preflight_passed:
+        status = "blocked_by_execution_parity_preflight"
+        next_step = "fix_execution_parity_preflight_fields_before_paper_apply"
+    elif paper_apply_available:
+        status = "ready_to_credit_next_paper_apply"
+        next_step = "operator_review_then_apply_paper_bridge_to_create_one_real_lifecycle_sample"
+    elif apply_requested:
+        status = "paper_apply_requested_review_lifecycle_rows"
+        next_step = "review_paper_bridge_result_and_rerun_execution_parity_journal"
+    else:
+        status = "collecting_wait_for_complete_lifecycle_rows"
+        next_step = "inspect_collection_cycle_bridge_report"
+    return {
+        "status": status,
+        "required_samples": required,
+        "eligible_journal_rows": journal_rows,
+        "eligible_lifecycle_rows": lifecycle_rows,
+        "entry_rows_written": entry_rows,
+        "exit_rows_written": exit_rows,
+        "missing_samples": missing,
+        "estimated_future_paper_apply_events_needed": missing,
+        "estimated_events_needed_after_current_creditable_apply": events_needed_after_next_credit,
+        "projected_journal_rows_after_current_creditable_apply": credited_sample_count_after_next_apply,
+        "sample_credit_per_completed_paper_apply_event": 1,
+        "will_credit_current_apply_after_operator_review": will_credit_current_apply,
+        "accepted_actions": accepted_actions,
+        "currently_creditable_actions": currently_creditable_actions,
+        "next_creditable_event_types": accepted_actions,
+        "bridge_action": bridge_action or None,
+        "paper_apply_status": apply_gate.get("status"),
+        "paper_apply_available_now": paper_apply_available,
+        "fresh_market_data": fresh_market_data,
+        "fresh_signal": fresh_signal,
+        "execution_parity_preflight_passed": preflight_passed,
+        "execution_parity_preflight": dict(apply_gate.get("execution_parity_preflight") or {}),
+        "blockers": list(collection_progress.get("execution_parity_blockers") or []),
+        "next_step": next_step,
+        "sample_credit_policy": {
+            "add": "one_completed_paper_add_lifecycle_row_counts_as_one_execution_parity_sample",
+            "remove": (
+                "one_completed_paper_remove_exit_lifecycle_row_counts_as_one_execution_parity_sample"
+                if include_exit_rows
+                else "remove_rows_are_not_enabled_for_this_journal_run"
+            ),
+            "backtest_rows": "not_creditable_for_execution_parity",
+            "manual_or_synthetic_rows": "not_creditable_for_execution_parity",
+        },
+        "non_substitutable": True,
+        "backtest_substitution_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+
+
+def _execution_parity_markdown(report: dict[str, Any]) -> str:
+    conversion = dict(report.get("conversion") or {})
+    summary = dict(report.get("contract_summary") or {})
+    return "\n".join(
+        [
+            "# Market State Rotation V6 Execution Parity Journal",
+            "",
+            f"- status: `{report.get('status')}`",
+            f"- no_live_order_sent: `{report.get('no_live_order_sent')}`",
+            f"- lifecycle_rows: `{conversion.get('lifecycle_row_count')}`",
+            f"- journal_rows: `{conversion.get('journal_row_count')}/{summary.get('min_sample_count')}`",
+            f"- missing_samples: `{conversion.get('missing_to_min_sample_count')}`",
+            f"- contract_passed: `{summary.get('passed')}`",
+            f"- contract_status: `{summary.get('status')}`",
+            f"- blockers: `{', '.join(summary.get('blockers') or [])}`",
+            "",
+        ]
+    )
+
+
 def _pct(observed: int | float, required: int | float) -> float:
     required_float = float(required or 0)
     if required_float <= 0:
@@ -536,6 +731,14 @@ def _readiness_progress(
     quote_min_distinct_hours = int(collection_progress.get("quote_min_distinct_hours") or 0)
     paper_fill_rows = int(collection_progress.get("paper_fill_rows") or 0)
     paper_fill_required = max(1, int(min_shadow_fill_samples or 1))
+    execution_parity_rows = int(collection_progress.get("execution_parity_journal_rows") or 0)
+    execution_parity_required = max(1, int(collection_progress.get("execution_parity_required_rows") or 20))
+    execution_parity_missing = max(
+        int(collection_progress.get("execution_parity_missing_samples") or 0),
+        0,
+    )
+    execution_parity_passed = collection_progress.get("execution_parity_passed") is True
+    execution_parity_blockers = list(collection_progress.get("execution_parity_blockers") or [])
     coverage_count = int(collection_forecast.get("utc_hour_of_day_covered_count") or 0)
     fresh_market_data = apply_gate.get("fresh_market_data") is True
     fresh_signal = apply_gate.get("fresh_signal") is True
@@ -545,6 +748,7 @@ def _readiness_progress(
         "quote_distinct_hours": _pct(quote_distinct_hours, quote_min_distinct_hours),
     }
     paper_shadow_fill_pct = _pct(paper_fill_rows, paper_fill_required)
+    execution_parity_pct = _pct(execution_parity_rows, execution_parity_required)
     quote_evidence_readiness_pct = min(quote_gate_pcts.values()) if quote_gate_pcts else 100.0
     shadow_promotion_readiness_pct = min(quote_evidence_readiness_pct, paper_shadow_fill_pct)
     paper_apply_readiness_pct = min(100.0 if fresh_market_data else 0.0, 100.0 if fresh_signal else 0.0)
@@ -581,6 +785,18 @@ def _readiness_progress(
                 "required": paper_fill_required,
                 "missing": paper_fill_missing,
                 "next_step": "collect_paper_lifecycle_rows_from_fresh_v6_signals",
+            }
+        )
+    if not execution_parity_passed:
+        blocking_gates.append(
+            {
+                "gate": "execution_parity_journal",
+                "pct": execution_parity_pct,
+                "observed": execution_parity_rows,
+                "required": execution_parity_required,
+                "missing": execution_parity_missing,
+                "blockers": execution_parity_blockers,
+                "next_step": "collect_real_paper_lifecycle_rows_and_rerun_execution_parity_journal",
             }
         )
     quote_missing_days = int(collection_progress.get("quote_missing_calendar_days") or 0)
@@ -627,6 +843,9 @@ def _readiness_progress(
         "quote_distinct_hour_pct": quote_gate_pcts["quote_distinct_hours"],
         "quote_hour_of_day_coverage_pct": _pct(coverage_count, 24),
         "paper_shadow_fill_pct": paper_shadow_fill_pct,
+        "execution_parity_journal_pct": execution_parity_pct,
+        "execution_parity_passed": execution_parity_passed,
+        "execution_parity_blockers": execution_parity_blockers,
         "fresh_market_data_pct": 100.0 if fresh_market_data else 0.0,
         "fresh_signal_pct": 100.0 if fresh_signal else 0.0,
         "paper_apply_readiness_pct": paper_apply_readiness_pct,
@@ -642,6 +861,8 @@ def _readiness_progress(
             "quote_calendar_days": quote_missing_days,
             "quote_distinct_hours": quote_missing_hours,
             "paper_shadow_fill_samples": paper_fill_missing,
+            "execution_parity_samples": execution_parity_missing,
+            "execution_parity_contract": 0 if execution_parity_passed else 1,
             "market_data_freshness": 0 if fresh_market_data else 1,
             "fresh_signal": 0 if fresh_signal else 1,
         },
@@ -672,6 +893,7 @@ def _execution_checklist(
         int(remaining.get(key) or 0) == 0 for key in ("quote_samples", "quote_calendar_days", "quote_distinct_hours")
     )
     paper_shadow_ready = int(remaining.get("paper_shadow_fill_samples") or 0) == 0
+    execution_parity_ready = int(remaining.get("execution_parity_contract") or 0) == 0
     fresh_signal_ready = int(remaining.get("fresh_signal") or 0) == 0
     if not fresh_signal_ready:
         current_phase = "wait_for_fresh_signal_and_continue_shadow_collection"
@@ -721,11 +943,21 @@ def _execution_checklist(
             "observed": collection_progress.get("paper_fill_rows"),
             "remaining": int(remaining.get("paper_shadow_fill_samples") or 0),
         },
+        {
+            "gate": "execution_parity_journal",
+            "status": _gate_status("execution_parity_journal" in blocking_gate_names),
+            "observed": collection_progress.get("execution_parity_journal_rows"),
+            "required": collection_progress.get("execution_parity_required_rows"),
+            "remaining": int(remaining.get("execution_parity_samples") or 0),
+            "contract_blocked": int(remaining.get("execution_parity_contract") or 0) > 0,
+            "blockers": list(collection_progress.get("execution_parity_blockers") or []),
+        },
     ]
     return {
         "current_phase": current_phase,
         "paper_apply_allowed_now": paper_apply_allowed_now,
         "shadow_promotion_ready": quote_ready and paper_shadow_ready,
+        "execution_parity_ready": execution_parity_ready,
         "live_ready": False,
         "live_block_reason": "evidence_cycle_is_paper_only_and_live_requires_separate_operator_promotion_gate",
         "target_next_utc_hour_of_day": collection_forecast.get("target_next_utc_hour_of_day"),
@@ -1337,6 +1569,25 @@ def _historical_gate_substitution(
         return {
             "status": "historical_replay_unavailable",
             "realtime_quote_wait_replaced": False,
+            "time_substitution_policy": {
+                "status": "historical_replay_unavailable",
+                "research_shadow_quote_calendar_wait": {
+                    "substitutable": True,
+                    "substituted": False,
+                    "days_removed": 0,
+                    "scope": "research_shadow_readiness_only",
+                },
+                "live_launch_current_evidence_wait": {
+                    "substitutable": False,
+                    "substituted": False,
+                    "scope": "live_or_unrestricted_canary",
+                },
+                "non_substitutable_live_gates": [
+                    "fresh_signal_requires_realtime_strategy_event",
+                    "paper_shadow_fill_samples_require_current_trade_lifecycle_rows",
+                    "current_exchange_microstructure_requires_quote_or_paper_fill_evidence",
+                ],
+            },
             "no_live_order_sent": True,
         }
     aggregate = dict(historical_replay.get("aggregate_quote_gate") or {})
@@ -1395,6 +1646,58 @@ def _historical_gate_substitution(
         status = "partial_quote_wait_replacement"
     else:
         status = "historical_replay_did_not_replace_quote_wait"
+    realtime_wait_days_removed = (
+        int(collection_progress.get("quote_missing_calendar_days") or 0) if quote_calendar_days_replaced else 0
+    )
+    time_substitution_policy = {
+        "status": status,
+        "research_shadow_quote_calendar_wait": {
+            "substitutable": True,
+            "substituted": quote_calendar_days_replaced,
+            "days_removed": realtime_wait_days_removed,
+            "scope": "research_shadow_readiness_only",
+            "source": "historical_replay_with_future_leakage_guard_and_rolling_window_confirmation",
+            "reason": (
+                "Historical replay passed aggregate quote-calendar and rolling confirmation gates."
+                if quote_calendar_days_replaced
+                else "Historical replay did not pass enough quote-calendar and rolling confirmation gates."
+            ),
+        },
+        "research_shadow_quote_sample_hour_wait": {
+            "substitutable": True,
+            "substituted": quote_samples_replaced and quote_distinct_hours_replaced,
+            "sample_gate_substituted": quote_samples_replaced,
+            "distinct_hour_gate_substituted": quote_distinct_hours_replaced,
+            "scope": "research_shadow_readiness_only",
+        },
+        "research_shadow_lifecycle_proxy_wait": {
+            "substitutable": True,
+            "substituted": lifecycle_proxy_replaced,
+            "scope": "research_shadow_readiness_only",
+            "reason": (
+                "Historical closed-trade lifecycle proxy satisfied the research sample count."
+                if lifecycle_proxy_replaced
+                else "Current paper lifecycle rows are still required unless a valid historical lifecycle proxy is supplied."
+            ),
+        },
+        "live_launch_current_evidence_wait": {
+            "substitutable": False,
+            "substituted": False,
+            "scope": "live_or_unrestricted_canary",
+            "reason": (
+                "Live launch still requires current fresh signal, paper/apply rows, and current exchange "
+                "microstructure evidence; historical replay only removes research wait time."
+            ),
+        },
+        "can_skip_research_quote_calendar_wait": quote_calendar_days_replaced,
+        "can_skip_live_current_evidence_wait": False,
+        "non_substitutable_live_gates": [
+            "fresh_signal_requires_realtime_strategy_event",
+            "paper_shadow_fill_samples_require_current_trade_lifecycle_rows",
+            "market_data_freshness_requires_current_exchange_cache_when_stale",
+            "real_order_book_spread_slippage_latency_require_l2_quote_shadow_or_paper_fill_evidence",
+        ],
+    }
     return {
         "status": status,
         "realtime_quote_wait_replaced": realtime_quote_wait_replaced,
@@ -1410,9 +1713,7 @@ def _historical_gate_substitution(
             "quote_distinct_hours": quote_distinct_hours_replaced,
         },
         "paper_shadow_fill_proxy_replaced": lifecycle_proxy_replaced,
-        "realtime_wait_days_removed": (
-            int(collection_progress.get("quote_missing_calendar_days") or 0) if quote_calendar_days_replaced else 0
-        ),
+        "realtime_wait_days_removed": realtime_wait_days_removed,
         "remaining_work_units_after_substitution": substituted_remaining,
         "blocking_gates_after_substitution": substituted_blockers,
         "strictest_deployment_gate_after_substitution": (
@@ -1433,6 +1734,7 @@ def _historical_gate_substitution(
             ),
             "do_not_promote_live_orders_without_real_microstructure_or_paper_fill_evidence",
         ],
+        "time_substitution_policy": time_substitution_policy,
         "non_replaced_live_gates": [
             "fresh_signal_requires_realtime_strategy_event",
             "paper_shadow_fill_samples_require_trade_lifecycle_rows",
@@ -1638,6 +1940,7 @@ def _launch_readiness_state_machine(
     substitution = dict(report.get("historical_gate_substitution") or {})
     substituted_remaining = dict(substitution.get("remaining_work_units_after_substitution") or remaining)
     apply_gate = dict(report.get("paper_bridge_apply_gate") or {})
+    pre_apply_backup = dict(report.get("pre_apply_backup_plan") or {})
     signal_wait = dict(report.get("signal_wait_plan") or {})
     market_data_plan = dict(report.get("market_data_refresh_plan") or {})
     lifecycle = dict(report.get("historical_lifecycle_replay") or {})
@@ -1871,11 +2174,17 @@ def _launch_readiness_state_machine(
     report_suffix = generated_at.strftime("%Y%m%d_%H%MZ")
     risk_caps_path = str(risk_caps_config.get("path") or "").strip()
     risk_caps_arg = f"--canary-risk-caps-json {shlex.quote(risk_caps_path)} " if risk_caps_path else ""
+    backup_dir = str(pre_apply_backup.get("backup_dir") or "").strip()
+    backup_arg = f"--pre-apply-backup-dir {shlex.quote(backup_dir)} " if backup_dir else ""
+    signal_age_minutes = max(1, int(signal_wait.get("max_signal_age_minutes") or 15))
+    signal_age_arg = f"--max-signal-age-minutes {signal_age_minutes} "
     launch_commands = {
         "signal_monitor": signal_monitor_command,
         "paper_bridge_dry_run": (
             ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
             "--quote-samples-per-tick 0 "
+            "--refresh-market-data-before-run "
+            f"{signal_age_arg}"
             "--historical-evidence-replay --historical-lifecycle-replay "
             f"{risk_caps_arg}"
             f"--report-dir reports/validation/diagnostics/market_state_rotation_v6_launch_paper_dry_run_{report_suffix}"
@@ -1890,8 +2199,11 @@ def _launch_readiness_state_machine(
         "paper_apply_only_after_fresh_signal": (
             ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
             "--apply-paper-bridge --quote-samples-per-tick 0 "
+            "--refresh-market-data-before-run "
+            f"{signal_age_arg}"
             "--historical-evidence-replay --historical-lifecycle-replay "
             f"{risk_caps_arg}"
+            f"{backup_arg}"
             f"--report-dir reports/validation/diagnostics/market_state_rotation_v6_launch_paper_apply_{report_suffix}"
         ),
     }
@@ -2027,6 +2339,7 @@ def _launch_readiness_state_machine(
             "apply_allowed_now": bool(paper_ready_for_apply),
             "requires_operator_review": True,
             "requires_verified_pre_apply_backup": True,
+            "pre_apply_backup_plan": pre_apply_backup,
             "blocked_by": [
                 item["gate"]
                 for item in stage_gates
@@ -2164,8 +2477,11 @@ def _trend_snapshot(report_path: Path, payload: dict[str, Any]) -> dict[str, Any
         "quote_calendar_days": int(progress.get("quote_calendar_days") or 0),
         "quote_distinct_hours": int(progress.get("quote_distinct_hours") or 0),
         "paper_fill_rows": int(progress.get("paper_fill_rows") or 0),
+        "execution_parity_journal_rows": int(progress.get("execution_parity_journal_rows") or 0),
+        "execution_parity_missing_samples": int(progress.get("execution_parity_missing_samples") or 0),
         "quote_evidence_readiness_pct": float(readiness.get("quote_evidence_readiness_pct") or 0.0),
         "shadow_promotion_readiness_pct": float(readiness.get("shadow_promotion_readiness_pct") or 0.0),
+        "execution_parity_journal_pct": float(readiness.get("execution_parity_journal_pct") or 0.0),
         "current_phase": checklist.get("current_phase"),
     }
 
@@ -2225,6 +2541,10 @@ def _readiness_trend(
         "quote_calendar_days": current_snapshot["quote_calendar_days"] - int(previous.get("quote_calendar_days") or 0),
         "quote_distinct_hours": current_snapshot["quote_distinct_hours"] - int(previous.get("quote_distinct_hours") or 0),
         "paper_fill_rows": current_snapshot["paper_fill_rows"] - int(previous.get("paper_fill_rows") or 0),
+        "execution_parity_journal_rows": current_snapshot["execution_parity_journal_rows"]
+        - int(previous.get("execution_parity_journal_rows") or 0),
+        "execution_parity_missing_samples": current_snapshot["execution_parity_missing_samples"]
+        - int(previous.get("execution_parity_missing_samples") or 0),
         "quote_evidence_readiness_pct": round(
             current_snapshot["quote_evidence_readiness_pct"] - float(previous.get("quote_evidence_readiness_pct") or 0.0),
             4,
@@ -2232,6 +2552,11 @@ def _readiness_trend(
         "shadow_promotion_readiness_pct": round(
             current_snapshot["shadow_promotion_readiness_pct"]
             - float(previous.get("shadow_promotion_readiness_pct") or 0.0),
+            4,
+        ),
+        "execution_parity_journal_pct": round(
+            current_snapshot["execution_parity_journal_pct"]
+            - float(previous.get("execution_parity_journal_pct") or 0.0),
             4,
         ),
     }
@@ -2245,6 +2570,7 @@ def _readiness_trend(
     missing_calendar_days = int(remaining.get("quote_calendar_days") or 0)
     missing_distinct_hours = int(remaining.get("quote_distinct_hours") or 0)
     missing_paper_fills = int(remaining.get("paper_shadow_fill_samples") or 0)
+    missing_execution_parity = int(remaining.get("execution_parity_samples") or 0)
     fresh_signal_missing = int(remaining.get("fresh_signal") or 0)
     stagnation_flags: list[str] = []
     if missing_quote_samples > 0 and delta["quote_observed"] <= 0:
@@ -2255,9 +2581,20 @@ def _readiness_trend(
         stagnation_flags.append("quote_hour_coverage_no_new_bucket")
     if missing_paper_fills > 0 and delta["paper_fill_rows"] <= 0:
         stagnation_flags.append("paper_shadow_fill_no_recent_progress")
+    if missing_execution_parity > 0 and delta["execution_parity_journal_rows"] <= 0:
+        stagnation_flags.append("execution_parity_journal_no_recent_progress")
     if fresh_signal_missing > 0:
         stagnation_flags.append("fresh_signal_waiting")
-    any_progress = any(int(delta.get(key) or 0) > 0 for key in ("quote_observed", "quote_calendar_days", "quote_distinct_hours", "paper_fill_rows"))
+    any_progress = any(
+        int(delta.get(key) or 0) > 0
+        for key in (
+            "quote_observed",
+            "quote_calendar_days",
+            "quote_distinct_hours",
+            "paper_fill_rows",
+            "execution_parity_journal_rows",
+        )
+    )
     if any_progress and stagnation_flags:
         status = "progressing_with_unresolved_gates"
     elif any_progress:
@@ -2266,6 +2603,10 @@ def _readiness_trend(
         status = "no_recent_progress"
     cycles_to_quote_sample_completion = _ceil_div(missing_quote_samples, max(delta["quote_observed"], 0))
     cycles_to_paper_fill_completion = _ceil_div(missing_paper_fills, max(delta["paper_fill_rows"], 0))
+    cycles_to_execution_parity_completion = _ceil_div(
+        missing_execution_parity,
+        max(delta["execution_parity_journal_rows"], 0),
+    )
     quote_samples_per_hour = None
     if elapsed_hours and elapsed_hours > 0:
         quote_samples_per_hour = round(delta["quote_observed"] / elapsed_hours, 4)
@@ -2279,6 +2620,7 @@ def _readiness_trend(
         "quote_samples_per_hour_since_previous": quote_samples_per_hour,
         "cycles_to_quote_sample_completion_at_latest_delta": cycles_to_quote_sample_completion,
         "cycles_to_paper_fill_completion_at_latest_delta": cycles_to_paper_fill_completion,
+        "cycles_to_execution_parity_completion_at_latest_delta": cycles_to_execution_parity_completion,
         "calendar_days_still_time_gated": missing_calendar_days,
         "distinct_hours_still_time_gated": missing_distinct_hours,
         "stagnation_flags": stagnation_flags,
@@ -2295,6 +2637,7 @@ def _adaptive_collection_plan(
     readiness_progress: dict[str, Any],
     readiness_trend: dict[str, Any],
     apply_gate: dict[str, Any],
+    pre_apply_backup_plan: dict[str, Any],
     quote_cadence_preflight: dict[str, Any],
     report_dir: Path,
 ) -> dict[str, Any]:
@@ -2338,6 +2681,8 @@ def _adaptive_collection_plan(
         blockers_to_action.append("fresh_signal_is_not_operator_forced")
     quote_capture_useful_now = effective_quote_samples_per_tick > 0
     useful_now = quote_capture_useful_now or apply_gate.get("can_request_paper_apply_now") is True
+    backup_dir = str(dict(pre_apply_backup_plan or {}).get("backup_dir") or "").strip()
+    backup_arg = f"--pre-apply-backup-dir {shlex.quote(backup_dir)} " if backup_dir else ""
     if missing_days > 0 and not missing_utc_hours and missing_samples <= 0:
         useful_now = False
     next_quote_window = _next_quote_evidence_window(
@@ -2397,6 +2742,9 @@ def _adaptive_collection_plan(
             "paper_apply_only_if_gate_allows": (
                 ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
                 "--apply-paper-bridge --quote-samples-per-tick 2 "
+                "--refresh-market-data-before-run "
+                "--max-signal-age-minutes 15 "
+                f"{backup_arg}"
                 "--report-dir reports/validation/diagnostics/<paper_apply_report_dir>"
             ),
         },
@@ -2660,6 +3008,12 @@ def _signal_wait_plan(
     max_age = float(max(1, int(max_signal_age_minutes or 1)))
     stale_by = round(max(float(signal_age_minutes or 0.0) - max_age, 0.0), 4) if signal_age_minutes is not None else None
     latest_add_age_hours = _num(cadence.get("latest_add_age_hours"))
+    median_gap_hours = _num(cadence.get("median_gap_hours"))
+    expected_days_per_event = _num(cadence.get("expected_days_per_event"))
+    expected_event_interval_hours = (
+        round(float(expected_days_per_event) * 24.0, 4) if expected_days_per_event is not None else None
+    )
+    latest_age_to_median_gap = _num(cadence.get("latest_age_to_median_gap"))
     median_add_gap_hours = _num(cadence.get("median_add_gap_hours"))
     expected_days_per_add = _num(cadence.get("expected_days_per_add"))
     expected_add_interval_hours = (
@@ -2672,34 +3026,44 @@ def _signal_wait_plan(
     if fresh_signal:
         status = "fresh_signal_available"
         cadence_lag_level = "none"
-        recommended_interval = None
+        cadence_recommended_interval = None
         recommended_action = "review_paper_apply_gate_if_bridge_is_dry_run_actionable"
     elif latest_add_age_to_median_gap is None:
         status = "blocked_waiting_for_fresh_signal"
         cadence_lag_level = "cadence_unknown"
-        recommended_interval = 30
+        cadence_recommended_interval = 30
         recommended_action = "monitor_bridge_without_forcing_entry_relaxation"
     elif latest_add_age_to_median_gap <= 1.0:
         status = "blocked_waiting_for_fresh_signal"
         cadence_lag_level = "within_recent_add_cadence"
-        recommended_interval = 60
+        cadence_recommended_interval = 60
         recommended_action = "monitor_bridge_without_forcing_entry_relaxation"
     elif latest_add_age_to_median_gap <= 2.0:
         status = "blocked_waiting_for_fresh_signal"
         cadence_lag_level = "above_recent_median_add_gap"
-        recommended_interval = 30
+        cadence_recommended_interval = 30
         recommended_action = "increase_signal_monitoring_without_relaxing_entry_filters"
     elif latest_add_age_to_median_gap <= 5.0:
         status = "blocked_waiting_for_fresh_signal"
         cadence_lag_level = "extended_signal_drought"
-        recommended_interval = 15
+        cadence_recommended_interval = 15
         recommended_action = "increase_signal_monitoring_without_relaxing_entry_filters"
     else:
         status = "blocked_waiting_for_fresh_signal"
         cadence_lag_level = "severe_signal_drought_but_entry_quality_gate_still_blocks_relaxation"
-        recommended_interval = 15
+        cadence_recommended_interval = 15
         recommended_action = "monitor_frequently_but_do_not_force_signal_or_relax_low_quality_filters"
 
+    recommended_interval = (
+        min(int(cadence_recommended_interval), int(max_age))
+        if cadence_recommended_interval is not None
+        else None
+    )
+    monitor_interval_capped = (
+        cadence_recommended_interval is not None
+        and recommended_interval is not None
+        and int(recommended_interval) < int(cadence_recommended_interval)
+    )
     next_monitor = (
         generated_at.astimezone(UTC) + timedelta(minutes=int(recommended_interval))
         if recommended_interval is not None
@@ -2722,6 +3086,14 @@ def _signal_wait_plan(
         "signal_stale_by_minutes": stale_by,
         "latest_event_ts": cadence.get("latest_event_ts"),
         "latest_event_age_hours": _num(cadence.get("latest_event_age_hours")),
+        "latest_age_to_median_gap": latest_age_to_median_gap,
+        "median_gap_hours": median_gap_hours,
+        "expected_days_per_event": expected_days_per_event,
+        "expected_event_interval_hours": expected_event_interval_hours,
+        "event_wait_state": cadence.get("wait_state"),
+        "bridge_event_count": cadence.get("bridge_event_count"),
+        "add_event_count": cadence.get("add_event_count"),
+        "remove_event_count": cadence.get("remove_event_count"),
         "latest_add_ts": cadence.get("latest_add_ts"),
         "latest_add_age_hours": latest_add_age_hours,
         "median_add_gap_hours": median_add_gap_hours,
@@ -2730,7 +3102,19 @@ def _signal_wait_plan(
         "latest_add_age_to_median_gap": latest_add_age_to_median_gap,
         "add_wait_state": cadence.get("add_wait_state"),
         "cadence_lag_level": cadence_lag_level,
+        "cadence_recommended_monitor_interval_minutes": cadence_recommended_interval,
         "recommended_monitor_interval_minutes": recommended_interval,
+        "signal_freshness_capture_window_minutes": max_age,
+        "monitor_interval_capped_by_signal_freshness": monitor_interval_capped,
+        "monitor_signal_age_alignment": (
+            "fresh_signal_available"
+            if fresh_signal
+            else (
+                "capped_to_fresh_signal_window"
+                if monitor_interval_capped
+                else "interval_within_fresh_signal_window"
+            )
+        ),
         "next_monitor_after_utc": next_monitor.isoformat() if next_monitor is not None else None,
         "next_monitor_after_kst": next_monitor.astimezone(KST).isoformat() if next_monitor is not None else None,
         "recommended_action": recommended_action,
@@ -2773,6 +3157,7 @@ def _operator_action_plan(
     adaptive_collection_plan: dict[str, Any],
     apply_gate: dict[str, Any],
     market_data_refresh_plan: dict[str, Any],
+    pre_apply_backup_plan: dict[str, Any],
     signal_wait_plan: dict[str, Any],
 ) -> dict[str, Any]:
     commands = dict(adaptive_collection_plan.get("operator_commands") or {})
@@ -2807,6 +3192,9 @@ def _operator_action_plan(
                 "command": commands.get("paper_apply_only_if_gate_allows"),
                 "reason": "fresh_signal_gate_open_and_bridge_is_dry_run_actionable",
                 "requires_operator_review": True,
+                "pre_apply_backup_plan": dict(pre_apply_backup_plan or {}),
+                "pre_apply_verification_required": True,
+                "post_apply_required_review": "execution_parity_review",
             }
         )
     if adaptive_collection_plan.get("advances_quote_evidence_now") is True:
@@ -2981,6 +3369,9 @@ def _compact_operator_item(item: dict[str, Any]) -> dict[str, Any]:
         "blocked_until": item.get("blocked_until"),
         "reason": item.get("reason"),
         "requires_operator_review": item.get("requires_operator_review"),
+        "pre_apply_backup_plan": item.get("pre_apply_backup_plan"),
+        "pre_apply_verification_required": item.get("pre_apply_verification_required"),
+        "post_apply_required_review": item.get("post_apply_required_review"),
     }
 
 
@@ -3248,8 +3639,9 @@ def _command_has_live_flags(command: Any) -> bool:
         "--submit-live-order",
         "--live-order",
         "--allow-live-orders",
+        "--live-trading",
     }
-    return any(token in live_flags for token in _command_tokens(command))
+    return any(str(token or "").strip().split("=", 1)[0] in live_flags for token in _command_tokens(command))
 
 
 def _quote_samples_per_tick(command: Any) -> int | None:
@@ -3870,10 +4262,12 @@ def _summary(
     entry_audit: dict[str, Any],
     drought_audit: dict[str, Any],
     report_dir: Path,
+    execution_parity_journal_report: dict[str, Any] | None = None,
     generated_at: datetime | None = None,
     max_signal_age_minutes: int = 15,
     min_shadow_fill_samples: int = 100,
     quote_cadence_preflight: dict[str, Any] | None = None,
+    pre_apply_backup_dir: Path | None = None,
 ) -> dict[str, Any]:
     generated_at = generated_at or datetime.now(UTC)
     collection = dict(cycle_report.get("collection") or {})
@@ -3882,6 +4276,7 @@ def _summary(
     entry_quality = dict(drought_audit.get("entry_quality") or {})
     apply_gate = _paper_apply_gate(cycle_report)
     collection_progress = _collection_progress(cycle_report)
+    collection_progress.update(_execution_parity_collection_progress(execution_parity_journal_report))
     collection_forecast = _quote_collection_forecast(progress=collection_progress, generated_at=generated_at)
     readiness_progress = _readiness_progress(
         collection_progress=collection_progress,
@@ -3916,6 +4311,24 @@ def _summary(
         "collection_progress": collection_progress,
         "collection_forecast": collection_forecast,
         "quote_cadence_preflight": dict(quote_cadence_preflight or {}),
+        "pre_apply_backup_plan": _pre_apply_backup_plan(
+            apply_gate=apply_gate,
+            pre_apply_backup_dir=pre_apply_backup_dir,
+        ),
+        "execution_parity_journal": {
+            "status": dict(execution_parity_journal_report or {}).get("status"),
+            "no_live_order_sent": dict(execution_parity_journal_report or {}).get("no_live_order_sent", True),
+            "conversion": dict(dict(execution_parity_journal_report or {}).get("conversion") or {}),
+            "collection_plan": dict(dict(execution_parity_journal_report or {}).get("collection_plan") or {}),
+            "contract_summary": dict(dict(execution_parity_journal_report or {}).get("contract_summary") or {}),
+            "contract_observed": dict(dict(execution_parity_journal_report or {}).get("contract_observed") or {}),
+            "next_actions": list(dict(execution_parity_journal_report or {}).get("next_actions") or []),
+        },
+        "execution_parity_collection_plan": _execution_parity_collection_plan(
+            collection_progress=collection_progress,
+            apply_gate=apply_gate,
+            journal_report=execution_parity_journal_report,
+        ),
         "readiness_progress": readiness_progress,
         "execution_checklist": execution_checklist,
         "paper_bridge_apply_gate": apply_gate,
@@ -3942,6 +4355,15 @@ def _summary(
             "signal_drought_audit": _display_path(
                 report_dir / "signal_drought_audit" / "market_state_rotation_v6_signal_drought_audit.json"
             ),
+            "execution_parity_journal": _display_path(
+                report_dir / "execution_parity_journal" / "market_state_rotation_v6_execution_parity_journal.json"
+            ),
+            "execution_parity_contract": _display_path(
+                report_dir / "execution_parity_journal" / "market_state_rotation_v6_execution_parity_contract.json"
+            ),
+            "execution_parity_journal_jsonl": _display_path(
+                report_dir / "execution_parity_journal" / EXECUTION_PARITY_JOURNAL_NAME
+            ),
         },
         "non_negotiables": [
             "do_not_enable_live_orders_from_evidence_cycle",
@@ -3958,6 +4380,7 @@ def _summary(
         readiness_progress=readiness_progress,
         readiness_trend=dict(report.get("readiness_trend") or {}),
         apply_gate=apply_gate,
+        pre_apply_backup_plan=dict(report.get("pre_apply_backup_plan") or {}),
         quote_cadence_preflight=dict(report.get("quote_cadence_preflight") or {}),
         report_dir=report_dir,
     )
@@ -3971,6 +4394,7 @@ def _summary(
         adaptive_collection_plan=dict(report.get("adaptive_collection_plan") or {}),
         apply_gate=apply_gate,
         market_data_refresh_plan=dict(report.get("market_data_refresh_plan") or {}),
+        pre_apply_backup_plan=dict(report.get("pre_apply_backup_plan") or {}),
         signal_wait_plan=dict(report.get("signal_wait_plan") or {}),
     )
     report["operator_runbook_plan"] = _operator_runbook_plan(
@@ -4017,6 +4441,10 @@ def _markdown(report: dict[str, Any]) -> str:
     historical_lifecycle = dict(report.get("historical_lifecycle_replay") or {})
     historical_lifecycle_selected = dict(historical_lifecycle.get("selected_candidate") or {})
     historical_substitution = dict(report.get("historical_gate_substitution") or {})
+    execution_parity = dict(report.get("execution_parity_journal") or {})
+    execution_parity_conversion = dict(execution_parity.get("conversion") or {})
+    execution_parity_summary = dict(execution_parity.get("contract_summary") or {})
+    execution_parity_plan = dict(report.get("execution_parity_collection_plan") or {})
     launch_readiness = dict(report.get("launch_readiness") or {})
     launch_next_blocker = dict(launch_readiness.get("next_blocker") or {})
     launch_canary_policy = dict(launch_readiness.get("canary_policy") or {})
@@ -4028,6 +4456,7 @@ def _markdown(report: dict[str, Any]) -> str:
     launch_safety_controls = dict(report.get("launch_safety_controls") or {})
     checklist = dict(report.get("execution_checklist") or {})
     apply_gate = dict(report.get("paper_bridge_apply_gate") or {})
+    pre_apply_backup = dict(report.get("pre_apply_backup_plan") or {})
     entry = dict(report.get("entry_quality") or {})
     lines = [
         "# Market State Rotation V6 Evidence Cycle",
@@ -4045,6 +4474,11 @@ def _markdown(report: dict[str, Any]) -> str:
         f"- signal_age_hours: `{signal_wait_plan.get('signal_age_hours')}`",
         f"- latest_add_age_to_median_gap: `{signal_wait_plan.get('latest_add_age_to_median_gap')}`",
         f"- signal_cadence_lag_level: `{signal_wait_plan.get('cadence_lag_level')}`",
+        f"- signal_cadence_recommended_monitor_interval_minutes: `{signal_wait_plan.get('cadence_recommended_monitor_interval_minutes')}`",
+        f"- signal_recommended_monitor_interval_minutes: `{signal_wait_plan.get('recommended_monitor_interval_minutes')}`",
+        f"- signal_freshness_capture_window_minutes: `{signal_wait_plan.get('signal_freshness_capture_window_minutes')}`",
+        f"- signal_monitor_interval_capped_by_freshness: `{signal_wait_plan.get('monitor_interval_capped_by_signal_freshness')}`",
+        f"- signal_monitor_age_alignment: `{signal_wait_plan.get('monitor_signal_age_alignment')}`",
         f"- signal_next_monitor_after_utc: `{signal_wait_plan.get('next_monitor_after_utc')}`",
         f"- max_authorized_stage: `{decision.get('max_authorized_stage')}`",
         f"- live_order_submission_allowed: `{decision.get('live_order_submission_allowed')}`",
@@ -4061,9 +4495,23 @@ def _markdown(report: dict[str, Any]) -> str:
         f"- quote_evidence_readiness_pct: `{readiness_progress.get('quote_evidence_readiness_pct')}`",
         f"- shadow_promotion_readiness_pct: `{readiness_progress.get('shadow_promotion_readiness_pct')}`",
         f"- paper_apply_readiness_pct: `{readiness_progress.get('paper_apply_readiness_pct')}`",
+        f"- execution_parity_status: `{execution_parity.get('status')}`",
+        f"- execution_parity_journal_rows: `{progress.get('execution_parity_journal_rows')}/{progress.get('execution_parity_required_rows')}`",
+        f"- execution_parity_missing_samples: `{progress.get('execution_parity_missing_samples')}`",
+        f"- execution_parity_contract_passed: `{execution_parity_summary.get('passed')}`",
+        f"- execution_parity_blockers: `{execution_parity_summary.get('blockers')}`",
+        f"- execution_parity_lifecycle_rows: `{execution_parity_conversion.get('lifecycle_row_count')}`",
+        f"- execution_parity_collection_status: `{execution_parity_plan.get('status')}`",
+        f"- execution_parity_events_needed: `{execution_parity_plan.get('estimated_future_paper_apply_events_needed')}`",
+        f"- execution_parity_creditable_actions: `{execution_parity_plan.get('currently_creditable_actions')}`",
+        f"- execution_parity_next_step: `{execution_parity_plan.get('next_step')}`",
         f"- strictest_deployment_gate: `{readiness_progress.get('strictest_deployment_gate')}`",
         f"- current_phase: `{checklist.get('current_phase')}`",
         f"- paper_apply_allowed_now: `{checklist.get('paper_apply_allowed_now')}`",
+        f"- pre_apply_backup_status: `{pre_apply_backup.get('status')}`",
+        f"- pre_apply_backup_required: `{pre_apply_backup.get('required')}`",
+        f"- pre_apply_backup_dir: `{pre_apply_backup.get('backup_dir')}`",
+        f"- pre_apply_backup_verification_required: `{pre_apply_backup.get('verification_required')}`",
         f"- shadow_promotion_ready: `{checklist.get('shadow_promotion_ready')}`",
         f"- next_unblocked_operator_step: `{readiness_progress.get('next_unblocked_operator_step')}`",
         f"- readiness_trend_status: `{trend.get('status')}`",
@@ -4156,6 +4604,7 @@ def _markdown(report: dict[str, Any]) -> str:
         f"- launch_safety_controls_missing: `{launch_safety_controls.get('missing_or_failed')}`",
         f"- launch_paper_bridge_handoff_status: `{launch_paper_handoff.get('status')}`",
         f"- launch_paper_bridge_apply_allowed_now: `{launch_paper_handoff.get('apply_allowed_now')}`",
+        f"- launch_paper_bridge_pre_apply_backup_status: `{dict(launch_paper_handoff.get('pre_apply_backup_plan') or {}).get('status')}`",
         f"- top_operator_action: `{top_operator_action.get('action')}`",
         f"- top_operator_action_run_now: `{top_operator_action.get('run_now')}`",
         f"- top_operator_action_execute_after_utc: `{top_operator_action.get('execute_after_utc')}`",
@@ -4294,15 +4743,48 @@ def run_evidence_cycle(
         f"- status: `{drought_audit.get('status')}`\n"
         f"- no_live_order_sent: `{drought_audit.get('no_live_order_sent')}`\n",
     )
+    execution_parity_dir = report_dir / "execution_parity_journal"
+    execution_parity_journal_path = execution_parity_dir / EXECUTION_PARITY_JOURNAL_NAME
+    lifecycle_export_path = cycle_dir / "collection_tick" / "market_state_rotation_v6_shadow_fill_export.json"
+    lifecycle_payload = _load_json_if_exists(lifecycle_export_path) or {"rows": []}
+    walk_report = _load_json_if_exists(walk_forward_report_path) or {}
+    execution_parity_journal_report, execution_parity_journal_rows = build_execution_parity_journal_report(
+        walk_report=walk_report,
+        lifecycle_payload=lifecycle_payload,
+        input_walk_report=_display_path(walk_forward_report_path),
+        input_lifecycle_report=_display_path(lifecycle_export_path) if lifecycle_export_path.exists() else None,
+        input_execution_journal=_display_path(execution_parity_journal_path),
+        symbol=str(symbol or EXPECTED_SYMBOL).upper(),
+        strategy_family="market_state_rotation_v6",
+        interval_minutes=5,
+        min_sample_count=20,
+        include_exit_rows=True,
+        generated_at=generated_at,
+    )
+    _write_jsonl(execution_parity_journal_path, execution_parity_journal_rows)
+    _write_json(
+        execution_parity_dir / "market_state_rotation_v6_execution_parity_journal.json",
+        execution_parity_journal_report,
+    )
+    _write_json(
+        execution_parity_dir / "market_state_rotation_v6_execution_parity_contract.json",
+        dict(execution_parity_journal_report.get("contract_report") or {}),
+    )
+    _write_text(
+        execution_parity_dir / "market_state_rotation_v6_execution_parity_journal.md",
+        _execution_parity_markdown(execution_parity_journal_report),
+    )
     report = _summary(
         cycle_report=cycle_report,
         entry_audit=entry_audit,
         drought_audit=drought_audit,
+        execution_parity_journal_report=execution_parity_journal_report,
         report_dir=report_dir,
         generated_at=generated_at,
         max_signal_age_minutes=max_signal_age_minutes,
         min_shadow_fill_samples=min_shadow_fill_samples,
         quote_cadence_preflight=quote_preflight,
+        pre_apply_backup_dir=pre_apply_backup_dir,
     )
     report["pre_run_market_data_refresh"] = pre_run_market_data_refresh
     if pre_run_market_data_refresh:

@@ -285,6 +285,50 @@ def _stress_rows(stress_report: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return rows
 
 
+def _stress_diagnostics(stress_report: dict[str, Any]) -> dict[str, Any]:
+    baseline = dict(stress_report.get("baseline_summary") or {})
+    if not baseline:
+        baseline = dict(dict(dict(stress_report.get("scenarios") or {}).get("baseline") or {}).get("summary") or {})
+    root_causes = {
+        str(name): int(count or 0)
+        for name, count in dict(baseline.get("root_cause_counts") or {}).items()
+    }
+    tradeoffs = {
+        str(name): int(count or 0)
+        for name, count in dict(baseline.get("tradeoff_tag_counts") or {}).items()
+    }
+    remediation_hints = {
+        str(name): int(count or 0)
+        for name, count in dict(baseline.get("remediation_hint_counts") or {}).items()
+    }
+    return {
+        "available": bool(baseline),
+        "compounded_return_pct": _pct(_float(baseline.get("compounded_return_pct"))),
+        "avg_trade_cost_drag_pct": _pct(_float(baseline.get("avg_trade_cost_drag_pct"))),
+        "avg_cost_to_gross_ratio": _pct(_float(baseline.get("avg_cost_to_gross_ratio"))),
+        "max_drawdown_proxy_pct": _pct(_float(baseline.get("max_drawdown_proxy_pct"))),
+        "max_actionable_drawdown_proxy_pct": _pct(
+            _float(
+                baseline.get(
+                    "max_actionable_drawdown_proxy_pct",
+                    baseline.get("max_drawdown_proxy_pct"),
+                )
+            )
+        ),
+        "stress_floor_gap_count": int(baseline.get("stress_floor_gap_count") or 0),
+        "verdict": baseline.get("verdict"),
+        "return_verdict": baseline.get("return_verdict"),
+        "drawdown_verdict": baseline.get("drawdown_verdict"),
+        "actionable_drawdown_verdict": baseline.get("actionable_drawdown_verdict"),
+        "root_cause_counts": root_causes,
+        "tradeoff_tag_counts": tradeoffs,
+        "remediation_hint_counts": remediation_hints,
+        "top_root_causes": sorted(root_causes.items(), key=lambda item: item[1], reverse=True)[:8],
+        "top_tradeoff_tags": sorted(tradeoffs.items(), key=lambda item: item[1], reverse=True)[:8],
+        "top_remediation_hints": sorted(remediation_hints.items(), key=lambda item: item[1], reverse=True)[:8],
+    }
+
+
 def _compact_stress_priority_fold(row: dict[str, Any]) -> dict[str, Any]:
     floor = dict(row.get("stress_floor") or {})
     return {
@@ -306,6 +350,278 @@ def _compact_stress_priority_fold(row: dict[str, Any]) -> dict[str, Any]:
         "remediation_hints": list(row.get("remediation_hints") or [])[:6],
         "top_cost_reasons": list(row.get("top_cost_reasons") or [])[:3],
         "targeted_cost_reduction_plan": dict(row.get("targeted_cost_reduction_plan") or {}),
+    }
+
+
+def _time_substitution_policy(
+    *,
+    exact_rolling: dict[str, Any],
+    kst_hour_pnl: dict[str, Any],
+    execution_parity: dict[str, Any],
+) -> dict[str, Any]:
+    exact_available = bool(exact_rolling.get("all_windows_available"))
+    hour_pnl_available = bool(kst_hour_pnl.get("available"))
+    execution_parity_passed = bool(execution_parity.get("passed"))
+    return {
+        "status": (
+            "research_time_wait_substituted"
+            if exact_available and hour_pnl_available
+            else "research_time_wait_not_fully_substituted"
+        ),
+        "research_30d_calendar_wait": {
+            "substitutable": True,
+            "substituted": exact_available,
+            "scope": "research_and_paper_review",
+            "source": "historical_exact_30_60_90d_rolling_windows",
+            "missing_fold_count": len(exact_rolling.get("missing_folds") or []),
+            "reason": (
+                "Exact rolling windows are present across every fold, so a new 30 calendar day wait "
+                "is not required to judge the historical research gate."
+                if exact_available
+                else "Historical exact rolling windows are incomplete, so the 30 day review wait is not replaced."
+            ),
+        },
+        "research_hour_pnl_wait": {
+            "substitutable": True,
+            "substituted": hour_pnl_available,
+            "scope": "research_and_paper_review",
+            "source": "historical_realized_pnl_by_kst_hour",
+            "missing_fold_count": len(kst_hour_pnl.get("missing_folds") or []),
+        },
+        "live_current_30d_calendar_wait": {
+            "substitutable": False,
+            "substituted": False,
+            "scope": "full_live_or_unrestricted_canary",
+            "reason": (
+                "Current live deployment still needs current fresh signals, paper/execution parity rows, "
+                "and exchange microstructure evidence. Historical windows cannot prove current routing health."
+            ),
+        },
+        "live_or_paper_execution_parity_wait": {
+            "substitutable": False,
+            "substituted": execution_parity_passed,
+            "scope": "full_live_or_unrestricted_canary",
+            "reason": "Order parity requires actual paper/live intent, apply, fee, slippage, lag, and position-drift rows.",
+        },
+        "can_skip_30_calendar_days_for_research_review": exact_available and hour_pnl_available,
+        "can_skip_live_or_paper_execution_evidence": False,
+        "non_substitutable_gates": [
+            "current_fresh_signal",
+            "paper_or_live_execution_parity",
+            "real_paper_lifecycle_rows",
+            "current_exchange_microstructure",
+            "order_router_position_drift",
+        ],
+    }
+
+
+def _backlog_item(
+    *,
+    item_id: str,
+    status: str,
+    priority: str,
+    backtest_substitutable: bool,
+    evidence: dict[str, Any] | None = None,
+    next_action: str,
+) -> dict[str, Any]:
+    return {
+        "id": item_id,
+        "status": status,
+        "priority": priority,
+        "backtest_substitutable": backtest_substitutable,
+        "evidence": dict(evidence or {}),
+        "next_action": next_action,
+    }
+
+
+def _build_upgrade_backlog(
+    *,
+    blockers: list[str],
+    warnings: list[str],
+    stress_diagnostics: dict[str, Any],
+    execution_parity: dict[str, Any],
+    time_substitution_policy: dict[str, Any],
+) -> dict[str, Any]:
+    root_causes = dict(stress_diagnostics.get("root_cause_counts") or {})
+    tradeoffs = dict(stress_diagnostics.get("tradeoff_tag_counts") or {})
+    hints = dict(stress_diagnostics.get("remediation_hint_counts") or {})
+    items: list[dict[str, Any]] = []
+
+    items.append(
+        _backlog_item(
+            item_id="research_30d_wait_replacement",
+            status=(
+                "resolved_for_research"
+                if time_substitution_policy.get("can_skip_30_calendar_days_for_research_review")
+                else "pending_historical_rolling_evidence"
+            ),
+            priority="high",
+            backtest_substitutable=True,
+            evidence=dict(time_substitution_policy.get("research_30d_calendar_wait") or {}),
+            next_action=(
+                "Use exact historical 30/60/90d rolling windows as the research-time replacement, "
+                "then keep live-current gates separate."
+            ),
+        )
+    )
+    if "live_or_paper_execution_parity_available" in blockers or not execution_parity.get("passed"):
+        items.append(
+            _backlog_item(
+                item_id="paper_execution_parity",
+                status="pending_real_or_paper_evidence",
+                priority="critical",
+                backtest_substitutable=False,
+                evidence={
+                    "execution_parity_passed": bool(execution_parity.get("passed")),
+                    "nested_blockers": list(execution_parity.get("blockers") or []),
+                    "value": execution_parity.get("value"),
+                },
+                next_action=(
+                    "Collect paper execution rows with decision lineage, replay-vs-actual side/action, "
+                    "signal lag, position drift, fees, slippage, and apply result."
+                ),
+            )
+        )
+    if any(
+        int(root_causes.get(name, 0)) > 0
+        for name in (
+            "base_entry_cost_ge_2pct",
+            "high_oos_cost_drag_ge_8pct",
+            "reaction_trim_cost_ge_1_5pct",
+            "one_way_against_forced_trim_cost_ge_0_75pct",
+        )
+    ) or any(int(tradeoffs.get(name, 0)) > 0 for name in ("wide_cost_buffer", "cost_buffer_alpha_tradeoff")):
+        items.append(
+            _backlog_item(
+                item_id="cost_funding_slippage_hardening",
+                status="needs_targeted_retest",
+                priority="high",
+                backtest_substitutable=True,
+                evidence={
+                    "root_causes": {
+                        name: root_causes.get(name, 0)
+                        for name in (
+                            "base_entry_cost_ge_2pct",
+                            "high_oos_cost_drag_ge_8pct",
+                            "reaction_trim_cost_ge_1_5pct",
+                            "one_way_against_forced_trim_cost_ge_0_75pct",
+                        )
+                    },
+                    "tradeoffs": {
+                        name: tradeoffs.get(name, 0)
+                        for name in ("wide_cost_buffer", "cost_buffer_alpha_tradeoff")
+                    },
+                    "avg_trade_cost_drag_pct": stress_diagnostics.get("avg_trade_cost_drag_pct"),
+                },
+                next_action=(
+                    "Retest only targeted turnover, trim, and forced-flip cost controls; avoid blanket entry cuts "
+                    "unless they preserve base/chase alpha."
+                ),
+            )
+        )
+    if (
+        _float(stress_diagnostics.get("max_actionable_drawdown_proxy_pct")) >= 14.0
+        or "max_fold_drawdown" in blockers
+        or any(name.endswith("_actionable_drawdown_proxy_cap") for name in blockers + warnings)
+    ):
+        items.append(
+            _backlog_item(
+                item_id="high_drawdown_fold_compression",
+                status="monitor_or_retest",
+                priority="medium",
+                backtest_substitutable=True,
+                evidence={
+                    "max_actionable_drawdown_proxy_pct": stress_diagnostics.get("max_actionable_drawdown_proxy_pct"),
+                    "drawdown_related_gates": [
+                        name for name in blockers + warnings if "drawdown" in name
+                    ],
+                },
+                next_action=(
+                    "Identify the drawdown-heavy folds and test regime-specific size compression before changing "
+                    "the signal engine."
+                ),
+            )
+        )
+    if int(root_causes.get("probe_realized_pnl_negative", 0)) > 0 or int(tradeoffs.get("probe_alpha_leak", 0)) > 0:
+        items.append(
+            _backlog_item(
+                item_id="probe_alpha_leak_pruning",
+                status="needs_targeted_retest",
+                priority="high",
+                backtest_substitutable=True,
+                evidence={
+                    "probe_realized_pnl_negative": root_causes.get("probe_realized_pnl_negative", 0),
+                    "probe_alpha_leak": tradeoffs.get("probe_alpha_leak", 0),
+                    "probe_suppression_hint": hints.get("test_probe_suppression_before_base_cuts", 0),
+                },
+                next_action=(
+                    "Suppress or downsize only probe contexts with negative realized contribution, then compare "
+                    "against the preserved base/chase engine."
+                ),
+            )
+        )
+    if int(root_causes.get("base_negative_context_pockets", 0)) > 0 or int(
+        tradeoffs.get("selective_base_context_pruning_candidate", 0)
+    ) > 0:
+        items.append(
+            _backlog_item(
+                item_id="base_negative_context_pruning",
+                status="needs_targeted_retest",
+                priority="high",
+                backtest_substitutable=True,
+                evidence={
+                    "base_negative_context_pockets": root_causes.get("base_negative_context_pockets", 0),
+                    "selective_base_context_pruning_candidate": tradeoffs.get(
+                        "selective_base_context_pruning_candidate", 0
+                    ),
+                    "negative_base_context_filter_hint": hints.get("test_negative_base_context_filter_only", 0),
+                },
+                next_action=(
+                    "Filter only the negative base contexts and preserve positive chase contexts; blanket base cuts "
+                    "are treated as high risk."
+                ),
+            )
+        )
+    if int(root_causes.get("one_way_against_forced_trim_cost_ge_0_75pct", 0)) > 0:
+        items.append(
+            _backlog_item(
+                item_id="one_way_forced_trim_cost_repair",
+                status="needs_targeted_retest",
+                priority="medium",
+                backtest_substitutable=True,
+                evidence={
+                    "one_way_against_forced_trim_cost_ge_0_75pct": root_causes.get(
+                        "one_way_against_forced_trim_cost_ge_0_75pct", 0
+                    ),
+                },
+                next_action=(
+                    "Separate one-way trend trim logic from choppy reversal trim logic so trend-following winners "
+                    "are not repeatedly taxed."
+                ),
+            )
+        )
+    if int(root_causes.get("single_unit_capacity_saturated", 0)) > 0:
+        items.append(
+            _backlog_item(
+                item_id="single_unit_capacity_review",
+                status="needs_capacity_ablation",
+                priority="medium",
+                backtest_substitutable=True,
+                evidence={"single_unit_capacity_saturated": root_causes.get("single_unit_capacity_saturated", 0)},
+                next_action=(
+                    "Run capacity ablations for additional unit tiers, but require drawdown and cost drag to remain "
+                    "inside the readiness gates."
+                ),
+            )
+        )
+    unresolved = [
+        item for item in items if str(item.get("status")) not in {"resolved", "resolved_for_research"}
+    ]
+    return {
+        "item_count": len(items),
+        "unresolved_item_count": len(unresolved),
+        "critical_unresolved_count": sum(1 for item in unresolved if item.get("priority") == "critical"),
+        "items": items,
     }
 
 
@@ -505,6 +821,7 @@ def build_readiness_report(
     rolling_3m = _rolling_month_returns(monthly, 3)
     rolling_6m = _rolling_month_returns(monthly, 6)
     stress = _stress_rows(stress_report)
+    stress_diagnostics = _stress_diagnostics(stress_report)
     kst_hours = _aggregate_kst_hour_adds(walk_report)
     exact_rolling = _calendar_rolling_summary(walk_report)
     kst_hour_pnl = _aggregate_kst_hour_realized_pnl(walk_report)
@@ -840,6 +1157,18 @@ def build_readiness_report(
         stress=stress,
         execution_parity=execution_parity,
     )
+    time_substitution_policy = _time_substitution_policy(
+        exact_rolling=exact_rolling,
+        kst_hour_pnl=kst_hour_pnl,
+        execution_parity=execution_parity,
+    )
+    upgrade_backlog = _build_upgrade_backlog(
+        blockers=blockers,
+        warnings=warnings,
+        stress_diagnostics=stress_diagnostics,
+        execution_parity=execution_parity,
+        time_substitution_policy=time_substitution_policy,
+    )
 
     return {
         "created_at": datetime.now(UTC).isoformat(),
@@ -898,9 +1227,13 @@ def build_readiness_report(
         "kst_hour_realized_pnl": kst_hour_pnl,
         "execution_parity": execution_parity,
         "stress_scenarios": stress,
+        "stress_diagnostics": stress_diagnostics,
+        "time_substitution_policy": time_substitution_policy,
+        "upgrade_backlog": upgrade_backlog,
         "remediation_plan": remediation_plan,
         "notes": [
             "Full-live requires passing historical, stressed-cost, and evidence availability gates.",
+            "Historical 30d rolling evidence can replace research wait time, but it cannot replace current execution, fresh-signal, or microstructure evidence.",
             "The canary size cap is derived from the worst stressed drawdown proxy and should not be treated as a profit target.",
         ],
     }
@@ -911,6 +1244,8 @@ def _markdown(report: dict[str, Any]) -> str:
     limits = dict(report.get("deployment_limits") or {})
     stage_blockers = dict(report.get("stage_blockers") or {})
     execution_parity = dict(report.get("execution_parity") or {})
+    time_policy = dict(report.get("time_substitution_policy") or {})
+    upgrade_backlog = dict(report.get("upgrade_backlog") or {})
     lines = [
         "# Market State Rotation V6 Live Readiness",
         "",
@@ -945,9 +1280,28 @@ def _markdown(report: dict[str, Any]) -> str:
         f"- Recommended max size multiplier: `{limits.get('recommended_max_size_multiplier')}`",
         f"- Recommended effective leverage cap: `{limits.get('recommended_effective_leverage_cap')}`",
         "",
-        "## Failed Gates",
+        "## Time Substitution Policy",
+        "",
+        f"- Status: `{time_policy.get('status')}`",
+        f"- Research 30d wait: `{json.dumps(time_policy.get('research_30d_calendar_wait'), ensure_ascii=False)}`",
+        f"- Live current 30d wait: `{json.dumps(time_policy.get('live_current_30d_calendar_wait'), ensure_ascii=False)}`",
+        f"- Non-substitutable gates: `{', '.join(time_policy.get('non_substitutable_gates') or [])}`",
+        "",
+        "## Upgrade Backlog",
+        "",
+        f"- Items / unresolved: `{upgrade_backlog.get('item_count')}/{upgrade_backlog.get('unresolved_item_count')}`",
+        f"- Critical unresolved: `{upgrade_backlog.get('critical_unresolved_count')}`",
         "",
     ]
+    for item in list(upgrade_backlog.get("items") or []):
+        lines.append(
+            f"- `{item.get('id')}`: status=`{item.get('status')}`, priority=`{item.get('priority')}`, "
+            f"backtest_substitutable=`{item.get('backtest_substitutable')}`, next=`{item.get('next_action')}`"
+        )
+    lines.extend([
+        "## Failed Gates",
+        "",
+    ])
     failed = [
         gate
         for section in dict(report.get("gates") or {}).values()

@@ -186,6 +186,7 @@ def build_collection_cycle_summary(
             "top_no_trade_reasons": list(snapshot.get("top_no_trade_reasons") or [])[:5],
             "no_trade_hotspots": dict(snapshot.get("no_trade_hotspots") or {}),
             "pre_apply_backup": bridge_report.get("pre_apply_backup"),
+            "execution_parity_preflight": dict(bridge_report.get("execution_parity_preflight") or {}),
             "report_path": _display_path(bridge_report_dir / BRIDGE_REPORT_NAME),
         },
         "collection": {
