@@ -39,6 +39,19 @@ DEFAULT_SOURCE_REPORT = (
     "market_state_rotation_v6_BTCUSDT_5m_365d_latest.json"
 )
 
+SOURCE_REPLAY_EXPERIMENT_OVERLAY_FIELDS = {
+    "winner_pyramid_units",
+    "winner_pyramid_min_profit_reaction",
+    "winner_pyramid_min_score",
+    "winner_pyramid_min_reason_stack",
+    "winner_pyramid_cooldown_bars",
+    "winner_pyramid_max_units",
+    "winner_pyramid_min_extension_atr",
+    "winner_pyramid_max_extension_atr",
+    "winner_pyramid_block_risk_off",
+    "winner_pyramid_block_one_way_chase",
+}
+
 
 def _add_one_way_impulse_after_selection_args(
     parser: argparse.ArgumentParser,
@@ -568,6 +581,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--source-replay-anchor-after-selection-overlay-metrics",
+        action="store_true",
+        help=(
+            "When source replay is anchored to the source fold's selected train config, also use "
+            "the source selected-train metrics for after-selection overlay gating. This keeps "
+            "shadow overlays from accidentally dropping the source report's protective overlays "
+            "before the tested change is evaluated."
+        ),
+    )
+    parser.add_argument(
         "--source-replay-fail-on-unresolved-material-drift",
         action="store_true",
         help=(
@@ -756,6 +779,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_false",
     )
     parser.set_defaults(router_transition_trim_against_only=True)
+    _add_train_state_after_selection_args(
+        parser,
+        option_prefix="router-mode-size",
+        description=(
+            "After selection, apply router mode size multipliers only when the selected train state "
+            "matches a configured return/drawdown/cost band."
+        ),
+    )
+    parser.add_argument("--router-mode-size-after-selection-trend-reaction-size-mult", type=float, default=None)
+    parser.add_argument("--router-mode-size-after-selection-one-way-chase-size-mult", type=float, default=None)
+    parser.add_argument("--router-mode-size-after-selection-one-way-counter-size-mult", type=float, default=None)
+    parser.add_argument("--router-mode-size-after-selection-range-probe-size-mult", type=float, default=None)
+    parser.add_argument("--router-mode-size-after-selection-range-base-size-mult", type=float, default=None)
+    parser.add_argument("--router-mode-size-after-selection-exhaustion-reversal-size-mult", type=float, default=None)
+    parser.add_argument("--router-mode-size-after-selection-risk-off-size-mult", type=float, default=None)
     parser.add_argument(
         "--include-no-defensive-trim-cooldown-candidates",
         action="store_true",
@@ -1092,6 +1130,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "train state matches a low-confidence structure."
         ),
     )
+    _add_train_state_after_selection_args(
+        parser,
+        option_prefix="winner-pyramid-min-extension",
+        description=(
+            "After selection, apply the winner-pyramid minimum extension gate only when the selected "
+            "train state matches a configured return/drawdown/cost band."
+        ),
+    )
+    parser.add_argument("--winner-pyramid-min-extension-after-selection-atr", type=float, default=None)
     parser.add_argument("--low-confidence-abstain-after-selection-min-train-score", type=float, default=None)
     parser.add_argument("--low-confidence-abstain-after-selection-max-train-score", type=float, default=None)
     parser.add_argument("--low-confidence-abstain-after-selection-max-chase-add-per-add", type=float, default=0.0)
@@ -1110,7 +1157,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--winner-pyramid-min-reason-stack", type=int, default=None)
     parser.add_argument("--winner-pyramid-cooldown-bars", type=int, default=None)
     parser.add_argument("--winner-pyramid-max-units", type=float, default=None)
+    parser.add_argument("--winner-pyramid-min-extension-atr", type=float, default=None)
     parser.add_argument("--winner-pyramid-max-extension-atr", type=float, default=None)
+    parser.add_argument("--winner-pyramid-block-risk-off", action="store_true")
+    parser.add_argument("--winner-pyramid-block-one-way-chase", action="store_true")
     parser.add_argument("--base-entry-max-extension-atr", type=float, default=None)
     parser.add_argument("--base-entry-max-extension-side", choices=("both", "long", "short"), default="")
     parser.add_argument("--base-entry-reduce-extension-atr", type=float, default=None)
@@ -3019,6 +3069,8 @@ def _material_config_key(
     ignore_observe_only_router: bool = False,
 ) -> str:
     ignored = {"model_id", "max_battle_bars"}
+    if ignore_observe_only_router:
+        ignored |= SOURCE_REPLAY_EXPERIMENT_OVERLAY_FIELDS
     if ignore_observe_only_router and _router_fields_are_source_replay_ignorable(config):
         ignored |= {
             "regime_router_enabled",
@@ -3136,6 +3188,21 @@ def _configs_from_source_fold(
     return []
 
 
+def _source_replay_selected_train_result(
+    source_report: dict[str, Any],
+    *,
+    fold: int,
+) -> dict[str, Any] | None:
+    for fold_record in source_report.get("folds") or []:
+        if not isinstance(fold_record, dict):
+            continue
+        if int(fold_record.get("fold") or 0) != int(fold):
+            continue
+        selected = fold_record.get("selected_train_result")
+        return selected if isinstance(selected, dict) else None
+    return None
+
+
 def _source_replay_selected_train_anchor(
     source_report: dict[str, Any],
     *,
@@ -3143,19 +3210,12 @@ def _source_replay_selected_train_anchor(
     train_results: list[dict[str, Any]],
     selected_train: dict[str, Any],
     enabled: bool,
+    source_selected_train: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if not enabled:
         return selected_train, {"enabled": False, "applied": False, "reason": "disabled"}
-    source_selected_train: dict[str, Any] | None = None
-    for fold_record in source_report.get("folds") or []:
-        if not isinstance(fold_record, dict):
-            continue
-        if int(fold_record.get("fold") or 0) != int(fold):
-            continue
-        value = fold_record.get("selected_train_result")
-        if isinstance(value, dict):
-            source_selected_train = value
-        break
+    if source_selected_train is None:
+        source_selected_train = _source_replay_selected_train_result(source_report, fold=fold)
     if not source_selected_train or not isinstance(source_selected_train.get("config"), dict):
         return selected_train, {"enabled": True, "applied": False, "reason": "source_selected_train_missing"}
     try:
@@ -3200,15 +3260,48 @@ def _source_replay_selected_train_anchor(
             "source_model_id": source_selected_train.get("model_id"),
             "selected_model_id_before_anchor": selected_train.get("model_id"),
             "selected_model_id_after_anchor": candidate.get("model_id"),
-            "selected_score_before_anchor": selected_train.get("walk_forward_selection_score"),
-            "selected_score_after_anchor": candidate.get("walk_forward_selection_score"),
-        }
+        "selected_score_before_anchor": selected_train.get("walk_forward_selection_score"),
+        "selected_score_after_anchor": candidate.get("walk_forward_selection_score"),
+    }
     return selected_train, {
         "enabled": True,
         "applied": False,
         "reason": "source_selected_train_not_in_candidates",
         "source_model_id": source_selected_train.get("model_id"),
         "selected_model_id_before_anchor": selected_train.get("model_id"),
+    }
+
+
+def _source_replay_after_selection_overlay_train_anchor(
+    source_report: dict[str, Any],
+    *,
+    fold: int,
+    selected_train: dict[str, Any],
+    enabled: bool,
+    source_selected_train: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not enabled:
+        return selected_train, {"enabled": False, "applied": False, "reason": "disabled"}
+    if source_selected_train is None:
+        source_selected_train = _source_replay_selected_train_result(source_report, fold=fold)
+    if not source_selected_train:
+        return selected_train, {
+            "enabled": True,
+            "applied": False,
+            "reason": "source_selected_train_missing",
+        }
+    return source_selected_train, {
+        "enabled": True,
+        "applied": True,
+        "reason": "source_selected_train_metrics",
+        "source_model_id": source_selected_train.get("model_id"),
+        "selected_model_id": selected_train.get("model_id"),
+        "source_train_return_pct": source_selected_train.get("total_return_pct"),
+        "selected_train_return_pct": selected_train.get("total_return_pct"),
+        "source_train_drawdown_pct": source_selected_train.get("max_drawdown_pct"),
+        "selected_train_drawdown_pct": selected_train.get("max_drawdown_pct"),
+        "source_train_cost_drag_pct": source_selected_train.get("estimated_cost_drag_pct"),
+        "selected_train_cost_drag_pct": selected_train.get("estimated_cost_drag_pct"),
     }
 
 
@@ -3542,10 +3635,20 @@ def _apply_config_overrides(
         value = max(0.0, float(args.winner_pyramid_max_units))
         updates["winner_pyramid_max_units"] = value
         suffix_parts.append(f"wfWinPyrMax{value:g}")
+    if include_btc_rotation and args.winner_pyramid_min_extension_atr is not None:
+        value = max(0.0, float(args.winner_pyramid_min_extension_atr))
+        updates["winner_pyramid_min_extension_atr"] = value
+        suffix_parts.append(f"wfWinPyrMinExt{value:g}")
     if include_btc_rotation and args.winner_pyramid_max_extension_atr is not None:
         value = max(0.1, float(args.winner_pyramid_max_extension_atr))
         updates["winner_pyramid_max_extension_atr"] = value
         suffix_parts.append(f"wfWinPyrExt{value:g}")
+    if include_btc_rotation and bool(args.winner_pyramid_block_risk_off):
+        updates["winner_pyramid_block_risk_off"] = True
+        suffix_parts.append("wfWinPyrNoRiskOff")
+    if include_btc_rotation and bool(args.winner_pyramid_block_one_way_chase):
+        updates["winner_pyramid_block_one_way_chase"] = True
+        suffix_parts.append("wfWinPyrNoOwChase")
     if include_base_reduce:
         if args.base_entry_max_extension_atr is not None:
             value = max(0.0, float(args.base_entry_max_extension_atr))
@@ -7199,6 +7302,68 @@ def _apply_risk_smoothing_overlay(config: MarketStateConfig, args: argparse.Name
     return replace(config, **updates)
 
 
+def _apply_router_mode_size_overlay(config: MarketStateConfig, args: argparse.Namespace) -> MarketStateConfig:
+    updates: dict[str, Any] = {}
+    suffix_parts: list[str] = []
+
+    def set_size(field: str, raw_value: Any, *, cap: float, suffix: str) -> None:
+        if raw_value is None:
+            return
+        value = min(max(float(raw_value), 0.0), float(cap))
+        current = float(getattr(config, field))
+        if math.isclose(current, value, rel_tol=0.0, abs_tol=1e-12):
+            return
+        updates[field] = value
+        suffix_parts.append(f"{suffix}{value:g}")
+
+    set_size(
+        "router_trend_reaction_size_mult",
+        args.router_mode_size_after_selection_trend_reaction_size_mult,
+        cap=1.5,
+        suffix="wfRtSelTrend",
+    )
+    set_size(
+        "router_one_way_chase_size_mult",
+        args.router_mode_size_after_selection_one_way_chase_size_mult,
+        cap=1.5,
+        suffix="wfRtSelOw",
+    )
+    set_size(
+        "router_one_way_counter_size_mult",
+        args.router_mode_size_after_selection_one_way_counter_size_mult,
+        cap=1.0,
+        suffix="wfRtSelOwCtr",
+    )
+    set_size(
+        "router_range_probe_size_mult",
+        args.router_mode_size_after_selection_range_probe_size_mult,
+        cap=1.0,
+        suffix="wfRtSelRangeP",
+    )
+    set_size(
+        "router_range_base_size_mult",
+        args.router_mode_size_after_selection_range_base_size_mult,
+        cap=1.0,
+        suffix="wfRtSelRangeB",
+    )
+    set_size(
+        "router_exhaustion_reversal_size_mult",
+        args.router_mode_size_after_selection_exhaustion_reversal_size_mult,
+        cap=1.0,
+        suffix="wfRtSelExh",
+    )
+    set_size(
+        "router_risk_off_size_mult",
+        args.router_mode_size_after_selection_risk_off_size_mult,
+        cap=1.0,
+        suffix="wfRtSelRisk",
+    )
+    if not updates:
+        return config
+    updates["model_id"] = config.model_id + ":" + ":".join(suffix_parts)
+    return replace(config, **updates)
+
+
 def _apply_hold_compression_overlay(config: MarketStateConfig, args: argparse.Namespace) -> MarketStateConfig:
     if args.hold_compression_after_selection_max_hold_bars is None:
         return config
@@ -7994,6 +8159,43 @@ def _apply_after_selection_overlays(
             overlays_applied.append("risk_smoothing")
         else:
             overlays_skipped.append("risk_smoothing")
+    if bool(args.winner_pyramid_min_extension_after_selection):
+        if is_blocked("winner_pyramid_min_extension"):
+            pass
+        elif args.winner_pyramid_min_extension_after_selection_atr is None:
+            overlays_skipped.append("winner_pyramid_min_extension")
+        elif _train_state_after_selection_allowed(
+            train_result,
+            args,
+            prefix="winner_pyramid_min_extension_after_selection",
+        ):
+            value = max(0.0, float(args.winner_pyramid_min_extension_after_selection_atr))
+            apply_changed_overlay(
+                "winner_pyramid_min_extension",
+                replace(
+                    config,
+                    winner_pyramid_min_extension_atr=value,
+                    model_id=f"{config.model_id}:wfWinPyrMinExtAS{value:g}",
+                ),
+            )
+        else:
+            overlays_skipped.append("winner_pyramid_min_extension")
+    if bool(args.router_mode_size_after_selection):
+        if is_blocked("router_mode_size"):
+            pass
+        elif _train_state_after_selection_allowed(
+            train_result,
+            args,
+            prefix="router_mode_size_after_selection",
+        ):
+            updated_config = _apply_router_mode_size_overlay(config, args)
+            if updated_config is config:
+                overlays_skipped.append("router_mode_size")
+            else:
+                config = updated_config
+                overlays_applied.append("router_mode_size")
+        else:
+            overlays_skipped.append("router_mode_size")
     if bool(args.hold_compression_after_selection):
         if is_blocked("hold_compression"):
             pass
@@ -9969,6 +10171,28 @@ def _fold_risk_brief(fold: dict[str, Any]) -> dict[str, Any]:
     )
     total_bars = _result_regime_bar_count(result)
     soft_circuit_cooldown_bars = int(event_counts.get("equity_soft_circuit_cooldown_bars") or 0)
+    battle_adds = int(result.get("battle_adds") or event_counts.get("battle_adds") or 0)
+    winner_pyramid_adds = int(
+        result.get("winner_pyramid_adds") or event_counts.get("winner_pyramid_adds") or 0
+    )
+    scale_in_add_events = battle_adds + winner_pyramid_adds
+    capacity_after_first_base_units = capacity_context.get("capacity_after_first_base_units")
+    try:
+        capacity_after_first_base_units_float = float(capacity_after_first_base_units or 0.0)
+    except (TypeError, ValueError):
+        capacity_after_first_base_units_float = 0.0
+    base_add_share = round(_train_role_share({"event_diagnostics": diagnostics}, "base"), 4)
+    scale_in_capacity_available = (
+        bool(capacity_context.get("scale_in_capacity_available"))
+        if capacity_context
+        else None
+    )
+    scale_in_capacity_unused = (
+        scale_in_capacity_available is True
+        and capacity_after_first_base_units_float > 1e-12
+        and scale_in_add_events <= 0
+        and base_add_share >= 0.80
+    )
     return {
         "fold": int(fold.get("fold") or 0),
         "test_start": fold.get("test_start_at") or fold.get("test_start"),
@@ -10013,14 +10237,14 @@ def _fold_risk_brief(fold: dict[str, Any]) -> dict[str, Any]:
         },
         "dominant_add_role": str(diagnostics.get("dominant_add_role") or "none"),
         "max_role_add_share": round(float(diagnostics.get("max_role_add_share") or 0.0), 4),
-        "base_add_share": round(_train_role_share({"event_diagnostics": diagnostics}, "base"), 4),
+        "base_add_share": base_add_share,
+        "battle_adds": battle_adds,
+        "winner_pyramid_adds": winner_pyramid_adds,
+        "scale_in_add_events": scale_in_add_events,
         "capacity_status": str(capacity_context.get("status") or "unknown"),
-        "scale_in_capacity_available": (
-            bool(capacity_context.get("scale_in_capacity_available"))
-            if capacity_context
-            else None
-        ),
+        "scale_in_capacity_available": scale_in_capacity_available,
         "capacity_after_first_base_units": capacity_context.get("capacity_after_first_base_units"),
+        "scale_in_capacity_unused": scale_in_capacity_unused,
         "unit_account_exposure": capacity_context.get("unit_account_exposure"),
         "base_add_account_exposure": capacity_context.get("base_add_account_exposure"),
         "top_no_trade_reasons": _top_no_trade_reasons(result),
@@ -10065,9 +10289,13 @@ def _fold_risk_tags(
         and float(brief.get("base_add_share") or 0.0) >= 0.80
     ):
         tags.append("base_dominance")
+    if bool(brief.get("scale_in_capacity_unused")):
+        tags.append("unused_scale_in_capacity")
     capacity_status = str(brief.get("capacity_status") or "")
     if capacity_status == "battle_capacity_saturated":
         tags.append("battle_capacity_saturated")
+    elif capacity_status == "single_unit_winner_refill_active":
+        pass
     elif brief.get("scale_in_capacity_available") is False:
         tags.append("single_unit_full_entry")
     if str(brief.get("confirmation") or "").startswith("would_reject:"):
@@ -10133,6 +10361,9 @@ def _aggregate_weak_fold_diagnostics(folds: list[dict[str, Any]], *, limit: int 
         if str(brief.get("dominant_add_role") or "") == "base"
         and float(brief.get("base_add_share") or 0.0) >= 0.80
     ]
+    unused_scale_in_capacity_folds = [
+        brief for brief in briefs if bool(brief.get("scale_in_capacity_unused"))
+    ]
     return {
         "low_return_threshold_pct": low_return_threshold_pct,
         "high_drawdown_threshold_pct": high_drawdown_threshold_pct,
@@ -10154,11 +10385,17 @@ def _aggregate_weak_fold_diagnostics(folds: list[dict[str, Any]], *, limit: int 
         "confirmation_warning_count": len(confirmation_warning_folds),
         "role_concentration_count": len(role_concentration_folds),
         "base_dominance_count": len(base_dominance_folds),
+        "unused_scale_in_capacity_count": len(unused_scale_in_capacity_folds),
         "no_scale_in_capacity_count": sum(
             1 for brief in briefs if brief.get("scale_in_capacity_available") is False
         ),
         "single_unit_full_entry_count": sum(
             1 for brief in briefs if str(brief.get("capacity_status") or "") == "single_unit_full_entry"
+        ),
+        "single_unit_winner_refill_active_count": sum(
+            1
+            for brief in briefs
+            if str(brief.get("capacity_status") or "") == "single_unit_winner_refill_active"
         ),
         "battle_capacity_saturated_count": sum(
             1 for brief in briefs if str(brief.get("capacity_status") or "") == "battle_capacity_saturated"
@@ -10210,6 +10447,15 @@ def _aggregate_weak_fold_diagnostics(folds: list[dict[str, Any]], *, limit: int 
         "base_dominance_folds": sorted(
             base_dominance_folds,
             key=lambda item: (
+                -float(item.get("base_add_share") or 0.0),
+                float(item["return_pct"]),
+                item["fold"],
+            ),
+        )[:limit],
+        "unused_scale_in_capacity_folds": sorted(
+            unused_scale_in_capacity_folds,
+            key=lambda item: (
+                -float(item.get("capacity_after_first_base_units") or 0.0),
                 -float(item.get("base_add_share") or 0.0),
                 float(item["return_pct"]),
                 item["fold"],
@@ -12636,8 +12882,10 @@ def _write_markdown(report: dict[str, Any], path: Path) -> None:
             f"high_cost={dict(aggregate.get('weak_fold_diagnostics') or {}).get('high_cost_count', 0)}, "
             f"role_concentration={dict(aggregate.get('weak_fold_diagnostics') or {}).get('role_concentration_count', 0)}, "
             f"base_dominance={dict(aggregate.get('weak_fold_diagnostics') or {}).get('base_dominance_count', 0)}, "
+            f"unused_scale={dict(aggregate.get('weak_fold_diagnostics') or {}).get('unused_scale_in_capacity_count', 0)}, "
             f"no_scale={dict(aggregate.get('weak_fold_diagnostics') or {}).get('no_scale_in_capacity_count', 0)}, "
             f"single_unit={dict(aggregate.get('weak_fold_diagnostics') or {}).get('single_unit_full_entry_count', 0)}, "
+            f"single_refill={dict(aggregate.get('weak_fold_diagnostics') or {}).get('single_unit_winner_refill_active_count', 0)}, "
             f"battle_capacity={dict(aggregate.get('weak_fold_diagnostics') or {}).get('battle_capacity_saturated_count', 0)}, "
             f"confirmation_warnings={dict(aggregate.get('weak_fold_diagnostics') or {}).get('confirmation_warning_count', 0)}`"
         ),
@@ -13166,8 +13414,10 @@ def _write_markdown(report: dict[str, Any], path: Path) -> None:
                     f"high_overlay={weak_fold_diagnostics.get('high_overlay_count')}, "
                     f"role_concentration={weak_fold_diagnostics.get('role_concentration_count')}, "
                     f"base_dominance={weak_fold_diagnostics.get('base_dominance_count')}, "
+                    f"unused_scale={weak_fold_diagnostics.get('unused_scale_in_capacity_count')}, "
                     f"no_scale={weak_fold_diagnostics.get('no_scale_in_capacity_count')}, "
                     f"single_unit={weak_fold_diagnostics.get('single_unit_full_entry_count')}, "
+                    f"single_refill={weak_fold_diagnostics.get('single_unit_winner_refill_active_count')}, "
                     f"battle_capacity={weak_fold_diagnostics.get('battle_capacity_saturated_count')}, "
                     f"low_activity={weak_fold_diagnostics.get('low_activity_count')}, "
                     f"soft_circuit_dominated={weak_fold_diagnostics.get('soft_circuit_dominated_count')}, "
@@ -13644,12 +13894,29 @@ def main() -> None:
             if bool(deep_drawdown_reversal_guard.get("applied")) or selection_guard is None:
                 selection_guard = deep_drawdown_reversal_guard
         selected_train = train_results[0]
+        source_selected_train_result = _source_replay_selected_train_result(
+            source_report,
+            fold=valid_fold_idx,
+        )
         selected_train, source_replay_selected_train_anchor = _source_replay_selected_train_anchor(
             source_report,
             fold=valid_fold_idx,
             train_results=train_results,
             selected_train=selected_train,
             enabled=not bool(args.disable_source_replay_selected_train_anchor),
+            source_selected_train=source_selected_train_result,
+        )
+        overlay_train_result, source_replay_after_selection_overlay_anchor = (
+            _source_replay_after_selection_overlay_train_anchor(
+                source_report,
+                fold=valid_fold_idx,
+                selected_train=selected_train,
+                enabled=(
+                    bool(args.source_replay_anchor_after_selection_overlay_metrics)
+                    and not bool(args.disable_source_replay_selected_train_anchor)
+                ),
+                source_selected_train=source_selected_train_result,
+            )
         )
         selected_config = MarketStateConfig(**selected_train["config"])
         source_selected_config = selected_config
@@ -13664,7 +13931,7 @@ def main() -> None:
         )
         selected_config, overlays_applied, overlays_skipped = _apply_after_selection_overlays(
             selected_config,
-            selected_train,
+            overlay_train_result,
             args,
             blocked_overlays=recent_oos_block_reasons,
         )
@@ -13711,7 +13978,7 @@ def main() -> None:
                         target_block_reasons[target] = "train_confirm_rejected"
                         ablated_config, _, _ = _apply_after_selection_overlays(
                             source_selected_config,
-                            selected_train,
+                            overlay_train_result,
                             args,
                             blocked_overlays=target_block_reasons,
                         )
@@ -13790,7 +14057,7 @@ def main() -> None:
                 )
                 selected_config, overlays_applied, overlays_skipped = _apply_after_selection_overlays(
                     source_selected_config,
-                    selected_train,
+                    overlay_train_result,
                     args,
                     blocked_overlays=confirmation_block_reasons,
                 )
@@ -13889,6 +14156,9 @@ def main() -> None:
             "after_selection_train_confirmation": after_selection_train_confirmation,
             "selection_guard": selection_guard,
             "source_replay_selected_train_anchor": source_replay_selected_train_anchor,
+            "source_replay_after_selection_overlay_anchor": (
+                source_replay_after_selection_overlay_anchor
+            ),
             "low_confidence_abstain": low_confidence_abstain,
             "selected_train_result": selected_train,
             "test_result": test_result,
@@ -13907,6 +14177,7 @@ def main() -> None:
 
     report = {
         "created_at": datetime.now(UTC).isoformat(),
+        "no_live_order_sent": True,
         "source_report": str(source_path),
         "symbol": symbol,
         "exec_interval": exec_interval,
@@ -13937,6 +14208,10 @@ def main() -> None:
         "source_replay_selected_train_anchor_enabled": not bool(
             args.disable_source_replay_selected_train_anchor
         ),
+        "source_replay_after_selection_overlay_anchor_enabled": bool(
+            args.source_replay_anchor_after_selection_overlay_metrics
+        )
+        and not bool(args.disable_source_replay_selected_train_anchor),
         "cost_model": {
             "fee_bps_per_side": float(args.fee_bps_per_side),
             "slippage_bps_per_side": float(args.slippage_bps_per_side),
@@ -13955,6 +14230,9 @@ def main() -> None:
             "risk_off_micro_sizer_recipe": getattr(args, "risk_off_micro_sizer_recipe", None),
             "disable_source_replay_selected_train_anchor": bool(
                 args.disable_source_replay_selected_train_anchor
+            ),
+            "source_replay_anchor_after_selection_overlay_metrics": bool(
+                args.source_replay_anchor_after_selection_overlay_metrics
             ),
             "force_near_miss_in_selection": bool(args.force_near_miss_in_selection),
             "balanced_structure_replay_note": getattr(args, "balanced_structure_replay_note", None),
@@ -14794,6 +15072,13 @@ def main() -> None:
             **_one_way_impulse_after_selection_override_payload(args, "one_way_impulse_micro_after_selection"),
             **_one_way_impulse_after_selection_override_payload(args, "role_balance_impulse_after_selection"),
             **_train_state_after_selection_override_payload(args, "low_confidence_abstain_after_selection"),
+            **_train_state_after_selection_override_payload(
+                args,
+                "winner_pyramid_min_extension_after_selection",
+            ),
+            "winner_pyramid_min_extension_after_selection_atr": (
+                args.winner_pyramid_min_extension_after_selection_atr
+            ),
             "low_confidence_abstain_after_selection_min_train_score": (
                 args.low_confidence_abstain_after_selection_min_train_score
             ),
@@ -14824,7 +15109,10 @@ def main() -> None:
             "winner_pyramid_min_reason_stack": args.winner_pyramid_min_reason_stack,
             "winner_pyramid_cooldown_bars": args.winner_pyramid_cooldown_bars,
             "winner_pyramid_max_units": args.winner_pyramid_max_units,
+            "winner_pyramid_min_extension_atr": args.winner_pyramid_min_extension_atr,
             "winner_pyramid_max_extension_atr": args.winner_pyramid_max_extension_atr,
+            "winner_pyramid_block_risk_off": bool(args.winner_pyramid_block_risk_off),
+            "winner_pyramid_block_one_way_chase": bool(args.winner_pyramid_block_one_way_chase),
             "base_entry_max_extension_atr": args.base_entry_max_extension_atr,
             "base_entry_max_extension_side": args.base_entry_max_extension_side or None,
             "base_entry_reduce_extension_atr": args.base_entry_reduce_extension_atr,
@@ -14870,6 +15158,28 @@ def main() -> None:
             "router_transition_trim_modes": args.router_transition_trim_modes or None,
             "router_transition_trim_cooldown_bars": args.router_transition_trim_cooldown_bars,
             "router_transition_trim_against_only": bool(args.router_transition_trim_against_only),
+            **_train_state_after_selection_override_payload(args, "router_mode_size_after_selection"),
+            "router_mode_size_after_selection_trend_reaction_size_mult": (
+                args.router_mode_size_after_selection_trend_reaction_size_mult
+            ),
+            "router_mode_size_after_selection_one_way_chase_size_mult": (
+                args.router_mode_size_after_selection_one_way_chase_size_mult
+            ),
+            "router_mode_size_after_selection_one_way_counter_size_mult": (
+                args.router_mode_size_after_selection_one_way_counter_size_mult
+            ),
+            "router_mode_size_after_selection_range_probe_size_mult": (
+                args.router_mode_size_after_selection_range_probe_size_mult
+            ),
+            "router_mode_size_after_selection_range_base_size_mult": (
+                args.router_mode_size_after_selection_range_base_size_mult
+            ),
+            "router_mode_size_after_selection_exhaustion_reversal_size_mult": (
+                args.router_mode_size_after_selection_exhaustion_reversal_size_mult
+            ),
+            "router_mode_size_after_selection_risk_off_size_mult": (
+                args.router_mode_size_after_selection_risk_off_size_mult
+            ),
             "base_entry_reduce_after_selection": bool(args.base_entry_reduce_after_selection),
             "base_entry_reduce_after_selection_max_train_return_pct": (
                 args.base_entry_reduce_after_selection_max_train_return_pct

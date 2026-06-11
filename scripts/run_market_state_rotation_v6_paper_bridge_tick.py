@@ -252,9 +252,24 @@ def _top_count_mapping(values: Any, *, limit: int) -> dict[str, int]:
     return {key: count for key, count in rows[: max(1, int(limit))]}
 
 
+def _count_mapping(values: Any) -> dict[str, int]:
+    rows = [
+        (str(key), _safe_int(value))
+        for key, value in dict(values or {}).items()
+        if _safe_int(value) > 0
+    ]
+    rows.sort(key=lambda item: (-item[1], item[0]))
+    return {key: count for key, count in rows}
+
+
 def _no_trade_hotspots(result: dict[str, Any]) -> dict[str, Any]:
     diagnostics = dict(result.get("event_diagnostics") or {})
     return {
+        "no_trade_contexts": _count_mapping(
+            diagnostics.get("no_trade_contexts")
+            or diagnostics.get("all_no_trade_contexts")
+            or diagnostics.get("top_no_trade_contexts")
+        ),
         "top_no_trade_contexts": _top_count_mapping(
             diagnostics.get("top_no_trade_contexts"),
             limit=12,
@@ -818,6 +833,23 @@ def _open_v6_paper_plans(db: Any, *, symbol: str, direction: str) -> list[Plan]:
     return rows
 
 
+def _remove_snapshot_plan_precheck(*, db: Any, snapshot: dict[str, Any]) -> dict[str, Any]:
+    event = dict(snapshot.get("latest_event") or {})
+    direction = _side_to_direction(event.get("side"))
+    symbol = str(snapshot.get("symbol") or EXPECTED_SYMBOL)
+    open_plans = _open_v6_paper_plans(db, symbol=symbol, direction=direction)
+    return {
+        "status": "open_v6_paper_plan_available" if open_plans else "no_open_v6_paper_plan",
+        "symbol": symbol,
+        "direction": direction,
+        "open_plan_count": len(open_plans),
+        "open_plan_ids": [str(getattr(plan, "plan_id", "")) for plan in open_plans],
+        "source_event_key": _event_key(event),
+        "source_event_ts": event.get("ts"),
+        "no_live_order_sent": True,
+    }
+
+
 def _remaining_paper_qty(db: Any, plan: Plan) -> float:
     fills = list(
         db.scalars(
@@ -949,6 +981,19 @@ def run_paper_bridge_tick(
         plan_valid_minutes=plan_valid_minutes,
     )
     execution_parity_preflight = _execution_parity_preflight(snapshot)
+    remove_plan_precheck: dict[str, Any] | None = None
+    if snapshot.get("overall_status") == "actionable" and str(snapshot.get("bridge_action") or "") == "remove":
+        try:
+            init_db()
+            with SessionLocal() as db:
+                remove_plan_precheck = _remove_snapshot_plan_precheck(db=db, snapshot=snapshot)
+        except Exception as exc:  # pragma: no cover - defensive fail-closed guard.
+            remove_plan_precheck = {
+                "status": "remove_plan_precheck_failed",
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "no_live_order_sent": True,
+            }
     report: dict[str, Any] = {
         "created_at": datetime.now(UTC).isoformat(),
         "overall_status": "dry_run" if not apply_paper else "not_actionable",
@@ -957,6 +1002,7 @@ def run_paper_bridge_tick(
         "source_backtest_report": _display_path(source_backtest_report_path),
         "snapshot": snapshot,
         "execution_parity_preflight": execution_parity_preflight,
+        "remove_plan_precheck": remove_plan_precheck,
         "pre_apply_backup": None,
         "result": None,
         "non_negotiables": [
@@ -970,11 +1016,26 @@ def run_paper_bridge_tick(
     if snapshot.get("overall_status") != "actionable":
         report["overall_status"] = "not_actionable"
     elif not apply_paper:
-        report["overall_status"] = (
-            "dry_run_actionable"
-            if execution_parity_preflight.get("passed") is True
-            else "dry_run_preflight_blocked"
-        )
+        if str((remove_plan_precheck or {}).get("status") or "") == "no_open_v6_paper_plan":
+            report["overall_status"] = "dry_run_no_open_v6_paper_plan"
+            report["result"] = {
+                "status": "blocked_before_db_write",
+                "reason": "remove_signal_has_no_open_v6_paper_plan",
+                "remove_plan_precheck": remove_plan_precheck,
+            }
+        elif str((remove_plan_precheck or {}).get("status") or "") == "remove_plan_precheck_failed":
+            report["overall_status"] = "dry_run_remove_plan_precheck_failed"
+            report["result"] = {
+                "status": "blocked_before_db_write",
+                "reason": "remove_plan_precheck_failed",
+                "remove_plan_precheck": remove_plan_precheck,
+            }
+        else:
+            report["overall_status"] = (
+                "dry_run_actionable"
+                if execution_parity_preflight.get("passed") is True
+                else "dry_run_preflight_blocked"
+            )
     elif execution_parity_preflight.get("passed") is not True:
         report["overall_status"] = "execution_parity_preflight_failed"
         report["result"] = {

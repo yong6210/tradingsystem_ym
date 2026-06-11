@@ -55,6 +55,11 @@ EVIDENCE_REPORT_NAME = "market_state_rotation_v6_evidence_cycle.json"
 DEFAULT_HISTORICAL_REPLAY_SOURCE = "data/binance/BTCUSDT_1h_1831d.json"
 DEFAULT_HISTORICAL_LIFECYCLE_REPLAY_SOURCE = "reports/validation/btc_flip_rotation_search/latest.json"
 DEFAULT_CANARY_RISK_CAPS_PATH = "reports/operations/market_state_rotation_v6_canary_risk_caps.json"
+DEFAULT_ENTRY_PROBE_FULL_WALK_FORWARD_GATE_REPORT = (
+    "reports/validation/diagnostics/"
+    "market_state_rotation_v6_near_miss_promotion_gate_quality_gated_mc12/"
+    "market_state_rotation_v6_near_miss_promotion_gate.json"
+)
 DEFAULT_MARKET_DATA_CACHE_DIR = "reports/validation/btc_flip_rotation_search/cache"
 DEFAULT_MARKET_DATA_BASE_URL = "https://fapi.binance.com"
 DEFAULT_MARKET_DATA_REFRESH_DAYS = 180
@@ -443,6 +448,7 @@ def _paper_apply_gate(cycle_report: dict[str, Any]) -> dict[str, Any]:
     blockers = set(str(item) for item in bridge.get("snapshot_blockers") or [])
     bridge_status = str(bridge.get("overall_status") or "")
     execution_parity_preflight = dict(bridge.get("execution_parity_preflight") or {})
+    remove_plan_precheck = dict(bridge.get("remove_plan_precheck") or {})
     preflight_passed = execution_parity_preflight.get("passed") is True or not execution_parity_preflight
     apply_requested = bridge.get("apply_paper") is True
     fresh_market_data = "market_data_stale" not in blockers
@@ -459,6 +465,14 @@ def _paper_apply_gate(cycle_report: dict[str, Any]) -> dict[str, Any]:
         status = "blocked_execution_parity_preflight"
         can_request_apply = False
         next_step = "fix_execution_parity_preflight_fields_before_paper_apply"
+    elif bridge_status in {"dry_run_no_open_v6_paper_plan", "no_open_v6_paper_plan"}:
+        status = "paper_apply_no_open_plan_not_credited" if apply_requested else "blocked_no_open_v6_paper_plan"
+        can_request_apply = False
+        next_step = "wait_for_next_add_signal_or_existing_open_paper_plan_before_reapplying_remove"
+    elif bridge_status == "dry_run_remove_plan_precheck_failed":
+        status = "blocked_remove_plan_precheck_failed"
+        can_request_apply = False
+        next_step = "inspect_paper_bridge_remove_plan_precheck_before_apply"
     elif not apply_requested and bridge_status == "dry_run_actionable":
         status = "paper_apply_request_available"
         can_request_apply = True
@@ -481,6 +495,7 @@ def _paper_apply_gate(cycle_report: dict[str, Any]) -> dict[str, Any]:
         "fresh_signal": fresh_signal,
         "execution_parity_preflight_passed": preflight_passed,
         "execution_parity_preflight": execution_parity_preflight,
+        "remove_plan_precheck": remove_plan_precheck,
         "snapshot_blockers": list(bridge.get("snapshot_blockers") or []),
         "required_pre_apply_backup": True,
         "next_step": next_step,
@@ -617,6 +632,7 @@ def _execution_parity_collection_plan(
     preflight_passed = apply_gate.get("execution_parity_preflight_passed") is True
     paper_apply_available = apply_gate.get("can_request_paper_apply_now") is True
     apply_requested = apply_gate.get("apply_requested") is True
+    paper_apply_status = str(apply_gate.get("status") or "")
     currently_creditable_actions = (
         [bridge_action]
         if paper_apply_available and bridge_action in set(accepted_actions)
@@ -637,6 +653,9 @@ def _execution_parity_collection_plan(
     elif not preflight_passed:
         status = "blocked_by_execution_parity_preflight"
         next_step = "fix_execution_parity_preflight_fields_before_paper_apply"
+    elif paper_apply_status in {"blocked_no_open_v6_paper_plan", "paper_apply_no_open_plan_not_credited"}:
+        status = "waiting_for_open_paper_plan_after_remove_signal"
+        next_step = "wait_for_next_add_signal_or_existing_open_paper_plan_before_crediting_remove"
     elif paper_apply_available:
         status = "ready_to_credit_next_paper_apply"
         next_step = "operator_review_then_apply_paper_bridge_to_create_one_real_lifecycle_sample"
@@ -669,7 +688,13 @@ def _execution_parity_collection_plan(
         "fresh_signal": fresh_signal,
         "execution_parity_preflight_passed": preflight_passed,
         "execution_parity_preflight": dict(apply_gate.get("execution_parity_preflight") or {}),
-        "blockers": list(collection_progress.get("execution_parity_blockers") or []),
+        "remove_plan_precheck": dict(apply_gate.get("remove_plan_precheck") or {}),
+        "blockers": list(collection_progress.get("execution_parity_blockers") or [])
+        + (
+            ["remove_signal_has_no_open_v6_paper_plan"]
+            if paper_apply_status in {"blocked_no_open_v6_paper_plan", "paper_apply_no_open_plan_not_credited"}
+            else []
+        ),
         "next_step": next_step,
         "sample_credit_policy": {
             "add": "one_completed_paper_add_lifecycle_row_counts_as_one_execution_parity_sample",
@@ -2018,6 +2043,7 @@ def _launch_readiness_state_machine(
     shadow_runtime_observed = shadow_runtime_observed_hours >= shadow_runtime_required_hours
     paper_ready_for_apply = market_data_fresh and fresh_signal_ready and apply_gate.get("can_request_paper_apply_now") is True
     paper_operational_ready = market_data_fresh and fresh_signal_ready and (paper_ready_for_apply or actual_paper_rows > 0)
+    execution_parity_passed = progress.get("execution_parity_passed") is True
     canary_evidence_ready = (
         research_ready
         and fresh_signal_ready
@@ -2208,6 +2234,106 @@ def _launch_readiness_state_machine(
         ),
     }
     launch_commands = {key: value for key, value in launch_commands.items() if value}
+    paper_only_rehearsal_system_ready = (
+        paper_ready_for_apply
+        or (
+            research_ready
+            and market_data_fresh
+            and (fresh_signal_ready or bool(launch_commands.get("signal_monitor")))
+            and bool(launch_commands.get("paper_bridge_dry_run"))
+            and bool(launch_commands.get("paper_apply_only_after_fresh_signal"))
+        )
+    )
+    if paper_ready_for_apply:
+        paper_only_rehearsal_status = "paper_apply_review_available"
+    elif not research_ready:
+        paper_only_rehearsal_status = "research_blocked"
+    elif not market_data_fresh:
+        paper_only_rehearsal_status = "refresh_market_data_before_rehearsal"
+    elif actual_paper_rows > 0 and execution_parity_passed:
+        paper_only_rehearsal_status = "paper_only_rehearsal_sample_goal_met"
+    elif actual_paper_rows > 0:
+        paper_only_rehearsal_status = "paper_only_rehearsal_active_collecting_parity"
+    elif fresh_signal_ready:
+        paper_only_rehearsal_status = "fresh_signal_seen_waiting_for_paper_apply_gate"
+    else:
+        paper_only_rehearsal_status = "armed_waiting_for_fresh_signal"
+    paper_only_remaining_gates: list[str] = []
+    if not research_ready and not paper_ready_for_apply:
+        paper_only_remaining_gates.append("research_ready")
+    if not market_data_fresh:
+        paper_only_remaining_gates.append("current_market_data_fresh")
+    if not fresh_signal_ready:
+        paper_only_remaining_gates.append("current_fresh_signal")
+    if fresh_signal_ready and not paper_ready_for_apply and actual_paper_rows <= 0:
+        paper_only_remaining_gates.append("paper_bridge_apply_gate")
+    if actual_paper_rows <= 0:
+        paper_only_remaining_gates.append("first_real_paper_lifecycle_row")
+    if actual_paper_rows > 0 and not execution_parity_passed:
+        paper_only_remaining_gates.append("post_apply_execution_parity_review")
+    paper_only_command_contract_ready = (
+        bool(launch_commands.get("paper_bridge_dry_run"))
+        and bool(launch_commands.get("paper_apply_only_after_fresh_signal"))
+        and "--quote-samples-per-tick 0" in str(launch_commands.get("paper_bridge_dry_run") or "")
+        and "--quote-samples-per-tick 0" in str(launch_commands.get("paper_apply_only_after_fresh_signal") or "")
+        and "--refresh-market-data-before-run" in str(launch_commands.get("paper_bridge_dry_run") or "")
+        and "--refresh-market-data-before-run" in str(launch_commands.get("paper_apply_only_after_fresh_signal") or "")
+        and "--max-signal-age-minutes" in str(launch_commands.get("paper_bridge_dry_run") or "")
+        and "--max-signal-age-minutes" in str(launch_commands.get("paper_apply_only_after_fresh_signal") or "")
+        and "--pre-apply-backup-dir" in str(launch_commands.get("paper_apply_only_after_fresh_signal") or "")
+    )
+    pre_apply_backup_contract_ready = (
+        pre_apply_backup.get("required") is True
+        and pre_apply_backup.get("backup_dir_configured") is True
+        and pre_apply_backup.get("verification_required") is True
+        and bool(pre_apply_backup.get("verification_required_fields"))
+    )
+    paper_only_proxy_gates = [
+        {
+            "gate": "historical_quote_replay",
+            "passed": quote_research_ready,
+            "substitution_type": "historical_replay",
+            "scope": "paper_only_research_readiness",
+        },
+        {
+            "gate": "historical_lifecycle_proxy",
+            "passed": lifecycle_research_ready,
+            "substitution_type": "historical_lifecycle_replay",
+            "scope": "paper_only_research_lifecycle_proxy",
+        },
+        {
+            "gate": "paper_bridge_command_contract",
+            "passed": paper_only_command_contract_ready,
+            "substitution_type": "static_command_preflight",
+            "scope": "paper_only_operator_rehearsal_precheck",
+        },
+        {
+            "gate": "pre_apply_backup_contract",
+            "passed": pre_apply_backup_contract_ready,
+            "substitution_type": "backup_plan_precheck",
+            "scope": "paper_only_operator_rehearsal_precheck",
+        },
+        {
+            "gate": "no_live_authority_contract",
+            "passed": True,
+            "substitution_type": "authority_guard",
+            "scope": "paper_only_no_live_authority_change",
+        },
+    ]
+    paper_only_proxy_ready = all(item["passed"] is True for item in paper_only_proxy_gates)
+    paper_only_unresolved_proxy_gates = [
+        str(item["gate"]) for item in paper_only_proxy_gates if item["passed"] is not True
+    ]
+    paper_only_non_substitutable_remaining = [
+        gate for gate in ("current_fresh_signal", "first_real_paper_lifecycle_row") if gate in paper_only_remaining_gates
+    ]
+    paper_only_proxy_status = (
+        "max_substitution_complete_realtime_gate_remaining"
+        if paper_only_proxy_ready and paper_only_non_substitutable_remaining
+        else "max_substitution_complete"
+        if paper_only_proxy_ready
+        else "proxy_prechecks_remaining"
+    )
     component_readiness = {
         "market_data_fresh": market_data_fresh,
         "current_fresh_signal": fresh_signal_ready,
@@ -2328,6 +2454,58 @@ def _launch_readiness_state_machine(
             if item.get("next_action")
         ],
         "operator_commands": launch_commands,
+        "paper_only_rehearsal": {
+            "objective": "paper_only_live_market_rehearsal",
+            "authority": "paper_only_no_live_authority_change",
+            "status": paper_only_rehearsal_status,
+            "system_ready": paper_only_rehearsal_system_ready,
+            "armed": paper_only_rehearsal_system_ready and not fresh_signal_ready,
+            "current_rehearsal_available": paper_ready_for_apply,
+            "first_rehearsal_event_completed": actual_paper_rows > 0,
+            "extended_parity_sample_complete": execution_parity_passed,
+            "max_substitution_status": paper_only_proxy_status,
+            "max_substitution_ready": paper_only_proxy_ready,
+            "proxy_gates": paper_only_proxy_gates,
+            "unresolved_proxy_gates": paper_only_unresolved_proxy_gates,
+            "substituted_or_prevalidated_gates": [
+                str(item["gate"]) for item in paper_only_proxy_gates if item["passed"] is True
+            ],
+            "non_substitutable_remaining_gates": paper_only_non_substitutable_remaining,
+            "paper_operational_ready": paper_operational_ready,
+            "paper_apply_allowed_now": paper_ready_for_apply,
+            "actual_paper_lifecycle_rows": actual_paper_rows,
+            "remaining_gates": paper_only_remaining_gates,
+            "next_action": (
+                "operator_review_paper_bridge_dry_run_then_apply_with_verified_backup"
+                if paper_ready_for_apply
+                else "monitor_fresh_v6_signal_without_forcing_entry"
+                if fresh_signal_ready is not True
+                else "inspect_paper_bridge_apply_gate_before_any_apply"
+            ),
+            "not_required_for_paper_only_goal": [
+                "tiny_canary_order_submission",
+                "full_live_order_submission",
+                "tiny_canary_evidence_ready",
+                "execution_parity_20_sample_floor_for_live_promotion",
+                "real_microstructure_30d_calendar_coverage_for_live_promotion",
+            ],
+            "still_required_for_live_or_tiny_canary": [
+                "real_paper_lifecycle_rows",
+                "execution_parity_20_sample_floor",
+                "real_microstructure_30d_calendar_coverage",
+                "operator_live_promotion_review",
+            ],
+            "operator_commands": {
+                "signal_monitor": launch_commands.get("signal_monitor"),
+                "paper_bridge_dry_run": launch_commands.get("paper_bridge_dry_run"),
+                "paper_apply_only_after_fresh_signal": launch_commands.get("paper_apply_only_after_fresh_signal"),
+            },
+            "requires_operator_review": True,
+            "requires_verified_pre_apply_backup": True,
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        },
         "paper_bridge_handoff": {
             "status": (
                 "paper_apply_review_available"
@@ -2992,6 +3170,68 @@ def _market_data_refresh_plan(
     }
 
 
+def _signal_absence_diagnosis(
+    *,
+    fresh_signal: bool,
+    market_data_stale: bool,
+    signal_age_minutes: float | None,
+    max_signal_age_minutes: float,
+    cadence_lag_level: str,
+    latest_add_age_to_median_gap: float | None,
+    event_wait_state: Any,
+    add_wait_state: Any,
+) -> dict[str, Any]:
+    if fresh_signal:
+        primary_cause = "fresh_signal_available"
+        diagnosis_class = "signal_available"
+        pipeline_issue_suspected = False
+        safe_next_step = "review_paper_apply_gate_if_bridge_is_dry_run_actionable"
+    elif market_data_stale:
+        primary_cause = "market_data_stale_obscures_current_signal_state"
+        diagnosis_class = "data_freshness_blocker"
+        pipeline_issue_suspected = True
+        safe_next_step = "refresh_market_data_before_interpreting_signal_absence"
+    elif cadence_lag_level == "cadence_unknown":
+        primary_cause = "signal_cadence_unknown"
+        diagnosis_class = "diagnostic_gap"
+        pipeline_issue_suspected = True
+        safe_next_step = "run_signal_monitor_with_market_data_refresh_and_cadence_audit"
+    elif cadence_lag_level == "within_recent_add_cadence":
+        primary_cause = "expected_sparse_signal_wait_within_recent_add_cadence"
+        diagnosis_class = "healthy_sparse_cadence_wait"
+        pipeline_issue_suspected = False
+        safe_next_step = "monitor_on_fresh_signal_window_without_forcing_entry"
+    elif cadence_lag_level in {"above_recent_median_add_gap", "extended_signal_drought"}:
+        primary_cause = "signal_drought_above_recent_add_cadence"
+        diagnosis_class = "sparse_signal_drought_watch"
+        pipeline_issue_suspected = False
+        safe_next_step = "increase_monitoring_frequency_without_relaxing_entry_filters"
+    else:
+        primary_cause = "severe_signal_drought_but_quality_gate_blocks_forced_entry"
+        diagnosis_class = "quality_gate_protected_signal_drought"
+        pipeline_issue_suspected = False
+        safe_next_step = "monitor_frequently_and_design_only_full_wfo_nonregressing_candidates"
+
+    return {
+        "primary_cause": primary_cause,
+        "class": diagnosis_class,
+        "pipeline_issue_suspected": pipeline_issue_suspected,
+        "market_data_stale": market_data_stale,
+        "signal_age_minutes": signal_age_minutes,
+        "max_signal_age_minutes": max_signal_age_minutes,
+        "cadence_lag_level": cadence_lag_level,
+        "latest_add_age_to_median_gap": latest_add_age_to_median_gap,
+        "event_wait_state": event_wait_state,
+        "add_wait_state": add_wait_state,
+        "force_signal_allowed": False,
+        "runtime_filter_relaxation_allowed": False,
+        "paper_apply_dependency_unblocked": fresh_signal,
+        "paper_apply_allowed_now": False,
+        "safe_next_step": safe_next_step,
+        "no_live_order_sent": True,
+    }
+
+
 def _signal_wait_plan(
     *,
     cycle_report: dict[str, Any],
@@ -3002,6 +3242,8 @@ def _signal_wait_plan(
     bridge = dict(cycle_report.get("bridge") or {})
     cadence = dict(bridge.get("event_cadence") or {})
     freshness = dict(bridge.get("freshness") or {})
+    snapshot_blockers = {str(item) for item in list(bridge.get("snapshot_blockers") or [])}
+    market_data_stale = "market_data_stale" in snapshot_blockers
     fresh_signal = apply_gate.get("fresh_signal") is True
     signal_age_minutes = _num(freshness.get("signal_age_minutes"))
     signal_age_hours = round(signal_age_minutes / 60.0, 4) if signal_age_minutes is not None else None
@@ -3054,6 +3296,17 @@ def _signal_wait_plan(
         cadence_recommended_interval = 15
         recommended_action = "monitor_frequently_but_do_not_force_signal_or_relax_low_quality_filters"
 
+    signal_absence_diagnosis = _signal_absence_diagnosis(
+        fresh_signal=fresh_signal,
+        market_data_stale=market_data_stale,
+        signal_age_minutes=signal_age_minutes,
+        max_signal_age_minutes=max_age,
+        cadence_lag_level=cadence_lag_level,
+        latest_add_age_to_median_gap=latest_add_age_to_median_gap,
+        event_wait_state=cadence.get("wait_state"),
+        add_wait_state=cadence.get("add_wait_state"),
+    )
+
     recommended_interval = (
         min(int(cadence_recommended_interval), int(max_age))
         if cadence_recommended_interval is not None
@@ -3102,6 +3355,9 @@ def _signal_wait_plan(
         "latest_add_age_to_median_gap": latest_add_age_to_median_gap,
         "add_wait_state": cadence.get("add_wait_state"),
         "cadence_lag_level": cadence_lag_level,
+        "signal_absence_diagnosis": signal_absence_diagnosis,
+        "signal_absence_primary_cause": signal_absence_diagnosis.get("primary_cause"),
+        "signal_pipeline_issue_suspected": signal_absence_diagnosis.get("pipeline_issue_suspected"),
         "cadence_recommended_monitor_interval_minutes": cadence_recommended_interval,
         "recommended_monitor_interval_minutes": recommended_interval,
         "signal_freshness_capture_window_minutes": max_age,
@@ -3148,6 +3404,475 @@ def _quote_window_execution_plan(*, next_window: dict[str, Any], capture_command
         "capture_command": capture_command,
         "missed_window_next_step": next_window.get("missed_window_next_step"),
         "missed_window_command": missed_window_command if next_window.get("missed_window_next_step") else None,
+        "no_live_order_sent": True,
+    }
+
+
+def _entry_probe_validation_state(
+    gate_report: dict[str, Any] | None,
+    *,
+    input_report: str | None = None,
+) -> dict[str, Any]:
+    report = dict(gate_report or {})
+    if not report:
+        return {
+            "status": "not_available",
+            "input_report": input_report,
+            "full_walk_forward_gate_available": False,
+            "runtime_filter_change_allowed": False,
+            "paper_or_live_promotion_allowed": False,
+            "no_live_order_sent": True,
+        }
+    if "downstream_full_walk_forward_gates" in report or "active_full_walk_forward_candidate_count" in report:
+        return _entry_probe_promotion_gate_validation_state(report, input_report=input_report)
+
+    failed_checks = [str(item) for item in list(report.get("failed_checks") or []) if str(item)]
+    overall_status = str(report.get("overall_status") or "").strip()
+    decision = str(report.get("decision") or "").strip()
+    blocked = overall_status == "blocked" or bool(failed_checks)
+    if blocked:
+        status = "blocked_full_walk_forward_gate"
+        safe_next_step = "do_not_promote_mc12_near_miss_probe_inspect_failed_wfo_checks"
+    elif decision == "eligible_for_paper_evidence_collection_only":
+        status = "paper_evidence_collection_candidate_available"
+        safe_next_step = "collect_paper_evidence_only_after_fresh_signal_and_operator_review"
+    else:
+        status = "full_walk_forward_gate_review_required"
+        safe_next_step = "review_full_walk_forward_gate_before_any_runtime_or_paper_change"
+
+    return {
+        "status": status,
+        "input_report": input_report,
+        "full_walk_forward_gate_available": True,
+        "generated_at": report.get("generated_at"),
+        "overall_status": overall_status,
+        "promotion_type": report.get("promotion_type"),
+        "decision": decision,
+        "failed_checks": failed_checks,
+        "deltas": dict(report.get("deltas") or {}),
+        "activity_regression_summary": dict(report.get("activity_regression_summary") or {}),
+        "fold_delta_summary": dict(report.get("fold_delta_summary") or {}),
+        "failure_details": dict(report.get("failure_details") or {}),
+        "root_cause_hints": list(report.get("root_cause_hints") or []),
+        "baseline": dict(report.get("baseline") or {}),
+        "candidate": dict(report.get("candidate") or {}),
+        "safe_next_step": safe_next_step,
+        "runtime_filter_change_allowed": False,
+        "paper_evidence_collection_allowed": (
+            not blocked and decision == "eligible_for_paper_evidence_collection_only"
+        ),
+        "paper_or_live_promotion_allowed": False,
+        "no_live_order_sent": report.get("no_live_order_sent") is not False,
+    }
+
+
+def _dedupe_strings(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _normalize_next_candidate_design_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    out = dict(contract or {})
+    requirements = dict(out.get("minimum_full_walk_forward_requirements") or {})
+    validation_sequence = [
+        str(item) for item in list(out.get("required_validation_sequence") or [])
+    ]
+    if "full_walk_forward_gate_must_run_with_require_nonregressing_activity" in set(
+        validation_sequence
+    ):
+        requirements["probe_add_delta_min"] = requirements.get("probe_add_delta_min", 0)
+        requirements["trade_like_events_delta_min"] = max(
+            _int_field(requirements, "trade_like_events_delta_min", 0),
+            1,
+        )
+        requirements["trade_like_activity_increase_required"] = True
+        requirements["signal_sparsity_fix_requires_trade_like_events_increase"] = True
+        out["minimum_full_walk_forward_requirements"] = requirements
+    return out
+
+
+def _entry_probe_promotion_gate_validation_state(
+    report: dict[str, Any],
+    *,
+    input_report: str | None = None,
+) -> dict[str, Any]:
+    gate_summaries = [
+        dict(item)
+        for item in list(report.get("downstream_full_walk_forward_gates") or [])
+        if isinstance(item, dict)
+    ]
+    blocked_gate_summaries = [
+        item for item in gate_summaries if item.get("status") == "blocked_full_walk_forward_gate"
+    ]
+    paper_gate_summaries = [
+        item
+        for item in gate_summaries
+        if item.get("status") == "paper_evidence_collection_candidate_available"
+    ]
+    active_names = _dedupe_strings(list(report.get("active_full_walk_forward_candidate_names") or []))
+    blocked_names = _dedupe_strings(list(report.get("downstream_blocked_candidate_names") or []))
+    paper_names = _dedupe_strings(
+        list(report.get("paper_evidence_candidate_names") or [])
+        or [item.get("candidate_name") for item in paper_gate_summaries]
+    )
+    active_count = _int_field(report, "active_full_walk_forward_candidate_count", len(active_names))
+    paper_candidate_count = _int_field(
+        report,
+        "paper_evidence_candidate_count",
+        len(paper_names) or len(paper_gate_summaries),
+    )
+    overall_status = str(report.get("overall_status") or "").strip()
+    resolution_plan = dict(report.get("resolution_plan") or {})
+    all_failed_checks = _dedupe_strings(
+        [
+            check
+            for item in blocked_gate_summaries
+            for check in list(item.get("failed_checks") or [])
+        ]
+    )
+    root_cause_hints = _dedupe_strings(
+        [
+            hint
+            for item in blocked_gate_summaries
+            for hint in list(item.get("root_cause_hints") or [])
+        ]
+    )
+    activity_regression_summary = dict(report.get("downstream_activity_regression_summary") or {})
+    if not activity_regression_summary:
+        activity_rows: list[dict[str, Any]] = []
+        for item in blocked_gate_summaries:
+            activity = dict(item.get("activity_regression_summary") or {})
+            if not activity:
+                continue
+            activity_rows.append(
+                {
+                    "candidate_name": item.get("candidate_name"),
+                    "signal_sparsity_fix_failed": bool(activity.get("signal_sparsity_fix_failed")),
+                    "probe_activity_regressed": bool(activity.get("probe_activity_regressed")),
+                    "trade_like_activity_regressed": bool(activity.get("trade_like_activity_regressed")),
+                    "probe_add_delta": activity.get("probe_add_delta"),
+                    "probe_add_delta_pct": activity.get("probe_add_delta_pct"),
+                    "trade_like_events_delta": activity.get("trade_like_events_delta"),
+                    "trade_like_events_delta_pct": activity.get("trade_like_events_delta_pct"),
+                    "diagnostic_labels": list(activity.get("diagnostic_labels") or []),
+                }
+            )
+        signal_failed_rows = [row for row in activity_rows if row.get("signal_sparsity_fix_failed")]
+        activity_regression_summary = {
+            "available": bool(activity_rows),
+            "candidate_count": len(activity_rows),
+            "signal_sparsity_fix_failed_candidate_count": len(signal_failed_rows),
+            "signal_sparsity_fix_failed_candidate_names": sorted(
+                str(row.get("candidate_name")) for row in signal_failed_rows if row.get("candidate_name")
+            ),
+            "diagnostic_labels": _dedupe_strings(
+                [
+                    label
+                    for row in activity_rows
+                    for label in list(row.get("diagnostic_labels") or [])
+                ]
+            ),
+            "candidates": activity_rows,
+        }
+    activity_inversion_summary = dict(report.get("downstream_activity_inversion_summary") or {})
+    next_candidate_design_contract = _normalize_next_candidate_design_contract(
+        dict(report.get("next_candidate_design_contract") or {})
+    )
+    by_candidate: dict[str, Any] = {}
+    worst_candidate: dict[str, Any] = {}
+    worst_delta: float | None = None
+    max_return_degraded_fold_count = 0
+    max_positive_fold_lost_count = 0
+    max_drawdown_gate_violation_count = 0
+    for item in blocked_gate_summaries:
+        name = str(item.get("candidate_name") or "unknown_candidate")
+        deltas = dict(item.get("deltas") or {})
+        fold_delta_summary = dict(item.get("fold_delta_summary") or {})
+        by_candidate[name] = {
+            "status": item.get("status"),
+            "overall_status": item.get("overall_status"),
+            "decision": item.get("decision"),
+            "failed_checks": list(item.get("failed_checks") or []),
+            "deltas": deltas,
+            "activity_regression_summary": dict(item.get("activity_regression_summary") or {}),
+            "fold_delta_summary": fold_delta_summary,
+            "failure_details": dict(item.get("failure_details") or {}),
+            "root_cause_hints": list(item.get("root_cause_hints") or []),
+        }
+        compounded_delta = _float_field(deltas, "compounded_oos_return_pct", 0.0)
+        if worst_delta is None or compounded_delta < worst_delta:
+            worst_delta = compounded_delta
+            worst_candidate = {"candidate_name": name, "compounded_oos_return_pct": compounded_delta}
+        max_return_degraded_fold_count = max(
+            max_return_degraded_fold_count,
+            _int_field(fold_delta_summary, "return_degraded_fold_count", 0),
+        )
+        max_positive_fold_lost_count = max(
+            max_positive_fold_lost_count,
+            _int_field(fold_delta_summary, "positive_fold_lost_count", 0),
+        )
+        max_drawdown_gate_violation_count = max(
+            max_drawdown_gate_violation_count,
+            len(list(fold_delta_summary.get("drawdown_gate_violation_fold_ids") or [])),
+        )
+
+    paper_candidate_available = paper_candidate_count > 0 or bool(paper_gate_summaries)
+    blocked = (
+        not paper_candidate_available
+        and (
+            overall_status == "full_walk_forward_candidate_blocked"
+            or (active_count == 0 and bool(blocked_gate_summaries))
+        )
+    )
+    activity_failed_count = _int_field(
+        activity_regression_summary,
+        "signal_sparsity_fix_failed_candidate_count",
+        0,
+    )
+    activity_regression_blocks_signal_fix = bool(blocked_names) and activity_failed_count >= len(blocked_names)
+    activity_inversion_available = bool(activity_inversion_summary.get("available"))
+    if paper_candidate_available:
+        status = "paper_evidence_collection_candidate_available"
+        safe_next_step = "collect_paper_evidence_only_after_fresh_signal_and_operator_review"
+    elif blocked:
+        status = "blocked_full_walk_forward_gate"
+        safe_next_step = (
+            "abandon_activity_regressing_near_miss_family_design_non_regressing_signal_candidate_or_wait_native_signal"
+            if activity_regression_blocks_signal_fix
+            else "design_new_candidate_family_or_wait_for_native_signal_do_not_relax_runtime_filters"
+        )
+    elif active_count > 0:
+        status = "full_walk_forward_candidate_available"
+        safe_next_step = "run_full_walk_forward_gate_for_active_candidates_before_paper_evidence"
+    else:
+        status = "full_walk_forward_gate_review_required"
+        safe_next_step = "review_promotion_gate_before_any_runtime_or_paper_change"
+
+    return {
+        "status": status,
+        "input_report": input_report,
+        "full_walk_forward_gate_available": bool(gate_summaries),
+        "promotion_gate_available": True,
+        "generated_at": report.get("generated_at"),
+        "overall_status": overall_status,
+        "promotion_type": "near_miss_promotion_gate",
+        "decision": resolution_plan.get("safe_next_step"),
+        "failed_checks": all_failed_checks,
+        "deltas": {
+            "blocked_candidate_count": len(blocked_names),
+            "active_full_walk_forward_candidate_count": active_count,
+            "paper_evidence_candidate_count": paper_candidate_count,
+            "worst_compounded_oos_return_pct_delta": worst_candidate.get("compounded_oos_return_pct"),
+        },
+        "activity_regression_summary": activity_regression_summary,
+        "activity_inversion_summary": activity_inversion_summary,
+        "next_candidate_design_contract": next_candidate_design_contract,
+        "fold_delta_summary": {
+            "blocked_candidate_count": len(blocked_names),
+            "active_full_walk_forward_candidate_count": active_count,
+            "active_full_walk_forward_candidate_names": active_names,
+            "paper_evidence_candidate_count": paper_candidate_count,
+            "paper_evidence_candidate_names": paper_names,
+            "downstream_blocked_candidate_names": blocked_names,
+            "max_return_degraded_fold_count": max_return_degraded_fold_count,
+            "max_positive_fold_lost_count": max_positive_fold_lost_count,
+            "max_drawdown_gate_violation_fold_count": max_drawdown_gate_violation_count,
+            "worst_compounded_return_degradation_candidate": worst_candidate,
+        },
+        "failure_details": {
+            "blocked_candidates": by_candidate,
+        },
+        "root_cause_hints": root_cause_hints,
+        "baseline": {},
+        "candidate": {},
+        "primary_downstream_failure": (
+            "short_window_activity_inversion_and_full_wfo_activity_regression"
+            if activity_inversion_available
+            else "activity_regression_blocks_signal_sparsity_fix"
+            if activity_regression_blocks_signal_fix
+            else "full_walk_forward_quality_gate_failed"
+            if blocked
+            else None
+        ),
+        "candidate_count": report.get("candidate_count"),
+        "promoted_candidate_count": report.get("promoted_candidate_count"),
+        "active_full_walk_forward_candidate_count": active_count,
+        "active_full_walk_forward_candidate_names": active_names,
+        "paper_evidence_candidate_count": paper_candidate_count,
+        "paper_evidence_candidate_names": paper_names,
+        "downstream_blocked_candidate_names": blocked_names,
+        "safe_next_step": safe_next_step,
+        "runtime_filter_change_allowed": False,
+        "paper_evidence_collection_allowed": paper_candidate_available,
+        "paper_or_live_promotion_allowed": False,
+        "no_live_order_sent": report.get("no_live_order_sent") is not False,
+    }
+
+
+def _entry_quality_resolution_plan(
+    *,
+    entry_quality: dict[str, Any],
+    signal_wait_plan: dict[str, Any],
+    apply_gate: dict[str, Any],
+) -> dict[str, Any]:
+    top_reasons = [dict(item) for item in list(entry_quality.get("top_no_trade_reasons") or [])[:5]]
+    reason_counts = {
+        str(item.get("reason") or ""): int(_num(item.get("count"), 0) or 0)
+        for item in top_reasons
+        if str(item.get("reason") or "")
+    }
+    eligible_probe_count = int(_num(entry_quality.get("eligible_probe_context_count"), 0) or 0)
+    rejected_soft_count = int(_num(entry_quality.get("rejected_soft_context_count"), 0) or 0)
+    signal_fresh = (
+        signal_wait_plan.get("fresh_signal") is True
+        or apply_gate.get("fresh_signal") is True
+    )
+    mc12_count = int(reason_counts.get("no_trade_MC12_low_confluence", 0))
+    mc04_count = int(reason_counts.get("no_trade_MC04_no_clear_first_touch", 0))
+    hard_guard_count = int(dict(entry_quality.get("reason_class_counts") or {}).get("hard_guard") or 0)
+    backlog = [dict(item) for item in list(entry_quality.get("safe_experiment_backlog") or [])[:3]]
+    primary_experiment = backlog[0] if backlog else {}
+    entry_filter_resolution = dict(entry_quality.get("entry_filter_resolution_plan") or {})
+    entry_probe_validation = dict(entry_quality.get("entry_probe_validation") or {})
+    probe_failed_full_wfo = entry_probe_validation.get("status") == "blocked_full_walk_forward_gate"
+
+    root_causes: list[dict[str, Any]] = []
+    if not signal_fresh:
+        root_causes.append(
+            {
+                "cause": "current_signal_missing_or_stale",
+                "class": "realtime_gate",
+                "evidence": {
+                    "signal_age_minutes": signal_wait_plan.get("signal_age_minutes"),
+                    "max_signal_age_minutes": signal_wait_plan.get("max_signal_age_minutes"),
+                    "latest_event_ts": signal_wait_plan.get("latest_event_ts"),
+                    "cadence_lag_level": signal_wait_plan.get("cadence_lag_level"),
+                },
+                "resolution": "wait_for_new_realtime_v6_add_or_remove_signal",
+                "operator_fixable_now": False,
+            }
+        )
+    if mc12_count > 0:
+        root_causes.append(
+            {
+                "cause": "mc12_low_confluence_dominates_soft_candidates",
+                "class": "strategy_quality_filter",
+                "evidence": {"top_reason_count": mc12_count},
+                "resolution": "validate_quality_gated_mc12_near_miss_micro_probe_before_any_paper_or_live_use",
+                "operator_fixable_now": eligible_probe_count > 0 and not probe_failed_full_wfo,
+            }
+        )
+    if mc04_count > 0:
+        root_causes.append(
+            {
+                "cause": "mc04_no_clear_first_touch_is_ambiguous",
+                "class": "strategy_quality_filter",
+                "evidence": {"top_reason_count": mc04_count},
+                "resolution": "observation_only_until_a_narrow_high_quality_first_touch_subset_is_proven",
+                "operator_fixable_now": False,
+            }
+        )
+    if eligible_probe_count > 0 and probe_failed_full_wfo:
+        root_causes.append(
+            {
+                "cause": "quality_gated_mc12_probe_failed_full_walk_forward_gate",
+                "class": "offline_validation_gate",
+                "evidence": {
+                    "status": entry_probe_validation.get("status"),
+                    "failed_checks": list(entry_probe_validation.get("failed_checks") or []),
+                    "deltas": dict(entry_probe_validation.get("deltas") or {}),
+                    "fold_delta_summary": dict(entry_probe_validation.get("fold_delta_summary") or {}),
+                    "activity_regression_summary": dict(
+                        entry_probe_validation.get("activity_regression_summary") or {}
+                    ),
+                    "activity_inversion_summary": dict(
+                        entry_probe_validation.get("activity_inversion_summary") or {}
+                    ),
+                    "next_candidate_design_contract": dict(
+                        entry_probe_validation.get("next_candidate_design_contract") or {}
+                    ),
+                    "failure_details": dict(entry_probe_validation.get("failure_details") or {}),
+                    "root_cause_hints": list(entry_probe_validation.get("root_cause_hints") or []),
+                    "input_report": entry_probe_validation.get("input_report"),
+                },
+                "resolution": "do_not_promote_or_runtime_enable_this_probe_until_a_new_wfo_candidate_passes",
+                "operator_fixable_now": False,
+            }
+        )
+    if eligible_probe_count <= 0 and rejected_soft_count > 0:
+        root_causes.append(
+            {
+                "cause": "no_current_probe_context_passes_quality_constraints",
+                "class": "candidate_quality",
+                "evidence": {
+                    "eligible_probe_context_count": eligible_probe_count,
+                    "rejected_soft_context_count": rejected_soft_count,
+                },
+                "resolution": "do_not_unlock_current_market_by_broad_filter_relaxation",
+                "operator_fixable_now": False,
+            }
+        )
+
+    immediate_status = (
+        "fresh_signal_available_review_paper_gate"
+        if signal_fresh and apply_gate.get("can_request_paper_apply_now") is True
+        else (
+            "offline_probe_candidate_failed_full_walk_forward_gate"
+            if eligible_probe_count > 0 and probe_failed_full_wfo
+            else (
+                "offline_probe_candidates_available"
+                if eligible_probe_count > 0
+                else "no_safe_runtime_fix_available"
+            )
+        )
+    )
+    safe_actions = [
+        "monitor_fresh_signal_on_capped_interval_without_forcing_entry",
+        "keep_paper_apply_blocked_until_fresh_signal_and_operator_review",
+    ]
+    if eligible_probe_count > 0 and probe_failed_full_wfo:
+        safe_actions.append("do_not_promote_quality_gated_mc12_probe_after_failed_full_walk_forward_gate")
+        safe_actions.append("inspect_full_walk_forward_failed_checks_before_new_candidate_design")
+    elif eligible_probe_count > 0:
+        safe_actions.append("review_quality_gated_near_miss_probe_candidates_in_paper_or_walk_forward_only")
+    else:
+        safe_actions.append("run_or_review_offline_near_miss_walk_forward_before_changing_runtime_filters")
+    if mc04_count > 0:
+        safe_actions.append("keep_mc04_first_touch_broad_relaxation_observation_only")
+    if hard_guard_count > 0:
+        safe_actions.append("do_not_relax_hard_guards")
+
+    return {
+        "status": immediate_status,
+        "root_cause_count": len(root_causes),
+        "root_causes": root_causes,
+        "dominant_primary_issue": entry_quality.get("dominant_primary_issue"),
+        "top_no_trade_reason": top_reasons[0] if top_reasons else None,
+        "eligible_probe_context_count": eligible_probe_count,
+        "rejected_soft_context_count": rejected_soft_count,
+        "mc12_low_confluence_count": mc12_count,
+        "mc04_no_clear_first_touch_count": mc04_count,
+        "primary_safe_experiment": primary_experiment.get("name"),
+        "safe_experiment_backlog": backlog,
+        "entry_filter_resolution_plan": entry_filter_resolution,
+        "entry_probe_validation": entry_probe_validation,
+        "safe_actions": safe_actions,
+        "unsafe_shortcuts": [
+            "force_current_fresh_signal",
+            "broadly_relax_mc04_first_touch",
+            "broadly_lower_confluence_floor_without_walk_forward_evidence",
+            "apply_paper_bridge_without_fresh_signal_and_verified_backup",
+            "enable_live_orders_from_evidence_cycle",
+        ],
+        "paper_apply_unblocked_when": "fresh_signal_true_and_bridge_dry_run_actionable_after_operator_review",
+        "operator_fixable_now": bool(signal_fresh and apply_gate.get("can_request_paper_apply_now") is True),
         "no_live_order_sent": True,
     }
 
@@ -4263,6 +4988,8 @@ def _summary(
     drought_audit: dict[str, Any],
     report_dir: Path,
     execution_parity_journal_report: dict[str, Any] | None = None,
+    entry_probe_full_walk_forward_gate_report: dict[str, Any] | None = None,
+    entry_probe_full_walk_forward_gate_report_path: Path | None = None,
     generated_at: datetime | None = None,
     max_signal_age_minutes: int = 15,
     min_shadow_fill_samples: int = 100,
@@ -4274,6 +5001,20 @@ def _summary(
     readiness = dict(collection.get("readiness") or {})
     drought_classification = dict(drought_audit.get("classification") or {})
     entry_quality = dict(drought_audit.get("entry_quality") or {})
+    entry_diagnosis = dict(entry_audit.get("diagnosis") or {})
+    entry_hotspots = dict(entry_audit.get("no_trade_hotspots") or {})
+    entry_primary_context = dict(entry_diagnosis.get("primary_context") or {})
+    entry_experiment_backlog = list(entry_audit.get("experiment_backlog") or [])[:3]
+    entry_top_reasons = list(entry_audit.get("top_no_trade_reasons") or [])[:5]
+    entry_top_contexts = list(entry_hotspots.get("top_contexts") or [])[:5]
+    entry_probe_validation = _entry_probe_validation_state(
+        entry_probe_full_walk_forward_gate_report,
+        input_report=(
+            _display_path(entry_probe_full_walk_forward_gate_report_path)
+            if entry_probe_full_walk_forward_gate_report_path is not None
+            else None
+        ),
+    )
     apply_gate = _paper_apply_gate(cycle_report)
     collection_progress = _collection_progress(cycle_report)
     collection_progress.update(_execution_parity_collection_progress(execution_parity_journal_report))
@@ -4345,6 +5086,47 @@ def _summary(
             "eligible_probe_context_count": entry_quality.get("eligible_probe_context_count"),
             "rejected_soft_context_count": entry_quality.get("rejected_soft_context_count"),
             "mc04_broad_relaxation_rejected": entry_quality.get("mc04_broad_relaxation_rejected"),
+            "dominant_primary_issue": entry_diagnosis.get("primary_issue"),
+            "dominant_soft_contexts_are_low_quality": entry_diagnosis.get(
+                "dominant_soft_contexts_are_low_quality"
+            ),
+            "reason_class_counts": dict(entry_audit.get("reason_class_counts") or {}),
+            "context_class_counts": dict(entry_hotspots.get("context_class_counts") or {}),
+            "probe_quality_reason_counts": dict(
+                entry_hotspots.get("probe_quality_reason_counts") or {}
+            ),
+            "soft_bucket_counts": dict(entry_hotspots.get("soft_bucket_counts") or {}),
+            "top_no_trade_reasons": entry_top_reasons,
+            "top_no_trade_contexts": entry_top_contexts,
+            "eligible_probe_contexts": list(
+                entry_hotspots.get("eligible_probe_contexts") or []
+            )[:5],
+            "top_rejected_soft_contexts": list(
+                entry_hotspots.get("top_rejected_soft_contexts") or []
+            )[:5],
+            "entry_filter_context_distribution_scope": dict(
+                entry_hotspots.get("context_distribution_scope") or {}
+            ),
+            "dominant_no_trade_context": entry_primary_context,
+            "entry_filter_resolution_plan": dict(entry_audit.get("resolution_plan") or {}),
+            "entry_probe_validation": entry_probe_validation,
+            "safe_experiment_backlog": entry_experiment_backlog,
+            "operator_interpretation": {
+                "status": (
+                    "offline_probe_candidates_blocked_by_full_walk_forward_gate"
+                    if entry_probe_validation.get("status") == "blocked_full_walk_forward_gate"
+                    else "wait_for_new_walk_forward_evidence_before_relaxing_soft_contexts"
+                    if entry_quality.get("eligible_probe_context_count") == 0
+                    else "paper_or_walk_forward_probe_candidates_available"
+                ),
+                "do_not_relax_mc04_broad_first_touch": entry_quality.get(
+                    "mc04_broad_relaxation_rejected"
+                )
+                is True,
+                "primary_safe_experiment": dict(entry_experiment_backlog[0]).get("name")
+                if entry_experiment_backlog
+                else None,
+            },
         },
         "next_actions": base_next_actions,
         "report_paths": {
@@ -4363,6 +5145,11 @@ def _summary(
             ),
             "execution_parity_journal_jsonl": _display_path(
                 report_dir / "execution_parity_journal" / EXECUTION_PARITY_JOURNAL_NAME
+            ),
+            "entry_probe_full_walk_forward_gate": (
+                _display_path(entry_probe_full_walk_forward_gate_report_path)
+                if entry_probe_full_walk_forward_gate_report_path is not None
+                else None
             ),
         },
         "non_negotiables": [
@@ -4390,6 +5177,17 @@ def _summary(
         apply_gate=apply_gate,
         signal_wait_plan=dict(report.get("signal_wait_plan") or {}),
     )
+    report["fresh_signal_resolution_plan"] = _entry_quality_resolution_plan(
+        entry_quality=dict(report.get("entry_quality") or {}),
+        signal_wait_plan=dict(report.get("signal_wait_plan") or {}),
+        apply_gate=apply_gate,
+    )
+    if report["fresh_signal_resolution_plan"].get("status") == "offline_probe_candidate_failed_full_walk_forward_gate":
+        report["overall_status"] = "quality_gated_probe_blocked_by_full_walk_forward"
+        report["decision_state"]["primary_cause"] = (
+            "fresh_signal_missing_and_quality_gated_mc12_probe_failed_full_walk_forward_gate"
+        )
+    report["entry_quality"]["fresh_signal_resolution_plan"] = dict(report["fresh_signal_resolution_plan"])
     report["operator_action_plan"] = _operator_action_plan(
         adaptive_collection_plan=dict(report.get("adaptive_collection_plan") or {}),
         apply_gate=apply_gate,
@@ -4449,6 +5247,7 @@ def _markdown(report: dict[str, Any]) -> str:
     launch_next_blocker = dict(launch_readiness.get("next_blocker") or {})
     launch_canary_policy = dict(launch_readiness.get("canary_policy") or {})
     launch_paper_handoff = dict(launch_readiness.get("paper_bridge_handoff") or {})
+    launch_paper_only = dict(launch_readiness.get("paper_only_rehearsal") or {})
     launch_components = dict(launch_readiness.get("component_readiness") or {})
     launch_substitution = dict(launch_readiness.get("substitution_matrix") or {})
     launch_resolution = dict(launch_readiness.get("resolution_matrix") or {})
@@ -4458,6 +5257,21 @@ def _markdown(report: dict[str, Any]) -> str:
     apply_gate = dict(report.get("paper_bridge_apply_gate") or {})
     pre_apply_backup = dict(report.get("pre_apply_backup_plan") or {})
     entry = dict(report.get("entry_quality") or {})
+    entry_reason_class_counts = dict(entry.get("reason_class_counts") or {})
+    entry_operator_interpretation = dict(entry.get("operator_interpretation") or {})
+    entry_top_reasons = list(entry.get("top_no_trade_reasons") or [])
+    entry_top_reason = dict(entry_top_reasons[0] if entry_top_reasons else {})
+    entry_dominant_context = dict(entry.get("dominant_no_trade_context") or {})
+    entry_backlog = list(entry.get("safe_experiment_backlog") or [])
+    entry_primary_experiment = dict(entry_backlog[0] if entry_backlog else {})
+    entry_resolution = dict(
+        report.get("fresh_signal_resolution_plan")
+        or entry.get("fresh_signal_resolution_plan")
+        or {}
+    )
+    entry_filter_resolution = dict(entry.get("entry_filter_resolution_plan") or {})
+    entry_probe_validation = dict(entry.get("entry_probe_validation") or {})
+    entry_resolution_top_reason = dict(entry_resolution.get("top_no_trade_reason") or {})
     lines = [
         "# Market State Rotation V6 Evidence Cycle",
         "",
@@ -4474,6 +5288,8 @@ def _markdown(report: dict[str, Any]) -> str:
         f"- signal_age_hours: `{signal_wait_plan.get('signal_age_hours')}`",
         f"- latest_add_age_to_median_gap: `{signal_wait_plan.get('latest_add_age_to_median_gap')}`",
         f"- signal_cadence_lag_level: `{signal_wait_plan.get('cadence_lag_level')}`",
+        f"- signal_absence_primary_cause: `{signal_wait_plan.get('signal_absence_primary_cause')}`",
+        f"- signal_pipeline_issue_suspected: `{signal_wait_plan.get('signal_pipeline_issue_suspected')}`",
         f"- signal_cadence_recommended_monitor_interval_minutes: `{signal_wait_plan.get('cadence_recommended_monitor_interval_minutes')}`",
         f"- signal_recommended_monitor_interval_minutes: `{signal_wait_plan.get('recommended_monitor_interval_minutes')}`",
         f"- signal_freshness_capture_window_minutes: `{signal_wait_plan.get('signal_freshness_capture_window_minutes')}`",
@@ -4585,6 +5401,16 @@ def _markdown(report: dict[str, Any]) -> str:
         f"- launch_research_ready: `{launch_readiness.get('research_ready')}`",
         f"- launch_shadow_ready: `{launch_readiness.get('shadow_ready')}`",
         f"- launch_paper_operational_ready: `{launch_readiness.get('paper_operational_ready')}`",
+        f"- launch_paper_only_rehearsal_status: `{launch_paper_only.get('status')}`",
+        f"- launch_paper_only_rehearsal_system_ready: `{launch_paper_only.get('system_ready')}`",
+        f"- launch_paper_only_rehearsal_armed: `{launch_paper_only.get('armed')}`",
+        f"- launch_paper_only_rehearsal_available: `{launch_paper_only.get('current_rehearsal_available')}`",
+        f"- launch_paper_only_rehearsal_first_completed: `{launch_paper_only.get('first_rehearsal_event_completed')}`",
+        f"- launch_paper_only_max_substitution_status: `{launch_paper_only.get('max_substitution_status')}`",
+        f"- launch_paper_only_max_substitution_ready: `{launch_paper_only.get('max_substitution_ready')}`",
+        f"- launch_paper_only_unresolved_proxy_gates: `{launch_paper_only.get('unresolved_proxy_gates')}`",
+        f"- launch_paper_only_non_substitutable_remaining_gates: `{launch_paper_only.get('non_substitutable_remaining_gates')}`",
+        f"- launch_paper_only_rehearsal_remaining_gates: `{launch_paper_only.get('remaining_gates')}`",
         f"- launch_tiny_canary_evidence_ready: `{launch_readiness.get('tiny_canary_evidence_ready')}`",
         f"- launch_tiny_canary_order_submission_allowed: `{launch_readiness.get('tiny_canary_order_submission_allowed')}`",
         f"- launch_quote_time_proxy_ready: `{launch_components.get('quote_time_proxy_ready')}`",
@@ -4621,6 +5447,28 @@ def _markdown(report: dict[str, Any]) -> str:
         f"- can_request_paper_apply_now: `{apply_gate.get('can_request_paper_apply_now')}`",
         f"- entry_scope: `{entry.get('recommended_experiment_scope')}`",
         f"- eligible_probe_context_count: `{entry.get('eligible_probe_context_count')}`",
+        f"- entry_dominant_primary_issue: `{entry.get('dominant_primary_issue')}`",
+        f"- entry_soft_candidate_count: `{entry_reason_class_counts.get('soft_candidate')}`",
+        f"- entry_hard_guard_count: `{entry_reason_class_counts.get('hard_guard')}`",
+        f"- entry_top_no_trade_reason: `{entry_top_reason.get('reason')}`",
+        f"- entry_top_no_trade_reason_count: `{entry_top_reason.get('count')}`",
+        f"- entry_dominant_context_reason: `{entry_dominant_context.get('reason')}`",
+        f"- entry_dominant_context_quality: `{entry_dominant_context.get('probe_quality')}`",
+        f"- entry_operator_interpretation: `{entry_operator_interpretation.get('status')}`",
+        f"- entry_primary_safe_experiment: `{entry_primary_experiment.get('name')}`",
+        f"- entry_filter_resolution_status: `{entry_filter_resolution.get('status')}`",
+        f"- entry_filter_resolution_dominant_probe_quality_blocker: `{entry_filter_resolution.get('dominant_probe_quality_blocker')}`",
+        f"- entry_filter_resolution_safe_next_step: `{entry_filter_resolution.get('safe_next_step')}`",
+        f"- entry_probe_validation_status: `{entry_probe_validation.get('status')}`",
+        f"- entry_probe_validation_failed_checks: `{entry_probe_validation.get('failed_checks')}`",
+        f"- entry_probe_validation_decision: `{entry_probe_validation.get('decision')}`",
+        f"- fresh_signal_resolution_status: `{entry_resolution.get('status')}`",
+        f"- fresh_signal_resolution_root_cause_count: `{entry_resolution.get('root_cause_count')}`",
+        f"- fresh_signal_resolution_top_no_trade_reason: `{entry_resolution_top_reason.get('reason')}`",
+        f"- fresh_signal_resolution_operator_fixable_now: `{entry_resolution.get('operator_fixable_now')}`",
+        f"- fresh_signal_resolution_primary_safe_experiment: `{entry_resolution.get('primary_safe_experiment')}`",
+        f"- fresh_signal_resolution_safe_actions: `{entry_resolution.get('safe_actions')}`",
+        f"- fresh_signal_resolution_unsafe_shortcuts: `{entry_resolution.get('unsafe_shortcuts')}`",
         "",
         "## Next Actions",
         "",
@@ -4662,6 +5510,7 @@ def run_evidence_cycle(
     historical_replay_days: int = 1095,
     historical_lifecycle_replay: bool = False,
     historical_lifecycle_source_path: Path | None = None,
+    entry_probe_full_walk_forward_gate_report_path: Path | None = None,
     canary_max_notional_usdt: float = 0.0,
     canary_max_leverage: float = 10.0,
     canary_max_daily_loss_usdt: float = 0.0,
@@ -4774,11 +5623,16 @@ def run_evidence_cycle(
         execution_parity_dir / "market_state_rotation_v6_execution_parity_journal.md",
         _execution_parity_markdown(execution_parity_journal_report),
     )
+    entry_probe_full_walk_forward_gate_report = _load_json_if_exists(
+        entry_probe_full_walk_forward_gate_report_path
+    )
     report = _summary(
         cycle_report=cycle_report,
         entry_audit=entry_audit,
         drought_audit=drought_audit,
         execution_parity_journal_report=execution_parity_journal_report,
+        entry_probe_full_walk_forward_gate_report=entry_probe_full_walk_forward_gate_report,
+        entry_probe_full_walk_forward_gate_report_path=entry_probe_full_walk_forward_gate_report_path,
         report_dir=report_dir,
         generated_at=generated_at,
         max_signal_age_minutes=max_signal_age_minutes,
@@ -4902,6 +5756,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--historical-replay-days", type=int, default=1095)
     parser.add_argument("--historical-lifecycle-replay", action="store_true")
     parser.add_argument("--historical-lifecycle-source", default=DEFAULT_HISTORICAL_LIFECYCLE_REPLAY_SOURCE)
+    parser.add_argument(
+        "--entry-probe-full-walk-forward-gate-report",
+        default=DEFAULT_ENTRY_PROBE_FULL_WALK_FORWARD_GATE_REPORT,
+    )
     parser.add_argument("--canary-max-notional-usdt", type=float, default=0.0)
     parser.add_argument("--canary-max-leverage", type=float, default=10.0)
     parser.add_argument("--canary-max-daily-loss-usdt", type=float, default=0.0)
@@ -4946,6 +5804,11 @@ def main() -> int:
         historical_replay_days=max(1, int(args.historical_replay_days)),
         historical_lifecycle_replay=bool(args.historical_lifecycle_replay),
         historical_lifecycle_source_path=_resolve(args.historical_lifecycle_source),
+        entry_probe_full_walk_forward_gate_report_path=(
+            _resolve(args.entry_probe_full_walk_forward_gate_report)
+            if args.entry_probe_full_walk_forward_gate_report
+            else None
+        ),
         canary_max_notional_usdt=max(0.0, float(args.canary_max_notional_usdt)),
         canary_max_leverage=max(0.0, float(args.canary_max_leverage)),
         canary_max_daily_loss_usdt=max(0.0, float(args.canary_max_daily_loss_usdt)),

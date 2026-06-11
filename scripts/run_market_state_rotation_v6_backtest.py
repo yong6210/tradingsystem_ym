@@ -199,7 +199,10 @@ class MarketStateConfig:
     winner_pyramid_min_reason_stack: int = 2
     winner_pyramid_cooldown_bars: int = 24
     winner_pyramid_max_units: float = 0.0
+    winner_pyramid_min_extension_atr: float = 0.0
     winner_pyramid_max_extension_atr: float = 2.75
+    winner_pyramid_block_risk_off: bool = False
+    winner_pyramid_block_one_way_chase: bool = False
     base_entry_max_extension_atr: float = 0.0
     base_entry_max_extension_side: str = "both"
     base_entry_reduce_extension_atr: float = 0.0
@@ -681,7 +684,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--winner-pyramid-min-reason-stack", type=int, default=2)
     parser.add_argument("--winner-pyramid-cooldown-bars", type=int, default=24)
     parser.add_argument("--winner-pyramid-max-units", type=float, default=0.0)
+    parser.add_argument("--winner-pyramid-min-extension-atr", type=float, default=0.0)
     parser.add_argument("--winner-pyramid-max-extension-atr", type=float, default=2.75)
+    parser.add_argument(
+        "--winner-pyramid-block-risk-off",
+        action="store_true",
+        help="Block winner-refill scale-ins when the regime router is in risk-off mode.",
+    )
+    parser.add_argument(
+        "--winner-pyramid-block-one-way-chase",
+        action="store_true",
+        help="Block winner-refill scale-ins when the regime router is in one-way chase mode.",
+    )
     parser.add_argument(
         "--base-entry-max-extension-atr",
         type=float,
@@ -2184,6 +2198,18 @@ def _top_prefixed_counter_payload(counters: Counter[str], prefix: str, *, limit:
     return {key: int(value) for key, value in items[:limit]}
 
 
+def _prefixed_counter_payload(counters: Counter[str], prefix: str) -> dict[str, int]:
+    values = Counter(
+        {
+            key[len(prefix) :]: int(value)
+            for key, value in counters.items()
+            if key.startswith(prefix) and int(value) > 0
+        }
+    )
+    items = sorted(values.items(), key=lambda item: (-int(item[1]), item[0]))
+    return {key: int(value) for key, value in items}
+
+
 def _top_cost_pct_payload(counter: Counter[str], *, limit: int = 12) -> dict[str, float]:
     items = sorted(counter.items(), key=lambda item: (float(item[1]), item[0]), reverse=True)
     return {key: round(float(value) * 100.0, 4) for key, value in items[:limit]}
@@ -2552,6 +2578,7 @@ def _capacity_structure_context(
     add_total: int,
     add_by_role: Counter[str],
     battle_add_ratio: float,
+    winner_pyramid_add_count: int,
     battle_capacity_saturated: bool,
 ) -> dict[str, Any]:
     max_possible_units = max(0.0, float(getattr(config, "max_possible_units", 0.0) or 0.0))
@@ -2561,8 +2588,11 @@ def _capacity_structure_context(
     capacity_after_first_base = max(max_possible_units - base_add_units, 0.0)
     unit_exposure = max_account_exposure / max(max_possible_units, 1e-12)
     base_add_share = int(add_by_role.get("base", 0)) / max(int(add_total), 1)
+    winner_pyramid_add_ratio = int(winner_pyramid_add_count) / max(int(add_total), 1)
     scale_in_capacity = max_possible_units > base_add_units + 1e-12
-    if battle_capacity_saturated and battle_add_ratio <= 0.015:
+    if not scale_in_capacity and winner_pyramid_add_count > 0:
+        status = "single_unit_winner_refill_active"
+    elif battle_capacity_saturated and battle_add_ratio <= 0.015:
         status = "battle_capacity_saturated"
     elif not scale_in_capacity:
         status = "single_unit_full_entry"
@@ -2580,6 +2610,8 @@ def _capacity_structure_context(
         "base_add_account_exposure": round(base_add_units * unit_exposure, 6),
         "base_add_share": round(base_add_share, 4),
         "battle_add_ratio": round(float(battle_add_ratio), 4),
+        "winner_pyramid_add_count": int(winner_pyramid_add_count),
+        "winner_pyramid_add_ratio": round(float(winner_pyramid_add_ratio), 4),
     }
 
 
@@ -2802,6 +2834,7 @@ def _event_diagnostics(
         add_total=add_total,
         add_by_role=add_by_role,
         battle_add_ratio=battle_add_ratio,
+        winner_pyramid_add_count=int(counters.get("winner_pyramid_adds", 0)),
         battle_capacity_saturated=battle_capacity_saturated,
     )
     enough_orders_for_coverage = add_total >= expected_add_events
@@ -2842,6 +2875,14 @@ def _event_diagnostics(
         for side in ("long", "short")
         if add_by_side.get(side, 0) > 0
     }
+    profitable_low_activity_day_share_limit = max(
+        float(thresholds["day_concentration_share"]),
+        0.20,
+    )
+    thresholds["profitable_low_activity_max_day_share"] = round(
+        float(profitable_low_activity_day_share_limit),
+        4,
+    )
     profitable_low_activity = (
         not (risk_off_idle or risk_off_partial)
         and add_total < expected_add_events
@@ -2852,7 +2893,7 @@ def _event_diagnostics(
         and sum(float(value) for value in pnl_by_side.values()) > 0.0
         and bool(profitable_side_pnl)
         and all(value > 0.0 for value in profitable_side_pnl.values())
-        and max_day_share < float(thresholds["day_concentration_share"])
+        and max_day_share <= profitable_low_activity_day_share_limit
         and max_hour_share < float(thresholds["kst_hour_concentration_share"])
         and max_month_share <= 0.60
     )
@@ -2970,6 +3011,7 @@ def _event_diagnostics(
         "capacity_structure_context": capacity_structure_context,
         "add_events": add_total,
         "remove_events": remove_total,
+        "no_trade_contexts": _prefixed_counter_payload(counters, "no_trade_context::"),
         "top_no_trade_contexts": _top_prefixed_counter_payload(counters, "no_trade_context::", limit=12),
         "no_trade_reason_side_counts": _top_prefixed_counter_payload(
             counters,
@@ -4297,23 +4339,48 @@ def _apply_decision(
     winner_trend_alive = market.bias == side or (
         market.one_way_side == side and market.one_way_score >= max(0.0, float(config.chase_min_one_way_score))
     )
-    winner_pyramid_ready = (
-        config.winner_pyramid_units > 1e-12
-        and winner_capacity > 1e-12
-        and winner_trend_alive
-        and favorable_from_avg >= expected_reaction * max(0.0, float(config.winner_pyramid_min_profit_reaction))
-        and favorable_from_last_entry >= expected_reaction * 0.10
-        and same_score >= config.winner_pyramid_min_score
-        and same_reason_stack >= config.winner_pyramid_min_reason_stack
-        and scenario_allows_current
-        and not one_way_against
-        and not market.bad_rr
-        and not hard_no_trade
-        and zone.chase_extension_atr <= max(0.1, float(config.winner_pyramid_max_extension_atr))
-        and not memory.in_cooldown(side, exec_idx)
-        and exec_idx - memory.last_winner_pyramid_idx > config.winner_pyramid_cooldown_bars
-        and memory.state(same_zone_key, exec_idx, config.zone_retire_bars) != "retired"
-    )
+    winner_pyramid_blocker = ""
+    if config.winner_pyramid_units <= 1e-12:
+        winner_pyramid_blocker = "disabled"
+    elif winner_capacity <= 1e-12:
+        winner_pyramid_blocker = "no_capacity"
+    elif not winner_trend_alive:
+        winner_pyramid_blocker = "trend_not_alive"
+    elif bool(config.winner_pyramid_block_risk_off) and route_mode == "risk_off":
+        winner_pyramid_blocker = "risk_off"
+    elif bool(config.winner_pyramid_block_one_way_chase) and route_mode == "one_way_chase":
+        winner_pyramid_blocker = "one_way_chase"
+    elif favorable_from_avg < expected_reaction * max(0.0, float(config.winner_pyramid_min_profit_reaction)):
+        winner_pyramid_blocker = "avg_profit_reaction"
+    elif favorable_from_last_entry < expected_reaction * 0.10:
+        winner_pyramid_blocker = "last_entry_profit_reaction"
+    elif same_score < config.winner_pyramid_min_score:
+        winner_pyramid_blocker = "score"
+    elif same_reason_stack < config.winner_pyramid_min_reason_stack:
+        winner_pyramid_blocker = "reason_stack"
+    elif not scenario_allows_current:
+        winner_pyramid_blocker = "scenario"
+    elif one_way_against:
+        winner_pyramid_blocker = "one_way_against"
+    elif market.bad_rr:
+        winner_pyramid_blocker = "bad_rr"
+    elif hard_no_trade:
+        winner_pyramid_blocker = "hard_no_trade"
+    elif zone.chase_extension_atr < max(0.0, float(config.winner_pyramid_min_extension_atr)):
+        winner_pyramid_blocker = "early_extension"
+    elif zone.chase_extension_atr > max(0.1, float(config.winner_pyramid_max_extension_atr)):
+        winner_pyramid_blocker = "extension"
+    elif memory.in_cooldown(side, exec_idx):
+        winner_pyramid_blocker = "side_cooldown"
+    elif exec_idx - memory.last_winner_pyramid_idx <= config.winner_pyramid_cooldown_bars:
+        winner_pyramid_blocker = "pyramid_cooldown"
+    elif memory.state(same_zone_key, exec_idx, config.zone_retire_bars) == "retired":
+        winner_pyramid_blocker = "retired_zone"
+    winner_pyramid_ready = not winner_pyramid_blocker
+    if config.winner_pyramid_units > 1e-12:
+        counters["winner_pyramid_evaluations"] += 1
+        if winner_pyramid_blocker:
+            counters[f"winner_pyramid_block_{winner_pyramid_blocker}"] += 1
     if winner_pyramid_ready:
         qty = min(
             config.winner_pyramid_units
@@ -4372,6 +4439,8 @@ def _apply_decision(
                     },
                 )
                 return
+        else:
+            counters["winner_pyramid_block_zero_qty"] += 1
 
     reaction_roles_qty = _role_qty(book, "battle") + _role_qty(book, "chase") + _role_qty(book, "base")
     near_recovery_band = abs(recovery - close) <= expected_reaction * config.reaction_avg_band
@@ -5717,7 +5786,10 @@ def build_configs(
     winner_pyramid_min_reason_stack: int,
     winner_pyramid_cooldown_bars: int,
     winner_pyramid_max_units: float,
+    winner_pyramid_min_extension_atr: float,
     winner_pyramid_max_extension_atr: float,
+    winner_pyramid_block_risk_off: bool,
+    winner_pyramid_block_one_way_chase: bool,
     base_entry_max_extension_atr: float,
     base_entry_max_extension_side: str,
     base_entry_reduce_extension_atr: float,
@@ -5791,8 +5863,13 @@ def build_configs(
             f":winPyrStack{max(0, int(winner_pyramid_min_reason_stack))}"
             f":winPyrCool{max(0, int(winner_pyramid_cooldown_bars))}"
             f":winPyrMax{max(0.0, float(winner_pyramid_max_units)):g}"
+            f":winPyrMinExt{max(0.0, float(winner_pyramid_min_extension_atr)):g}"
             f":winPyrExt{max(0.1, float(winner_pyramid_max_extension_atr)):g}"
         )
+        if bool(winner_pyramid_block_risk_off):
+            btc_rotation_suffix += ":winPyrNoRiskOff"
+        if bool(winner_pyramid_block_one_way_chase):
+            btc_rotation_suffix += ":winPyrNoOwChase"
     trim_memory_suffix = ""
     if one_way_trim_retire_same_zone:
         trim_memory_suffix += ":owRetire1"
@@ -6425,9 +6502,17 @@ def build_configs(
                                                         0.0,
                                                         float(winner_pyramid_max_units),
                                                     ),
+                                                    winner_pyramid_min_extension_atr=max(
+                                                        0.0,
+                                                        float(winner_pyramid_min_extension_atr),
+                                                    ),
                                                     winner_pyramid_max_extension_atr=max(
                                                         0.1,
                                                         float(winner_pyramid_max_extension_atr),
+                                                    ),
+                                                    winner_pyramid_block_risk_off=bool(winner_pyramid_block_risk_off),
+                                                    winner_pyramid_block_one_way_chase=bool(
+                                                        winner_pyramid_block_one_way_chase
                                                     ),
                                                     base_entry_max_extension_atr=max(
                                                         0.0,
@@ -6963,7 +7048,10 @@ def main() -> None:
         winner_pyramid_min_reason_stack=max(0, int(args.winner_pyramid_min_reason_stack)),
         winner_pyramid_cooldown_bars=max(0, int(args.winner_pyramid_cooldown_bars)),
         winner_pyramid_max_units=max(0.0, float(args.winner_pyramid_max_units)),
+        winner_pyramid_min_extension_atr=max(0.0, float(args.winner_pyramid_min_extension_atr)),
         winner_pyramid_max_extension_atr=max(0.1, float(args.winner_pyramid_max_extension_atr)),
+        winner_pyramid_block_risk_off=bool(args.winner_pyramid_block_risk_off),
+        winner_pyramid_block_one_way_chase=bool(args.winner_pyramid_block_one_way_chase),
         base_entry_max_extension_atr=max(0.0, float(args.base_entry_max_extension_atr)),
         base_entry_max_extension_side=(
             args.base_entry_max_extension_side

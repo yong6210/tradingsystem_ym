@@ -73,8 +73,12 @@ def _next_actions(*, bridge_report: dict[str, Any], collection_report: dict[str,
     snapshot = dict(bridge_report.get("snapshot") or {})
     snapshot_blockers = set(str(item) for item in snapshot.get("blockers") or [])
     cadence = dict(snapshot.get("bridge_event_cadence") or {})
+    bridge_status = str(bridge_report.get("overall_status") or "")
+    remove_without_open_plan = bridge_status in {"dry_run_no_open_v6_paper_plan", "no_open_v6_paper_plan"}
     if str(bridge_report.get("overall_status") or "") == "not_actionable" and "signal_stale" in snapshot_blockers:
         actions.append("rerun_cycle_until_fresh_v6_add_or_remove_signal_is_seen")
+    if remove_without_open_plan:
+        actions.append("wait_for_next_add_signal_or_existing_open_paper_plan_before_reapplying_remove")
     if str(cadence.get("add_wait_state") or "") == "latest_add_age_above_recent_median_gap":
         latest_add_age_days = _float(cadence.get("latest_add_age_hours")) / 24.0
         expected_days_per_add = _float(cadence.get("expected_days_per_add"))
@@ -97,6 +101,7 @@ def _cycle_bottleneck_diagnosis(*, bridge_report: dict[str, Any], collection_rep
         return embedded
     snapshot = dict(bridge_report.get("snapshot") or {})
     snapshot_blockers = set(str(item) for item in snapshot.get("blockers") or [])
+    bridge_status = str(bridge_report.get("overall_status") or "")
     quote = dict(collection_report.get("quote_shadow") or {})
     paper = dict(collection_report.get("paper_fill") or {})
     readiness = dict(collection_report.get("readiness") or {})
@@ -114,10 +119,13 @@ def _cycle_bottleneck_diagnosis(*, bridge_report: dict[str, Any], collection_rep
     waiting_for_signal = "signal_stale" in snapshot_blockers or str(paper.get("bridge_status") or "") == (
         "runtime_bridge_waiting_for_fresh_signal"
     )
+    remove_without_open_plan = bridge_status in {"dry_run_no_open_v6_paper_plan", "no_open_v6_paper_plan"}
     quote_incomplete = bool(quote_missing_samples or quote_missing_days or quote_missing_hours)
     live_allowed = readiness.get("live_order_submission_allowed") is True
     if waiting_for_signal and shadow_missing > 0:
         primary = "fresh_v6_signal_missing_for_paper_fill_collection"
+    elif remove_without_open_plan and shadow_missing > 0 and not quote_incomplete:
+        primary = "remove_signal_without_open_paper_plan"
     elif quote_incomplete:
         primary = "quote_shadow_collection_incomplete"
     elif shadow_missing > 0:
@@ -132,6 +140,8 @@ def _cycle_bottleneck_diagnosis(*, bridge_report: dict[str, Any], collection_rep
     blocked_until: list[str] = []
     if waiting_for_signal:
         blocked_until.append("fresh_market_state_rotation_v6_add_or_remove_signal")
+    if remove_without_open_plan:
+        blocked_until.append("next_add_signal_or_existing_open_paper_plan")
     if shadow_missing > 0:
         blocked_until.append("min_shadow_fill_samples")
     if quote_incomplete:
@@ -141,6 +151,7 @@ def _cycle_bottleneck_diagnosis(*, bridge_report: dict[str, Any], collection_rep
     return {
         "primary_bottleneck": primary,
         "waiting_for_fresh_signal": waiting_for_signal,
+        "remove_signal_without_open_paper_plan": remove_without_open_plan,
         "collectable_without_fresh_signal": collectable_now,
         "blocked_until": blocked_until,
         "quote_missing": {
@@ -186,6 +197,8 @@ def build_collection_cycle_summary(
             "top_no_trade_reasons": list(snapshot.get("top_no_trade_reasons") or [])[:5],
             "no_trade_hotspots": dict(snapshot.get("no_trade_hotspots") or {}),
             "pre_apply_backup": bridge_report.get("pre_apply_backup"),
+            "remove_plan_precheck": dict(bridge_report.get("remove_plan_precheck") or {}),
+            "result": dict(bridge_report.get("result") or {}),
             "execution_parity_preflight": dict(bridge_report.get("execution_parity_preflight") or {}),
             "report_path": _display_path(bridge_report_dir / BRIDGE_REPORT_NAME),
         },

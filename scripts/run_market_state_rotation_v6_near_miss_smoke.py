@@ -75,6 +75,12 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _int_dict(mapping: Any) -> dict[str, int]:
+    if not isinstance(mapping, dict):
+        return {}
+    return {str(key): _safe_int(value) for key, value in mapping.items() if _safe_int(value) != 0}
+
+
 def _coerce_config(raw: dict[str, Any]) -> MarketStateConfig:
     allowed = {item.name for item in fields(MarketStateConfig)}
     return MarketStateConfig(**{key: value for key, value in raw.items() if key in allowed})
@@ -96,6 +102,204 @@ def _source_config(report: dict[str, Any]) -> MarketStateConfig:
 def _candidate_configs(base: MarketStateConfig) -> list[tuple[str, dict[str, Any], MarketStateConfig]]:
     recipes: list[tuple[str, dict[str, Any]]] = [
         ("base", {}),
+        (
+            "quality_gated_mc12_near_miss_micro_probe",
+            {
+                "near_miss_probe_units": 0.00025,
+                "near_miss_probe_min_score": 4,
+                "near_miss_probe_min_score_edge": 2,
+                "near_miss_probe_min_reason_stack": 2,
+                "near_miss_probe_cooldown_bars": 72,
+                "near_miss_probe_max_extension_atr": 1.5,
+                "near_miss_probe_failure_guard_count": 2,
+                "near_miss_probe_failure_guard_window_bars": 1440,
+                "near_miss_probe_failure_cooldown_bars": 4320,
+                "near_miss_probe_allowed_soft_reasons": ("MC12_low_confluence",),
+                "near_miss_probe_allowed_alignments": ("with_trend",),
+                "near_miss_probe_allowed_execution_contexts": ("normal",),
+                "near_miss_probe_allowed_regimes": ("uptrend", "downtrend"),
+            },
+        ),
+        (
+            "seeded_mc12_uptrend_score4_edge2_stack2_ext15_cooldown72",
+            {
+                "near_miss_probe_units": 0.00025,
+                "near_miss_probe_min_score": 4,
+                "near_miss_probe_min_score_edge": 2,
+                "near_miss_probe_min_reason_stack": 2,
+                "near_miss_probe_cooldown_bars": 72,
+                "near_miss_probe_max_extension_atr": 1.5,
+                "near_miss_probe_failure_guard_count": 2,
+                "near_miss_probe_failure_guard_window_bars": 1440,
+                "near_miss_probe_failure_cooldown_bars": 4320,
+                "near_miss_probe_allowed_soft_reasons": ("MC12_low_confluence",),
+                "near_miss_probe_allowed_alignments": ("with_trend",),
+                "near_miss_probe_allowed_execution_contexts": ("normal",),
+                "near_miss_probe_allowed_regimes": ("uptrend",),
+            },
+        ),
+        (
+            "seeded_mc12_downtrend_score4_edge2_stack2_ext15_cooldown72",
+            {
+                "near_miss_probe_units": 0.00025,
+                "near_miss_probe_min_score": 4,
+                "near_miss_probe_min_score_edge": 2,
+                "near_miss_probe_min_reason_stack": 2,
+                "near_miss_probe_cooldown_bars": 72,
+                "near_miss_probe_max_extension_atr": 1.5,
+                "near_miss_probe_failure_guard_count": 2,
+                "near_miss_probe_failure_guard_window_bars": 1440,
+                "near_miss_probe_failure_cooldown_bars": 4320,
+                "near_miss_probe_allowed_soft_reasons": ("MC12_low_confluence",),
+                "near_miss_probe_allowed_alignments": ("with_trend",),
+                "near_miss_probe_allowed_execution_contexts": ("normal",),
+                "near_miss_probe_allowed_regimes": ("downtrend",),
+            },
+        ),
+        (
+            "seeded_mc12_downtrend_score4_edge2_stack2_ext10_cooldown72",
+            {
+                "near_miss_probe_units": 0.00025,
+                "near_miss_probe_min_score": 4,
+                "near_miss_probe_min_score_edge": 2,
+                "near_miss_probe_min_reason_stack": 2,
+                "near_miss_probe_cooldown_bars": 72,
+                "near_miss_probe_max_extension_atr": 1.0,
+                "near_miss_probe_failure_guard_count": 2,
+                "near_miss_probe_failure_guard_window_bars": 1440,
+                "near_miss_probe_failure_cooldown_bars": 4320,
+                "near_miss_probe_allowed_soft_reasons": ("MC12_low_confluence",),
+                "near_miss_probe_allowed_alignments": ("with_trend",),
+                "near_miss_probe_allowed_execution_contexts": ("normal",),
+                "near_miss_probe_allowed_regimes": ("downtrend",),
+            },
+        ),
+        (
+            "seeded_mc12_downtrend_score4_edge2_stack2_ext15_cooldown144",
+            {
+                "near_miss_probe_units": 0.00025,
+                "near_miss_probe_min_score": 4,
+                "near_miss_probe_min_score_edge": 2,
+                "near_miss_probe_min_reason_stack": 2,
+                "near_miss_probe_cooldown_bars": 144,
+                "near_miss_probe_max_extension_atr": 1.5,
+                "near_miss_probe_failure_guard_count": 2,
+                "near_miss_probe_failure_guard_window_bars": 1440,
+                "near_miss_probe_failure_cooldown_bars": 4320,
+                "near_miss_probe_allowed_soft_reasons": ("MC12_low_confluence",),
+                "near_miss_probe_allowed_alignments": ("with_trend",),
+                "near_miss_probe_allowed_execution_contexts": ("normal",),
+                "near_miss_probe_allowed_regimes": ("downtrend",),
+            },
+        ),
+        (
+            "seeded_mc12_downtrend_score5_edge2_stack2_ext15_cooldown72",
+            {
+                "near_miss_probe_units": 0.00025,
+                "near_miss_probe_min_score": 5,
+                "near_miss_probe_min_score_edge": 2,
+                "near_miss_probe_min_reason_stack": 2,
+                "near_miss_probe_cooldown_bars": 72,
+                "near_miss_probe_max_extension_atr": 1.5,
+                "near_miss_probe_failure_guard_count": 2,
+                "near_miss_probe_failure_guard_window_bars": 1440,
+                "near_miss_probe_failure_cooldown_bars": 4320,
+                "near_miss_probe_allowed_soft_reasons": ("MC12_low_confluence",),
+                "near_miss_probe_allowed_alignments": ("with_trend",),
+                "near_miss_probe_allowed_execution_contexts": ("normal",),
+                "near_miss_probe_allowed_regimes": ("downtrend",),
+            },
+        ),
+        (
+            "quality_gated_mc12_score5_edge2_stack2_ext10_cooldown144",
+            {
+                "near_miss_probe_units": 0.00025,
+                "near_miss_probe_min_score": 5,
+                "near_miss_probe_min_score_edge": 2,
+                "near_miss_probe_min_reason_stack": 2,
+                "near_miss_probe_cooldown_bars": 144,
+                "near_miss_probe_max_extension_atr": 1.0,
+                "near_miss_probe_failure_guard_count": 1,
+                "near_miss_probe_failure_guard_window_bars": 1440,
+                "near_miss_probe_failure_cooldown_bars": 4320,
+                "near_miss_probe_allowed_soft_reasons": ("MC12_low_confluence",),
+                "near_miss_probe_allowed_alignments": ("with_trend",),
+                "near_miss_probe_allowed_execution_contexts": ("normal",),
+                "near_miss_probe_allowed_regimes": ("uptrend", "downtrend"),
+            },
+        ),
+        (
+            "quality_gated_mc12_score5_edge3_stack2_ext10_cooldown144",
+            {
+                "near_miss_probe_units": 0.00025,
+                "near_miss_probe_min_score": 5,
+                "near_miss_probe_min_score_edge": 3,
+                "near_miss_probe_min_reason_stack": 2,
+                "near_miss_probe_cooldown_bars": 144,
+                "near_miss_probe_max_extension_atr": 1.0,
+                "near_miss_probe_failure_guard_count": 1,
+                "near_miss_probe_failure_guard_window_bars": 1440,
+                "near_miss_probe_failure_cooldown_bars": 4320,
+                "near_miss_probe_allowed_soft_reasons": ("MC12_low_confluence",),
+                "near_miss_probe_allowed_alignments": ("with_trend",),
+                "near_miss_probe_allowed_execution_contexts": ("normal",),
+                "near_miss_probe_allowed_regimes": ("uptrend", "downtrend"),
+            },
+        ),
+        (
+            "quality_gated_mc12_score6_edge3_stack3_ext075_cooldown216",
+            {
+                "near_miss_probe_units": 0.00025,
+                "near_miss_probe_min_score": 6,
+                "near_miss_probe_min_score_edge": 3,
+                "near_miss_probe_min_reason_stack": 3,
+                "near_miss_probe_cooldown_bars": 216,
+                "near_miss_probe_max_extension_atr": 0.75,
+                "near_miss_probe_failure_guard_count": 1,
+                "near_miss_probe_failure_guard_window_bars": 1440,
+                "near_miss_probe_failure_cooldown_bars": 4320,
+                "near_miss_probe_allowed_soft_reasons": ("MC12_low_confluence",),
+                "near_miss_probe_allowed_alignments": ("with_trend",),
+                "near_miss_probe_allowed_execution_contexts": ("normal",),
+                "near_miss_probe_allowed_regimes": ("uptrend", "downtrend"),
+            },
+        ),
+        (
+            "quality_gated_mc12_downtrend_score5_edge2_stack2_ext10",
+            {
+                "near_miss_probe_units": 0.00025,
+                "near_miss_probe_min_score": 5,
+                "near_miss_probe_min_score_edge": 2,
+                "near_miss_probe_min_reason_stack": 2,
+                "near_miss_probe_cooldown_bars": 144,
+                "near_miss_probe_max_extension_atr": 1.0,
+                "near_miss_probe_failure_guard_count": 1,
+                "near_miss_probe_failure_guard_window_bars": 1440,
+                "near_miss_probe_failure_cooldown_bars": 4320,
+                "near_miss_probe_allowed_soft_reasons": ("MC12_low_confluence",),
+                "near_miss_probe_allowed_alignments": ("with_trend",),
+                "near_miss_probe_allowed_execution_contexts": ("normal",),
+                "near_miss_probe_allowed_regimes": ("downtrend",),
+            },
+        ),
+        (
+            "quality_gated_mc12_uptrend_score5_edge2_stack2_ext10",
+            {
+                "near_miss_probe_units": 0.00025,
+                "near_miss_probe_min_score": 5,
+                "near_miss_probe_min_score_edge": 2,
+                "near_miss_probe_min_reason_stack": 2,
+                "near_miss_probe_cooldown_bars": 144,
+                "near_miss_probe_max_extension_atr": 1.0,
+                "near_miss_probe_failure_guard_count": 1,
+                "near_miss_probe_failure_guard_window_bars": 1440,
+                "near_miss_probe_failure_cooldown_bars": 4320,
+                "near_miss_probe_allowed_soft_reasons": ("MC12_low_confluence",),
+                "near_miss_probe_allowed_alignments": ("with_trend",),
+                "near_miss_probe_allowed_execution_contexts": ("normal",),
+                "near_miss_probe_allowed_regimes": ("uptrend",),
+            },
+        ),
         (
             "near_miss_mc12_mc04_trend_normal_0001_score3_ext15",
             {
@@ -312,6 +516,8 @@ def _summarize_result(name: str, change: dict[str, Any], result: dict[str, Any] 
         return {"name": name, "status": "no_result", "config_change": change}
     diagnostics = dict(result.get("event_diagnostics") or {})
     ratios = dict(diagnostics.get("ratios") or {})
+    add_by_role = _int_dict(diagnostics.get("add_by_role"))
+    add_by_side = _int_dict(diagnostics.get("add_by_side"))
     return {
         "name": name,
         "status": "ok",
@@ -322,6 +528,12 @@ def _summarize_result(name: str, change: dict[str, Any], result: dict[str, Any] 
         "trade_like_events": _safe_int(result.get("trade_like_events")),
         "add_events": _safe_int(diagnostics.get("add_events")),
         "remove_events": _safe_int(diagnostics.get("remove_events")),
+        "add_by_role": add_by_role,
+        "add_by_side": add_by_side,
+        "probe_adds": _safe_int(add_by_role.get("probe")),
+        "base_adds": _safe_int(add_by_role.get("base")),
+        "battle_adds": _safe_int(add_by_role.get("battle")),
+        "chase_adds": _safe_int(add_by_role.get("chase")),
         "turnover_events_per_add": _safe_float(ratios.get("turnover_events_per_add")),
         "probe_add_per_add": _safe_float(ratios.get("probe_add_per_add")),
         "one_way_forced_trim_per_add": _safe_float(ratios.get("one_way_forced_trim_per_add")),
@@ -336,19 +548,43 @@ def _with_deltas(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     base_return = _safe_float(base.get("total_return_pct"))
     base_dd = _safe_float(base.get("max_drawdown_pct"))
     base_adds = _safe_int(base.get("add_events"))
+    base_trade_like = _safe_int(base.get("trade_like_events"))
+    base_add_by_role = dict(base.get("add_by_role") or {})
+    base_probe_adds = _safe_int(base.get("probe_adds"))
+    base_role_diagnostics_available = bool(base_add_by_role)
     rows: list[dict[str, Any]] = []
     for item in candidates:
         row = dict(item)
         if row.get("status") == "ok":
+            row_add_by_role = dict(row.get("add_by_role") or {})
+            role_diagnostics_available = base_role_diagnostics_available and bool(row_add_by_role)
+            probe_add_delta = _safe_int(row.get("probe_adds")) - base_probe_adds
+            add_events_delta = _safe_int(row.get("add_events")) - base_adds
+            trade_like_events_delta = _safe_int(row.get("trade_like_events")) - base_trade_like
             row["delta_vs_base"] = {
                 "return_pct": round(_safe_float(row.get("total_return_pct")) - base_return, 4),
                 "max_drawdown_pct": round(_safe_float(row.get("max_drawdown_pct")) - base_dd, 4),
-                "add_events": _safe_int(row.get("add_events")) - base_adds,
+                "add_events": add_events_delta,
+                "trade_like_events": trade_like_events_delta,
+                "probe_adds": probe_add_delta,
             }
             delta = dict(row["delta_vs_base"])
+            activity_contract = {
+                "role_diagnostics_available": role_diagnostics_available,
+                "add_events_delta": add_events_delta,
+                "trade_like_events_delta": trade_like_events_delta,
+                "probe_add_delta": probe_add_delta,
+                "total_add_activity_increased": add_events_delta > 0,
+                "trade_like_activity_not_regressed": trade_like_events_delta >= 0,
+                "probe_activity_not_regressed": (not role_diagnostics_available) or probe_add_delta >= 0,
+                "signal_sparsity_fix_candidate": add_events_delta > 0
+                and trade_like_events_delta >= 0
+                and ((not role_diagnostics_available) or probe_add_delta >= 0),
+            }
+            row["activity_non_regression_contract"] = activity_contract
             row["smoke_decision"] = (
                 "promote_to_full_walk_forward_evidence_probe_candidate"
-                if _safe_int(delta.get("add_events")) > 0
+                if activity_contract["signal_sparsity_fix_candidate"]
                 and _safe_float(delta.get("max_drawdown_pct")) <= 3.0
                 and _safe_float(delta.get("return_pct")) >= -5.0
                 else "reject_or_keep_for_manual_review"

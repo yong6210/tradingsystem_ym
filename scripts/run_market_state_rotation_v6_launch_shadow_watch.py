@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shlex
 import subprocess
@@ -20,6 +21,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from scripts.run_market_state_rotation_v6_evidence_cycle import (
     DEFAULT_CANARY_RISK_CAPS_PATH,
+    DEFAULT_ENTRY_PROBE_FULL_WALK_FORWARD_GATE_REPORT,
     DEFAULT_HISTORICAL_LIFECYCLE_REPLAY_SOURCE,
     DEFAULT_HISTORICAL_REPLAY_SOURCE,
     DEFAULT_MANUAL_EVIDENCE,
@@ -39,6 +41,9 @@ from scripts.run_market_state_rotation_v6_quote_shadow_audit import (
     _load_jsonl,
     build_quote_shadow_audit_report,
 )
+from scripts.complete_market_state_rotation_v6_operator_review_decision import (
+    _draft_metadata_quality as _operator_review_completion_draft_metadata_quality,
+)
 
 
 DEFAULT_REPORT_DIR = "reports/operations/market_state_rotation_v6_launch_shadow_watch"
@@ -46,6 +51,33 @@ DEFAULT_EVIDENCE_REPORT_ROOT = "reports/validation/diagnostics"
 DEFAULT_MARKET_DATA_CACHE_DIR = "reports/validation/btc_flip_rotation_search/cache"
 DEFAULT_MARKET_DATA_BASE_URL = "https://fapi.binance.com"
 DEFAULT_MARKET_DATA_REFRESH_DAYS = 180
+PAPER_REHEARSAL_FAST_SIGNAL_MONITOR_MINUTES = 5.0
+DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS = 30
+DEFAULT_OPERATOR_REVIEW_MIN_EVIDENCE_ANCHORS = 1
+DEFAULT_OPERATOR_REVIEW_MAX_FUTURE_MINUTES = 5.0
+GENERIC_OPERATOR_REVIEW_EVIDENCE_ANCHOR_VALUES = {
+    "accepted",
+    "candidate",
+    "live",
+    "operator",
+    "paper",
+    "proxy",
+    "rejected",
+    "report",
+    "review",
+}
+OPERATOR_REVIEW_EVIDENCE_ANCHOR_KEYS = (
+    "candidate_recipe_id",
+    "recipe_id",
+    "review_packet_fingerprint",
+    "overfit_review_packet_fingerprint",
+    "lineage_review_fingerprint",
+    "review_packet_summary",
+    "candidate_report",
+    "proxy_audit_report",
+    "conditional_overfit_holdout_audit_report",
+    "source_promotion_gate_report",
+)
 KST = timezone(timedelta(hours=9))
 
 
@@ -67,6 +99,11 @@ def _read_json(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _fingerprint_payload(value: Any) -> str:
+    normalized = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _command_display(argv: list[str]) -> str:
@@ -145,16 +182,105 @@ def _refresh_runtime_market_data_cache(*, evidence_root: Path, generated_at: dat
 def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
     latest = dict(payload.get("latest_run") or {})
     launch = dict(latest.get("launch_readiness") or {})
+    launch_paper_only = dict(launch.get("paper_only_rehearsal") or {})
     next_blocker = dict(launch.get("next_blocker") or {})
     launch_components = dict(launch.get("component_readiness") or {})
     launch_substitution = dict(launch.get("substitution_matrix") or {})
     launch_resolution = dict(launch.get("resolution_matrix") or {})
     microstructure_substitution = dict(launch_substitution.get("microstructure_time_coverage") or {})
     progress = dict(payload.get("progress") or {})
+    latest_launch_state = dict(payload.get("latest_launch_state") or {})
+    launch_shadow_watch_brief = dict(payload.get("launch_shadow_watch_brief") or {})
+    brief_runtime = dict(launch_shadow_watch_brief.get("runtime") or {})
+    brief_fresh_signal = dict(launch_shadow_watch_brief.get("fresh_signal") or {})
+    brief_paper_apply = dict(launch_shadow_watch_brief.get("paper_apply") or {})
+    brief_signal_monitor = dict(launch_shadow_watch_brief.get("signal_monitor") or {})
+    brief_actionability = dict(launch_shadow_watch_brief.get("actionability") or {})
+    brief_operator_next = dict(launch_shadow_watch_brief.get("operator_next_actions") or {})
+    brief_manual_batch = dict(brief_operator_next.get("manual_batch") or {})
+    brief_primary_batch_step = dict(brief_manual_batch.get("primary_next_step") or {})
+    brief_primary_batch_command_options = list(
+        brief_primary_batch_step.get("decision_command_options") or []
+    )
+    brief_primary_accept_command = next(
+        (
+            dict(option)
+            for option in brief_primary_batch_command_options
+            if dict(option).get("decision") == "accept"
+        ),
+        {},
+    )
+    brief_primary_reject_command = next(
+        (
+            dict(option)
+            for option in brief_primary_batch_command_options
+            if dict(option).get("decision") == "reject"
+        ),
+        {},
+    )
+    brief_primary_accept_safety = dict(
+        brief_primary_accept_command.get("command_safety_summary") or {}
+    )
+    brief_primary_reject_safety = dict(
+        brief_primary_reject_command.get("command_safety_summary") or {}
+    )
+    brief_primary_input_contract = dict(
+        brief_primary_batch_step.get("operator_input_contract")
+        or brief_manual_batch.get("operator_input_contract")
+        or {}
+    )
+    brief_manual_batch_command_rollup = dict(
+        brief_manual_batch.get("command_safety_rollup") or {}
+    )
+    brief_manual_batch_input_rollup = dict(
+        brief_manual_batch.get("operator_input_rollup") or {}
+    )
+    brief_manual_batch_execution_checklist = dict(
+        brief_manual_batch.get("operator_execution_checklist") or {}
+    )
+    brief_manual_batch_review_file_rollup = dict(
+        brief_manual_batch.get("review_file_rollup") or {}
+    )
+    brief_placeholder_guides = [
+        dict(item)
+        for item in list(
+            brief_manual_batch_input_rollup.get("placeholder_resolution_guide") or []
+        )
+    ]
+    brief_reviewer_placeholder_guide = next(
+        (
+            item
+            for item in brief_placeholder_guides
+            if item.get("input_type") == "reviewer"
+        ),
+        {},
+    )
+    brief_accept_rationale_placeholder_guide = next(
+        (
+            item
+            for item in brief_placeholder_guides
+            if item.get("input_type") == "accept_rationale"
+        ),
+        {},
+    )
+    brief_reject_rationale_placeholder_guide = next(
+        (
+            item
+            for item in brief_placeholder_guides
+            if item.get("input_type") == "reject_or_hold_rationale"
+        ),
+        {},
+    )
+    brief_unlock_plan = dict(launch_shadow_watch_brief.get("dependency_unlock_plan") or {})
+    brief_safety_authority = dict(launch_shadow_watch_brief.get("safety_authority") or {})
+    quote_progress = dict(payload.get("quote_progress") or {})
+    fresh_signal_status = dict(payload.get("fresh_signal_status") or payload.get("fresh_signal") or {})
+    paper_apply_status = dict(payload.get("paper_apply_status") or payload.get("paper_apply") or {})
     runtime_progress = dict(payload.get("runtime_progress") or {})
     target_observation_status = dict(payload.get("target_observation_status") or {})
     continuity = dict(payload.get("watch_continuity") or {})
     signal_monitor_alignment = dict(payload.get("signal_monitor_cadence_alignment") or {})
+    signal_monitor = dict(payload.get("signal_monitor") or {})
     risk_caps = dict(payload.get("canary_risk_caps_config") or {})
     operator_handoff = dict(payload.get("operator_handoff") or {})
     operator_packet = dict(operator_handoff.get("paper_apply_operator_packet") or {})
@@ -162,6 +288,7 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
     operator_packet_command_safety = dict(operator_packet.get("command_safety") or {})
     operator_packet_pre_apply_evidence = dict(operator_packet.get("pre_apply_evidence_report_status") or {})
     execution_parity_eta = dict(operator_handoff.get("execution_parity_eta_plan") or {})
+    execution_parity_status = dict(payload.get("execution_parity_status_summary") or {})
     eta_scenarios = dict(execution_parity_eta.get("eta_scenarios") or {})
     eta_all_events = dict(eta_scenarios.get("all_creditable_events") or {})
     eta_add_only = dict(eta_scenarios.get("conservative_add_only") or {})
@@ -169,12 +296,202 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
     promotion_gate = dict(payload.get("meta_router_promotion_gate") or {})
     promotion_readiness = dict(promotion_gate.get("readiness") or {})
     promotion_candidate = dict(promotion_gate.get("candidate") or {})
+    promotion_execution_audit = dict(promotion_candidate.get("execution_change_audit") or {})
+    promotion_overfit_audit = dict(
+        promotion_candidate.get("overfit_audit") or promotion_gate.get("overfit_audit") or {}
+    )
+    promotion_conditional_holdout = dict(
+        promotion_gate.get("conditional_overfit_holdout_audit") or {}
+    )
+    promotion_conditional_overfit_review = dict(
+        promotion_gate.get("conditional_overfit_operator_review") or {}
+    )
+    promotion_conditional_overfit_review_operator = dict(
+        promotion_conditional_overfit_review.get("operator_review") or {}
+    )
+    promotion_conditional_overfit_review_template = dict(
+        promotion_conditional_overfit_review.get("operator_review_template") or {}
+    )
+    promotion_conditional_overfit_review_artifacts = dict(
+        promotion_gate.get("conditional_overfit_operator_review_artifacts") or {}
+    )
+    promotion_conditional_overfit_review_manifest = dict(
+        promotion_conditional_overfit_review_artifacts.get("manifest") or {}
+    )
+    promotion_conditional_overfit_review_artifact_template = dict(
+        promotion_conditional_overfit_review_artifacts.get("template") or {}
+    )
+    promotion_conditional_overfit_review_artifact_skeleton = dict(
+        promotion_conditional_overfit_review_artifacts.get("skeleton") or {}
+    )
+    promotion_conditional_holdout_tail = dict(
+        promotion_conditional_holdout.get("tail_holdout_proxy") or {}
+    )
+    promotion_compare_summary = dict(promotion_gate.get("compare_summary") or {})
+    promotion_risk_tradeoff = dict(
+        promotion_compare_summary.get("best_risk_compression_tradeoff") or {}
+    )
+    promotion_risk_adjusted = dict(
+        promotion_compare_summary.get("best_risk_adjusted_compression_candidate") or {}
+    )
+    promotion_switch_policy = dict(
+        promotion_gate.get("candidate_switch_policy")
+        or promotion_compare_summary.get("candidate_switch_policy")
+        or {}
+    )
+    promotion_defensive_lineage_review = dict(
+        promotion_switch_policy.get("defensive_lineage_review") or {}
+    )
+    promotion_defensive_operator_review = dict(
+        promotion_defensive_lineage_review.get("operator_review") or {}
+    )
+    promotion_defensive_operator_template = dict(
+        promotion_defensive_lineage_review.get("operator_review_template") or {}
+    )
+    promotion_lineage_artifacts = dict(promotion_gate.get("operator_lineage_review_artifacts") or {})
+    promotion_lineage_artifact_manifest = dict(promotion_lineage_artifacts.get("manifest") or {})
+    promotion_lineage_artifact_template = dict(promotion_lineage_artifacts.get("template") or {})
+    promotion_lineage_artifact_skeleton = dict(promotion_lineage_artifacts.get("skeleton") or {})
+    promotion_readiness_alignment = dict(promotion_gate.get("readiness_candidate_alignment") or {})
     blocker_plan = list(payload.get("blocker_resolution_plan") or [])
+    unresolved_problem_register = list(payload.get("unresolved_problem_register") or [])
+    launch_blocker_summary = dict(payload.get("launch_blocker_priority_summary") or {})
+    remaining_work_closure = dict(payload.get("remaining_work_closure_summary") or {})
+    actionability_tracks = dict(
+        payload.get("actionability_tracks")
+        or remaining_work_closure.get("actionability_tracks")
+        or dict(remaining_work_closure.get("actionability_partition") or {}).get("tracks")
+        or {}
+    )
+    validation_redesign_runbook = dict(payload.get("validation_redesign_runbook") or {})
+    candidate_redesign_work_order = dict(
+        validation_redesign_runbook.get("candidate_redesign_work_order") or {}
+    )
+    candidate_redesign_constraints = dict(
+        candidate_redesign_work_order.get("next_candidate_design_constraints") or {}
+    )
+    strict_activity_revalidation_summary = dict(
+        payload.get("strict_activity_revalidation_summary")
+        or validation_redesign_runbook.get("strict_activity_revalidation_summary")
+        or {}
+    )
+    closest_strict_activity_candidate = dict(
+        strict_activity_revalidation_summary.get("closest_activity_contract_candidate")
+        or {}
+    )
+    brief_validation_redesign = dict(
+        launch_shadow_watch_brief.get("validation_redesign_runbook") or {}
+    )
+    brief_strict_activity_revalidation = dict(
+        brief_validation_redesign.get("strict_activity_revalidation") or {}
+    )
+    first_signal_runbook = dict(payload.get("first_fresh_signal_paper_apply_runbook") or {})
+    operator_review_aid = dict(payload.get("operator_review_decision_aid") or {})
+    operator_review_resolution = dict(payload.get("operator_review_resolution_plan") or {})
+    operator_action_digest = dict(payload.get("operator_action_digest") or {})
+    gate_substitution_digest = dict(payload.get("gate_substitution_digest") or {})
+    gate_eta_digest = dict(payload.get("gate_eta_digest") or {})
+    launch_progress_scorecard = dict(payload.get("launch_progress_scorecard") or {})
+    launch_progress_lanes = dict(launch_progress_scorecard.get("lanes") or {})
+    launch_critical_path = dict(launch_progress_scorecard.get("critical_path_scorecard") or {})
+    launch_paper_apply_path = dict(launch_critical_path.get("paper_apply_path") or {})
+    launch_parallel_path = dict(launch_critical_path.get("parallel_path") or {})
+    launch_execution_matrix = dict(payload.get("launch_execution_matrix") or {})
+    launch_execution_primary_step = dict(launch_execution_matrix.get("primary_next_step") or {})
+    launch_execution_effective_primary_step = dict(
+        launch_execution_matrix.get("primary_effective_next_step") or {}
+    )
+    launch_execution_current_signal_wait = next(
+        (
+            dict(item)
+            for item in list(launch_execution_matrix.get("wait_gates") or [])
+            if dict(item).get("target_gate") == "current_fresh_signal"
+        ),
+        {},
+    )
+    launch_execution_primary_manual_input = dict(
+        launch_execution_matrix.get("primary_manual_input_step") or {}
+    )
+    launch_execution_primary_manual_contract = dict(
+        launch_execution_matrix.get("primary_manual_input_contract") or {}
+    )
+    launch_execution_primary_manual_prompt = dict(
+        launch_execution_matrix.get("primary_manual_prompt_card") or {}
+    )
+    launch_execution_primary_rationale_gate = dict(
+        launch_execution_primary_manual_prompt.get("rationale_quality_gate") or {}
+    )
+    launch_execution_primary_manual_form = dict(
+        launch_execution_matrix.get("primary_manual_input_form") or {}
+    )
+    launch_execution_primary_form_decision = dict(
+        launch_execution_primary_manual_form.get("decision_field") or {}
+    )
+    launch_execution_primary_form_default_alignment = dict(
+        launch_execution_primary_form_decision.get("safe_default_alignment") or {}
+    )
+    launch_execution_primary_form_rationale = dict(
+        launch_execution_primary_manual_form.get("rationale_field") or {}
+    )
+    launch_progress_runtime = dict(launch_progress_lanes.get("shadow_runtime") or {})
+    launch_progress_quote = dict(launch_progress_lanes.get("quote_microstructure") or {})
+    launch_progress_operator = dict(launch_progress_lanes.get("operator_review") or {})
+    launch_progress_parity = dict(launch_progress_lanes.get("execution_parity") or {})
+    launch_progress_fresh_signal = dict(launch_progress_lanes.get("fresh_signal") or {})
+    daily_quote_checkpoint = dict(payload.get("daily_quote_checkpoint_summary") or {})
+    next_material_progress = dict(payload.get("next_material_progress_plan") or {})
+    primary_material_event = dict(next_material_progress.get("primary_next_event") or {})
+    operator_work_queue = dict(payload.get("operator_work_queue") or {})
+    operator_review_handoff = dict(payload.get("operator_review_handoff_summary") or {})
+    primary_review_handoff = dict(operator_review_handoff.get("primary_ready_review") or {})
+    primary_operator_decision_packet = dict(operator_review_handoff.get("primary_operator_decision_packet") or {})
+    primary_automation_work = dict(operator_work_queue.get("primary_automation_action") or {})
+    primary_effective_automation_work = dict(
+        operator_work_queue.get("primary_effective_automation_action") or {}
+    )
+    primary_covered_automation_work = dict(
+        operator_work_queue.get("primary_covered_automation_action") or {}
+    )
+    primary_operator_review_work = dict(operator_work_queue.get("primary_operator_review_action") or {})
+    primary_operator_review_wait_work = dict(
+        operator_work_queue.get("primary_operator_review_wait_action") or {}
+    )
+    primary_startable_wait_work = dict(operator_work_queue.get("primary_startable_wait_action") or {})
+    scheduled_projection = dict(payload.get("scheduled_command_projection") or {})
+    command_consistency = dict(payload.get("command_consistency_audit") or {})
+    signal_command_parity = dict(command_consistency.get("signal_monitor_command_parity") or {})
+    shadow_runtime_command_parity = dict(
+        command_consistency.get("shadow_runtime_command_parity") or {}
+    )
+    operator_command_parity = dict(command_consistency.get("operator_review_command_parity") or {})
+    no_signal_resolution = dict(payload.get("no_signal_resolution_summary") or {})
+    fresh_signal_diag = dict(payload.get("fresh_signal_blocker_diagnostics") or {})
+    fresh_signal_reason_classes = dict(fresh_signal_diag.get("reason_class_counts") or {})
+    fresh_signal_top_reasons = list(fresh_signal_diag.get("top_no_trade_reasons") or [])
+    fresh_signal_top_reason = dict(fresh_signal_top_reasons[0] if fresh_signal_top_reasons else {})
+    fresh_signal_dominant_context = dict(fresh_signal_diag.get("dominant_no_trade_context") or {})
+    fresh_signal_experiments = list(fresh_signal_diag.get("safe_experiment_backlog") or [])
+    fresh_signal_primary_experiment = dict(fresh_signal_experiments[0] if fresh_signal_experiments else {})
+    fresh_signal_interpretation = dict(fresh_signal_diag.get("operator_interpretation") or {})
+    fresh_signal_resolution = dict(fresh_signal_diag.get("fresh_signal_resolution_plan") or {})
+    fresh_signal_resolution_top_reason = dict(fresh_signal_resolution.get("top_no_trade_reason") or {})
     safe_next_action = dict(payload.get("safe_next_action_plan") or {})
     primary_action = dict(safe_next_action.get("primary_action") or {})
+    primary_next_add_plan = dict(primary_action.get("next_creditable_add_signal_plan") or {})
     scheduled_action = dict(safe_next_action.get("next_scheduled_action") or {})
     startable_wait_action = dict(safe_next_action.get("next_startable_wait_action") or {})
     deferred_wait_action = dict(safe_next_action.get("next_deferred_wait_action") or {})
+    coordination_plan = dict(safe_next_action.get("coordination_plan") or {})
+    safe_paper_wait_action = next(
+        (
+            dict(item)
+            for item in list(safe_next_action.get("actions") or [])
+            if str(dict(item).get("action_type") or "").startswith("paper_bridge_wait_")
+        ),
+        {},
+    )
+    safe_paper_packet = dict(safe_paper_wait_action.get("paper_apply_operator_packet") or {})
+    safe_paper_packet_safety = dict(safe_paper_packet.get("command_safety") or {})
     safety = dict(latest.get("launch_safety_controls") or {})
     preflight = dict(latest.get("quote_cadence_preflight") or {})
     pre_run_wait = dict(payload.get("pre_run_quote_window_wait_plan") or {})
@@ -203,6 +520,24 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- signal_monitor_cadence_alignment_warning: `{signal_monitor_alignment.get('warning')}`",
         f"- signal_monitor_cadence_gap_minutes: `{signal_monitor_alignment.get('gap_minutes')}`",
         f"- signal_monitor_cadence_recommended_minutes: `{signal_monitor_alignment.get('recommended_monitor_interval_minutes')}`",
+        f"- signal_monitor_command_source: `{signal_monitor.get('command_source')}`",
+        f"- signal_monitor_command: `{signal_monitor.get('command')}`",
+        f"- signal_monitor_raw_command_report_dir: `{signal_monitor.get('raw_command_report_dir')}`",
+        f"- signal_monitor_safe_next_report_dir: `{signal_monitor.get('safe_next_action_report_dir')}`",
+        f"- signal_monitor_report_dir_retimestampted_to_safe_next: `{signal_monitor.get('report_dir_retimestampted_to_safe_next_action')}`",
+        f"- signal_monitor_next_monitor_after_source: `{signal_monitor.get('next_monitor_after_source')}`",
+        f"- signal_monitor_next_monitor_after_kst: `{signal_monitor.get('next_monitor_after_kst')}`",
+        f"- signal_monitor_raw_next_monitor_after_kst: `{signal_monitor.get('raw_next_monitor_after_kst')}`",
+        f"- signal_monitor_covered_next_recheck_after_kst: `{signal_monitor.get('covered_next_recheck_after_kst')}`",
+        f"- signal_monitor_next_monitor_retimestampted_after_current_iteration: `{signal_monitor.get('next_monitor_retimestampted_after_current_iteration')}`",
+        f"- safe_next_primary_action_window_status: `{safe_next_action.get('primary_action_window_status')}`",
+        f"- safe_next_primary_action_effective_window_status: `{safe_next_action.get('primary_action_effective_window_status')}`",
+        f"- safe_next_primary_action_due_now: `{safe_next_action.get('primary_action_due_now')}`",
+        f"- safe_next_primary_action_effective_due_now: `{safe_next_action.get('primary_action_effective_due_now')}`",
+        f"- safe_next_primary_action_covered_due_by_current_iteration: `{safe_next_action.get('primary_action_covered_due_by_current_iteration')}`",
+        f"- safe_next_primary_action_overdue_minutes: `{safe_next_action.get('primary_action_overdue_minutes')}`",
+        f"- safe_next_covered_due_safe_action_count: `{safe_next_action.get('covered_due_safe_action_count')}`",
+        f"- safe_next_uncovered_due_safe_action_count: `{safe_next_action.get('uncovered_due_safe_action_count')}`",
         f"- pre_run_quote_window_wait_status: `{pre_run_wait.get('status')}`",
         f"- pre_run_quote_window_should_sleep: `{pre_run_wait.get('should_sleep')}`",
         f"- pre_run_quote_window_wait_seconds: `{pre_run_wait.get('wait_seconds')}`",
@@ -228,6 +563,145 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- evidence_pre_run_market_data_refresh_status: `{evidence_pre_run_refresh.get('status')}`",
         f"- evidence_pre_run_market_data_refresh_returncode: `{evidence_pre_run_refresh.get('returncode')}`",
         f"- completed_iterations: `{payload.get('completed_iterations')}`",
+        f"- launch_shadow_watch_brief_status: `{launch_shadow_watch_brief.get('status')}`",
+        f"- launch_shadow_watch_brief_generated_at_utc: `{launch_shadow_watch_brief.get('generated_at_utc')}`",
+        f"- launch_shadow_watch_brief_generated_at_kst: `{launch_shadow_watch_brief.get('generated_at_kst')}`",
+        f"- launch_shadow_watch_brief_launch_status: `{launch_shadow_watch_brief.get('launch_status')}`",
+        f"- launch_shadow_watch_brief_next_blocker: `{launch_shadow_watch_brief.get('next_blocker')}`",
+        f"- launch_shadow_watch_brief_runtime_remaining_hours: `{brief_runtime.get('remaining_hours')}`",
+        f"- launch_shadow_watch_brief_runtime_progress_pct: `{brief_runtime.get('progress_pct')}`",
+        f"- launch_shadow_watch_brief_fresh_signal_available: `{brief_fresh_signal.get('available')}`",
+        f"- launch_shadow_watch_brief_signal_cause_partition: `{brief_fresh_signal.get('cause_partition_status')}`",
+        f"- launch_shadow_watch_brief_signal_cause_interpretation: `{brief_fresh_signal.get('cause_partition_interpretation')}`",
+        f"- launch_shadow_watch_brief_signal_absence_primary_cause: `{brief_fresh_signal.get('signal_absence_primary_cause')}`",
+        f"- launch_shadow_watch_brief_signal_absence_class: `{brief_fresh_signal.get('signal_absence_class')}`",
+        f"- launch_shadow_watch_brief_signal_pipeline_issue_suspected: `{brief_fresh_signal.get('signal_pipeline_issue_suspected')}`",
+        f"- no_signal_resolution_status: `{no_signal_resolution.get('status')}`",
+        f"- no_signal_resolution_root_cause: `{no_signal_resolution.get('root_cause')}`",
+        f"- no_signal_resolution_safe_next_action: `{no_signal_resolution.get('safe_next_action')}`",
+        f"- no_signal_resolution_required_trade_like_delta_min: `{no_signal_resolution.get('required_next_candidate_trade_like_events_delta_min')}`",
+        f"- no_signal_resolution_dominant_probe_quality_blocker: `{no_signal_resolution.get('dominant_probe_quality_blocker')}`",
+        f"- no_signal_resolution_seed_context_count: `{no_signal_resolution.get('candidate_design_seed_context_count')}`",
+        f"- no_signal_resolution_blueprint_status: `{no_signal_resolution.get('candidate_design_blueprint_status')}`",
+        f"- no_signal_resolution_blueprint_count: `{no_signal_resolution.get('candidate_design_blueprint_count')}`",
+        f"- no_signal_resolution_closest_rejected_candidate: `{no_signal_resolution.get('closest_rejected_candidate')}`",
+        f"- launch_shadow_watch_brief_paper_apply_available: `{brief_paper_apply.get('available')}`",
+        f"- launch_shadow_watch_brief_paper_apply_allowed_now: `{brief_paper_apply.get('allowed_now')}`",
+        f"- launch_shadow_watch_brief_signal_monitor_interval_seconds: `{brief_signal_monitor.get('interval_seconds')}`",
+        f"- launch_shadow_watch_brief_signal_monitor_capped: `{brief_signal_monitor.get('capped_to_fresh_signal_window')}`",
+        f"- launch_shadow_watch_brief_signal_monitor_next_utc: `{brief_signal_monitor.get('next_monitor_after_utc')}`",
+        f"- launch_shadow_watch_brief_signal_monitor_next_kst: `{brief_signal_monitor.get('next_monitor_after_kst')}`",
+        f"- launch_shadow_watch_brief_dependency_aware_status: `{brief_actionability.get('dependency_aware_status')}`",
+        f"- launch_shadow_watch_brief_operator_next_status: `{brief_operator_next.get('status')}`",
+        f"- launch_shadow_watch_brief_operator_primary_next: `{brief_operator_next.get('primary_next')}`",
+        f"- launch_shadow_watch_brief_operator_manual_count: `{brief_operator_next.get('manual_decision_count')}`",
+        f"- launch_shadow_watch_brief_operator_primary_manual_gate: `{brief_operator_next.get('primary_manual_gate')}`",
+        f"- launch_shadow_watch_brief_manual_batch_status: `{brief_manual_batch.get('status')}`",
+        f"- launch_shadow_watch_brief_manual_batch_primary_step: `{brief_primary_batch_step.get('step')}`",
+        f"- launch_shadow_watch_brief_manual_batch_primary_gate: `{brief_primary_batch_step.get('target_gate')}`",
+        f"- launch_shadow_watch_brief_manual_batch_safe_default_decision: `{brief_primary_batch_step.get('safe_default_decision')}`",
+        f"- launch_shadow_watch_brief_manual_batch_decision_command_count: `{len(brief_primary_batch_command_options)}`",
+        f"- launch_shadow_watch_brief_manual_batch_safe_default_dry_run_command: `{brief_primary_batch_step.get('safe_default_dry_run_command')}`",
+        f"- launch_shadow_watch_brief_manual_batch_input_contract_status: `{brief_primary_input_contract.get('status')}`",
+        f"- launch_shadow_watch_brief_manual_batch_unresolved_placeholder_count: `{brief_primary_input_contract.get('unresolved_placeholder_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_safe_default_dry_run_executable_now: `{brief_primary_input_contract.get('safe_default_dry_run_command_executable_now')}`",
+        f"- launch_shadow_watch_brief_manual_batch_write_allowed_now: `{brief_primary_input_contract.get('write_allowed_now')}`",
+        f"- launch_shadow_watch_brief_manual_batch_accept_command_safety: `{brief_primary_accept_safety.get('status')}`",
+        f"- launch_shadow_watch_brief_manual_batch_accept_live_flag_present: `{brief_primary_accept_safety.get('live_flag_present')}`",
+        f"- launch_shadow_watch_brief_manual_batch_accept_structural_blockers: `{brief_primary_accept_safety.get('structural_blockers')}`",
+        f"- launch_shadow_watch_brief_manual_batch_reject_command_safety: `{brief_primary_reject_safety.get('status')}`",
+        f"- launch_shadow_watch_brief_manual_batch_reject_live_flag_present: `{brief_primary_reject_safety.get('live_flag_present')}`",
+        f"- launch_shadow_watch_brief_manual_batch_reject_structural_blockers: `{brief_primary_reject_safety.get('structural_blockers')}`",
+        f"- launch_shadow_watch_brief_manual_batch_command_safety_status: `{brief_manual_batch_command_rollup.get('status')}`",
+        f"- launch_shadow_watch_brief_manual_batch_next_safety_action: `{brief_manual_batch_command_rollup.get('next_safety_action')}`",
+        f"- launch_shadow_watch_brief_manual_batch_command_structural_blocker_count: `{brief_manual_batch_command_rollup.get('structural_blocker_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_command_input_blocker_count: `{brief_manual_batch_command_rollup.get('operator_input_blocker_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_command_live_flag_count: `{brief_manual_batch_command_rollup.get('live_flag_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_command_ready_option_count: `{brief_manual_batch_command_rollup.get('ready_for_manual_dry_run_option_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_effective_ready_option_count: `{brief_manual_batch_command_rollup.get('effective_ready_for_manual_dry_run_option_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_effective_next_safety_action: `{brief_manual_batch_command_rollup.get('effective_next_safety_action')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_blocks_dry_run: `{brief_manual_batch_command_rollup.get('review_file_blocks_manual_dry_run')}`",
+        f"- launch_shadow_watch_brief_manual_batch_operator_input_status: `{brief_manual_batch_input_rollup.get('status')}`",
+        f"- launch_shadow_watch_brief_manual_batch_next_operator_action: `{brief_manual_batch_input_rollup.get('next_operator_action')}`",
+        f"- launch_shadow_watch_brief_manual_batch_unique_placeholder_count: `{brief_manual_batch_input_rollup.get('unique_placeholder_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_unique_placeholder_scope: `{brief_manual_batch_input_rollup.get('unique_placeholder_count_scope')}`",
+        f"- launch_shadow_watch_brief_manual_batch_selected_decision_placeholder_scope: `{brief_manual_batch_input_rollup.get('selected_decision_placeholder_count_scope')}`",
+        f"- launch_shadow_watch_brief_manual_batch_primary_decision_placeholder_counts: `{brief_manual_batch_input_rollup.get('primary_decision_placeholder_count_by_decision')}`",
+        f"- launch_shadow_watch_brief_manual_batch_primary_safe_default_placeholder_count: `{brief_manual_batch_input_rollup.get('primary_safe_default_placeholder_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_selected_decision_min_placeholder_count: `{brief_manual_batch_input_rollup.get('selected_decision_min_placeholder_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_operator_only_needs_one_decision_rationale: `{brief_manual_batch_input_rollup.get('operator_only_needs_one_decision_rationale')}`",
+        f"- launch_shadow_watch_brief_manual_batch_common_placeholders: `{brief_manual_batch_input_rollup.get('common_placeholder_tokens')}`",
+        f"- launch_shadow_watch_brief_manual_batch_accept_placeholder_count: `{len(brief_manual_batch_input_rollup.get('accept_placeholder_tokens') or [])}`",
+        f"- launch_shadow_watch_brief_manual_batch_reject_placeholder_count: `{len(brief_manual_batch_input_rollup.get('reject_placeholder_tokens') or [])}`",
+        f"- launch_shadow_watch_brief_manual_batch_placeholder_guide_count: `{len(brief_placeholder_guides)}`",
+        f"- launch_shadow_watch_brief_manual_batch_reviewer_placeholder_rule: `{brief_reviewer_placeholder_guide.get('required_value_rule')}`",
+        f"- launch_shadow_watch_brief_manual_batch_accept_rationale_min_chars: `{brief_accept_rationale_placeholder_guide.get('minimum_rationale_chars')}`",
+        f"- launch_shadow_watch_brief_manual_batch_accept_rationale_min_anchors: `{brief_accept_rationale_placeholder_guide.get('minimum_evidence_anchors')}`",
+        f"- launch_shadow_watch_brief_manual_batch_reject_rationale_min_chars: `{brief_reject_rationale_placeholder_guide.get('minimum_rationale_chars')}`",
+        f"- launch_shadow_watch_brief_manual_batch_reject_rationale_min_anchors: `{brief_reject_rationale_placeholder_guide.get('minimum_evidence_anchors')}`",
+        f"- launch_shadow_watch_brief_manual_batch_execution_status: `{brief_manual_batch_execution_checklist.get('status')}`",
+        f"- launch_shadow_watch_brief_manual_batch_execution_current_step: `{brief_manual_batch_execution_checklist.get('current_step')}`",
+        f"- launch_shadow_watch_brief_manual_batch_execution_current_blocker: `{brief_manual_batch_execution_checklist.get('current_blocker')}`",
+        f"- launch_shadow_watch_brief_manual_batch_execution_step_count: `{len(brief_manual_batch_execution_checklist.get('steps') or [])}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_status: `{brief_manual_batch_review_file_rollup.get('status')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_next_action: `{brief_manual_batch_review_file_rollup.get('next_action')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_count: `{brief_manual_batch_review_file_rollup.get('file_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_blocked_count: `{brief_manual_batch_review_file_rollup.get('blocked_file_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_primary_blocked_report: `{brief_manual_batch_review_file_rollup.get('primary_blocked_review_report')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_template_count: `{brief_manual_batch_review_file_rollup.get('template_value_file_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_template_fields: `{brief_manual_batch_review_file_rollup.get('template_like_fields')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_template_scope: `{brief_manual_batch_review_file_rollup.get('template_like_fields_scope')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_cli_supplied_fields_pending: `{brief_manual_batch_review_file_rollup.get('completion_cli_supplied_fields_pending')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_cli_fixed_fields: `{brief_manual_batch_review_file_rollup.get('completion_cli_fixed_fields')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_cli_operator_placeholder_fields: `{brief_manual_batch_review_file_rollup.get('completion_cli_operator_placeholder_fields')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_cli_field_mapping: `{brief_manual_batch_review_file_rollup.get('completion_cli_field_mapping')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_draft_contract_failed_count: `{brief_manual_batch_review_file_rollup.get('draft_contract_failed_file_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_draft_contract_blockers: `{brief_manual_batch_review_file_rollup.get('draft_contract_blockers')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_primary_draft_contract_blockers: `{brief_manual_batch_review_file_rollup.get('primary_blocked_draft_contract_blockers')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_status_placeholder_failed_count: `{brief_manual_batch_review_file_rollup.get('status_placeholder_failed_file_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_primary_status_blockers: `{brief_manual_batch_review_file_rollup.get('primary_blocked_status_blockers')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_quality_failed_count: `{brief_manual_batch_review_file_rollup.get('quality_failed_file_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_rationale_quality_failed_count: `{brief_manual_batch_review_file_rollup.get('rationale_quality_failed_file_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_quality_blockers: `{brief_manual_batch_review_file_rollup.get('quality_blockers')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_primary_quality_blockers: `{brief_manual_batch_review_file_rollup.get('primary_blocked_quality_blockers')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_pending_quality_count: `{brief_manual_batch_review_file_rollup.get('quality_pending_basic_input_file_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_pending_rationale_quality_count: `{brief_manual_batch_review_file_rollup.get('rationale_quality_pending_basic_input_file_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_pending_quality_blockers: `{brief_manual_batch_review_file_rollup.get('pending_quality_blockers')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_primary_pending_quality_blockers: `{brief_manual_batch_review_file_rollup.get('primary_blocked_pending_quality_blockers')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_reviewed_at_quality_failed_count: `{brief_manual_batch_review_file_rollup.get('reviewed_at_quality_failed_file_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_reviewed_at_quality_blockers: `{brief_manual_batch_review_file_rollup.get('reviewed_at_quality_blockers')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_pending_reviewed_at_quality_count: `{brief_manual_batch_review_file_rollup.get('reviewed_at_quality_pending_basic_input_file_count')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_pending_reviewed_at_quality_blockers: `{brief_manual_batch_review_file_rollup.get('pending_reviewed_at_quality_blockers')}`",
+        f"- launch_shadow_watch_brief_manual_batch_review_file_primary_pending_reviewed_at_quality_blockers: `{brief_manual_batch_review_file_rollup.get('primary_blocked_pending_reviewed_at_quality_blockers')}`",
+        f"- launch_shadow_watch_brief_manual_batch_after_write_actions: `{brief_primary_batch_step.get('after_write_required_actions')}`",
+        f"- launch_shadow_watch_brief_operator_wait_card_count: `{len(brief_operator_next.get('wait_action_cards') or [])}`",
+        f"- launch_shadow_watch_brief_operator_dependency_card_count: `{len(brief_operator_next.get('dependency_blocked_cards') or [])}`",
+        f"- launch_shadow_watch_brief_primary_unlock_gate: `{brief_unlock_plan.get('primary_gate')}`",
+        f"- launch_shadow_watch_brief_authority_scope: `{brief_safety_authority.get('scope')}`",
+        f"- launch_shadow_watch_brief_live_order_allowed: `{brief_safety_authority.get('live_order_submission_allowed')}`",
+        f"- launch_shadow_watch_brief_order_submission_allowed: `{brief_safety_authority.get('order_submission_allowed')}`",
+        f"- launch_shadow_watch_brief_auto_decision_allowed: `{brief_safety_authority.get('auto_decision_allowed')}`",
+        f"- launch_shadow_watch_brief_auto_apply_allowed: `{brief_safety_authority.get('auto_apply_allowed')}`",
+        f"- launch_shadow_watch_brief_forbidden_action_count: `{brief_safety_authority.get('forbidden_action_count')}`",
+        f"- launch_shadow_watch_brief_live_violation_count: `{brief_safety_authority.get('live_violation_count')}`",
+        f"- launch_shadow_watch_brief_no_live_order_sent: `{launch_shadow_watch_brief.get('no_live_order_sent')}`",
+        f"- launch_shadow_watch_brief_strict_revalidation_status: `{brief_strict_activity_revalidation.get('status')}`",
+        f"- launch_shadow_watch_brief_strict_revalidation_report_count: `{brief_strict_activity_revalidation.get('report_count')}`",
+        f"- launch_shadow_watch_brief_strict_revalidation_blocked_count: `{brief_strict_activity_revalidation.get('blocked_count')}`",
+        f"- launch_shadow_watch_brief_strict_revalidation_passed_count: `{brief_strict_activity_revalidation.get('passed_count')}`",
+        f"- launch_shadow_watch_brief_strict_revalidation_legacy_promoted_blocked: `{brief_strict_activity_revalidation.get('legacy_promoted_reports_blocked')}`",
+        f"- latest_launch_state_status: `{latest_launch_state.get('status')}`",
+        f"- latest_launch_state_launch_status: `{latest_launch_state.get('launch_status')}`",
+        f"- latest_launch_state_next_blocker: `{latest_launch_state.get('next_blocker_gate')}`",
+        f"- latest_launch_state_fresh_signal_seen: `{fresh_signal_status.get('seen_during_watch')}`",
+        f"- latest_launch_state_paper_apply_seen: `{paper_apply_status.get('seen_during_watch')}`",
+        f"- latest_launch_state_paper_apply_allowed_now: `{paper_apply_status.get('allowed_now')}`",
+        f"- quote_progress_observed_latest: `{quote_progress.get('observed_latest')}`",
+        f"- quote_progress_observed_delta: `{quote_progress.get('observed_delta')}`",
+        f"- quote_progress_state: `{quote_progress.get('progress_state')}`",
+        f"- quote_progress_distinct_hours_latest: `{quote_progress.get('distinct_hours_latest')}`",
+        f"- quote_progress_distinct_hours_delta: `{quote_progress.get('distinct_hours_delta')}`",
+        f"- quote_progress_hour_state: `{quote_progress.get('hour_progress_state')}`",
         f"- launch_status: `{launch.get('status')}`",
         f"- launch_effective_research_status: `{launch.get('effective_research_status')}`",
         f"- launch_resolution_status: `{launch_resolution.get('status')}`",
@@ -241,17 +715,89 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- meta_router_promotion_decision: `{promotion_gate.get('promotion_decision')}`",
         f"- meta_router_promotion_next_blocker: `{promotion_gate.get('next_blocker')}`",
         f"- meta_router_promotion_stale: `{promotion_gate.get('stale')}`",
+        f"- meta_router_promotion_generated_at: `{promotion_gate.get('generated_at')}`",
         f"- meta_router_promotion_source: `{promotion_gate.get('source_report')}`",
+        f"- meta_router_promotion_expected_lineage_source: `{promotion_gate.get('expected_operator_lineage_source_report')}`",
+        f"- meta_router_input_operator_lineage_review_report: `{promotion_gate.get('input_operator_lineage_review_report')}`",
+        f"- meta_router_performance_upgrade_ready: `{promotion_gate.get('performance_upgrade_ready')}`",
+        f"- meta_router_performance_delta_status: `{promotion_gate.get('performance_delta_status')}`",
+        f"- meta_router_performance_upgrade_blockers: `{promotion_gate.get('performance_upgrade_blockers')}`",
+        f"- meta_router_overfit_audit_status: `{promotion_overfit_audit.get('status')}`",
+        f"- meta_router_overfit_blockers: `{promotion_gate.get('overfit_blockers')}`",
+        f"- meta_router_conditional_overfit_holdout_status: `{promotion_conditional_holdout.get('status')}`",
+        f"- meta_router_conditional_overfit_holdout_proxy_passed: `{promotion_conditional_holdout.get('proxy_passed')}`",
+        f"- meta_router_conditional_overfit_holdout_real_shadow_required: `{promotion_conditional_holdout.get('real_shadow_still_required')}`",
+        f"- meta_router_conditional_overfit_holdout_tail_delta_pct: `{promotion_conditional_holdout_tail.get('return_delta_pct')}`",
+        f"- meta_router_conditional_overfit_operator_review_status: `{promotion_conditional_overfit_review.get('status')}`",
+        f"- meta_router_conditional_overfit_operator_review_accepted_for_paper_only: `{promotion_conditional_overfit_review.get('accepted_for_paper_only')}`",
+        f"- meta_router_conditional_overfit_operator_review_blockers: `{promotion_conditional_overfit_review.get('blockers')}`",
+        f"- meta_router_conditional_overfit_operator_review_report_status: `{promotion_conditional_overfit_review_operator.get('status')}`",
+        f"- meta_router_conditional_overfit_operator_review_template_candidate: `{promotion_conditional_overfit_review_template.get('candidate_recipe_id')}`",
+        f"- meta_router_conditional_overfit_operator_review_template_fingerprint: `{promotion_conditional_overfit_review_template.get('review_packet_fingerprint')}`",
+        f"- meta_router_conditional_overfit_operator_review_template_report: `{promotion_gate.get('conditional_overfit_operator_review_template_report')}`",
+        f"- meta_router_conditional_overfit_operator_review_skeleton_report: `{promotion_gate.get('conditional_overfit_operator_review_skeleton_report')}`",
+        f"- meta_router_conditional_overfit_operator_review_artifact_status: `{promotion_conditional_overfit_review_artifacts.get('status')}`",
+        f"- meta_router_conditional_overfit_operator_review_artifact_blockers: `{promotion_conditional_overfit_review_artifacts.get('blockers')}`",
+        f"- meta_router_conditional_overfit_operator_review_artifact_manifest_algorithm: `{promotion_conditional_overfit_review_manifest.get('fingerprint_algorithm')}`",
+        f"- meta_router_conditional_overfit_operator_review_artifact_template_fingerprint: `{promotion_conditional_overfit_review_artifact_template.get('payload_fingerprint')}`",
+        f"- meta_router_conditional_overfit_operator_review_artifact_skeleton_fingerprint: `{promotion_conditional_overfit_review_artifact_skeleton.get('payload_fingerprint')}`",
+        f"- meta_router_compare_performance_upgrade_status: `{promotion_compare_summary.get('performance_upgrade_status')}`",
+        f"- meta_router_risk_compression_ready: `{promotion_gate.get('risk_compression_ready')}`",
+        f"- meta_router_risk_compression_blockers: `{promotion_gate.get('risk_compression_blockers')}`",
+        f"- meta_router_compare_risk_compression_status: `{promotion_compare_summary.get('risk_compression_status')}`",
+        f"- meta_router_compare_risk_compression_next_action: `{promotion_compare_summary.get('risk_compression_next_action')}`",
+        f"- meta_router_compare_best_risk_tradeoff: `{promotion_risk_tradeoff.get('recipe_id')}`",
+        f"- meta_router_compare_best_risk_tradeoff_deltas: `{promotion_risk_tradeoff.get('return_delta_vs_baseline_pct')}` / `{promotion_risk_tradeoff.get('drawdown_delta_vs_baseline_pct')}` / `{promotion_risk_tradeoff.get('cost_delta_vs_baseline_pct')}`",
+        f"- meta_router_compare_risk_adjusted_compression_status: `{promotion_compare_summary.get('risk_adjusted_compression_status')}`",
+        f"- meta_router_compare_risk_adjusted_compression_next_action: `{promotion_compare_summary.get('risk_adjusted_compression_next_action')}`",
+        f"- meta_router_compare_best_risk_adjusted: `{promotion_risk_adjusted.get('recipe_id')}`",
+        f"- meta_router_compare_best_risk_adjusted_deltas: `{promotion_risk_adjusted.get('return_delta_vs_baseline_pct')}` / `{promotion_risk_adjusted.get('drawdown_delta_vs_baseline_pct')}` / `{promotion_risk_adjusted.get('cost_delta_vs_baseline_pct')}`",
+        f"- meta_router_candidate_switch_policy_status: `{promotion_switch_policy.get('status')}`",
+        f"- meta_router_candidate_switch_default_route: `{promotion_switch_policy.get('default_route')}`",
+        f"- meta_router_candidate_switch_defensive_route: `{promotion_switch_policy.get('defensive_route')}`",
+        f"- meta_router_candidate_switch_defensive_eligible: `{promotion_switch_policy.get('defensive_route_eligible_after_current_gates')}`",
+        f"- meta_router_candidate_switch_next_action: `{promotion_switch_policy.get('next_action')}`",
+        f"- meta_router_candidate_switch_lineage_review_status: `{promotion_defensive_lineage_review.get('status')}`",
+        f"- meta_router_candidate_switch_lineage_operator_review_status: `{promotion_defensive_operator_review.get('status')}`",
+        f"- meta_router_candidate_switch_lineage_template_candidate: `{promotion_defensive_operator_template.get('candidate_recipe_id')}`",
+        f"- meta_router_candidate_switch_lineage_template_folds: `{promotion_defensive_operator_template.get('reviewed_folds')}`",
+        f"- meta_router_candidate_switch_lineage_template_summary: `{promotion_defensive_operator_template.get('review_packet_summary')}`",
+        f"- meta_router_candidate_switch_lineage_template_fingerprint: `{promotion_defensive_operator_template.get('review_packet_fingerprint')}`",
+        f"- meta_router_candidate_switch_lineage_template_reviewed_at_required: `{promotion_defensive_operator_template.get('required_operator_reviewed_at')}`",
+        f"- meta_router_operator_lineage_review_template_report: `{promotion_gate.get('operator_lineage_review_template_report')}`",
+        f"- meta_router_operator_lineage_review_skeleton_report: `{promotion_gate.get('operator_lineage_review_skeleton_report')}`",
+        f"- meta_router_operator_lineage_artifact_status: `{promotion_lineage_artifacts.get('status')}`",
+        f"- meta_router_operator_lineage_artifact_blockers: `{promotion_lineage_artifacts.get('blockers')}`",
+        f"- meta_router_operator_lineage_artifact_manifest_algorithm: `{promotion_lineage_artifact_manifest.get('fingerprint_algorithm')}`",
+        f"- meta_router_operator_lineage_artifact_template_fingerprint: `{promotion_lineage_artifact_template.get('payload_fingerprint')}`",
+        f"- meta_router_operator_lineage_artifact_skeleton_fingerprint: `{promotion_lineage_artifact_skeleton.get('payload_fingerprint')}`",
+        f"- meta_router_candidate_switch_blockers: `{promotion_switch_policy.get('promotion_blockers')}`",
         f"- meta_router_candidate: `{promotion_candidate.get('recipe_id')}`",
         f"- meta_router_candidate_return_pct: `{promotion_candidate.get('compounded_return_pct')}`",
         f"- meta_router_candidate_max_drawdown_pct: `{promotion_candidate.get('max_drawdown_pct')}`",
+        f"- meta_router_candidate_return_delta_pct: `{promotion_execution_audit.get('return_delta_vs_baseline_pct')}`",
+        f"- meta_router_candidate_dd_delta_pct: `{promotion_execution_audit.get('drawdown_delta_vs_baseline_pct')}`",
+        f"- meta_router_candidate_cost_delta_pct: `{promotion_execution_audit.get('cost_delta_vs_baseline_pct')}`",
+        f"- meta_router_candidate_trade_event_delta: `{promotion_execution_audit.get('trade_event_delta_vs_baseline')}`",
         f"- meta_router_readiness_stage: `{promotion_readiness.get('stage')}`",
+        f"- meta_router_readiness_candidate_alignment_passed: `{promotion_readiness_alignment.get('passed')}`",
+        f"- meta_router_readiness_candidate_alignment_blockers: `{promotion_readiness_alignment.get('blockers')}`",
         f"- meta_router_ready_for_paper: `{promotion_readiness.get('ready_for_paper')}`",
         f"- meta_router_ready_for_tiny_canary: `{promotion_readiness.get('ready_for_tiny_canary')}`",
         f"- meta_router_ready_for_full_live: `{promotion_readiness.get('ready_for_full_live')}`",
         f"- meta_router_readiness_blockers: `{promotion_readiness.get('blockers')}`",
         f"- launch_research_ready: `{launch.get('research_ready')}`",
         f"- launch_shadow_ready: `{launch.get('shadow_ready')}`",
+        f"- launch_paper_only_rehearsal_status: `{launch_paper_only.get('status')}`",
+        f"- launch_paper_only_rehearsal_system_ready: `{launch_paper_only.get('system_ready')}`",
+        f"- launch_paper_only_rehearsal_armed: `{launch_paper_only.get('armed')}`",
+        f"- launch_paper_only_rehearsal_available: `{launch_paper_only.get('current_rehearsal_available')}`",
+        f"- launch_paper_only_rehearsal_first_completed: `{launch_paper_only.get('first_rehearsal_event_completed')}`",
+        f"- launch_paper_only_max_substitution_status: `{launch_paper_only.get('max_substitution_status')}`",
+        f"- launch_paper_only_max_substitution_ready: `{launch_paper_only.get('max_substitution_ready')}`",
+        f"- launch_paper_only_unresolved_proxy_gates: `{launch_paper_only.get('unresolved_proxy_gates')}`",
+        f"- launch_paper_only_non_substitutable_remaining_gates: `{launch_paper_only.get('non_substitutable_remaining_gates')}`",
+        f"- launch_paper_only_rehearsal_remaining_gates: `{launch_paper_only.get('remaining_gates')}`",
         f"- launch_tiny_canary_evidence_ready: `{launch.get('tiny_canary_evidence_ready')}`",
         f"- launch_microstructure_metric_ready: `{launch_components.get('microstructure_metric_ready')}`",
         f"- launch_microstructure_time_proxy_ready: `{launch_components.get('microstructure_time_proxy_ready')}`",
@@ -259,6 +805,36 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- launch_real_microstructure_ready: `{launch_components.get('real_microstructure_ready')}`",
         f"- launch_next_blocker: `{next_blocker.get('gate')}`",
         f"- launch_next_action: `{next_blocker.get('next_action')}`",
+        f"- fresh_signal_blocker_status: `{fresh_signal_diag.get('status')}`",
+        f"- fresh_signal_blocker_primary_cause: `{fresh_signal_diag.get('primary_cause')}`",
+        f"- fresh_signal_cause_partition_status: `{dict(fresh_signal_diag.get('cause_partition') or {}).get('status')}`",
+        f"- fresh_signal_cause_partition_interpretation: `{dict(fresh_signal_diag.get('cause_partition') or {}).get('interpretation')}`",
+        f"- fresh_signal_absence_primary_cause: `{fresh_signal_diag.get('signal_absence_primary_cause')}`",
+        f"- fresh_signal_absence_class: `{fresh_signal_diag.get('signal_absence_class')}`",
+        f"- fresh_signal_pipeline_issue_suspected: `{fresh_signal_diag.get('signal_pipeline_issue_suspected')}`",
+        f"- fresh_signal_blocker_signal_stale: `{fresh_signal_diag.get('signal_stale')}`",
+        f"- fresh_signal_blocker_snapshot_blockers: `{fresh_signal_diag.get('snapshot_blockers')}`",
+        f"- fresh_signal_blocker_preflight_blockers: `{fresh_signal_diag.get('preflight_blockers')}`",
+        f"- fresh_signal_blocker_rejected_soft_context_count: `{fresh_signal_diag.get('rejected_soft_context_count')}`",
+        f"- fresh_signal_blocker_mc04_broad_relaxation_rejected: `{fresh_signal_diag.get('mc04_broad_relaxation_rejected')}`",
+        f"- fresh_signal_blocker_recommended_experiment_scope: `{fresh_signal_diag.get('recommended_experiment_scope')}`",
+        f"- fresh_signal_blocker_dominant_primary_issue: `{fresh_signal_diag.get('dominant_primary_issue')}`",
+        f"- fresh_signal_blocker_soft_candidate_count: `{fresh_signal_reason_classes.get('soft_candidate')}`",
+        f"- fresh_signal_blocker_hard_guard_count: `{fresh_signal_reason_classes.get('hard_guard')}`",
+        f"- fresh_signal_blocker_top_no_trade_reason: `{fresh_signal_top_reason.get('reason')}`",
+        f"- fresh_signal_blocker_top_no_trade_reason_count: `{fresh_signal_top_reason.get('count')}`",
+        f"- fresh_signal_blocker_dominant_context_reason: `{fresh_signal_dominant_context.get('reason')}`",
+        f"- fresh_signal_blocker_dominant_context_quality: `{fresh_signal_dominant_context.get('probe_quality')}`",
+        f"- fresh_signal_blocker_operator_interpretation: `{fresh_signal_interpretation.get('status')}`",
+        f"- fresh_signal_blocker_primary_safe_experiment: `{fresh_signal_primary_experiment.get('name')}`",
+        f"- fresh_signal_resolution_status: `{fresh_signal_resolution.get('status')}`",
+        f"- fresh_signal_resolution_root_cause_count: `{fresh_signal_resolution.get('root_cause_count')}`",
+        f"- fresh_signal_resolution_top_no_trade_reason: `{fresh_signal_resolution_top_reason.get('reason')}`",
+        f"- fresh_signal_resolution_operator_fixable_now: `{fresh_signal_resolution.get('operator_fixable_now')}`",
+        f"- fresh_signal_resolution_safe_actions: `{fresh_signal_resolution.get('safe_actions')}`",
+        f"- fresh_signal_resolution_unsafe_shortcuts: `{fresh_signal_resolution.get('unsafe_shortcuts')}`",
+        f"- fresh_signal_blocker_next_monitor_after_kst: `{fresh_signal_diag.get('next_monitor_after_kst')}`",
+        f"- fresh_signal_blocker_safe_operator_next_action: `{fresh_signal_diag.get('safe_operator_next_action')}`",
         f"- quote_observed_latest: `{latest_collection.get('quote_observed')}`",
         f"- quote_observed_delta: `{progress.get('quote_observed_delta')}`",
         f"- quote_progress_state: `{progress.get('quote_progress_state')}`",
@@ -316,6 +892,14 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- operator_handoff_execution_parity_events_after_current_apply: `{operator_handoff.get('execution_parity_events_needed_after_current_apply')}`",
         f"- operator_handoff_execution_parity_will_credit_current_apply: `{operator_handoff.get('execution_parity_will_credit_current_apply')}`",
         f"- operator_handoff_execution_parity_creditable_actions: `{operator_handoff.get('execution_parity_creditable_actions')}`",
+        f"- execution_parity_status_summary_status: `{execution_parity_status.get('status')}`",
+        f"- execution_parity_status_summary_rows: `{execution_parity_status.get('eligible_journal_rows')}/{execution_parity_status.get('required_samples')}`",
+        f"- execution_parity_status_summary_missing_samples: `{execution_parity_status.get('missing_samples')}`",
+        f"- execution_parity_status_summary_events_needed: `{execution_parity_status.get('estimated_future_paper_apply_events_needed')}`",
+        f"- execution_parity_status_summary_eta_days: `{execution_parity_status.get('estimated_days_at_current_cadence')}`",
+        f"- execution_parity_status_summary_eta_completion_kst: `{execution_parity_status.get('estimated_completion_kst')}`",
+        f"- execution_parity_status_summary_next_step: `{execution_parity_status.get('next_step')}`",
+        f"- execution_parity_status_summary_non_substitutable: `{execution_parity_status.get('non_substitutable')}`",
         f"- execution_parity_eta_status: `{execution_parity_eta.get('status')}`",
         f"- execution_parity_eta_selected_scenario: `{execution_parity_eta.get('selected_eta_scenario')}`",
         f"- execution_parity_eta_days_at_current_cadence: `{execution_parity_eta.get('estimated_days_at_current_cadence')}`",
@@ -337,26 +921,360 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- safe_next_action_can_run_now: `{primary_action.get('can_run_now')}`",
         f"- safe_next_action_requires_operator_review: `{primary_action.get('requires_operator_review')}`",
         f"- safe_next_action_command: `{primary_action.get('command')}`",
+        f"- safe_next_action_source_promotion_gate_report: `{primary_action.get('source_promotion_gate_report')}`",
+        f"- safe_next_action_operator_lineage_source_required: `{primary_action.get('operator_lineage_review_source_report_required')}`",
+        f"- safe_next_action_operator_review_json_skeleton_report: `{primary_action.get('operator_lineage_review_skeleton_report')}`",
+        f"- safe_next_action_operator_lineage_artifact_status: `{primary_action.get('operator_lineage_artifact_status')}`",
+        f"- safe_next_action_operator_lineage_artifact_blockers: `{primary_action.get('operator_lineage_artifact_blockers')}`",
+        f"- safe_next_action_operator_lineage_artifact_manifest: `{primary_action.get('operator_lineage_artifact_manifest')}`",
+        f"- safe_next_action_operator_lineage_template_fingerprint: `{primary_action.get('operator_lineage_template_payload_fingerprint')}`",
+        f"- safe_next_action_operator_lineage_skeleton_fingerprint: `{primary_action.get('operator_lineage_skeleton_payload_fingerprint')}`",
+        f"- safe_next_action_operator_fields_to_fill: `{primary_action.get('operator_fields_to_fill')}`",
+        f"- safe_next_action_operator_review_json_skeleton: `{primary_action.get('operator_review_json_skeleton')}`",
+        f"- safe_next_action_operator_acceptance_contract: `{primary_action.get('operator_lineage_review_acceptance_contract')}`",
+        f"- safe_next_action_operator_validation_command_template: `{primary_action.get('operator_lineage_review_validation_command_template')}`",
+        f"- safe_next_action_operator_validation_contract: `{primary_action.get('operator_lineage_review_validation_contract')}`",
         f"- safe_next_action_recommended_monitor_interval_minutes: `{primary_action.get('recommended_monitor_interval_minutes')}`",
         f"- safe_next_action_signal_freshness_capture_window_minutes: `{primary_action.get('signal_freshness_capture_window_minutes')}`",
         f"- safe_next_action_monitor_interval_capped_by_freshness: `{primary_action.get('monitor_interval_capped_by_signal_freshness')}`",
         f"- safe_next_action_monitor_signal_age_alignment: `{primary_action.get('monitor_signal_age_alignment')}`",
+        f"- safe_next_action_next_add_monitor_after_kst: `{primary_next_add_plan.get('next_monitor_after_kst')}`",
+        f"- safe_next_action_next_add_expected_due_kst: `{dict(primary_next_add_plan.get('expected_add_due') or {}).get('due_kst')}`",
+        f"- safe_next_action_next_add_median_due_kst: `{dict(primary_next_add_plan.get('median_add_due') or {}).get('due_kst')}`",
+        f"- safe_next_action_next_add_monitor_capped_by_freshness: `{primary_next_add_plan.get('monitor_interval_capped_by_signal_freshness')}`",
         f"- safe_next_action_paper_packet_status: `{dict(primary_action.get('paper_apply_operator_packet') or {}).get('status')}`",
+        f"- safe_next_paper_wait_action_type: `{safe_paper_wait_action.get('action_type')}`",
+        f"- safe_next_paper_wait_execute_after_kst: `{safe_paper_wait_action.get('execute_after_kst')}`",
+        f"- safe_next_paper_wait_dry_run_command: `{safe_paper_wait_action.get('command')}`",
+        f"- safe_next_paper_wait_apply_when_gate_allows: `{safe_paper_wait_action.get('paper_apply_command_when_gate_allows')}`",
+        f"- safe_next_paper_wait_packet_dry_run_command: `{safe_paper_packet.get('dry_run_command')}`",
+        f"- safe_next_paper_wait_packet_apply_when_gate_allows: `{safe_paper_packet.get('apply_command_when_gate_allows')}`",
+        f"- safe_next_paper_wait_safety_dry_run_report_dir: `{safe_paper_packet_safety.get('dry_run_report_dir')}`",
+        f"- safe_next_paper_wait_safety_apply_report_dir: `{safe_paper_packet_safety.get('apply_report_dir')}`",
+        f"- scheduled_command_projection_status: `{scheduled_projection.get('status')}`",
+        f"- scheduled_command_projection_source: `{scheduled_projection.get('source')}`",
+        f"- scheduled_command_projection_raw_scope: `{scheduled_projection.get('raw_operator_handoff_scope')}`",
+        f"- scheduled_command_projection_use_for_next_action: `{scheduled_projection.get('use_projection_for_next_operator_action')}`",
+        f"- scheduled_command_projection_primary_execute_after_kst: `{scheduled_projection.get('primary_execute_after_kst')}`",
+        f"- scheduled_command_projection_primary_raw_execute_after_kst: `{scheduled_projection.get('primary_raw_execute_after_kst')}`",
+        f"- scheduled_command_projection_primary_execute_after_source: `{scheduled_projection.get('primary_execute_after_source')}`",
+        f"- scheduled_command_projection_primary_retimestampted_after_current_iteration: `{scheduled_projection.get('primary_retimestampted_after_current_iteration')}`",
+        f"- scheduled_command_projection_primary_command: `{scheduled_projection.get('primary_command')}`",
+        f"- scheduled_command_projection_primary_raw_command: `{scheduled_projection.get('primary_raw_command')}`",
+        f"- scheduled_command_projection_primary_report_dir: `{scheduled_projection.get('primary_report_dir')}`",
+        f"- scheduled_command_projection_primary_raw_report_dir: `{scheduled_projection.get('primary_raw_report_dir')}`",
+        f"- scheduled_command_projection_primary_report_dir_retimestampted_to_effective: `{scheduled_projection.get('primary_report_dir_retimestampted_to_effective')}`",
+        f"- scheduled_command_projection_paper_apply_when_gate_allows: `{scheduled_projection.get('paper_wait_apply_command_when_gate_allows')}`",
+        f"- scheduled_command_projection_paper_safety_dry_run_report_dir: `{scheduled_projection.get('paper_wait_safety_dry_run_report_dir')}`",
+        f"- scheduled_command_projection_paper_safety_apply_report_dir: `{scheduled_projection.get('paper_wait_safety_apply_report_dir')}`",
+        f"- scheduled_command_projection_report_dirs_differ_from_raw: `{scheduled_projection.get('paper_wait_report_dirs_differ_from_raw_handoff')}`",
+        f"- scheduled_command_projection_reason: `{scheduled_projection.get('projection_reason')}`",
+        f"- scheduled_command_projection_next_command_source: `{scheduled_projection.get('next_operator_command_source')}`",
+        f"- command_consistency_audit_status: `{command_consistency.get('status')}`",
+        f"- command_consistency_signal_status: `{signal_command_parity.get('status')}`",
+        f"- command_consistency_signal_mismatch_count: `{signal_command_parity.get('mismatch_count')}`",
+        f"- command_consistency_signal_canonical_source: `{signal_command_parity.get('canonical_source')}`",
+        f"- command_consistency_signal_canonical_report_dir: `{signal_command_parity.get('canonical_report_dir')}`",
+        f"- command_consistency_shadow_runtime_status: `{shadow_runtime_command_parity.get('status')}`",
+        f"- command_consistency_shadow_runtime_mismatch_count: `{shadow_runtime_command_parity.get('mismatch_count')}`",
+        f"- command_consistency_shadow_runtime_canonical_source: `{shadow_runtime_command_parity.get('canonical_source')}`",
+        f"- command_consistency_operator_status: `{operator_command_parity.get('status')}`",
+        f"- command_consistency_operator_mismatch_count: `{operator_command_parity.get('mismatch_count')}`",
+        f"- command_consistency_operator_canonical_source: `{operator_command_parity.get('canonical_source')}`",
         f"- safe_next_scheduled_action_type: `{scheduled_action.get('action_type')}`",
+        f"- safe_next_scheduled_action_command: `{scheduled_action.get('command')}`",
         f"- safe_next_scheduled_execute_after_utc: `{scheduled_action.get('execute_after_utc')}`",
+        f"- safe_next_scheduled_execute_after_kst: `{scheduled_action.get('execute_after_kst')}`",
         f"- safe_next_scheduled_wait_minutes: `{scheduled_action.get('wait_minutes')}`",
+        f"- safe_next_scheduled_recommended_monitor_interval_minutes: `{scheduled_action.get('recommended_monitor_interval_minutes')}`",
+        f"- safe_next_scheduled_signal_freshness_capture_window_minutes: `{scheduled_action.get('signal_freshness_capture_window_minutes')}`",
+        f"- safe_next_scheduled_monitor_interval_capped_by_freshness: `{scheduled_action.get('monitor_interval_capped_by_signal_freshness')}`",
+        f"- safe_next_scheduled_monitor_signal_age_alignment: `{scheduled_action.get('monitor_signal_age_alignment')}`",
         f"- safe_next_startable_wait_action_type: `{startable_wait_action.get('action_type')}`",
+        f"- safe_next_startable_wait_action_command: `{startable_wait_action.get('command')}`",
         f"- safe_next_startable_wait_execute_after_utc: `{startable_wait_action.get('execute_after_utc')}`",
+        f"- safe_next_startable_wait_execute_after_kst: `{startable_wait_action.get('execute_after_kst')}`",
+        f"- safe_next_startable_wait_minutes: `{startable_wait_action.get('wait_minutes')}`",
+        f"- safe_next_startable_wait_remaining_calendar_days: `{startable_wait_action.get('remaining_calendar_days')}`",
+        f"- safe_next_startable_wait_earliest_calendar_completion_kst: `{startable_wait_action.get('earliest_calendar_completion_kst')}`",
+        f"- safe_next_startable_wait_calendar_completion_policy: `{startable_wait_action.get('calendar_completion_policy')}`",
         f"- safe_next_deferred_wait_action_type: `{deferred_wait_action.get('action_type')}`",
+        f"- safe_next_deferred_wait_action_command: `{deferred_wait_action.get('command')}`",
         f"- safe_next_deferred_wait_execute_after_utc: `{deferred_wait_action.get('execute_after_utc')}`",
+        f"- safe_next_deferred_wait_execute_after_kst: `{deferred_wait_action.get('execute_after_kst')}`",
+        f"- safe_next_deferred_wait_minutes: `{deferred_wait_action.get('wait_minutes')}`",
         f"- safe_next_deferred_wait_reason: `{deferred_wait_action.get('deferred_reason')}`",
         f"- safe_next_pre_wait_scheduled_action_count: `{safe_next_action.get('pre_wait_scheduled_action_count')}`",
+        f"- safe_next_pre_wait_primary_action_type: `{safe_next_action.get('pre_wait_primary_action_type')}`",
+        f"- safe_next_pre_wait_primary_action_due_now: `{safe_next_action.get('pre_wait_primary_action_due_now')}`",
+        f"- safe_next_pre_wait_primary_action_execute_after_kst: `{safe_next_action.get('pre_wait_primary_action_execute_after_kst')}`",
         f"- safe_next_coordination_warnings: `{safe_next_action.get('coordination_warnings')}`",
+        f"- safe_next_coordination_status: `{coordination_plan.get('status')}`",
+        f"- safe_next_coordination_primary: `{coordination_plan.get('primary_action_type')}`",
+        f"- safe_next_coordination_next_signal_or_add_monitor_kst: `{coordination_plan.get('next_signal_or_add_monitor_kst')}`",
+        f"- safe_next_coordination_raw_next_signal_or_add_monitor_kst: `{coordination_plan.get('raw_next_signal_or_add_monitor_kst')}`",
+        f"- safe_next_coordination_next_signal_or_add_monitor_source: `{coordination_plan.get('next_signal_or_add_monitor_source')}`",
+        f"- safe_next_coordination_next_signal_or_add_monitor_wait_minutes: `{coordination_plan.get('next_signal_or_add_monitor_wait_minutes')}`",
+        f"- safe_next_coordination_next_signal_or_add_monitor_retimestampted_after_current_iteration: `{coordination_plan.get('next_signal_or_add_monitor_retimestampted_after_current_iteration')}`",
+        f"- safe_next_coordination_next_signal_or_add_monitor_window_status: `{coordination_plan.get('next_signal_or_add_monitor_window_status')}`",
+        f"- safe_next_coordination_next_signal_or_add_monitor_overdue_minutes: `{coordination_plan.get('next_signal_or_add_monitor_overdue_minutes')}`",
+        f"- safe_next_coordination_next_signal_or_add_monitor_raw_window_status: `{coordination_plan.get('next_signal_or_add_monitor_raw_window_status')}`",
+        f"- safe_next_coordination_next_signal_or_add_monitor_raw_overdue_minutes: `{coordination_plan.get('next_signal_or_add_monitor_raw_overdue_minutes')}`",
+        f"- safe_next_coordination_next_quote_window_kst: `{coordination_plan.get('next_quote_window_kst')}`",
+        f"- safe_next_coordination_next_quote_window_status: `{coordination_plan.get('next_quote_window_status')}`",
+        f"- safe_next_coordination_quote_deferred: `{coordination_plan.get('quote_window_deferred_by_earlier_monitor')}`",
+        f"- safe_next_coordination_next_after_primary: `{coordination_plan.get('next_action_after_primary')}`",
+        f"- safe_next_coordination_do_not_skip_quote_window: `{coordination_plan.get('do_not_skip_quote_window_for_signal_monitor')}`",
+        f"- operator_work_queue_status: `{operator_work_queue.get('status')}`",
+        f"- operator_work_queue_raw_status: `{operator_work_queue.get('raw_status')}`",
+        f"- operator_work_queue_status_scope: `{operator_work_queue.get('status_scope')}`",
+        f"- operator_work_queue_effective_status: `{operator_work_queue.get('effective_status')}`",
+        f"- operator_work_queue_effective_status_scope: `{operator_work_queue.get('effective_status_scope')}`",
+        f"- operator_work_queue_covered_automation_status: `{operator_work_queue.get('covered_automation_status')}`",
+        f"- operator_work_queue_automation_now_count: `{operator_work_queue.get('automation_now_count')}`",
+        f"- operator_work_queue_raw_automation_now_count: `{operator_work_queue.get('raw_automation_now_count')}`",
+        f"- operator_work_queue_effective_automation_now_count: `{operator_work_queue.get('effective_automation_now_count')}`",
+        f"- operator_work_queue_covered_automation_now_count: `{operator_work_queue.get('covered_automation_now_count')}`",
+        f"- operator_work_queue_operator_review_count: `{operator_work_queue.get('operator_review_count')}`",
+        f"- operator_work_queue_operator_review_now_count: `{operator_work_queue.get('operator_review_now_count')}`",
+        f"- operator_work_queue_operator_review_wait_count: `{operator_work_queue.get('operator_review_wait_count')}`",
+        f"- operator_work_queue_startable_wait_count: `{operator_work_queue.get('startable_wait_count')}`",
+        f"- operator_work_queue_primary_automation: `{primary_automation_work.get('action_type')}`",
+        f"- operator_work_queue_primary_automation_report_dir: `{primary_automation_work.get('command_report_dir')}`",
+        f"- operator_work_queue_primary_automation_window_status: `{primary_automation_work.get('execution_window_status')}`",
+        f"- operator_work_queue_primary_automation_effective_window_status: `{primary_automation_work.get('effective_execution_window_status')}`",
+        f"- operator_work_queue_primary_automation_due_now: `{primary_automation_work.get('action_due_now')}`",
+        f"- operator_work_queue_primary_automation_effective_due_now: `{primary_automation_work.get('effective_action_due_now')}`",
+        f"- operator_work_queue_primary_automation_covered_due_by_current_iteration: `{primary_automation_work.get('covered_due_by_current_iteration')}`",
+        f"- operator_work_queue_primary_automation_overdue_minutes: `{primary_automation_work.get('overdue_minutes')}`",
+        f"- operator_work_queue_primary_automation_effective_next_monitor_after_kst: `{primary_automation_work.get('effective_next_monitor_after_kst')}`",
+        f"- operator_work_queue_primary_automation_raw_next_monitor_after_kst: `{primary_automation_work.get('raw_next_monitor_after_kst')}`",
+        f"- operator_work_queue_primary_automation_covered_next_recheck_after_kst: `{primary_automation_work.get('covered_next_recheck_after_kst')}`",
+        f"- operator_work_queue_primary_automation_retimestampted_after_current_iteration: `{primary_automation_work.get('next_monitor_retimestampted_after_current_iteration')}`",
+        f"- operator_work_queue_primary_effective_automation: `{primary_effective_automation_work.get('action_type')}`",
+        f"- operator_work_queue_primary_effective_automation_report_dir: `{primary_effective_automation_work.get('command_report_dir')}`",
+        f"- operator_work_queue_primary_covered_automation: `{primary_covered_automation_work.get('action_type')}`",
+        f"- operator_work_queue_primary_covered_automation_report_dir: `{primary_covered_automation_work.get('command_report_dir')}`",
+        f"- operator_work_queue_primary_operator_review: `{primary_operator_review_work.get('action_type')}`",
+        f"- operator_work_queue_primary_operator_review_template: `{primary_operator_review_work.get('template_report')}`",
+        f"- operator_work_queue_primary_operator_review_skeleton: `{primary_operator_review_work.get('skeleton_report')}`",
+        f"- operator_work_queue_primary_operator_review_wait: `{primary_operator_review_wait_work.get('action_type')}`",
+        f"- operator_work_queue_primary_operator_review_wait_execute_after_kst: `{primary_operator_review_wait_work.get('execute_after_kst')}`",
+        f"- operator_work_queue_primary_startable_wait: `{primary_startable_wait_work.get('action_type')}`",
+        f"- operator_review_handoff_status: `{operator_review_handoff.get('status')}`",
+        f"- operator_review_handoff_ready_review_count: `{operator_review_handoff.get('ready_review_count')}`",
+        f"- operator_review_handoff_blocked_review_count: `{operator_review_handoff.get('blocked_review_count')}`",
+        f"- operator_review_handoff_waiting_review_count: `{operator_review_handoff.get('waiting_review_count')}`",
+        f"- operator_review_decision_required_count: `{operator_review_handoff.get('operator_decision_required_count')}`",
+        f"- operator_review_primary_decision_packet_status: `{primary_operator_decision_packet.get('status')}`",
+        f"- operator_review_primary_decision_packet_required_fields: `{primary_operator_decision_packet.get('operator_required_fields_remaining')}`",
+        f"- operator_review_primary_decision_packet_accepted_status_values: `{primary_operator_decision_packet.get('accepted_status_values')}`",
+        f"- operator_review_primary_decision_dry_run_command_template: `{primary_operator_decision_packet.get('decision_dry_run_command_template')}`",
+        f"- operator_review_primary_decision_fill_command_template: `{primary_operator_decision_packet.get('decision_fill_command_template')}`",
+        f"- operator_review_primary_decision_command_safety: `{dict(primary_operator_decision_packet.get('decision_command_safety') or {}).get('status')}`",
+        f"- operator_review_primary_decision_command_safety_blockers: `{dict(primary_operator_decision_packet.get('decision_command_safety') or {}).get('blockers')}`",
+        f"- operator_review_primary_decision_packet_validation: `{primary_operator_decision_packet.get('validation_command')}`",
+        f"- operator_review_handoff_primary_ready_review: `{primary_review_handoff.get('action_type')}`",
+        f"- operator_review_handoff_primary_ready_template: `{primary_review_handoff.get('template_report')}`",
+        f"- operator_review_handoff_primary_ready_skeleton: `{primary_review_handoff.get('skeleton_report')}`",
+        f"- operator_review_handoff_primary_ready_validation: `{primary_review_handoff.get('validation_command_template')}`",
+        f"- operator_review_handoff_primary_ready_suggested_report: `{primary_review_handoff.get('suggested_operator_review_report')}`",
+        f"- operator_review_handoff_primary_ready_draft_prepare_command: `{dict(primary_review_handoff.get('operator_review_file_plan') or {}).get('draft_prepare_command')}`",
+        f"- operator_review_handoff_primary_ready_validation_command: `{primary_review_handoff.get('validation_command_with_suggested_report')}`",
         f"- launch_safety_controls_status: `{safety.get('overall_status')}`",
         f"- launch_safety_controls_verified: `{safety.get('verified_count')}/{safety.get('required_count')}`",
+        f"- launch_blocker_priority_status: `{launch_blocker_summary.get('status')}`",
+        f"- launch_blocker_priority_non_substitutable_count: `{launch_blocker_summary.get('non_substitutable_blocker_count')}`",
+        f"- launch_blocker_priority_non_substitutable_problem_count: `{launch_blocker_summary.get('non_substitutable_problem_count')}`",
+        f"- launch_blocker_priority_non_substitutable_wait_count: `{launch_blocker_summary.get('non_substitutable_wait_blocker_count')}`",
+        f"- launch_blocker_priority_dependency_blocked_count: `{launch_blocker_summary.get('dependency_blocked_count')}`",
+        f"- launch_blocker_priority_operator_review_ready_count: `{launch_blocker_summary.get('operator_review_ready_count')}`",
+        f"- launch_blocker_priority_waiting_count: `{launch_blocker_summary.get('waiting_blocker_count')}`",
+        f"- launch_blocker_priority_primary_non_substitutable: `{dict(launch_blocker_summary.get('primary_non_substitutable_problem') or {}).get('id')}`",
+        f"- launch_blocker_priority_primary_waiting: `{dict(launch_blocker_summary.get('primary_waiting_blocker') or {}).get('id')}`",
+        f"- launch_blocker_priority_primary_dependency: `{dict(launch_blocker_summary.get('primary_dependency_blocker') or {}).get('id')}`",
+        f"- launch_blocker_priority_primary_review: `{dict(launch_blocker_summary.get('primary_operator_review') or {}).get('action_type')}`",
+        f"- remaining_work_closure_status: `{remaining_work_closure.get('status')}`",
+        f"- remaining_work_auto_complete_without_future_market_or_operator: `{remaining_work_closure.get('auto_complete_without_future_market_or_operator')}`",
+        f"- remaining_work_safe_automation_now_count: `{remaining_work_closure.get('safe_automation_now_count')}`",
+        f"- remaining_work_safe_effective_automation_now_count: `{remaining_work_closure.get('safe_effective_automation_now_count')}`",
+        f"- remaining_work_safe_covered_automation_now_count: `{remaining_work_closure.get('safe_covered_automation_now_count')}`",
+        f"- remaining_work_safe_useful_automation_now_count: `{remaining_work_closure.get('safe_useful_automation_now_count')}`",
+        f"- remaining_work_safe_noop_or_deferred_automation_now_count: `{remaining_work_closure.get('safe_noop_or_deferred_automation_now_count')}`",
+        f"- remaining_work_safe_raw_useful_automation_now_count: `{remaining_work_closure.get('safe_raw_useful_automation_now_count')}`",
+        f"- remaining_work_automation_now_usefulness_scope: `{remaining_work_closure.get('automation_now_usefulness_scope')}`",
+        f"- remaining_work_realtime_signal_effective_next_kst: `{dict(dict(remaining_work_closure.get('dependency_lanes') or {}).get('realtime_signal_lane') or {}).get('monitor_effective_next_after_kst')}`",
+        f"- remaining_work_realtime_signal_raw_next_kst: `{dict(dict(remaining_work_closure.get('dependency_lanes') or {}).get('realtime_signal_lane') or {}).get('monitor_raw_next_after_kst')}`",
+        f"- remaining_work_realtime_signal_next_source: `{dict(dict(remaining_work_closure.get('dependency_lanes') or {}).get('realtime_signal_lane') or {}).get('monitor_next_after_source')}`",
+        f"- remaining_work_realtime_signal_retimestampted_after_current_iteration: `{dict(dict(remaining_work_closure.get('dependency_lanes') or {}).get('realtime_signal_lane') or {}).get('monitor_next_after_retimestampted_after_current_iteration')}`",
+        f"- remaining_work_operator_decision_required_count: `{remaining_work_closure.get('operator_decision_required_count')}`",
+        f"- remaining_work_non_substitutable_wait_count: `{remaining_work_closure.get('non_substitutable_wait_count')}`",
+        f"- remaining_work_dependency_blocked_problem_count: `{remaining_work_closure.get('dependency_blocked_problem_count')}`",
+        f"- remaining_work_primary_wait_only_problem: `{dict(remaining_work_closure.get('primary_wait_only_problem') or {}).get('id')}`",
+        f"- remaining_work_primary_dependency_blocked_problem: `{dict(remaining_work_closure.get('primary_dependency_blocked_problem') or {}).get('id')}`",
+        f"- remaining_work_not_auto_completable_reasons: `{remaining_work_closure.get('not_auto_completable_reasons')}`",
+        f"- first_fresh_signal_runbook_status: `{first_signal_runbook.get('status')}`",
+        f"- first_fresh_signal_runbook_next_step: `{first_signal_runbook.get('next_operator_step')}`",
+        f"- first_fresh_signal_runbook_apply_allowed_now: `{first_signal_runbook.get('paper_apply_allowed_now')}`",
+        f"- operator_review_decision_aid_status: `{operator_review_aid.get('status')}`",
+        f"- operator_review_decision_aid_required_count: `{operator_review_aid.get('decision_required_count')}`",
+        f"- operator_review_resolution_status: `{operator_review_resolution.get('status')}`",
+        f"- operator_review_resolution_decision_count: `{operator_review_resolution.get('decision_count')}`",
+        f"- operator_review_resolution_safe_default: `{operator_review_resolution.get('safe_default_policy')}`",
+        f"- daily_quote_checkpoint_status: `{daily_quote_checkpoint.get('status')}`",
+        f"- daily_quote_checkpoint_next_kst: `{daily_quote_checkpoint.get('next_quote_window_kst') or daily_quote_checkpoint.get('next_quote_coverage_kst_at')}`",
+        f"- daily_quote_checkpoint_coordination_status: `{daily_quote_checkpoint.get('quote_window_coordination_status')}`",
+        f"- daily_quote_checkpoint_next_signal_kst: `{daily_quote_checkpoint.get('next_signal_or_add_monitor_kst')}`",
+        f"- daily_quote_checkpoint_raw_next_signal_kst: `{daily_quote_checkpoint.get('raw_next_signal_or_add_monitor_kst')}`",
+        f"- daily_quote_checkpoint_next_signal_source: `{daily_quote_checkpoint.get('next_signal_or_add_monitor_source')}`",
+        f"- daily_quote_checkpoint_next_signal_wait_minutes: `{daily_quote_checkpoint.get('next_signal_or_add_monitor_wait_minutes')}`",
+        f"- daily_quote_checkpoint_next_signal_retimestampted_after_current_iteration: `{daily_quote_checkpoint.get('next_signal_or_add_monitor_retimestampted_after_current_iteration')}`",
+        f"- daily_quote_checkpoint_next_signal_window_status: `{daily_quote_checkpoint.get('next_signal_or_add_monitor_window_status')}`",
+        f"- daily_quote_checkpoint_next_signal_overdue_minutes: `{daily_quote_checkpoint.get('next_signal_or_add_monitor_overdue_minutes')}`",
+        f"- next_material_progress_status: `{next_material_progress.get('status')}`",
+        f"- next_material_primary_event: `{primary_material_event.get('event_type')}`",
+        f"- next_material_primary_gate: `{primary_material_event.get('gate')}`",
+        f"- next_material_primary_eta_kst: `{primary_material_event.get('eta_kst')}`",
+        f"- next_material_immediate_auto_count: `{next_material_progress.get('immediate_auto_count')}`",
+        f"- next_material_immediate_operator_count: `{next_material_progress.get('immediate_operator_count')}`",
+        f"- next_material_future_event_count: `{next_material_progress.get('future_event_count')}`",
+        f"- operator_action_digest_status: `{operator_action_digest.get('status')}`",
+        f"- operator_action_digest_primary_next: `{operator_action_digest.get('primary_next')}`",
+        f"- operator_action_digest_primary_ready_now: `{operator_action_digest.get('primary_material_ready_now')}`",
+        f"- operator_action_digest_primary_wait_minutes: `{operator_action_digest.get('primary_material_wait_minutes')}`",
+        f"- operator_action_digest_scope: `{operator_action_digest.get('operator_action_scope')}`",
+        f"- operator_action_digest_primary_launch_wait_gate: `{operator_action_digest.get('primary_launch_wait_gate')}`",
+        f"- operator_action_digest_primary_human_action_gate: `{operator_action_digest.get('primary_human_action_gate')}`",
+        f"- operator_action_digest_no_safe_auto_command_now: `{operator_action_digest.get('no_safe_auto_command_now')}`",
+        f"- operator_action_digest_auto_count: `{operator_action_digest.get('safe_auto_command_count')}`",
+        f"- operator_action_digest_primary_safe_auto_command: `{operator_action_digest.get('primary_safe_auto_command')}`",
+        f"- operator_action_digest_primary_material_command: `{operator_action_digest.get('primary_material_command')}`",
+        f"- operator_action_digest_manual_count: `{operator_action_digest.get('manual_decision_count')}`",
+        f"- operator_action_digest_next_blocker: `{operator_action_digest.get('next_blocker_gate')}`",
+        f"- gate_substitution_digest_status: `{gate_substitution_digest.get('status')}`",
+        f"- gate_substitution_proxy_passed: `{gate_substitution_digest.get('proxy_gate_passed_count')}` / `{gate_substitution_digest.get('proxy_gate_count')}`",
+        f"- gate_substitution_realtime_wait_count: `{gate_substitution_digest.get('realtime_wait_count')}`",
+        f"- gate_substitution_non_substitutable: `{gate_substitution_digest.get('non_substitutable_problem_ids')}`",
+        f"- gate_eta_digest_status: `{gate_eta_digest.get('status')}`",
+        f"- gate_eta_paper_apply_eta_known: `{gate_eta_digest.get('paper_apply_eta_known')}`",
+        f"- gate_eta_next_unscheduled_gate: `{gate_eta_digest.get('next_unscheduled_gate')}`",
+        f"- gate_eta_next_scheduled_event: `{dict(gate_eta_digest.get('next_scheduled_event') or {}).get('event_type')}`",
+        f"- gate_eta_quote_completion_kst: `{gate_eta_digest.get('quote_calendar_completion_kst')}`",
+        f"- gate_eta_execution_parity_kst: `{gate_eta_digest.get('execution_parity_eta_kst')}`",
+        f"- launch_progress_scorecard_status: `{launch_progress_scorecard.get('status')}`",
+        f"- launch_progress_scorecard_overall_pct: `{launch_progress_scorecard.get('overall_progress_pct')}`",
+        f"- launch_progress_scorecard_complete_lanes: `{launch_progress_scorecard.get('complete_lane_count')}` / `{launch_progress_scorecard.get('measurable_lane_count')}`",
+        f"- launch_progress_scorecard_next_blocker: `{launch_progress_scorecard.get('next_blocker_gate')}`",
+        f"- launch_progress_runtime_pct: `{launch_progress_runtime.get('progress_pct')}`",
+        f"- launch_progress_quote_pct: `{launch_progress_quote.get('progress_pct')}`",
+        f"- launch_progress_operator_pct: `{launch_progress_operator.get('progress_pct')}`",
+        f"- launch_progress_execution_parity_pct: `{launch_progress_parity.get('progress_pct')}`",
+        f"- launch_progress_fresh_signal_available: `{launch_progress_fresh_signal.get('fresh_signal_available')}`",
+        f"- launch_progress_fresh_signal_next_monitor_kst: `{launch_progress_fresh_signal.get('next_monitor_kst')}`",
+        f"- launch_progress_fresh_signal_raw_next_monitor_kst: `{launch_progress_fresh_signal.get('raw_next_monitor_kst')}`",
+        f"- launch_progress_fresh_signal_next_monitor_source: `{launch_progress_fresh_signal.get('next_monitor_source')}`",
+        f"- launch_progress_fresh_signal_retimestampted_after_current_iteration: `{launch_progress_fresh_signal.get('next_monitor_retimestampted_after_current_iteration')}`",
+        f"- launch_progress_ready_for_paper_apply_now: `{launch_progress_scorecard.get('ready_for_paper_apply_now')}`",
+        f"- launch_critical_path_status: `{launch_critical_path.get('status')}`",
+        f"- launch_critical_path_floor_pct: `{launch_critical_path.get('progress_floor_pct')}`",
+        f"- launch_critical_path_avg_pct: `{launch_critical_path.get('progress_average_pct')}`",
+        f"- launch_critical_path_next_open_gate: `{launch_critical_path.get('next_open_gate')}`",
+        f"- launch_paper_apply_path_status: `{launch_paper_apply_path.get('status')}`",
+        f"- launch_paper_apply_path_next_open_gate: `{launch_paper_apply_path.get('next_open_gate')}`",
+        f"- launch_parallel_path_status: `{launch_parallel_path.get('status')}`",
+        f"- launch_parallel_path_next_open_gate: `{launch_parallel_path.get('next_open_gate')}`",
+        f"- launch_execution_matrix_status: `{launch_execution_matrix.get('status')}`",
+        f"- launch_execution_matrix_urgency_status: `{launch_execution_matrix.get('urgency_status')}`",
+        f"- launch_execution_matrix_primary_urgency: `{launch_execution_matrix.get('primary_urgency')}`",
+        f"- launch_execution_matrix_effective_urgency_status: `{launch_execution_matrix.get('effective_urgency_status')}`",
+        f"- launch_execution_matrix_effective_primary_urgency: `{launch_execution_matrix.get('effective_primary_urgency')}`",
+        f"- launch_execution_matrix_safe_auto_coverage_status: `{launch_execution_matrix.get('safe_auto_coverage_status')}`",
+        f"- launch_execution_matrix_safe_auto_count: `{launch_execution_matrix.get('safe_auto_action_count')}`",
+        f"- launch_execution_matrix_effective_safe_auto_count: `{launch_execution_matrix.get('effective_safe_auto_action_count')}`",
+        f"- launch_execution_matrix_raw_safe_auto_count: `{launch_execution_matrix.get('raw_safe_auto_action_count')}`",
+        f"- launch_execution_matrix_raw_useful_safe_auto_count: `{launch_execution_matrix.get('raw_useful_safe_auto_action_count')}`",
+        f"- launch_execution_matrix_covered_raw_safe_auto_count: `{launch_execution_matrix.get('covered_raw_safe_auto_action_count')}`",
+        f"- launch_execution_matrix_primary_covered_raw_safe_auto: `{dict(launch_execution_matrix.get('primary_covered_raw_safe_auto_action') or {}).get('action_type')}`",
+        f"- launch_execution_matrix_safe_auto_count_scope: `{launch_execution_matrix.get('safe_auto_count_scope')}`",
+        f"- launch_execution_matrix_ready_safe_auto_count: `{launch_execution_matrix.get('ready_safe_auto_action_count')}`",
+        f"- launch_execution_matrix_safe_auto_ready_count: `{launch_execution_matrix.get('safe_auto_ready_count')}`",
+        f"- launch_execution_matrix_safe_auto_effective_ready_count: `{launch_execution_matrix.get('safe_auto_effective_ready_count')}`",
+        f"- launch_execution_matrix_overdue_safe_auto_count: `{launch_execution_matrix.get('overdue_safe_auto_action_count')}`",
+        f"- launch_execution_matrix_covered_due_safe_auto_count: `{launch_execution_matrix.get('covered_due_safe_auto_action_count')}`",
+        f"- launch_execution_matrix_uncovered_ready_safe_auto_count: `{launch_execution_matrix.get('uncovered_ready_safe_auto_action_count')}`",
+        f"- launch_execution_matrix_uncovered_overdue_safe_auto_count: `{launch_execution_matrix.get('uncovered_overdue_safe_auto_action_count')}`",
+        f"- launch_execution_matrix_scheduled_safe_auto_count: `{launch_execution_matrix.get('scheduled_safe_auto_action_count')}`",
+        f"- launch_execution_matrix_max_overdue_minutes: `{launch_execution_matrix.get('max_overdue_minutes')}`",
+        f"- launch_execution_matrix_manual_count: `{launch_execution_matrix.get('manual_action_count')}`",
+        f"- launch_execution_matrix_manual_ready_count: `{launch_execution_matrix.get('manual_ready_count')}`",
+        f"- launch_execution_matrix_manual_due_count: `{launch_execution_matrix.get('manual_due_count')}`",
+        f"- launch_execution_matrix_manual_wait_count: `{launch_execution_matrix.get('manual_wait_count')}`",
+        f"- launch_execution_matrix_manual_effective_due_count: `{launch_execution_matrix.get('manual_effective_due_count')}`",
+        f"- launch_execution_matrix_manual_readiness_status: `{launch_execution_matrix.get('manual_readiness_status')}`",
+        f"- launch_execution_matrix_manual_template_ready_count: `{launch_execution_matrix.get('manual_template_ready_count')}`",
+        f"- launch_execution_matrix_manual_operator_input_required_count: `{launch_execution_matrix.get('manual_operator_input_required_count')}`",
+        f"- launch_execution_matrix_manual_dry_run_ready_count: `{launch_execution_matrix.get('manual_dry_run_ready_count')}`",
+        f"- launch_execution_matrix_manual_write_ready_count: `{launch_execution_matrix.get('manual_write_ready_count')}`",
+        f"- launch_execution_matrix_manual_required_inputs: `{launch_execution_matrix.get('manual_required_input_names')}`",
+        f"- launch_execution_matrix_manual_input_contract_statuses: `{launch_execution_matrix.get('manual_input_contract_statuses')}`",
+        f"- launch_execution_matrix_manual_prompt_card_statuses: `{launch_execution_matrix.get('manual_prompt_card_statuses')}`",
+        f"- launch_execution_matrix_manual_prompt_card_ready_count: `{launch_execution_matrix.get('manual_prompt_card_ready_count')}`",
+        f"- launch_execution_matrix_manual_input_form_statuses: `{launch_execution_matrix.get('manual_input_form_statuses')}`",
+        f"- launch_execution_matrix_manual_input_form_ready_count: `{launch_execution_matrix.get('manual_input_form_ready_count')}`",
+        f"- launch_execution_matrix_manual_safe_default_alignment_status: `{launch_execution_matrix.get('manual_safe_default_alignment_status')}`",
+        f"- launch_execution_matrix_manual_safe_default_alignment_statuses: `{launch_execution_matrix.get('manual_safe_default_alignment_statuses')}`",
+        f"- launch_execution_matrix_manual_safe_default_decisions: `{launch_execution_matrix.get('manual_safe_default_decisions')}`",
+        f"- launch_execution_matrix_manual_safe_default_alignment_mismatch_count: `{launch_execution_matrix.get('manual_safe_default_alignment_mismatch_count')}`",
+        f"- launch_execution_matrix_manual_safe_default_alignment_next_step: `{launch_execution_matrix.get('manual_safe_default_alignment_next_step')}`",
+        f"- launch_execution_matrix_manual_rationale_must_address_count: `{launch_execution_matrix.get('manual_rationale_must_address_count')}`",
+        f"- launch_execution_matrix_manual_minimum_anchor_count: `{launch_execution_matrix.get('manual_minimum_anchor_count')}`",
+        f"- launch_execution_matrix_manual_decision_option_count: `{launch_execution_matrix.get('manual_decision_option_count')}`",
+        f"- launch_execution_matrix_manual_decision_dry_run_ready_count: `{launch_execution_matrix.get('manual_decision_dry_run_ready_count')}`",
+        f"- launch_execution_matrix_manual_decision_write_ready_count: `{launch_execution_matrix.get('manual_decision_write_ready_count')}`",
+        f"- launch_execution_matrix_manual_decision_validation_ready_count: `{launch_execution_matrix.get('manual_decision_validation_ready_count')}`",
+        f"- launch_execution_matrix_primary_manual_input_item: `{launch_execution_primary_manual_input.get('item')}`",
+        f"- launch_execution_matrix_primary_manual_input_status: `{launch_execution_primary_manual_input.get('status')}`",
+        f"- launch_execution_matrix_primary_manual_contract_status: `{launch_execution_primary_manual_contract.get('status')}`",
+        f"- launch_execution_matrix_primary_manual_contract_next_step: `{launch_execution_primary_manual_contract.get('next_contract_step')}`",
+        f"- launch_execution_matrix_primary_manual_prompt_status: `{launch_execution_primary_manual_prompt.get('status')}`",
+        f"- launch_execution_matrix_primary_manual_prompt_safe_default: `{launch_execution_primary_manual_prompt.get('safe_default_if_uncertain')}`",
+        f"- launch_execution_matrix_primary_manual_prompt_min_anchors: `{launch_execution_primary_rationale_gate.get('minimum_recommended_anchor_count')}`",
+        f"- launch_execution_matrix_primary_manual_prompt_must_address_count: `{launch_execution_primary_rationale_gate.get('must_address_count')}`",
+        f"- launch_execution_matrix_primary_manual_form_status: `{launch_execution_primary_manual_form.get('status')}`",
+        f"- launch_execution_matrix_primary_manual_form_required_fields: `{launch_execution_primary_manual_form.get('required_field_names')}`",
+        f"- launch_execution_matrix_primary_manual_form_safe_default_decision: `{launch_execution_primary_form_decision.get('safe_default_decision_if_uncertain')}`",
+        f"- launch_execution_matrix_primary_manual_form_safe_default_policy: `{launch_execution_primary_form_decision.get('safe_default_policy_if_uncertain')}`",
+        f"- launch_execution_matrix_primary_manual_form_safe_default_alignment: `{launch_execution_primary_form_default_alignment.get('status')}`",
+        f"- launch_execution_matrix_primary_manual_form_min_rationale_chars: `{launch_execution_primary_form_rationale.get('minimum_rationale_chars')}`",
+        f"- launch_execution_matrix_primary_manual_form_min_anchors: `{launch_execution_primary_form_rationale.get('minimum_recommended_anchor_count')}`",
+        f"- launch_execution_matrix_wait_count: `{launch_execution_matrix.get('wait_gate_count')}`",
+        f"- launch_execution_matrix_forbidden_count: `{launch_execution_matrix.get('forbidden_action_count')}`",
+        f"- launch_execution_matrix_primary_step: `{launch_execution_primary_step.get('step_type')}`",
+        f"- launch_execution_matrix_primary_gate: `{launch_execution_primary_step.get('target_gate')}`",
+        f"- launch_execution_matrix_primary_action: `{launch_execution_primary_step.get('action_type')}`",
+        f"- launch_execution_matrix_primary_due_status: `{launch_execution_primary_step.get('due_status')}`",
+        f"- launch_execution_matrix_primary_ready_now: `{launch_execution_primary_step.get('ready_now')}`",
+        f"- launch_execution_matrix_primary_next_monitor_kst: `{launch_execution_primary_step.get('next_monitor_kst')}`",
+        f"- launch_execution_matrix_primary_raw_next_monitor_kst: `{launch_execution_primary_step.get('raw_next_monitor_kst')}`",
+        f"- launch_execution_matrix_primary_next_monitor_source: `{launch_execution_primary_step.get('next_monitor_source')}`",
+        f"- launch_execution_matrix_current_signal_wait_next_monitor_kst: `{launch_execution_current_signal_wait.get('next_monitor_kst')}`",
+        f"- launch_execution_matrix_current_signal_wait_raw_next_monitor_kst: `{launch_execution_current_signal_wait.get('raw_next_monitor_kst')}`",
+        f"- launch_execution_matrix_current_signal_wait_next_monitor_source: `{launch_execution_current_signal_wait.get('next_monitor_source')}`",
+        f"- launch_execution_matrix_current_signal_wait_retimestampted_after_current_iteration: `{launch_execution_current_signal_wait.get('next_monitor_retimestampted_after_current_iteration')}`",
+        f"- launch_execution_matrix_effective_primary_step: `{launch_execution_effective_primary_step.get('step_type')}`",
+        f"- launch_execution_matrix_effective_primary_gate: `{launch_execution_effective_primary_step.get('target_gate')}`",
+        f"- launch_execution_matrix_effective_primary_action: `{launch_execution_effective_primary_step.get('action_type')}`",
+        f"- launch_execution_matrix_effective_primary_due_status: `{launch_execution_effective_primary_step.get('effective_due_status') or launch_execution_effective_primary_step.get('due_status')}`",
+        f"- unresolved_problem_count: `{len(unresolved_problem_register)}`",
+        f"- unresolved_problem_ids: `{[item.get('id') for item in unresolved_problem_register]}`",
         f"- blocker_resolution_count: `{len(blocker_plan)}`",
         f"- fresh_signal_seen: `{progress.get('fresh_signal_seen')}`",
         f"- paper_apply_available_seen: `{progress.get('paper_apply_available_seen')}`",
+        f"- paper_only_rehearsal_statuses_seen: `{progress.get('paper_only_rehearsal_statuses_seen')}`",
+        f"- paper_only_rehearsal_armed_seen: `{progress.get('paper_only_rehearsal_armed_seen')}`",
+        f"- paper_only_rehearsal_available_seen: `{progress.get('paper_only_rehearsal_available_seen')}`",
+        f"- paper_only_rehearsal_first_completed_seen: `{progress.get('paper_only_rehearsal_first_completed_seen')}`",
+        f"- paper_only_max_substitution_ready_seen: `{progress.get('paper_only_max_substitution_ready_seen')}`",
         f"- tiny_canary_ready_seen: `{progress.get('tiny_canary_ready_seen')}`",
         f"- execution_parity_journal_rows_latest: `{progress.get('execution_parity_journal_rows_latest')}`",
         f"- execution_parity_journal_rows_delta: `{progress.get('execution_parity_journal_rows_delta')}`",
@@ -369,10 +1287,463 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- execution_parity_creditable_actions_latest: `{progress.get('execution_parity_creditable_actions_latest')}`",
         f"- execution_parity_next_step_latest: `{progress.get('execution_parity_next_step_latest')}`",
         f"- latest_evidence_report: `{latest.get('evidence_report')}`",
-        "",
-        "## Blocking Gates",
-        "",
     ]
+    lines.extend(["", "## Unresolved Problem Register", ""])
+    for item in unresolved_problem_register:
+        lines.append(
+            f"- `{item.get('id')}` status=`{item.get('status')}` severity=`{item.get('severity')}` "
+            f"non_substitutable=`{item.get('non_substitutable')}` "
+            f"safe_action=`{item.get('safe_action_type')}` "
+            f"coordination=`{item.get('coordination_status')}` "
+            f"next_signal_kst=`{item.get('next_signal_or_add_monitor_kst')}` "
+            f"next_quote_kst=`{item.get('next_quote_window_kst')}` "
+            f"quote_deferred=`{item.get('quote_window_deferred_by_earlier_monitor')}` "
+            f"review_file_status=`{item.get('active_operator_review_file_status')}` "
+            f"dry_run_ready=`{item.get('operator_decision_dry_run_ready')}` "
+            f"blocker_interpretation=`{item.get('blocker_interpretation')}` "
+            f"next_action=`{item.get('next_action')}`"
+        )
+    lines.extend(["", "## Operator Work Queue", ""])
+    lines.append(
+        f"- status=`{operator_work_queue.get('status')}` "
+        f"raw_status=`{operator_work_queue.get('raw_status')}` "
+        f"effective_status=`{operator_work_queue.get('effective_status')}` "
+        f"status_scope=`{operator_work_queue.get('status_scope')}` "
+        f"effective_scope=`{operator_work_queue.get('effective_status_scope')}` "
+        f"covered_status=`{operator_work_queue.get('covered_automation_status')}` "
+        f"raw_automation_now=`{operator_work_queue.get('raw_automation_now_count')}` "
+        f"effective_automation_now=`{operator_work_queue.get('effective_automation_now_count')}` "
+        f"covered_automation_now=`{operator_work_queue.get('covered_automation_now_count')}` "
+        f"operator_reviews_now=`{operator_work_queue.get('operator_review_now_count')}` "
+        f"operator_review_waits=`{operator_work_queue.get('operator_review_wait_count')}` "
+        f"startable_waits=`{operator_work_queue.get('startable_wait_count')}`"
+    )
+    for item in list(operator_work_queue.get("automation_now") or [])[:3]:
+        lines.append(
+            f"- automation type=`{item.get('action_type')}` target=`{item.get('target_gate')}` "
+            f"raw_next_kst=`{item.get('raw_next_monitor_after_kst')}` "
+            f"effective_next_kst=`{item.get('effective_next_monitor_after_kst')}` "
+            f"covered_next_kst=`{item.get('covered_next_recheck_after_kst')}` "
+            f"covered=`{item.get('covered_by_current_iteration')}` "
+            f"effective_available_now=`{item.get('effective_available_now')}` "
+            f"retimestamped=`{item.get('next_monitor_retimestampted_after_current_iteration')}` "
+            f"report_dir=`{item.get('command_report_dir')}`"
+        )
+    for item in list(operator_work_queue.get("operator_reviews") or [])[:3]:
+        lines.append(
+            f"- operator_review type=`{item.get('action_type')}` target=`{item.get('target_gate')}` "
+            f"template=`{item.get('template_report')}` skeleton=`{item.get('skeleton_report')}`"
+        )
+    for item in list(operator_work_queue.get("operator_review_waits") or [])[:3]:
+        lines.append(
+            f"- operator_review_wait type=`{item.get('action_type')}` target=`{item.get('target_gate')}` "
+            f"execute_after_kst=`{item.get('execute_after_kst')}` reason=`{item.get('reason')}`"
+        )
+    lines.extend(["", "## Operator Review Handoff", ""])
+    lines.append(
+        f"- status=`{operator_review_handoff.get('status')}` "
+        f"ready=`{operator_review_handoff.get('ready_review_count')}` "
+        f"blocked=`{operator_review_handoff.get('blocked_review_count')}` "
+        f"waiting=`{operator_review_handoff.get('waiting_review_count')}`"
+    )
+    for item in list(operator_review_handoff.get("reviews") or [])[:5]:
+        lines.append(
+            f"- review type=`{item.get('action_type')}` target=`{item.get('target_gate')}` "
+            f"status=`{item.get('status')}` artifact=`{item.get('artifact_status')}` "
+            f"operator_report_status=`{item.get('operator_review_status')}` "
+            f"active_file_status=`{item.get('active_operator_review_file_status')}` "
+            f"decision_packet_status=`{dict(item.get('operator_decision_packet') or {}).get('status')}` "
+            f"decision_command_safety=`{dict(dict(item.get('operator_decision_packet') or {}).get('decision_command_safety') or {}).get('status')}` "
+            f"draft_min_rationale_chars=`{dict(item.get('active_operator_review_file_summary') or {}).get('draft_min_rationale_chars')}` "
+            f"draft_min_evidence_anchors=`{dict(item.get('active_operator_review_file_summary') or {}).get('draft_min_evidence_anchors')}` "
+            f"required_fields_remaining=`{item.get('operator_required_fields_remaining')}` "
+            f"template=`{item.get('template_report')}` skeleton=`{item.get('skeleton_report')}` "
+            f"suggested_report=`{item.get('suggested_operator_review_report')}` "
+            f"draft_prepare_required=`{dict(item.get('operator_review_file_plan') or {}).get('draft_prepare_required')}`"
+        )
+    lines.extend(["", "## Launch Blocker Priority", ""])
+    lines.append(
+        f"- status=`{launch_blocker_summary.get('status')}` "
+        f"non_substitutable_problem=`{launch_blocker_summary.get('non_substitutable_problem_count')}` "
+        f"non_substitutable_wait=`{launch_blocker_summary.get('non_substitutable_wait_blocker_count')}` "
+        f"non_substitutable_compat=`{launch_blocker_summary.get('non_substitutable_blocker_count')}` "
+        f"dependency_blocked=`{launch_blocker_summary.get('dependency_blocked_count')}` "
+        f"waiting=`{launch_blocker_summary.get('waiting_blocker_count')}` "
+        f"operator_ready=`{launch_blocker_summary.get('operator_review_ready_count')}`"
+    )
+    for item in list(launch_blocker_summary.get("priority_items") or [])[:5]:
+        lines.append(
+            f"- blocker id=`{item.get('id')}` category=`{item.get('category')}` "
+            f"severity=`{item.get('severity')}` next_action=`{item.get('next_action')}`"
+        )
+    lines.extend(["", "## Remaining Work Closure", ""])
+    dependency_lanes = dict(remaining_work_closure.get("dependency_lanes") or {})
+    actionability = dict(remaining_work_closure.get("actionability_partition") or {})
+    dependency_unlock_plan = dict(remaining_work_closure.get("dependency_unlock_plan") or {})
+    operator_lane = dict(dependency_lanes.get("operator_input_lane") or {})
+    signal_lane = dict(dependency_lanes.get("realtime_signal_lane") or {})
+    first_row_lane = dict(dependency_lanes.get("first_paper_row_lane") or {})
+    parity_lane = dict(dependency_lanes.get("execution_parity_lane") or {})
+    calendar_lane = dict(dependency_lanes.get("calendar_coverage_lane") or {})
+    runtime_lane = dict(dependency_lanes.get("runtime_observation_lane") or {})
+    lines.append(
+        f"- status=`{remaining_work_closure.get('status')}` "
+        f"auto_complete_without_future_market_or_operator="
+        f"`{remaining_work_closure.get('auto_complete_without_future_market_or_operator')}` "
+        f"automation_now=`{remaining_work_closure.get('safe_automation_now_count')}` "
+        f"effective_automation_now=`{remaining_work_closure.get('safe_effective_automation_now_count')}` "
+        f"covered_automation_now=`{remaining_work_closure.get('safe_covered_automation_now_count')}` "
+        f"useful_now=`{remaining_work_closure.get('safe_useful_automation_now_count')}` "
+        f"raw_useful_now=`{remaining_work_closure.get('safe_raw_useful_automation_now_count')}` "
+        f"noop_or_deferred_now=`{remaining_work_closure.get('safe_noop_or_deferred_automation_now_count')}` "
+        f"operator_decisions=`{remaining_work_closure.get('operator_decision_required_count')}` "
+        f"wait_only=`{remaining_work_closure.get('non_substitutable_wait_count')}`"
+    )
+    lines.append(
+        f"- dependency_lanes=`{dependency_lanes.get('status')}` "
+        f"critical_path=`{dependency_lanes.get('critical_path')}` "
+        f"parallel_calendar_path=`{dependency_lanes.get('parallel_calendar_path')}`"
+    )
+    lines.append(
+        f"  - operator_lane=`{operator_lane.get('status')}` "
+        f"decisions=`{operator_lane.get('decision_required_count')}` "
+        f"drafts=`{operator_lane.get('draft_prepared_count')}` "
+        f"safety_pass=`{operator_lane.get('command_safety_pass_count')}`"
+    )
+    lines.append(
+        f"  - signal_lane=`{signal_lane.get('status')}` "
+        f"monitor_useful_now=`{signal_lane.get('monitor_useful_now')}` "
+        f"monitor_execute_after_kst=`{signal_lane.get('monitor_execute_after_kst')}`"
+    )
+    lines.append(
+        f"  - first_paper_row_lane=`{first_row_lane.get('status')}` "
+        f"depends_on=`{first_row_lane.get('depends_on')}` "
+        f"auto_apply_allowed=`{first_row_lane.get('auto_apply_allowed')}`"
+    )
+    lines.append(
+        f"  - parity_lane=`{parity_lane.get('status')}` "
+        f"missing=`{parity_lane.get('missing_samples')}` "
+        f"eta_kst=`{parity_lane.get('eta_completion_kst')}`"
+    )
+    lines.append(
+        f"  - calendar_lane=`{calendar_lane.get('status')}` "
+        f"remaining_days=`{calendar_lane.get('remaining_calendar_days')}` "
+        f"next_quote_kst=`{calendar_lane.get('next_quote_window_kst')}`"
+    )
+    lines.append(
+        f"  - runtime_lane=`{runtime_lane.get('status')}` "
+        f"remaining_hours=`{runtime_lane.get('remaining_hours')}` "
+        f"progress_pct=`{runtime_lane.get('progress_pct')}`"
+    )
+    lines.append(
+        f"- actionability_partition=`{actionability.get('status')}` "
+        f"dependency_aware=`{actionability.get('dependency_aware_status')}` "
+        f"primary_launch_wait=`{actionability.get('primary_launch_wait_gate')}` "
+        f"primary_human_action=`{actionability.get('primary_human_action_gate')}` "
+        f"no_safe_auto_now=`{actionability.get('no_safe_auto_command_now')}` "
+        f"auto_now=`{actionability.get('run_now_without_operator_count')}` "
+        f"manual_now=`{actionability.get('manual_now_count')}` "
+        f"manual_repair=`{actionability.get('manual_repair_now_count')}` "
+        f"signal_waits=`{actionability.get('signal_wait_count')}` "
+        f"time_waits=`{actionability.get('time_wait_count')}` "
+        f"dependency_blocked=`{actionability.get('dependency_blocked_count')}` "
+        f"waits_open=`{actionability.get('waits_open')}` "
+        f"dependency_blockers_open=`{actionability.get('dependency_blockers_open')}`"
+    )
+    lines.append(
+        f"- actionability_tracks=`{actionability_tracks.get('status')}` "
+        f"primary_launch_wait=`{actionability_tracks.get('primary_launch_wait_gate')}` "
+        f"primary_human_action=`{actionability_tracks.get('primary_human_action_gate')}` "
+        f"validation_redesign_blocked="
+        f"`{dict(actionability_tracks.get('blocked_by_validation_redesign') or {}).get('count')}` "
+        f"interpretation=`{actionability_tracks.get('interpretation')}`"
+    )
+    lines.append(
+        f"- validation_redesign_runbook=`{validation_redesign_runbook.get('status')}` "
+        f"primary_problem=`{validation_redesign_runbook.get('primary_problem_id')}` "
+        f"downstream_failure=`{validation_redesign_runbook.get('primary_downstream_failure')}` "
+        f"contract=`{validation_redesign_runbook.get('next_candidate_design_contract_status')}` "
+        f"active_full_wfo_candidates="
+        f"`{dict(validation_redesign_runbook.get('current_failed_family_summary') or {}).get('active_full_walk_forward_candidate_count')}` "
+        f"worst_probe_candidate="
+        f"`{dict(dict(validation_redesign_runbook.get('current_failed_family_summary') or {}).get('worst_probe_add_delta_candidate') or {}).get('candidate_name')}` "
+        f"command_templates=`{validation_redesign_runbook.get('validation_command_template_count')}` "
+        f"required_placeholders=`{validation_redesign_runbook.get('required_placeholder_count')}` "
+        f"templates_validation_only="
+        f"`{dict(validation_redesign_runbook.get('command_template_safety') or {}).get('validation_only')}` "
+        f"strict_revalidation=`{strict_activity_revalidation_summary.get('status')}` "
+        f"strict_blocked=`{strict_activity_revalidation_summary.get('blocked_count')}` "
+        f"strict_passed=`{strict_activity_revalidation_summary.get('passed_count')}` "
+        f"strict_gate_missing=`{strict_activity_revalidation_summary.get('strict_gate_missing_count')}` "
+        f"strict_safety_blocked=`{strict_activity_revalidation_summary.get('safety_blocked_count')}` "
+        f"closest_strict_candidate=`{closest_strict_activity_candidate.get('candidate_name')}` "
+        f"closest_strict_candidate_status=`{closest_strict_activity_candidate.get('eligibility_status')}` "
+        f"closest_why_not_default=`{closest_strict_activity_candidate.get('why_not_default_candidate')}` "
+        f"redesign_work_order=`{candidate_redesign_work_order.get('status')}` "
+        f"redesign_objective=`{candidate_redesign_work_order.get('objective')}` "
+        f"redesign_target_reason=`{candidate_redesign_work_order.get('current_no_signal_driver')}` "
+        f"redesign_constraints=`{candidate_redesign_constraints.get('status')}` "
+        f"must_trade_like_delta_min="
+        f"`{candidate_redesign_constraints.get('must_increase_trade_like_events_delta_min')}` "
+        f"legacy_promoted_strict_blocked="
+        f"`{strict_activity_revalidation_summary.get('strict_revalidated_promoted_legacy_reports_blocked')}` "
+        f"runtime_filter_change_allowed=`{validation_redesign_runbook.get('runtime_filter_change_allowed')}` "
+        f"paper_or_live_promotion_allowed=`{validation_redesign_runbook.get('paper_or_live_promotion_allowed')}`"
+    )
+    lines.append(
+        f"- dependency_unlock_plan=`{dependency_unlock_plan.get('status')}` "
+        f"steps=`{dependency_unlock_plan.get('step_count')}` "
+        f"manual_steps=`{dependency_unlock_plan.get('manual_unlock_step_count')}` "
+        f"realtime_steps=`{dependency_unlock_plan.get('realtime_unlock_step_count')}` "
+        f"primary_gate=`{dict(dependency_unlock_plan.get('primary_unlock_step') or {}).get('gate')}` "
+        f"primary_realtime_gate=`{dict(dependency_unlock_plan.get('primary_realtime_unlock_step') or {}).get('gate')}`"
+    )
+    lines.append(
+        f"  - recommended_parallel_next_moves="
+        f"`{actionability.get('recommended_parallel_next_moves')}`"
+    )
+    for step in list(dependency_unlock_plan.get("steps") or [])[:6]:
+        lines.append(
+            f"  - unlock step=`{step.get('step')}` gate=`{step.get('gate')}` "
+            f"status=`{step.get('status')}` ready_now=`{step.get('ready_now')}` "
+            f"unlock_mode=`{step.get('unlock_mode')}` "
+            f"direct_unlocks=`{step.get('direct_unlocks')}` "
+            f"partial_unlocks=`{step.get('partial_unlocks')}` "
+            f"safe_action=`{step.get('safe_action')}`"
+        )
+    for item in list(remaining_work_closure.get("automation_now_usefulness") or [])[:5]:
+        lines.append(
+            f"- automation_usefulness type=`{item.get('action_type')}` target=`{item.get('target_gate')}` "
+            f"useful_now=`{item.get('useful_now')}` reason=`{item.get('reason')}`"
+        )
+    lines.append(
+        f"- wait_only_problem_ids=`{remaining_work_closure.get('wait_only_problem_ids')}` "
+        f"dependency_blocked_problem_ids=`{remaining_work_closure.get('dependency_blocked_problem_ids')}` "
+        f"operator_review_problem_ids=`{remaining_work_closure.get('operator_review_problem_ids')}`"
+    )
+    lines.append(
+        f"- not_auto_completable_reasons="
+        f"`{remaining_work_closure.get('not_auto_completable_reasons')}`"
+    )
+    lines.append(
+        f"- prepared_review_drafts=`{remaining_work_closure.get('operator_review_draft_prepared_count')}` "
+        f"decision_safety_pass=`{remaining_work_closure.get('operator_decision_command_safety_pass_count')}`"
+    )
+    lines.extend(["", "## First Fresh Signal Runbook", ""])
+    lines.append(
+        f"- status=`{first_signal_runbook.get('status')}` "
+        f"fresh_signal=`{first_signal_runbook.get('fresh_signal')}` "
+        f"paper_apply_allowed_now=`{first_signal_runbook.get('paper_apply_allowed_now')}` "
+        f"next_step=`{first_signal_runbook.get('next_operator_step')}`"
+    )
+    lines.append(
+        f"- dry_run_command=`{first_signal_runbook.get('dry_run_command')}` "
+        f"apply_allowed_now=`{first_signal_runbook.get('apply_command_allowed_now')}`"
+    )
+    lines.append(
+        f"- apply_when_gate_allows=`{first_signal_runbook.get('apply_command_when_gate_allows')}`"
+    )
+    lines.append(
+        f"- post_apply_review=`{first_signal_runbook.get('post_apply_execution_parity_review_command')}` "
+        f"backup_required=`{first_signal_runbook.get('pre_apply_backup_required')}` "
+        f"parity_will_credit=`{first_signal_runbook.get('execution_parity_will_credit_current_apply')}`"
+    )
+    lines.extend(["", "## Operator Review Decision Aid", ""])
+    lines.append(
+        f"- status=`{operator_review_aid.get('status')}` "
+        f"decision_required=`{operator_review_aid.get('decision_required_count')}` "
+        f"blocked=`{operator_review_aid.get('blocked_review_count')}` "
+        f"waiting=`{operator_review_aid.get('waiting_review_count')}`"
+    )
+    for item in list(operator_review_aid.get("decisions") or [])[:3]:
+        evidence = dict(item.get("evidence_snapshot") or {})
+        guidance = dict(evidence.get("review_guidance") or {})
+        contract = dict(item.get("manual_decision_contract") or {})
+        scaffold = dict(item.get("rationale_scaffold") or {})
+        command_plan = dict(item.get("decision_command_plan") or {})
+        candidate_evidence = dict(evidence.get("candidate") or {})
+        proxy_evidence = dict(evidence.get("proxy_audit") or {})
+        promotion_evidence = dict(evidence.get("promotion_gate") or {})
+        lines.append(
+            f"- decision type=`{item.get('action_type')}` target=`{item.get('target_gate')}` "
+            f"candidate=`{item.get('candidate_recipe_id')}` "
+            f"required_fields=`{item.get('required_fields_remaining')}` "
+            f"safety=`{item.get('decision_command_safety_status')}` "
+            f"active_report=`{item.get('active_operator_review_report')}`"
+        )
+        lines.append(
+            f"  - evidence_status=`{evidence.get('status')}` "
+            f"candidate_return_pct=`{candidate_evidence.get('compounded_oos_return_pct')}` "
+            f"proxy_failed_checks=`{proxy_evidence.get('failed_check_count')}` "
+            f"promotion_decision=`{promotion_evidence.get('promotion_decision')}` "
+            f"guidance=`{guidance.get('status')}` "
+            f"concerns=`{guidance.get('rationale_must_address')}` "
+            f"contract=`{contract.get('status')}`"
+        )
+        lines.append(
+            f"  - contract_accept_blockers=`{contract.get('accept_blockers_before_operator_write')}` "
+            f"min_anchor_count=`{contract.get('minimum_recommended_anchor_count')}` "
+            f"snapshot_fingerprint=`{contract.get('evidence_snapshot_fingerprint')}` "
+            f"safe_default=`{contract.get('safe_default_if_any_contract_item_fails')}`"
+        )
+        lines.append(
+            f"  - rationale_scaffold=`{scaffold.get('status')}` "
+            f"minimum_anchor_set=`{scaffold.get('minimum_anchor_set')}` "
+            f"operator_write_blocked=`{scaffold.get('operator_write_still_blocked_by_contract')}`"
+        )
+        lines.append(
+            f"  - decision_command_plan=`{command_plan.get('status')}` "
+            f"command_blockers=`{command_plan.get('blockers')}` "
+            f"safe_default_if_uncertain=`{command_plan.get('safe_default_if_operator_uncertain')}`"
+        )
+    lines.extend(["", "## Operator Review Resolution Plan", ""])
+    lines.append(
+        f"- status=`{operator_review_resolution.get('status')}` "
+        f"decision_count=`{operator_review_resolution.get('decision_count')}` "
+        f"all_commands_safe=`{operator_review_resolution.get('all_decision_commands_safe')}` "
+        f"safe_default=`{operator_review_resolution.get('safe_default_policy')}` "
+        f"auto_decision_allowed=`{operator_review_resolution.get('auto_decision_allowed')}`"
+    )
+    readiness_matrix = dict(operator_review_resolution.get("readiness_matrix") or {})
+    lines.append(
+        f"- readiness_matrix=`{readiness_matrix.get('status')}` "
+        f"rows=`{readiness_matrix.get('row_count')}` "
+        f"dry_run_ready=`{readiness_matrix.get('dry_run_ready_count')}` "
+        f"contract_blocked=`{readiness_matrix.get('contract_blocked_count')}` "
+        f"repair_required=`{readiness_matrix.get('repair_required_count')}`"
+    )
+    for row in list(readiness_matrix.get("rows") or [])[:5]:
+        lines.append(
+            f"  - matrix_step=`{row.get('step')}` kind=`{row.get('review_kind')}` "
+            f"candidate=`{row.get('candidate_recipe_id')}` "
+            f"dry_run_ready=`{row.get('ready_for_operator_dry_run_template')}` "
+            f"contract_blockers=`{row.get('contract_accept_blockers_before_write')}` "
+            f"next_manual_action=`{row.get('next_manual_action')}`"
+        )
+    manual_batch = dict(operator_review_resolution.get("manual_batch_handoff") or {})
+    primary_batch_step = dict(manual_batch.get("primary_next_step") or {})
+    lines.append(
+        f"- manual_batch_handoff=`{manual_batch.get('status')}` "
+        f"rows=`{manual_batch.get('row_count')}` "
+        f"dry_run_ready=`{manual_batch.get('dry_run_ready_count')}` "
+        f"operator_inputs_only=`{manual_batch.get('blocked_by_operator_inputs_only')}` "
+        f"sequential_validation=`{manual_batch.get('requires_sequential_validation')}` "
+        f"batch_fingerprint=`{manual_batch.get('batch_fingerprint')}`"
+    )
+    lines.append(
+        f"- manual_batch_primary_step=`{primary_batch_step.get('step')}` "
+        f"kind=`{primary_batch_step.get('review_kind')}` "
+        f"candidate=`{primary_batch_step.get('candidate_recipe_id')}` "
+        f"next_manual_action=`{primary_batch_step.get('next_manual_action')}` "
+        f"safe_default=`{primary_batch_step.get('safe_default_if_uncertain')}`"
+    )
+    for row in list(manual_batch.get("batch_order") or [])[:5]:
+        lines.append(
+            f"  - batch_step=`{row.get('step')}` kind=`{row.get('review_kind')}` "
+            f"target=`{row.get('target_gate')}` candidate=`{row.get('candidate_recipe_id')}` "
+            f"dry_run_ready=`{row.get('ready_for_operator_dry_run_template')}` "
+            f"validation=`{row.get('validation_command')}` "
+            f"next_manual_action=`{row.get('next_manual_action')}`"
+        )
+    for item in list(operator_review_resolution.get("resolution_steps") or [])[:5]:
+        evidence = dict(item.get("evidence_snapshot") or {})
+        guidance = dict(evidence.get("review_guidance") or {})
+        contract = dict(item.get("manual_decision_contract") or {})
+        scaffold = dict(item.get("rationale_scaffold") or {})
+        command_plan = dict(item.get("decision_command_plan") or {})
+        candidate_evidence = dict(evidence.get("candidate") or {})
+        proxy_evidence = dict(evidence.get("proxy_audit") or {})
+        promotion_evidence = dict(evidence.get("promotion_gate") or {})
+        lines.append(
+            f"- step=`{item.get('step')}` kind=`{item.get('review_kind')}` "
+            f"target=`{item.get('target_gate')}` candidate=`{item.get('candidate_recipe_id')}` "
+            f"required_inputs=`{item.get('required_operator_inputs')}` "
+            f"safe_default=`{item.get('safe_default_if_uncertain')}` "
+            f"safety=`{item.get('decision_command_safety_status')}` "
+            f"active_report=`{item.get('active_operator_review_report')}`"
+        )
+        lines.append(
+            f"  - dry_run=`{item.get('decision_dry_run_command_template')}`"
+        )
+        lines.append(
+            f"  - validation=`{item.get('validation_command')}`"
+        )
+        lines.append(
+            f"  - evidence_status=`{evidence.get('status')}` "
+            f"candidate_folds=`{candidate_evidence.get('fold_count')}` "
+            f"candidate_min_return_pct=`{candidate_evidence.get('min_oos_return_pct')}` "
+            f"candidate_max_dd_pct=`{candidate_evidence.get('max_fold_drawdown_pct')}` "
+            f"proxy_warnings=`{len(list(proxy_evidence.get('warnings') or []))}` "
+            f"promotion_blockers=`{len(list(promotion_evidence.get('overfit_blockers') or []))}` "
+            f"snapshot_safety_blockers=`{evidence.get('explicit_safety_blockers')}`"
+        )
+        lines.append(
+            f"  - guidance_status=`{guidance.get('status')}` "
+            f"supporting_evidence=`{guidance.get('supporting_evidence')}` "
+            f"rationale_must_address=`{guidance.get('rationale_must_address')}` "
+            f"anchor_candidates=`{guidance.get('evidence_anchor_candidates')}`"
+        )
+        lines.append(
+            f"  - manual_decision_contract=`{contract.get('status')}` "
+            f"accept_blockers_before_write=`{contract.get('accept_blockers_before_operator_write')}` "
+            f"reject_or_hold_triggers=`{contract.get('reject_or_hold_triggers')}` "
+            f"snapshot_fingerprint=`{contract.get('evidence_snapshot_fingerprint')}`"
+        )
+        lines.append(
+            f"  - rationale_scaffold=`{scaffold.get('status')}` "
+            f"minimum_anchor_set=`{scaffold.get('minimum_anchor_set')}` "
+            f"concerns_to_address=`{scaffold.get('concerns_to_address')}` "
+            f"operator_write_blocked=`{scaffold.get('operator_write_still_blocked_by_contract')}`"
+        )
+        lines.append(
+            f"  - decision_command_plan=`{command_plan.get('status')}` "
+            f"dry_run_before_write=`{command_plan.get('dry_run_before_write_required')}` "
+            f"validation_after_write=`{command_plan.get('validation_after_write_required')}` "
+            f"command_blockers=`{command_plan.get('blockers')}`"
+        )
+    lines.extend(["", "## Daily Quote Checkpoint", ""])
+    lines.append(
+        f"- status=`{daily_quote_checkpoint.get('status')}` "
+        f"next_action=`{daily_quote_checkpoint.get('next_action')}` "
+        f"remaining_calendar_days=`{daily_quote_checkpoint.get('remaining_calendar_days')}` "
+        f"next_quote_kst=`{daily_quote_checkpoint.get('next_quote_window_kst') or daily_quote_checkpoint.get('next_quote_coverage_kst_at')}` "
+        f"coordination=`{daily_quote_checkpoint.get('quote_window_coordination_status')}` "
+        f"signal_next_kst=`{daily_quote_checkpoint.get('next_signal_or_add_monitor_kst')}` "
+        f"signal_raw_next_kst=`{daily_quote_checkpoint.get('raw_next_signal_or_add_monitor_kst')}` "
+        f"signal_source=`{daily_quote_checkpoint.get('next_signal_or_add_monitor_source')}` "
+        f"signal_wait_minutes=`{daily_quote_checkpoint.get('next_signal_or_add_monitor_wait_minutes')}` "
+        f"signal_window=`{daily_quote_checkpoint.get('next_signal_or_add_monitor_window_status')}` "
+        f"signal_overdue_minutes=`{daily_quote_checkpoint.get('next_signal_or_add_monitor_overdue_minutes')}`"
+    )
+    lines.append(
+        f"- capture_now=`{daily_quote_checkpoint.get('capture_command_now')}` "
+        f"wait_command=`{daily_quote_checkpoint.get('wait_command')}` "
+        f"backfill_allowed=`{daily_quote_checkpoint.get('backfill_allowed_for_launch_gate')}` "
+        f"deferred_by_signal_monitor=`{daily_quote_checkpoint.get('quote_window_deferred_by_signal_monitor')}` "
+        f"do_not_skip_quote_window=`{daily_quote_checkpoint.get('do_not_skip_quote_window_for_signal_monitor')}`"
+    )
+    lines.extend(["", "## Next Material Progress", ""])
+    lines.append(
+        f"- status=`{next_material_progress.get('status')}` "
+        f"immediate_auto=`{next_material_progress.get('immediate_auto_count')}` "
+        f"immediate_operator=`{next_material_progress.get('immediate_operator_count')}` "
+        f"future=`{next_material_progress.get('future_event_count')}` "
+        f"unscheduled=`{next_material_progress.get('unscheduled_wait_count')}`"
+    )
+    for item in list(next_material_progress.get("events") or [])[:8]:
+        lines.append(
+            f"- event=`{item.get('event_type')}` gate=`{item.get('gate')}` "
+            f"ready_now=`{item.get('ready_now')}` auto=`{item.get('can_auto_run')}` "
+            f"operator_review=`{item.get('requires_operator_review')}` "
+            f"eta_kst=`{item.get('eta_kst')}` wait_minutes=`{item.get('wait_minutes')}` "
+            f"status=`{item.get('status')}` reason=`{item.get('reason')}`"
+        )
+    for item in list(operator_work_queue.get("startable_waits") or [])[:3]:
+        lines.append(
+            f"- startable_wait type=`{item.get('action_type')}` target=`{item.get('target_gate')}` "
+            f"execute_after_kst=`{item.get('execute_after_kst')}`"
+        )
+    lines.extend(["", "## Blocking Gates", ""])
     for item in list(launch.get("blocking_gates") or []):
         lines.append(f"- `{item.get('gate')}`: {item.get('blocker')} -> {item.get('next_action')}")
     lines.extend(["", "## Blocker Resolution Plan", ""])
@@ -468,6 +1839,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--historical-replay-source", default=DEFAULT_HISTORICAL_REPLAY_SOURCE)
     parser.add_argument("--historical-replay-days", type=int, default=1831)
     parser.add_argument("--historical-lifecycle-source", default=DEFAULT_HISTORICAL_LIFECYCLE_REPLAY_SOURCE)
+    parser.add_argument(
+        "--entry-probe-full-walk-forward-gate-report",
+        default=DEFAULT_ENTRY_PROBE_FULL_WALK_FORWARD_GATE_REPORT,
+    )
     parser.add_argument("--canary-max-notional-usdt", type=float, default=0.0)
     parser.add_argument("--canary-max-leverage", type=float, default=10.0)
     parser.add_argument("--canary-max-daily-loss-usdt", type=float, default=0.0)
@@ -506,6 +1881,11 @@ def _run_once(
         historical_replay_days=max(1, int(args.historical_replay_days)),
         historical_lifecycle_replay=True,
         historical_lifecycle_source_path=_resolve(args.historical_lifecycle_source),
+        entry_probe_full_walk_forward_gate_report_path=(
+            _resolve(getattr(args, "entry_probe_full_walk_forward_gate_report", None))
+            if getattr(args, "entry_probe_full_walk_forward_gate_report", None)
+            else None
+        ),
         canary_max_notional_usdt=max(0.0, float(args.canary_max_notional_usdt)),
         canary_max_leverage=max(0.0, float(args.canary_max_leverage)),
         canary_max_daily_loss_usdt=max(0.0, float(args.canary_max_daily_loss_usdt)),
@@ -522,6 +1902,8 @@ def _run_once(
         "evidence_report": _display_path(evidence_dir / EVIDENCE_REPORT_NAME),
         "overall_status": report.get("overall_status"),
         "no_live_order_sent": report.get("no_live_order_sent") is True,
+        "decision_state": dict(report.get("decision_state") or {}),
+        "entry_quality": dict(report.get("entry_quality") or {}),
         "collection_progress": dict(report.get("collection_progress") or {}),
         "readiness_progress": dict(report.get("readiness_progress") or {}),
         "execution_parity_journal": dict(report.get("execution_parity_journal") or {}),
@@ -544,12 +1926,21 @@ def _watch_progress(runs: list[dict[str, Any]], *, baseline_collection: dict[str
         return {
             "fresh_signal_seen": False,
             "paper_apply_available_seen": False,
+            "paper_only_rehearsal_statuses_seen": [],
+            "paper_only_rehearsal_armed_seen": False,
+            "paper_only_rehearsal_available_seen": False,
+            "paper_only_rehearsal_first_completed_seen": False,
+            "paper_only_max_substitution_ready_seen": False,
             "tiny_canary_ready_seen": False,
         }
     first_collection = dict(baseline_collection or runs[0].get("collection_progress") or {})
     latest_collection = dict(runs[-1].get("collection_progress") or {})
     latest_parity_plan = dict(runs[-1].get("execution_parity_collection_plan") or {})
     launch_statuses = [str(dict(run.get("launch_readiness") or {}).get("status") or "") for run in runs]
+    paper_only_statuses = [
+        str(dict(dict(run.get("launch_readiness") or {}).get("paper_only_rehearsal") or {}).get("status") or "")
+        for run in runs
+    ]
     next_blockers = [
         str(dict(dict(run.get("launch_readiness") or {}).get("next_blocker") or {}).get("gate") or "")
         for run in runs
@@ -560,6 +1951,31 @@ def _watch_progress(runs: list[dict[str, Any]], *, baseline_collection: dict[str
     )
     paper_apply_available_seen = any(
         dict(run.get("paper_bridge_apply_gate") or {}).get("can_request_paper_apply_now") is True
+        for run in runs
+    )
+    paper_only_rehearsal_armed_seen = any(
+        dict(dict(run.get("launch_readiness") or {}).get("paper_only_rehearsal") or {}).get("armed") is True
+        for run in runs
+    )
+    paper_only_rehearsal_available_seen = any(
+        dict(dict(run.get("launch_readiness") or {}).get("paper_only_rehearsal") or {}).get(
+            "current_rehearsal_available"
+        )
+        is True
+        for run in runs
+    )
+    paper_only_rehearsal_first_completed_seen = any(
+        dict(dict(run.get("launch_readiness") or {}).get("paper_only_rehearsal") or {}).get(
+            "first_rehearsal_event_completed"
+        )
+        is True
+        for run in runs
+    )
+    paper_only_max_substitution_ready_seen = any(
+        dict(dict(run.get("launch_readiness") or {}).get("paper_only_rehearsal") or {}).get(
+            "max_substitution_ready"
+        )
+        is True
         for run in runs
     )
     tiny_canary_ready_seen = any(
@@ -580,9 +1996,14 @@ def _watch_progress(runs: list[dict[str, Any]], *, baseline_collection: dict[str
     )
     return {
         "launch_statuses_seen": sorted(set(item for item in launch_statuses if item)),
+        "paper_only_rehearsal_statuses_seen": sorted(set(item for item in paper_only_statuses if item)),
         "next_blockers_seen": sorted(set(item for item in next_blockers if item)),
         "fresh_signal_seen": fresh_signal_seen,
         "paper_apply_available_seen": paper_apply_available_seen,
+        "paper_only_rehearsal_armed_seen": paper_only_rehearsal_armed_seen,
+        "paper_only_rehearsal_available_seen": paper_only_rehearsal_available_seen,
+        "paper_only_rehearsal_first_completed_seen": paper_only_rehearsal_first_completed_seen,
+        "paper_only_max_substitution_ready_seen": paper_only_max_substitution_ready_seen,
         "tiny_canary_ready_seen": tiny_canary_ready_seen,
         "quote_observed_start": _int_value(first_collection, "quote_observed"),
         "quote_observed_latest": _int_value(latest_collection, "quote_observed"),
@@ -628,11 +2049,417 @@ def _number_or_none(value: Any) -> float | None:
     return parsed if parsed == parsed and parsed not in {float("inf"), float("-inf")} else None
 
 
+def _paper_rehearsal_fast_signal_monitor_plan(
+    latest: dict[str, Any],
+    *,
+    generated_at: datetime,
+    previous_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    signal_wait = dict(latest.get("signal_wait_plan") or {})
+    launch = dict(latest.get("launch_readiness") or {})
+    rehearsal = dict(launch.get("paper_only_rehearsal") or {})
+    remaining = {str(item) for item in list(rehearsal.get("remaining_gates") or [])}
+    armed_waiting = (
+        rehearsal.get("armed") is True
+        and "current_fresh_signal" in remaining
+        and signal_wait.get("fresh_signal") is not True
+    )
+    if not armed_waiting:
+        return signal_wait
+    current_recommended = _number_or_none(signal_wait.get("recommended_monitor_interval_minutes"))
+    fast_minutes = PAPER_REHEARSAL_FAST_SIGNAL_MONITOR_MINUTES
+    effective_minutes = min(current_recommended, fast_minutes) if current_recommended else fast_minutes
+    current_event_key = str(signal_wait.get("latest_event_ts") or "").strip()
+    previous_signal_wait = dict(dict(previous_payload or {}).get("latest_run") or {}).get(
+        "signal_wait_plan"
+    )
+    previous_signal_wait = dict(previous_signal_wait or {})
+    previous_event_key = str(previous_signal_wait.get("latest_event_ts") or "").strip()
+    previous_next_monitor = _parse_dt(previous_signal_wait.get("next_monitor_after_utc"))
+    previous_monitor_completed = _scheduled_monitor_report_completed(
+        previous_signal_wait.get("command"),
+        scheduled_at=previous_next_monitor,
+    )
+    preserve_previous_monitor = (
+        bool(current_event_key)
+        and current_event_key == previous_event_key
+        and previous_signal_wait.get("fresh_signal") is not True
+        and previous_next_monitor is not None
+        and not previous_monitor_completed
+    )
+    next_monitor = (
+        previous_next_monitor.astimezone(UTC)
+        if preserve_previous_monitor
+        else generated_at.astimezone(UTC) + timedelta(minutes=effective_minutes)
+    )
+    out = dict(signal_wait)
+    out["paper_rehearsal_fast_capture_enabled"] = True
+    out["paper_rehearsal_fast_monitor_interval_minutes"] = fast_minutes
+    out["original_recommended_monitor_interval_minutes"] = current_recommended
+    out["recommended_monitor_interval_minutes"] = round(effective_minutes, 4)
+    out["signal_freshness_capture_window_minutes"] = (
+        signal_wait.get("signal_freshness_capture_window_minutes") or 15.0
+    )
+    out["monitor_interval_capped_by_signal_freshness"] = True
+    out["monitor_signal_age_alignment"] = "paper_rehearsal_fast_capture_capped_to_fresh_signal_window"
+    out["next_monitor_after_utc"] = next_monitor.isoformat()
+    out["next_monitor_after_kst"] = next_monitor.astimezone(KST).isoformat()
+    out["command"] = _scheduled_signal_monitor_command(
+        signal_wait.get("command"),
+        scheduled_at=next_monitor,
+    ) or signal_wait.get("command")
+    out["next_monitor_preserved_from_previous_watch"] = preserve_previous_monitor
+    out["previous_monitor_report_completed"] = previous_monitor_completed
+    out["next_monitor_anchor"] = (
+        "previous_watch_same_latest_signal_event"
+        if preserve_previous_monitor
+        else "previous_watch_monitor_report_completed"
+        if previous_monitor_completed
+        else "current_watch_generated_at_plus_fast_monitor_interval"
+    )
+    out["recommended_action"] = "monitor_bridge_without_forcing_entry_at_paper_rehearsal_fast_cadence"
+    out["no_live_order_sent"] = True
+    return out
+
+
 def _int_or_default(value: Any, default: int = 0) -> int:
     try:
         return int(value)
     except (TypeError, ValueError):
         return int(default)
+
+
+def _bucket_numeric_bounds(value: Any) -> tuple[float | None, float | None]:
+    text = str(value or "").strip()
+    if not text or "_" not in text:
+        return None, None
+    suffix = text.rsplit("_", 1)[-1]
+    if "-" not in suffix:
+        try:
+            number = float(suffix)
+        except ValueError:
+            return None, None
+        return number, number
+    left, right = suffix.split("-", 1)
+    try:
+        low = float(left)
+    except ValueError:
+        low = None
+    try:
+        high = float(right)
+    except ValueError:
+        high = None
+    return low, high
+
+
+def _candidate_design_blueprints_from_seed_contexts(
+    seed_contexts: Any,
+    *,
+    top_rejected_soft_contexts: Any = None,
+    constraints: dict[str, Any] | None = None,
+    dominant_probe_quality_blocker: Any = None,
+) -> dict[str, Any]:
+    rows = [dict(item) for item in list(seed_contexts or []) if isinstance(item, dict)]
+    strict_constraints = dict(constraints or {})
+    rejected_reasons = [
+        str(dict(item).get("reason") or "")
+        for item in list(top_rejected_soft_contexts or [])
+        if isinstance(item, dict) and dict(item).get("reason")
+    ]
+    blueprints: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    risk_repair_mode = (
+        strict_constraints.get("status") == "strict_risk_repair_constraints_required"
+        or "drawdown_worsening" in set(strict_constraints.get("remaining_primary_blockers") or [])
+    )
+    for row in rows[:3]:
+        reason = str(row.get("reason") or "").replace("no_trade_", "")
+        if reason != "MC12_low_confluence":
+            continue
+        side = str(row.get("side") or "any").lower()
+        regime = str(row.get("regime") or "unknown").lower()
+        alignment = str(row.get("side_alignment") or "with_trend")
+        execution_context = str(row.get("execution_context") or "normal")
+        if not regime or regime == "unknown":
+            continue
+
+        score_low, _ = _bucket_numeric_bounds(row.get("score_bucket"))
+        edge_low, _ = _bucket_numeric_bounds(row.get("edge_bucket"))
+        stack_low, _ = _bucket_numeric_bounds(row.get("reason_stack_bucket"))
+        _, extension_high = _bucket_numeric_bounds(row.get("extension_bucket"))
+        min_score = max(4, int(score_low or 4))
+        min_edge = max(2, int(edge_low or 2))
+        min_stack = max(2, int(stack_low or 2))
+        max_extension = min(float(extension_high or 1.5), 1.5)
+        blueprint_id = f"seeded_mc12_{side}_{regime}_{execution_context}_{alignment}_v1"
+        if blueprint_id in seen_ids:
+            continue
+        seen_ids.add(blueprint_id)
+        cooldown_bars = 72
+        extension_suffix = int(round(max_extension * 10))
+        smoke_candidate_recipe_id = (
+            f"seeded_mc12_{regime}_score{min_score}_edge{min_edge}_stack{min_stack}"
+            f"_ext{extension_suffix}_cooldown{cooldown_bars}"
+        )
+        overlay_config = {
+            "near_miss_probe_units": 0.00025,
+            "near_miss_probe_min_score": min_score,
+            "near_miss_probe_min_score_edge": min_edge,
+            "near_miss_probe_min_reason_stack": min_stack,
+            "near_miss_probe_cooldown_bars": cooldown_bars,
+            "near_miss_probe_max_extension_atr": max_extension,
+            "near_miss_probe_failure_guard_count": 2,
+            "near_miss_probe_failure_guard_window_bars": 1440,
+            "near_miss_probe_failure_cooldown_bars": 4320,
+            "near_miss_probe_allowed_soft_reasons": ["MC12_low_confluence"],
+            "near_miss_probe_allowed_alignments": [alignment],
+            "near_miss_probe_allowed_execution_contexts": [execution_context],
+            "near_miss_probe_allowed_regimes": [regime],
+        }
+        cli_overlay_args = [
+            "--near-miss-probe-units",
+            f"{overlay_config['near_miss_probe_units']:g}",
+            "--near-miss-probe-min-score",
+            str(overlay_config["near_miss_probe_min_score"]),
+            "--near-miss-probe-min-score-edge",
+            str(overlay_config["near_miss_probe_min_score_edge"]),
+            "--near-miss-probe-min-reason-stack",
+            str(overlay_config["near_miss_probe_min_reason_stack"]),
+            "--near-miss-probe-cooldown-bars",
+            str(overlay_config["near_miss_probe_cooldown_bars"]),
+            "--near-miss-probe-max-extension-atr",
+            f"{overlay_config['near_miss_probe_max_extension_atr']:g}",
+            "--near-miss-probe-failure-guard-count",
+            str(overlay_config["near_miss_probe_failure_guard_count"]),
+            "--near-miss-probe-failure-guard-window-bars",
+            str(overlay_config["near_miss_probe_failure_guard_window_bars"]),
+            "--near-miss-probe-failure-cooldown-bars",
+            str(overlay_config["near_miss_probe_failure_cooldown_bars"]),
+            "--near-miss-probe-allowed-soft-reasons",
+            ",".join(overlay_config["near_miss_probe_allowed_soft_reasons"]),
+            "--near-miss-probe-allowed-alignments",
+            ",".join(overlay_config["near_miss_probe_allowed_alignments"]),
+            "--near-miss-probe-allowed-execution-contexts",
+            ",".join(overlay_config["near_miss_probe_allowed_execution_contexts"]),
+            "--near-miss-probe-allowed-regimes",
+            ",".join(overlay_config["near_miss_probe_allowed_regimes"]),
+        ]
+        risk_repair_variants: list[dict[str, Any]] = []
+        if risk_repair_mode and regime == "downtrend":
+            risk_repair_selection_args = [
+                "--selection-max-reaction-usd",
+                "200",
+                "--selection-mdd-soft-threshold-pct",
+                "20",
+                "--selection-mdd-soft-penalty",
+                "0.01",
+            ]
+            for variant_id, variant_overlay in [
+                (
+                    "seeded_mc12_downtrend_score4_edge2_stack2_ext10_cooldown72",
+                    {
+                        **overlay_config,
+                        "near_miss_probe_max_extension_atr": 1.0,
+                    },
+                ),
+                (
+                    "quality_gated_mc12_downtrend_score5_edge2_stack2_ext10",
+                    {
+                        **overlay_config,
+                        "near_miss_probe_min_score": max(5, min_score),
+                        "near_miss_probe_max_extension_atr": 1.0,
+                    },
+                ),
+                (
+                    "quality_gated_mc12_score5_edge2_stack2_ext10_cooldown144",
+                    {
+                        **overlay_config,
+                        "near_miss_probe_min_score": max(5, min_score),
+                        "near_miss_probe_max_extension_atr": 1.0,
+                        "near_miss_probe_cooldown_bars": 144,
+                    },
+                ),
+            ]:
+                variant_args = [
+                    "--near-miss-probe-units",
+                    f"{variant_overlay['near_miss_probe_units']:g}",
+                    "--near-miss-probe-min-score",
+                    str(variant_overlay["near_miss_probe_min_score"]),
+                    "--near-miss-probe-min-score-edge",
+                    str(variant_overlay["near_miss_probe_min_score_edge"]),
+                    "--near-miss-probe-min-reason-stack",
+                    str(variant_overlay["near_miss_probe_min_reason_stack"]),
+                    "--near-miss-probe-cooldown-bars",
+                    str(variant_overlay["near_miss_probe_cooldown_bars"]),
+                    "--near-miss-probe-max-extension-atr",
+                    f"{variant_overlay['near_miss_probe_max_extension_atr']:g}",
+                    "--near-miss-probe-failure-guard-count",
+                    str(variant_overlay["near_miss_probe_failure_guard_count"]),
+                    "--near-miss-probe-failure-guard-window-bars",
+                    str(variant_overlay["near_miss_probe_failure_guard_window_bars"]),
+                    "--near-miss-probe-failure-cooldown-bars",
+                    str(variant_overlay["near_miss_probe_failure_cooldown_bars"]),
+                    "--near-miss-probe-allowed-soft-reasons",
+                    ",".join(variant_overlay["near_miss_probe_allowed_soft_reasons"]),
+                    "--near-miss-probe-allowed-alignments",
+                    ",".join(variant_overlay["near_miss_probe_allowed_alignments"]),
+                    "--near-miss-probe-allowed-execution-contexts",
+                    ",".join(variant_overlay["near_miss_probe_allowed_execution_contexts"]),
+                    "--near-miss-probe-allowed-regimes",
+                    ",".join(variant_overlay["near_miss_probe_allowed_regimes"]),
+                ]
+                risk_repair_variants.append(
+                    {
+                        "candidate_recipe_id": variant_id,
+                        "overlay_config": variant_overlay,
+                        "cli_overlay_args": variant_args,
+                        "candidate_generation_command_template": shlex.join(
+                            [
+                                ".venv/bin/python",
+                                "scripts/run_market_state_rotation_v6_walk_forward_validation.py",
+                                "--source-report",
+                                "<source_backtest_report.json>",
+                                "--report-dir",
+                                f"reports/validation/diagnostics/{variant_id}_full_wfo",
+                                *variant_args,
+                                *risk_repair_selection_args,
+                                "--write-report",
+                            ]
+                        ),
+                        "selection_safety_config": {
+                            "selection_max_reaction_usd": 200,
+                            "blocks_known_drawdown_worsening_reaction_usd": 350,
+                            "selection_mdd_soft_threshold_pct": 20,
+                            "selection_mdd_soft_penalty": 0.01,
+                        },
+                        "validation_only": True,
+                        "order_submission_allowed": False,
+                    }
+                )
+        blueprints.append(
+            {
+                "id": blueprint_id,
+                "status": "ready_for_validation_only_research",
+                "design_family": "mc12_quality_gated_near_miss_micro_probe",
+                "hypothesis": (
+                    "restrict_near_miss_probe_to_current_eligible_mc12_seed_context"
+                ),
+                "source_seed_context": row,
+                "target_reason": "MC12_low_confluence",
+                "target_side": side,
+                "target_regime": regime,
+                "target_alignment": alignment,
+                "target_execution_context": execution_context,
+                "dominant_probe_quality_blocker": dominant_probe_quality_blocker,
+                "smoke_candidate_recipe_id": smoke_candidate_recipe_id,
+                "risk_repair_candidate_recipe_ids": [
+                    item["candidate_recipe_id"] for item in risk_repair_variants
+                ],
+                "risk_repair_command_templates": risk_repair_variants,
+                "overlay_config": overlay_config,
+                "cli_overlay_args": cli_overlay_args,
+                "candidate_generation_command_template": shlex.join(
+                    [
+                        ".venv/bin/python",
+                        "scripts/run_market_state_rotation_v6_walk_forward_validation.py",
+                        "--source-report",
+                        "<source_backtest_report.json>",
+                        "--report-dir",
+                        f"reports/validation/diagnostics/{blueprint_id}_walk_forward",
+                        *cli_overlay_args,
+                        "--write-report",
+                    ]
+                ),
+                "smoke_validation_command_templates": [
+                    {
+                        "window_days": 120,
+                        "candidate_recipe_id": smoke_candidate_recipe_id,
+                        "command": (
+                            ".venv/bin/python "
+                            "scripts/run_market_state_rotation_v6_near_miss_smoke.py "
+                            "--source-backtest-report <source_backtest_report.json> "
+                            "--days 120 "
+                            f"--report-dir reports/validation/diagnostics/{smoke_candidate_recipe_id}_near_miss_smoke_120d "
+                            "--write-report"
+                        ),
+                        "expected_candidate_row": smoke_candidate_recipe_id,
+                        "validation_only": True,
+                        "order_submission_allowed": False,
+                    },
+                    {
+                        "window_days": 365,
+                        "candidate_recipe_id": smoke_candidate_recipe_id,
+                        "command": (
+                            ".venv/bin/python "
+                            "scripts/run_market_state_rotation_v6_near_miss_smoke.py "
+                            "--source-backtest-report <source_backtest_report.json> "
+                            "--days 365 "
+                            f"--report-dir reports/validation/diagnostics/{smoke_candidate_recipe_id}_near_miss_smoke_365d "
+                            "--write-report"
+                        ),
+                        "expected_candidate_row": smoke_candidate_recipe_id,
+                        "validation_only": True,
+                        "order_submission_allowed": False,
+                    },
+                ],
+                "acceptance_contract": {
+                    "probe_add_delta_min": strict_constraints.get(
+                        "must_not_reduce_probe_add_delta_min", 0
+                    ),
+                    "trade_like_events_delta_min": strict_constraints.get(
+                        "must_increase_trade_like_events_delta_min", 1
+                    ),
+                    "max_drawdown_worsening_pct": strict_constraints.get(
+                        "must_keep_max_drawdown_worsening_pct_at_or_below"
+                    ),
+                    "strict_full_walk_forward_require_nonregressing_activity": True,
+                },
+                "reject_if": [
+                    "probe_add_delta_less_than_0",
+                    "trade_like_events_delta_less_than_1",
+                    "drawdown_worsening",
+                    "activity_inversion_between_smoke_and_full_wfo",
+                    "mc04_first_touch_relaxation_added_without_new_365d_evidence",
+                    "runtime_filter_change_required",
+                ],
+                "validation_only": True,
+                "runtime_filter_change_allowed": False,
+                "paper_or_live_promotion_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        )
+    target_reasons = {
+        str(item.get("target_reason") or "")
+        for item in blueprints
+        if item.get("target_reason")
+    }
+    excluded_rejected_reasons = sorted(
+        {
+            reason
+            for reason in rejected_reasons
+            if reason and reason not in target_reasons
+        }
+    )
+    return {
+        "status": "seed_context_blueprints_ready" if blueprints else "no_seed_context_blueprints",
+        "blueprint_count": len(blueprints),
+        "blueprints": blueprints,
+        "shared_safety_rules": [
+            "research_and_validation_only",
+            "do_not_force_current_fresh_signal",
+            "do_not_change_runtime_filters_before_strict_full_wfo_pass",
+            "do_not_enable_paper_or_live_promotion_from_blueprint",
+            "do_not_submit_live_orders",
+        ],
+        "target_reasons": sorted(target_reasons),
+        "excluded_rejected_context_reasons": excluded_rejected_reasons,
+        "validation_only": True,
+        "runtime_filter_change_allowed": False,
+        "paper_or_live_promotion_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
 
 
 def _metric_trend_item(*, current: Any, baseline: Any, lower_is_better: bool = True) -> dict[str, Any]:
@@ -1387,8 +3214,10 @@ def _execution_parity_eta_plan(
     generated_at: datetime,
 ) -> dict[str, Any]:
     required = _int_or_default(execution_parity_plan.get("required_samples"), 0)
-    missing = _int_or_default(execution_parity_plan.get("missing_samples"), 0)
-    events_needed = _int_or_default(execution_parity_plan.get("estimated_future_paper_apply_events_needed"), missing)
+    events_needed = _int_or_default(execution_parity_plan.get("estimated_future_paper_apply_events_needed"), 0)
+    missing = _int_or_default(execution_parity_plan.get("missing_samples"), events_needed)
+    if events_needed <= 0:
+        events_needed = missing
     events_after_current = _int_or_default(
         execution_parity_plan.get("estimated_events_needed_after_current_creditable_apply"),
         events_needed,
@@ -1554,6 +3383,194 @@ def _execution_parity_eta_plan(
     return estimate
 
 
+def _execution_parity_journal_eta_summary(eta_plan: dict[str, Any]) -> dict[str, Any]:
+    plan = dict(eta_plan or {})
+    if not plan:
+        return {
+            "status": "eta_unavailable",
+            "reason": "execution_parity_eta_plan_missing",
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+    return {
+        "status": plan.get("status"),
+        "selected_eta_scenario": plan.get("selected_eta_scenario"),
+        "cadence_source": plan.get("cadence_source"),
+        "required_samples": plan.get("required_samples"),
+        "eligible_journal_rows": plan.get("eligible_journal_rows"),
+        "missing_samples": plan.get("missing_samples"),
+        "estimated_future_paper_apply_events_needed": plan.get("estimated_future_paper_apply_events_needed"),
+        "estimated_events_needed_after_current_creditable_apply": plan.get(
+            "estimated_events_needed_after_current_creditable_apply"
+        ),
+        "estimated_days_at_current_cadence": plan.get("estimated_days_at_current_cadence"),
+        "estimated_completion_utc": plan.get("estimated_completion_utc"),
+        "estimated_completion_kst": plan.get("estimated_completion_kst"),
+        "fresh_signal": plan.get("fresh_signal") is True,
+        "paper_apply_available_now": plan.get("paper_apply_available_now") is True,
+        "will_credit_current_apply_after_operator_review": (
+            plan.get("will_credit_current_apply_after_operator_review") is True
+        ),
+        "currently_creditable_actions": list(plan.get("currently_creditable_actions") or []),
+        "non_substitutable": plan.get("non_substitutable") is True,
+        "backtest_substitution_allowed": plan.get("backtest_substitution_allowed") is True,
+        "caveat": plan.get("caveat"),
+        "order_submission_allowed": False,
+        "no_live_order_sent": plan.get("no_live_order_sent") is not False,
+    }
+
+
+def _execution_parity_status_summary(
+    *,
+    collection_plan: dict[str, Any],
+    eta_plan: dict[str, Any],
+    promotion_gate: dict[str, Any],
+) -> dict[str, Any]:
+    collection = dict(collection_plan or {})
+    eta = dict(eta_plan or {})
+    promotion_execution = dict(dict(promotion_gate.get("readiness") or {}).get("execution_parity") or {})
+    promotion_value = dict(promotion_execution.get("value") or {})
+
+    rows = _int_or_default(
+        collection.get("eligible_journal_rows"),
+        _int_or_default(promotion_value.get("sample_count"), 0),
+    )
+    required = _int_or_default(
+        collection.get("required_samples"),
+        _int_or_default(promotion_value.get("min_sample_count"), 0),
+    )
+    events_needed = _int_or_default(
+        collection.get("estimated_future_paper_apply_events_needed"),
+        _int_or_default(eta.get("estimated_future_paper_apply_events_needed"), 0),
+    )
+    missing = collection.get("missing_samples")
+    if missing is None:
+        missing = eta.get("missing_samples")
+    if missing is None and required > 0:
+        missing = max(required - rows, 0)
+    if missing is None:
+        missing = events_needed
+    missing_samples = _int_or_default(missing, 0)
+    blockers = list(collection.get("blockers") or promotion_execution.get("blockers") or [])
+    return {
+        "status": collection.get("status") or promotion_value.get("status") or eta.get("status"),
+        "required_samples": required,
+        "eligible_journal_rows": rows,
+        "sample_count": rows,
+        "missing_samples": missing_samples,
+        "min_sample_count": required,
+        "estimated_future_paper_apply_events_needed": events_needed,
+        "estimated_events_needed_after_current_creditable_apply": _int_or_default(
+            collection.get("estimated_events_needed_after_current_creditable_apply"),
+            _int_or_default(eta.get("estimated_events_needed_after_current_creditable_apply"), events_needed),
+        ),
+        "will_credit_current_apply_after_operator_review": (
+            collection.get("will_credit_current_apply_after_operator_review") is True
+            or eta.get("will_credit_current_apply_after_operator_review") is True
+        ),
+        "currently_creditable_actions": list(
+            collection.get("currently_creditable_actions") or eta.get("currently_creditable_actions") or []
+        ),
+        "next_creditable_event_types": list(
+            collection.get("next_creditable_event_types") or eta.get("next_creditable_event_types") or []
+        ),
+        "next_step": collection.get("next_step"),
+        "blockers": blockers,
+        "eta_status": eta.get("status"),
+        "selected_eta_scenario": eta.get("selected_eta_scenario"),
+        "estimated_days_at_current_cadence": eta.get("estimated_days_at_current_cadence"),
+        "estimated_completion_utc": eta.get("estimated_completion_utc"),
+        "estimated_completion_kst": eta.get("estimated_completion_kst"),
+        "fresh_signal": collection.get("fresh_signal") is True or eta.get("fresh_signal") is True,
+        "paper_apply_available_now": (
+            collection.get("paper_apply_available_now") is True
+            or eta.get("paper_apply_available_now") is True
+        ),
+        "non_substitutable": collection.get("non_substitutable") is True or eta.get("non_substitutable") is True,
+        "backtest_substitution_allowed": (
+            collection.get("backtest_substitution_allowed") is True
+            or eta.get("backtest_substitution_allowed") is True
+        ),
+        "caveat": eta.get("caveat"),
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            collection.get("no_live_order_sent") is not False
+            and eta.get("no_live_order_sent") is not False
+            and promotion_execution.get("no_live_order_sent") is not False
+        ),
+    }
+
+
+def _next_creditable_add_signal_monitor_plan(
+    *,
+    paper_action: dict[str, Any],
+    generated_at: datetime,
+    command: str | None,
+    scheduled_at: datetime | None = None,
+    schedule_preserved_from_previous_watch: bool = False,
+) -> dict[str, Any]:
+    max_signal_age = _number_or_none(paper_action.get("signal_freshness_capture_window_minutes"))
+    if max_signal_age is None:
+        max_signal_age = _number_or_none(paper_action.get("max_signal_age_minutes"))
+    if max_signal_age is None or max_signal_age <= 0:
+        max_signal_age = 15.0
+    monitor_interval = max(1, min(15, int(max_signal_age)))
+    next_monitor = scheduled_at.astimezone(UTC) if scheduled_at is not None else (
+        generated_at.astimezone(UTC) + timedelta(minutes=monitor_interval)
+    )
+    scheduled_command = _scheduled_paper_dry_run_command(command, scheduled_at=next_monitor) or command
+
+    latest_add_ts = _parse_dt(paper_action.get("latest_add_ts"))
+    expected_add_interval_hours = _number_or_none(paper_action.get("expected_add_interval_hours"))
+    median_add_gap_hours = _number_or_none(paper_action.get("median_add_gap_hours"))
+
+    def _due(interval_hours: float | None) -> dict[str, Any]:
+        if latest_add_ts is None or interval_hours is None or interval_hours <= 0:
+            return {"available": False}
+        due = latest_add_ts.astimezone(UTC) + timedelta(hours=float(interval_hours))
+        remaining_minutes = max((due - generated_at.astimezone(UTC)).total_seconds(), 0.0) / 60.0
+        return {
+            "available": True,
+            "due_utc": due.isoformat(),
+            "due_kst": due.astimezone(KST).isoformat(),
+            "remaining_minutes": round(remaining_minutes, 3),
+            "overdue": due <= generated_at.astimezone(UTC),
+        }
+
+    expected_due = _due(expected_add_interval_hours)
+    median_due = _due(median_add_gap_hours)
+    return {
+        "status": "waiting_for_next_add_signal_or_existing_open_paper_plan",
+        "reason": "current_remove_signal_has_no_open_v6_paper_plan_so_it_cannot_credit_execution_parity",
+        "monitor_command": scheduled_command,
+        "recommended_monitor_interval_minutes": monitor_interval,
+        "monitor_interval_capped_by_signal_freshness": True,
+        "signal_freshness_capture_window_minutes": max_signal_age,
+        "monitor_signal_age_alignment": "monitor_interval_capped_to_signal_freshness_window",
+        "next_monitor_after_utc": next_monitor.isoformat(),
+        "next_monitor_after_kst": next_monitor.astimezone(KST).isoformat(),
+        "wait_minutes": round(max((next_monitor - generated_at.astimezone(UTC)).total_seconds(), 0.0) / 60.0, 3),
+        "schedule_preserved_from_previous_watch": schedule_preserved_from_previous_watch,
+        "schedule_anchor": (
+            "previous_watch_same_remove_source_event"
+            if schedule_preserved_from_previous_watch
+            else "current_watch_generated_at_plus_monitor_interval"
+        ),
+        "latest_add_ts": paper_action.get("latest_add_ts"),
+        "latest_add_age_hours": paper_action.get("latest_add_age_hours"),
+        "latest_add_age_to_median_gap": paper_action.get("latest_add_age_to_median_gap"),
+        "add_wait_state": paper_action.get("add_wait_state"),
+        "expected_days_per_add": paper_action.get("expected_days_per_add"),
+        "expected_add_interval_hours": expected_add_interval_hours,
+        "expected_add_due": expected_due,
+        "median_add_gap_hours": median_add_gap_hours,
+        "median_add_due": median_due,
+        "next_action": "rerun_dry_run_on_monitor_cadence_until_add_signal_or_open_paper_plan_exists",
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+
+
 def _post_apply_execution_parity_review_command(before_evidence_report: Any) -> str:
     before_report = str(before_evidence_report or "<pre_apply_evidence_report>").strip()
     return (
@@ -1573,6 +3590,167 @@ def _command_tokens(command: Any) -> list[str]:
         return shlex.split(text)
     except ValueError:
         return text.split()
+
+
+def _replace_command_flag_value(command: Any, flag: str, value: str) -> str | None:
+    tokens = _command_tokens(command)
+    if not tokens:
+        return None
+    if flag not in tokens:
+        return str(command)
+    index = tokens.index(flag)
+    if index + 1 >= len(tokens):
+        return str(command)
+    tokens[index + 1] = value
+    return shlex.join(tokens)
+
+
+def _command_flag_value(command: Any, flag: str) -> str | None:
+    tokens = _command_tokens(command)
+    for index, token in enumerate(tokens[:-1]):
+        if token == flag:
+            return str(tokens[index + 1])
+    return None
+
+
+def _scheduled_monitor_report_completed(command: Any, *, scheduled_at: datetime | None) -> bool:
+    if scheduled_at is None:
+        return False
+    report_dir = _command_flag_value(command, "--report-dir")
+    if not report_dir:
+        return False
+    report_path = Path(report_dir) / "market_state_rotation_v6_evidence_cycle.json"
+    if _evidence_cycle_report_completed_after(report_path, scheduled_at=scheduled_at):
+        return True
+    report_parent = Path(report_dir).parent
+    return _any_signal_monitor_report_completed_after(report_parent, scheduled_at=scheduled_at)
+
+
+def _evidence_cycle_report_completed_after(report_path: Path, *, scheduled_at: datetime) -> bool:
+    if not report_path.exists():
+        return False
+    payload = _read_json(report_path)
+    if payload.get("no_live_order_sent") is not True:
+        return False
+    generated_at = _parse_dt(payload.get("generated_at"))
+    if generated_at is None:
+        return True
+    return generated_at.astimezone(UTC) >= scheduled_at.astimezone(UTC) - timedelta(seconds=120)
+
+
+def _any_signal_monitor_report_completed_after(report_parent: Path, *, scheduled_at: datetime) -> bool:
+    if not report_parent.exists():
+        return False
+    candidates = sorted(
+        report_parent.glob("market_state_rotation_v6_signal_monitor_*/market_state_rotation_v6_evidence_cycle.json"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+        reverse=True,
+    )
+    for path in candidates[:200]:
+        if _evidence_cycle_report_completed_after(path, scheduled_at=scheduled_at):
+            return True
+    return False
+
+
+def _scheduled_paper_dry_run_command(command: Any, *, scheduled_at: datetime) -> str | None:
+    report_dir = (
+        "reports/validation/diagnostics/"
+        f"market_state_rotation_v6_launch_paper_dry_run_{scheduled_at.astimezone(UTC):%Y%m%d_%H%MZ}"
+    )
+    return _replace_command_flag_value(command, "--report-dir", report_dir)
+
+
+def _scheduled_paper_apply_command(command: Any, *, scheduled_at: datetime) -> str | None:
+    report_dir = (
+        "reports/validation/diagnostics/"
+        f"market_state_rotation_v6_launch_paper_apply_{scheduled_at.astimezone(UTC):%Y%m%d_%H%MZ}"
+    )
+    return _replace_command_flag_value(command, "--report-dir", report_dir)
+
+
+def _scheduled_signal_monitor_command(command: Any, *, scheduled_at: datetime) -> str | None:
+    report_dir = (
+        "reports/validation/diagnostics/"
+        f"market_state_rotation_v6_signal_monitor_{scheduled_at.astimezone(UTC):%Y%m%d_%H%M%SZ}"
+    )
+    return _replace_command_flag_value(command, "--report-dir", report_dir)
+
+
+def _command_report_timestamp(
+    *,
+    scheduled_at: datetime | None,
+    generated_at: datetime,
+    can_run_now: bool,
+) -> datetime | None:
+    if scheduled_at is None:
+        return None
+    scheduled = scheduled_at.astimezone(UTC)
+    now = generated_at.astimezone(UTC)
+    if can_run_now and scheduled < now:
+        return now
+    return scheduled
+
+
+def _scheduled_waiting_paper_operator_packet(
+    packet: dict[str, Any],
+    *,
+    scheduled_at: datetime | None,
+) -> dict[str, Any]:
+    out = dict(packet)
+    if scheduled_at is None:
+        return out
+    for key in ["dry_run_command", "rerun_command_after_deadline"]:
+        out[key] = _scheduled_paper_dry_run_command(out.get(key), scheduled_at=scheduled_at) or out.get(key)
+    for key in ["apply_command_allowed_now", "apply_command_when_gate_allows"]:
+        out[key] = _scheduled_paper_apply_command(out.get(key), scheduled_at=scheduled_at) or out.get(key)
+    command_safety = dict(out.get("command_safety") or {})
+    if command_safety:
+        dry_run_report_dir = _command_flag_value(out.get("dry_run_command"), "--report-dir")
+        apply_command = out.get("apply_command_allowed_now") or out.get("apply_command_when_gate_allows")
+        apply_report_dir = _command_flag_value(apply_command, "--report-dir")
+        apply_backup_dir = _command_flag_value(apply_command, "--pre-apply-backup-dir")
+        if dry_run_report_dir:
+            command_safety["dry_run_report_dir"] = dry_run_report_dir
+        if apply_report_dir:
+            command_safety["apply_report_dir"] = apply_report_dir
+        if apply_backup_dir:
+            command_safety["apply_pre_apply_backup_dir"] = apply_backup_dir
+        out["command_safety"] = command_safety
+    return out
+
+
+def _previous_next_add_monitor_schedule(
+    *,
+    previous_payload: dict[str, Any] | None,
+    paper_action: dict[str, Any],
+) -> datetime | None:
+    current_precheck = dict(paper_action.get("remove_plan_precheck") or {})
+    current_source_key = str(current_precheck.get("source_event_key") or "").strip()
+    if not current_source_key:
+        return None
+    previous_safe_next = dict(dict(previous_payload or {}).get("safe_next_action_plan") or {})
+    previous_actions: list[dict[str, Any]] = []
+    for candidate in [previous_safe_next.get("primary_action"), *list(previous_safe_next.get("actions") or [])]:
+        if isinstance(candidate, dict):
+            previous_actions.append(dict(candidate))
+    for previous_action in previous_actions:
+        if previous_action.get("action_type") != "paper_bridge_wait_for_next_add_signal":
+            continue
+        previous_precheck = dict(previous_action.get("remove_plan_precheck") or {})
+        previous_source_key = str(previous_precheck.get("source_event_key") or "").strip()
+        if previous_source_key != current_source_key:
+            continue
+        previous_plan = dict(previous_action.get("next_creditable_add_signal_plan") or {})
+        previous_monitor = _parse_dt(
+            previous_plan.get("next_monitor_after_utc") or previous_action.get("execute_after_utc")
+        )
+        previous_command = previous_plan.get("monitor_command") or previous_action.get("command")
+        if previous_monitor is not None and not _scheduled_monitor_report_completed(
+            previous_command,
+            scheduled_at=previous_monitor,
+        ):
+            return previous_monitor.astimezone(UTC)
+    return None
 
 
 def _has_quote_samples(tokens: list[str], expected: str) -> bool:
@@ -1851,11 +4029,15 @@ def _paper_apply_operator_packet(
     apply_allowed_now: bool,
     retry_blocker: dict[str, Any],
     parity_review_blocker: dict[str, Any],
+    previous_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     launch = dict(latest.get("launch_readiness") or {})
     handoff = dict(launch.get("paper_bridge_handoff") or {})
     apply_gate = dict(latest.get("paper_bridge_apply_gate") or {})
     signal_wait = dict(latest.get("signal_wait_plan") or {})
+    current_preflight = dict(apply_gate.get("execution_parity_preflight") or {})
+    current_source_event_key = current_preflight.get("source_event_key")
+    current_source_event_ts = current_preflight.get("source_event_ts")
     packet_generated_at = _parse_dt(latest.get("generated_at"))
     review_window_minutes = _number_or_none(
         signal_wait.get("max_signal_age_minutes") or signal_wait.get("signal_freshness_capture_window_minutes")
@@ -1867,6 +4049,24 @@ def _paper_apply_operator_packet(
         if packet_generated_at is not None and apply_allowed_now
         else None
     )
+    previous = dict(previous_payload or {})
+    previous_latest = dict(previous.get("latest_run") or {})
+    previous_apply_gate = dict(previous_latest.get("paper_bridge_apply_gate") or {})
+    previous_preflight = dict(previous_apply_gate.get("execution_parity_preflight") or {})
+    previous_source_event_key = previous_preflight.get("source_event_key")
+    previous_packet = dict(dict(previous.get("operator_handoff") or {}).get("paper_apply_operator_packet") or {})
+    previous_deadline = _parse_dt(previous_packet.get("operator_review_deadline_utc"))
+    previous_packet_generated_at = _parse_dt(previous_packet.get("packet_generated_at"))
+    preserve_previous_deadline = (
+        apply_allowed_now
+        and bool(current_source_event_key)
+        and current_source_event_key == previous_source_event_key
+        and previous_deadline is not None
+    )
+    if preserve_previous_deadline:
+        review_deadline = previous_deadline
+        if previous_packet_generated_at is not None:
+            packet_generated_at = previous_packet_generated_at
     before_report = latest.get("evidence_report")
     pre_apply_evidence_status = _pre_apply_evidence_report_status(
         report_path=before_report,
@@ -1929,6 +4129,9 @@ def _paper_apply_operator_packet(
         "blocker": blocker,
         "pre_apply_evidence_report": before_report,
         "pre_apply_evidence_report_status": pre_apply_evidence_status,
+        "source_event_key": current_source_event_key,
+        "source_event_ts": current_source_event_ts,
+        "bridge_action": apply_gate.get("bridge_action"),
         "packet_generated_at": packet_generated_at.isoformat() if packet_generated_at is not None else None,
         "operator_review_window_minutes": round(float(review_window_minutes), 4),
         "operator_review_deadline_utc": review_deadline.isoformat() if review_deadline is not None else None,
@@ -1936,6 +4139,14 @@ def _paper_apply_operator_packet(
         if review_deadline is not None
         else None,
         "operator_review_deadline_active": review_deadline is not None,
+        "operator_review_deadline_preserved_from_previous_watch": preserve_previous_deadline,
+        "operator_review_deadline_anchor": (
+            "previous_watch_same_source_event"
+            if preserve_previous_deadline
+            else "current_pre_apply_evidence_report"
+            if review_deadline is not None
+            else "not_armed"
+        ),
         "deadline_policy": (
             "operator_command_safety_failed_rerun_dry_run_before_apply"
             if command_safety.get("status") != "PASS"
@@ -1981,6 +4192,7 @@ def _operator_handoff(
     recent_paper_apply: dict[str, Any] | None = None,
     recent_paper_review: dict[str, Any] | None = None,
     recent_paper_apply_parity_review: dict[str, Any] | None = None,
+    previous_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     launch = dict(latest.get("launch_readiness") or {})
     commands = dict(launch.get("operator_commands") or {})
@@ -2046,6 +4258,7 @@ def _operator_handoff(
         apply_allowed_now=can_request_paper_apply,
         retry_blocker=paper_apply_retry_blocker,
         parity_review_blocker=parity_review_blocker,
+        previous_payload=previous_payload,
     )
     if can_request_paper_apply and paper_apply_operator_packet.get("status") != "ready_for_operator_review":
         can_request_paper_apply = False
@@ -2177,6 +4390,12 @@ def _blocker_resolution_plan(
             parity_review_blocker = dict(operator_handoff.get("paper_apply_parity_review_blocker") or {})
             paper_apply_operator_packet = dict(operator_handoff.get("paper_apply_operator_packet") or {})
             fresh_signal = apply_gate.get("fresh_signal") is True
+            no_open_remove_gate = (
+                str(apply_gate.get("status") or "")
+                in {"blocked_no_open_v6_paper_plan", "paper_apply_no_open_plan_not_credited"}
+                or str(execution_parity_plan.get("status") or "")
+                == "waiting_for_open_paper_plan_after_remove_signal"
+            )
             monitor_command = (
                 signal_wait.get("command")
                 or commands.get("signal_monitor")
@@ -2192,6 +4411,22 @@ def _blocker_resolution_plan(
                 if paper_apply_retry_blocker.get("blocked") is True
                 else signal_wait.get("next_monitor_after_kst")
             )
+            scheduled_paper_packet = (
+                _scheduled_waiting_paper_operator_packet(
+                    paper_apply_operator_packet,
+                    scheduled_at=_parse_dt(next_monitor_after_utc),
+                )
+                if not can_apply_paper_now
+                else paper_apply_operator_packet
+            )
+            scheduled_paper_dry_run_command = (
+                scheduled_paper_packet.get("dry_run_command")
+                or operator_handoff.get("paper_dry_run_command")
+            )
+            scheduled_paper_apply_command = (
+                scheduled_paper_packet.get("apply_command_when_gate_allows")
+                or operator_handoff.get("paper_apply_command")
+            )
             if can_apply_paper_now:
                 reason = "paper_bridge_apply_available_after_operator_review_and_verified_backup"
             elif parity_review_blocker.get("blocked") is True:
@@ -2201,6 +4436,8 @@ def _blocker_resolution_plan(
                     paper_apply_retry_blocker.get("reason")
                     or "recent_remove_paper_apply_found_no_open_v6_paper_plan"
                 )
+            elif no_open_remove_gate:
+                reason = "remove_signal_has_no_open_v6_paper_plan"
             elif fresh_signal:
                 reason = "fresh_signal_seen_but_paper_bridge_apply_gate_not_available"
             else:
@@ -2210,15 +4447,28 @@ def _blocker_resolution_plan(
                     "can_resolve_now": can_apply_paper_now,
                     "requires_operator_review": True,
                     "command": operator_handoff.get("paper_apply_command") if can_apply_paper_now else None,
-                    "dry_run_command": operator_handoff.get("paper_dry_run_command"),
+                    "dry_run_command": scheduled_paper_dry_run_command,
                     "monitor_command": monitor_command,
                     "next_monitor_after_utc": next_monitor_after_utc,
                     "next_monitor_after_kst": next_monitor_after_kst,
                     "recommended_monitor_interval_minutes": signal_wait.get("recommended_monitor_interval_minutes"),
-                    "paper_apply_command_when_gate_allows": operator_handoff.get("paper_apply_command"),
+                    "signal_freshness_capture_window_minutes": signal_wait.get(
+                        "signal_freshness_capture_window_minutes"
+                    ),
+                    "max_signal_age_minutes": signal_wait.get("max_signal_age_minutes"),
+                    "latest_add_ts": signal_wait.get("latest_add_ts"),
+                    "latest_add_age_hours": signal_wait.get("latest_add_age_hours"),
+                    "latest_add_age_to_median_gap": signal_wait.get("latest_add_age_to_median_gap"),
+                    "add_wait_state": signal_wait.get("add_wait_state"),
+                    "expected_days_per_add": signal_wait.get("expected_days_per_add"),
+                    "expected_add_interval_hours": signal_wait.get("expected_add_interval_hours"),
+                    "median_add_gap_hours": signal_wait.get("median_add_gap_hours"),
+                    "paper_apply_command_when_gate_allows": scheduled_paper_apply_command,
                     "reason": reason,
                     "fresh_signal": fresh_signal,
                     "can_request_paper_apply_now": apply_gate.get("can_request_paper_apply_now") is True,
+                    "paper_apply_no_open_plan": no_open_remove_gate,
+                    "remove_plan_precheck": dict(apply_gate.get("remove_plan_precheck") or {}),
                     "paper_apply_retry_blocked": paper_apply_retry_blocker.get("blocked") is True,
                     "paper_apply_retry_blocker": paper_apply_retry_blocker,
                     "paper_apply_parity_review_blocked": parity_review_blocker.get("blocked") is True,
@@ -2226,8 +4476,8 @@ def _blocker_resolution_plan(
                     "paper_handoff_status": operator_handoff.get("paper_handoff_status"),
                     "paper_fill_rows": latest_collection.get("paper_fill_rows"),
                     "pre_apply_evidence_report": latest.get("evidence_report"),
-                    "pre_apply_backup_plan": dict(paper_apply_operator_packet.get("pre_apply_backup_plan") or {}),
-                    "paper_apply_operator_packet": paper_apply_operator_packet,
+                    "pre_apply_backup_plan": dict(scheduled_paper_packet.get("pre_apply_backup_plan") or {}),
+                    "paper_apply_operator_packet": scheduled_paper_packet,
                     "post_apply_execution_parity_review_command": paper_apply_operator_packet.get(
                         "post_apply_execution_parity_review_command"
                     )
@@ -2374,6 +4624,14 @@ def _action_report_suffix(generated_at: datetime, action_type: str) -> str:
     return f"market_state_rotation_v6_launch_{normalized}_{generated_at.astimezone(UTC):%Y%m%d_%H%M%SZ}"
 
 
+def _slug_token(value: Any, *, max_length: int = 48) -> str:
+    text = "".join(ch if ch.isalnum() else "_" for ch in str(value or "").lower()).strip("_")
+    text = "_".join(part for part in text.split("_") if part)
+    if not text:
+        text = "review"
+    return text[: max(1, int(max_length or 1))]
+
+
 def _materialize_action_command(command: Any, *, generated_at: datetime, action_type: str) -> str | None:
     text = str(command or "").strip()
     if not text:
@@ -2402,7 +4660,18 @@ def _materialize_operator_packet(packet: dict[str, Any], *, generated_at: dateti
     )
     deadline = _parse_dt(out.get("operator_review_deadline_utc"))
     deadline_expired = deadline is not None and generated_at.astimezone(UTC) >= deadline.astimezone(UTC)
+    remaining_seconds = (
+        max((deadline.astimezone(UTC) - generated_at.astimezone(UTC)).total_seconds(), 0.0)
+        if deadline is not None
+        else None
+    )
     out["operator_review_deadline_expired"] = deadline_expired
+    out["operator_review_deadline_remaining_seconds"] = (
+        round(remaining_seconds, 3) if remaining_seconds is not None else None
+    )
+    out["operator_review_deadline_remaining_minutes"] = (
+        round(remaining_seconds / 60.0, 4) if remaining_seconds is not None else None
+    )
     if deadline_expired:
         out["original_status_before_deadline_expiry"] = out.get("status")
         out["status"] = "operator_review_deadline_expired"
@@ -2431,6 +4700,333 @@ def _action_due_state(scheduled_at: Any, *, generated_at: datetime) -> dict[str,
     }
 
 
+def _safe_action_execution_time(action: dict[str, Any], *, generated_at: datetime) -> datetime:
+    scheduled = _parse_dt(action.get("execute_after_utc"))
+    if scheduled is not None:
+        return scheduled.astimezone(UTC)
+    if action.get("can_run_now") is True:
+        return generated_at.astimezone(UTC)
+    return datetime.max.replace(tzinfo=UTC)
+
+
+def _current_iteration_recheck_schedule(action: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(action or {})
+    coverage = dict(payload.get("current_iteration_coverage") or {})
+    raw_next_utc = payload.get("execute_after_utc") or payload.get("next_monitor_after_utc")
+    raw_next_kst = payload.get("execute_after_kst") or payload.get("next_monitor_after_kst")
+    if raw_next_utc is None and raw_next_kst is not None:
+        raw_dt = _parse_dt(raw_next_kst)
+        raw_next_utc = raw_dt.astimezone(UTC).isoformat() if raw_dt is not None else None
+    if raw_next_kst is None and raw_next_utc is not None:
+        raw_dt = _parse_dt(raw_next_utc)
+        raw_next_kst = raw_dt.astimezone(KST).isoformat() if raw_dt is not None else None
+    covered_by_current_iteration = (
+        payload.get("covered_by_current_iteration") is True
+        or coverage.get("covered") is True
+    )
+    covered_next_kst = (
+        coverage.get("recommended_next_recheck_after_kst")
+        if covered_by_current_iteration
+        else payload.get("covered_next_recheck_after_kst")
+        if payload.get("next_monitor_retimestampted_after_current_iteration") is True
+        else None
+    )
+    covered_next_utc = (
+        coverage.get("recommended_next_recheck_after_utc")
+        if covered_by_current_iteration
+        else payload.get("covered_next_recheck_after_utc")
+        if payload.get("next_monitor_retimestampted_after_current_iteration") is True
+        else None
+    )
+    if covered_next_utc is None and covered_next_kst is not None:
+        covered_dt = _parse_dt(covered_next_kst)
+        covered_next_utc = (
+            covered_dt.astimezone(UTC).isoformat() if covered_dt is not None else None
+        )
+    if covered_next_kst is None and covered_next_utc is not None:
+        covered_dt = _parse_dt(covered_next_utc)
+        covered_next_kst = (
+            covered_dt.astimezone(KST).isoformat() if covered_dt is not None else None
+        )
+    retimestamped = bool(covered_next_utc or covered_next_kst)
+    explicit_effective_utc = payload.get("effective_next_monitor_after_utc")
+    explicit_effective_kst = payload.get("effective_next_monitor_after_kst")
+    if retimestamped:
+        effective_source = "current_iteration_coverage.recommended_next_recheck_after"
+    elif payload.get("effective_next_monitor_after_source"):
+        effective_source = payload.get("effective_next_monitor_after_source")
+    elif raw_next_utc or raw_next_kst:
+        effective_source = "action.execute_after"
+    else:
+        effective_source = None
+    return {
+        "effective_next_monitor_after_utc": covered_next_utc or explicit_effective_utc or raw_next_utc,
+        "effective_next_monitor_after_kst": covered_next_kst or explicit_effective_kst or raw_next_kst,
+        "effective_next_monitor_after_source": effective_source,
+        "raw_next_monitor_after_utc": raw_next_utc,
+        "raw_next_monitor_after_kst": raw_next_kst,
+        "covered_next_recheck_after_utc": covered_next_utc,
+        "covered_next_recheck_after_kst": covered_next_kst,
+        "next_monitor_retimestampted_after_current_iteration": retimestamped,
+    }
+
+
+def _effective_next_monitor_window_fields(
+    summary: dict[str, Any] | None, *, generated_at: datetime
+) -> dict[str, Any]:
+    payload = dict(summary or {})
+    effective_utc = (
+        payload.get("effective_next_monitor_after_utc")
+        or payload.get("next_monitor_after_utc")
+        or payload.get("execute_after_utc")
+    )
+    effective_kst = (
+        payload.get("effective_next_monitor_after_kst")
+        or payload.get("next_monitor_after_kst")
+        or payload.get("execute_after_kst")
+    )
+    parsed = _parse_dt(effective_utc or effective_kst)
+    if parsed is None:
+        return {
+            "utc": effective_utc,
+            "kst": effective_kst,
+            "window_status": payload.get("execution_window_status"),
+            "overdue_minutes": payload.get("overdue_minutes"),
+            "wait_minutes": payload.get("wait_minutes"),
+        }
+
+    parsed_utc = parsed.astimezone(UTC)
+    parsed_kst = parsed_utc.astimezone(KST)
+    retimestamped = payload.get("next_monitor_retimestampted_after_current_iteration") is True
+    if not retimestamped and payload.get("execution_window_status") is not None:
+        return {
+            "utc": parsed_utc.isoformat(),
+            "kst": parsed_kst.isoformat(),
+            "window_status": payload.get("execution_window_status"),
+            "overdue_minutes": payload.get("overdue_minutes"),
+            "wait_minutes": payload.get("minutes_until_execution_window")
+            if payload.get("minutes_until_execution_window") is not None
+            else payload.get("wait_minutes"),
+        }
+
+    delta_minutes = round(
+        (parsed_utc - generated_at.astimezone(UTC)).total_seconds() / 60.0,
+        3,
+    )
+    if delta_minutes <= 0.0:
+        return {
+            "utc": parsed_utc.isoformat(),
+            "kst": parsed_kst.isoformat(),
+            "window_status": "due_or_overdue",
+            "overdue_minutes": round(abs(delta_minutes), 3),
+            "wait_minutes": 0.0,
+        }
+    return {
+        "utc": parsed_utc.isoformat(),
+        "kst": parsed_kst.isoformat(),
+        "window_status": "scheduled_future",
+        "overdue_minutes": 0.0,
+        "wait_minutes": delta_minutes,
+    }
+
+
+def _compact_safe_action(action: dict[str, Any] | None, *, generated_at: datetime) -> dict[str, Any] | None:
+    if not action:
+        return None
+    scheduled = _parse_dt(action.get("execute_after_utc"))
+    planned_time = _safe_action_execution_time(action, generated_at=generated_at)
+    if scheduled is None:
+        execution_window_status = "no_execution_window"
+        minutes_until_execution_window = None
+        overdue_minutes = 0.0
+    else:
+        delta_minutes = round((scheduled.astimezone(UTC) - generated_at).total_seconds() / 60.0, 3)
+        if delta_minutes <= 0.0:
+            execution_window_status = (
+                "due_or_overdue"
+                if action.get("can_run_now") is True or action.get("can_start_now") is True
+                else "scheduled_time_elapsed_not_startable"
+            )
+            minutes_until_execution_window = 0.0
+            overdue_minutes = round(abs(delta_minutes), 3)
+        else:
+            execution_window_status = "scheduled_future"
+            minutes_until_execution_window = delta_minutes
+            overdue_minutes = 0.0
+    return {
+        "action_type": action.get("action_type"),
+        "target_gate": action.get("target_gate"),
+        "can_run_now": action.get("can_run_now") is True,
+        "can_start_now": action.get("can_start_now") is True,
+        "execute_after_utc": action.get("execute_after_utc"),
+        "execute_after_kst": action.get("execute_after_kst"),
+        **_current_iteration_recheck_schedule(action),
+        "planned_order_utc": None
+        if planned_time == datetime.max.replace(tzinfo=UTC)
+        else planned_time.isoformat(),
+        "planned_order_kst": None
+        if planned_time == datetime.max.replace(tzinfo=UTC)
+        else planned_time.astimezone(KST).isoformat(),
+        "wait_minutes": action.get("wait_minutes"),
+        "execution_window_status": execution_window_status,
+        "minutes_until_execution_window": minutes_until_execution_window,
+        "overdue_minutes": overdue_minutes,
+        "reason": action.get("reason"),
+        "is_scheduled": scheduled is not None,
+        "waits_until_execution_window": action.get("waits_until_execution_window") is True,
+        "monitor_interval_capped_by_signal_freshness": action.get(
+            "monitor_interval_capped_by_signal_freshness"
+        )
+        is True,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+
+
+def _safe_next_coordination_plan(
+    *,
+    primary: dict[str, Any] | None,
+    actions: list[dict[str, Any]],
+    scheduled: list[dict[str, Any]],
+    startable_wait_action: dict[str, Any] | None,
+    deferred_wait_action: dict[str, Any] | None,
+    generated_at: datetime,
+) -> dict[str, Any]:
+    primary_action = dict(primary or {})
+    signal_or_add_types = {
+        "monitor_fresh_signal",
+        "paper_bridge_wait_for_fresh_signal",
+        "paper_bridge_wait_for_next_add_signal",
+    }
+    quote_types = {
+        "capture_microstructure_quote_window_now",
+        "wait_for_next_microstructure_quote_window",
+    }
+    signal_actions = [
+        dict(item)
+        for item in actions
+        if str(item.get("action_type") or "") in signal_or_add_types
+    ]
+    quote_actions = [
+        dict(item)
+        for item in actions
+        if str(item.get("action_type") or "") in quote_types
+    ]
+    signal_actions = sorted(
+        signal_actions,
+        key=lambda item: (
+            _safe_action_execution_time(item, generated_at=generated_at),
+            int(item.get("priority") or 999),
+        ),
+    )
+    quote_actions = sorted(
+        quote_actions,
+        key=lambda item: (
+            _safe_action_execution_time(item, generated_at=generated_at),
+            int(item.get("priority") or 999),
+        ),
+    )
+    next_signal = signal_actions[0] if signal_actions else None
+    next_quote = quote_actions[0] if quote_actions else None
+    deferred_wait = dict(deferred_wait_action or {})
+    startable_wait = dict(startable_wait_action or {})
+    primary_type = primary_action.get("action_type")
+    quote_deferred = (
+        str(deferred_wait.get("action_type") or "") == "wait_for_next_microstructure_quote_window"
+        and str(primary_type or "") in signal_or_add_types
+    )
+    next_after_primary = None
+    if quote_deferred:
+        next_after_primary = "wait_for_next_microstructure_quote_window"
+    elif (
+        str(primary_type or "") in signal_or_add_types
+        and next_quote
+        and _safe_action_execution_time(primary_action, generated_at=generated_at)
+        <= _safe_action_execution_time(next_quote, generated_at=generated_at)
+    ):
+        next_after_primary = "wait_for_next_microstructure_quote_window"
+
+    if quote_deferred:
+        status = "earlier_signal_or_add_monitor_before_quote_window"
+    elif str(primary_type or "") == "wait_for_next_microstructure_quote_window":
+        status = "quote_window_wait_active"
+    elif str(primary_type or "") == "capture_microstructure_quote_window_now":
+        status = "quote_window_capture_active"
+    elif next_signal and next_quote:
+        status = "parallel_signal_and_microstructure_schedule_ready"
+    elif next_signal:
+        status = "signal_or_add_monitor_active"
+    elif next_quote:
+        status = "microstructure_quote_schedule_active"
+    else:
+        status = "single_objective_or_no_coordination_needed"
+
+    next_signal_summary = _compact_safe_action(next_signal, generated_at=generated_at)
+    next_quote_summary = _compact_safe_action(next_quote, generated_at=generated_at)
+    primary_summary = _compact_safe_action(primary_action, generated_at=generated_at)
+    next_signal_window = _effective_next_monitor_window_fields(
+        next_signal_summary,
+        generated_at=generated_at,
+    )
+    next_signal_payload = dict(next_signal_summary or {})
+    sequence = sorted(
+        [
+            item
+            for item in [
+                _compact_safe_action(item, generated_at=generated_at)
+                for item in scheduled[:3]
+            ]
+            if item
+        ],
+        key=lambda item: item.get("planned_order_utc") or "9999-12-31T23:59:59+00:00",
+    )
+    return {
+        "status": status,
+        "primary_action_type": primary_type,
+        "primary_action": primary_summary,
+        "next_signal_or_add_monitor": next_signal_summary,
+        "next_signal_or_add_monitor_utc": next_signal_window.get("utc"),
+        "next_signal_or_add_monitor_kst": next_signal_window.get("kst"),
+        "raw_next_signal_or_add_monitor_utc": (
+            next_signal_payload.get("raw_next_monitor_after_utc")
+            or next_signal_payload.get("execute_after_utc")
+        ),
+        "raw_next_signal_or_add_monitor_kst": (
+            next_signal_payload.get("raw_next_monitor_after_kst")
+            or next_signal_payload.get("execute_after_kst")
+        ),
+        "next_signal_or_add_monitor_source": next_signal_payload.get(
+            "effective_next_monitor_after_source"
+        ),
+        "next_signal_or_add_monitor_retimestampted_after_current_iteration": (
+            next_signal_payload.get("next_monitor_retimestampted_after_current_iteration") is True
+        ),
+        "next_signal_or_add_monitor_window_status": next_signal_window.get("window_status"),
+        "next_signal_or_add_monitor_wait_minutes": next_signal_window.get("wait_minutes"),
+        "next_signal_or_add_monitor_overdue_minutes": next_signal_window.get("overdue_minutes"),
+        "next_signal_or_add_monitor_raw_window_status": next_signal_payload.get(
+            "execution_window_status"
+        ),
+        "next_signal_or_add_monitor_raw_overdue_minutes": next_signal_payload.get("overdue_minutes"),
+        "next_quote_window": next_quote_summary,
+        "next_quote_window_utc": dict(next_quote_summary or {}).get("execute_after_utc"),
+        "next_quote_window_kst": dict(next_quote_summary or {}).get("execute_after_kst"),
+        "next_quote_window_status": dict(next_quote_summary or {}).get("execution_window_status"),
+        "next_quote_window_overdue_minutes": dict(next_quote_summary or {}).get("overdue_minutes"),
+        "startable_quote_window": _compact_safe_action(startable_wait, generated_at=generated_at),
+        "deferred_quote_window": _compact_safe_action(deferred_wait, generated_at=generated_at),
+        "quote_window_deferred_by_earlier_monitor": quote_deferred,
+        "next_action_after_primary": next_after_primary,
+        "do_not_skip_quote_window_for_signal_monitor": bool(next_quote or deferred_wait),
+        "signal_monitor_interval_capped_by_freshness": any(
+            item.get("monitor_interval_capped_by_signal_freshness") is True for item in signal_actions
+        ),
+        "scheduled_sequence_preview": sequence,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+
+
 def _safe_next_action_plan(
     *,
     blocker_resolution_plan: list[dict[str, Any]],
@@ -2438,10 +5034,13 @@ def _safe_next_action_plan(
     microstructure_watch: dict[str, Any],
     operator_handoff: dict[str, Any],
     meta_router_promotion_gate: dict[str, Any] | None = None,
+    latest_run: dict[str, Any] | None = None,
+    previous_payload: dict[str, Any] | None = None,
     target_hours: float,
     generated_at: datetime,
 ) -> dict[str, Any]:
     by_gate = {str(item.get("gate") or ""): dict(item) for item in blocker_resolution_plan}
+    latest_payload = dict(latest_run or {})
     actions: list[dict[str, Any]] = []
     operator_packet = _materialize_operator_packet(
         dict(operator_handoff.get("paper_apply_operator_packet") or {}),
@@ -2449,6 +5048,106 @@ def _safe_next_action_plan(
     )
     operator_packet_command_safety = dict(operator_packet.get("command_safety") or {})
     operator_packet_pre_apply_evidence = dict(operator_packet.get("pre_apply_evidence_report_status") or {})
+
+    def _current_iteration_coverage(action: dict[str, Any]) -> dict[str, Any]:
+        action_type = str(action.get("action_type") or "")
+        if not latest_payload:
+            return {
+                "covered": False,
+                "status": "no_current_iteration_payload",
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        if action_type in {
+            "monitor_fresh_signal",
+            "paper_bridge_wait_for_fresh_signal",
+            "paper_bridge_wait_for_next_add_signal",
+        }:
+            signal_wait = dict(latest_payload.get("signal_wait_plan") or {})
+            paper_gate = dict(latest_payload.get("paper_bridge_apply_gate") or {})
+            decision_state = dict(latest_payload.get("decision_state") or {})
+            has_signal_evidence = bool(signal_wait or paper_gate or decision_state)
+            fresh_signal = (
+                signal_wait.get("fresh_signal") is True
+                or paper_gate.get("fresh_signal") is True
+            )
+            paper_apply_available = paper_gate.get("can_request_paper_apply_now") is True
+            recommended_minutes = (
+                _number_or_none(signal_wait.get("recommended_monitor_interval_minutes"))
+                or _number_or_none(action.get("recommended_monitor_interval_minutes"))
+                or PAPER_REHEARSAL_FAST_SIGNAL_MONITOR_MINUTES
+            )
+            return {
+                "covered": has_signal_evidence,
+                "status": (
+                    "covered_fresh_signal_available"
+                    if fresh_signal
+                    else "covered_fresh_signal_still_waiting"
+                    if has_signal_evidence
+                    else "not_covered_signal_evidence_missing"
+                ),
+                "coverage_evidence": "latest_run.signal_wait_plan",
+                "covered_at": generated_at.isoformat() if has_signal_evidence else None,
+                "fresh_signal": fresh_signal,
+                "paper_apply_available_after_coverage": paper_apply_available,
+                "signal_wait_status": signal_wait.get("status"),
+                "signal_stale": decision_state.get("signal_stale"),
+                "recommended_next_recheck_after_kst": (
+                    (generated_at + timedelta(minutes=recommended_minutes))
+                    .astimezone(KST)
+                    .isoformat()
+                ),
+                "recommended_recheck_minutes": recommended_minutes,
+                "order_submission_allowed": False,
+                "no_live_order_sent": (
+                    signal_wait.get("no_live_order_sent") is not False
+                    and paper_gate.get("no_live_order_sent") is not False
+                    and latest_payload.get("no_live_order_sent") is not False
+                    and action.get("no_live_order_sent") is not False
+                ),
+            }
+        if action_type == "continue_no_live_shadow_watch":
+            return {
+                "covered": True,
+                "status": "covered_launch_shadow_watch_iteration_recorded",
+                "coverage_evidence": "latest_run_present_in_current_watch_summary",
+                "covered_at": generated_at.isoformat(),
+                "order_submission_allowed": False,
+                "no_live_order_sent": (
+                    latest_payload.get("no_live_order_sent") is not False
+                    and action.get("no_live_order_sent") is not False
+                ),
+            }
+        if action_type in {
+            "capture_microstructure_quote_window_now",
+            "capture_due_quote_window",
+        }:
+            collection = dict(latest_payload.get("collection_progress") or {})
+            covered = bool(collection)
+            return {
+                "covered": covered,
+                "status": (
+                    "covered_collection_progress_observed"
+                    if covered
+                    else "not_covered_collection_progress_missing"
+                ),
+                "coverage_evidence": "latest_run.collection_progress",
+                "covered_at": generated_at.isoformat() if covered else None,
+                "quote_observed": collection.get("quote_observed"),
+                "quote_distinct_hours": collection.get("quote_distinct_hours"),
+                "order_submission_allowed": False,
+                "no_live_order_sent": (
+                    latest_payload.get("no_live_order_sent") is not False
+                    and action.get("no_live_order_sent") is not False
+                ),
+            }
+        return {
+            "covered": False,
+            "status": "not_covered_action_type_not_matched",
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+
     if operator_packet_command_safety.get("status") == "FAIL":
         actions.append(
             {
@@ -2562,12 +5261,20 @@ def _safe_next_action_plan(
 
     signal = by_gate.get("current_fresh_signal")
     if signal and signal.get("command"):
+        due = _action_due_state(signal.get("next_monitor_after_utc"), generated_at=generated_at)
         command = _materialize_action_command(
             signal.get("command"),
             generated_at=generated_at,
             action_type="monitor_fresh_signal",
         )
-        due = _action_due_state(signal.get("next_monitor_after_utc"), generated_at=generated_at)
+        due_at = _parse_dt(due.get("execute_after_utc"))
+        report_at = _command_report_timestamp(
+            scheduled_at=due_at,
+            generated_at=generated_at,
+            can_run_now=due["can_run_now"],
+        )
+        if report_at is not None:
+            command = _scheduled_signal_monitor_command(command, scheduled_at=report_at) or command
         actions.append(
             {
                 "priority": 20,
@@ -2664,25 +5371,98 @@ def _safe_next_action_plan(
                 action_type="paper_bridge_wait_for_fresh_signal",
             )
             due = _action_due_state(paper.get("next_monitor_after_utc"), generated_at=generated_at)
+            due_at = _parse_dt(due.get("execute_after_utc"))
+            report_at = _command_report_timestamp(
+                scheduled_at=due_at,
+                generated_at=generated_at,
+                can_run_now=due["can_run_now"],
+            )
+            if report_at is not None:
+                command = _scheduled_signal_monitor_command(command, scheduled_at=report_at) or command
             retry_blocked = paper.get("paper_apply_retry_blocked") is True
+            no_open_blocked = paper.get("paper_apply_no_open_plan") is True
             parity_review_blocked = paper.get("paper_apply_parity_review_blocked") is True
             parity_review_blocker = dict(paper.get("paper_apply_parity_review_blocker") or {})
+            previous_next_add_monitor = (
+                _previous_next_add_monitor_schedule(
+                    previous_payload=previous_payload,
+                    paper_action=paper,
+                )
+                if no_open_blocked
+                else None
+            )
+            next_add_plan = (
+                _next_creditable_add_signal_monitor_plan(
+                    paper_action=paper,
+                    generated_at=generated_at,
+                    command=command,
+                    scheduled_at=previous_next_add_monitor,
+                    schedule_preserved_from_previous_watch=previous_next_add_monitor is not None,
+                )
+                if no_open_blocked
+                else {}
+            )
+            next_add_due = (
+                _action_due_state(next_add_plan.get("next_monitor_after_utc"), generated_at=generated_at)
+                if no_open_blocked
+                else {}
+            )
+            paper_execute_after_utc = (
+                None
+                if parity_review_blocked
+                else next_add_plan.get("next_monitor_after_utc")
+                if no_open_blocked
+                else due["execute_after_utc"]
+            )
+            paper_execute_after_kst = (
+                None
+                if parity_review_blocked
+                else next_add_plan.get("next_monitor_after_kst")
+                if no_open_blocked
+                else due["execute_after_kst"]
+            )
+            paper_wait_minutes = (
+                0.0
+                if parity_review_blocked
+                else next_add_due.get("wait_minutes")
+                if no_open_blocked
+                else due["wait_minutes"]
+            )
+            paper_scheduled_at = _parse_dt(paper_execute_after_utc)
+            scheduled_paper_operator_packet = (
+                _scheduled_waiting_paper_operator_packet(
+                    paper_operator_packet,
+                    scheduled_at=paper_scheduled_at,
+                )
+                if not parity_review_blocked
+                else paper_operator_packet
+            )
+            paper_apply_command_when_gate_allows = (
+                scheduled_paper_operator_packet.get("apply_command_when_gate_allows")
+                or paper.get("paper_apply_command_when_gate_allows")
+            )
             actions.append(
                 {
-                    "priority": 10 if parity_review_blocked else (20 if retry_blocked else 60),
+                    "priority": 10 if parity_review_blocked else (20 if retry_blocked or no_open_blocked else 60),
                     "action_type": (
                         "resolve_paper_apply_parity_review_blocker"
                         if parity_review_blocked
                         else (
                         "paper_bridge_wait_for_next_add_signal"
-                        if retry_blocked
+                        if retry_blocked or no_open_blocked
                         else "paper_bridge_wait_for_fresh_signal"
                         )
                     ),
                     "target_gate": "real_paper_lifecycle_rows",
                     "can_run_now": True
                     if parity_review_blocked
-                    else (False if paper.get("fresh_signal") is not True else due["can_run_now"]),
+                    else (
+                        False
+                        if paper.get("fresh_signal") is not True
+                        else bool(next_add_due.get("can_run_now"))
+                        if no_open_blocked
+                        else due["can_run_now"]
+                    ),
                     "requires_operator_review": True,
                     "command": _materialize_action_command(
                         parity_review_blocker.get("recommended_command"),
@@ -2690,10 +5470,15 @@ def _safe_next_action_plan(
                         action_type="paper_apply_parity_review",
                     )
                     if parity_review_blocked
+                    else next_add_plan.get("monitor_command")
+                    if no_open_blocked
                     else command,
-                    "paper_apply_command_when_gate_allows": paper.get("paper_apply_command_when_gate_allows"),
-                    "paper_apply_operator_packet": paper_operator_packet,
-                    "pre_apply_backup_plan": dict(paper_operator_packet.get("pre_apply_backup_plan") or {}),
+                    "paper_apply_command_when_gate_allows": paper_apply_command_when_gate_allows,
+                    "paper_apply_operator_packet": scheduled_paper_operator_packet,
+                    "pre_apply_backup_plan": dict(scheduled_paper_operator_packet.get("pre_apply_backup_plan") or {}),
+                    "paper_apply_no_open_plan": no_open_blocked,
+                    "remove_plan_precheck": dict(paper.get("remove_plan_precheck") or {}),
+                    "next_creditable_add_signal_plan": next_add_plan,
                     "paper_apply_retry_blocker": paper.get("paper_apply_retry_blocker"),
                     "paper_apply_parity_review_blocker": parity_review_blocker,
                     "execution_parity_events_needed": paper.get("execution_parity_events_needed"),
@@ -2705,10 +5490,29 @@ def _safe_next_action_plan(
                     "source_report": parity_review_blocker.get("source_report") if parity_review_blocked else None,
                     "blockers": list(parity_review_blocker.get("blockers") or []) if parity_review_blocked else [],
                     "next_actions": list(parity_review_blocker.get("next_actions") or []) if parity_review_blocked else [],
-                    "execute_after_utc": None if parity_review_blocked else due["execute_after_utc"],
-                    "execute_after_kst": None if parity_review_blocked else due["execute_after_kst"],
-                    "wait_minutes": 0.0 if parity_review_blocked else due["wait_minutes"],
-                    "recommended_monitor_interval_minutes": paper.get("recommended_monitor_interval_minutes"),
+                    "execute_after_utc": paper_execute_after_utc,
+                    "execute_after_kst": paper_execute_after_kst,
+                    "wait_minutes": paper_wait_minutes,
+                    "recommended_monitor_interval_minutes": (
+                        next_add_plan.get("recommended_monitor_interval_minutes")
+                        if no_open_blocked
+                        else paper.get("recommended_monitor_interval_minutes")
+                    ),
+                    "signal_freshness_capture_window_minutes": (
+                        next_add_plan.get("signal_freshness_capture_window_minutes")
+                        if no_open_blocked
+                        else paper.get("signal_freshness_capture_window_minutes")
+                    ),
+                    "monitor_interval_capped_by_signal_freshness": (
+                        next_add_plan.get("monitor_interval_capped_by_signal_freshness") is True
+                        if no_open_blocked
+                        else paper.get("monitor_interval_capped_by_signal_freshness") is True
+                    ),
+                    "monitor_signal_age_alignment": (
+                        next_add_plan.get("monitor_signal_age_alignment")
+                        if no_open_blocked
+                        else paper.get("monitor_signal_age_alignment")
+                    ),
                     "order_submission_allowed": False,
                     "no_live_order_sent": True,
                 }
@@ -2719,6 +5523,7 @@ def _safe_next_action_plan(
         not promotion_gate
         or promotion_gate.get("status") in {None, "", "unavailable", "stale"}
         or promotion_gate.get("stale") is True
+        or dict(promotion_gate.get("operator_lineage_review_artifacts") or {}).get("status") == "fail"
         or promotion_gate.get("no_live_order_sent") is not True
     )
     if promotion_needs_refresh:
@@ -2736,16 +5541,304 @@ def _safe_next_action_plan(
                 "reason": (
                     "promotion_gate_missing_or_stale"
                     if promotion_gate.get("no_live_order_sent", True) is True
+                    and dict(promotion_gate.get("operator_lineage_review_artifacts") or {}).get("status") != "fail"
                     else "promotion_gate_report_failed_no_live_order_safety_check"
+                    if promotion_gate.get("no_live_order_sent", True) is not True
+                    else "operator_lineage_review_artifact_check_failed"
                 ),
                 "promotion_gate_status": promotion_gate.get("status"),
                 "promotion_gate_stale": promotion_gate.get("stale"),
                 "promotion_gate_source": promotion_gate.get("source_report"),
                 "promotion_decision": promotion_gate.get("promotion_decision"),
+                "operator_lineage_artifact_status": dict(
+                    promotion_gate.get("operator_lineage_review_artifacts") or {}
+                ).get("status"),
+                "operator_lineage_artifact_blockers": list(
+                    dict(promotion_gate.get("operator_lineage_review_artifacts") or {}).get("blockers") or []
+                ),
                 "order_submission_allowed": False,
                 "no_live_order_sent": True,
             }
         )
+    elif promotion_gate:
+        conditional_review = dict(promotion_gate.get("conditional_overfit_operator_review") or {})
+        conditional_review_operator = dict(conditional_review.get("operator_review") or {})
+        conditional_review_template = dict(conditional_review.get("operator_review_template") or {})
+        conditional_review_artifacts = dict(
+            promotion_gate.get("conditional_overfit_operator_review_artifacts") or {}
+        )
+        conditional_operator_blockers = list(conditional_review_operator.get("blockers") or [])
+        conditional_review_missing = (
+            conditional_review.get("required") is True
+            and conditional_review.get("proxy_passed") is True
+            and conditional_review.get("accepted_for_paper_only") is not True
+            and (
+                conditional_review_operator.get("status") in {None, "", "missing", "missing_status"}
+                or "conditional_overfit_operator_review_report_missing" in conditional_operator_blockers
+            )
+        )
+        if conditional_review_missing:
+            source_promotion_gate_report = (
+                promotion_gate.get("expected_operator_lineage_source_report")
+                or promotion_gate.get("report_path")
+                or promotion_gate.get("source_report")
+            )
+            expected_source_arg = shlex.quote(
+                str(source_promotion_gate_report or "<source_promotion_gate_report>")
+            )
+            accepted_status_values = list(
+                conditional_review_template.get("required_decision_values")
+                or [
+                    "accepted",
+                    "conditional_overfit_review_accepted",
+                    "operator_overfit_review_accepted",
+                    "operator_review_accepted",
+                ]
+            )
+            review_packet_summary = conditional_review_template.get("review_packet_summary")
+            review_packet_fingerprint = conditional_review_template.get("review_packet_fingerprint")
+            overfit_blockers = list(conditional_review_template.get("overfit_blockers") or [])
+            conditional_overfit_acceptance_contract = {
+                "source_promotion_gate_report_must_match": source_promotion_gate_report,
+                "candidate_recipe_id_must_match": conditional_review_template.get("candidate_recipe_id"),
+                "candidate_report_must_match": conditional_review_template.get("candidate_report"),
+                "overfit_blockers_must_match": overfit_blockers,
+                "proxy_audit_report_must_match": conditional_review_template.get("proxy_audit_report"),
+                "review_packet_summary_must_match": review_packet_summary,
+                "review_packet_fingerprint_must_match": review_packet_fingerprint,
+                "reviewed_at_must_be_at_or_after_promotion_gate_generated_at": promotion_gate.get(
+                    "generated_at"
+                ),
+                "reviewer_must_be_non_empty": True,
+                "rationale_must_be_non_empty": True,
+                "paper_only_scope_must_be_true": True,
+                "real_shadow_still_required_before_tiny_canary_or_live_must_be_true": True,
+                "no_live_order_sent_must_be_true": True,
+                "accepted_status_values": accepted_status_values,
+            }
+            conditional_overfit_review_json_skeleton = {
+                "status": "conditional_overfit_review_accepted_or_rejected",
+                "candidate_recipe_id": conditional_review_template.get("candidate_recipe_id"),
+                "candidate_report": conditional_review_template.get("candidate_report"),
+                "overfit_blockers": overfit_blockers,
+                "proxy_audit_report": conditional_review_template.get("proxy_audit_report"),
+                "review_packet_summary": review_packet_summary,
+                "review_packet_fingerprint": review_packet_fingerprint,
+                "source_promotion_gate_report": source_promotion_gate_report,
+                "source_promotion_gate_generated_at": promotion_gate.get("generated_at"),
+                "reviewer": "operator_name_or_initials",
+                "reviewed_at": "iso8601_timestamp_after_source_promotion_gate_generated_at",
+                "rationale": "why_the_conditional_overlay_proxy_evidence_is_accepted_or_rejected_for_paper_only",
+                "paper_only_scope": True,
+                "real_shadow_still_required_before_tiny_canary_or_live": True,
+                "acceptance_contract": conditional_overfit_acceptance_contract,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+            actions.append(
+                {
+                    "priority": 34,
+                    "action_type": "review_conditional_overfit_holdout_proxy",
+                    "target_gate": "conditional_overfit_operator_review",
+                    "can_run_now": True,
+                    "requires_operator_review": True,
+                    "command": None,
+                    "reason": "conditional_overfit_proxy_requires_operator_review_before_paper_candidate_activation",
+                    "template_report": promotion_gate.get("conditional_overfit_operator_review_template_report"),
+                    "conditional_overfit_operator_review_skeleton_report": promotion_gate.get(
+                        "conditional_overfit_operator_review_skeleton_report"
+                    ),
+                    "conditional_overfit_operator_review_artifact_status": conditional_review_artifacts.get("status"),
+                    "conditional_overfit_operator_review_artifact_blockers": list(
+                        conditional_review_artifacts.get("blockers") or []
+                    ),
+                    "conditional_overfit_operator_review_artifact_manifest": dict(
+                        conditional_review_artifacts.get("manifest") or {}
+                    ),
+                    "conditional_overfit_operator_review_template_payload_fingerprint": dict(
+                        conditional_review_artifacts.get("template") or {}
+                    ).get("payload_fingerprint"),
+                    "conditional_overfit_operator_review_skeleton_payload_fingerprint": dict(
+                        conditional_review_artifacts.get("skeleton") or {}
+                    ).get("payload_fingerprint"),
+                    "source_promotion_gate_report": source_promotion_gate_report,
+                    "source_promotion_gate_generated_at": promotion_gate.get("generated_at"),
+                    "candidate_recipe_id": conditional_review_template.get("candidate_recipe_id"),
+                    "candidate_report": conditional_review_template.get("candidate_report"),
+                    "overfit_blockers": overfit_blockers,
+                    "proxy_audit_report": conditional_review_template.get("proxy_audit_report"),
+                    "proxy_passed": conditional_review_template.get("proxy_passed") is True,
+                    "review_packet_summary": review_packet_summary,
+                    "review_packet_fingerprint": review_packet_fingerprint,
+                    "operator_fields_to_fill": {
+                        "status": "conditional_overfit_review_accepted_or_rejected",
+                        "source_promotion_gate_report": source_promotion_gate_report,
+                        "reviewer": "operator_name_or_initials",
+                        "reviewed_at": "iso8601_timestamp_after_source_promotion_gate_generated_at",
+                        "rationale": (
+                            "why_the_conditional_overlay_proxy_evidence_is_accepted_or_rejected_for_paper_only"
+                        ),
+                        "paper_only_scope": True,
+                        "real_shadow_still_required_before_tiny_canary_or_live": True,
+                        "no_live_order_sent": True,
+                    },
+                    "operator_review_json_skeleton": conditional_overfit_review_json_skeleton,
+                    "conditional_overfit_operator_review_acceptance_contract": (
+                        conditional_overfit_acceptance_contract
+                    ),
+                    "conditional_overfit_operator_review_validation_command_template": (
+                        ".venv/bin/python scripts/run_market_state_rotation_v6_meta_router_promotion_gate.py "
+                        "--conditional-overfit-operator-review-report "
+                        "<conditional_overfit_operator_review_report.json> "
+                        f"--expected-operator-lineage-source-report {expected_source_arg}"
+                    ),
+                    "conditional_overfit_operator_review_validation_contract": {
+                        "expected_operator_lineage_source_report": source_promotion_gate_report,
+                        "expected_operator_review_status_path": (
+                            "conditional_overfit_operator_review.operator_review.status"
+                        ),
+                        "expected_no_live_order_sent": True,
+                        "write_report_required_for_validation": False,
+                        "paper_only_scope": True,
+                        "real_shadow_still_required_before_tiny_canary_or_live": True,
+                        "order_submission_allowed": False,
+                    },
+                    "paper_only_scope": True,
+                    "real_shadow_still_required_before_tiny_canary_or_live": True,
+                    "does_not_enable_tiny_canary_or_live_until_real_shadow_passes": True,
+                    "order_submission_allowed": False,
+                    "no_live_order_sent": True,
+                }
+            )
+
+        switch_policy = dict(promotion_gate.get("candidate_switch_policy") or {})
+        defensive_lineage_review = dict(switch_policy.get("defensive_lineage_review") or {})
+        operator_review = dict(defensive_lineage_review.get("operator_review") or {})
+        operator_template = dict(defensive_lineage_review.get("operator_review_template") or {})
+        operator_blockers = list(operator_review.get("blockers") or [])
+        lineage_review_missing = (
+            defensive_lineage_review.get("required") is True
+            and defensive_lineage_review.get("status") == "pending_operator_lineage_review"
+            and (
+                operator_review.get("status") in {None, "", "missing", "missing_status"}
+                or "operator_lineage_review_report_missing" in operator_blockers
+            )
+        )
+        if lineage_review_missing:
+            source_promotion_gate_report = (
+                promotion_gate.get("expected_operator_lineage_source_report")
+                or promotion_gate.get("report_path")
+                or promotion_gate.get("source_report")
+            )
+            expected_source_arg = shlex.quote(
+                str(source_promotion_gate_report or "<source_promotion_gate_report>")
+            )
+            reviewed_folds = list(operator_template.get("reviewed_folds") or [])
+            review_packet_summary = operator_template.get("review_packet_summary")
+            review_packet_fingerprint = operator_template.get("review_packet_fingerprint")
+            accepted_status_values = list(
+                operator_template.get("required_decision_values")
+                or [
+                    "accepted",
+                    "operator_lineage_review_accepted",
+                    "operator_review_accepted",
+                ]
+            )
+            operator_lineage_review_acceptance_contract = {
+                "source_promotion_gate_report_must_match": source_promotion_gate_report,
+                "candidate_recipe_id_must_match": operator_template.get("candidate_recipe_id"),
+                "reviewed_folds_must_match": reviewed_folds,
+                "review_packet_summary_must_match": review_packet_summary,
+                "review_packet_fingerprint_must_match": review_packet_fingerprint,
+                "reviewed_at_must_be_at_or_after_promotion_gate_generated_at": promotion_gate.get(
+                    "generated_at"
+                ),
+                "reviewer_must_be_non_empty": True,
+                "rationale_must_be_non_empty": True,
+                "no_live_order_sent_must_be_true": True,
+                "accepted_status_values": accepted_status_values,
+            }
+            operator_review_json_skeleton = {
+                "status": "operator_lineage_review_accepted_or_rejected",
+                "candidate_recipe_id": operator_template.get("candidate_recipe_id"),
+                "reviewed_folds": reviewed_folds,
+                "review_packet_summary": review_packet_summary,
+                "review_packet_fingerprint": review_packet_fingerprint,
+                "source_promotion_gate_report": source_promotion_gate_report,
+                "source_promotion_gate_generated_at": promotion_gate.get("generated_at"),
+                "reviewer": "operator_name_or_initials",
+                "reviewed_at": "iso8601_timestamp_after_source_promotion_gate_generated_at",
+                "rationale": "why_the_defensive_size_overlay_delta_is_accepted_or_rejected",
+                "acceptance_contract": operator_lineage_review_acceptance_contract,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+            actions.append(
+                {
+                    "priority": 35,
+                    "action_type": "review_defensive_candidate_lineage_template",
+                    "target_gate": "defensive_lineage_review",
+                    "can_run_now": True,
+                    "requires_operator_review": True,
+                    "command": None,
+                    "reason": "defensive_candidate_route_requires_operator_lineage_review_before_activation",
+                    "template_report": promotion_gate.get("operator_lineage_review_template_report"),
+                    "operator_lineage_review_skeleton_report": promotion_gate.get(
+                        "operator_lineage_review_skeleton_report"
+                    ),
+                    "operator_lineage_artifact_status": dict(
+                        promotion_gate.get("operator_lineage_review_artifacts") or {}
+                    ).get("status"),
+                    "operator_lineage_artifact_blockers": list(
+                        dict(promotion_gate.get("operator_lineage_review_artifacts") or {}).get("blockers") or []
+                    ),
+                    "operator_lineage_artifact_manifest": dict(
+                        dict(promotion_gate.get("operator_lineage_review_artifacts") or {}).get("manifest") or {}
+                    ),
+                    "operator_lineage_template_payload_fingerprint": dict(
+                        dict(promotion_gate.get("operator_lineage_review_artifacts") or {}).get("template") or {}
+                    ).get("payload_fingerprint"),
+                    "operator_lineage_skeleton_payload_fingerprint": dict(
+                        dict(promotion_gate.get("operator_lineage_review_artifacts") or {}).get("skeleton") or {}
+                    ).get("payload_fingerprint"),
+                    "source_promotion_gate_report": source_promotion_gate_report,
+                    "source_promotion_gate_generated_at": promotion_gate.get("generated_at"),
+                    "candidate_recipe_id": operator_template.get("candidate_recipe_id"),
+                    "reviewed_folds": reviewed_folds,
+                    "review_packet_summary": review_packet_summary,
+                    "review_packet_fingerprint": review_packet_fingerprint,
+                    "operator_fields_to_fill": {
+                        "status": "operator_lineage_review_accepted_or_rejected",
+                        "source_promotion_gate_report": source_promotion_gate_report,
+                        "reviewer": "operator_name_or_initials",
+                        "reviewed_at": "iso8601_timestamp_after_source_promotion_gate_generated_at",
+                        "rationale": "why_the_defensive_size_overlay_delta_is_accepted_or_rejected",
+                        "no_live_order_sent": True,
+                    },
+                    "operator_review_json_skeleton": operator_review_json_skeleton,
+                    "operator_lineage_review_acceptance_contract": operator_lineage_review_acceptance_contract,
+                    "operator_lineage_review_validation_command_template": (
+                        ".venv/bin/python scripts/run_market_state_rotation_v6_meta_router_promotion_gate.py "
+                        "--operator-lineage-review-report <operator_lineage_review_report.json> "
+                        f"--expected-operator-lineage-source-report {expected_source_arg}"
+                    ),
+                    "operator_lineage_review_validation_contract": {
+                        "expected_operator_lineage_source_report": source_promotion_gate_report,
+                        "expected_operator_review_status_path": (
+                            "candidate_switch_policy.defensive_lineage_review.operator_review.status"
+                        ),
+                        "expected_no_live_order_sent": True,
+                        "write_report_required_for_validation": False,
+                        "order_submission_allowed": False,
+                    },
+                    "operator_lineage_review_source_report_required": True,
+                    "reviewed_at_required": operator_template.get("required_operator_reviewed_at") is True,
+                    "promotion_blockers": list(switch_policy.get("promotion_blockers") or []),
+                    "does_not_enable_route_until_execution_parity_passes": True,
+                    "order_submission_allowed": False,
+                    "no_live_order_sent": True,
+                }
+            )
 
     caps = by_gate.get("tiny_canary_risk_caps_configured")
     if caps and caps.get("quick_audit_command"):
@@ -2793,6 +5886,45 @@ def _safe_next_action_plan(
     for action in actions:
         action.setdefault("can_start_now", action.get("can_run_now") is True)
         action.setdefault("waits_until_execution_window", False)
+        compact_action = _compact_safe_action(action, generated_at=generated_at) or {}
+        action.setdefault("execution_window_status", compact_action.get("execution_window_status"))
+        action.setdefault(
+            "minutes_until_execution_window",
+            compact_action.get("minutes_until_execution_window"),
+        )
+        action.setdefault("overdue_minutes", compact_action.get("overdue_minutes"))
+        action.setdefault(
+            "action_due_now",
+            compact_action.get("execution_window_status") == "due_or_overdue",
+        )
+        coverage = _current_iteration_coverage(action)
+        covered_by_current_iteration = coverage.get("covered") is True
+        covered_due_by_current_iteration = (
+            covered_by_current_iteration
+            and action.get("action_due_now") is True
+        )
+        action.setdefault("current_iteration_coverage", coverage)
+        action.setdefault("covered_by_current_iteration", covered_by_current_iteration)
+        action.setdefault("covered_due_by_current_iteration", covered_due_by_current_iteration)
+        action.setdefault(
+            "effective_execution_window_status",
+            "covered_this_iteration"
+            if covered_due_by_current_iteration
+            else action.get("execution_window_status"),
+        )
+        action.setdefault(
+            "effective_action_due_now",
+            False
+            if covered_due_by_current_iteration
+            else action.get("action_due_now") is True,
+        )
+        action.update(
+            {
+                key: value
+                for key, value in _current_iteration_recheck_schedule(action).items()
+                if value is not None
+            }
+        )
     runnable = [item for item in actions if item.get("can_run_now") is True]
     startable = [item for item in actions if item.get("can_start_now") is True]
     scheduled = sorted(
@@ -2820,16 +5952,23 @@ def _safe_next_action_plan(
         status = "safe_actions_available"
     else:
         status = "waiting_for_external_or_time_gate"
-    primary_execute_after = _parse_dt(dict(primary or {}).get("execute_after_utc"))
     pre_wait_scheduled_actions: list[dict[str, Any]] = []
     coordination_warnings: list[str] = []
     deferred_wait_action: dict[str, Any] | None = None
-    if primary and primary.get("waits_until_execution_window") is True and primary_execute_after is not None:
+    wait_action_for_deferral = (
+        primary
+        if primary and primary.get("waits_until_execution_window") is True
+        else startable_waits[0]
+        if startable_waits
+        else None
+    )
+    wait_execute_after = _parse_dt(dict(wait_action_for_deferral or {}).get("execute_after_utc"))
+    if wait_action_for_deferral and wait_execute_after is not None:
         pre_wait_scheduled_actions = [
             item
             for item in scheduled
-            if item is not primary
-            and (_parse_dt(item.get("execute_after_utc")) or datetime.max.replace(tzinfo=UTC)) < primary_execute_after
+            if item is not wait_action_for_deferral
+            and (_parse_dt(item.get("execute_after_utc")) or datetime.max.replace(tzinfo=UTC)) < wait_execute_after
             and not (
                 item.get("action_type") == "paper_bridge_wait_for_fresh_signal"
                 and item.get("can_run_now") is not True
@@ -2839,7 +5978,7 @@ def _safe_next_action_plan(
             coordination_warnings.append(
                 "startable_quote_window_wait_sleeps_past_earlier_scheduled_signal_or_review_actions"
             )
-            deferred_wait_action = primary
+            deferred_wait_action = wait_action_for_deferral
             first_pre_wait_action = pre_wait_scheduled_actions[0]
             deferred_wait_action.update(
                 {
@@ -2852,16 +5991,59 @@ def _safe_next_action_plan(
                     "deferred_until_after_kst": first_pre_wait_action.get("execute_after_kst"),
                 }
             )
-            primary = pre_wait_scheduled_actions[0]
-            status = "waiting_for_earlier_scheduled_action_before_quote_window_wait"
+            primary = first_pre_wait_action
+            status = (
+                "safe_action_covered_this_iteration_before_quote_window_wait"
+                if first_pre_wait_action.get("covered_due_by_current_iteration") is True
+                else "safe_action_due_before_quote_window_wait"
+                if first_pre_wait_action.get("can_run_now") is True
+                else "waiting_for_earlier_scheduled_action_before_quote_window_wait"
+            )
             coordination_warnings = []
             startable = [item for item in actions if item.get("can_start_now") is True]
             startable_waits = [
                 item for item in startable if item.get("waits_until_execution_window") is True and item.get("command")
             ]
+    coordination_plan = _safe_next_coordination_plan(
+        primary=primary,
+        actions=actions,
+        scheduled=scheduled,
+        startable_wait_action=startable_waits[0] if startable_waits else None,
+        deferred_wait_action=deferred_wait_action,
+        generated_at=generated_at,
+    )
+    pre_wait_primary_action = dict(pre_wait_scheduled_actions[0] if pre_wait_scheduled_actions else {})
+    primary_action = dict(primary or {})
+    covered_due_safe_actions = [
+        item for item in actions if item.get("covered_due_by_current_iteration") is True
+    ]
+    uncovered_due_safe_actions = [
+        item
+        for item in actions
+        if item.get("action_due_now") is True
+        and item.get("covered_due_by_current_iteration") is not True
+    ]
     return {
         "status": status,
         "primary_action": primary,
+        "primary_action_window_status": primary_action.get("execution_window_status"),
+        "primary_action_effective_window_status": primary_action.get(
+            "effective_execution_window_status"
+        ),
+        "primary_action_overdue_minutes": primary_action.get("overdue_minutes"),
+        "primary_action_minutes_until_execution_window": primary_action.get(
+            "minutes_until_execution_window"
+        ),
+        "primary_action_due_now": primary_action.get("action_due_now") is True,
+        "primary_action_effective_due_now": primary_action.get("effective_action_due_now") is True,
+        "primary_action_covered_by_current_iteration": (
+            primary_action.get("covered_by_current_iteration") is True
+        ),
+        "primary_action_covered_due_by_current_iteration": (
+            primary_action.get("covered_due_by_current_iteration") is True
+        ),
+        "covered_due_safe_action_count": len(covered_due_safe_actions),
+        "uncovered_due_safe_action_count": len(uncovered_due_safe_actions),
         "runnable_action_count": len(runnable),
         "startable_action_count": len(startable),
         "action_count": len(actions),
@@ -2870,7 +6052,11 @@ def _safe_next_action_plan(
         "next_deferred_wait_action": deferred_wait_action,
         "pre_wait_scheduled_actions": pre_wait_scheduled_actions,
         "pre_wait_scheduled_action_count": len(pre_wait_scheduled_actions),
+        "pre_wait_primary_action_type": pre_wait_primary_action.get("action_type"),
+        "pre_wait_primary_action_due_now": pre_wait_primary_action.get("can_run_now") is True,
+        "pre_wait_primary_action_execute_after_kst": pre_wait_primary_action.get("execute_after_kst"),
         "coordination_warnings": coordination_warnings,
+        "coordination_plan": coordination_plan,
         "actions": actions,
         "paper_apply_allowed_now": operator_handoff.get("paper_apply_allowed_now") is True,
         "order_submission_allowed": False,
@@ -3276,6 +6462,271 @@ def _recent_paper_apply_parity_review(
     return latest
 
 
+def _operator_lineage_artifact_review(
+    *,
+    promotion_gate_report: dict[str, Any],
+    expected_source_promotion_gate_report: str,
+    expected_promotion_gate_generated_at: str,
+) -> dict[str, Any]:
+    switch_policy = dict(promotion_gate_report.get("candidate_switch_policy") or {})
+    lineage_review = dict(switch_policy.get("defensive_lineage_review") or {})
+    if lineage_review.get("required") is not True:
+        return {
+            "status": "not_required",
+            "blockers": [],
+            "template": {},
+            "skeleton": {},
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+
+    template_report = promotion_gate_report.get("operator_lineage_review_template_report")
+    skeleton_report = promotion_gate_report.get("operator_lineage_review_skeleton_report")
+    manifest = dict(promotion_gate_report.get("operator_lineage_artifact_manifest") or {})
+    template_path = _resolve(template_report)
+    skeleton_path = _resolve(skeleton_report)
+    template_payload = _read_json(template_path) if template_path is not None and template_path.exists() else {}
+    skeleton_payload = _read_json(skeleton_path) if skeleton_path is not None and skeleton_path.exists() else {}
+    blockers: list[str] = []
+
+    template_exists = bool(template_path is not None and template_path.exists())
+    skeleton_exists = bool(skeleton_path is not None and skeleton_path.exists())
+    if not template_report:
+        blockers.append("operator_lineage_template_report_path_missing")
+    elif not template_exists:
+        blockers.append("operator_lineage_template_report_file_missing")
+    if not skeleton_report:
+        blockers.append("operator_lineage_skeleton_report_path_missing")
+    elif not skeleton_exists:
+        blockers.append("operator_lineage_skeleton_report_file_missing")
+
+    template_source = str(template_payload.get("source_promotion_gate_report") or "").strip()
+    template_generated = str(template_payload.get("source_promotion_gate_generated_at") or "").strip()
+    template_skeleton = str(template_payload.get("operator_review_json_skeleton_report") or "").strip()
+    template_fingerprint = _fingerprint_payload(template_payload) if template_payload else None
+    skeleton_source = str(skeleton_payload.get("source_promotion_gate_report") or "").strip()
+    skeleton_generated = str(skeleton_payload.get("source_promotion_gate_generated_at") or "").strip()
+    skeleton_template = str(skeleton_payload.get("source_template_report") or "").strip()
+    skeleton_fingerprint = _fingerprint_payload(skeleton_payload) if skeleton_payload else None
+
+    if not manifest:
+        blockers.append("operator_lineage_artifact_manifest_missing")
+    else:
+        if manifest.get("no_live_order_sent") is not True:
+            blockers.append("operator_lineage_artifact_manifest_no_live_order_sent_not_true")
+        if manifest.get("order_submission_allowed") is not False:
+            blockers.append("operator_lineage_artifact_manifest_order_submission_allowed_not_false")
+        if manifest.get("template_report") != template_report:
+            blockers.append("operator_lineage_artifact_manifest_template_report_mismatch")
+        if manifest.get("skeleton_report") != skeleton_report:
+            blockers.append("operator_lineage_artifact_manifest_skeleton_report_mismatch")
+
+    if template_exists:
+        if template_payload.get("no_live_order_sent") is not True:
+            blockers.append("operator_lineage_template_no_live_order_sent_not_true")
+        if template_source != expected_source_promotion_gate_report:
+            blockers.append("operator_lineage_template_source_promotion_gate_report_mismatch")
+        if template_generated != expected_promotion_gate_generated_at:
+            blockers.append("operator_lineage_template_source_promotion_gate_generated_at_mismatch")
+        if skeleton_report and template_skeleton != str(skeleton_report):
+            blockers.append("operator_lineage_template_skeleton_report_mismatch")
+        if manifest and template_fingerprint != manifest.get("template_payload_fingerprint"):
+            blockers.append("operator_lineage_template_payload_fingerprint_mismatch")
+    if skeleton_exists:
+        if skeleton_payload.get("no_live_order_sent") is not True:
+            blockers.append("operator_lineage_skeleton_no_live_order_sent_not_true")
+        if skeleton_payload.get("order_submission_allowed") is not False:
+            blockers.append("operator_lineage_skeleton_order_submission_allowed_not_false")
+        if skeleton_source != expected_source_promotion_gate_report:
+            blockers.append("operator_lineage_skeleton_source_promotion_gate_report_mismatch")
+        if skeleton_generated != expected_promotion_gate_generated_at:
+            blockers.append("operator_lineage_skeleton_source_promotion_gate_generated_at_mismatch")
+        if template_report and skeleton_template != str(template_report):
+            blockers.append("operator_lineage_skeleton_template_report_mismatch")
+        if manifest and skeleton_fingerprint != manifest.get("skeleton_payload_fingerprint"):
+            blockers.append("operator_lineage_skeleton_payload_fingerprint_mismatch")
+
+    return {
+        "status": "pass" if not blockers else "fail",
+        "blockers": sorted(set(blockers)),
+        "manifest": {
+            "present": bool(manifest),
+            "fingerprint_algorithm": manifest.get("fingerprint_algorithm"),
+            "template_report": manifest.get("template_report"),
+            "template_payload_fingerprint": manifest.get("template_payload_fingerprint"),
+            "skeleton_report": manifest.get("skeleton_report"),
+            "skeleton_payload_fingerprint": manifest.get("skeleton_payload_fingerprint"),
+            "order_submission_allowed": manifest.get("order_submission_allowed"),
+            "no_live_order_sent": manifest.get("no_live_order_sent") is True,
+        },
+        "template": {
+            "path": template_report,
+            "exists": template_exists,
+            "payload_fingerprint": template_fingerprint,
+            "source_promotion_gate_report": template_source or None,
+            "source_promotion_gate_generated_at": template_generated or None,
+            "operator_review_json_skeleton_report": template_skeleton or None,
+            "no_live_order_sent": template_payload.get("no_live_order_sent") is True,
+        },
+        "skeleton": {
+            "path": skeleton_report,
+            "exists": skeleton_exists,
+            "payload_fingerprint": skeleton_fingerprint,
+            "source_template_report": skeleton_template or None,
+            "source_promotion_gate_report": skeleton_source or None,
+            "source_promotion_gate_generated_at": skeleton_generated or None,
+            "order_submission_allowed": skeleton_payload.get("order_submission_allowed"),
+            "no_live_order_sent": skeleton_payload.get("no_live_order_sent") is True,
+        },
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+
+
+def _conditional_overfit_operator_review_artifact_review(
+    *,
+    promotion_gate_report: dict[str, Any],
+    expected_source_promotion_gate_report: str,
+    expected_promotion_gate_generated_at: str,
+) -> dict[str, Any]:
+    review = dict(promotion_gate_report.get("conditional_overfit_operator_review") or {})
+    if review.get("required") is not True or review.get("proxy_passed") is not True:
+        return {
+            "status": "not_required",
+            "blockers": [],
+            "template": {},
+            "skeleton": {},
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+
+    template_report = promotion_gate_report.get("conditional_overfit_operator_review_template_report")
+    skeleton_report = promotion_gate_report.get("conditional_overfit_operator_review_skeleton_report")
+    manifest = dict(promotion_gate_report.get("conditional_overfit_operator_review_artifact_manifest") or {})
+    template_path = _resolve(template_report)
+    skeleton_path = _resolve(skeleton_report)
+    template_payload = _read_json(template_path) if template_path is not None else {}
+    skeleton_payload = _read_json(skeleton_path) if skeleton_path is not None else {}
+    blockers: list[str] = []
+
+    template_exists = bool(template_path is not None and template_path.exists())
+    skeleton_exists = bool(skeleton_path is not None and skeleton_path.exists())
+    if not template_report:
+        blockers.append("conditional_overfit_operator_review_template_report_path_missing")
+    elif not template_exists:
+        blockers.append("conditional_overfit_operator_review_template_report_file_missing")
+    if not skeleton_report:
+        blockers.append("conditional_overfit_operator_review_skeleton_report_path_missing")
+    elif not skeleton_exists:
+        blockers.append("conditional_overfit_operator_review_skeleton_report_file_missing")
+
+    template_source = str(template_payload.get("source_promotion_gate_report") or "").strip()
+    template_generated = str(template_payload.get("source_promotion_gate_generated_at") or "").strip()
+    template_skeleton = str(template_payload.get("operator_review_json_skeleton_report") or "").strip()
+    template_fingerprint = _fingerprint_payload(template_payload) if template_payload else None
+    skeleton_source = str(skeleton_payload.get("source_promotion_gate_report") or "").strip()
+    skeleton_generated = str(skeleton_payload.get("source_promotion_gate_generated_at") or "").strip()
+    skeleton_template = str(skeleton_payload.get("source_template_report") or "").strip()
+    skeleton_fingerprint = _fingerprint_payload(skeleton_payload) if skeleton_payload else None
+
+    if not manifest:
+        blockers.append("conditional_overfit_operator_review_artifact_manifest_missing")
+    else:
+        if manifest.get("no_live_order_sent") is not True:
+            blockers.append("conditional_overfit_operator_review_artifact_manifest_no_live_order_sent_not_true")
+        if manifest.get("order_submission_allowed") is not False:
+            blockers.append("conditional_overfit_operator_review_artifact_manifest_order_submission_allowed_not_false")
+        if manifest.get("paper_only_scope") is not True:
+            blockers.append("conditional_overfit_operator_review_artifact_manifest_paper_only_scope_not_true")
+        if manifest.get("real_shadow_still_required_before_tiny_canary_or_live") is not True:
+            blockers.append("conditional_overfit_operator_review_artifact_manifest_real_shadow_not_acknowledged")
+        if manifest.get("template_report") != template_report:
+            blockers.append("conditional_overfit_operator_review_artifact_manifest_template_report_mismatch")
+        if manifest.get("skeleton_report") != skeleton_report:
+            blockers.append("conditional_overfit_operator_review_artifact_manifest_skeleton_report_mismatch")
+
+    if template_exists:
+        if template_payload.get("no_live_order_sent") is not True:
+            blockers.append("conditional_overfit_operator_review_template_no_live_order_sent_not_true")
+        if template_payload.get("paper_only_scope") is not True:
+            blockers.append("conditional_overfit_operator_review_template_paper_only_scope_not_true")
+        if template_payload.get("real_shadow_still_required_before_tiny_canary_or_live") is not True:
+            blockers.append("conditional_overfit_operator_review_template_real_shadow_not_acknowledged")
+        if template_source != expected_source_promotion_gate_report:
+            blockers.append("conditional_overfit_operator_review_template_source_promotion_gate_report_mismatch")
+        if template_generated != expected_promotion_gate_generated_at:
+            blockers.append("conditional_overfit_operator_review_template_source_promotion_gate_generated_at_mismatch")
+        if skeleton_report and template_skeleton != str(skeleton_report):
+            blockers.append("conditional_overfit_operator_review_template_skeleton_report_mismatch")
+        if manifest and template_fingerprint != manifest.get("template_payload_fingerprint"):
+            blockers.append("conditional_overfit_operator_review_template_payload_fingerprint_mismatch")
+    if skeleton_exists:
+        if skeleton_payload.get("no_live_order_sent") is not True:
+            blockers.append("conditional_overfit_operator_review_skeleton_no_live_order_sent_not_true")
+        if skeleton_payload.get("order_submission_allowed") is not False:
+            blockers.append("conditional_overfit_operator_review_skeleton_order_submission_allowed_not_false")
+        if skeleton_payload.get("paper_only_scope") is not True:
+            blockers.append("conditional_overfit_operator_review_skeleton_paper_only_scope_not_true")
+        if skeleton_payload.get("real_shadow_still_required_before_tiny_canary_or_live") is not True:
+            blockers.append("conditional_overfit_operator_review_skeleton_real_shadow_not_acknowledged")
+        if skeleton_source != expected_source_promotion_gate_report:
+            blockers.append("conditional_overfit_operator_review_skeleton_source_promotion_gate_report_mismatch")
+        if skeleton_generated != expected_promotion_gate_generated_at:
+            blockers.append("conditional_overfit_operator_review_skeleton_source_promotion_gate_generated_at_mismatch")
+        if template_report and skeleton_template != str(template_report):
+            blockers.append("conditional_overfit_operator_review_skeleton_template_report_mismatch")
+        if manifest and skeleton_fingerprint != manifest.get("skeleton_payload_fingerprint"):
+            blockers.append("conditional_overfit_operator_review_skeleton_payload_fingerprint_mismatch")
+
+    return {
+        "status": "pass" if not blockers else "fail",
+        "blockers": sorted(set(blockers)),
+        "manifest": {
+            "present": bool(manifest),
+            "fingerprint_algorithm": manifest.get("fingerprint_algorithm"),
+            "template_report": manifest.get("template_report"),
+            "template_payload_fingerprint": manifest.get("template_payload_fingerprint"),
+            "skeleton_report": manifest.get("skeleton_report"),
+            "skeleton_payload_fingerprint": manifest.get("skeleton_payload_fingerprint"),
+            "paper_only_scope": manifest.get("paper_only_scope") is True,
+            "real_shadow_still_required_before_tiny_canary_or_live": (
+                manifest.get("real_shadow_still_required_before_tiny_canary_or_live") is True
+            ),
+            "order_submission_allowed": manifest.get("order_submission_allowed"),
+            "no_live_order_sent": manifest.get("no_live_order_sent") is True,
+        },
+        "template": {
+            "path": template_report,
+            "exists": template_exists,
+            "payload_fingerprint": template_fingerprint,
+            "source_promotion_gate_report": template_source or None,
+            "source_promotion_gate_generated_at": template_generated or None,
+            "operator_review_json_skeleton_report": template_skeleton or None,
+            "paper_only_scope": template_payload.get("paper_only_scope") is True,
+            "real_shadow_still_required_before_tiny_canary_or_live": (
+                template_payload.get("real_shadow_still_required_before_tiny_canary_or_live") is True
+            ),
+            "no_live_order_sent": template_payload.get("no_live_order_sent") is True,
+        },
+        "skeleton": {
+            "path": skeleton_report,
+            "exists": skeleton_exists,
+            "payload_fingerprint": skeleton_fingerprint,
+            "source_template_report": skeleton_template or None,
+            "source_promotion_gate_report": skeleton_source or None,
+            "source_promotion_gate_generated_at": skeleton_generated or None,
+            "paper_only_scope": skeleton_payload.get("paper_only_scope") is True,
+            "real_shadow_still_required_before_tiny_canary_or_live": (
+                skeleton_payload.get("real_shadow_still_required_before_tiny_canary_or_live") is True
+            ),
+            "order_submission_allowed": skeleton_payload.get("order_submission_allowed"),
+            "no_live_order_sent": skeleton_payload.get("no_live_order_sent") is True,
+        },
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+
+
 def _recent_meta_router_promotion_gate(
     *,
     evidence_root: Path,
@@ -3313,21 +6764,136 @@ def _recent_meta_router_promotion_gate(
     stale = age_minutes < -0.1 or age_minutes > max(0.0, float(max_age_minutes or 0.0))
     readiness = dict(latest_payload.get("readiness") or {})
     candidate = dict(latest_payload.get("candidate") or {})
+    execution_audit = dict(candidate.get("execution_change_audit") or {})
+    overfit_audit = dict(candidate.get("overfit_audit") or latest_payload.get("overfit_audit") or {})
+    conditional_overfit_holdout_audit = dict(
+        latest_payload.get("conditional_overfit_holdout_audit") or {}
+    )
+    conditional_overfit_operator_review = dict(
+        latest_payload.get("conditional_overfit_operator_review") or {}
+    )
+    compare_summary = dict(latest_payload.get("compare_summary") or {})
+    readiness_alignment = dict(latest_payload.get("readiness_candidate_alignment") or {})
+    candidate_switch_policy = dict(
+        latest_payload.get("candidate_switch_policy")
+        or compare_summary.get("candidate_switch_policy")
+        or {}
+    )
     decision = str(latest_payload.get("promotion_decision") or "")
     live_pass_decisions = {
         "tiny_canary_gate_passed_manual_approval_required",
         "full_live_gate_passed_manual_approval_required",
     }
+    source_report = str(latest_payload.get("report_path") or _display_path(latest_path))
+    expected_operator_lineage_source_report = str(
+        latest_payload.get("expected_operator_lineage_source_report") or source_report
+    )
+    operator_lineage_artifacts = _operator_lineage_artifact_review(
+        promotion_gate_report=latest_payload,
+        expected_source_promotion_gate_report=expected_operator_lineage_source_report,
+        expected_promotion_gate_generated_at=latest_generated.isoformat(),
+    )
+    conditional_overfit_operator_review_artifacts = _conditional_overfit_operator_review_artifact_review(
+        promotion_gate_report=latest_payload,
+        expected_source_promotion_gate_report=expected_operator_lineage_source_report,
+        expected_promotion_gate_generated_at=latest_generated.isoformat(),
+    )
     return {
         "status": "stale" if stale else latest_payload.get("status"),
         "generated_at": latest_generated.isoformat(),
         "age_minutes": round(age_minutes, 3),
         "source_report": _display_path(latest_path),
+        "report_path": source_report,
+        "expected_operator_lineage_source_report": expected_operator_lineage_source_report,
         "stale": stale,
         "promotion_decision": decision,
         "decision_reasons": list(latest_payload.get("decision_reasons") or []),
         "next_actions": list(latest_payload.get("next_actions") or []),
         "next_blocker": latest_payload.get("next_blocker"),
+        "input_operator_lineage_review_report": latest_payload.get("input_operator_lineage_review_report"),
+        "input_conditional_overfit_operator_review_report": latest_payload.get(
+            "input_conditional_overfit_operator_review_report"
+        ),
+        "operator_lineage_review_template_report": latest_payload.get(
+            "operator_lineage_review_template_report"
+        ),
+        "operator_lineage_review_skeleton_report": latest_payload.get(
+            "operator_lineage_review_skeleton_report"
+        ),
+        "operator_lineage_review_artifacts": operator_lineage_artifacts,
+        "conditional_overfit_operator_review_template_report": latest_payload.get(
+            "conditional_overfit_operator_review_template_report"
+        ),
+        "conditional_overfit_operator_review_skeleton_report": latest_payload.get(
+            "conditional_overfit_operator_review_skeleton_report"
+        ),
+        "conditional_overfit_operator_review_artifacts": conditional_overfit_operator_review_artifacts,
+        "readiness_candidate_alignment": readiness_alignment,
+        "performance_upgrade_ready": bool(latest_payload.get("performance_upgrade_ready")),
+        "performance_delta_status": latest_payload.get("performance_delta_status"),
+        "performance_upgrade_blockers": list(latest_payload.get("performance_upgrade_blockers") or []),
+        "performance_upgrade_notes": list(latest_payload.get("performance_upgrade_notes") or []),
+        "overfit_audit": overfit_audit,
+        "overfit_blockers": list(
+            latest_payload.get("overfit_blockers") or overfit_audit.get("blockers") or []
+        ),
+        "conditional_overfit_holdout_audit": conditional_overfit_holdout_audit,
+        "conditional_overfit_operator_review": conditional_overfit_operator_review,
+        "risk_compression_ready": bool(latest_payload.get("risk_compression_ready")),
+        "risk_compression_detected": bool(latest_payload.get("risk_compression_detected")),
+        "risk_compression_blockers": list(latest_payload.get("risk_compression_blockers") or []),
+        "compare_summary": {
+            "performance_upgrade_status": compare_summary.get("performance_upgrade_status"),
+            "performance_upgrade_candidate_count": compare_summary.get("performance_upgrade_candidate_count"),
+            "performance_upgrade_smoke_candidate_count": compare_summary.get(
+                "performance_upgrade_smoke_candidate_count"
+            ),
+            "risk_compression_status": compare_summary.get("risk_compression_status"),
+            "risk_compression_candidate_count": compare_summary.get("risk_compression_candidate_count"),
+            "risk_compression_smoke_candidate_count": compare_summary.get(
+                "risk_compression_smoke_candidate_count"
+            ),
+            "risk_compression_formal_tradeoff_count": compare_summary.get(
+                "risk_compression_formal_tradeoff_count"
+            ),
+            "risk_compression_tradeoff_count": compare_summary.get("risk_compression_tradeoff_count"),
+            "risk_compression_next_action": compare_summary.get("risk_compression_next_action"),
+            "risk_adjusted_compression_status": compare_summary.get(
+                "risk_adjusted_compression_status"
+            ),
+            "risk_adjusted_compression_candidate_count": compare_summary.get(
+                "risk_adjusted_compression_candidate_count"
+            ),
+            "risk_adjusted_compression_smoke_candidate_count": compare_summary.get(
+                "risk_adjusted_compression_smoke_candidate_count"
+            ),
+            "risk_adjusted_compression_next_action": compare_summary.get(
+                "risk_adjusted_compression_next_action"
+            ),
+            "best_performance_upgrade_candidate": dict(
+                compare_summary.get("best_performance_upgrade_candidate") or {}
+            ),
+            "best_performance_upgrade_smoke_candidate": dict(
+                compare_summary.get("best_performance_upgrade_smoke_candidate") or {}
+            ),
+            "best_risk_compression_candidate": dict(
+                compare_summary.get("best_risk_compression_candidate") or {}
+            ),
+            "best_risk_compression_smoke_candidate": dict(
+                compare_summary.get("best_risk_compression_smoke_candidate") or {}
+            ),
+            "best_risk_compression_tradeoff": dict(
+                compare_summary.get("best_risk_compression_tradeoff") or {}
+            ),
+            "best_risk_adjusted_compression_candidate": dict(
+                compare_summary.get("best_risk_adjusted_compression_candidate") or {}
+            ),
+            "best_risk_adjusted_compression_smoke_candidate": dict(
+                compare_summary.get("best_risk_adjusted_compression_smoke_candidate") or {}
+            ),
+            "candidate_switch_policy": dict(candidate_switch_policy),
+        },
+        "candidate_switch_policy": dict(candidate_switch_policy),
         "candidate": {
             "recipe_id": candidate.get("recipe_id"),
             "decision": candidate.get("decision"),
@@ -3335,6 +6901,12 @@ def _recent_meta_router_promotion_gate(
             "max_drawdown_pct": candidate.get("max_drawdown_pct"),
             "avg_cost_drag_pct": candidate.get("avg_cost_drag_pct"),
             "trade_like_events": candidate.get("trade_like_events"),
+            "return_delta_vs_baseline_pct": candidate.get("return_delta_vs_baseline_pct"),
+            "drawdown_delta_vs_baseline_pct": candidate.get("drawdown_delta_vs_baseline_pct"),
+            "cost_delta_vs_baseline_pct": candidate.get("cost_delta_vs_baseline_pct"),
+            "trade_event_delta_vs_baseline": candidate.get("trade_event_delta_vs_baseline"),
+            "execution_change_audit": execution_audit,
+            "overfit_audit": overfit_audit,
             "router_modes": dict(candidate.get("router_modes") or {}),
         },
         "readiness": {
@@ -3541,6 +7113,9063 @@ def _continuous_runtime_start(
     }
 
 
+def _paper_only_rehearsal_summary(launch_readiness: dict[str, Any]) -> dict[str, Any]:
+    rehearsal = dict(launch_readiness.get("paper_only_rehearsal") or {})
+    return {
+        "objective": rehearsal.get("objective"),
+        "authority": rehearsal.get("authority"),
+        "status": rehearsal.get("status"),
+        "system_ready": rehearsal.get("system_ready"),
+        "armed": rehearsal.get("armed"),
+        "current_rehearsal_available": rehearsal.get("current_rehearsal_available"),
+        "first_rehearsal_event_completed": rehearsal.get("first_rehearsal_event_completed"),
+        "extended_parity_sample_complete": rehearsal.get("extended_parity_sample_complete"),
+        "max_substitution_status": rehearsal.get("max_substitution_status"),
+        "max_substitution_ready": rehearsal.get("max_substitution_ready"),
+        "proxy_gates": list(rehearsal.get("proxy_gates") or []),
+        "unresolved_proxy_gates": list(rehearsal.get("unresolved_proxy_gates") or []),
+        "substituted_or_prevalidated_gates": list(
+            rehearsal.get("substituted_or_prevalidated_gates") or []
+        ),
+        "not_required_for_paper_only_goal": list(
+            rehearsal.get("not_required_for_paper_only_goal") or []
+        ),
+        "still_required_for_live_or_tiny_canary": list(
+            rehearsal.get("still_required_for_live_or_tiny_canary") or []
+        ),
+        "paper_operational_ready": rehearsal.get("paper_operational_ready"),
+        "paper_apply_allowed_now": rehearsal.get("paper_apply_allowed_now"),
+        "actual_paper_lifecycle_rows": rehearsal.get("actual_paper_lifecycle_rows"),
+        "remaining_gates": list(rehearsal.get("remaining_gates") or []),
+        "non_substitutable_remaining_gates": list(rehearsal.get("non_substitutable_remaining_gates") or []),
+        "operator_commands": dict(rehearsal.get("operator_commands") or {}),
+        "requires_operator_review": rehearsal.get("requires_operator_review") is True,
+        "requires_verified_pre_apply_backup": rehearsal.get("requires_verified_pre_apply_backup") is True,
+        "next_action": rehearsal.get("next_action"),
+        "live_order_submission_allowed": rehearsal.get("live_order_submission_allowed") is True,
+        "order_submission_allowed": rehearsal.get("order_submission_allowed") is True,
+        "no_live_order_sent": rehearsal.get("no_live_order_sent") is not False,
+    }
+
+
+def _as_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    return [str(value)]
+
+
+def _fresh_signal_blocker_diagnostics(
+    *,
+    latest: dict[str, Any],
+    safe_next_action_plan: dict[str, Any],
+) -> dict[str, Any]:
+    decision = dict(latest.get("decision_state") or {})
+    entry_quality = dict(latest.get("entry_quality") or {})
+    signal_wait = dict(latest.get("signal_wait_plan") or {})
+    paper_gate = dict(latest.get("paper_bridge_apply_gate") or {})
+    preflight = dict(paper_gate.get("execution_parity_preflight") or {})
+    primary_action = dict(safe_next_action_plan.get("primary_action") or {})
+    snapshot_blockers = _as_string_list(paper_gate.get("snapshot_blockers"))
+    preflight_blockers = _as_string_list(preflight.get("blockers"))
+    fresh_signal = signal_wait.get("fresh_signal") is True or paper_gate.get("fresh_signal") is True
+    signal_stale = (
+        decision.get("signal_stale") is True
+        or "signal_stale" in snapshot_blockers
+        or "snapshot_blocker:signal_stale" in preflight_blockers
+    )
+    primary_cause = str(decision.get("primary_cause") or "").strip()
+    if not primary_cause:
+        primary_cause = "fresh_signal_available" if fresh_signal else "fresh_signal_missing_or_stale"
+    fresh_signal_resolution = dict(entry_quality.get("fresh_signal_resolution_plan") or {})
+    signal_absence_diagnosis = dict(signal_wait.get("signal_absence_diagnosis") or {})
+    if (
+        not fresh_signal
+        and fresh_signal_resolution.get("status") == "offline_probe_candidate_failed_full_walk_forward_gate"
+    ):
+        primary_cause = "fresh_signal_missing_and_quality_gated_mc12_probe_failed_full_walk_forward_gate"
+    signal_absence_primary_cause = (
+        signal_absence_diagnosis.get("primary_cause")
+        or signal_wait.get("signal_absence_primary_cause")
+    )
+    signal_pipeline_issue_suspected = (
+        signal_absence_diagnosis.get("pipeline_issue_suspected")
+        if "pipeline_issue_suspected" in signal_absence_diagnosis
+        else signal_wait.get("signal_pipeline_issue_suspected")
+    )
+    signal_absence_class = signal_absence_diagnosis.get("class")
+    entry_probe_validation = dict(fresh_signal_resolution.get("entry_probe_validation") or {})
+    next_candidate_contract = dict(
+        entry_probe_validation.get("next_candidate_design_contract") or {}
+    )
+    activity_regression_summary = dict(
+        entry_probe_validation.get("activity_regression_summary") or {}
+    )
+    activity_inversion_summary = dict(
+        entry_probe_validation.get("activity_inversion_summary") or {}
+    )
+    entry_filter_resolution = dict(entry_quality.get("entry_filter_resolution_plan") or {})
+
+    def _activity_candidate_digest(candidate: dict[str, Any]) -> dict[str, Any]:
+        if not candidate:
+            return {}
+        fields = (
+            "candidate_name",
+            "status",
+            "signal_sparsity_fix_failed",
+            "probe_activity_regressed",
+            "trade_like_activity_regressed",
+            "baseline_probe_adds",
+            "candidate_probe_adds",
+            "probe_add_delta",
+            "probe_add_delta_pct",
+            "baseline_trade_like_events",
+            "candidate_trade_like_events",
+            "trade_like_events_delta",
+            "trade_like_events_delta_pct",
+            "downstream_failure",
+        )
+        return {field: candidate.get(field) for field in fields if field in candidate}
+
+    fold_delta_summary = dict(entry_probe_validation.get("fold_delta_summary") or {})
+    candidate_failure_digest = {
+        "input_report": entry_probe_validation.get("input_report"),
+        "candidate_count": entry_probe_validation.get("candidate_count"),
+        "promoted_candidate_count": entry_probe_validation.get("promoted_candidate_count"),
+        "active_full_walk_forward_candidate_count": entry_probe_validation.get(
+            "active_full_walk_forward_candidate_count"
+        ),
+        "active_full_walk_forward_candidate_names": list(
+            entry_probe_validation.get("active_full_walk_forward_candidate_names") or []
+        ),
+        "downstream_blocked_candidate_names": list(
+            entry_probe_validation.get("downstream_blocked_candidate_names") or []
+        ),
+        "activity_regression_diagnostic_labels": list(
+            activity_regression_summary.get("diagnostic_labels") or []
+        ),
+        "activity_inversion_diagnostic_label": activity_inversion_summary.get(
+            "diagnostic_label"
+        ),
+        "worst_probe_add_delta_candidate": _activity_candidate_digest(
+            dict(activity_regression_summary.get("worst_probe_add_delta_candidate") or {})
+        ),
+        "worst_trade_like_events_delta_candidate": _activity_candidate_digest(
+            dict(activity_regression_summary.get("worst_trade_like_events_delta_candidate") or {})
+        ),
+        "worst_compounded_return_degradation_candidate": dict(
+            fold_delta_summary.get("worst_compounded_return_degradation_candidate") or {}
+        ),
+        "root_cause_hints": list(entry_probe_validation.get("root_cause_hints") or []),
+        "no_live_order_sent": entry_probe_validation.get("no_live_order_sent") is not False,
+    }
+    healthy_sparse_wait = (
+        signal_absence_class == "healthy_sparse_cadence_wait"
+        and signal_pipeline_issue_suspected is False
+    )
+    strategy_design_blocked = bool(
+        fresh_signal_resolution.get("status")
+        == "offline_probe_candidate_failed_full_walk_forward_gate"
+        or entry_probe_validation.get("status") == "blocked_full_walk_forward_gate"
+        or next_candidate_contract
+    )
+    if signal_pipeline_issue_suspected is True:
+        partition_status = "runtime_signal_pipeline_issue_requires_repair"
+    elif healthy_sparse_wait and strategy_design_blocked:
+        partition_status = "healthy_runtime_wait_strategy_candidate_redesign_required"
+    elif strategy_design_blocked:
+        partition_status = "strategy_candidate_redesign_required"
+    elif healthy_sparse_wait:
+        partition_status = "healthy_sparse_runtime_wait"
+    elif fresh_signal:
+        partition_status = "fresh_signal_available"
+    else:
+        partition_status = "signal_absence_unclassified"
+    cause_partition = {
+        "status": partition_status,
+        "runtime_signal_absence": {
+            "status": signal_absence_class,
+            "primary_cause": signal_absence_primary_cause,
+            "pipeline_issue_suspected": signal_pipeline_issue_suspected,
+            "healthy_sparse_wait": healthy_sparse_wait,
+            "force_signal_allowed": signal_absence_diagnosis.get("force_signal_allowed") is True,
+            "runtime_filter_relaxation_allowed": (
+                signal_absence_diagnosis.get("runtime_filter_relaxation_allowed") is True
+            ),
+            "safe_next_step": signal_absence_diagnosis.get("safe_next_step"),
+            "no_live_order_sent": signal_absence_diagnosis.get("no_live_order_sent") is not False,
+        },
+        "strategy_design_blocker": {
+            "status": fresh_signal_resolution.get("status")
+            or entry_probe_validation.get("status"),
+            "validation_status": entry_probe_validation.get("status"),
+            "primary_downstream_failure": entry_probe_validation.get(
+                "primary_downstream_failure"
+            ),
+            "decision": entry_probe_validation.get("decision")
+            or fresh_signal_resolution.get("decision"),
+            "active_full_walk_forward_candidate_count": entry_probe_validation.get(
+                "active_full_walk_forward_candidate_count"
+            ),
+            "failed_checks": list(entry_probe_validation.get("failed_checks") or []),
+            "activity_regression_candidate_count": activity_regression_summary.get(
+                "candidate_count"
+            ),
+            "activity_inversion_candidate_count": activity_inversion_summary.get(
+                "candidate_count"
+            ),
+            "next_candidate_design_contract_status": next_candidate_contract.get("status"),
+            "next_candidate_design_contract_reason": next_candidate_contract.get("reason"),
+            "minimum_full_walk_forward_requirements": dict(
+                next_candidate_contract.get("minimum_full_walk_forward_requirements") or {}
+            ),
+            "required_validation_sequence": list(
+                next_candidate_contract.get("required_validation_sequence") or []
+            ),
+            "reject_patterns": list(next_candidate_contract.get("reject_patterns") or []),
+            "blocked_prior_family_candidate_count": next_candidate_contract.get(
+                "blocked_prior_family_candidate_count"
+            ),
+            "short_window_activity_inversion_candidate_count": next_candidate_contract.get(
+                "short_window_activity_inversion_candidate_count"
+            ),
+            "candidate_failure_digest": candidate_failure_digest,
+            "root_cause_hints": list(entry_probe_validation.get("root_cause_hints") or []),
+            "runtime_filter_change_allowed": (
+                entry_probe_validation.get("runtime_filter_change_allowed") is True
+                or next_candidate_contract.get("runtime_filter_change_allowed") is True
+            ),
+            "paper_or_live_promotion_allowed": (
+                entry_probe_validation.get("paper_or_live_promotion_allowed") is True
+                or next_candidate_contract.get("paper_or_live_promotion_allowed") is True
+            ),
+            "operator_fixable_now": fresh_signal_resolution.get("operator_fixable_now") is True,
+            "blocked": strategy_design_blocked,
+            "no_live_order_sent": (
+                fresh_signal_resolution.get("no_live_order_sent") is not False
+                and entry_probe_validation.get("no_live_order_sent") is not False
+                and next_candidate_contract.get("no_live_order_sent") is not False
+            ),
+        },
+        "interpretation": (
+            "runtime_signal_wait_is_healthy_sparse_cadence_but_current_near_miss_family_failed_full_wfo"
+            if healthy_sparse_wait and strategy_design_blocked
+            else "runtime_signal_pipeline_issue_should_be_repaired_before_waiting"
+            if signal_pipeline_issue_suspected is True
+            else "current_candidate_family_requires_redesign_before_runtime_filter_change"
+            if strategy_design_blocked
+            else "runtime_signal_wait_is_healthy_sparse_cadence"
+            if healthy_sparse_wait
+            else "inspect_signal_absence_inputs_before_changing_runtime_filters"
+        ),
+        "safe_next_step": (
+            "monitor_without_forcing_signal_and_design_next_non_regressing_full_wfo_candidate"
+            if healthy_sparse_wait and strategy_design_blocked
+            else "repair_signal_pipeline_before_candidate_or_operator_actions"
+            if signal_pipeline_issue_suspected is True
+            else "monitor_fresh_signal_without_forcing_entry"
+        ),
+        "force_signal_allowed": False,
+        "runtime_filter_relaxation_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+    return {
+        "status": "fresh_signal_available" if fresh_signal else "blocked_waiting_for_fresh_signal",
+        "primary_cause": primary_cause,
+        "cause_partition": cause_partition,
+        "overall_status": latest.get("overall_status"),
+        "signal_stale": signal_stale,
+        "snapshot_blockers": snapshot_blockers,
+        "preflight_blockers": preflight_blockers,
+        "latest_event_ts": signal_wait.get("latest_event_ts") or preflight.get("source_event_ts"),
+        "signal_age_minutes": signal_wait.get("signal_age_minutes"),
+        "signal_stale_by_minutes": signal_wait.get("signal_stale_by_minutes"),
+        "max_signal_age_minutes": signal_wait.get("max_signal_age_minutes"),
+        "event_wait_state": signal_wait.get("event_wait_state"),
+        "cadence_lag_level": signal_wait.get("cadence_lag_level"),
+        "signal_absence_diagnosis": signal_absence_diagnosis,
+        "signal_absence_primary_cause": signal_absence_primary_cause,
+        "signal_absence_class": signal_absence_class,
+        "signal_pipeline_issue_suspected": signal_pipeline_issue_suspected,
+        "add_wait_state": signal_wait.get("add_wait_state"),
+        "rejected_soft_context_count": entry_quality.get("rejected_soft_context_count"),
+        "eligible_probe_context_count": entry_quality.get("eligible_probe_context_count"),
+        "mc04_broad_relaxation_rejected": entry_quality.get("mc04_broad_relaxation_rejected") is True,
+        "recommended_experiment_scope": entry_quality.get("recommended_experiment_scope"),
+        "dominant_primary_issue": entry_quality.get("dominant_primary_issue"),
+        "reason_class_counts": dict(entry_quality.get("reason_class_counts") or {}),
+        "top_no_trade_reasons": list(entry_quality.get("top_no_trade_reasons") or [])[:3],
+        "dominant_no_trade_context": dict(entry_quality.get("dominant_no_trade_context") or {}),
+        "dominant_probe_quality_blocker": entry_filter_resolution.get(
+            "dominant_probe_quality_blocker"
+        ),
+        "probe_quality_blocker_counts": dict(
+            entry_quality.get("probe_quality_reason_counts")
+            or entry_filter_resolution.get("probe_quality_blocker_counts")
+            or {}
+        ),
+        "eligible_probe_contexts": list(entry_quality.get("eligible_probe_contexts") or [])[
+            :5
+        ],
+        "top_rejected_soft_contexts": list(
+            entry_quality.get("top_rejected_soft_contexts") or []
+        )[:5],
+        "entry_filter_context_distribution_scope": dict(
+            entry_quality.get("entry_filter_context_distribution_scope")
+            or entry_filter_resolution.get("context_distribution_scope")
+            or {}
+        ),
+        "safe_experiment_backlog": list(entry_quality.get("safe_experiment_backlog") or [])[:3],
+        "fresh_signal_resolution_plan": fresh_signal_resolution,
+        "operator_interpretation": dict(entry_quality.get("operator_interpretation") or {}),
+        "paper_apply_gate_status": paper_gate.get("status"),
+        "paper_apply_available_now": paper_gate.get("can_request_paper_apply_now") is True,
+        "bridge_action": paper_gate.get("bridge_action"),
+        "next_monitor_after_kst": primary_action.get("execute_after_kst")
+        or signal_wait.get("next_monitor_after_kst"),
+        "next_monitor_command": primary_action.get("command") or signal_wait.get("command"),
+        "safe_operator_next_action": (
+            "paper_apply_gate_open_review_before_apply"
+            if fresh_signal and paper_gate.get("can_request_paper_apply_now") is True
+            else "monitor_without_forcing_entry_or_relaxing_low_quality_contexts"
+        ),
+        "do_not_force_signal": fresh_signal is not True,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+
+
+def _signal_monitor_summary(
+    *,
+    signal_wait_plan: dict[str, Any],
+    cadence_alignment: dict[str, Any],
+    safe_next_action_plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    signal = dict(signal_wait_plan or {})
+    cadence = dict(cadence_alignment or {})
+    safe_next = dict(safe_next_action_plan or {})
+    primary_action = dict(safe_next.get("primary_action") or {})
+    safe_next_command = (
+        primary_action.get("command")
+        if primary_action.get("action_type") == "monitor_fresh_signal"
+        else None
+    )
+    coverage = dict(primary_action.get("current_iteration_coverage") or {})
+    covered_by_current_iteration = primary_action.get("covered_by_current_iteration") is True
+    covered_due_by_current_iteration = primary_action.get("covered_due_by_current_iteration") is True
+    monitor_schedule = _current_iteration_recheck_schedule(primary_action)
+    raw_next_monitor_after_utc = (
+        monitor_schedule.get("raw_next_monitor_after_utc")
+        or signal.get("next_monitor_after_utc")
+        or cadence.get("next_monitor_after_utc")
+    )
+    raw_next_monitor_after_kst = (
+        monitor_schedule.get("raw_next_monitor_after_kst")
+        or signal.get("next_monitor_after_kst")
+        or cadence.get("next_monitor_after_kst")
+    )
+    covered_next_recheck_after_utc = monitor_schedule.get("covered_next_recheck_after_utc")
+    covered_next_recheck_after_kst = monitor_schedule.get("covered_next_recheck_after_kst")
+    next_monitor_after_utc = (
+        monitor_schedule.get("effective_next_monitor_after_utc")
+        or raw_next_monitor_after_utc
+    )
+    next_monitor_after_kst = (
+        monitor_schedule.get("effective_next_monitor_after_kst")
+        or raw_next_monitor_after_kst
+    )
+    raw_command = signal.get("command")
+    command = safe_next_command or raw_command
+    raw_report_dir = _command_flag_value(raw_command, "--report-dir")
+    safe_next_report_dir = _command_flag_value(safe_next_command, "--report-dir")
+    interval_minutes = _number_or_none(signal.get("recommended_monitor_interval_minutes"))
+    if interval_minutes is None:
+        interval_minutes = _number_or_none(cadence.get("recommended_monitor_interval_minutes"))
+    freshness_window_minutes = _number_or_none(signal.get("signal_freshness_capture_window_minutes"))
+    if freshness_window_minutes is None:
+        freshness_window_minutes = _number_or_none(cadence.get("signal_freshness_capture_window_minutes"))
+    return {
+        "status": signal.get("status"),
+        "cadence_status": cadence.get("status"),
+        "fresh_signal": signal.get("fresh_signal") is True,
+        "signal_age_minutes": signal.get("signal_age_minutes"),
+        "max_signal_age_minutes": signal.get("max_signal_age_minutes"),
+        "recommended_monitor_interval_minutes": interval_minutes,
+        "interval_seconds": round(interval_minutes * 60.0, 4) if interval_minutes is not None else None,
+        "signal_freshness_capture_window_minutes": freshness_window_minutes,
+        "capped_to_fresh_signal_window": (
+            signal.get("monitor_interval_capped_by_signal_freshness") is True
+            or cadence.get("monitor_interval_capped_by_signal_freshness") is True
+        ),
+        "monitor_signal_age_alignment": signal.get("monitor_signal_age_alignment")
+        or cadence.get("monitor_signal_age_alignment"),
+        "gap_minutes": cadence.get("gap_minutes"),
+        "warning": cadence.get("warning"),
+        "next_monitor_after_utc": next_monitor_after_utc,
+        "next_monitor_after_kst": next_monitor_after_kst,
+        "next_monitor_after_source": (
+            monitor_schedule.get("effective_next_monitor_after_source")
+            if monitor_schedule.get("effective_next_monitor_after_source")
+            else "safe_next_action_plan.primary_action.execute_after"
+            if primary_action.get("action_type") == "monitor_fresh_signal"
+            else "signal_wait_plan.next_monitor_after"
+            if signal.get("next_monitor_after_utc") or signal.get("next_monitor_after_kst")
+            else "cadence_alignment.next_monitor_after"
+            if cadence.get("next_monitor_after_utc") or cadence.get("next_monitor_after_kst")
+            else None
+        ),
+        "raw_next_monitor_after_utc": raw_next_monitor_after_utc,
+        "raw_next_monitor_after_kst": raw_next_monitor_after_kst,
+        "covered_next_recheck_after_utc": covered_next_recheck_after_utc,
+        "covered_next_recheck_after_kst": covered_next_recheck_after_kst,
+        "next_monitor_retimestampted_after_current_iteration": (
+            monitor_schedule.get("next_monitor_retimestampted_after_current_iteration")
+            is True
+        ),
+        "covered_by_current_iteration": covered_by_current_iteration,
+        "covered_due_by_current_iteration": covered_due_by_current_iteration,
+        "command": command,
+        "command_source": (
+            "safe_next_action_plan.primary_action.command"
+            if safe_next_command
+            else "signal_wait_plan.command"
+            if raw_command
+            else None
+        ),
+        "raw_command_scope": "signal_wait_plan_snapshot",
+        "raw_command": raw_command,
+        "safe_next_action_command": safe_next_command,
+        "raw_command_report_dir": raw_report_dir,
+        "safe_next_action_report_dir": safe_next_report_dir,
+        "report_dir_retimestampted_to_safe_next_action": bool(
+            raw_report_dir and safe_next_report_dir and raw_report_dir != safe_next_report_dir
+        ),
+        "order_submission_allowed": False,
+        "no_live_order_sent": signal.get("no_live_order_sent") is not False
+        and cadence.get("no_live_order_sent") is not False,
+    }
+
+
+def _no_signal_resolution_summary(
+    *,
+    fresh_signal_blocker_diagnostics: dict[str, Any],
+    validation_redesign_runbook: dict[str, Any],
+    strict_activity_revalidation_summary: dict[str, Any],
+) -> dict[str, Any]:
+    fresh = dict(fresh_signal_blocker_diagnostics or {})
+    partition = dict(fresh.get("cause_partition") or {})
+    runtime = dict(partition.get("runtime_signal_absence") or {})
+    strategy = dict(partition.get("strategy_design_blocker") or {})
+    runbook = dict(validation_redesign_runbook or {})
+    work_order = dict(runbook.get("candidate_redesign_work_order") or {})
+    strict = dict(strict_activity_revalidation_summary or {})
+    closest = dict(strict.get("closest_activity_contract_candidate") or {})
+    constraints = dict(
+        work_order.get("next_candidate_design_constraints")
+        or strict.get("next_candidate_design_constraints")
+        or {}
+    )
+    try:
+        strict_passed_count = int(strict.get("passed_count") or 0)
+    except (TypeError, ValueError):
+        strict_passed_count = 0
+    strict_candidate_available = (
+        strict.get("status") == "strict_revalidation_candidate_available"
+        and strict_passed_count > 0
+    )
+    strict_revalidated_candidate = dict(strict.get("strict_revalidated_candidate") or {})
+    if not strict_revalidated_candidate and strict_candidate_available:
+        closest_candidate = dict(strict.get("closest_activity_contract_candidate") or {})
+        if closest_candidate.get("eligibility_status") == "eligible_strict_candidate":
+            strict_revalidated_candidate = closest_candidate
+    if strict_candidate_available:
+        constraints = dict(constraints)
+        constraints["status"] = "strict_revalidation_candidate_available"
+        constraints["remaining_primary_blockers"] = []
+    top_reasons = [dict(item) for item in list(fresh.get("top_no_trade_reasons") or [])]
+    top_reason = top_reasons[0] if top_reasons else {}
+    dominant_context = dict(fresh.get("dominant_no_trade_context") or {})
+    context_digest_fields = (
+        "context",
+        "reason",
+        "count",
+        "side",
+        "side_alignment",
+        "regime",
+        "execution_context",
+        "score_bucket",
+        "edge_bucket",
+        "reason_stack_bucket",
+        "extension_bucket",
+        "probe_quality",
+        "probe_quality_reasons",
+    )
+
+    def _context_digest(rows: Any, *, limit: int = 3) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for row in list(rows or [])[: max(0, int(limit))]:
+            item = dict(row or {})
+            result.append({field: item.get(field) for field in context_digest_fields if field in item})
+        return result
+
+    eligible_contexts = _context_digest(fresh.get("eligible_probe_contexts"))
+    rejected_contexts = _context_digest(fresh.get("top_rejected_soft_contexts"))
+    candidate_design_blueprints = _candidate_design_blueprints_from_seed_contexts(
+        eligible_contexts,
+        top_rejected_soft_contexts=rejected_contexts,
+        constraints=constraints,
+        dominant_probe_quality_blocker=fresh.get("dominant_probe_quality_blocker"),
+    )
+    fresh_available = fresh.get("status") == "fresh_signal_available"
+    pipeline_issue = fresh.get("signal_pipeline_issue_suspected") is True
+    healthy_wait = runtime.get("healthy_sparse_wait") is True
+    closest_blockers = set(str(item) for item in list(closest.get("primary_blockers") or []))
+    activity_contract_solved_by_closest = (
+        strict.get("activity_contract_solved_by_closest_candidate") is True
+        or constraints.get("activity_contract_solved_by_closest_candidate") is True
+    )
+    risk_repair_required = (
+        not strict_candidate_available
+        and activity_contract_solved_by_closest
+        and (
+            "drawdown_worsening" in closest_blockers
+            or constraints.get("status") == "strict_risk_repair_constraints_required"
+        )
+    )
+    redesign_required = (
+        False
+        if strict_candidate_available
+        else (
+            runbook.get("status") == "non_regressing_candidate_design_required"
+            or partition.get("status")
+            == "healthy_runtime_wait_strategy_candidate_redesign_required"
+            or strict.get("status") == "all_strict_revalidations_blocked"
+            or bool(closest)
+        )
+    )
+    if fresh_available:
+        status = "fresh_signal_available"
+        root_cause = "fresh_signal_available_no_absence_to_resolve"
+        next_action = "review_paper_apply_gate_before_manual_paper_apply"
+    elif pipeline_issue:
+        status = "signal_pipeline_repair_required"
+        root_cause = "signal_pipeline_issue_suspected"
+        next_action = "repair_signal_pipeline_before_waiting_or_candidate_design"
+    elif healthy_wait and strict_candidate_available:
+        status = "healthy_sparse_runtime_wait"
+        root_cause = "strict_revalidation_candidate_available_waiting_for_fresh_signal"
+        next_action = "monitor_fresh_signal_without_forcing_entry"
+    elif strict_candidate_available:
+        status = "strict_revalidation_candidate_available_waiting_for_fresh_signal"
+        root_cause = "strict_revalidation_candidate_available"
+        next_action = "monitor_fresh_signal_without_forcing_entry"
+    elif healthy_wait and risk_repair_required:
+        status = "healthy_runtime_wait_but_risk_repair_required"
+        root_cause = "seeded_mc12_candidate_fixed_signal_sparsity_but_failed_drawdown_contract"
+        next_action = "repair_drawdown_regression_then_validate_with_strict_full_wfo_gate"
+    elif healthy_wait and redesign_required:
+        status = "healthy_runtime_wait_but_candidate_redesign_required"
+        root_cause = "low_confluence_soft_contexts_current_candidate_failed_strict_activity_contract"
+        next_action = "design_non_regressing_candidate_then_validate_with_strict_full_wfo_gate"
+    elif risk_repair_required:
+        status = "candidate_risk_repair_required"
+        root_cause = "candidate_fixed_signal_sparsity_but_failed_drawdown_contract"
+        next_action = "repair_drawdown_regression_then_validate_with_strict_full_wfo_gate"
+    elif redesign_required:
+        status = "candidate_redesign_required"
+        root_cause = "current_candidate_family_failed_validation_contract"
+        next_action = "design_non_regressing_candidate_then_validate_with_strict_full_wfo_gate"
+    elif healthy_wait:
+        status = "healthy_sparse_runtime_wait"
+        root_cause = "expected_sparse_signal_wait_within_recent_add_cadence"
+        next_action = "monitor_fresh_signal_without_forcing_entry"
+    else:
+        status = "no_signal_resolution_needs_manual_review"
+        root_cause = "no_signal_cause_not_fully_classified"
+        next_action = "inspect_signal_absence_inputs_before_changing_runtime_filters"
+
+    minimum_acceptance = dict(work_order.get("minimum_acceptance") or {})
+    required_trade_like_delta = constraints.get("must_increase_trade_like_events_delta_min")
+    if required_trade_like_delta is None:
+        required_trade_like_delta = minimum_acceptance.get("trade_like_events_delta_min")
+    required_probe_delta = constraints.get("must_not_reduce_probe_add_delta_min")
+    if required_probe_delta is None:
+        required_probe_delta = minimum_acceptance.get("probe_add_delta_min")
+    blocked_reasons = list(closest.get("primary_blockers") or [])
+    if not blocked_reasons:
+        blocked_reasons = list(strategy.get("failed_checks") or runbook.get("failed_checks") or [])
+    if strict_candidate_available:
+        blocked_reasons = []
+    remaining_validation_blockers = (
+        []
+        if strict_candidate_available
+        else list(
+            constraints.get("remaining_primary_blockers")
+            or strict.get("remaining_primary_blockers")
+            or closest.get("primary_blockers")
+            or []
+        )
+    )
+    return {
+        "status": status,
+        "root_cause": root_cause,
+        "fresh_signal_available": fresh_available,
+        "runtime_wait_is_healthy_sparse_cadence": healthy_wait,
+        "signal_pipeline_issue_suspected": pipeline_issue,
+        "strategy_candidate_redesign_required": redesign_required,
+        "strict_revalidated_candidate_available": strict_candidate_available,
+        "strict_revalidated_candidate": strict_revalidated_candidate,
+        "activity_contract_solved_by_closest_candidate": activity_contract_solved_by_closest,
+        "risk_repair_required": risk_repair_required,
+        "remaining_validation_blockers": remaining_validation_blockers,
+        "operator_fixable_now": (
+            dict(fresh.get("fresh_signal_resolution_plan") or {}).get("operator_fixable_now")
+            is True
+            or strategy.get("operator_fixable_now") is True
+        ),
+        "top_no_trade_reason": top_reason.get("reason"),
+        "top_no_trade_reason_count": top_reason.get("count"),
+        "dominant_no_trade_context_reason": dominant_context.get("reason"),
+        "dominant_no_trade_context_quality": dominant_context.get("probe_quality"),
+        "dominant_probe_quality_blocker": fresh.get("dominant_probe_quality_blocker"),
+        "probe_quality_blocker_counts": dict(fresh.get("probe_quality_blocker_counts") or {}),
+        "rejected_soft_context_count": fresh.get("rejected_soft_context_count"),
+        "eligible_probe_context_count": fresh.get("eligible_probe_context_count"),
+        "candidate_design_seed_context_count": len(eligible_contexts),
+        "candidate_design_seed_contexts": eligible_contexts,
+        "candidate_design_blueprint_status": candidate_design_blueprints.get("status"),
+        "candidate_design_blueprint_count": candidate_design_blueprints.get(
+            "blueprint_count"
+        ),
+        "candidate_design_blueprints": list(
+            candidate_design_blueprints.get("blueprints") or []
+        ),
+        "candidate_design_blueprint_safety": {
+            key: candidate_design_blueprints.get(key)
+            for key in (
+                "shared_safety_rules",
+                "excluded_rejected_context_reasons",
+                "validation_only",
+                "runtime_filter_change_allowed",
+                "paper_or_live_promotion_allowed",
+                "order_submission_allowed",
+                "no_live_order_sent",
+            )
+        },
+        "top_rejected_soft_contexts": rejected_contexts,
+        "entry_filter_context_distribution_scope": dict(
+            fresh.get("entry_filter_context_distribution_scope") or {}
+        ),
+        "current_candidate_family_status": runbook.get("status"),
+        "current_failed_family_active_full_wfo_candidate_count": dict(
+            runbook.get("current_failed_family_summary") or {}
+        ).get("active_full_walk_forward_candidate_count"),
+        "strict_revalidation_status": strict.get("status"),
+        "strict_revalidation_report_count": strict.get("report_count"),
+        "strict_revalidation_blocked_count": strict.get("blocked_count"),
+        "strict_revalidation_passed_count": strict_passed_count,
+        "closest_rejected_candidate": (
+            None if strict_candidate_available else closest.get("candidate_name")
+        ),
+        "closest_rejected_candidate_trade_like_events_delta": (
+            None
+            if strict_candidate_available
+            else closest.get("trade_like_events_delta")
+        ),
+        "closest_rejected_candidate_probe_add_delta": (
+            None if strict_candidate_available else closest.get("probe_add_delta")
+        ),
+        "why_closest_is_not_default": (
+            None if strict_candidate_available else closest.get("why_not_default_candidate")
+        ),
+        "blocked_reasons": blocked_reasons,
+        "required_next_candidate_trade_like_events_delta_min": required_trade_like_delta,
+        "required_next_candidate_probe_add_delta_min": required_probe_delta,
+        "required_next_candidate_constraint_status": constraints.get("status"),
+        "safe_next_action": next_action,
+        "force_signal_allowed": False,
+        "runtime_filter_change_allowed": False,
+        "paper_or_live_promotion_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            fresh.get("no_live_order_sent") is not False
+            and runbook.get("no_live_order_sent") is not False
+            and strict.get("no_live_order_sent") is not False
+        ),
+    }
+
+
+def _unresolved_problem_register(
+    *,
+    latest: dict[str, Any],
+    paper_only_rehearsal: dict[str, Any],
+    operator_handoff: dict[str, Any],
+    execution_parity_eta: dict[str, Any],
+    microstructure_watch: dict[str, Any],
+    meta_router_promotion_gate: dict[str, Any],
+    safe_next_action_plan: dict[str, Any],
+    operator_review_handoff_summary: dict[str, Any] | None = None,
+    runtime_progress: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    problems: list[dict[str, Any]] = []
+    signal_wait = dict(latest.get("signal_wait_plan") or {})
+    paper_gate = dict(latest.get("paper_bridge_apply_gate") or {})
+    execution_parity_plan = dict(latest.get("execution_parity_collection_plan") or {})
+    execution_journal = dict(latest.get("execution_parity_journal") or {})
+    conversion = dict(execution_journal.get("conversion") or {})
+    primary_action = dict(safe_next_action_plan.get("primary_action") or {})
+    safe_actions = [dict(item) for item in list(safe_next_action_plan.get("actions") or [])]
+    shadow_runtime_action = next(
+        (
+            item
+            for item in safe_actions
+            if str(item.get("target_gate") or "") == "shadow_runtime_24h_observed"
+        ),
+        {},
+    )
+    paper_lifecycle_action = next(
+        (
+            item
+            for item in safe_actions
+            if str(item.get("target_gate") or "") == "real_paper_lifecycle_rows"
+            or str(item.get("action_type") or "").startswith("paper_bridge_")
+            or str(item.get("action_type") or "").startswith("operator_review_paper_bridge")
+        ),
+        {},
+    )
+    packet = dict(primary_action.get("paper_apply_operator_packet") or {})
+    if not packet:
+        packet = dict(operator_handoff.get("paper_apply_operator_packet") or {})
+    coverage_plan = dict(dict(microstructure_watch or {}).get("coverage_plan") or {})
+    promotion_gate = dict(meta_router_promotion_gate or {})
+    switch_policy = dict(promotion_gate.get("candidate_switch_policy") or {})
+    defensive_lineage_review = dict(switch_policy.get("defensive_lineage_review") or {})
+    defensive_operator = dict(defensive_lineage_review.get("operator_review") or {})
+    conditional_overfit_review = dict(promotion_gate.get("conditional_overfit_operator_review") or {})
+    conditional_overfit_operator = dict(conditional_overfit_review.get("operator_review") or {})
+    conditional_overfit_template = dict(conditional_overfit_review.get("operator_review_template") or {})
+    coordination_plan = dict(safe_next_action_plan.get("coordination_plan") or {})
+    review_handoff = dict(operator_review_handoff_summary or {})
+    review_rows = [dict(item) for item in list(review_handoff.get("reviews") or [])]
+    runtime = dict(runtime_progress or {})
+    signal_absence_diagnosis = dict(signal_wait.get("signal_absence_diagnosis") or {})
+    signal_absence_primary_cause = (
+        signal_absence_diagnosis.get("primary_cause")
+        or signal_wait.get("signal_absence_primary_cause")
+    )
+    signal_pipeline_issue_suspected = (
+        signal_absence_diagnosis.get("pipeline_issue_suspected")
+        if "pipeline_issue_suspected" in signal_absence_diagnosis
+        else signal_wait.get("signal_pipeline_issue_suspected")
+    )
+    primary_monitor_schedule = _current_iteration_recheck_schedule(primary_action)
+    next_signal_or_add_monitor_kst = (
+        primary_monitor_schedule.get("effective_next_monitor_after_kst")
+        or coordination_plan.get("next_signal_or_add_monitor_kst")
+    )
+    next_signal_or_add_monitor_utc = (
+        primary_monitor_schedule.get("effective_next_monitor_after_utc")
+        or coordination_plan.get("next_signal_or_add_monitor_utc")
+    )
+    raw_next_signal_or_add_monitor_kst = (
+        primary_monitor_schedule.get("raw_next_monitor_after_kst")
+        or coordination_plan.get("next_signal_or_add_monitor_kst")
+    )
+    next_signal_or_add_monitor_source = (
+        primary_monitor_schedule.get("effective_next_monitor_after_source")
+        or "safe_next_action_plan.coordination_plan"
+    )
+    next_signal_or_add_monitor_retimestampted = (
+        primary_monitor_schedule.get("next_monitor_retimestampted_after_current_iteration")
+        is True
+    )
+
+    def _review_runtime_state(target_gate: str) -> dict[str, Any]:
+        row = next(
+            (
+                item
+                for item in review_rows
+                if str(item.get("target_gate") or "") == target_gate
+            ),
+            {},
+        )
+        packet = dict(row.get("operator_decision_packet") or {})
+        safety = dict(packet.get("decision_command_safety") or {})
+        active = dict(row.get("active_operator_review_file_summary") or {})
+        required_fields = list(
+            row.get("operator_required_fields_remaining")
+            or active.get("operator_required_fields_remaining")
+            or []
+        )
+        decision_status = packet.get("status")
+        active_status = row.get("active_operator_review_file_status") or active.get("status")
+        draft_prepared = (
+            active_status == "draft_exists_operator_decision_required"
+            or active.get("draft_status") == "operator_review_draft_prepared"
+        )
+        dry_run_template_ready = (
+            decision_status == "operator_decision_required"
+            and safety.get("status") == "PASS"
+            and bool(packet.get("decision_dry_run_command_template"))
+        )
+        return {
+            "target_gate": target_gate,
+            "handoff_status": row.get("status"),
+            "review_kind": row.get("review_kind"),
+            "active_operator_review_report": row.get("active_operator_review_report"),
+            "active_operator_review_file_status": active_status,
+            "operator_decision_packet_status": decision_status,
+            "decision_command_safety_status": safety.get("status"),
+            "operator_required_fields_remaining": required_fields,
+            "draft_prepared": draft_prepared,
+            "dry_run_template_ready": dry_run_template_ready,
+            "blocker_interpretation": (
+                "accepted_review_missing_but_operator_draft_ready_for_manual_decision"
+                if draft_prepared and decision_status == "operator_decision_required"
+                else "accepted_review_missing_and_draft_not_ready"
+                if row
+                else "no_operator_handoff_row_available"
+            ),
+            "next_manual_action": (
+                "choose_accept_or_reject_replace_placeholders_then_run_dry_run"
+                if dry_run_template_ready
+                else row.get("next_action")
+            ),
+            "order_submission_allowed": False,
+            "no_live_order_sent": row.get("no_live_order_sent") is not False,
+        }
+
+    if signal_wait.get("fresh_signal") is not True:
+        problems.append(
+            {
+                "id": "current_fresh_signal",
+                "status": "open_waiting_for_realtime_signal",
+                "severity": "launch_blocker",
+                "non_substitutable": True,
+                "current_state": signal_wait.get("status"),
+                "signal_absence_primary_cause": signal_absence_primary_cause,
+                "signal_absence_diagnosis": signal_absence_diagnosis,
+                "signal_pipeline_issue_suspected": signal_pipeline_issue_suspected,
+                "cadence_lag_level": signal_wait.get("cadence_lag_level"),
+                "latest_add_age_to_median_gap": signal_wait.get("latest_add_age_to_median_gap"),
+                "next_action": "monitor_without_forcing_entry",
+                "safe_action_type": primary_action.get("action_type"),
+                "coordination_status": coordination_plan.get("status"),
+                "next_signal_or_add_monitor_utc": next_signal_or_add_monitor_utc,
+                "next_signal_or_add_monitor_kst": next_signal_or_add_monitor_kst,
+                "raw_next_signal_or_add_monitor_kst": raw_next_signal_or_add_monitor_kst,
+                "next_signal_or_add_monitor_source": next_signal_or_add_monitor_source,
+                "next_signal_or_add_monitor_retimestampted_after_current_iteration": (
+                    next_signal_or_add_monitor_retimestampted
+                ),
+                "next_quote_window_kst": coordination_plan.get("next_quote_window_kst"),
+                "quote_window_deferred_by_earlier_monitor": coordination_plan.get(
+                    "quote_window_deferred_by_earlier_monitor"
+                )
+                is True,
+                "do_not_skip_quote_window_for_signal_monitor": coordination_plan.get(
+                    "do_not_skip_quote_window_for_signal_monitor"
+                )
+                is True,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        )
+
+    paper_remaining_gates = list(paper_only_rehearsal.get("remaining_gates") or [])
+    if "first_real_paper_lifecycle_row" in paper_remaining_gates:
+        problems.append(
+            {
+                "id": "first_real_paper_lifecycle_row",
+                "status": "blocked_until_fresh_signal_and_operator_review",
+                "severity": "paper_lifecycle_blocker",
+                "non_substitutable": True,
+                "actual_paper_lifecycle_rows": paper_only_rehearsal.get(
+                    "actual_paper_lifecycle_rows"
+                ),
+                "paper_apply_allowed_now": paper_only_rehearsal.get(
+                    "paper_apply_allowed_now"
+                )
+                is True,
+                "current_rehearsal_available": paper_only_rehearsal.get(
+                    "current_rehearsal_available"
+                )
+                is True,
+                "depends_on": [
+                    "current_fresh_signal",
+                    "operator_review_decisions",
+                ],
+                "safe_action_type": (
+                    paper_lifecycle_action.get("action_type")
+                    or "paper_bridge_wait_for_fresh_signal"
+                ),
+                "coordination_status": coordination_plan.get("status"),
+                "next_signal_or_add_monitor_utc": next_signal_or_add_monitor_utc,
+                "next_signal_or_add_monitor_kst": next_signal_or_add_monitor_kst,
+                "raw_next_signal_or_add_monitor_kst": raw_next_signal_or_add_monitor_kst,
+                "next_signal_or_add_monitor_source": next_signal_or_add_monitor_source,
+                "next_signal_or_add_monitor_retimestampted_after_current_iteration": (
+                    next_signal_or_add_monitor_retimestampted
+                ),
+                "next_action": "wait_for_fresh_signal_and_operator_review_decisions_before_first_paper_apply",
+                "auto_apply_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": paper_lifecycle_action.get("no_live_order_sent") is not False,
+            }
+        )
+
+    if paper_gate.get("can_request_paper_apply_now") is True:
+        problems.append(
+            {
+                "id": "paper_apply_operator_review",
+                "status": (
+                    "open_deadline_expired_rerun_dry_run"
+                    if packet.get("operator_review_deadline_expired") is True
+                    else "open_operator_review_available"
+                ),
+                "severity": "paper_launch_blocker",
+                "non_substitutable": True,
+                "requires_operator_review": True,
+                "source_event_key": packet.get("source_event_key"),
+                "deadline_kst": packet.get("operator_review_deadline_kst"),
+                "deadline_remaining_minutes": packet.get("operator_review_deadline_remaining_minutes"),
+                "deadline_preserved_from_previous_watch": packet.get(
+                    "operator_review_deadline_preserved_from_previous_watch"
+                ),
+                "safe_action_type": primary_action.get("action_type"),
+                "next_action": (
+                    "rerun_paper_bridge_dry_run_before_apply"
+                    if packet.get("operator_review_deadline_expired") is True
+                    else "operator_review_then_apply_paper_bridge_only_if_backup_checks_pass"
+                ),
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        )
+
+    missing_samples = _int_or_default(
+        conversion.get("missing_to_min_sample_count")
+        if conversion.get("missing_to_min_sample_count") is not None
+        else execution_parity_eta.get("missing_samples")
+        if execution_parity_eta.get("missing_samples") is not None
+        else execution_parity_plan.get("missing_samples")
+        if execution_parity_plan.get("missing_samples") is not None
+        else execution_parity_plan.get("estimated_future_paper_apply_events_needed"),
+        0,
+    )
+    if missing_samples > 0:
+        no_open_remove_gate = (
+            str(paper_gate.get("status") or "")
+            in {"blocked_no_open_v6_paper_plan", "paper_apply_no_open_plan_not_credited"}
+            or str(execution_parity_plan.get("status") or "")
+            == "waiting_for_open_paper_plan_after_remove_signal"
+        )
+        problems.append(
+            {
+                "id": "execution_parity_samples",
+                "status": "open_collect_real_paper_lifecycle_rows",
+                "severity": "live_readiness_blocker",
+                "non_substitutable": True,
+                "journal_rows": _int_or_default(
+                    conversion.get("journal_row_count")
+                    if conversion.get("journal_row_count") is not None
+                    else execution_parity_eta.get("eligible_journal_rows"),
+                    0,
+                ),
+                "missing_samples": missing_samples,
+                "eta_status": execution_parity_eta.get("status"),
+                "estimated_days_at_current_cadence": execution_parity_eta.get(
+                    "estimated_days_at_current_cadence"
+                ),
+                "estimated_completion_kst": execution_parity_eta.get("estimated_completion_kst"),
+                "current_paper_apply_status": paper_gate.get("status"),
+                "current_bridge_action": paper_gate.get("bridge_action"),
+                "current_blocker": (
+                    "remove_signal_has_no_open_v6_paper_plan" if no_open_remove_gate else None
+                ),
+                "remove_plan_precheck": dict(paper_gate.get("remove_plan_precheck") or {}),
+                "currently_creditable_actions": list(
+                    execution_parity_plan.get("currently_creditable_actions") or []
+                ),
+                "next_creditable_event_types": list(
+                    execution_parity_plan.get("next_creditable_event_types") or []
+                ),
+                "safe_action_type": primary_action.get("action_type"),
+                "coordination_status": coordination_plan.get("status"),
+                "next_signal_or_add_monitor_utc": next_signal_or_add_monitor_utc,
+                "next_signal_or_add_monitor_kst": next_signal_or_add_monitor_kst,
+                "raw_next_signal_or_add_monitor_kst": raw_next_signal_or_add_monitor_kst,
+                "next_signal_or_add_monitor_source": next_signal_or_add_monitor_source,
+                "next_signal_or_add_monitor_retimestampted_after_current_iteration": (
+                    next_signal_or_add_monitor_retimestampted
+                ),
+                "next_quote_window_kst": coordination_plan.get("next_quote_window_kst"),
+                "next_creditable_add_signal_plan": dict(
+                    primary_action.get("next_creditable_add_signal_plan") or {}
+                ),
+                "backtest_substitution_allowed": execution_parity_eta.get("backtest_substitution_allowed") is True,
+                "next_action": (
+                    "wait_for_next_add_signal_or_existing_open_paper_plan_before_crediting_remove"
+                    if no_open_remove_gate
+                    else "collect_reviewed_paper_apply_rows_until_execution_parity_passes"
+                ),
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        )
+
+    remaining_calendar_days = _int_or_default(coverage_plan.get("remaining_calendar_days"), 0)
+    if remaining_calendar_days > 0:
+        problems.append(
+            {
+                "id": "microstructure_calendar_day_coverage",
+                "status": "open_waiting_for_future_calendar_days",
+                "severity": "evidence_depth_blocker",
+                "non_substitutable": True,
+                "remaining_calendar_days": remaining_calendar_days,
+                "earliest_completion_kst": coverage_plan.get("earliest_calendar_completion_kst"),
+                "calendar_completion_policy": coverage_plan.get("calendar_completion_policy"),
+                "safe_action_type": primary_action.get("action_type"),
+                "coordination_status": coordination_plan.get("status"),
+                "next_quote_window_kst": coordination_plan.get("next_quote_window_kst"),
+                "next_signal_or_add_monitor_utc": next_signal_or_add_monitor_utc,
+                "next_signal_or_add_monitor_kst": next_signal_or_add_monitor_kst,
+                "raw_next_signal_or_add_monitor_kst": raw_next_signal_or_add_monitor_kst,
+                "next_signal_or_add_monitor_source": next_signal_or_add_monitor_source,
+                "next_signal_or_add_monitor_retimestampted_after_current_iteration": (
+                    next_signal_or_add_monitor_retimestampted
+                ),
+                "do_not_skip_quote_window_for_signal_monitor": coordination_plan.get(
+                    "do_not_skip_quote_window_for_signal_monitor"
+                )
+                is True,
+                "next_action": "continue_daily_quote_window_collection",
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        )
+
+    runtime_remaining_hours = _number_or_none(runtime.get("remaining_hours"))
+    if runtime_remaining_hours is not None and runtime_remaining_hours > 0.0:
+        problems.append(
+            {
+                "id": "shadow_runtime_24h_observed",
+                "status": "open_collect_continuous_no_live_shadow_runtime",
+                "severity": "runtime_observation_blocker",
+                "non_substitutable": True,
+                "observed_hours": runtime.get("observed_hours"),
+                "target_hours": runtime.get("target_hours"),
+                "remaining_hours": runtime_remaining_hours,
+                "progress_pct": runtime.get("progress_pct"),
+                "safe_action_type": (
+                    shadow_runtime_action.get("action_type") or "continue_no_live_shadow_watch"
+                ),
+                "can_run_now": (
+                    shadow_runtime_action.get("can_run_now") is True
+                    if shadow_runtime_action
+                    else None
+                ),
+                "effective_can_run_now": (
+                    shadow_runtime_action.get("effective_action_due_now") is True
+                    if shadow_runtime_action
+                    else None
+                ),
+                "safe_action_window_status": shadow_runtime_action.get(
+                    "execution_window_status"
+                ),
+                "safe_action_effective_window_status": shadow_runtime_action.get(
+                    "effective_execution_window_status"
+                ),
+                "safe_action_covered_due_by_current_iteration": (
+                    shadow_runtime_action.get("covered_due_by_current_iteration") is True
+                    if shadow_runtime_action
+                    else False
+                ),
+                "coordination_status": coordination_plan.get("status"),
+                "next_action": "continue_continuous_no_live_shadow_watch_until_runtime_target",
+                "backtest_substitution_allowed": False,
+                "synthetic_or_backtest_rows_close_gate": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": shadow_runtime_action.get("no_live_order_sent") is not False,
+            }
+        )
+
+    promotion_blockers = list(switch_policy.get("promotion_blockers") or [])
+    if (
+        conditional_overfit_review.get("required") is True
+        and conditional_overfit_review.get("proxy_passed") is True
+        and conditional_overfit_review.get("accepted_for_paper_only") is not True
+    ):
+        runtime_state = _review_runtime_state("conditional_overfit_operator_review")
+        problems.append(
+            {
+                "id": "conditional_overfit_operator_review",
+                "status": "open_operator_review_required_for_paper_only_candidate_activation",
+                "severity": "paper_candidate_blocker",
+                "non_substitutable": False,
+                "operator_review_status": conditional_overfit_operator.get("status"),
+                "operator_review_blockers": list(conditional_overfit_operator.get("blockers") or []),
+                "candidate": conditional_overfit_template.get("candidate_recipe_id"),
+                "candidate_report": conditional_overfit_template.get("candidate_report"),
+                "proxy_audit_report": conditional_overfit_template.get("proxy_audit_report"),
+                "review_packet_fingerprint": conditional_overfit_template.get("review_packet_fingerprint"),
+                "template_report": promotion_gate.get("conditional_overfit_operator_review_template_report"),
+                "skeleton_report": promotion_gate.get("conditional_overfit_operator_review_skeleton_report"),
+                "paper_only_scope": True,
+                "real_shadow_still_required_before_tiny_canary_or_live": True,
+                "operator_review_runtime_state": runtime_state,
+                "active_operator_review_report": runtime_state.get("active_operator_review_report"),
+                "active_operator_review_file_status": runtime_state.get(
+                    "active_operator_review_file_status"
+                ),
+                "operator_decision_packet_status": runtime_state.get(
+                    "operator_decision_packet_status"
+                ),
+                "operator_decision_dry_run_ready": runtime_state.get("dry_run_template_ready"),
+                "operator_required_fields_remaining": runtime_state.get(
+                    "operator_required_fields_remaining"
+                ),
+                "blocker_interpretation": runtime_state.get("blocker_interpretation"),
+                "next_action": "complete_or_reject_conditional_overfit_proxy_review_for_paper_only_scope",
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        )
+
+    if "defensive_lineage_review_not_passed" in promotion_blockers:
+        runtime_state = _review_runtime_state("defensive_lineage_review")
+        problems.append(
+            {
+                "id": "defensive_lineage_operator_review",
+                "status": "open_operator_review_required",
+                "severity": "defensive_route_blocker",
+                "non_substitutable": False,
+                "operator_review_status": defensive_operator.get("status"),
+                "operator_review_blockers": list(defensive_operator.get("blockers") or []),
+                "candidate": dict(
+                    defensive_lineage_review.get("operator_review_template")
+                    or {}
+                ).get("candidate_recipe_id"),
+                "template_report": promotion_gate.get("operator_lineage_review_template_report"),
+                "skeleton_report": promotion_gate.get("operator_lineage_review_skeleton_report"),
+                "operator_review_runtime_state": runtime_state,
+                "active_operator_review_report": runtime_state.get("active_operator_review_report"),
+                "active_operator_review_file_status": runtime_state.get(
+                    "active_operator_review_file_status"
+                ),
+                "operator_decision_packet_status": runtime_state.get(
+                    "operator_decision_packet_status"
+                ),
+                "operator_decision_dry_run_ready": runtime_state.get("dry_run_template_ready"),
+                "operator_required_fields_remaining": runtime_state.get(
+                    "operator_required_fields_remaining"
+                ),
+                "blocker_interpretation": runtime_state.get("blocker_interpretation"),
+                "next_action": "complete_or_reject_defensive_candidate_lineage_review",
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        )
+
+    if not problems and paper_only_rehearsal.get("system_ready") is True:
+        problems.append(
+            {
+                "id": "none",
+                "status": "no_open_launch_blockers_detected",
+                "severity": "info",
+                "non_substitutable": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+    )
+    primary_action_type = primary_action.get("action_type")
+    primary_action_due_now = primary_action.get("action_due_now") is True
+    primary_effective_due_now = primary_action.get("effective_action_due_now") is True
+    primary_action_covered_due = primary_action.get("covered_due_by_current_iteration") is True
+
+    def _problem_actionability(problem: dict[str, Any]) -> str:
+        problem_id = str(problem.get("id") or "")
+        if problem_id == "none":
+            return "closed_info"
+        if problem.get("requires_operator_review") is True or "operator_review" in problem_id:
+            return "manual_operator_review_required"
+        if problem_id == "current_fresh_signal":
+            return (
+                "safe_monitor_covered_this_iteration_wait_for_next_recheck"
+                if primary_action_covered_due
+                else "safe_monitor_due_now"
+                if primary_action_due_now
+                else "safe_monitor_scheduled_or_waiting"
+            )
+        if problem_id == "microstructure_calendar_day_coverage":
+            return "calendar_quote_window_wait"
+        if problem_id == "first_real_paper_lifecycle_row":
+            return "dependency_blocked_until_fresh_signal_and_operator_review"
+        if problem_id == "execution_parity_samples":
+            return "realtime_paper_lifecycle_collection"
+        if problem_id == "shadow_runtime_24h_observed":
+            return "continuous_no_live_runtime_wait"
+        if problem_id == "paper_apply_operator_review":
+            return "manual_paper_apply_review_required"
+        return "open_follow_up"
+
+    def _problem_next_action_type(problem: dict[str, Any]) -> str | None:
+        problem_id = str(problem.get("id") or "")
+        if problem_id == "current_fresh_signal":
+            return "monitor_fresh_signal"
+        if problem_id == "microstructure_calendar_day_coverage":
+            return "collect_next_quote_window"
+        if problem_id == "execution_parity_samples":
+            return (
+                "wait_for_next_add_signal_or_open_plan"
+                if problem.get("current_blocker") == "remove_signal_has_no_open_v6_paper_plan"
+                else "collect_real_paper_lifecycle_rows"
+            )
+        if problem_id == "first_real_paper_lifecycle_row":
+            return "wait_for_fresh_signal_and_operator_review_decisions"
+        if problem_id == "shadow_runtime_24h_observed":
+            return "continue_no_live_shadow_watch"
+        if problem_id == "paper_apply_operator_review":
+            return (
+                "rerun_paper_bridge_dry_run"
+                if packet.get("operator_review_deadline_expired") is True
+                else "manual_paper_apply_review"
+            )
+        if problem_id == "conditional_overfit_operator_review":
+            return "manual_conditional_overfit_review"
+        if problem_id == "defensive_lineage_operator_review":
+            return "manual_defensive_lineage_review"
+        return problem.get("next_action") or problem.get("safe_action_type")
+
+    def _problem_blocker(problem: dict[str, Any]) -> str | None:
+        problem_id = str(problem.get("id") or "")
+        if problem_id == "current_fresh_signal":
+            return "fresh_signal_missing_or_stale"
+        if problem_id == "microstructure_calendar_day_coverage":
+            return "future_calendar_quote_windows"
+        if problem_id == "execution_parity_samples":
+            return problem.get("current_blocker") or "real_paper_lifecycle_rows_missing"
+        if problem_id == "first_real_paper_lifecycle_row":
+            return "fresh_signal_or_operator_review_missing"
+        if problem_id == "shadow_runtime_24h_observed":
+            return "continuous_runtime_observation_incomplete"
+        if problem_id == "paper_apply_operator_review":
+            return (
+                "operator_review_deadline_expired"
+                if packet.get("operator_review_deadline_expired") is True
+                else "operator_paper_apply_review_required"
+            )
+        if "operator_review" in problem_id:
+            return "operator_required_fields_still_empty"
+        return None
+
+    def _primary_action_matches_problem(problem: dict[str, Any]) -> bool:
+        problem_id = str(problem.get("id") or "")
+        primary_type = str(primary_action_type or "")
+        primary_gate = str(primary_action.get("target_gate") or "")
+        signal_action_types = {
+            "monitor_fresh_signal",
+            "paper_bridge_wait_for_fresh_signal",
+            "paper_bridge_wait_for_next_add_signal",
+        }
+        quote_action_types = {
+            "capture_microstructure_quote_window_now",
+            "capture_due_quote_window",
+            "wait_for_next_microstructure_quote_window",
+        }
+        paper_action_types = {
+            "operator_review_paper_bridge_apply",
+            "rerun_paper_bridge_dry_run_after_operator_review_deadline",
+            "rerun_paper_bridge_dry_run_for_fresh_pre_apply_evidence_report",
+            "paper_bridge_wait_for_fresh_signal",
+            "paper_bridge_wait_for_next_add_signal",
+            "resolve_paper_apply_parity_review_blocker",
+        }
+        if problem_id == "current_fresh_signal":
+            return primary_gate == "current_fresh_signal" or primary_type in signal_action_types
+        if problem_id == "microstructure_calendar_day_coverage":
+            return (
+                primary_gate == "real_microstructure_execution_evidence"
+                or primary_type in quote_action_types
+            )
+        if problem_id in {
+            "execution_parity_samples",
+            "first_real_paper_lifecycle_row",
+            "paper_apply_operator_review",
+        }:
+            return primary_gate == "real_paper_lifecycle_rows" or primary_type in paper_action_types
+        if problem_id == "shadow_runtime_24h_observed":
+            return primary_gate == "shadow_runtime_24h_observed" or primary_type == "continue_no_live_shadow_watch"
+        return False
+
+    for problem in problems:
+        problem_id = problem.get("id")
+        problem.setdefault("problem_id", problem_id)
+        problem.setdefault("next_action_type", _problem_next_action_type(problem))
+        problem.setdefault("blocked_by", _problem_blocker(problem))
+        problem.setdefault("actionability", _problem_actionability(problem))
+        problem.setdefault(
+            "manual_required",
+            problem.get("requires_operator_review") is True
+            or "operator_review" in str(problem_id or ""),
+        )
+        safe_action_matches_primary = _primary_action_matches_problem(problem)
+        problem.setdefault(
+            "can_run_now",
+            primary_action.get("can_run_now") is True if safe_action_matches_primary else None,
+        )
+        problem.setdefault(
+            "effective_can_run_now",
+            primary_effective_due_now if safe_action_matches_primary else None,
+        )
+        problem.setdefault(
+            "safe_action_window_status",
+            primary_action.get("execution_window_status") if safe_action_matches_primary else None,
+        )
+        problem.setdefault(
+            "safe_action_effective_window_status",
+            primary_action.get("effective_execution_window_status")
+            if safe_action_matches_primary
+            else None,
+        )
+        problem.setdefault(
+            "safe_action_covered_due_by_current_iteration",
+            primary_action_covered_due if safe_action_matches_primary else False,
+        )
+        problem.setdefault("order_submission_allowed", False)
+        problem.setdefault("no_live_order_sent", True)
+    return problems
+
+
+def _scheduled_command_projection(
+    *,
+    operator_handoff: dict[str, Any],
+    safe_next_action_plan: dict[str, Any],
+) -> dict[str, Any]:
+    primary = dict(safe_next_action_plan.get("primary_action") or {})
+    coordination = dict(safe_next_action_plan.get("coordination_plan") or {})
+    primary_schedule = _current_iteration_recheck_schedule(primary)
+    primary_effective_dt = _parse_dt(
+        primary_schedule.get("effective_next_monitor_after_utc")
+        or primary_schedule.get("effective_next_monitor_after_kst")
+    )
+    primary_raw_utc = primary_schedule.get("raw_next_monitor_after_utc") or primary.get(
+        "execute_after_utc"
+    )
+    primary_raw_kst = primary_schedule.get("raw_next_monitor_after_kst") or primary.get(
+        "execute_after_kst"
+    )
+    primary_effective_utc = (
+        primary_effective_dt.astimezone(UTC).isoformat()
+        if primary_effective_dt is not None
+        else primary.get("execute_after_utc")
+    )
+    primary_effective_kst = (
+        primary_effective_dt.astimezone(KST).isoformat()
+        if primary_effective_dt is not None
+        else primary.get("execute_after_kst")
+    )
+    primary_raw_command = primary.get("command")
+    primary_command = primary_raw_command
+    primary_retimestamped = (
+        primary_schedule.get("next_monitor_retimestampted_after_current_iteration") is True
+    )
+    if primary_retimestamped and primary_effective_dt is not None:
+        primary_command = (
+            _scheduled_signal_monitor_command(primary_raw_command, scheduled_at=primary_effective_dt)
+            or primary_raw_command
+        )
+    paper_wait_action = next(
+        (
+            dict(item)
+            for item in list(safe_next_action_plan.get("actions") or [])
+            if str(dict(item).get("action_type") or "").startswith("paper_bridge_wait_")
+        ),
+        {},
+    )
+    paper_wait_schedule = _current_iteration_recheck_schedule(paper_wait_action)
+    paper_wait_effective_dt = _parse_dt(
+        paper_wait_schedule.get("effective_next_monitor_after_utc")
+        or paper_wait_schedule.get("effective_next_monitor_after_kst")
+    )
+    paper_wait_raw_utc = paper_wait_schedule.get("raw_next_monitor_after_utc") or paper_wait_action.get(
+        "execute_after_utc"
+    )
+    paper_wait_raw_kst = paper_wait_schedule.get("raw_next_monitor_after_kst") or paper_wait_action.get(
+        "execute_after_kst"
+    )
+    paper_wait_effective_utc = (
+        paper_wait_effective_dt.astimezone(UTC).isoformat()
+        if paper_wait_effective_dt is not None
+        else paper_wait_action.get("execute_after_utc")
+    )
+    paper_wait_effective_kst = (
+        paper_wait_effective_dt.astimezone(KST).isoformat()
+        if paper_wait_effective_dt is not None
+        else paper_wait_action.get("execute_after_kst")
+    )
+    paper_wait_raw_command = paper_wait_action.get("command")
+    paper_wait_monitor_command = paper_wait_raw_command
+    paper_wait_retimestamped = (
+        paper_wait_schedule.get("next_monitor_retimestampted_after_current_iteration") is True
+    )
+    if paper_wait_retimestamped and paper_wait_effective_dt is not None:
+        paper_wait_monitor_command = (
+            _scheduled_signal_monitor_command(
+                paper_wait_raw_command,
+                scheduled_at=paper_wait_effective_dt,
+            )
+            or paper_wait_raw_command
+        )
+    paper_packet = dict(paper_wait_action.get("paper_apply_operator_packet") or {})
+    paper_wait_apply_command = paper_wait_action.get("paper_apply_command_when_gate_allows")
+    paper_packet_dry_run_command = paper_packet.get("dry_run_command")
+    paper_packet_apply_command = paper_packet.get("apply_command_when_gate_allows")
+    if paper_wait_retimestamped and paper_wait_effective_dt is not None:
+        paper_wait_apply_command = (
+            _scheduled_paper_apply_command(
+                paper_wait_apply_command,
+                scheduled_at=paper_wait_effective_dt,
+            )
+            or paper_wait_apply_command
+        )
+        paper_packet_dry_run_command = (
+            _scheduled_paper_dry_run_command(
+                paper_packet_dry_run_command,
+                scheduled_at=paper_wait_effective_dt,
+            )
+            or paper_packet_dry_run_command
+        )
+        paper_packet_apply_command = (
+            _scheduled_paper_apply_command(
+                paper_packet_apply_command,
+                scheduled_at=paper_wait_effective_dt,
+            )
+            or paper_packet_apply_command
+        )
+    paper_safety = dict(paper_packet.get("command_safety") or {})
+    raw_packet = dict(operator_handoff.get("paper_apply_operator_packet") or {})
+    raw_safety = dict(raw_packet.get("command_safety") or {})
+    raw_dry_report_dir = raw_safety.get("dry_run_report_dir")
+    raw_apply_report_dir = raw_safety.get("apply_report_dir")
+    projected_dry_report_dir = (
+        _command_flag_value(paper_packet_dry_run_command, "--report-dir")
+        or paper_safety.get("dry_run_report_dir")
+    )
+    projected_apply_report_dir = (
+        _command_flag_value(paper_packet_apply_command, "--report-dir")
+        or paper_safety.get("apply_report_dir")
+    )
+    paper_dirs_differ_from_raw = any(
+        raw and projected and raw != projected
+        for raw, projected in [
+            (raw_dry_report_dir, projected_dry_report_dir),
+            (raw_apply_report_dir, projected_apply_report_dir),
+        ]
+    )
+    return {
+        "status": (
+            "scheduled_safe_next_commands_available"
+            if primary or paper_wait_action
+            else "no_scheduled_safe_next_commands"
+        ),
+        "source": "safe_next_action_plan",
+        "raw_operator_handoff_scope": "evidence_snapshot_not_execution_schedule",
+        "raw_operator_handoff_status": operator_handoff.get("status"),
+        "raw_operator_handoff_dry_run_command": operator_handoff.get("paper_dry_run_command"),
+        "raw_operator_handoff_apply_command": operator_handoff.get("paper_apply_command"),
+        "raw_operator_handoff_safety_dry_run_report_dir": raw_dry_report_dir,
+        "raw_operator_handoff_safety_apply_report_dir": raw_apply_report_dir,
+        "primary_action_type": primary.get("action_type"),
+        "primary_execute_after_utc": primary_effective_utc,
+        "primary_execute_after_kst": primary_effective_kst,
+        "primary_raw_execute_after_utc": primary_raw_utc,
+        "primary_raw_execute_after_kst": primary_raw_kst,
+        "primary_execute_after_source": primary_schedule.get("effective_next_monitor_after_source"),
+        "primary_retimestampted_after_current_iteration": primary_retimestamped,
+        "primary_raw_command": primary_raw_command,
+        "primary_command": primary_command,
+        "primary_report_dir": _command_flag_value(primary_command, "--report-dir"),
+        "primary_raw_report_dir": _command_flag_value(primary_raw_command, "--report-dir"),
+        "primary_report_dir_retimestampted_to_effective": (
+            bool(
+                _command_flag_value(primary_raw_command, "--report-dir")
+                and _command_flag_value(primary_command, "--report-dir")
+            )
+            and _command_flag_value(primary_raw_command, "--report-dir")
+            != _command_flag_value(primary_command, "--report-dir")
+        ),
+        "paper_wait_action_type": paper_wait_action.get("action_type"),
+        "paper_wait_execute_after_utc": paper_wait_effective_utc,
+        "paper_wait_execute_after_kst": paper_wait_effective_kst,
+        "paper_wait_raw_execute_after_utc": paper_wait_raw_utc,
+        "paper_wait_raw_execute_after_kst": paper_wait_raw_kst,
+        "paper_wait_execute_after_source": paper_wait_schedule.get(
+            "effective_next_monitor_after_source"
+        ),
+        "paper_wait_retimestampted_after_current_iteration": paper_wait_retimestamped,
+        "paper_wait_raw_monitor_command": paper_wait_raw_command,
+        "paper_wait_monitor_command": paper_wait_monitor_command,
+        "paper_wait_monitor_report_dir": _command_flag_value(
+            paper_wait_monitor_command,
+            "--report-dir",
+        ),
+        "paper_wait_raw_monitor_report_dir": _command_flag_value(
+            paper_wait_raw_command,
+            "--report-dir",
+        ),
+        "paper_wait_apply_command_when_gate_allows": paper_wait_apply_command,
+        "paper_wait_apply_report_dir": _command_flag_value(
+            paper_wait_apply_command,
+            "--report-dir",
+        ),
+        "paper_wait_packet_dry_run_command": paper_packet_dry_run_command,
+        "paper_wait_packet_apply_command_when_gate_allows": paper_packet_apply_command,
+        "paper_wait_safety_dry_run_report_dir": projected_dry_report_dir,
+        "paper_wait_safety_apply_report_dir": projected_apply_report_dir,
+        "paper_wait_report_dirs_differ_from_raw_handoff": paper_dirs_differ_from_raw,
+        "projection_reason": (
+            "scheduled_report_dirs_retimestampted_to_next_safe_action"
+            if paper_dirs_differ_from_raw
+            else "scheduled_commands_match_or_raw_dirs_unavailable"
+        ),
+        "next_operator_command_source": "scheduled_command_projection.primary_command",
+        "paper_apply_command_source_when_gate_allows": (
+            "scheduled_command_projection.paper_wait_apply_command_when_gate_allows"
+        ),
+        "next_quote_window_kst": coordination.get("next_quote_window_kst"),
+        "next_signal_or_add_monitor_kst": coordination.get("next_signal_or_add_monitor_kst"),
+        "quote_window_deferred_by_earlier_monitor": coordination.get(
+            "quote_window_deferred_by_earlier_monitor"
+        )
+        is True,
+        "use_projection_for_next_operator_action": True,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+
+
+def _command_consistency_audit(
+    *,
+    safe_next_action_plan: dict[str, Any],
+    remaining_work_closure_summary: dict[str, Any],
+    next_material_progress_plan: dict[str, Any],
+    scheduled_command_projection: dict[str, Any],
+    signal_monitor: dict[str, Any],
+) -> dict[str, Any]:
+    safe_next = dict(safe_next_action_plan or {})
+    primary = dict(safe_next.get("primary_action") or {})
+    closure = dict(remaining_work_closure_summary or {})
+    actionability = dict(closure.get("actionability_partition") or {})
+    next_material = dict(next_material_progress_plan or {})
+    scheduled = dict(scheduled_command_projection or {})
+    signal = dict(signal_monitor or {})
+    material_events = [dict(item) for item in list(next_material.get("events") or [])]
+    actionability_run_now = [
+        dict(item) for item in list(actionability.get("run_now_without_operator") or [])
+    ]
+    actionability_manual_now = [
+        dict(item) for item in list(actionability.get("manual_now") or [])
+    ]
+    raw_automation_actions = [
+        dict(item) for item in list(closure.get("raw_automation_now_usefulness") or [])
+    ]
+
+    def _source(
+        name: str,
+        command: Any,
+        *,
+        expected_to_match: bool = True,
+        raw_equivalent_command: Any = None,
+        retimestamped_to_effective: bool = False,
+    ) -> dict[str, Any]:
+        command_text = str(command or "").strip() or None
+        raw_equivalent_text = str(raw_equivalent_command or "").strip() or None
+        return {
+            "source": name,
+            "command": command_text,
+            "report_dir": _command_flag_value(command_text, "--report-dir"),
+            "raw_equivalent_command": raw_equivalent_text,
+            "raw_equivalent_report_dir": _command_flag_value(raw_equivalent_text, "--report-dir"),
+            "retimestamped_to_effective": retimestamped_to_effective,
+            "expected_to_match": expected_to_match,
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+
+    material_signal = next(
+        (item for item in material_events if item.get("event_type") == "fresh_signal_monitor"),
+        {},
+    )
+    actionability_signal = next(
+        (
+            item
+            for item in actionability_run_now
+            if item.get("action_type") == "monitor_fresh_signal"
+            or item.get("target_gate") == "current_fresh_signal"
+        ),
+        {},
+    )
+    raw_signal = next(
+        (
+            item
+            for item in raw_automation_actions
+            if item.get("action_type") == "monitor_fresh_signal"
+            or item.get("target_gate") == "current_fresh_signal"
+        ),
+        {},
+    )
+    material_shadow_runtime = next(
+        (item for item in material_events if item.get("event_type") == "shadow_runtime_observation"),
+        {},
+    )
+    actionability_shadow_runtime = next(
+        (
+            item
+            for item in actionability_run_now
+            if item.get("action_type") == "continue_no_live_shadow_watch"
+            or item.get("target_gate") == "shadow_runtime_24h_observed"
+        ),
+        {},
+    )
+    raw_shadow_runtime = next(
+        (
+            item
+            for item in raw_automation_actions
+            if item.get("action_type") == "continue_no_live_shadow_watch"
+            or item.get("target_gate") == "shadow_runtime_24h_observed"
+        ),
+        {},
+    )
+    signal_actionability_expected = not (
+        bool(raw_signal.get("command")) and not bool(actionability_signal.get("command"))
+    )
+    signal_sources = [
+        _source("safe_next_action_plan.primary_action.command", primary.get("command")),
+        _source(
+            "remaining_work_closure_summary.actionability_partition.run_now_without_operator",
+            actionability_signal.get("command"),
+            expected_to_match=signal_actionability_expected,
+        ),
+        _source(
+            "remaining_work_closure_summary.raw_automation_now_usefulness.signal_monitor",
+            raw_signal.get("command"),
+            expected_to_match=bool(raw_signal.get("command")),
+        ),
+        _source(
+            "next_material_progress_plan.fresh_signal_monitor.command",
+            material_signal.get("command"),
+            raw_equivalent_command=dict(material_signal.get("details") or {}).get(
+                "raw_canonical_signal_command"
+            ),
+            retimestamped_to_effective=dict(material_signal.get("details") or {}).get(
+                "signal_command_report_dir_retimestampted_to_effective"
+            )
+            is True,
+        ),
+        _source(
+            "scheduled_command_projection.primary_command",
+            scheduled.get("primary_command"),
+            raw_equivalent_command=scheduled.get("primary_raw_command"),
+            retimestamped_to_effective=scheduled.get(
+                "primary_report_dir_retimestampted_to_effective"
+            )
+            is True,
+        ),
+        _source("signal_monitor.command", signal.get("command")),
+    ]
+    comparable_signal_sources = [
+        item
+        for item in signal_sources
+        if item.get("expected_to_match") is True and item.get("command")
+    ]
+    canonical_signal = next(
+        (
+            item
+            for item in comparable_signal_sources
+            if item.get("source")
+            == "remaining_work_closure_summary.actionability_partition.run_now_without_operator"
+        ),
+        next(
+            (
+                item
+                for item in comparable_signal_sources
+                if item.get("source")
+                == "remaining_work_closure_summary.raw_automation_now_usefulness.signal_monitor"
+            ),
+            comparable_signal_sources[0] if comparable_signal_sources else None,
+        ),
+    )
+    canonical_command = dict(canonical_signal or {}).get("command")
+
+    def _matches_canonical(item: dict[str, Any]) -> bool:
+        return (
+            item.get("command") == canonical_command
+            or (
+                item.get("retimestamped_to_effective") is True
+                and item.get("raw_equivalent_command") == canonical_command
+            )
+        )
+
+    mismatches = [
+        item
+        for item in comparable_signal_sources
+        if canonical_command and not _matches_canonical(item)
+    ]
+    retimestamped_equivalent_matches = [
+        item
+        for item in comparable_signal_sources
+        if canonical_command
+        and item.get("command") != canonical_command
+        and _matches_canonical(item)
+    ]
+    missing_expected = [
+        item.get("source")
+        for item in signal_sources
+        if item.get("expected_to_match") is True and not item.get("command")
+    ]
+    if not comparable_signal_sources:
+        signal_status = "signal_monitor_command_sources_missing"
+    elif mismatches:
+        signal_status = "signal_monitor_command_mismatch"
+    elif missing_expected:
+        signal_status = "signal_monitor_command_match_with_missing_optional_sources"
+    else:
+        signal_status = "signal_monitor_command_match"
+    signal_parity = {
+        "status": signal_status,
+        "canonical_source": dict(canonical_signal or {}).get("source"),
+        "canonical_command": canonical_command,
+        "canonical_report_dir": dict(canonical_signal or {}).get("report_dir"),
+        "source_count": len(signal_sources),
+        "comparable_source_count": len(comparable_signal_sources),
+        "missing_expected_sources": missing_expected,
+        "mismatch_count": len(mismatches),
+        "mismatches": mismatches,
+        "retimestamped_equivalent_match_count": len(retimestamped_equivalent_matches),
+        "retimestamped_equivalent_matches": retimestamped_equivalent_matches,
+        "sources": signal_sources,
+        "actionability_effective_queue_empty_but_raw_covered_command_available": (
+            bool(raw_signal.get("command")) and not bool(actionability_signal.get("command"))
+        ),
+        "policy": "fresh_signal_monitor_commands_should_share_the_actionability_canonical_command",
+        "auto_execute_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": all(item.get("no_live_order_sent") is not False for item in signal_sources),
+    }
+    shadow_actionability_expected = not (
+        bool(raw_shadow_runtime.get("command")) and not bool(actionability_shadow_runtime.get("command"))
+    )
+    shadow_runtime_sources = [
+        _source(
+            "remaining_work_closure_summary.actionability_partition.run_now_without_operator.shadow_runtime",
+            actionability_shadow_runtime.get("command"),
+            expected_to_match=shadow_actionability_expected,
+        ),
+        _source(
+            "remaining_work_closure_summary.raw_automation_now_usefulness.shadow_runtime",
+            raw_shadow_runtime.get("command"),
+            expected_to_match=bool(raw_shadow_runtime.get("command")),
+        ),
+        _source(
+            "next_material_progress_plan.shadow_runtime_observation.command",
+            material_shadow_runtime.get("command"),
+            expected_to_match=bool(raw_shadow_runtime.get("command")) or bool(actionability_shadow_runtime.get("command")),
+        ),
+    ]
+    comparable_shadow_runtime_sources = [
+        item
+        for item in shadow_runtime_sources
+        if item.get("expected_to_match") is True and item.get("command")
+    ]
+    canonical_shadow_runtime = next(
+        (
+            item
+            for item in comparable_shadow_runtime_sources
+            if item.get("source")
+            == "remaining_work_closure_summary.actionability_partition.run_now_without_operator.shadow_runtime"
+        ),
+        next(
+            (
+                item
+                for item in comparable_shadow_runtime_sources
+                if item.get("source")
+                == "remaining_work_closure_summary.raw_automation_now_usefulness.shadow_runtime"
+            ),
+            comparable_shadow_runtime_sources[0] if comparable_shadow_runtime_sources else None,
+        ),
+    )
+    canonical_shadow_runtime_command = dict(canonical_shadow_runtime or {}).get("command")
+    shadow_runtime_mismatches = [
+        item
+        for item in comparable_shadow_runtime_sources
+        if canonical_shadow_runtime_command and item.get("command") != canonical_shadow_runtime_command
+    ]
+    shadow_runtime_missing_expected = [
+        item.get("source")
+        for item in shadow_runtime_sources
+        if item.get("expected_to_match") is True and not item.get("command")
+    ]
+    if not comparable_shadow_runtime_sources:
+        shadow_runtime_status = "shadow_runtime_command_sources_missing"
+    elif shadow_runtime_mismatches:
+        shadow_runtime_status = "shadow_runtime_command_mismatch"
+    elif shadow_runtime_missing_expected:
+        shadow_runtime_status = "shadow_runtime_command_match_with_missing_optional_sources"
+    else:
+        shadow_runtime_status = "shadow_runtime_command_match"
+    shadow_runtime_parity = {
+        "status": shadow_runtime_status,
+        "canonical_source": dict(canonical_shadow_runtime or {}).get("source"),
+        "canonical_command": canonical_shadow_runtime_command,
+        "canonical_report_dir": dict(canonical_shadow_runtime or {}).get("report_dir"),
+        "source_count": len(shadow_runtime_sources),
+        "comparable_source_count": len(comparable_shadow_runtime_sources),
+        "missing_expected_sources": shadow_runtime_missing_expected,
+        "mismatch_count": len(shadow_runtime_mismatches),
+        "mismatches": shadow_runtime_mismatches,
+        "sources": shadow_runtime_sources,
+        "actionability_effective_queue_empty_but_raw_covered_command_available": (
+            bool(raw_shadow_runtime.get("command")) and not bool(actionability_shadow_runtime.get("command"))
+        ),
+        "policy": "shadow_runtime_commands_should_share_the_actionability_canonical_watch_command",
+        "auto_execute_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": all(
+            item.get("no_live_order_sent") is not False for item in shadow_runtime_sources
+        ),
+    }
+    material_operator = next(
+        (item for item in material_events if item.get("event_type") == "operator_review_decisions"),
+        {},
+    )
+    actionability_operator = actionability_manual_now[0] if actionability_manual_now else {}
+    primary_operator = dict(closure.get("primary_operator_decision_action") or {})
+    primary_operator_packet = dict(primary_operator.get("operator_decision_packet") or {})
+    operator_sources = [
+        _source(
+            "remaining_work_closure_summary.actionability_partition.manual_now",
+            actionability_operator.get("dry_run_command_template"),
+        ),
+        _source(
+            "remaining_work_closure_summary.primary_operator_decision_action",
+            primary_operator_packet.get("decision_dry_run_command_template"),
+        ),
+        _source("next_material_progress_plan.operator_review_decisions.command", material_operator.get("command")),
+    ]
+    comparable_operator_sources = [
+        item
+        for item in operator_sources
+        if item.get("expected_to_match") is True and item.get("command")
+    ]
+    canonical_operator = next(
+        (
+            item
+            for item in comparable_operator_sources
+            if item.get("source") == "remaining_work_closure_summary.actionability_partition.manual_now"
+        ),
+        comparable_operator_sources[0] if comparable_operator_sources else None,
+    )
+    canonical_operator_command = dict(canonical_operator or {}).get("command")
+    operator_mismatches = [
+        item
+        for item in comparable_operator_sources
+        if canonical_operator_command and item.get("command") != canonical_operator_command
+    ]
+    operator_missing_expected = [
+        item.get("source")
+        for item in operator_sources
+        if item.get("expected_to_match") is True and not item.get("command")
+    ]
+    if not comparable_operator_sources:
+        operator_status = "operator_review_command_sources_missing"
+    elif operator_mismatches:
+        operator_status = "operator_review_command_mismatch"
+    elif operator_missing_expected:
+        operator_status = "operator_review_command_match_with_missing_optional_sources"
+    else:
+        operator_status = "operator_review_command_match"
+    operator_parity = {
+        "status": operator_status,
+        "canonical_source": dict(canonical_operator or {}).get("source"),
+        "canonical_command": canonical_operator_command,
+        "canonical_report_dir": dict(canonical_operator or {}).get("report_dir"),
+        "source_count": len(operator_sources),
+        "comparable_source_count": len(comparable_operator_sources),
+        "missing_expected_sources": operator_missing_expected,
+        "mismatch_count": len(operator_mismatches),
+        "mismatches": operator_mismatches,
+        "sources": operator_sources,
+        "policy": "operator_review_primary_dry_run_commands_should_share_the_actionability_canonical_command",
+        "auto_execute_allowed": False,
+        "auto_decision_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": all(item.get("no_live_order_sent") is not False for item in operator_sources),
+    }
+    parity_statuses = {signal_status, shadow_runtime_status, operator_status}
+    status = (
+        "command_consistency_pass"
+        if parity_statuses
+        <= {
+            "signal_monitor_command_match",
+            "signal_monitor_command_match_with_missing_optional_sources",
+            "signal_monitor_command_sources_missing",
+            "shadow_runtime_command_match",
+            "shadow_runtime_command_match_with_missing_optional_sources",
+            "shadow_runtime_command_sources_missing",
+            "operator_review_command_match",
+            "operator_review_command_match_with_missing_optional_sources",
+            "operator_review_command_sources_missing",
+        }
+        else "command_consistency_mismatch_detected"
+    )
+    return {
+        "status": status,
+        "signal_monitor_command_parity": signal_parity,
+        "shadow_runtime_command_parity": shadow_runtime_parity,
+        "operator_review_command_parity": operator_parity,
+        "policy": "audit_only_no_commands_are_executed_or_rewritten_here",
+        "auto_execute_allowed": False,
+        "auto_decision_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            signal_parity.get("no_live_order_sent") is not False
+            and shadow_runtime_parity.get("no_live_order_sent") is not False
+            and operator_parity.get("no_live_order_sent") is not False
+        ),
+    }
+
+
+def _operator_work_queue(safe_next_action_plan: dict[str, Any]) -> dict[str, Any]:
+    actions = [dict(item) for item in list(dict(safe_next_action_plan or {}).get("actions") or [])]
+
+    def _summary(item: dict[str, Any]) -> dict[str, Any]:
+        command = item.get("command")
+        recheck_schedule = _current_iteration_recheck_schedule(item)
+        return {
+            "action_type": item.get("action_type"),
+            "target_gate": item.get("target_gate"),
+            "priority": item.get("priority"),
+            "can_run_now": item.get("can_run_now") is True,
+            "can_start_now": item.get("can_start_now") is True,
+            "requires_operator_review": item.get("requires_operator_review") is True,
+            "waits_until_execution_window": item.get("waits_until_execution_window") is True,
+            "execute_after_utc": item.get("execute_after_utc"),
+            "execute_after_kst": item.get("execute_after_kst"),
+            "wait_minutes": item.get("wait_minutes"),
+            "execution_window_status": item.get("execution_window_status"),
+            "minutes_until_execution_window": item.get("minutes_until_execution_window"),
+            "overdue_minutes": item.get("overdue_minutes"),
+            "action_due_now": item.get("action_due_now") is True,
+            "effective_execution_window_status": item.get("effective_execution_window_status"),
+            "effective_action_due_now": item.get("effective_action_due_now") is True,
+            "covered_by_current_iteration": item.get("covered_by_current_iteration") is True,
+            "covered_due_by_current_iteration": item.get("covered_due_by_current_iteration") is True,
+            "current_iteration_coverage": dict(item.get("current_iteration_coverage") or {}),
+            "effective_available_now": (
+                item.get("can_run_now") is True
+                and item.get("requires_operator_review") is not True
+                and bool(command)
+                and item.get("covered_by_current_iteration") is not True
+            ),
+            "effective_next_monitor_after_utc": recheck_schedule.get(
+                "effective_next_monitor_after_utc"
+            ),
+            "effective_next_monitor_after_kst": recheck_schedule.get(
+                "effective_next_monitor_after_kst"
+            ),
+            "effective_next_monitor_after_source": recheck_schedule.get(
+                "effective_next_monitor_after_source"
+            ),
+            "raw_next_monitor_after_utc": recheck_schedule.get("raw_next_monitor_after_utc"),
+            "raw_next_monitor_after_kst": recheck_schedule.get("raw_next_monitor_after_kst"),
+            "covered_next_recheck_after_utc": recheck_schedule.get(
+                "covered_next_recheck_after_utc"
+            ),
+            "covered_next_recheck_after_kst": recheck_schedule.get(
+                "covered_next_recheck_after_kst"
+            ),
+            "next_monitor_retimestampted_after_current_iteration": (
+                recheck_schedule.get("next_monitor_retimestampted_after_current_iteration")
+                is True
+            ),
+            "reason": item.get("reason"),
+            "command": command,
+            "command_report_dir": _command_flag_value(command, "--report-dir"),
+            "template_report": item.get("template_report"),
+            "skeleton_report": (
+                item.get("conditional_overfit_operator_review_skeleton_report")
+                or item.get("operator_lineage_review_skeleton_report")
+            ),
+            "validation_command_template": (
+                item.get("conditional_overfit_operator_review_validation_command_template")
+                or item.get("operator_lineage_review_validation_command_template")
+            ),
+            "candidate_recipe_id": item.get("candidate_recipe_id"),
+            "candidate_report": item.get("candidate_report"),
+            "review_packet_fingerprint": item.get("review_packet_fingerprint"),
+            "review_packet_summary": item.get("review_packet_summary"),
+            "source_promotion_gate_report": item.get("source_promotion_gate_report"),
+            "source_promotion_gate_generated_at": item.get("source_promotion_gate_generated_at"),
+            "reviewed_folds": list(item.get("reviewed_folds") or []),
+            "paper_only_scope": item.get("paper_only_scope") is True,
+            "real_shadow_still_required_before_tiny_canary_or_live": (
+                item.get("real_shadow_still_required_before_tiny_canary_or_live") is True
+            ),
+            "order_submission_allowed": False,
+            "no_live_order_sent": item.get("no_live_order_sent") is not False,
+        }
+
+    automation_now = [
+        _summary(item)
+        for item in actions
+        if item.get("can_run_now") is True
+        and item.get("requires_operator_review") is not True
+        and bool(item.get("command"))
+    ]
+    operator_reviews_now = [
+        _summary(item)
+        for item in actions
+        if item.get("requires_operator_review") is True
+        and item.get("can_run_now") is True
+    ]
+    operator_review_waits = [
+        _summary(item)
+        for item in actions
+        if item.get("requires_operator_review") is True
+        and item.get("can_run_now") is not True
+    ]
+    startable_waits = [
+        _summary(item)
+        for item in actions
+        if item.get("can_start_now") is True
+        and item.get("can_run_now") is not True
+        and item.get("waits_until_execution_window") is True
+        and item.get("requires_operator_review") is not True
+        and bool(item.get("command"))
+    ]
+    scheduled_waits = [
+        _summary(item)
+        for item in actions
+        if item.get("can_run_now") is not True
+        and item.get("waits_until_execution_window") is not True
+        and item.get("requires_operator_review") is not True
+    ]
+    automation_now = sorted(automation_now, key=lambda item: (int(item.get("priority") or 999), str(item.get("action_type") or "")))
+    effective_automation_now = [
+        item for item in automation_now if item.get("effective_available_now") is True
+    ]
+    covered_automation_now = [
+        item for item in automation_now if item.get("covered_by_current_iteration") is True
+    ]
+    operator_reviews_now = sorted(
+        operator_reviews_now,
+        key=lambda item: (int(item.get("priority") or 999), str(item.get("action_type") or "")),
+    )
+    operator_review_waits = sorted(
+        operator_review_waits,
+        key=lambda item: (
+            _parse_dt(item.get("execute_after_utc")) or datetime.max.replace(tzinfo=UTC),
+            int(item.get("priority") or 999),
+            str(item.get("action_type") or ""),
+        ),
+    )
+    startable_waits = sorted(startable_waits, key=lambda item: (int(item.get("priority") or 999), str(item.get("action_type") or "")))
+    scheduled_waits = sorted(
+        scheduled_waits,
+        key=lambda item: (
+            _parse_dt(item.get("execute_after_utc")) or datetime.max.replace(tzinfo=UTC),
+            int(item.get("priority") or 999),
+        ),
+    )
+    if automation_now and operator_reviews_now:
+        status = "automation_and_operator_review_available"
+    elif automation_now and operator_review_waits:
+        status = "automation_available_operator_review_waiting"
+    elif automation_now:
+        status = "automation_available"
+    elif operator_reviews_now:
+        status = "operator_review_required"
+    elif startable_waits:
+        status = "startable_time_wait_available"
+    elif operator_review_waits:
+        status = "operator_review_waiting_for_gate"
+    elif scheduled_waits:
+        status = "waiting_for_scheduled_action"
+    else:
+        status = "no_open_work_items"
+    if effective_automation_now and operator_reviews_now:
+        effective_status = "effective_automation_and_operator_review_available"
+    elif effective_automation_now and operator_review_waits:
+        effective_status = "effective_automation_available_operator_review_waiting"
+    elif effective_automation_now:
+        effective_status = "effective_automation_available"
+    elif operator_reviews_now:
+        effective_status = "operator_review_required"
+    elif startable_waits:
+        effective_status = "startable_time_wait_available"
+    elif operator_review_waits:
+        effective_status = "operator_review_waiting_for_gate"
+    elif scheduled_waits:
+        effective_status = "waiting_for_scheduled_action"
+    elif covered_automation_now:
+        effective_status = "safe_automation_covered_this_iteration"
+    else:
+        effective_status = "no_open_work_items"
+    if automation_now and len(covered_automation_now) == len(automation_now):
+        covered_automation_status = "all_raw_automation_covered_this_iteration"
+    elif covered_automation_now and effective_automation_now:
+        covered_automation_status = "mixed_effective_and_covered_automation"
+    elif covered_automation_now:
+        covered_automation_status = "some_raw_automation_covered_this_iteration"
+    else:
+        covered_automation_status = "no_raw_automation_covered_this_iteration"
+    operator_review_count = len(operator_reviews_now) + len(operator_review_waits)
+    return {
+        "status": status,
+        "raw_status": status,
+        "status_scope": "raw_queue_includes_actions_already_covered_this_iteration",
+        "effective_status": effective_status,
+        "effective_status_scope": "covered_actions_excluded_from_effective_queue",
+        "covered_automation_status": covered_automation_status,
+        "automation_now_count": len(automation_now),
+        "raw_automation_now_count": len(automation_now),
+        "effective_automation_now_count": len(effective_automation_now),
+        "covered_automation_now_count": len(covered_automation_now),
+        "operator_review_count": operator_review_count,
+        "operator_review_now_count": len(operator_reviews_now),
+        "operator_review_wait_count": len(operator_review_waits),
+        "startable_wait_count": len(startable_waits),
+        "scheduled_wait_count": len(scheduled_waits),
+        "primary_automation_action": automation_now[0] if automation_now else None,
+        "primary_effective_automation_action": (
+            effective_automation_now[0] if effective_automation_now else None
+        ),
+        "primary_covered_automation_action": (
+            covered_automation_now[0] if covered_automation_now else None
+        ),
+        "primary_operator_review_action": operator_reviews_now[0] if operator_reviews_now else None,
+        "primary_operator_review_wait_action": (
+            operator_review_waits[0] if operator_review_waits else None
+        ),
+        "primary_startable_wait_action": startable_waits[0] if startable_waits else None,
+        "next_scheduled_wait_action": scheduled_waits[0] if scheduled_waits else None,
+        "automation_now": automation_now,
+        "effective_automation_now": effective_automation_now,
+        "covered_automation_now": covered_automation_now,
+        "operator_reviews": operator_reviews_now,
+        "operator_review_waits": operator_review_waits,
+        "operator_reviews_all": [*operator_reviews_now, *operator_review_waits],
+        "startable_waits": startable_waits,
+        "scheduled_waits": scheduled_waits,
+        "notes": [
+            "automation_now_items_can_run_without_operator_review_and_without_live_orders",
+            "effective_automation_now_excludes_items_already_covered_by_current_watch_iteration",
+            "operator_review_now_items_are_immediately_reviewable_but_not_auto_accepted_by_the_watcher",
+            "operator_review_wait_items_require_a_signal_or_time_gate_before_review_is_actionable",
+            "scheduled_wait_items_are_time_or_signal_dependent",
+        ],
+        "order_submission_allowed": False,
+        "no_live_order_sent": all(item.get("no_live_order_sent") is not False for item in actions),
+    }
+
+
+def _operator_review_handoff_summary(
+    *,
+    operator_work_queue: dict[str, Any],
+    meta_router_promotion_gate: dict[str, Any],
+) -> dict[str, Any]:
+    queue = dict(operator_work_queue or {})
+    promotion_gate = dict(meta_router_promotion_gate or {})
+    conditional_review = dict(promotion_gate.get("conditional_overfit_operator_review") or {})
+    conditional_operator = dict(conditional_review.get("operator_review") or {})
+    conditional_artifacts = dict(promotion_gate.get("conditional_overfit_operator_review_artifacts") or {})
+    switch_policy = dict(promotion_gate.get("candidate_switch_policy") or {})
+    defensive_lineage = dict(switch_policy.get("defensive_lineage_review") or {})
+    defensive_operator = dict(defensive_lineage.get("operator_review") or {})
+    defensive_artifacts = dict(promotion_gate.get("operator_lineage_review_artifacts") or {})
+
+    def _review_context(item: dict[str, Any]) -> dict[str, Any]:
+        target = str(item.get("target_gate") or "")
+        if target == "conditional_overfit_operator_review":
+            return {
+                "review_kind": "conditional_overfit",
+                "artifact_status": conditional_artifacts.get("status"),
+                "artifact_blockers": list(conditional_artifacts.get("blockers") or []),
+                "operator_review_status": conditional_operator.get("status"),
+                "operator_review_blockers": list(conditional_operator.get("blockers") or []),
+                "operator_review_template": dict(conditional_review.get("operator_review_template") or {}),
+                "input_operator_review_report": promotion_gate.get(
+                    "input_conditional_overfit_operator_review_report"
+                ),
+                "paper_only_scope": True,
+                "real_shadow_still_required_before_tiny_canary_or_live": True,
+            }
+        if target == "defensive_lineage_review":
+            return {
+                "review_kind": "defensive_lineage",
+                "artifact_status": defensive_artifacts.get("status"),
+                "artifact_blockers": list(defensive_artifacts.get("blockers") or []),
+                "operator_review_status": defensive_operator.get("status"),
+                "operator_review_blockers": list(defensive_operator.get("blockers") or []),
+                "operator_review_template": dict(defensive_lineage.get("operator_review_template") or {}),
+                "input_operator_review_report": promotion_gate.get("input_operator_lineage_review_report"),
+                "paper_only_scope": item.get("paper_only_scope") is True,
+                "real_shadow_still_required_before_tiny_canary_or_live": (
+                    item.get("real_shadow_still_required_before_tiny_canary_or_live") is True
+                ),
+            }
+        return {
+            "review_kind": target or item.get("action_type"),
+            "artifact_status": None,
+            "artifact_blockers": [],
+            "operator_review_status": None,
+            "operator_review_blockers": [],
+            "operator_review_template": {},
+            "input_operator_review_report": None,
+            "paper_only_scope": item.get("paper_only_scope") is True,
+            "real_shadow_still_required_before_tiny_canary_or_live": (
+                item.get("real_shadow_still_required_before_tiny_canary_or_live") is True
+            ),
+        }
+
+    def _operator_review_placeholder_fields(payload: dict[str, Any], *, review_status: str) -> list[str]:
+        remaining: list[str] = []
+        reviewer = str(payload.get("reviewer") or "").strip()
+        reviewed_at = str(payload.get("reviewed_at") or payload.get("accepted_at") or "").strip()
+        rationale = str(payload.get("rationale") or "").strip()
+        if not review_status or review_status.endswith("_accepted_or_rejected"):
+            remaining.append("status")
+        if not reviewer or reviewer == "operator_name_or_initials":
+            remaining.append("reviewer")
+        if not reviewed_at or reviewed_at.startswith("iso8601_timestamp"):
+            remaining.append("reviewed_at")
+        if not rationale or rationale.startswith("why_"):
+            remaining.append("rationale")
+        return remaining
+
+    def _active_review_file_summary(path_value: Any) -> dict[str, Any]:
+        path_text = str(path_value or "").strip()
+        base = {
+            "path": path_text or None,
+            "exists": False,
+            "status": "missing",
+            "review_status": None,
+            "draft_status": None,
+            "operator_required_fields_remaining": [],
+            "candidate_recipe_id": None,
+            "candidate_report": None,
+            "reviewed_folds": [],
+            "review_packet_summary": None,
+            "review_packet_fingerprint": None,
+            "proxy_audit_report": None,
+            "source_promotion_gate_report": None,
+            "source_promotion_gate_generated_at": None,
+            "required_decision_values": [],
+            "blockers": [],
+            "next_action": "prepare_or_attach_operator_review_report",
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+        if not path_text:
+            return base
+        resolved = _resolve(path_text)
+        display_path = _display_path(resolved)
+        if not resolved.exists():
+            return {
+                **base,
+                "path": display_path,
+                "blockers": ["operator_review_report_file_missing"],
+            }
+        payload = _read_json(resolved)
+        if not payload:
+            return {
+                **base,
+                "path": display_path,
+                "exists": True,
+                "status": "review_report_file_unreadable_or_empty",
+                "blockers": ["operator_review_report_file_unreadable_or_empty"],
+                "next_action": "repair_operator_review_report_file_before_validation",
+            }
+        review_status = str(payload.get("status") or payload.get("decision") or "").strip()
+        draft_metadata = dict(payload.get("draft_metadata") or {})
+        draft_status = str(draft_metadata.get("status") or "").strip() or None
+        operator_required_fields_remaining = _operator_review_placeholder_fields(
+            payload,
+            review_status=review_status,
+        )
+        active_payload_fields = {
+            "draft_metadata": draft_metadata,
+            "draft_min_rationale_chars": draft_metadata.get("min_rationale_chars"),
+            "draft_min_evidence_anchors": draft_metadata.get("min_evidence_anchors"),
+            "candidate_recipe_id": payload.get("candidate_recipe_id") or payload.get("recipe_id"),
+            "candidate_report": payload.get("candidate_report"),
+            "reviewed_folds": list(payload.get("reviewed_folds") or []),
+            "review_packet_summary": payload.get("review_packet_summary") or payload.get("summary"),
+            "review_packet_fingerprint": (
+                payload.get("review_packet_fingerprint")
+                or payload.get("overfit_review_packet_fingerprint")
+                or payload.get("lineage_review_fingerprint")
+                or payload.get("fingerprint")
+            ),
+            "proxy_audit_report": (
+                payload.get("proxy_audit_report")
+                or payload.get("conditional_overfit_holdout_audit_report")
+            ),
+            "source_promotion_gate_report": (
+                payload.get("source_promotion_gate_report")
+                or payload.get("source_report")
+                or payload.get("promotion_gate_report")
+            ),
+            "source_promotion_gate_generated_at": (
+                payload.get("source_promotion_gate_generated_at")
+                or payload.get("source_generated_at")
+            ),
+            "required_decision_values": list(payload.get("required_decision_values") or []),
+        }
+        blockers: list[str] = []
+        if payload.get("no_live_order_sent") is not True:
+            blockers.append("operator_review_report_no_live_order_sent_not_true")
+        if payload.get("order_submission_allowed") is not False:
+            blockers.append("operator_review_report_order_submission_allowed_not_false")
+        if blockers:
+            return {
+                **base,
+                "path": display_path,
+                "exists": True,
+                "status": "review_report_file_safety_blocked",
+                "review_status": review_status or None,
+                "draft_status": draft_status,
+                "operator_required_fields_remaining": operator_required_fields_remaining,
+                **active_payload_fields,
+                "blockers": blockers,
+                "next_action": "repair_operator_review_report_safety_fields_before_validation",
+                "no_live_order_sent": False,
+            }
+        if draft_status == "operator_review_draft_prepared" and review_status.endswith("_accepted_or_rejected"):
+            status = "draft_exists_operator_decision_required"
+            next_action = "operator_fill_reviewer_reviewed_at_rationale_and_accept_or_reject_then_run_validation_command"
+        else:
+            status = "review_report_exists_ready_for_validation"
+            next_action = "run_validation_command_with_existing_review_report"
+        return {
+            **base,
+            "path": display_path,
+            "exists": True,
+            "status": status,
+            "review_status": review_status or None,
+            "draft_status": draft_status,
+            "operator_required_fields_remaining": operator_required_fields_remaining,
+            **active_payload_fields,
+            "blockers": [],
+            "next_action": next_action,
+        }
+
+    def _operator_decision_packet(
+        *,
+        item: dict[str, Any],
+        context: dict[str, Any],
+        active_review_file_summary: dict[str, Any],
+        active_operator_review_report: Any,
+        validation_command_with_suggested_path: str | None,
+        suggested_review_report: str | None,
+        waiting: bool,
+    ) -> dict[str, Any]:
+        template = dict(context.get("operator_review_template") or {})
+        active = dict(active_review_file_summary or {})
+        required_fields = list(active.get("operator_required_fields_remaining") or [])
+        accepted_status_values = list(template.get("required_decision_values") or active.get("required_decision_values") or [])
+        active_status = str(active.get("status") or "")
+        if waiting:
+            status = "not_applicable_until_signal_or_time_gate_ready"
+        elif active_status == "review_report_file_safety_blocked":
+            status = "blocked_review_report_safety_fields"
+        elif active_status == "draft_exists_operator_decision_required":
+            status = "operator_decision_required"
+        elif active_operator_review_report and not required_fields:
+            status = "ready_for_validation"
+        elif suggested_review_report:
+            status = "draft_preparation_required"
+        else:
+            status = "review_packet_incomplete"
+        decision_fill_command_template = (
+            ".venv/bin/python scripts/complete_market_state_rotation_v6_operator_review_decision.py "
+            f"--review-report {shlex.quote(str(active_operator_review_report))} "
+            "--in-place "
+            "--decision <accept_or_reject> "
+            "--reviewer <operator_name_or_initials> "
+            "--rationale <operator_rationale> "
+            "--reviewed-at now "
+            f"--min-rationale-chars {DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS} "
+            f"--min-evidence-anchors {DEFAULT_OPERATOR_REVIEW_MIN_EVIDENCE_ANCHORS} "
+            "--backup-dir reports/operations/market_state_rotation_v6_operator_reviews/backups "
+            "--write-summary"
+            if active_operator_review_report and waiting is not True
+            else None
+        )
+        decision_dry_run_command_template = (
+            ".venv/bin/python scripts/complete_market_state_rotation_v6_operator_review_decision.py "
+            f"--review-report {shlex.quote(str(active_operator_review_report))} "
+            "--in-place "
+            "--decision <accept_or_reject> "
+            "--reviewer <operator_name_or_initials> "
+            "--rationale <operator_rationale> "
+            "--reviewed-at now "
+            f"--min-rationale-chars {DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS} "
+            f"--min-evidence-anchors {DEFAULT_OPERATOR_REVIEW_MIN_EVIDENCE_ANCHORS} "
+            "--backup-dir reports/operations/market_state_rotation_v6_operator_reviews/backups "
+            "--dry-run"
+            if active_operator_review_report and waiting is not True
+            else None
+        )
+        live_flags = {
+            "--allow-live-orders",
+            "--enable-live",
+            "--enable-live-orders",
+            "--live",
+            "--live-order",
+            "--live-trading",
+            "--submit-live-order",
+        }
+        fill_tokens = _command_tokens(decision_fill_command_template)
+        dry_run_tokens = _command_tokens(decision_dry_run_command_template)
+        validation_tokens = _command_tokens(validation_command_with_suggested_path)
+        command_blockers: list[str] = []
+        command_warnings: list[str] = []
+        required_placeholders = [
+            "<accept_or_reject>",
+            "<operator_name_or_initials>",
+            "<operator_rationale>",
+        ]
+        if waiting is not True and not fill_tokens:
+            command_blockers.append("decision_fill_command_template_missing")
+        if waiting is not True and not dry_run_tokens:
+            command_blockers.append("decision_dry_run_command_template_missing")
+        if waiting is not True and not validation_tokens:
+            command_blockers.append("decision_validation_command_missing")
+        if any(_is_forbidden_live_flag(token, live_flags) for token in [*fill_tokens, *dry_run_tokens, *validation_tokens]):
+            command_blockers.append("live_order_flag_present_in_operator_decision_commands")
+        if validation_tokens and _has_unresolved_placeholder(validation_tokens):
+            command_blockers.append("decision_validation_command_has_unresolved_placeholder")
+        if fill_tokens and "--in-place" in fill_tokens and not _flag_has_value(fill_tokens, "--backup-dir"):
+            command_blockers.append("decision_fill_in_place_requires_backup_dir")
+        if fill_tokens and not _flag_has_value(fill_tokens, "--reviewed-at"):
+            command_blockers.append("decision_fill_command_reviewed_at_missing_or_invalid")
+        if fill_tokens and not _flag_positive_int_value(fill_tokens, "--min-rationale-chars"):
+            command_blockers.append("decision_fill_command_min_rationale_chars_missing_or_invalid")
+        if fill_tokens and not _flag_positive_int_value(fill_tokens, "--min-evidence-anchors"):
+            command_blockers.append("decision_fill_command_min_evidence_anchors_missing_or_invalid")
+        if dry_run_tokens and "--dry-run" not in dry_run_tokens:
+            command_blockers.append("decision_dry_run_command_must_use_dry_run_flag")
+        if dry_run_tokens and "--in-place" in dry_run_tokens and not _flag_has_value(dry_run_tokens, "--backup-dir"):
+            command_blockers.append("decision_dry_run_in_place_requires_backup_dir")
+        if dry_run_tokens and not _flag_has_value(dry_run_tokens, "--reviewed-at"):
+            command_blockers.append("decision_dry_run_command_reviewed_at_missing_or_invalid")
+        if dry_run_tokens and not _flag_positive_int_value(dry_run_tokens, "--min-rationale-chars"):
+            command_blockers.append("decision_dry_run_command_min_rationale_chars_missing_or_invalid")
+        if dry_run_tokens and not _flag_positive_int_value(dry_run_tokens, "--min-evidence-anchors"):
+            command_blockers.append("decision_dry_run_command_min_evidence_anchors_missing_or_invalid")
+        missing_placeholders = [
+            placeholder
+            for placeholder in required_placeholders
+            if decision_fill_command_template and placeholder not in decision_fill_command_template
+        ]
+        dry_run_missing_placeholders = [
+            placeholder
+            for placeholder in required_placeholders
+            if decision_dry_run_command_template and placeholder not in decision_dry_run_command_template
+        ]
+        if status == "operator_decision_required" and missing_placeholders:
+            command_blockers.append("decision_fill_command_missing_required_explicit_placeholders")
+        if status == "operator_decision_required" and dry_run_missing_placeholders:
+            command_blockers.append("decision_dry_run_command_missing_required_explicit_placeholders")
+        if status == "operator_decision_required" and not missing_placeholders and not dry_run_missing_placeholders:
+            command_warnings.append("decision_fill_command_intentionally_requires_operator_placeholder_replacement")
+        command_safety = {
+            "status": "PASS" if not command_blockers else "FAIL",
+            "blockers": command_blockers,
+            "warnings": command_warnings,
+            "fill_command_checked": bool(fill_tokens),
+            "dry_run_command_checked": bool(dry_run_tokens),
+            "validation_command_checked": bool(validation_tokens),
+            "reviewed_at_required": True,
+            "fill_reviewed_at_present": _flag_has_value(fill_tokens, "--reviewed-at"),
+            "dry_run_reviewed_at_present": _flag_has_value(dry_run_tokens, "--reviewed-at"),
+            "reviewed_at_source_order_enforced_by_completion_tool": True,
+            "reviewed_at_future_guard_enforced_by_completion_tool": True,
+            "rationale_decision_alignment_enforced_by_completion_tool": True,
+            "review_status_placeholder_required_by_completion_tool": True,
+            "draft_metadata_required_by_completion_tool": True,
+            "draft_metadata_contract_enforced_by_completion_tool": True,
+            "source_skeleton_verified_by_completion_tool": True,
+            "source_skeleton_fingerprint_verified_when_required_by_completion_tool": True,
+            "min_rationale_chars_required": DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS,
+            "min_evidence_anchors_required": DEFAULT_OPERATOR_REVIEW_MIN_EVIDENCE_ANCHORS,
+            "fill_min_rationale_chars_present": _flag_positive_int_value(fill_tokens, "--min-rationale-chars"),
+            "dry_run_min_rationale_chars_present": _flag_positive_int_value(dry_run_tokens, "--min-rationale-chars"),
+            "fill_min_evidence_anchors_present": _flag_positive_int_value(fill_tokens, "--min-evidence-anchors"),
+            "dry_run_min_evidence_anchors_present": _flag_positive_int_value(dry_run_tokens, "--min-evidence-anchors"),
+            "required_explicit_placeholders": required_placeholders,
+            "missing_required_explicit_placeholders": missing_placeholders,
+            "dry_run_missing_required_explicit_placeholders": dry_run_missing_placeholders,
+            "validation_command_has_unresolved_placeholder": bool(
+                validation_tokens and _has_unresolved_placeholder(validation_tokens)
+            ),
+            "forbidden_flags": sorted(live_flags),
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+        return {
+            "status": status,
+            "action_type": item.get("action_type"),
+            "target_gate": item.get("target_gate"),
+            "review_kind": context.get("review_kind"),
+            "active_operator_review_report": active_operator_review_report,
+            "suggested_operator_review_report": suggested_review_report,
+            "active_file_status": active.get("status"),
+            "current_review_status": active.get("review_status"),
+            "accepted_status_values": accepted_status_values,
+            "reject_or_keep_blocked_status_note": (
+                "any_non_accepted_status_keeps_this_candidate_or_route_blocked_by_validation"
+            ),
+            "operator_required_fields_remaining": required_fields,
+            "candidate_recipe_id": active.get("candidate_recipe_id") or item.get("candidate_recipe_id"),
+            "candidate_report": active.get("candidate_report") or item.get("candidate_report") or template.get("candidate_report"),
+            "reviewed_folds": list(active.get("reviewed_folds") or item.get("reviewed_folds") or template.get("reviewed_folds") or []),
+            "review_packet_summary": (
+                active.get("review_packet_summary")
+                or item.get("review_packet_summary")
+                or template.get("review_packet_summary")
+            ),
+            "review_packet_fingerprint": (
+                active.get("review_packet_fingerprint")
+                or item.get("review_packet_fingerprint")
+                or template.get("review_packet_fingerprint")
+            ),
+            "proxy_audit_report": active.get("proxy_audit_report") or template.get("proxy_audit_report"),
+            "source_promotion_gate_report": (
+                active.get("source_promotion_gate_report") or item.get("source_promotion_gate_report")
+            ),
+            "source_promotion_gate_generated_at": (
+                active.get("source_promotion_gate_generated_at")
+                or item.get("source_promotion_gate_generated_at")
+            ),
+            "validation_command": validation_command_with_suggested_path,
+            "decision_dry_run_command_template": decision_dry_run_command_template,
+            "decision_dry_run_command_requires_explicit_accept_or_reject": bool(decision_dry_run_command_template),
+            "decision_fill_command_template": decision_fill_command_template,
+            "decision_fill_command_requires_explicit_accept_or_reject": bool(decision_fill_command_template),
+            "decision_command_safety": command_safety,
+            "operator_must_choose_accept_or_reject": waiting is not True,
+            "auto_accept_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": active.get("no_live_order_sent") is not False and item.get("no_live_order_sent") is not False,
+        }
+
+    def _row(item: dict[str, Any], *, waiting: bool) -> dict[str, Any]:
+        context = _review_context(item)
+        artifact_blockers = list(context.get("artifact_blockers") or [])
+        operator_blockers = list(context.get("operator_review_blockers") or [])
+        template_report = item.get("template_report")
+        skeleton_report = item.get("skeleton_report")
+        validation_command = item.get("validation_command_template")
+        review_kind = str(context.get("review_kind") or item.get("target_gate") or item.get("action_type") or "review")
+        fingerprint = str(item.get("review_packet_fingerprint") or "").strip()
+        fingerprint_token = fingerprint[:12] if fingerprint else _fingerprint_payload(
+            {
+                "action_type": item.get("action_type"),
+                "target_gate": item.get("target_gate"),
+                "template_report": template_report,
+                "skeleton_report": skeleton_report,
+            }
+        )[:12]
+        candidate_token = _slug_token(
+            item.get("candidate_recipe_id") or item.get("target_gate") or item.get("action_type"),
+            max_length=72,
+        )
+        suggested_review_report = (
+            "reports/operations/market_state_rotation_v6_operator_reviews/"
+            f"{_slug_token(review_kind, max_length=32)}_{candidate_token}_{fingerprint_token}.json"
+            if waiting is not True
+            else None
+        )
+        validation_command_with_suggested_path = None
+        if validation_command and suggested_review_report:
+            validation_command_with_suggested_path = str(validation_command)
+            for placeholder in [
+                "<conditional_overfit_operator_review_report.json>",
+                "<operator_lineage_review_report.json>",
+            ]:
+                validation_command_with_suggested_path = validation_command_with_suggested_path.replace(
+                    placeholder,
+                    shlex.quote(suggested_review_report),
+                )
+        suggested_review_report_exists = (
+            _resolve(suggested_review_report).exists() if suggested_review_report else False
+        )
+        input_operator_review_report = context.get("input_operator_review_report")
+        active_operator_review_report = (
+            input_operator_review_report
+            or suggested_review_report
+            if suggested_review_report_exists
+            else input_operator_review_report
+        )
+        active_review_file_summary = _active_review_file_summary(active_operator_review_report)
+        review_file_next_action = (
+            "not_applicable_until_signal_or_time_gate_ready"
+            if waiting
+            else active_review_file_summary.get("next_action")
+            if active_operator_review_report
+            else "fill_suggested_review_report_from_skeleton_then_run_validation_command"
+            if suggested_review_report
+            else "repair_review_packet_before_operator_decision"
+        )
+        draft_prepare_command = (
+            ".venv/bin/python scripts/prepare_market_state_rotation_v6_operator_review_draft.py "
+            f"--skeleton-report {shlex.quote(str(skeleton_report))} "
+            f"--output-report {shlex.quote(str(suggested_review_report))} "
+            f"--min-rationale-chars {DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS} "
+            f"--min-evidence-anchors {DEFAULT_OPERATOR_REVIEW_MIN_EVIDENCE_ANCHORS} "
+            "--write-summary"
+            if skeleton_report and suggested_review_report and not suggested_review_report_exists
+            else None
+        )
+        operator_decision_packet = _operator_decision_packet(
+            item=item,
+            context=context,
+            active_review_file_summary=active_review_file_summary,
+            active_operator_review_report=active_operator_review_report,
+            validation_command_with_suggested_path=validation_command_with_suggested_path,
+            suggested_review_report=suggested_review_report,
+            waiting=waiting,
+        )
+        missing_packet_fields = [
+            name
+            for name, value in {
+                "template_report": template_report,
+                "skeleton_report": skeleton_report,
+                "validation_command_template": validation_command,
+            }.items()
+            if not value and waiting is not True
+        ]
+        if waiting:
+            status = "waiting_for_signal_or_time_gate"
+        elif artifact_blockers or missing_packet_fields:
+            status = "blocked_review_packet_incomplete"
+        else:
+            status = "ready_for_operator_review"
+        return {
+            "action_type": item.get("action_type"),
+            "target_gate": item.get("target_gate"),
+            "review_kind": context.get("review_kind"),
+            "status": status,
+            "can_run_now": item.get("can_run_now") is True,
+            "waiting_for_gate": waiting,
+            "priority": item.get("priority"),
+            "reason": item.get("reason"),
+            "execute_after_utc": item.get("execute_after_utc"),
+            "execute_after_kst": item.get("execute_after_kst"),
+            "template_report": template_report,
+            "skeleton_report": skeleton_report,
+            "validation_command_template": validation_command,
+            "suggested_operator_review_report": suggested_review_report,
+            "suggested_operator_review_report_exists": suggested_review_report_exists,
+            "active_operator_review_report": active_operator_review_report,
+            "active_operator_review_file_status": active_review_file_summary.get("status"),
+            "active_operator_review_file_summary": active_review_file_summary,
+            "operator_required_fields_remaining": list(
+                active_review_file_summary.get("operator_required_fields_remaining") or []
+            ),
+            "operator_decision_packet": operator_decision_packet,
+            "validation_command_with_suggested_report": validation_command_with_suggested_path,
+            "operator_review_file_plan": {
+                "status": (
+                    "active_review_report_safety_blocked"
+                    if active_review_file_summary.get("status") == "review_report_file_safety_blocked"
+                    else "active_review_draft_waiting_for_operator_decision"
+                    if active_review_file_summary.get("status") == "draft_exists_operator_decision_required"
+                    else "active_review_report_ready_for_validation"
+                    if active_operator_review_report
+                    else
+                    "suggested_review_report_ready"
+                    if suggested_review_report and validation_command_with_suggested_path
+                    else "not_applicable_until_gate_ready"
+                    if waiting
+                    else "review_report_plan_incomplete"
+                ),
+                "skeleton_source_report": skeleton_report,
+                "suggested_review_report": suggested_review_report,
+                "suggested_review_report_exists": suggested_review_report_exists,
+                "active_operator_review_report": active_operator_review_report,
+                "active_operator_review_file_status": active_review_file_summary.get("status"),
+                "active_operator_review_file_next_action": active_review_file_summary.get("next_action"),
+                "active_operator_review_file_safety_blockers": list(active_review_file_summary.get("blockers") or []),
+                "operator_required_fields_remaining": list(
+                    active_review_file_summary.get("operator_required_fields_remaining") or []
+                ),
+                "draft_prepare_command": draft_prepare_command,
+                "draft_prepare_required": bool(draft_prepare_command),
+                "validation_command": validation_command_with_suggested_path,
+                "next_action": review_file_next_action,
+                "auto_write_review_report": False,
+                "operator_must_choose_accept_or_reject": waiting is not True,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            },
+            "artifact_status": context.get("artifact_status"),
+            "artifact_blockers": artifact_blockers,
+            "missing_packet_fields": missing_packet_fields,
+            "operator_review_status": context.get("operator_review_status"),
+            "operator_review_blockers": operator_blockers,
+            "input_operator_review_report": input_operator_review_report,
+            "candidate_recipe_id": item.get("candidate_recipe_id"),
+            "candidate_report": item.get("candidate_report"),
+            "review_packet_fingerprint": item.get("review_packet_fingerprint"),
+            "review_packet_summary": item.get("review_packet_summary"),
+            "source_promotion_gate_report": item.get("source_promotion_gate_report"),
+            "source_promotion_gate_generated_at": item.get("source_promotion_gate_generated_at"),
+            "reviewed_folds": list(item.get("reviewed_folds") or []),
+            "paper_only_scope": context.get("paper_only_scope") is True,
+            "real_shadow_still_required_before_tiny_canary_or_live": (
+                context.get("real_shadow_still_required_before_tiny_canary_or_live") is True
+            ),
+            "operator_decision_required": waiting is not True,
+            "auto_accept_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": item.get("no_live_order_sent") is not False,
+        }
+
+    immediate = [
+        _row(dict(item), waiting=False)
+        for item in list(queue.get("operator_reviews") or [])
+    ]
+    waiting = [
+        _row(dict(item), waiting=True)
+        for item in list(queue.get("operator_review_waits") or [])
+    ]
+    reviews = [*immediate, *waiting]
+    ready = [item for item in immediate if item.get("status") == "ready_for_operator_review"]
+    blocked = [item for item in immediate if item.get("status") == "blocked_review_packet_incomplete"]
+    waiting_rows = [item for item in reviews if item.get("waiting_for_gate") is True]
+    decision_packets = [
+        dict(item.get("operator_decision_packet") or {})
+        for item in reviews
+        if item.get("operator_decision_packet")
+    ]
+    actionable_decision_packets = [
+        item for item in decision_packets if item.get("status") == "operator_decision_required"
+    ]
+    if blocked:
+        status = "operator_review_packet_blocked"
+    elif ready:
+        status = "operator_review_ready"
+    elif waiting_rows:
+        status = "operator_review_waiting_for_gate"
+    else:
+        status = "no_operator_review_work"
+    return {
+        "status": status,
+        "ready_review_count": len(ready),
+        "blocked_review_count": len(blocked),
+        "waiting_review_count": len(waiting_rows),
+        "total_review_count": len(reviews),
+        "primary_ready_review": ready[0] if ready else None,
+        "primary_blocked_review": blocked[0] if blocked else None,
+        "primary_waiting_review": waiting_rows[0] if waiting_rows else None,
+        "primary_operator_decision_packet": (
+            actionable_decision_packets[0]
+            if actionable_decision_packets
+            else decision_packets[0]
+            if decision_packets
+            else None
+        ),
+        "operator_decision_packet_count": len(decision_packets),
+        "operator_decision_required_count": len(actionable_decision_packets),
+        "operator_decision_packets": decision_packets,
+        "reviews": reviews,
+        "notes": [
+            "operator_review_handoff_does_not_accept_or_reject_reviews",
+            "ready_reviews_have_complete_template_skeleton_and_validation_command_context",
+            "waiting_reviews_require_a_future_signal_or_time_gate_before_operator_decision",
+        ],
+        "order_submission_allowed": False,
+        "no_live_order_sent": all(item.get("no_live_order_sent") is not False for item in reviews),
+    }
+
+
+def _launch_blocker_priority_summary(
+    *,
+    unresolved_problem_register: list[dict[str, Any]],
+    operator_review_handoff_summary: dict[str, Any],
+    execution_parity_status_summary: dict[str, Any],
+) -> dict[str, Any]:
+    problems = [dict(item) for item in list(unresolved_problem_register or [])]
+    review_handoff = dict(operator_review_handoff_summary or {})
+    execution_parity = dict(execution_parity_status_summary or {})
+    severity_rank = {
+        "launch_blocker": 0,
+        "paper_launch_blocker": 1,
+        "paper_lifecycle_blocker": 1,
+        "live_readiness_blocker": 2,
+        "paper_candidate_blocker": 3,
+        "defensive_route_blocker": 4,
+        "evidence_depth_blocker": 5,
+        "info": 99,
+    }
+
+    def _category(problem: dict[str, Any]) -> str:
+        if (
+            str(problem.get("id") or "") == "first_real_paper_lifecycle_row"
+            or str(problem.get("actionability") or "").startswith("dependency_blocked")
+        ):
+            return "dependency_blocked"
+        if problem.get("non_substitutable") is True:
+            return "non_substitutable_wait"
+        if str(problem.get("id") or "").endswith("operator_review"):
+            return "operator_review"
+        if "operator_review" in str(problem.get("id") or ""):
+            return "operator_review"
+        return "review_or_configuration"
+
+    priority_items = []
+    for problem in problems:
+        category = _category(problem)
+        priority_items.append(
+            {
+                "id": problem.get("id"),
+                "category": category,
+                "status": problem.get("status"),
+                "severity": problem.get("severity"),
+                "severity_rank": severity_rank.get(str(problem.get("severity") or ""), 50),
+                "non_substitutable": problem.get("non_substitutable") is True,
+                "next_action": problem.get("next_action"),
+                "safe_action_type": problem.get("safe_action_type"),
+                "order_submission_allowed": False,
+                "no_live_order_sent": problem.get("no_live_order_sent") is not False,
+            }
+        )
+    priority_items = sorted(
+        priority_items,
+        key=lambda item: (
+            int(item.get("severity_rank") if item.get("severity_rank") is not None else 50),
+            0 if item.get("non_substitutable") is True else 1,
+            str(item.get("id") or ""),
+        ),
+    )
+    waiting_blockers = [item for item in priority_items if item.get("category") == "non_substitutable_wait"]
+    dependency_blockers = [item for item in priority_items if item.get("category") == "dependency_blocked"]
+    non_substitutable_items = [
+        item for item in priority_items if item.get("non_substitutable") is True
+    ]
+    review_blockers = [item for item in priority_items if item.get("category") == "operator_review"]
+    ready_reviews = [
+        dict(item)
+        for item in list(review_handoff.get("reviews") or [])
+        if item.get("status") == "ready_for_operator_review"
+    ]
+    blocked_reviews = [
+        dict(item)
+        for item in list(review_handoff.get("reviews") or [])
+        if item.get("status") == "blocked_review_packet_incomplete"
+    ]
+    if waiting_blockers and ready_reviews:
+        status = "waiting_for_realtime_evidence_with_operator_reviews_ready"
+    elif waiting_blockers:
+        status = "waiting_for_realtime_evidence"
+    elif blocked_reviews:
+        status = "operator_review_packet_blocked"
+    elif ready_reviews:
+        status = "operator_reviews_ready"
+    elif priority_items:
+        status = "open_blockers_need_review"
+    else:
+        status = "no_open_blockers"
+    return {
+        "status": status,
+        "open_problem_count": len(priority_items),
+        "non_substitutable_problem_count": len(non_substitutable_items),
+        "non_substitutable_wait_blocker_count": len(waiting_blockers),
+        "non_substitutable_blocker_count": len(waiting_blockers),
+        "waiting_blocker_count": len(waiting_blockers),
+        "dependency_blocked_count": len(dependency_blockers),
+        "operator_review_problem_count": len(review_blockers),
+        "operator_review_ready_count": len(ready_reviews),
+        "operator_review_blocked_count": len(blocked_reviews),
+        "execution_parity_missing_samples": execution_parity.get("missing_samples"),
+        "execution_parity_eta_completion_kst": execution_parity.get("estimated_completion_kst"),
+        "primary_non_substitutable_problem": (
+            non_substitutable_items[0] if non_substitutable_items else None
+        ),
+        "primary_waiting_blocker": waiting_blockers[0] if waiting_blockers else None,
+        "primary_dependency_blocker": dependency_blockers[0] if dependency_blockers else None,
+        "primary_operator_review": ready_reviews[0] if ready_reviews else None,
+        "priority_items": priority_items,
+        "non_substitutable_items": non_substitutable_items,
+        "dependency_blocked_items": dependency_blockers,
+        "operator_review_ready_items": ready_reviews,
+        "operator_review_blocked_items": blocked_reviews,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            review_handoff.get("no_live_order_sent") is not False
+            and execution_parity.get("no_live_order_sent") is not False
+            and all(item.get("no_live_order_sent") is not False for item in priority_items)
+        ),
+    }
+
+
+def _remaining_work_closure_summary(
+    *,
+    unresolved_problem_register: list[dict[str, Any]],
+    operator_work_queue: dict[str, Any],
+    operator_review_handoff_summary: dict[str, Any],
+    launch_blocker_priority_summary: dict[str, Any],
+    runtime_progress: dict[str, Any],
+    microstructure_watch: dict[str, Any],
+    execution_parity_status_summary: dict[str, Any],
+    fresh_signal_blocker_diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    problems = [dict(item) for item in list(unresolved_problem_register or [])]
+    queue = dict(operator_work_queue or {})
+    review_handoff = dict(operator_review_handoff_summary or {})
+    priority = dict(launch_blocker_priority_summary or {})
+    runtime = dict(runtime_progress or {})
+    coverage = dict(dict(microstructure_watch or {}).get("coverage_plan") or {})
+    parity = dict(execution_parity_status_summary or {})
+    signal_blocker = dict(fresh_signal_blocker_diagnostics or {})
+    signal_cause_partition = dict(signal_blocker.get("cause_partition") or {})
+    signal_strategy_blocker = dict(signal_cause_partition.get("strategy_design_blocker") or {})
+    raw_automation_now = [dict(item) for item in list(queue.get("automation_now") or [])]
+    effective_automation_now = [
+        dict(item) for item in list(queue.get("effective_automation_now") or [])
+    ]
+    effective_queue_available = "effective_automation_now" in queue
+    if not effective_queue_available:
+        effective_automation_now = list(raw_automation_now)
+    covered_automation_now = [
+        dict(item) for item in list(queue.get("covered_automation_now") or [])
+    ]
+    automation_now = effective_automation_now
+    current_date_missing = coverage.get("current_utc_date_missing") is True
+    current_hour_missing = coverage.get("current_utc_hour_missing") is True
+    remaining_quote_samples = _int_or_default(coverage.get("remaining_quote_samples"), 0)
+    remaining_calendar_days_for_usefulness = _int_or_default(coverage.get("remaining_calendar_days"), 0)
+    remaining_missing_hour_count = _int_or_default(coverage.get("remaining_missing_utc_hour_count"), 0)
+
+    def _automation_usefulness(item: dict[str, Any]) -> dict[str, Any]:
+        action_type = str(item.get("action_type") or "")
+        useful_now = True
+        reason = "can_run_and_may_advance_realtime_gate"
+        recheck_schedule = _current_iteration_recheck_schedule(item)
+        if action_type == "capture_microstructure_quote_window_now":
+            useful_now = bool(
+                current_date_missing
+                or current_hour_missing
+                or remaining_quote_samples > 0
+                or remaining_missing_hour_count > 0
+            )
+            if useful_now:
+                reason = "current_quote_window_can_advance_microstructure_coverage"
+            elif remaining_calendar_days_for_usefulness > 0:
+                reason = "current_quote_window_already_covered_wait_for_next_utc_calendar_day"
+            else:
+                reason = "quote_microstructure_gate_already_satisfied"
+        elif action_type == "monitor_fresh_signal":
+            reason = "keeps_fresh_signal_capture_cadence_aligned"
+        return {
+            "action_type": action_type,
+            "target_gate": item.get("target_gate"),
+            "priority": item.get("priority"),
+            "useful_now": useful_now,
+            "reason": reason,
+            "command": item.get("command"),
+            "execute_after_kst": item.get("execute_after_kst"),
+            "effective_next_monitor_after_utc": recheck_schedule.get(
+                "effective_next_monitor_after_utc"
+            ),
+            "effective_next_monitor_after_kst": recheck_schedule.get(
+                "effective_next_monitor_after_kst"
+            ),
+            "effective_next_monitor_after_source": recheck_schedule.get(
+                "effective_next_monitor_after_source"
+            ),
+            "raw_next_monitor_after_utc": recheck_schedule.get("raw_next_monitor_after_utc"),
+            "raw_next_monitor_after_kst": recheck_schedule.get("raw_next_monitor_after_kst"),
+            "covered_next_recheck_after_utc": recheck_schedule.get(
+                "covered_next_recheck_after_utc"
+            ),
+            "covered_next_recheck_after_kst": recheck_schedule.get(
+                "covered_next_recheck_after_kst"
+            ),
+            "next_monitor_retimestampted_after_current_iteration": (
+                recheck_schedule.get("next_monitor_retimestampted_after_current_iteration")
+                is True
+            ),
+            "order_submission_allowed": False,
+            "no_live_order_sent": item.get("no_live_order_sent") is not False,
+        }
+
+    raw_automation_usefulness = [_automation_usefulness(item) for item in raw_automation_now]
+    automation_usefulness = [_automation_usefulness(item) for item in automation_now]
+    raw_useful_automation_now = [
+        item for item in raw_automation_usefulness if item.get("useful_now") is True
+    ]
+    raw_noop_or_deferred_automation_now = [
+        item for item in raw_automation_usefulness if item.get("useful_now") is not True
+    ]
+    useful_automation_now = [item for item in automation_usefulness if item.get("useful_now") is True]
+    noop_or_deferred_automation_now = [
+        item for item in automation_usefulness if item.get("useful_now") is not True
+    ]
+    startable_waits = [dict(item) for item in list(queue.get("startable_waits") or [])]
+    scheduled_waits = [dict(item) for item in list(queue.get("scheduled_waits") or [])]
+    reviews = [dict(item) for item in list(review_handoff.get("reviews") or [])]
+    ready_reviews = [item for item in reviews if item.get("status") == "ready_for_operator_review"]
+    waiting_reviews = [item for item in reviews if item.get("status") == "waiting_for_signal_or_time_gate"]
+    blocked_reviews = [item for item in reviews if item.get("status") == "blocked_review_packet_incomplete"]
+    decision_required = [
+        item
+        for item in ready_reviews
+        if dict(item.get("operator_decision_packet") or {}).get("status") == "operator_decision_required"
+    ]
+    review_drafts_prepared = [
+        item
+        for item in ready_reviews
+        if item.get("active_operator_review_file_status") == "draft_exists_operator_decision_required"
+    ]
+    review_safety_passed = [
+        item
+        for item in decision_required
+        if dict(dict(item.get("operator_decision_packet") or {}).get("decision_command_safety") or {}).get(
+            "status"
+        )
+        == "PASS"
+    ]
+    runtime_remaining_hours = _number_or_none(runtime.get("remaining_hours"))
+    non_substitutable = [item for item in problems if item.get("non_substitutable") is True]
+    operator_review_problem_ids = [
+        str(item.get("id"))
+        for item in problems
+        if "operator_review" in str(item.get("id") or "")
+    ]
+    non_substitutable_ids = [str(item.get("id")) for item in non_substitutable]
+    if (
+        runtime_remaining_hours is not None
+        and runtime_remaining_hours > 0.0
+        and "shadow_runtime_24h_observed" not in non_substitutable_ids
+    ):
+        non_substitutable_ids.append("shadow_runtime_24h_observed")
+    wait_only_ids = [
+        problem_id
+        for problem_id in non_substitutable_ids
+        if problem_id
+        in {
+            "current_fresh_signal",
+            "execution_parity_samples",
+            "microstructure_calendar_day_coverage",
+            "shadow_runtime_24h_observed",
+        }
+    ]
+    dependency_blocked_problem_ids = [
+        problem_id
+        for problem_id in non_substitutable_ids
+        if problem_id and problem_id not in set(wait_only_ids)
+    ]
+    remaining_calendar_days = _int_or_default(coverage.get("remaining_calendar_days"), 0)
+    missing_parity_samples = _int_or_default(parity.get("missing_samples"), 0)
+    auto_complete_blockers: list[str] = []
+    if "current_fresh_signal" in wait_only_ids:
+        auto_complete_blockers.append("fresh_signal_requires_realtime_market_event")
+    if missing_parity_samples > 0:
+        auto_complete_blockers.append("execution_parity_requires_real_reviewed_paper_lifecycle_rows")
+    if remaining_calendar_days > 0:
+        auto_complete_blockers.append("quote_calendar_coverage_requires_future_utc_dates")
+    if runtime_remaining_hours is not None and runtime_remaining_hours > 0:
+        auto_complete_blockers.append("shadow_runtime_requires_continuous_calendar_observation")
+    if decision_required:
+        auto_complete_blockers.append("operator_reviews_require_explicit_accept_or_reject")
+    if blocked_reviews:
+        auto_complete_blockers.append("operator_review_packets_have_incomplete_artifacts")
+    code_prepared_count = len(review_drafts_prepared) + len(review_safety_passed)
+    has_wait_or_decision = bool(
+        wait_only_ids
+        or dependency_blocked_problem_ids
+        or decision_required
+        or waiting_reviews
+        or blocked_reviews
+    )
+    if blocked_reviews:
+        status = "remaining_work_has_blocked_review_packets"
+    elif has_wait_or_decision and automation_now:
+        status = "automation_continues_operator_and_realtime_gates_remaining"
+    elif has_wait_or_decision:
+        status = "operator_or_realtime_gates_remaining"
+    elif automation_now or startable_waits or scheduled_waits:
+        status = "automation_work_available"
+    else:
+        status = "no_remaining_work_detected"
+    problem_by_id = {str(item.get("id") or ""): item for item in problems}
+    current_fresh_problem = dict(problem_by_id.get("current_fresh_signal") or {})
+    parity_problem = dict(problem_by_id.get("execution_parity_samples") or {})
+    calendar_problem = dict(problem_by_id.get("microstructure_calendar_day_coverage") or {})
+    runtime_problem = dict(problem_by_id.get("shadow_runtime_24h_observed") or {})
+    wait_only_problems = [
+        dict(problem_by_id.get(problem_id) or {})
+        for problem_id in wait_only_ids
+        if problem_by_id.get(problem_id)
+    ]
+    dependency_blocked_problems = [
+        dict(problem_by_id.get(problem_id) or {})
+        for problem_id in dependency_blocked_problem_ids
+        if problem_by_id.get(problem_id)
+    ]
+    monitor_action = next(
+        (
+            dict(item)
+            for item in automation_usefulness
+            if item.get("action_type") == "monitor_fresh_signal"
+        ),
+        next(
+            (
+                dict(item)
+                for item in raw_automation_usefulness
+                if item.get("action_type") == "monitor_fresh_signal"
+            ),
+            {},
+        ),
+    )
+    effective_monitor_action = next(
+        (
+            dict(item)
+            for item in automation_usefulness
+            if item.get("action_type") == "monitor_fresh_signal"
+        ),
+        {},
+    )
+    operator_input_lane = {
+        "status": (
+            "operator_inputs_ready_for_manual_decision"
+            if decision_required and not blocked_reviews
+            else "operator_review_packets_need_repair"
+            if blocked_reviews
+            else "operator_inputs_not_currently_required"
+        ),
+        "decision_required_count": len(decision_required),
+        "ready_review_count": len(ready_reviews),
+        "draft_prepared_count": len(review_drafts_prepared),
+        "command_safety_pass_count": len(review_safety_passed),
+        "problem_ids": operator_review_problem_ids,
+        "manual_only": bool(decision_required or blocked_reviews),
+        "auto_decision_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": all(item.get("no_live_order_sent") is not False for item in reviews),
+    }
+    realtime_signal_lane = {
+        "status": (
+            "waiting_for_realtime_fresh_signal"
+            if "current_fresh_signal" in wait_only_ids
+            else "fresh_signal_gate_not_currently_blocking"
+        ),
+        "problem_id": "current_fresh_signal" if current_fresh_problem else None,
+        "monitor_action_type": monitor_action.get("action_type"),
+        "monitor_useful_now": monitor_action.get("useful_now") is True,
+        "monitor_effective_useful_now": effective_monitor_action.get("useful_now") is True,
+        "monitor_execute_after_kst": monitor_action.get("execute_after_kst"),
+        "monitor_effective_next_after_utc": monitor_action.get(
+            "effective_next_monitor_after_utc"
+        ),
+        "monitor_effective_next_after_kst": monitor_action.get(
+            "effective_next_monitor_after_kst"
+        ),
+        "monitor_raw_next_after_kst": monitor_action.get("raw_next_monitor_after_kst"),
+        "monitor_covered_next_recheck_after_kst": monitor_action.get(
+            "covered_next_recheck_after_kst"
+        ),
+        "monitor_next_after_source": monitor_action.get("effective_next_monitor_after_source"),
+        "monitor_next_after_retimestampted_after_current_iteration": (
+            monitor_action.get("next_monitor_retimestampted_after_current_iteration") is True
+        ),
+        "monitor_command": monitor_action.get("command"),
+        "non_substitutable": bool(current_fresh_problem),
+        "unlocks": ["first_real_paper_lifecycle_row", "execution_parity_samples"],
+        "order_submission_allowed": False,
+        "no_live_order_sent": current_fresh_problem.get("no_live_order_sent") is not False,
+    }
+    first_paper_row_lane = {
+        "status": (
+            "blocked_until_fresh_signal_and_operator_review"
+            if "current_fresh_signal" in wait_only_ids
+            else "ready_only_after_paper_apply_operator_gate"
+            if decision_required
+            else "not_currently_blocked"
+        ),
+        "depends_on": ["current_fresh_signal", "operator_review_decisions"],
+        "requires_operator_review": True,
+        "auto_apply_allowed": False,
+        "unlocks": ["execution_parity_samples"],
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+    execution_parity_lane = {
+        "status": (
+            "waiting_for_real_reviewed_paper_lifecycle_rows"
+            if missing_parity_samples > 0
+            else "execution_parity_sample_floor_satisfied"
+        ),
+        "problem_id": "execution_parity_samples" if parity_problem else None,
+        "missing_samples": missing_parity_samples,
+        "eta_completion_kst": parity.get("estimated_completion_kst"),
+        "depends_on": ["first_real_paper_lifecycle_row"],
+        "non_substitutable": missing_parity_samples > 0,
+        "backtest_substitution_allowed": parity.get("backtest_substitution_allowed") is True,
+        "order_submission_allowed": False,
+        "no_live_order_sent": parity.get("no_live_order_sent") is not False,
+    }
+    calendar_coverage_lane = {
+        "status": (
+            "waiting_for_future_quote_calendar_days"
+            if remaining_calendar_days > 0
+            else "quote_calendar_coverage_satisfied"
+        ),
+        "problem_id": "microstructure_calendar_day_coverage" if calendar_problem else None,
+        "remaining_calendar_days": remaining_calendar_days,
+        "next_quote_window_kst": coverage.get("next_quote_coverage_kst_at"),
+        "earliest_completion_kst": coverage.get("earliest_calendar_completion_kst"),
+        "backfill_allowed_for_launch_gate": False,
+        "non_substitutable": remaining_calendar_days > 0,
+        "order_submission_allowed": False,
+        "no_live_order_sent": calendar_problem.get("no_live_order_sent") is not False,
+    }
+    runtime_observation_lane = {
+        "status": (
+            "collecting_shadow_runtime"
+            if runtime_remaining_hours is not None and runtime_remaining_hours > 0
+            else "shadow_runtime_target_satisfied"
+        ),
+        "remaining_hours": runtime_remaining_hours,
+        "progress_pct": runtime.get("progress_pct"),
+        "non_substitutable": runtime_remaining_hours is not None and runtime_remaining_hours > 0,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+    dependency_lanes = {
+        "status": (
+            "operator_and_realtime_dependencies_open"
+            if decision_required and wait_only_ids
+            else "realtime_dependencies_open"
+            if wait_only_ids
+            else "operator_dependencies_open"
+            if decision_required or blocked_reviews
+            else "no_open_dependencies_detected"
+        ),
+        "operator_input_lane": operator_input_lane,
+        "realtime_signal_lane": realtime_signal_lane,
+        "first_paper_row_lane": first_paper_row_lane,
+        "execution_parity_lane": execution_parity_lane,
+        "calendar_coverage_lane": calendar_coverage_lane,
+        "runtime_observation_lane": runtime_observation_lane,
+        "critical_path": [
+            item
+            for item in [
+                "current_fresh_signal" if "current_fresh_signal" in wait_only_ids else None,
+                "operator_review_decisions" if decision_required else None,
+                "first_real_paper_lifecycle_row"
+                if ("current_fresh_signal" in wait_only_ids or decision_required)
+                else None,
+                "execution_parity_samples" if missing_parity_samples > 0 else None,
+            ]
+            if item
+        ],
+        "parallel_calendar_path": [
+            item
+            for item in [
+                "microstructure_calendar_day_coverage" if remaining_calendar_days > 0 else None,
+                "shadow_runtime_24h_observed"
+                if runtime_remaining_hours is not None and runtime_remaining_hours > 0
+                else None,
+            ]
+            if item
+        ],
+        "policy": (
+            "automation_may_monitor_or_collect_quotes_but_must_not_replace_operator_or_realtime_gates"
+        ),
+        "auto_decision_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            operator_input_lane.get("no_live_order_sent") is not False
+            and realtime_signal_lane.get("no_live_order_sent") is not False
+            and execution_parity_lane.get("no_live_order_sent") is not False
+            and calendar_coverage_lane.get("no_live_order_sent") is not False
+            and runtime_observation_lane.get("no_live_order_sent") is not False
+        ),
+    }
+    run_now_without_operator = [
+        {
+            "action_type": item.get("action_type"),
+            "target_gate": item.get("target_gate"),
+            "priority": item.get("priority"),
+            "command": item.get("command"),
+            "execute_after_kst": item.get("execute_after_kst"),
+            "reason": item.get("reason"),
+            "safe_to_auto_run_without_operator": True,
+            "order_submission_allowed": False,
+            "no_live_order_sent": item.get("no_live_order_sent") is not False,
+        }
+        for item in useful_automation_now
+    ]
+    manual_now = []
+    for item in decision_required:
+        packet = dict(item.get("operator_decision_packet") or {})
+        manual_now.append(
+            {
+                "action_type": item.get("action_type"),
+                "target_gate": item.get("target_gate"),
+                "review_kind": item.get("review_kind"),
+                "active_operator_review_report": item.get("active_operator_review_report"),
+                "active_operator_review_file_status": item.get("active_operator_review_file_status"),
+                "required_fields_remaining": list(item.get("operator_required_fields_remaining") or []),
+                "dry_run_command_template": packet.get("decision_dry_run_command_template"),
+                "validation_command": packet.get("validation_command"),
+                "safe_default_if_uncertain": "reject_or_hold_blocked",
+                "requires_operator_review": True,
+                "auto_execute_allowed": False,
+                "auto_decision_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": (
+                    item.get("no_live_order_sent") is not False
+                    and packet.get("no_live_order_sent") is not False
+                ),
+            }
+        )
+    manual_repair_now = [
+        {
+            "action_type": item.get("action_type"),
+            "target_gate": item.get("target_gate"),
+            "missing_packet_fields": list(item.get("missing_packet_fields") or []),
+            "artifact_blockers": list(item.get("artifact_blockers") or []),
+            "next_action": item.get("next_action"),
+            "auto_execute_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": item.get("no_live_order_sent") is not False,
+        }
+        for item in blocked_reviews
+    ]
+    signal_waits = []
+    if current_fresh_problem:
+        signal_waits.append(
+            {
+                "problem_id": "current_fresh_signal",
+                "status": current_fresh_problem.get("status"),
+                "next_monitor_utc": realtime_signal_lane.get("monitor_effective_next_after_utc"),
+                "next_monitor_kst": realtime_signal_lane.get("monitor_effective_next_after_kst")
+                or realtime_signal_lane.get("monitor_execute_after_kst"),
+                "raw_next_monitor_kst": realtime_signal_lane.get("monitor_raw_next_after_kst")
+                or realtime_signal_lane.get("monitor_execute_after_kst"),
+                "covered_next_recheck_after_kst": realtime_signal_lane.get(
+                    "monitor_covered_next_recheck_after_kst"
+                ),
+                "next_monitor_source": realtime_signal_lane.get("monitor_next_after_source"),
+                "next_monitor_retimestampted_after_current_iteration": (
+                    realtime_signal_lane.get(
+                        "monitor_next_after_retimestampted_after_current_iteration"
+                    )
+                    is True
+                ),
+                "monitor_command": realtime_signal_lane.get("monitor_command"),
+                "unlocks": list(realtime_signal_lane.get("unlocks") or []),
+                "non_substitutable": True,
+                "order_submission_allowed": False,
+                "no_live_order_sent": current_fresh_problem.get("no_live_order_sent") is not False,
+            }
+        )
+    if missing_parity_samples > 0:
+        signal_waits.append(
+            {
+                "problem_id": "execution_parity_samples",
+                "status": execution_parity_lane.get("status"),
+                "missing_samples": missing_parity_samples,
+                "eta_completion_kst": parity.get("estimated_completion_kst"),
+                "depends_on": list(execution_parity_lane.get("depends_on") or []),
+                "non_substitutable": True,
+                "order_submission_allowed": False,
+                "no_live_order_sent": parity.get("no_live_order_sent") is not False,
+            }
+        )
+    time_waits = []
+    if remaining_calendar_days > 0:
+        time_waits.append(
+            {
+                "problem_id": "microstructure_calendar_day_coverage",
+                "status": calendar_coverage_lane.get("status"),
+                "remaining_calendar_days": remaining_calendar_days,
+                "next_kst": coverage.get("next_quote_coverage_kst_at"),
+                "earliest_completion_kst": coverage.get("earliest_calendar_completion_kst"),
+                "backfill_allowed_for_launch_gate": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": calendar_problem.get("no_live_order_sent") is not False,
+            }
+        )
+    if runtime_remaining_hours is not None and runtime_remaining_hours > 0:
+        time_waits.append(
+            {
+                "problem_id": "shadow_runtime_24h_observed",
+                "status": runtime_observation_lane.get("status"),
+                "remaining_hours": runtime_remaining_hours,
+                "progress_pct": runtime.get("progress_pct"),
+                "order_submission_allowed": False,
+                "no_live_order_sent": runtime_problem.get("no_live_order_sent") is not False,
+            }
+        )
+    dependency_blocked = []
+    if first_paper_row_lane.get("status") != "not_currently_blocked":
+        dependency_blocked.append(
+            {
+                "problem_id": "first_real_paper_lifecycle_row",
+                "status": first_paper_row_lane.get("status"),
+                "depends_on": list(first_paper_row_lane.get("depends_on") or []),
+                "unlocks": list(first_paper_row_lane.get("unlocks") or []),
+                "auto_apply_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        )
+    first_row_missing_dependencies = [
+        item
+        for item in [
+            "current_fresh_signal" if current_fresh_problem else None,
+            "operator_review_decisions" if decision_required or blocked_reviews else None,
+        ]
+        if item
+    ]
+    dependency_unlock_steps = [
+        {
+            "step": 1,
+            "gate": "operator_review_decisions",
+            "status": operator_input_lane.get("status"),
+            "ready_now": bool(manual_now),
+            "manual_only": True,
+            "manual_now_count": len(manual_now),
+            "manual_repair_required": bool(manual_repair_now),
+            "required_problem_ids": list(operator_input_lane.get("problem_ids") or []),
+            "unlocks": ["first_real_paper_lifecycle_row"],
+            "direct_unlocks": [],
+            "partial_unlocks": ["first_real_paper_lifecycle_row"],
+            "downstream_unlocks": ["execution_parity_samples"],
+            "combines_with": ["current_fresh_signal"],
+            "unlock_mode": "partial_dependency_clear",
+            "safe_action": (
+                "complete_operator_review_batch_manually"
+                if manual_now
+                else "repair_operator_review_packets"
+                if manual_repair_now
+                else "wait_until_operator_review_packet_ready"
+            ),
+            "auto_execute_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": operator_input_lane.get("no_live_order_sent") is not False,
+        },
+        {
+            "step": 2,
+            "gate": "current_fresh_signal",
+            "status": realtime_signal_lane.get("status"),
+            "ready_now": False,
+            "monitor_effective_useful_now": (
+                realtime_signal_lane.get("monitor_effective_useful_now") is True
+            ),
+            "next_monitor_kst": realtime_signal_lane.get("monitor_effective_next_after_kst")
+            or realtime_signal_lane.get("monitor_execute_after_kst"),
+            "raw_next_monitor_kst": realtime_signal_lane.get("monitor_raw_next_after_kst"),
+            "covered_next_recheck_after_kst": realtime_signal_lane.get(
+                "monitor_covered_next_recheck_after_kst"
+            ),
+            "unlocks": list(realtime_signal_lane.get("unlocks") or []),
+            "direct_unlocks": [],
+            "partial_unlocks": ["first_real_paper_lifecycle_row"],
+            "downstream_unlocks": ["execution_parity_samples"],
+            "combines_with": ["operator_review_decisions"],
+            "unlock_mode": "partial_dependency_clear",
+            "safe_action": "monitor_fresh_signal_without_forcing_entry",
+            "auto_execute_allowed": realtime_signal_lane.get("monitor_effective_useful_now") is True,
+            "order_submission_allowed": False,
+            "no_live_order_sent": realtime_signal_lane.get("no_live_order_sent") is not False,
+        },
+        {
+            "step": 3,
+            "gate": "first_real_paper_lifecycle_row",
+            "status": first_paper_row_lane.get("status"),
+            "ready_now": False,
+            "missing_dependencies": first_row_missing_dependencies,
+            "depends_on": list(first_paper_row_lane.get("depends_on") or []),
+            "unlocks": list(first_paper_row_lane.get("unlocks") or []),
+            "direct_unlocks": list(first_paper_row_lane.get("unlocks") or []),
+            "partial_unlocks": [],
+            "downstream_unlocks": [],
+            "combines_with": [],
+            "unlock_mode": "all_dependencies_required_before_manual_paper_apply",
+            "safe_action": "paper_apply_only_after_fresh_signal_and_operator_review",
+            "auto_apply_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": first_paper_row_lane.get("no_live_order_sent") is not False,
+        },
+        {
+            "step": 4,
+            "gate": "execution_parity_samples",
+            "status": execution_parity_lane.get("status"),
+            "ready_now": missing_parity_samples <= 0,
+            "missing_samples": missing_parity_samples,
+            "depends_on": list(execution_parity_lane.get("depends_on") or []),
+            "eta_completion_kst": execution_parity_lane.get("eta_completion_kst"),
+            "direct_unlocks": [],
+            "partial_unlocks": [],
+            "downstream_unlocks": [],
+            "combines_with": [],
+            "unlock_mode": "sample_floor_collection",
+            "safe_action": "collect_reviewed_real_paper_lifecycle_rows",
+            "backtest_substitution_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": execution_parity_lane.get("no_live_order_sent") is not False,
+        },
+    ]
+    dependency_unlock_steps = [
+        step
+        for step in dependency_unlock_steps
+        if (
+            step.get("gate") != "operator_review_decisions"
+            or decision_required
+            or blocked_reviews
+            or waiting_reviews
+        )
+        and (
+            step.get("gate") != "current_fresh_signal"
+            or "current_fresh_signal" in wait_only_ids
+        )
+        and (
+            step.get("gate") != "first_real_paper_lifecycle_row"
+            or first_paper_row_lane.get("status") != "not_currently_blocked"
+        )
+        and (step.get("gate") != "execution_parity_samples" or missing_parity_samples > 0)
+    ]
+    manual_unlock_steps = [
+        step for step in dependency_unlock_steps if step.get("manual_only") is True
+    ]
+    realtime_unlock_steps = [
+        step
+        for step in dependency_unlock_steps
+        if step.get("gate") in {"current_fresh_signal", "first_real_paper_lifecycle_row"}
+    ]
+    dependency_unlock_plan = {
+        "status": (
+            "manual_and_realtime_unlocks_remaining"
+            if manual_unlock_steps and realtime_unlock_steps
+            else "manual_unlocks_remaining"
+            if manual_unlock_steps
+            else "realtime_unlocks_remaining"
+            if realtime_unlock_steps
+            else "execution_parity_collection_remaining"
+            if dependency_unlock_steps
+            else "no_dependency_unlock_steps_open"
+        ),
+        "step_count": len(dependency_unlock_steps),
+        "manual_unlock_step_count": len(manual_unlock_steps),
+        "realtime_unlock_step_count": len(realtime_unlock_steps),
+        "primary_unlock_step": dependency_unlock_steps[0] if dependency_unlock_steps else None,
+        "primary_realtime_unlock_step": realtime_unlock_steps[0] if realtime_unlock_steps else None,
+        "first_paper_row_missing_dependencies": first_row_missing_dependencies,
+        "first_paper_row_requires_all_dependencies": True,
+        "steps": dependency_unlock_steps,
+        "policy": "operator_review_and_paper_apply_steps_are_manual_only_no_live_orders_allowed",
+        "auto_decision_allowed": False,
+        "auto_apply_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": all(
+            step.get("no_live_order_sent") is not False for step in dependency_unlock_steps
+        ),
+    }
+    if run_now_without_operator and manual_now and (signal_waits or time_waits):
+        actionability_status = "parallel_auto_and_manual_actions_available_waits_remain"
+    elif run_now_without_operator and (signal_waits or time_waits):
+        actionability_status = "auto_actions_available_waits_remain"
+    elif manual_now and (signal_waits or time_waits):
+        actionability_status = "manual_actions_available_waits_remain"
+    elif manual_repair_now:
+        actionability_status = "manual_repair_required"
+    elif run_now_without_operator:
+        actionability_status = "auto_actions_available"
+    elif signal_waits or time_waits or dependency_blocked:
+        actionability_status = "waiting_only"
+    else:
+        actionability_status = "no_open_actionability_items"
+    waits_open = bool(signal_waits or time_waits)
+    dependency_open = bool(dependency_blocked)
+    if dependency_open and waits_open and run_now_without_operator and manual_now:
+        dependency_aware_status = (
+            "parallel_auto_and_manual_actions_available_waits_and_dependencies_remain"
+        )
+    elif dependency_open and waits_open and run_now_without_operator:
+        dependency_aware_status = "auto_actions_available_waits_and_dependencies_remain"
+    elif dependency_open and waits_open and manual_now:
+        dependency_aware_status = "manual_actions_available_waits_and_dependencies_remain"
+    elif dependency_open and waits_open and manual_repair_now:
+        dependency_aware_status = "manual_repair_required_waits_and_dependencies_remain"
+    elif dependency_open and waits_open:
+        dependency_aware_status = "waiting_and_dependency_blocked"
+    elif dependency_open and run_now_without_operator:
+        dependency_aware_status = "auto_actions_available_dependency_blocked"
+    elif dependency_open and manual_now:
+        dependency_aware_status = "manual_actions_available_dependency_blocked"
+    elif dependency_open and manual_repair_now:
+        dependency_aware_status = "manual_repair_required_dependency_blocked"
+    elif dependency_open:
+        dependency_aware_status = "dependency_blocked"
+    else:
+        dependency_aware_status = actionability_status
+    primary_signal_wait = signal_waits[0] if signal_waits else {}
+    primary_time_wait = time_waits[0] if time_waits else {}
+    primary_dependency_blocked = dependency_blocked[0] if dependency_blocked else {}
+    validation_redesign_blockers = [
+        item
+        for item in problems
+        if any(
+            token in str(item.get(field) or "")
+            for field in ["id", "status", "next_action", "blocker_interpretation"]
+            for token in [
+                "validation_redesign",
+                "full_walk_forward",
+                "candidate_design_contract",
+                "activity_regression",
+            ]
+        )
+    ]
+    if signal_strategy_blocker.get("blocked") is True:
+        validation_redesign_blockers.append(
+            {
+                "id": "strategy_candidate_redesign_required",
+                "status": signal_strategy_blocker.get("status"),
+                "next_action": "design_next_non_regressing_full_wfo_candidate",
+                "primary_downstream_failure": signal_strategy_blocker.get(
+                    "primary_downstream_failure"
+                ),
+                "failed_checks": list(signal_strategy_blocker.get("failed_checks") or []),
+                "activity_regression_candidate_count": signal_strategy_blocker.get(
+                    "activity_regression_candidate_count"
+                ),
+                "activity_inversion_candidate_count": signal_strategy_blocker.get(
+                    "activity_inversion_candidate_count"
+                ),
+                "next_candidate_design_contract_status": signal_strategy_blocker.get(
+                    "next_candidate_design_contract_status"
+                ),
+                "next_candidate_design_contract_reason": signal_strategy_blocker.get(
+                    "next_candidate_design_contract_reason"
+                ),
+                "minimum_full_walk_forward_requirements": dict(
+                    signal_strategy_blocker.get("minimum_full_walk_forward_requirements")
+                    or {}
+                ),
+                "required_validation_sequence": list(
+                    signal_strategy_blocker.get("required_validation_sequence") or []
+                ),
+                "reject_patterns": list(signal_strategy_blocker.get("reject_patterns") or []),
+                "blocked_prior_family_candidate_count": signal_strategy_blocker.get(
+                    "blocked_prior_family_candidate_count"
+                ),
+                "short_window_activity_inversion_candidate_count": (
+                    signal_strategy_blocker.get(
+                        "short_window_activity_inversion_candidate_count"
+                    )
+                ),
+                "candidate_failure_digest": dict(
+                    signal_strategy_blocker.get("candidate_failure_digest") or {}
+                ),
+                "root_cause_hints": list(signal_strategy_blocker.get("root_cause_hints") or []),
+                "runtime_filter_change_allowed": (
+                    signal_strategy_blocker.get("runtime_filter_change_allowed") is True
+                ),
+                "paper_or_live_promotion_allowed": (
+                    signal_strategy_blocker.get("paper_or_live_promotion_allowed") is True
+                ),
+                "operator_fixable_now": signal_strategy_blocker.get("operator_fixable_now")
+                is True,
+                "source": "fresh_signal_blocker_diagnostics.cause_partition.strategy_design_blocker",
+                "order_submission_allowed": False,
+                "no_live_order_sent": signal_strategy_blocker.get("no_live_order_sent")
+                is not False,
+            }
+        )
+    primary_launch_wait_gate = (
+        "current_fresh_signal"
+        if current_fresh_problem
+        else primary_signal_wait.get("problem_id")
+        or primary_time_wait.get("problem_id")
+        or primary_dependency_blocked.get("problem_id")
+    )
+    primary_human_action_gate = (
+        manual_now[0].get("target_gate")
+        if manual_now
+        else manual_repair_now[0].get("target_gate")
+        if manual_repair_now
+        else None
+    )
+    if run_now_without_operator and primary_human_action_gate and primary_launch_wait_gate:
+        actionability_tracks_status = "parallel_safe_auto_manual_and_realtime_wait"
+    elif primary_human_action_gate and primary_launch_wait_gate:
+        actionability_tracks_status = "manual_available_realtime_wait_primary"
+    elif run_now_without_operator and primary_launch_wait_gate:
+        actionability_tracks_status = "safe_auto_available_realtime_wait_primary"
+    elif primary_launch_wait_gate:
+        actionability_tracks_status = "realtime_wait_primary"
+    elif primary_human_action_gate:
+        actionability_tracks_status = "manual_operator_action_primary"
+    elif validation_redesign_blockers:
+        actionability_tracks_status = "validation_redesign_primary"
+    elif run_now_without_operator:
+        actionability_tracks_status = "safe_auto_available"
+    else:
+        actionability_tracks_status = "no_actionable_track_open"
+    actionability_tracks = {
+        "status": actionability_tracks_status,
+        "primary_launch_wait_gate": primary_launch_wait_gate,
+        "primary_launch_wait_status": (
+            current_fresh_problem.get("status")
+            or primary_signal_wait.get("status")
+            or primary_time_wait.get("status")
+            or primary_dependency_blocked.get("status")
+        ),
+        "primary_human_action_gate": primary_human_action_gate,
+        "primary_human_action": (
+            manual_now[0].get("action_type")
+            if manual_now
+            else manual_repair_now[0].get("action_type")
+            if manual_repair_now
+            else None
+        ),
+        "safe_automatable_now": {
+            "count": len(run_now_without_operator),
+            "primary_action": (
+                run_now_without_operator[0].get("action_type")
+                if run_now_without_operator
+                else None
+            ),
+            "primary_gate": (
+                run_now_without_operator[0].get("target_gate")
+                if run_now_without_operator
+                else None
+            ),
+            "covered_this_iteration_count": len(covered_automation_now),
+            "no_safe_auto_command_now": not bool(run_now_without_operator),
+            "scope": (
+                "effective_queue_excludes_current_iteration_covered_actions"
+                if effective_queue_available
+                else "raw_queue_no_effective_queue_available"
+            ),
+            "order_submission_allowed": False,
+            "no_live_order_sent": all(
+                item.get("no_live_order_sent") is not False
+                for item in run_now_without_operator
+            ),
+        },
+        "manual_operator_required_now": {
+            "count": len(manual_now),
+            "repair_count": len(manual_repair_now),
+            "primary_gate": primary_human_action_gate,
+            "primary_action": (
+                manual_now[0].get("action_type")
+                if manual_now
+                else manual_repair_now[0].get("action_type")
+                if manual_repair_now
+                else None
+            ),
+            "manual_only": bool(manual_now or manual_repair_now),
+            "auto_decision_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": (
+                all(item.get("no_live_order_sent") is not False for item in manual_now)
+                and all(item.get("no_live_order_sent") is not False for item in manual_repair_now)
+            ),
+        },
+        "realtime_wait_required": {
+            "count": len(signal_waits),
+            "primary_gate": primary_signal_wait.get("problem_id")
+            or ("current_fresh_signal" if current_fresh_problem else None),
+            "primary_status": primary_signal_wait.get("status")
+            or current_fresh_problem.get("status"),
+            "next_monitor_kst": primary_signal_wait.get("next_monitor_kst"),
+            "non_substitutable": bool(signal_waits or current_fresh_problem),
+            "order_submission_allowed": False,
+            "no_live_order_sent": (
+                all(item.get("no_live_order_sent") is not False for item in signal_waits)
+                and current_fresh_problem.get("no_live_order_sent") is not False
+            ),
+        },
+        "calendar_or_runtime_wait_required": {
+            "count": len(time_waits),
+            "primary_gate": primary_time_wait.get("problem_id"),
+            "primary_status": primary_time_wait.get("status"),
+            "order_submission_allowed": False,
+            "no_live_order_sent": all(
+                item.get("no_live_order_sent") is not False for item in time_waits
+            ),
+        },
+        "dependency_blocked": {
+            "count": len(dependency_blocked),
+            "primary_gate": primary_dependency_blocked.get("problem_id"),
+            "primary_status": primary_dependency_blocked.get("status"),
+            "order_submission_allowed": False,
+            "no_live_order_sent": all(
+                item.get("no_live_order_sent") is not False for item in dependency_blocked
+            ),
+        },
+        "blocked_by_validation_redesign": {
+            "count": len(validation_redesign_blockers),
+            "primary_problem_id": (
+                validation_redesign_blockers[0].get("id")
+                if validation_redesign_blockers
+                else None
+            ),
+            "primary_next_action": (
+                validation_redesign_blockers[0].get("next_action")
+                if validation_redesign_blockers
+                else None
+            ),
+            "items": validation_redesign_blockers,
+            "order_submission_allowed": False,
+            "no_live_order_sent": all(
+                item.get("no_live_order_sent") is not False
+                for item in validation_redesign_blockers
+            ),
+        },
+        "interpretation": (
+            "manual_reviews_can_progress_in_parallel_but_launch_primary_wait_is_realtime"
+            if primary_human_action_gate and primary_launch_wait_gate
+            else "launch_primary_wait_is_realtime"
+            if primary_launch_wait_gate
+            else "manual_operator_action_is_primary"
+            if primary_human_action_gate
+            else "no_immediate_safe_auto_or_manual_track"
+        ),
+        "auto_decision_allowed": False,
+        "auto_apply_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+    actionability_partition = {
+        "status": actionability_status,
+        "dependency_aware_status": dependency_aware_status,
+        "primary_launch_wait_gate": actionability_tracks.get("primary_launch_wait_gate"),
+        "primary_human_action_gate": actionability_tracks.get("primary_human_action_gate"),
+        "no_safe_auto_command_now": actionability_tracks["safe_automatable_now"].get(
+            "no_safe_auto_command_now"
+        ),
+        "tracks": actionability_tracks,
+        "waits_open": waits_open,
+        "dependency_blockers_open": dependency_open,
+        "run_now_without_operator_count": len(run_now_without_operator),
+        "manual_now_count": len(manual_now),
+        "manual_repair_now_count": len(manual_repair_now),
+        "signal_wait_count": len(signal_waits),
+        "time_wait_count": len(time_waits),
+        "dependency_blocked_count": len(dependency_blocked),
+        "run_now_without_operator": run_now_without_operator,
+        "manual_now": manual_now,
+        "manual_repair_now": manual_repair_now,
+        "signal_waits": signal_waits,
+        "time_waits": time_waits,
+        "dependency_blocked": dependency_blocked,
+        "dependency_unlock_plan_status": dependency_unlock_plan.get("status"),
+        "primary_dependency_unlock_gate": dict(
+            dependency_unlock_plan.get("primary_unlock_step") or {}
+        ).get("gate"),
+        "recommended_parallel_next_moves": [
+            item
+            for item in [
+                "run_safe_monitoring_actions_without_live_orders"
+                if run_now_without_operator
+                else None,
+                "complete_operator_review_batch_manually"
+                if manual_now
+                else None,
+                "repair_operator_review_packets"
+                if manual_repair_now
+                else None,
+                "wait_for_realtime_fresh_signal_before_paper_apply"
+                if current_fresh_problem
+                else None,
+                "continue_future_quote_calendar_collection"
+                if remaining_calendar_days > 0
+                else None,
+                "continue_continuous_no_live_shadow_watch"
+                if runtime_remaining_hours is not None and runtime_remaining_hours > 0.0
+                else None,
+            ]
+            if item
+        ],
+        "policy": "operator_decisions_and_paper_apply_are_never_auto_run_by_actionability_partition",
+        "auto_decision_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            all(item.get("no_live_order_sent") is not False for item in run_now_without_operator)
+            and all(item.get("no_live_order_sent") is not False for item in manual_now)
+            and all(item.get("no_live_order_sent") is not False for item in manual_repair_now)
+            and all(item.get("no_live_order_sent") is not False for item in signal_waits)
+            and all(item.get("no_live_order_sent") is not False for item in time_waits)
+            and all(item.get("no_live_order_sent") is not False for item in dependency_blocked)
+        ),
+    }
+    return {
+        "status": status,
+        "open_problem_count": len(problems),
+        "priority_status": priority.get("status"),
+        "safe_automation_now_count": len(raw_automation_now),
+        "safe_effective_automation_now_count": len(automation_now),
+        "safe_covered_automation_now_count": len(covered_automation_now),
+        "safe_useful_automation_now_count": len(useful_automation_now),
+        "safe_noop_or_deferred_automation_now_count": len(noop_or_deferred_automation_now),
+        "safe_raw_useful_automation_now_count": len(raw_useful_automation_now),
+        "safe_raw_noop_or_deferred_automation_now_count": len(raw_noop_or_deferred_automation_now),
+        "effective_queue_available": effective_queue_available,
+        "automation_now_usefulness_scope": (
+            "effective_queue_excludes_current_iteration_covered_actions"
+            if effective_queue_available
+            else "raw_queue_no_effective_queue_available"
+        ),
+        "automation_now_usefulness": automation_usefulness,
+        "raw_automation_now_usefulness": raw_automation_usefulness,
+        "primary_useful_automation_action": useful_automation_now[0] if useful_automation_now else None,
+        "primary_raw_useful_automation_action": (
+            raw_useful_automation_now[0] if raw_useful_automation_now else None
+        ),
+        "primary_noop_or_deferred_automation_action": (
+            noop_or_deferred_automation_now[0] if noop_or_deferred_automation_now else None
+        ),
+        "primary_covered_automation_action": covered_automation_now[0] if covered_automation_now else None,
+        "safe_startable_wait_count": len(startable_waits),
+        "safe_scheduled_wait_count": len(scheduled_waits),
+        "operator_review_ready_count": len(ready_reviews),
+        "operator_review_waiting_count": len(waiting_reviews),
+        "operator_review_blocked_count": len(blocked_reviews),
+        "operator_decision_required_count": len(decision_required),
+        "operator_review_draft_prepared_count": len(review_drafts_prepared),
+        "operator_decision_command_safety_pass_count": len(review_safety_passed),
+        "code_prepared_review_safety_item_count": code_prepared_count,
+        "non_substitutable_wait_count": len(wait_only_ids),
+        "non_substitutable_problem_ids": non_substitutable_ids,
+        "wait_only_problem_ids": wait_only_ids,
+        "dependency_blocked_problem_count": len(dependency_blocked_problem_ids),
+        "dependency_blocked_problem_ids": dependency_blocked_problem_ids,
+        "operator_review_problem_ids": operator_review_problem_ids,
+        "not_auto_completable_reasons": auto_complete_blockers,
+        "auto_complete_without_future_market_or_operator": not bool(auto_complete_blockers),
+        "dependency_lanes": dependency_lanes,
+        "dependency_unlock_plan": dependency_unlock_plan,
+        "actionability_partition": actionability_partition,
+        "actionability_tracks": actionability_tracks,
+        "remaining_calendar_days": remaining_calendar_days,
+        "earliest_calendar_completion_kst": coverage.get("earliest_calendar_completion_kst"),
+        "execution_parity_missing_samples": missing_parity_samples,
+        "execution_parity_eta_completion_kst": parity.get("estimated_completion_kst"),
+        "runtime_remaining_hours": runtime_remaining_hours,
+        "primary_automation_action": queue.get("primary_automation_action"),
+        "primary_operator_decision_action": decision_required[0] if decision_required else None,
+        "primary_wait_only_problem": wait_only_problems[0] if wait_only_problems else None,
+        "primary_dependency_blocked_problem": (
+            dependency_blocked_problems[0] if dependency_blocked_problems else None
+        ),
+        "next_quote_window_kst": coverage.get("next_quote_coverage_kst_at"),
+        "notes": [
+            "safe_automation_can_continue_without_live_orders",
+            "operator_reviews_are_prepared_but_not_auto_accepted_or_rejected",
+            "backtest_or_synthetic_rows_do_not_close_realtime_execution_parity",
+            "calendar_day_quote_coverage_is_not_backfilled_for_launch_gate",
+        ],
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            queue.get("no_live_order_sent") is not False
+            and review_handoff.get("no_live_order_sent") is not False
+            and parity.get("no_live_order_sent") is not False
+            and all(item.get("no_live_order_sent") is not False for item in problems)
+        ),
+    }
+
+
+def _first_fresh_signal_paper_apply_runbook(
+    *,
+    operator_handoff: dict[str, Any],
+    paper_only_rehearsal: dict[str, Any],
+    fresh_signal_blocker_diagnostics: dict[str, Any],
+    safe_next_action_plan: dict[str, Any],
+    execution_parity_status_summary: dict[str, Any],
+) -> dict[str, Any]:
+    handoff = dict(operator_handoff or {})
+    packet = dict(handoff.get("paper_apply_operator_packet") or {})
+    packet_safety = dict(packet.get("command_safety") or {})
+    evidence_status = dict(packet.get("pre_apply_evidence_report_status") or {})
+    backup_plan = dict(packet.get("pre_apply_backup_plan") or handoff.get("pre_apply_backup_plan") or {})
+    parity = dict(execution_parity_status_summary or {})
+    fresh = dict(fresh_signal_blocker_diagnostics or {})
+    safe_next = dict(safe_next_action_plan or {})
+    primary = dict(safe_next.get("primary_action") or {})
+    primary_monitor_schedule = _current_iteration_recheck_schedule(primary)
+    paper_wait_action = next(
+        (
+            dict(item)
+            for item in list(safe_next.get("actions") or [])
+            if str(dict(item).get("action_type") or "").startswith("paper_bridge_wait_")
+        ),
+        {},
+    )
+    paper_apply_allowed = handoff.get("paper_apply_allowed_now") is True
+    fresh_signal = fresh.get("status") == "fresh_signal_available" or packet.get("status") == "ready_for_operator_review"
+    command_safety_pass = packet_safety.get("status") == "PASS"
+    pre_apply_evidence_fresh = evidence_status.get("fresh") is True or evidence_status.get("status") == "fresh"
+    backup_required = backup_plan.get("required") is True or packet.get("verified_pre_apply_backup_required") is True
+    parity_will_credit = handoff.get("execution_parity_will_credit_current_apply") is True
+    if paper_apply_allowed and command_safety_pass:
+        status = "paper_apply_operator_review_ready"
+        next_operator_step = "review_dry_run_evidence_then_apply_paper_bridge_with_verified_backup"
+    elif packet_safety.get("status") == "FAIL":
+        status = "paper_apply_command_safety_blocked"
+        next_operator_step = "fix_paper_apply_command_safety_before_any_apply"
+    elif fresh_signal:
+        status = "fresh_signal_seen_waiting_for_apply_gate"
+        next_operator_step = "inspect_paper_bridge_apply_gate_and_rerun_dry_run"
+    elif paper_only_rehearsal.get("system_ready") is True:
+        status = "armed_waiting_for_first_fresh_signal"
+        next_operator_step = "monitor_fresh_signal_without_forcing_entry"
+    else:
+        status = "paper_rehearsal_not_ready"
+        next_operator_step = "repair_paper_only_rehearsal_prerequisites"
+    apply_command_allowed_now = packet.get("apply_command_allowed_now")
+    apply_command_when_gate_allows = (
+        packet.get("apply_command_when_gate_allows")
+        or paper_wait_action.get("paper_apply_command_when_gate_allows")
+        or handoff.get("paper_apply_command")
+    )
+    return {
+        "status": status,
+        "fresh_signal": fresh_signal,
+        "paper_apply_allowed_now": paper_apply_allowed,
+        "operator_review_required": True,
+        "paper_only_rehearsal_status": paper_only_rehearsal.get("status"),
+        "paper_only_system_ready": paper_only_rehearsal.get("system_ready") is True,
+        "paper_only_armed": paper_only_rehearsal.get("armed") is True,
+        "remaining_gates": list(paper_only_rehearsal.get("remaining_gates") or []),
+        "source_event_key": packet.get("source_event_key"),
+        "source_event_ts": packet.get("source_event_ts"),
+        "bridge_action": packet.get("bridge_action"),
+        "pre_apply_evidence_report": packet.get("pre_apply_evidence_report"),
+        "pre_apply_evidence_fresh": pre_apply_evidence_fresh,
+        "pre_apply_evidence_status": evidence_status,
+        "command_safety_status": packet_safety.get("status"),
+        "command_safety_blockers": list(packet_safety.get("blockers") or []),
+        "dry_run_command": packet.get("dry_run_command") or handoff.get("paper_dry_run_command"),
+        "apply_command_allowed_now": apply_command_allowed_now,
+        "apply_command_when_gate_allows": apply_command_when_gate_allows,
+        "post_apply_execution_parity_review_command": packet.get("post_apply_execution_parity_review_command"),
+        "pre_apply_backup_required": backup_required,
+        "pre_apply_backup_plan": backup_plan,
+        "backup_verification_required_fields": list(
+            packet.get("backup_verification_required_fields")
+            or backup_plan.get("verification_required_fields")
+            or []
+        ),
+        "execution_parity_missing_samples": parity.get("missing_samples"),
+        "execution_parity_will_credit_current_apply": parity_will_credit,
+        "execution_parity_events_after_current_apply": handoff.get(
+            "execution_parity_events_needed_after_current_apply"
+        ),
+        "operator_sequence": [
+            "confirm_fresh_signal_and_apply_gate_are_open",
+            "review_fresh_pre_apply_evidence_report",
+            "run_or_review_dry_run_command",
+            "run_apply_command_only_when_apply_command_allowed_now_is_present",
+            "verify_pre_apply_backup_created_quick_check_ok_and_backup_path_present",
+            "run_post_apply_execution_parity_review_before_next_paper_apply",
+        ],
+        "notification_trigger": "notify_when_fresh_signal_or_paper_apply_allowed_becomes_true",
+        "next_monitor_after_kst": (
+            primary_monitor_schedule.get("effective_next_monitor_after_kst")
+            or primary.get("execute_after_kst")
+            or paper_wait_action.get("execute_after_kst")
+            or fresh.get("next_monitor_after_kst")
+        ),
+        "raw_next_monitor_after_kst": (
+            primary_monitor_schedule.get("raw_next_monitor_after_kst")
+            or primary.get("execute_after_kst")
+            or paper_wait_action.get("execute_after_kst")
+            or fresh.get("next_monitor_after_kst")
+        ),
+        "covered_next_recheck_after_kst": primary_monitor_schedule.get(
+            "covered_next_recheck_after_kst"
+        ),
+        "next_monitor_after_source": primary_monitor_schedule.get(
+            "effective_next_monitor_after_source"
+        ),
+        "next_monitor_retimestampted_after_current_iteration": (
+            primary_monitor_schedule.get("next_monitor_retimestampted_after_current_iteration")
+            is True
+        ),
+        "next_operator_step": next_operator_step,
+        "auto_apply_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            handoff.get("no_live_order_sent") is not False
+            and packet.get("no_live_order_sent") is not False
+            and packet_safety.get("no_live_order_sent") is not False
+            and backup_plan.get("no_live_order_sent") is not False
+        ),
+    }
+
+
+def _operator_review_source_report_payload(report_path: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    text = str(report_path or "").strip()
+    base = {
+        "report_path": text or None,
+        "exists": False,
+        "readable": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+    if not text:
+        return {}, {**base, "status": "missing_report_path", "blockers": ["report_path_missing"]}
+    if "<" in text or ">" in text:
+        return {}, {
+            **base,
+            "status": "unresolved_report_path_placeholder",
+            "blockers": ["report_path_has_unresolved_placeholder"],
+        }
+    resolved = _resolve(text)
+    display_path = _display_path(resolved)
+    if not resolved.exists():
+        return {}, {
+            **base,
+            "status": "report_file_missing",
+            "report_path": display_path,
+            "blockers": ["report_file_missing"],
+        }
+    payload = _read_json(resolved)
+    if not payload:
+        return {}, {
+            **base,
+            "status": "report_unreadable_or_empty",
+            "report_path": display_path,
+            "exists": True,
+            "blockers": ["report_unreadable_or_empty"],
+        }
+    return payload, {
+        **base,
+        "status": "report_available",
+        "report_path": display_path,
+        "exists": True,
+        "readable": True,
+        "payload_fingerprint": _fingerprint_payload(payload),
+        "source_status": payload.get("status"),
+        "source_generated_at": payload.get("generated_at") or payload.get("created_at"),
+        "source_no_live_order_sent": payload.get("no_live_order_sent"),
+        "source_order_submission_allowed": payload.get("order_submission_allowed"),
+        "order_submission_allowed": payload.get("order_submission_allowed") is True,
+        "no_live_order_sent": payload.get("no_live_order_sent") is not False,
+        "blockers": [],
+    }
+
+
+def _operator_review_candidate_evidence_summary(report_path: Any) -> dict[str, Any]:
+    payload, status = _operator_review_source_report_payload(report_path)
+    if not payload:
+        return {"kind": "candidate_walk_forward_report", **status}
+    aggregate = dict(payload.get("aggregate") or {})
+    distribution = dict(aggregate.get("test_add_distribution_diagnostics") or {})
+    drawdown = dict(aggregate.get("drawdown_recovery_diagnostics") or {})
+    folds = list(payload.get("folds") or [])
+    return {
+        "kind": "candidate_walk_forward_report",
+        **status,
+        "fold_count": aggregate.get("fold_count") or len(folds),
+        "positive_fold_count": aggregate.get("positive_fold_count"),
+        "compounded_oos_return_pct": aggregate.get("compounded_oos_return_pct"),
+        "avg_oos_return_pct": aggregate.get("avg_oos_return_pct"),
+        "min_oos_return_pct": aggregate.get("min_oos_return_pct"),
+        "max_fold_drawdown_pct": aggregate.get("max_fold_drawdown_pct"),
+        "avg_oos_cost_drag_pct": aggregate.get("avg_oos_cost_drag_pct"),
+        "total_trade_like_events": aggregate.get("total_trade_like_events"),
+        "add_by_side_share": aggregate.get("test_add_by_side_share"),
+        "add_by_role_share": aggregate.get("test_add_by_role_share"),
+        "dominant_add_side": distribution.get("dominant_add_side"),
+        "dominant_add_side_share": distribution.get("dominant_add_side_share"),
+        "dominant_add_role": distribution.get("dominant_add_role"),
+        "dominant_add_role_share": distribution.get("dominant_add_role_share"),
+        "high_drawdown_count": drawdown.get("high_drawdown_count"),
+        "high_drawdown_recovered_count": drawdown.get("high_drawdown_recovered_count"),
+        "evidence_use": "performance_and_distribution_context_only_not_operator_decision",
+    }
+
+
+def _operator_review_proxy_audit_evidence_summary(report_path: Any) -> dict[str, Any]:
+    payload, status = _operator_review_source_report_payload(report_path)
+    if not payload:
+        return {"kind": "conditional_overfit_proxy_audit", **status}
+    checks = [dict(item) for item in list(payload.get("checks") or [])]
+    passed_checks = [str(item.get("name") or "") for item in checks if item.get("passed") is True]
+    failed_checks = [str(item.get("name") or "") for item in checks if item.get("passed") is not True]
+    return {
+        "kind": "conditional_overfit_proxy_audit",
+        **status,
+        "candidate_decision": payload.get("candidate_decision"),
+        "check_count": len(checks),
+        "passed_check_count": len(passed_checks),
+        "failed_check_count": len(failed_checks),
+        "failed_checks": failed_checks,
+        "aggregate_delta": payload.get("aggregate_delta"),
+        "fold_delta_summary": payload.get("fold_delta_summary"),
+        "tail_holdout_proxy": payload.get("tail_holdout_proxy"),
+        "blockers": list(payload.get("blockers") or []),
+        "warnings": list(payload.get("warnings") or []),
+        "limitations": list(payload.get("limitations") or []),
+        "evidence_use": "proxy_overfit_context_only_real_shadow_still_required",
+    }
+
+
+def _operator_review_promotion_gate_evidence_summary(report_path: Any) -> dict[str, Any]:
+    payload, status = _operator_review_source_report_payload(report_path)
+    if not payload:
+        return {"kind": "promotion_gate_report", **status}
+    readiness_alignment = dict(payload.get("readiness_candidate_alignment") or {})
+    return {
+        "kind": "promotion_gate_report",
+        **status,
+        "promotion_decision": payload.get("promotion_decision"),
+        "performance_upgrade_ready": payload.get("performance_upgrade_ready"),
+        "performance_delta_status": payload.get("performance_delta_status"),
+        "risk_adjusted_compression_ready": payload.get("risk_adjusted_compression_ready"),
+        "risk_compression_ready": payload.get("risk_compression_ready"),
+        "risk_compression_detected": payload.get("risk_compression_detected"),
+        "readiness_candidate_alignment_passed": readiness_alignment.get("passed"),
+        "readiness_candidate_alignment_blockers": list(readiness_alignment.get("blockers") or []),
+        "overfit_blockers": list(payload.get("overfit_blockers") or []),
+        "performance_upgrade_blockers": list(payload.get("performance_upgrade_blockers") or []),
+        "risk_compression_blockers": list(payload.get("risk_compression_blockers") or []),
+        "decision_reasons": list(payload.get("decision_reasons") or []),
+        "evidence_use": "gate_context_only_does_not_clear_operator_review",
+    }
+
+
+def _operator_review_lineage_evidence_summary(report_path: Any) -> dict[str, Any]:
+    payload, status = _operator_review_source_report_payload(report_path)
+    if not payload:
+        return {"kind": "operator_lineage_review_draft", **status}
+    acceptance = dict(payload.get("acceptance_contract") or {})
+    validation = dict(payload.get("validation_contract") or {})
+    return {
+        "kind": "operator_lineage_review_draft",
+        **status,
+        "review_status": payload.get("status"),
+        "candidate_recipe_id": payload.get("candidate_recipe_id") or payload.get("recipe_id"),
+        "reviewed_folds": list(payload.get("reviewed_folds") or []),
+        "review_packet_summary": payload.get("review_packet_summary"),
+        "review_packet_fingerprint": payload.get("review_packet_fingerprint"),
+        "source_promotion_gate_report": payload.get("source_promotion_gate_report"),
+        "source_promotion_gate_generated_at": payload.get("source_promotion_gate_generated_at"),
+        "source_template_report": payload.get("source_template_report"),
+        "accepted_status_values": list(acceptance.get("accepted_status_values") or []),
+        "acceptance_contract_keys": sorted(acceptance.keys()),
+        "validation_contract_purpose": validation.get("purpose"),
+        "evidence_use": "defensive_lineage_review_context_only_not_operator_decision",
+    }
+
+
+def _operator_review_evidence_guidance(
+    *,
+    candidate: dict[str, Any],
+    proxy: dict[str, Any],
+    promotion: dict[str, Any],
+    lineage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    supporting_evidence: list[str] = []
+    concern_evidence: list[str] = []
+    anchor_candidates: list[str] = []
+    missing_anchor_sources: list[str] = []
+    lineage = dict(lineage or {})
+
+    if candidate.get("not_applicable") is True:
+        pass
+    elif candidate.get("readable") is True:
+        anchor_candidates.extend(
+            [
+                "candidate.compounded_oos_return_pct",
+                "candidate.fold_count",
+                "candidate.positive_fold_count",
+                "candidate.max_fold_drawdown_pct",
+                "candidate.total_trade_like_events",
+                "candidate.add_by_side_share",
+                "candidate.add_by_role_share",
+            ]
+        )
+        fold_count = candidate.get("fold_count")
+        positive_fold_count = candidate.get("positive_fold_count")
+        if fold_count and positive_fold_count == fold_count:
+            supporting_evidence.append("candidate_all_walk_forward_folds_positive")
+        if candidate.get("compounded_oos_return_pct") is not None:
+            supporting_evidence.append("candidate_compounded_oos_return_available")
+        try:
+            max_drawdown = float(candidate.get("max_fold_drawdown_pct"))
+        except (TypeError, ValueError):
+            max_drawdown = None
+        if max_drawdown is not None and max_drawdown >= 10.0:
+            concern_evidence.append("candidate_has_double_digit_max_fold_drawdown")
+        if candidate.get("high_drawdown_count"):
+            concern_evidence.append("candidate_contains_high_drawdown_folds")
+    else:
+        missing_anchor_sources.append("candidate")
+
+    if proxy.get("not_applicable") is True:
+        pass
+    elif proxy.get("readable") is True:
+        anchor_candidates.extend(
+            [
+                "proxy_audit.candidate_decision",
+                "proxy_audit.check_count",
+                "proxy_audit.failed_check_count",
+                "proxy_audit.aggregate_delta",
+                "proxy_audit.fold_delta_summary",
+                "proxy_audit.tail_holdout_proxy",
+                "proxy_audit.warnings",
+                "proxy_audit.limitations",
+            ]
+        )
+        if proxy.get("failed_check_count") == 0:
+            supporting_evidence.append("proxy_audit_all_checks_passed")
+        else:
+            concern_evidence.append("proxy_audit_has_failed_checks")
+        if proxy.get("warnings"):
+            concern_evidence.append("proxy_audit_has_warnings")
+        if proxy.get("limitations"):
+            concern_evidence.append("proxy_audit_has_limitations")
+    else:
+        missing_anchor_sources.append("proxy_audit")
+
+    if lineage:
+        if lineage.get("readable") is True:
+            anchor_candidates.extend(
+                [
+                    "lineage.review_packet_fingerprint",
+                    "lineage.review_packet_summary",
+                    "lineage.reviewed_folds",
+                    "lineage.acceptance_contract_keys",
+                    "lineage.source_template_report",
+                    "lineage.source_promotion_gate_report",
+                ]
+            )
+            if lineage.get("review_packet_fingerprint"):
+                supporting_evidence.append("lineage_review_packet_fingerprint_available")
+            if lineage.get("review_packet_summary"):
+                supporting_evidence.append("lineage_review_packet_summary_available")
+            if lineage.get("reviewed_folds"):
+                supporting_evidence.append("lineage_review_folds_declared")
+            review_status = str(lineage.get("review_status") or "")
+            if review_status.endswith("_accepted_or_rejected"):
+                concern_evidence.append("lineage_review_still_pending_operator_decision")
+        else:
+            missing_anchor_sources.append("lineage_review")
+
+    if promotion.get("readable") is True:
+        anchor_candidates.extend(
+            [
+                "promotion_gate.promotion_decision",
+                "promotion_gate.performance_upgrade_ready",
+                "promotion_gate.overfit_blockers",
+                "promotion_gate.decision_reasons",
+                "promotion_gate.readiness_candidate_alignment_passed",
+            ]
+        )
+        if promotion.get("performance_upgrade_ready") is True:
+            supporting_evidence.append("promotion_gate_performance_upgrade_ready")
+        if promotion.get("readiness_candidate_alignment_passed") is True:
+            supporting_evidence.append("promotion_gate_candidate_alignment_passed")
+        promotion_decision = str(promotion.get("promotion_decision") or "")
+        if promotion_decision.startswith("blocked"):
+            concern_evidence.append("promotion_gate_still_blocked")
+        if promotion.get("overfit_blockers"):
+            concern_evidence.append("promotion_gate_has_overfit_blockers")
+    else:
+        missing_anchor_sources.append("promotion_gate")
+
+    return {
+        "status": "guidance_ready" if not missing_anchor_sources else "guidance_incomplete",
+        "supporting_evidence": supporting_evidence,
+        "concern_evidence": concern_evidence,
+        "rationale_must_address": sorted(set(concern_evidence)),
+        "evidence_anchor_candidates": anchor_candidates,
+        "missing_anchor_sources": missing_anchor_sources,
+        "minimum_recommended_anchor_count": 3,
+        "safe_default_if_anchors_are_weak": "reject_or_hold_blocked",
+        "auto_accept_allowed": False,
+        "auto_reject_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            candidate.get("no_live_order_sent") is not False
+            and proxy.get("no_live_order_sent") is not False
+            and promotion.get("no_live_order_sent") is not False
+        ),
+    }
+
+
+def _operator_review_evidence_snapshot(decision: dict[str, Any]) -> dict[str, Any]:
+    review_kind = str(decision.get("review_kind") or "")
+    if review_kind == "defensive_lineage":
+        candidate = {
+            "kind": "candidate_walk_forward_report",
+            "status": "not_applicable_for_defensive_lineage_review",
+            "not_applicable": True,
+            "readable": True,
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+        proxy = {
+            "kind": "conditional_overfit_proxy_audit",
+            "status": "not_applicable_for_defensive_lineage_review",
+            "not_applicable": True,
+            "readable": True,
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+        lineage = _operator_review_lineage_evidence_summary(decision.get("active_operator_review_report"))
+    else:
+        candidate = _operator_review_candidate_evidence_summary(decision.get("candidate_report"))
+        proxy = _operator_review_proxy_audit_evidence_summary(decision.get("proxy_audit_report"))
+        lineage = {}
+    promotion = _operator_review_promotion_gate_evidence_summary(decision.get("source_promotion_gate_report"))
+    guidance = _operator_review_evidence_guidance(
+        candidate=candidate,
+        proxy=proxy,
+        promotion=promotion,
+        lineage=lineage,
+    )
+    sources = [candidate, proxy, promotion]
+    if lineage:
+        sources.append(lineage)
+    missing_or_unreadable = [
+        str(item.get("kind") or "source_report")
+        for item in sources
+        if item.get("readable") is not True
+    ]
+    explicit_safety_blockers: list[str] = []
+    for item in sources:
+        kind = str(item.get("kind") or "source_report")
+        if item.get("source_no_live_order_sent") is False:
+            explicit_safety_blockers.append(f"{kind}_no_live_order_sent_false")
+        if item.get("source_order_submission_allowed") is True:
+            explicit_safety_blockers.append(f"{kind}_order_submission_allowed_true")
+    if explicit_safety_blockers:
+        status = "evidence_snapshot_safety_blocked"
+    elif missing_or_unreadable:
+        status = "evidence_snapshot_incomplete"
+    else:
+        status = "evidence_snapshot_ready"
+    snapshot_core = {
+        "status": status,
+        "candidate": candidate,
+        "proxy_audit": proxy,
+        "promotion_gate": promotion,
+        "lineage_review": lineage or None,
+        "review_guidance": guidance,
+        "missing_or_unreadable_sources": missing_or_unreadable,
+        "explicit_safety_blockers": explicit_safety_blockers,
+        "operator_decision_policy": "operator_must_interpret_evidence_snapshot_no_auto_accept_or_reject",
+        "acceptance_still_requires_operator_rationale": True,
+        "real_shadow_still_required_before_tiny_canary_or_live": True,
+        "auto_decision_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            not explicit_safety_blockers
+            and all(item.get("no_live_order_sent") is not False for item in sources)
+            and guidance.get("no_live_order_sent") is not False
+        ),
+    }
+    return {
+        **snapshot_core,
+        "evidence_snapshot_fingerprint": _fingerprint_payload(snapshot_core),
+        "fingerprint_algorithm": "sha256_canonical_json",
+    }
+
+
+def _operator_review_manual_decision_contract(
+    *,
+    evidence_snapshot: dict[str, Any],
+    required_fields_remaining: list[Any],
+    paper_only_scope: bool,
+) -> dict[str, Any]:
+    evidence = dict(evidence_snapshot or {})
+    guidance = dict(evidence.get("review_guidance") or {})
+    snapshot_fingerprint = evidence.get("evidence_snapshot_fingerprint")
+    missing_sources = list(evidence.get("missing_or_unreadable_sources") or [])
+    safety_blockers = list(evidence.get("explicit_safety_blockers") or [])
+    rationale_must_address = list(guidance.get("rationale_must_address") or [])
+    anchor_candidates = list(guidance.get("evidence_anchor_candidates") or [])
+    min_anchor_count = int(guidance.get("minimum_recommended_anchor_count") or 3)
+    required_fields = [str(item) for item in list(required_fields_remaining or [])]
+    accept_blockers = []
+    if evidence.get("status") != "evidence_snapshot_ready":
+        accept_blockers.append("evidence_snapshot_not_ready")
+    if guidance.get("status") != "guidance_ready":
+        accept_blockers.append("review_guidance_not_ready")
+    if missing_sources:
+        accept_blockers.append("source_evidence_missing_or_unreadable")
+    if safety_blockers:
+        accept_blockers.append("source_evidence_safety_blocked")
+    if len(anchor_candidates) < min_anchor_count:
+        accept_blockers.append("insufficient_evidence_anchor_candidates")
+    if required_fields:
+        accept_blockers.append("operator_required_fields_still_empty")
+    status = "manual_decision_contract_ready" if not accept_blockers else "manual_decision_contract_blocked"
+    return {
+        "status": status,
+        "accept_blockers_before_operator_write": sorted(set(accept_blockers)),
+        "accept_requires": [
+            "explicit_accept_decision_from_operator",
+            "reviewer_identity",
+            "reviewed_at_timestamp",
+            "rationale_uses_evidence_anchors",
+            "rationale_references_evidence_snapshot_fingerprint_or_source_report_paths",
+            "rationale_addresses_all_must_address_concerns",
+            "operator_acknowledges_acceptance_does_not_enable_live_or_tiny_canary",
+        ],
+        "reject_or_hold_triggers": sorted(
+            set(
+                [
+                    *rationale_must_address,
+                    *missing_sources,
+                    *safety_blockers,
+                    "operator_uncertain_after_review",
+                    "evidence_anchor_is_missing_or_weak",
+                ]
+            )
+        ),
+        "rationale_must_address": rationale_must_address,
+        "evidence_snapshot_fingerprint": snapshot_fingerprint,
+        "fingerprint_algorithm": evidence.get("fingerprint_algorithm"),
+        "required_evidence_anchor_candidates": anchor_candidates,
+        "minimum_recommended_anchor_count": min_anchor_count,
+        "required_fields_remaining": required_fields,
+        "paper_only_scope": paper_only_scope,
+        "accepted_scope_after_manual_accept": (
+            "paper_only_candidate_activation_still_requires_fresh_signal_real_paper_rows_and_execution_parity"
+            if paper_only_scope
+            else "defensive_route_validation_still_requires_execution_parity_and_operator_promotion"
+        ),
+        "safe_default_if_any_contract_item_fails": "reject_or_hold_blocked",
+        "auto_decision_allowed": False,
+        "auto_accept_allowed": False,
+        "auto_reject_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": evidence.get("no_live_order_sent") is not False and guidance.get("no_live_order_sent") is not False,
+    }
+
+
+def _operator_review_rationale_scaffold(
+    *,
+    evidence_snapshot: dict[str, Any],
+    manual_decision_contract: dict[str, Any],
+) -> dict[str, Any]:
+    evidence = dict(evidence_snapshot or {})
+    guidance = dict(evidence.get("review_guidance") or {})
+    contract = dict(manual_decision_contract or {})
+    snapshot_fingerprint = contract.get("evidence_snapshot_fingerprint") or evidence.get("evidence_snapshot_fingerprint")
+    anchor_candidates = list(
+        contract.get("required_evidence_anchor_candidates")
+        or guidance.get("evidence_anchor_candidates")
+        or []
+    )
+    min_anchor_count = int(
+        contract.get("minimum_recommended_anchor_count")
+        or guidance.get("minimum_recommended_anchor_count")
+        or 3
+    )
+    minimum_anchor_set = anchor_candidates[: max(0, min(min_anchor_count, len(anchor_candidates)))]
+    concerns = list(contract.get("rationale_must_address") or guidance.get("rationale_must_address") or [])
+    supporting_evidence = list(guidance.get("supporting_evidence") or [])
+    accept_blockers = list(contract.get("accept_blockers_before_operator_write") or [])
+    scaffold_blockers = []
+    if not snapshot_fingerprint:
+        scaffold_blockers.append("evidence_snapshot_fingerprint_missing")
+    if len(anchor_candidates) < min_anchor_count:
+        scaffold_blockers.append("insufficient_anchor_candidates_for_scaffold")
+    if evidence.get("status") != "evidence_snapshot_ready":
+        scaffold_blockers.append("evidence_snapshot_not_ready")
+    if guidance.get("status") != "guidance_ready":
+        scaffold_blockers.append("review_guidance_not_ready")
+    status = "rationale_scaffold_ready" if not scaffold_blockers else "rationale_scaffold_incomplete"
+    return {
+        "status": status,
+        "scaffold_blockers": sorted(set(scaffold_blockers)),
+        "decision_field": "<accept_or_reject>",
+        "reviewer_field": "<operator_name_or_initials>",
+        "reviewed_at_field": "now",
+        "evidence_snapshot_fingerprint": snapshot_fingerprint,
+        "minimum_anchor_set": minimum_anchor_set,
+        "minimum_recommended_anchor_count": min_anchor_count,
+        "supporting_evidence_to_consider": supporting_evidence,
+        "concerns_to_address": concerns,
+        "concern_response_prompts": [
+            {
+                "concern": concern,
+                "required_response": "address_with_specific_evidence_anchor_or_choose_reject_hold",
+            }
+            for concern in concerns
+        ],
+        "accept_rationale_outline": [
+            {
+                "section": "decision",
+                "must_include": "explicit_accept",
+            },
+            {
+                "section": "evidence_identity",
+                "must_include": "evidence_snapshot_fingerprint_or_source_report_paths",
+            },
+            {
+                "section": "supporting_anchors",
+                "must_include": "at_least_minimum_recommended_anchor_count",
+                "recommended_anchors": minimum_anchor_set,
+            },
+            {
+                "section": "concern_responses",
+                "must_include": "every_rationale_must_address_item",
+                "concerns": concerns,
+            },
+            {
+                "section": "scope_acknowledgement",
+                "must_include": contract.get("accepted_scope_after_manual_accept"),
+            },
+            {
+                "section": "safety_acknowledgement",
+                "must_include": "acceptance_does_not_enable_live_or_tiny_canary",
+            },
+        ],
+        "reject_or_hold_rationale_outline": [
+            {
+                "section": "decision",
+                "must_include": "explicit_reject_or_hold",
+            },
+            {
+                "section": "primary_reason",
+                "must_include": "one_or_more_reject_or_hold_triggers",
+                "triggers": list(contract.get("reject_or_hold_triggers") or []),
+            },
+            {
+                "section": "evidence_identity",
+                "must_include": "evidence_snapshot_fingerprint_or_source_report_paths",
+            },
+            {
+                "section": "next_condition_to_reconsider",
+                "must_include": "what_new_evidence_would_be_needed_for_re_review",
+            },
+        ],
+        "operator_write_still_blocked_by_contract": bool(accept_blockers),
+        "contract_accept_blockers_before_write": accept_blockers,
+        "safe_default_if_uncertain": contract.get("safe_default_if_any_contract_item_fails") or "reject_or_hold_blocked",
+        "auto_decision_allowed": False,
+        "auto_accept_allowed": False,
+        "auto_reject_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": evidence.get("no_live_order_sent") is not False and contract.get("no_live_order_sent") is not False,
+    }
+
+
+def _operator_review_fill_decision_command_template(
+    *,
+    template: Any,
+    decision: str,
+    reviewer_placeholder: str,
+    rationale_placeholder: str,
+) -> str | None:
+    text = str(template or "").strip()
+    if not text:
+        return None
+    return (
+        text.replace("<accept_or_reject>", decision)
+        .replace("<operator_name_or_initials>", shlex.quote(reviewer_placeholder))
+        .replace("<operator_rationale>", shlex.quote(rationale_placeholder))
+    )
+
+
+def _operator_review_decision_command_plan(
+    *,
+    decision_dry_run_command_template: Any,
+    decision_fill_command_template: Any,
+    validation_command: Any,
+    rationale_scaffold: dict[str, Any],
+    manual_decision_contract: dict[str, Any],
+    decision_command_safety_status: Any,
+) -> dict[str, Any]:
+    dry_template = str(decision_dry_run_command_template or "").strip()
+    fill_template = str(decision_fill_command_template or "").strip()
+    validation = str(validation_command or "").strip()
+    scaffold = dict(rationale_scaffold or {})
+    contract = dict(manual_decision_contract or {})
+    reviewer_placeholder = "<operator_name_or_initials>"
+    accept_rationale_placeholder = (
+        "<accept_rationale_use_snapshot_fingerprint_min_anchors_and_address_all_concerns>"
+    )
+    reject_rationale_placeholder = (
+        "<reject_or_hold_rationale_primary_trigger_snapshot_fingerprint_next_reconsider_condition>"
+    )
+    blockers: list[str] = []
+    if not dry_template:
+        blockers.append("decision_dry_run_command_template_missing")
+    if not fill_template:
+        blockers.append("decision_fill_command_template_missing")
+    if not validation:
+        blockers.append("validation_command_missing")
+    for name, template in {
+        "dry_run": dry_template,
+        "write": fill_template,
+    }.items():
+        if template:
+            for placeholder in [
+                "<accept_or_reject>",
+                "<operator_name_or_initials>",
+                "<operator_rationale>",
+            ]:
+                if placeholder not in template:
+                    blockers.append(f"{name}_template_missing_{placeholder.strip('<>')}_placeholder")
+    if dry_template and "--dry-run" not in _command_tokens(dry_template):
+        blockers.append("decision_dry_run_command_template_missing_dry_run_flag")
+    if fill_template and "--write-summary" not in _command_tokens(fill_template):
+        blockers.append("decision_fill_command_template_missing_write_summary_flag")
+    if scaffold.get("status") != "rationale_scaffold_ready":
+        blockers.append("rationale_scaffold_not_ready")
+    if decision_command_safety_status != "PASS":
+        blockers.append("decision_command_safety_not_pass")
+
+    accept_dry_run = _operator_review_fill_decision_command_template(
+        template=dry_template,
+        decision="accept",
+        reviewer_placeholder=reviewer_placeholder,
+        rationale_placeholder=accept_rationale_placeholder,
+    )
+    accept_write = _operator_review_fill_decision_command_template(
+        template=fill_template,
+        decision="accept",
+        reviewer_placeholder=reviewer_placeholder,
+        rationale_placeholder=accept_rationale_placeholder,
+    )
+    reject_dry_run = _operator_review_fill_decision_command_template(
+        template=dry_template,
+        decision="reject",
+        reviewer_placeholder=reviewer_placeholder,
+        rationale_placeholder=reject_rationale_placeholder,
+    )
+    reject_write = _operator_review_fill_decision_command_template(
+        template=fill_template,
+        decision="reject",
+        reviewer_placeholder=reviewer_placeholder,
+        rationale_placeholder=reject_rationale_placeholder,
+    )
+
+    status = "decision_command_plan_ready" if not blockers else "decision_command_plan_blocked"
+    return {
+        "status": status,
+        "blockers": sorted(set(blockers)),
+        "safe_default_if_operator_uncertain": "reject",
+        "operator_must_replace_placeholders": [
+            reviewer_placeholder,
+            accept_rationale_placeholder,
+            reject_rationale_placeholder,
+        ],
+        "dry_run_before_write_required": True,
+        "write_requires_operator_confirmation": True,
+        "validation_after_write_required": True,
+        "contract_accept_blockers_before_write": list(
+            contract.get("accept_blockers_before_operator_write") or []
+        ),
+        "decision_options": [
+            {
+                "decision": "accept",
+                "rationale_placeholder": accept_rationale_placeholder,
+                "dry_run_command": accept_dry_run,
+                "write_command": accept_write,
+                "validation_command": validation or None,
+                "write_allowed_without_operator_review": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            },
+            {
+                "decision": "reject",
+                "rationale_placeholder": reject_rationale_placeholder,
+                "dry_run_command": reject_dry_run,
+                "write_command": reject_write,
+                "validation_command": validation or None,
+                "write_allowed_without_operator_review": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            },
+        ],
+        "execution_sequence": [
+            "choose_accept_or_reject_manually",
+            "replace_reviewer_and_rationale_placeholders",
+            "run_matching_dry_run_command",
+            "inspect_dry_run_summary_and_backup_plan",
+            "run_matching_write_command_only_after_operator_confirmation",
+            "run_validation_command",
+            "rerun_launch_shadow_watch",
+        ],
+        "auto_execute_allowed": False,
+        "auto_decision_allowed": False,
+        "auto_accept_allowed": False,
+        "auto_reject_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+
+
+def _operator_review_decision_aid(
+    *,
+    operator_review_handoff_summary: dict[str, Any],
+    remaining_work_closure_summary: dict[str, Any],
+) -> dict[str, Any]:
+    handoff = dict(operator_review_handoff_summary or {})
+    closure = dict(remaining_work_closure_summary or {})
+    rows = [dict(item) for item in list(handoff.get("reviews") or [])]
+    ready_rows = [item for item in rows if item.get("status") == "ready_for_operator_review"]
+    decision_rows = [
+        item
+        for item in ready_rows
+        if dict(item.get("operator_decision_packet") or {}).get("status") == "operator_decision_required"
+    ]
+    blocked_rows = [item for item in rows if item.get("status") == "blocked_review_packet_incomplete"]
+    waiting_rows = [item for item in rows if item.get("status") == "waiting_for_signal_or_time_gate"]
+
+    def _decision_row(item: dict[str, Any]) -> dict[str, Any]:
+        packet = dict(item.get("operator_decision_packet") or {})
+        active = dict(item.get("active_operator_review_file_summary") or {})
+        safety = dict(packet.get("decision_command_safety") or {})
+        paper_only_scope = item.get("paper_only_scope") is True
+        candidate_report = packet.get("candidate_report") or item.get("candidate_report")
+        proxy_audit_report = packet.get("proxy_audit_report")
+        source_promotion_gate_report = packet.get("source_promotion_gate_report")
+        evidence_snapshot = _operator_review_evidence_snapshot(
+            {
+                "review_kind": item.get("review_kind"),
+                "active_operator_review_report": packet.get("active_operator_review_report"),
+                "candidate_report": candidate_report,
+                "proxy_audit_report": proxy_audit_report,
+                "source_promotion_gate_report": source_promotion_gate_report,
+            }
+        )
+        required_fields = list(packet.get("operator_required_fields_remaining") or [])
+        manual_decision_contract = _operator_review_manual_decision_contract(
+            evidence_snapshot=evidence_snapshot,
+            required_fields_remaining=required_fields,
+            paper_only_scope=paper_only_scope,
+        )
+        rationale_scaffold = _operator_review_rationale_scaffold(
+            evidence_snapshot=evidence_snapshot,
+            manual_decision_contract=manual_decision_contract,
+        )
+        decision_command_plan = _operator_review_decision_command_plan(
+            decision_dry_run_command_template=packet.get("decision_dry_run_command_template"),
+            decision_fill_command_template=packet.get("decision_fill_command_template"),
+            validation_command=packet.get("validation_command"),
+            rationale_scaffold=rationale_scaffold,
+            manual_decision_contract=manual_decision_contract,
+            decision_command_safety_status=safety.get("status"),
+        )
+        return {
+            "action_type": item.get("action_type"),
+            "target_gate": item.get("target_gate"),
+            "review_kind": item.get("review_kind"),
+            "candidate_recipe_id": packet.get("candidate_recipe_id") or item.get("candidate_recipe_id"),
+            "candidate_report": candidate_report,
+            "proxy_audit_report": proxy_audit_report,
+            "source_promotion_gate_report": source_promotion_gate_report,
+            "source_promotion_gate_generated_at": packet.get("source_promotion_gate_generated_at"),
+            "evidence_snapshot": evidence_snapshot,
+            "review_packet_summary": packet.get("review_packet_summary") or item.get("review_packet_summary"),
+            "review_packet_fingerprint": packet.get("review_packet_fingerprint") or item.get("review_packet_fingerprint"),
+            "active_operator_review_report": packet.get("active_operator_review_report"),
+            "required_fields_remaining": required_fields,
+            "manual_decision_contract": manual_decision_contract,
+            "rationale_scaffold": rationale_scaffold,
+            "decision_command_plan": decision_command_plan,
+            "accepted_status_values": list(packet.get("accepted_status_values") or []),
+            "decision_dry_run_command_template": packet.get("decision_dry_run_command_template"),
+            "decision_fill_command_template": packet.get("decision_fill_command_template"),
+            "validation_command": packet.get("validation_command"),
+            "decision_command_safety_status": safety.get("status"),
+            "decision_command_safety_blockers": list(safety.get("blockers") or []),
+            "draft_min_rationale_chars": active.get("draft_min_rationale_chars"),
+            "draft_min_evidence_anchors": active.get("draft_min_evidence_anchors"),
+            "paper_only_scope": paper_only_scope,
+            "accept_consequence": (
+                "allows_paper_only_candidate_activation_but_tiny_canary_or_live_still_requires_real_shadow_and_execution_parity"
+                if paper_only_scope
+                else "allows_defensive_route_validation_but_live_still_requires_execution_parity"
+            ),
+            "reject_consequence": "keeps_this_candidate_or_route_blocked_by_validation",
+            "review_focus": [
+                "verify_candidate_report_matches_review_packet",
+                "verify_proxy_or_lineage_audit_is_relevant_to_the_candidate",
+                "verify_review_packet_fingerprint_matches_source_artifact",
+                "write_accept_or_reject_rationale_with_evidence_anchor",
+            ],
+            "auto_accept_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": (
+                item.get("no_live_order_sent") is not False
+                and packet.get("no_live_order_sent") is not False
+                and evidence_snapshot.get("no_live_order_sent") is not False
+                and manual_decision_contract.get("no_live_order_sent") is not False
+                and rationale_scaffold.get("no_live_order_sent") is not False
+                and decision_command_plan.get("no_live_order_sent") is not False
+            ),
+        }
+
+    if blocked_rows:
+        status = "operator_review_packets_blocked"
+    elif decision_rows:
+        status = "operator_decisions_ready"
+    elif waiting_rows:
+        status = "operator_reviews_waiting_for_signal_or_time_gate"
+    else:
+        status = "no_operator_review_decisions_open"
+    decision_aids = [_decision_row(item) for item in decision_rows]
+    return {
+        "status": status,
+        "decision_required_count": len(decision_rows),
+        "ready_review_count": len(ready_rows),
+        "blocked_review_count": len(blocked_rows),
+        "waiting_review_count": len(waiting_rows),
+        "primary_decision": decision_aids[0] if decision_aids else None,
+        "decisions": decision_aids,
+        "blocked_reviews": [
+            {
+                "action_type": item.get("action_type"),
+                "target_gate": item.get("target_gate"),
+                "missing_packet_fields": list(item.get("missing_packet_fields") or []),
+                "artifact_blockers": list(item.get("artifact_blockers") or []),
+                "order_submission_allowed": False,
+                "no_live_order_sent": item.get("no_live_order_sent") is not False,
+            }
+            for item in blocked_rows
+        ],
+        "waiting_reviews": [
+            {
+                "action_type": item.get("action_type"),
+                "target_gate": item.get("target_gate"),
+                "execute_after_kst": item.get("execute_after_kst"),
+                "reason": item.get("reason"),
+                "order_submission_allowed": False,
+                "no_live_order_sent": item.get("no_live_order_sent") is not False,
+            }
+            for item in waiting_rows
+        ],
+        "remaining_work_operator_review_problem_ids": list(closure.get("operator_review_problem_ids") or []),
+        "auto_decision_allowed": False,
+        "notes": [
+            "this_aid_does_not_accept_or_reject_operator_reviews",
+            "non_accepted_review_status_keeps_candidate_or_route_blocked",
+            "paper_only_acceptance_does_not_enable_tiny_canary_or_live_by_itself",
+        ],
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            handoff.get("no_live_order_sent") is not False
+            and closure.get("no_live_order_sent") is not False
+            and all(item.get("no_live_order_sent") is not False for item in rows)
+        ),
+    }
+
+
+def _operator_review_resolution_plan(
+    *,
+    operator_review_decision_aid: dict[str, Any],
+    next_material_progress_plan: dict[str, Any],
+) -> dict[str, Any]:
+    aid = dict(operator_review_decision_aid or {})
+    next_progress = dict(next_material_progress_plan or {})
+    decisions = [dict(item) for item in list(aid.get("decisions") or [])]
+    immediate_operator_events = [
+        dict(item) for item in list(next_progress.get("immediate_operator_events") or [])
+    ]
+    waiting_reviews = [dict(item) for item in list(aid.get("waiting_reviews") or [])]
+
+    def _step(item: dict[str, Any], index: int) -> dict[str, Any]:
+        paper_only_scope = item.get("paper_only_scope") is True
+        safety_pass = item.get("decision_command_safety_status") == "PASS"
+        required_fields = list(item.get("required_fields_remaining") or [])
+        evidence_snapshot = dict(item.get("evidence_snapshot") or {})
+        manual_decision_contract = dict(
+            item.get("manual_decision_contract")
+            or _operator_review_manual_decision_contract(
+                evidence_snapshot=evidence_snapshot,
+                required_fields_remaining=required_fields,
+                paper_only_scope=paper_only_scope,
+            )
+        )
+        rationale_scaffold = dict(
+            item.get("rationale_scaffold")
+            or _operator_review_rationale_scaffold(
+                evidence_snapshot=evidence_snapshot,
+                manual_decision_contract=manual_decision_contract,
+            )
+        )
+        decision_command_plan = dict(
+            item.get("decision_command_plan")
+            or _operator_review_decision_command_plan(
+                decision_dry_run_command_template=item.get("decision_dry_run_command_template"),
+                decision_fill_command_template=item.get("decision_fill_command_template"),
+                validation_command=item.get("validation_command"),
+                rationale_scaffold=rationale_scaffold,
+                manual_decision_contract=manual_decision_contract,
+                decision_command_safety_status=item.get("decision_command_safety_status"),
+            )
+        )
+        return {
+            "step": index,
+            "action_type": item.get("action_type"),
+            "target_gate": item.get("target_gate"),
+            "review_kind": item.get("review_kind"),
+            "candidate_recipe_id": item.get("candidate_recipe_id"),
+            "active_operator_review_report": item.get("active_operator_review_report"),
+            "evidence_snapshot": evidence_snapshot,
+            "manual_decision_contract": manual_decision_contract,
+            "rationale_scaffold": rationale_scaffold,
+            "decision_command_plan": decision_command_plan,
+            "required_fields_remaining": required_fields,
+            "required_operator_inputs": [
+                "decision_accept_or_reject",
+                "reviewer",
+                "reviewed_at",
+                "rationale_with_evidence_anchor",
+            ],
+            "decision_command_safety_status": item.get("decision_command_safety_status"),
+            "decision_command_safety_blockers": list(item.get("decision_command_safety_blockers") or []),
+            "decision_dry_run_command_template": item.get("decision_dry_run_command_template"),
+            "decision_fill_command_template": item.get("decision_fill_command_template"),
+            "validation_command": item.get("validation_command"),
+            "dry_run_before_write_required": True,
+            "backup_required": True,
+            "accept_preconditions": [
+                "candidate_report_or_lineage_source_matches_review_packet",
+                "review_packet_fingerprint_matches_source_artifact",
+                "rationale_identifies_at_least_one_evidence_anchor",
+                "operator_accepts_remaining_live_or_canary_gates_still_blocked",
+            ],
+            "reject_preconditions": [
+                "evidence_anchor_is_missing_or_weak",
+                "candidate_or_lineage_intent_is_not_clear",
+                "review_packet_or_fingerprint_does_not_match_source_artifact",
+                "operator_is_uncertain_after_review",
+            ],
+            "safe_default_if_uncertain": "reject_or_hold_blocked",
+            "accept_consequence": item.get("accept_consequence"),
+            "reject_consequence": item.get("reject_consequence"),
+            "blocks_if_unresolved": True,
+            "paper_only_scope": paper_only_scope,
+            "acceptance_does_not_enable_live": True,
+            "acceptance_does_not_enable_tiny_canary": paper_only_scope,
+            "can_auto_decide": False,
+            "can_auto_accept": False,
+            "can_auto_reject": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": (
+                item.get("no_live_order_sent") is not False
+                and evidence_snapshot.get("no_live_order_sent") is not False
+                and manual_decision_contract.get("no_live_order_sent") is not False
+                and rationale_scaffold.get("no_live_order_sent") is not False
+                and decision_command_plan.get("no_live_order_sent") is not False
+                and safety_pass
+            ),
+        }
+
+    steps = [_step(item, index + 1) for index, item in enumerate(decisions)]
+    unsafe_steps = [item for item in steps if item.get("decision_command_safety_status") != "PASS"]
+    readiness_rows: list[dict[str, Any]] = []
+
+    def _operator_prompt_card(
+        *,
+        row: dict[str, Any],
+        evidence: dict[str, Any],
+        contract: dict[str, Any],
+        scaffold: dict[str, Any],
+    ) -> dict[str, Any]:
+        guidance = dict(evidence.get("review_guidance") or {})
+        rationale_must_address = list(
+            contract.get("rationale_must_address")
+            or scaffold.get("concerns_to_address")
+            or guidance.get("rationale_must_address")
+            or []
+        )
+        anchor_candidates = list(
+            contract.get("required_evidence_anchor_candidates")
+            or guidance.get("evidence_anchor_candidates")
+            or []
+        )
+        minimum_anchor_set = list(scaffold.get("minimum_anchor_set") or anchor_candidates[:3])
+        minimum_anchor_count = (
+            _int_or_default(contract.get("minimum_recommended_anchor_count"), 0)
+            or _int_or_default(guidance.get("minimum_recommended_anchor_count"), 0)
+            or DEFAULT_OPERATOR_REVIEW_MIN_EVIDENCE_ANCHORS
+        )
+        accept_requires = list(contract.get("accept_requires") or [])
+        reject_or_hold_triggers = list(contract.get("reject_or_hold_triggers") or [])
+        status = (
+            "operator_prompt_card_ready"
+            if evidence.get("status") == "evidence_snapshot_ready"
+            and scaffold.get("status") == "rationale_scaffold_ready"
+            else "operator_prompt_card_incomplete"
+        )
+        return {
+            "status": status,
+            "review_kind": row.get("review_kind"),
+            "target_gate": row.get("target_gate"),
+            "candidate_recipe_id": row.get("candidate_recipe_id"),
+            "active_operator_review_report": row.get("active_operator_review_report"),
+            "decision_rule": (
+                "accept_only_if_all_accept_requires_are_met_and_every_must_address_concern_is_answered"
+            ),
+            "safe_default_if_uncertain": (
+                contract.get("safe_default_if_any_contract_item_fails")
+                or scaffold.get("safe_default_if_uncertain")
+                or "reject_or_hold_blocked"
+            ),
+            "rationale_quality_gate": {
+                "minimum_rationale_chars": DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS,
+                "minimum_recommended_anchor_count": minimum_anchor_count,
+                "minimum_anchor_set": minimum_anchor_set,
+                "must_address_count": len(rationale_must_address),
+                "evidence_identity_required": True,
+                "evidence_snapshot_fingerprint": contract.get("evidence_snapshot_fingerprint")
+                or scaffold.get("evidence_snapshot_fingerprint"),
+            },
+            "supporting_evidence_to_consider": list(
+                scaffold.get("supporting_evidence_to_consider")
+                or guidance.get("supporting_evidence")
+                or []
+            ),
+            "rationale_must_address": rationale_must_address,
+            "accept_requires": accept_requires,
+            "reject_or_hold_triggers": reject_or_hold_triggers,
+            "evidence_anchor_candidates": anchor_candidates,
+            "accept_scope_after_manual_accept": contract.get(
+                "accepted_scope_after_manual_accept"
+            ),
+            "acceptance_does_not_enable_live": True,
+            "acceptance_does_not_enable_tiny_canary": row.get("paper_only_scope") is True,
+            "auto_decision_allowed": False,
+            "auto_accept_allowed": False,
+            "auto_reject_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": (
+                row.get("no_live_order_sent") is not False
+                and evidence.get("no_live_order_sent") is not False
+                and contract.get("no_live_order_sent") is not False
+                and scaffold.get("no_live_order_sent") is not False
+            ),
+        }
+
+    for item in steps:
+        evidence = dict(item.get("evidence_snapshot") or {})
+        contract = dict(item.get("manual_decision_contract") or {})
+        scaffold = dict(item.get("rationale_scaffold") or {})
+        command_plan = dict(item.get("decision_command_plan") or {})
+        command_ready = command_plan.get("status") == "decision_command_plan_ready"
+        evidence_ready = evidence.get("status") == "evidence_snapshot_ready"
+        scaffold_ready = scaffold.get("status") == "rationale_scaffold_ready"
+        safety_pass = item.get("decision_command_safety_status") == "PASS"
+        contract_accept_blockers = list(contract.get("accept_blockers_before_operator_write") or [])
+        command_blockers = list(command_plan.get("blockers") or [])
+        ready_for_operator_dry_run = command_ready and evidence_ready and scaffold_ready and safety_pass
+        if not safety_pass:
+            next_manual_action = "repair_decision_command_safety_before_review"
+        elif not evidence_ready:
+            next_manual_action = "repair_or_refresh_evidence_snapshot_before_review"
+        elif not scaffold_ready:
+            next_manual_action = "repair_rationale_scaffold_before_review"
+        elif not command_ready:
+            next_manual_action = "repair_decision_command_templates_before_review"
+        elif contract_accept_blockers:
+            next_manual_action = "choose_accept_or_reject_replace_placeholders_then_run_dry_run"
+        else:
+            next_manual_action = "run_dry_run_then_write_only_after_operator_confirmation"
+        readiness_rows.append(
+            {
+                "step": item.get("step"),
+                "review_kind": item.get("review_kind"),
+                "target_gate": item.get("target_gate"),
+                "candidate_recipe_id": item.get("candidate_recipe_id"),
+                "active_operator_review_report": item.get("active_operator_review_report"),
+                "evidence_status": evidence.get("status"),
+                "contract_status": contract.get("status"),
+                "rationale_scaffold_status": scaffold.get("status"),
+                "decision_command_plan_status": command_plan.get("status"),
+                "decision_command_safety_status": item.get("decision_command_safety_status"),
+                "required_fields_remaining": list(item.get("required_fields_remaining") or []),
+                "contract_accept_blockers_before_write": contract_accept_blockers,
+                "command_plan_blockers": command_blockers,
+                "ready_for_operator_dry_run_template": ready_for_operator_dry_run,
+                "operator_write_still_blocked_by_contract": scaffold.get("operator_write_still_blocked_by_contract"),
+                "safe_default_if_uncertain": (
+                    command_plan.get("safe_default_if_operator_uncertain")
+                    or contract.get("safe_default_if_any_contract_item_fails")
+                    or "reject_or_hold_blocked"
+                ),
+                "operator_prompt_card": _operator_prompt_card(
+                    row=item,
+                    evidence=evidence,
+                    contract=contract,
+                    scaffold=scaffold,
+                ),
+                "next_manual_action": next_manual_action,
+                "auto_decision_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": (
+                    item.get("no_live_order_sent") is not False
+                    and evidence.get("no_live_order_sent") is not False
+                    and contract.get("no_live_order_sent") is not False
+                    and scaffold.get("no_live_order_sent") is not False
+                    and command_plan.get("no_live_order_sent") is not False
+                ),
+            }
+        )
+    readiness_repair_rows = [
+        item
+        for item in readiness_rows
+        if item.get("ready_for_operator_dry_run_template") is not True
+    ]
+    readiness_contract_blocked_rows = [
+        item
+        for item in readiness_rows
+        if item.get("ready_for_operator_dry_run_template") is True
+        and item.get("contract_accept_blockers_before_write")
+    ]
+    readiness_dry_run_ready_rows = [
+        item
+        for item in readiness_rows
+        if item.get("ready_for_operator_dry_run_template") is True
+    ]
+    if readiness_repair_rows:
+        readiness_status = "operator_review_matrix_repair_required"
+    elif readiness_contract_blocked_rows:
+        readiness_status = "operator_review_matrix_ready_for_manual_dry_run_inputs"
+    elif readiness_rows:
+        readiness_status = "operator_review_matrix_ready_for_manual_dry_run"
+    else:
+        readiness_status = "operator_review_matrix_not_needed"
+    readiness_matrix = {
+        "status": readiness_status,
+        "row_count": len(readiness_rows),
+        "dry_run_ready_count": len(readiness_dry_run_ready_rows),
+        "contract_blocked_count": len(readiness_contract_blocked_rows),
+        "repair_required_count": len(readiness_repair_rows),
+        "primary_row": readiness_rows[0] if readiness_rows else None,
+        "rows": readiness_rows,
+        "policy": "matrix_only_summarizes_manual_review_readiness_and_never_executes_decisions",
+        "auto_decision_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": all(item.get("no_live_order_sent") is not False for item in readiness_rows),
+    }
+    step_by_number = {item.get("step"): item for item in steps}
+    allowed_operator_input_blockers = {"operator_required_fields_still_empty"}
+    blocked_by_operator_inputs_only = (
+        bool(readiness_contract_blocked_rows)
+        and not readiness_repair_rows
+        and all(
+            set(item.get("contract_accept_blockers_before_write") or [])
+            <= allowed_operator_input_blockers
+            for item in readiness_contract_blocked_rows
+        )
+    )
+    if not readiness_rows:
+        batch_status = "operator_review_batch_not_needed"
+    elif readiness_repair_rows:
+        batch_status = "operator_review_batch_repair_required"
+    elif readiness_contract_blocked_rows:
+        batch_status = "operator_review_batch_waiting_for_operator_inputs"
+    else:
+        batch_status = "operator_review_batch_ready_for_manual_dry_run"
+    batch_rows: list[dict[str, Any]] = []
+    for row in readiness_rows:
+        step = dict(step_by_number.get(row.get("step")) or {})
+        command_plan = dict(step.get("decision_command_plan") or {})
+        decision_options = []
+        for option in list(command_plan.get("decision_options") or []):
+            option_payload = dict(option)
+            decision_options.append(
+                {
+                    "decision": option_payload.get("decision"),
+                    "dry_run_command": option_payload.get("dry_run_command"),
+                    "write_command": option_payload.get("write_command"),
+                    "validation_command": option_payload.get("validation_command"),
+                    "write_allowed_without_operator_review": False,
+                    "order_submission_allowed": False,
+                    "no_live_order_sent": option_payload.get("no_live_order_sent") is not False,
+                }
+            )
+        batch_rows.append(
+            {
+                "step": row.get("step"),
+                "review_kind": row.get("review_kind"),
+                "target_gate": row.get("target_gate"),
+                "candidate_recipe_id": row.get("candidate_recipe_id"),
+                "active_operator_review_report": row.get("active_operator_review_report"),
+                "ready_for_operator_dry_run_template": row.get("ready_for_operator_dry_run_template"),
+                "contract_accept_blockers_before_write": list(
+                    row.get("contract_accept_blockers_before_write") or []
+                ),
+                "command_plan_blockers": list(row.get("command_plan_blockers") or []),
+                "next_manual_action": row.get("next_manual_action"),
+                "safe_default_if_uncertain": row.get("safe_default_if_uncertain"),
+                "operator_prompt_card": dict(row.get("operator_prompt_card") or {}),
+                "decision_options": decision_options,
+                "validation_command": step.get("validation_command"),
+                "after_write_required_actions": [
+                    "run_validation_command_for_this_step",
+                    "rerun_launch_shadow_watch_before_next_review_step",
+                    "confirm_gate_status_changed_or_remains_blocked_with_reason",
+                ],
+                "auto_execute_allowed": False,
+                "auto_decision_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": (
+                    row.get("no_live_order_sent") is not False
+                    and step.get("no_live_order_sent") is not False
+                    and all(item.get("no_live_order_sent") is not False for item in decision_options)
+                ),
+            }
+        )
+    manual_batch_handoff = {
+        "status": batch_status,
+        "row_count": len(batch_rows),
+        "dry_run_ready_count": len(readiness_dry_run_ready_rows),
+        "contract_blocked_count": len(readiness_contract_blocked_rows),
+        "repair_required_count": len(readiness_repair_rows),
+        "blocked_by_operator_inputs_only": blocked_by_operator_inputs_only,
+        "requires_sequential_validation": bool(batch_rows),
+        "rerun_watch_after_each_written_decision": bool(batch_rows),
+        "primary_next_step": batch_rows[0] if batch_rows else None,
+        "batch_order": batch_rows,
+        "batch_fingerprint": _fingerprint_payload(
+            [
+                {
+                    "step": item.get("step"),
+                    "review_kind": item.get("review_kind"),
+                    "target_gate": item.get("target_gate"),
+                    "candidate_recipe_id": item.get("candidate_recipe_id"),
+                    "active_operator_review_report": item.get("active_operator_review_report"),
+                    "contract_accept_blockers_before_write": item.get(
+                        "contract_accept_blockers_before_write"
+                    ),
+                    "ready_for_operator_dry_run_template": item.get(
+                        "ready_for_operator_dry_run_template"
+                    ),
+                }
+                for item in batch_rows
+            ]
+        ),
+        "policy": "manual_reviews_must_be_processed_in_batch_order_with_watch_rerun_after_each_write",
+        "auto_execute_allowed": False,
+        "auto_decision_allowed": False,
+        "auto_accept_allowed": False,
+        "auto_reject_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": all(item.get("no_live_order_sent") is not False for item in batch_rows),
+    }
+    if unsafe_steps:
+        status = "operator_review_resolution_blocked_by_command_safety"
+    elif steps:
+        status = "operator_review_manual_resolution_ready"
+    elif waiting_reviews:
+        status = "operator_review_resolution_waiting_for_signal_or_time_gate"
+    else:
+        status = "no_operator_review_resolution_needed"
+    return {
+        "status": status,
+        "decision_count": len(steps),
+        "waiting_review_count": len(waiting_reviews),
+        "immediate_operator_event_count": len(immediate_operator_events),
+        "all_decision_commands_safe": not bool(unsafe_steps),
+        "unsafe_decision_steps": unsafe_steps,
+        "readiness_matrix": readiness_matrix,
+        "manual_batch_handoff": manual_batch_handoff,
+        "resolution_steps": steps,
+        "primary_step": steps[0] if steps else None,
+        "waiting_reviews": waiting_reviews,
+        "post_resolution_sequence": [
+            "run_decision_dry_run_with_explicit_accept_or_reject_reviewer_rationale",
+            "write_decision_with_backup_only_after_dry_run_passes",
+            "run_validation_command_after_each_written_decision",
+            "rerun_launch_shadow_watch_to_recompute_gates",
+        ],
+        "safe_default_policy": "reject_or_hold_blocked_if_evidence_is_not_clear_enough",
+        "manual_decision_required": bool(steps),
+        "auto_decision_allowed": False,
+        "auto_accept_allowed": False,
+        "auto_reject_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            aid.get("no_live_order_sent") is not False
+            and next_progress.get("no_live_order_sent") is not False
+            and all(item.get("no_live_order_sent") is not False for item in steps)
+        ),
+    }
+
+
+def _daily_quote_checkpoint_summary(
+    *,
+    microstructure_watch: dict[str, Any],
+    safe_next_action_plan: dict[str, Any],
+    remaining_work_closure_summary: dict[str, Any],
+) -> dict[str, Any]:
+    micro = dict(microstructure_watch or {})
+    coverage = dict(micro.get("coverage_plan") or {})
+    safe_next = dict(safe_next_action_plan or {})
+    closure = dict(remaining_work_closure_summary or {})
+    quote_actions = [
+        dict(item)
+        for item in list(safe_next.get("actions") or [])
+        if str(dict(item).get("action_type") or "") in {
+            "capture_microstructure_quote_window_now",
+            "wait_for_next_microstructure_quote_window",
+        }
+    ]
+    capture_now = next(
+        (item for item in quote_actions if item.get("action_type") == "capture_microstructure_quote_window_now"),
+        None,
+    )
+    wait_action = next(
+        (item for item in quote_actions if item.get("action_type") == "wait_for_next_microstructure_quote_window"),
+        None,
+    )
+    remaining_calendar_days = _int_or_default(coverage.get("remaining_calendar_days"), 0)
+    remaining_quote_samples = _int_or_default(coverage.get("remaining_quote_samples"), 0)
+    coordination = dict(safe_next.get("coordination_plan") or {})
+    next_quote_window_utc = (
+        coordination.get("next_quote_window_utc")
+        or dict(wait_action or {}).get("execute_after_utc")
+        or coverage.get("next_quote_coverage_at")
+    )
+    next_quote_window_kst = (
+        coordination.get("next_quote_window_kst")
+        or dict(wait_action or {}).get("execute_after_kst")
+        or coverage.get("next_quote_coverage_kst_at")
+    )
+    next_signal_or_add_monitor = dict(coordination.get("next_signal_or_add_monitor") or {})
+    next_quote_window = dict(coordination.get("next_quote_window") or {})
+
+    def _first_not_none(*values: Any) -> Any:
+        for value in values:
+            if value is not None:
+                return value
+        return None
+    if capture_now:
+        status = "quote_capture_available_now"
+        next_action = "capture_current_quote_window"
+    elif remaining_calendar_days > 0:
+        status = "waiting_for_next_utc_calendar_day"
+        next_action = "wait_for_next_quote_calendar_checkpoint"
+    elif remaining_quote_samples > 0:
+        status = "collecting_additional_quote_samples"
+        next_action = "collect_quote_samples"
+    else:
+        status = "quote_checkpoint_complete"
+        next_action = "continue_monitoring_for_regression"
+    return {
+        "status": status,
+        "next_action": next_action,
+        "quote_observed": coverage.get("eligible_quote_samples") or micro.get("eligible_row_count"),
+        "quote_required": coverage.get("required_quote_samples") or micro.get("required_quote_samples"),
+        "remaining_quote_samples": remaining_quote_samples,
+        "calendar_day_count": coverage.get("calendar_day_count") or micro.get("calendar_day_count"),
+        "min_calendar_days": coverage.get("min_calendar_days") or micro.get("min_calendar_days"),
+        "remaining_calendar_days": remaining_calendar_days,
+        "covered_calendar_days": list(coverage.get("covered_calendar_days") or micro.get("calendar_days") or []),
+        "current_utc_date": coverage.get("current_utc_date"),
+        "current_utc_date_missing": coverage.get("current_utc_date_missing") is True,
+        "next_quote_coverage_kind": coverage.get("next_quote_coverage_kind"),
+        "next_quote_coverage_utc_at": coverage.get("next_quote_coverage_at"),
+        "next_quote_coverage_kst_at": coverage.get("next_quote_coverage_kst_at"),
+        "next_quote_window_utc": next_quote_window_utc,
+        "next_quote_window_kst": next_quote_window_kst,
+        "quote_window_coordination_status": coordination.get("status"),
+        "next_signal_or_add_monitor_kst": coordination.get("next_signal_or_add_monitor_kst"),
+        "raw_next_signal_or_add_monitor_kst": _first_not_none(
+            coordination.get("raw_next_signal_or_add_monitor_kst"),
+            next_signal_or_add_monitor.get("raw_next_monitor_after_kst"),
+            next_signal_or_add_monitor.get("execute_after_kst"),
+            coordination.get("next_signal_or_add_monitor_kst"),
+        ),
+        "next_signal_or_add_monitor_source": _first_not_none(
+            coordination.get("next_signal_or_add_monitor_source"),
+            next_signal_or_add_monitor.get("effective_next_monitor_after_source"),
+        ),
+        "next_signal_or_add_monitor_wait_minutes": _first_not_none(
+            coordination.get("next_signal_or_add_monitor_wait_minutes"),
+            next_signal_or_add_monitor.get("minutes_until_execution_window"),
+            next_signal_or_add_monitor.get("wait_minutes"),
+        ),
+        "next_signal_or_add_monitor_retimestampted_after_current_iteration": (
+            coordination.get("next_signal_or_add_monitor_retimestampted_after_current_iteration")
+            is True
+            or next_signal_or_add_monitor.get("next_monitor_retimestampted_after_current_iteration")
+            is True
+        ),
+        "next_signal_or_add_monitor_window_status": _first_not_none(
+            coordination.get("next_signal_or_add_monitor_window_status"),
+            next_signal_or_add_monitor.get("execution_window_status"),
+        ),
+        "next_signal_or_add_monitor_overdue_minutes": _first_not_none(
+            coordination.get("next_signal_or_add_monitor_overdue_minutes"),
+            next_signal_or_add_monitor.get("overdue_minutes"),
+        ),
+        "next_signal_or_add_monitor_raw_window_status": _first_not_none(
+            coordination.get("next_signal_or_add_monitor_raw_window_status"),
+            next_signal_or_add_monitor.get("execution_window_status"),
+            coordination.get("next_signal_or_add_monitor_window_status"),
+        ),
+        "next_signal_or_add_monitor_raw_overdue_minutes": _first_not_none(
+            coordination.get("next_signal_or_add_monitor_raw_overdue_minutes"),
+            next_signal_or_add_monitor.get("overdue_minutes"),
+            coordination.get("next_signal_or_add_monitor_overdue_minutes"),
+        ),
+        "next_quote_window_status": _first_not_none(
+            coordination.get("next_quote_window_status"),
+            next_quote_window.get("execution_window_status"),
+        ),
+        "next_quote_window_overdue_minutes": _first_not_none(
+            coordination.get("next_quote_window_overdue_minutes"),
+            next_quote_window.get("overdue_minutes"),
+        ),
+        "earliest_calendar_completion_kst": coverage.get("earliest_calendar_completion_kst"),
+        "calendar_completion_policy": coverage.get("calendar_completion_policy"),
+        "capture_command_now": dict(capture_now or {}).get("command"),
+        "wait_command": dict(wait_action or {}).get("command"),
+        "quote_window_deferred_by_signal_monitor": (
+            coordination.get("quote_window_deferred_by_earlier_monitor") is True
+        ),
+        "do_not_skip_quote_window_for_signal_monitor": (
+            coordination.get("do_not_skip_quote_window_for_signal_monitor") is True
+        ),
+        "not_auto_completable_until_future_date": (
+            "quote_calendar_coverage_requires_future_utc_dates"
+            in set(closure.get("not_auto_completable_reasons") or [])
+        ),
+        "backfill_allowed_for_launch_gate": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": micro.get("no_live_order_sent") is not False,
+    }
+
+
+def _next_material_progress_plan(
+    *,
+    generated_at: datetime,
+    runtime_progress: dict[str, Any],
+    latest_signal_wait_plan: dict[str, Any],
+    daily_quote_checkpoint_summary: dict[str, Any],
+    first_fresh_signal_paper_apply_runbook: dict[str, Any],
+    operator_review_decision_aid: dict[str, Any],
+    remaining_work_closure_summary: dict[str, Any],
+    execution_parity_status_summary: dict[str, Any],
+) -> dict[str, Any]:
+    now = generated_at.astimezone(UTC)
+    runtime = dict(runtime_progress or {})
+    signal = dict(latest_signal_wait_plan or {})
+    quote = dict(daily_quote_checkpoint_summary or {})
+    first_signal = dict(first_fresh_signal_paper_apply_runbook or {})
+    review = dict(operator_review_decision_aid or {})
+    closure = dict(remaining_work_closure_summary or {})
+    parity = dict(execution_parity_status_summary or {})
+    actionability = dict(closure.get("actionability_partition") or {})
+    run_now_actions = [
+        dict(item) for item in list(actionability.get("run_now_without_operator") or [])
+    ]
+    raw_automation_actions = [
+        dict(item) for item in list(closure.get("raw_automation_now_usefulness") or [])
+    ]
+
+    def _is_signal_monitor_action(item: dict[str, Any]) -> bool:
+        return (
+            item.get("action_type") == "monitor_fresh_signal"
+            or item.get("target_gate") == "current_fresh_signal"
+        )
+
+    canonical_signal_monitor = next(
+        (
+            item
+            for item in run_now_actions
+            if _is_signal_monitor_action(item)
+        ),
+        {},
+    )
+    canonical_shadow_watch = next(
+        (
+            item
+            for item in run_now_actions
+            if item.get("action_type") == "continue_no_live_shadow_watch"
+            or item.get("target_gate") == "shadow_runtime_24h_observed"
+        ),
+        {},
+    )
+    primary_useful_action = dict(closure.get("primary_useful_automation_action") or {})
+    primary_raw_useful_action = dict(closure.get("primary_raw_useful_automation_action") or {})
+    primary_covered_action = dict(closure.get("primary_covered_automation_action") or {})
+    primary_raw_useful_is_signal_monitor = _is_signal_monitor_action(primary_raw_useful_action)
+    primary_useful_is_shadow_watch = (
+        primary_useful_action.get("action_type") == "continue_no_live_shadow_watch"
+        or primary_useful_action.get("target_gate") == "shadow_runtime_24h_observed"
+    )
+    raw_shadow_watch_action = next(
+        (
+            item
+            for item in raw_automation_actions
+            if item.get("action_type") == "continue_no_live_shadow_watch"
+            or item.get("target_gate") == "shadow_runtime_24h_observed"
+        ),
+        {},
+    )
+
+    def _event(
+        *,
+        event_type: str,
+        gate: str,
+        status: str,
+        material_progress: str,
+        eta: Any = None,
+        command: Any = None,
+        ready_now: bool = False,
+        can_auto_run: bool = False,
+        requires_operator_review: bool = False,
+        reason: Any = None,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        eta_dt = _parse_dt(eta)
+        wait_minutes = None
+        if eta_dt is not None:
+            wait_minutes = round(max((eta_dt.astimezone(UTC) - now).total_seconds(), 0.0) / 60.0, 3)
+            ready_now = ready_now or wait_minutes <= 0.0
+        return {
+            "event_type": event_type,
+            "gate": gate,
+            "status": status,
+            "material_progress": material_progress,
+            "eta_utc": eta_dt.astimezone(UTC).isoformat() if eta_dt is not None else None,
+            "eta_kst": eta_dt.astimezone(KST).isoformat() if eta_dt is not None else None,
+            "wait_minutes": wait_minutes,
+            "ready_now": ready_now,
+            "can_auto_run": can_auto_run,
+            "requires_operator_review": requires_operator_review,
+            "command": command,
+            "reason": reason,
+            "details": dict(details or {}),
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+
+    events: list[dict[str, Any]] = []
+    if signal:
+        signal_schedule_candidates = [
+            dict(item)
+            for item in [
+                canonical_signal_monitor,
+                primary_raw_useful_action,
+                primary_covered_action,
+                primary_useful_action,
+                *raw_automation_actions,
+            ]
+            if _is_signal_monitor_action(dict(item))
+        ]
+        signal_monitor_schedule: dict[str, Any] = {}
+        for candidate in signal_schedule_candidates:
+            candidate_schedule = _current_iteration_recheck_schedule(candidate)
+            if candidate_schedule.get("next_monitor_retimestampted_after_current_iteration") is True:
+                signal_monitor_schedule = candidate_schedule
+                break
+        if not signal_monitor_schedule and signal_schedule_candidates:
+            signal_monitor_schedule = _current_iteration_recheck_schedule(signal_schedule_candidates[0])
+        effective_signal_monitor_eta = (
+            signal_monitor_schedule.get("effective_next_monitor_after_utc")
+            or signal.get("next_monitor_after_utc")
+        )
+        effective_signal_monitor_dt = _parse_dt(
+            effective_signal_monitor_eta
+            or signal_monitor_schedule.get("effective_next_monitor_after_kst")
+        )
+        raw_signal_wait_eta_utc = (
+            signal_monitor_schedule.get("raw_next_monitor_after_utc")
+            or signal.get("next_monitor_after_utc")
+        )
+        raw_signal_wait_eta_kst = (
+            signal_monitor_schedule.get("raw_next_monitor_after_kst")
+            or signal.get("next_monitor_after_kst")
+        )
+        signal_monitor_retimestampted = (
+            signal_monitor_schedule.get("next_monitor_retimestampted_after_current_iteration")
+            is True
+        )
+        effective_signal_monitor_auto_run_available = (
+            bool(canonical_signal_monitor.get("command")) and not signal_monitor_retimestampted
+        )
+        raw_signal_command = signal.get("command")
+        raw_covered_signal_command = (
+            primary_raw_useful_action.get("command")
+            if primary_raw_useful_is_signal_monitor
+            else None
+        )
+        canonical_signal_command = (
+            canonical_signal_monitor.get("command")
+            or raw_covered_signal_command
+            or raw_signal_command
+        )
+        effective_signal_command = canonical_signal_command
+        if signal_monitor_retimestampted and effective_signal_monitor_dt is not None:
+            effective_signal_command = (
+                _scheduled_signal_monitor_command(
+                    canonical_signal_command,
+                    scheduled_at=effective_signal_monitor_dt,
+                )
+                or canonical_signal_command
+            )
+        signal_command_source = (
+            "remaining_work_closure_summary.actionability_partition.run_now_without_operator"
+            if canonical_signal_monitor.get("command")
+            else "remaining_work_closure_summary.primary_raw_useful_automation_action"
+            if raw_covered_signal_command
+            else "latest_signal_wait_plan.command"
+        )
+        events.append(
+            _event(
+                event_type="fresh_signal_monitor",
+                gate="current_fresh_signal",
+                status=signal.get("status") or "waiting",
+                material_progress="detects_fresh_add_or_remove_signal_without_forcing_entry",
+                eta=effective_signal_monitor_eta,
+                command=effective_signal_command,
+                can_auto_run=effective_signal_monitor_auto_run_available,
+                reason=signal.get("recommended_action") or signal.get("reason"),
+                details={
+                    "fresh_signal": signal.get("fresh_signal") is True,
+                    "command_source": signal_command_source,
+                    "raw_signal_wait_command": raw_signal_command,
+                    "raw_canonical_signal_command": canonical_signal_command,
+                    "effective_signal_command": effective_signal_command,
+                    "raw_signal_command_report_dir": _command_flag_value(
+                        canonical_signal_command,
+                        "--report-dir",
+                    ),
+                    "effective_signal_command_report_dir": _command_flag_value(
+                        effective_signal_command,
+                        "--report-dir",
+                    ),
+                    "signal_command_report_dir_retimestampted_to_effective": (
+                        bool(
+                            _command_flag_value(canonical_signal_command, "--report-dir")
+                            and _command_flag_value(effective_signal_command, "--report-dir")
+                        )
+                        and _command_flag_value(canonical_signal_command, "--report-dir")
+                        != _command_flag_value(effective_signal_command, "--report-dir")
+                    ),
+                    "raw_signal_wait_eta_utc": raw_signal_wait_eta_utc,
+                    "raw_signal_wait_eta_kst": raw_signal_wait_eta_kst,
+                    "effective_signal_monitor_eta_source": (
+                        signal_monitor_schedule.get("effective_next_monitor_after_source")
+                        or "latest_signal_wait_plan.next_monitor_after"
+                    ),
+                    "covered_next_recheck_after_utc": signal_monitor_schedule.get(
+                        "covered_next_recheck_after_utc"
+                    ),
+                    "covered_next_recheck_after_kst": signal_monitor_schedule.get(
+                        "covered_next_recheck_after_kst"
+                    ),
+                    "retimestampted_after_current_iteration": signal_monitor_retimestampted,
+                    "source_command_mismatch_resolved": bool(
+                        canonical_signal_command
+                        and raw_signal_command
+                        and canonical_signal_command != raw_signal_command
+                    ),
+                    "raw_covered_signal_command": raw_covered_signal_command,
+                    "effective_auto_run_available": effective_signal_monitor_auto_run_available,
+                    "recommended_monitor_interval_minutes": signal.get(
+                        "recommended_monitor_interval_minutes"
+                    ),
+                    "monitor_interval_capped_by_signal_freshness": signal.get(
+                        "monitor_interval_capped_by_signal_freshness"
+                    )
+                    is True,
+                    "next_monitor_preserved_from_previous_watch": signal.get(
+                        "next_monitor_preserved_from_previous_watch"
+                    )
+                    is True,
+                },
+            )
+        )
+    runtime_remaining_hours = _number_or_none(runtime.get("remaining_hours"))
+    if runtime_remaining_hours is not None:
+        runtime_eta = now + timedelta(hours=runtime_remaining_hours)
+        runtime_command = canonical_shadow_watch.get("command")
+        runtime_can_auto_run = bool(runtime_command)
+        runtime_command_source = None
+        if runtime_command:
+            runtime_command_source = (
+                "remaining_work_closure_summary.actionability_partition.run_now_without_operator"
+            )
+        elif primary_useful_is_shadow_watch:
+            runtime_command = primary_useful_action.get("command")
+            runtime_command_source = "remaining_work_closure_summary.primary_useful_automation_action"
+            runtime_can_auto_run = bool(runtime_command)
+        elif raw_shadow_watch_action.get("command"):
+            runtime_command = raw_shadow_watch_action.get("command")
+            runtime_command_source = "remaining_work_closure_summary.raw_automation_now_usefulness.shadow_runtime"
+            runtime_can_auto_run = False
+        events.append(
+            _event(
+                event_type="shadow_runtime_observation",
+                gate="shadow_runtime_24h_observed",
+                status=runtime.get("status") or "collecting_runtime",
+                material_progress="advances_24h_no_live_shadow_runtime_observation",
+                eta=runtime_eta if runtime_remaining_hours > 0 else now,
+                command=runtime_command,
+                ready_now=runtime_remaining_hours <= 0,
+                can_auto_run=runtime_can_auto_run,
+                reason="calendar_runtime_observation_cannot_be_backtest_substituted",
+                details={
+                    "observed_hours": runtime.get("observed_hours"),
+                    "target_hours": runtime.get("target_hours"),
+                    "remaining_hours": runtime.get("remaining_hours"),
+                    "progress_pct": runtime.get("progress_pct"),
+                    "command_source": runtime_command_source,
+                    "effective_auto_run_available": runtime_can_auto_run,
+                },
+            )
+        )
+    if quote:
+        events.append(
+            _event(
+                event_type="quote_calendar_checkpoint",
+                gate="microstructure_calendar_day_coverage",
+                status=quote.get("status") or "waiting",
+                material_progress="adds_next_real_utc_calendar_day_to_quote_microstructure_coverage",
+                eta=quote.get("next_quote_coverage_utc_at"),
+                command=quote.get("capture_command_now") or quote.get("wait_command"),
+                ready_now=bool(quote.get("capture_command_now")),
+                can_auto_run=bool(quote.get("capture_command_now") or quote.get("wait_command")),
+                reason=quote.get("next_action"),
+                details={
+                    "remaining_calendar_days": quote.get("remaining_calendar_days"),
+                    "calendar_day_count": quote.get("calendar_day_count"),
+                    "min_calendar_days": quote.get("min_calendar_days"),
+                    "backfill_allowed_for_launch_gate": quote.get("backfill_allowed_for_launch_gate") is True,
+                },
+            )
+        )
+    paper_ready = first_signal.get("paper_apply_allowed_now") is True
+    events.append(
+        _event(
+            event_type="first_fresh_signal_paper_apply",
+            gate="first_real_paper_lifecycle_row",
+            status=first_signal.get("status") or "waiting",
+            material_progress="creates_first_real_paper_lifecycle_row_after_fresh_signal_and_operator_review",
+            eta=None,
+            command=first_signal.get("apply_command_allowed_now")
+            or first_signal.get("apply_command_when_gate_allows"),
+            ready_now=paper_ready,
+            can_auto_run=False,
+            requires_operator_review=True,
+            reason=first_signal.get("next_operator_step"),
+            details={
+                "fresh_signal": first_signal.get("fresh_signal") is True,
+                "paper_apply_allowed_now": paper_ready,
+                "remaining_gates": list(first_signal.get("remaining_gates") or []),
+                "auto_apply_allowed": first_signal.get("auto_apply_allowed") is True,
+            },
+        )
+    )
+    if review.get("decision_required_count"):
+        events.append(
+            _event(
+                event_type="operator_review_decisions",
+                gate="operator_review",
+                status=review.get("status") or "operator_decisions_ready",
+                material_progress="unblocks_review_gated_paper_candidate_or_defensive_route_validation",
+                eta=now,
+                command=dict(review.get("primary_decision") or {}).get("decision_dry_run_command_template"),
+                ready_now=True,
+                can_auto_run=False,
+                requires_operator_review=True,
+                reason="explicit_accept_or_reject_required_no_auto_decision",
+                details={
+                    "decision_required_count": review.get("decision_required_count"),
+                    "ready_review_count": review.get("ready_review_count"),
+                    "blocked_review_count": review.get("blocked_review_count"),
+                    "waiting_review_count": review.get("waiting_review_count"),
+                },
+            )
+        )
+    parity_eta = _parse_dt(parity.get("estimated_completion_utc") or parity.get("estimated_completion_kst"))
+    events.append(
+        _event(
+            event_type="execution_parity_sample_floor",
+            gate="execution_parity_samples",
+            status=parity.get("status") or "collecting_samples",
+            material_progress="collects_real_reviewed_paper_lifecycle_rows_until_execution_parity_sample_floor_passes",
+            eta=parity_eta,
+            command=None,
+            ready_now=_int_or_default(parity.get("missing_samples"), 0) <= 0,
+            can_auto_run=False,
+            requires_operator_review=False,
+            reason=parity.get("next_step"),
+            details={
+                "eligible_journal_rows": parity.get("eligible_journal_rows"),
+                "required_samples": parity.get("required_samples"),
+                "missing_samples": parity.get("missing_samples"),
+                "estimated_future_paper_apply_events_needed": parity.get(
+                    "estimated_future_paper_apply_events_needed"
+                ),
+                "non_substitutable": parity.get("non_substitutable") is True,
+            },
+        )
+    )
+
+    def _sort_key(item: dict[str, Any]) -> tuple[int, str, str]:
+        if item.get("ready_now") is True and item.get("can_auto_run") is True:
+            priority = 0
+        elif item.get("ready_now") is True and item.get("requires_operator_review") is True:
+            priority = 1
+        elif item.get("ready_now") is True:
+            priority = 2
+        elif item.get("eta_utc"):
+            priority = 3
+        else:
+            priority = 4
+        return (priority, str(item.get("eta_utc") or "9999-12-31T23:59:59+00:00"), str(item.get("event_type") or ""))
+
+    ordered = sorted(events, key=_sort_key)
+    immediate_auto = [
+        item for item in ordered if item.get("ready_now") is True and item.get("can_auto_run") is True
+    ]
+    immediate_operator = [
+        item for item in ordered if item.get("ready_now") is True and item.get("requires_operator_review") is True
+    ]
+    future_events = [item for item in ordered if item.get("ready_now") is not True and item.get("eta_utc")]
+    unscheduled_waits = [item for item in ordered if item.get("ready_now") is not True and not item.get("eta_utc")]
+    if paper_ready:
+        status = "paper_apply_operator_review_ready"
+    elif immediate_operator:
+        status = "operator_review_ready_realtime_evidence_waiting"
+    elif immediate_auto:
+        status = "safe_auto_progress_available"
+    elif future_events:
+        status = "waiting_for_next_material_time_window"
+    else:
+        status = "waiting_for_unscheduled_realtime_market_event"
+    return {
+        "status": status,
+        "generated_at": now.isoformat(),
+        "primary_next_event": ordered[0] if ordered else None,
+        "immediate_auto_count": len(immediate_auto),
+        "immediate_operator_count": len(immediate_operator),
+        "future_event_count": len(future_events),
+        "unscheduled_wait_count": len(unscheduled_waits),
+        "events": ordered,
+        "immediate_auto_events": immediate_auto,
+        "immediate_operator_events": immediate_operator,
+        "future_events": future_events,
+        "unscheduled_waits": unscheduled_waits,
+        "not_auto_completable_reasons": list(closure.get("not_auto_completable_reasons") or []),
+        "policy": "only_no_live_monitoring_and_quote_collection_can_auto_run_operator_decisions_and_paper_apply_are_not_auto_run",
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            closure.get("no_live_order_sent") is not False
+            and first_signal.get("no_live_order_sent") is not False
+            and review.get("no_live_order_sent") is not False
+            and parity.get("no_live_order_sent") is not False
+        ),
+    }
+
+
+def _operator_action_digest(
+    *,
+    latest: dict[str, Any],
+    actionability_partition: dict[str, Any],
+    dependency_lanes: dict[str, Any],
+    manual_batch_handoff: dict[str, Any],
+    next_material_progress_plan: dict[str, Any],
+    daily_quote_checkpoint_summary: dict[str, Any],
+    execution_parity_status_summary: dict[str, Any],
+    command_consistency_audit: dict[str, Any],
+) -> dict[str, Any]:
+    latest_payload = dict(latest or {})
+    launch = dict(latest_payload.get("launch_readiness") or {})
+    next_blocker = dict(launch.get("next_blocker") or {})
+    signal = dict(latest_payload.get("signal_wait_plan") or {})
+    actionability = dict(actionability_partition or {})
+    lanes = dict(dependency_lanes or {})
+    manual_batch = dict(manual_batch_handoff or {})
+    next_material = dict(next_material_progress_plan or {})
+    quote = dict(daily_quote_checkpoint_summary or {})
+    parity = dict(execution_parity_status_summary or {})
+    command_audit = dict(command_consistency_audit or {})
+
+    auto_now = [dict(item) for item in list(actionability.get("run_now_without_operator") or [])]
+    manual_now = [dict(item) for item in list(actionability.get("manual_now") or [])]
+    time_waits = [dict(item) for item in list(actionability.get("time_waits") or [])]
+    signal_waits = [dict(item) for item in list(actionability.get("signal_waits") or [])]
+    dependency_blocked = [dict(item) for item in list(actionability.get("dependency_blocked") or [])]
+    tracks = dict(actionability.get("tracks") or {})
+    safe_auto_track = dict(tracks.get("safe_automatable_now") or {})
+    manual_track = dict(tracks.get("manual_operator_required_now") or {})
+    realtime_track = dict(tracks.get("realtime_wait_required") or {})
+    primary_auto = auto_now[0] if auto_now else {}
+    primary_manual = manual_now[0] if manual_now else {}
+    primary_time_wait = time_waits[0] if time_waits else {}
+    primary_signal_wait = signal_waits[0] if signal_waits else {}
+    primary_dependency = dependency_blocked[0] if dependency_blocked else {}
+    primary_material = dict(next_material.get("primary_next_event") or {})
+
+    paper_rehearsal = dict(
+        launch.get("paper_only_rehearsal") or latest_payload.get("paper_only_rehearsal") or {}
+    )
+    paper_apply_allowed = paper_rehearsal.get("paper_apply_allowed_now") is True
+    fresh_signal_available = signal.get("fresh_signal") is True
+    manual_decisions_open = len(manual_now)
+    auto_commands_open = len(auto_now)
+    wait_count = len(time_waits) + len(signal_waits) + len(dependency_blocked)
+    primary_launch_wait_gate = (
+        tracks.get("primary_launch_wait_gate")
+        or realtime_track.get("primary_gate")
+        or primary_signal_wait.get("problem_id")
+        or next_blocker.get("gate")
+        if fresh_signal_available is not True
+        else tracks.get("primary_launch_wait_gate")
+    )
+    primary_human_action_gate = (
+        tracks.get("primary_human_action_gate")
+        or manual_track.get("primary_gate")
+        or primary_manual.get("target_gate")
+    )
+    no_safe_auto_command_now = (
+        safe_auto_track.get("no_safe_auto_command_now")
+        if "no_safe_auto_command_now" in safe_auto_track
+        else auto_commands_open == 0
+    )
+    operator_action_scope = (
+        "manual_available_but_launch_primary_wait_is_realtime"
+        if primary_human_action_gate and primary_launch_wait_gate and auto_commands_open == 0
+        else "safe_auto_and_manual_available_but_launch_primary_wait_is_realtime"
+        if primary_human_action_gate and primary_launch_wait_gate
+        else "safe_auto_available_but_launch_primary_wait_is_realtime"
+        if primary_launch_wait_gate and auto_commands_open
+        else "launch_primary_wait_is_realtime"
+        if primary_launch_wait_gate
+        else "manual_operator_action_is_primary"
+        if primary_human_action_gate
+        else "no_immediate_operator_action"
+    )
+
+    if command_audit.get("status") == "command_consistency_mismatch_detected":
+        status = "repair_command_consistency_before_operator_use"
+        primary_next = "repair_command_consistency_audit"
+    elif fresh_signal_available and paper_apply_allowed:
+        status = "paper_apply_operator_review_available"
+        primary_next = "operator_review_paper_apply_dry_run_then_apply_if_confirmed"
+    elif auto_commands_open and manual_decisions_open:
+        status = "run_safe_monitoring_and_complete_manual_reviews"
+        primary_next = "run_primary_safe_auto_command_then_process_manual_review_batch"
+    elif auto_commands_open:
+        status = "run_safe_monitoring"
+        primary_next = "run_primary_safe_auto_command"
+    elif manual_decisions_open:
+        status = "complete_manual_operator_reviews"
+        primary_next = "process_manual_review_batch"
+    elif wait_count:
+        status = "waiting_on_realtime_or_calendar_gates"
+        primary_next = "wait_for_next_gate"
+    else:
+        status = "no_open_operator_action_detected"
+        primary_next = "continue_periodic_watch"
+
+    return {
+        "status": status,
+        "launch_status": launch.get("status"),
+        "next_blocker_gate": next_blocker.get("gate"),
+        "next_blocker": next_blocker.get("blocker"),
+        "fresh_signal_available": fresh_signal_available,
+        "paper_apply_allowed_now": paper_apply_allowed,
+        "primary_next": primary_next,
+        "primary_material_event": primary_material.get("event_type"),
+        "primary_material_gate": primary_material.get("gate"),
+        "primary_material_eta_kst": primary_material.get("eta_kst"),
+        "primary_material_ready_now": primary_material.get("ready_now") is True,
+        "primary_material_wait_minutes": primary_material.get("wait_minutes"),
+        "operator_action_scope": operator_action_scope,
+        "primary_launch_wait_gate": primary_launch_wait_gate,
+        "primary_launch_wait_status": (
+            tracks.get("primary_launch_wait_status")
+            or realtime_track.get("primary_status")
+            or primary_signal_wait.get("status")
+        ),
+        "primary_human_action_gate": primary_human_action_gate,
+        "primary_human_action": (
+            manual_track.get("primary_action") or primary_manual.get("action_type")
+        ),
+        "no_safe_auto_command_now": bool(no_safe_auto_command_now),
+        "actionability_tracks_status": tracks.get("status"),
+        "safe_auto_command_count": auto_commands_open,
+        "primary_safe_auto_action": primary_auto.get("action_type"),
+        "primary_safe_auto_gate": primary_auto.get("target_gate"),
+        "primary_safe_auto_execute_after_kst": primary_auto.get("execute_after_kst"),
+        "primary_safe_auto_command": primary_auto.get("command"),
+        "primary_material_command": primary_material.get("command"),
+        "manual_decision_count": manual_decisions_open,
+        "manual_batch_status": manual_batch.get("status"),
+        "manual_batch_fingerprint": manual_batch.get("batch_fingerprint"),
+        "primary_manual_action": primary_manual.get("action_type"),
+        "primary_manual_gate": primary_manual.get("target_gate"),
+        "primary_manual_review_report": primary_manual.get("active_operator_review_report"),
+        "primary_manual_required_fields": list(primary_manual.get("required_fields_remaining") or []),
+        "primary_time_wait": {
+            "problem_id": primary_time_wait.get("problem_id"),
+            "status": primary_time_wait.get("status"),
+            "next_kst": primary_time_wait.get("next_kst") or primary_time_wait.get("eta_completion_kst"),
+            "remaining_calendar_days": primary_time_wait.get("remaining_calendar_days"),
+            "remaining_hours": primary_time_wait.get("remaining_hours"),
+        },
+        "primary_signal_wait": {
+            "problem_id": primary_signal_wait.get("problem_id"),
+            "status": primary_signal_wait.get("status"),
+            "next_monitor_kst": primary_signal_wait.get("next_monitor_kst"),
+            "missing_samples": primary_signal_wait.get("missing_samples"),
+        },
+        "primary_dependency_blocked": {
+            "problem_id": primary_dependency.get("problem_id"),
+            "status": primary_dependency.get("status"),
+            "depends_on": list(primary_dependency.get("depends_on") or []),
+        },
+        "dependency_status": lanes.get("status"),
+        "critical_path": list(lanes.get("critical_path") or []),
+        "parallel_calendar_path": list(lanes.get("parallel_calendar_path") or []),
+        "quote_remaining_calendar_days": quote.get("remaining_calendar_days"),
+        "next_quote_kst": quote.get("next_quote_coverage_kst_at"),
+        "execution_parity_missing_samples": parity.get("missing_samples"),
+        "execution_parity_eta_kst": parity.get("estimated_completion_kst"),
+        "command_consistency_status": command_audit.get("status"),
+        "operator_decisions_are_manual_only": True,
+        "paper_apply_is_manual_only": True,
+        "auto_decision_allowed": False,
+        "auto_apply_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            latest_payload.get("no_live_order_sent") is not False
+            and actionability.get("no_live_order_sent") is not False
+            and lanes.get("no_live_order_sent") is not False
+            and manual_batch.get("no_live_order_sent") is not False
+            and next_material.get("no_live_order_sent") is not False
+            and command_audit.get("no_live_order_sent") is not False
+        ),
+    }
+
+
+def _validation_redesign_runbook(
+    *,
+    actionability_tracks: dict[str, Any],
+    fresh_signal_blocker_diagnostics: dict[str, Any],
+    strict_activity_revalidation_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    tracks = dict(actionability_tracks or {})
+    redesign = dict(tracks.get("blocked_by_validation_redesign") or {})
+    items = [dict(item) for item in list(redesign.get("items") or [])]
+    primary = items[0] if items else {}
+    cause_partition = dict(dict(fresh_signal_blocker_diagnostics or {}).get("cause_partition") or {})
+    strategy = dict(cause_partition.get("strategy_design_blocker") or {})
+    requirements = dict(
+        primary.get("minimum_full_walk_forward_requirements")
+        or strategy.get("minimum_full_walk_forward_requirements")
+        or {}
+    )
+    validation_sequence = list(
+        primary.get("required_validation_sequence")
+        or strategy.get("required_validation_sequence")
+        or []
+    )
+    if "full_walk_forward_gate_must_run_with_require_nonregressing_activity" in set(
+        str(item) for item in validation_sequence
+    ):
+        requirements["probe_add_delta_min"] = requirements.get("probe_add_delta_min", 0)
+        requirements["trade_like_events_delta_min"] = max(
+            _int_or_default(requirements.get("trade_like_events_delta_min"), 0),
+            1,
+        )
+        requirements["trade_like_activity_increase_required"] = True
+        requirements["signal_sparsity_fix_requires_trade_like_events_increase"] = True
+    reject_patterns = list(
+        primary.get("reject_patterns") or strategy.get("reject_patterns") or []
+    )
+    failed_checks = list(primary.get("failed_checks") or strategy.get("failed_checks") or [])
+    candidate_failure_digest = dict(
+        primary.get("candidate_failure_digest")
+        or strategy.get("candidate_failure_digest")
+        or {}
+    )
+    root_cause_hints = list(
+        primary.get("root_cause_hints")
+        or strategy.get("root_cause_hints")
+        or candidate_failure_digest.get("root_cause_hints")
+        or []
+    )
+    strict_revalidation = dict(strict_activity_revalidation_summary or {})
+    top_no_trade_reasons = list(
+        dict(fresh_signal_blocker_diagnostics or {}).get("top_no_trade_reasons") or []
+    )
+    top_no_trade_reason = dict(top_no_trade_reasons[0] if top_no_trade_reasons else {})
+    dominant_no_trade_context = dict(
+        dict(fresh_signal_blocker_diagnostics or {}).get("dominant_no_trade_context")
+        or {}
+    )
+    safe_experiment_backlog = list(
+        dict(fresh_signal_blocker_diagnostics or {}).get("safe_experiment_backlog")
+        or []
+    )
+    primary_safe_experiment = dict(
+        safe_experiment_backlog[0] if safe_experiment_backlog else {}
+    )
+    candidate_design_seed_contexts = [
+        dict(item)
+        for item in list(
+            dict(fresh_signal_blocker_diagnostics or {}).get("eligible_probe_contexts")
+            or []
+        )[:3]
+    ]
+    top_rejected_soft_contexts = [
+        dict(item)
+        for item in list(
+            dict(fresh_signal_blocker_diagnostics or {}).get("top_rejected_soft_contexts")
+            or []
+        )[:3]
+    ]
+    closest_strict_candidate = dict(
+        strict_revalidation.get("closest_activity_contract_candidate") or {}
+    )
+    dominant_probe_quality_blocker = dict(fresh_signal_blocker_diagnostics or {}).get(
+        "dominant_probe_quality_blocker"
+    )
+    candidate_design_blueprints = _candidate_design_blueprints_from_seed_contexts(
+        candidate_design_seed_contexts,
+        top_rejected_soft_contexts=top_rejected_soft_contexts,
+        constraints=dict(strict_revalidation.get("next_candidate_design_constraints") or {}),
+        dominant_probe_quality_blocker=dominant_probe_quality_blocker,
+    )
+    blocked = redesign.get("count") not in {None, 0} or strategy.get("blocked") is True
+    status = (
+        "non_regressing_candidate_design_required"
+        if blocked
+        else "no_validation_redesign_blocker_open"
+    )
+    candidate_design_placeholders = [
+        "<candidate_name>",
+        "<candidate_backtest_report.json>",
+        "<baseline_full_walk_forward_report.json>",
+        "<candidate_full_walk_forward_report.json>",
+        "<candidate_smoke_120d_report.json>",
+        "<candidate_smoke_365d_report.json>",
+        "<candidate_full_walk_forward_gate_report.json>",
+    ]
+    validation_command_templates = [
+        {
+            "id": "smoke_120d_activity_non_regression",
+            "sequence_index": 1,
+            "command": (
+                ".venv/bin/python "
+                "scripts/run_market_state_rotation_v6_near_miss_smoke.py "
+                "--source-backtest-report <candidate_backtest_report.json> "
+                "--days 120 "
+                "--report-dir "
+                "reports/validation/diagnostics/<candidate_name>_near_miss_smoke_120d "
+                "--write-report"
+            ),
+            "required_placeholders": [
+                "<candidate_name>",
+                "<candidate_backtest_report.json>",
+            ],
+            "expected_report_placeholder": "<candidate_smoke_120d_report.json>",
+            "validation_only": True,
+            "order_submission_allowed": False,
+        },
+        {
+            "id": "smoke_365d_activity_non_regression",
+            "sequence_index": 2,
+            "command": (
+                ".venv/bin/python "
+                "scripts/run_market_state_rotation_v6_near_miss_smoke.py "
+                "--source-backtest-report <candidate_backtest_report.json> "
+                "--days 365 "
+                "--report-dir "
+                "reports/validation/diagnostics/<candidate_name>_near_miss_smoke_365d "
+                "--write-report"
+            ),
+            "required_placeholders": [
+                "<candidate_name>",
+                "<candidate_backtest_report.json>",
+            ],
+            "expected_report_placeholder": "<candidate_smoke_365d_report.json>",
+            "validation_only": True,
+            "order_submission_allowed": False,
+        },
+        {
+            "id": "full_walk_forward_activity_non_regression_gate",
+            "sequence_index": 3,
+            "command": (
+                ".venv/bin/python "
+                "scripts/run_market_state_rotation_v6_full_walk_forward_gate.py "
+                "--baseline-report <baseline_full_walk_forward_report.json> "
+                "--candidate-report <candidate_full_walk_forward_report.json> "
+                "--candidate-name <candidate_name> "
+                "--max-compounded-return-degradation-pct 5.0 "
+                "--max-drawdown-worsening-pct 3.0 "
+                "--min-positive-fold-delta 0 "
+                "--require-nonregressing-activity "
+                "--report-dir "
+                "reports/validation/diagnostics/<candidate_name>_full_wfo_gate "
+                "--write-report"
+            ),
+            "required_placeholders": [
+                "<candidate_name>",
+                "<baseline_full_walk_forward_report.json>",
+                "<candidate_full_walk_forward_report.json>",
+            ],
+            "expected_report_placeholder": "<candidate_full_walk_forward_gate_report.json>",
+            "validation_only": True,
+            "order_submission_allowed": False,
+        },
+        {
+            "id": "near_miss_promotion_gate",
+            "sequence_index": 4,
+            "command": (
+                ".venv/bin/python "
+                "scripts/run_market_state_rotation_v6_near_miss_promotion_gate.py "
+                "--smoke-reports "
+                "<candidate_smoke_120d_report.json>,<candidate_smoke_365d_report.json> "
+                "--full-walk-forward-gate-report "
+                "<candidate_full_walk_forward_gate_report.json> "
+                "--max-return-degradation-pct 5.0 "
+                "--max-drawdown-worsening-pct 3.0 "
+                "--report-dir "
+                "reports/validation/diagnostics/<candidate_name>_promotion_gate "
+                "--write-report"
+            ),
+            "required_placeholders": [
+                "<candidate_name>",
+                "<candidate_smoke_120d_report.json>",
+                "<candidate_smoke_365d_report.json>",
+                "<candidate_full_walk_forward_gate_report.json>",
+            ],
+            "expected_report_placeholder": (
+                "reports/validation/diagnostics/<candidate_name>_promotion_gate/latest.json"
+            ),
+            "validation_only": True,
+            "order_submission_allowed": False,
+        },
+    ] if blocked else []
+    command_template_safety = {
+        "templates_are_placeholders": bool(validation_command_templates),
+        "validation_only": True,
+        "dry_run_or_validation_only": True,
+        "requires_operator_supplied_candidate_reports": bool(validation_command_templates),
+        "runtime_filter_change_allowed": False,
+        "paper_or_live_promotion_allowed": False,
+        "order_submission_allowed": False,
+        "live_order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+    return {
+        "status": status,
+        "primary_problem_id": primary.get("id"),
+        "primary_next_action": primary.get("next_action"),
+        "source": primary.get("source"),
+        "primary_downstream_failure": primary.get("primary_downstream_failure")
+        or strategy.get("primary_downstream_failure"),
+        "failed_checks": failed_checks,
+        "activity_regression_candidate_count": primary.get(
+            "activity_regression_candidate_count"
+        )
+        or strategy.get("activity_regression_candidate_count"),
+        "activity_inversion_candidate_count": primary.get(
+            "activity_inversion_candidate_count"
+        )
+        or strategy.get("activity_inversion_candidate_count"),
+        "candidate_failure_digest": candidate_failure_digest,
+        "root_cause_hints": root_cause_hints,
+        "current_failed_family_summary": {
+            "candidate_count": candidate_failure_digest.get("candidate_count"),
+            "promoted_candidate_count": candidate_failure_digest.get(
+                "promoted_candidate_count"
+            ),
+            "active_full_walk_forward_candidate_count": candidate_failure_digest.get(
+                "active_full_walk_forward_candidate_count"
+            ),
+            "downstream_blocked_candidate_names": list(
+                candidate_failure_digest.get("downstream_blocked_candidate_names") or []
+            ),
+            "worst_probe_add_delta_candidate": dict(
+                candidate_failure_digest.get("worst_probe_add_delta_candidate") or {}
+            ),
+            "worst_trade_like_events_delta_candidate": dict(
+                candidate_failure_digest.get("worst_trade_like_events_delta_candidate") or {}
+            ),
+            "root_cause_hints": root_cause_hints[:8],
+        }
+        if blocked
+        else {},
+        "strict_activity_revalidation_summary": strict_revalidation,
+        "candidate_redesign_work_order": {
+            "status": "ready_for_research_only_candidate_design",
+            "objective": (
+                "design_non_regressing_signal_sparsity_candidate_that_survives_strict_full_wfo"
+            ),
+            "current_no_signal_driver": top_no_trade_reason.get("reason"),
+            "current_no_signal_driver_count": top_no_trade_reason.get("count"),
+            "dominant_no_trade_context_reason": dominant_no_trade_context.get("reason"),
+            "dominant_no_trade_context_quality": dominant_no_trade_context.get(
+                "probe_quality"
+            ),
+            "dominant_probe_quality_blocker": dominant_probe_quality_blocker,
+            "probe_quality_blocker_counts": dict(
+                dict(fresh_signal_blocker_diagnostics or {}).get(
+                    "probe_quality_blocker_counts"
+                )
+                or {}
+            ),
+            "candidate_design_seed_contexts": candidate_design_seed_contexts,
+            "candidate_design_blueprint_status": candidate_design_blueprints.get("status"),
+            "candidate_design_blueprint_count": candidate_design_blueprints.get(
+                "blueprint_count"
+            ),
+            "candidate_design_blueprints": list(
+                candidate_design_blueprints.get("blueprints") or []
+            ),
+            "candidate_design_blueprint_safety": {
+                key: candidate_design_blueprints.get(key)
+                for key in (
+                    "shared_safety_rules",
+                    "excluded_rejected_context_reasons",
+                    "validation_only",
+                    "runtime_filter_change_allowed",
+                    "paper_or_live_promotion_allowed",
+                    "order_submission_allowed",
+                    "no_live_order_sent",
+                )
+            },
+            "top_rejected_soft_contexts": top_rejected_soft_contexts,
+            "primary_safe_experiment_family": primary_safe_experiment.get("name"),
+            "closest_rejected_candidate": closest_strict_candidate,
+            "next_candidate_design_constraints": dict(
+                strict_revalidation.get("next_candidate_design_constraints") or {}
+            ),
+            "minimum_acceptance": {
+                "probe_add_delta_min": requirements.get("probe_add_delta_min"),
+                "trade_like_events_delta_min": requirements.get("trade_like_events_delta_min"),
+                "trade_like_activity_increase_required": requirements.get(
+                    "trade_like_activity_increase_required"
+                ),
+                "signal_sparsity_fix_requires_trade_like_events_increase": requirements.get(
+                    "signal_sparsity_fix_requires_trade_like_events_increase"
+                ),
+                "compounded_return_delta_min_pct": requirements.get(
+                    "compounded_return_delta_min_pct"
+                ),
+                "max_drawdown_worsening_max_pct": requirements.get(
+                    "max_drawdown_worsening_max_pct"
+                ),
+                "positive_fold_delta_min": requirements.get("positive_fold_delta_min"),
+                "active_full_walk_forward_candidate_count_min": 1,
+            },
+            "required_validation_sequence": validation_sequence,
+            "reject_patterns": reject_patterns,
+            "forbidden_shortcuts": [
+                "use_closest_rejected_candidate_as_default",
+                "lower_runtime_filters_before_strict_full_wfo_pass",
+                "treat_zero_trade_like_delta_as_signal_sparsity_fix",
+                "promote_mc04_broad_first_touch_without_new_365d_evidence",
+                "enable_live_orders_from_redesign_work_order",
+            ],
+            "runtime_filter_change_allowed": False,
+            "paper_or_live_promotion_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+        if blocked
+        else {
+            "status": "not_required",
+            "runtime_filter_change_allowed": False,
+            "paper_or_live_promotion_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        },
+        "redesign_hypothesis": (
+            "short_window_activity_gains_must_survive_full_wfo_without_probe_or_trade_like_regression"
+            if blocked
+            else None
+        ),
+        "next_candidate_design_contract_status": primary.get(
+            "next_candidate_design_contract_status"
+        )
+        or strategy.get("next_candidate_design_contract_status"),
+        "next_candidate_design_contract_reason": primary.get(
+            "next_candidate_design_contract_reason"
+        )
+        or strategy.get("next_candidate_design_contract_reason"),
+        "minimum_full_walk_forward_requirements": requirements,
+        "required_validation_sequence": validation_sequence,
+        "reject_patterns": reject_patterns,
+        "required_design_properties": {
+            "probe_add_delta_min": requirements.get("probe_add_delta_min"),
+            "trade_like_events_delta_min": requirements.get("trade_like_events_delta_min"),
+            "trade_like_activity_increase_required": requirements.get(
+                "trade_like_activity_increase_required"
+            ),
+            "signal_sparsity_fix_requires_trade_like_events_increase": requirements.get(
+                "signal_sparsity_fix_requires_trade_like_events_increase"
+            ),
+            "compounded_return_delta_min_pct": requirements.get(
+                "compounded_return_delta_min_pct"
+            ),
+            "max_drawdown_worsening_max_pct": requirements.get(
+                "max_drawdown_worsening_max_pct"
+            ),
+            "positive_fold_delta_min": requirements.get("positive_fold_delta_min"),
+            "activity_inversion_allowed": requirements.get("activity_inversion_allowed"),
+            "source_replay_lineage_guard_must_pass": requirements.get(
+                "source_replay_lineage_guard_must_pass"
+            ),
+        },
+        "safe_next_steps": [
+            "design_candidate_that_does_not_reduce_probe_adds_or_trade_like_events",
+            "run_smoke_windows_with_activity_non_regression_contract",
+            "run_full_walk_forward_gate_with_require_nonregressing_activity",
+            "rerun_promotion_gate_and_require_active_full_walk_forward_candidate_count_above_zero",
+            "keep_paper_apply_blocked_until_current_fresh_signal_and_manual_reviews",
+        ]
+        if blocked
+        else [],
+        "unsafe_shortcuts": [
+            "force_current_fresh_signal",
+            "relax_runtime_filters_before_non_regressing_full_wfo_passes",
+            "promote_short_window_smoke_activity_without_full_wfo_activity_non_regression",
+            "treat_backtest_or_synthetic_rows_as_realtime_paper_lifecycle_rows",
+            "enable_live_orders_from_redesign_runbook",
+        ]
+        if blocked
+        else [],
+        "candidate_design_placeholders": candidate_design_placeholders if blocked else [],
+        "required_placeholder_count": len(candidate_design_placeholders) if blocked else 0,
+        "validation_command_templates": validation_command_templates,
+        "validation_command_template_count": len(validation_command_templates),
+        "command_template_safety": command_template_safety,
+        "runtime_filter_change_allowed": False,
+        "paper_or_live_promotion_allowed": False,
+        "operator_fixable_now": primary.get("operator_fixable_now") is True,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            redesign.get("no_live_order_sent") is not False
+            and strategy.get("no_live_order_sent") is not False
+            and strict_revalidation.get("no_live_order_sent") is not False
+        ),
+    }
+
+
+def _strict_activity_revalidation_summary(
+    evidence_report_root: Path | None,
+) -> dict[str, Any]:
+    if evidence_report_root is None:
+        return {
+            "status": "no_strict_revalidation_reports_found",
+            "report_count": 0,
+            "blocked_count": 0,
+            "passed_count": 0,
+            "strict_gate_present_count": 0,
+            "strict_gate_missing_count": 0,
+            "safety_blocked_count": 0,
+            "strict_revalidated_promoted_legacy_reports_blocked": False,
+            "all_reports_validation_only": True,
+            "strict_signal_sparsity_failure_reason_counts": {},
+            "failed_check_counts": {},
+            "next_candidate_design_constraints": {},
+            "no_live_order_sent": True,
+            "reports": [],
+        }
+    root = Path(evidence_report_root)
+    if not root.exists():
+        return {
+            "status": "no_strict_revalidation_reports_found",
+            "report_count": 0,
+            "blocked_count": 0,
+            "passed_count": 0,
+            "strict_gate_present_count": 0,
+            "strict_gate_missing_count": 0,
+            "safety_blocked_count": 0,
+            "strict_revalidated_promoted_legacy_reports_blocked": False,
+            "all_reports_validation_only": True,
+            "strict_signal_sparsity_failure_reason_counts": {},
+            "failed_check_counts": {},
+            "next_candidate_design_constraints": {},
+            "no_live_order_sent": True,
+            "reports": [],
+        }
+    rows: list[dict[str, Any]] = []
+    label_counts: dict[str, int] = {}
+    failed_check_counts: dict[str, int] = {}
+    sparsity_failure_reason_counts: dict[str, int] = {}
+    for path in sorted(root.glob("*strict_activity_gate/market_state_rotation_v6_full_walk_forward_gate.json")):
+        payload = _read_json(path)
+        failed_checks = [str(item) for item in list(payload.get("failed_checks") or [])]
+        gates = dict(payload.get("gates") or {})
+        activity = dict(payload.get("activity_regression_summary") or {})
+        deltas = dict(payload.get("deltas") or {})
+        labels = [str(item) for item in list(activity.get("diagnostic_labels") or [])]
+        sparsity_failure_reasons = [
+            str(item)
+            for item in list(
+                activity.get("strict_signal_sparsity_fix_failure_reasons") or []
+            )
+        ]
+        for check in failed_checks:
+            failed_check_counts[check] = failed_check_counts.get(check, 0) + 1
+        for reason in sparsity_failure_reasons:
+            sparsity_failure_reason_counts[reason] = (
+                sparsity_failure_reason_counts.get(reason, 0) + 1
+            )
+        for label in labels:
+            label_counts[label] = label_counts.get(label, 0) + 1
+        overall_status = str(payload.get("overall_status") or "").strip()
+        strict_activity_gate_present = gates.get("require_nonregressing_activity") is True
+        no_live_order_sent = payload.get("no_live_order_sent") is not False
+        strict_revalidation_blockers: list[str] = []
+        if not strict_activity_gate_present:
+            strict_revalidation_blockers.append("strict_activity_gate_missing")
+        if not no_live_order_sent:
+            strict_revalidation_blockers.append("no_live_order_sent_false")
+        blocked = (
+            overall_status == "blocked"
+            or bool(failed_checks)
+            or bool(strict_revalidation_blockers)
+        )
+        row = {
+            "report": _display_path(path),
+            "candidate_name": payload.get("candidate_name") or path.parent.name,
+            "overall_status": overall_status or None,
+            "decision": payload.get("decision"),
+            "strict_activity_gate_present": strict_activity_gate_present,
+            "strict_revalidation_blockers": strict_revalidation_blockers,
+            "failed_checks": failed_checks,
+            "probe_add_delta": _number_or_none(activity.get("probe_add_delta")),
+            "trade_like_events_delta": _number_or_none(
+                activity.get("trade_like_events_delta")
+            ),
+            "compounded_oos_return_delta_pct": _number_or_none(
+                deltas.get("compounded_oos_return_pct")
+            ),
+            "max_drawdown_delta_pct": _number_or_none(
+                deltas.get("max_fold_drawdown_pct")
+                if "max_fold_drawdown_pct" in deltas
+                else deltas.get("max_drawdown_pct")
+            ),
+            "max_drawdown_worsening_pct": _number_or_none(
+                gates.get("max_drawdown_worsening_pct")
+            ),
+            "positive_fold_delta": _number_or_none(deltas.get("positive_fold_count")),
+            "diagnostic_labels": labels,
+            "strict_signal_sparsity_fix_failure_reasons": sparsity_failure_reasons,
+            "strict_revalidation_passed": not blocked,
+            "blocked": blocked,
+            "no_live_order_sent": no_live_order_sent,
+        }
+        rows.append(row)
+    report_count = len(rows)
+    blocked_count = sum(1 for row in rows if row.get("blocked") is True)
+    passed_count = sum(1 for row in rows if row.get("blocked") is not True)
+    strict_gate_present_count = sum(
+        1 for row in rows if row.get("strict_activity_gate_present") is True
+    )
+    strict_gate_missing_count = report_count - strict_gate_present_count
+    safety_blocked_count = sum(
+        1 for row in rows if row.get("no_live_order_sent") is False
+    )
+    no_live_order_sent = all(row.get("no_live_order_sent") is not False for row in rows)
+
+    def _best_row(metric: str) -> dict[str, Any]:
+        candidates = [row for row in rows if row.get(metric) is not None]
+        if not candidates:
+            return {}
+        return dict(max(candidates, key=lambda row: float(row.get(metric) or 0.0)))
+
+    def _best_passed_row() -> dict[str, Any]:
+        candidates = [row for row in rows if row.get("strict_revalidation_passed") is True]
+        if not candidates:
+            return {}
+
+        def _candidate_metric(item: dict[str, Any], key: str) -> float:
+            value = item.get(key)
+            return float(value) if value is not None else float(-10**9)
+
+        return dict(
+            max(
+                candidates,
+                key=lambda item: (
+                    _candidate_metric(item, "trade_like_events_delta"),
+                    _candidate_metric(item, "probe_add_delta"),
+                    _candidate_metric(item, "compounded_oos_return_delta_pct"),
+                    -_candidate_metric(item, "max_drawdown_delta_pct"),
+                ),
+            )
+        )
+
+    def _closest_activity_contract_row() -> dict[str, Any]:
+        candidates = [
+            row
+            for row in rows
+            if row.get("probe_add_delta") is not None
+            or row.get("trade_like_events_delta") is not None
+        ]
+        if not candidates:
+            return {}
+        passed_candidates = [
+            row for row in candidates if row.get("strict_revalidation_passed") is True
+        ]
+        if passed_candidates:
+            candidates = passed_candidates
+
+        def _candidate_metric(item: dict[str, Any], key: str) -> float:
+            value = item.get(key)
+            return float(value) if value is not None else float(-10**9)
+
+        row = dict(
+            max(
+                candidates,
+                key=lambda item: (
+                    _candidate_metric(item, "trade_like_events_delta"),
+                    _candidate_metric(item, "probe_add_delta"),
+                ),
+            )
+        )
+        primary_blockers = list(row.get("strict_revalidation_blockers") or []) + list(
+            row.get("failed_checks") or []
+        ) + list(
+            row.get("strict_signal_sparsity_fix_failure_reasons") or []
+        )
+        trade_like_delta = _number_or_none(row.get("trade_like_events_delta"))
+        probe_delta = _number_or_none(row.get("probe_add_delta"))
+        activity_contract_met = (
+            row.get("strict_activity_gate_present") is True
+            and row.get("no_live_order_sent") is not False
+            and trade_like_delta is not None
+            and trade_like_delta >= 1
+            and (probe_delta is None or probe_delta >= 0)
+            and "activity_regression_blocks_signal_sparsity_fix" not in primary_blockers
+            and "trade_like_activity_did_not_increase" not in primary_blockers
+            and "probe_activity_regressed" not in primary_blockers
+        )
+        why_not_default = None
+        if row.get("strict_revalidation_passed") is not True:
+            why_not_default = "strict_revalidation_failed_or_activity_contract_not_met"
+            if activity_contract_met and "drawdown_worsening" in primary_blockers:
+                why_not_default = (
+                    "strict_revalidation_failed_drawdown_worsening_after_activity_contract_met"
+                )
+        return {
+            "candidate_name": row.get("candidate_name"),
+            "report": row.get("report"),
+            "overall_status": row.get("overall_status"),
+            "decision": row.get("decision"),
+            "probe_add_delta": row.get("probe_add_delta"),
+            "trade_like_events_delta": row.get("trade_like_events_delta"),
+            "primary_blockers": primary_blockers,
+            "eligibility_status": (
+                "eligible_strict_candidate"
+                if row.get("strict_revalidation_passed") is True
+                else "blocked_by_strict_full_walk_forward_gate"
+            ),
+            "why_not_default_candidate": why_not_default,
+            "no_live_order_sent": row.get("no_live_order_sent") is not False,
+            "strict_activity_gate_present": row.get("strict_activity_gate_present") is True,
+        }
+
+    if report_count == 0:
+        status = "no_strict_revalidation_reports_found"
+    elif passed_count > 0:
+        status = "strict_revalidation_candidate_available"
+    else:
+        status = "all_strict_revalidations_blocked"
+    strict_revalidated_candidate = _best_passed_row()
+    closest_activity_contract_candidate = _closest_activity_contract_row()
+    activity_blockers = {
+        "activity_regression_blocks_signal_sparsity_fix",
+        "trade_like_activity_did_not_increase",
+        "candidate_reduces_total_trade_like_events",
+        "candidate_reduces_probe_activity_instead_of_solving_signal_sparsity",
+        "candidate_reduces_trade_like_activity_instead_of_solving_signal_sparsity",
+        "probe_activity_regressed",
+        "trade_like_activity_regressed",
+        "probe_add_delta_less_than_0",
+        "trade_like_events_delta_less_than_1",
+    }
+    closest_primary_blockers = set(
+        str(item) for item in list(closest_activity_contract_candidate.get("primary_blockers") or [])
+    )
+    closest_trade_like_delta = _number_or_none(
+        closest_activity_contract_candidate.get("trade_like_events_delta")
+    )
+    closest_probe_delta = _number_or_none(
+        closest_activity_contract_candidate.get("probe_add_delta")
+    )
+    activity_contract_solved_by_closest = (
+        bool(closest_activity_contract_candidate)
+        and closest_activity_contract_candidate.get("strict_activity_gate_present") is True
+        and closest_activity_contract_candidate.get("no_live_order_sent") is True
+        and closest_trade_like_delta is not None
+        and closest_trade_like_delta >= 1
+        and (closest_probe_delta is None or closest_probe_delta >= 0)
+        and not (closest_primary_blockers & activity_blockers)
+    )
+    remaining_primary_blockers = (
+        []
+        if passed_count > 0
+        else sorted(
+            blocker for blocker in closest_primary_blockers if blocker not in activity_blockers
+        )
+    )
+    drawdown_gate_limits = [
+        float(row["max_drawdown_worsening_pct"])
+        for row in rows
+        if row.get("max_drawdown_worsening_pct") is not None
+    ]
+    max_drawdown_worsening_limit = (
+        min(drawdown_gate_limits) if drawdown_gate_limits else 3.0
+    )
+    risk_repair_required = (
+        passed_count == 0
+        and activity_contract_solved_by_closest
+        and (
+            "drawdown_worsening" in closest_primary_blockers
+            or "drawdown_worsening" in failed_check_counts
+        )
+    )
+    constraint_status = "not_available"
+    if report_count:
+        if passed_count > 0:
+            constraint_status = "strict_revalidation_candidate_available"
+        else:
+            constraint_status = (
+                "strict_risk_repair_constraints_required"
+                if risk_repair_required
+                else "strict_activity_constraints_required"
+            )
+    next_candidate_constraints = {
+        "status": constraint_status,
+        "must_run_strict_full_wfo_gate": True,
+        "must_keep_no_live_order_sent": True,
+        "must_have_zero_failed_checks": True,
+        "must_keep_activity_contract": True,
+        "must_increase_trade_like_events_delta_min": 1,
+        "must_not_reduce_probe_add_delta_min": 0,
+        "must_not_reduce_total_trade_like_events": (
+            False
+            if risk_repair_required
+            else (
+                "candidate_reduces_total_trade_like_events" in label_counts
+                or "trade_like_activity_did_not_increase" in sparsity_failure_reason_counts
+            )
+        ),
+        "activity_contract_solved_by_closest_candidate": activity_contract_solved_by_closest,
+        "remaining_primary_blockers": remaining_primary_blockers,
+        "must_keep_max_drawdown_worsening_pct_at_or_below": (
+            max_drawdown_worsening_limit if risk_repair_required else None
+        ),
+        "must_beat_closest_rejected_candidate_trade_like_delta": (
+            None
+            if risk_repair_required
+            else closest_activity_contract_candidate.get("trade_like_events_delta")
+        ),
+        "must_beat_closest_rejected_candidate_probe_delta": (
+            None
+            if risk_repair_required
+            else closest_activity_contract_candidate.get("probe_add_delta")
+        ),
+        "reject_if": [
+            "strict_activity_gate_missing",
+            "no_live_order_sent_false",
+            "failed_checks_non_empty",
+            "trade_like_events_delta_less_than_1",
+            "probe_add_delta_below_0",
+            "drawdown_worsening",
+        ],
+        "evidence": {
+            "strict_revalidation_report_count": report_count,
+            "blocked_count": blocked_count,
+            "passed_count": passed_count,
+            "failure_reason_counts": sparsity_failure_reason_counts,
+            "failed_check_counts": failed_check_counts,
+            "diagnostic_label_counts": label_counts,
+        },
+        "order_submission_allowed": False,
+        "no_live_order_sent": no_live_order_sent,
+    }
+    return {
+        "status": status,
+        "report_count": report_count,
+        "blocked_count": blocked_count,
+        "passed_count": passed_count,
+        "strict_gate_present_count": strict_gate_present_count,
+        "strict_gate_missing_count": strict_gate_missing_count,
+        "safety_blocked_count": safety_blocked_count,
+        "strict_revalidated_promoted_legacy_reports_blocked": (
+            report_count > 0 and passed_count == 0
+        ),
+        "all_reports_validation_only": True,
+        "strict_activity_contract": {
+            "probe_add_delta_min": 0,
+            "trade_like_events_delta_min": 1,
+            "trade_like_activity_increase_required": True,
+            "signal_sparsity_fix_requires_trade_like_events_increase": True,
+        },
+        "strict_signal_sparsity_failure_reason_counts": sparsity_failure_reason_counts,
+        "failed_check_counts": failed_check_counts,
+        "next_candidate_design_constraints": next_candidate_constraints,
+        "activity_contract_solved_by_closest_candidate": activity_contract_solved_by_closest,
+        "remaining_primary_blockers": remaining_primary_blockers,
+        "risk_repair_required": risk_repair_required,
+        "max_drawdown_worsening_pct_required": (
+            max_drawdown_worsening_limit if risk_repair_required else None
+        ),
+        "diagnostic_label_counts": label_counts,
+        "best_probe_delta_report": _best_row("probe_add_delta"),
+        "best_trade_like_delta_report": _best_row("trade_like_events_delta"),
+        "strict_revalidated_candidate": strict_revalidated_candidate,
+        "closest_activity_contract_candidate": closest_activity_contract_candidate,
+        "reports": rows,
+        "order_submission_allowed": False,
+        "live_order_submission_allowed": False,
+        "no_live_order_sent": no_live_order_sent,
+    }
+
+
+def _gate_substitution_digest(
+    *,
+    paper_only_rehearsal: dict[str, Any],
+    remaining_work_closure_summary: dict[str, Any],
+    daily_quote_checkpoint_summary: dict[str, Any],
+    execution_parity_status_summary: dict[str, Any],
+    runtime_progress: dict[str, Any],
+) -> dict[str, Any]:
+    rehearsal = dict(paper_only_rehearsal or {})
+    closure = dict(remaining_work_closure_summary or {})
+    quote = dict(daily_quote_checkpoint_summary or {})
+    parity = dict(execution_parity_status_summary or {})
+    runtime = dict(runtime_progress or {})
+
+    proxy_gates = [dict(item) for item in list(rehearsal.get("proxy_gates") or [])]
+    passed_proxy_gates = [item for item in proxy_gates if item.get("passed") is True]
+    unresolved_proxy_gates = list(rehearsal.get("unresolved_proxy_gates") or [])
+    substituted_or_prevalidated = list(rehearsal.get("substituted_or_prevalidated_gates") or [])
+    non_substitutable_remaining = list(rehearsal.get("non_substitutable_remaining_gates") or [])
+    non_substitutable_problem_ids = list(closure.get("non_substitutable_problem_ids") or [])
+    wait_only_problem_ids = list(closure.get("wait_only_problem_ids") or [])
+    not_required_for_paper = list(rehearsal.get("not_required_for_paper_only_goal") or [])
+    still_required_for_live = list(rehearsal.get("still_required_for_live_or_tiny_canary") or [])
+
+    realtime_waits = []
+    if "current_fresh_signal" in wait_only_problem_ids or "current_fresh_signal" in non_substitutable_remaining:
+        realtime_waits.append(
+            {
+                "gate": "current_fresh_signal",
+                "reason": "requires_realtime_add_or_remove_signal",
+                "eta_kst": None,
+                "non_substitutable": True,
+            }
+        )
+    if "first_real_paper_lifecycle_row" in non_substitutable_remaining:
+        realtime_waits.append(
+            {
+                "gate": "first_real_paper_lifecycle_row",
+                "reason": "requires_first_real_paper_apply_after_fresh_signal_and_operator_review",
+                "eta_kst": None,
+                "non_substitutable": True,
+            }
+        )
+    if "execution_parity_samples" in non_substitutable_problem_ids:
+        realtime_waits.append(
+            {
+                "gate": "execution_parity_samples",
+                "reason": "requires_real_reviewed_paper_lifecycle_rows",
+                "missing_samples": parity.get("missing_samples"),
+                "eta_kst": parity.get("estimated_completion_kst"),
+                "non_substitutable": True,
+            }
+        )
+    if "microstructure_calendar_day_coverage" in non_substitutable_problem_ids:
+        realtime_waits.append(
+            {
+                "gate": "microstructure_calendar_day_coverage",
+                "reason": "requires_future_utc_calendar_days_not_backfill_for_launch_gate",
+                "remaining_calendar_days": quote.get("remaining_calendar_days"),
+                "eta_kst": quote.get("earliest_calendar_completion_kst"),
+                "non_substitutable": True,
+            }
+        )
+    runtime_remaining_hours = _number_or_none(runtime.get("remaining_hours"))
+    if runtime_remaining_hours is not None and runtime_remaining_hours > 0:
+        realtime_waits.append(
+            {
+                "gate": "shadow_runtime_24h_observed",
+                "reason": "requires_continuous_no_live_runtime_observation",
+                "remaining_hours": runtime_remaining_hours,
+                "non_substitutable": True,
+            }
+        )
+
+    proxy_ready = rehearsal.get("max_substitution_ready") is True and not unresolved_proxy_gates
+    status = (
+        "paper_only_proxy_substitution_complete_realtime_gates_remaining"
+        if proxy_ready and realtime_waits
+        else "paper_only_proxy_substitution_complete"
+        if proxy_ready
+        else "paper_only_proxy_substitution_incomplete"
+    )
+    return {
+        "status": status,
+        "paper_only_scope": True,
+        "paper_only_system_ready": rehearsal.get("system_ready") is True,
+        "paper_only_armed": rehearsal.get("armed") is True,
+        "max_substitution_status": rehearsal.get("max_substitution_status"),
+        "max_substitution_ready": rehearsal.get("max_substitution_ready") is True,
+        "proxy_gate_count": len(proxy_gates),
+        "proxy_gate_passed_count": len(passed_proxy_gates),
+        "unresolved_proxy_gate_count": len(unresolved_proxy_gates),
+        "proxy_gates": proxy_gates,
+        "unresolved_proxy_gates": unresolved_proxy_gates,
+        "substituted_or_prevalidated_gates": substituted_or_prevalidated,
+        "non_substitutable_remaining_gates": non_substitutable_remaining,
+        "non_substitutable_problem_ids": non_substitutable_problem_ids,
+        "wait_only_problem_ids": wait_only_problem_ids,
+        "realtime_waits": realtime_waits,
+        "realtime_wait_count": len(realtime_waits),
+        "not_required_for_paper_only_goal": not_required_for_paper,
+        "still_required_for_live_or_tiny_canary": still_required_for_live,
+        "backtest_substitution_allowed_for_launch_gate": False,
+        "synthetic_or_backtest_rows_close_realtime_gates": False,
+        "paper_only_proxy_completed_but_live_still_blocked": bool(proxy_ready and still_required_for_live),
+        "policy": (
+            "historical_or_static_proxy_can_prepare_paper_only_rehearsal_but_cannot_close_realtime_launch_gates"
+        ),
+        "operator_decision_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            rehearsal.get("no_live_order_sent") is not False
+            and closure.get("no_live_order_sent") is not False
+            and quote.get("no_live_order_sent") is not False
+            and parity.get("no_live_order_sent") is not False
+            and runtime.get("no_live_order_sent") is not False
+        ),
+    }
+
+
+def _gate_eta_digest(
+    *,
+    gate_substitution_digest: dict[str, Any],
+    next_material_progress_plan: dict[str, Any],
+    operator_action_digest: dict[str, Any],
+    dependency_lanes: dict[str, Any],
+    daily_quote_checkpoint_summary: dict[str, Any],
+    execution_parity_status_summary: dict[str, Any],
+    runtime_progress: dict[str, Any],
+) -> dict[str, Any]:
+    substitution = dict(gate_substitution_digest or {})
+    next_material = dict(next_material_progress_plan or {})
+    action_digest = dict(operator_action_digest or {})
+    lanes = dict(dependency_lanes or {})
+    quote = dict(daily_quote_checkpoint_summary or {})
+    parity = dict(execution_parity_status_summary or {})
+    runtime = dict(runtime_progress or {})
+
+    events = [dict(item) for item in list(next_material.get("events") or [])]
+    future_events = [dict(item) for item in list(next_material.get("future_events") or [])]
+    unscheduled_waits = [dict(item) for item in list(next_material.get("unscheduled_waits") or [])]
+    realtime_waits = [dict(item) for item in list(substitution.get("realtime_waits") or [])]
+    unscheduled_realtime_waits = [
+        item for item in realtime_waits if not item.get("eta_kst")
+    ]
+    next_scheduled_event = next(
+        (
+            item
+            for item in future_events
+            if item.get("eta_kst") or item.get("eta_utc")
+        ),
+        {},
+    )
+    next_unscheduled_wait = (
+        unscheduled_realtime_waits[0]
+        if unscheduled_realtime_waits
+        else unscheduled_waits[0]
+        if unscheduled_waits
+        else {}
+    )
+    runtime_event = next(
+        (item for item in events if item.get("event_type") == "shadow_runtime_observation"),
+        {},
+    )
+    quote_event = next(
+        (item for item in events if item.get("event_type") == "quote_calendar_checkpoint"),
+        {},
+    )
+    parity_event = next(
+        (item for item in events if item.get("event_type") == "execution_parity_sample_floor"),
+        {},
+    )
+    has_unscheduled_realtime_gate = bool(unscheduled_realtime_waits)
+    manual_decision_required = _int_or_default(action_digest.get("manual_decision_count"), 0) > 0
+    paper_apply_eta_known = (
+        not has_unscheduled_realtime_gate
+        and not manual_decision_required
+        and action_digest.get("paper_apply_allowed_now") is True
+    )
+    if action_digest.get("paper_apply_allowed_now") is True:
+        status = "paper_apply_ready_now_operator_review_required"
+    elif has_unscheduled_realtime_gate and manual_decision_required:
+        status = "unscheduled_realtime_and_manual_gates_block_paper_apply_eta"
+    elif has_unscheduled_realtime_gate:
+        status = "unscheduled_realtime_gate_blocks_paper_apply_eta"
+    elif manual_decision_required:
+        status = "manual_operator_review_blocks_paper_apply_eta"
+    elif next_scheduled_event:
+        status = "scheduled_gate_waiting"
+    else:
+        status = "no_eta_blockers_detected"
+
+    return {
+        "status": status,
+        "paper_apply_eta_known": paper_apply_eta_known,
+        "paper_apply_earliest_known_kst": None if not paper_apply_eta_known else action_digest.get("primary_material_eta_kst"),
+        "has_unscheduled_realtime_gate": has_unscheduled_realtime_gate,
+        "next_unscheduled_gate": next_unscheduled_wait.get("gate")
+        or next_unscheduled_wait.get("event_type"),
+        "next_unscheduled_reason": next_unscheduled_wait.get("reason"),
+        "manual_decision_required": manual_decision_required,
+        "manual_decision_count": action_digest.get("manual_decision_count"),
+        "immediate_auto_count": next_material.get("immediate_auto_count"),
+        "immediate_operator_count": next_material.get("immediate_operator_count"),
+        "future_event_count": next_material.get("future_event_count"),
+        "unscheduled_wait_count": next_material.get("unscheduled_wait_count"),
+        "next_scheduled_event": {
+            "event_type": next_scheduled_event.get("event_type"),
+            "gate": next_scheduled_event.get("gate"),
+            "eta_kst": next_scheduled_event.get("eta_kst"),
+            "wait_minutes": next_scheduled_event.get("wait_minutes"),
+            "can_auto_run": next_scheduled_event.get("can_auto_run") is True,
+            "requires_operator_review": next_scheduled_event.get("requires_operator_review") is True,
+        },
+        "quote_checkpoint_eta_kst": quote_event.get("eta_kst") or quote.get("next_quote_coverage_kst_at"),
+        "quote_calendar_completion_kst": quote.get("earliest_calendar_completion_kst"),
+        "quote_remaining_calendar_days": quote.get("remaining_calendar_days"),
+        "shadow_runtime_completion_eta_kst": runtime_event.get("eta_kst"),
+        "shadow_runtime_remaining_hours": runtime.get("remaining_hours"),
+        "execution_parity_eta_kst": (
+            parity_event.get("eta_kst") or parity.get("estimated_completion_kst")
+        ),
+        "execution_parity_missing_samples": parity.get("missing_samples"),
+        "critical_path": list(lanes.get("critical_path") or []),
+        "parallel_calendar_path": list(lanes.get("parallel_calendar_path") or []),
+        "realtime_waits": realtime_waits,
+        "realtime_wait_count": substitution.get("realtime_wait_count"),
+        "non_substitutable_problem_ids": list(substitution.get("non_substitutable_problem_ids") or []),
+        "planning_caveat": (
+            "paper_apply_eta_is_unknown_until_a_fresh_realtime_signal_exists_and_manual_reviews_are_completed"
+            if not paper_apply_eta_known
+            else "paper_apply_gate_is_currently_known"
+        ),
+        "backtest_substitution_allowed_for_launch_gate": substitution.get(
+            "backtest_substitution_allowed_for_launch_gate"
+        )
+        is True,
+        "synthetic_or_backtest_rows_close_realtime_gates": substitution.get(
+            "synthetic_or_backtest_rows_close_realtime_gates"
+        )
+        is True,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            substitution.get("no_live_order_sent") is not False
+            and next_material.get("no_live_order_sent") is not False
+            and action_digest.get("no_live_order_sent") is not False
+            and quote.get("no_live_order_sent") is not False
+            and parity.get("no_live_order_sent") is not False
+            and runtime.get("no_live_order_sent") is not False
+        ),
+    }
+
+
+def _launch_progress_scorecard(
+    *,
+    latest: dict[str, Any],
+    runtime_progress: dict[str, Any],
+    daily_quote_checkpoint_summary: dict[str, Any],
+    gate_substitution_digest: dict[str, Any],
+    gate_eta_digest: dict[str, Any],
+    operator_action_digest: dict[str, Any],
+    operator_review_handoff_summary: dict[str, Any],
+    operator_review_resolution_plan: dict[str, Any],
+    execution_parity_status_summary: dict[str, Any],
+    next_material_progress_plan: dict[str, Any],
+    remaining_work_closure_summary: dict[str, Any],
+) -> dict[str, Any]:
+    latest_payload = dict(latest or {})
+    launch = dict(latest_payload.get("launch_readiness") or {})
+    signal = dict(latest_payload.get("signal_wait_plan") or {})
+    runtime = dict(runtime_progress or {})
+    quote = dict(daily_quote_checkpoint_summary or {})
+    substitution = dict(gate_substitution_digest or {})
+    eta = dict(gate_eta_digest or {})
+    action = dict(operator_action_digest or {})
+    review_handoff = dict(operator_review_handoff_summary or {})
+    review_resolution = dict(operator_review_resolution_plan or {})
+    readiness_matrix = dict(review_resolution.get("readiness_matrix") or {})
+    manual_batch = dict(review_resolution.get("manual_batch_handoff") or {})
+    parity = dict(execution_parity_status_summary or {})
+    next_material = dict(next_material_progress_plan or {})
+    closure = dict(remaining_work_closure_summary or {})
+    dependency_lanes = dict(closure.get("dependency_lanes") or {})
+    realtime_signal_lane = dict(dependency_lanes.get("realtime_signal_lane") or {})
+
+    def _pct(numerator: Any, denominator: Any) -> float | None:
+        numerator_value = _number_or_none(numerator)
+        denominator_value = _number_or_none(denominator)
+        if numerator_value is None or denominator_value is None or denominator_value <= 0:
+            return None
+        return round(max(min(numerator_value / denominator_value * 100.0, 100.0), 0.0), 4)
+
+    def _dedupe(values: list[Any]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            out.append(text)
+        return out
+
+    proxy_gate_count = _int_or_default(substitution.get("proxy_gate_count"), 0)
+    proxy_gate_passed = _int_or_default(substitution.get("proxy_gate_passed_count"), 0)
+    unresolved_proxy_count = _int_or_default(substitution.get("unresolved_proxy_gate_count"), 0)
+    proxy_complete = (
+        substitution.get("max_substitution_ready") is True
+        and unresolved_proxy_count <= 0
+        and (proxy_gate_count <= 0 or proxy_gate_passed >= proxy_gate_count)
+    )
+    proxy_progress_pct = (
+        100.0
+        if proxy_complete
+        else _pct(proxy_gate_passed, proxy_gate_count)
+        if proxy_gate_count > 0
+        else 0.0
+    )
+
+    runtime_remaining = _number_or_none(runtime.get("remaining_hours"))
+    runtime_progress_pct = _number_or_none(runtime.get("progress_pct"))
+    if runtime_progress_pct is None:
+        runtime_progress_pct = _pct(runtime.get("observed_hours"), runtime.get("target_hours"))
+    runtime_complete = (
+        runtime.get("status") == "target_complete"
+        or (runtime_remaining is not None and runtime_remaining <= 0)
+    )
+
+    quote_calendar_count = _int_or_default(quote.get("calendar_day_count"), 0)
+    quote_min_calendar_days = _int_or_default(quote.get("min_calendar_days"), 0)
+    quote_remaining_calendar_days = _int_or_default(quote.get("remaining_calendar_days"), 0)
+    quote_observed = _int_or_default(quote.get("quote_observed"), 0)
+    quote_required = _int_or_default(quote.get("quote_required"), 0)
+    quote_remaining_samples = _int_or_default(quote.get("remaining_quote_samples"), 0)
+    quote_calendar_pct = _pct(quote_calendar_count, quote_min_calendar_days)
+    quote_sample_pct = _pct(quote_observed, quote_required)
+    quote_pct_candidates = [
+        value for value in [quote_calendar_pct, quote_sample_pct] if value is not None
+    ]
+    quote_progress_pct = min(quote_pct_candidates) if quote_pct_candidates else None
+    quote_complete = quote_remaining_calendar_days <= 0 and quote_remaining_samples <= 0
+
+    manual_decision_count = _int_or_default(
+        action.get("manual_decision_count"),
+        _int_or_default(review_handoff.get("operator_decision_required_count"), 0),
+    )
+    ready_review_count = _int_or_default(review_handoff.get("ready_review_count"), 0)
+    dry_run_ready_count = _int_or_default(readiness_matrix.get("dry_run_ready_count"), 0)
+    review_row_count = _int_or_default(
+        readiness_matrix.get("row_count"),
+        max(manual_decision_count, _int_or_default(review_handoff.get("total_review_count"), 0)),
+    )
+    if review_row_count > 0:
+        operator_template_ready_pct = _pct(dry_run_ready_count, review_row_count)
+        operator_decision_completion_pct = _pct(
+            max(review_row_count - manual_decision_count, 0),
+            review_row_count,
+        )
+    else:
+        operator_template_ready_pct = 100.0
+        operator_decision_completion_pct = 100.0
+    operator_progress_candidates = [
+        value
+        for value in [operator_template_ready_pct, operator_decision_completion_pct]
+        if value is not None
+    ]
+    operator_progress_pct = (
+        min(operator_progress_candidates) if operator_progress_candidates else None
+    )
+    operator_complete = manual_decision_count <= 0 and review_row_count <= 0
+
+    parity_rows = _int_or_default(parity.get("eligible_journal_rows"), 0)
+    parity_required = _int_or_default(parity.get("required_samples"), 0)
+    parity_missing = _int_or_default(parity.get("missing_samples"), 0)
+    parity_progress_pct = _pct(parity_rows, parity_required)
+    if parity_progress_pct is None:
+        parity_progress_pct = 100.0 if parity_missing <= 0 else 0.0
+    parity_complete = parity_missing <= 0 and (parity_required <= 0 or parity_rows >= parity_required)
+
+    fresh_signal_available = signal.get("fresh_signal") is True or action.get("fresh_signal_available") is True
+    fresh_signal_progress_pct = 100.0 if fresh_signal_available else 0.0
+    paper_rehearsal = dict(launch.get("paper_only_rehearsal") or {})
+    ready_for_paper_apply_now = (
+        action.get("paper_apply_allowed_now") is True
+        or paper_rehearsal.get("paper_apply_allowed_now") is True
+    )
+    first_paper_lifecycle_rows = _int_or_default(
+        paper_rehearsal.get("actual_paper_lifecycle_rows"),
+        parity_rows,
+    )
+    first_paper_lifecycle_complete = first_paper_lifecycle_rows > 0 or parity_rows > 0
+
+    lanes = {
+        "paper_only_proxy": {
+            "status": substitution.get("status"),
+            "complete": proxy_complete,
+            "progress_pct": proxy_progress_pct,
+            "passed": proxy_gate_passed,
+            "required": proxy_gate_count,
+            "unresolved": unresolved_proxy_count,
+            "max_substitution_ready": substitution.get("max_substitution_ready") is True,
+            "remaining_gates": list(substitution.get("unresolved_proxy_gates") or []),
+            "order_submission_allowed": False,
+            "no_live_order_sent": substitution.get("no_live_order_sent") is not False,
+        },
+        "shadow_runtime": {
+            "status": runtime.get("status"),
+            "complete": runtime_complete,
+            "progress_pct": runtime_progress_pct,
+            "observed_hours": runtime.get("observed_hours"),
+            "target_hours": runtime.get("target_hours"),
+            "remaining_hours": runtime.get("remaining_hours"),
+            "completion_eta_kst": eta.get("shadow_runtime_completion_eta_kst"),
+            "order_submission_allowed": False,
+            "no_live_order_sent": runtime.get("no_live_order_sent") is not False,
+        },
+        "quote_microstructure": {
+            "status": quote.get("status"),
+            "complete": quote_complete,
+            "progress_pct": quote_progress_pct,
+            "sample_progress_pct": quote_sample_pct,
+            "calendar_progress_pct": quote_calendar_pct,
+            "quote_observed": quote_observed,
+            "quote_required": quote_required,
+            "remaining_quote_samples": quote_remaining_samples,
+            "calendar_day_count": quote_calendar_count,
+            "min_calendar_days": quote_min_calendar_days,
+            "remaining_calendar_days": quote_remaining_calendar_days,
+            "next_quote_coverage_kst_at": quote.get("next_quote_coverage_kst_at"),
+            "completion_eta_kst": eta.get("quote_calendar_completion_kst"),
+            "backfill_allowed_for_launch_gate": quote.get("backfill_allowed_for_launch_gate") is True,
+            "order_submission_allowed": False,
+            "no_live_order_sent": quote.get("no_live_order_sent") is not False,
+        },
+        "operator_review": {
+            "status": review_resolution.get("status") or review_handoff.get("status"),
+            "complete": operator_complete,
+            "progress_pct": operator_progress_pct,
+            "template_ready_pct": operator_template_ready_pct,
+            "manual_decision_completion_pct": operator_decision_completion_pct,
+            "manual_decision_count": manual_decision_count,
+            "ready_review_count": ready_review_count,
+            "readiness_matrix_status": readiness_matrix.get("status"),
+            "readiness_row_count": review_row_count,
+            "dry_run_ready_count": dry_run_ready_count,
+            "manual_batch_status": manual_batch.get("status"),
+            "auto_decision_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": (
+                review_handoff.get("no_live_order_sent") is not False
+                and review_resolution.get("no_live_order_sent") is not False
+            ),
+        },
+        "execution_parity": {
+            "status": parity.get("status"),
+            "complete": parity_complete,
+            "progress_pct": parity_progress_pct,
+            "eligible_journal_rows": parity_rows,
+            "required_samples": parity_required,
+            "missing_samples": parity_missing,
+            "estimated_future_paper_apply_events_needed": parity.get(
+                "estimated_future_paper_apply_events_needed"
+            ),
+            "completion_eta_kst": eta.get("execution_parity_eta_kst"),
+            "non_substitutable": parity.get("non_substitutable") is True,
+            "order_submission_allowed": False,
+            "no_live_order_sent": parity.get("no_live_order_sent") is not False,
+        },
+        "fresh_signal": {
+            "status": signal.get("status"),
+            "complete": fresh_signal_available,
+            "progress_pct": fresh_signal_progress_pct,
+            "fresh_signal_available": fresh_signal_available,
+            "next_monitor_kst": (
+                realtime_signal_lane.get("monitor_effective_next_after_kst")
+                or signal.get("next_monitor_after_kst")
+            ),
+            "raw_next_monitor_kst": (
+                realtime_signal_lane.get("monitor_raw_next_after_kst")
+                or signal.get("next_monitor_after_kst")
+            ),
+            "covered_next_recheck_after_kst": realtime_signal_lane.get(
+                "monitor_covered_next_recheck_after_kst"
+            ),
+            "next_monitor_source": realtime_signal_lane.get("monitor_next_after_source"),
+            "next_monitor_retimestampted_after_current_iteration": (
+                realtime_signal_lane.get(
+                    "monitor_next_after_retimestampted_after_current_iteration"
+                )
+                is True
+            ),
+            "recommended_monitor_interval_minutes": signal.get("recommended_monitor_interval_minutes"),
+            "monitor_interval_capped_by_signal_freshness": (
+                signal.get("monitor_interval_capped_by_signal_freshness") is True
+            ),
+            "eta_known": eta.get("has_unscheduled_realtime_gate") is not True,
+            "order_submission_allowed": False,
+            "no_live_order_sent": signal.get("no_live_order_sent") is not False,
+        },
+    }
+    measurable_lane_values = [
+        _number_or_none(dict(item).get("progress_pct")) for item in lanes.values()
+    ]
+    measurable_lane_values = [value for value in measurable_lane_values if value is not None]
+    complete_lane_count = sum(1 for item in lanes.values() if dict(item).get("complete") is True)
+    overall_progress_pct = (
+        round(sum(measurable_lane_values) / len(measurable_lane_values), 4)
+        if measurable_lane_values
+        else None
+    )
+    open_lanes = [
+        name for name, item in lanes.items() if dict(item).get("complete") is not True
+    ]
+
+    def _gate_row(gate: Any) -> dict[str, Any]:
+        gate_id = str(gate or "").strip()
+        realtime_lane = dict(dependency_lanes.get("realtime_signal_lane") or {})
+        operator_lane = dict(dependency_lanes.get("operator_input_lane") or {})
+        first_row_lane = dict(dependency_lanes.get("first_paper_row_lane") or {})
+        parity_lane = dict(dependency_lanes.get("execution_parity_lane") or {})
+        calendar_lane = dict(dependency_lanes.get("calendar_coverage_lane") or {})
+        runtime_lane = dict(dependency_lanes.get("runtime_observation_lane") or {})
+        if gate_id == "current_fresh_signal":
+            lane = dict(lanes["fresh_signal"])
+            return {
+                "gate": gate_id,
+                "lane": "fresh_signal",
+                "status": realtime_lane.get("status") or lane.get("status"),
+                "complete": lane.get("complete") is True,
+                "progress_pct": lane.get("progress_pct"),
+                "actionability": "safe_monitor_only_no_forced_entry",
+                "next_action_type": realtime_lane.get("monitor_action_type") or "monitor_fresh_signal",
+                "next_action_kst": lane.get("next_monitor_kst")
+                or realtime_lane.get("monitor_effective_next_after_kst")
+                or realtime_lane.get("monitor_execute_after_kst"),
+                "raw_next_action_kst": lane.get("raw_next_monitor_kst")
+                or realtime_lane.get("monitor_raw_next_after_kst")
+                or realtime_lane.get("monitor_execute_after_kst"),
+                "covered_next_recheck_after_kst": lane.get("covered_next_recheck_after_kst")
+                or realtime_lane.get("monitor_covered_next_recheck_after_kst"),
+                "next_action_source": lane.get("next_monitor_source")
+                or realtime_lane.get("monitor_next_after_source"),
+                "next_action_retimestampted_after_current_iteration": (
+                    lane.get("next_monitor_retimestampted_after_current_iteration") is True
+                    or realtime_lane.get(
+                        "monitor_next_after_retimestampted_after_current_iteration"
+                    )
+                    is True
+                ),
+                "non_substitutable": realtime_lane.get("non_substitutable") is not False,
+                "blocks_paper_apply": True,
+                "auto_decision_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": realtime_lane.get("no_live_order_sent") is not False and lane.get("no_live_order_sent") is not False,
+            }
+        if gate_id == "operator_review_decisions":
+            lane = dict(lanes["operator_review"])
+            return {
+                "gate": gate_id,
+                "lane": "operator_review",
+                "status": operator_lane.get("status") or lane.get("status"),
+                "complete": lane.get("complete") is True,
+                "progress_pct": lane.get("progress_pct"),
+                "template_ready_pct": lane.get("template_ready_pct"),
+                "manual_decision_completion_pct": lane.get("manual_decision_completion_pct"),
+                "manual_decision_count": lane.get("manual_decision_count"),
+                "actionability": "manual_operator_decision_required",
+                "next_action_type": "complete_operator_review_batch_manually",
+                "non_substitutable": False,
+                "blocks_paper_apply": True,
+                "auto_decision_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": operator_lane.get("no_live_order_sent") is not False and lane.get("no_live_order_sent") is not False,
+            }
+        if gate_id == "first_real_paper_lifecycle_row":
+            return {
+                "gate": gate_id,
+                "lane": "first_paper_lifecycle",
+                "status": first_row_lane.get("status") or (
+                    "first_paper_lifecycle_row_complete"
+                    if first_paper_lifecycle_complete
+                    else "blocked_until_fresh_signal_and_operator_review"
+                ),
+                "complete": first_paper_lifecycle_complete,
+                "progress_pct": 100.0 if first_paper_lifecycle_complete else 0.0,
+                "actual_paper_lifecycle_rows": first_paper_lifecycle_rows,
+                "ready_for_paper_apply_now": ready_for_paper_apply_now,
+                "depends_on": list(first_row_lane.get("depends_on") or [
+                    "current_fresh_signal",
+                    "operator_review_decisions",
+                ]),
+                "actionability": "manual_paper_apply_after_fresh_signal_and_operator_review_only",
+                "next_action_type": (
+                    "operator_review_paper_apply_dry_run_then_apply_if_confirmed"
+                    if ready_for_paper_apply_now
+                    else "wait_for_fresh_signal_and_operator_review_decisions"
+                ),
+                "non_substitutable": True,
+                "blocks_paper_apply": True,
+                "auto_apply_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": first_row_lane.get("no_live_order_sent") is not False,
+            }
+        if gate_id == "execution_parity_samples":
+            lane = dict(lanes["execution_parity"])
+            return {
+                "gate": gate_id,
+                "lane": "execution_parity",
+                "status": parity_lane.get("status") or lane.get("status"),
+                "complete": lane.get("complete") is True,
+                "progress_pct": lane.get("progress_pct"),
+                "missing_samples": lane.get("missing_samples"),
+                "completion_eta_kst": lane.get("completion_eta_kst"),
+                "actionability": "requires_real_reviewed_paper_lifecycle_rows",
+                "depends_on": list(parity_lane.get("depends_on") or ["first_real_paper_lifecycle_row"]),
+                "non_substitutable": True,
+                "blocks_paper_apply": False,
+                "auto_decision_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": parity_lane.get("no_live_order_sent") is not False and lane.get("no_live_order_sent") is not False,
+            }
+        if gate_id == "microstructure_calendar_day_coverage":
+            lane = dict(lanes["quote_microstructure"])
+            return {
+                "gate": gate_id,
+                "lane": "quote_microstructure",
+                "status": calendar_lane.get("status") or lane.get("status"),
+                "complete": lane.get("complete") is True,
+                "progress_pct": lane.get("progress_pct"),
+                "remaining_calendar_days": lane.get("remaining_calendar_days"),
+                "completion_eta_kst": lane.get("completion_eta_kst"),
+                "actionability": "wait_for_future_quote_calendar_days",
+                "non_substitutable": True,
+                "blocks_paper_apply": False,
+                "backfill_allowed_for_launch_gate": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": calendar_lane.get("no_live_order_sent") is not False and lane.get("no_live_order_sent") is not False,
+            }
+        if gate_id == "shadow_runtime_24h_observed":
+            lane = dict(lanes["shadow_runtime"])
+            return {
+                "gate": gate_id,
+                "lane": "shadow_runtime",
+                "status": runtime_lane.get("status") or lane.get("status"),
+                "complete": lane.get("complete") is True,
+                "progress_pct": lane.get("progress_pct"),
+                "remaining_hours": lane.get("remaining_hours"),
+                "completion_eta_kst": lane.get("completion_eta_kst"),
+                "actionability": "continue_no_live_shadow_watch",
+                "non_substitutable": True,
+                "blocks_paper_apply": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": runtime_lane.get("no_live_order_sent") is not False and lane.get("no_live_order_sent") is not False,
+            }
+        return {
+            "gate": gate_id,
+            "lane": "unknown",
+            "status": "unknown_gate",
+            "complete": False,
+            "progress_pct": 0.0,
+            "actionability": "inspect_gate_mapping",
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+
+    def _path_summary(path: list[Any], *, label: str) -> dict[str, Any]:
+        rows = [_gate_row(item) for item in path if str(item or "").strip()]
+        progress_values = [
+            _number_or_none(item.get("progress_pct"))
+            for item in rows
+            if _number_or_none(item.get("progress_pct")) is not None
+        ]
+        next_open = next((item for item in rows if item.get("complete") is not True), None)
+        if not rows:
+            status = f"{label}_not_defined"
+        elif next_open:
+            status = f"{label}_blocked_at_{next_open.get('gate')}"
+        else:
+            status = f"{label}_complete"
+        return {
+            "status": status,
+            "path": [item.get("gate") for item in rows],
+            "gate_count": len(rows),
+            "complete_gate_count": sum(1 for item in rows if item.get("complete") is True),
+            "open_gate_count": sum(1 for item in rows if item.get("complete") is not True),
+            "progress_floor_pct": min(progress_values) if progress_values else None,
+            "progress_average_pct": (
+                round(sum(progress_values) / len(progress_values), 4)
+                if progress_values
+                else None
+            ),
+            "next_open_gate": dict(next_open or {}).get("gate"),
+            "next_open_lane": dict(next_open or {}).get("lane"),
+            "next_open_actionability": dict(next_open or {}).get("actionability"),
+            "next_open_action_type": dict(next_open or {}).get("next_action_type"),
+            "rows": rows,
+            "auto_decision_allowed": False,
+            "auto_apply_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": all(item.get("no_live_order_sent") is not False for item in rows),
+        }
+
+    critical_path_ids = list(
+        dependency_lanes.get("critical_path")
+        or [
+            "current_fresh_signal",
+            "operator_review_decisions",
+            "first_real_paper_lifecycle_row",
+            "execution_parity_samples",
+        ]
+    )
+    parallel_path_ids = list(
+        dependency_lanes.get("parallel_calendar_path")
+        or ["microstructure_calendar_day_coverage", "shadow_runtime_24h_observed"]
+    )
+    paper_apply_path_ids = [
+        item
+        for item in critical_path_ids
+        if item
+        in {
+            "current_fresh_signal",
+            "operator_review_decisions",
+            "first_real_paper_lifecycle_row",
+        }
+    ]
+    critical_path_summary = _path_summary(critical_path_ids, label="critical_path")
+    paper_apply_path_summary = _path_summary(paper_apply_path_ids, label="paper_apply_path")
+    parallel_path_summary = _path_summary(parallel_path_ids, label="parallel_path")
+    critical_path_scorecard = {
+        **critical_path_summary,
+        "paper_apply_path": paper_apply_path_summary,
+        "parallel_path": parallel_path_summary,
+        "paper_apply_ready_now": ready_for_paper_apply_now,
+        "paper_apply_blocked_by": paper_apply_path_summary.get("next_open_gate"),
+        "launch_blocked_by": critical_path_summary.get("next_open_gate"),
+        "parallel_blocked_by": parallel_path_summary.get("next_open_gate"),
+        "policy": "launch_readiness_is_limited_by_the_first_open_critical_path_gate_not_the_overall_average",
+        "backtest_substitution_allowed_for_launch_gate": False,
+        "synthetic_or_backtest_rows_close_realtime_gates": False,
+        "auto_decision_allowed": False,
+        "auto_apply_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            critical_path_summary.get("no_live_order_sent") is not False
+            and paper_apply_path_summary.get("no_live_order_sent") is not False
+            and parallel_path_summary.get("no_live_order_sent") is not False
+        ),
+    }
+    blocking_gates = _dedupe(
+        [
+            critical_path_scorecard.get("launch_blocked_by"),
+            critical_path_scorecard.get("paper_apply_blocked_by"),
+            critical_path_scorecard.get("parallel_blocked_by"),
+            action.get("next_blocker_gate"),
+            eta.get("next_unscheduled_gate"),
+            *list(substitution.get("non_substitutable_remaining_gates") or []),
+            *list(substitution.get("non_substitutable_problem_ids") or []),
+            *list(closure.get("operator_review_problem_ids") or []),
+        ]
+    )
+    if ready_for_paper_apply_now:
+        status = "paper_apply_manual_review_ready"
+    elif proxy_complete and open_lanes:
+        status = "paper_only_proxy_complete_realtime_or_manual_gates_open"
+    elif proxy_complete:
+        status = "paper_only_proxy_complete_no_open_scorecard_lanes"
+    else:
+        status = "paper_only_proxy_incomplete"
+
+    return {
+        "status": status,
+        "launch_status": launch.get("status"),
+        "next_blocker_gate": action.get("next_blocker_gate") or eta.get("next_unscheduled_gate"),
+        "primary_next": action.get("primary_next"),
+        "primary_material_event": action.get("primary_material_event"),
+        "primary_material_gate": action.get("primary_material_gate"),
+        "overall_progress_pct": overall_progress_pct,
+        "measurable_lane_count": len(measurable_lane_values),
+        "complete_lane_count": complete_lane_count,
+        "open_lane_count": len(open_lanes),
+        "open_lanes": open_lanes,
+        "blocking_gates": blocking_gates,
+        "lanes": lanes,
+        "critical_path_scorecard": critical_path_scorecard,
+        "paper_only_research_proxy_complete": proxy_complete,
+        "paper_apply_eta_known": eta.get("paper_apply_eta_known") is True,
+        "paper_apply_earliest_known_kst": eta.get("paper_apply_earliest_known_kst"),
+        "ready_for_paper_apply_now": ready_for_paper_apply_now,
+        "ready_for_tiny_canary_or_live": False,
+        "backtest_substitution_allowed_for_launch_gate": substitution.get(
+            "backtest_substitution_allowed_for_launch_gate"
+        )
+        is True,
+        "synthetic_or_backtest_rows_close_realtime_gates": substitution.get(
+            "synthetic_or_backtest_rows_close_realtime_gates"
+        )
+        is True,
+        "non_substitutable_problem_ids": list(substitution.get("non_substitutable_problem_ids") or []),
+        "next_material_status": next_material.get("status"),
+        "immediate_auto_count": next_material.get("immediate_auto_count"),
+        "immediate_operator_count": next_material.get("immediate_operator_count"),
+        "future_event_count": next_material.get("future_event_count"),
+        "unscheduled_wait_count": next_material.get("unscheduled_wait_count"),
+        "planning_caveat": eta.get("planning_caveat"),
+        "operator_decisions_are_manual_only": True,
+        "paper_apply_is_manual_only": True,
+        "auto_decision_allowed": False,
+        "auto_apply_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            latest_payload.get("no_live_order_sent") is not False
+            and runtime.get("no_live_order_sent") is not False
+            and quote.get("no_live_order_sent") is not False
+            and substitution.get("no_live_order_sent") is not False
+            and eta.get("no_live_order_sent") is not False
+            and action.get("no_live_order_sent") is not False
+            and review_handoff.get("no_live_order_sent") is not False
+            and review_resolution.get("no_live_order_sent") is not False
+            and parity.get("no_live_order_sent") is not False
+            and next_material.get("no_live_order_sent") is not False
+            and closure.get("no_live_order_sent") is not False
+        ),
+    }
+
+
+def _launch_execution_matrix(
+    *,
+    generated_at: datetime,
+    launch_progress_scorecard: dict[str, Any],
+    remaining_work_closure_summary: dict[str, Any],
+    operator_review_resolution_plan: dict[str, Any],
+    command_consistency_audit: dict[str, Any],
+    latest_run: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now = generated_at.astimezone(UTC)
+    scorecard = dict(launch_progress_scorecard or {})
+    critical_path = dict(scorecard.get("critical_path_scorecard") or {})
+    closure = dict(remaining_work_closure_summary or {})
+    actionability = dict(closure.get("actionability_partition") or {})
+    review_resolution = dict(operator_review_resolution_plan or {})
+    manual_batch = dict(review_resolution.get("manual_batch_handoff") or {})
+    command_audit = dict(command_consistency_audit or {})
+    latest_payload = dict(latest_run or {})
+
+    def _safe_auto_current_iteration_coverage(payload: dict[str, Any]) -> dict[str, Any]:
+        action_type = str(payload.get("action_type") or "")
+        if not latest_payload:
+            return {
+                "covered": False,
+                "status": "no_current_iteration_payload",
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        if action_type == "monitor_fresh_signal":
+            signal_wait = dict(latest_payload.get("signal_wait_plan") or {})
+            paper_gate = dict(latest_payload.get("paper_bridge_apply_gate") or {})
+            decision_state = dict(latest_payload.get("decision_state") or {})
+            has_signal_evidence = bool(signal_wait or paper_gate or decision_state)
+            fresh_signal = (
+                signal_wait.get("fresh_signal") is True
+                or paper_gate.get("fresh_signal") is True
+            )
+            paper_apply_available = paper_gate.get("can_request_paper_apply_now") is True
+            recommended_minutes = (
+                _number_or_none(signal_wait.get("recommended_monitor_interval_minutes"))
+                or _number_or_none(payload.get("recommended_monitor_interval_minutes"))
+                or PAPER_REHEARSAL_FAST_SIGNAL_MONITOR_MINUTES
+            )
+            next_recheck_after_kst = (
+                (generated_at + timedelta(minutes=recommended_minutes))
+                .astimezone(KST)
+                .isoformat()
+            )
+            return {
+                "covered": has_signal_evidence,
+                "status": (
+                    "covered_fresh_signal_available"
+                    if fresh_signal
+                    else "covered_fresh_signal_still_waiting"
+                    if has_signal_evidence
+                    else "not_covered_signal_evidence_missing"
+                ),
+                "coverage_evidence": "latest_run.signal_wait_plan",
+                "covered_at": generated_at.isoformat(),
+                "fresh_signal": fresh_signal,
+                "paper_apply_available_after_coverage": paper_apply_available,
+                "signal_wait_status": signal_wait.get("status"),
+                "signal_stale": decision_state.get("signal_stale"),
+                "recommended_next_recheck_after_kst": next_recheck_after_kst,
+                "recommended_recheck_minutes": recommended_minutes,
+                "order_submission_allowed": False,
+                "no_live_order_sent": (
+                    signal_wait.get("no_live_order_sent") is not False
+                    and paper_gate.get("no_live_order_sent") is not False
+                    and latest_payload.get("no_live_order_sent") is not False
+                ),
+            }
+        if action_type == "continue_no_live_shadow_watch":
+            return {
+                "covered": True,
+                "status": "covered_launch_shadow_watch_iteration_recorded",
+                "coverage_evidence": "latest_run_present_in_current_watch_summary",
+                "covered_at": generated_at.isoformat(),
+                "order_submission_allowed": False,
+                "no_live_order_sent": latest_payload.get("no_live_order_sent") is not False,
+            }
+        if action_type in {
+            "capture_microstructure_quote_window_now",
+            "capture_due_quote_window",
+        }:
+            collection = dict(latest_payload.get("collection_progress") or {})
+            covered = bool(collection)
+            return {
+                "covered": covered,
+                "status": (
+                    "covered_collection_progress_observed"
+                    if covered
+                    else "not_covered_collection_progress_missing"
+                ),
+                "coverage_evidence": "latest_run.collection_progress",
+                "covered_at": generated_at.isoformat() if covered else None,
+                "quote_observed": collection.get("quote_observed"),
+                "quote_distinct_hours": collection.get("quote_distinct_hours"),
+                "order_submission_allowed": False,
+                "no_live_order_sent": latest_payload.get("no_live_order_sent") is not False,
+            }
+        return {
+            "covered": False,
+            "status": "not_covered_action_type_not_matched",
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+
+    def _command_row(item: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(item or {})
+        execute_after = payload.get("execute_after_kst")
+        execute_after_dt = _parse_dt(execute_after)
+        wait_minutes = None
+        overdue_minutes = None
+        if execute_after_dt is None:
+            ready_now = True
+            due_status = "ready_no_schedule"
+        else:
+            execute_after_utc = execute_after_dt.astimezone(UTC)
+            delta_minutes = round((execute_after_utc - now).total_seconds() / 60.0, 3)
+            ready_now = delta_minutes <= 0.0
+            if ready_now:
+                overdue_minutes = round(abs(min(delta_minutes, 0.0)), 3)
+                due_status = "ready_due_or_overdue"
+            else:
+                wait_minutes = delta_minutes
+                due_status = "scheduled_future"
+        coverage = _safe_auto_current_iteration_coverage(payload)
+        covered_by_current_iteration = coverage.get("covered") is True
+        covered_due_by_current_iteration = covered_by_current_iteration and ready_now
+        effective_due_status = (
+            "covered_this_iteration"
+            if covered_due_by_current_iteration
+            else due_status
+        )
+        return {
+            "step_type": "safe_auto_monitoring",
+            "action_type": payload.get("action_type"),
+            "target_gate": payload.get("target_gate") or payload.get("problem_id"),
+            "priority": payload.get("priority"),
+            "ready_now": ready_now,
+            "due_status": due_status,
+            "effective_due_status": effective_due_status,
+            "execute_after_kst": execute_after,
+            "wait_minutes": wait_minutes,
+            "overdue_minutes": overdue_minutes,
+            "covered_by_current_iteration": covered_by_current_iteration,
+            "covered_due_by_current_iteration": covered_due_by_current_iteration,
+            "current_iteration_coverage": coverage,
+            "command": payload.get("command") or payload.get("monitor_command"),
+            "reason": payload.get("reason"),
+            "operator_required": False,
+            "safe_to_auto_run_without_operator": (
+                payload.get("safe_to_auto_run_without_operator") is not False
+            ),
+            "auto_decision_allowed": False,
+            "auto_apply_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": payload.get("no_live_order_sent") is not False,
+        }
+
+    safe_auto_rows = sorted(
+        [
+            _command_row(dict(item))
+            for item in list(actionability.get("run_now_without_operator") or [])
+        ],
+        key=lambda item: (
+            0 if item.get("ready_now") is True else 1,
+            _number_or_none(item.get("priority")) or 9999.0,
+            str(item.get("execute_after_kst") or ""),
+            str(item.get("action_type") or ""),
+        ),
+    )
+    ready_safe_auto_rows = [
+        item for item in safe_auto_rows if item.get("ready_now") is True
+    ]
+    overdue_safe_auto_rows = [
+        item
+        for item in safe_auto_rows
+        if item.get("due_status") == "ready_due_or_overdue"
+        and (_number_or_none(item.get("overdue_minutes")) or 0.0) > 0.0
+    ]
+    covered_safe_auto_rows = [
+        item for item in safe_auto_rows if item.get("covered_by_current_iteration") is True
+    ]
+    covered_due_safe_auto_rows = [
+        item for item in safe_auto_rows if item.get("covered_due_by_current_iteration") is True
+    ]
+    uncovered_ready_safe_auto_rows = [
+        item for item in ready_safe_auto_rows if item.get("covered_due_by_current_iteration") is not True
+    ]
+    uncovered_overdue_safe_auto_rows = [
+        item for item in overdue_safe_auto_rows if item.get("covered_due_by_current_iteration") is not True
+    ]
+    scheduled_safe_auto_rows = [
+        item for item in safe_auto_rows if item.get("ready_now") is not True
+    ]
+    raw_safe_auto_rows = [
+        dict(item) for item in list(closure.get("raw_automation_now_usefulness") or [])
+    ]
+    raw_safe_auto_action_count = _int_or_default(
+        closure.get("safe_automation_now_count"),
+        len(raw_safe_auto_rows) if raw_safe_auto_rows else len(safe_auto_rows),
+    )
+    effective_safe_auto_action_count = _int_or_default(
+        closure.get("safe_effective_automation_now_count"),
+        len(safe_auto_rows),
+    )
+    raw_useful_safe_auto_action_count = _int_or_default(
+        closure.get("safe_raw_useful_automation_now_count"),
+        len(raw_safe_auto_rows) if raw_safe_auto_rows else len(safe_auto_rows),
+    )
+    covered_raw_safe_auto_action_count = _int_or_default(
+        closure.get("safe_covered_automation_now_count"),
+        len(covered_safe_auto_rows),
+    )
+    primary_covered_raw_safe_auto_action = dict(
+        closure.get("primary_covered_automation_action") or {}
+    )
+    raw_safe_auto_actions = raw_safe_auto_rows if raw_safe_auto_rows else [dict(item) for item in safe_auto_rows]
+    max_overdue_minutes = (
+        max(
+            _number_or_none(item.get("overdue_minutes")) or 0.0
+            for item in overdue_safe_auto_rows
+        )
+        if overdue_safe_auto_rows
+        else 0.0
+    )
+    next_scheduled_safe_auto = scheduled_safe_auto_rows[0] if scheduled_safe_auto_rows else None
+
+    manual_rows: list[dict[str, Any]] = []
+    manual_batch_rows = [dict(item) for item in list(manual_batch.get("batch_order") or [])]
+    operator_input_blocker_names = {
+        "operator_required_fields_still_empty",
+        "operator_rationale_missing",
+        "operator_reviewer_missing",
+        "operator_reviewed_at_missing",
+        "operator_decision_missing",
+    }
+
+    def _manual_readiness_fields(
+        *,
+        ready_for_operator_dry_run_template: bool,
+        required_fields_remaining: list[Any],
+        contract_accept_blockers_before_write: list[Any],
+        available_decisions: list[Any] | None = None,
+        safe_default_if_uncertain: Any = None,
+        validation_command: Any = None,
+        command_plan_blockers: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        required_fields = [str(item) for item in required_fields_remaining if item is not None]
+        decisions = [str(item) for item in list(available_decisions or []) if item is not None]
+        contract_blockers = [
+            str(item) for item in contract_accept_blockers_before_write if item is not None
+        ]
+        command_blockers = [str(item) for item in list(command_plan_blockers or []) if item is not None]
+        operator_input_blockers = [
+            item
+            for item in contract_blockers
+            if item in operator_input_blocker_names or item.startswith("operator_")
+        ]
+        operator_input_required = bool(required_fields or operator_input_blockers)
+        manual_dry_run_ready_now = (
+            ready_for_operator_dry_run_template
+            and not operator_input_required
+            and not command_blockers
+        )
+        manual_write_ready_now = False
+        if not ready_for_operator_dry_run_template:
+            manual_dry_run_status = "template_not_ready"
+            manual_write_status = "blocked_until_template_ready_and_dry_run_passes"
+        elif operator_input_required:
+            manual_dry_run_status = "template_ready_waiting_for_operator_inputs"
+            manual_write_status = "blocked_until_operator_inputs_and_dry_run_pass"
+        elif command_blockers:
+            manual_dry_run_status = "template_ready_command_plan_blocked"
+            manual_write_status = "blocked_until_command_plan_repaired_and_dry_run_passes"
+        else:
+            manual_dry_run_status = "ready_for_operator_dry_run"
+            manual_write_status = "blocked_until_dry_run_passes_and_operator_confirms_write"
+        operator_required_inputs = [
+            {
+                "input": "decision",
+                "required": bool(decisions),
+                "accepted_values": decisions,
+                "safe_default_if_uncertain": safe_default_if_uncertain,
+            },
+            {
+                "input": "reviewer",
+                "required": True,
+                "accepted_values": ["operator_name_or_initials"],
+            },
+            {
+                "input": "reviewed_at",
+                "required": True,
+                "accepted_values": ["now", "explicit_timestamp"],
+            },
+            {
+                "input": "rationale",
+                "required": True,
+                "minimum_rationale_chars": DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS,
+                "minimum_evidence_anchors": DEFAULT_OPERATOR_REVIEW_MIN_EVIDENCE_ANCHORS,
+            },
+        ]
+        operator_input_checklist = [
+            {
+                "step": 1,
+                "item": "choose_accept_or_reject",
+                "status": "required" if decisions else "not_applicable",
+                "accepted_values": decisions,
+                "auto_decision_allowed": False,
+            },
+            {
+                "step": 2,
+                "item": "fill_reviewer_reviewed_at_and_rationale",
+                "status": "required",
+                "minimum_rationale_chars": DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS,
+                "minimum_evidence_anchors": DEFAULT_OPERATOR_REVIEW_MIN_EVIDENCE_ANCHORS,
+            },
+            {
+                "step": 3,
+                "item": "run_decision_dry_run",
+                "status": "blocked_until_operator_inputs_complete"
+                if operator_input_required
+                else "ready",
+                "dry_run_required_before_write": True,
+            },
+            {
+                "step": 4,
+                "item": "write_decision_only_after_dry_run_passes",
+                "status": "blocked",
+                "operator_confirmation_required": True,
+            },
+            {
+                "step": 5,
+                "item": "run_validation_and_rerun_watch",
+                "status": "required_after_write" if validation_command else "validation_command_missing",
+                "validation_command": validation_command,
+            },
+        ]
+        return {
+            "operator_input_required": operator_input_required,
+            "operator_input_status": (
+                "operator_inputs_required" if operator_input_required else "operator_inputs_complete"
+            ),
+            "operator_input_blockers": operator_input_blockers,
+            "operator_required_inputs": operator_required_inputs,
+            "operator_required_input_names": [
+                item["input"] for item in operator_required_inputs if item.get("required") is True
+            ],
+            "operator_input_checklist": operator_input_checklist,
+            "operator_next_input_step": next(
+                (item for item in operator_input_checklist if item.get("status") in {"required", "blocked_until_operator_inputs_complete"}),
+                operator_input_checklist[0] if operator_input_checklist else None,
+            ),
+            "manual_dry_run_ready_now": manual_dry_run_ready_now,
+            "manual_dry_run_status": manual_dry_run_status,
+            "manual_write_ready_now": manual_write_ready_now,
+            "manual_write_status": manual_write_status,
+            "manual_write_blockers": [
+                *required_fields,
+                *operator_input_blockers,
+                *command_blockers,
+                "dry_run_not_yet_recorded_as_passed",
+                "operator_write_confirmation_required",
+            ],
+        }
+
+    def _manual_due_fields(manual_readiness: dict[str, Any]) -> dict[str, Any]:
+        if manual_readiness.get("operator_input_required") is True:
+            due_status = "operator_input_required_now"
+            ready_now = True
+        elif manual_readiness.get("manual_dry_run_ready_now") is True:
+            due_status = "manual_dry_run_ready_now"
+            ready_now = True
+        else:
+            due_status = "manual_review_not_ready"
+            ready_now = False
+        return {
+            "ready_now": ready_now,
+            "due_status": due_status,
+            "effective_due_status": due_status,
+            "wait_minutes": None,
+            "overdue_minutes": None,
+            "manual_action_due_now": ready_now,
+            "covered_by_current_iteration": False,
+            "covered_due_by_current_iteration": False,
+        }
+
+    def _manual_input_contract(
+        *,
+        active_operator_review_report: Any = None,
+        available_decisions: list[Any] | None = None,
+        decision_options: list[Any] | None = None,
+        dry_run_command_template: Any = None,
+        validation_command: Any = None,
+        safe_default_if_uncertain: Any = None,
+        after_write_required_actions: list[Any] | None = None,
+        operator_prompt_card: dict[str, Any] | None = None,
+        operator_input_required: bool = True,
+    ) -> dict[str, Any]:
+        options = [dict(option) for option in list(decision_options or [])]
+        prompt_card = dict(operator_prompt_card or {})
+        option_by_decision = {
+            str(option.get("decision")): option
+            for option in options
+            if option.get("decision")
+        }
+        decisions = list(
+            dict.fromkeys(
+                [
+                    str(decision)
+                    for decision in [
+                        *list(available_decisions or []),
+                        *list(option_by_decision.keys()),
+                    ]
+                    if decision
+                ]
+            )
+        )
+        option_rows: list[dict[str, Any]] = []
+        for decision in decisions:
+            option = dict(option_by_decision.get(decision) or {})
+            dry_run_command = option.get("dry_run_command") or dry_run_command_template
+            write_command = option.get("write_command")
+            option_validation_command = option.get("validation_command") or validation_command
+            option_rows.append(
+                {
+                    "decision": decision,
+                    "dry_run_command": dry_run_command,
+                    "write_command": write_command,
+                    "validation_command": option_validation_command,
+                    "dry_run_command_available": bool(dry_run_command),
+                    "write_command_available": bool(write_command),
+                    "validation_command_available": bool(option_validation_command),
+                    "write_allowed_without_operator_review": False,
+                    "operator_confirmation_required_before_write": True,
+                    "order_submission_allowed": False,
+                    "no_live_order_sent": option.get("no_live_order_sent") is not False,
+                }
+            )
+        dry_run_ready_count = sum(
+            1 for option in option_rows if option.get("dry_run_command_available") is True
+        )
+        write_ready_count = sum(
+            1 for option in option_rows if option.get("write_command_available") is True
+        )
+        validation_ready_count = sum(
+            1 for option in option_rows if option.get("validation_command_available") is True
+        )
+        blockers: list[str] = []
+        if not option_rows:
+            blockers.append("operator_decision_options_missing")
+        if option_rows and dry_run_ready_count < len(option_rows):
+            blockers.append("decision_dry_run_command_missing_for_one_or_more_options")
+        if option_rows and write_ready_count < len(option_rows):
+            blockers.append("decision_write_command_missing_for_one_or_more_options")
+        if option_rows and validation_ready_count < len(option_rows):
+            blockers.append("decision_validation_command_missing_for_one_or_more_options")
+        if not option_rows:
+            status = "operator_input_contract_missing_decision_options"
+            next_contract_step = "repair_operator_decision_options"
+        elif blockers:
+            status = "operator_input_contract_command_coverage_incomplete"
+            next_contract_step = "repair_decision_command_coverage_before_write"
+        elif operator_input_required:
+            status = "operator_input_contract_ready_waiting_for_operator_inputs"
+            next_contract_step = "choose_accept_or_reject_and_fill_required_fields"
+        else:
+            status = "operator_input_contract_ready_for_manual_dry_run"
+            next_contract_step = "run_matching_decision_dry_run"
+        rationale_quality_gate = dict(prompt_card.get("rationale_quality_gate") or {})
+        rationale_must_address = list(prompt_card.get("rationale_must_address") or [])
+        evidence_anchor_candidates = list(prompt_card.get("evidence_anchor_candidates") or [])
+        minimum_anchor_set = list(rationale_quality_gate.get("minimum_anchor_set") or [])
+        minimum_anchor_count = (
+            _int_or_default(
+                rationale_quality_gate.get("minimum_recommended_anchor_count"),
+                DEFAULT_OPERATOR_REVIEW_MIN_EVIDENCE_ANCHORS,
+            )
+            or DEFAULT_OPERATOR_REVIEW_MIN_EVIDENCE_ANCHORS
+        )
+        minimum_rationale_chars = (
+            _int_or_default(
+                rationale_quality_gate.get("minimum_rationale_chars"),
+                DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS,
+            )
+            or DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS
+        )
+        prompt_ready = prompt_card.get("status") == "operator_prompt_card_ready"
+        if not decisions:
+            form_status = "operator_input_form_missing_decision_options"
+        elif prompt_ready:
+            form_status = "operator_input_form_ready"
+        else:
+            form_status = "operator_input_form_ready_without_prompt_card"
+        safe_default_policy = (
+            prompt_card.get("safe_default_if_uncertain")
+            or safe_default_if_uncertain
+            or "reject_or_hold_blocked"
+        )
+        safe_default_decision = str(safe_default_if_uncertain or "").strip()
+        if safe_default_decision not in decisions and "reject" in decisions:
+            safe_default_decision = "reject"
+        elif safe_default_decision not in decisions and decisions:
+            safe_default_decision = decisions[-1]
+        safe_default_alignment = {
+            "status": (
+                "safe_default_decision_matches_accepted_values"
+                if safe_default_decision in decisions
+                else "safe_default_decision_not_in_accepted_values"
+            ),
+            "decision_if_uncertain": safe_default_decision or None,
+            "policy_if_uncertain": safe_default_policy,
+            "accepted_values": decisions,
+            "decision_is_accepted_value": safe_default_decision in decisions,
+            "operator_must_still_provide_explicit_decision": True,
+            "auto_decision_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+        operator_input_form = {
+            "status": form_status,
+            "active_operator_review_report": active_operator_review_report,
+            "required_field_names": [
+                "decision",
+                "reviewer",
+                "reviewed_at",
+                "rationale",
+            ],
+            "decision_field": {
+                "name": "decision",
+                "accepted_values": decisions,
+                "safe_default_decision_if_uncertain": safe_default_decision or None,
+                "safe_default_policy_if_uncertain": safe_default_policy,
+                "safe_default_if_uncertain": safe_default_decision or None,
+                "safe_default_alignment": safe_default_alignment,
+                "auto_decision_allowed": False,
+            },
+            "reviewer_field": {
+                "name": "reviewer",
+                "accepted_values": ["operator_name_or_initials"],
+                "placeholder": "<operator_name_or_initials>",
+            },
+            "reviewed_at_field": {
+                "name": "reviewed_at",
+                "accepted_values": ["now", "explicit_timestamp"],
+                "default": "now",
+            },
+            "rationale_field": {
+                "name": "rationale",
+                "minimum_rationale_chars": minimum_rationale_chars,
+                "minimum_recommended_anchor_count": minimum_anchor_count,
+                "minimum_anchor_set": minimum_anchor_set,
+                "evidence_identity_required": rationale_quality_gate.get(
+                    "evidence_identity_required"
+                )
+                is not False,
+                "evidence_snapshot_fingerprint": rationale_quality_gate.get(
+                    "evidence_snapshot_fingerprint"
+                ),
+                "must_address": rationale_must_address,
+                "evidence_anchor_candidates": evidence_anchor_candidates,
+                "accept_template_sections": [
+                    "explicit_accept_decision",
+                    "evidence_identity",
+                    "supporting_anchors",
+                    "responses_to_all_must_address_concerns",
+                    "scope_and_safety_acknowledgement",
+                ],
+                "reject_template_sections": [
+                    "explicit_reject_or_hold_decision",
+                    "primary_reject_or_hold_trigger",
+                    "evidence_identity",
+                    "next_condition_to_reconsider",
+                ],
+            },
+            "decision_option_command_availability": [
+                {
+                    "decision": option.get("decision"),
+                    "dry_run_command_available": option.get("dry_run_command_available") is True,
+                    "write_command_available": option.get("write_command_available") is True,
+                    "validation_command_available": option.get("validation_command_available") is True,
+                }
+                for option in option_rows
+            ],
+            "dry_run_before_write_required": True,
+            "write_requires_operator_confirmation": True,
+            "order_submission_allowed": False,
+            "no_live_order_sent": all(
+                option.get("no_live_order_sent") is not False for option in option_rows
+            ),
+        }
+        return {
+            "status": status,
+            "blockers": blockers,
+            "active_operator_review_report": active_operator_review_report,
+            "required_manual_inputs": [
+                "decision",
+                "reviewer",
+                "reviewed_at",
+                "rationale",
+            ],
+            "accepted_decisions": decisions,
+            "safe_default_if_uncertain": safe_default_if_uncertain,
+            "operator_prompt_card": prompt_card,
+            "operator_prompt_card_status": prompt_card.get("status"),
+            "rationale_quality_gate": dict(prompt_card.get("rationale_quality_gate") or {}),
+            "rationale_must_address": list(prompt_card.get("rationale_must_address") or []),
+            "evidence_anchor_candidates": list(prompt_card.get("evidence_anchor_candidates") or []),
+            "operator_input_form": operator_input_form,
+            "operator_input_form_status": operator_input_form.get("status"),
+            "decision_option_count": len(option_rows),
+            "dry_run_command_ready_count": dry_run_ready_count,
+            "write_command_ready_count": write_ready_count,
+            "validation_command_ready_count": validation_ready_count,
+            "decision_options": option_rows,
+            "next_contract_step": next_contract_step,
+            "execution_sequence": [
+                "choose_accept_or_reject_manually",
+                "fill_reviewer_reviewed_at_and_rationale",
+                "run_matching_dry_run_command",
+                "write_matching_decision_only_after_operator_confirmation",
+                "run_validation_command",
+                "rerun_launch_shadow_watch",
+            ],
+            "write_blocked_until": [
+                "operator_inputs_complete",
+                "matching_dry_run_passed",
+                "operator_confirms_write",
+            ],
+            "after_write_required_actions": [
+                str(item)
+                for item in list(after_write_required_actions or [])
+                if item is not None
+            ],
+            "auto_execute_allowed": False,
+            "auto_decision_allowed": False,
+            "auto_apply_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": all(
+                option.get("no_live_order_sent") is not False for option in option_rows
+            ),
+        }
+
+    if manual_batch_rows:
+        for item in manual_batch_rows:
+            decision_options = [dict(option) for option in list(item.get("decision_options") or [])]
+            available_decisions = [
+                option.get("decision")
+                for option in decision_options
+                if option.get("decision")
+            ]
+            ready_template = item.get("ready_for_operator_dry_run_template") is True
+            required_fields = list(item.get("required_fields_remaining") or [])
+            contract_blockers = list(item.get("contract_accept_blockers_before_write") or [])
+            command_blockers = list(item.get("command_plan_blockers") or [])
+            manual_readiness = _manual_readiness_fields(
+                ready_for_operator_dry_run_template=ready_template,
+                required_fields_remaining=required_fields,
+                contract_accept_blockers_before_write=contract_blockers,
+                available_decisions=available_decisions,
+                safe_default_if_uncertain=item.get("safe_default_if_uncertain"),
+                validation_command=item.get("validation_command"),
+                command_plan_blockers=command_blockers,
+            )
+            operator_input_contract = _manual_input_contract(
+                active_operator_review_report=item.get("active_operator_review_report"),
+                available_decisions=available_decisions,
+                decision_options=decision_options,
+                validation_command=item.get("validation_command"),
+                safe_default_if_uncertain=item.get("safe_default_if_uncertain"),
+                after_write_required_actions=list(item.get("after_write_required_actions") or []),
+                operator_prompt_card=dict(item.get("operator_prompt_card") or {}),
+                operator_input_required=manual_readiness.get("operator_input_required") is True,
+            )
+            manual_rows.append(
+                {
+                    "step_type": "manual_operator_review",
+                    "action_type": item.get("review_kind") or item.get("action_type"),
+                    "target_gate": item.get("target_gate"),
+                    "candidate_recipe_id": item.get("candidate_recipe_id"),
+                    "active_operator_review_report": item.get("active_operator_review_report"),
+                    "ready_for_operator_dry_run_template": ready_template,
+                    "required_fields_remaining": required_fields,
+                    "contract_accept_blockers_before_write": contract_blockers,
+                    "command_plan_blockers": command_blockers,
+                    **manual_readiness,
+                    **_manual_due_fields(manual_readiness),
+                    "next_manual_action": item.get("next_manual_action"),
+                    "safe_default_if_uncertain": item.get("safe_default_if_uncertain"),
+                    "decision_option_count": len(decision_options),
+                    "available_decisions": available_decisions,
+                    "operator_prompt_card": dict(item.get("operator_prompt_card") or {}),
+                    "operator_input_contract": operator_input_contract,
+                    "operator_input_contract_status": operator_input_contract.get("status"),
+                    "dry_run_before_write_required": True,
+                    "validation_command": item.get("validation_command"),
+                    "after_write_required_actions": list(item.get("after_write_required_actions") or []),
+                    "operator_required": True,
+                    "auto_execute_allowed": False,
+                    "auto_decision_allowed": False,
+                    "auto_apply_allowed": False,
+                    "order_submission_allowed": False,
+                    "no_live_order_sent": item.get("no_live_order_sent") is not False,
+                }
+            )
+    else:
+        for item in list(actionability.get("manual_now") or []):
+            payload = dict(item)
+            ready_template = payload.get("ready_for_operator_dry_run_template") is not False
+            required_fields = list(payload.get("required_fields_remaining") or [])
+            contract_blockers = list(payload.get("contract_accept_blockers_before_write") or [])
+            command_blockers = list(payload.get("command_plan_blockers") or [])
+            available_decisions = list(payload.get("available_decisions") or ["accept", "reject"])
+            manual_readiness = _manual_readiness_fields(
+                ready_for_operator_dry_run_template=ready_template,
+                required_fields_remaining=required_fields,
+                contract_accept_blockers_before_write=contract_blockers,
+                available_decisions=available_decisions,
+                safe_default_if_uncertain=payload.get("safe_default_if_uncertain"),
+                validation_command=payload.get("validation_command"),
+                command_plan_blockers=command_blockers,
+            )
+            operator_input_contract = _manual_input_contract(
+                active_operator_review_report=payload.get("active_operator_review_report"),
+                available_decisions=available_decisions,
+                dry_run_command_template=payload.get("dry_run_command_template"),
+                validation_command=payload.get("validation_command"),
+                safe_default_if_uncertain=payload.get("safe_default_if_uncertain"),
+                operator_prompt_card=dict(payload.get("operator_prompt_card") or {}),
+                operator_input_required=manual_readiness.get("operator_input_required") is True,
+            )
+            manual_rows.append(
+                {
+                    "step_type": "manual_operator_review",
+                    "action_type": payload.get("action_type"),
+                    "target_gate": payload.get("target_gate"),
+                    "active_operator_review_report": payload.get("active_operator_review_report"),
+                    "ready_for_operator_dry_run_template": ready_template,
+                    "required_fields_remaining": required_fields,
+                        "contract_accept_blockers_before_write": contract_blockers,
+                        "command_plan_blockers": command_blockers,
+                        **manual_readiness,
+                        **_manual_due_fields(manual_readiness),
+                        "dry_run_command_template": payload.get("dry_run_command_template"),
+                        "validation_command": payload.get("validation_command"),
+                    "safe_default_if_uncertain": payload.get("safe_default_if_uncertain"),
+                    "operator_prompt_card": dict(payload.get("operator_prompt_card") or {}),
+                    "operator_input_contract": operator_input_contract,
+                    "operator_input_contract_status": operator_input_contract.get("status"),
+                    "operator_required": True,
+                    "auto_execute_allowed": False,
+                    "auto_decision_allowed": False,
+                    "auto_apply_allowed": False,
+                    "order_submission_allowed": False,
+                    "no_live_order_sent": payload.get("no_live_order_sent") is not False,
+                }
+            )
+
+    wait_rows: list[dict[str, Any]] = []
+    for item in list(actionability.get("signal_waits") or []):
+        payload = dict(item)
+        wait_rows.append(
+            {
+                "step_type": "realtime_signal_wait",
+                "target_gate": payload.get("problem_id"),
+                "status": payload.get("status"),
+                "next_monitor_utc": payload.get("next_monitor_utc"),
+                "next_monitor_kst": payload.get("next_monitor_kst"),
+                "raw_next_monitor_kst": payload.get("raw_next_monitor_kst"),
+                "covered_next_recheck_after_kst": payload.get(
+                    "covered_next_recheck_after_kst"
+                ),
+                "next_monitor_source": payload.get("next_monitor_source"),
+                "next_monitor_retimestampted_after_current_iteration": (
+                    payload.get("next_monitor_retimestampted_after_current_iteration") is True
+                ),
+                "monitor_command": payload.get("monitor_command"),
+                "missing_samples": payload.get("missing_samples"),
+                "depends_on": list(payload.get("depends_on") or []),
+                "unlocks": list(payload.get("unlocks") or []),
+                "non_substitutable": payload.get("non_substitutable") is True,
+                "operator_required": False,
+                "auto_decision_allowed": False,
+                "auto_apply_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": payload.get("no_live_order_sent") is not False,
+            }
+        )
+    for item in list(actionability.get("time_waits") or []):
+        payload = dict(item)
+        wait_rows.append(
+            {
+                "step_type": "time_or_calendar_wait",
+                "target_gate": payload.get("problem_id"),
+                "status": payload.get("status"),
+                "next_kst": payload.get("next_kst") or payload.get("eta_completion_kst"),
+                "remaining_calendar_days": payload.get("remaining_calendar_days"),
+                "remaining_hours": payload.get("remaining_hours"),
+                "progress_pct": payload.get("progress_pct"),
+                "backfill_allowed_for_launch_gate": (
+                    payload.get("backfill_allowed_for_launch_gate") is True
+                ),
+                "operator_required": False,
+                "auto_decision_allowed": False,
+                "auto_apply_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": payload.get("no_live_order_sent") is not False,
+            }
+        )
+    for item in list(actionability.get("dependency_blocked") or []):
+        payload = dict(item)
+        wait_rows.append(
+            {
+                "step_type": "dependency_blocked",
+                "target_gate": payload.get("problem_id"),
+                "status": payload.get("status"),
+                "depends_on": list(payload.get("depends_on") or []),
+                "unlocks": list(payload.get("unlocks") or []),
+                "auto_apply_allowed": payload.get("auto_apply_allowed") is True,
+                "operator_required": False,
+                "auto_decision_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": payload.get("no_live_order_sent") is not False,
+            }
+        )
+
+    forbidden_actions = [
+        {
+            "action_type": "auto_accept_or_reject_operator_reviews",
+            "allowed": False,
+            "reason": "operator_review_decisions_require_manual_accept_or_reject_with_rationale",
+        },
+        {
+            "action_type": "auto_apply_paper_order_after_signal",
+            "allowed": False,
+            "reason": "paper_apply_requires_operator_review_and_explicit_confirmation",
+        },
+        {
+            "action_type": "submit_live_order_or_enable_live_trading",
+            "allowed": False,
+            "reason": "launch_watch_is_no_live_only",
+        },
+        {
+            "action_type": "use_backtest_or_synthetic_rows_to_close_realtime_launch_gates",
+            "allowed": False,
+            "reason": "fresh_signal_paper_lifecycle_execution_parity_and_calendar_gates_are_non_substitutable",
+        },
+    ]
+
+    sequence: list[dict[str, Any]] = []
+    if command_audit.get("status") == "command_consistency_mismatch_detected":
+        sequence.append(
+            {
+                "step": 1,
+                "step_type": "repair",
+                "target_gate": "command_consistency",
+                "action_type": "repair_command_consistency_audit",
+                "operator_required": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": command_audit.get("no_live_order_sent") is not False,
+            }
+        )
+    for row in safe_auto_rows:
+        sequence.append({**row, "step": len(sequence) + 1})
+    for row in manual_rows:
+        sequence.append({**row, "step": len(sequence) + 1})
+    if critical_path.get("paper_apply_ready_now") is True:
+        sequence.append(
+            {
+                "step": len(sequence) + 1,
+                "step_type": "manual_paper_apply_review",
+                "target_gate": "first_real_paper_lifecycle_row",
+                "action_type": "paper_apply_dry_run_then_apply_only_after_operator_confirmation",
+                "operator_required": True,
+                "auto_apply_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        )
+    else:
+        blocked_by = critical_path.get("paper_apply_blocked_by") or critical_path.get("next_open_gate")
+        if blocked_by:
+            sequence.append(
+                {
+                    "step": len(sequence) + 1,
+                    "step_type": "wait_for_paper_apply_gate",
+                    "target_gate": blocked_by,
+                    "action_type": "wait_until_paper_apply_path_opens",
+                    "operator_required": False,
+                    "auto_apply_allowed": False,
+                    "order_submission_allowed": False,
+                    "no_live_order_sent": True,
+                }
+            )
+    sequence.append(
+        {
+            "step": len(sequence) + 1,
+            "step_type": "post_first_paper_apply_collection",
+            "target_gate": "execution_parity_samples",
+            "action_type": "collect_real_reviewed_paper_lifecycle_rows",
+            "operator_required": False,
+            "auto_decision_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+    )
+    effective_sequence: list[dict[str, Any]] = []
+    for row in uncovered_overdue_safe_auto_rows:
+        effective_sequence.append({**row, "step": len(effective_sequence) + 1})
+    for row in uncovered_ready_safe_auto_rows:
+        if row not in uncovered_overdue_safe_auto_rows:
+            effective_sequence.append({**row, "step": len(effective_sequence) + 1})
+    for row in manual_rows:
+        effective_sequence.append({**row, "step": len(effective_sequence) + 1})
+    for row in scheduled_safe_auto_rows:
+        effective_sequence.append({**row, "step": len(effective_sequence) + 1})
+    for row in wait_rows:
+        effective_sequence.append({**row, "step": len(effective_sequence) + 1})
+    for row in covered_due_safe_auto_rows:
+        effective_sequence.append({**row, "step": len(effective_sequence) + 1})
+
+    if command_audit.get("status") == "command_consistency_mismatch_detected":
+        status = "repair_command_consistency_before_operator_use"
+    elif safe_auto_rows and manual_rows:
+        status = "safe_auto_monitoring_and_manual_reviews_available"
+    elif safe_auto_rows:
+        status = "safe_auto_monitoring_available"
+    elif manual_rows:
+        status = "manual_operator_reviews_required"
+    elif wait_rows:
+        status = "waiting_for_realtime_or_calendar_gates"
+    else:
+        status = "no_actionable_launch_steps_detected"
+    if command_audit.get("status") == "command_consistency_mismatch_detected":
+        urgency_status = "repair_required_before_any_operator_use"
+        primary_urgency = "repair"
+    elif overdue_safe_auto_rows:
+        urgency_status = "overdue_safe_auto_action_ready"
+        primary_urgency = "overdue_safe_auto"
+    elif ready_safe_auto_rows:
+        urgency_status = "safe_auto_action_ready"
+        primary_urgency = "ready_safe_auto"
+    elif scheduled_safe_auto_rows:
+        urgency_status = "safe_auto_action_scheduled_future"
+        primary_urgency = "scheduled_safe_auto"
+    elif manual_rows:
+        urgency_status = "manual_operator_action_available"
+        primary_urgency = "manual_operator_review"
+    elif wait_rows:
+        urgency_status = "waiting_only"
+        primary_urgency = "wait"
+    else:
+        urgency_status = "no_open_action"
+        primary_urgency = "none"
+    if command_audit.get("status") == "command_consistency_mismatch_detected":
+        effective_urgency_status = "repair_required_before_any_operator_use"
+        effective_primary_urgency = "repair"
+    elif uncovered_overdue_safe_auto_rows:
+        effective_urgency_status = "overdue_safe_auto_action_ready"
+        effective_primary_urgency = "overdue_safe_auto"
+    elif uncovered_ready_safe_auto_rows:
+        effective_urgency_status = "safe_auto_action_ready"
+        effective_primary_urgency = "ready_safe_auto"
+    elif manual_rows and covered_due_safe_auto_rows:
+        effective_urgency_status = "safe_auto_due_covered_this_iteration_manual_action_available"
+        effective_primary_urgency = "manual_operator_review"
+    elif manual_rows:
+        effective_urgency_status = "manual_operator_action_available"
+        effective_primary_urgency = "manual_operator_review"
+    elif scheduled_safe_auto_rows:
+        effective_urgency_status = "safe_auto_action_scheduled_future"
+        effective_primary_urgency = "scheduled_safe_auto"
+    elif wait_rows and covered_due_safe_auto_rows:
+        effective_urgency_status = "safe_auto_due_covered_this_iteration_waiting_only"
+        effective_primary_urgency = "wait"
+    elif covered_due_safe_auto_rows:
+        effective_urgency_status = "safe_auto_due_covered_this_iteration"
+        effective_primary_urgency = "covered_safe_auto"
+    elif wait_rows:
+        effective_urgency_status = "waiting_only"
+        effective_primary_urgency = "wait"
+    else:
+        effective_urgency_status = "no_open_action"
+        effective_primary_urgency = "none"
+    if uncovered_overdue_safe_auto_rows:
+        safe_auto_coverage_status = "overdue_safe_auto_actions_uncovered"
+    elif uncovered_ready_safe_auto_rows:
+        safe_auto_coverage_status = "ready_safe_auto_actions_uncovered"
+    elif covered_due_safe_auto_rows:
+        safe_auto_coverage_status = "all_due_safe_auto_actions_covered_by_current_iteration"
+    elif scheduled_safe_auto_rows:
+        safe_auto_coverage_status = "only_future_safe_auto_actions_scheduled"
+    elif safe_auto_rows:
+        safe_auto_coverage_status = "safe_auto_actions_present_not_due"
+    else:
+        safe_auto_coverage_status = "no_safe_auto_actions"
+    manual_template_ready_count = sum(
+        1 for item in manual_rows if item.get("ready_for_operator_dry_run_template") is True
+    )
+    manual_operator_input_required_count = sum(
+        1 for item in manual_rows if item.get("operator_input_required") is True
+    )
+    manual_dry_run_ready_count = sum(
+        1 for item in manual_rows if item.get("manual_dry_run_ready_now") is True
+    )
+    manual_write_ready_count = sum(
+        1 for item in manual_rows if item.get("manual_write_ready_now") is True
+    )
+    manual_required_input_names = sorted(
+        {
+            str(name)
+            for item in manual_rows
+            for name in list(item.get("operator_required_input_names") or [])
+        }
+    )
+    manual_input_contract_statuses = sorted(
+        {
+            str(item.get("operator_input_contract_status"))
+            for item in manual_rows
+            if item.get("operator_input_contract_status")
+        }
+    )
+    manual_prompt_card_statuses = sorted(
+        {
+            str(dict(item.get("operator_prompt_card") or {}).get("status"))
+            for item in manual_rows
+            if dict(item.get("operator_prompt_card") or {}).get("status")
+        }
+    )
+    manual_prompt_card_ready_count = sum(
+        1
+        for item in manual_rows
+        if dict(item.get("operator_prompt_card") or {}).get("status")
+        == "operator_prompt_card_ready"
+    )
+
+    def _operator_input_form_decision_field(item: dict[str, Any], field: str) -> Any:
+        contract = dict(item.get("operator_input_contract") or {})
+        form = dict(contract.get("operator_input_form") or {})
+        decision_field = dict(form.get("decision_field") or {})
+        return decision_field.get(field)
+
+    def _operator_input_form_safe_default_status(item: dict[str, Any]) -> Any:
+        alignment = dict(_operator_input_form_decision_field(item, "safe_default_alignment") or {})
+        return alignment.get("status")
+
+    manual_input_form_statuses = sorted(
+        {
+            str(dict(item.get("operator_input_contract") or {}).get("operator_input_form_status"))
+            for item in manual_rows
+            if dict(item.get("operator_input_contract") or {}).get("operator_input_form_status")
+        }
+    )
+    manual_input_form_ready_count = sum(
+        1
+        for item in manual_rows
+        if dict(item.get("operator_input_contract") or {}).get("operator_input_form_status")
+        in {
+            "operator_input_form_ready",
+            "operator_input_form_ready_without_prompt_card",
+        }
+    )
+    manual_safe_default_alignment_status_values: set[str] = set()
+    manual_safe_default_decision_values: set[str] = set()
+    manual_safe_default_alignment_mismatch_count = 0
+    for item in manual_rows:
+        safe_default_alignment_status = _operator_input_form_safe_default_status(item)
+        if safe_default_alignment_status:
+            manual_safe_default_alignment_status_values.add(
+                str(safe_default_alignment_status)
+            )
+            if safe_default_alignment_status != "safe_default_decision_matches_accepted_values":
+                manual_safe_default_alignment_mismatch_count += 1
+        safe_default_decision = _operator_input_form_decision_field(
+            item,
+            "safe_default_decision_if_uncertain",
+        )
+        if safe_default_decision:
+            manual_safe_default_decision_values.add(str(safe_default_decision))
+    manual_safe_default_alignment_statuses = sorted(manual_safe_default_alignment_status_values)
+    manual_safe_default_decisions = sorted(manual_safe_default_decision_values)
+    if manual_safe_default_alignment_mismatch_count:
+        manual_safe_default_alignment_status = "manual_safe_default_alignment_repair_required"
+        manual_safe_default_alignment_next_step = "repair_operator_input_safe_default_decision_options"
+    elif manual_safe_default_alignment_statuses:
+        manual_safe_default_alignment_status = "manual_safe_default_alignment_pass"
+        manual_safe_default_alignment_next_step = None
+    elif manual_rows:
+        manual_safe_default_alignment_status = "manual_safe_default_alignment_not_reported"
+        manual_safe_default_alignment_next_step = "regenerate_operator_input_contracts"
+    else:
+        manual_safe_default_alignment_status = "no_manual_safe_default_alignment"
+        manual_safe_default_alignment_next_step = None
+    manual_rationale_must_address_count = sum(
+        len(list(dict(item.get("operator_prompt_card") or {}).get("rationale_must_address") or []))
+        for item in manual_rows
+    )
+    manual_minimum_anchor_count = sum(
+        int(
+            dict(
+                dict(item.get("operator_prompt_card") or {}).get("rationale_quality_gate")
+                or {}
+            ).get("minimum_recommended_anchor_count")
+            or 0
+        )
+        for item in manual_rows
+    )
+    manual_decision_option_count = sum(
+        int(dict(item.get("operator_input_contract") or {}).get("decision_option_count") or 0)
+        for item in manual_rows
+    )
+    manual_decision_dry_run_ready_count = sum(
+        int(
+            dict(item.get("operator_input_contract") or {}).get("dry_run_command_ready_count")
+            or 0
+        )
+        for item in manual_rows
+    )
+    manual_decision_write_ready_count = sum(
+        int(
+            dict(item.get("operator_input_contract") or {}).get("write_command_ready_count")
+            or 0
+        )
+        for item in manual_rows
+    )
+    manual_decision_validation_ready_count = sum(
+        int(
+            dict(item.get("operator_input_contract") or {}).get(
+                "validation_command_ready_count"
+            )
+            or 0
+        )
+        for item in manual_rows
+    )
+    primary_manual_input_step = next(
+        (
+            dict(item.get("operator_next_input_step") or {})
+            for item in manual_rows
+            if item.get("operator_input_required") is True
+        ),
+        None,
+    )
+    primary_manual_input_contract = next(
+        (
+            dict(item.get("operator_input_contract") or {})
+            for item in manual_rows
+            if item.get("operator_input_contract")
+        ),
+        None,
+    )
+    primary_manual_prompt_card = next(
+        (
+            dict(item.get("operator_prompt_card") or {})
+            for item in manual_rows
+            if item.get("operator_prompt_card")
+        ),
+        None,
+    )
+    primary_manual_input_form = next(
+        (
+            dict(dict(item.get("operator_input_contract") or {}).get("operator_input_form") or {})
+            for item in manual_rows
+            if dict(item.get("operator_input_contract") or {}).get("operator_input_form")
+        ),
+        None,
+    )
+    if manual_safe_default_alignment_mismatch_count:
+        manual_readiness_status = "manual_safe_default_alignment_repair_required"
+    elif manual_operator_input_required_count:
+        manual_readiness_status = "manual_reviews_waiting_for_operator_inputs"
+    elif manual_dry_run_ready_count:
+        manual_readiness_status = "manual_reviews_ready_for_operator_dry_run"
+    elif manual_rows:
+        manual_readiness_status = "manual_reviews_not_write_ready"
+    else:
+        manual_readiness_status = "no_manual_reviews"
+
+    return {
+        "status": status,
+        "urgency_status": urgency_status,
+        "primary_urgency": primary_urgency,
+        "effective_urgency_status": effective_urgency_status,
+        "effective_primary_urgency": effective_primary_urgency,
+        "primary_next_step": sequence[0] if sequence else None,
+        "primary_effective_next_step": effective_sequence[0] if effective_sequence else None,
+        "safe_auto_action_count": len(safe_auto_rows),
+        "effective_safe_auto_action_count": effective_safe_auto_action_count,
+        "raw_safe_auto_action_count": raw_safe_auto_action_count,
+        "raw_useful_safe_auto_action_count": raw_useful_safe_auto_action_count,
+        "covered_raw_safe_auto_action_count": covered_raw_safe_auto_action_count,
+        "primary_covered_raw_safe_auto_action": (
+            primary_covered_raw_safe_auto_action
+            if primary_covered_raw_safe_auto_action
+            else None
+        ),
+        "safe_auto_count_scope": (
+            "effective_actionability_partition_excludes_current_iteration_covered_actions"
+        ),
+        "ready_safe_auto_action_count": sum(
+            1 for item in safe_auto_rows if item.get("ready_now") is True
+        ),
+        "safe_auto_ready_count": sum(
+            1 for item in safe_auto_rows if item.get("ready_now") is True
+        ),
+        "safe_auto_effective_ready_count": len(uncovered_ready_safe_auto_rows),
+        "overdue_safe_auto_action_count": len(overdue_safe_auto_rows),
+        "covered_safe_auto_action_count": len(covered_safe_auto_rows),
+        "covered_due_safe_auto_action_count": len(covered_due_safe_auto_rows),
+        "uncovered_ready_safe_auto_action_count": len(uncovered_ready_safe_auto_rows),
+        "uncovered_overdue_safe_auto_action_count": len(uncovered_overdue_safe_auto_rows),
+        "safe_auto_coverage_status": safe_auto_coverage_status,
+        "scheduled_safe_auto_action_count": len(scheduled_safe_auto_rows),
+        "max_overdue_minutes": round(max_overdue_minutes, 3),
+        "next_scheduled_safe_auto_kst": dict(next_scheduled_safe_auto or {}).get("execute_after_kst"),
+        "next_scheduled_safe_auto_wait_minutes": dict(next_scheduled_safe_auto or {}).get("wait_minutes"),
+        "manual_action_count": len(manual_rows),
+        "manual_ready_count": sum(1 for item in manual_rows if item.get("ready_now") is True),
+        "manual_due_count": sum(
+            1 for item in manual_rows if item.get("manual_action_due_now") is True
+        ),
+        "manual_wait_count": sum(1 for item in manual_rows if item.get("ready_now") is not True),
+        "manual_effective_due_count": sum(
+            1
+            for item in manual_rows
+            if item.get("manual_action_due_now") is True
+            and item.get("covered_due_by_current_iteration") is not True
+        ),
+        "manual_readiness_status": manual_readiness_status,
+        "manual_template_ready_count": manual_template_ready_count,
+        "manual_operator_input_required_count": manual_operator_input_required_count,
+        "manual_dry_run_ready_count": manual_dry_run_ready_count,
+        "manual_write_ready_count": manual_write_ready_count,
+        "manual_required_input_names": manual_required_input_names,
+        "manual_input_contract_statuses": manual_input_contract_statuses,
+        "manual_prompt_card_statuses": manual_prompt_card_statuses,
+        "manual_prompt_card_ready_count": manual_prompt_card_ready_count,
+        "manual_input_form_statuses": manual_input_form_statuses,
+        "manual_input_form_ready_count": manual_input_form_ready_count,
+        "manual_safe_default_alignment_status": manual_safe_default_alignment_status,
+        "manual_safe_default_alignment_statuses": manual_safe_default_alignment_statuses,
+        "manual_safe_default_decisions": manual_safe_default_decisions,
+        "manual_safe_default_alignment_mismatch_count": manual_safe_default_alignment_mismatch_count,
+        "manual_safe_default_alignment_next_step": manual_safe_default_alignment_next_step,
+        "manual_safe_default_alignment_requires_repair": (
+            manual_safe_default_alignment_mismatch_count > 0
+        ),
+        "manual_rationale_must_address_count": manual_rationale_must_address_count,
+        "manual_minimum_anchor_count": manual_minimum_anchor_count,
+        "manual_decision_option_count": manual_decision_option_count,
+        "manual_decision_dry_run_ready_count": manual_decision_dry_run_ready_count,
+        "manual_decision_write_ready_count": manual_decision_write_ready_count,
+        "manual_decision_validation_ready_count": manual_decision_validation_ready_count,
+        "primary_manual_input_step": primary_manual_input_step,
+        "primary_manual_input_contract": primary_manual_input_contract,
+        "primary_manual_prompt_card": primary_manual_prompt_card,
+        "primary_manual_input_form": primary_manual_input_form,
+        "wait_gate_count": len(wait_rows),
+        "forbidden_action_count": len(forbidden_actions),
+        "safe_auto_actions": safe_auto_rows,
+        "ready_safe_auto_actions": ready_safe_auto_rows,
+        "overdue_safe_auto_actions": overdue_safe_auto_rows,
+        "covered_safe_auto_actions": covered_safe_auto_rows,
+        "covered_due_safe_auto_actions": covered_due_safe_auto_rows,
+        "uncovered_ready_safe_auto_actions": uncovered_ready_safe_auto_rows,
+        "uncovered_overdue_safe_auto_actions": uncovered_overdue_safe_auto_rows,
+        "scheduled_safe_auto_actions": scheduled_safe_auto_rows,
+        "raw_safe_auto_actions": raw_safe_auto_actions,
+        "manual_actions": manual_rows,
+        "wait_gates": wait_rows,
+        "forbidden_actions": forbidden_actions,
+        "recommended_sequence": sequence,
+        "effective_recommended_sequence": effective_sequence,
+        "critical_path_blocked_by": critical_path.get("launch_blocked_by") or critical_path.get("next_open_gate"),
+        "paper_apply_blocked_by": critical_path.get("paper_apply_blocked_by"),
+        "parallel_blocked_by": critical_path.get("parallel_blocked_by"),
+        "manual_batch_status": manual_batch.get("status"),
+        "manual_batch_fingerprint": manual_batch.get("batch_fingerprint"),
+        "operator_decisions_are_manual_only": True,
+        "paper_apply_is_manual_only": True,
+        "auto_decision_allowed": False,
+        "auto_apply_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            scorecard.get("no_live_order_sent") is not False
+            and closure.get("no_live_order_sent") is not False
+            and review_resolution.get("no_live_order_sent") is not False
+            and command_audit.get("no_live_order_sent") is not False
+            and all(item.get("no_live_order_sent") is not False for item in safe_auto_rows)
+            and all(item.get("no_live_order_sent") is not False for item in raw_safe_auto_actions)
+            and all(item.get("no_live_order_sent") is not False for item in manual_rows)
+            and all(item.get("no_live_order_sent") is not False for item in wait_rows)
+        ),
+    }
+
+
 def _build_watch_summary(
     *,
     started_at: datetime,
@@ -3560,11 +16189,19 @@ def _build_watch_summary(
     pre_run_wait_incident_log: list[dict[str, Any]] | None = None,
     pre_run_market_data_refresh: dict[str, Any] | None = None,
     runtime_start_plan: dict[str, Any] | None = None,
+    previous_payload: dict[str, Any] | None = None,
+    evidence_report_root: Path | None = None,
 ) -> dict[str, Any]:
     runtime_start = continuous_started_at or started_at
     observed_hours = round(max((completed_at - runtime_start).total_seconds(), 0.0) / 3600.0, 4)
     calendar_elapsed_hours = round(max((completed_at - started_at).total_seconds(), 0.0) / 3600.0, 4)
-    latest = runs[-1] if runs else {}
+    latest = dict(runs[-1] if runs else {})
+    if latest:
+        latest["signal_wait_plan"] = _paper_rehearsal_fast_signal_monitor_plan(
+            latest,
+            generated_at=completed_at,
+            previous_payload=previous_payload,
+        )
     live_violation_count = sum(1 for run in runs if run.get("no_live_order_sent") is not True)
     target_reached = observed_hours >= max(float(target_hours or 0.0), 0.0)
     progress = _watch_progress(runs, baseline_collection=baseline_collection)
@@ -3602,7 +16239,21 @@ def _build_watch_summary(
         recent_paper_apply=recent_paper_apply,
         recent_paper_review=recent_paper_review,
         recent_paper_apply_parity_review=parity_review_state,
+        previous_payload=previous_payload,
     )
+    execution_parity_eta = dict(operator_handoff.get("execution_parity_eta_plan") or {})
+    execution_parity_collection_plan = dict(
+        operator_handoff.get("execution_parity_collection_plan") or {}
+    )
+    execution_parity_status_summary = _execution_parity_status_summary(
+        collection_plan=execution_parity_collection_plan,
+        eta_plan=execution_parity_eta,
+        promotion_gate=dict(recent_meta_router_promotion_gate or {}),
+    )
+    if latest:
+        execution_parity_journal = dict(latest.get("execution_parity_journal") or {})
+        execution_parity_journal["eta"] = _execution_parity_journal_eta_summary(execution_parity_eta)
+        latest["execution_parity_journal"] = execution_parity_journal
     micro["coverage_plan"] = _microstructure_coverage_plan(
         coverage=dict(micro.get("coverage") or {}),
         latest_collection=dict(latest.get("collection_progress") or {}),
@@ -3624,8 +16275,80 @@ def _build_watch_summary(
         microstructure_watch=micro,
         operator_handoff=operator_handoff,
         meta_router_promotion_gate=dict(recent_meta_router_promotion_gate or {}),
+        latest_run=latest,
+        previous_payload=previous_payload,
         target_hours=float(target_hours or 0.0),
         generated_at=completed_at,
+    )
+    fresh_signal_blocker_diagnostics = _fresh_signal_blocker_diagnostics(
+        latest=latest,
+        safe_next_action_plan=safe_next_action_plan,
+    )
+    paper_only_rehearsal = _paper_only_rehearsal_summary(launch)
+    scheduled_command_projection = _scheduled_command_projection(
+        operator_handoff=operator_handoff,
+        safe_next_action_plan=safe_next_action_plan,
+    )
+    operator_work_queue = _operator_work_queue(safe_next_action_plan)
+    operator_review_handoff_summary = _operator_review_handoff_summary(
+        operator_work_queue=operator_work_queue,
+        meta_router_promotion_gate=dict(recent_meta_router_promotion_gate or {}),
+    )
+    unresolved_problem_register = _unresolved_problem_register(
+        latest=latest,
+        paper_only_rehearsal=paper_only_rehearsal,
+        operator_handoff=operator_handoff,
+        execution_parity_eta=execution_parity_eta,
+        microstructure_watch=micro,
+        meta_router_promotion_gate=dict(recent_meta_router_promotion_gate or {}),
+        safe_next_action_plan=safe_next_action_plan,
+        operator_review_handoff_summary=operator_review_handoff_summary,
+        runtime_progress=runtime,
+    )
+    launch_blocker_priority_summary = _launch_blocker_priority_summary(
+        unresolved_problem_register=unresolved_problem_register,
+        operator_review_handoff_summary=operator_review_handoff_summary,
+        execution_parity_status_summary=execution_parity_status_summary,
+    )
+    remaining_work_closure_summary = _remaining_work_closure_summary(
+        unresolved_problem_register=unresolved_problem_register,
+        operator_work_queue=operator_work_queue,
+        operator_review_handoff_summary=operator_review_handoff_summary,
+        launch_blocker_priority_summary=launch_blocker_priority_summary,
+        runtime_progress=runtime,
+        microstructure_watch=micro,
+        execution_parity_status_summary=execution_parity_status_summary,
+        fresh_signal_blocker_diagnostics=fresh_signal_blocker_diagnostics,
+    )
+    first_fresh_signal_paper_apply_runbook = _first_fresh_signal_paper_apply_runbook(
+        operator_handoff=operator_handoff,
+        paper_only_rehearsal=paper_only_rehearsal,
+        fresh_signal_blocker_diagnostics=fresh_signal_blocker_diagnostics,
+        safe_next_action_plan=safe_next_action_plan,
+        execution_parity_status_summary=execution_parity_status_summary,
+    )
+    operator_review_decision_aid = _operator_review_decision_aid(
+        operator_review_handoff_summary=operator_review_handoff_summary,
+        remaining_work_closure_summary=remaining_work_closure_summary,
+    )
+    daily_quote_checkpoint_summary = _daily_quote_checkpoint_summary(
+        microstructure_watch=micro,
+        safe_next_action_plan=safe_next_action_plan,
+        remaining_work_closure_summary=remaining_work_closure_summary,
+    )
+    next_material_progress_plan = _next_material_progress_plan(
+        generated_at=completed_at,
+        runtime_progress=runtime,
+        latest_signal_wait_plan=dict(latest.get("signal_wait_plan") or {}),
+        daily_quote_checkpoint_summary=daily_quote_checkpoint_summary,
+        first_fresh_signal_paper_apply_runbook=first_fresh_signal_paper_apply_runbook,
+        operator_review_decision_aid=operator_review_decision_aid,
+        remaining_work_closure_summary=remaining_work_closure_summary,
+        execution_parity_status_summary=execution_parity_status_summary,
+    )
+    operator_review_resolution_plan = _operator_review_resolution_plan(
+        operator_review_decision_aid=operator_review_decision_aid,
+        next_material_progress_plan=next_material_progress_plan,
     )
     incident_log = list(pre_run_wait_incident_log or [])
     pre_run_capture_outcome = _pre_run_quote_window_capture_outcome(
@@ -3637,6 +16360,2447 @@ def _build_watch_summary(
         current_completed_at=completed_at,
         signal_wait_plan=dict(latest.get("signal_wait_plan") or {}),
     )
+    signal_monitor = _signal_monitor_summary(
+        signal_wait_plan=dict(latest.get("signal_wait_plan") or {}),
+        cadence_alignment=signal_monitor_cadence_alignment,
+        safe_next_action_plan=safe_next_action_plan,
+    )
+    command_consistency_audit = _command_consistency_audit(
+        safe_next_action_plan=safe_next_action_plan,
+        remaining_work_closure_summary=remaining_work_closure_summary,
+        next_material_progress_plan=next_material_progress_plan,
+        scheduled_command_projection=scheduled_command_projection,
+        signal_monitor=signal_monitor,
+    )
+    operator_action_digest = _operator_action_digest(
+        latest=latest,
+        actionability_partition=dict(
+            remaining_work_closure_summary.get("actionability_partition") or {}
+        ),
+        dependency_lanes=dict(remaining_work_closure_summary.get("dependency_lanes") or {}),
+        manual_batch_handoff=dict(
+            operator_review_resolution_plan.get("manual_batch_handoff") or {}
+        ),
+        next_material_progress_plan=next_material_progress_plan,
+        daily_quote_checkpoint_summary=daily_quote_checkpoint_summary,
+        execution_parity_status_summary=execution_parity_status_summary,
+        command_consistency_audit=command_consistency_audit,
+    )
+    strict_activity_revalidation_summary = _strict_activity_revalidation_summary(
+        evidence_report_root
+    )
+    validation_redesign_runbook = _validation_redesign_runbook(
+        actionability_tracks=dict(
+            remaining_work_closure_summary.get("actionability_tracks")
+            or dict(remaining_work_closure_summary.get("actionability_partition") or {}).get(
+                "tracks"
+            )
+            or {}
+        ),
+        fresh_signal_blocker_diagnostics=fresh_signal_blocker_diagnostics,
+        strict_activity_revalidation_summary=strict_activity_revalidation_summary,
+    )
+    no_signal_resolution_summary = _no_signal_resolution_summary(
+        fresh_signal_blocker_diagnostics=fresh_signal_blocker_diagnostics,
+        validation_redesign_runbook=validation_redesign_runbook,
+        strict_activity_revalidation_summary=strict_activity_revalidation_summary,
+    )
+    gate_substitution_digest = _gate_substitution_digest(
+        paper_only_rehearsal=paper_only_rehearsal,
+        remaining_work_closure_summary=remaining_work_closure_summary,
+        daily_quote_checkpoint_summary=daily_quote_checkpoint_summary,
+        execution_parity_status_summary=execution_parity_status_summary,
+        runtime_progress=runtime,
+    )
+    gate_eta_digest = _gate_eta_digest(
+        gate_substitution_digest=gate_substitution_digest,
+        next_material_progress_plan=next_material_progress_plan,
+        operator_action_digest=operator_action_digest,
+        dependency_lanes=dict(remaining_work_closure_summary.get("dependency_lanes") or {}),
+        daily_quote_checkpoint_summary=daily_quote_checkpoint_summary,
+        execution_parity_status_summary=execution_parity_status_summary,
+        runtime_progress=runtime,
+    )
+    launch_progress_scorecard = _launch_progress_scorecard(
+        latest=latest,
+        runtime_progress=runtime,
+        daily_quote_checkpoint_summary=daily_quote_checkpoint_summary,
+        gate_substitution_digest=gate_substitution_digest,
+        gate_eta_digest=gate_eta_digest,
+        operator_action_digest=operator_action_digest,
+        operator_review_handoff_summary=operator_review_handoff_summary,
+        operator_review_resolution_plan=operator_review_resolution_plan,
+        execution_parity_status_summary=execution_parity_status_summary,
+        next_material_progress_plan=next_material_progress_plan,
+        remaining_work_closure_summary=remaining_work_closure_summary,
+    )
+    launch_execution_matrix = _launch_execution_matrix(
+        generated_at=completed_at,
+        launch_progress_scorecard=launch_progress_scorecard,
+        remaining_work_closure_summary=remaining_work_closure_summary,
+        operator_review_resolution_plan=operator_review_resolution_plan,
+        command_consistency_audit=command_consistency_audit,
+        latest_run=latest,
+    )
+    if latest:
+        latest["paper_only_rehearsal"] = paper_only_rehearsal
+        latest["signal_monitor"] = signal_monitor
+        latest["fresh_signal_blocker_diagnostics"] = fresh_signal_blocker_diagnostics
+        latest["no_signal_resolution_summary"] = no_signal_resolution_summary
+    quote_progress = {
+        "observed_start": progress.get("quote_observed_start"),
+        "observed_latest": progress.get("quote_observed_latest"),
+        "observed_delta": progress.get("quote_observed_delta"),
+        "progress_state": progress.get("quote_progress_state"),
+        "distinct_hours_start": progress.get("quote_distinct_hours_start"),
+        "distinct_hours_latest": progress.get("quote_distinct_hours_latest"),
+        "distinct_hours_delta": progress.get("quote_distinct_hours_delta"),
+        "hour_progress_state": progress.get("quote_hour_progress_state"),
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+    signal_absence_diagnosis = dict(
+        fresh_signal_blocker_diagnostics.get("signal_absence_diagnosis") or {}
+    )
+    signal_blocker_cause_partition = dict(
+        fresh_signal_blocker_diagnostics.get("cause_partition") or {}
+    )
+    fresh_signal_status = {
+        "available": progress.get("fresh_signal_seen") is True,
+        "seen_during_watch": progress.get("fresh_signal_seen") is True,
+        "blocker_status": fresh_signal_blocker_diagnostics.get("status"),
+        "primary_cause": fresh_signal_blocker_diagnostics.get("primary_cause"),
+        "cause_partition_status": signal_blocker_cause_partition.get("status"),
+        "cause_partition_interpretation": signal_blocker_cause_partition.get(
+            "interpretation"
+        ),
+        "signal_absence_primary_cause": fresh_signal_blocker_diagnostics.get(
+            "signal_absence_primary_cause"
+        ),
+        "signal_absence_class": signal_absence_diagnosis.get("class"),
+        "signal_pipeline_issue_suspected": fresh_signal_blocker_diagnostics.get(
+            "signal_pipeline_issue_suspected"
+        ),
+        "current_next_blocker_gate": launch_next_blocker_gate or None,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
+    }
+    top_no_trade_reasons = list(
+        fresh_signal_blocker_diagnostics.get("top_no_trade_reasons") or []
+    )
+    top_no_trade_reason = dict(top_no_trade_reasons[0] if top_no_trade_reasons else {})
+    dominant_no_trade_context = dict(
+        fresh_signal_blocker_diagnostics.get("dominant_no_trade_context") or {}
+    )
+    safe_experiment_backlog = list(
+        fresh_signal_blocker_diagnostics.get("safe_experiment_backlog") or []
+    )
+    primary_safe_experiment = dict(
+        safe_experiment_backlog[0] if safe_experiment_backlog else {}
+    )
+    fresh_signal_resolution = dict(
+        fresh_signal_blocker_diagnostics.get("fresh_signal_resolution_plan") or {}
+    )
+    paper_apply_status = {
+        "available": progress.get("paper_apply_available_seen") is True,
+        "seen_during_watch": progress.get("paper_apply_available_seen") is True,
+        "allowed_now": paper_only_rehearsal.get("paper_apply_allowed_now") is True,
+        "rehearsal_available_now": paper_only_rehearsal.get("current_rehearsal_available") is True,
+        "remaining_gates": list(paper_only_rehearsal.get("remaining_gates") or []),
+        "order_submission_allowed": False,
+        "no_live_order_sent": paper_only_rehearsal.get("no_live_order_sent") is not False,
+    }
+    latest_launch_state = {
+        "status": status,
+        "launch_status": launch.get("status"),
+        "launch_next_blocker": launch_next_blocker_gate or None,
+        "next_blocker_gate": launch_next_blocker_gate or None,
+        "next_action": launch_next_blocker.get("next_action"),
+        "target_observation_complete": target_reached,
+        "fresh_signal_available_seen": fresh_signal_status.get("seen_during_watch"),
+        "signal_absence_primary_cause": fresh_signal_status.get(
+            "signal_absence_primary_cause"
+        ),
+        "signal_absence_class": fresh_signal_status.get("signal_absence_class"),
+        "signal_pipeline_issue_suspected": fresh_signal_status.get(
+            "signal_pipeline_issue_suspected"
+        ),
+        "paper_apply_available_seen": paper_apply_status.get("seen_during_watch"),
+        "paper_apply_allowed_now": paper_apply_status.get("allowed_now"),
+        "paper_only_rehearsal_status": paper_only_rehearsal.get("status"),
+        "paper_only_system_ready": paper_only_rehearsal.get("system_ready") is True,
+        "paper_only_armed": paper_only_rehearsal.get("armed") is True,
+        "paper_only_remaining_gates": list(paper_only_rehearsal.get("remaining_gates") or []),
+        "quote_progress": quote_progress,
+        "no_live_order_sent": live_violation_count == 0,
+    }
+    actionability_partition = dict(
+        remaining_work_closure_summary.get("actionability_partition") or {}
+    )
+    dependency_unlock_plan = dict(
+        remaining_work_closure_summary.get("dependency_unlock_plan") or {}
+    )
+    manual_action_cards = [
+        {
+            "action_type": item.get("action_type"),
+            "target_gate": item.get("target_gate"),
+            "review_kind": item.get("review_kind"),
+            "review_report": item.get("active_operator_review_report"),
+            "required_fields_remaining": list(item.get("required_fields_remaining") or []),
+            "safe_default_if_uncertain": item.get("safe_default_if_uncertain"),
+            "dry_run_command_template": item.get("dry_run_command_template"),
+            "validation_command": item.get("validation_command"),
+            "auto_decision_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": item.get("no_live_order_sent") is not False,
+        }
+        for item in list(actionability_partition.get("manual_now") or [])[:3]
+    ]
+    wait_action_cards = [
+        {
+            "wait_type": (
+                "signal"
+                if item.get("problem_id") == "current_fresh_signal"
+                else "execution_dependency"
+            ),
+            "problem_id": item.get("problem_id"),
+            "status": item.get("status"),
+            "next_kst": item.get("next_monitor_kst") or item.get("eta_completion_kst"),
+            "missing_samples": item.get("missing_samples"),
+            "safe_action": (
+                "monitor_fresh_signal_without_forcing_entry"
+                if item.get("problem_id") == "current_fresh_signal"
+                else "collect_reviewed_paper_lifecycle_rows"
+            ),
+            "order_submission_allowed": False,
+            "no_live_order_sent": item.get("no_live_order_sent") is not False,
+        }
+        for item in list(actionability_partition.get("signal_waits") or [])[:4]
+    ] + [
+        {
+            "wait_type": "time",
+            "problem_id": item.get("problem_id"),
+            "status": item.get("status"),
+            "next_kst": item.get("next_kst"),
+            "remaining_calendar_days": item.get("remaining_calendar_days"),
+            "remaining_hours": item.get("remaining_hours"),
+            "safe_action": (
+                "continue_future_quote_calendar_collection"
+                if item.get("problem_id") == "microstructure_calendar_day_coverage"
+                else "continue_continuous_no_live_shadow_watch"
+            ),
+            "order_submission_allowed": False,
+            "no_live_order_sent": item.get("no_live_order_sent") is not False,
+        }
+        for item in list(actionability_partition.get("time_waits") or [])[:4]
+    ]
+    dependency_blocked_cards = [
+        {
+            "problem_id": item.get("problem_id"),
+            "status": item.get("status"),
+            "depends_on": list(item.get("depends_on") or []),
+            "unlocks": list(item.get("unlocks") or []),
+            "safe_action": "wait_until_all_dependencies_clear_then_manual_paper_apply",
+            "auto_apply_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": item.get("no_live_order_sent") is not False,
+        }
+        for item in list(actionability_partition.get("dependency_blocked") or [])[:3]
+    ]
+    manual_batch = dict(operator_review_resolution_plan.get("manual_batch_handoff") or {})
+    primary_batch_step = dict(manual_batch.get("primary_next_step") or {})
+
+    def _review_field_template_like(field: str, value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return True
+        lowered = text.lower()
+        return (
+            "<" in text
+            or ">" in text
+            or "placeholder" in lowered
+            or lowered == "operator_name_or_initials"
+            or lowered.startswith("iso8601_")
+            or "after_this_template" in lowered
+            or lowered.startswith("why_the_")
+        )
+
+    def _compact_review_text(value: Any) -> str:
+        return "".join(char for char in str(value or "").lower() if char.isalnum())
+
+    def _add_review_evidence_anchor(
+        anchors: list[dict[str, str]], *, label: str, value: Any
+    ) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        candidates = [text]
+        if "/" in text:
+            path = Path(text)
+            candidates.extend([path.name, path.stem])
+        compact_full = _compact_review_text(text)
+        if (
+            len(compact_full) >= 12
+            and all(char in "0123456789abcdef" for char in compact_full)
+        ):
+            candidates.append(compact_full[:12])
+        seen = {item["compact"] for item in anchors}
+        for candidate in candidates:
+            compact = _compact_review_text(candidate)
+            if (
+                len(compact) < 8
+                or compact in GENERIC_OPERATOR_REVIEW_EVIDENCE_ANCHOR_VALUES
+                or compact in seen
+            ):
+                continue
+            anchors.append(
+                {
+                    "label": label,
+                    "value": str(candidate).strip(),
+                    "compact": compact,
+                }
+            )
+            seen.add(compact)
+
+    def _review_evidence_anchors(payload: dict[str, Any]) -> list[dict[str, str]]:
+        anchors: list[dict[str, str]] = []
+        for key in OPERATOR_REVIEW_EVIDENCE_ANCHOR_KEYS:
+            _add_review_evidence_anchor(anchors, label=key, value=payload.get(key))
+        reviewed_folds = payload.get("reviewed_folds")
+        if isinstance(reviewed_folds, list):
+            for fold in reviewed_folds:
+                _add_review_evidence_anchor(
+                    anchors, label="reviewed_folds", value=f"fold_{fold}"
+                )
+        return anchors
+
+    def _operator_review_rationale_quality(
+        payload: dict[str, Any],
+        *,
+        rationale: str,
+    ) -> dict[str, Any]:
+        anchors = _review_evidence_anchors(payload)
+        rationale_text = str(rationale or "")
+        rationale_lower = rationale_text.lower()
+        rationale_compact = _compact_review_text(rationale_text)
+        matched: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for anchor in anchors:
+            value = anchor["value"].lower()
+            compact = anchor["compact"]
+            if value in rationale_lower or compact in rationale_compact:
+                key = f"{anchor['label']}:{anchor['compact']}"
+                if key not in seen:
+                    matched.append({"label": anchor["label"], "value": anchor["value"]})
+                    seen.add(key)
+        required_anchor_count = max(0, DEFAULT_OPERATOR_REVIEW_MIN_EVIDENCE_ANCHORS)
+        evidence_anchor_check_applied = bool(anchors and required_anchor_count > 0)
+        required_matched_count = min(required_anchor_count, len(anchors))
+        blockers: list[str] = []
+        if len(rationale_text) < DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS:
+            blockers.append("rationale_too_short")
+        if len(matched) < required_matched_count:
+            blockers.append("rationale_missing_evidence_anchor")
+        return {
+            "status": "pass" if not blockers else "fail",
+            "blockers": blockers,
+            "min_rationale_chars": DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS,
+            "rationale_char_count": len(rationale_text),
+            "rationale_meets_min_chars": (
+                len(rationale_text) >= DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS
+            ),
+            "min_evidence_anchors": required_anchor_count,
+            "available_evidence_anchor_count": len(anchors),
+            "matched_evidence_anchor_count": len(matched),
+            "matched_evidence_anchors": matched[:5],
+            "evidence_anchor_check_applied": evidence_anchor_check_applied,
+        }
+
+    def _operator_review_source_generated_at(payload: dict[str, Any]) -> str | None:
+        acceptance = dict(payload.get("acceptance_contract") or {})
+        text = str(
+            payload.get("source_promotion_gate_generated_at")
+            or payload.get("source_generated_at")
+            or acceptance.get(
+                "reviewed_at_must_be_at_or_after_promotion_gate_generated_at"
+            )
+            or ""
+        ).strip()
+        return text or None
+
+    def _operator_review_reviewed_at_quality(
+        payload: dict[str, Any],
+        *,
+        reviewed_at_text: str,
+    ) -> dict[str, Any]:
+        source_text = _operator_review_source_generated_at(payload)
+        generated = completed_at.astimezone(UTC)
+        max_future = max(0.0, float(DEFAULT_OPERATOR_REVIEW_MAX_FUTURE_MINUTES))
+        future_cutoff = generated + timedelta(minutes=max_future)
+        blockers: list[str] = []
+        source_dt: datetime | None = None
+        reviewed_dt: datetime | None = None
+        if source_text:
+            source_dt = _parse_dt(source_text)
+            if source_dt is None:
+                blockers.append("source_promotion_gate_generated_at_invalid_iso8601")
+        if reviewed_at_text:
+            reviewed_dt = _parse_dt(reviewed_at_text)
+            if reviewed_dt is None:
+                blockers.append("reviewed_at_invalid_iso8601")
+        if source_dt is not None and reviewed_dt is not None and reviewed_dt < source_dt:
+            blockers.append("reviewed_at_before_source_promotion_gate_generated_at")
+        if source_dt is not None and source_dt > future_cutoff:
+            blockers.append("source_promotion_gate_generated_at_in_future")
+        if reviewed_dt is not None and reviewed_dt > future_cutoff:
+            blockers.append("reviewed_at_in_future")
+        return {
+            "status": "pass" if not blockers else "fail",
+            "blockers": blockers,
+            "source_check_applied": bool(source_text),
+            "source_promotion_gate_generated_at": (
+                source_dt.isoformat() if source_dt is not None else source_text
+            ),
+            "reviewed_at": (
+                reviewed_dt.isoformat() if reviewed_dt is not None else reviewed_at_text
+            ),
+            "generated_at": generated.isoformat(),
+            "max_future_minutes": max_future,
+        }
+
+    def _same_operator_review_path(left: Path, right_value: Any) -> bool:
+        right_text = str(right_value or "").strip()
+        if not right_text:
+            return False
+        candidates = {str(left), _display_path(left)}
+        try:
+            candidates.add(str(left.resolve()))
+        except OSError:
+            pass
+        if right_text in candidates:
+            return True
+        try:
+            right = Path(right_text)
+            if not right.is_absolute():
+                right = ROOT_DIR / right
+            return right.resolve() == left.resolve()
+        except OSError:
+            return False
+
+    def _first_existing_review_path(path_text: str, *, base_path: Path) -> Path | None:
+        text = str(path_text or "").strip()
+        if not text:
+            return None
+        raw_path = Path(text).expanduser()
+        candidates = [raw_path]
+        if not raw_path.is_absolute():
+            candidates.extend([ROOT_DIR / raw_path, base_path.parent / raw_path])
+        for candidate in candidates:
+            try:
+                if candidate.exists():
+                    return candidate
+            except OSError:
+                continue
+        return None
+
+    def _parse_int(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _operator_review_draft_contract_quality(
+        payload: dict[str, Any],
+        *,
+        review_report: Path,
+    ) -> dict[str, Any]:
+        return _operator_review_completion_draft_metadata_quality(
+            payload,
+            review_report=review_report,
+            generated_at=completed_at,
+            min_rationale_chars=DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS,
+            min_evidence_anchors=DEFAULT_OPERATOR_REVIEW_MIN_EVIDENCE_ANCHORS,
+            max_future_minutes=DEFAULT_OPERATOR_REVIEW_MAX_FUTURE_MINUTES,
+        )
+
+    def _operator_review_status_quality(status_value: Any) -> dict[str, Any]:
+        current_status = str(status_value or "").strip()
+        placeholder_status = current_status.endswith("_accepted_or_rejected")
+        blockers: list[str] = []
+        if not current_status:
+            blockers.append("review_report_status_missing")
+        elif not placeholder_status:
+            blockers.append("review_report_status_is_not_operator_decision_placeholder")
+            if current_status.endswith("_accepted"):
+                blockers.append("review_report_already_accepted")
+            if current_status.endswith("_rejected"):
+                blockers.append("review_report_already_rejected")
+        return {
+            "status": "pass" if not blockers else "fail",
+            "review_status_value": current_status or None,
+            "placeholder_status_required": True,
+            "placeholder_status": placeholder_status,
+            "blockers": blockers,
+        }
+
+    def _operator_review_file_state(path_value: Any) -> dict[str, Any]:
+        path_text = str(path_value or "").strip()
+        if not path_text:
+            return {
+                "status": "review_report_path_missing",
+                "review_report": None,
+                "exists": False,
+                "readable": False,
+                "operator_inputs_complete": False,
+                "write_allowed_now": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        path = Path(path_text)
+        if not path.exists():
+            return {
+                "status": "review_report_file_missing",
+                "review_report": path_text,
+                "exists": False,
+                "readable": False,
+                "operator_inputs_complete": False,
+                "write_allowed_now": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        try:
+            payload = _read_json(path)
+            readable = True
+        except Exception:
+            payload = {}
+            readable = False
+        fields = {
+            "status": payload.get("status"),
+            "reviewer": payload.get("reviewer"),
+            "reviewed_at": payload.get("reviewed_at"),
+            "rationale": payload.get("rationale"),
+        }
+        field_states = {
+            name: {
+                "present": bool(str(value or "").strip()),
+                "template_like": _review_field_template_like(name, value),
+                "char_count": len(str(value or "")),
+            }
+            for name, value in fields.items()
+        }
+        template_like_fields = [
+            name for name, state in field_states.items() if state.get("template_like") is True
+        ]
+        missing_fields = [
+            name for name, state in field_states.items() if state.get("present") is not True
+        ]
+        rationale_quality = _operator_review_rationale_quality(
+            payload, rationale=str(fields.get("rationale") or "")
+        )
+        quality_blockers = list(rationale_quality.get("blockers") or [])
+        reviewed_at_quality = _operator_review_reviewed_at_quality(
+            payload, reviewed_at_text=str(fields.get("reviewed_at") or "").strip()
+        )
+        reviewed_at_quality_blockers = list(reviewed_at_quality.get("blockers") or [])
+        draft_contract_quality = _operator_review_draft_contract_quality(
+            payload, review_report=path
+        )
+        draft_contract_blockers = list(draft_contract_quality.get("blockers") or [])
+        draft_contract_blockers_active = readable and bool(draft_contract_blockers)
+        status_quality = _operator_review_status_quality(fields.get("status"))
+        status_blockers = list(status_quality.get("blockers") or [])
+        status_blockers_active = readable and bool(status_blockers)
+        quality_blockers_active = (
+            False
+        )
+        reviewed_at_quality_blockers_active = (
+            False
+        )
+        operator_inputs_complete = (
+            readable
+            and not draft_contract_blockers_active
+            and not status_blockers_active
+        )
+        if not readable:
+            state_status = "review_report_unreadable"
+        elif draft_contract_blockers_active:
+            state_status = "operator_review_draft_contract_failed"
+        elif status_blockers_active:
+            state_status = "operator_review_status_placeholder_failed"
+        elif template_like_fields or missing_fields:
+            state_status = "operator_review_completion_contract_ready_waiting_for_cli_inputs"
+        else:
+            state_status = "operator_review_completion_contract_ready"
+        return {
+            "status": state_status,
+            "review_report": path_text,
+            "exists": True,
+            "readable": readable,
+            "review_status_value": fields.get("status"),
+            "status_quality": status_quality,
+            "status_blockers": status_blockers,
+            "status_blockers_active": status_blockers if status_blockers_active else [],
+            "reviewer_present": field_states["reviewer"]["present"],
+            "reviewer_template_like": field_states["reviewer"]["template_like"],
+            "reviewed_at_present": field_states["reviewed_at"]["present"],
+            "reviewed_at_template_like": field_states["reviewed_at"]["template_like"],
+            "reviewed_at_quality": reviewed_at_quality,
+            "reviewed_at_quality_blockers": reviewed_at_quality_blockers,
+            "reviewed_at_quality_blockers_active": (
+                reviewed_at_quality_blockers
+                if reviewed_at_quality_blockers_active
+                else []
+            ),
+            "draft_contract_quality": draft_contract_quality,
+            "draft_contract_blockers": draft_contract_blockers,
+            "draft_contract_blockers_active": (
+                draft_contract_blockers if draft_contract_blockers_active else []
+            ),
+            "rationale_present": field_states["rationale"]["present"],
+            "rationale_template_like": field_states["rationale"]["template_like"],
+            "rationale_char_count": field_states["rationale"]["char_count"],
+            "rationale_quality": rationale_quality,
+            "quality_blockers": quality_blockers,
+            "quality_blockers_active": quality_blockers if quality_blockers_active else [],
+            "quality_check_pending_basic_inputs": bool(
+                readable
+                and (template_like_fields or missing_fields)
+                and bool(quality_blockers)
+            ),
+            "reviewed_at_quality_check_pending_basic_inputs": bool(
+                readable
+                and (template_like_fields or missing_fields)
+                and bool(reviewed_at_quality_blockers)
+            ),
+            "missing_fields": missing_fields,
+            "template_like_fields": template_like_fields,
+            "operator_inputs_complete": operator_inputs_complete,
+            "completion_contract_ready": operator_inputs_complete,
+            "completion_cli_supplied_fields_pending": [
+                field
+                for field in ("reviewer", "reviewed_at", "rationale")
+                if field in template_like_fields or field in missing_fields
+            ],
+            "dry_run_allowed_after_placeholders_replaced": operator_inputs_complete,
+            "write_allowed_now": False,
+            "auto_decision_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": payload.get("no_live_order_sent") is not False,
+        }
+
+    def _angle_placeholders(*values: Any) -> list[str]:
+        placeholders: list[str] = []
+        for value in values:
+            text = str(value or "")
+            for part in text.split("<")[1:]:
+                token = part.split(">", 1)[0].strip()
+                if token:
+                    placeholders.append(f"<{token}>")
+        return sorted(set(placeholders))
+
+    def _decision_option_input_contract(option: dict[str, Any]) -> dict[str, Any]:
+        placeholders = _angle_placeholders(
+            option.get("dry_run_command"),
+            option.get("write_command"),
+            option.get("validation_command"),
+        )
+        return {
+            "status": (
+                "operator_inputs_required"
+                if placeholders
+                else "operator_command_placeholder_free"
+            ),
+            "required_placeholder_tokens": placeholders,
+            "unresolved_placeholder_count": len(placeholders),
+            "dry_run_command_executable_now": bool(option.get("dry_run_command"))
+            and not placeholders,
+            "write_command_executable_now": False,
+            "write_allowed_now": False,
+            "write_allowed_without_operator_review": False,
+            "dry_run_before_write_required": True,
+            "write_requires_operator_confirmation": True,
+            "validation_after_write_required": True,
+            "auto_decision_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": option.get("no_live_order_sent") is not False,
+        }
+
+    def _decision_option_command_safety_summary(option: dict[str, Any]) -> dict[str, Any]:
+        dry_tokens = _command_tokens(option.get("dry_run_command"))
+        write_tokens = _command_tokens(option.get("write_command"))
+        validation_tokens = _command_tokens(option.get("validation_command"))
+        live_flags = {
+            "--allow-live-orders",
+            "--enable-live",
+            "--enable-live-orders",
+            "--live",
+            "--live-order",
+            "--live-trading",
+            "--submit-live-order",
+        }
+        structural_blockers: list[str] = []
+        operator_input_blockers: list[str] = []
+        if not dry_tokens:
+            structural_blockers.append("dry_run_command_missing")
+        if not write_tokens:
+            structural_blockers.append("write_command_missing")
+        if not validation_tokens:
+            structural_blockers.append("validation_command_missing")
+        if dry_tokens and "--dry-run" not in dry_tokens:
+            structural_blockers.append("dry_run_command_missing_dry_run_flag")
+        if write_tokens and "--write-summary" not in write_tokens:
+            structural_blockers.append("write_command_missing_write_summary_flag")
+        if dry_tokens and "--review-report" not in dry_tokens:
+            structural_blockers.append("dry_run_command_missing_review_report")
+        if write_tokens and "--review-report" not in write_tokens:
+            structural_blockers.append("write_command_missing_review_report")
+        if dry_tokens and "--in-place" in dry_tokens and not _flag_has_value(
+            dry_tokens, "--backup-dir"
+        ):
+            structural_blockers.append("dry_run_in_place_requires_backup_dir")
+        if write_tokens and "--in-place" in write_tokens and not _flag_has_value(
+            write_tokens, "--backup-dir"
+        ):
+            structural_blockers.append("write_in_place_requires_backup_dir")
+        if dry_tokens and not _flag_has_value(dry_tokens, "--reviewed-at"):
+            structural_blockers.append("dry_run_reviewed_at_missing_or_invalid")
+        if write_tokens and not _flag_has_value(write_tokens, "--reviewed-at"):
+            structural_blockers.append("write_reviewed_at_missing_or_invalid")
+        if dry_tokens and not _flag_positive_int_value(dry_tokens, "--min-rationale-chars"):
+            structural_blockers.append("dry_run_min_rationale_chars_missing_or_invalid")
+        if write_tokens and not _flag_positive_int_value(write_tokens, "--min-rationale-chars"):
+            structural_blockers.append("write_min_rationale_chars_missing_or_invalid")
+        if dry_tokens and not _flag_positive_int_value(dry_tokens, "--min-evidence-anchors"):
+            structural_blockers.append("dry_run_min_evidence_anchors_missing_or_invalid")
+        if write_tokens and not _flag_positive_int_value(write_tokens, "--min-evidence-anchors"):
+            structural_blockers.append("write_min_evidence_anchors_missing_or_invalid")
+        if any(
+            _is_forbidden_live_flag(token, live_flags)
+            for token in [*dry_tokens, *write_tokens, *validation_tokens]
+        ):
+            structural_blockers.append("live_order_flag_present_in_operator_decision_commands")
+        if dry_tokens and _has_unresolved_placeholder(dry_tokens):
+            operator_input_blockers.append("dry_run_command_has_unresolved_placeholder")
+        if write_tokens and _has_unresolved_placeholder(write_tokens):
+            operator_input_blockers.append("write_command_has_unresolved_placeholder")
+        if validation_tokens and _has_unresolved_placeholder(validation_tokens):
+            operator_input_blockers.append("validation_command_has_unresolved_placeholder")
+        if structural_blockers:
+            status = "operator_decision_command_blocked_by_safety"
+        elif operator_input_blockers:
+            status = "operator_decision_command_waiting_for_operator_inputs"
+        else:
+            status = "operator_decision_command_ready_for_manual_dry_run"
+        return {
+            "status": status,
+            "structural_blockers": sorted(set(structural_blockers)),
+            "operator_input_blockers": sorted(set(operator_input_blockers)),
+            "dry_run_has_dry_run_flag": "--dry-run" in dry_tokens,
+            "write_has_write_summary_flag": "--write-summary" in write_tokens,
+            "dry_run_has_review_report": "--review-report" in dry_tokens,
+            "write_has_review_report": "--review-report" in write_tokens,
+            "dry_run_has_backup_dir": _flag_has_value(dry_tokens, "--backup-dir"),
+            "write_has_backup_dir": _flag_has_value(write_tokens, "--backup-dir"),
+            "dry_run_has_reviewed_at": _flag_has_value(dry_tokens, "--reviewed-at"),
+            "write_has_reviewed_at": _flag_has_value(write_tokens, "--reviewed-at"),
+            "dry_run_has_positive_min_rationale_chars": _flag_positive_int_value(
+                dry_tokens, "--min-rationale-chars"
+            ),
+            "write_has_positive_min_rationale_chars": _flag_positive_int_value(
+                write_tokens, "--min-rationale-chars"
+            ),
+            "dry_run_has_positive_min_evidence_anchors": _flag_positive_int_value(
+                dry_tokens, "--min-evidence-anchors"
+            ),
+            "write_has_positive_min_evidence_anchors": _flag_positive_int_value(
+                write_tokens, "--min-evidence-anchors"
+            ),
+            "live_flag_present": "live_order_flag_present_in_operator_decision_commands"
+            in structural_blockers,
+            "order_submission_allowed": False,
+            "no_live_order_sent": option.get("no_live_order_sent") is not False,
+        }
+
+    def _decision_command_option_card(option: dict[str, Any]) -> dict[str, Any]:
+        input_contract = _decision_option_input_contract(option)
+        command_safety = _decision_option_command_safety_summary(option)
+        return {
+            "decision": option.get("decision"),
+            "dry_run_command": option.get("dry_run_command"),
+            "write_command": option.get("write_command"),
+            "validation_command": option.get("validation_command"),
+            "operator_input_contract": input_contract,
+            "command_safety_summary": command_safety,
+            "dry_run_command_executable_now": input_contract.get(
+                "dry_run_command_executable_now"
+            )
+            and command_safety.get("status") == "operator_decision_command_ready_for_manual_dry_run",
+            "write_command_executable_now": False,
+            "write_allowed_now": False,
+            "write_allowed_without_operator_review": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": (
+                option.get("no_live_order_sent") is not False
+                and command_safety.get("no_live_order_sent") is not False
+            ),
+        }
+
+    primary_batch_decision_options = [
+        dict(option) for option in list(primary_batch_step.get("decision_options") or [])
+    ]
+    primary_batch_command_options = [
+        _decision_command_option_card(option)
+        for option in primary_batch_decision_options
+    ]
+    primary_safe_default_decision = (
+        "reject"
+        if str(primary_batch_step.get("safe_default_if_uncertain") or "").startswith("reject")
+        else primary_batch_step.get("safe_default_if_uncertain")
+    )
+    primary_safe_default_option = next(
+        (
+            option
+            for option in primary_batch_command_options
+            if option.get("decision") == primary_safe_default_decision
+        ),
+        None,
+    )
+    primary_command_placeholders = _angle_placeholders(
+        *[
+            command
+            for option in primary_batch_command_options
+            for command in (
+                option.get("dry_run_command"),
+                option.get("write_command"),
+            )
+        ],
+        primary_batch_step.get("validation_command"),
+    )
+    primary_input_contract = {
+        "status": (
+            "operator_inputs_required"
+            if primary_command_placeholders
+            else "operator_commands_placeholder_free"
+            if primary_batch_step
+            else "operator_batch_not_open"
+        ),
+        "required_placeholder_tokens": primary_command_placeholders,
+        "unresolved_placeholder_count": len(primary_command_placeholders),
+        "safe_default_dry_run_command_executable_now": bool(primary_safe_default_option)
+        and not primary_command_placeholders,
+        "safe_default_write_command_executable_now": False,
+        "write_allowed_now": False,
+        "dry_run_before_write_required": True,
+        "write_requires_operator_confirmation": True,
+        "validation_after_write_required": True,
+        "rerun_watch_after_write_required": True,
+        "operator_sequence": [
+            "choose_manual_accept_or_reject",
+            "replace_all_placeholder_tokens",
+            "verify_operator_review_file_completion_contract",
+            "run_matching_dry_run_command",
+            "inspect_dry_run_summary_and_backup_plan",
+            "run_matching_write_command_only_after_operator_confirmation",
+            "run_validation_command_for_this_step",
+            "rerun_launch_shadow_watch_before_next_review_step",
+        ],
+        "auto_decision_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": primary_batch_step.get("no_live_order_sent") is not False,
+    }
+    def _manual_batch_order_card(row: dict[str, Any]) -> dict[str, Any]:
+        decision_options = [dict(option) for option in list(row.get("decision_options") or [])]
+        command_options = [
+            _decision_command_option_card(option)
+            for option in decision_options
+        ]
+        safe_default_decision = (
+            "reject"
+            if str(row.get("safe_default_if_uncertain") or "").startswith("reject")
+            else row.get("safe_default_if_uncertain")
+        )
+        safe_default_option = next(
+            (
+                option
+                for option in command_options
+                if option.get("decision") == safe_default_decision
+            ),
+            None,
+        )
+        placeholders = _angle_placeholders(
+            *[
+                command
+                for option in command_options
+                for command in (
+                    option.get("dry_run_command"),
+                    option.get("write_command"),
+                )
+            ],
+            row.get("validation_command"),
+        )
+        input_contract = {
+            "status": (
+                "operator_inputs_required"
+                if placeholders
+                else "operator_commands_placeholder_free"
+            ),
+            "required_placeholder_tokens": placeholders,
+            "unresolved_placeholder_count": len(placeholders),
+            "safe_default_dry_run_command_executable_now": bool(safe_default_option)
+            and not placeholders,
+            "safe_default_write_command_executable_now": False,
+            "write_allowed_now": False,
+            "dry_run_before_write_required": True,
+            "write_requires_operator_confirmation": True,
+            "validation_after_write_required": True,
+            "rerun_watch_after_write_required": True,
+            "auto_decision_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": row.get("no_live_order_sent") is not False,
+        }
+        return {
+            "step": row.get("step"),
+            "review_kind": row.get("review_kind"),
+            "target_gate": row.get("target_gate"),
+            "candidate_recipe_id": row.get("candidate_recipe_id"),
+            "review_report": row.get("active_operator_review_report"),
+            "review_file_state": _operator_review_file_state(
+                row.get("active_operator_review_report")
+            ),
+            "ready_for_operator_dry_run_template": row.get(
+                "ready_for_operator_dry_run_template"
+            )
+            is True,
+            "next_manual_action": row.get("next_manual_action"),
+            "safe_default_if_uncertain": row.get("safe_default_if_uncertain"),
+            "safe_default_decision": safe_default_decision,
+            "safe_default_dry_run_command": dict(safe_default_option or {}).get(
+                "dry_run_command"
+            ),
+            "safe_default_write_command": dict(safe_default_option or {}).get(
+                "write_command"
+            ),
+            "decision_option_count": len(decision_options),
+            "decision_command_options": command_options,
+            "operator_input_contract": input_contract,
+            "validation_command": row.get("validation_command"),
+            "auto_decision_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": row.get("no_live_order_sent") is not False,
+        }
+
+    manual_batch_order_cards = [
+        _manual_batch_order_card(dict(row))
+        for row in list(manual_batch.get("batch_order") or [])[:5]
+    ]
+    batch_review_file_states = [
+        dict(row.get("review_file_state") or {})
+        for row in manual_batch_order_cards
+    ] or [
+        _operator_review_file_state(primary_batch_step.get("active_operator_review_report"))
+    ]
+    batch_review_file_states = [
+        state
+        for state in batch_review_file_states
+        if state.get("status") != "review_report_path_missing"
+    ]
+    review_file_missing_count = sum(
+        1 for state in batch_review_file_states if state.get("exists") is not True
+    )
+    review_file_unreadable_count = sum(
+        1 for state in batch_review_file_states if state.get("readable") is not True
+    )
+    review_file_template_count = sum(
+        1
+        for state in batch_review_file_states
+        if state.get("template_like_fields")
+    )
+    review_file_draft_contract_failed_count = sum(
+        1
+        for state in batch_review_file_states
+        if state.get("draft_contract_blockers_active")
+    )
+    review_file_status_failed_count = sum(
+        1
+        for state in batch_review_file_states
+        if state.get("status_blockers_active")
+    )
+    review_file_rationale_quality_failed_count = sum(
+        1
+        for state in batch_review_file_states
+        if state.get("quality_blockers_active")
+    )
+    review_file_reviewed_at_quality_failed_count = sum(
+        1
+        for state in batch_review_file_states
+        if state.get("reviewed_at_quality_blockers_active")
+    )
+    review_file_quality_failed_count = sum(
+        1
+        for state in batch_review_file_states
+        if state.get("quality_blockers_active")
+        or state.get("reviewed_at_quality_blockers_active")
+    )
+    review_file_rationale_pending_quality_count = sum(
+        1
+        for state in batch_review_file_states
+        if state.get("quality_check_pending_basic_inputs") is True
+        and state.get("quality_blockers")
+    )
+    review_file_reviewed_at_pending_quality_count = sum(
+        1
+        for state in batch_review_file_states
+        if state.get("reviewed_at_quality_check_pending_basic_inputs") is True
+        and state.get("reviewed_at_quality_blockers")
+    )
+    review_file_pending_quality_count = sum(
+        1
+        for state in batch_review_file_states
+        if (
+            state.get("quality_check_pending_basic_inputs") is True
+            and state.get("quality_blockers")
+        )
+        or (
+            state.get("reviewed_at_quality_check_pending_basic_inputs") is True
+            and state.get("reviewed_at_quality_blockers")
+        )
+    )
+    review_file_inputs_complete_count = sum(
+        1
+        for state in batch_review_file_states
+        if state.get("operator_inputs_complete") is True
+    )
+    if not batch_review_file_states:
+        review_file_rollup_status = "operator_review_files_not_open"
+        review_file_next_action = "wait_until_operator_review_files_exist"
+    elif review_file_missing_count:
+        review_file_rollup_status = "operator_review_files_missing"
+        review_file_next_action = "regenerate_or_restore_missing_operator_review_files"
+    elif review_file_unreadable_count:
+        review_file_rollup_status = "operator_review_files_unreadable"
+        review_file_next_action = "repair_unreadable_operator_review_files"
+    elif review_file_draft_contract_failed_count:
+        review_file_rollup_status = "operator_review_files_draft_contract_failed"
+        review_file_next_action = (
+            "repair_operator_review_draft_contract_before_manual_dry_run"
+        )
+    elif review_file_status_failed_count:
+        review_file_rollup_status = "operator_review_files_status_placeholder_failed"
+        review_file_next_action = (
+            "restore_operator_review_status_placeholder_before_manual_dry_run"
+        )
+    elif review_file_quality_failed_count:
+        review_file_rollup_status = "operator_review_files_quality_failed"
+        review_file_next_action = "repair_review_quality_before_manual_dry_run"
+    elif review_file_inputs_complete_count == len(batch_review_file_states):
+        review_file_rollup_status = "operator_review_files_completion_contract_ready"
+        review_file_next_action = "replace_command_placeholders_before_manual_dry_run"
+    else:
+        review_file_rollup_status = "operator_review_files_partially_complete"
+        review_file_next_action = "complete_remaining_operator_review_fields"
+    manual_batch_review_file_rollup = {
+        "status": review_file_rollup_status,
+        "next_action": review_file_next_action,
+        "file_count": len(batch_review_file_states),
+        "missing_file_count": review_file_missing_count,
+        "unreadable_file_count": review_file_unreadable_count,
+        "template_value_file_count": review_file_template_count,
+        "draft_contract_failed_file_count": review_file_draft_contract_failed_count,
+        "status_placeholder_failed_file_count": review_file_status_failed_count,
+        "draft_contract_blockers": sorted(
+            {
+                str(blocker)
+                for state in batch_review_file_states
+                for blocker in list(state.get("draft_contract_blockers_active") or [])
+            }
+        ),
+        "quality_failed_file_count": review_file_quality_failed_count,
+        "rationale_quality_failed_file_count": (
+            review_file_rationale_quality_failed_count
+        ),
+        "reviewed_at_quality_failed_file_count": (
+            review_file_reviewed_at_quality_failed_count
+        ),
+        "quality_pending_basic_input_file_count": review_file_pending_quality_count,
+        "rationale_quality_pending_basic_input_file_count": (
+            review_file_rationale_pending_quality_count
+        ),
+        "reviewed_at_quality_pending_basic_input_file_count": (
+            review_file_reviewed_at_pending_quality_count
+        ),
+        "inputs_complete_file_count": review_file_inputs_complete_count,
+        "template_like_fields": sorted(
+            {
+                str(field)
+                for state in batch_review_file_states
+                for field in list(state.get("template_like_fields") or [])
+            }
+        ),
+        "template_like_fields_are_cli_supplied": True,
+        "template_like_fields_scope": (
+            "informational_completion_cli_inputs_not_review_file_blockers"
+        ),
+        "completion_cli_supplied_fields_pending": sorted(
+            {
+                str(field)
+                for state in batch_review_file_states
+                for field in list(
+                    state.get("completion_cli_supplied_fields_pending") or []
+                )
+            }
+        ),
+        "quality_blockers": sorted(
+            {
+                str(blocker)
+                for state in batch_review_file_states
+                for blocker in list(state.get("quality_blockers_active") or [])
+                + list(state.get("reviewed_at_quality_blockers_active") or [])
+            }
+        ),
+        "pending_quality_blockers": sorted(
+            {
+                str(blocker)
+                for state in batch_review_file_states
+                for blocker in (
+                    list(state.get("quality_blockers") or [])
+                    if state.get("quality_check_pending_basic_inputs") is True
+                    else []
+                )
+                + (
+                    list(state.get("reviewed_at_quality_blockers") or [])
+                    if state.get("reviewed_at_quality_check_pending_basic_inputs")
+                    is True
+                    else []
+                )
+            }
+        ),
+        "reviewed_at_quality_blockers": sorted(
+            {
+                str(blocker)
+                for state in batch_review_file_states
+                for blocker in list(
+                    state.get("reviewed_at_quality_blockers_active") or []
+                )
+            }
+        ),
+        "pending_reviewed_at_quality_blockers": sorted(
+            {
+                str(blocker)
+                for state in batch_review_file_states
+                if state.get("reviewed_at_quality_check_pending_basic_inputs") is True
+                for blocker in list(state.get("reviewed_at_quality_blockers") or [])
+            }
+        ),
+        "write_allowed_now": False,
+        "auto_decision_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": all(
+            state.get("no_live_order_sent") is not False for state in batch_review_file_states
+        ),
+    }
+    review_file_blocks_manual_dry_run = review_file_rollup_status in {
+        "operator_review_files_missing",
+        "operator_review_files_unreadable",
+        "operator_review_files_draft_contract_failed",
+        "operator_review_files_status_placeholder_failed",
+        "operator_review_files_quality_failed",
+        "operator_review_files_partially_complete",
+    }
+    review_file_current_blocker_by_status = {
+        "operator_review_files_missing": "operator_review_files_missing",
+        "operator_review_files_unreadable": "operator_review_files_unreadable",
+        "operator_review_files_draft_contract_failed": (
+            "operator_review_file_draft_contract_failed"
+        ),
+        "operator_review_files_status_placeholder_failed": (
+            "operator_review_file_status_placeholder_failed"
+        ),
+        "operator_review_files_quality_failed": "operator_review_file_quality_failed",
+        "operator_review_files_partially_complete": "operator_review_file_inputs_required",
+    }
+    review_file_current_blocker = review_file_current_blocker_by_status.get(
+        review_file_rollup_status
+    )
+    blocked_review_file_cards = [
+        {
+            "review_report": state.get("review_report"),
+            "status": state.get("status"),
+            "missing_fields": list(state.get("missing_fields") or []),
+            "template_like_fields": list(state.get("template_like_fields") or []),
+            "draft_contract_blockers": list(state.get("draft_contract_blockers") or []),
+            "draft_contract_blockers_active": list(
+                state.get("draft_contract_blockers_active") or []
+            ),
+            "draft_contract_quality": dict(state.get("draft_contract_quality") or {}),
+            "status_blockers": list(state.get("status_blockers") or []),
+            "status_blockers_active": list(state.get("status_blockers_active") or []),
+            "status_quality": dict(state.get("status_quality") or {}),
+            "completion_cli_supplied_fields_pending": list(
+                state.get("completion_cli_supplied_fields_pending") or []
+            ),
+            "quality_blockers": list(state.get("quality_blockers") or []),
+            "quality_blockers_active": list(state.get("quality_blockers_active") or []),
+            "quality_check_pending_basic_inputs": (
+                state.get("quality_check_pending_basic_inputs") is True
+            ),
+            "reviewed_at_quality_blockers": list(
+                state.get("reviewed_at_quality_blockers") or []
+            ),
+            "reviewed_at_quality_blockers_active": list(
+                state.get("reviewed_at_quality_blockers_active") or []
+            ),
+            "reviewed_at_quality_check_pending_basic_inputs": (
+                state.get("reviewed_at_quality_check_pending_basic_inputs") is True
+            ),
+            "reviewed_at_quality": dict(state.get("reviewed_at_quality") or {}),
+            "rationale_quality": dict(state.get("rationale_quality") or {}),
+            "next_action": review_file_next_action,
+            "operator_inputs_complete": state.get("operator_inputs_complete") is True,
+            "write_allowed_now": False,
+            "auto_decision_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": state.get("no_live_order_sent") is not False,
+        }
+        for state in batch_review_file_states
+        if state.get("operator_inputs_complete") is not True
+    ]
+    primary_blocked_review_file = (
+        dict(blocked_review_file_cards[0]) if blocked_review_file_cards else None
+    )
+    manual_batch_review_file_rollup.update(
+        {
+            "review_file_blocks_manual_dry_run": review_file_blocks_manual_dry_run,
+            "review_file_manual_dry_run_blocker": review_file_current_blocker,
+            "review_file_manual_dry_run_next_action": review_file_next_action,
+            "review_file_manual_dry_run_blocker_scope": (
+                "review_file_completion_contract_only_command_placeholders_checked_separately"
+            ),
+            "blocked_file_count": len(blocked_review_file_cards),
+            "primary_blocked_review_report": dict(
+                primary_blocked_review_file or {}
+            ).get("review_report"),
+            "primary_blocked_template_like_fields": dict(
+                primary_blocked_review_file or {}
+            ).get("template_like_fields")
+            or [],
+            "primary_blocked_draft_contract_blockers": dict(
+                primary_blocked_review_file or {}
+            ).get("draft_contract_blockers_active")
+            or [],
+            "primary_blocked_status_blockers": dict(
+                primary_blocked_review_file or {}
+            ).get("status_blockers_active")
+            or [],
+            "primary_blocked_quality_blockers": dict(
+                primary_blocked_review_file or {}
+            ).get("quality_blockers_active")
+            or [],
+            "primary_blocked_pending_quality_blockers": dict(
+                primary_blocked_review_file or {}
+            ).get("quality_blockers")
+            or [],
+            "primary_blocked_reviewed_at_quality_blockers": dict(
+                primary_blocked_review_file or {}
+            ).get("reviewed_at_quality_blockers_active")
+            or [],
+            "primary_blocked_pending_reviewed_at_quality_blockers": dict(
+                primary_blocked_review_file or {}
+            ).get("reviewed_at_quality_blockers")
+            or [],
+            "blocked_review_reports": blocked_review_file_cards[:5],
+        }
+    )
+    all_batch_command_options = [
+        dict(option)
+        for row in manual_batch_order_cards
+        for option in list(row.get("decision_command_options") or [])
+    ] or primary_batch_command_options
+    batch_structural_blockers = sorted(
+        {
+            str(blocker)
+            for option in all_batch_command_options
+            for blocker in list(
+                dict(option.get("command_safety_summary") or {}).get("structural_blockers")
+                or []
+            )
+        }
+    )
+    batch_operator_input_blockers = sorted(
+        {
+            str(blocker)
+            for option in all_batch_command_options
+            for blocker in list(
+                dict(option.get("command_safety_summary") or {}).get(
+                    "operator_input_blockers"
+                )
+                or []
+            )
+        }
+    )
+    batch_live_flag_count = sum(
+        1
+        for option in all_batch_command_options
+        if dict(option.get("command_safety_summary") or {}).get("live_flag_present") is True
+    )
+    batch_ready_option_count = sum(
+        1
+        for option in all_batch_command_options
+        if dict(option.get("command_safety_summary") or {}).get("status")
+        == "operator_decision_command_ready_for_manual_dry_run"
+    )
+    batch_waiting_input_option_count = sum(
+        1
+        for option in all_batch_command_options
+        if dict(option.get("command_safety_summary") or {}).get("status")
+        == "operator_decision_command_waiting_for_operator_inputs"
+    )
+    batch_blocked_by_safety_option_count = sum(
+        1
+        for option in all_batch_command_options
+        if dict(option.get("command_safety_summary") or {}).get("status")
+        == "operator_decision_command_blocked_by_safety"
+    )
+    if not manual_batch_order_cards and not primary_batch_step:
+        batch_command_safety_status = "operator_review_batch_not_open"
+        batch_next_safety_action = "wait_until_operator_review_batch_exists"
+    elif batch_structural_blockers or batch_live_flag_count:
+        batch_command_safety_status = "operator_review_batch_blocked_by_command_safety"
+        batch_next_safety_action = "repair_structural_command_safety_before_operator_inputs"
+    elif batch_operator_input_blockers:
+        batch_command_safety_status = "operator_review_batch_waiting_for_operator_inputs"
+        batch_next_safety_action = "replace_placeholders_before_manual_dry_run"
+    elif batch_ready_option_count:
+        batch_command_safety_status = "operator_review_batch_ready_for_manual_dry_run"
+        batch_next_safety_action = "run_selected_manual_dry_run_before_write"
+    else:
+        batch_command_safety_status = "operator_review_batch_command_safety_unknown"
+        batch_next_safety_action = "inspect_operator_review_command_options"
+    batch_effective_next_safety_action = (
+        review_file_next_action
+        if (
+            not batch_structural_blockers
+            and not batch_live_flag_count
+            and not batch_operator_input_blockers
+            and review_file_blocks_manual_dry_run
+        )
+        else batch_next_safety_action
+    )
+    batch_safe_default_dry_run_executable_now = (
+        dict(primary_safe_default_option or {}).get("dry_run_command_executable_now")
+        is True
+    )
+    manual_batch_command_safety_rollup = {
+        "status": batch_command_safety_status,
+        "next_safety_action": batch_next_safety_action,
+        "effective_next_safety_action": batch_effective_next_safety_action,
+        "decision_option_count": len(all_batch_command_options),
+        "ready_for_manual_dry_run_option_count": batch_ready_option_count,
+        "effective_ready_for_manual_dry_run_option_count": (
+            0 if review_file_blocks_manual_dry_run else batch_ready_option_count
+        ),
+        "waiting_for_operator_input_option_count": batch_waiting_input_option_count,
+        "blocked_by_safety_option_count": batch_blocked_by_safety_option_count,
+        "structural_blocker_count": len(batch_structural_blockers),
+        "operator_input_blocker_count": len(batch_operator_input_blockers),
+        "live_flag_count": batch_live_flag_count,
+        "structural_blockers": batch_structural_blockers,
+        "operator_input_blockers": batch_operator_input_blockers,
+        "safe_default_decision": primary_safe_default_decision,
+        "safe_default_dry_run_executable_now": batch_safe_default_dry_run_executable_now,
+        "effective_safe_default_dry_run_executable_now": (
+            batch_safe_default_dry_run_executable_now
+            and not review_file_blocks_manual_dry_run
+        ),
+        "review_file_blocks_manual_dry_run": review_file_blocks_manual_dry_run,
+        "write_allowed_now": False,
+        "auto_decision_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": all(
+            option.get("no_live_order_sent") is not False
+            for option in all_batch_command_options
+        ),
+    }
+    batch_placeholder_tokens = [
+        str(token)
+        for option in all_batch_command_options
+        for token in list(
+            dict(option.get("operator_input_contract") or {}).get(
+                "required_placeholder_tokens"
+            )
+            or []
+        )
+    ]
+    batch_unique_placeholder_tokens = sorted(set(batch_placeholder_tokens))
+    batch_placeholder_counts = {
+        token: batch_placeholder_tokens.count(token)
+        for token in batch_unique_placeholder_tokens
+    }
+    batch_common_placeholder_tokens = [
+        token
+        for token, count in batch_placeholder_counts.items()
+        if all_batch_command_options and count == len(all_batch_command_options)
+    ]
+    batch_accept_placeholder_tokens = sorted(
+        {
+            str(token)
+            for option in all_batch_command_options
+            if option.get("decision") == "accept"
+            for token in list(
+                dict(option.get("operator_input_contract") or {}).get(
+                    "required_placeholder_tokens"
+                )
+                or []
+            )
+        }
+    )
+    batch_reject_placeholder_tokens = sorted(
+        {
+            str(token)
+            for option in all_batch_command_options
+            if option.get("decision") == "reject"
+            for token in list(
+                dict(option.get("operator_input_contract") or {}).get(
+                    "required_placeholder_tokens"
+                )
+                or []
+            )
+        }
+    )
+    command_reviewed_at_fixed = any(
+        _flag_has_value(_command_tokens(option.get("dry_run_command")), "--reviewed-at")
+        or _flag_has_value(_command_tokens(option.get("write_command")), "--reviewed-at")
+        for option in all_batch_command_options
+    )
+    completion_cli_fixed_fields = ["reviewed_at"] if command_reviewed_at_fixed else []
+    completion_cli_operator_placeholder_fields = sorted(
+        {
+            field
+            for field, marker in {
+                "reviewer": "<operator_name_or_initials>",
+                "rationale": "rationale",
+                "decision": "<accept_or_reject>",
+            }.items()
+            if any(marker in token for token in batch_unique_placeholder_tokens)
+        }
+    )
+    manual_batch_review_file_rollup.update(
+        {
+            "completion_cli_fixed_fields": completion_cli_fixed_fields,
+            "completion_cli_operator_placeholder_fields": (
+                completion_cli_operator_placeholder_fields
+            ),
+            "completion_cli_field_mapping": {
+                "reviewer": (
+                    "operator_placeholder"
+                    if "reviewer" in completion_cli_operator_placeholder_fields
+                    else "not_required_by_current_command"
+                ),
+                "rationale": (
+                    "operator_placeholder"
+                    if "rationale" in completion_cli_operator_placeholder_fields
+                    else "not_required_by_current_command"
+                ),
+                "reviewed_at": (
+                    "fixed_command_argument_now"
+                    if "reviewed_at" in completion_cli_fixed_fields
+                    else "operator_placeholder_or_missing"
+                ),
+            },
+            "operator_actionable_cli_fields": (
+                completion_cli_operator_placeholder_fields
+            ),
+        }
+    )
+    placeholder_resolution_guide: list[dict[str, Any]] = []
+    for token in batch_unique_placeholder_tokens:
+        applies_to_decisions = sorted(
+            {
+                str(option.get("decision"))
+                for option in all_batch_command_options
+                if token
+                in list(
+                    dict(option.get("operator_input_contract") or {}).get(
+                        "required_placeholder_tokens"
+                    )
+                    or []
+                )
+                and option.get("decision")
+            }
+        )
+        if token == "<operator_name_or_initials>":
+            input_type = "reviewer"
+            required_value_rule = "replace_with_operator_name_or_initials"
+            quality_requirements = [
+                "must_identify_the_human_operator_who_reviewed_the_evidence",
+                "must_not_leave_placeholder_text",
+            ]
+        elif "accept_rationale" in token:
+            input_type = "accept_rationale"
+            required_value_rule = (
+                "replace_with_accept_rationale_referencing_evidence_snapshot_and_all_concerns"
+            )
+            quality_requirements = [
+                "must_include_explicit_accept_decision",
+                "must_reference_evidence_snapshot_fingerprint_or_source_report_path",
+                "must_address_all_material_concerns_before_accepting",
+                "must_include_at_least_one_evidence_anchor",
+                "acceptance_does_not_enable_live_or_tiny_canary",
+            ]
+        elif "reject_or_hold_rationale" in token:
+            input_type = "reject_or_hold_rationale"
+            required_value_rule = (
+                "replace_with_reject_or_hold_rationale_and_next_reconsider_condition"
+            )
+            quality_requirements = [
+                "must_include_explicit_reject_or_hold_decision",
+                "must_name_the_primary_blocking_trigger",
+                "must_reference_evidence_snapshot_fingerprint_or_source_report_path",
+                "must_include_next_reconsider_condition",
+                "keeps_candidate_or_route_blocked",
+            ]
+        else:
+            input_type = "operator_placeholder"
+            required_value_rule = "replace_placeholder_with_operator_verified_value"
+            quality_requirements = [
+                "must_not_leave_placeholder_text",
+                "must_be_verified_against_the_review_packet",
+            ]
+        placeholder_resolution_guide.append(
+            {
+                "placeholder": token,
+                "input_type": input_type,
+                "applies_to_decisions": applies_to_decisions,
+                "required_value_rule": required_value_rule,
+                "minimum_rationale_chars": (
+                    DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS
+                    if "rationale" in input_type
+                    else None
+                ),
+                "minimum_evidence_anchors": (
+                    DEFAULT_OPERATOR_REVIEW_MIN_EVIDENCE_ANCHORS
+                    if "rationale" in input_type
+                    else None
+                ),
+                "quality_requirements": quality_requirements,
+                "dry_run_before_write_required": True,
+                "write_allowed_now": False,
+                "auto_decision_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            }
+        )
+    primary_placeholder_tokens_by_decision = {
+        str(option.get("decision")): list(
+            dict(option.get("operator_input_contract") or {}).get(
+                "required_placeholder_tokens"
+            )
+            or []
+        )
+        for option in primary_batch_command_options
+        if option.get("decision")
+    }
+    primary_decision_placeholder_tokens_by_decision = (
+        primary_placeholder_tokens_by_decision
+    )
+    primary_placeholder_counts_by_decision = {
+        decision: len(tokens)
+        for decision, tokens in primary_placeholder_tokens_by_decision.items()
+    }
+    primary_decision_placeholder_count_by_decision = (
+        primary_placeholder_counts_by_decision
+    )
+    primary_safe_default_selected_placeholder_tokens = (
+        primary_placeholder_tokens_by_decision.get(str(primary_safe_default_decision))
+        or []
+    )
+    primary_safe_default_placeholder_tokens = (
+        primary_safe_default_selected_placeholder_tokens
+    )
+    primary_selected_decision_min_placeholder_count = (
+        min(primary_placeholder_counts_by_decision.values())
+        if primary_placeholder_counts_by_decision
+        else 0
+    )
+    primary_selected_decision_max_placeholder_count = (
+        max(primary_placeholder_counts_by_decision.values())
+        if primary_placeholder_counts_by_decision
+        else 0
+    )
+    selected_decision_min_placeholder_count = (
+        primary_selected_decision_min_placeholder_count
+    )
+    selected_decision_max_placeholder_count = (
+        primary_selected_decision_max_placeholder_count
+    )
+    operator_only_needs_one_decision_rationale = bool(
+        batch_accept_placeholder_tokens and batch_reject_placeholder_tokens
+    )
+    batch_operator_input_rollup = {
+        "status": (
+            "operator_inputs_required"
+            if batch_unique_placeholder_tokens
+            else "operator_inputs_complete_ready_for_manual_dry_run"
+            if all_batch_command_options
+            else "operator_batch_not_open"
+        ),
+        "next_operator_action": (
+            "choose_accept_or_reject_then_replace_reviewer_and_selected_rationale_placeholders"
+            if batch_unique_placeholder_tokens
+            else "run_selected_manual_dry_run_before_write"
+            if all_batch_command_options
+            else "wait_until_operator_review_batch_exists"
+        ),
+        "unique_placeholder_count": len(batch_unique_placeholder_tokens),
+        "unique_placeholder_tokens": batch_unique_placeholder_tokens,
+        "unique_placeholder_count_scope": (
+            "union_across_all_decision_options_not_single_selected_decision"
+        ),
+        "selected_decision_placeholder_count_scope": (
+            "after_operator_chooses_accept_or_reject"
+        ),
+        "primary_placeholder_tokens_by_decision": (
+            primary_placeholder_tokens_by_decision
+        ),
+        "primary_placeholder_counts_by_decision": (
+            primary_placeholder_counts_by_decision
+        ),
+        "primary_decision_placeholder_tokens_by_decision": (
+            primary_decision_placeholder_tokens_by_decision
+        ),
+        "primary_decision_placeholder_count_by_decision": (
+            primary_decision_placeholder_count_by_decision
+        ),
+        "primary_safe_default_decision": primary_safe_default_decision,
+        "primary_safe_default_selected_placeholder_tokens": (
+            primary_safe_default_selected_placeholder_tokens
+        ),
+        "primary_safe_default_selected_placeholder_count": len(
+            primary_safe_default_selected_placeholder_tokens
+        ),
+        "primary_safe_default_placeholder_tokens": (
+            primary_safe_default_placeholder_tokens
+        ),
+        "primary_safe_default_placeholder_count": len(
+            primary_safe_default_placeholder_tokens
+        ),
+        "primary_selected_decision_min_placeholder_count": (
+            primary_selected_decision_min_placeholder_count
+        ),
+        "primary_selected_decision_max_placeholder_count": (
+            primary_selected_decision_max_placeholder_count
+        ),
+        "selected_decision_min_placeholder_count": (
+            selected_decision_min_placeholder_count
+        ),
+        "selected_decision_max_placeholder_count": (
+            selected_decision_max_placeholder_count
+        ),
+        "operator_only_needs_one_decision_rationale": (
+            operator_only_needs_one_decision_rationale
+        ),
+        "selected_decision_operator_action": (
+            "choose_one_decision_then_replace_reviewer_and_that_decision_rationale_only"
+            if operator_only_needs_one_decision_rationale
+            else "replace_placeholders_required_by_selected_decision"
+        ),
+        "placeholder_resolution_guide": placeholder_resolution_guide,
+        "common_placeholder_tokens": batch_common_placeholder_tokens,
+        "decision_specific_placeholder_tokens": [
+            token
+            for token in batch_unique_placeholder_tokens
+            if token not in batch_common_placeholder_tokens
+        ],
+        "accept_placeholder_tokens": batch_accept_placeholder_tokens,
+        "reject_placeholder_tokens": batch_reject_placeholder_tokens,
+        "reviewer_placeholder_required": "<operator_name_or_initials>"
+        in batch_unique_placeholder_tokens,
+        "accept_rationale_placeholder_count": sum(
+            1 for token in batch_accept_placeholder_tokens if "accept_rationale" in token
+        ),
+        "reject_rationale_placeholder_count": sum(
+            1
+            for token in batch_reject_placeholder_tokens
+            if "reject_or_hold_rationale" in token
+        ),
+        "reviewed_at_value": "now",
+        "completion_cli_fixed_fields": completion_cli_fixed_fields,
+        "completion_cli_operator_placeholder_fields": (
+            completion_cli_operator_placeholder_fields
+        ),
+        "completion_cli_field_mapping": manual_batch_review_file_rollup.get(
+            "completion_cli_field_mapping"
+        ),
+        "operator_actionable_cli_fields": completion_cli_operator_placeholder_fields,
+        "options_requiring_input_count": sum(
+            1
+            for option in all_batch_command_options
+            if dict(option.get("operator_input_contract") or {}).get(
+                "unresolved_placeholder_count"
+            )
+        ),
+        "batch_rows_requiring_input_count": sum(
+            1
+            for row in manual_batch_order_cards
+            if dict(row.get("operator_input_contract") or {}).get(
+                "unresolved_placeholder_count"
+            )
+        ),
+        "required_operator_fields": [
+            "decision_accept_or_reject",
+            "reviewer",
+            "rationale_with_evidence_anchor",
+        ],
+        "dry_run_before_write_required": True,
+        "write_allowed_now": False,
+        "auto_decision_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": all(
+            option.get("no_live_order_sent") is not False
+            for option in all_batch_command_options
+        ),
+    }
+    if not manual_batch_order_cards and not primary_batch_step:
+        checklist_status = "operator_review_batch_not_open"
+        checklist_current_step = "wait_for_operator_review_batch"
+        checklist_current_blocker = "operator_review_batch_missing"
+    elif batch_structural_blockers or batch_live_flag_count:
+        checklist_status = "blocked_before_operator_inputs_by_command_safety"
+        checklist_current_step = "repair_command_safety"
+        checklist_current_blocker = "structural_command_safety_blocker"
+    elif batch_unique_placeholder_tokens:
+        checklist_status = "blocked_before_manual_dry_run_waiting_for_operator_inputs"
+        checklist_current_step = "replace_placeholders"
+        checklist_current_blocker = "operator_inputs_required"
+    elif review_file_blocks_manual_dry_run:
+        checklist_status = "blocked_before_manual_dry_run_waiting_for_review_file_inputs"
+        checklist_current_step = "verify_review_file_completion_contract"
+        checklist_current_blocker = review_file_current_blocker
+    elif batch_ready_option_count:
+        checklist_status = "ready_for_selected_manual_dry_run"
+        checklist_current_step = "run_selected_dry_run"
+        checklist_current_blocker = None
+    else:
+        checklist_status = "operator_review_execution_state_unknown"
+        checklist_current_step = "inspect_operator_review_batch"
+        checklist_current_blocker = "state_unknown"
+    manual_batch_execution_checklist = {
+        "status": checklist_status,
+        "current_step": checklist_current_step,
+        "current_blocker": checklist_current_blocker,
+        "next_operator_action": (
+            batch_operator_input_rollup.get("next_operator_action")
+            if checklist_current_step == "replace_placeholders"
+            else manual_batch_review_file_rollup.get("next_action")
+            if checklist_current_step == "verify_review_file_completion_contract"
+            else batch_next_safety_action
+        ),
+        "review_file_rollup_status": review_file_rollup_status,
+        "review_file_next_action": review_file_next_action,
+        "review_file_blocks_manual_dry_run": review_file_blocks_manual_dry_run,
+        "requires_sequential_execution": True,
+        "rerun_watch_after_each_written_decision": manual_batch.get(
+            "rerun_watch_after_each_written_decision"
+        )
+        is True,
+        "dry_run_before_write_required": True,
+        "write_allowed_now": False,
+        "auto_decision_allowed": False,
+        "order_submission_allowed": False,
+        "steps": [
+            {
+                "step": 1,
+                "name": "choose_manual_accept_or_reject",
+                "status": (
+                    "waiting_for_operator_choice"
+                    if manual_batch_order_cards
+                    else "blocked_until_operator_review_batch_exists"
+                ),
+                "required": True,
+                "auto_decision_allowed": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            },
+            {
+                "step": 2,
+                "name": "replace_reviewer_and_selected_rationale_placeholders",
+                "status": (
+                    "blocked_open"
+                    if batch_unique_placeholder_tokens
+                    else "complete_or_not_required"
+                    if manual_batch_order_cards
+                    else "blocked_until_operator_review_batch_exists"
+                ),
+                "required_placeholder_tokens": batch_unique_placeholder_tokens,
+                "required_placeholder_token_scope": (
+                    "union_across_all_decision_options_not_single_selected_decision"
+                ),
+                "selected_decision_placeholder_count_scope": (
+                    "after_operator_chooses_accept_or_reject"
+                ),
+                "selected_decision_placeholder_tokens_by_decision": (
+                    primary_decision_placeholder_tokens_by_decision
+                ),
+                "selected_decision_placeholder_count_by_decision": (
+                    primary_decision_placeholder_count_by_decision
+                ),
+                "safe_default_decision": primary_safe_default_decision,
+                "safe_default_required_placeholder_tokens": (
+                    primary_safe_default_placeholder_tokens
+                ),
+                "safe_default_required_placeholder_count": len(
+                    primary_safe_default_placeholder_tokens
+                ),
+                "operator_only_needs_one_decision_rationale": (
+                    operator_only_needs_one_decision_rationale
+                ),
+                "selected_decision_operator_action": (
+                    "choose_one_decision_then_replace_reviewer_and_that_decision_rationale_only"
+                    if operator_only_needs_one_decision_rationale
+                    else "replace_placeholders_required_by_selected_decision"
+                ),
+                "required": bool(batch_unique_placeholder_tokens),
+                "write_allowed_now": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            },
+            {
+                "step": 3,
+                "name": "verify_operator_review_file_completion_contract",
+                "status": (
+                    "blocked_until_command_placeholders_replaced"
+                    if batch_unique_placeholder_tokens and review_file_blocks_manual_dry_run
+                    else "blocked_open"
+                    if review_file_blocks_manual_dry_run
+                    else "complete_or_not_required"
+                    if manual_batch_order_cards or primary_batch_step
+                    else "blocked_until_operator_review_batch_exists"
+                ),
+                "required": bool(
+                    manual_batch_order_cards
+                    or primary_batch_step
+                    or review_file_blocks_manual_dry_run
+                ),
+                "review_file_rollup_status": review_file_rollup_status,
+                "completion_cli_supplied_fields_pending": (
+                    manual_batch_review_file_rollup.get(
+                        "completion_cli_supplied_fields_pending"
+                    )
+                ),
+                "template_like_fields_are_cli_supplied": True,
+                "write_allowed_now": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            },
+            {
+                "step": 4,
+                "name": "run_selected_manual_dry_run",
+                "status": (
+                    "blocked_until_operator_inputs_complete"
+                    if batch_unique_placeholder_tokens
+                    else "blocked_until_review_file_inputs_complete"
+                    if review_file_blocks_manual_dry_run
+                    else "ready"
+                    if batch_ready_option_count
+                    else "blocked_until_command_safety_repaired"
+                    if batch_structural_blockers or batch_live_flag_count
+                    else "blocked_until_operator_review_batch_exists"
+                ),
+                "required": bool(manual_batch_order_cards or primary_batch_step),
+                "write_allowed_now": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            },
+            {
+                "step": 5,
+                "name": "inspect_dry_run_summary_and_backup_plan",
+                "status": "blocked_until_dry_run_completed",
+                "required": bool(manual_batch_order_cards or primary_batch_step),
+                "write_allowed_now": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            },
+            {
+                "step": 6,
+                "name": "run_write_summary_after_operator_confirmation",
+                "status": "blocked_until_dry_run_reviewed",
+                "required": bool(manual_batch_order_cards or primary_batch_step),
+                "write_allowed_now": False,
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            },
+            {
+                "step": 7,
+                "name": "run_validation_command_for_written_decision",
+                "status": "blocked_until_write_completed",
+                "validation_command": primary_batch_step.get("validation_command"),
+                "required": bool(manual_batch_order_cards or primary_batch_step),
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            },
+            {
+                "step": 8,
+                "name": "rerun_launch_shadow_watch_before_next_review_step",
+                "status": "blocked_until_validation_completed",
+                "required": bool(manual_batch_order_cards or primary_batch_step),
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            },
+        ],
+        "no_live_order_sent": True,
+    }
+    manual_batch_brief = {
+        "status": manual_batch.get("status"),
+        "row_count": manual_batch.get("row_count"),
+        "dry_run_ready_count": manual_batch.get("dry_run_ready_count"),
+        "contract_blocked_count": manual_batch.get("contract_blocked_count"),
+        "repair_required_count": manual_batch.get("repair_required_count"),
+        "blocked_by_operator_inputs_only": manual_batch.get(
+            "blocked_by_operator_inputs_only"
+        )
+        is True,
+        "requires_sequential_validation": manual_batch.get(
+            "requires_sequential_validation"
+        )
+        is True,
+        "rerun_watch_after_each_written_decision": manual_batch.get(
+            "rerun_watch_after_each_written_decision"
+        )
+        is True,
+        "batch_fingerprint": manual_batch.get("batch_fingerprint"),
+        "primary_next_step": {
+            "step": primary_batch_step.get("step"),
+            "review_kind": primary_batch_step.get("review_kind"),
+            "target_gate": primary_batch_step.get("target_gate"),
+            "candidate_recipe_id": primary_batch_step.get("candidate_recipe_id"),
+            "review_report": primary_batch_step.get("active_operator_review_report"),
+            "review_file_state": _operator_review_file_state(
+                primary_batch_step.get("active_operator_review_report")
+            ),
+            "next_manual_action": primary_batch_step.get("next_manual_action"),
+            "safe_default_if_uncertain": primary_batch_step.get("safe_default_if_uncertain"),
+            "contract_accept_blockers_before_write": list(
+                primary_batch_step.get("contract_accept_blockers_before_write") or []
+            ),
+            "command_plan_blockers": list(primary_batch_step.get("command_plan_blockers") or []),
+            "decision_options": [
+                dict(option).get("decision")
+                for option in primary_batch_decision_options
+            ],
+            "decision_command_options": primary_batch_command_options,
+            "safe_default_decision": primary_safe_default_decision,
+            "safe_default_dry_run_command": dict(primary_safe_default_option or {}).get(
+                "dry_run_command"
+            ),
+            "safe_default_write_command": dict(primary_safe_default_option or {}).get(
+                "write_command"
+            ),
+            "operator_input_contract": primary_input_contract,
+            "dry_run_before_write_required": True,
+            "write_requires_operator_confirmation": True,
+            "validation_command": primary_batch_step.get("validation_command"),
+            "after_write_required_actions": list(
+                primary_batch_step.get("after_write_required_actions") or []
+            ),
+            "auto_decision_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": primary_batch_step.get("no_live_order_sent") is not False,
+        }
+        if primary_batch_step
+        else None,
+        "auto_decision_allowed": False,
+        "auto_accept_allowed": False,
+        "auto_reject_allowed": False,
+        "order_submission_allowed": False,
+        "command_safety_rollup": manual_batch_command_safety_rollup,
+        "operator_input_rollup": batch_operator_input_rollup,
+        "operator_execution_checklist": manual_batch_execution_checklist,
+        "review_file_rollup": manual_batch_review_file_rollup,
+        "operator_input_contract": primary_input_contract,
+        "batch_order": manual_batch_order_cards,
+        "no_live_order_sent": manual_batch.get("no_live_order_sent") is not False,
+    }
+    forbidden_actions = list(launch_execution_matrix.get("forbidden_actions") or [])
+    forbidden_action_cards = [
+        {
+            "action_type": item.get("action_type"),
+            "allowed": item.get("allowed") is True,
+            "reason": item.get("reason"),
+            "order_submission_allowed": False,
+            "no_live_order_sent": item.get("no_live_order_sent") is not False,
+        }
+        for item in forbidden_actions[:5]
+    ]
+    launch_safety_controls = dict(latest.get("launch_safety_controls") or {})
+    safety_authority = {
+        "scope": "paper_only_shadow_watch_no_live_orders",
+        "authority": paper_only_rehearsal.get("authority")
+        or "paper_only_no_live_authority_change",
+        "paper_operational_ready": paper_only_rehearsal.get("paper_operational_ready") is True,
+        "paper_apply_allowed_now": paper_only_rehearsal.get("paper_apply_allowed_now") is True,
+        "paper_apply_is_manual_only": True,
+        "operator_decisions_are_manual_only": True,
+        "live_order_submission_allowed": False,
+        "order_submission_allowed": False,
+        "tiny_canary_allowed": False,
+        "full_live_allowed": False,
+        "auto_decision_allowed": False,
+        "auto_apply_allowed": False,
+        "forbidden_action_count": launch_execution_matrix.get("forbidden_action_count")
+        or len(forbidden_actions),
+        "forbidden_actions": forbidden_action_cards,
+        "launch_safety_controls_status": launch_safety_controls.get("overall_status"),
+        "launch_safety_controls_verified_count": launch_safety_controls.get("verified_count"),
+        "launch_safety_controls_required_count": launch_safety_controls.get("required_count"),
+        "live_violation_count": live_violation_count,
+        "no_live_order_sent": (
+            live_violation_count == 0
+            and paper_only_rehearsal.get("no_live_order_sent") is not False
+            and operator_action_digest.get("no_live_order_sent") is not False
+            and launch_execution_matrix.get("no_live_order_sent") is not False
+            and all(item.get("no_live_order_sent") is not False for item in forbidden_action_cards)
+        ),
+    }
+    launch_shadow_watch_brief = {
+        "status": status,
+        "generated_at": completed_at.isoformat(),
+        "generated_at_utc": completed_at.astimezone(UTC).isoformat(),
+        "generated_at_kst": completed_at.astimezone(KST).isoformat(),
+        "launch_status": launch.get("status"),
+        "next_blocker": launch_next_blocker_gate or None,
+        "next_action": launch_next_blocker.get("next_action"),
+        "target_observation_complete": target_reached,
+        "runtime": {
+            "status": runtime.get("status"),
+            "observed_hours": runtime.get("observed_hours"),
+            "target_hours": runtime.get("target_hours"),
+            "remaining_hours": runtime.get("remaining_hours"),
+            "progress_pct": runtime.get("progress_pct"),
+        },
+        "quote_progress": {
+            "observed_latest": quote_progress.get("observed_latest"),
+            "observed_delta": quote_progress.get("observed_delta"),
+            "progress_state": quote_progress.get("progress_state"),
+            "distinct_hours_latest": quote_progress.get("distinct_hours_latest"),
+            "distinct_hours_delta": quote_progress.get("distinct_hours_delta"),
+            "hour_progress_state": quote_progress.get("hour_progress_state"),
+        },
+        "fresh_signal": {
+            "available": fresh_signal_status.get("available") is True,
+            "seen_during_watch": fresh_signal_status.get("seen_during_watch") is True,
+            "blocker_status": fresh_signal_status.get("blocker_status"),
+            "primary_cause": fresh_signal_status.get("primary_cause"),
+            "cause_partition_status": fresh_signal_status.get("cause_partition_status"),
+            "cause_partition_interpretation": fresh_signal_status.get(
+                "cause_partition_interpretation"
+            ),
+            "signal_absence_primary_cause": fresh_signal_status.get(
+                "signal_absence_primary_cause"
+            ),
+            "signal_absence_class": fresh_signal_status.get("signal_absence_class"),
+            "signal_pipeline_issue_suspected": fresh_signal_status.get(
+                "signal_pipeline_issue_suspected"
+            ),
+            "top_no_trade_reason": top_no_trade_reason.get("reason"),
+            "top_no_trade_reason_count": top_no_trade_reason.get("count"),
+            "top_no_trade_reason_class": top_no_trade_reason.get("class"),
+            "dominant_no_trade_context_reason": dominant_no_trade_context.get("reason"),
+            "dominant_no_trade_context_quality": dominant_no_trade_context.get(
+                "probe_quality"
+            ),
+            "primary_safe_experiment": primary_safe_experiment.get("name"),
+            "fresh_signal_resolution_status": fresh_signal_resolution.get("status"),
+            "operator_fixable_now": fresh_signal_resolution.get("operator_fixable_now")
+            is True,
+            "no_signal_resolution_status": no_signal_resolution_summary.get("status"),
+            "no_signal_root_cause": no_signal_resolution_summary.get("root_cause"),
+        },
+        "no_signal_resolution": {
+            "status": no_signal_resolution_summary.get("status"),
+            "root_cause": no_signal_resolution_summary.get("root_cause"),
+            "runtime_wait_is_healthy_sparse_cadence": no_signal_resolution_summary.get(
+                "runtime_wait_is_healthy_sparse_cadence"
+            )
+            is True,
+            "signal_pipeline_issue_suspected": no_signal_resolution_summary.get(
+                "signal_pipeline_issue_suspected"
+            )
+            is True,
+            "strategy_candidate_redesign_required": no_signal_resolution_summary.get(
+                "strategy_candidate_redesign_required"
+            )
+            is True,
+            "dominant_probe_quality_blocker": no_signal_resolution_summary.get(
+                "dominant_probe_quality_blocker"
+            ),
+            "candidate_design_seed_context_count": no_signal_resolution_summary.get(
+                "candidate_design_seed_context_count"
+            ),
+            "candidate_design_blueprint_status": no_signal_resolution_summary.get(
+                "candidate_design_blueprint_status"
+            ),
+            "candidate_design_blueprint_count": no_signal_resolution_summary.get(
+                "candidate_design_blueprint_count"
+            ),
+            "closest_rejected_candidate": no_signal_resolution_summary.get(
+                "closest_rejected_candidate"
+            ),
+            "blocked_reasons": list(no_signal_resolution_summary.get("blocked_reasons") or []),
+            "required_next_candidate_trade_like_events_delta_min": (
+                no_signal_resolution_summary.get(
+                    "required_next_candidate_trade_like_events_delta_min"
+                )
+            ),
+            "required_next_candidate_probe_add_delta_min": no_signal_resolution_summary.get(
+                "required_next_candidate_probe_add_delta_min"
+            ),
+            "safe_next_action": no_signal_resolution_summary.get("safe_next_action"),
+            "operator_fixable_now": no_signal_resolution_summary.get("operator_fixable_now")
+            is True,
+            "force_signal_allowed": False,
+            "runtime_filter_change_allowed": False,
+            "paper_or_live_promotion_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": no_signal_resolution_summary.get("no_live_order_sent")
+            is not False,
+        },
+        "paper_apply": {
+            "available": paper_apply_status.get("available") is True,
+            "seen_during_watch": paper_apply_status.get("seen_during_watch") is True,
+            "allowed_now": paper_apply_status.get("allowed_now") is True,
+            "rehearsal_available_now": paper_apply_status.get("rehearsal_available_now") is True,
+            "remaining_gates": list(paper_apply_status.get("remaining_gates") or []),
+        },
+        "paper_only_rehearsal": {
+            "status": paper_only_rehearsal.get("status"),
+            "system_ready": paper_only_rehearsal.get("system_ready") is True,
+            "armed": paper_only_rehearsal.get("armed") is True,
+            "remaining_gates": list(paper_only_rehearsal.get("remaining_gates") or []),
+            "max_substitution_ready": paper_only_rehearsal.get("max_substitution_ready") is True,
+        },
+        "execution_parity": {
+            "status": execution_parity_status_summary.get("status"),
+            "eligible_journal_rows": execution_parity_status_summary.get("eligible_journal_rows"),
+            "sample_count": execution_parity_status_summary.get("sample_count"),
+            "missing_samples": execution_parity_status_summary.get("missing_samples"),
+            "estimated_future_paper_apply_events_needed": execution_parity_status_summary.get(
+                "estimated_future_paper_apply_events_needed"
+            ),
+            "eta_completion_kst": execution_parity_status_summary.get("estimated_completion_kst"),
+            "paper_apply_available_now": execution_parity_status_summary.get(
+                "paper_apply_available_now"
+            )
+            is True,
+            "non_substitutable": execution_parity_status_summary.get("non_substitutable") is True,
+        },
+        "signal_monitor": {
+            "status": signal_monitor.get("status"),
+            "interval_seconds": signal_monitor.get("interval_seconds"),
+            "recommended_monitor_interval_minutes": signal_monitor.get(
+                "recommended_monitor_interval_minutes"
+            ),
+            "capped_to_fresh_signal_window": signal_monitor.get(
+                "capped_to_fresh_signal_window"
+            )
+            is True,
+            "next_monitor_after_utc": signal_monitor.get("next_monitor_after_utc"),
+            "next_monitor_after_kst": signal_monitor.get("next_monitor_after_kst"),
+            "raw_next_monitor_after_utc": signal_monitor.get("raw_next_monitor_after_utc"),
+            "raw_next_monitor_after_kst": signal_monitor.get("raw_next_monitor_after_kst"),
+            "covered_next_recheck_after_utc": signal_monitor.get(
+                "covered_next_recheck_after_utc"
+            ),
+            "covered_next_recheck_after_kst": signal_monitor.get(
+                "covered_next_recheck_after_kst"
+            ),
+            "next_monitor_retimestampted_after_current_iteration": signal_monitor.get(
+                "next_monitor_retimestampted_after_current_iteration"
+            )
+            is True,
+        },
+        "actionability": {
+            "status": actionability_partition.get("status"),
+            "dependency_aware_status": actionability_partition.get("dependency_aware_status"),
+            "tracks_status": dict(actionability_partition.get("tracks") or {}).get("status"),
+            "primary_launch_wait_gate": actionability_partition.get("primary_launch_wait_gate"),
+            "primary_human_action_gate": actionability_partition.get(
+                "primary_human_action_gate"
+            ),
+            "no_safe_auto_command_now": actionability_partition.get(
+                "no_safe_auto_command_now"
+            ),
+            "validation_redesign_blocked_count": dict(
+                dict(actionability_partition.get("tracks") or {}).get(
+                    "blocked_by_validation_redesign"
+                )
+                or {}
+            ).get("count"),
+            "primary_validation_redesign_problem": dict(
+                dict(actionability_partition.get("tracks") or {}).get(
+                    "blocked_by_validation_redesign"
+                )
+                or {}
+            ).get("primary_problem_id"),
+            "manual_now_count": actionability_partition.get("manual_now_count"),
+            "run_now_without_operator_count": actionability_partition.get(
+                "run_now_without_operator_count"
+            ),
+            "signal_wait_count": actionability_partition.get("signal_wait_count"),
+            "time_wait_count": actionability_partition.get("time_wait_count"),
+            "dependency_blocked_count": actionability_partition.get("dependency_blocked_count"),
+            "dependency_unlock_plan_status": actionability_partition.get(
+                "dependency_unlock_plan_status"
+            ),
+            "primary_dependency_unlock_gate": actionability_partition.get(
+                "primary_dependency_unlock_gate"
+            ),
+            "recommended_parallel_next_moves": list(
+                actionability_partition.get("recommended_parallel_next_moves") or []
+            ),
+        },
+        "validation_redesign_runbook": {
+            "status": validation_redesign_runbook.get("status"),
+            "primary_problem_id": validation_redesign_runbook.get("primary_problem_id"),
+            "primary_downstream_failure": validation_redesign_runbook.get(
+                "primary_downstream_failure"
+            ),
+            "next_candidate_design_contract_status": validation_redesign_runbook.get(
+                "next_candidate_design_contract_status"
+            ),
+            "required_design_properties": dict(
+                validation_redesign_runbook.get("required_design_properties") or {}
+            ),
+            "current_failed_family_summary": dict(
+                validation_redesign_runbook.get("current_failed_family_summary") or {}
+            ),
+            "strict_activity_revalidation": {
+                "status": strict_activity_revalidation_summary.get("status"),
+                "report_count": strict_activity_revalidation_summary.get("report_count"),
+                "blocked_count": strict_activity_revalidation_summary.get("blocked_count"),
+                "passed_count": strict_activity_revalidation_summary.get("passed_count"),
+                "strict_gate_present_count": strict_activity_revalidation_summary.get(
+                    "strict_gate_present_count"
+                ),
+                "strict_gate_missing_count": strict_activity_revalidation_summary.get(
+                    "strict_gate_missing_count"
+                ),
+                "safety_blocked_count": strict_activity_revalidation_summary.get(
+                    "safety_blocked_count"
+                ),
+                "legacy_promoted_reports_blocked": strict_activity_revalidation_summary.get(
+                    "strict_revalidated_promoted_legacy_reports_blocked"
+                )
+                is True,
+                "closest_activity_contract_candidate": dict(
+                    strict_activity_revalidation_summary.get(
+                        "closest_activity_contract_candidate"
+                    )
+                    or {}
+                ).get("candidate_name"),
+                "closest_candidate_eligibility_status": dict(
+                    strict_activity_revalidation_summary.get(
+                        "closest_activity_contract_candidate"
+                    )
+                    or {}
+                ).get("eligibility_status"),
+                "closest_candidate_why_not_default": dict(
+                    strict_activity_revalidation_summary.get(
+                        "closest_activity_contract_candidate"
+                    )
+                    or {}
+                ).get("why_not_default_candidate"),
+                "no_live_order_sent": strict_activity_revalidation_summary.get(
+                    "no_live_order_sent"
+                )
+                is not False,
+            },
+            "redesign_hypothesis": validation_redesign_runbook.get("redesign_hypothesis"),
+            "candidate_redesign_work_order": {
+                "status": dict(
+                    validation_redesign_runbook.get("candidate_redesign_work_order") or {}
+                ).get("status"),
+                "objective": dict(
+                    validation_redesign_runbook.get("candidate_redesign_work_order") or {}
+                ).get("objective"),
+                "current_no_signal_driver": dict(
+                    validation_redesign_runbook.get("candidate_redesign_work_order") or {}
+                ).get("current_no_signal_driver"),
+                "primary_safe_experiment_family": dict(
+                    validation_redesign_runbook.get("candidate_redesign_work_order") or {}
+                ).get("primary_safe_experiment_family"),
+                "dominant_probe_quality_blocker": dict(
+                    validation_redesign_runbook.get("candidate_redesign_work_order") or {}
+                ).get("dominant_probe_quality_blocker"),
+                "candidate_design_seed_context_count": len(
+                    list(
+                        dict(
+                            validation_redesign_runbook.get(
+                                "candidate_redesign_work_order"
+                            )
+                            or {}
+                        ).get("candidate_design_seed_contexts")
+                        or []
+                    )
+                ),
+                "candidate_design_blueprint_status": dict(
+                    validation_redesign_runbook.get("candidate_redesign_work_order") or {}
+                ).get("candidate_design_blueprint_status"),
+                "candidate_design_blueprint_count": dict(
+                    validation_redesign_runbook.get("candidate_redesign_work_order") or {}
+                ).get("candidate_design_blueprint_count"),
+                "closest_rejected_candidate": dict(
+                    dict(
+                        validation_redesign_runbook.get("candidate_redesign_work_order")
+                        or {}
+                    ).get("closest_rejected_candidate")
+                    or {}
+                ).get("candidate_name"),
+                "constraint_status": dict(
+                    dict(
+                        validation_redesign_runbook.get("candidate_redesign_work_order")
+                        or {}
+                    ).get("next_candidate_design_constraints")
+                    or {}
+                ).get("status"),
+                "must_increase_trade_like_events_delta_min": dict(
+                    dict(
+                        validation_redesign_runbook.get("candidate_redesign_work_order")
+                        or {}
+                    ).get("next_candidate_design_constraints")
+                    or {}
+                ).get("must_increase_trade_like_events_delta_min"),
+                "order_submission_allowed": False,
+                "no_live_order_sent": dict(
+                    validation_redesign_runbook.get("candidate_redesign_work_order") or {}
+                ).get("no_live_order_sent")
+                is not False,
+            },
+            "safe_next_steps": list(validation_redesign_runbook.get("safe_next_steps") or []),
+            "validation_command_template_count": validation_redesign_runbook.get(
+                "validation_command_template_count"
+            ),
+            "required_placeholder_count": validation_redesign_runbook.get(
+                "required_placeholder_count"
+            ),
+            "templates_are_validation_only": dict(
+                validation_redesign_runbook.get("command_template_safety") or {}
+            ).get("validation_only")
+            is True,
+            "requires_operator_supplied_candidate_reports": dict(
+                validation_redesign_runbook.get("command_template_safety") or {}
+            ).get("requires_operator_supplied_candidate_reports")
+            is True,
+            "runtime_filter_change_allowed": validation_redesign_runbook.get(
+                "runtime_filter_change_allowed"
+            )
+            is True,
+            "paper_or_live_promotion_allowed": validation_redesign_runbook.get(
+                "paper_or_live_promotion_allowed"
+            )
+            is True,
+            "order_submission_allowed": False,
+            "no_live_order_sent": validation_redesign_runbook.get("no_live_order_sent")
+            is not False,
+        },
+        "operator_next_actions": {
+            "status": operator_action_digest.get("status"),
+            "primary_next": operator_action_digest.get("primary_next"),
+            "operator_action_scope": operator_action_digest.get("operator_action_scope"),
+            "primary_launch_wait_gate": operator_action_digest.get(
+                "primary_launch_wait_gate"
+            ),
+            "primary_human_action_gate": operator_action_digest.get(
+                "primary_human_action_gate"
+            ),
+            "no_safe_auto_command_now": operator_action_digest.get(
+                "no_safe_auto_command_now"
+            ),
+            "primary_material_event": operator_action_digest.get("primary_material_event"),
+            "primary_material_gate": operator_action_digest.get("primary_material_gate"),
+            "primary_material_ready_now": operator_action_digest.get(
+                "primary_material_ready_now"
+            )
+            is True,
+            "primary_material_wait_minutes": operator_action_digest.get(
+                "primary_material_wait_minutes"
+            ),
+            "manual_decision_count": operator_action_digest.get("manual_decision_count"),
+            "safe_auto_command_count": operator_action_digest.get("safe_auto_command_count"),
+            "primary_manual_action": operator_action_digest.get("primary_manual_action"),
+            "primary_manual_gate": operator_action_digest.get("primary_manual_gate"),
+            "primary_manual_review_report": operator_action_digest.get(
+                "primary_manual_review_report"
+            ),
+            "primary_manual_required_fields": list(
+                operator_action_digest.get("primary_manual_required_fields") or []
+            ),
+            "primary_signal_wait": dict(operator_action_digest.get("primary_signal_wait") or {}),
+            "primary_time_wait": dict(operator_action_digest.get("primary_time_wait") or {}),
+            "primary_dependency_blocked": dict(
+                operator_action_digest.get("primary_dependency_blocked") or {}
+            ),
+            "manual_action_cards": manual_action_cards,
+            "wait_action_cards": wait_action_cards,
+            "dependency_blocked_cards": dependency_blocked_cards,
+            "manual_batch": manual_batch_brief,
+            "operator_decisions_are_manual_only": True,
+            "paper_apply_is_manual_only": True,
+            "auto_decision_allowed": False,
+            "auto_apply_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": (
+                operator_action_digest.get("no_live_order_sent") is not False
+                and all(item.get("no_live_order_sent") is not False for item in manual_action_cards)
+                and all(item.get("no_live_order_sent") is not False for item in wait_action_cards)
+                and all(
+                    item.get("no_live_order_sent") is not False
+                    for item in dependency_blocked_cards
+                )
+            ),
+        },
+        "dependency_unlock_plan": {
+            "status": dependency_unlock_plan.get("status"),
+            "step_count": dependency_unlock_plan.get("step_count"),
+            "manual_unlock_step_count": dependency_unlock_plan.get(
+                "manual_unlock_step_count"
+            ),
+            "realtime_unlock_step_count": dependency_unlock_plan.get(
+                "realtime_unlock_step_count"
+            ),
+            "primary_gate": dict(dependency_unlock_plan.get("primary_unlock_step") or {}).get(
+                "gate"
+            ),
+            "primary_realtime_gate": dict(
+                dependency_unlock_plan.get("primary_realtime_unlock_step") or {}
+            ).get("gate"),
+            "first_paper_row_missing_dependencies": list(
+                dependency_unlock_plan.get("first_paper_row_missing_dependencies") or []
+            ),
+            "first_paper_row_requires_all_dependencies": dependency_unlock_plan.get(
+                "first_paper_row_requires_all_dependencies"
+            )
+            is True,
+        },
+        "launch_blockers": {
+            "waiting_count": launch_blocker_priority_summary.get("waiting_blocker_count"),
+            "dependency_blocked_count": launch_blocker_priority_summary.get(
+                "dependency_blocked_count"
+            ),
+            "non_substitutable_problem_count": launch_blocker_priority_summary.get(
+                "non_substitutable_problem_count"
+            ),
+            "non_substitutable_wait_count": launch_blocker_priority_summary.get(
+                "non_substitutable_wait_blocker_count"
+            ),
+            "primary_waiting": dict(
+                launch_blocker_priority_summary.get("primary_waiting_blocker") or {}
+            ).get("id"),
+            "primary_dependency": dict(
+                launch_blocker_priority_summary.get("primary_dependency_blocker") or {}
+            ).get("id"),
+        },
+        "safety_authority": safety_authority,
+        "no_live_order_sent": live_violation_count == 0,
+    }
     return {
         "status": status,
         "started_at": started_at.isoformat(),
@@ -3667,6 +18831,33 @@ def _build_watch_summary(
             current_completed_at=completed_at,
             interval_seconds=interval_seconds,
         ),
+        "paper_only_rehearsal": paper_only_rehearsal,
+        "latest_launch_state": latest_launch_state,
+        "launch_shadow_watch_brief": launch_shadow_watch_brief,
+        "launch_status": latest_launch_state.get("launch_status"),
+        "launch_next_blocker": latest_launch_state.get("next_blocker_gate"),
+        "next_blocker": latest_launch_state.get("next_blocker_gate"),
+        "quote_progress": quote_progress,
+        "fresh_signal": fresh_signal_status,
+        "fresh_signal_status": fresh_signal_status,
+        "fresh_signal_available": fresh_signal_status.get("seen_during_watch"),
+        "signal_blocker_cause_partition": signal_blocker_cause_partition,
+        "signal_blocker_cause_partition_status": signal_blocker_cause_partition.get(
+            "status"
+        ),
+        "signal_absence_primary_cause": fresh_signal_status.get(
+            "signal_absence_primary_cause"
+        ),
+        "signal_absence_class": fresh_signal_status.get("signal_absence_class"),
+        "signal_pipeline_issue_suspected": fresh_signal_status.get(
+            "signal_pipeline_issue_suspected"
+        ),
+        "paper_apply": paper_apply_status,
+        "paper_apply_status": paper_apply_status,
+        "paper_apply_available": paper_apply_status.get("seen_during_watch"),
+        "signal_monitor": signal_monitor,
+        "fresh_signal_blocker_diagnostics": fresh_signal_blocker_diagnostics,
+        "no_signal_resolution_summary": no_signal_resolution_summary,
         "signal_monitor_cadence_alignment": signal_monitor_cadence_alignment,
         "pre_run_quote_window_wait_plan": dict(pre_run_wait_plan or {}),
         "pre_run_quote_window_capture_outcome": pre_run_capture_outcome,
@@ -3699,11 +18890,49 @@ def _build_watch_summary(
         "microstructure_watch": micro,
         "canary_risk_caps_config": risk_caps,
         "operator_handoff": operator_handoff,
-        "execution_parity_eta_plan": dict(operator_handoff.get("execution_parity_eta_plan") or {}),
+        "operator_work_queue": operator_work_queue,
+        "operator_review_handoff_summary": operator_review_handoff_summary,
+        "launch_blocker_priority_summary": launch_blocker_priority_summary,
+        "remaining_work_closure_summary": remaining_work_closure_summary,
+        "dependency_lanes": dict(remaining_work_closure_summary.get("dependency_lanes") or {}),
+        "actionability_partition": dict(
+            remaining_work_closure_summary.get("actionability_partition") or {}
+        ),
+        "actionability_tracks": dict(
+            remaining_work_closure_summary.get("actionability_tracks")
+            or dict(remaining_work_closure_summary.get("actionability_partition") or {}).get(
+                "tracks"
+            )
+            or {}
+        ),
+        "first_fresh_signal_paper_apply_runbook": first_fresh_signal_paper_apply_runbook,
+        "operator_review_decision_aid": operator_review_decision_aid,
+        "operator_review_resolution_plan": operator_review_resolution_plan,
+        "operator_review_readiness_matrix": dict(
+            operator_review_resolution_plan.get("readiness_matrix") or {}
+        ),
+        "validation_redesign_runbook": validation_redesign_runbook,
+        "strict_activity_revalidation_summary": strict_activity_revalidation_summary,
+        "manual_batch_handoff": dict(
+            operator_review_resolution_plan.get("manual_batch_handoff") or {}
+        ),
+        "operator_action_digest": operator_action_digest,
+        "gate_substitution_digest": gate_substitution_digest,
+        "gate_eta_digest": gate_eta_digest,
+        "launch_progress_scorecard": launch_progress_scorecard,
+        "launch_execution_matrix": launch_execution_matrix,
+        "daily_quote_checkpoint_summary": daily_quote_checkpoint_summary,
+        "next_material_progress_plan": next_material_progress_plan,
+        "scheduled_command_projection": scheduled_command_projection,
+        "command_consistency_audit": command_consistency_audit,
+        "execution_parity_collection_plan": execution_parity_collection_plan,
+        "execution_parity_eta_plan": execution_parity_eta,
+        "execution_parity_status_summary": execution_parity_status_summary,
         "recent_paper_apply_result": dict(recent_paper_apply or {}),
         "recent_paper_bridge_review": dict(recent_paper_review or {}),
         "recent_paper_apply_parity_review": parity_review_state,
         "meta_router_promotion_gate": dict(recent_meta_router_promotion_gate or {}),
+        "unresolved_problem_register": unresolved_problem_register,
         "blocker_resolution_plan": blocker_resolution_plan,
         "safe_next_action_plan": safe_next_action_plan,
         "launch_week_plan": _launch_week_plan(latest),
@@ -3833,6 +19062,8 @@ def run_launch_shadow_watch(
             pre_run_wait_incident_log=pre_run_wait_incident_log,
             pre_run_market_data_refresh=pre_run_market_data_refresh,
             runtime_start_plan=runtime_start_plan,
+            previous_payload=previous_payload,
+            evidence_report_root=evidence_root,
         )
         _write_json(report_dir / "latest.json", summary)
         _write_markdown(report_dir / "latest.md", summary)
@@ -3868,6 +19099,8 @@ def run_launch_shadow_watch(
         pre_run_wait_incident_log=pre_run_wait_incident_log,
         pre_run_market_data_refresh=pre_run_market_data_refresh,
         runtime_start_plan=runtime_start_plan,
+        previous_payload=previous_payload,
+        evidence_report_root=evidence_root,
     )
 
 

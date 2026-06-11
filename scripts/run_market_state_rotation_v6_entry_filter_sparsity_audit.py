@@ -189,6 +189,66 @@ def _annotate_contexts(top_no_trade_contexts: dict[str, Any]) -> list[dict[str, 
     return [_parse_context_key(key, count, total) for key, count in rows]
 
 
+def _context_distribution_source(hotspots: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    for field in ("no_trade_contexts", "all_no_trade_contexts", "top_no_trade_contexts"):
+        contexts = dict(hotspots.get(field) or {})
+        if contexts:
+            return contexts, field
+    return {}, "missing"
+
+
+def _weighted_value_counts(
+    rows: list[dict[str, Any]],
+    field: str,
+    *,
+    class_filter: str | None = None,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        if class_filter is not None and row.get("class") != class_filter:
+            continue
+        value = str(row.get(field) or "unknown")
+        counts[value] = counts.get(value, 0) + max(0, _int(row.get("count")))
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _probe_quality_reason_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    priority = {
+        "score_too_low": 0,
+        "edge_too_low": 1,
+        "reason_stack_too_thin": 2,
+        "extension_too_late": 3,
+        "mc04_broad_relaxation_rejected_by_365d_probe": 4,
+        "execution_context_not_normal": 5,
+        "not_with_trend": 6,
+        "regime_not_directional_trend": 7,
+    }
+    for row in rows:
+        if row.get("class") != "soft_candidate":
+            continue
+        row_count = max(0, _int(row.get("count")))
+        for reason in list(row.get("probe_quality_reasons") or []):
+            key = str(reason)
+            counts[key] = counts.get(key, 0) + row_count
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], priority.get(item[0], 999), item[0])))
+
+
+def _top_contexts_by_quality(
+    rows: list[dict[str, Any]],
+    quality: str,
+    *,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    selected = [
+        dict(row)
+        for row in rows
+        if str(row.get("probe_quality") or "") == quality
+    ]
+    selected.sort(key=lambda row: (-_int(row.get("count")), str(row.get("context") or "")))
+    return selected[: max(1, int(limit))]
+
+
 def build_entry_filter_sparsity_audit(
     cycle_report: dict[str, Any],
     *,
@@ -200,7 +260,12 @@ def build_entry_filter_sparsity_audit(
     cadence = dict(bridge.get("event_cadence") or {})
     reasons = _annotate_reasons(list(bridge.get("top_no_trade_reasons") or []))
     hotspots = dict(bridge.get("no_trade_hotspots") or {})
-    top_contexts = _annotate_contexts(dict(hotspots.get("top_no_trade_contexts") or {}))
+    raw_contexts, context_source = _context_distribution_source(hotspots)
+    context_rows = _annotate_contexts(raw_contexts)
+    display_contexts = context_rows[:24]
+    top_context_sample = _annotate_contexts(dict(hotspots.get("top_no_trade_contexts") or {}))
+    context_observed_count = sum(max(0, _int(item.get("count"))) for item in context_rows)
+    top_context_observed_count = sum(max(0, _int(item.get("count"))) for item in top_context_sample)
     latest_add_age_days = _float(cadence.get("latest_add_age_hours")) / 24.0
     expected_days_per_add = _float(cadence.get("expected_days_per_add"))
     add_wait_multiple = (
@@ -211,28 +276,61 @@ def build_entry_filter_sparsity_audit(
     soft_count = sum(item["count"] for item in reasons if item["class"] == "soft_candidate")
     hard_count = sum(item["count"] for item in reasons if item["class"] == "hard_guard")
     context_count = sum(item["count"] for item in reasons if item["class"] == "context_guard")
-    soft_context_count = sum(item["count"] for item in top_contexts if item["class"] == "soft_candidate")
+    soft_context_count = sum(item["count"] for item in context_rows if item["class"] == "soft_candidate")
     hour_open_soft_context_count = sum(
         item["count"]
-        for item in top_contexts
+        for item in context_rows
         if item["class"] == "soft_candidate" and item["execution_context"] == "hour_open"
     )
     normal_soft_context_count = sum(
         item["count"]
-        for item in top_contexts
+        for item in context_rows
         if item["class"] == "soft_candidate" and item["execution_context"] == "normal"
     )
     probe_quality_counts: dict[str, int] = {}
-    for item in top_contexts:
+    for item in context_rows:
         quality = str(item.get("probe_quality") or "unknown")
         probe_quality_counts[quality] = probe_quality_counts.get(quality, 0) + int(item.get("count") or 0)
     eligible_probe_context_count = int(probe_quality_counts.get("eligible_mc12_quality_gated_micro_probe") or 0)
     rejected_soft_context_count = int(probe_quality_counts.get("reject_low_quality_soft_context") or 0)
+    probe_quality_blocker_counts = _probe_quality_reason_counts(context_rows)
+    dominant_probe_quality_blocker = next(iter(probe_quality_blocker_counts), None)
+    soft_bucket_counts = {
+        "score_bucket": _weighted_value_counts(context_rows, "score_bucket", class_filter="soft_candidate"),
+        "edge_bucket": _weighted_value_counts(context_rows, "edge_bucket", class_filter="soft_candidate"),
+        "reason_stack_bucket": _weighted_value_counts(
+            context_rows,
+            "reason_stack_bucket",
+            class_filter="soft_candidate",
+        ),
+        "extension_bucket": _weighted_value_counts(
+            context_rows,
+            "extension_bucket",
+            class_filter="soft_candidate",
+        ),
+    }
+    eligible_probe_contexts = _top_contexts_by_quality(
+        context_rows,
+        "eligible_mc12_quality_gated_micro_probe",
+    )
+    top_rejected_soft_contexts = _top_contexts_by_quality(
+        context_rows,
+        "reject_low_quality_soft_context",
+    )
     mc04_soft_context_count = sum(
         item["count"]
-        for item in top_contexts
+        for item in context_rows
         if item["class"] == "soft_candidate" and item["reason"] == "MC04_no_clear_first_touch"
     )
+    context_distribution_scope = {
+        "source_field": context_source,
+        "uses_full_bucketed_context_distribution": context_source in {"no_trade_contexts", "all_no_trade_contexts"},
+        "available_context_key_count": len(context_rows),
+        "available_context_observed_count": context_observed_count,
+        "top_context_sample_key_count": len(top_context_sample),
+        "top_context_sample_observed_count": top_context_observed_count,
+        "limited_to_top_context_sample": context_source == "top_no_trade_contexts",
+    }
     review_required = (
         str(cadence.get("add_wait_state") or "") == "latest_add_age_above_recent_median_gap"
         and (add_wait_multiple is None or add_wait_multiple >= 2.0)
@@ -276,6 +374,42 @@ def build_entry_filter_sparsity_audit(
             ],
         },
     ]
+    resolution_plan = {
+        "status": (
+            "mc12_quality_gated_probe_candidates_available"
+            if eligible_probe_context_count > 0
+            else "blocked_no_quality_probe_context"
+            if soft_count > max(hard_count, context_count)
+            else "blocked_by_hard_or_context_guards"
+        ),
+        "operator_fixable_now": False,
+        "runtime_filter_change_allowed": False,
+        "dominant_probe_quality_blocker": dominant_probe_quality_blocker,
+        "probe_quality_blocker_counts": probe_quality_blocker_counts,
+        "context_distribution_scope": context_distribution_scope,
+        "eligible_probe_context_count": eligible_probe_context_count,
+        "rejected_soft_context_count": rejected_soft_context_count,
+        "safe_next_step": (
+            "run_mc12_quality_gated_near_miss_walk_forward_before_any_runtime_change"
+            if eligible_probe_context_count > 0
+            else "do_not_relax_current_low_quality_contexts_collect_more_market_or_offline_evidence"
+        ),
+        "candidate_policy": {
+            "mc12_low_confluence": (
+                "paper_or_walk_forward_micro_probe_only_when_score_edge_stack_and_extension_constraints_pass"
+            ),
+            "mc04_no_clear_first_touch": "observation_only_no_broad_relaxation",
+            "hard_guards": "never_relax_from_sparsity_audit",
+        },
+        "unsafe_shortcuts": [
+            "lower_confluence_floor_for_score_0_3_contexts",
+            "allow_edge_0_1_or_stack_0_1_contexts",
+            "allow_late_extension_ext_1_5_2_5_without_pullback_confirmation",
+            "promote_mc04_first_touch_without_new_365d_evidence",
+            "enable_live_orders_from_this_audit",
+        ],
+        "no_live_order_sent": True,
+    }
     return {
         "generated_at": generated_at.isoformat(),
         "status": status,
@@ -299,7 +433,7 @@ def build_entry_filter_sparsity_audit(
         },
         "top_no_trade_reasons": reasons,
         "no_trade_hotspots": {
-            "top_contexts": top_contexts,
+            "top_contexts": display_contexts,
             "reason_side_counts": dict(hotspots.get("no_trade_reason_side_counts") or {}),
             "reason_regime_counts": dict(hotspots.get("no_trade_reason_regime_counts") or {}),
             "context_class_counts": {
@@ -308,6 +442,11 @@ def build_entry_filter_sparsity_audit(
                 "soft_candidate_hour_open": hour_open_soft_context_count,
                 **{f"probe_quality_{key}": value for key, value in sorted(probe_quality_counts.items())},
             },
+            "probe_quality_reason_counts": probe_quality_blocker_counts,
+            "soft_bucket_counts": soft_bucket_counts,
+            "eligible_probe_contexts": eligible_probe_contexts,
+            "top_rejected_soft_contexts": top_rejected_soft_contexts,
+            "context_distribution_scope": context_distribution_scope,
         },
         "diagnosis": {
             "primary_issue": (
@@ -315,11 +454,14 @@ def build_entry_filter_sparsity_audit(
                 if soft_count > max(hard_count, context_count)
                 else "hard_or_context_guards_are_dominating_current_no_trade_distribution"
             ),
-            "primary_context": top_contexts[0] if top_contexts else None,
+            "primary_context": context_rows[0] if context_rows else None,
             "soft_contexts_are_mostly_normal_time": normal_soft_context_count > hour_open_soft_context_count,
             "dominant_soft_contexts_are_low_quality": rejected_soft_context_count > eligible_probe_context_count,
             "eligible_probe_context_count": eligible_probe_context_count,
             "rejected_soft_context_count": rejected_soft_context_count,
+            "dominant_probe_quality_blocker": dominant_probe_quality_blocker,
+            "probe_quality_blocker_counts": probe_quality_blocker_counts,
+            "context_distribution_scope": context_distribution_scope,
             "mc04_soft_context_count": mc04_soft_context_count,
             "mc04_broad_relaxation_rejected": mc04_soft_context_count > 0,
             "recommended_experiment_scope": (
@@ -330,6 +472,7 @@ def build_entry_filter_sparsity_audit(
             "latest_add_signal_is_late_vs_expected": bool(review_required),
             "paper_fill_collection_will_remain_slow_without_fresh_adds": True,
         },
+        "resolution_plan": resolution_plan,
         "experiment_backlog": experiment_backlog,
         "non_negotiables": [
             "do_not_relax_hard_guards_directly",
@@ -343,6 +486,9 @@ def build_entry_filter_sparsity_audit(
 def _markdown(report: dict[str, Any]) -> str:
     cadence = dict(report.get("cadence") or {})
     reasons = list(report.get("top_no_trade_reasons") or [])
+    diagnosis = dict(report.get("diagnosis") or {})
+    resolution = dict(report.get("resolution_plan") or {})
+    hotspots = dict(report.get("no_trade_hotspots") or {})
     lines = [
         "# Market State Rotation V6 Entry Filter Sparsity Audit",
         "",
@@ -352,6 +498,13 @@ def _markdown(report: dict[str, Any]) -> str:
         f"- expected_days_per_add: `{cadence.get('expected_days_per_add')}`",
         f"- latest_add_age_days: `{cadence.get('latest_add_age_days')}`",
         f"- add_wait_state: `{cadence.get('add_wait_state')}`",
+        f"- dominant_probe_quality_blocker: `{diagnosis.get('dominant_probe_quality_blocker')}`",
+        f"- eligible_probe_context_count: `{diagnosis.get('eligible_probe_context_count')}`",
+        f"- rejected_soft_context_count: `{diagnosis.get('rejected_soft_context_count')}`",
+        f"- resolution_status: `{resolution.get('status')}`",
+        f"- resolution_safe_next_step: `{resolution.get('safe_next_step')}`",
+        f"- runtime_filter_change_allowed: `{resolution.get('runtime_filter_change_allowed')}`",
+        f"- probe_quality_blocker_counts: `{hotspots.get('probe_quality_reason_counts')}`",
         "",
         "## Top No-Trade Reasons",
     ]

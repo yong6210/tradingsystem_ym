@@ -19,6 +19,7 @@ from scripts.run_market_state_rotation_v6_paper_bridge_tick import (
     _execution_parity_preflight,
     _freshness_status,
     _plan_from_add_event,
+    _remove_snapshot_plan_precheck,
     _runtime_event_cadence,
     _top_no_trade_reasons,
     build_runtime_decision_snapshot,
@@ -181,6 +182,10 @@ def test_runtime_snapshot_uses_runtime_load_window_and_fresh_cache_contract(monk
             "recent_events": [event],
             "event_counts": {"no_trade_MC12_low_confluence": 3},
             "event_diagnostics": {
+                "no_trade_contexts": {
+                    "MC12_low_confluence|long|with_trend|uptrend|normal|score_0-3|edge_1-2|stack_1-2|ext_0-0.75|break_0-0.1": 3,
+                    "MC12_low_confluence|short|with_trend|downtrend|normal|score_4-5|edge_2-4|stack_2-4|ext_0.75-1.5|break_0-0.1": 2,
+                },
                 "top_no_trade_contexts": {
                     "MC12_low_confluence|long|with_trend|uptrend|normal|score_0-3|edge_1-2|stack_1-2|ext_0-0.75|break_0-0.1": 3,
                 },
@@ -230,6 +235,7 @@ def test_runtime_snapshot_uses_runtime_load_window_and_fresh_cache_contract(monk
     assert snapshot["blockers"] == []
     assert snapshot["no_trade_hotspots"]["no_trade_reason_side_counts"] == {"MC12_low_confluence|long": 3}
     assert list(snapshot["no_trade_hotspots"]["top_no_trade_contexts"].values()) == [3]
+    assert list(snapshot["no_trade_hotspots"]["no_trade_contexts"].values()) == [3, 2]
 
 
 def test_runtime_snapshot_reports_resolved_settings_base_url_when_source_is_blank(monkeypatch) -> None:
@@ -336,6 +342,56 @@ def test_paper_bridge_tick_blocks_apply_before_db_write_when_parity_preflight_fa
     assert report["result"]["status"] == "blocked_before_db_write"
     assert "source_event_ts_missing_or_invalid" in report["execution_parity_preflight"]["blockers"]
     assert "source_event_price_missing_or_invalid" in report["execution_parity_preflight"]["blockers"]
+    assert report["pre_apply_backup"] is None
+    assert report["no_live_order_sent"] is True
+
+
+def test_remove_snapshot_plan_precheck_requires_open_paper_plan(monkeypatch) -> None:
+    now = datetime.now(UTC)
+    event = {**_add_event(now, side="short"), "action": "remove"}
+    monkeypatch.setattr(bridge, "_open_v6_paper_plans", lambda *_args, **_kwargs: [])
+
+    precheck = _remove_snapshot_plan_precheck(db=object(), snapshot=_snapshot(event))
+
+    assert precheck["status"] == "no_open_v6_paper_plan"
+    assert precheck["direction"] == "short"
+    assert precheck["open_plan_count"] == 0
+    assert precheck["no_live_order_sent"] is True
+
+
+def test_paper_bridge_tick_dry_run_blocks_remove_without_open_paper_plan(monkeypatch, tmp_path) -> None:
+    source_report = tmp_path / "source.json"
+    source_report.write_text('{"top_results": [{"config": {"model_id": "x"}}]}', encoding="utf-8")
+    now = datetime.now(UTC)
+    remove_event = {**_add_event(now, side="short"), "action": "remove"}
+
+    class FakeSession:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        bridge,
+        "build_runtime_decision_snapshot",
+        lambda **_kwargs: _snapshot(remove_event),
+    )
+    monkeypatch.setattr(bridge, "init_db", lambda: None)
+    monkeypatch.setattr(bridge, "SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(bridge, "_open_v6_paper_plans", lambda *_args, **_kwargs: [])
+
+    report = run_paper_bridge_tick(
+        source_backtest_report_path=source_report,
+        apply_paper=False,
+        pre_apply_backup_dir=tmp_path / "backup",
+        require_pre_apply_backup=True,
+    )
+
+    assert report["overall_status"] == "dry_run_no_open_v6_paper_plan"
+    assert report["remove_plan_precheck"]["status"] == "no_open_v6_paper_plan"
+    assert report["result"]["status"] == "blocked_before_db_write"
+    assert report["result"]["reason"] == "remove_signal_has_no_open_v6_paper_plan"
     assert report["pre_apply_backup"] is None
     assert report["no_live_order_sent"] is True
 

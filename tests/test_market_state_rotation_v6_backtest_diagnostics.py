@@ -554,6 +554,48 @@ def test_profitable_low_activity_does_not_count_as_too_few_orders() -> None:
     assert diagnostics["diagnostic_thresholds"]["profitable_low_activity_min_add_events"] == 9
 
 
+def test_profitable_low_activity_allows_one_two_trade_day() -> None:
+    events = []
+    add_plan = [
+        ("2024-08-21T00:00:00+00:00", "long", 80.0),
+        ("2024-08-27T03:00:00+00:00", "short", 90.0),
+        ("2024-09-03T06:00:00+00:00", "short", 120.0),
+        ("2024-09-03T18:00:00+00:00", "long", 110.0),
+        ("2024-09-09T08:00:00+00:00", "long", 150.0),
+        ("2024-09-16T17:00:00+00:00", "short", 95.0),
+        ("2024-09-24T21:00:00+00:00", "short", 85.0),
+        ("2024-10-02T23:00:00+00:00", "long", 130.0),
+        ("2024-10-16T10:00:00+00:00", "short", 110.0),
+        ("2024-10-29T14:00:00+00:00", "short", 125.0),
+    ]
+    for ts, side, pnl in add_plan:
+        events.append({"action": "add", "side": side, "role": "base", "ts": ts})
+        events.append(
+            {
+                "action": "remove",
+                "side": side,
+                "role": "base",
+                "ts": ts,
+                "pnl_usd_units": pnl,
+            }
+        )
+
+    diagnostics = _event_diagnostics(
+        events=events,
+        counters=Counter({"reaction_inventory_trims": 6, "turnover_events": 24}),
+        exposure_side_bars=Counter({"flat": 900, "long": 60, "short": 40}),
+        exposure_bars=1000,
+        total_months=4,
+        config=_diagnostic_config(),
+    )
+
+    assert diagnostics["health"] == "ok"
+    assert diagnostics["flags"] == []
+    assert diagnostics["sample_mode"] == "profitable_low_activity"
+    assert diagnostics["max_day_add_share"] == 0.2
+    assert diagnostics["diagnostic_thresholds"]["profitable_low_activity_max_day_share"] == 0.2
+
+
 def test_losing_low_activity_still_reports_too_few_orders() -> None:
     events = []
     add_plan = [
@@ -632,6 +674,7 @@ def test_event_diagnostics_reports_no_trade_context_hotspots() -> None:
             "score_3-5|edge_0-1|stack_1-2|ext_0-0.75|break_0-0.1"
         ): 7,
     }
+    assert diagnostics["no_trade_contexts"] == diagnostics["top_no_trade_contexts"]
     assert diagnostics["no_trade_reason_side_counts"] == {
         "MC12_low_confluence|long": 11,
         "MC04_no_clear_first_touch|flat": 7,
@@ -960,6 +1003,35 @@ def test_capacity_structure_context_reports_available_scale_in_capacity() -> Non
     assert context["unit_account_exposure"] == 3.333333
     assert context["base_add_account_exposure"] == 3.333333
     assert context["battle_add_ratio"] == 0.3333
+
+
+def test_capacity_structure_context_reports_single_unit_winner_refill() -> None:
+    events = [
+        {
+            "action": "add",
+            "side": "long",
+            "role": "base" if idx < 10 else "chase",
+            "ts": f"2025-05-{idx + 1:02d}T00:00:00+00:00",
+        }
+        for idx in range(13)
+    ]
+
+    diagnostics = _event_diagnostics(
+        events=events,
+        counters=Counter({"base_adds": 10, "chase_adds": 3, "winner_pyramid_adds": 1}),
+        exposure_side_bars=Counter({"long": 1000}),
+        exposure_bars=1000,
+        total_months=4,
+        config=_diagnostic_config(max_possible_units=1.0, base_add_units=1.0, max_account_exposure=10.0),
+    )
+
+    context = diagnostics["capacity_structure_context"]
+    assert diagnostics["ratios"]["battle_capacity_saturated"]
+    assert context["status"] == "single_unit_winner_refill_active"
+    assert not context["scale_in_capacity_available"]
+    assert context["winner_pyramid_add_count"] == 1
+    assert context["winner_pyramid_add_ratio"] == 0.0769
+    assert context["capacity_after_first_base_units"] == 0.0
 
 
 def test_trend_aligned_side_concentration_is_not_side_imbalance() -> None:

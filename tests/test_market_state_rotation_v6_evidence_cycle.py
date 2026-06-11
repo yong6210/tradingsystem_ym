@@ -1050,6 +1050,15 @@ def test_evidence_cycle_writes_collection_entry_and_drought_bundle(monkeypatch, 
     assert report["signal_wait_plan"]["cadence_lag_level"] == (
         "severe_signal_drought_but_entry_quality_gate_still_blocks_relaxation"
     )
+    assert report["signal_wait_plan"]["signal_absence_primary_cause"] == (
+        "severe_signal_drought_but_quality_gate_blocks_forced_entry"
+    )
+    assert report["signal_wait_plan"]["signal_pipeline_issue_suspected"] is False
+    assert report["signal_wait_plan"]["signal_absence_diagnosis"]["class"] == (
+        "quality_gate_protected_signal_drought"
+    )
+    assert report["signal_wait_plan"]["signal_absence_diagnosis"]["force_signal_allowed"] is False
+    assert report["signal_wait_plan"]["signal_absence_diagnosis"]["runtime_filter_relaxation_allowed"] is False
     assert report["signal_wait_plan"]["recommended_monitor_interval_minutes"] == 15
     assert "--max-signal-age-minutes 15" in report["signal_wait_plan"]["command"]
     assert "--refresh-market-data-before-run" in report["signal_wait_plan"]["command"]
@@ -1102,6 +1111,48 @@ def test_evidence_cycle_writes_collection_entry_and_drought_bundle(monkeypatch, 
     ]
     assert report["entry_quality"]["eligible_probe_context_count"] == 0
     assert report["entry_quality"]["mc04_broad_relaxation_rejected"] is True
+    assert report["entry_quality"]["dominant_primary_issue"] == (
+        "soft_confluence_filters_are_dominating_current_no_trade_distribution"
+    )
+    assert report["entry_quality"]["reason_class_counts"]["soft_candidate"] == 180
+    assert report["entry_quality"]["top_no_trade_reasons"][0]["reason"] == "no_trade_MC12_low_confluence"
+    assert report["entry_quality"]["dominant_no_trade_context"]["reason"] == "MC12_low_confluence"
+    assert report["entry_quality"]["probe_quality_reason_counts"]["score_too_low"] == 100
+    assert report["entry_quality"]["eligible_probe_contexts"] == []
+    assert report["entry_quality"]["top_rejected_soft_contexts"][0]["reason"] == (
+        "MC12_low_confluence"
+    )
+    assert report["entry_quality"]["top_rejected_soft_contexts"][0]["count"] == 60
+    assert report["entry_quality"]["entry_filter_context_distribution_scope"][
+        "source_field"
+    ] == "top_no_trade_contexts"
+    assert report["entry_quality"]["operator_interpretation"]["status"] == (
+        "wait_for_new_walk_forward_evidence_before_relaxing_soft_contexts"
+    )
+    assert report["entry_quality"]["safe_experiment_backlog"][0]["name"] == (
+        "quality_gated_mc12_near_miss_micro_probe"
+    )
+    assert report["entry_quality"]["entry_filter_resolution_plan"]["status"] == (
+        "blocked_no_quality_probe_context"
+    )
+    assert report["entry_quality"]["entry_filter_resolution_plan"][
+        "dominant_probe_quality_blocker"
+    ] == "score_too_low"
+    assert report["fresh_signal_resolution_plan"]["status"] == "no_safe_runtime_fix_available"
+    assert report["fresh_signal_resolution_plan"]["operator_fixable_now"] is False
+    assert report["fresh_signal_resolution_plan"]["mc12_low_confluence_count"] == 100
+    assert report["fresh_signal_resolution_plan"]["mc04_no_clear_first_touch_count"] == 80
+    assert report["fresh_signal_resolution_plan"]["root_causes"][0]["cause"] == (
+        "current_signal_missing_or_stale"
+    )
+    assert "force_current_fresh_signal" in report["fresh_signal_resolution_plan"]["unsafe_shortcuts"]
+    assert (
+        report["entry_quality"]["fresh_signal_resolution_plan"]
+        == report["fresh_signal_resolution_plan"]
+    )
+    assert report["fresh_signal_resolution_plan"]["entry_filter_resolution_plan"][
+        "dominant_probe_quality_blocker"
+    ] == "score_too_low"
     assert "do_not_relax_current_low_quality_soft_contexts" in report["next_actions"]
     assert "continue_quote_shadow_collection_until_samples_calendar_days_and_distinct_hours_pass" in report["next_actions"]
     assert "run_quote_shadow_capture_on_current_valid_quote_window" in report["next_actions"]
@@ -1114,6 +1165,410 @@ def test_evidence_cycle_writes_collection_entry_and_drought_bundle(monkeypatch, 
     assert (report_dir / "signal_drought_audit" / "market_state_rotation_v6_signal_drought_audit.json").exists()
     assert (report_dir / "execution_parity_journal" / "market_state_rotation_v6_execution_parity_journal.json").exists()
     assert (report_dir / "execution_parity_journal" / "market_state_rotation_v6_execution_parity_contract.json").exists()
+
+
+def test_evidence_cycle_reports_blocked_mc12_probe_full_walk_forward_gate(monkeypatch, tmp_path) -> None:
+    def fake_collection_cycle(**kwargs):
+        report_dir = Path(kwargs["report_dir"])
+        report_dir.mkdir(parents=True, exist_ok=True)
+        payload = _cycle_report()
+        payload["bridge"]["no_trade_hotspots"]["no_trade_contexts"] = {
+            "MC12_low_confluence|long|with_trend|uptrend|normal|score_3-5|edge_2-4|stack_2-4|ext_0.75-1.5|break_0-0.1": 8,
+            "MC12_low_confluence|short|with_trend|downtrend|normal|score_3-5|edge_2-4|stack_2-4|ext_0.75-1.5|break_0-0.1": 7,
+        }
+        (report_dir / CYCLE_REPORT_NAME).write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(evidence, "run_collection_cycle", fake_collection_cycle)
+    gate_report = tmp_path / "full_wfo_gate.json"
+    gate_report.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-06-09T10:27:06+00:00",
+                "overall_status": "blocked",
+                "promotion_type": "blocked",
+                "decision": "do_not_promote_to_paper_or_live",
+                "failed_checks": [
+                    "compounded_return_degradation",
+                    "drawdown_worsening",
+                    "positive_fold_count_degradation",
+                ],
+                "deltas": {
+                    "compounded_oos_return_pct": -23270.146,
+                    "max_fold_drawdown_pct": 15.7602,
+                    "positive_fold_count": -3,
+                },
+                "activity_regression_summary": {
+                    "signal_sparsity_fix_failed": True,
+                    "probe_activity_regressed": True,
+                    "trade_like_activity_regressed": True,
+                    "probe_add_delta": -19,
+                    "trade_like_events_delta": -3,
+                    "diagnostic_labels": [
+                        "candidate_reduces_probe_activity_instead_of_solving_signal_sparsity"
+                    ],
+                },
+                "fold_delta_summary": {
+                    "matched_fold_count": 16,
+                    "return_degraded_fold_count": 16,
+                    "positive_fold_lost_count": 3,
+                    "drawdown_gate_violation_fold_ids": ["1", "4", "12"],
+                    "worst_return_degradation_fold": {"fold": "4", "return_delta_pct": -44.4624},
+                },
+                "failure_details": {
+                    "compounded_return_degradation": {
+                        "worst_fold": {"fold": "4", "return_delta_pct": -44.4624}
+                    }
+                },
+                "root_cause_hints": [
+                    "candidate_underperforms_baseline_in_every_matched_oos_fold",
+                    "candidate_turns_previously_positive_oos_folds_negative",
+                ],
+                "no_live_order_sent": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_evidence_cycle(
+        source_backtest_report_path=tmp_path / "source.json",
+        stress_report_path=tmp_path / "stress.json",
+        walk_forward_report_path=tmp_path / "walk.json",
+        manual_evidence_path=tmp_path / "manual.json",
+        sample_jsonl=tmp_path / "sample.jsonl",
+        report_dir=tmp_path / "evidence",
+        entry_probe_full_walk_forward_gate_report_path=gate_report,
+    )
+
+    probe_validation = report["entry_quality"]["entry_probe_validation"]
+    assert report["entry_quality"]["eligible_probe_context_count"] == 15
+    assert len(report["entry_quality"]["eligible_probe_contexts"]) == 2
+    assert report["entry_quality"]["eligible_probe_contexts"][0]["reason"] == (
+        "MC12_low_confluence"
+    )
+    assert report["entry_quality"]["eligible_probe_contexts"][0]["count"] == 8
+    assert report["entry_quality"]["entry_filter_context_distribution_scope"][
+        "uses_full_bucketed_context_distribution"
+    ] is True
+    assert probe_validation["status"] == "blocked_full_walk_forward_gate"
+    assert probe_validation["paper_or_live_promotion_allowed"] is False
+    assert probe_validation["runtime_filter_change_allowed"] is False
+    assert probe_validation["failed_checks"] == [
+        "compounded_return_degradation",
+        "drawdown_worsening",
+        "positive_fold_count_degradation",
+    ]
+    assert probe_validation["fold_delta_summary"]["return_degraded_fold_count"] == 16
+    assert probe_validation["activity_regression_summary"]["signal_sparsity_fix_failed"] is True
+    assert probe_validation["failure_details"]["compounded_return_degradation"]["worst_fold"]["fold"] == "4"
+    assert (
+        "candidate_underperforms_baseline_in_every_matched_oos_fold"
+        in probe_validation["root_cause_hints"]
+    )
+    resolution = report["fresh_signal_resolution_plan"]
+    assert resolution["status"] == "offline_probe_candidate_failed_full_walk_forward_gate"
+    assert resolution["operator_fixable_now"] is False
+    assert resolution["entry_probe_validation"]["status"] == "blocked_full_walk_forward_gate"
+    assert any(
+        item["cause"] == "quality_gated_mc12_probe_failed_full_walk_forward_gate"
+        for item in resolution["root_causes"]
+    )
+    full_wfo_cause = next(
+        item
+        for item in resolution["root_causes"]
+        if item["cause"] == "quality_gated_mc12_probe_failed_full_walk_forward_gate"
+    )
+    assert full_wfo_cause["evidence"]["fold_delta_summary"]["worst_return_degradation_fold"]["fold"] == "4"
+    assert full_wfo_cause["evidence"]["activity_regression_summary"]["probe_add_delta"] == -19
+    assert "candidate_turns_previously_positive_oos_folds_negative" in full_wfo_cause["evidence"][
+        "root_cause_hints"
+    ]
+    assert "do_not_promote_quality_gated_mc12_probe_after_failed_full_walk_forward_gate" in resolution[
+        "safe_actions"
+    ]
+    assert report["report_paths"]["entry_probe_full_walk_forward_gate"] == str(gate_report)
+    assert report["no_live_order_sent"] is True
+
+
+def test_entry_probe_promotion_gate_accepts_paper_candidate_with_stale_blockers() -> None:
+    probe_validation = evidence._entry_probe_validation_state(
+        {
+            "generated_at": "2026-06-09T15:09:41+00:00",
+            "overall_status": "candidate_promoted",
+            "active_full_walk_forward_candidate_count": 0,
+            "active_full_walk_forward_candidate_names": [],
+            "paper_evidence_candidate_count": 1,
+            "paper_evidence_candidate_names": ["seeded_mc12_downtrend_react200_mdd20"],
+            "downstream_blocked_candidate_names": [
+                "quality_gated_mc12_near_miss_micro_probe"
+            ],
+            "resolution_plan": {
+                "status": "full_walk_forward_candidate_passed_paper_evidence_collection_only",
+                "safe_next_step": (
+                    "collect_paper_evidence_only_after_fresh_signal_and_operator_review"
+                ),
+                "paper_evidence_collection_allowed": True,
+                "paper_evidence_candidate_count": 1,
+                "paper_evidence_candidate_names": [
+                    "seeded_mc12_downtrend_react200_mdd20"
+                ],
+            },
+            "downstream_full_walk_forward_gates": [
+                {
+                    "status": "blocked_full_walk_forward_gate",
+                    "candidate_name": "quality_gated_mc12_near_miss_micro_probe",
+                    "overall_status": "blocked",
+                    "decision": "do_not_promote_to_paper_or_live",
+                    "failed_checks": ["drawdown_worsening"],
+                },
+                {
+                    "status": "paper_evidence_collection_candidate_available",
+                    "candidate_name": "seeded_mc12_downtrend_react200_mdd20",
+                    "overall_status": "return_improving",
+                    "decision": "eligible_for_paper_evidence_collection_only",
+                    "failed_checks": [],
+                    "deltas": {
+                        "compounded_oos_return_pct": 723.1,
+                        "max_fold_drawdown_pct": -1.19,
+                    },
+                    "activity_regression_summary": {
+                        "signal_sparsity_fix_failed": False,
+                        "probe_add_delta": 17,
+                        "trade_like_events_delta": 206,
+                    },
+                },
+            ],
+            "no_live_order_sent": True,
+        },
+        input_report="promotion_gate.json",
+    )
+
+    assert probe_validation["status"] == "paper_evidence_collection_candidate_available"
+    assert probe_validation["paper_evidence_collection_allowed"] is True
+    assert probe_validation["paper_evidence_candidate_count"] == 1
+    assert probe_validation["paper_evidence_candidate_names"] == [
+        "seeded_mc12_downtrend_react200_mdd20"
+    ]
+    assert probe_validation["active_full_walk_forward_candidate_count"] == 0
+    assert probe_validation["downstream_blocked_candidate_names"] == [
+        "quality_gated_mc12_near_miss_micro_probe"
+    ]
+    assert probe_validation["safe_next_step"] == (
+        "collect_paper_evidence_only_after_fresh_signal_and_operator_review"
+    )
+    assert probe_validation["primary_downstream_failure"] is None
+    assert probe_validation["no_live_order_sent"] is True
+
+
+def test_evidence_cycle_reports_promotion_gate_when_all_mc12_probe_candidates_block(monkeypatch, tmp_path) -> None:
+    def fake_collection_cycle(**kwargs):
+        report_dir = Path(kwargs["report_dir"])
+        report_dir.mkdir(parents=True, exist_ok=True)
+        payload = _cycle_report()
+        payload["bridge"]["no_trade_hotspots"]["no_trade_contexts"] = {
+            "MC12_low_confluence|long|with_trend|uptrend|normal|score_3-5|edge_2-4|stack_2-4|ext_0.75-1.5|break_0-0.1": 8,
+            "MC12_low_confluence|short|with_trend|downtrend|normal|score_3-5|edge_2-4|stack_2-4|ext_0.75-1.5|break_0-0.1": 7,
+        }
+        (report_dir / CYCLE_REPORT_NAME).write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(evidence, "run_collection_cycle", fake_collection_cycle)
+    gate_report = tmp_path / "near_miss_promotion_gate.json"
+    gate_report.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-06-09T11:32:20+00:00",
+                "overall_status": "full_walk_forward_candidate_blocked",
+                "candidate_count": 18,
+                "promoted_candidate_count": 4,
+                "active_full_walk_forward_candidate_count": 0,
+                "active_full_walk_forward_candidate_names": [],
+                "downstream_blocked_candidate_names": [
+                    "quality_gated_mc12_near_miss_micro_probe",
+                    "quality_gated_mc12_score5_edge2_stack2_ext10_cooldown144",
+                ],
+                "resolution_plan": {
+                    "status": "blocked_by_full_walk_forward_gate",
+                    "safe_next_step": "inspect_failed_full_walk_forward_gate_before_any_new_near_miss_recipe",
+                },
+                "downstream_activity_inversion_summary": {
+                    "available": True,
+                    "candidate_count": 2,
+                    "candidate_names": [
+                        "quality_gated_mc12_near_miss_micro_probe",
+                        "quality_gated_mc12_score5_edge2_stack2_ext10_cooldown144",
+                    ],
+                    "diagnostic_label": (
+                        "short_window_smoke_activity_increase_inverts_to_full_wfo_activity_regression"
+                    ),
+                },
+                "next_candidate_design_contract": {
+                    "status": "required_before_next_near_miss_family",
+                    "reason": "current_short_window_activity_gains_do_not_survive_full_walk_forward",
+                    "minimum_full_walk_forward_requirements": {
+                        "probe_add_delta_min": 0,
+                        "trade_like_events_delta_min": 0,
+                        "activity_inversion_allowed": False,
+                    },
+                    "required_validation_sequence": [
+                        "full_walk_forward_gate_must_run_with_require_nonregressing_activity"
+                    ],
+                    "runtime_filter_change_allowed": False,
+                    "paper_or_live_promotion_allowed": False,
+                    "no_live_order_sent": True,
+                },
+                "downstream_full_walk_forward_gates": [
+                    {
+                        "status": "blocked_full_walk_forward_gate",
+                        "candidate_name": "quality_gated_mc12_near_miss_micro_probe",
+                        "overall_status": "blocked",
+                        "decision": "do_not_promote_to_paper_or_live",
+                        "failed_checks": ["compounded_return_degradation"],
+                        "deltas": {"compounded_oos_return_pct": -22454.192},
+                        "activity_regression_summary": {
+                            "signal_sparsity_fix_failed": True,
+                            "probe_activity_regressed": True,
+                            "trade_like_activity_regressed": True,
+                            "probe_add_delta": -19,
+                            "probe_add_delta_pct": -15.0794,
+                            "trade_like_events_delta": -3,
+                            "trade_like_events_delta_pct": -1.0067,
+                            "diagnostic_labels": [
+                                "candidate_reduces_probe_activity_instead_of_solving_signal_sparsity"
+                            ],
+                        },
+                        "fold_delta_summary": {
+                            "return_degraded_fold_count": 16,
+                            "positive_fold_lost_count": 3,
+                            "drawdown_gate_violation_fold_ids": ["1", "4", "12"],
+                        },
+                        "failure_details": {
+                            "compounded_return_degradation": {
+                                "worst_fold": {"fold": "4", "return_delta_pct": -44.4624}
+                            }
+                        },
+                        "root_cause_hints": [
+                            "candidate_underperforms_baseline_in_every_matched_oos_fold"
+                        ],
+                    },
+                    {
+                        "status": "blocked_full_walk_forward_gate",
+                        "candidate_name": "quality_gated_mc12_score5_edge2_stack2_ext10_cooldown144",
+                        "overall_status": "blocked",
+                        "decision": "do_not_promote_to_paper_or_live",
+                        "failed_checks": ["drawdown_worsening", "positive_fold_count_degradation"],
+                        "deltas": {"compounded_oos_return_pct": -22607.9546},
+                        "activity_regression_summary": {
+                            "signal_sparsity_fix_failed": True,
+                            "probe_activity_regressed": True,
+                            "trade_like_activity_regressed": True,
+                            "probe_add_delta": -92,
+                            "probe_add_delta_pct": -73.0159,
+                            "trade_like_events_delta": -75,
+                            "trade_like_events_delta_pct": -25.1678,
+                            "diagnostic_labels": [
+                                "candidate_reduces_probe_activity_instead_of_solving_signal_sparsity",
+                                "candidate_reduces_total_trade_like_events",
+                            ],
+                        },
+                        "fold_delta_summary": {
+                            "return_degraded_fold_count": 15,
+                            "positive_fold_lost_count": 3,
+                            "drawdown_gate_violation_fold_ids": ["1", "2", "4", "12"],
+                        },
+                        "root_cause_hints": [
+                            "candidate_turns_previously_positive_oos_folds_negative"
+                        ],
+                    },
+                ],
+                "no_live_order_sent": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_evidence_cycle(
+        source_backtest_report_path=tmp_path / "source.json",
+        stress_report_path=tmp_path / "stress.json",
+        walk_forward_report_path=tmp_path / "walk.json",
+        manual_evidence_path=tmp_path / "manual.json",
+        sample_jsonl=tmp_path / "sample.jsonl",
+        report_dir=tmp_path / "evidence",
+        entry_probe_full_walk_forward_gate_report_path=gate_report,
+    )
+
+    probe_validation = report["entry_quality"]["entry_probe_validation"]
+    assert probe_validation["status"] == "blocked_full_walk_forward_gate"
+    assert probe_validation["promotion_gate_available"] is True
+    assert probe_validation["active_full_walk_forward_candidate_count"] == 0
+    assert probe_validation["downstream_blocked_candidate_names"] == [
+        "quality_gated_mc12_near_miss_micro_probe",
+        "quality_gated_mc12_score5_edge2_stack2_ext10_cooldown144",
+    ]
+    assert probe_validation["failed_checks"] == [
+        "compounded_return_degradation",
+        "drawdown_worsening",
+        "positive_fold_count_degradation",
+    ]
+    assert probe_validation["fold_delta_summary"]["blocked_candidate_count"] == 2
+    assert probe_validation["activity_regression_summary"]["signal_sparsity_fix_failed_candidate_count"] == 2
+    assert probe_validation["activity_regression_summary"]["signal_sparsity_fix_failed_candidate_names"] == [
+        "quality_gated_mc12_near_miss_micro_probe",
+        "quality_gated_mc12_score5_edge2_stack2_ext10_cooldown144",
+    ]
+    assert (
+        "candidate_reduces_probe_activity_instead_of_solving_signal_sparsity"
+        in probe_validation["activity_regression_summary"]["diagnostic_labels"]
+    )
+    assert probe_validation["activity_inversion_summary"]["available"] is True
+    assert probe_validation["next_candidate_design_contract"]["status"] == (
+        "required_before_next_near_miss_family"
+    )
+    assert probe_validation["next_candidate_design_contract"]["minimum_full_walk_forward_requirements"][
+        "activity_inversion_allowed"
+    ] is False
+    assert probe_validation["next_candidate_design_contract"]["minimum_full_walk_forward_requirements"][
+        "trade_like_events_delta_min"
+    ] == 1
+    assert probe_validation["next_candidate_design_contract"]["minimum_full_walk_forward_requirements"][
+        "trade_like_activity_increase_required"
+    ] is True
+    assert probe_validation["next_candidate_design_contract"]["minimum_full_walk_forward_requirements"][
+        "signal_sparsity_fix_requires_trade_like_events_increase"
+    ] is True
+    assert probe_validation["primary_downstream_failure"] == (
+        "short_window_activity_inversion_and_full_wfo_activity_regression"
+    )
+    assert probe_validation["safe_next_step"] == (
+        "abandon_activity_regressing_near_miss_family_design_non_regressing_signal_candidate_or_wait_native_signal"
+    )
+    assert (
+        probe_validation["fold_delta_summary"]["worst_compounded_return_degradation_candidate"][
+            "candidate_name"
+        ]
+        == "quality_gated_mc12_score5_edge2_stack2_ext10_cooldown144"
+    )
+    assert report["entry_quality"]["operator_interpretation"]["status"] == (
+        "offline_probe_candidates_blocked_by_full_walk_forward_gate"
+    )
+    resolution = report["fresh_signal_resolution_plan"]
+    assert report["overall_status"] == "quality_gated_probe_blocked_by_full_walk_forward"
+    assert report["decision_state"]["primary_cause"] == (
+        "fresh_signal_missing_and_quality_gated_mc12_probe_failed_full_walk_forward_gate"
+    )
+    assert resolution["status"] == "offline_probe_candidate_failed_full_walk_forward_gate"
+    assert resolution["entry_probe_validation"]["active_full_walk_forward_candidate_count"] == 0
+    assert (
+        resolution["entry_probe_validation"]["activity_regression_summary"][
+            "signal_sparsity_fix_failed_candidate_count"
+        ]
+        == 2
+    )
+    assert any(
+        item["cause"] == "quality_gated_mc12_probe_failed_full_walk_forward_gate"
+        for item in resolution["root_causes"]
+    )
+    assert report["no_live_order_sent"] is True
 
 
 def test_evidence_cycle_attaches_historical_replay_gate_substitution(monkeypatch, tmp_path) -> None:
@@ -1156,6 +1611,26 @@ def test_evidence_cycle_attaches_historical_replay_gate_substitution(monkeypatch
     assert report["launch_readiness"]["research_ready"] is True
     assert report["launch_readiness"]["shadow_ready"] is True
     assert report["launch_readiness"]["paper_operational_ready"] is False
+    paper_only = report["launch_readiness"]["paper_only_rehearsal"]
+    assert paper_only["status"] == "armed_waiting_for_fresh_signal"
+    assert paper_only["system_ready"] is True
+    assert paper_only["armed"] is True
+    assert paper_only["current_rehearsal_available"] is False
+    assert paper_only["first_rehearsal_event_completed"] is False
+    assert paper_only["max_substitution_status"] == "max_substitution_complete_realtime_gate_remaining"
+    assert paper_only["max_substitution_ready"] is True
+    assert paper_only["unresolved_proxy_gates"] == []
+    assert paper_only["non_substitutable_remaining_gates"] == [
+        "current_fresh_signal",
+        "first_real_paper_lifecycle_row",
+    ]
+    assert "historical_quote_replay" in paper_only["substituted_or_prevalidated_gates"]
+    assert "historical_lifecycle_proxy" in paper_only["substituted_or_prevalidated_gates"]
+    assert "paper_bridge_command_contract" in paper_only["substituted_or_prevalidated_gates"]
+    assert "pre_apply_backup_contract" in paper_only["substituted_or_prevalidated_gates"]
+    assert paper_only["live_order_submission_allowed"] is False
+    assert "current_fresh_signal" in paper_only["remaining_gates"]
+    assert "tiny_canary_evidence_ready" in paper_only["not_required_for_paper_only_goal"]
     assert report["launch_readiness"]["tiny_canary_evidence_ready"] is False
     assert report["launch_readiness"]["tiny_canary_order_submission_allowed"] is False
     assert report["launch_readiness"]["next_blocker"]["gate"] == "current_fresh_signal"
@@ -1196,6 +1671,9 @@ def test_evidence_cycle_attaches_historical_replay_gate_substitution(monkeypatch
     assert "historical_realtime_quote_wait_replaced: `True`" in markdown
     assert "historical_paper_shadow_fill_proxy_replaced: `True`" in markdown
     assert "launch_readiness_status: `research_ready_waiting_for_fresh_signal`" in markdown
+    assert "launch_paper_only_rehearsal_status: `armed_waiting_for_fresh_signal`" in markdown
+    assert "launch_paper_only_rehearsal_system_ready: `True`" in markdown
+    assert "launch_paper_only_max_substitution_status: `max_substitution_complete_realtime_gate_remaining`" in markdown
     assert "launch_resolution_status: `substitution_exhausted_realtime_gates_remaining`" in markdown
     assert "launch_backtest_substitution_exhausted: `True`" in markdown
     assert "launch_no_live_progressable_remaining_gates:" in markdown
@@ -1533,9 +2011,62 @@ def test_evidence_cycle_marks_fresh_dry_run_actionable_as_paper_apply_request_av
     assert report["launch_readiness"]["paper_bridge_handoff"]["pre_apply_backup_plan"]["status"] == (
         "ready_required_before_paper_apply"
     )
+    paper_only = report["launch_readiness"]["paper_only_rehearsal"]
+    assert paper_only["status"] == "paper_apply_review_available"
+    assert paper_only["system_ready"] is True
+    assert paper_only["armed"] is False
+    assert paper_only["current_rehearsal_available"] is True
+    assert paper_only["paper_apply_allowed_now"] is True
+    assert paper_only["max_substitution_status"] == "proxy_prechecks_remaining"
+    assert paper_only["max_substitution_ready"] is False
+    assert "historical_quote_replay" in paper_only["unresolved_proxy_gates"]
+    assert paper_only["next_action"] == "operator_review_paper_bridge_dry_run_then_apply_with_verified_backup"
+    assert "execution_parity_20_sample_floor_for_live_promotion" in paper_only["not_required_for_paper_only_goal"]
     assert "--pre-apply-backup-dir" in report["launch_readiness"]["paper_bridge_handoff"]["apply_command"]
     assert "operator_may_rerun_with_apply_paper_bridge_after_review_and_backup" in report["next_actions"]
     assert "do_not_apply_paper_bridge_without_verified_pre_apply_backup" in report["non_negotiables"]
+
+
+def test_evidence_cycle_blocks_remove_apply_when_no_open_paper_plan(monkeypatch, tmp_path) -> None:
+    def fake_collection_cycle(**kwargs):
+        payload = _cycle_report(bridge_status="dry_run_no_open_v6_paper_plan", blockers=[])
+        payload["bridge"]["remove_plan_precheck"] = {
+            "status": "no_open_v6_paper_plan",
+            "direction": "short",
+            "open_plan_count": 0,
+            "no_live_order_sent": True,
+        }
+        report_dir = Path(kwargs["report_dir"])
+        report_dir.mkdir(parents=True, exist_ok=True)
+        (report_dir / CYCLE_REPORT_NAME).write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(evidence, "run_collection_cycle", fake_collection_cycle)
+
+    report = run_evidence_cycle(
+        source_backtest_report_path=tmp_path / "source.json",
+        stress_report_path=tmp_path / "stress.json",
+        walk_forward_report_path=tmp_path / "walk.json",
+        manual_evidence_path=tmp_path / "manual.json",
+        sample_jsonl=tmp_path / "sample.jsonl",
+        report_dir=tmp_path / "evidence",
+        apply_paper_bridge=False,
+    )
+
+    gate = report["paper_bridge_apply_gate"]
+    assert gate["status"] == "blocked_no_open_v6_paper_plan"
+    assert gate["can_request_paper_apply_now"] is False
+    assert gate["remove_plan_precheck"]["status"] == "no_open_v6_paper_plan"
+    assert report["pre_apply_backup_plan"]["status"] == "blocked_until_paper_apply_gate_available"
+    assert report["execution_parity_collection_plan"]["status"] == "waiting_for_open_paper_plan_after_remove_signal"
+    assert "remove_signal_has_no_open_v6_paper_plan" in report["execution_parity_collection_plan"]["blockers"]
+    assert report["execution_parity_collection_plan"]["will_credit_current_apply_after_operator_review"] is False
+    assert not [
+        item
+        for item in report["operator_action_plan"]["items"]
+        if item["action"] == "operator_review_paper_bridge_apply" and item["run_now"] is True
+    ]
+    assert report["no_live_order_sent"] is True
 
 
 def test_signal_wait_plan_caps_monitor_interval_to_fresh_signal_window() -> None:
@@ -1559,6 +2090,12 @@ def test_signal_wait_plan_caps_monitor_interval_to_fresh_signal_window() -> None
     )
 
     assert plan["cadence_lag_level"] == "within_recent_add_cadence"
+    assert plan["signal_absence_primary_cause"] == "expected_sparse_signal_wait_within_recent_add_cadence"
+    assert plan["signal_pipeline_issue_suspected"] is False
+    assert plan["signal_absence_diagnosis"]["class"] == "healthy_sparse_cadence_wait"
+    assert plan["signal_absence_diagnosis"]["safe_next_step"] == (
+        "monitor_on_fresh_signal_window_without_forcing_entry"
+    )
     assert plan["cadence_recommended_monitor_interval_minutes"] == 60
     assert plan["recommended_monitor_interval_minutes"] == 15
     assert plan["signal_freshness_capture_window_minutes"] == 15.0

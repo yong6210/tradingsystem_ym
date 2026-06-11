@@ -61,7 +61,9 @@ from scripts.run_market_state_rotation_v6_walk_forward_validation import (
     _source_replay_high_return_soft_sizer_relax_drawdown_pct,
     _inherit_source_replay_model_encoded_policy,
     _stabilize_source_replay_ratio_gates,
+    _source_replay_after_selection_overlay_train_anchor,
     _source_replay_selected_train_anchor,
+    _source_replay_selected_train_result,
     _source_replay_should_auto_warm_selection_state,
     _flat_walk_forward_result,
     _low_confidence_abstain_decision,
@@ -84,6 +86,22 @@ class _HoldOnlyConfig:
 class _TinySourceConfig:
     model_id: str
     max_hold_bars: int
+
+
+@dataclass(frozen=True)
+class _TinyWinnerSourceConfig:
+    model_id: str
+    max_hold_bars: int
+    winner_pyramid_units: float = 0.0
+    winner_pyramid_min_profit_reaction: float = 0.55
+    winner_pyramid_min_score: int = 6
+    winner_pyramid_min_reason_stack: int = 2
+    winner_pyramid_cooldown_bars: int = 24
+    winner_pyramid_max_units: float = 0.0
+    winner_pyramid_min_extension_atr: float = 0.0
+    winner_pyramid_max_extension_atr: float = 2.75
+    winner_pyramid_block_risk_off: bool = False
+    winner_pyramid_block_one_way_chase: bool = False
 
 
 @dataclass(frozen=True)
@@ -383,6 +401,183 @@ def test_source_replay_selected_train_anchor_prefers_source_fold_candidate(monke
     assert detail["reason"] == "source_selected_train_matched"
     assert detail["selected_model_id_before_anchor"] == "score-leader"
     assert detail["selected_model_id_after_anchor"] == "source-selected-replayed"
+
+
+def test_source_replay_selected_train_result_returns_source_fold_selection() -> None:
+    source_report = {
+        "folds": [
+            {"fold": 11, "selected_train_result": {"model_id": "old"}},
+            {"fold": 12, "selected_train_result": {"model_id": "source-selected"}},
+        ]
+    }
+
+    selected = _source_replay_selected_train_result(source_report, fold=12)
+
+    assert selected == {"model_id": "source-selected"}
+
+
+def test_source_replay_after_selection_overlay_anchor_uses_source_train_metrics() -> None:
+    source_report = {
+        "folds": [
+            {
+                "fold": 12,
+                "selected_train_result": {
+                    "model_id": "source-selected",
+                    "total_return_pct": 10.0,
+                    "max_drawdown_pct": 8.0,
+                    "estimated_cost_drag_pct": 2.0,
+                },
+            }
+        ]
+    }
+    selected_train = {
+        "model_id": "shadow-selected",
+        "total_return_pct": 30.0,
+        "max_drawdown_pct": 3.0,
+        "estimated_cost_drag_pct": 5.0,
+    }
+
+    overlay_train, detail = _source_replay_after_selection_overlay_train_anchor(
+        source_report,
+        fold=12,
+        selected_train=selected_train,
+        enabled=True,
+    )
+
+    assert overlay_train is source_report["folds"][0]["selected_train_result"]
+    assert detail["applied"] is True
+    assert detail["reason"] == "source_selected_train_metrics"
+    assert detail["source_train_return_pct"] == 10.0
+    assert detail["selected_train_return_pct"] == 30.0
+
+
+def test_source_replay_selected_train_anchor_ignores_winner_refill_overlay_fields(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(walk_forward_module, "MarketStateConfig", _TinyWinnerSourceConfig)
+    source_report = {
+        "folds": [
+            {
+                "fold": 12,
+                "selected_train_result": {
+                    "model_id": "source-selected",
+                    "config": {
+                        "model_id": "source-selected",
+                        "max_hold_bars": 54,
+                        "winner_pyramid_units": 0.0,
+                    },
+                },
+            }
+        ]
+    }
+    selected_train = {
+        "model_id": "score-leader",
+        "walk_forward_selection_score": 3.0,
+        "config": {
+            "model_id": "score-leader",
+            "max_hold_bars": 55,
+            "winner_pyramid_units": 0.25,
+            "winner_pyramid_min_profit_reaction": 0.10,
+            "winner_pyramid_min_score": 4,
+            "winner_pyramid_min_reason_stack": 1,
+            "winner_pyramid_max_units": 1.0,
+            "winner_pyramid_min_extension_atr": 0.75,
+            "winner_pyramid_block_risk_off": True,
+            "winner_pyramid_block_one_way_chase": True,
+        },
+    }
+    source_candidate_with_refill = {
+        "model_id": "source-selected-with-refill",
+        "walk_forward_selection_score": 2.8,
+        "config": {
+            "model_id": "source-selected-with-refill",
+            "max_hold_bars": 54,
+            "winner_pyramid_units": 0.25,
+            "winner_pyramid_min_profit_reaction": 0.10,
+            "winner_pyramid_min_score": 4,
+            "winner_pyramid_min_reason_stack": 1,
+            "winner_pyramid_max_units": 1.0,
+            "winner_pyramid_min_extension_atr": 0.75,
+            "winner_pyramid_block_risk_off": True,
+            "winner_pyramid_block_one_way_chase": True,
+        },
+    }
+
+    anchored, detail = _source_replay_selected_train_anchor(
+        source_report,
+        fold=12,
+        train_results=[selected_train, source_candidate_with_refill],
+        selected_train=selected_train,
+        enabled=True,
+    )
+
+    assert anchored is source_candidate_with_refill
+    assert detail["applied"] is True
+    assert detail["reason"] == "source_selected_train_matched"
+    assert detail["selected_model_id_after_anchor"] == "source-selected-with-refill"
+
+
+def test_winner_pyramid_min_extension_after_selection_applies_inside_train_band() -> None:
+    args = walk_forward_module._parse_args(
+        [
+            "--winner-pyramid-min-extension-after-selection",
+            "--winner-pyramid-min-extension-after-selection-atr",
+            "0.75",
+            "--winner-pyramid-min-extension-after-selection-min-train-cost-drag-pct",
+            "30",
+            "--winner-pyramid-min-extension-after-selection-max-train-cost-drag-pct",
+            "60",
+        ]
+    )
+    config = _TinyWinnerSourceConfig(model_id="source", max_hold_bars=52)
+    train_result = {
+        "total_return_pct": 50.0,
+        "max_drawdown_pct": 12.0,
+        "estimated_cost_drag_pct": 34.0,
+        "config": {"model_id": "source"},
+    }
+
+    updated, applied, skipped = walk_forward_module._apply_after_selection_overlays(
+        config,
+        train_result,
+        args,
+    )
+
+    assert updated.winner_pyramid_min_extension_atr == 0.75
+    assert updated.model_id.endswith(":wfWinPyrMinExtAS0.75")
+    assert "winner_pyramid_min_extension" in applied
+    assert "winner_pyramid_min_extension" not in skipped
+
+
+def test_winner_pyramid_min_extension_after_selection_skips_outside_train_band() -> None:
+    args = walk_forward_module._parse_args(
+        [
+            "--winner-pyramid-min-extension-after-selection",
+            "--winner-pyramid-min-extension-after-selection-atr",
+            "0.75",
+            "--winner-pyramid-min-extension-after-selection-min-train-cost-drag-pct",
+            "30",
+            "--winner-pyramid-min-extension-after-selection-max-train-cost-drag-pct",
+            "60",
+        ]
+    )
+    config = _TinyWinnerSourceConfig(model_id="source", max_hold_bars=52)
+    train_result = {
+        "total_return_pct": 50.0,
+        "max_drawdown_pct": 12.0,
+        "estimated_cost_drag_pct": 75.0,
+        "config": {"model_id": "source"},
+    }
+
+    updated, applied, skipped = walk_forward_module._apply_after_selection_overlays(
+        config,
+        train_result,
+        args,
+    )
+
+    assert updated is config
+    assert "winner_pyramid_min_extension" not in applied
+    assert "winner_pyramid_min_extension" in skipped
 
 
 def test_source_replay_selected_train_anchor_can_be_disabled(monkeypatch) -> None:
@@ -8761,6 +8956,124 @@ def test_aggregate_folds_reports_capacity_structure_tags_when_present() -> None:
     assert not weak["lowest_return_folds"][0]["scale_in_capacity_available"]
     assert weak["lowest_return_folds"][0]["unit_account_exposure"] == 10.0
     assert weak["lowest_return_folds"][0]["base_add_account_exposure"] == 10.0
+
+
+def test_aggregate_folds_reports_unused_scale_in_capacity_when_capacity_is_open() -> None:
+    aggregate = _aggregate_folds(
+        [
+            {
+                "fold": 16,
+                "selected_model_id": "5m:market_state_rotation_v6:profile",
+                "after_selection_overlays_applied": [],
+                "selected_train_result": {
+                    "config": {"model_id": "5m:market_state_rotation_v6:profile"}
+                },
+                "test_result": {
+                    "final_equity": 1.18,
+                    "total_return_pct": 18.0,
+                    "estimated_cost_drag_pct": 3.5,
+                    "modeled_carry_cost_fraction_sum": 0.0,
+                    "max_drawdown_pct": 6.0,
+                    "trade_like_events": 12,
+                    "battle_adds": 0,
+                    "config": {"model_id": "5m:market_state_rotation_v6:profile"},
+                    "event_counts": {"winner_pyramid_adds": 0},
+                    "event_diagnostics": {
+                        "health": "ok",
+                        "flags": [],
+                        "add_events": 12,
+                        "add_by_side": {"long": 4, "short": 8},
+                        "add_by_role": {"base": 12},
+                        "add_role_share": {"base": 1.0},
+                        "dominant_add_role": "base",
+                        "max_role_add_share": 1.0,
+                        "capacity_structure_context": {
+                            "status": "scale_in_capacity_available",
+                            "scale_in_capacity_available": True,
+                            "capacity_after_first_base_units": 0.25,
+                            "unit_account_exposure": 8.0,
+                            "base_add_account_exposure": 8.0,
+                        },
+                    },
+                    "regime_performance": {},
+                },
+            },
+        ]
+    )
+
+    weak = aggregate["weak_fold_diagnostics"]
+    fold = weak["unused_scale_in_capacity_folds"][0]
+
+    assert weak["unused_scale_in_capacity_count"] == 1
+    assert weak["risk_tag_counts"] == {
+        "base_dominance": 1,
+        "unused_scale_in_capacity": 1,
+    }
+    assert weak["no_scale_in_capacity_count"] == 0
+    assert fold["fold"] == 16
+    assert fold["scale_in_capacity_available"]
+    assert fold["scale_in_capacity_unused"]
+    assert fold["capacity_after_first_base_units"] == 0.25
+    assert fold["scale_in_add_events"] == 0
+    assert fold["battle_adds"] == 0
+    assert fold["winner_pyramid_adds"] == 0
+
+
+def test_aggregate_folds_treats_single_unit_winner_refill_as_active_reentry() -> None:
+    aggregate = _aggregate_folds(
+        [
+            {
+                "fold": 16,
+                "selected_model_id": "5m:market_state_rotation_v6:profile",
+                "after_selection_overlays_applied": [],
+                "selected_train_result": {
+                    "config": {"model_id": "5m:market_state_rotation_v6:profile"}
+                },
+                "test_result": {
+                    "final_equity": 1.28,
+                    "total_return_pct": 28.0,
+                    "estimated_cost_drag_pct": 6.0,
+                    "modeled_carry_cost_fraction_sum": 0.0,
+                    "max_drawdown_pct": 9.0,
+                    "trade_like_events": 13,
+                    "battle_adds": 0,
+                    "config": {"model_id": "5m:market_state_rotation_v6:profile"},
+                    "event_counts": {"winner_pyramid_adds": 1},
+                    "event_diagnostics": {
+                        "health": "ok",
+                        "flags": [],
+                        "add_events": 13,
+                        "add_by_side": {"long": 5, "short": 8},
+                        "add_by_role": {"base": 10, "chase": 3},
+                        "add_role_share": {"base": 0.7692, "chase": 0.2308},
+                        "dominant_add_role": "base",
+                        "max_role_add_share": 0.7692,
+                        "capacity_structure_context": {
+                            "status": "single_unit_winner_refill_active",
+                            "scale_in_capacity_available": False,
+                            "capacity_after_first_base_units": 0.0,
+                            "winner_pyramid_add_count": 1,
+                            "winner_pyramid_add_ratio": 0.0769,
+                            "unit_account_exposure": 10.0,
+                            "base_add_account_exposure": 10.0,
+                        },
+                    },
+                    "regime_performance": {},
+                },
+            },
+        ]
+    )
+
+    weak = aggregate["weak_fold_diagnostics"]
+    fold = weak["lowest_return_folds"][0]
+
+    assert weak["single_unit_winner_refill_active_count"] == 1
+    assert weak["single_unit_full_entry_count"] == 0
+    assert weak["battle_capacity_saturated_count"] == 0
+    assert weak["risk_tag_counts"] == {}
+    assert fold["capacity_status"] == "single_unit_winner_refill_active"
+    assert fold["scale_in_add_events"] == 1
+    assert fold["winner_pyramid_adds"] == 1
 
 
 def test_aggregate_confirmation_uses_per_overlay_target_details() -> None:
