@@ -23,6 +23,7 @@ def _args(tmp_path: Path) -> argparse.Namespace:
         force_quote_sample=False,
         disable_adaptive_quote_cadence=False,
         sleep_until_next_missing_quote_window=False,
+        sleep_until_next_btcusdc_parallel_quote_window=False,
         max_pre_run_wait_seconds=3600.0,
         quote_window_wakeup_buffer_seconds=5.0,
         disable_market_data_refresh_after_quote_window_sleep=False,
@@ -44,6 +45,1008 @@ def _args(tmp_path: Path) -> argparse.Namespace:
         microstructure_recent_hours=24.0,
         quiet=True,
     )
+
+
+def test_write_watch_reports_preserves_timestamped_snapshot(tmp_path: Path) -> None:
+    report_dir = tmp_path / "watch"
+    payload = watch._write_watch_reports(
+        report_dir,
+        {
+            "status": "watch_in_progress",
+            "completed_at": "2026-01-01T00:00:00+00:00",
+            "launch_status": "research_ready_waiting_for_fresh_signal",
+            "next_blocker": "current_fresh_signal",
+            "quote_progress": {"observed_latest": 12, "observed_delta": 2},
+            "fresh_signal_status": {"seen_during_watch": False},
+            "paper_apply_status": {"seen_during_watch": False, "allowed_now": False},
+            "paper_only_rehearsal": {
+                "status": "armed_waiting_for_fresh_signal",
+                "system_ready": True,
+                "armed": True,
+                "remaining_gates": ["current_fresh_signal"],
+            },
+            "notification_decision": {
+                "decision": "DONT_NOTIFY",
+                "status": "quiet_waiting_for_fresh_signal",
+                "priority": "quiet",
+                "message": "Still waiting for a fresh signal; no operator action is needed.",
+            },
+            "notification_delivery_plan": {
+                "delivery_decision": "DONT_NOTIFY",
+                "status": "quiet_no_delivery_needed",
+                "duplicate_notification_suppressed": False,
+            },
+            "operator_work_queue": {
+                "status": "automation_available",
+                "effective_status": "effective_automation_available",
+                "raw_automation_now_count": 1,
+                "effective_automation_now_count": 1,
+                "covered_automation_now_count": 0,
+                "operator_review_now_count": 0,
+                "operator_review_wait_count": 0,
+                "startable_wait_count": 0,
+                "primary_effective_automation_action": {
+                    "action_type": "refresh_meta_router_promotion_gate",
+                    "target_gate": "meta_router_promotion_gate",
+                    "priority": 25,
+                    "can_run_now": True,
+                    "can_start_now": True,
+                    "requires_operator_review": False,
+                    "effective_available_now": True,
+                    "command": ".venv/bin/python scripts/run_market_state_rotation_v6_meta_router_promotion_gate.py --write-report",
+                    "order_submission_allowed": False,
+                    "no_live_order_sent": True,
+                },
+            },
+            "operator_action_digest": {
+                "status": "run_safe_monitoring",
+                "primary_next": "run_primary_safe_auto_command",
+                "operator_action_scope": "safe_auto_available_but_launch_primary_wait_is_realtime",
+                "safe_auto_command_count": 1,
+                "manual_decision_count": 0,
+                "command_consistency_status": "command_consistency_pass",
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            },
+            "no_live_order_sent": True,
+        },
+    )
+
+    snapshot_path = report_dir / "snapshots" / (
+        "market_state_rotation_v6_launch_shadow_watch_20260101T000000000000Z.json"
+    )
+    assert snapshot_path.exists()
+    assert (report_dir / "latest.json").exists()
+    assert (report_dir / "latest.md").exists()
+    assert (report_dir / "latest_status.json").exists()
+    assert (report_dir / "latest_status_history.json").exists()
+    assert (report_dir / "latest_action_outbox.json").exists()
+    assert (report_dir / "latest_action_outbox_history.json").exists()
+    assert (report_dir / "latest_artifact_manifest.json").exists()
+    assert (report_dir / "latest_artifact_manifest_history.json").exists()
+    assert (report_dir / "latest_safety_invariants.json").exists()
+    assert (report_dir / "latest_safety_invariants_history.json").exists()
+    assert (report_dir / "latest_safety_coverage.json").exists()
+    assert (report_dir / "latest_safety_coverage_history.json").exists()
+    assert (report_dir / "latest_report_index.json").exists()
+    assert (report_dir / "latest_report_index_history.json").exists()
+    assert (report_dir / "latest_operations_health.json").exists()
+    assert (report_dir / "latest_operations_health_history.json").exists()
+    assert (report_dir / "latest_launch_gate_checklist.json").exists()
+    assert (report_dir / "latest_launch_gate_checklist_history.json").exists()
+    latest = json.loads((report_dir / "latest.json").read_text(encoding="utf-8"))
+    latest_status = json.loads((report_dir / "latest_status.json").read_text(encoding="utf-8"))
+    status_history = json.loads(
+        (report_dir / "latest_status_history.json").read_text(encoding="utf-8")
+    )
+    action_outbox = json.loads(
+        (report_dir / "latest_action_outbox.json").read_text(encoding="utf-8")
+    )
+    action_outbox_history = json.loads(
+        (report_dir / "latest_action_outbox_history.json").read_text(encoding="utf-8")
+    )
+    artifact_manifest = json.loads(
+        (report_dir / "latest_artifact_manifest.json").read_text(encoding="utf-8")
+    )
+    artifact_manifest_history = json.loads(
+        (report_dir / "latest_artifact_manifest_history.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    safety_invariants = json.loads(
+        (report_dir / "latest_safety_invariants.json").read_text(encoding="utf-8")
+    )
+    safety_invariants_history = json.loads(
+        (report_dir / "latest_safety_invariants_history.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    safety_coverage = json.loads(
+        (report_dir / "latest_safety_coverage.json").read_text(encoding="utf-8")
+    )
+    safety_coverage_history = json.loads(
+        (report_dir / "latest_safety_coverage_history.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    report_index = json.loads(
+        (report_dir / "latest_report_index.json").read_text(encoding="utf-8")
+    )
+    report_index_history = json.loads(
+        (report_dir / "latest_report_index_history.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    operations_health = json.loads(
+        (report_dir / "latest_operations_health.json").read_text(encoding="utf-8")
+    )
+    operations_health_history = json.loads(
+        (report_dir / "latest_operations_health_history.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    launch_gate_checklist = json.loads(
+        (report_dir / "latest_launch_gate_checklist.json").read_text(encoding="utf-8")
+    )
+    launch_gate_checklist_history = json.loads(
+        (report_dir / "latest_launch_gate_checklist_history.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert latest["watch_snapshot_path"] == watch._display_path(snapshot_path)
+    assert latest["watch_status_path"] == watch._display_path(report_dir / "latest_status.json")
+    assert latest["watch_status_history_path"] == watch._display_path(
+        report_dir / "latest_status_history.json"
+    )
+    assert latest["watch_action_outbox_path"] == watch._display_path(
+        report_dir / "latest_action_outbox.json"
+    )
+    assert latest["watch_action_outbox_history_path"] == watch._display_path(
+        report_dir / "latest_action_outbox_history.json"
+    )
+    assert latest["watch_artifact_manifest_path"] == watch._display_path(
+        report_dir / "latest_artifact_manifest.json"
+    )
+    assert latest["watch_artifact_manifest_history_path"] == watch._display_path(
+        report_dir / "latest_artifact_manifest_history.json"
+    )
+    assert latest["watch_safety_invariants_path"] == watch._display_path(
+        report_dir / "latest_safety_invariants.json"
+    )
+    assert latest["watch_safety_invariants_history_path"] == watch._display_path(
+        report_dir / "latest_safety_invariants_history.json"
+    )
+    assert latest["watch_safety_coverage_path"] == watch._display_path(
+        report_dir / "latest_safety_coverage.json"
+    )
+    assert latest["watch_safety_coverage_history_path"] == watch._display_path(
+        report_dir / "latest_safety_coverage_history.json"
+    )
+    assert latest["watch_report_index_path"] == watch._display_path(
+        report_dir / "latest_report_index.json"
+    )
+    assert latest["watch_report_index_history_path"] == watch._display_path(
+        report_dir / "latest_report_index_history.json"
+    )
+    assert latest["watch_operations_health_path"] == watch._display_path(
+        report_dir / "latest_operations_health.json"
+    )
+    assert latest["watch_operations_health_history_path"] == watch._display_path(
+        report_dir / "latest_operations_health_history.json"
+    )
+    assert latest["watch_launch_gate_checklist_path"] == watch._display_path(
+        report_dir / "latest_launch_gate_checklist.json"
+    )
+    assert latest["watch_launch_gate_checklist_history_path"] == watch._display_path(
+        report_dir / "latest_launch_gate_checklist_history.json"
+    )
+    assert snapshot["watch_snapshot_path"] == latest["watch_snapshot_path"]
+    assert payload["watch_snapshot_path"] == latest["watch_snapshot_path"]
+    assert payload["watch_status_path"] == latest["watch_status_path"]
+    assert payload["watch_status_history_path"] == latest["watch_status_history_path"]
+    assert payload["watch_action_outbox_path"] == latest["watch_action_outbox_path"]
+    assert payload["watch_action_outbox_history_path"] == latest[
+        "watch_action_outbox_history_path"
+    ]
+    assert payload["watch_artifact_manifest_path"] == latest[
+        "watch_artifact_manifest_path"
+    ]
+    assert payload["watch_artifact_manifest_history_path"] == latest[
+        "watch_artifact_manifest_history_path"
+    ]
+    assert payload["watch_safety_invariants_path"] == latest[
+        "watch_safety_invariants_path"
+    ]
+    assert payload["watch_safety_invariants_history_path"] == latest[
+        "watch_safety_invariants_history_path"
+    ]
+    assert payload["watch_safety_coverage_path"] == latest[
+        "watch_safety_coverage_path"
+    ]
+    assert payload["watch_safety_coverage_history_path"] == latest[
+        "watch_safety_coverage_history_path"
+    ]
+    assert payload["watch_report_index_path"] == latest["watch_report_index_path"]
+    assert payload["watch_report_index_history_path"] == latest[
+        "watch_report_index_history_path"
+    ]
+    assert payload["watch_operations_health_path"] == latest[
+        "watch_operations_health_path"
+    ]
+    assert payload["watch_operations_health_history_path"] == latest[
+        "watch_operations_health_history_path"
+    ]
+    assert payload["watch_launch_gate_checklist_path"] == latest[
+        "watch_launch_gate_checklist_path"
+    ]
+    assert payload["watch_launch_gate_checklist_history_path"] == latest[
+        "watch_launch_gate_checklist_history_path"
+    ]
+    assert latest_status["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_status_v1"
+    )
+    assert latest_status["launch_status"] == "research_ready_waiting_for_fresh_signal"
+    assert latest_status["next_blocker"] == "current_fresh_signal"
+    assert latest_status["notification"]["decision"] == "DONT_NOTIFY"
+    assert latest_status["notification"]["delivery_decision"] == "DONT_NOTIFY"
+    assert latest_status["reports"]["latest_status_history_json"] == latest[
+        "watch_status_history_path"
+    ]
+    assert latest_status["reports"]["latest_action_outbox_json"] == latest[
+        "watch_action_outbox_path"
+    ]
+    assert latest_status["reports"]["latest_action_outbox_history_json"] == latest[
+        "watch_action_outbox_history_path"
+    ]
+    assert latest_status["reports"]["latest_artifact_manifest_json"] == latest[
+        "watch_artifact_manifest_path"
+    ]
+    assert latest_status["reports"]["latest_artifact_manifest_history_json"] == latest[
+        "watch_artifact_manifest_history_path"
+    ]
+    assert latest_status["reports"]["latest_safety_invariants_json"] == latest[
+        "watch_safety_invariants_path"
+    ]
+    assert latest_status["reports"]["latest_safety_invariants_history_json"] == latest[
+        "watch_safety_invariants_history_path"
+    ]
+    assert latest_status["reports"]["latest_safety_coverage_json"] == latest[
+        "watch_safety_coverage_path"
+    ]
+    assert latest_status["reports"]["latest_safety_coverage_history_json"] == latest[
+        "watch_safety_coverage_history_path"
+    ]
+    assert latest_status["reports"]["latest_report_index_json"] == latest[
+        "watch_report_index_path"
+    ]
+    assert latest_status["reports"]["latest_report_index_history_json"] == latest[
+        "watch_report_index_history_path"
+    ]
+    assert latest_status["reports"]["latest_operations_health_json"] == latest[
+        "watch_operations_health_path"
+    ]
+    assert latest_status["reports"]["latest_launch_gate_checklist_json"] == latest[
+        "watch_launch_gate_checklist_path"
+    ]
+    assert latest_status["reports"]["latest_launch_gate_checklist_history_json"] == latest[
+        "watch_launch_gate_checklist_history_path"
+    ]
+    assert latest_status["safety"]["order_submission_allowed"] is False
+    assert status_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_status_history_v1"
+    )
+    assert status_history["entry_count"] == 1
+    assert status_history["latest_launch_status"] == (
+        "research_ready_waiting_for_fresh_signal"
+    )
+    assert status_history["latest_next_blocker"] == "current_fresh_signal"
+    assert status_history["live_order_safety_violation_count"] == 0
+    assert status_history["no_live_order_sent"] is True
+    assert action_outbox["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_action_outbox_v1"
+    )
+    assert action_outbox["status"] == "action_outbox_safe_automation_available"
+    assert action_outbox["primary_effective_safe_command"]["action_type"] == (
+        "refresh_meta_router_promotion_gate"
+    )
+    assert action_outbox["safety"]["order_submission_allowed"] is False
+    assert action_outbox["safety"]["auto_apply_allowed"] is False
+    assert action_outbox["no_live_order_sent"] is True
+    assert action_outbox["reports"]["latest_action_outbox_history_json"] == latest[
+        "watch_action_outbox_history_path"
+    ]
+    assert action_outbox["reports"]["latest_artifact_manifest_json"] == latest[
+        "watch_artifact_manifest_path"
+    ]
+    assert action_outbox["reports"]["latest_artifact_manifest_history_json"] == latest[
+        "watch_artifact_manifest_history_path"
+    ]
+    assert action_outbox["reports"]["latest_safety_invariants_json"] == latest[
+        "watch_safety_invariants_path"
+    ]
+    assert action_outbox["reports"]["latest_safety_invariants_history_json"] == latest[
+        "watch_safety_invariants_history_path"
+    ]
+    assert action_outbox["reports"]["latest_safety_coverage_json"] == latest[
+        "watch_safety_coverage_path"
+    ]
+    assert action_outbox["reports"]["latest_safety_coverage_history_json"] == latest[
+        "watch_safety_coverage_history_path"
+    ]
+    assert action_outbox["reports"]["latest_report_index_json"] == latest[
+        "watch_report_index_path"
+    ]
+    assert action_outbox["reports"]["latest_report_index_history_json"] == latest[
+        "watch_report_index_history_path"
+    ]
+    assert action_outbox["reports"]["latest_operations_health_json"] == latest[
+        "watch_operations_health_path"
+    ]
+    assert action_outbox_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_action_outbox_history_v1"
+    )
+    assert action_outbox_history["entry_count"] == 1
+    assert action_outbox_history["latest_effective_action_type"] == (
+        "refresh_meta_router_promotion_gate"
+    )
+    assert action_outbox_history["live_order_safety_violation_count"] == 0
+    assert action_outbox_history["no_live_order_sent"] is True
+    assert artifact_manifest["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_artifact_manifest_v1"
+    )
+    assert artifact_manifest["status"] == "artifact_manifest_complete"
+    assert artifact_manifest["artifact_count"] == 9
+    assert artifact_manifest["missing_count"] == 0
+    assert artifact_manifest["artifacts_by_name"]["latest_json"]["exists"] is True
+    assert artifact_manifest["artifacts_by_name"]["latest_safety_invariants_json"][
+        "exists"
+    ] is True
+    assert artifact_manifest["artifacts_by_name"]["latest_safety_invariants_history_json"][
+        "exists"
+    ] is True
+    assert len(artifact_manifest["artifacts_by_name"]["latest_json"]["sha256"]) == 64
+    assert artifact_manifest["artifacts_by_name"]["snapshot_json"]["path"] == latest[
+        "watch_snapshot_path"
+    ]
+    assert artifact_manifest["reports"]["latest_artifact_manifest_history_json"] == latest[
+        "watch_artifact_manifest_history_path"
+    ]
+    assert artifact_manifest["reports"]["latest_safety_coverage_json"] == latest[
+        "watch_safety_coverage_path"
+    ]
+    assert artifact_manifest["reports"]["latest_safety_coverage_history_json"] == latest[
+        "watch_safety_coverage_history_path"
+    ]
+    assert artifact_manifest["reports"]["latest_report_index_json"] == latest[
+        "watch_report_index_path"
+    ]
+    assert artifact_manifest["reports"]["latest_report_index_history_json"] == latest[
+        "watch_report_index_history_path"
+    ]
+    assert artifact_manifest["reports"]["latest_operations_health_json"] == latest[
+        "watch_operations_health_path"
+    ]
+    assert artifact_manifest["safety"]["order_submission_allowed"] is False
+    assert artifact_manifest["no_live_order_sent"] is True
+    assert artifact_manifest_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_artifact_manifest_history_v1"
+    )
+    assert artifact_manifest_history["status"] == "artifact_manifest_history_stable"
+    assert artifact_manifest_history["entry_count"] == 1
+    assert artifact_manifest_history["latest_manifest_status"] == (
+        "artifact_manifest_complete"
+    )
+    assert artifact_manifest_history["pass_count"] == 1
+    assert artifact_manifest_history["fail_count"] == 0
+    assert artifact_manifest_history["max_missing_count"] == 0
+    assert artifact_manifest_history["max_empty_count"] == 0
+    assert artifact_manifest_history["consecutive_fail_count"] == 0
+    assert artifact_manifest_history["no_live_order_sent"] is True
+    assert artifact_manifest_history["reports"]["latest_safety_coverage_json"] == latest[
+        "watch_safety_coverage_path"
+    ]
+    assert artifact_manifest_history["reports"][
+        "latest_safety_coverage_history_json"
+    ] == latest["watch_safety_coverage_history_path"]
+    assert artifact_manifest_history["reports"]["latest_report_index_json"] == latest[
+        "watch_report_index_path"
+    ]
+    assert artifact_manifest_history["reports"]["latest_report_index_history_json"] == latest[
+        "watch_report_index_history_path"
+    ]
+    assert artifact_manifest_history["reports"]["latest_operations_health_json"] == latest[
+        "watch_operations_health_path"
+    ]
+    assert safety_invariants["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_safety_invariants_v1"
+    )
+    assert safety_invariants["status"] == "safety_invariants_pass"
+    assert safety_invariants["checked_payload_count"] == 5
+    assert safety_invariants["violation_count"] == 0
+    assert safety_invariants["safety"]["order_submission_allowed"] is False
+    assert safety_invariants["no_live_order_sent"] is True
+    assert safety_invariants["reports"]["latest_safety_coverage_json"] == latest[
+        "watch_safety_coverage_path"
+    ]
+    assert safety_invariants["reports"]["latest_safety_coverage_history_json"] == latest[
+        "watch_safety_coverage_history_path"
+    ]
+    assert safety_invariants["reports"]["latest_report_index_json"] == latest[
+        "watch_report_index_path"
+    ]
+    assert safety_invariants["reports"]["latest_report_index_history_json"] == latest[
+        "watch_report_index_history_path"
+    ]
+    assert safety_invariants["reports"]["latest_operations_health_json"] == latest[
+        "watch_operations_health_path"
+    ]
+    assert safety_invariants_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_safety_invariants_history_v1"
+    )
+    assert safety_invariants_history["status"] == "safety_invariants_history_clean"
+    assert safety_invariants_history["entry_count"] == 1
+    assert safety_invariants_history["fail_count"] == 0
+    assert safety_invariants_history["max_violation_count"] == 0
+    assert safety_invariants_history["no_live_order_sent"] is True
+    assert safety_invariants_history["reports"]["latest_safety_coverage_json"] == latest[
+        "watch_safety_coverage_path"
+    ]
+    assert safety_invariants_history["reports"][
+        "latest_safety_coverage_history_json"
+    ] == latest["watch_safety_coverage_history_path"]
+    assert safety_invariants_history["reports"]["latest_report_index_json"] == latest[
+        "watch_report_index_path"
+    ]
+    assert safety_invariants_history["reports"]["latest_report_index_history_json"] == latest[
+        "watch_report_index_history_path"
+    ]
+    assert safety_invariants_history["reports"]["latest_operations_health_json"] == latest[
+        "watch_operations_health_path"
+    ]
+    assert safety_coverage["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_safety_coverage_v1"
+    )
+    assert safety_coverage["status"] == "safety_coverage_pass"
+    assert safety_coverage["coverage_checked_payload_count"] == 10
+    assert safety_coverage["primary_invariant_checked_count"] == 5
+    assert safety_coverage["primary_invariant_exempt_count"] == 5
+    assert safety_coverage["primary_invariant_gap_count"] == 0
+    assert safety_coverage["direct_violation_count"] == 0
+    assert safety_coverage["artifact_manifest_covered_count"] == 8
+    assert safety_coverage["artifact_manifest_exempt_count"] == 2
+    assert safety_coverage["artifact_manifest_gap_count"] == 0
+    assert safety_coverage["artifact_manifest_history_fail_count"] == 0
+    assert safety_coverage["no_live_order_sent"] is True
+    assert safety_coverage["reports"]["latest_safety_coverage_history_json"] == latest[
+        "watch_safety_coverage_history_path"
+    ]
+    assert safety_coverage["reports"]["latest_report_index_json"] == latest[
+        "watch_report_index_path"
+    ]
+    assert safety_coverage["reports"]["latest_report_index_history_json"] == latest[
+        "watch_report_index_history_path"
+    ]
+    assert safety_coverage["reports"]["latest_operations_health_json"] == latest[
+        "watch_operations_health_path"
+    ]
+    assert safety_coverage_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_safety_coverage_history_v1"
+    )
+    assert safety_coverage_history["status"] == "safety_coverage_history_clean"
+    assert safety_coverage_history["entry_count"] == 1
+    assert safety_coverage_history["latest_coverage_status"] == "safety_coverage_pass"
+    assert safety_coverage_history["pass_count"] == 1
+    assert safety_coverage_history["fail_count"] == 0
+    assert safety_coverage_history["coverage_change_count"] == 0
+    assert safety_coverage_history["max_direct_violation_count"] == 0
+    assert safety_coverage_history["max_primary_invariant_gap_count"] == 0
+    assert safety_coverage_history["max_artifact_manifest_gap_count"] == 0
+    assert safety_coverage_history["max_no_live_false_count"] == 0
+    assert safety_coverage_history["no_live_order_sent"] is True
+    assert safety_coverage_history["reports"]["latest_report_index_json"] == latest[
+        "watch_report_index_path"
+    ]
+    assert safety_coverage_history["reports"]["latest_report_index_history_json"] == latest[
+        "watch_report_index_history_path"
+    ]
+    assert safety_coverage_history["reports"]["latest_operations_health_json"] == latest[
+        "watch_operations_health_path"
+    ]
+    assert report_index["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_report_index_v1"
+    )
+    assert report_index["status"] == "report_index_complete"
+    assert report_index["report_count"] == 13
+    assert report_index["json_payload_count"] == 12
+    assert report_index["missing_count"] == 0
+    assert report_index["empty_count"] == 0
+    assert report_index["no_live_false_count"] == 0
+    assert report_index["report_index_excludes_self"] is True
+    assert report_index["reports"]["latest_report_index_json"] == latest[
+        "watch_report_index_path"
+    ]
+    assert report_index["reports"]["latest_report_index_history_json"] == latest[
+        "watch_report_index_history_path"
+    ]
+    assert report_index["reports"]["latest_operations_health_json"] == latest[
+        "watch_operations_health_path"
+    ]
+    assert report_index["reports_by_name"]["latest_markdown"]["exists"] is True
+    assert report_index["reports_by_name"]["latest_markdown"]["schema_version"] is None
+    assert report_index["reports_by_name"]["latest_safety_coverage_history_json"][
+        "exists"
+    ] is True
+    assert report_index["safety"]["order_submission_allowed"] is False
+    assert report_index["no_live_order_sent"] is True
+    assert report_index_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_report_index_history_v1"
+    )
+    assert report_index_history["status"] == "report_index_history_clean"
+    assert report_index_history["entry_count"] == 1
+    assert report_index_history["latest_report_index_status"] == "report_index_complete"
+    assert report_index_history["pass_count"] == 1
+    assert report_index_history["fail_count"] == 0
+    assert report_index_history["consecutive_fail_count"] == 0
+    assert report_index_history["report_index_change_count"] == 0
+    assert report_index_history["max_missing_count"] == 0
+    assert report_index_history["max_empty_count"] == 0
+    assert report_index_history["max_no_live_false_count"] == 0
+    assert report_index_history["reports"]["latest_report_index_json"] == latest[
+        "watch_report_index_path"
+    ]
+    assert report_index_history["reports"]["latest_operations_health_json"] == latest[
+        "watch_operations_health_path"
+    ]
+    assert report_index_history["no_live_order_sent"] is True
+    assert operations_health["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_operations_health_v1"
+    )
+    assert operations_health["status"] == "operations_health_waiting_for_fresh_signal"
+    assert operations_health["launch_status"] == (
+        "research_ready_waiting_for_fresh_signal"
+    )
+    assert operations_health["next_blocker"] == "current_fresh_signal"
+    assert operations_health["fresh_signal_available"] is False
+    assert operations_health["paper_apply_available"] is False
+    assert operations_health["paper_apply_allowed_now"] is False
+    assert operations_health["paper_only_rehearsal_status"] == (
+        "armed_waiting_for_fresh_signal"
+    )
+    assert operations_health["report_index_status"] == "report_index_complete"
+    assert operations_health["report_index_history_fail_count"] == 0
+    assert operations_health["safety_invariants_violation_count"] == 0
+    assert operations_health["safety_coverage_direct_violation_count"] == 0
+    assert operations_health["failed_safety_components"] == []
+    assert operations_health["operator_action"] == (
+        "monitor_fresh_signal_without_forcing_entry"
+    )
+    assert operations_health["reports"]["latest_operations_health_json"] == latest[
+        "watch_operations_health_path"
+    ]
+    assert operations_health["reports"]["latest_operations_health_history_json"] == latest[
+        "watch_operations_health_history_path"
+    ]
+    assert operations_health["reports"]["latest_launch_gate_checklist_json"] == latest[
+        "watch_launch_gate_checklist_path"
+    ]
+    assert operations_health["reports"][
+        "latest_launch_gate_checklist_history_json"
+    ] == latest["watch_launch_gate_checklist_history_path"]
+    assert operations_health["safety"]["order_submission_allowed"] is False
+    assert operations_health["no_live_order_sent"] is True
+    assert operations_health_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_operations_health_history_v1"
+    )
+    assert operations_health_history["status"] == "operations_health_history_stable"
+    assert operations_health_history["entry_count"] == 1
+    assert operations_health_history["latest_health_status"] == (
+        "operations_health_waiting_for_fresh_signal"
+    )
+    assert operations_health_history["latest_next_blocker"] == "current_fresh_signal"
+    assert operations_health_history["pass_count"] == 1
+    assert operations_health_history["fail_count"] == 0
+    assert operations_health_history["consecutive_fail_count"] == 0
+    assert operations_health_history["health_change_count"] == 0
+    assert operations_health_history["max_failed_safety_component_count"] == 0
+    assert operations_health_history["reports"][
+        "latest_operations_health_json"
+    ] == latest["watch_operations_health_path"]
+    assert operations_health_history["reports"][
+        "latest_operations_health_history_json"
+    ] == latest["watch_operations_health_history_path"]
+    assert operations_health_history["reports"][
+        "latest_launch_gate_checklist_json"
+    ] == latest["watch_launch_gate_checklist_path"]
+    assert operations_health_history["reports"][
+        "latest_launch_gate_checklist_history_json"
+    ] == latest["watch_launch_gate_checklist_history_path"]
+    assert operations_health_history["safety"]["order_submission_allowed"] is False
+    assert operations_health_history["no_live_order_sent"] is True
+    assert launch_gate_checklist["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_launch_gate_checklist_v1"
+    )
+    assert launch_gate_checklist["status"] == (
+        "launch_gate_checklist_waiting_for_fresh_signal"
+    )
+    assert launch_gate_checklist["launch_status"] == (
+        "research_ready_waiting_for_fresh_signal"
+    )
+    assert launch_gate_checklist["next_blocker"] == "current_fresh_signal"
+    assert launch_gate_checklist["first_open_gate"] == "current_fresh_signal"
+    assert launch_gate_checklist["gate_count"] == 7
+    assert launch_gate_checklist["blocking_open_gate_count"] >= 1
+    assert launch_gate_checklist["fresh_signal_available"] is False
+    assert launch_gate_checklist["paper_apply_available"] is False
+    assert launch_gate_checklist["paper_apply_allowed_now"] is False
+    assert launch_gate_checklist["gates_by_id"]["no_live_safety_authority"][
+        "passed"
+    ] is True
+    assert launch_gate_checklist["gates_by_id"]["report_safety_integrity"][
+        "passed"
+    ] is True
+    assert launch_gate_checklist["gates_by_id"]["paper_only_rehearsal_armed"][
+        "passed"
+    ] is True
+    assert launch_gate_checklist["gates_by_id"]["current_fresh_signal"][
+        "passed"
+    ] is False
+    assert launch_gate_checklist["gates_by_id"]["current_fresh_signal"][
+        "next_action"
+    ] == "monitor_fresh_signal_without_forcing_entry"
+    assert launch_gate_checklist["gates_by_id"]["first_real_paper_lifecycle_row"][
+        "passed"
+    ] is False
+    assert launch_gate_checklist["gates_by_id"]["execution_parity_samples"][
+        "passed"
+    ] is False
+    assert launch_gate_checklist["gates_by_id"]["signal_monitor_cadence"][
+        "passed"
+    ] is False
+    assert launch_gate_checklist["operator_next"]["auto_apply_allowed"] is False
+    assert launch_gate_checklist["reports"]["latest_launch_gate_checklist_json"] == latest[
+        "watch_launch_gate_checklist_path"
+    ]
+    assert launch_gate_checklist["reports"][
+        "latest_launch_gate_checklist_history_json"
+    ] == latest["watch_launch_gate_checklist_history_path"]
+    assert launch_gate_checklist["safety"]["order_submission_allowed"] is False
+    assert launch_gate_checklist["no_live_order_sent"] is True
+    assert launch_gate_checklist_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_launch_gate_checklist_history_v1"
+    )
+    assert launch_gate_checklist_history["status"] == (
+        "launch_gate_checklist_history_stable"
+    )
+    assert launch_gate_checklist_history["entry_count"] == 1
+    assert launch_gate_checklist_history["latest_checklist_status"] == (
+        "launch_gate_checklist_waiting_for_fresh_signal"
+    )
+    assert launch_gate_checklist_history["latest_first_open_gate"] == (
+        "current_fresh_signal"
+    )
+    assert launch_gate_checklist_history["latest_open_gate_ids"] == [
+        "current_fresh_signal",
+        "first_real_paper_lifecycle_row",
+        "execution_parity_samples",
+        "signal_monitor_cadence",
+    ]
+    assert launch_gate_checklist_history["gate_regression_count"] == 0
+    assert launch_gate_checklist_history["no_live_false_count"] == 0
+    assert launch_gate_checklist_history["reports"][
+        "latest_launch_gate_checklist_json"
+    ] == latest["watch_launch_gate_checklist_path"]
+    assert launch_gate_checklist_history["reports"][
+        "latest_launch_gate_checklist_history_json"
+    ] == latest["watch_launch_gate_checklist_history_path"]
+    assert launch_gate_checklist_history["safety"]["order_submission_allowed"] is False
+    assert launch_gate_checklist_history["no_live_order_sent"] is True
+    assert latest["no_live_order_sent"] is True
+
+
+def test_write_watch_reports_rolls_compact_status_history(tmp_path: Path) -> None:
+    report_dir = tmp_path / "watch"
+    common = {
+        "status": "watch_in_progress",
+        "launch_status": "research_ready_waiting_for_fresh_signal",
+        "next_blocker": "current_fresh_signal",
+        "fresh_signal_status": {"seen_during_watch": False},
+        "paper_apply_status": {"seen_during_watch": False, "allowed_now": False},
+        "paper_only_rehearsal": {
+            "status": "armed_waiting_for_fresh_signal",
+            "armed": True,
+        },
+        "notification_decision": {
+            "decision": "DONT_NOTIFY",
+            "status": "quiet_waiting_for_fresh_signal",
+            "priority": "quiet",
+        },
+        "notification_delivery_plan": {
+            "delivery_decision": "DONT_NOTIFY",
+            "status": "quiet_no_delivery_needed",
+        },
+        "no_live_order_sent": True,
+    }
+    watch._write_watch_reports(
+        report_dir,
+        {
+            **common,
+            "completed_at": "2026-01-01T00:00:00+00:00",
+            "quote_progress": {"observed_latest": 12, "observed_delta": 2},
+        },
+    )
+    payload = watch._write_watch_reports(
+        report_dir,
+        {
+            **common,
+            "completed_at": "2026-01-01T00:05:00+00:00",
+            "quote_progress": {"observed_latest": 14, "observed_delta": 4},
+        },
+    )
+
+    status_history = json.loads(
+        (report_dir / "latest_status_history.json").read_text(encoding="utf-8")
+    )
+    assert payload["watch_status_history_path"] == watch._display_path(
+        report_dir / "latest_status_history.json"
+    )
+    assert payload["watch_action_outbox_path"] == watch._display_path(
+        report_dir / "latest_action_outbox.json"
+    )
+    assert payload["watch_action_outbox_history_path"] == watch._display_path(
+        report_dir / "latest_action_outbox_history.json"
+    )
+    assert payload["watch_artifact_manifest_path"] == watch._display_path(
+        report_dir / "latest_artifact_manifest.json"
+    )
+    assert payload["watch_artifact_manifest_history_path"] == watch._display_path(
+        report_dir / "latest_artifact_manifest_history.json"
+    )
+    assert payload["watch_safety_invariants_path"] == watch._display_path(
+        report_dir / "latest_safety_invariants.json"
+    )
+    assert payload["watch_safety_invariants_history_path"] == watch._display_path(
+        report_dir / "latest_safety_invariants_history.json"
+    )
+    assert payload["watch_safety_coverage_path"] == watch._display_path(
+        report_dir / "latest_safety_coverage.json"
+    )
+    assert payload["watch_safety_coverage_history_path"] == watch._display_path(
+        report_dir / "latest_safety_coverage_history.json"
+    )
+    assert payload["watch_report_index_path"] == watch._display_path(
+        report_dir / "latest_report_index.json"
+    )
+    assert payload["watch_report_index_history_path"] == watch._display_path(
+        report_dir / "latest_report_index_history.json"
+    )
+    assert payload["watch_operations_health_path"] == watch._display_path(
+        report_dir / "latest_operations_health.json"
+    )
+    assert payload["watch_operations_health_history_path"] == watch._display_path(
+        report_dir / "latest_operations_health_history.json"
+    )
+    assert payload["watch_launch_gate_checklist_path"] == watch._display_path(
+        report_dir / "latest_launch_gate_checklist.json"
+    )
+    assert payload["watch_launch_gate_checklist_history_path"] == watch._display_path(
+        report_dir / "latest_launch_gate_checklist_history.json"
+    )
+    assert status_history["entry_count"] == 2
+    assert status_history["same_blocker_since"] == "2026-01-01T00:00:00+00:00"
+    assert status_history["same_blocker_wait_minutes"] == 5.0
+    assert status_history["state_change_count"] == 0
+    assert status_history["blocker_change_count"] == 0
+    assert status_history["notify_count"] == 0
+    assert status_history["live_order_safety_violation_count"] == 0
+    assert status_history["entries"][-1]["quote_observed_latest"] == 14
+    assert status_history["safety"]["order_submission_allowed"] is False
+    assert status_history["no_live_order_sent"] is True
+    action_outbox_history = json.loads(
+        (report_dir / "latest_action_outbox_history.json").read_text(encoding="utf-8")
+    )
+    assert action_outbox_history["entry_count"] == 2
+    assert action_outbox_history["command_change_count"] == 0
+    assert action_outbox_history["live_order_safety_violation_count"] == 0
+    assert action_outbox_history["no_live_order_sent"] is True
+    artifact_manifest = json.loads(
+        (report_dir / "latest_artifact_manifest.json").read_text(encoding="utf-8")
+    )
+    artifact_manifest_history = json.loads(
+        (report_dir / "latest_artifact_manifest_history.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    safety_invariants = json.loads(
+        (report_dir / "latest_safety_invariants.json").read_text(encoding="utf-8")
+    )
+    safety_invariants_history = json.loads(
+        (report_dir / "latest_safety_invariants_history.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    safety_coverage = json.loads(
+        (report_dir / "latest_safety_coverage.json").read_text(encoding="utf-8")
+    )
+    safety_coverage_history = json.loads(
+        (report_dir / "latest_safety_coverage_history.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    report_index = json.loads(
+        (report_dir / "latest_report_index.json").read_text(encoding="utf-8")
+    )
+    report_index_history = json.loads(
+        (report_dir / "latest_report_index_history.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    operations_health = json.loads(
+        (report_dir / "latest_operations_health.json").read_text(encoding="utf-8")
+    )
+    operations_health_history = json.loads(
+        (report_dir / "latest_operations_health_history.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    launch_gate_checklist = json.loads(
+        (report_dir / "latest_launch_gate_checklist.json").read_text(encoding="utf-8")
+    )
+    launch_gate_checklist_history = json.loads(
+        (report_dir / "latest_launch_gate_checklist_history.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert artifact_manifest["status"] == "artifact_manifest_complete"
+    assert artifact_manifest["missing_count"] == 0
+    assert artifact_manifest["no_live_order_sent"] is True
+    assert artifact_manifest_history["entry_count"] == 2
+    assert artifact_manifest_history["latest_manifest_status"] == (
+        "artifact_manifest_complete"
+    )
+    assert artifact_manifest_history["fail_count"] == 0
+    assert artifact_manifest_history["max_missing_count"] == 0
+    assert artifact_manifest_history["max_empty_count"] == 0
+    assert artifact_manifest_history["consecutive_fail_count"] == 0
+    assert artifact_manifest_history["no_live_order_sent"] is True
+    assert safety_invariants["status"] == "safety_invariants_pass"
+    assert safety_invariants["violation_count"] == 0
+    assert safety_invariants["no_live_order_sent"] is True
+    assert safety_invariants_history["entry_count"] == 2
+    assert safety_invariants_history["fail_count"] == 0
+    assert safety_invariants_history["consecutive_fail_count"] == 0
+    assert safety_invariants_history["no_live_order_sent"] is True
+    assert safety_coverage["status"] == "safety_coverage_pass"
+    assert safety_coverage["coverage_checked_payload_count"] == 10
+    assert safety_coverage["primary_invariant_gap_count"] == 0
+    assert safety_coverage["direct_violation_count"] == 0
+    assert safety_coverage["artifact_manifest_gap_count"] == 0
+    assert safety_coverage["no_live_order_sent"] is True
+    assert safety_coverage_history["entry_count"] == 2
+    assert safety_coverage_history["latest_coverage_status"] == "safety_coverage_pass"
+    assert safety_coverage_history["fail_count"] == 0
+    assert safety_coverage_history["consecutive_fail_count"] == 0
+    assert safety_coverage_history["coverage_change_count"] == 0
+    assert safety_coverage_history["same_coverage_since"] == "2026-01-01T00:00:00+00:00"
+    assert safety_coverage_history["same_coverage_age_minutes"] == 5.0
+    assert safety_coverage_history["max_direct_violation_count"] == 0
+    assert safety_coverage_history["max_primary_invariant_gap_count"] == 0
+    assert safety_coverage_history["max_artifact_manifest_gap_count"] == 0
+    assert safety_coverage_history["max_no_live_false_count"] == 0
+    assert safety_coverage_history["no_live_order_sent"] is True
+    assert report_index["status"] == "report_index_complete"
+    assert report_index["report_count"] == 13
+    assert report_index["json_payload_count"] == 12
+    assert report_index["missing_count"] == 0
+    assert report_index["empty_count"] == 0
+    assert report_index["no_live_order_sent"] is True
+    assert report_index_history["entry_count"] == 2
+    assert report_index_history["latest_report_index_status"] == "report_index_complete"
+    assert report_index_history["fail_count"] == 0
+    assert report_index_history["consecutive_fail_count"] == 0
+    assert report_index_history["report_index_change_count"] == 1
+    assert report_index_history["same_report_index_since"] == "2026-01-01T00:05:00+00:00"
+    assert report_index_history["same_report_index_age_minutes"] == 0.0
+    assert report_index_history["max_missing_count"] == 0
+    assert report_index_history["max_empty_count"] == 0
+    assert report_index_history["max_no_live_false_count"] == 0
+    assert report_index_history["no_live_order_sent"] is True
+    assert operations_health["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_operations_health_v1"
+    )
+    assert operations_health["status"] == "operations_health_waiting_for_fresh_signal"
+    assert operations_health["launch_status"] == (
+        "research_ready_waiting_for_fresh_signal"
+    )
+    assert operations_health["next_blocker"] == "current_fresh_signal"
+    assert operations_health["fresh_signal_available"] is False
+    assert operations_health["paper_apply_available"] is False
+    assert operations_health["report_index_history_fail_count"] == 0
+    assert operations_health["failed_safety_components"] == []
+    assert operations_health["reports"]["latest_operations_health_json"] == payload[
+        "watch_operations_health_path"
+    ]
+    assert operations_health["reports"]["latest_launch_gate_checklist_json"] == payload[
+        "watch_launch_gate_checklist_path"
+    ]
+    assert operations_health["reports"][
+        "latest_launch_gate_checklist_history_json"
+    ] == payload["watch_launch_gate_checklist_history_path"]
+    assert operations_health["no_live_order_sent"] is True
+    assert operations_health_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_operations_health_history_v1"
+    )
+    assert operations_health_history["status"] == "operations_health_history_stable"
+    assert operations_health_history["entry_count"] == 2
+    assert operations_health_history["latest_health_status"] == (
+        "operations_health_waiting_for_fresh_signal"
+    )
+    assert operations_health_history["latest_next_blocker"] == "current_fresh_signal"
+    assert operations_health_history["same_health_since"] == "2026-01-01T00:00:00+00:00"
+    assert operations_health_history["same_health_age_minutes"] == 5.0
+    assert operations_health_history["health_change_count"] == 0
+    assert operations_health_history["status_change_count"] == 0
+    assert operations_health_history["blocker_change_count"] == 0
+    assert operations_health_history["fail_count"] == 0
+    assert operations_health_history["max_failed_safety_component_count"] == 0
+    assert operations_health_history["reports"][
+        "latest_operations_health_json"
+    ] == payload["watch_operations_health_path"]
+    assert operations_health_history["reports"][
+        "latest_operations_health_history_json"
+    ] == payload["watch_operations_health_history_path"]
+    assert operations_health_history["reports"][
+        "latest_launch_gate_checklist_json"
+    ] == payload["watch_launch_gate_checklist_path"]
+    assert operations_health_history["reports"][
+        "latest_launch_gate_checklist_history_json"
+    ] == payload["watch_launch_gate_checklist_history_path"]
+    assert operations_health_history["no_live_order_sent"] is True
+    assert launch_gate_checklist["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_launch_gate_checklist_v1"
+    )
+    assert launch_gate_checklist["status"] == (
+        "launch_gate_checklist_tracking_open_gates"
+    )
+    assert launch_gate_checklist["first_open_gate"] == "paper_only_rehearsal_armed"
+    assert launch_gate_checklist["gate_count"] == 7
+    assert launch_gate_checklist["gates_by_id"]["paper_only_rehearsal_armed"][
+        "passed"
+    ] is False
+    assert launch_gate_checklist["gates_by_id"]["current_fresh_signal"][
+        "passed"
+    ] is False
+    assert launch_gate_checklist["reports"]["latest_launch_gate_checklist_json"] == payload[
+        "watch_launch_gate_checklist_path"
+    ]
+    assert launch_gate_checklist["reports"][
+        "latest_launch_gate_checklist_history_json"
+    ] == payload["watch_launch_gate_checklist_history_path"]
+    assert launch_gate_checklist["safety"]["order_submission_allowed"] is False
+    assert launch_gate_checklist["no_live_order_sent"] is True
+    assert launch_gate_checklist_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_launch_gate_checklist_history_v1"
+    )
+    assert launch_gate_checklist_history["status"] == (
+        "launch_gate_checklist_history_stable"
+    )
+    assert launch_gate_checklist_history["entry_count"] == 2
+    assert launch_gate_checklist_history["latest_checklist_status"] == (
+        "launch_gate_checklist_tracking_open_gates"
+    )
+    assert launch_gate_checklist_history["latest_first_open_gate"] == (
+        "paper_only_rehearsal_armed"
+    )
+    assert launch_gate_checklist_history["same_gate_state_since"] == (
+        "2026-01-01T00:00:00+00:00"
+    )
+    assert launch_gate_checklist_history["same_gate_state_age_minutes"] == 5.0
+    assert launch_gate_checklist_history["open_gate_change_count"] == 0
+    assert launch_gate_checklist_history["gate_regression_count"] == 0
+    assert launch_gate_checklist_history["reports"][
+        "latest_launch_gate_checklist_history_json"
+    ] == payload["watch_launch_gate_checklist_history_path"]
+    assert launch_gate_checklist_history["no_live_order_sent"] is True
 
 
 def test_launch_shadow_watch_repeats_no_live_evidence_cycles(monkeypatch, tmp_path) -> None:
@@ -248,11 +1251,48 @@ def test_launch_shadow_watch_repeats_no_live_evidence_cycles(monkeypatch, tmp_pa
     assert brief["paper_only_rehearsal"]["status"] == "armed_waiting_for_fresh_signal"
     assert brief["paper_only_rehearsal"]["system_ready"] is True
     assert brief["paper_only_rehearsal"]["armed"] is True
+    assert brief["paper_lifecycle"]["status"] == "waiting_for_fresh_signal_before_first_paper_apply"
+    assert brief["paper_lifecycle"]["missing_stage"] == "current_fresh_signal"
+    assert brief["paper_lifecycle"]["rows_available"] is False
+    assert brief["paper_lifecycle"]["order_submission_allowed"] is False
     assert brief["execution_parity"]["missing_samples"] == 20
+    assert brief["execution_parity_ledger"]["status"] == "waiting_for_first_creditable_paper_apply"
+    assert brief["execution_parity_ledger"]["entry_count"] == 0
+    assert brief["execution_parity_ledger"]["progress_pct"] == 0.0
+    assert brief["execution_parity_ledger"]["order_submission_allowed"] is False
     assert brief["signal_monitor"]["interval_seconds"] == 300.0
     assert brief["signal_monitor"]["capped_to_fresh_signal_window"] is True
     assert "next_monitor_after_utc" in brief["signal_monitor"]
     assert "next_monitor_after_kst" in brief["signal_monitor"]
+    assert brief["heartbeat_sla"]["status"] == "no_previous_watch_baseline"
+    assert brief["heartbeat_sla"]["monitor_interval_seconds"] == 300.0
+    assert brief["heartbeat_sla"]["fresh_signal_window_minutes"] == 15.0
+    assert brief["heartbeat_sla"]["order_submission_allowed"] is False
+    assert brief["heartbeat_sla"]["no_live_order_sent"] is True
+    assert brief["heartbeat_sla_history"]["status"] == (
+        "heartbeat_sla_history_baseline_established"
+    )
+    assert brief["heartbeat_sla_history"]["entry_count"] == 1
+    assert brief["heartbeat_sla_history"]["order_submission_allowed"] is False
+    assert brief["heartbeat_sla_history"]["no_live_order_sent"] is True
+    assert brief["heartbeat_sla_response"]["status"] == (
+        "heartbeat_sla_response_baseline_pending"
+    )
+    assert brief["heartbeat_sla_response"]["operator_notify"] is False
+    assert brief["heartbeat_sla_response"]["auto_schedule_change_allowed"] is False
+    assert brief["heartbeat_sla_response"]["order_submission_allowed"] is False
+    assert brief["notification_decision"]["decision"] == "DONT_NOTIFY"
+    assert brief["notification_decision"]["status"] == "quiet_waiting_for_fresh_signal"
+    assert brief["notification_decision"]["operator_action_required"] is False
+    assert brief["notification_decision"]["order_submission_allowed"] is False
+    assert brief["notification_delivery"]["delivery_decision"] == "DONT_NOTIFY"
+    assert brief["notification_delivery"]["status"] == "quiet_no_delivery_needed"
+    assert brief["notification_delivery"]["duplicate_notification_suppressed"] is False
+    assert brief["notification_delivery"]["order_submission_allowed"] is False
+    assert brief["notification_delivery_history"]["status"] == "notification_history_quiet"
+    assert brief["notification_delivery_history"]["entry_count"] == 1
+    assert brief["notification_delivery_history"]["notify_count"] == 0
+    assert brief["notification_delivery_history"]["order_submission_allowed"] is False
     assert brief["operator_next_actions"]["operator_decisions_are_manual_only"] is True
     assert brief["operator_next_actions"]["paper_apply_is_manual_only"] is True
     assert brief["operator_next_actions"]["auto_decision_allowed"] is False
@@ -612,9 +1652,539 @@ def test_launch_shadow_watch_repeats_no_live_evidence_cycles(monkeypatch, tmp_pa
     assert sleeps == [0.0]
     latest_json = tmp_path / "watch" / "latest.json"
     latest_md = tmp_path / "watch" / "latest.md"
+    latest_status_json = tmp_path / "watch" / "latest_status.json"
+    latest_status_history_json = tmp_path / "watch" / "latest_status_history.json"
+    latest_action_outbox_json = tmp_path / "watch" / "latest_action_outbox.json"
+    latest_action_outbox_history_json = (
+        tmp_path / "watch" / "latest_action_outbox_history.json"
+    )
+    latest_artifact_manifest_json = tmp_path / "watch" / "latest_artifact_manifest.json"
+    latest_artifact_manifest_history_json = (
+        tmp_path / "watch" / "latest_artifact_manifest_history.json"
+    )
+    latest_safety_invariants_json = tmp_path / "watch" / "latest_safety_invariants.json"
+    latest_safety_invariants_history_json = (
+        tmp_path / "watch" / "latest_safety_invariants_history.json"
+    )
+    latest_safety_coverage_json = tmp_path / "watch" / "latest_safety_coverage.json"
+    latest_safety_coverage_history_json = (
+        tmp_path / "watch" / "latest_safety_coverage_history.json"
+    )
+    latest_report_index_json = tmp_path / "watch" / "latest_report_index.json"
+    latest_report_index_history_json = (
+        tmp_path / "watch" / "latest_report_index_history.json"
+    )
+    latest_operations_health_json = tmp_path / "watch" / "latest_operations_health.json"
+    latest_operations_health_history_json = (
+        tmp_path / "watch" / "latest_operations_health_history.json"
+    )
+    latest_launch_gate_checklist_json = (
+        tmp_path / "watch" / "latest_launch_gate_checklist.json"
+    )
+    latest_launch_gate_checklist_history_json = (
+        tmp_path / "watch" / "latest_launch_gate_checklist_history.json"
+    )
     assert latest_json.exists()
     assert latest_md.exists()
+    assert latest_status_json.exists()
+    assert latest_status_history_json.exists()
+    assert latest_action_outbox_json.exists()
+    assert latest_action_outbox_history_json.exists()
+    assert latest_artifact_manifest_json.exists()
+    assert latest_artifact_manifest_history_json.exists()
+    assert latest_safety_invariants_json.exists()
+    assert latest_safety_invariants_history_json.exists()
+    assert latest_safety_coverage_json.exists()
+    assert latest_safety_coverage_history_json.exists()
+    assert latest_report_index_json.exists()
+    assert latest_report_index_history_json.exists()
+    assert latest_operations_health_json.exists()
+    assert latest_operations_health_history_json.exists()
+    assert latest_launch_gate_checklist_json.exists()
+    assert latest_launch_gate_checklist_history_json.exists()
     payload = json.loads(latest_json.read_text(encoding="utf-8"))
+    compact_status = json.loads(latest_status_json.read_text(encoding="utf-8"))
+    compact_status_history = json.loads(
+        latest_status_history_json.read_text(encoding="utf-8")
+    )
+    action_outbox = json.loads(latest_action_outbox_json.read_text(encoding="utf-8"))
+    action_outbox_history = json.loads(
+        latest_action_outbox_history_json.read_text(encoding="utf-8")
+    )
+    artifact_manifest = json.loads(
+        latest_artifact_manifest_json.read_text(encoding="utf-8")
+    )
+    artifact_manifest_history = json.loads(
+        latest_artifact_manifest_history_json.read_text(encoding="utf-8")
+    )
+    safety_invariants = json.loads(
+        latest_safety_invariants_json.read_text(encoding="utf-8")
+    )
+    safety_invariants_history = json.loads(
+        latest_safety_invariants_history_json.read_text(encoding="utf-8")
+    )
+    safety_coverage = json.loads(
+        latest_safety_coverage_json.read_text(encoding="utf-8")
+    )
+    safety_coverage_history = json.loads(
+        latest_safety_coverage_history_json.read_text(encoding="utf-8")
+    )
+    report_index = json.loads(latest_report_index_json.read_text(encoding="utf-8"))
+    report_index_history = json.loads(
+        latest_report_index_history_json.read_text(encoding="utf-8")
+    )
+    operations_health = json.loads(
+        latest_operations_health_json.read_text(encoding="utf-8")
+    )
+    operations_health_history = json.loads(
+        latest_operations_health_history_json.read_text(encoding="utf-8")
+    )
+    launch_gate_checklist = json.loads(
+        latest_launch_gate_checklist_json.read_text(encoding="utf-8")
+    )
+    launch_gate_checklist_history = json.loads(
+        latest_launch_gate_checklist_history_json.read_text(encoding="utf-8")
+    )
+    snapshot_path = Path(payload["watch_snapshot_path"])
+    assert summary["watch_snapshot_path"] == payload["watch_snapshot_path"]
+    assert summary["watch_status_path"] == payload["watch_status_path"]
+    assert summary["watch_status_history_path"] == payload["watch_status_history_path"]
+    assert summary["watch_action_outbox_path"] == payload["watch_action_outbox_path"]
+    assert summary["watch_action_outbox_history_path"] == payload[
+        "watch_action_outbox_history_path"
+    ]
+    assert summary["watch_artifact_manifest_path"] == payload[
+        "watch_artifact_manifest_path"
+    ]
+    assert summary["watch_artifact_manifest_history_path"] == payload[
+        "watch_artifact_manifest_history_path"
+    ]
+    assert summary["watch_safety_invariants_path"] == payload[
+        "watch_safety_invariants_path"
+    ]
+    assert summary["watch_safety_invariants_history_path"] == payload[
+        "watch_safety_invariants_history_path"
+    ]
+    assert summary["watch_safety_coverage_path"] == payload[
+        "watch_safety_coverage_path"
+    ]
+    assert summary["watch_safety_coverage_history_path"] == payload[
+        "watch_safety_coverage_history_path"
+    ]
+    assert summary["watch_report_index_path"] == payload["watch_report_index_path"]
+    assert summary["watch_report_index_history_path"] == payload[
+        "watch_report_index_history_path"
+    ]
+    assert summary["watch_operations_health_path"] == payload[
+        "watch_operations_health_path"
+    ]
+    assert summary["watch_operations_health_history_path"] == payload[
+        "watch_operations_health_history_path"
+    ]
+    assert summary["watch_launch_gate_checklist_path"] == payload[
+        "watch_launch_gate_checklist_path"
+    ]
+    assert summary["watch_launch_gate_checklist_history_path"] == payload[
+        "watch_launch_gate_checklist_history_path"
+    ]
+    assert snapshot_path.exists()
+    assert compact_status["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_status_v1"
+    )
+    assert compact_status["launch_status"] == "research_ready_waiting_for_fresh_signal"
+    assert compact_status["next_blocker"] == "current_fresh_signal"
+    assert compact_status["fresh_signal"]["available"] is False
+    assert compact_status["paper_apply"]["available"] is False
+    assert compact_status["execution_parity"]["required_samples"] == 20
+    assert compact_status["execution_parity"]["next_step"] == (
+        "wait_for_fresh_v6_add_or_remove_signal"
+    )
+    assert compact_status["notification"]["decision"] == "DONT_NOTIFY"
+    assert compact_status["notification"]["delivery_decision"] == "DONT_NOTIFY"
+    assert compact_status["reports"]["snapshot_json"] == payload["watch_snapshot_path"]
+    assert compact_status["reports"]["latest_status_history_json"] == payload[
+        "watch_status_history_path"
+    ]
+    assert compact_status["reports"]["latest_action_outbox_json"] == payload[
+        "watch_action_outbox_path"
+    ]
+    assert compact_status["reports"]["latest_action_outbox_history_json"] == payload[
+        "watch_action_outbox_history_path"
+    ]
+    assert compact_status["reports"]["latest_artifact_manifest_json"] == payload[
+        "watch_artifact_manifest_path"
+    ]
+    assert compact_status["reports"]["latest_artifact_manifest_history_json"] == payload[
+        "watch_artifact_manifest_history_path"
+    ]
+    assert compact_status["reports"]["latest_safety_invariants_json"] == payload[
+        "watch_safety_invariants_path"
+    ]
+    assert compact_status["reports"]["latest_safety_invariants_history_json"] == payload[
+        "watch_safety_invariants_history_path"
+    ]
+    assert compact_status["reports"]["latest_safety_coverage_json"] == payload[
+        "watch_safety_coverage_path"
+    ]
+    assert compact_status["reports"]["latest_safety_coverage_history_json"] == payload[
+        "watch_safety_coverage_history_path"
+    ]
+    assert compact_status["reports"]["latest_report_index_json"] == payload[
+        "watch_report_index_path"
+    ]
+    assert compact_status["reports"]["latest_report_index_history_json"] == payload[
+        "watch_report_index_history_path"
+    ]
+    assert compact_status["reports"]["latest_operations_health_json"] == payload[
+        "watch_operations_health_path"
+    ]
+    assert compact_status["reports"]["latest_launch_gate_checklist_json"] == payload[
+        "watch_launch_gate_checklist_path"
+    ]
+    assert compact_status["reports"]["latest_launch_gate_checklist_history_json"] == payload[
+        "watch_launch_gate_checklist_history_path"
+    ]
+    assert compact_status["safety"]["no_live_order_sent"] is True
+    assert compact_status_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_status_history_v1"
+    )
+    assert compact_status_history["latest_launch_status"] == (
+        "research_ready_waiting_for_fresh_signal"
+    )
+    assert compact_status_history["latest_next_blocker"] == "current_fresh_signal"
+    assert compact_status_history["live_order_safety_violation_count"] == 0
+    assert compact_status_history["no_live_order_sent"] is True
+    assert action_outbox["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_action_outbox_v1"
+    )
+    assert action_outbox["next_blocker"] == "current_fresh_signal"
+    assert action_outbox["safety"]["order_submission_allowed"] is False
+    assert action_outbox["safety"]["auto_apply_allowed"] is False
+    assert action_outbox["no_live_order_sent"] is True
+    assert action_outbox["reports"]["latest_action_outbox_history_json"] == payload[
+        "watch_action_outbox_history_path"
+    ]
+    assert action_outbox["reports"]["latest_artifact_manifest_json"] == payload[
+        "watch_artifact_manifest_path"
+    ]
+    assert action_outbox["reports"]["latest_artifact_manifest_history_json"] == payload[
+        "watch_artifact_manifest_history_path"
+    ]
+    assert action_outbox["reports"]["latest_safety_invariants_json"] == payload[
+        "watch_safety_invariants_path"
+    ]
+    assert action_outbox["reports"]["latest_safety_invariants_history_json"] == payload[
+        "watch_safety_invariants_history_path"
+    ]
+    assert action_outbox["reports"]["latest_safety_coverage_json"] == payload[
+        "watch_safety_coverage_path"
+    ]
+    assert action_outbox["reports"]["latest_safety_coverage_history_json"] == payload[
+        "watch_safety_coverage_history_path"
+    ]
+    assert action_outbox["reports"]["latest_report_index_json"] == payload[
+        "watch_report_index_path"
+    ]
+    assert action_outbox["reports"]["latest_report_index_history_json"] == payload[
+        "watch_report_index_history_path"
+    ]
+    assert action_outbox["reports"]["latest_operations_health_json"] == payload[
+        "watch_operations_health_path"
+    ]
+    assert action_outbox_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_action_outbox_history_v1"
+    )
+    assert action_outbox_history["live_order_safety_violation_count"] == 0
+    assert action_outbox_history["no_live_order_sent"] is True
+    assert artifact_manifest["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_artifact_manifest_v1"
+    )
+    assert artifact_manifest["status"] == "artifact_manifest_complete"
+    assert artifact_manifest["missing_count"] == 0
+    assert artifact_manifest["artifacts_by_name"]["latest_action_outbox_json"][
+        "exists"
+    ] is True
+    assert artifact_manifest["artifacts_by_name"]["latest_safety_invariants_json"][
+        "exists"
+    ] is True
+    assert artifact_manifest["artifacts_by_name"]["latest_safety_invariants_history_json"][
+        "exists"
+    ] is True
+    assert artifact_manifest["reports"]["latest_artifact_manifest_history_json"] == payload[
+        "watch_artifact_manifest_history_path"
+    ]
+    assert artifact_manifest["reports"]["latest_safety_coverage_json"] == payload[
+        "watch_safety_coverage_path"
+    ]
+    assert artifact_manifest["reports"]["latest_safety_coverage_history_json"] == payload[
+        "watch_safety_coverage_history_path"
+    ]
+    assert artifact_manifest["reports"]["latest_report_index_json"] == payload[
+        "watch_report_index_path"
+    ]
+    assert artifact_manifest["reports"]["latest_report_index_history_json"] == payload[
+        "watch_report_index_history_path"
+    ]
+    assert artifact_manifest["reports"]["latest_operations_health_json"] == payload[
+        "watch_operations_health_path"
+    ]
+    assert artifact_manifest["safety"]["order_submission_allowed"] is False
+    assert artifact_manifest["no_live_order_sent"] is True
+    assert artifact_manifest_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_artifact_manifest_history_v1"
+    )
+    assert artifact_manifest_history["latest_manifest_status"] == (
+        "artifact_manifest_complete"
+    )
+    assert artifact_manifest_history["fail_count"] == 0
+    assert artifact_manifest_history["no_live_order_sent"] is True
+    assert artifact_manifest_history["reports"]["latest_safety_coverage_json"] == payload[
+        "watch_safety_coverage_path"
+    ]
+    assert artifact_manifest_history["reports"][
+        "latest_safety_coverage_history_json"
+    ] == payload["watch_safety_coverage_history_path"]
+    assert artifact_manifest_history["reports"]["latest_report_index_json"] == payload[
+        "watch_report_index_path"
+    ]
+    assert artifact_manifest_history["reports"]["latest_report_index_history_json"] == payload[
+        "watch_report_index_history_path"
+    ]
+    assert artifact_manifest_history["reports"]["latest_operations_health_json"] == payload[
+        "watch_operations_health_path"
+    ]
+    assert safety_invariants["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_safety_invariants_v1"
+    )
+    assert safety_invariants["status"] == "safety_invariants_pass"
+    assert safety_invariants["violation_count"] == 0
+    assert safety_invariants["safety"]["order_submission_allowed"] is False
+    assert safety_invariants["no_live_order_sent"] is True
+    assert safety_invariants["reports"]["latest_safety_coverage_json"] == payload[
+        "watch_safety_coverage_path"
+    ]
+    assert safety_invariants["reports"]["latest_safety_coverage_history_json"] == payload[
+        "watch_safety_coverage_history_path"
+    ]
+    assert safety_invariants["reports"]["latest_report_index_json"] == payload[
+        "watch_report_index_path"
+    ]
+    assert safety_invariants["reports"]["latest_report_index_history_json"] == payload[
+        "watch_report_index_history_path"
+    ]
+    assert safety_invariants["reports"]["latest_operations_health_json"] == payload[
+        "watch_operations_health_path"
+    ]
+    assert safety_invariants_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_safety_invariants_history_v1"
+    )
+    assert safety_invariants_history["fail_count"] == 0
+    assert safety_invariants_history["no_live_order_sent"] is True
+    assert safety_invariants_history["reports"]["latest_safety_coverage_json"] == payload[
+        "watch_safety_coverage_path"
+    ]
+    assert safety_invariants_history["reports"][
+        "latest_safety_coverage_history_json"
+    ] == payload["watch_safety_coverage_history_path"]
+    assert safety_invariants_history["reports"]["latest_report_index_json"] == payload[
+        "watch_report_index_path"
+    ]
+    assert safety_invariants_history["reports"]["latest_report_index_history_json"] == payload[
+        "watch_report_index_history_path"
+    ]
+    assert safety_invariants_history["reports"]["latest_operations_health_json"] == payload[
+        "watch_operations_health_path"
+    ]
+    assert safety_coverage["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_safety_coverage_v1"
+    )
+    assert safety_coverage["status"] == "safety_coverage_pass"
+    assert safety_coverage["coverage_checked_payload_count"] == 10
+    assert safety_coverage["primary_invariant_gap_count"] == 0
+    assert safety_coverage["direct_violation_count"] == 0
+    assert safety_coverage["artifact_manifest_gap_count"] == 0
+    assert safety_coverage["no_live_order_sent"] is True
+    assert safety_coverage["reports"]["latest_safety_coverage_history_json"] == payload[
+        "watch_safety_coverage_history_path"
+    ]
+    assert safety_coverage["reports"]["latest_report_index_json"] == payload[
+        "watch_report_index_path"
+    ]
+    assert safety_coverage["reports"]["latest_report_index_history_json"] == payload[
+        "watch_report_index_history_path"
+    ]
+    assert safety_coverage["reports"]["latest_operations_health_json"] == payload[
+        "watch_operations_health_path"
+    ]
+    assert safety_coverage_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_safety_coverage_history_v1"
+    )
+    assert safety_coverage_history["latest_coverage_status"] == "safety_coverage_pass"
+    assert safety_coverage_history["fail_count"] == 0
+    assert safety_coverage_history["max_direct_violation_count"] == 0
+    assert safety_coverage_history["max_primary_invariant_gap_count"] == 0
+    assert safety_coverage_history["max_artifact_manifest_gap_count"] == 0
+    assert safety_coverage_history["no_live_order_sent"] is True
+    assert safety_coverage_history["reports"]["latest_report_index_json"] == payload[
+        "watch_report_index_path"
+    ]
+    assert safety_coverage_history["reports"]["latest_report_index_history_json"] == payload[
+        "watch_report_index_history_path"
+    ]
+    assert safety_coverage_history["reports"]["latest_operations_health_json"] == payload[
+        "watch_operations_health_path"
+    ]
+    assert report_index["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_report_index_v1"
+    )
+    assert report_index["status"] == "report_index_complete"
+    assert report_index["report_count"] == 13
+    assert report_index["json_payload_count"] == 12
+    assert report_index["missing_count"] == 0
+    assert report_index["no_live_order_sent"] is True
+    assert report_index["reports"]["latest_report_index_history_json"] == payload[
+        "watch_report_index_history_path"
+    ]
+    assert report_index["reports"]["latest_operations_health_json"] == payload[
+        "watch_operations_health_path"
+    ]
+    assert report_index_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_report_index_history_v1"
+    )
+    assert report_index_history["latest_report_index_status"] == "report_index_complete"
+    assert report_index_history["fail_count"] == 0
+    assert report_index_history["max_missing_count"] == 0
+    assert report_index_history["max_empty_count"] == 0
+    assert report_index_history["max_no_live_false_count"] == 0
+    assert report_index_history["no_live_order_sent"] is True
+    assert report_index_history["reports"]["latest_operations_health_json"] == payload[
+        "watch_operations_health_path"
+    ]
+    assert operations_health["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_operations_health_v1"
+    )
+    assert operations_health["status"] == "operations_health_waiting_for_fresh_signal"
+    assert operations_health["launch_status"] == (
+        "research_ready_waiting_for_fresh_signal"
+    )
+    assert operations_health["next_blocker"] == "current_fresh_signal"
+    assert operations_health["fresh_signal_available"] is False
+    assert operations_health["paper_apply_available"] is False
+    assert operations_health["paper_apply_allowed_now"] is False
+    assert operations_health["report_index_status"] == "report_index_complete"
+    assert operations_health["report_index_history_fail_count"] == 0
+    assert operations_health["failed_safety_components"] == []
+    assert operations_health["reports"]["latest_operations_health_json"] == payload[
+        "watch_operations_health_path"
+    ]
+    assert operations_health["reports"]["latest_operations_health_history_json"] == payload[
+        "watch_operations_health_history_path"
+    ]
+    assert operations_health["reports"]["latest_launch_gate_checklist_json"] == payload[
+        "watch_launch_gate_checklist_path"
+    ]
+    assert operations_health["reports"][
+        "latest_launch_gate_checklist_history_json"
+    ] == payload["watch_launch_gate_checklist_history_path"]
+    assert operations_health["safety"]["order_submission_allowed"] is False
+    assert operations_health["no_live_order_sent"] is True
+    assert operations_health_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_operations_health_history_v1"
+    )
+    assert operations_health_history["status"] == "operations_health_history_stable"
+    assert operations_health_history["entry_count"] == 2
+    assert operations_health_history["latest_health_status"] == (
+        "operations_health_waiting_for_fresh_signal"
+    )
+    assert operations_health_history["latest_next_blocker"] == "current_fresh_signal"
+    assert operations_health_history["fail_count"] == 0
+    assert operations_health_history["health_change_count"] == 0
+    assert operations_health_history["max_failed_safety_component_count"] == 0
+    assert operations_health_history["reports"][
+        "latest_operations_health_json"
+    ] == payload["watch_operations_health_path"]
+    assert operations_health_history["reports"][
+        "latest_operations_health_history_json"
+    ] == payload["watch_operations_health_history_path"]
+    assert operations_health_history["reports"][
+        "latest_launch_gate_checklist_json"
+    ] == payload["watch_launch_gate_checklist_path"]
+    assert operations_health_history["reports"][
+        "latest_launch_gate_checklist_history_json"
+    ] == payload["watch_launch_gate_checklist_history_path"]
+    assert operations_health_history["safety"]["order_submission_allowed"] is False
+    assert operations_health_history["no_live_order_sent"] is True
+    assert launch_gate_checklist["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_launch_gate_checklist_v1"
+    )
+    assert launch_gate_checklist["status"] == (
+        "launch_gate_checklist_waiting_for_fresh_signal"
+    )
+    assert launch_gate_checklist["launch_status"] == (
+        "research_ready_waiting_for_fresh_signal"
+    )
+    assert launch_gate_checklist["next_blocker"] == "current_fresh_signal"
+    assert launch_gate_checklist["first_open_gate"] == "current_fresh_signal"
+    assert launch_gate_checklist["gate_count"] == 7
+    assert launch_gate_checklist["gates_by_id"]["no_live_safety_authority"][
+        "passed"
+    ] is True
+    assert launch_gate_checklist["gates_by_id"]["report_safety_integrity"][
+        "passed"
+    ] is True
+    assert launch_gate_checklist["gates_by_id"]["paper_only_rehearsal_armed"][
+        "passed"
+    ] is True
+    assert launch_gate_checklist["gates_by_id"]["current_fresh_signal"][
+        "passed"
+    ] is False
+    assert launch_gate_checklist["gates_by_id"]["signal_monitor_cadence"][
+        "passed"
+    ] is True
+    assert launch_gate_checklist["gates_by_id"]["execution_parity_samples"][
+        "details"
+    ]["missing_samples"] == 20
+    assert launch_gate_checklist["gates_by_id"]["execution_parity_samples"][
+        "details"
+    ]["required_samples"] == 20
+    assert launch_gate_checklist["gates_by_id"]["execution_parity_samples"][
+        "next_action"
+    ] == "wait_for_fresh_v6_add_or_remove_signal"
+    assert launch_gate_checklist["operator_next"]["manual_only"] is True
+    assert launch_gate_checklist["reports"]["latest_launch_gate_checklist_json"] == payload[
+        "watch_launch_gate_checklist_path"
+    ]
+    assert launch_gate_checklist["reports"][
+        "latest_launch_gate_checklist_history_json"
+    ] == payload["watch_launch_gate_checklist_history_path"]
+    assert launch_gate_checklist["safety"]["order_submission_allowed"] is False
+    assert launch_gate_checklist["no_live_order_sent"] is True
+    assert launch_gate_checklist_history["schema_version"] == (
+        "market_state_rotation_v6_launch_shadow_watch_launch_gate_checklist_history_v1"
+    )
+    assert launch_gate_checklist_history["status"] == (
+        "launch_gate_checklist_history_stable"
+    )
+    assert launch_gate_checklist_history["entry_count"] == 2
+    assert launch_gate_checklist_history["latest_checklist_status"] == (
+        "launch_gate_checklist_waiting_for_fresh_signal"
+    )
+    assert launch_gate_checklist_history["latest_first_open_gate"] == (
+        "current_fresh_signal"
+    )
+    assert launch_gate_checklist_history["latest_open_gate_ids"] == [
+        "current_fresh_signal",
+        "first_real_paper_lifecycle_row",
+        "execution_parity_samples",
+    ]
+    assert launch_gate_checklist_history["open_gate_change_count"] == 0
+    assert launch_gate_checklist_history["gate_regression_count"] == 0
+    assert launch_gate_checklist_history["no_live_false_count"] == 0
+    assert launch_gate_checklist_history["reports"][
+        "latest_launch_gate_checklist_history_json"
+    ] == payload["watch_launch_gate_checklist_history_path"]
+    assert launch_gate_checklist_history["safety"]["order_submission_allowed"] is False
+    assert launch_gate_checklist_history["no_live_order_sent"] is True
     assert payload["latest_run"]["launch_readiness"]["next_blocker"]["gate"] == "current_fresh_signal"
     assert payload["latest_launch_state"]["next_blocker_gate"] == "current_fresh_signal"
     assert payload["latest_launch_state"]["fresh_signal_available_seen"] is False
@@ -647,11 +2217,86 @@ def test_launch_shadow_watch_repeats_no_live_evidence_cycles(monkeypatch, tmp_pa
     ] == "healthy_sparse_runtime_wait"
     assert payload["launch_shadow_watch_brief"]["paper_apply"]["allowed_now"] is False
     assert payload["launch_shadow_watch_brief"]["paper_only_rehearsal"]["system_ready"] is True
+    assert payload["launch_shadow_watch_brief"]["paper_lifecycle"]["status"] == (
+        "waiting_for_fresh_signal_before_first_paper_apply"
+    )
+    assert payload["paper_lifecycle_row_diagnostics"]["missing_stage"] == "current_fresh_signal"
+    assert payload["paper_lifecycle_row_diagnostics"]["rows_available"] is False
+    assert payload["paper_lifecycle_row_diagnostics"]["order_submission_allowed"] is False
     assert payload["launch_shadow_watch_brief"]["execution_parity"]["missing_samples"] == 20
+    assert payload["execution_parity_evidence_ledger"]["status"] == (
+        "waiting_for_first_creditable_paper_apply"
+    )
+    assert payload["execution_parity_evidence_ledger"]["entry_count"] == 0
+    assert payload["execution_parity_evidence_ledger"]["backtest_substitution_allowed"] is False
+    assert payload["launch_shadow_watch_brief"]["execution_parity_ledger"]["progress_pct"] == 0.0
     assert payload["launch_shadow_watch_brief"]["signal_monitor"]["interval_seconds"] == 300.0
     assert payload["launch_shadow_watch_brief"]["signal_monitor"][
         "capped_to_fresh_signal_window"
     ] is True
+    assert payload["heartbeat_sla_diagnostics"]["status"] == "no_previous_watch_baseline"
+    assert payload["heartbeat_sla_diagnostics"]["monitor_interval_seconds"] == 300.0
+    assert payload["heartbeat_sla_diagnostics"]["fresh_signal_window_minutes"] == 15.0
+    assert payload["heartbeat_sla_diagnostics"]["order_submission_allowed"] is False
+    assert payload["latest_run"]["heartbeat_sla_diagnostics"]["status"] == (
+        "no_previous_watch_baseline"
+    )
+    assert payload["heartbeat_sla_history"]["status"] == (
+        "heartbeat_sla_history_baseline_established"
+    )
+    assert payload["heartbeat_sla_history"]["entry_count"] == 1
+    assert payload["latest_run"]["heartbeat_sla_history"]["status"] == (
+        "heartbeat_sla_history_baseline_established"
+    )
+    assert payload["heartbeat_sla_response_plan"]["status"] == (
+        "heartbeat_sla_response_baseline_pending"
+    )
+    assert payload["heartbeat_sla_response_plan"]["automation_update_allowed"] is False
+    assert payload["latest_run"]["heartbeat_sla_response_plan"]["status"] == (
+        "heartbeat_sla_response_baseline_pending"
+    )
+    assert payload["launch_shadow_watch_brief"]["heartbeat_sla"]["status"] == (
+        "no_previous_watch_baseline"
+    )
+    assert payload["launch_shadow_watch_brief"]["heartbeat_sla_history"]["status"] == (
+        "heartbeat_sla_history_baseline_established"
+    )
+    assert payload["launch_shadow_watch_brief"]["heartbeat_sla_response"]["status"] == (
+        "heartbeat_sla_response_baseline_pending"
+    )
+    assert payload["launch_shadow_watch_notification_decision"]["decision"] == "DONT_NOTIFY"
+    assert payload["launch_shadow_watch_notification_decision"]["status"] == (
+        "quiet_waiting_for_fresh_signal"
+    )
+    assert payload["notification_decision"]["decision"] == "DONT_NOTIFY"
+    assert payload["latest_run"]["launch_shadow_watch_notification_decision"]["status"] == (
+        "quiet_waiting_for_fresh_signal"
+    )
+    assert payload["notification_delivery_plan"]["delivery_decision"] == "DONT_NOTIFY"
+    assert payload["notification_delivery_plan"]["status"] == "quiet_no_delivery_needed"
+    assert payload["launch_shadow_watch_notification_delivery_plan"][
+        "delivery_decision"
+    ] == "DONT_NOTIFY"
+    assert payload["notification_delivery_history"]["status"] == "notification_history_quiet"
+    assert payload["notification_delivery_history"]["entry_count"] == 1
+    assert payload["launch_shadow_watch_notification_delivery_history"]["status"] == (
+        "notification_history_quiet"
+    )
+    assert payload["latest_run"]["notification_delivery_plan"]["status"] == (
+        "quiet_no_delivery_needed"
+    )
+    assert payload["latest_run"]["notification_delivery_history"]["status"] == (
+        "notification_history_quiet"
+    )
+    assert payload["launch_shadow_watch_brief"]["notification_decision"]["decision"] == (
+        "DONT_NOTIFY"
+    )
+    assert payload["launch_shadow_watch_brief"]["notification_delivery"][
+        "delivery_decision"
+    ] == "DONT_NOTIFY"
+    assert payload["launch_shadow_watch_brief"]["notification_delivery_history"][
+        "entry_count"
+    ] == 1
     assert "next_monitor_after_utc" in payload["launch_shadow_watch_brief"]["signal_monitor"]
     assert "next_monitor_after_kst" in payload["launch_shadow_watch_brief"]["signal_monitor"]
     assert payload["launch_shadow_watch_brief"]["operator_next_actions"][
@@ -2280,6 +3925,178 @@ def test_launch_shadow_watch_repeats_no_live_evidence_cycles(monkeypatch, tmp_pa
     assert "scheduled_command_projection_reason: `" in latest_md.read_text(encoding="utf-8")
     assert "scheduled_command_projection_next_command_source: `" in latest_md.read_text(encoding="utf-8")
     assert "## Blocker Resolution Plan" in latest_md.read_text(encoding="utf-8")
+
+
+def test_btcusdc_parallel_lane_uses_separate_canary_caps_path(monkeypatch, tmp_path) -> None:
+    calls = []
+    args = _args(tmp_path)
+    args.iterations = 1
+    args.target_hours = 0.0
+    args.enable_btcusdc_parallel_shadow_lane = True
+    args.btcusdc_parallel_canary_risk_caps_json = str(tmp_path / "canary_caps_BTCUSDC.json")
+    args.btcusdc_parallel_sample_jsonl = str(tmp_path / "quote_shadow_BTCUSDC.jsonl")
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    btcusdc_rows = [
+        build_quote_shadow_row(
+            order_book=_book(),
+            timestamp=now - timedelta(minutes=idx),
+            symbol="BTCUSDC",
+            strategy_family="market_state_rotation_v6",
+            decision_id=f"btcusdc_quote_{idx}",
+            side="long" if idx % 2 == 0 else "short",
+            order_notional_usdt=100.0,
+            latency_ms=80.0,
+        )
+        for idx in range(4)
+    ]
+    Path(args.btcusdc_parallel_sample_jsonl).write_text(
+        "\n".join(json.dumps(row) for row in btcusdc_rows) + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_evidence_cycle(**kwargs):
+        calls.append(kwargs)
+        symbol = str(kwargs["symbol"]).upper()
+        caps_path = kwargs["canary_risk_caps_path"]
+        return {
+            "overall_status": "healthy_abstention_waiting_for_quality_signal",
+            "no_live_order_sent": True,
+            "decision_state": {"fresh_signal": False, "signal_stale": True},
+            "collection_progress": {
+                "quote_observed": 4 if symbol == "BTCUSDC" else 390,
+                "quote_required": 300,
+                "quote_missing_samples": 296 if symbol == "BTCUSDC" else 0,
+                "quote_distinct_hours": 1 if symbol == "BTCUSDC" else 30,
+                "quote_calendar_days": 1,
+                "captured_quote_rows_this_cycle": 0,
+                "paper_fill_rows": 0,
+            },
+            "readiness_progress": {},
+            "execution_parity_journal": {
+                "status": "execution_parity_journal_collecting",
+                "collection_plan": {"sample_count": 0, "required_samples": 20, "missing_samples": 20},
+                "contract_summary": {"symbol": symbol, "sample_count": 0, "min_sample_count": 20},
+            },
+            "execution_parity_collection_plan": {"status": "waiting_for_fresh_signal"},
+            "paper_bridge_apply_gate": {"status": "blocked_waiting_for_fresh_signal", "fresh_signal": False},
+            "quote_cadence_preflight": {
+                "decision": "skip_duplicate_utc_hour_until_missing_hour_window",
+                "effective_quote_samples_per_tick": 0,
+            },
+            "signal_wait_plan": {},
+            "launch_readiness": {
+                "status": "research_ready_waiting_for_fresh_signal",
+                "next_blocker": {"gate": "current_fresh_signal"},
+                "blocking_gates": [{"gate": "current_fresh_signal"}],
+            },
+            "historical_gate_substitution": {},
+            "canary_risk_caps_config": {
+                "status": "missing_optional_config_file",
+                "configured": False,
+                "path": str(caps_path),
+                "path_exists": False,
+                "safeguards": {"scope_symbol": ""},
+                "required_safeguards": {"scope_symbol": symbol},
+                "errors": ["canary_risk_caps_json_required"],
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            },
+        }
+
+    monkeypatch.setattr(watch, "run_evidence_cycle", fake_run_evidence_cycle)
+
+    summary = watch.run_launch_shadow_watch(args, sleep_fn=lambda seconds: None)
+
+    assert len(calls) == 2
+    assert calls[0]["symbol"] == "BTCUSDT"
+    assert calls[0]["canary_risk_caps_path"] == tmp_path / "canary_caps.json"
+    assert calls[1]["symbol"] == "BTCUSDC"
+    assert calls[1]["canary_risk_caps_path"] == tmp_path / "canary_caps_BTCUSDC.json"
+    lane = summary["btcusdc_parallel_shadow_lane"]
+    assert lane["candidate_symbol"] == "BTCUSDC"
+    assert lane["candidate_canary_risk_caps"]["status"] == "missing_optional_config_file"
+    assert lane["candidate_canary_risk_caps"]["required_scope_symbol"] == "BTCUSDC"
+    assert lane["candidate_gates"]["canary_risk_caps_path"] == str(tmp_path / "canary_caps_BTCUSDC.json")
+    assert lane["candidate_quote_microstructure_watch"]["sample_path"] == args.btcusdc_parallel_sample_jsonl
+    assert lane["candidate_quote_microstructure_watch"]["eligible_row_count"] == 4
+    coverage = lane["candidate_quote_coverage_plan"]
+    assert coverage["status"] in {
+        "quote_sample_count_incomplete",
+        "quote_sample_count_incomplete_current_window_open",
+        "quote_sample_count_incomplete_waiting_for_next_coverage_window",
+    }
+    assert coverage["remaining_quote_samples"] == 296
+    assert coverage["sample_count_incomplete"] is True
+    assert coverage["force_quote_sample_available"] is True
+    assert coverage["can_collect_now"] == coverage["standard_capture_window_open"]
+    assert coverage["recommended_action"] in {
+        "collect_quote_samples_now",
+        "wait_until_next_quote_coverage_window",
+    }
+    assert "--symbol BTCUSDC" in coverage["quote_capture_command"]
+    assert args.btcusdc_parallel_sample_jsonl in coverage["quote_capture_command"]
+    assert "--refresh-market-data-before-run" in coverage["quote_capture_command"]
+    assert str(tmp_path / "canary_caps_BTCUSDC.json") in coverage["quote_capture_command"]
+    runbook = lane["candidate_quote_capture_runbook"]
+    assert runbook["status"] in {
+        "capture_current_standard_window_now",
+        "wait_for_next_standard_capture_window",
+    }
+    assert runbook["command_includes_market_data_refresh"] is True
+    assert runbook["command_includes_apply_paper_bridge"] is False
+    assert runbook["command_includes_live_flag"] is False
+    assert runbook["expected_rows_per_successful_capture"] == 4
+    assert runbook["expected_quote_observed_after_successful_capture"] == 8
+    assert runbook["expected_remaining_samples_after_successful_capture"] == 292
+    assert lane["safety"]["order_submission_allowed"] is False
+    assert lane["no_live_order_sent"] is True
+    latest_status = json.loads((tmp_path / "watch" / "latest_status.json").read_text(encoding="utf-8"))
+    assert latest_status["btcusdc_parallel_shadow_lane"]["quote_coverage_status"] == coverage["status"]
+    assert "quote_standard_capture_window_open" in latest_status["btcusdc_parallel_shadow_lane"]
+    assert latest_status["btcusdc_parallel_shadow_lane"]["quote_capture_runbook_status"] == runbook["status"]
+    assert latest_status["btcusdc_parallel_shadow_lane"][
+        "quote_capture_expected_rows_per_successful_capture"
+    ] == 4
+    latest_md = (tmp_path / "watch" / "latest.md").read_text(encoding="utf-8")
+    assert f"btcusdc_parallel_quote_coverage_status: `{coverage['status']}`" in latest_md
+    assert "btcusdc_parallel_quote_standard_capture_window_open: `" in latest_md
+    assert "btcusdc_parallel_quote_capture_runbook_status: `" in latest_md
+
+
+def test_microstructure_coverage_plan_marks_duplicate_hour_wait() -> None:
+    generated_at = datetime(2026, 6, 12, 5, 37, tzinfo=UTC)
+    plan = watch._microstructure_coverage_plan(
+        coverage={
+            "utc_hour_of_day_covered_count": 1,
+            "utc_hour_of_day_missing": ["06", "07"],
+        },
+        latest_collection={
+            "quote_observed": 4,
+            "quote_required": 300,
+            "quote_calendar_days": 1,
+            "quote_min_calendar_days": 30,
+            "quote_distinct_hours": 1,
+            "quote_min_distinct_hours": 24,
+        },
+        microstructure_watch={
+            "eligible_row_count": 4,
+            "required_quote_samples": 300,
+            "calendar_day_count": 1,
+            "min_calendar_days": 30,
+            "calendar_days": ["2026-06-12"],
+            "distinct_hour_count": 1,
+            "min_distinct_hours": 24,
+        },
+        generated_at=generated_at,
+        quote_capture_command="safe quote capture command",
+    )
+
+    assert plan["status"] == "quote_sample_count_incomplete_waiting_for_next_coverage_window"
+    assert plan["can_collect_now"] is False
+    assert plan["standard_capture_window_open"] is False
+    assert plan["standard_capture_would_skip_duplicate_window"] is True
+    assert plan["force_quote_sample_available"] is True
+    assert plan["next_quote_coverage_kst_at"] == "2026-06-12T15:00:00+09:00"
 
 
 def test_paper_rehearsal_fast_signal_monitor_preserves_schedule_for_same_event() -> None:
@@ -7129,6 +8946,95 @@ def test_first_fresh_signal_runbook_uses_current_iteration_recheck_schedule() ->
     assert runbook["no_live_order_sent"] is True
 
 
+def test_fresh_signal_opportunity_memory_records_current_signal_without_auto_apply() -> None:
+    memory = watch._fresh_signal_opportunity_memory(
+        progress={"fresh_signal_seen": True, "paper_apply_available_seen": False},
+        latest={
+            "paper_bridge_apply_gate": {
+                "fresh_signal": True,
+                "bridge_action": "add",
+                "execution_parity_preflight": {
+                    "source_event_key": "event:add:long",
+                    "source_event_ts": "2026-01-01T00:00:00+00:00",
+                },
+            }
+        },
+        first_fresh_signal_paper_apply_runbook={
+            "fresh_signal": True,
+            "paper_apply_allowed_now": False,
+            "apply_command_when_gate_allows": "paper-apply",
+            "post_apply_execution_parity_review_command": "review-after",
+        },
+        execution_parity_status_summary={"missing_samples": 20},
+        previous_payload=None,
+        generated_at=datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
+    )
+
+    assert memory["status"] == "current_fresh_signal_seen_waiting_for_paper_apply_gate"
+    assert memory["ever_seen"] is True
+    assert memory["current_window_active"] is True
+    assert memory["source_event_key"] == "event:add:long"
+    assert memory["apply_command_when_gate_allows"] == "paper-apply"
+    assert memory["stale_signal_apply_allowed"] is False
+    assert memory["auto_apply_allowed"] is False
+    assert memory["order_submission_allowed"] is False
+    assert memory["no_live_order_sent"] is True
+
+
+def test_fresh_signal_opportunity_memory_carries_forward_expired_signal_safely() -> None:
+    memory = watch._fresh_signal_opportunity_memory(
+        progress={"fresh_signal_seen": False, "paper_apply_available_seen": False},
+        latest={"paper_bridge_apply_gate": {"fresh_signal": False}},
+        first_fresh_signal_paper_apply_runbook={"fresh_signal": False},
+        execution_parity_status_summary={"missing_samples": 20},
+        previous_payload={
+            "fresh_signal_opportunity_memory": {
+                "status": "current_fresh_signal_seen_waiting_for_paper_apply_gate",
+                "ever_seen": True,
+                "paper_apply_available_now": False,
+                "last_seen_at": "2026-01-01T00:05:00+00:00",
+                "source_event_key": "event:add:long",
+                "source_event_ts": "2026-01-01T00:00:00+00:00",
+                "bridge_action": "add",
+                "apply_command_when_gate_allows": "paper-apply",
+                "post_apply_execution_parity_review_command": "review-after",
+                "no_live_order_sent": True,
+            }
+        },
+        generated_at=datetime(2026, 1, 1, 0, 25, tzinfo=UTC),
+    )
+
+    assert memory["status"] == "previous_fresh_signal_expired_before_paper_apply_gate_opened"
+    assert memory["ever_seen"] is True
+    assert memory["current_window_active"] is False
+    assert memory["carried_forward_from_previous_watch"] is True
+    assert memory["last_seen_age_minutes"] == 20.0
+    assert memory["source_event_key"] == "event:add:long"
+    assert memory["expired_window_outcome"] == "fresh_signal_was_observed_but_apply_gate_never_opened_in_time"
+    assert memory["safe_next_action"] == "wait_for_next_fresh_signal_and_rerun_pre_apply_dry_run"
+    assert memory["stale_signal_apply_allowed"] is False
+    assert memory["auto_apply_allowed"] is False
+    assert memory["no_live_order_sent"] is True
+
+
+def test_fresh_signal_opportunity_memory_reports_no_signal_seen_yet() -> None:
+    memory = watch._fresh_signal_opportunity_memory(
+        progress={"fresh_signal_seen": False},
+        latest={"paper_bridge_apply_gate": {"fresh_signal": False}},
+        first_fresh_signal_paper_apply_runbook={},
+        execution_parity_status_summary={},
+        previous_payload={},
+        generated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert memory["status"] == "no_fresh_signal_seen_yet"
+    assert memory["ever_seen"] is False
+    assert memory["current_window_active"] is False
+    assert memory["safe_next_action"] == "monitor_fresh_signal_without_forcing_entry"
+    assert memory["stale_signal_apply_allowed"] is False
+    assert memory["no_live_order_sent"] is True
+
+
 def test_operator_review_decision_aid_summarizes_accept_reject_context() -> None:
     aid = watch._operator_review_decision_aid(
         operator_review_handoff_summary={
@@ -9930,6 +11836,325 @@ def test_paper_apply_parity_review_state_blocks_when_stale_after_recent_apply() 
     assert state["no_live_order_sent"] is True
 
 
+def test_paper_lifecycle_row_diagnostics_waits_for_fresh_signal_first() -> None:
+    diagnostics = watch._paper_lifecycle_row_diagnostics(
+        latest={
+            "signal_wait_plan": {"fresh_signal": False},
+            "paper_bridge_apply_gate": {
+                "fresh_signal": False,
+                "can_request_paper_apply_now": False,
+            },
+            "collection_progress": {"paper_fill_rows": 0},
+        },
+        paper_only_rehearsal={
+            "actual_paper_lifecycle_rows": 0,
+            "remaining_gates": ["current_fresh_signal", "first_real_paper_lifecycle_row"],
+        },
+        recent_paper_apply={"status": "unavailable"},
+        recent_paper_review={"status": "unavailable"},
+        parity_review_state={"status": "unavailable", "no_live_order_sent": True},
+        execution_parity_status_summary={"eligible_journal_rows": 0, "missing_samples": 20},
+    )
+
+    assert diagnostics["status"] == "waiting_for_fresh_signal_before_first_paper_apply"
+    assert diagnostics["missing_stage"] == "current_fresh_signal"
+    assert diagnostics["blockers"] == ["current_fresh_signal", "first_real_paper_lifecycle_row"]
+    assert diagnostics["diagnostic_matrix"]["fresh_signal_gate"] == "waiting"
+    assert diagnostics["rows_available"] is False
+    assert diagnostics["auto_apply_allowed"] is False
+    assert diagnostics["order_submission_allowed"] is False
+    assert diagnostics["no_live_order_sent"] is True
+
+
+def test_paper_lifecycle_row_diagnostics_requires_post_apply_parity_review() -> None:
+    diagnostics = watch._paper_lifecycle_row_diagnostics(
+        latest={
+            "signal_wait_plan": {"fresh_signal": True},
+            "paper_bridge_apply_gate": {
+                "fresh_signal": True,
+                "can_request_paper_apply_now": False,
+            },
+            "collection_progress": {"paper_fill_rows": 0},
+        },
+        paper_only_rehearsal={"actual_paper_lifecycle_rows": 0},
+        recent_paper_apply={
+            "status": "available",
+            "generated_at": "2026-01-01T12:05:00+00:00",
+            "source_report": "reports/apply.json",
+            "paper_fill_rows": 0,
+            "no_live_order_sent": True,
+        },
+        recent_paper_review={
+            "status": "available",
+            "generated_at": "2026-01-01T12:00:00+00:00",
+            "source_report": "reports/pre.json",
+            "no_live_order_sent": True,
+        },
+        parity_review_state={
+            "status": "missing_after_recent_paper_apply",
+            "blocks_next_paper_apply": True,
+            "recommended_command": "review --after-evidence-report reports/apply.json",
+            "blockers": ["post_apply_parity_review_missing"],
+            "next_actions": ["run_post_apply_parity_review_before_next_paper_apply"],
+            "no_live_order_sent": True,
+        },
+        execution_parity_status_summary={"eligible_journal_rows": 0, "missing_samples": 20},
+    )
+
+    assert diagnostics["status"] == "recent_paper_apply_waiting_for_post_apply_parity_review"
+    assert diagnostics["missing_stage"] == "post_apply_parity_review"
+    assert diagnostics["recommended_command"] == "review --after-evidence-report reports/apply.json"
+    assert diagnostics["safe_next_action"] == "run_post_apply_parity_review_before_next_paper_apply"
+    assert diagnostics["recent_paper_apply_seen"] is True
+    assert diagnostics["recent_paper_bridge_review_seen"] is True
+    assert diagnostics["no_live_order_sent"] is True
+
+
+def test_paper_lifecycle_row_diagnostics_reports_parity_blocker() -> None:
+    diagnostics = watch._paper_lifecycle_row_diagnostics(
+        latest={
+            "signal_wait_plan": {"fresh_signal": True},
+            "paper_bridge_apply_gate": {
+                "fresh_signal": True,
+                "can_request_paper_apply_now": False,
+            },
+            "collection_progress": {"paper_fill_rows": 0},
+        },
+        paper_only_rehearsal={"actual_paper_lifecycle_rows": 0},
+        recent_paper_apply={
+            "status": "available",
+            "source_report": "reports/apply.json",
+            "paper_fill_rows": 0,
+            "no_live_order_sent": True,
+        },
+        recent_paper_review={"status": "available", "no_live_order_sent": True},
+        parity_review_state={
+            "status": "paper_apply_parity_credit_missing",
+            "blocks_next_paper_apply": True,
+            "actual_journal_row_delta": 0,
+            "new_journal_row_count": 0,
+            "blockers": ["expected_execution_parity_credit_missing"],
+            "no_live_order_sent": True,
+        },
+        execution_parity_status_summary={"eligible_journal_rows": 0, "missing_samples": 20},
+    )
+
+    assert diagnostics["status"] == "recent_paper_apply_lifecycle_row_blocked_by_parity_review"
+    assert diagnostics["missing_stage"] == "paper_apply_parity_review"
+    assert diagnostics["blockers"] == ["expected_execution_parity_credit_missing"]
+    assert diagnostics["safe_next_action"] == "resolve_paper_apply_parity_review_blocker_before_next_apply"
+    assert diagnostics["rows_available"] is False
+    assert diagnostics["no_live_order_sent"] is True
+
+
+def test_paper_lifecycle_row_diagnostics_reports_rows_available() -> None:
+    diagnostics = watch._paper_lifecycle_row_diagnostics(
+        latest={
+            "signal_wait_plan": {"fresh_signal": False},
+            "paper_bridge_apply_gate": {
+                "fresh_signal": False,
+                "can_request_paper_apply_now": False,
+            },
+            "collection_progress": {"paper_fill_rows": 1},
+        },
+        paper_only_rehearsal={"actual_paper_lifecycle_rows": 1},
+        recent_paper_apply={"status": "available", "paper_fill_rows": 1, "no_live_order_sent": True},
+        recent_paper_review={"status": "available", "no_live_order_sent": True},
+        parity_review_state={
+            "status": "paper_apply_parity_credit_confirmed",
+            "credit_confirmed": True,
+            "actual_journal_row_delta": 1,
+            "new_journal_row_count": 1,
+            "no_live_order_sent": True,
+        },
+        execution_parity_status_summary={"eligible_journal_rows": 1, "missing_samples": 19},
+    )
+
+    assert diagnostics["status"] == "paper_lifecycle_rows_available"
+    assert diagnostics["missing_stage"] is None
+    assert diagnostics["rows_available"] is True
+    assert diagnostics["actual_paper_lifecycle_rows"] == 1
+    assert diagnostics["eligible_journal_rows"] == 1
+    assert diagnostics["safe_next_action"] == "continue_execution_parity_collection_until_sample_floor"
+    assert diagnostics["no_live_order_sent"] is True
+
+
+def test_execution_parity_evidence_ledger_waits_for_first_creditable_apply() -> None:
+    ledger = watch._execution_parity_evidence_ledger(
+        latest={
+            "signal_wait_plan": {"fresh_signal": False},
+            "paper_bridge_apply_gate": {"fresh_signal": False, "can_request_paper_apply_now": False},
+        },
+        paper_lifecycle_row_diagnostics={
+            "status": "waiting_for_fresh_signal_before_first_paper_apply",
+            "missing_stage": "current_fresh_signal",
+            "safe_next_action": "monitor_fresh_signal_without_forcing_entry",
+            "no_live_order_sent": True,
+        },
+        recent_paper_apply={"status": "unavailable"},
+        recent_paper_review={"status": "unavailable"},
+        parity_review_state={"status": "unavailable", "no_live_order_sent": True},
+        execution_parity_status_summary={
+            "required_samples": 20,
+            "eligible_journal_rows": 0,
+            "missing_samples": 20,
+            "no_live_order_sent": True,
+        },
+        previous_payload={},
+        generated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert ledger["status"] == "waiting_for_first_creditable_paper_apply"
+    assert ledger["entry_count"] == 0
+    assert ledger["progress_pct"] == 0.0
+    assert ledger["paper_lifecycle_missing_stage"] == "current_fresh_signal"
+    assert ledger["backtest_substitution_allowed"] is False
+    assert ledger["order_submission_allowed"] is False
+    assert ledger["no_live_order_sent"] is True
+
+
+def test_execution_parity_evidence_ledger_records_pending_apply_review() -> None:
+    ledger = watch._execution_parity_evidence_ledger(
+        latest={"paper_bridge_apply_gate": {"fresh_signal": True}},
+        paper_lifecycle_row_diagnostics={
+            "status": "recent_paper_apply_waiting_for_post_apply_parity_review",
+            "missing_stage": "post_apply_parity_review",
+            "blockers": ["post_apply_parity_review_missing"],
+            "safe_next_action": "run_post_apply_parity_review_before_next_paper_apply",
+            "no_live_order_sent": True,
+        },
+        recent_paper_apply={
+            "status": "available",
+            "generated_at": "2026-01-01T12:05:00+00:00",
+            "source_report": "reports/apply.json",
+            "bridge_action": "add",
+            "bridge_status": "applied",
+            "paper_fill_rows": 0,
+            "no_live_order_sent": True,
+        },
+        recent_paper_review={
+            "status": "available",
+            "source_report": "reports/pre.json",
+            "no_live_order_sent": True,
+        },
+        parity_review_state={
+            "status": "missing_after_recent_paper_apply",
+            "recommended_command": "review --after-evidence-report reports/apply.json",
+            "no_live_order_sent": True,
+        },
+        execution_parity_status_summary={
+            "required_samples": 20,
+            "eligible_journal_rows": 0,
+            "missing_samples": 20,
+            "no_live_order_sent": True,
+        },
+        previous_payload={},
+        generated_at=datetime(2026, 1, 1, 12, 6, tzinfo=UTC),
+    )
+
+    assert ledger["status"] == "recent_paper_apply_pending_parity_review"
+    assert ledger["entry_count"] == 1
+    assert ledger["latest_credit_event"]["event_type"] == "paper_apply"
+    assert ledger["latest_credit_event"]["credit_status"] == "pending_post_apply_parity_review"
+    assert ledger["latest_credit_event"]["source_report"] == "reports/apply.json"
+    assert ledger["safe_next_action"] == "run_post_apply_parity_review_before_next_paper_apply"
+    assert ledger["no_live_order_sent"] is True
+
+
+def test_execution_parity_evidence_ledger_records_credit_and_carries_previous_entries() -> None:
+    previous_entry = {
+        "event_type": "paper_apply",
+        "credit_status": "pending_post_apply_parity_review",
+        "generated_at": "2026-01-01T12:05:00+00:00",
+        "source_report": "reports/apply.json",
+        "no_live_order_sent": True,
+    }
+    ledger = watch._execution_parity_evidence_ledger(
+        latest={"paper_bridge_apply_gate": {"fresh_signal": False}},
+        paper_lifecycle_row_diagnostics={
+            "status": "paper_lifecycle_rows_available",
+            "missing_stage": None,
+            "safe_next_action": "continue_execution_parity_collection_until_sample_floor",
+            "no_live_order_sent": True,
+        },
+        recent_paper_apply={
+            "status": "available",
+            "source_report": "reports/apply.json",
+            "no_live_order_sent": True,
+        },
+        recent_paper_review={"status": "available", "source_report": "reports/pre.json", "no_live_order_sent": True},
+        parity_review_state={
+            "status": "paper_apply_parity_credit_confirmed",
+            "generated_at": "2026-01-01T12:08:00+00:00",
+            "source_report": "reports/parity.json",
+            "actual_journal_row_delta": 1,
+            "new_journal_row_count": 1,
+            "credit_confirmed": True,
+            "no_live_order_sent": True,
+        },
+        execution_parity_status_summary={
+            "required_samples": 20,
+            "eligible_journal_rows": 1,
+            "missing_samples": 19,
+            "no_live_order_sent": True,
+        },
+        previous_payload={"execution_parity_evidence_ledger": {"entries": [previous_entry]}},
+        generated_at=datetime(2026, 1, 1, 12, 9, tzinfo=UTC),
+    )
+
+    assert ledger["status"] == "execution_parity_credit_recorded"
+    assert ledger["entry_count"] == 2
+    assert ledger["carried_forward_entry_count"] == 1
+    assert ledger["progress_pct"] == 5.0
+    assert ledger["latest_credit_event"]["event_type"] == "post_apply_parity_review"
+    assert ledger["latest_credit_event"]["credit_status"] == "credited"
+    assert ledger["latest_credit_event"]["actual_journal_row_delta"] == 1
+    assert ledger["no_live_order_sent"] is True
+
+
+def test_execution_parity_evidence_ledger_records_current_creditable_forecast() -> None:
+    ledger = watch._execution_parity_evidence_ledger(
+        latest={
+            "evidence_report": "reports/current.json",
+            "paper_bridge_apply_gate": {
+                "fresh_signal": True,
+                "can_request_paper_apply_now": True,
+                "bridge_action": "add",
+                "execution_parity_preflight": {"source_event_key": "event:add:1"},
+            },
+        },
+        paper_lifecycle_row_diagnostics={
+            "status": "paper_apply_available_waiting_for_manual_operator_apply",
+            "missing_stage": "operator_paper_apply_review",
+            "safe_next_action": "operator_review_then_manual_paper_apply_only_if_backup_checks_pass",
+            "no_live_order_sent": True,
+        },
+        recent_paper_apply={"status": "unavailable"},
+        recent_paper_review={"status": "unavailable"},
+        parity_review_state={"status": "unavailable", "no_live_order_sent": True},
+        execution_parity_status_summary={
+            "required_samples": 20,
+            "eligible_journal_rows": 0,
+            "missing_samples": 20,
+            "will_credit_current_apply_after_operator_review": True,
+            "currently_creditable_actions": ["add"],
+            "next_creditable_event_types": ["add", "remove"],
+            "no_live_order_sent": True,
+        },
+        previous_payload={},
+        generated_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+    )
+
+    assert ledger["status"] == "current_apply_forecast_creditable_after_operator_review"
+    assert ledger["entry_count"] == 1
+    assert ledger["latest_credit_event"]["event_type"] == "current_apply_forecast"
+    assert ledger["latest_credit_event"]["credit_status"] == "forecast_creditable_after_operator_review"
+    assert ledger["latest_credit_event"]["source_event_key"] == "event:add:1"
+    assert ledger["current_apply_forecast_creditable"] is True
+    assert ledger["currently_creditable_actions"] == ["add"]
+    assert ledger["no_live_order_sent"] is True
+
+
 def test_blocker_plan_suppresses_repeated_remove_paper_apply_after_no_open_plan() -> None:
     plan = watch._blocker_resolution_plan(
         latest={
@@ -11973,6 +14198,56 @@ def test_pre_run_quote_window_wait_plan_prefers_next_calendar_day_before_missing
     assert plan["no_live_order_sent"] is True
 
 
+def test_pre_run_btcusdc_parallel_quote_window_wait_plan_uses_previous_lane() -> None:
+    plan = watch._pre_run_btcusdc_parallel_quote_window_wait_plan(
+        previous_payload={
+            "btcusdc_parallel_shadow_lane": {
+                "candidate_symbol": "BTCUSDC",
+                "candidate_sample_jsonl": "data/shadow/btcusdc.jsonl",
+                "candidate_quote_microstructure_watch": {
+                    "coverage_plan": {
+                        "status": "quote_sample_count_incomplete_waiting_for_next_coverage_window",
+                        "can_collect_now": False,
+                        "missing_utc_hour_of_day": ["12"],
+                        "next_quote_coverage_kind": "missing_utc_hour_bucket",
+                        "next_quote_coverage_at": "2026-01-01T12:00:00+00:00",
+                        "next_quote_coverage_kst_at": "2026-01-01T21:00:00+09:00",
+                        "next_missing_utc_hour": "12",
+                        "next_missing_utc_at": "2026-01-01T12:00:00+00:00",
+                    }
+                },
+                "candidate_quote_capture_runbook": {
+                    "standard_capture_command": "capture --refresh-market-data-before-run",
+                    "command_includes_market_data_refresh": True,
+                    "command_includes_apply_paper_bridge": False,
+                    "command_includes_live_flag": False,
+                    "expected_rows_per_successful_capture": 4,
+                    "expected_quote_observed_after_successful_capture": 12,
+                    "expected_remaining_samples_after_successful_capture": 288,
+                    "expected_distinct_hours_after_successful_capture": 3,
+                },
+            }
+        },
+        generated_at=datetime(2026, 1, 1, 11, 55, tzinfo=UTC),
+        enabled=True,
+        parallel_lane_enabled=True,
+        max_wait_seconds=600.0,
+        wakeup_buffer_seconds=5.0,
+    )
+
+    assert plan["status"] == "sleep_until_next_quote_coverage_window"
+    assert plan["scope"] == "btcusdc_parallel_shadow_lane"
+    assert plan["should_sleep"] is True
+    assert plan["wait_seconds"] == 305.0
+    assert plan["candidate_symbol"] == "BTCUSDC"
+    assert plan["standard_capture_command"] == "capture --refresh-market-data-before-run"
+    assert plan["command_includes_market_data_refresh"] is True
+    assert plan["command_includes_apply_paper_bridge"] is False
+    assert plan["command_includes_live_flag"] is False
+    assert plan["expected_rows_per_successful_capture"] == 4
+    assert plan["no_live_order_sent"] is True
+
+
 def test_pre_run_quote_window_wait_plan_recomputes_current_hour_from_missing_list() -> None:
     plan = watch._pre_run_quote_window_wait_plan(
         previous_payload={
@@ -12320,6 +14595,132 @@ def test_launch_shadow_watch_refreshes_market_data_after_quote_window_sleep(monk
     assert "pre_run_quote_window_capture_status: `target_hour_captured`" in latest_md
 
 
+def test_launch_shadow_watch_can_sleep_until_btcusdc_parallel_quote_window(monkeypatch, tmp_path) -> None:
+    args = _args(tmp_path)
+    args.iterations = 1
+    args.target_hours = 0.0
+    args.enable_btcusdc_parallel_shadow_lane = True
+    args.sleep_until_next_btcusdc_parallel_quote_window = True
+    args.max_pre_run_wait_seconds = 86400.0
+    args.btcusdc_parallel_sample_jsonl = str(tmp_path / "quote_shadow_BTCUSDC.jsonl")
+    report_dir = Path(args.report_dir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(UTC)
+    next_hour = f"{(now.hour + 1) % 24:02d}"
+    next_missing_utc_at = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)).isoformat()
+    Path(args.btcusdc_parallel_sample_jsonl).write_text("", encoding="utf-8")
+    (report_dir / "latest.json").write_text(
+        json.dumps(
+            {
+                "started_at": (now - timedelta(hours=1)).isoformat(),
+                "completed_at": (now - timedelta(minutes=5)).isoformat(),
+                "no_live_order_sent": True,
+                "btcusdc_parallel_shadow_lane": {
+                    "candidate_symbol": "BTCUSDC",
+                    "candidate_sample_jsonl": args.btcusdc_parallel_sample_jsonl,
+                    "candidate_quote_microstructure_watch": {
+                        "coverage_plan": {
+                            "status": "quote_sample_count_incomplete_waiting_for_next_coverage_window",
+                            "can_collect_now": False,
+                            "missing_utc_hour_of_day": [next_hour],
+                            "next_missing_utc_hour": next_hour,
+                            "next_missing_utc_at": next_missing_utc_at,
+                            "next_quote_coverage_kind": "missing_utc_hour_bucket",
+                            "next_quote_coverage_at": next_missing_utc_at,
+                        }
+                    },
+                    "candidate_quote_capture_runbook": {
+                        "standard_capture_command": "capture --refresh-market-data-before-run",
+                        "command_includes_market_data_refresh": True,
+                        "expected_rows_per_successful_capture": 4,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    evidence_calls = []
+    refresh_calls = []
+
+    def fake_run_evidence_cycle(**kwargs):
+        evidence_calls.append(kwargs)
+        symbol = str(kwargs["symbol"]).upper()
+        return {
+            "overall_status": "healthy_abstention_waiting_for_quality_signal",
+            "no_live_order_sent": True,
+            "collection_progress": {
+                "quote_observed": 12 if symbol == "BTCUSDC" else 390,
+                "quote_required": 300,
+                "quote_missing_samples": 288 if symbol == "BTCUSDC" else 0,
+                "quote_distinct_hours": 3 if symbol == "BTCUSDC" else 30,
+                "quote_calendar_days": 1,
+                "captured_quote_rows_this_cycle": 4 if symbol == "BTCUSDC" else 0,
+                "paper_fill_rows": 0,
+            },
+            "readiness_progress": {},
+            "execution_parity_journal": {
+                "status": "execution_parity_journal_collecting",
+                "collection_plan": {"sample_count": 0, "required_samples": 20, "missing_samples": 20},
+                "contract_summary": {"symbol": symbol, "sample_count": 0, "min_sample_count": 20},
+            },
+            "execution_parity_collection_plan": {"status": "waiting_for_fresh_signal"},
+            "paper_bridge_apply_gate": {"status": "blocked_waiting_for_fresh_signal", "fresh_signal": False},
+            "quote_cadence_preflight": {
+                "requested_quote_samples_per_tick": 2,
+                "effective_quote_samples_per_tick": 2 if symbol == "BTCUSDC" else 0,
+                "decision": "capture_new_utc_hour_for_hour_gate" if symbol == "BTCUSDC" else "skip",
+            },
+            "market_data_refresh_plan": {"status": "fresh", "fresh_market_data": True},
+            "signal_wait_plan": {},
+            "launch_readiness": {
+                "status": "research_ready_waiting_for_fresh_signal",
+                "next_blocker": {"gate": "current_fresh_signal"},
+                "blocking_gates": [{"gate": "current_fresh_signal"}],
+            },
+            "historical_gate_substitution": {},
+            "canary_risk_caps_config": {
+                "status": "disabled",
+                "configured": False,
+                "path": str(kwargs["canary_risk_caps_path"]),
+                "path_exists": False,
+                "safeguards": {"scope_symbol": symbol},
+                "required_safeguards": {"scope_symbol": symbol},
+                "errors": ["canary_risk_caps_json_disabled"],
+                "order_submission_allowed": False,
+                "no_live_order_sent": True,
+            },
+        }
+
+    def fake_refresh(**kwargs):
+        refresh_calls.append(kwargs)
+        return {"status": "refreshed", "returncode": 0, "no_live_order_sent": True}
+
+    monkeypatch.setattr(watch, "run_evidence_cycle", fake_run_evidence_cycle)
+
+    summary = watch.run_launch_shadow_watch(
+        args,
+        sleep_fn=lambda seconds: None,
+        market_data_refresh_fn=fake_refresh,
+    )
+
+    assert len(refresh_calls) == 1
+    assert len(evidence_calls) == 2
+    assert evidence_calls[1]["symbol"] == "BTCUSDC"
+    assert evidence_calls[1]["force_quote_sample"] is False
+    plan = summary["btcusdc_parallel_pre_run_quote_window_wait_plan"]
+    assert plan["status"] == "sleep_until_next_quote_coverage_window"
+    assert plan["selected_sleep_scope"] == "btcusdc_parallel_shadow_lane"
+    assert plan["actual_sleep_seconds"] is not None
+    assert summary["pre_run_quote_window_sleep_scope"] == "btcusdc_parallel_shadow_lane"
+    assert summary["pre_run_market_data_refresh"]["status"] == "refreshed"
+    latest_status = json.loads((report_dir / "latest_status.json").read_text(encoding="utf-8"))
+    assert latest_status["btcusdc_parallel_shadow_lane"]["pre_run_wait_status"] == (
+        "sleep_until_next_quote_coverage_window"
+    )
+    latest_md = (report_dir / "latest.md").read_text(encoding="utf-8")
+    assert "btcusdc_parallel_pre_run_wait_selected_sleep_scope: `btcusdc_parallel_shadow_lane`" in latest_md
+
+
 def test_launch_shadow_watch_forces_quote_sample_after_hour_of_day_balance_wait(monkeypatch, tmp_path) -> None:
     args = _args(tmp_path)
     args.iterations = 1
@@ -12508,6 +14909,755 @@ def test_launch_shadow_watch_reuses_previous_started_at_for_heartbeat_accumulati
     assert summary["started_at"] == prior_started_at.isoformat()
     assert summary["observed_hours"] >= 1.9
     assert summary["runtime_observation"]["gap_reset"] is False
+
+
+def test_heartbeat_sla_diagnostics_reports_no_previous_watch() -> None:
+    current_at = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+
+    diagnostics = watch._heartbeat_sla_diagnostics(
+        previous_completed_at=None,
+        current_completed_at=current_at,
+        interval_seconds=0.0,
+        watch_continuity={"status": "no_previous_watch_summary"},
+        signal_monitor={
+            "interval_seconds": 300.0,
+            "signal_freshness_capture_window_minutes": 15.0,
+            "capped_to_fresh_signal_window": True,
+        },
+        signal_monitor_cadence_alignment={},
+    )
+
+    assert diagnostics["status"] == "no_previous_watch_baseline"
+    assert diagnostics["monitor_interval_seconds"] == 300.0
+    assert diagnostics["fresh_signal_window_minutes"] == 15.0
+    assert diagnostics["within_monitor_interval"] is None
+    assert diagnostics["order_submission_allowed"] is False
+    assert diagnostics["no_live_order_sent"] is True
+
+
+def test_heartbeat_sla_diagnostics_reports_on_schedule() -> None:
+    current_at = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+
+    diagnostics = watch._heartbeat_sla_diagnostics(
+        previous_completed_at=current_at - timedelta(minutes=4),
+        current_completed_at=current_at,
+        interval_seconds=0.0,
+        watch_continuity={"status": "continuous", "warning": None},
+        signal_monitor={
+            "interval_seconds": 300.0,
+            "signal_freshness_capture_window_minutes": 15.0,
+            "capped_to_fresh_signal_window": True,
+        },
+        signal_monitor_cadence_alignment={},
+    )
+
+    assert diagnostics["status"] == "heartbeat_on_schedule"
+    assert diagnostics["actual_gap_minutes"] == 4.0
+    assert diagnostics["within_monitor_interval"] is True
+    assert diagnostics["within_fresh_signal_window"] is True
+    assert diagnostics["missed_monitor_count_estimate"] == 0
+    assert diagnostics["auto_apply_allowed"] is False
+
+
+def test_heartbeat_sla_diagnostics_reports_late_within_fresh_signal_window() -> None:
+    current_at = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+
+    diagnostics = watch._heartbeat_sla_diagnostics(
+        previous_completed_at=current_at - timedelta(minutes=10),
+        current_completed_at=current_at,
+        interval_seconds=0.0,
+        watch_continuity={"status": "continuous", "warning": None},
+        signal_monitor={
+            "interval_seconds": 300.0,
+            "signal_freshness_capture_window_minutes": 15.0,
+            "capped_to_fresh_signal_window": True,
+        },
+        signal_monitor_cadence_alignment={},
+    )
+
+    assert diagnostics["status"] == "heartbeat_late_but_within_fresh_signal_window"
+    assert diagnostics["within_monitor_interval"] is False
+    assert diagnostics["within_fresh_signal_window"] is True
+    assert diagnostics["fresh_signal_window_risk"] == "fresh_signal_window_still_covered"
+    assert diagnostics["stale_signal_apply_allowed"] is False
+
+
+def test_heartbeat_sla_diagnostics_reports_late_may_miss_fresh_signal_window() -> None:
+    current_at = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+
+    diagnostics = watch._heartbeat_sla_diagnostics(
+        previous_completed_at=current_at - timedelta(minutes=30),
+        current_completed_at=current_at,
+        interval_seconds=0.0,
+        watch_continuity={"status": "continuous", "warning": None},
+        signal_monitor={
+            "interval_seconds": 300.0,
+            "signal_freshness_capture_window_minutes": 15.0,
+            "capped_to_fresh_signal_window": True,
+        },
+        signal_monitor_cadence_alignment={},
+    )
+
+    assert diagnostics["status"] == "heartbeat_late_may_miss_fresh_signal_window"
+    assert diagnostics["within_monitor_interval"] is False
+    assert diagnostics["within_fresh_signal_window"] is False
+    assert diagnostics["missed_monitor_count_estimate"] == 5
+    assert diagnostics["fresh_signal_window_risk"] == "fresh_signal_window_may_have_been_missed"
+    assert diagnostics["safe_next_action"] == "run_next_watch_now_and_treat_any_prior_signal_as_stale"
+
+
+def test_heartbeat_sla_diagnostics_reports_gap_reset_required() -> None:
+    current_at = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+
+    diagnostics = watch._heartbeat_sla_diagnostics(
+        previous_completed_at=current_at - timedelta(hours=3),
+        current_completed_at=current_at,
+        interval_seconds=0.0,
+        watch_continuity={
+            "status": "gap_warning",
+            "warning": "watch_gap_exceeded_threshold",
+        },
+        signal_monitor={
+            "interval_seconds": 300.0,
+            "signal_freshness_capture_window_minutes": 15.0,
+            "capped_to_fresh_signal_window": True,
+        },
+        signal_monitor_cadence_alignment={},
+    )
+
+    assert diagnostics["status"] == "heartbeat_gap_reset_required"
+    assert diagnostics["gap_reset_required"] is True
+    assert diagnostics["within_fresh_signal_window"] is False
+    assert diagnostics["order_submission_allowed"] is False
+
+
+def test_heartbeat_sla_history_establishes_baseline_without_prior_entries() -> None:
+    current_at = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+
+    history = watch._heartbeat_sla_history(
+        previous_payload={},
+        current_sla={
+            "status": "no_previous_watch_baseline",
+            "actual_gap_minutes": None,
+            "within_monitor_interval": None,
+            "within_fresh_signal_window": None,
+            "fresh_signal_window_risk": "unknown_no_previous_watch_baseline",
+            "missed_monitor_count_estimate": None,
+            "no_live_order_sent": True,
+        },
+        current_completed_at=current_at,
+    )
+
+    assert history["status"] == "heartbeat_sla_history_baseline_established"
+    assert history["entry_count"] == 1
+    assert history["late_count"] == 0
+    assert history["fresh_signal_window_miss_count"] == 0
+    assert history["entries"][0]["completed_at"] == current_at.isoformat()
+    assert history["order_submission_allowed"] is False
+    assert history["no_live_order_sent"] is True
+
+
+def test_heartbeat_sla_history_seeds_previous_single_sla_payload() -> None:
+    previous_at = datetime(2026, 1, 1, 9, 54, tzinfo=UTC)
+    current_at = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+
+    history = watch._heartbeat_sla_history(
+        previous_payload={
+            "completed_at": previous_at.isoformat(),
+            "heartbeat_sla_diagnostics": {
+                "status": "heartbeat_late_but_within_fresh_signal_window",
+                "actual_gap_minutes": 6.2,
+                "within_monitor_interval": False,
+                "within_fresh_signal_window": True,
+                "fresh_signal_window_risk": "fresh_signal_window_still_covered",
+                "missed_monitor_count_estimate": 0,
+                "no_live_order_sent": True,
+            },
+        },
+        current_sla={
+            "status": "heartbeat_on_schedule",
+            "actual_gap_minutes": 5.0,
+            "within_monitor_interval": True,
+            "within_fresh_signal_window": True,
+            "fresh_signal_window_risk": "fresh_signal_window_still_covered",
+            "missed_monitor_count_estimate": 0,
+            "no_live_order_sent": True,
+        },
+        current_completed_at=current_at,
+    )
+
+    assert history["status"] == "heartbeat_sla_minor_lateness_seen"
+    assert history["entry_count"] == 2
+    assert history["late_count"] == 1
+    assert history["entries"][0]["seeded_from_previous_single_sla"] is True
+    assert history["entries"][0]["completed_at"] == previous_at.isoformat()
+    assert history["entries"][1]["completed_at"] == current_at.isoformat()
+
+
+def test_heartbeat_sla_history_reports_repeated_fresh_window_risk() -> None:
+    previous_at = datetime(2026, 1, 1, 9, 30, tzinfo=UTC)
+    current_at = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+
+    history = watch._heartbeat_sla_history(
+        previous_payload={
+            "heartbeat_sla_history": {
+                "entries": [
+                    {
+                        "completed_at": previous_at.isoformat(),
+                        "status": "heartbeat_late_may_miss_fresh_signal_window",
+                        "actual_gap_minutes": 30.0,
+                        "within_monitor_interval": False,
+                        "within_fresh_signal_window": False,
+                        "fresh_signal_window_risk": "fresh_signal_window_may_have_been_missed",
+                        "missed_monitor_count_estimate": 5,
+                        "no_live_order_sent": True,
+                    }
+                ]
+            }
+        },
+        current_sla={
+            "status": "heartbeat_late_may_miss_fresh_signal_window",
+            "actual_gap_minutes": 20.0,
+            "within_monitor_interval": False,
+            "within_fresh_signal_window": False,
+            "fresh_signal_window_risk": "fresh_signal_window_may_have_been_missed",
+            "missed_monitor_count_estimate": 3,
+            "no_live_order_sent": True,
+        },
+        current_completed_at=current_at,
+    )
+
+    assert history["status"] == "heartbeat_sla_repeated_fresh_window_risk"
+    assert history["entry_count"] == 2
+    assert history["late_count"] == 2
+    assert history["fresh_signal_window_miss_count"] == 2
+    assert history["consecutive_fresh_signal_window_miss_count"] == 2
+    assert history["max_gap_minutes"] == 30.0
+    assert history["safe_next_action"] == "tighten_or_repair_heartbeat_schedule_before_paper_apply"
+    assert history["auto_apply_allowed"] is False
+
+
+def test_heartbeat_sla_history_trims_to_rolling_window_and_deduplicates() -> None:
+    current_at = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+    prior_entries = [
+        {
+            "completed_at": (current_at - timedelta(minutes=idx + 1)).isoformat(),
+            "status": "heartbeat_on_schedule",
+            "actual_gap_minutes": 5.0,
+            "within_monitor_interval": True,
+            "within_fresh_signal_window": True,
+            "fresh_signal_window_risk": "fresh_signal_window_still_covered",
+            "missed_monitor_count_estimate": 0,
+            "no_live_order_sent": True,
+        }
+        for idx in range(5)
+    ]
+    prior_entries.append(dict(prior_entries[-1]))
+
+    history = watch._heartbeat_sla_history(
+        previous_payload={"heartbeat_sla_history": {"entries": prior_entries}},
+        current_sla={
+            "status": "heartbeat_on_schedule",
+            "actual_gap_minutes": 5.0,
+            "within_monitor_interval": True,
+            "within_fresh_signal_window": True,
+            "fresh_signal_window_risk": "fresh_signal_window_still_covered",
+            "missed_monitor_count_estimate": 0,
+            "no_live_order_sent": True,
+        },
+        current_completed_at=current_at,
+        max_entries=3,
+    )
+
+    assert history["status"] == "heartbeat_sla_history_clean"
+    assert history["entry_count"] == 3
+    assert len({entry["completed_at"] for entry in history["entries"]}) == 3
+    assert history["entries"][-1]["completed_at"] == current_at.isoformat()
+    assert history["late_count"] == 0
+
+
+def test_heartbeat_sla_response_plan_reports_clean_history() -> None:
+    response = watch._heartbeat_sla_response_plan(
+        current_sla={
+            "status": "heartbeat_on_schedule",
+            "monitor_interval_seconds": 300.0,
+            "fresh_signal_window_seconds": 900.0,
+            "no_live_order_sent": True,
+        },
+        history={
+            "status": "heartbeat_sla_history_clean",
+            "late_count": 0,
+            "fresh_signal_window_miss_count": 0,
+            "gap_reset_count": 0,
+            "no_live_order_sent": True,
+        },
+        signal_monitor={"interval_seconds": 300.0},
+    )
+
+    assert response["status"] == "heartbeat_sla_response_clean"
+    assert response["severity"] == "info"
+    assert response["operator_notify"] is False
+    assert response["paper_apply_blocked_by_sla"] is False
+    assert response["recommended_heartbeat_interval_seconds"] == 300.0
+    assert response["order_submission_allowed"] is False
+
+
+def test_heartbeat_sla_response_plan_tightens_repeated_minor_lateness() -> None:
+    response = watch._heartbeat_sla_response_plan(
+        current_sla={
+            "status": "heartbeat_late_but_within_fresh_signal_window",
+            "monitor_interval_seconds": 300.0,
+            "fresh_signal_window_seconds": 900.0,
+            "no_live_order_sent": True,
+        },
+        history={
+            "status": "heartbeat_sla_repeated_minor_lateness",
+            "late_count": 3,
+            "fresh_signal_window_miss_count": 0,
+            "gap_reset_count": 0,
+            "consecutive_late_count": 2,
+            "no_live_order_sent": True,
+        },
+        signal_monitor={"interval_seconds": 300.0},
+    )
+
+    assert response["status"] == "heartbeat_sla_response_tighten_monitor_cadence"
+    assert response["severity"] == "degraded"
+    assert response["operator_notify"] is True
+    assert response["paper_apply_blocked_by_sla"] is False
+    assert response["auto_schedule_change_allowed"] is False
+    assert response["automation_update_allowed"] is False
+
+
+def test_heartbeat_sla_response_plan_blocks_stale_apply_after_window_miss() -> None:
+    response = watch._heartbeat_sla_response_plan(
+        current_sla={
+            "status": "heartbeat_late_may_miss_fresh_signal_window",
+            "monitor_interval_seconds": 300.0,
+            "fresh_signal_window_seconds": 900.0,
+            "no_live_order_sent": True,
+        },
+        history={
+            "status": "heartbeat_sla_repeated_fresh_window_risk",
+            "late_count": 2,
+            "fresh_signal_window_miss_count": 2,
+            "gap_reset_count": 0,
+            "consecutive_fresh_signal_window_miss_count": 2,
+            "no_live_order_sent": True,
+        },
+        signal_monitor={"interval_seconds": 300.0},
+    )
+
+    assert response["status"] == "heartbeat_sla_response_fresh_window_recheck_required"
+    assert response["severity"] == "critical"
+    assert response["operator_notify"] is True
+    assert response["paper_apply_blocked_by_sla"] is True
+    assert response["primary_next_action"] == "rerun_watch_now_and_require_new_current_fresh_signal"
+    assert response["stale_signal_apply_allowed"] is False
+
+
+def test_heartbeat_sla_response_plan_requires_scheduler_repair_after_gap_reset() -> None:
+    response = watch._heartbeat_sla_response_plan(
+        current_sla={
+            "status": "heartbeat_gap_reset_required",
+            "monitor_interval_seconds": 300.0,
+            "fresh_signal_window_seconds": 900.0,
+            "no_live_order_sent": True,
+        },
+        history={
+            "status": "heartbeat_sla_gap_reset_seen_in_recent_history",
+            "late_count": 1,
+            "fresh_signal_window_miss_count": 1,
+            "gap_reset_count": 1,
+            "no_live_order_sent": True,
+        },
+        signal_monitor={"interval_seconds": 300.0},
+    )
+
+    assert response["status"] == "heartbeat_sla_response_scheduler_repair_required"
+    assert response["severity"] == "critical"
+    assert response["operator_notify"] is True
+    assert response["paper_apply_blocked_by_sla"] is True
+    assert response["force_signal_allowed"] is False
+
+
+def test_launch_shadow_watch_notification_decision_stays_quiet_while_waiting() -> None:
+    decision = watch._launch_shadow_watch_notification_decision(
+        status="target_observation_complete_waiting_for_fresh_signal",
+        latest_launch_state={
+            "launch_status": "research_ready_waiting_for_fresh_signal",
+            "next_blocker_gate": "current_fresh_signal",
+        },
+        fresh_signal_status={"seen_during_watch": False, "available": False},
+        paper_apply_status={"seen_during_watch": False, "allowed_now": False},
+        heartbeat_sla_response_plan={
+            "status": "heartbeat_sla_response_clean",
+            "operator_notify": False,
+            "severity": "info",
+        },
+        execution_parity_evidence_ledger={
+            "status": "waiting_for_first_creditable_paper_apply"
+        },
+        live_violation_count=0,
+    )
+
+    assert decision["decision"] == "DONT_NOTIFY"
+    assert decision["status"] == "quiet_waiting_for_fresh_signal"
+    assert decision["operator_action_required"] is False
+    assert decision["order_submission_allowed"] is False
+    assert decision["no_live_order_sent"] is True
+
+
+def test_launch_shadow_watch_notification_decision_notifies_fresh_signal() -> None:
+    decision = watch._launch_shadow_watch_notification_decision(
+        status="fresh_signal_seen_continue_paper_bridge_review",
+        latest_launch_state={
+            "launch_status": "research_ready_waiting_for_fresh_signal",
+            "next_blocker_gate": "current_fresh_signal",
+        },
+        fresh_signal_status={"seen_during_watch": True, "available": True},
+        paper_apply_status={"seen_during_watch": False, "allowed_now": False},
+        heartbeat_sla_response_plan={"operator_notify": False},
+        execution_parity_evidence_ledger={},
+        live_violation_count=0,
+    )
+
+    assert decision["decision"] == "NOTIFY"
+    assert decision["status"] == "notify_fresh_signal_available"
+    assert decision["priority"] == "high"
+    assert decision["operator_action_required"] is True
+    assert decision["auto_apply_allowed"] is False
+
+
+def test_launch_shadow_watch_notification_decision_prioritizes_manual_paper_apply() -> None:
+    decision = watch._launch_shadow_watch_notification_decision(
+        status="fresh_signal_seen_paper_apply_review_available",
+        latest_launch_state={
+            "launch_status": "research_ready_waiting_for_fresh_signal",
+            "next_blocker_gate": "first_real_paper_lifecycle_row",
+        },
+        fresh_signal_status={"seen_during_watch": True, "available": True},
+        paper_apply_status={"seen_during_watch": True, "allowed_now": True},
+        heartbeat_sla_response_plan={"operator_notify": False},
+        execution_parity_evidence_ledger={},
+        live_violation_count=0,
+    )
+
+    assert decision["decision"] == "NOTIFY"
+    assert decision["status"] == "notify_manual_paper_apply_available"
+    assert decision["priority"] == "high"
+    assert decision["paper_apply_allowed_now"] is True
+    assert decision["order_submission_allowed"] is False
+
+
+def test_launch_shadow_watch_notification_decision_notifies_sla_response() -> None:
+    decision = watch._launch_shadow_watch_notification_decision(
+        status="target_observation_complete_waiting_for_fresh_signal",
+        latest_launch_state={
+            "launch_status": "research_ready_waiting_for_fresh_signal",
+            "next_blocker_gate": "current_fresh_signal",
+        },
+        fresh_signal_status={"seen_during_watch": False, "available": False},
+        paper_apply_status={"seen_during_watch": False, "allowed_now": False},
+        heartbeat_sla_response_plan={
+            "status": "heartbeat_sla_response_fresh_window_recheck_required",
+            "operator_notify": True,
+            "severity": "critical",
+            "paper_apply_blocked_by_sla": True,
+        },
+        execution_parity_evidence_ledger={},
+        live_violation_count=0,
+    )
+
+    assert decision["decision"] == "NOTIFY"
+    assert decision["status"] == "notify_heartbeat_sla_response"
+    assert decision["priority"] == "critical"
+    assert decision["reason"] == "heartbeat_sla_response_fresh_window_recheck_required"
+    assert decision["stale_signal_apply_allowed"] is False
+
+
+def test_notification_delivery_plan_stays_quiet_when_source_does_not_notify() -> None:
+    current_at = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+
+    delivery = watch._notification_delivery_plan(
+        previous_payload={},
+        current_decision={
+            "decision": "DONT_NOTIFY",
+            "status": "quiet_waiting_for_fresh_signal",
+            "priority": "quiet",
+            "reason": "no_material_operator_event",
+            "message": "Still waiting for a fresh signal; no operator action is needed.",
+            "no_live_order_sent": True,
+        },
+        current_completed_at=current_at,
+    )
+
+    assert delivery["delivery_decision"] == "DONT_NOTIFY"
+    assert delivery["status"] == "quiet_no_delivery_needed"
+    assert delivery["duplicate_notification_suppressed"] is False
+    assert delivery["emitted_at"] is None
+    assert delivery["order_submission_allowed"] is False
+
+
+def test_notification_delivery_plan_notifies_new_material_event() -> None:
+    current_at = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+
+    delivery = watch._notification_delivery_plan(
+        previous_payload={},
+        current_decision={
+            "decision": "NOTIFY",
+            "status": "notify_fresh_signal_available",
+            "priority": "high",
+            "reason": "fresh_signal_available",
+            "message": "Fresh signal observed; inspect paper bridge gate without enabling live trading.",
+            "next_blocker": "current_fresh_signal",
+            "fresh_signal_available": True,
+            "paper_apply_allowed_now": False,
+            "operator_action_required": True,
+            "no_live_order_sent": True,
+        },
+        current_completed_at=current_at,
+    )
+
+    assert delivery["delivery_decision"] == "NOTIFY"
+    assert delivery["status"] == "notify_new_material_event"
+    assert delivery["operator_action_required"] is True
+    assert delivery["emitted_at"] == current_at.isoformat()
+    assert delivery["last_notified_at"] == current_at.isoformat()
+
+
+def test_notification_delivery_plan_suppresses_duplicate_high_event() -> None:
+    current_at = datetime(2026, 1, 1, 10, 10, tzinfo=UTC)
+    current_decision = {
+        "decision": "NOTIFY",
+        "status": "notify_fresh_signal_available",
+        "priority": "high",
+        "reason": "fresh_signal_available",
+        "message": "Fresh signal observed; inspect paper bridge gate without enabling live trading.",
+        "next_blocker": "current_fresh_signal",
+        "fresh_signal_available": True,
+        "paper_apply_allowed_now": False,
+        "no_live_order_sent": True,
+    }
+    previous_delivery = watch._notification_delivery_plan(
+        previous_payload={},
+        current_decision=current_decision,
+        current_completed_at=current_at - timedelta(minutes=10),
+    )
+
+    delivery = watch._notification_delivery_plan(
+        previous_payload={"notification_delivery_plan": previous_delivery},
+        current_decision=current_decision,
+        current_completed_at=current_at,
+    )
+
+    assert delivery["delivery_decision"] == "DONT_NOTIFY"
+    assert delivery["status"] == "suppress_duplicate_notification_within_cooldown"
+    assert delivery["duplicate_notification_suppressed"] is True
+    assert delivery["elapsed_since_last_notify_seconds"] == 600.0
+    assert delivery["last_notified_at"] == previous_delivery["last_notified_at"]
+
+
+def test_notification_delivery_plan_repeats_critical_after_cooldown() -> None:
+    current_at = datetime(2026, 1, 1, 10, 20, tzinfo=UTC)
+    current_decision = {
+        "decision": "NOTIFY",
+        "status": "notify_heartbeat_sla_response",
+        "priority": "critical",
+        "reason": "heartbeat_sla_response_fresh_window_recheck_required",
+        "message": "Heartbeat SLA requires scheduler or fresh-window recheck before paper apply.",
+        "next_blocker": "current_fresh_signal",
+        "fresh_signal_available": False,
+        "paper_apply_allowed_now": False,
+        "heartbeat_sla_response_status": "heartbeat_sla_response_fresh_window_recheck_required",
+        "no_live_order_sent": True,
+    }
+    previous_delivery = watch._notification_delivery_plan(
+        previous_payload={},
+        current_decision=current_decision,
+        current_completed_at=current_at - timedelta(minutes=20),
+    )
+
+    delivery = watch._notification_delivery_plan(
+        previous_payload={"notification_delivery_plan": previous_delivery},
+        current_decision=current_decision,
+        current_completed_at=current_at,
+    )
+
+    assert delivery["delivery_decision"] == "NOTIFY"
+    assert delivery["status"] == "notify_critical_repeat_after_cooldown"
+    assert delivery["elapsed_since_last_notify_seconds"] == 1200.0
+    assert delivery["cooldown_seconds"] == 900.0
+    assert delivery["stale_signal_apply_allowed"] is False
+
+
+def test_notification_delivery_history_records_quiet_delivery() -> None:
+    current_at = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+
+    history = watch._notification_delivery_history(
+        previous_payload={},
+        current_delivery={
+            "delivery_decision": "DONT_NOTIFY",
+            "status": "quiet_no_delivery_needed",
+            "source_decision": "DONT_NOTIFY",
+            "priority": "quiet",
+            "message": "Still waiting for a fresh signal; no operator action is needed.",
+            "reason": "no_material_operator_event",
+            "current_fingerprint": "quiet",
+            "fingerprint_changed": False,
+            "duplicate_notification_suppressed": False,
+            "emitted_at": None,
+            "last_notified_at": None,
+            "no_live_order_sent": True,
+        },
+        current_completed_at=current_at,
+    )
+
+    assert history["status"] == "notification_history_quiet"
+    assert history["entry_count"] == 1
+    assert history["notify_count"] == 0
+    assert history["quiet_count"] == 1
+    assert history["duplicate_suppressed_count"] == 0
+    assert history["entries"][0]["completed_at"] == current_at.isoformat()
+    assert history["order_submission_allowed"] is False
+
+
+def test_notification_delivery_history_seeds_previous_single_delivery() -> None:
+    previous_at = datetime(2026, 1, 1, 9, 55, tzinfo=UTC)
+    current_at = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+
+    history = watch._notification_delivery_history(
+        previous_payload={
+            "completed_at": previous_at.isoformat(),
+            "notification_delivery_plan": {
+                "delivery_decision": "NOTIFY",
+                "status": "notify_new_material_event",
+                "source_decision": "NOTIFY",
+                "priority": "high",
+                "message": "Fresh signal observed.",
+                "reason": "material_notification_fingerprint_changed",
+                "current_fingerprint": "fresh",
+                "fingerprint_changed": True,
+                "duplicate_notification_suppressed": False,
+                "emitted_at": previous_at.isoformat(),
+                "last_notified_at": previous_at.isoformat(),
+                "no_live_order_sent": True,
+            },
+        },
+        current_delivery={
+            "delivery_decision": "DONT_NOTIFY",
+            "status": "suppress_duplicate_notification_within_cooldown",
+            "source_decision": "NOTIFY",
+            "priority": "high",
+            "message": "Fresh signal observed.",
+            "reason": "same_material_notification_fingerprint",
+            "current_fingerprint": "fresh",
+            "fingerprint_changed": False,
+            "duplicate_notification_suppressed": True,
+            "emitted_at": None,
+            "last_notified_at": previous_at.isoformat(),
+            "no_live_order_sent": True,
+        },
+        current_completed_at=current_at,
+    )
+
+    assert history["status"] == "notification_history_duplicate_suppressed"
+    assert history["entry_count"] == 2
+    assert history["notify_count"] == 1
+    assert history["duplicate_suppressed_count"] == 1
+    assert history["last_notified_at"] == previous_at.isoformat()
+    assert history["entries"][0]["seeded_from_previous_single_delivery"] is True
+
+
+def test_notification_delivery_history_counts_repeated_suppression() -> None:
+    current_at = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+    prior_entries = [
+        {
+            "completed_at": (current_at - timedelta(minutes=idx + 1)).isoformat(),
+            "delivery_decision": "DONT_NOTIFY",
+            "status": "suppress_duplicate_notification_within_cooldown",
+            "source_decision": "NOTIFY",
+            "priority": "high",
+            "message": "Fresh signal observed.",
+            "reason": "same_material_notification_fingerprint",
+            "current_fingerprint": "fresh",
+            "fingerprint_changed": False,
+            "duplicate_notification_suppressed": True,
+            "emitted_at": None,
+            "last_notified_at": (current_at - timedelta(minutes=10)).isoformat(),
+            "no_live_order_sent": True,
+        }
+        for idx in range(2)
+    ]
+
+    history = watch._notification_delivery_history(
+        previous_payload={"notification_delivery_history": {"entries": prior_entries}},
+        current_delivery={
+            "delivery_decision": "DONT_NOTIFY",
+            "status": "suppress_duplicate_notification_within_cooldown",
+            "source_decision": "NOTIFY",
+            "priority": "high",
+            "message": "Fresh signal observed.",
+            "reason": "same_material_notification_fingerprint",
+            "current_fingerprint": "fresh",
+            "fingerprint_changed": False,
+            "duplicate_notification_suppressed": True,
+            "emitted_at": None,
+            "last_notified_at": (current_at - timedelta(minutes=10)).isoformat(),
+            "no_live_order_sent": True,
+        },
+        current_completed_at=current_at,
+    )
+
+    assert history["status"] == "notification_history_duplicate_suppressed"
+    assert history["duplicate_suppressed_count"] == 3
+    assert history["consecutive_duplicate_suppressed_count"] == 3
+    assert history["notify_count"] == 0
+    assert history["no_live_order_sent"] is True
+
+
+def test_notification_delivery_history_trims_and_deduplicates() -> None:
+    current_at = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+    prior_entries = [
+        {
+            "completed_at": (current_at - timedelta(minutes=idx + 1)).isoformat(),
+            "delivery_decision": "DONT_NOTIFY",
+            "status": "quiet_no_delivery_needed",
+            "source_decision": "DONT_NOTIFY",
+            "priority": "quiet",
+            "message": "Still waiting.",
+            "reason": "no_material_operator_event",
+            "current_fingerprint": "quiet",
+            "fingerprint_changed": False,
+            "duplicate_notification_suppressed": False,
+            "no_live_order_sent": True,
+        }
+        for idx in range(5)
+    ]
+    prior_entries.append(dict(prior_entries[-1]))
+
+    history = watch._notification_delivery_history(
+        previous_payload={"notification_delivery_history": {"entries": prior_entries}},
+        current_delivery={
+            "delivery_decision": "DONT_NOTIFY",
+            "status": "quiet_no_delivery_needed",
+            "source_decision": "DONT_NOTIFY",
+            "priority": "quiet",
+            "message": "Still waiting.",
+            "reason": "no_material_operator_event",
+            "current_fingerprint": "quiet",
+            "fingerprint_changed": False,
+            "duplicate_notification_suppressed": False,
+            "no_live_order_sent": True,
+        },
+        current_completed_at=current_at,
+        max_entries=3,
+    )
+
+    assert history["entry_count"] == 3
+    assert len({entry["completed_at"] for entry in history["entries"]}) == 3
+    assert history["entries"][-1]["completed_at"] == current_at.isoformat()
+    assert history["quiet_count"] == 3
 
 
 def test_historical_shadow_runtime_floor_uses_recent_launch_evidence(tmp_path) -> None:
@@ -13021,8 +16171,9 @@ def test_launch_shadow_watch_reports_microstructure_trend_and_operator_handoff(m
     assert micro["min_calendar_days"] == 2
     assert micro["distinct_hour_count"] == 1
     assert micro["coverage_plan"]["remaining_quote_samples"] == 6
-    assert micro["coverage_plan"]["can_collect_now"] is True
-    assert micro["coverage_plan"]["recommended_action"] == "collect_quote_samples_now"
+    assert micro["coverage_plan"]["can_collect_now"] is False
+    assert micro["coverage_plan"]["standard_capture_would_skip_duplicate_window"] is True
+    assert micro["coverage_plan"]["recommended_action"] == "wait_until_next_quote_coverage_window"
     handoff = summary["operator_handoff"]
     assert handoff["status"] == "waiting_for_fresh_signal_and_canary_risk_caps"
     assert handoff["paper_apply_allowed_now"] is False

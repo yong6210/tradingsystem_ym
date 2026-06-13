@@ -78,6 +78,21 @@ def test_execution_parity_contract_passes_matching_lineage_journal() -> None:
     assert report["observed"]["role_counts"] == {"base": 7, "chase": 6, "probe": 7}
 
 
+def test_execution_parity_contract_expected_symbol_can_override_walk_symbol() -> None:
+    report = build_execution_parity_contract_report(
+        _walk_report(),
+        _journal_rows(symbol="BTCUSDC"),
+        expected_symbol="BTCUSDC",
+        max_effective_exposure=2.5,
+    )
+
+    assert report["overall_status"] == "PASS"
+    assert report["summary"]["symbol"] == "BTCUSDC"
+    assert report["summary"]["walk_forward_symbol"] == "BTCUSDT"
+    assert report["observed"]["symbol_mismatch_count"] == 0
+    assert "execution_parity_symbol_mismatch" not in report["summary"]["blockers"]
+
+
 def test_execution_parity_contract_blocks_wrong_symbol_family_and_action_mismatch() -> None:
     rows = _journal_rows(symbol="ETHUSDT", family="session_impulse_retest")
     rows[0]["expected_action"] = "remove"

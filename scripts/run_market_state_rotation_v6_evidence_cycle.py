@@ -197,11 +197,14 @@ def _bool_field(payload: dict[str, Any], key: str, fallback: bool = False) -> bo
 def load_canary_risk_caps_config(
     *,
     path: Path | None,
+    expected_symbol: str = EXPECTED_SYMBOL,
     cli_max_notional_usdt: float,
     cli_max_leverage: float,
     cli_max_daily_loss_usdt: float,
 ) -> dict[str, Any]:
     """Load optional tiny-canary risk caps without ever authorizing order submission."""
+    expected_symbol_value = str(expected_symbol or EXPECTED_SYMBOL).upper()
+    target_config_path = _display_path(path) if path is not None else DEFAULT_CANARY_RISK_CAPS_PATH
     cli_values = {
         "max_notional_usdt": max(0.0, float(cli_max_notional_usdt or 0.0)),
         "max_leverage": max(0.0, float(cli_max_leverage or 0.0)),
@@ -260,8 +263,8 @@ def load_canary_risk_caps_config(
     if source != "json_file":
         errors.append("canary_risk_caps_json_required")
     if raw and enabled:
-        if safeguards["scope_symbol"] != EXPECTED_SYMBOL:
-            errors.append("scope_symbol_must_be_BTCUSDT")
+        if safeguards["scope_symbol"] != expected_symbol_value:
+            errors.append(f"scope_symbol_must_be_{expected_symbol_value}")
         if safeguards["strategy_family"] != "market_state_rotation_v6":
             errors.append("strategy_family_must_be_market_state_rotation_v6")
         if not (1 <= int(safeguards["max_daily_order_count"]) <= 3):
@@ -301,7 +304,7 @@ def load_canary_risk_caps_config(
         "errors": sorted(set(errors)),
         "warnings": sorted(set(warnings)),
         "required_safeguards": {
-            "scope_symbol": EXPECTED_SYMBOL,
+            "scope_symbol": expected_symbol_value,
             "strategy_family": "market_state_rotation_v6",
             "max_notional_usdt": "positive operator-defined tiny canary notional",
             "max_daily_order_count": "integer between 1 and 3",
@@ -315,27 +318,31 @@ def load_canary_risk_caps_config(
         "operator_review": {
             "required": not configured,
             "reason": "tiny_canary_risk_caps_are_operator_defined_and_never_auto_enabled_by_evidence_cycle",
-            "target_config_path": _display_path(path) if path is not None else DEFAULT_CANARY_RISK_CAPS_PATH,
+            "target_config_path": target_config_path,
             "template_path": "reports/operations/market_state_rotation_v6_canary_risk_caps.template.json",
             "safe_template_copy_command": (
-                "cp reports/operations/market_state_rotation_v6_canary_risk_caps.template.json "
-                "reports/operations/market_state_rotation_v6_canary_risk_caps.json"
+                ".venv/bin/python scripts/run_market_state_rotation_v6_canary_risk_caps_audit.py "
+                f"--symbol {expected_symbol_value} "
+                f"--canary-risk-caps-json {target_config_path} "
+                "--write-template --write-report"
             ),
             "quick_audit_command": (
                 ".venv/bin/python scripts/run_market_state_rotation_v6_canary_risk_caps_audit.py "
                 "--write-report "
-                "--canary-risk-caps-json reports/operations/market_state_rotation_v6_canary_risk_caps.json "
+                f"--symbol {expected_symbol_value} "
+                f"--canary-risk-caps-json {target_config_path} "
                 "--report-dir reports/validation/diagnostics/market_state_rotation_v6_canary_risk_caps_audit"
             ),
             "validation_command": (
                 ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
                 "--quote-samples-per-tick 0 "
-                "--canary-risk-caps-json reports/operations/market_state_rotation_v6_canary_risk_caps.json "
+                f"--symbol {expected_symbol_value} "
+                f"--canary-risk-caps-json {target_config_path} "
                 "--report-dir reports/validation/diagnostics/market_state_rotation_v6_canary_risk_caps_review"
             ),
             "review_checklist": [
                 "set_enabled_true_only_after_operator_review",
-                "keep_scope_symbol_BTCUSDT",
+                f"keep_scope_symbol_{expected_symbol_value}",
                 "keep_strategy_family_market_state_rotation_v6",
                 "choose_max_notional_usdt_as_tiny_canary_size",
                 "keep_max_leverage_lte_10",
@@ -5686,6 +5693,7 @@ def run_evidence_cycle(
         _write_json(report_dir / "historical_gate_substitution.json", substitution)
     canary_risk_caps_config = load_canary_risk_caps_config(
         path=canary_risk_caps_path,
+        expected_symbol=str(symbol or EXPECTED_SYMBOL).upper(),
         cli_max_notional_usdt=max(0.0, float(canary_max_notional_usdt or 0.0)),
         cli_max_leverage=max(0.0, float(canary_max_leverage or 0.0)),
         cli_max_daily_loss_usdt=max(0.0, float(canary_max_daily_loss_usdt or 0.0)),

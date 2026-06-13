@@ -1,5 +1,8 @@
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 
+import scripts.run_market_state_rotation_v6_quote_shadow_audit as quote_shadow
 from scripts.run_market_state_rotation_v6_quote_shadow_audit import (
     build_quote_shadow_audit_report,
     build_quote_shadow_row,
@@ -11,6 +14,48 @@ def _book() -> dict:
         "bids": [["99999", "1.0"], ["99998", "1.0"]],
         "asks": [["100001", "1.0"], ["100002", "1.0"]],
     }
+
+
+def test_quote_shadow_audit_import_does_not_load_binance_client_module() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "import scripts.run_market_state_rotation_v6_quote_shadow_audit; "
+                "print('app.integrations.binance_futures' in sys.modules)"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.stdout.strip() == "False"
+
+
+def test_capture_quote_shadow_rows_loads_client_lazily(monkeypatch) -> None:
+    class FakeClient:
+        def fetch_order_book(self, *, symbol: str, limit: int) -> dict:
+            assert symbol == "BTCUSDT"
+            assert limit == 100
+            return _book()
+
+    monkeypatch.setattr(quote_shadow, "_binance_futures_client_cls", lambda: FakeClient)
+
+    rows = quote_shadow.capture_quote_shadow_rows(
+        symbol="BTCUSDT",
+        strategy_family="market_state_rotation_v6",
+        decision_id="decision_1",
+        side="both",
+        order_notional_usdt=100.0,
+        order_book_limit=100,
+    )
+
+    assert [row["side"] for row in rows] == ["long", "short"]
+    assert all(row["source"] == "binance_public_order_book" for row in rows)
 
 
 def test_quote_shadow_row_computes_spread_depth_and_slippage() -> None:

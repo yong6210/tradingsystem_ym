@@ -33,7 +33,6 @@ ERROR_ACTIONS = {
     "max_notional_usdt_must_be_positive": "set_tiny_positive_max_notional_usdt",
     "max_daily_loss_usdt_must_be_positive": "set_tiny_positive_daily_loss_cap",
     "max_leverage_must_be_between_0_and_10": "set_max_leverage_between_0_and_10",
-    "scope_symbol_must_be_BTCUSDT": "keep_scope_symbol_BTCUSDT",
     "strategy_family_must_be_market_state_rotation_v6": "keep_strategy_family_market_state_rotation_v6",
     "max_daily_order_count_must_be_between_1_and_3": "set_max_daily_order_count_between_1_and_3",
     "max_consecutive_loss_count_must_be_between_1_and_2": "set_max_consecutive_loss_count_between_1_and_2",
@@ -67,10 +66,12 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _template_payload() -> dict[str, Any]:
+def _template_payload(*, expected_symbol: str = "BTCUSDT", target_config_path: Path | None = None) -> dict[str, Any]:
+    expected_symbol_value = str(expected_symbol or "BTCUSDT").upper()
+    target_name = target_config_path.name if target_config_path is not None else "market_state_rotation_v6_canary_risk_caps.json"
     return {
         "enabled": False,
-        "scope_symbol": "BTCUSDT",
+        "scope_symbol": expected_symbol_value,
         "strategy_family": "market_state_rotation_v6",
         "max_notional_usdt": 0.0,
         "max_leverage": 10.0,
@@ -81,7 +82,7 @@ def _template_payload() -> dict[str, Any]:
         "reduce_only_exit_required": True,
         "operator_acknowledged_no_auto_live_order": False,
         "notes": (
-            "Copy this template to market_state_rotation_v6_canary_risk_caps.json only after operator review. "
+            f"Disabled {expected_symbol_value} canary caps scaffold for {target_name}. "
             "Set enabled=true and operator_acknowledged_no_auto_live_order=true only after reviewing the launch report. "
             "This audit and the evidence cycle never send live orders."
         ),
@@ -89,10 +90,16 @@ def _template_payload() -> dict[str, Any]:
 
 
 def _operator_actions(errors: list[str]) -> list[dict[str, Any]]:
+    def action_for(error: str) -> str:
+        if error.startswith("scope_symbol_must_be_"):
+            symbol = error.removeprefix("scope_symbol_must_be_")
+            return f"keep_scope_symbol_{symbol}"
+        return ERROR_ACTIONS.get(error, "inspect_canary_risk_caps_json_and_rerun_audit")
+
     return [
         {
             "error": error,
-            "action": ERROR_ACTIONS.get(error, "inspect_canary_risk_caps_json_and_rerun_audit"),
+            "action": action_for(error),
         }
         for error in errors
     ]
@@ -101,14 +108,17 @@ def _operator_actions(errors: list[str]) -> list[dict[str, Any]]:
 def build_canary_risk_caps_audit(
     *,
     canary_risk_caps_path: Path,
+    expected_symbol: str = "BTCUSDT",
     cli_max_notional_usdt: float = 0.0,
     cli_max_leverage: float = 10.0,
     cli_max_daily_loss_usdt: float = 0.0,
     generated_at: datetime | None = None,
 ) -> dict[str, Any]:
     generated_at = (generated_at or datetime.now(UTC)).astimezone(UTC)
+    expected_symbol_value = str(expected_symbol or "BTCUSDT").upper()
     config = load_canary_risk_caps_config(
         path=canary_risk_caps_path,
+        expected_symbol=expected_symbol_value,
         cli_max_notional_usdt=float(cli_max_notional_usdt),
         cli_max_leverage=float(cli_max_leverage),
         cli_max_daily_loss_usdt=float(cli_max_daily_loss_usdt),
@@ -120,21 +130,29 @@ def build_canary_risk_caps_audit(
         overall_status = "INCOMPLETE"
     else:
         overall_status = "FAIL"
-    target_path = _resolve(DEFAULT_CANARY_RISK_CAPS_PATH)
-    template_path = target_path.with_name(TEMPLATE_NAME)
+    target_path = canary_risk_caps_path
+    template_path = _resolve(DEFAULT_CANARY_RISK_CAPS_PATH).with_name(TEMPLATE_NAME)
+    target_path_display = _display_path(target_path)
     return {
         "created_at": generated_at.isoformat(),
         "overall_status": overall_status,
         "canary_risk_caps_path": _display_path(canary_risk_caps_path),
+        "expected_symbol": expected_symbol_value,
         "template_path": _display_path(template_path),
         "target_config_path": _display_path(target_path),
         "config": config,
         "operator_actions": _operator_actions(errors),
         "ready_for_operator_review": config.get("configured") is True,
-        "safe_template_copy_command": f"cp {_display_path(template_path)} {_display_path(target_path)}",
+        "safe_template_copy_command": (
+            ".venv/bin/python scripts/run_market_state_rotation_v6_canary_risk_caps_audit.py "
+            f"--symbol {expected_symbol_value} "
+            f"--canary-risk-caps-json {target_path_display} "
+            "--write-template --write-report"
+        ),
         "evidence_cycle_validation_command": (
             ".venv/bin/python scripts/run_market_state_rotation_v6_evidence_cycle.py "
             "--quote-samples-per-tick 0 "
+            f"--symbol {expected_symbol_value} "
             f"--canary-risk-caps-json {_display_path(canary_risk_caps_path)} "
             "--report-dir reports/validation/diagnostics/market_state_rotation_v6_canary_risk_caps_review"
         ),
@@ -180,6 +198,7 @@ def _markdown(report: dict[str, Any]) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Audit v6 tiny-canary risk caps without sending orders.")
     parser.add_argument("--canary-risk-caps-json", default=DEFAULT_CANARY_RISK_CAPS_PATH)
+    parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--canary-max-notional-usdt", type=float, default=0.0)
     parser.add_argument("--canary-max-leverage", type=float, default=10.0)
     parser.add_argument("--canary-max-daily-loss-usdt", type=float, default=0.0)
@@ -193,10 +212,17 @@ def main() -> int:
     args = parse_args()
     caps_path = _resolve(args.canary_risk_caps_json)
     if args.write_template:
-        template_path = _resolve(DEFAULT_CANARY_RISK_CAPS_PATH).with_name(TEMPLATE_NAME)
-        _write_json(template_path, _template_payload())
+        if not caps_path.exists():
+            _write_json(
+                caps_path,
+                _template_payload(
+                    expected_symbol=str(args.symbol or "BTCUSDT").upper(),
+                    target_config_path=caps_path,
+                ),
+            )
     report = build_canary_risk_caps_audit(
         canary_risk_caps_path=caps_path,
+        expected_symbol=str(args.symbol or "BTCUSDT").upper(),
         cli_max_notional_usdt=float(args.canary_max_notional_usdt),
         cli_max_leverage=float(args.canary_max_leverage),
         cli_max_daily_loss_usdt=float(args.canary_max_daily_loss_usdt),

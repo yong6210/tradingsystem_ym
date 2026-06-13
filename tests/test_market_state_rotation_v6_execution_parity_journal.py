@@ -26,7 +26,7 @@ def _walk_report() -> dict:
     }
 
 
-def _lifecycle_rows(count: int = 20) -> list[dict]:
+def _lifecycle_rows(count: int = 20, *, symbol: str = "BTCUSDT") -> list[dict]:
     rows = []
     for idx in range(count):
         role = "base" if idx % 3 == 0 else ("probe" if idx % 3 == 1 else "chase")
@@ -35,7 +35,7 @@ def _lifecycle_rows(count: int = 20) -> list[dict]:
         ts = f"2026-01-01T00:{idx:02d}:00+00:00"
         rows.append(
             {
-                "symbol": "BTCUSDT",
+                "symbol": symbol,
                 "strategy_family": "market_state_rotation_v6",
                 "plan_id": f"plan-{idx}",
                 "intent_id": f"intent-{idx}",
@@ -114,6 +114,26 @@ def test_execution_parity_journal_report_passes_when_lifecycle_has_required_fiel
     assert report["collection_plan"]["accepted_actions"] == ["add"]
     assert report["collection_plan"]["backtest_substitution_allowed"] is False
     assert report["collection_plan"]["no_live_order_sent"] is True
+
+
+def test_execution_parity_journal_uses_requested_symbol_for_contract_scope() -> None:
+    report, journal_rows = build_execution_parity_journal_report(
+        walk_report=_walk_report(),
+        lifecycle_payload={"rows": _lifecycle_rows(symbol="BTCUSDC")},
+        symbol="BTCUSDC",
+        input_walk_report="walk.json",
+        input_lifecycle_report="lifecycle.json",
+        input_execution_journal="journal.jsonl",
+        generated_at=datetime(2026, 6, 7, tzinfo=UTC),
+    )
+
+    assert len(journal_rows) == 20
+    assert report["symbol"] == "BTCUSDC"
+    assert report["status"] == "execution_parity_journal_passed"
+    assert report["contract_summary"]["symbol"] == "BTCUSDC"
+    assert report["contract_summary"]["walk_forward_symbol"] == "BTCUSDT"
+    assert report["contract_observed"]["symbol_mismatch_count"] == 0
+    assert "execution_parity_symbol_mismatch" not in report["contract_summary"]["blockers"]
 
 
 def test_execution_parity_journal_can_count_exit_rows_when_exit_fields_are_complete() -> None:

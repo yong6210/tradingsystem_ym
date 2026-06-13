@@ -184,6 +184,7 @@ def build_execution_parity_contract_report(
     *,
     input_walk_report: str | None = None,
     input_execution_journal: str | None = None,
+    expected_symbol: str | None = None,
     expected_strategy_family: str = EXPECTED_STRATEGY_FAMILY,
     min_sample_count: int = 20,
     min_order_match_rate: float = 0.99,
@@ -193,7 +194,7 @@ def build_execution_parity_contract_report(
     max_effective_exposure: float | None = None,
 ) -> dict[str, Any]:
     contract = _walk_contract(walk_report, expected_strategy_family=expected_strategy_family)
-    expected_symbol = str(contract.get("symbol") or "").upper()
+    expected_symbol_value = str(expected_symbol or contract.get("symbol") or "").upper()
     rows = list(execution_journal or [])
     blockers: list[str] = []
     warnings: list[str] = []
@@ -232,7 +233,7 @@ def build_execution_parity_contract_report(
         symbol = str(row.get("symbol") or "").upper()
         if not symbol:
             schema_issue_counts["missing_symbol"] += 1
-        if expected_symbol and symbol and symbol != expected_symbol:
+        if expected_symbol_value and symbol and symbol != expected_symbol_value:
             symbol_mismatches += 1
         family = str(row.get("strategy_family") or row.get("family") or "")
         if not family:
@@ -350,7 +351,8 @@ def build_execution_parity_contract_report(
     summary = {
         "status": status,
         "passed": status == "PASS",
-        "symbol": expected_symbol,
+        "symbol": expected_symbol_value,
+        "walk_forward_symbol": contract.get("symbol"),
         "strategy_families": [expected_strategy_family],
         "sample_count": actionable,
         "min_sample_count": min_sample_count,
@@ -444,6 +446,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--walk-forward-report", required=True)
     parser.add_argument("--execution-journal", default="")
+    parser.add_argument("--expected-symbol", default="")
     parser.add_argument("--report-dir", default="reports/validation/diagnostics/market_state_rotation_v6_execution_parity_contract")
     parser.add_argument("--write-report", action="store_true")
     parser.add_argument("--min-sample-count", type=int, default=20)
@@ -474,6 +477,7 @@ def main() -> None:
             if journal_path is not None and journal_path.is_relative_to(ROOT_DIR)
             else (str(journal_path) if journal_path is not None else None)
         ),
+        expected_symbol=str(args.expected_symbol or "").upper() or None,
         min_sample_count=args.min_sample_count,
         min_order_match_rate=args.min_order_match_rate,
         max_signal_lag_bars=args.max_signal_lag_bars,

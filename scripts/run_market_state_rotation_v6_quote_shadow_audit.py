@@ -16,9 +16,6 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from app.integrations.binance_futures import BinanceFuturesClient
-
-
 EXPECTED_SYMBOL = "BTCUSDT"
 EXPECTED_STRATEGY_FAMILY = "market_state_rotation_v6"
 DEFAULT_SAMPLE_PATH = "data/shadow/market_state_rotation_v6_quote_shadow.jsonl"
@@ -53,6 +50,12 @@ def _json_default(value: Any) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
+
+
+def _binance_futures_client_cls() -> type:
+    from app.integrations.binance_futures import BinanceFuturesClient
+
+    return BinanceFuturesClient
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -152,7 +155,7 @@ def capture_quote_shadow_rows(
     order_notional_usdt: float = 125.0,
     order_book_limit: int = 100,
 ) -> list[dict[str, Any]]:
-    client = BinanceFuturesClient()
+    client = _binance_futures_client_cls()()
     started = time.perf_counter()
     book = client.fetch_order_book(symbol=symbol.upper(), limit=max(5, int(order_book_limit)))
     latency_ms = (time.perf_counter() - started) * 1000.0

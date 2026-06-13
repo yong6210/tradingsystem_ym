@@ -1836,6 +1836,7 @@ def test_evidence_cycle_loads_canary_risk_caps_json_without_enabling_orders(monk
     assert caps["errors"] == []
     assert caps["operator_review"]["required"] is False
     assert "run_market_state_rotation_v6_canary_risk_caps_audit.py" in caps["operator_review"]["quick_audit_command"]
+    assert "--symbol BTCUSDT" in caps["operator_review"]["quick_audit_command"]
     assert caps["order_submission_allowed"] is False
     launch = report["launch_readiness"]
     assert launch["canary_policy"]["max_notional_usdt"] == 75.0
@@ -1864,6 +1865,61 @@ def test_evidence_cycle_loads_canary_risk_caps_json_without_enabling_orders(monk
     markdown = (report_dir / "market_state_rotation_v6_evidence_cycle.md").read_text(encoding="utf-8")
     assert "launch_canary_risk_caps_status: `configured_from_file`" in markdown
     assert "launch_safety_controls_status: `INCOMPLETE`" in markdown
+
+
+def test_evidence_cycle_loads_btcusdc_canary_risk_caps_scope(monkeypatch, tmp_path) -> None:
+    def fake_collection_cycle(**kwargs):
+        report_dir = Path(kwargs["report_dir"])
+        report_dir.mkdir(parents=True, exist_ok=True)
+        payload = _cycle_report()
+        (report_dir / CYCLE_REPORT_NAME).write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(evidence, "run_collection_cycle", fake_collection_cycle)
+    caps_path = tmp_path / "canary_caps_BTCUSDC.json"
+    caps_path.write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "scope_symbol": "BTCUSDC",
+                "strategy_family": "market_state_rotation_v6",
+                "max_notional_usdt": 75.0,
+                "max_leverage": 7.5,
+                "max_daily_loss_usdt": 15.0,
+                "max_daily_order_count": 1,
+                "max_consecutive_loss_count": 1,
+                "kill_switch_required": True,
+                "reduce_only_exit_required": True,
+                "operator_acknowledged_no_auto_live_order": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_evidence_cycle(
+        source_backtest_report_path=tmp_path / "source.json",
+        stress_report_path=tmp_path / "stress.json",
+        walk_forward_report_path=tmp_path / "walk.json",
+        manual_evidence_path=tmp_path / "manual.json",
+        sample_jsonl=tmp_path / "sample.jsonl",
+        report_dir=tmp_path / "evidence",
+        symbol="BTCUSDC",
+        canary_risk_caps_path=caps_path,
+    )
+
+    caps = report["canary_risk_caps_config"]
+    assert caps["status"] == "configured_from_file"
+    assert caps["configured"] is True
+    assert caps["required_safeguards"]["scope_symbol"] == "BTCUSDC"
+    assert caps["safeguards"]["scope_symbol"] == "BTCUSDC"
+    assert caps["errors"] == []
+    assert "keep_scope_symbol_BTCUSDC" in caps["operator_review"]["review_checklist"]
+    assert "--write-template" in caps["operator_review"]["safe_template_copy_command"]
+    assert "--symbol BTCUSDC" in caps["operator_review"]["safe_template_copy_command"]
+    assert "--symbol BTCUSDC" in caps["operator_review"]["quick_audit_command"]
+    assert "--symbol BTCUSDC" in caps["operator_review"]["validation_command"]
+    assert report["launch_readiness"]["tiny_canary_order_submission_allowed"] is False
+    assert report["no_live_order_sent"] is True
 
 
 def test_evidence_cycle_accepts_full_safety_controls_without_enabling_live_orders(monkeypatch, tmp_path) -> None:

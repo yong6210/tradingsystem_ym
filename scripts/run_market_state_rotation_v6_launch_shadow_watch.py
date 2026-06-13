@@ -51,6 +51,11 @@ DEFAULT_EVIDENCE_REPORT_ROOT = "reports/validation/diagnostics"
 DEFAULT_MARKET_DATA_CACHE_DIR = "reports/validation/btc_flip_rotation_search/cache"
 DEFAULT_MARKET_DATA_BASE_URL = "https://fapi.binance.com"
 DEFAULT_MARKET_DATA_REFRESH_DAYS = 180
+DEFAULT_BTCUSDC_PARALLEL_SYMBOL = "BTCUSDC"
+DEFAULT_BTCUSDC_PARALLEL_SAMPLE_PATH = "data/shadow/market_state_rotation_v6_quote_shadow_BTCUSDC.jsonl"
+DEFAULT_BTCUSDC_PARALLEL_CANARY_RISK_CAPS_PATH = (
+    "reports/operations/market_state_rotation_v6_canary_risk_caps_BTCUSDC.json"
+)
 PAPER_REHEARSAL_FAST_SIGNAL_MONITOR_MINUTES = 5.0
 DEFAULT_OPERATOR_REVIEW_MIN_RATIONALE_CHARS = 30
 DEFAULT_OPERATOR_REVIEW_MIN_EVIDENCE_ANCHORS = 1
@@ -91,6 +96,3462 @@ def _display_path(path: Path) -> str:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default) + "\n", encoding="utf-8")
+
+
+def _watch_snapshot_path(report_dir: Path, summary: dict[str, Any]) -> Path:
+    completed_at = _parse_dt(summary.get("completed_at")) or datetime.now(UTC)
+    stamp = completed_at.astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    return report_dir / "snapshots" / f"market_state_rotation_v6_launch_shadow_watch_{stamp}.json"
+
+
+def _watch_status_payload(report_dir: Path, summary: dict[str, Any]) -> dict[str, Any]:
+    latest = dict(summary.get("latest_run") or {})
+    launch_state = dict(summary.get("latest_launch_state") or {})
+    quote_progress = dict(summary.get("quote_progress") or {})
+    fresh_signal = dict(summary.get("fresh_signal_status") or summary.get("fresh_signal") or {})
+    paper_apply = dict(summary.get("paper_apply_status") or summary.get("paper_apply") or {})
+    rehearsal = dict(summary.get("paper_only_rehearsal") or {})
+    lifecycle = dict(summary.get("paper_lifecycle_row_diagnostics") or {})
+    parity = dict(summary.get("execution_parity_status_summary") or {})
+    parity_ledger = dict(summary.get("execution_parity_evidence_ledger") or {})
+    eta_plan = dict(summary.get("execution_parity_eta_plan") or {})
+    eta_scenarios = dict(eta_plan.get("eta_scenarios") or {})
+    eta_all = dict(eta_scenarios.get("all_creditable_events") or {})
+    signal_monitor = dict(summary.get("signal_monitor") or {})
+    btcusdc_lane = dict(summary.get("btcusdc_parallel_shadow_lane") or {})
+    btcusdc_fee_model = dict(btcusdc_lane.get("fee_model") or {})
+    btcusdc_candidate_quote = dict(btcusdc_lane.get("candidate_quote_progress") or {})
+    btcusdc_candidate_gates = dict(btcusdc_lane.get("candidate_gates") or {})
+    btcusdc_candidate_canary = dict(btcusdc_lane.get("candidate_canary_risk_caps") or {})
+    btcusdc_candidate_coverage = dict(btcusdc_lane.get("candidate_quote_coverage_plan") or {})
+    btcusdc_candidate_runbook = dict(btcusdc_lane.get("candidate_quote_capture_runbook") or {})
+    btcusdc_pre_run_wait = dict(summary.get("btcusdc_parallel_pre_run_quote_window_wait_plan") or {})
+    btcusdc_safety = dict(btcusdc_lane.get("safety") or {})
+    heartbeat_sla = dict(summary.get("heartbeat_sla_diagnostics") or {})
+    heartbeat_history = dict(summary.get("heartbeat_sla_history") or {})
+    heartbeat_response = dict(summary.get("heartbeat_sla_response_plan") or {})
+    notification = dict(
+        summary.get("launch_shadow_watch_notification_decision")
+        or summary.get("notification_decision")
+        or {}
+    )
+    delivery = dict(summary.get("notification_delivery_plan") or {})
+    delivery_history = dict(summary.get("notification_delivery_history") or {})
+    completed_at = _parse_dt(summary.get("completed_at"))
+    parity_required_samples = parity.get("required_samples") or parity.get(
+        "min_sample_count"
+    )
+    if parity_required_samples in (None, 0) and parity.get("missing_samples") is not None:
+        try:
+            parity_required_samples = int(parity.get("sample_count") or 0) + int(
+                parity.get("missing_samples") or 0
+            )
+        except (TypeError, ValueError):
+            parity_required_samples = parity.get("required_samples")
+    return {
+        "schema_version": "market_state_rotation_v6_launch_shadow_watch_status_v1",
+        "status": summary.get("status"),
+        "completed_at": summary.get("completed_at"),
+        "completed_at_kst": completed_at.astimezone(KST).isoformat()
+        if completed_at is not None
+        else None,
+        "launch_status": summary.get("launch_status") or launch_state.get("launch_status"),
+        "next_blocker": summary.get("next_blocker") or launch_state.get("next_blocker_gate"),
+        "target_observation_complete": summary.get("target_observation_complete"),
+        "quote_progress": {
+            "observed_latest": quote_progress.get("observed_latest"),
+            "observed_delta": quote_progress.get("observed_delta"),
+            "progress_state": quote_progress.get("progress_state"),
+            "distinct_hours_latest": quote_progress.get("distinct_hours_latest"),
+            "distinct_hours_delta": quote_progress.get("distinct_hours_delta"),
+            "hour_progress_state": quote_progress.get("hour_progress_state"),
+        },
+        "fresh_signal": {
+            "available": fresh_signal.get("seen_during_watch") is True
+            or fresh_signal.get("available") is True,
+            "primary_cause": fresh_signal.get("primary_cause"),
+            "signal_absence_primary_cause": fresh_signal.get(
+                "signal_absence_primary_cause"
+            ),
+            "signal_absence_class": fresh_signal.get("signal_absence_class"),
+        },
+        "paper_apply": {
+            "available": paper_apply.get("seen_during_watch") is True
+            or paper_apply.get("available") is True,
+            "allowed_now": paper_apply.get("allowed_now") is True,
+            "remaining_gates": list(paper_apply.get("remaining_gates") or []),
+        },
+        "paper_only_rehearsal": {
+            "status": rehearsal.get("status"),
+            "system_ready": rehearsal.get("system_ready") is True,
+            "armed": rehearsal.get("armed") is True,
+            "remaining_gates": list(rehearsal.get("remaining_gates") or []),
+        },
+        "paper_lifecycle": {
+            "status": lifecycle.get("status"),
+            "missing_stage": lifecycle.get("missing_stage"),
+            "rows_available": lifecycle.get("rows_available") is True,
+            "safe_next_action": lifecycle.get("safe_next_action"),
+        },
+        "execution_parity": {
+            "status": parity.get("status"),
+            "required_samples": parity_required_samples,
+            "min_sample_count": parity.get("min_sample_count"),
+            "eligible_journal_rows": parity.get("eligible_journal_rows"),
+            "sample_count": parity.get("sample_count"),
+            "missing_samples": parity.get("missing_samples"),
+            "eta_completion_kst": eta_all.get("estimated_completion_kst")
+            or parity.get("estimated_completion_kst"),
+            "ledger_status": parity_ledger.get("status"),
+            "ledger_entry_count": parity_ledger.get("entry_count"),
+            "next_step": parity.get("next_step"),
+        },
+        "signal_monitor": {
+            "interval_seconds": signal_monitor.get("interval_seconds"),
+            "capped_to_fresh_signal_window": signal_monitor.get(
+                "capped_to_fresh_signal_window"
+            )
+            is True,
+            "next_monitor_after_utc": signal_monitor.get("next_monitor_after_utc"),
+            "next_monitor_after_kst": signal_monitor.get("next_monitor_after_kst"),
+        },
+        "btcusdc_parallel_shadow_lane": {
+            "status": btcusdc_lane.get("status"),
+            "candidate_readiness_status": btcusdc_lane.get("candidate_readiness_status"),
+            "candidate_symbol": btcusdc_lane.get("candidate_symbol"),
+            "candidate_evidence_report": btcusdc_lane.get("candidate_evidence_report"),
+            "candidate_sample_jsonl": btcusdc_lane.get("candidate_sample_jsonl"),
+            "candidate_canary_risk_caps_status": btcusdc_candidate_canary.get("status"),
+            "candidate_canary_risk_caps_path": btcusdc_candidate_canary.get("path"),
+            "candidate_canary_required_scope_symbol": btcusdc_candidate_canary.get("required_scope_symbol"),
+            "candidate_canary_configured_scope_symbol": btcusdc_candidate_canary.get("configured_scope_symbol"),
+            "candidate_canary_risk_caps_errors": btcusdc_candidate_canary.get("errors"),
+            "maker_fee_bps": btcusdc_fee_model.get("maker_fee_bps"),
+            "requires_post_only_or_maker_only_reject": btcusdc_fee_model.get(
+                "requires_post_only_or_maker_only_reject"
+            )
+            is True,
+            "fee_model_is_promotional_and_must_be_rechecked_before_live": (
+                btcusdc_fee_model.get(
+                    "fee_model_is_promotional_and_must_be_rechecked_before_live"
+                )
+                is True
+            ),
+            "quote_observed": btcusdc_candidate_quote.get("observed"),
+            "quote_distinct_hours": btcusdc_candidate_quote.get("distinct_hours"),
+            "captured_quote_rows_this_cycle": btcusdc_candidate_quote.get(
+                "captured_quote_rows_this_cycle"
+            ),
+            "quote_coverage_status": btcusdc_candidate_coverage.get("status"),
+            "quote_remaining_samples": btcusdc_candidate_coverage.get("remaining_quote_samples"),
+            "quote_remaining_calendar_days": btcusdc_candidate_coverage.get("remaining_calendar_days"),
+            "quote_remaining_distinct_hours": btcusdc_candidate_coverage.get("remaining_distinct_hours"),
+            "quote_next_coverage_kind": btcusdc_candidate_coverage.get("next_quote_coverage_kind"),
+            "quote_next_coverage_kst_at": btcusdc_candidate_coverage.get("next_quote_coverage_kst_at"),
+            "quote_standard_capture_window_open": btcusdc_candidate_coverage.get(
+                "standard_capture_window_open"
+            )
+            is True,
+            "quote_standard_capture_would_skip_duplicate_window": btcusdc_candidate_coverage.get(
+                "standard_capture_would_skip_duplicate_window"
+            )
+            is True,
+            "quote_force_sample_available": btcusdc_candidate_coverage.get("force_quote_sample_available")
+            is True,
+            "quote_can_collect_now": btcusdc_candidate_coverage.get("can_collect_now") is True,
+            "quote_recommended_action": btcusdc_candidate_coverage.get("recommended_action"),
+            "quote_capture_runbook_status": btcusdc_candidate_runbook.get("status"),
+            "quote_capture_next_standard_kst_at": btcusdc_candidate_runbook.get(
+                "next_standard_capture_kst_at"
+            ),
+            "quote_capture_expected_rows_per_successful_capture": btcusdc_candidate_runbook.get(
+                "expected_rows_per_successful_capture"
+            ),
+            "quote_capture_expected_quote_observed_after_successful_capture": (
+                btcusdc_candidate_runbook.get("expected_quote_observed_after_successful_capture")
+            ),
+            "quote_capture_expected_remaining_samples_after_successful_capture": (
+                btcusdc_candidate_runbook.get("expected_remaining_samples_after_successful_capture")
+            ),
+            "quote_capture_expected_distinct_hours_after_successful_capture": (
+                btcusdc_candidate_runbook.get("expected_distinct_hours_after_successful_capture")
+            ),
+            "quote_capture_command_includes_market_data_refresh": (
+                btcusdc_candidate_runbook.get("command_includes_market_data_refresh") is True
+            ),
+            "pre_run_wait_status": btcusdc_pre_run_wait.get("status"),
+            "pre_run_wait_should_sleep": btcusdc_pre_run_wait.get("should_sleep") is True,
+            "pre_run_wait_seconds": btcusdc_pre_run_wait.get("wait_seconds"),
+            "pre_run_wait_next_kst_at": btcusdc_pre_run_wait.get("next_quote_coverage_kst_at"),
+            "pre_run_wait_selected_sleep_scope": btcusdc_pre_run_wait.get("selected_sleep_scope"),
+            "pre_run_wait_actual_sleep_seconds": btcusdc_pre_run_wait.get("actual_sleep_seconds"),
+            "pre_run_wait_target_window_missed": btcusdc_pre_run_wait.get("target_window_missed")
+            is True,
+            "launch_status": btcusdc_candidate_gates.get("launch_status"),
+            "next_blocker": btcusdc_candidate_gates.get("next_blocker"),
+            "execution_parity_sample_count": btcusdc_candidate_gates.get(
+                "execution_parity_sample_count"
+            ),
+            "execution_parity_required_samples": btcusdc_candidate_gates.get(
+                "execution_parity_required_samples"
+            ),
+            "execution_parity_missing_samples": btcusdc_candidate_gates.get(
+                "execution_parity_missing_samples"
+            ),
+            "execution_parity_contract_symbol": btcusdc_candidate_gates.get(
+                "execution_parity_contract_symbol"
+            ),
+            "candidate_symbol_contract_mismatch": btcusdc_candidate_gates.get(
+                "candidate_symbol_contract_mismatch"
+            )
+            is True,
+            "paper_apply_allowed": btcusdc_safety.get("paper_apply_allowed") is True,
+            "order_submission_allowed": btcusdc_safety.get("order_submission_allowed") is True,
+            "no_live_order_sent": btcusdc_lane.get("no_live_order_sent") is not False,
+            "launch_gate_effect": btcusdc_lane.get("launch_gate_effect"),
+        },
+        "heartbeat_sla": {
+            "status": heartbeat_sla.get("status"),
+            "actual_gap_minutes": heartbeat_sla.get("actual_gap_minutes"),
+            "within_monitor_interval": heartbeat_sla.get("within_monitor_interval"),
+            "within_fresh_signal_window": heartbeat_sla.get("within_fresh_signal_window"),
+            "history_status": heartbeat_history.get("status"),
+            "history_entry_count": heartbeat_history.get("entry_count"),
+            "history_late_count": heartbeat_history.get("late_count"),
+            "history_fresh_signal_window_miss_count": heartbeat_history.get(
+                "fresh_signal_window_miss_count"
+            ),
+            "response_status": heartbeat_response.get("status"),
+            "response_severity": heartbeat_response.get("severity"),
+            "operator_notify": heartbeat_response.get("operator_notify") is True,
+        },
+        "notification": {
+            "decision": notification.get("decision"),
+            "status": notification.get("status"),
+            "priority": notification.get("priority"),
+            "message": notification.get("message"),
+            "delivery_decision": delivery.get("delivery_decision"),
+            "delivery_status": delivery.get("status"),
+            "duplicate_notification_suppressed": delivery.get(
+                "duplicate_notification_suppressed"
+            )
+            is True,
+            "last_notified_at": delivery.get("last_notified_at"),
+            "history_status": delivery_history.get("status"),
+            "history_entry_count": delivery_history.get("entry_count"),
+            "history_notify_count": delivery_history.get("notify_count"),
+            "history_duplicate_suppressed_count": delivery_history.get(
+                "duplicate_suppressed_count"
+            ),
+        },
+        "reports": {
+            "latest_json": _display_path(report_dir / "latest.json"),
+            "latest_markdown": _display_path(report_dir / "latest.md"),
+            "latest_status_json": summary.get("watch_status_path")
+            or _display_path(report_dir / "latest_status.json"),
+            "latest_status_history_json": summary.get("watch_status_history_path")
+            or _display_path(report_dir / "latest_status_history.json"),
+            "latest_action_outbox_json": summary.get("watch_action_outbox_path")
+            or _display_path(report_dir / "latest_action_outbox.json"),
+            "latest_action_outbox_history_json": summary.get(
+                "watch_action_outbox_history_path"
+            )
+            or _display_path(report_dir / "latest_action_outbox_history.json"),
+            "latest_artifact_manifest_json": summary.get("watch_artifact_manifest_path")
+            or _display_path(report_dir / "latest_artifact_manifest.json"),
+            "latest_artifact_manifest_history_json": summary.get(
+                "watch_artifact_manifest_history_path"
+            )
+            or _display_path(report_dir / "latest_artifact_manifest_history.json"),
+            "latest_safety_invariants_json": summary.get(
+                "watch_safety_invariants_path"
+            )
+            or _display_path(report_dir / "latest_safety_invariants.json"),
+            "latest_safety_invariants_history_json": summary.get(
+                "watch_safety_invariants_history_path"
+            )
+            or _display_path(report_dir / "latest_safety_invariants_history.json"),
+            "latest_safety_coverage_json": summary.get("watch_safety_coverage_path")
+            or _display_path(report_dir / "latest_safety_coverage.json"),
+            "latest_safety_coverage_history_json": summary.get(
+                "watch_safety_coverage_history_path"
+            )
+            or _display_path(report_dir / "latest_safety_coverage_history.json"),
+            "latest_report_index_json": summary.get("watch_report_index_path")
+            or _display_path(report_dir / "latest_report_index.json"),
+            "latest_report_index_history_json": summary.get(
+                "watch_report_index_history_path"
+            )
+            or _display_path(report_dir / "latest_report_index_history.json"),
+            "latest_operations_health_json": summary.get(
+                "watch_operations_health_path"
+            )
+            or _display_path(report_dir / "latest_operations_health.json"),
+            "latest_launch_gate_checklist_json": summary.get(
+                "watch_launch_gate_checklist_path"
+            )
+            or _display_path(report_dir / "latest_launch_gate_checklist.json"),
+            "latest_launch_gate_checklist_history_json": summary.get(
+                "watch_launch_gate_checklist_history_path"
+            )
+            or _display_path(report_dir / "latest_launch_gate_checklist_history.json"),
+            "snapshot_json": summary.get("watch_snapshot_path"),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "no_live_order_sent": summary.get("no_live_order_sent") is not False
+            and latest.get("no_live_order_sent") is not False,
+        },
+        "no_live_order_sent": summary.get("no_live_order_sent") is not False,
+    }
+
+
+def _compact_watch_action(item: dict[str, Any] | None) -> dict[str, Any] | None:
+    action = dict(item or {})
+    if not action:
+        return None
+    command = action.get("command")
+    return {
+        "action_type": action.get("action_type"),
+        "target_gate": action.get("target_gate"),
+        "priority": action.get("priority"),
+        "reason": action.get("reason"),
+        "command": command,
+        "command_report_dir": action.get("command_report_dir")
+        or _command_flag_value(command, "--report-dir"),
+        "can_run_now": action.get("can_run_now") is True,
+        "can_start_now": action.get("can_start_now") is True,
+        "requires_operator_review": action.get("requires_operator_review") is True,
+        "effective_available_now": action.get("effective_available_now") is True,
+        "covered_by_current_iteration": action.get("covered_by_current_iteration") is True,
+        "covered_due_by_current_iteration": (
+            action.get("covered_due_by_current_iteration") is True
+        ),
+        "execution_window_status": action.get("execution_window_status"),
+        "effective_execution_window_status": action.get(
+            "effective_execution_window_status"
+        ),
+        "effective_next_monitor_after_utc": action.get("effective_next_monitor_after_utc"),
+        "effective_next_monitor_after_kst": action.get("effective_next_monitor_after_kst"),
+        "execute_after_utc": action.get("execute_after_utc"),
+        "execute_after_kst": action.get("execute_after_kst"),
+        "wait_minutes": action.get("wait_minutes"),
+        "template_report": action.get("template_report"),
+        "skeleton_report": action.get("skeleton_report"),
+        "candidate_recipe_id": action.get("candidate_recipe_id"),
+        "review_packet_fingerprint": action.get("review_packet_fingerprint"),
+        "paper_only_scope": action.get("paper_only_scope") is True,
+        "real_shadow_still_required_before_tiny_canary_or_live": (
+            action.get("real_shadow_still_required_before_tiny_canary_or_live") is True
+        ),
+        "order_submission_allowed": False,
+        "auto_apply_allowed": False,
+        "force_signal_allowed": False,
+        "stale_signal_apply_allowed": False,
+        "no_live_order_sent": action.get("no_live_order_sent") is not False,
+    }
+
+
+def _watch_action_outbox_payload(
+    report_dir: Path,
+    summary: dict[str, Any],
+    status_payload: dict[str, Any],
+) -> dict[str, Any]:
+    queue = dict(summary.get("operator_work_queue") or {})
+    digest = dict(summary.get("operator_action_digest") or {})
+    safe_next = dict(summary.get("safe_next_action_plan") or {})
+    notification = dict(status_payload.get("notification") or {})
+    heartbeat = dict(status_payload.get("heartbeat_sla") or {})
+    status_safety = dict(status_payload.get("safety") or {})
+
+    effective_action = _compact_watch_action(queue.get("primary_effective_automation_action"))
+    covered_action = _compact_watch_action(queue.get("primary_covered_automation_action"))
+    raw_action = _compact_watch_action(queue.get("primary_automation_action"))
+    operator_review = _compact_watch_action(queue.get("primary_operator_review_action"))
+    operator_review_wait = _compact_watch_action(
+        queue.get("primary_operator_review_wait_action")
+    )
+    startable_wait = _compact_watch_action(queue.get("primary_startable_wait_action"))
+    material_command = digest.get("primary_material_command")
+    material_action = {
+        "event": digest.get("primary_material_event"),
+        "gate": digest.get("primary_material_gate"),
+        "ready_now": digest.get("primary_material_ready_now") is True,
+        "wait_minutes": digest.get("primary_material_wait_minutes"),
+        "eta_kst": digest.get("primary_material_eta_kst"),
+        "command": material_command,
+        "command_report_dir": _command_flag_value(material_command, "--report-dir"),
+        "order_submission_allowed": False,
+        "auto_apply_allowed": False,
+        "no_live_order_sent": digest.get("no_live_order_sent") is not False,
+    }
+
+    live_safety_violation = (
+        status_safety.get("order_submission_allowed") is True
+        or status_safety.get("no_live_order_sent") is False
+        or queue.get("order_submission_allowed") is True
+        or queue.get("no_live_order_sent") is False
+        or digest.get("order_submission_allowed") is True
+        or digest.get("no_live_order_sent") is False
+    )
+    command_consistency_status = digest.get("command_consistency_status")
+    if live_safety_violation:
+        status = "action_outbox_safety_blocked"
+        primary_mode = "do_not_run_any_action_until_safety_is_repaired"
+    elif command_consistency_status == "command_consistency_mismatch_detected":
+        status = "action_outbox_command_consistency_repair_required"
+        primary_mode = "repair_command_consistency_before_operator_use"
+    elif status_payload.get("paper_apply", {}).get("available") is True:
+        status = "action_outbox_manual_paper_apply_review_available"
+        primary_mode = "manual_operator_review_only"
+    elif effective_action is not None:
+        status = "action_outbox_safe_automation_available"
+        primary_mode = "safe_command_available_without_live_orders"
+    elif operator_review is not None:
+        status = "action_outbox_operator_review_required"
+        primary_mode = "manual_operator_review_only"
+    elif operator_review_wait is not None:
+        status = "action_outbox_operator_review_waiting_for_gate"
+        primary_mode = "wait_for_gate_before_manual_review"
+    elif covered_action is not None:
+        status = "action_outbox_primary_action_already_covered"
+        primary_mode = "wait_for_next_recheck_window"
+    elif startable_wait is not None:
+        status = "action_outbox_time_wait_startable"
+        primary_mode = "wait_until_execution_window"
+    else:
+        status = "action_outbox_no_open_action"
+        primary_mode = "continue_periodic_watch"
+
+    return {
+        "schema_version": "market_state_rotation_v6_launch_shadow_watch_action_outbox_v1",
+        "status": status,
+        "generated_at": summary.get("completed_at"),
+        "launch_status": status_payload.get("launch_status"),
+        "next_blocker": status_payload.get("next_blocker"),
+        "primary_mode": primary_mode,
+        "primary_next": digest.get("primary_next"),
+        "operator_action_scope": digest.get("operator_action_scope"),
+        "queue_status": queue.get("status"),
+        "queue_effective_status": queue.get("effective_status"),
+        "safe_next_action_status": safe_next.get("status"),
+        "counts": {
+            "raw_automation_now": queue.get("raw_automation_now_count"),
+            "effective_automation_now": queue.get("effective_automation_now_count"),
+            "covered_automation_now": queue.get("covered_automation_now_count"),
+            "operator_review_now": queue.get("operator_review_now_count"),
+            "operator_review_wait": queue.get("operator_review_wait_count"),
+            "startable_wait": queue.get("startable_wait_count"),
+            "manual_decision_count": digest.get("manual_decision_count"),
+            "safe_auto_command_count": digest.get("safe_auto_command_count"),
+        },
+        "primary_effective_safe_command": effective_action,
+        "primary_covered_command": covered_action,
+        "primary_raw_command": raw_action,
+        "primary_material_monitor": material_action,
+        "primary_operator_review": operator_review,
+        "primary_operator_review_wait": operator_review_wait,
+        "primary_startable_wait": startable_wait,
+        "notification": {
+            "decision": notification.get("decision"),
+            "status": notification.get("status"),
+            "delivery_decision": notification.get("delivery_decision"),
+            "delivery_status": notification.get("delivery_status"),
+        },
+        "heartbeat_sla": {
+            "status": heartbeat.get("status"),
+            "response_status": heartbeat.get("response_status"),
+            "operator_notify": heartbeat.get("operator_notify") is True,
+        },
+        "forbidden_actions": [
+            {
+                "action": "submit_live_order",
+                "allowed": False,
+                "reason": "launch_shadow_watch_is_no_live_order_mode",
+            },
+            {
+                "action": "enable_live_trading",
+                "allowed": False,
+                "reason": "tiny_canary_or_live_requires_separate_operator_promotion",
+            },
+            {
+                "action": "auto_apply_paper_decision",
+                "allowed": False,
+                "reason": "paper_apply_remains_manual_operator_review_only",
+            },
+            {
+                "action": "force_signal_or_apply_stale_signal",
+                "allowed": False,
+                "reason": "fresh_signal_gate_must_be_satisfied_by_realtime_market_state",
+            },
+        ],
+        "reports": {
+            "latest_json": _display_path(report_dir / "latest.json"),
+            "latest_status_json": _display_path(report_dir / "latest_status.json"),
+            "latest_status_history_json": _display_path(
+                report_dir / "latest_status_history.json"
+            ),
+            "latest_action_outbox_json": summary.get("watch_action_outbox_path")
+            or _display_path(report_dir / "latest_action_outbox.json"),
+            "latest_action_outbox_history_json": summary.get(
+                "watch_action_outbox_history_path"
+            )
+            or _display_path(report_dir / "latest_action_outbox_history.json"),
+            "latest_artifact_manifest_json": summary.get("watch_artifact_manifest_path")
+            or _display_path(report_dir / "latest_artifact_manifest.json"),
+            "latest_artifact_manifest_history_json": summary.get(
+                "watch_artifact_manifest_history_path"
+            )
+            or _display_path(report_dir / "latest_artifact_manifest_history.json"),
+            "latest_safety_invariants_json": summary.get(
+                "watch_safety_invariants_path"
+            )
+            or _display_path(report_dir / "latest_safety_invariants.json"),
+            "latest_safety_invariants_history_json": summary.get(
+                "watch_safety_invariants_history_path"
+            )
+            or _display_path(report_dir / "latest_safety_invariants_history.json"),
+            "latest_safety_coverage_json": summary.get("watch_safety_coverage_path")
+            or _display_path(report_dir / "latest_safety_coverage.json"),
+            "latest_safety_coverage_history_json": summary.get(
+                "watch_safety_coverage_history_path"
+            )
+            or _display_path(report_dir / "latest_safety_coverage_history.json"),
+            "latest_report_index_json": summary.get("watch_report_index_path")
+            or _display_path(report_dir / "latest_report_index.json"),
+            "latest_report_index_history_json": summary.get(
+                "watch_report_index_history_path"
+            )
+            or _display_path(report_dir / "latest_report_index_history.json"),
+            "latest_operations_health_json": summary.get(
+                "watch_operations_health_path"
+            )
+            or _display_path(report_dir / "latest_operations_health.json"),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_decision_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "operator_decisions_are_manual_only": True,
+            "paper_apply_is_manual_only": True,
+            "no_live_order_sent": not live_safety_violation,
+        },
+        "no_live_order_sent": not live_safety_violation,
+    }
+
+
+def _watch_safety_invariant_violations(
+    name: str,
+    payload: Any,
+    *,
+    max_violations: int = 100,
+) -> list[dict[str, Any]]:
+    forbidden_true_keys = {
+        "live_order_submission_allowed",
+        "order_submission_allowed",
+        "auto_decision_allowed",
+        "auto_apply_allowed",
+        "force_signal_allowed",
+        "stale_signal_apply_allowed",
+        "tiny_canary_allowed",
+        "full_live_allowed",
+    }
+    positive_count_keys = {
+        "live_violation_count",
+        "live_order_safety_violation_count",
+        "safety_violation_count",
+    }
+    violations: list[dict[str, Any]] = []
+
+    def _add(path: str, key: str, value: Any, reason: str) -> None:
+        if len(violations) >= max_violations:
+            return
+        violations.append(
+            {
+                "payload": name,
+                "path": path,
+                "key": key,
+                "value": value,
+                "reason": reason,
+            }
+        )
+
+    def _walk(value: Any, path: str) -> None:
+        if len(violations) >= max_violations:
+            return
+        if isinstance(value, dict):
+            if (
+                str(value.get("action") or "") in {
+                    "submit_live_order",
+                    "enable_live_trading",
+                    "auto_apply_paper_decision",
+                    "force_signal_or_apply_stale_signal",
+                }
+                and value.get("allowed") is True
+            ):
+                _add(
+                    f"{path}.allowed",
+                    "allowed",
+                    True,
+                    "forbidden_action_marked_allowed",
+                )
+            for key, item in value.items():
+                item_path = f"{path}.{key}" if path else str(key)
+                if key in forbidden_true_keys and item is True:
+                    _add(
+                        item_path,
+                        str(key),
+                        item,
+                        "forbidden_safety_flag_true",
+                    )
+                elif key == "no_live_order_sent" and item is False:
+                    _add(item_path, str(key), item, "no_live_order_sent_false")
+                elif key in positive_count_keys:
+                    numeric = _number_or_none(item)
+                    if numeric is not None and numeric > 0:
+                        _add(
+                            item_path,
+                            str(key),
+                            item,
+                            "safety_violation_count_positive",
+                        )
+                _walk(item, item_path)
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                _walk(item, f"{path}[{index}]")
+
+    _walk(payload, "")
+    return violations
+
+
+def _watch_safety_invariants_payload(
+    *,
+    report_dir: Path,
+    summary: dict[str, Any],
+    generated_payloads: dict[str, Any],
+) -> dict[str, Any]:
+    payload_results: list[dict[str, Any]] = []
+    violations: list[dict[str, Any]] = []
+    for name, payload in generated_payloads.items():
+        current = _watch_safety_invariant_violations(name, payload)
+        payload_results.append(
+            {
+                "name": name,
+                "violation_count": len(current),
+                "no_live_order_sent": dict(payload or {}).get("no_live_order_sent")
+                is not False
+                if isinstance(payload, dict)
+                else True,
+            }
+        )
+        violations.extend(current)
+
+    status = (
+        "safety_invariants_failed"
+        if violations
+        else "safety_invariants_pass"
+    )
+    return {
+        "schema_version": "market_state_rotation_v6_launch_shadow_watch_safety_invariants_v1",
+        "status": status,
+        "generated_at": summary.get("completed_at"),
+        "checked_payload_count": len(generated_payloads),
+        "violation_count": len(violations),
+        "payload_results": payload_results,
+        "violations": violations,
+        "required_invariants": [
+            "live_order_submission_allowed_false",
+            "order_submission_allowed_false",
+            "auto_decision_allowed_false",
+            "auto_apply_allowed_false",
+            "force_signal_allowed_false",
+            "stale_signal_apply_allowed_false",
+            "tiny_canary_allowed_false",
+            "full_live_allowed_false",
+            "no_live_order_sent_not_false",
+            "forbidden_actions_not_allowed",
+            "live_violation_counts_zero",
+        ],
+        "reports": {
+            "latest_json": _display_path(report_dir / "latest.json"),
+            "latest_status_json": _display_path(report_dir / "latest_status.json"),
+            "latest_status_history_json": _display_path(
+                report_dir / "latest_status_history.json"
+            ),
+            "latest_action_outbox_json": _display_path(
+                report_dir / "latest_action_outbox.json"
+            ),
+            "latest_action_outbox_history_json": _display_path(
+                report_dir / "latest_action_outbox_history.json"
+            ),
+            "latest_artifact_manifest_json": _display_path(
+                report_dir / "latest_artifact_manifest.json"
+            ),
+            "latest_artifact_manifest_history_json": _display_path(
+                report_dir / "latest_artifact_manifest_history.json"
+            ),
+            "latest_safety_invariants_json": _display_path(
+                report_dir / "latest_safety_invariants.json"
+            ),
+            "latest_safety_invariants_history_json": _display_path(
+                report_dir / "latest_safety_invariants_history.json"
+            ),
+            "latest_safety_coverage_json": _display_path(
+                report_dir / "latest_safety_coverage.json"
+            ),
+            "latest_safety_coverage_history_json": _display_path(
+                report_dir / "latest_safety_coverage_history.json"
+            ),
+            "latest_report_index_json": _display_path(
+                report_dir / "latest_report_index.json"
+            ),
+            "latest_report_index_history_json": _display_path(
+                report_dir / "latest_report_index_history.json"
+            ),
+            "latest_operations_health_json": _display_path(
+                report_dir / "latest_operations_health.json"
+            ),
+            "snapshot_json": summary.get("watch_snapshot_path"),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_decision_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "no_live_order_sent": not violations
+            and summary.get("no_live_order_sent") is not False,
+        },
+        "no_live_order_sent": not violations
+        and summary.get("no_live_order_sent") is not False,
+    }
+
+
+def _watch_safety_invariants_history_entry(
+    invariants: dict[str, Any],
+) -> dict[str, Any]:
+    payload_results = [dict(item) for item in list(invariants.get("payload_results") or [])]
+    failing_payloads = [
+        item.get("name")
+        for item in payload_results
+        if int(item.get("violation_count") or 0) > 0
+    ]
+    return {
+        "generated_at": invariants.get("generated_at"),
+        "status": invariants.get("status"),
+        "checked_payload_count": invariants.get("checked_payload_count"),
+        "violation_count": invariants.get("violation_count"),
+        "failing_payloads": failing_payloads,
+        "no_live_order_sent": invariants.get("no_live_order_sent") is not False
+        and dict(invariants.get("safety") or {}).get("no_live_order_sent") is not False,
+    }
+
+
+def _watch_safety_invariants_history_payload(
+    *,
+    report_dir: Path,
+    current_invariants: dict[str, Any],
+    previous_history: dict[str, Any] | None,
+    max_entries: int = 48,
+) -> dict[str, Any]:
+    prior = dict(previous_history or {})
+    entries: list[dict[str, Any]] = []
+    seen_generated_at: set[str] = set()
+    copied_keys = set(_watch_safety_invariants_history_entry(current_invariants).keys())
+    for raw_entry in list(prior.get("entries") or []):
+        if not isinstance(raw_entry, dict):
+            continue
+        generated_at = str(raw_entry.get("generated_at") or "").strip()
+        if not generated_at or generated_at in seen_generated_at:
+            continue
+        seen_generated_at.add(generated_at)
+        entries.append({key: raw_entry.get(key) for key in copied_keys})
+
+    current_entry = _watch_safety_invariants_history_entry(current_invariants)
+    current_generated_at = str(current_entry.get("generated_at") or "").strip()
+    if current_generated_at and current_generated_at not in seen_generated_at:
+        entries.append(current_entry)
+    entries = entries[-max(1, int(max_entries or 1)) :]
+
+    fail_count = sum(1 for entry in entries if int(entry.get("violation_count") or 0) > 0)
+    pass_count = len(entries) - fail_count
+    max_violation_count = max(
+        (int(entry.get("violation_count") or 0) for entry in entries),
+        default=0,
+    )
+    consecutive_fail_count = 0
+    for entry in reversed(entries):
+        if int(entry.get("violation_count") or 0) > 0:
+            consecutive_fail_count += 1
+        else:
+            break
+    last_failed_at = next(
+        (
+            entry.get("generated_at")
+            for entry in reversed(entries)
+            if int(entry.get("violation_count") or 0) > 0
+        ),
+        None,
+    )
+    if consecutive_fail_count:
+        status = "safety_invariants_history_current_failure"
+    elif fail_count:
+        status = "safety_invariants_history_prior_failure_seen"
+    elif entries:
+        status = "safety_invariants_history_clean"
+    else:
+        status = "safety_invariants_history_empty"
+
+    return {
+        "schema_version": (
+            "market_state_rotation_v6_launch_shadow_watch_safety_invariants_history_v1"
+        ),
+        "status": status,
+        "window_size": max(1, int(max_entries or 1)),
+        "entry_count": len(entries),
+        "latest_generated_at": entries[-1].get("generated_at") if entries else None,
+        "latest_status": entries[-1].get("status") if entries else None,
+        "pass_count": pass_count,
+        "fail_count": fail_count,
+        "consecutive_fail_count": consecutive_fail_count,
+        "max_violation_count": max_violation_count,
+        "last_failed_at": last_failed_at,
+        "entries": entries,
+        "reports": {
+            "latest_safety_invariants_json": _display_path(
+                report_dir / "latest_safety_invariants.json"
+            ),
+            "latest_safety_invariants_history_json": _display_path(
+                report_dir / "latest_safety_invariants_history.json"
+            ),
+            "latest_artifact_manifest_json": _display_path(
+                report_dir / "latest_artifact_manifest.json"
+            ),
+            "latest_artifact_manifest_history_json": _display_path(
+                report_dir / "latest_artifact_manifest_history.json"
+            ),
+            "latest_safety_coverage_json": _display_path(
+                report_dir / "latest_safety_coverage.json"
+            ),
+            "latest_safety_coverage_history_json": _display_path(
+                report_dir / "latest_safety_coverage_history.json"
+            ),
+            "latest_report_index_json": _display_path(
+                report_dir / "latest_report_index.json"
+            ),
+            "latest_report_index_history_json": _display_path(
+                report_dir / "latest_report_index_history.json"
+            ),
+            "latest_operations_health_json": _display_path(
+                report_dir / "latest_operations_health.json"
+            ),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "no_live_order_sent": fail_count == 0
+            and all(entry.get("no_live_order_sent") is not False for entry in entries),
+        },
+        "no_live_order_sent": fail_count == 0
+        and all(entry.get("no_live_order_sent") is not False for entry in entries),
+    }
+
+
+def _watch_artifact_record(name: str, path: Path) -> dict[str, Any]:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return {
+            "name": name,
+            "path": _display_path(path),
+            "exists": False,
+            "size_bytes": None,
+            "sha256": None,
+        }
+    return {
+        "name": name,
+        "path": _display_path(path),
+        "exists": True,
+        "size_bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
+def _watch_artifact_manifest_payload(
+    *,
+    report_dir: Path,
+    summary: dict[str, Any],
+    artifacts: dict[str, Path],
+) -> dict[str, Any]:
+    records = [_watch_artifact_record(name, path) for name, path in artifacts.items()]
+    missing = [record for record in records if record.get("exists") is not True]
+    empty = [
+        record
+        for record in records
+        if record.get("exists") is True and not int(record.get("size_bytes") or 0)
+    ]
+    status = (
+        "artifact_manifest_missing_artifacts"
+        if missing
+        else "artifact_manifest_empty_artifacts"
+        if empty
+        else "artifact_manifest_complete"
+    )
+    return {
+        "schema_version": "market_state_rotation_v6_launch_shadow_watch_artifact_manifest_v1",
+        "status": status,
+        "generated_at": summary.get("completed_at"),
+        "artifact_count": len(records),
+        "missing_count": len(missing),
+        "empty_count": len(empty),
+        "artifacts": records,
+        "artifacts_by_name": {record["name"]: record for record in records},
+        "reports": {
+            "latest_json": _display_path(report_dir / "latest.json"),
+            "latest_markdown": _display_path(report_dir / "latest.md"),
+            "latest_status_json": _display_path(report_dir / "latest_status.json"),
+            "latest_status_history_json": _display_path(
+                report_dir / "latest_status_history.json"
+            ),
+            "latest_action_outbox_json": _display_path(
+                report_dir / "latest_action_outbox.json"
+            ),
+            "latest_action_outbox_history_json": _display_path(
+                report_dir / "latest_action_outbox_history.json"
+            ),
+            "latest_artifact_manifest_json": _display_path(
+                report_dir / "latest_artifact_manifest.json"
+            ),
+            "latest_artifact_manifest_history_json": _display_path(
+                report_dir / "latest_artifact_manifest_history.json"
+            ),
+            "latest_safety_invariants_json": _display_path(
+                report_dir / "latest_safety_invariants.json"
+            ),
+            "latest_safety_invariants_history_json": _display_path(
+                report_dir / "latest_safety_invariants_history.json"
+            ),
+            "latest_safety_coverage_json": _display_path(
+                report_dir / "latest_safety_coverage.json"
+            ),
+            "latest_safety_coverage_history_json": _display_path(
+                report_dir / "latest_safety_coverage_history.json"
+            ),
+            "latest_report_index_json": _display_path(
+                report_dir / "latest_report_index.json"
+            ),
+            "latest_report_index_history_json": _display_path(
+                report_dir / "latest_report_index_history.json"
+            ),
+            "latest_operations_health_json": _display_path(
+                report_dir / "latest_operations_health.json"
+            ),
+            "snapshot_json": summary.get("watch_snapshot_path"),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "no_live_order_sent": summary.get("no_live_order_sent") is not False,
+        },
+        "no_live_order_sent": summary.get("no_live_order_sent") is not False,
+    }
+
+
+def _watch_artifact_manifest_history_entry(
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    records = [
+        dict(record)
+        for record in list(manifest.get("artifacts") or [])
+        if isinstance(record, dict)
+    ]
+    artifact_names = [
+        str(record.get("name"))
+        for record in records
+        if str(record.get("name") or "").strip()
+    ]
+    missing_artifacts = [
+        str(record.get("name"))
+        for record in records
+        if record.get("exists") is not True and str(record.get("name") or "").strip()
+    ]
+    empty_artifacts = [
+        str(record.get("name"))
+        for record in records
+        if record.get("exists") is True
+        and not int(record.get("size_bytes") or 0)
+        and str(record.get("name") or "").strip()
+    ]
+    artifact_fingerprint_inputs = {
+        str(record.get("name")): {
+            "exists": record.get("exists") is True,
+            "size_bytes": record.get("size_bytes"),
+            "sha256": record.get("sha256"),
+        }
+        for record in records
+        if str(record.get("name") or "").strip()
+    }
+    no_live_order_sent = manifest.get("no_live_order_sent") is not False and dict(
+        manifest.get("safety") or {}
+    ).get("no_live_order_sent") is not False
+    failure = (
+        str(manifest.get("status") or "") != "artifact_manifest_complete"
+        or int(manifest.get("missing_count") or 0) > 0
+        or int(manifest.get("empty_count") or 0) > 0
+        or not no_live_order_sent
+    )
+    return {
+        "generated_at": manifest.get("generated_at"),
+        "status": manifest.get("status"),
+        "artifact_count": manifest.get("artifact_count"),
+        "missing_count": manifest.get("missing_count"),
+        "empty_count": manifest.get("empty_count"),
+        "artifact_names": artifact_names,
+        "missing_artifacts": missing_artifacts,
+        "empty_artifacts": empty_artifacts,
+        "manifest_fingerprint": _fingerprint_payload(artifact_fingerprint_inputs),
+        "failure": failure,
+        "no_live_order_sent": no_live_order_sent,
+    }
+
+
+def _watch_artifact_manifest_history_payload(
+    *,
+    report_dir: Path,
+    current_manifest: dict[str, Any],
+    previous_history: dict[str, Any] | None,
+    max_entries: int = 48,
+) -> dict[str, Any]:
+    prior = dict(previous_history or {})
+    entries: list[dict[str, Any]] = []
+    seen_generated_at: set[str] = set()
+    copied_keys = set(_watch_artifact_manifest_history_entry(current_manifest).keys())
+    for raw_entry in list(prior.get("entries") or []):
+        if not isinstance(raw_entry, dict):
+            continue
+        generated_at = str(raw_entry.get("generated_at") or "").strip()
+        if not generated_at or generated_at in seen_generated_at:
+            continue
+        seen_generated_at.add(generated_at)
+        entries.append({key: raw_entry.get(key) for key in copied_keys})
+
+    current_entry = _watch_artifact_manifest_history_entry(current_manifest)
+    current_generated_at = str(current_entry.get("generated_at") or "").strip()
+    if current_generated_at and current_generated_at not in seen_generated_at:
+        entries.append(current_entry)
+    entries = entries[-max(1, int(max_entries or 1)) :]
+
+    fail_count = sum(1 for entry in entries if entry.get("failure") is True)
+    pass_count = len(entries) - fail_count
+    max_missing_count = max(
+        (int(entry.get("missing_count") or 0) for entry in entries),
+        default=0,
+    )
+    max_empty_count = max(
+        (int(entry.get("empty_count") or 0) for entry in entries),
+        default=0,
+    )
+    manifest_change_count = 0
+    for previous, current in zip(entries, entries[1:]):
+        if previous.get("manifest_fingerprint") != current.get("manifest_fingerprint"):
+            manifest_change_count += 1
+
+    latest_entry = entries[-1] if entries else {}
+    same_manifest_since = None
+    if entries:
+        same_manifest_since = entries[0].get("generated_at")
+        latest_fingerprint = latest_entry.get("manifest_fingerprint")
+        for entry in reversed(entries):
+            if entry.get("manifest_fingerprint") != latest_fingerprint:
+                break
+            same_manifest_since = entry.get("generated_at")
+
+    same_manifest_age_minutes = None
+    started_at = _parse_dt(same_manifest_since)
+    ended_at = _parse_dt(latest_entry.get("generated_at"))
+    if started_at is not None and ended_at is not None and ended_at >= started_at:
+        same_manifest_age_minutes = round(
+            (ended_at - started_at).total_seconds() / 60.0,
+            3,
+        )
+
+    consecutive_fail_count = 0
+    for entry in reversed(entries):
+        if entry.get("failure") is True:
+            consecutive_fail_count += 1
+        else:
+            break
+    last_failed_at = next(
+        (
+            entry.get("generated_at")
+            for entry in reversed(entries)
+            if entry.get("failure") is True
+        ),
+        None,
+    )
+
+    if consecutive_fail_count:
+        status = "artifact_manifest_history_current_failure"
+    elif fail_count:
+        status = "artifact_manifest_history_prior_failure_seen"
+    elif manifest_change_count:
+        status = "artifact_manifest_history_manifest_changed"
+    elif entries:
+        status = "artifact_manifest_history_stable"
+    else:
+        status = "artifact_manifest_history_empty"
+
+    no_live_order_sent = fail_count == 0 and all(
+        entry.get("no_live_order_sent") is not False for entry in entries
+    )
+    return {
+        "schema_version": (
+            "market_state_rotation_v6_launch_shadow_watch_artifact_manifest_history_v1"
+        ),
+        "status": status,
+        "window_size": max(1, int(max_entries or 1)),
+        "entry_count": len(entries),
+        "latest_generated_at": latest_entry.get("generated_at"),
+        "latest_manifest_status": latest_entry.get("status"),
+        "latest_manifest_fingerprint": latest_entry.get("manifest_fingerprint"),
+        "same_manifest_since": same_manifest_since,
+        "same_manifest_age_minutes": same_manifest_age_minutes,
+        "pass_count": pass_count,
+        "fail_count": fail_count,
+        "consecutive_fail_count": consecutive_fail_count,
+        "last_failed_at": last_failed_at,
+        "manifest_change_count": manifest_change_count,
+        "max_missing_count": max_missing_count,
+        "max_empty_count": max_empty_count,
+        "entries": entries,
+        "reports": {
+            "latest_artifact_manifest_json": _display_path(
+                report_dir / "latest_artifact_manifest.json"
+            ),
+            "latest_artifact_manifest_history_json": _display_path(
+                report_dir / "latest_artifact_manifest_history.json"
+            ),
+            "latest_safety_invariants_json": _display_path(
+                report_dir / "latest_safety_invariants.json"
+            ),
+            "latest_safety_invariants_history_json": _display_path(
+                report_dir / "latest_safety_invariants_history.json"
+            ),
+            "latest_safety_coverage_json": _display_path(
+                report_dir / "latest_safety_coverage.json"
+            ),
+            "latest_safety_coverage_history_json": _display_path(
+                report_dir / "latest_safety_coverage_history.json"
+            ),
+            "latest_report_index_json": _display_path(
+                report_dir / "latest_report_index.json"
+            ),
+            "latest_report_index_history_json": _display_path(
+                report_dir / "latest_report_index_history.json"
+            ),
+            "latest_operations_health_json": _display_path(
+                report_dir / "latest_operations_health.json"
+            ),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "no_live_order_sent": no_live_order_sent,
+        },
+        "no_live_order_sent": no_live_order_sent,
+    }
+
+
+def _watch_safety_coverage_payload(
+    *,
+    report_dir: Path,
+    summary: dict[str, Any],
+    generated_payloads: dict[str, Any],
+    safety_invariants: dict[str, Any],
+    artifact_manifest: dict[str, Any],
+    artifact_manifest_history: dict[str, Any],
+) -> dict[str, Any]:
+    primary_results = [
+        dict(item)
+        for item in list(safety_invariants.get("payload_results") or [])
+        if isinstance(item, dict)
+    ]
+    primary_checked_names = {
+        str(item.get("name"))
+        for item in primary_results
+        if str(item.get("name") or "").strip()
+    }
+    primary_exemptions = {
+        "snapshot_json": "snapshot_payload_mirrors_latest_json",
+        "latest_safety_invariants_json": "safety_invariants_output_is_directly_scanned_by_coverage",
+        "latest_safety_invariants_history_json": "safety_invariants_history_is_directly_scanned_by_coverage",
+        "latest_artifact_manifest_json": "artifact_manifest_is_late_bound_and_directly_scanned_by_coverage",
+        "latest_artifact_manifest_history_json": "artifact_manifest_history_is_late_bound_and_directly_scanned_by_coverage",
+    }
+    manifest_exemptions = {
+        "latest_artifact_manifest_json": "self_referential_hash_excluded_from_primary_manifest",
+        "latest_artifact_manifest_history_json": "derived_manifest_history_hash_excluded_from_primary_manifest",
+    }
+    manifest_records = {
+        str(record.get("name")): dict(record)
+        for record in list(artifact_manifest.get("artifacts") or [])
+        if isinstance(record, dict) and str(record.get("name") or "").strip()
+    }
+
+    coverage_results: list[dict[str, Any]] = []
+    violations: list[dict[str, Any]] = []
+    for name, payload in generated_payloads.items():
+        current_violations = _watch_safety_invariant_violations(name, payload)
+        violations.extend(current_violations)
+        manifest_record = manifest_records.get(name)
+        included_in_manifest = (
+            isinstance(manifest_record, dict)
+            and manifest_record.get("exists") is True
+        )
+        primary_exempt_reason = primary_exemptions.get(name)
+        manifest_exempt_reason = manifest_exemptions.get(name)
+        no_live_order_sent = dict(payload or {}).get("no_live_order_sent") is not False
+        direct_scan_passed = not current_violations and no_live_order_sent
+        manifest_covered = included_in_manifest or bool(manifest_exempt_reason)
+        primary_covered = name in primary_checked_names or bool(primary_exempt_reason)
+        coverage_results.append(
+            {
+                "name": name,
+                "direct_scan_passed": direct_scan_passed,
+                "direct_violation_count": len(current_violations),
+                "no_live_order_sent": no_live_order_sent,
+                "included_in_primary_safety_invariants": name in primary_checked_names,
+                "primary_invariant_exempt": bool(primary_exempt_reason),
+                "primary_invariant_exempt_reason": primary_exempt_reason,
+                "included_in_artifact_manifest": included_in_manifest,
+                "artifact_manifest_exempt": bool(manifest_exempt_reason),
+                "artifact_manifest_exempt_reason": manifest_exempt_reason,
+                "artifact_manifest_path": manifest_record.get("path")
+                if isinstance(manifest_record, dict)
+                else None,
+                "artifact_manifest_sha256": manifest_record.get("sha256")
+                if isinstance(manifest_record, dict)
+                else None,
+                "coverage_passed": direct_scan_passed
+                and manifest_covered
+                and primary_covered,
+            }
+        )
+
+    direct_violation_count = len(violations)
+    manifest_missing_count = sum(
+        1
+        for result in coverage_results
+        if result.get("included_in_artifact_manifest") is not True
+        and result.get("artifact_manifest_exempt") is not True
+    )
+    primary_invariant_gap_count = sum(
+        1
+        for result in coverage_results
+        if result.get("included_in_primary_safety_invariants") is not True
+        and result.get("primary_invariant_exempt") is not True
+    )
+    no_live_false_count = sum(
+        1 for result in coverage_results if result.get("no_live_order_sent") is False
+    )
+    artifact_history_fail_count = int(artifact_manifest_history.get("fail_count") or 0)
+    manifest_complete = artifact_manifest.get("status") == "artifact_manifest_complete"
+    artifact_history_clean = artifact_history_fail_count == 0 and artifact_manifest_history.get(
+        "no_live_order_sent"
+    ) is not False
+    coverage_passed = (
+        direct_violation_count == 0
+        and manifest_missing_count == 0
+        and primary_invariant_gap_count == 0
+        and no_live_false_count == 0
+        and manifest_complete
+        and artifact_history_clean
+    )
+    status = "safety_coverage_pass" if coverage_passed else "safety_coverage_failed"
+
+    return {
+        "schema_version": "market_state_rotation_v6_launch_shadow_watch_safety_coverage_v1",
+        "status": status,
+        "generated_at": summary.get("completed_at"),
+        "coverage_checked_payload_count": len(coverage_results),
+        "primary_invariant_checked_count": len(primary_checked_names),
+        "primary_invariant_exempt_count": sum(
+            1 for result in coverage_results if result.get("primary_invariant_exempt")
+        ),
+        "primary_invariant_gap_count": primary_invariant_gap_count,
+        "direct_violation_count": direct_violation_count,
+        "no_live_false_count": no_live_false_count,
+        "artifact_manifest_status": artifact_manifest.get("status"),
+        "artifact_manifest_missing_count": artifact_manifest.get("missing_count"),
+        "artifact_manifest_empty_count": artifact_manifest.get("empty_count"),
+        "artifact_manifest_covered_count": sum(
+            1 for result in coverage_results if result.get("included_in_artifact_manifest")
+        ),
+        "artifact_manifest_exempt_count": sum(
+            1 for result in coverage_results if result.get("artifact_manifest_exempt")
+        ),
+        "artifact_manifest_gap_count": manifest_missing_count,
+        "artifact_manifest_history_status": artifact_manifest_history.get("status"),
+        "artifact_manifest_history_fail_count": artifact_history_fail_count,
+        "coverage_results": coverage_results,
+        "violations": violations,
+        "reports": {
+            "latest_json": _display_path(report_dir / "latest.json"),
+            "latest_status_json": _display_path(report_dir / "latest_status.json"),
+            "latest_status_history_json": _display_path(
+                report_dir / "latest_status_history.json"
+            ),
+            "latest_action_outbox_json": _display_path(
+                report_dir / "latest_action_outbox.json"
+            ),
+            "latest_action_outbox_history_json": _display_path(
+                report_dir / "latest_action_outbox_history.json"
+            ),
+            "latest_artifact_manifest_json": _display_path(
+                report_dir / "latest_artifact_manifest.json"
+            ),
+            "latest_artifact_manifest_history_json": _display_path(
+                report_dir / "latest_artifact_manifest_history.json"
+            ),
+            "latest_safety_invariants_json": _display_path(
+                report_dir / "latest_safety_invariants.json"
+            ),
+            "latest_safety_invariants_history_json": _display_path(
+                report_dir / "latest_safety_invariants_history.json"
+            ),
+            "latest_safety_coverage_json": _display_path(
+                report_dir / "latest_safety_coverage.json"
+            ),
+            "latest_safety_coverage_history_json": _display_path(
+                report_dir / "latest_safety_coverage_history.json"
+            ),
+            "latest_report_index_json": _display_path(
+                report_dir / "latest_report_index.json"
+            ),
+            "latest_report_index_history_json": _display_path(
+                report_dir / "latest_report_index_history.json"
+            ),
+            "latest_operations_health_json": _display_path(
+                report_dir / "latest_operations_health.json"
+            ),
+            "snapshot_json": summary.get("watch_snapshot_path"),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "no_live_order_sent": coverage_passed,
+        },
+        "no_live_order_sent": coverage_passed,
+    }
+
+
+def _watch_safety_coverage_history_entry(
+    coverage: dict[str, Any],
+) -> dict[str, Any]:
+    results = [
+        dict(item)
+        for item in list(coverage.get("coverage_results") or [])
+        if isinstance(item, dict)
+    ]
+    failing_payloads = [
+        str(result.get("name"))
+        for result in results
+        if result.get("coverage_passed") is not True
+        and str(result.get("name") or "").strip()
+    ]
+    coverage_signature = {
+        str(result.get("name")): {
+            "coverage_passed": result.get("coverage_passed") is True,
+            "direct_scan_passed": result.get("direct_scan_passed") is True,
+            "direct_violation_count": result.get("direct_violation_count"),
+            "no_live_order_sent": result.get("no_live_order_sent") is not False,
+            "included_in_primary_safety_invariants": result.get(
+                "included_in_primary_safety_invariants"
+            )
+            is True,
+            "primary_invariant_exempt": result.get("primary_invariant_exempt") is True,
+            "included_in_artifact_manifest": result.get("included_in_artifact_manifest")
+            is True,
+            "artifact_manifest_exempt": result.get("artifact_manifest_exempt") is True,
+        }
+        for result in results
+        if str(result.get("name") or "").strip()
+    }
+    failure = (
+        coverage.get("status") != "safety_coverage_pass"
+        or int(coverage.get("direct_violation_count") or 0) > 0
+        or int(coverage.get("primary_invariant_gap_count") or 0) > 0
+        or int(coverage.get("artifact_manifest_gap_count") or 0) > 0
+        or int(coverage.get("artifact_manifest_history_fail_count") or 0) > 0
+        or int(coverage.get("no_live_false_count") or 0) > 0
+        or coverage.get("no_live_order_sent") is False
+        or dict(coverage.get("safety") or {}).get("no_live_order_sent") is False
+    )
+    return {
+        "generated_at": coverage.get("generated_at"),
+        "status": coverage.get("status"),
+        "coverage_checked_payload_count": coverage.get(
+            "coverage_checked_payload_count"
+        ),
+        "primary_invariant_gap_count": coverage.get("primary_invariant_gap_count"),
+        "direct_violation_count": coverage.get("direct_violation_count"),
+        "no_live_false_count": coverage.get("no_live_false_count"),
+        "artifact_manifest_gap_count": coverage.get("artifact_manifest_gap_count"),
+        "artifact_manifest_history_fail_count": coverage.get(
+            "artifact_manifest_history_fail_count"
+        ),
+        "failing_payloads": failing_payloads,
+        "coverage_fingerprint": _fingerprint_payload(coverage_signature),
+        "failure": failure,
+        "no_live_order_sent": coverage.get("no_live_order_sent") is not False
+        and dict(coverage.get("safety") or {}).get("no_live_order_sent") is not False,
+    }
+
+
+def _watch_safety_coverage_history_payload(
+    *,
+    report_dir: Path,
+    current_coverage: dict[str, Any],
+    previous_history: dict[str, Any] | None,
+    max_entries: int = 48,
+) -> dict[str, Any]:
+    prior = dict(previous_history or {})
+    entries: list[dict[str, Any]] = []
+    seen_generated_at: set[str] = set()
+    copied_keys = set(_watch_safety_coverage_history_entry(current_coverage).keys())
+    for raw_entry in list(prior.get("entries") or []):
+        if not isinstance(raw_entry, dict):
+            continue
+        generated_at = str(raw_entry.get("generated_at") or "").strip()
+        if not generated_at or generated_at in seen_generated_at:
+            continue
+        seen_generated_at.add(generated_at)
+        entries.append({key: raw_entry.get(key) for key in copied_keys})
+
+    current_entry = _watch_safety_coverage_history_entry(current_coverage)
+    current_generated_at = str(current_entry.get("generated_at") or "").strip()
+    if current_generated_at and current_generated_at not in seen_generated_at:
+        entries.append(current_entry)
+    entries = entries[-max(1, int(max_entries or 1)) :]
+
+    fail_count = sum(1 for entry in entries if entry.get("failure") is True)
+    pass_count = len(entries) - fail_count
+    max_direct_violation_count = max(
+        (int(entry.get("direct_violation_count") or 0) for entry in entries),
+        default=0,
+    )
+    max_primary_invariant_gap_count = max(
+        (int(entry.get("primary_invariant_gap_count") or 0) for entry in entries),
+        default=0,
+    )
+    max_artifact_manifest_gap_count = max(
+        (int(entry.get("artifact_manifest_gap_count") or 0) for entry in entries),
+        default=0,
+    )
+    max_no_live_false_count = max(
+        (int(entry.get("no_live_false_count") or 0) for entry in entries),
+        default=0,
+    )
+    coverage_change_count = sum(
+        1
+        for previous, current in zip(entries, entries[1:])
+        if previous.get("coverage_fingerprint") != current.get("coverage_fingerprint")
+    )
+
+    latest_entry = entries[-1] if entries else {}
+    same_coverage_since = None
+    if entries:
+        same_coverage_since = entries[0].get("generated_at")
+        latest_fingerprint = latest_entry.get("coverage_fingerprint")
+        for entry in reversed(entries):
+            if entry.get("coverage_fingerprint") != latest_fingerprint:
+                break
+            same_coverage_since = entry.get("generated_at")
+
+    same_coverage_age_minutes = None
+    started_at = _parse_dt(same_coverage_since)
+    ended_at = _parse_dt(latest_entry.get("generated_at"))
+    if started_at is not None and ended_at is not None and ended_at >= started_at:
+        same_coverage_age_minutes = round(
+            (ended_at - started_at).total_seconds() / 60.0,
+            3,
+        )
+
+    consecutive_fail_count = 0
+    for entry in reversed(entries):
+        if entry.get("failure") is True:
+            consecutive_fail_count += 1
+        else:
+            break
+    last_failed_at = next(
+        (
+            entry.get("generated_at")
+            for entry in reversed(entries)
+            if entry.get("failure") is True
+        ),
+        None,
+    )
+
+    if consecutive_fail_count:
+        status = "safety_coverage_history_current_failure"
+    elif fail_count:
+        status = "safety_coverage_history_prior_failure_seen"
+    elif coverage_change_count:
+        status = "safety_coverage_history_coverage_changed"
+    elif entries:
+        status = "safety_coverage_history_clean"
+    else:
+        status = "safety_coverage_history_empty"
+
+    no_live_order_sent = fail_count == 0 and all(
+        entry.get("no_live_order_sent") is not False for entry in entries
+    )
+    return {
+        "schema_version": (
+            "market_state_rotation_v6_launch_shadow_watch_safety_coverage_history_v1"
+        ),
+        "status": status,
+        "window_size": max(1, int(max_entries or 1)),
+        "entry_count": len(entries),
+        "latest_generated_at": latest_entry.get("generated_at"),
+        "latest_coverage_status": latest_entry.get("status"),
+        "latest_coverage_fingerprint": latest_entry.get("coverage_fingerprint"),
+        "same_coverage_since": same_coverage_since,
+        "same_coverage_age_minutes": same_coverage_age_minutes,
+        "pass_count": pass_count,
+        "fail_count": fail_count,
+        "consecutive_fail_count": consecutive_fail_count,
+        "last_failed_at": last_failed_at,
+        "coverage_change_count": coverage_change_count,
+        "max_direct_violation_count": max_direct_violation_count,
+        "max_primary_invariant_gap_count": max_primary_invariant_gap_count,
+        "max_artifact_manifest_gap_count": max_artifact_manifest_gap_count,
+        "max_no_live_false_count": max_no_live_false_count,
+        "entries": entries,
+        "reports": {
+            "latest_safety_coverage_json": _display_path(
+                report_dir / "latest_safety_coverage.json"
+            ),
+            "latest_safety_coverage_history_json": _display_path(
+                report_dir / "latest_safety_coverage_history.json"
+            ),
+            "latest_report_index_json": _display_path(
+                report_dir / "latest_report_index.json"
+            ),
+            "latest_report_index_history_json": _display_path(
+                report_dir / "latest_report_index_history.json"
+            ),
+            "latest_operations_health_json": _display_path(
+                report_dir / "latest_operations_health.json"
+            ),
+            "latest_safety_invariants_json": _display_path(
+                report_dir / "latest_safety_invariants.json"
+            ),
+            "latest_safety_invariants_history_json": _display_path(
+                report_dir / "latest_safety_invariants_history.json"
+            ),
+            "latest_artifact_manifest_json": _display_path(
+                report_dir / "latest_artifact_manifest.json"
+            ),
+            "latest_artifact_manifest_history_json": _display_path(
+                report_dir / "latest_artifact_manifest_history.json"
+            ),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "no_live_order_sent": no_live_order_sent,
+        },
+        "no_live_order_sent": no_live_order_sent,
+    }
+
+
+def _watch_report_index_payload(
+    *,
+    report_dir: Path,
+    summary: dict[str, Any],
+    reports: dict[str, Path],
+    report_payloads: dict[str, Any],
+) -> dict[str, Any]:
+    records: list[dict[str, Any]] = []
+    for name, path in reports.items():
+        record = _watch_artifact_record(name, path)
+        payload = report_payloads.get(name)
+        if isinstance(payload, dict):
+            safety = dict(payload.get("safety") or {})
+            record.update(
+                {
+                    "schema_version": payload.get("schema_version"),
+                    "payload_status": payload.get("status"),
+                    "payload_no_live_order_sent": payload.get("no_live_order_sent")
+                    is not False,
+                    "payload_safety_no_live_order_sent": safety.get(
+                        "no_live_order_sent"
+                    )
+                    is not False,
+                }
+            )
+        else:
+            record.update(
+                {
+                    "schema_version": None,
+                    "payload_status": None,
+                    "payload_no_live_order_sent": None,
+                    "payload_safety_no_live_order_sent": None,
+                }
+            )
+        records.append(record)
+
+    missing = [record for record in records if record.get("exists") is not True]
+    empty = [
+        record
+        for record in records
+        if record.get("exists") is True and not int(record.get("size_bytes") or 0)
+    ]
+    no_live_false_records = [
+        record
+        for record in records
+        if record.get("payload_no_live_order_sent") is False
+        or record.get("payload_safety_no_live_order_sent") is False
+    ]
+    status = (
+        "report_index_missing_reports"
+        if missing
+        else "report_index_empty_reports"
+        if empty
+        else "report_index_no_live_violation"
+        if no_live_false_records
+        else "report_index_complete"
+    )
+    return {
+        "schema_version": "market_state_rotation_v6_launch_shadow_watch_report_index_v1",
+        "status": status,
+        "generated_at": summary.get("completed_at"),
+        "report_count": len(records),
+        "json_payload_count": len(report_payloads),
+        "missing_count": len(missing),
+        "empty_count": len(empty),
+        "no_live_false_count": len(no_live_false_records),
+        "report_index_excludes_self": True,
+        "reports_indexed": records,
+        "reports_by_name": {record["name"]: record for record in records},
+        "reports": {
+            "latest_report_index_json": summary.get("watch_report_index_path")
+            or _display_path(report_dir / "latest_report_index.json"),
+            "latest_report_index_history_json": summary.get(
+                "watch_report_index_history_path"
+            )
+            or _display_path(report_dir / "latest_report_index_history.json"),
+            "latest_json": _display_path(report_dir / "latest.json"),
+            "latest_status_json": _display_path(report_dir / "latest_status.json"),
+            "latest_safety_coverage_json": _display_path(
+                report_dir / "latest_safety_coverage.json"
+            ),
+            "latest_safety_coverage_history_json": _display_path(
+                report_dir / "latest_safety_coverage_history.json"
+            ),
+            "latest_operations_health_json": summary.get(
+                "watch_operations_health_path"
+            )
+            or _display_path(report_dir / "latest_operations_health.json"),
+            "snapshot_json": summary.get("watch_snapshot_path"),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "no_live_order_sent": status == "report_index_complete"
+            and summary.get("no_live_order_sent") is not False,
+        },
+        "no_live_order_sent": status == "report_index_complete"
+        and summary.get("no_live_order_sent") is not False,
+    }
+
+
+def _watch_report_index_history_entry(index: dict[str, Any]) -> dict[str, Any]:
+    records = [
+        dict(record)
+        for record in list(index.get("reports_indexed") or [])
+        if isinstance(record, dict)
+    ]
+    missing_reports = [
+        str(record.get("name"))
+        for record in records
+        if record.get("exists") is not True and str(record.get("name") or "").strip()
+    ]
+    empty_reports = [
+        str(record.get("name"))
+        for record in records
+        if record.get("exists") is True
+        and not int(record.get("size_bytes") or 0)
+        and str(record.get("name") or "").strip()
+    ]
+    no_live_false_reports = [
+        str(record.get("name"))
+        for record in records
+        if (
+            record.get("payload_no_live_order_sent") is False
+            or record.get("payload_safety_no_live_order_sent") is False
+        )
+        and str(record.get("name") or "").strip()
+    ]
+    report_signature = {
+        str(record.get("name")): {
+            "exists": record.get("exists") is True,
+            "size_bytes": record.get("size_bytes"),
+            "sha256": record.get("sha256"),
+            "schema_version": record.get("schema_version"),
+            "payload_status": record.get("payload_status"),
+            "payload_no_live_order_sent": record.get("payload_no_live_order_sent"),
+            "payload_safety_no_live_order_sent": record.get(
+                "payload_safety_no_live_order_sent"
+            ),
+        }
+        for record in records
+        if str(record.get("name") or "").strip()
+    }
+    no_live_order_sent = index.get("no_live_order_sent") is not False and dict(
+        index.get("safety") or {}
+    ).get("no_live_order_sent") is not False
+    failure = (
+        index.get("status") != "report_index_complete"
+        or int(index.get("missing_count") or 0) > 0
+        or int(index.get("empty_count") or 0) > 0
+        or int(index.get("no_live_false_count") or 0) > 0
+        or not no_live_order_sent
+    )
+    return {
+        "generated_at": index.get("generated_at"),
+        "status": index.get("status"),
+        "report_count": index.get("report_count"),
+        "json_payload_count": index.get("json_payload_count"),
+        "missing_count": index.get("missing_count"),
+        "empty_count": index.get("empty_count"),
+        "no_live_false_count": index.get("no_live_false_count"),
+        "missing_reports": missing_reports,
+        "empty_reports": empty_reports,
+        "no_live_false_reports": no_live_false_reports,
+        "report_index_fingerprint": _fingerprint_payload(report_signature),
+        "failure": failure,
+        "no_live_order_sent": no_live_order_sent,
+    }
+
+
+def _watch_report_index_history_payload(
+    *,
+    report_dir: Path,
+    current_index: dict[str, Any],
+    previous_history: dict[str, Any] | None,
+    max_entries: int = 48,
+) -> dict[str, Any]:
+    prior = dict(previous_history or {})
+    entries: list[dict[str, Any]] = []
+    seen_generated_at: set[str] = set()
+    copied_keys = set(_watch_report_index_history_entry(current_index).keys())
+    for raw_entry in list(prior.get("entries") or []):
+        if not isinstance(raw_entry, dict):
+            continue
+        generated_at = str(raw_entry.get("generated_at") or "").strip()
+        if not generated_at or generated_at in seen_generated_at:
+            continue
+        seen_generated_at.add(generated_at)
+        entries.append({key: raw_entry.get(key) for key in copied_keys})
+
+    current_entry = _watch_report_index_history_entry(current_index)
+    current_generated_at = str(current_entry.get("generated_at") or "").strip()
+    if current_generated_at and current_generated_at not in seen_generated_at:
+        entries.append(current_entry)
+    entries = entries[-max(1, int(max_entries or 1)) :]
+
+    fail_count = sum(1 for entry in entries if entry.get("failure") is True)
+    pass_count = len(entries) - fail_count
+    max_missing_count = max(
+        (int(entry.get("missing_count") or 0) for entry in entries),
+        default=0,
+    )
+    max_empty_count = max(
+        (int(entry.get("empty_count") or 0) for entry in entries),
+        default=0,
+    )
+    max_no_live_false_count = max(
+        (int(entry.get("no_live_false_count") or 0) for entry in entries),
+        default=0,
+    )
+    report_index_change_count = sum(
+        1
+        for previous, current in zip(entries, entries[1:])
+        if previous.get("report_index_fingerprint")
+        != current.get("report_index_fingerprint")
+    )
+
+    latest_entry = entries[-1] if entries else {}
+    same_report_index_since = None
+    if entries:
+        same_report_index_since = entries[0].get("generated_at")
+        latest_fingerprint = latest_entry.get("report_index_fingerprint")
+        for entry in reversed(entries):
+            if entry.get("report_index_fingerprint") != latest_fingerprint:
+                break
+            same_report_index_since = entry.get("generated_at")
+
+    same_report_index_age_minutes = None
+    started_at = _parse_dt(same_report_index_since)
+    ended_at = _parse_dt(latest_entry.get("generated_at"))
+    if started_at is not None and ended_at is not None and ended_at >= started_at:
+        same_report_index_age_minutes = round(
+            (ended_at - started_at).total_seconds() / 60.0,
+            3,
+        )
+
+    consecutive_fail_count = 0
+    for entry in reversed(entries):
+        if entry.get("failure") is True:
+            consecutive_fail_count += 1
+        else:
+            break
+    last_failed_at = next(
+        (
+            entry.get("generated_at")
+            for entry in reversed(entries)
+            if entry.get("failure") is True
+        ),
+        None,
+    )
+
+    if consecutive_fail_count:
+        status = "report_index_history_current_failure"
+    elif fail_count:
+        status = "report_index_history_prior_failure_seen"
+    elif report_index_change_count:
+        status = "report_index_history_index_changed"
+    elif entries:
+        status = "report_index_history_clean"
+    else:
+        status = "report_index_history_empty"
+
+    no_live_order_sent = fail_count == 0 and all(
+        entry.get("no_live_order_sent") is not False for entry in entries
+    )
+    return {
+        "schema_version": (
+            "market_state_rotation_v6_launch_shadow_watch_report_index_history_v1"
+        ),
+        "status": status,
+        "window_size": max(1, int(max_entries or 1)),
+        "entry_count": len(entries),
+        "latest_generated_at": latest_entry.get("generated_at"),
+        "latest_report_index_status": latest_entry.get("status"),
+        "latest_report_index_fingerprint": latest_entry.get("report_index_fingerprint"),
+        "same_report_index_since": same_report_index_since,
+        "same_report_index_age_minutes": same_report_index_age_minutes,
+        "pass_count": pass_count,
+        "fail_count": fail_count,
+        "consecutive_fail_count": consecutive_fail_count,
+        "last_failed_at": last_failed_at,
+        "report_index_change_count": report_index_change_count,
+        "max_missing_count": max_missing_count,
+        "max_empty_count": max_empty_count,
+        "max_no_live_false_count": max_no_live_false_count,
+        "entries": entries,
+        "reports": {
+            "latest_report_index_json": _display_path(
+                report_dir / "latest_report_index.json"
+            ),
+            "latest_report_index_history_json": _display_path(
+                report_dir / "latest_report_index_history.json"
+            ),
+            "latest_safety_coverage_json": _display_path(
+                report_dir / "latest_safety_coverage.json"
+            ),
+            "latest_safety_coverage_history_json": _display_path(
+                report_dir / "latest_safety_coverage_history.json"
+            ),
+            "latest_operations_health_json": _display_path(
+                report_dir / "latest_operations_health.json"
+            ),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "no_live_order_sent": no_live_order_sent,
+        },
+        "no_live_order_sent": no_live_order_sent,
+    }
+
+
+def _watch_operations_health_payload(
+    *,
+    report_dir: Path,
+    summary: dict[str, Any],
+    status_payload: dict[str, Any],
+    status_history: dict[str, Any],
+    action_outbox: dict[str, Any],
+    artifact_manifest: dict[str, Any],
+    artifact_manifest_history: dict[str, Any],
+    safety_invariants: dict[str, Any],
+    safety_invariants_history: dict[str, Any],
+    safety_coverage: dict[str, Any],
+    safety_coverage_history: dict[str, Any],
+    report_index: dict[str, Any],
+    report_index_history: dict[str, Any],
+) -> dict[str, Any]:
+    fresh_signal = dict(status_payload.get("fresh_signal") or {})
+    paper_apply = dict(status_payload.get("paper_apply") or {})
+    rehearsal = dict(status_payload.get("paper_only_rehearsal") or {})
+    parity = dict(status_payload.get("execution_parity") or {})
+    monitor = dict(status_payload.get("signal_monitor") or {})
+    safety_components = {
+        "status_payload": status_payload.get("no_live_order_sent") is not False,
+        "status_history": status_history.get("no_live_order_sent") is not False,
+        "action_outbox": action_outbox.get("no_live_order_sent") is not False,
+        "artifact_manifest": artifact_manifest.get("no_live_order_sent") is not False
+        and artifact_manifest.get("status") == "artifact_manifest_complete",
+        "artifact_manifest_history": artifact_manifest_history.get("no_live_order_sent")
+        is not False
+        and int(artifact_manifest_history.get("fail_count") or 0) == 0,
+        "safety_invariants": safety_invariants.get("no_live_order_sent") is not False
+        and int(safety_invariants.get("violation_count") or 0) == 0,
+        "safety_invariants_history": safety_invariants_history.get("no_live_order_sent")
+        is not False
+        and int(safety_invariants_history.get("fail_count") or 0) == 0,
+        "safety_coverage": safety_coverage.get("no_live_order_sent") is not False
+        and safety_coverage.get("status") == "safety_coverage_pass",
+        "safety_coverage_history": safety_coverage_history.get("no_live_order_sent")
+        is not False
+        and int(safety_coverage_history.get("fail_count") or 0) == 0,
+        "report_index": report_index.get("no_live_order_sent") is not False
+        and report_index.get("status") == "report_index_complete",
+        "report_index_history": report_index_history.get("no_live_order_sent") is not False
+        and int(report_index_history.get("fail_count") or 0) == 0,
+    }
+    failed_components = [
+        name for name, passed in safety_components.items() if passed is not True
+    ]
+    no_live_order_sent = (
+        summary.get("no_live_order_sent") is not False
+        and not failed_components
+    )
+    if failed_components:
+        health_status = "operations_health_action_required"
+    elif paper_apply.get("available") is True or paper_apply.get("allowed_now") is True:
+        health_status = "operations_health_paper_apply_available"
+    elif fresh_signal.get("available") is True:
+        health_status = "operations_health_fresh_signal_available"
+    elif status_payload.get("next_blocker") == "current_fresh_signal":
+        health_status = "operations_health_waiting_for_fresh_signal"
+    else:
+        health_status = "operations_health_tracking"
+
+    return {
+        "schema_version": "market_state_rotation_v6_launch_shadow_watch_operations_health_v1",
+        "status": health_status,
+        "generated_at": summary.get("completed_at"),
+        "launch_status": status_payload.get("launch_status"),
+        "next_blocker": status_payload.get("next_blocker"),
+        "fresh_signal_available": fresh_signal.get("available") is True,
+        "paper_apply_available": paper_apply.get("available") is True,
+        "paper_apply_allowed_now": paper_apply.get("allowed_now") is True,
+        "paper_only_rehearsal_status": rehearsal.get("status"),
+        "paper_only_system_ready": rehearsal.get("system_ready") is True,
+        "paper_only_armed": rehearsal.get("armed") is True,
+        "paper_only_remaining_gates": list(rehearsal.get("remaining_gates") or []),
+        "execution_parity_status": parity.get("status"),
+        "execution_parity_eligible_journal_rows": parity.get("eligible_journal_rows"),
+        "execution_parity_sample_count": parity.get("sample_count"),
+        "execution_parity_missing_samples": parity.get("missing_samples"),
+        "execution_parity_eta_completion_kst": parity.get("eta_completion_kst"),
+        "execution_parity_ledger_status": parity.get("ledger_status"),
+        "signal_monitor_interval_seconds": monitor.get("interval_seconds"),
+        "signal_monitor_capped_to_fresh_signal_window": monitor.get(
+            "capped_to_fresh_signal_window"
+        )
+        is True,
+        "artifact_manifest_status": artifact_manifest.get("status"),
+        "artifact_manifest_missing_count": artifact_manifest.get("missing_count"),
+        "artifact_manifest_empty_count": artifact_manifest.get("empty_count"),
+        "safety_invariants_status": safety_invariants.get("status"),
+        "safety_invariants_violation_count": safety_invariants.get("violation_count"),
+        "safety_coverage_status": safety_coverage.get("status"),
+        "safety_coverage_direct_violation_count": safety_coverage.get(
+            "direct_violation_count"
+        ),
+        "report_index_status": report_index.get("status"),
+        "report_index_report_count": report_index.get("report_count"),
+        "report_index_missing_count": report_index.get("missing_count"),
+        "report_index_empty_count": report_index.get("empty_count"),
+        "report_index_no_live_false_count": report_index.get("no_live_false_count"),
+        "report_index_history_status": report_index_history.get("status"),
+        "report_index_history_fail_count": report_index_history.get("fail_count"),
+        "safety_components": safety_components,
+        "failed_safety_components": failed_components,
+        "operator_action": (
+            "investigate_failed_safety_or_report_component"
+            if failed_components
+            else "monitor_fresh_signal_without_forcing_entry"
+            if status_payload.get("next_blocker") == "current_fresh_signal"
+            else "review_latest_status_and_action_outbox"
+        ),
+        "reports": {
+            "latest_operations_health_json": summary.get("watch_operations_health_path")
+            or _display_path(report_dir / "latest_operations_health.json"),
+            "latest_operations_health_history_json": summary.get(
+                "watch_operations_health_history_path"
+            )
+            or _display_path(report_dir / "latest_operations_health_history.json"),
+            "latest_launch_gate_checklist_json": summary.get(
+                "watch_launch_gate_checklist_path"
+            )
+            or _display_path(report_dir / "latest_launch_gate_checklist.json"),
+            "latest_launch_gate_checklist_history_json": summary.get(
+                "watch_launch_gate_checklist_history_path"
+            )
+            or _display_path(report_dir / "latest_launch_gate_checklist_history.json"),
+            "latest_status_json": _display_path(report_dir / "latest_status.json"),
+            "latest_action_outbox_json": _display_path(
+                report_dir / "latest_action_outbox.json"
+            ),
+            "latest_safety_coverage_json": _display_path(
+                report_dir / "latest_safety_coverage.json"
+            ),
+            "latest_report_index_json": _display_path(
+                report_dir / "latest_report_index.json"
+            ),
+            "latest_report_index_history_json": _display_path(
+                report_dir / "latest_report_index_history.json"
+            ),
+            "latest_json": _display_path(report_dir / "latest.json"),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "no_live_order_sent": no_live_order_sent,
+        },
+        "no_live_order_sent": no_live_order_sent,
+    }
+
+
+def _watch_operations_health_history_entry(health: dict[str, Any]) -> dict[str, Any]:
+    failed_components = [
+        str(item)
+        for item in list(health.get("failed_safety_components") or [])
+        if str(item or "").strip()
+    ]
+    health_signature = {
+        "status": health.get("status"),
+        "launch_status": health.get("launch_status"),
+        "next_blocker": health.get("next_blocker"),
+        "fresh_signal_available": health.get("fresh_signal_available") is True,
+        "paper_apply_available": health.get("paper_apply_available") is True,
+        "paper_apply_allowed_now": health.get("paper_apply_allowed_now") is True,
+        "paper_only_rehearsal_status": health.get("paper_only_rehearsal_status"),
+        "execution_parity_status": health.get("execution_parity_status"),
+        "execution_parity_missing_samples": health.get(
+            "execution_parity_missing_samples"
+        ),
+        "report_index_status": health.get("report_index_status"),
+        "report_index_history_fail_count": health.get(
+            "report_index_history_fail_count"
+        ),
+        "safety_invariants_violation_count": health.get(
+            "safety_invariants_violation_count"
+        ),
+        "safety_coverage_direct_violation_count": health.get(
+            "safety_coverage_direct_violation_count"
+        ),
+        "failed_safety_components": failed_components,
+    }
+    no_live_order_sent = health.get("no_live_order_sent") is not False and dict(
+        health.get("safety") or {}
+    ).get("no_live_order_sent") is not False
+    failure = (
+        health.get("status") == "operations_health_action_required"
+        or bool(failed_components)
+        or int(health.get("safety_invariants_violation_count") or 0) > 0
+        or int(health.get("safety_coverage_direct_violation_count") or 0) > 0
+        or int(health.get("report_index_history_fail_count") or 0) > 0
+        or not no_live_order_sent
+    )
+    return {
+        "generated_at": health.get("generated_at"),
+        "status": health.get("status"),
+        "launch_status": health.get("launch_status"),
+        "next_blocker": health.get("next_blocker"),
+        "fresh_signal_available": health.get("fresh_signal_available") is True,
+        "paper_apply_available": health.get("paper_apply_available") is True,
+        "paper_apply_allowed_now": health.get("paper_apply_allowed_now") is True,
+        "paper_only_rehearsal_status": health.get("paper_only_rehearsal_status"),
+        "execution_parity_status": health.get("execution_parity_status"),
+        "execution_parity_missing_samples": health.get(
+            "execution_parity_missing_samples"
+        ),
+        "report_index_status": health.get("report_index_status"),
+        "report_index_history_fail_count": health.get(
+            "report_index_history_fail_count"
+        ),
+        "safety_invariants_violation_count": health.get(
+            "safety_invariants_violation_count"
+        ),
+        "safety_coverage_direct_violation_count": health.get(
+            "safety_coverage_direct_violation_count"
+        ),
+        "failed_safety_component_count": len(failed_components),
+        "failed_safety_components": failed_components,
+        "operator_action": health.get("operator_action"),
+        "health_fingerprint": _fingerprint_payload(health_signature),
+        "failure": failure,
+        "no_live_order_sent": no_live_order_sent,
+    }
+
+
+def _watch_operations_health_history_payload(
+    *,
+    report_dir: Path,
+    current_health: dict[str, Any],
+    previous_history: dict[str, Any] | None,
+    max_entries: int = 96,
+) -> dict[str, Any]:
+    prior = dict(previous_history or {})
+    entries: list[dict[str, Any]] = []
+    seen_generated_at: set[str] = set()
+    copied_keys = set(_watch_operations_health_history_entry(current_health).keys())
+    for raw_entry in list(prior.get("entries") or []):
+        if not isinstance(raw_entry, dict):
+            continue
+        generated_at = str(raw_entry.get("generated_at") or "").strip()
+        if not generated_at or generated_at in seen_generated_at:
+            continue
+        seen_generated_at.add(generated_at)
+        entries.append({key: raw_entry.get(key) for key in copied_keys})
+
+    current_entry = _watch_operations_health_history_entry(current_health)
+    current_generated_at = str(current_entry.get("generated_at") or "").strip()
+    if current_generated_at and current_generated_at not in seen_generated_at:
+        entries.append(current_entry)
+    entries = entries[-max(1, int(max_entries or 1)) :]
+
+    fail_count = sum(1 for entry in entries if entry.get("failure") is True)
+    pass_count = len(entries) - fail_count
+    latest_entry = entries[-1] if entries else {}
+    health_change_count = sum(
+        1
+        for previous, current in zip(entries, entries[1:])
+        if previous.get("health_fingerprint") != current.get("health_fingerprint")
+    )
+    blocker_change_count = sum(
+        1
+        for previous, current in zip(entries, entries[1:])
+        if previous.get("next_blocker") != current.get("next_blocker")
+    )
+    status_change_count = sum(
+        1
+        for previous, current in zip(entries, entries[1:])
+        if previous.get("status") != current.get("status")
+    )
+    max_failed_safety_component_count = max(
+        (int(entry.get("failed_safety_component_count") or 0) for entry in entries),
+        default=0,
+    )
+    max_report_index_history_fail_count = max(
+        (int(entry.get("report_index_history_fail_count") or 0) for entry in entries),
+        default=0,
+    )
+    max_safety_invariants_violation_count = max(
+        (int(entry.get("safety_invariants_violation_count") or 0) for entry in entries),
+        default=0,
+    )
+    max_safety_coverage_direct_violation_count = max(
+        (
+            int(entry.get("safety_coverage_direct_violation_count") or 0)
+            for entry in entries
+        ),
+        default=0,
+    )
+
+    same_health_since = None
+    if entries:
+        same_health_since = entries[0].get("generated_at")
+        latest_fingerprint = latest_entry.get("health_fingerprint")
+        for entry in reversed(entries):
+            if entry.get("health_fingerprint") != latest_fingerprint:
+                break
+            same_health_since = entry.get("generated_at")
+
+    same_health_age_minutes = None
+    started_at = _parse_dt(same_health_since)
+    ended_at = _parse_dt(latest_entry.get("generated_at"))
+    if started_at is not None and ended_at is not None and ended_at >= started_at:
+        same_health_age_minutes = round(
+            (ended_at - started_at).total_seconds() / 60.0,
+            3,
+        )
+
+    consecutive_fail_count = 0
+    for entry in reversed(entries):
+        if entry.get("failure") is True:
+            consecutive_fail_count += 1
+        else:
+            break
+    last_failed_at = next(
+        (
+            entry.get("generated_at")
+            for entry in reversed(entries)
+            if entry.get("failure") is True
+        ),
+        None,
+    )
+
+    if consecutive_fail_count:
+        status = "operations_health_history_current_failure"
+    elif fail_count:
+        status = "operations_health_history_prior_failure_seen"
+    elif health_change_count:
+        status = "operations_health_history_changed"
+    elif entries:
+        status = "operations_health_history_stable"
+    else:
+        status = "operations_health_history_empty"
+
+    no_live_order_sent = fail_count == 0 and all(
+        entry.get("no_live_order_sent") is not False for entry in entries
+    )
+    return {
+        "schema_version": (
+            "market_state_rotation_v6_launch_shadow_watch_operations_health_history_v1"
+        ),
+        "status": status,
+        "window_size": max(1, int(max_entries or 1)),
+        "entry_count": len(entries),
+        "latest_generated_at": latest_entry.get("generated_at"),
+        "latest_health_status": latest_entry.get("status"),
+        "latest_launch_status": latest_entry.get("launch_status"),
+        "latest_next_blocker": latest_entry.get("next_blocker"),
+        "latest_health_fingerprint": latest_entry.get("health_fingerprint"),
+        "same_health_since": same_health_since,
+        "same_health_age_minutes": same_health_age_minutes,
+        "pass_count": pass_count,
+        "fail_count": fail_count,
+        "consecutive_fail_count": consecutive_fail_count,
+        "last_failed_at": last_failed_at,
+        "health_change_count": health_change_count,
+        "status_change_count": status_change_count,
+        "blocker_change_count": blocker_change_count,
+        "max_failed_safety_component_count": max_failed_safety_component_count,
+        "max_report_index_history_fail_count": max_report_index_history_fail_count,
+        "max_safety_invariants_violation_count": max_safety_invariants_violation_count,
+        "max_safety_coverage_direct_violation_count": (
+            max_safety_coverage_direct_violation_count
+        ),
+        "entries": entries,
+        "reports": {
+            "latest_operations_health_json": _display_path(
+                report_dir / "latest_operations_health.json"
+            ),
+            "latest_operations_health_history_json": _display_path(
+                report_dir / "latest_operations_health_history.json"
+            ),
+            "latest_launch_gate_checklist_json": _display_path(
+                report_dir / "latest_launch_gate_checklist.json"
+            ),
+            "latest_launch_gate_checklist_history_json": _display_path(
+                report_dir / "latest_launch_gate_checklist_history.json"
+            ),
+            "latest_status_json": _display_path(report_dir / "latest_status.json"),
+            "latest_action_outbox_json": _display_path(
+                report_dir / "latest_action_outbox.json"
+            ),
+            "latest_report_index_json": _display_path(
+                report_dir / "latest_report_index.json"
+            ),
+            "latest_report_index_history_json": _display_path(
+                report_dir / "latest_report_index_history.json"
+            ),
+            "latest_safety_coverage_json": _display_path(
+                report_dir / "latest_safety_coverage.json"
+            ),
+            "latest_safety_coverage_history_json": _display_path(
+                report_dir / "latest_safety_coverage_history.json"
+            ),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "no_live_order_sent": no_live_order_sent,
+        },
+        "no_live_order_sent": no_live_order_sent,
+    }
+
+
+def _watch_launch_gate_checklist_payload(
+    *,
+    report_dir: Path,
+    summary: dict[str, Any],
+    status_payload: dict[str, Any],
+    action_outbox: dict[str, Any],
+    operations_health: dict[str, Any],
+    operations_health_history: dict[str, Any],
+) -> dict[str, Any]:
+    quote = dict(status_payload.get("quote_progress") or {})
+    fresh_signal = dict(status_payload.get("fresh_signal") or {})
+    paper_apply = dict(status_payload.get("paper_apply") or {})
+    rehearsal = dict(status_payload.get("paper_only_rehearsal") or {})
+    lifecycle = dict(status_payload.get("paper_lifecycle") or {})
+    parity = dict(status_payload.get("execution_parity") or {})
+    monitor = dict(status_payload.get("signal_monitor") or {})
+    action_counts = dict(action_outbox.get("counts") or {})
+    safety = dict(operations_health.get("safety") or {})
+    failed_components = list(operations_health.get("failed_safety_components") or [])
+    remaining_rehearsal_gates = list(rehearsal.get("remaining_gates") or [])
+
+    def _gate(
+        *,
+        gate_id: str,
+        label: str,
+        passed: bool,
+        status: str | None,
+        next_action: str,
+        blocker: str | None = None,
+        details: dict[str, Any] | None = None,
+        blocks_paper_apply: bool = True,
+        non_substitutable: bool = True,
+        manual_only: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "gate": gate_id,
+            "label": label,
+            "state": "passed" if passed else "open",
+            "passed": passed,
+            "status": status,
+            "blocker": blocker,
+            "next_action": next_action,
+            "blocks_paper_apply": blocks_paper_apply,
+            "non_substitutable": non_substitutable,
+            "manual_only": manual_only,
+            "details": dict(details or {}),
+            "auto_decision_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+
+    fresh_signal_passed = fresh_signal.get("available") is True
+    paper_rehearsal_ready = (
+        rehearsal.get("system_ready") is True
+        and rehearsal.get("armed") is True
+    )
+    first_lifecycle_passed = lifecycle.get("rows_available") is True
+    parity_missing = int(parity.get("missing_samples") or 0)
+    parity_rows = int(parity.get("eligible_journal_rows") or 0)
+    parity_required = int(parity.get("required_samples") or parity.get("sample_count") or 0)
+    parity_passed = (
+        parity_missing <= 0
+        and parity_rows > 0
+        and (parity_required <= 0 or parity_rows >= parity_required)
+    )
+    report_safety_passed = (
+        not failed_components
+        and operations_health.get("report_index_status") == "report_index_complete"
+        and int(operations_health.get("report_index_history_fail_count") or 0) == 0
+        and int(operations_health.get("safety_invariants_violation_count") or 0) == 0
+        and int(operations_health.get("safety_coverage_direct_violation_count") or 0)
+        == 0
+    )
+    monitor_passed = (
+        monitor.get("interval_seconds") is not None
+        and monitor.get("capped_to_fresh_signal_window") is True
+    )
+    no_live_passed = (
+        operations_health.get("no_live_order_sent") is not False
+        and safety.get("order_submission_allowed") is not True
+        and safety.get("auto_apply_allowed") is not True
+    )
+
+    gates = [
+        _gate(
+            gate_id="no_live_safety_authority",
+            label="No-live safety authority",
+            passed=no_live_passed,
+            status="no_live_authority_intact" if no_live_passed else "safety_repair_required",
+            blocker=None if no_live_passed else "live_or_auto_apply_safety_violation",
+            next_action=(
+                "continue_shadow_watch_without_live_orders"
+                if no_live_passed
+                else "stop_and_repair_safety_invariants_before_any_operator_action"
+            ),
+            blocks_paper_apply=True,
+            non_substitutable=True,
+            details={
+                "order_submission_allowed": safety.get("order_submission_allowed") is True,
+                "auto_apply_allowed": safety.get("auto_apply_allowed") is True,
+                "no_live_order_sent": operations_health.get("no_live_order_sent") is not False,
+            },
+        ),
+        _gate(
+            gate_id="report_safety_integrity",
+            label="Report and safety integrity",
+            passed=report_safety_passed,
+            status=operations_health.get("report_index_status"),
+            blocker="failed_safety_components" if failed_components else None,
+            next_action=(
+                "continue_monitoring"
+                if report_safety_passed
+                else "inspect_latest_operations_health_failed_safety_components"
+            ),
+            blocks_paper_apply=True,
+            non_substitutable=False,
+            details={
+                "failed_safety_components": failed_components,
+                "operations_health_history_status": operations_health_history.get("status"),
+                "operations_health_history_fail_count": operations_health_history.get("fail_count"),
+            },
+        ),
+        _gate(
+            gate_id="paper_only_rehearsal_armed",
+            label="Paper-only rehearsal armed",
+            passed=paper_rehearsal_ready,
+            status=rehearsal.get("status"),
+            blocker=None if paper_rehearsal_ready else "paper_only_rehearsal_not_armed",
+            next_action=(
+                "keep_paper_only_rehearsal_armed"
+                if paper_rehearsal_ready
+                else "repair_paper_only_rehearsal_readiness"
+            ),
+            blocks_paper_apply=True,
+            non_substitutable=False,
+            details={
+                "system_ready": rehearsal.get("system_ready") is True,
+                "armed": rehearsal.get("armed") is True,
+                "remaining_gates": remaining_rehearsal_gates,
+            },
+        ),
+        _gate(
+            gate_id="current_fresh_signal",
+            label="Current fresh signal",
+            passed=fresh_signal_passed,
+            status=fresh_signal.get("primary_cause") or fresh_signal.get("signal_absence_class"),
+            blocker=None if fresh_signal_passed else "fresh_signal_missing_or_stale",
+            next_action=(
+                "review_fresh_signal_for_manual_paper_bridge"
+                if fresh_signal_passed
+                else "monitor_fresh_signal_without_forcing_entry"
+            ),
+            blocks_paper_apply=True,
+            non_substitutable=True,
+            details={
+                "signal_absence_primary_cause": fresh_signal.get(
+                    "signal_absence_primary_cause"
+                ),
+                "signal_absence_class": fresh_signal.get("signal_absence_class"),
+                "signal_monitor_interval_seconds": monitor.get("interval_seconds"),
+                "signal_monitor_capped_to_fresh_signal_window": monitor.get(
+                    "capped_to_fresh_signal_window"
+                )
+                is True,
+                "next_monitor_after_kst": monitor.get("next_monitor_after_kst"),
+            },
+        ),
+        _gate(
+            gate_id="first_real_paper_lifecycle_row",
+            label="First real paper lifecycle row",
+            passed=first_lifecycle_passed,
+            status=lifecycle.get("status"),
+            blocker=lifecycle.get("missing_stage") if not first_lifecycle_passed else None,
+            next_action=lifecycle.get("safe_next_action")
+            or "wait_for_fresh_signal_before_manual_paper_apply",
+            blocks_paper_apply=True,
+            non_substitutable=True,
+            manual_only=True,
+            details={
+                "rows_available": lifecycle.get("rows_available") is True,
+                "missing_stage": lifecycle.get("missing_stage"),
+                "paper_apply_allowed_now": paper_apply.get("allowed_now") is True,
+                "paper_apply_available": paper_apply.get("available") is True,
+            },
+        ),
+        _gate(
+            gate_id="execution_parity_samples",
+            label="Execution parity samples",
+            passed=parity_passed,
+            status=parity.get("status"),
+            blocker="insufficient_execution_sample_count"
+            if not parity_passed
+            else None,
+            next_action=parity.get("next_step") or "collect_reviewed_paper_lifecycle_rows",
+            blocks_paper_apply=False,
+            non_substitutable=True,
+            manual_only=True,
+            details={
+                "eligible_journal_rows": parity_rows,
+                "sample_count": parity.get("sample_count"),
+                "required_samples": parity.get("required_samples"),
+                "missing_samples": parity_missing,
+                "eta_completion_kst": parity.get("eta_completion_kst"),
+                "ledger_status": parity.get("ledger_status"),
+            },
+        ),
+        _gate(
+            gate_id="signal_monitor_cadence",
+            label="Signal monitor cadence",
+            passed=monitor_passed,
+            status="signal_monitor_capped" if monitor_passed else "signal_monitor_review_required",
+            blocker=None if monitor_passed else "monitor_interval_not_capped",
+            next_action="keep_monitor_interval_capped_to_fresh_signal_window",
+            blocks_paper_apply=False,
+            non_substitutable=False,
+            details={
+                "interval_seconds": monitor.get("interval_seconds"),
+                "capped_to_fresh_signal_window": monitor.get(
+                    "capped_to_fresh_signal_window"
+                )
+                is True,
+                "next_monitor_after_utc": monitor.get("next_monitor_after_utc"),
+                "next_monitor_after_kst": monitor.get("next_monitor_after_kst"),
+            },
+        ),
+    ]
+    open_gates = [gate for gate in gates if gate.get("passed") is not True]
+    blocking_open_gates = [
+        gate for gate in open_gates if gate.get("blocks_paper_apply") is True
+    ]
+    first_open_gate = dict(blocking_open_gates[0] if blocking_open_gates else open_gates[0] if open_gates else {})
+    if failed_components or not no_live_passed:
+        checklist_status = "launch_gate_checklist_action_required"
+    elif paper_apply.get("allowed_now") is True:
+        checklist_status = "launch_gate_checklist_manual_paper_apply_ready"
+    elif fresh_signal_passed:
+        checklist_status = "launch_gate_checklist_fresh_signal_review_needed"
+    elif first_open_gate.get("gate") == "current_fresh_signal":
+        checklist_status = "launch_gate_checklist_waiting_for_fresh_signal"
+    elif open_gates:
+        checklist_status = "launch_gate_checklist_tracking_open_gates"
+    else:
+        checklist_status = "launch_gate_checklist_all_gates_clear"
+
+    no_live_order_sent = all(gate.get("no_live_order_sent") is not False for gate in gates)
+    return {
+        "schema_version": "market_state_rotation_v6_launch_shadow_watch_launch_gate_checklist_v1",
+        "status": checklist_status,
+        "generated_at": summary.get("completed_at"),
+        "launch_status": status_payload.get("launch_status"),
+        "next_blocker": status_payload.get("next_blocker"),
+        "first_open_gate": first_open_gate.get("gate"),
+        "first_open_gate_next_action": first_open_gate.get("next_action"),
+        "gate_count": len(gates),
+        "passed_gate_count": sum(1 for gate in gates if gate.get("passed") is True),
+        "open_gate_count": len(open_gates),
+        "blocking_open_gate_count": len(blocking_open_gates),
+        "paper_apply_available": paper_apply.get("available") is True,
+        "paper_apply_allowed_now": paper_apply.get("allowed_now") is True,
+        "fresh_signal_available": fresh_signal_passed,
+        "quote_progress": quote,
+        "operator_next": {
+            "operator_action": operations_health.get("operator_action"),
+            "action_outbox_status": action_outbox.get("status"),
+            "primary_mode": action_outbox.get("primary_mode"),
+            "safe_auto_command_count": action_counts.get("safe_auto_command_count"),
+            "manual_decision_count": action_counts.get("manual_decision_count"),
+            "manual_only": True,
+            "auto_decision_allowed": False,
+            "auto_apply_allowed": False,
+            "order_submission_allowed": False,
+        },
+        "gates": gates,
+        "gates_by_id": {gate["gate"]: gate for gate in gates},
+        "reports": {
+            "latest_launch_gate_checklist_json": summary.get(
+                "watch_launch_gate_checklist_path"
+            )
+            or _display_path(report_dir / "latest_launch_gate_checklist.json"),
+            "latest_launch_gate_checklist_history_json": summary.get(
+                "watch_launch_gate_checklist_history_path"
+            )
+            or _display_path(report_dir / "latest_launch_gate_checklist_history.json"),
+            "latest_operations_health_json": summary.get("watch_operations_health_path")
+            or _display_path(report_dir / "latest_operations_health.json"),
+            "latest_operations_health_history_json": summary.get(
+                "watch_operations_health_history_path"
+            )
+            or _display_path(report_dir / "latest_operations_health_history.json"),
+            "latest_status_json": summary.get("watch_status_path")
+            or _display_path(report_dir / "latest_status.json"),
+            "latest_action_outbox_json": summary.get("watch_action_outbox_path")
+            or _display_path(report_dir / "latest_action_outbox.json"),
+            "latest_json": _display_path(report_dir / "latest.json"),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "no_live_order_sent": no_live_order_sent,
+        },
+        "no_live_order_sent": no_live_order_sent,
+    }
+
+
+def _watch_launch_gate_checklist_history_entry(
+    checklist: dict[str, Any],
+) -> dict[str, Any]:
+    gates = [
+        dict(gate)
+        for gate in list(checklist.get("gates") or [])
+        if isinstance(gate, dict)
+    ]
+    open_gate_ids = [
+        str(gate.get("gate"))
+        for gate in gates
+        if gate.get("passed") is not True and str(gate.get("gate") or "").strip()
+    ]
+    blocking_open_gate_ids = [
+        str(gate.get("gate"))
+        for gate in gates
+        if gate.get("passed") is not True
+        and gate.get("blocks_paper_apply") is True
+        and str(gate.get("gate") or "").strip()
+    ]
+    passed_gate_ids = [
+        str(gate.get("gate"))
+        for gate in gates
+        if gate.get("passed") is True and str(gate.get("gate") or "").strip()
+    ]
+    parity_gate = dict((checklist.get("gates_by_id") or {}).get("execution_parity_samples") or {})
+    parity_details = dict(parity_gate.get("details") or {})
+    safety = dict(checklist.get("safety") or {})
+    no_live_order_sent = (
+        checklist.get("no_live_order_sent") is not False
+        and safety.get("no_live_order_sent") is not False
+        and safety.get("order_submission_allowed") is not True
+    )
+    gate_signature = {
+        "status": checklist.get("status"),
+        "launch_status": checklist.get("launch_status"),
+        "next_blocker": checklist.get("next_blocker"),
+        "first_open_gate": checklist.get("first_open_gate"),
+        "open_gate_ids": open_gate_ids,
+        "blocking_open_gate_ids": blocking_open_gate_ids,
+        "passed_gate_ids": passed_gate_ids,
+        "fresh_signal_available": checklist.get("fresh_signal_available") is True,
+        "paper_apply_available": checklist.get("paper_apply_available") is True,
+        "paper_apply_allowed_now": checklist.get("paper_apply_allowed_now") is True,
+        "parity_missing_samples": parity_details.get("missing_samples"),
+        "parity_required_samples": parity_details.get("required_samples"),
+    }
+    return {
+        "generated_at": checklist.get("generated_at"),
+        "status": checklist.get("status"),
+        "launch_status": checklist.get("launch_status"),
+        "next_blocker": checklist.get("next_blocker"),
+        "first_open_gate": checklist.get("first_open_gate"),
+        "first_open_gate_next_action": checklist.get("first_open_gate_next_action"),
+        "gate_count": checklist.get("gate_count"),
+        "passed_gate_count": checklist.get("passed_gate_count"),
+        "open_gate_count": checklist.get("open_gate_count"),
+        "blocking_open_gate_count": checklist.get("blocking_open_gate_count"),
+        "open_gate_ids": open_gate_ids,
+        "blocking_open_gate_ids": blocking_open_gate_ids,
+        "passed_gate_ids": passed_gate_ids,
+        "fresh_signal_available": checklist.get("fresh_signal_available") is True,
+        "paper_apply_available": checklist.get("paper_apply_available") is True,
+        "paper_apply_allowed_now": checklist.get("paper_apply_allowed_now") is True,
+        "parity_missing_samples": parity_details.get("missing_samples"),
+        "parity_required_samples": parity_details.get("required_samples"),
+        "gate_fingerprint": _fingerprint_payload(gate_signature),
+        "no_live_order_sent": no_live_order_sent,
+    }
+
+
+def _watch_launch_gate_checklist_history_payload(
+    *,
+    report_dir: Path,
+    current_checklist: dict[str, Any],
+    previous_history: dict[str, Any] | None,
+    max_entries: int = 96,
+) -> dict[str, Any]:
+    prior = dict(previous_history or {})
+    entries: list[dict[str, Any]] = []
+    seen_generated_at: set[str] = set()
+    copied_keys = set(_watch_launch_gate_checklist_history_entry(current_checklist).keys())
+    for raw_entry in list(prior.get("entries") or []):
+        if not isinstance(raw_entry, dict):
+            continue
+        generated_at = str(raw_entry.get("generated_at") or "").strip()
+        if not generated_at or generated_at in seen_generated_at:
+            continue
+        seen_generated_at.add(generated_at)
+        entries.append({key: raw_entry.get(key) for key in copied_keys})
+
+    current_entry = _watch_launch_gate_checklist_history_entry(current_checklist)
+    current_generated_at = str(current_entry.get("generated_at") or "").strip()
+    if current_generated_at and current_generated_at not in seen_generated_at:
+        entries.append(current_entry)
+    entries = entries[-max(1, int(max_entries or 1)) :]
+
+    latest_entry = entries[-1] if entries else {}
+    checklist_status_change_count = sum(
+        1
+        for previous, current in zip(entries, entries[1:])
+        if previous.get("status") != current.get("status")
+    )
+    first_open_gate_change_count = sum(
+        1
+        for previous, current in zip(entries, entries[1:])
+        if previous.get("first_open_gate") != current.get("first_open_gate")
+    )
+    open_gate_change_count = sum(
+        1
+        for previous, current in zip(entries, entries[1:])
+        if previous.get("open_gate_ids") != current.get("open_gate_ids")
+        or previous.get("blocking_open_gate_ids")
+        != current.get("blocking_open_gate_ids")
+    )
+    gate_regression_count = sum(
+        1
+        for previous, current in zip(entries, entries[1:])
+        if set(previous.get("passed_gate_ids") or [])
+        & set(current.get("open_gate_ids") or [])
+    )
+    no_live_false_count = sum(
+        1 for entry in entries if entry.get("no_live_order_sent") is False
+    )
+
+    same_gate_state_since = None
+    if entries:
+        same_gate_state_since = entries[0].get("generated_at")
+        latest_fingerprint = latest_entry.get("gate_fingerprint")
+        for entry in reversed(entries):
+            if entry.get("gate_fingerprint") != latest_fingerprint:
+                break
+            same_gate_state_since = entry.get("generated_at")
+
+    same_gate_state_age_minutes = None
+    started_at = _parse_dt(same_gate_state_since)
+    ended_at = _parse_dt(latest_entry.get("generated_at"))
+    if started_at is not None and ended_at is not None and ended_at >= started_at:
+        same_gate_state_age_minutes = round(
+            (ended_at - started_at).total_seconds() / 60.0,
+            3,
+        )
+
+    if no_live_false_count:
+        status = "launch_gate_checklist_history_safety_violation"
+    elif gate_regression_count:
+        status = "launch_gate_checklist_history_gate_regression_detected"
+    elif latest_entry.get("status") == "launch_gate_checklist_manual_paper_apply_ready":
+        status = "launch_gate_checklist_history_manual_paper_apply_ready"
+    elif latest_entry.get("status") == "launch_gate_checklist_fresh_signal_review_needed":
+        status = "launch_gate_checklist_history_fresh_signal_review_needed"
+    elif checklist_status_change_count or first_open_gate_change_count or open_gate_change_count:
+        status = "launch_gate_checklist_history_changed"
+    elif entries:
+        status = "launch_gate_checklist_history_stable"
+    else:
+        status = "launch_gate_checklist_history_empty"
+
+    no_live_order_sent = no_live_false_count == 0 and all(
+        entry.get("no_live_order_sent") is not False for entry in entries
+    )
+    return {
+        "schema_version": (
+            "market_state_rotation_v6_launch_shadow_watch_launch_gate_checklist_history_v1"
+        ),
+        "status": status,
+        "window_size": max(1, int(max_entries or 1)),
+        "entry_count": len(entries),
+        "latest_generated_at": latest_entry.get("generated_at"),
+        "latest_checklist_status": latest_entry.get("status"),
+        "latest_launch_status": latest_entry.get("launch_status"),
+        "latest_next_blocker": latest_entry.get("next_blocker"),
+        "latest_first_open_gate": latest_entry.get("first_open_gate"),
+        "latest_open_gate_ids": list(latest_entry.get("open_gate_ids") or []),
+        "latest_blocking_open_gate_ids": list(
+            latest_entry.get("blocking_open_gate_ids") or []
+        ),
+        "latest_passed_gate_ids": list(latest_entry.get("passed_gate_ids") or []),
+        "latest_gate_fingerprint": latest_entry.get("gate_fingerprint"),
+        "same_gate_state_since": same_gate_state_since,
+        "same_gate_state_age_minutes": same_gate_state_age_minutes,
+        "checklist_status_change_count": checklist_status_change_count,
+        "first_open_gate_change_count": first_open_gate_change_count,
+        "open_gate_change_count": open_gate_change_count,
+        "gate_regression_count": gate_regression_count,
+        "no_live_false_count": no_live_false_count,
+        "entries": entries,
+        "reports": {
+            "latest_launch_gate_checklist_json": _display_path(
+                report_dir / "latest_launch_gate_checklist.json"
+            ),
+            "latest_launch_gate_checklist_history_json": _display_path(
+                report_dir / "latest_launch_gate_checklist_history.json"
+            ),
+            "latest_operations_health_json": _display_path(
+                report_dir / "latest_operations_health.json"
+            ),
+            "latest_operations_health_history_json": _display_path(
+                report_dir / "latest_operations_health_history.json"
+            ),
+            "latest_status_json": _display_path(report_dir / "latest_status.json"),
+            "latest_json": _display_path(report_dir / "latest.json"),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "no_live_order_sent": no_live_order_sent,
+        },
+        "no_live_order_sent": no_live_order_sent,
+    }
+
+
+def _watch_action_outbox_history_entry(outbox: dict[str, Any]) -> dict[str, Any]:
+    effective = dict(outbox.get("primary_effective_safe_command") or {})
+    covered = dict(outbox.get("primary_covered_command") or {})
+    material = dict(outbox.get("primary_material_monitor") or {})
+    review_wait = dict(outbox.get("primary_operator_review_wait") or {})
+    safety = dict(outbox.get("safety") or {})
+    command_signature = {
+        "status": outbox.get("status"),
+        "primary_mode": outbox.get("primary_mode"),
+        "effective_command": effective.get("command"),
+        "covered_command": covered.get("command"),
+        "material_command": material.get("command"),
+        "review_wait_action": review_wait.get("action_type"),
+    }
+    return {
+        "generated_at": outbox.get("generated_at"),
+        "status": outbox.get("status"),
+        "launch_status": outbox.get("launch_status"),
+        "next_blocker": outbox.get("next_blocker"),
+        "primary_mode": outbox.get("primary_mode"),
+        "primary_next": outbox.get("primary_next"),
+        "operator_action_scope": outbox.get("operator_action_scope"),
+        "queue_status": outbox.get("queue_status"),
+        "queue_effective_status": outbox.get("queue_effective_status"),
+        "effective_action_type": effective.get("action_type"),
+        "effective_target_gate": effective.get("target_gate"),
+        "effective_command": effective.get("command"),
+        "covered_action_type": covered.get("action_type"),
+        "covered_target_gate": covered.get("target_gate"),
+        "covered_next_monitor_after_kst": covered.get("effective_next_monitor_after_kst"),
+        "material_event": material.get("event"),
+        "material_gate": material.get("gate"),
+        "material_eta_kst": material.get("eta_kst"),
+        "material_command": material.get("command"),
+        "operator_review_wait_action": review_wait.get("action_type"),
+        "operator_review_wait_gate": review_wait.get("target_gate"),
+        "command_fingerprint": _fingerprint_payload(command_signature),
+        "order_submission_allowed": safety.get("order_submission_allowed") is True,
+        "auto_apply_allowed": safety.get("auto_apply_allowed") is True,
+        "no_live_order_sent": outbox.get("no_live_order_sent") is not False
+        and safety.get("no_live_order_sent") is not False,
+    }
+
+
+def _watch_action_outbox_history_payload(
+    *,
+    report_dir: Path,
+    current_outbox: dict[str, Any],
+    previous_history: dict[str, Any] | None,
+    max_entries: int = 24,
+) -> dict[str, Any]:
+    prior = dict(previous_history or {})
+    entries: list[dict[str, Any]] = []
+    seen_generated_at: set[str] = set()
+    copied_keys = set(_watch_action_outbox_history_entry(current_outbox).keys())
+    for raw_entry in list(prior.get("entries") or []):
+        if not isinstance(raw_entry, dict):
+            continue
+        generated_at = str(raw_entry.get("generated_at") or "").strip()
+        if not generated_at or generated_at in seen_generated_at:
+            continue
+        seen_generated_at.add(generated_at)
+        entries.append({key: raw_entry.get(key) for key in copied_keys})
+
+    current_entry = _watch_action_outbox_history_entry(current_outbox)
+    current_generated_at = str(current_entry.get("generated_at") or "").strip()
+    if current_generated_at and current_generated_at not in seen_generated_at:
+        entries.append(current_entry)
+    entries = entries[-max(1, int(max_entries or 1)) :]
+
+    status_change_count = 0
+    primary_mode_change_count = 0
+    command_change_count = 0
+    for previous, current in zip(entries, entries[1:]):
+        if previous.get("status") != current.get("status"):
+            status_change_count += 1
+        if previous.get("primary_mode") != current.get("primary_mode"):
+            primary_mode_change_count += 1
+        if previous.get("command_fingerprint") != current.get("command_fingerprint"):
+            command_change_count += 1
+
+    latest_entry = entries[-1] if entries else {}
+    same_command_since = None
+    if entries:
+        same_command_since = entries[0].get("generated_at")
+        latest_fingerprint = latest_entry.get("command_fingerprint")
+        for entry in reversed(entries):
+            if entry.get("command_fingerprint") != latest_fingerprint:
+                break
+            same_command_since = entry.get("generated_at")
+
+    same_command_age_minutes = None
+    started_at = _parse_dt(same_command_since)
+    ended_at = _parse_dt(latest_entry.get("generated_at"))
+    if started_at is not None and ended_at is not None and ended_at >= started_at:
+        same_command_age_minutes = round(
+            (ended_at - started_at).total_seconds() / 60.0,
+            3,
+        )
+
+    live_order_safety_violation_count = sum(
+        1
+        for entry in entries
+        if entry.get("order_submission_allowed") is True
+        or entry.get("auto_apply_allowed") is True
+        or entry.get("no_live_order_sent") is False
+    )
+    if live_order_safety_violation_count:
+        status = "action_outbox_history_safety_violation"
+    elif latest_entry.get("effective_command"):
+        status = "action_outbox_history_safe_command_tracking"
+    elif entries:
+        status = "action_outbox_history_tracking"
+    else:
+        status = "action_outbox_history_empty"
+
+    return {
+        "schema_version": (
+            "market_state_rotation_v6_launch_shadow_watch_action_outbox_history_v1"
+        ),
+        "status": status,
+        "window_size": max(1, int(max_entries or 1)),
+        "entry_count": len(entries),
+        "latest_generated_at": latest_entry.get("generated_at"),
+        "latest_outbox_status": latest_entry.get("status"),
+        "latest_primary_mode": latest_entry.get("primary_mode"),
+        "latest_effective_action_type": latest_entry.get("effective_action_type"),
+        "latest_effective_target_gate": latest_entry.get("effective_target_gate"),
+        "latest_command_fingerprint": latest_entry.get("command_fingerprint"),
+        "same_command_since": same_command_since,
+        "same_command_age_minutes": same_command_age_minutes,
+        "status_change_count": status_change_count,
+        "primary_mode_change_count": primary_mode_change_count,
+        "command_change_count": command_change_count,
+        "live_order_safety_violation_count": live_order_safety_violation_count,
+        "entries": entries,
+        "reports": {
+            "latest_action_outbox_json": _display_path(
+                report_dir / "latest_action_outbox.json"
+            ),
+            "latest_action_outbox_history_json": _display_path(
+                report_dir / "latest_action_outbox_history.json"
+            ),
+            "latest_artifact_manifest_json": _display_path(
+                report_dir / "latest_artifact_manifest.json"
+            ),
+            "latest_artifact_manifest_history_json": _display_path(
+                report_dir / "latest_artifact_manifest_history.json"
+            ),
+            "latest_safety_invariants_json": _display_path(
+                report_dir / "latest_safety_invariants.json"
+            ),
+            "latest_safety_invariants_history_json": _display_path(
+                report_dir / "latest_safety_invariants_history.json"
+            ),
+            "latest_safety_coverage_json": _display_path(
+                report_dir / "latest_safety_coverage.json"
+            ),
+            "latest_safety_coverage_history_json": _display_path(
+                report_dir / "latest_safety_coverage_history.json"
+            ),
+            "latest_report_index_json": _display_path(
+                report_dir / "latest_report_index.json"
+            ),
+            "latest_report_index_history_json": _display_path(
+                report_dir / "latest_report_index_history.json"
+            ),
+            "latest_operations_health_json": _display_path(
+                report_dir / "latest_operations_health.json"
+            ),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "no_live_order_sent": live_order_safety_violation_count == 0,
+        },
+        "no_live_order_sent": live_order_safety_violation_count == 0,
+    }
+
+
+def _watch_status_history_entry(status: dict[str, Any]) -> dict[str, Any]:
+    quote_progress = dict(status.get("quote_progress") or {})
+    fresh_signal = dict(status.get("fresh_signal") or {})
+    paper_apply = dict(status.get("paper_apply") or {})
+    rehearsal = dict(status.get("paper_only_rehearsal") or {})
+    parity = dict(status.get("execution_parity") or {})
+    monitor = dict(status.get("signal_monitor") or {})
+    heartbeat = dict(status.get("heartbeat_sla") or {})
+    notification = dict(status.get("notification") or {})
+    safety = dict(status.get("safety") or {})
+    return {
+        "completed_at": status.get("completed_at"),
+        "completed_at_kst": status.get("completed_at_kst"),
+        "launch_status": status.get("launch_status"),
+        "next_blocker": status.get("next_blocker"),
+        "quote_observed_latest": quote_progress.get("observed_latest"),
+        "quote_observed_delta": quote_progress.get("observed_delta"),
+        "quote_distinct_hours_latest": quote_progress.get("distinct_hours_latest"),
+        "quote_distinct_hours_delta": quote_progress.get("distinct_hours_delta"),
+        "fresh_signal_available": fresh_signal.get("available") is True,
+        "paper_apply_available": paper_apply.get("available") is True,
+        "paper_apply_allowed_now": paper_apply.get("allowed_now") is True,
+        "paper_rehearsal_status": rehearsal.get("status"),
+        "paper_rehearsal_armed": rehearsal.get("armed") is True,
+        "execution_parity_missing_samples": parity.get("missing_samples"),
+        "execution_parity_ledger_status": parity.get("ledger_status"),
+        "signal_monitor_interval_seconds": monitor.get("interval_seconds"),
+        "signal_monitor_capped_to_fresh_window": monitor.get(
+            "capped_to_fresh_signal_window"
+        )
+        is True,
+        "heartbeat_sla_status": heartbeat.get("status"),
+        "heartbeat_sla_response_status": heartbeat.get("response_status"),
+        "heartbeat_sla_operator_notify": heartbeat.get("operator_notify") is True,
+        "notification_decision": notification.get("decision"),
+        "notification_status": notification.get("status"),
+        "notification_delivery_decision": notification.get("delivery_decision"),
+        "notification_delivery_status": notification.get("delivery_status"),
+        "duplicate_notification_suppressed": notification.get(
+            "duplicate_notification_suppressed"
+        )
+        is True,
+        "order_submission_allowed": safety.get("order_submission_allowed") is True,
+        "auto_apply_allowed": safety.get("auto_apply_allowed") is True,
+        "no_live_order_sent": status.get("no_live_order_sent") is not False
+        and safety.get("no_live_order_sent") is not False,
+    }
+
+
+def _watch_status_history_payload(
+    *,
+    report_dir: Path,
+    current_status: dict[str, Any],
+    previous_history: dict[str, Any] | None,
+    max_entries: int = 24,
+) -> dict[str, Any]:
+    prior = dict(previous_history or {})
+    entries: list[dict[str, Any]] = []
+    seen_completed_at: set[str] = set()
+    copied_keys = set(_watch_status_history_entry(current_status).keys())
+    for raw_entry in list(prior.get("entries") or []):
+        if not isinstance(raw_entry, dict):
+            continue
+        completed_at = str(raw_entry.get("completed_at") or "").strip()
+        if not completed_at or completed_at in seen_completed_at:
+            continue
+        seen_completed_at.add(completed_at)
+        entries.append({key: raw_entry.get(key) for key in copied_keys})
+
+    current_entry = _watch_status_history_entry(current_status)
+    current_completed_at = str(current_entry.get("completed_at") or "").strip()
+    if current_completed_at and current_completed_at not in seen_completed_at:
+        entries.append(current_entry)
+    entries = entries[-max(1, int(max_entries or 1)) :]
+
+    state_change_count = 0
+    blocker_change_count = 0
+    notification_change_count = 0
+    for previous, current in zip(entries, entries[1:]):
+        if previous.get("launch_status") != current.get("launch_status"):
+            state_change_count += 1
+        if previous.get("next_blocker") != current.get("next_blocker"):
+            blocker_change_count += 1
+        if previous.get("notification_status") != current.get("notification_status"):
+            notification_change_count += 1
+
+    latest_entry = entries[-1] if entries else {}
+    same_blocker_since = None
+    if entries:
+        same_blocker_since = entries[0].get("completed_at")
+        latest_status = latest_entry.get("launch_status")
+        latest_blocker = latest_entry.get("next_blocker")
+        for entry in reversed(entries):
+            if (
+                entry.get("launch_status") != latest_status
+                or entry.get("next_blocker") != latest_blocker
+            ):
+                break
+            same_blocker_since = entry.get("completed_at")
+
+    same_blocker_wait_minutes = None
+    started_at = _parse_dt(same_blocker_since)
+    ended_at = _parse_dt(latest_entry.get("completed_at"))
+    if started_at is not None and ended_at is not None and ended_at >= started_at:
+        same_blocker_wait_minutes = round(
+            (ended_at - started_at).total_seconds() / 60.0,
+            3,
+        )
+
+    live_order_safety_violation_count = sum(
+        1
+        for entry in entries
+        if entry.get("order_submission_allowed") is True
+        or entry.get("no_live_order_sent") is False
+    )
+    notify_count = sum(
+        1 for entry in entries if entry.get("notification_delivery_decision") == "NOTIFY"
+    )
+    duplicate_suppressed_count = sum(
+        1 for entry in entries if entry.get("duplicate_notification_suppressed") is True
+    )
+
+    if live_order_safety_violation_count:
+        status = "status_history_safety_violation"
+    elif latest_entry.get("paper_apply_available") is True:
+        status = "status_history_paper_apply_available"
+    elif latest_entry.get("fresh_signal_available") is True:
+        status = "status_history_fresh_signal_available"
+    elif entries:
+        status = "status_history_tracking"
+    else:
+        status = "status_history_empty"
+
+    return {
+        "schema_version": "market_state_rotation_v6_launch_shadow_watch_status_history_v1",
+        "status": status,
+        "window_size": max(1, int(max_entries or 1)),
+        "entry_count": len(entries),
+        "latest_completed_at": latest_entry.get("completed_at"),
+        "latest_launch_status": latest_entry.get("launch_status"),
+        "latest_next_blocker": latest_entry.get("next_blocker"),
+        "same_blocker_since": same_blocker_since,
+        "same_blocker_wait_minutes": same_blocker_wait_minutes,
+        "state_change_count": state_change_count,
+        "blocker_change_count": blocker_change_count,
+        "notification_change_count": notification_change_count,
+        "fresh_signal_seen_count": sum(
+            1 for entry in entries if entry.get("fresh_signal_available") is True
+        ),
+        "paper_apply_available_count": sum(
+            1 for entry in entries if entry.get("paper_apply_available") is True
+        ),
+        "notify_count": notify_count,
+        "duplicate_suppressed_count": duplicate_suppressed_count,
+        "live_order_safety_violation_count": live_order_safety_violation_count,
+        "entries": entries,
+        "reports": {
+            "latest_status_json": _display_path(report_dir / "latest_status.json"),
+            "latest_status_history_json": _display_path(
+                report_dir / "latest_status_history.json"
+            ),
+            "latest_action_outbox_json": _display_path(
+                report_dir / "latest_action_outbox.json"
+            ),
+            "latest_action_outbox_history_json": _display_path(
+                report_dir / "latest_action_outbox_history.json"
+            ),
+            "latest_artifact_manifest_json": _display_path(
+                report_dir / "latest_artifact_manifest.json"
+            ),
+            "latest_artifact_manifest_history_json": _display_path(
+                report_dir / "latest_artifact_manifest_history.json"
+            ),
+            "latest_safety_invariants_json": _display_path(
+                report_dir / "latest_safety_invariants.json"
+            ),
+            "latest_safety_invariants_history_json": _display_path(
+                report_dir / "latest_safety_invariants_history.json"
+            ),
+            "latest_safety_coverage_json": _display_path(
+                report_dir / "latest_safety_coverage.json"
+            ),
+            "latest_safety_coverage_history_json": _display_path(
+                report_dir / "latest_safety_coverage_history.json"
+            ),
+            "latest_report_index_json": _display_path(
+                report_dir / "latest_report_index.json"
+            ),
+            "latest_report_index_history_json": _display_path(
+                report_dir / "latest_report_index_history.json"
+            ),
+            "latest_operations_health_json": _display_path(
+                report_dir / "latest_operations_health.json"
+            ),
+        },
+        "safety": {
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "stale_signal_apply_allowed": False,
+            "no_live_order_sent": live_order_safety_violation_count == 0,
+        },
+        "no_live_order_sent": live_order_safety_violation_count == 0,
+    }
+
+
+def _write_watch_reports(report_dir: Path, summary: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(summary)
+    snapshot_path = _watch_snapshot_path(report_dir, payload)
+    status_path = report_dir / "latest_status.json"
+    status_history_path = report_dir / "latest_status_history.json"
+    action_outbox_path = report_dir / "latest_action_outbox.json"
+    action_outbox_history_path = report_dir / "latest_action_outbox_history.json"
+    artifact_manifest_path = report_dir / "latest_artifact_manifest.json"
+    artifact_manifest_history_path = (
+        report_dir / "latest_artifact_manifest_history.json"
+    )
+    safety_invariants_path = report_dir / "latest_safety_invariants.json"
+    safety_invariants_history_path = report_dir / "latest_safety_invariants_history.json"
+    safety_coverage_path = report_dir / "latest_safety_coverage.json"
+    safety_coverage_history_path = report_dir / "latest_safety_coverage_history.json"
+    report_index_path = report_dir / "latest_report_index.json"
+    report_index_history_path = report_dir / "latest_report_index_history.json"
+    operations_health_path = report_dir / "latest_operations_health.json"
+    operations_health_history_path = report_dir / "latest_operations_health_history.json"
+    launch_gate_checklist_path = report_dir / "latest_launch_gate_checklist.json"
+    launch_gate_checklist_history_path = (
+        report_dir / "latest_launch_gate_checklist_history.json"
+    )
+    payload["watch_snapshot_path"] = _display_path(snapshot_path)
+    payload["watch_status_path"] = _display_path(status_path)
+    payload["watch_status_history_path"] = _display_path(status_history_path)
+    payload["watch_action_outbox_path"] = _display_path(action_outbox_path)
+    payload["watch_action_outbox_history_path"] = _display_path(
+        action_outbox_history_path
+    )
+    payload["watch_artifact_manifest_path"] = _display_path(artifact_manifest_path)
+    payload["watch_artifact_manifest_history_path"] = _display_path(
+        artifact_manifest_history_path
+    )
+    payload["watch_safety_invariants_path"] = _display_path(safety_invariants_path)
+    payload["watch_safety_invariants_history_path"] = _display_path(
+        safety_invariants_history_path
+    )
+    payload["watch_safety_coverage_path"] = _display_path(safety_coverage_path)
+    payload["watch_safety_coverage_history_path"] = _display_path(
+        safety_coverage_history_path
+    )
+    payload["watch_report_index_path"] = _display_path(report_index_path)
+    payload["watch_report_index_history_path"] = _display_path(
+        report_index_history_path
+    )
+    payload["watch_operations_health_path"] = _display_path(operations_health_path)
+    payload["watch_operations_health_history_path"] = _display_path(
+        operations_health_history_path
+    )
+    payload["watch_launch_gate_checklist_path"] = _display_path(
+        launch_gate_checklist_path
+    )
+    payload["watch_launch_gate_checklist_history_path"] = _display_path(
+        launch_gate_checklist_history_path
+    )
+    status_payload = _watch_status_payload(report_dir, payload)
+    status_history_payload = _watch_status_history_payload(
+        report_dir=report_dir,
+        current_status=status_payload,
+        previous_history=_read_json(status_history_path),
+    )
+    action_outbox_payload = _watch_action_outbox_payload(
+        report_dir,
+        payload,
+        status_payload,
+    )
+    action_outbox_history_payload = _watch_action_outbox_history_payload(
+        report_dir=report_dir,
+        current_outbox=action_outbox_payload,
+        previous_history=_read_json(action_outbox_history_path),
+    )
+    safety_invariants_payload = _watch_safety_invariants_payload(
+        report_dir=report_dir,
+        summary=payload,
+        generated_payloads={
+            "latest_json": payload,
+            "latest_status_json": status_payload,
+            "latest_status_history_json": status_history_payload,
+            "latest_action_outbox_json": action_outbox_payload,
+            "latest_action_outbox_history_json": action_outbox_history_payload,
+        },
+    )
+    safety_invariants_history_payload = _watch_safety_invariants_history_payload(
+        report_dir=report_dir,
+        current_invariants=safety_invariants_payload,
+        previous_history=_read_json(safety_invariants_history_path),
+    )
+    _write_json(snapshot_path, payload)
+    _write_json(status_path, status_payload)
+    _write_json(status_history_path, status_history_payload)
+    _write_json(action_outbox_path, action_outbox_payload)
+    _write_json(action_outbox_history_path, action_outbox_history_payload)
+    _write_json(safety_invariants_path, safety_invariants_payload)
+    _write_json(safety_invariants_history_path, safety_invariants_history_payload)
+    _write_json(report_dir / "latest.json", payload)
+    _write_markdown(report_dir / "latest.md", payload)
+    artifact_manifest_payload = _watch_artifact_manifest_payload(
+        report_dir=report_dir,
+        summary=payload,
+        artifacts={
+            "snapshot_json": snapshot_path,
+            "latest_json": report_dir / "latest.json",
+            "latest_markdown": report_dir / "latest.md",
+            "latest_status_json": status_path,
+            "latest_status_history_json": status_history_path,
+            "latest_action_outbox_json": action_outbox_path,
+            "latest_action_outbox_history_json": action_outbox_history_path,
+            "latest_safety_invariants_json": safety_invariants_path,
+            "latest_safety_invariants_history_json": safety_invariants_history_path,
+        },
+    )
+    artifact_manifest_history_payload = _watch_artifact_manifest_history_payload(
+        report_dir=report_dir,
+        current_manifest=artifact_manifest_payload,
+        previous_history=_read_json(artifact_manifest_history_path),
+    )
+    safety_coverage_payload = _watch_safety_coverage_payload(
+        report_dir=report_dir,
+        summary=payload,
+        generated_payloads={
+            "snapshot_json": payload,
+            "latest_json": payload,
+            "latest_status_json": status_payload,
+            "latest_status_history_json": status_history_payload,
+            "latest_action_outbox_json": action_outbox_payload,
+            "latest_action_outbox_history_json": action_outbox_history_payload,
+            "latest_safety_invariants_json": safety_invariants_payload,
+            "latest_safety_invariants_history_json": safety_invariants_history_payload,
+            "latest_artifact_manifest_json": artifact_manifest_payload,
+            "latest_artifact_manifest_history_json": artifact_manifest_history_payload,
+        },
+        safety_invariants=safety_invariants_payload,
+        artifact_manifest=artifact_manifest_payload,
+        artifact_manifest_history=artifact_manifest_history_payload,
+    )
+    safety_coverage_history_payload = _watch_safety_coverage_history_payload(
+        report_dir=report_dir,
+        current_coverage=safety_coverage_payload,
+        previous_history=_read_json(safety_coverage_history_path),
+    )
+    _write_json(artifact_manifest_path, artifact_manifest_payload)
+    _write_json(artifact_manifest_history_path, artifact_manifest_history_payload)
+    _write_json(safety_coverage_path, safety_coverage_payload)
+    _write_json(safety_coverage_history_path, safety_coverage_history_payload)
+    report_index_payload = _watch_report_index_payload(
+        report_dir=report_dir,
+        summary=payload,
+        reports={
+            "snapshot_json": snapshot_path,
+            "latest_json": report_dir / "latest.json",
+            "latest_markdown": report_dir / "latest.md",
+            "latest_status_json": status_path,
+            "latest_status_history_json": status_history_path,
+            "latest_action_outbox_json": action_outbox_path,
+            "latest_action_outbox_history_json": action_outbox_history_path,
+            "latest_artifact_manifest_json": artifact_manifest_path,
+            "latest_artifact_manifest_history_json": artifact_manifest_history_path,
+            "latest_safety_invariants_json": safety_invariants_path,
+            "latest_safety_invariants_history_json": safety_invariants_history_path,
+            "latest_safety_coverage_json": safety_coverage_path,
+            "latest_safety_coverage_history_json": safety_coverage_history_path,
+        },
+        report_payloads={
+            "snapshot_json": payload,
+            "latest_json": payload,
+            "latest_status_json": status_payload,
+            "latest_status_history_json": status_history_payload,
+            "latest_action_outbox_json": action_outbox_payload,
+            "latest_action_outbox_history_json": action_outbox_history_payload,
+            "latest_artifact_manifest_json": artifact_manifest_payload,
+            "latest_artifact_manifest_history_json": artifact_manifest_history_payload,
+            "latest_safety_invariants_json": safety_invariants_payload,
+            "latest_safety_invariants_history_json": safety_invariants_history_payload,
+            "latest_safety_coverage_json": safety_coverage_payload,
+            "latest_safety_coverage_history_json": safety_coverage_history_payload,
+        },
+    )
+    _write_json(report_index_path, report_index_payload)
+    report_index_history_payload = _watch_report_index_history_payload(
+        report_dir=report_dir,
+        current_index=report_index_payload,
+        previous_history=_read_json(report_index_history_path),
+    )
+    _write_json(report_index_history_path, report_index_history_payload)
+    operations_health_payload = _watch_operations_health_payload(
+        report_dir=report_dir,
+        summary=payload,
+        status_payload=status_payload,
+        status_history=status_history_payload,
+        action_outbox=action_outbox_payload,
+        artifact_manifest=artifact_manifest_payload,
+        artifact_manifest_history=artifact_manifest_history_payload,
+        safety_invariants=safety_invariants_payload,
+        safety_invariants_history=safety_invariants_history_payload,
+        safety_coverage=safety_coverage_payload,
+        safety_coverage_history=safety_coverage_history_payload,
+        report_index=report_index_payload,
+        report_index_history=report_index_history_payload,
+    )
+    _write_json(operations_health_path, operations_health_payload)
+    operations_health_history_payload = _watch_operations_health_history_payload(
+        report_dir=report_dir,
+        current_health=operations_health_payload,
+        previous_history=_read_json(operations_health_history_path),
+    )
+    _write_json(operations_health_history_path, operations_health_history_payload)
+    launch_gate_checklist_payload = _watch_launch_gate_checklist_payload(
+        report_dir=report_dir,
+        summary=payload,
+        status_payload=status_payload,
+        action_outbox=action_outbox_payload,
+        operations_health=operations_health_payload,
+        operations_health_history=operations_health_history_payload,
+    )
+    _write_json(launch_gate_checklist_path, launch_gate_checklist_payload)
+    launch_gate_checklist_history_payload = _watch_launch_gate_checklist_history_payload(
+        report_dir=report_dir,
+        current_checklist=launch_gate_checklist_payload,
+        previous_history=_read_json(launch_gate_checklist_history_path),
+    )
+    _write_json(launch_gate_checklist_history_path, launch_gate_checklist_history_payload)
+    return payload
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -279,8 +3740,35 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
     runtime_progress = dict(payload.get("runtime_progress") or {})
     target_observation_status = dict(payload.get("target_observation_status") or {})
     continuity = dict(payload.get("watch_continuity") or {})
+    heartbeat_sla = dict(payload.get("heartbeat_sla_diagnostics") or {})
+    heartbeat_sla_history = dict(payload.get("heartbeat_sla_history") or {})
+    heartbeat_sla_response = dict(payload.get("heartbeat_sla_response_plan") or {})
+    notification_decision = dict(
+        payload.get("launch_shadow_watch_notification_decision")
+        or payload.get("notification_decision")
+        or {}
+    )
+    notification_delivery = dict(
+        payload.get("notification_delivery_plan")
+        or payload.get("launch_shadow_watch_notification_delivery_plan")
+        or {}
+    )
+    notification_history = dict(
+        payload.get("notification_delivery_history")
+        or payload.get("launch_shadow_watch_notification_delivery_history")
+        or {}
+    )
     signal_monitor_alignment = dict(payload.get("signal_monitor_cadence_alignment") or {})
     signal_monitor = dict(payload.get("signal_monitor") or {})
+    btcusdc_lane = dict(payload.get("btcusdc_parallel_shadow_lane") or {})
+    btcusdc_fee_model = dict(btcusdc_lane.get("fee_model") or {})
+    btcusdc_quote = dict(btcusdc_lane.get("candidate_quote_progress") or {})
+    btcusdc_gates = dict(btcusdc_lane.get("candidate_gates") or {})
+    btcusdc_canary = dict(btcusdc_lane.get("candidate_canary_risk_caps") or {})
+    btcusdc_coverage = dict(btcusdc_lane.get("candidate_quote_coverage_plan") or {})
+    btcusdc_runbook = dict(btcusdc_lane.get("candidate_quote_capture_runbook") or {})
+    btcusdc_pre_run_wait = dict(payload.get("btcusdc_parallel_pre_run_quote_window_wait_plan") or {})
+    btcusdc_safety = dict(btcusdc_lane.get("safety") or {})
     risk_caps = dict(payload.get("canary_risk_caps_config") or {})
     operator_handoff = dict(payload.get("operator_handoff") or {})
     operator_packet = dict(operator_handoff.get("paper_apply_operator_packet") or {})
@@ -293,6 +3781,9 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
     eta_all_events = dict(eta_scenarios.get("all_creditable_events") or {})
     eta_add_only = dict(eta_scenarios.get("conservative_add_only") or {})
     recent_parity_review = dict(payload.get("recent_paper_apply_parity_review") or {})
+    paper_lifecycle_diagnostics = dict(payload.get("paper_lifecycle_row_diagnostics") or {})
+    execution_parity_ledger = dict(payload.get("execution_parity_evidence_ledger") or {})
+    latest_parity_event = dict(execution_parity_ledger.get("latest_credit_event") or {})
     promotion_gate = dict(payload.get("meta_router_promotion_gate") or {})
     promotion_readiness = dict(promotion_gate.get("readiness") or {})
     promotion_candidate = dict(promotion_gate.get("candidate") or {})
@@ -505,6 +3996,23 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         "",
         f"- status: `{payload.get('status')}`",
         f"- no_live_order_sent: `{payload.get('no_live_order_sent')}`",
+        f"- watch_status_path: `{payload.get('watch_status_path')}`",
+        f"- watch_status_history_path: `{payload.get('watch_status_history_path')}`",
+        f"- watch_action_outbox_path: `{payload.get('watch_action_outbox_path')}`",
+        f"- watch_action_outbox_history_path: `{payload.get('watch_action_outbox_history_path')}`",
+        f"- watch_artifact_manifest_path: `{payload.get('watch_artifact_manifest_path')}`",
+        f"- watch_artifact_manifest_history_path: `{payload.get('watch_artifact_manifest_history_path')}`",
+        f"- watch_safety_invariants_path: `{payload.get('watch_safety_invariants_path')}`",
+        f"- watch_safety_invariants_history_path: `{payload.get('watch_safety_invariants_history_path')}`",
+        f"- watch_safety_coverage_path: `{payload.get('watch_safety_coverage_path')}`",
+        f"- watch_safety_coverage_history_path: `{payload.get('watch_safety_coverage_history_path')}`",
+        f"- watch_report_index_path: `{payload.get('watch_report_index_path')}`",
+        f"- watch_report_index_history_path: `{payload.get('watch_report_index_history_path')}`",
+        f"- watch_operations_health_path: `{payload.get('watch_operations_health_path')}`",
+        f"- watch_operations_health_history_path: `{payload.get('watch_operations_health_history_path')}`",
+        f"- watch_launch_gate_checklist_path: `{payload.get('watch_launch_gate_checklist_path')}`",
+        f"- watch_launch_gate_checklist_history_path: `{payload.get('watch_launch_gate_checklist_history_path')}`",
+        f"- watch_snapshot_path: `{payload.get('watch_snapshot_path')}`",
         f"- target_hours: `{payload.get('target_hours')}`",
         f"- target_observation_runtime_reached: `{target_observation_status.get('runtime_target_reached')}`",
         f"- target_observation_reason: `{target_observation_status.get('reason')}`",
@@ -516,6 +4024,40 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- runtime_continuous_started_at: `{dict(payload.get('runtime_observation') or {}).get('continuous_started_at')}`",
         f"- watch_continuity_status: `{continuity.get('status')}`",
         f"- watch_continuity_warning: `{continuity.get('warning')}`",
+        f"- heartbeat_sla_status: `{heartbeat_sla.get('status')}`",
+        f"- heartbeat_sla_actual_gap_minutes: `{heartbeat_sla.get('actual_gap_minutes')}`",
+        f"- heartbeat_sla_monitor_interval_seconds: `{heartbeat_sla.get('monitor_interval_seconds')}`",
+        f"- heartbeat_sla_fresh_signal_window_minutes: `{heartbeat_sla.get('fresh_signal_window_minutes')}`",
+        f"- heartbeat_sla_within_monitor_interval: `{heartbeat_sla.get('within_monitor_interval')}`",
+        f"- heartbeat_sla_within_fresh_signal_window: `{heartbeat_sla.get('within_fresh_signal_window')}`",
+        f"- heartbeat_sla_missed_monitor_count_estimate: `{heartbeat_sla.get('missed_monitor_count_estimate')}`",
+        f"- heartbeat_sla_fresh_signal_window_risk: `{heartbeat_sla.get('fresh_signal_window_risk')}`",
+        f"- heartbeat_sla_safe_next_action: `{heartbeat_sla.get('safe_next_action')}`",
+        f"- heartbeat_sla_history_status: `{heartbeat_sla_history.get('status')}`",
+        f"- heartbeat_sla_history_entry_count: `{heartbeat_sla_history.get('entry_count')}`",
+        f"- heartbeat_sla_history_late_count: `{heartbeat_sla_history.get('late_count')}`",
+        f"- heartbeat_sla_history_fresh_window_miss_count: `{heartbeat_sla_history.get('fresh_signal_window_miss_count')}`",
+        f"- heartbeat_sla_history_consecutive_late_count: `{heartbeat_sla_history.get('consecutive_late_count')}`",
+        f"- heartbeat_sla_history_max_gap_minutes: `{heartbeat_sla_history.get('max_gap_minutes')}`",
+        f"- heartbeat_sla_history_safe_next_action: `{heartbeat_sla_history.get('safe_next_action')}`",
+        f"- heartbeat_sla_response_status: `{heartbeat_sla_response.get('status')}`",
+        f"- heartbeat_sla_response_severity: `{heartbeat_sla_response.get('severity')}`",
+        f"- heartbeat_sla_response_operator_notify: `{heartbeat_sla_response.get('operator_notify')}`",
+        f"- heartbeat_sla_response_paper_apply_blocked_by_sla: `{heartbeat_sla_response.get('paper_apply_blocked_by_sla')}`",
+        f"- heartbeat_sla_response_primary_next_action: `{heartbeat_sla_response.get('primary_next_action')}`",
+        f"- notification_decision: `{notification_decision.get('decision')}`",
+        f"- notification_status: `{notification_decision.get('status')}`",
+        f"- notification_priority: `{notification_decision.get('priority')}`",
+        f"- notification_message: `{notification_decision.get('message')}`",
+        f"- notification_delivery_decision: `{notification_delivery.get('delivery_decision')}`",
+        f"- notification_delivery_status: `{notification_delivery.get('status')}`",
+        f"- notification_delivery_duplicate_suppressed: `{notification_delivery.get('duplicate_notification_suppressed')}`",
+        f"- notification_delivery_last_notified_at: `{notification_delivery.get('last_notified_at')}`",
+        f"- notification_history_status: `{notification_history.get('status')}`",
+        f"- notification_history_entry_count: `{notification_history.get('entry_count')}`",
+        f"- notification_history_notify_count: `{notification_history.get('notify_count')}`",
+        f"- notification_history_duplicate_suppressed_count: `{notification_history.get('duplicate_suppressed_count')}`",
+        f"- notification_history_last_notified_at: `{notification_history.get('last_notified_at')}`",
         f"- signal_monitor_cadence_alignment_status: `{signal_monitor_alignment.get('status')}`",
         f"- signal_monitor_cadence_alignment_warning: `{signal_monitor_alignment.get('warning')}`",
         f"- signal_monitor_cadence_gap_minutes: `{signal_monitor_alignment.get('gap_minutes')}`",
@@ -591,6 +4133,57 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- launch_shadow_watch_brief_signal_monitor_capped: `{brief_signal_monitor.get('capped_to_fresh_signal_window')}`",
         f"- launch_shadow_watch_brief_signal_monitor_next_utc: `{brief_signal_monitor.get('next_monitor_after_utc')}`",
         f"- launch_shadow_watch_brief_signal_monitor_next_kst: `{brief_signal_monitor.get('next_monitor_after_kst')}`",
+        f"- btcusdc_parallel_shadow_status: `{btcusdc_lane.get('status')}`",
+        f"- btcusdc_parallel_candidate_readiness_status: `{btcusdc_lane.get('candidate_readiness_status')}`",
+        f"- btcusdc_parallel_candidate_symbol: `{btcusdc_lane.get('candidate_symbol')}`",
+        f"- btcusdc_parallel_candidate_evidence_report: `{btcusdc_lane.get('candidate_evidence_report')}`",
+        f"- btcusdc_parallel_candidate_sample_jsonl: `{btcusdc_lane.get('candidate_sample_jsonl')}`",
+        f"- btcusdc_parallel_canary_risk_caps_status: `{btcusdc_canary.get('status')}`",
+        f"- btcusdc_parallel_canary_risk_caps_path: `{btcusdc_canary.get('path')}`",
+        f"- btcusdc_parallel_canary_required_scope_symbol: `{btcusdc_canary.get('required_scope_symbol')}`",
+        f"- btcusdc_parallel_canary_configured_scope_symbol: `{btcusdc_canary.get('configured_scope_symbol')}`",
+        f"- btcusdc_parallel_canary_risk_caps_errors: `{btcusdc_canary.get('errors')}`",
+        f"- btcusdc_parallel_maker_fee_bps: `{btcusdc_fee_model.get('maker_fee_bps')}`",
+        f"- btcusdc_parallel_requires_post_only: `{btcusdc_fee_model.get('requires_post_only_or_maker_only_reject')}`",
+        f"- btcusdc_parallel_fee_recheck_before_live: `{btcusdc_fee_model.get('fee_model_is_promotional_and_must_be_rechecked_before_live')}`",
+        f"- btcusdc_parallel_quote_observed: `{btcusdc_quote.get('observed')}`",
+        f"- btcusdc_parallel_quote_distinct_hours: `{btcusdc_quote.get('distinct_hours')}`",
+        f"- btcusdc_parallel_captured_quote_rows_this_cycle: `{btcusdc_quote.get('captured_quote_rows_this_cycle')}`",
+        f"- btcusdc_parallel_quote_coverage_status: `{btcusdc_coverage.get('status')}`",
+        f"- btcusdc_parallel_quote_remaining_samples: `{btcusdc_coverage.get('remaining_quote_samples')}`",
+        f"- btcusdc_parallel_quote_remaining_calendar_days: `{btcusdc_coverage.get('remaining_calendar_days')}`",
+        f"- btcusdc_parallel_quote_remaining_distinct_hours: `{btcusdc_coverage.get('remaining_distinct_hours')}`",
+        f"- btcusdc_parallel_quote_next_coverage_kind: `{btcusdc_coverage.get('next_quote_coverage_kind')}`",
+        f"- btcusdc_parallel_quote_next_coverage_kst_at: `{btcusdc_coverage.get('next_quote_coverage_kst_at')}`",
+        f"- btcusdc_parallel_quote_standard_capture_window_open: `{btcusdc_coverage.get('standard_capture_window_open')}`",
+        f"- btcusdc_parallel_quote_standard_capture_would_skip_duplicate_window: `{btcusdc_coverage.get('standard_capture_would_skip_duplicate_window')}`",
+        f"- btcusdc_parallel_quote_force_sample_available: `{btcusdc_coverage.get('force_quote_sample_available')}`",
+        f"- btcusdc_parallel_quote_force_sample_policy: `{btcusdc_coverage.get('force_quote_sample_policy')}`",
+        f"- btcusdc_parallel_quote_can_collect_now: `{btcusdc_coverage.get('can_collect_now')}`",
+        f"- btcusdc_parallel_quote_recommended_action: `{btcusdc_coverage.get('recommended_action')}`",
+        f"- btcusdc_parallel_quote_capture_runbook_status: `{btcusdc_runbook.get('status')}`",
+        f"- btcusdc_parallel_quote_capture_next_standard_kst_at: `{btcusdc_runbook.get('next_standard_capture_kst_at')}`",
+        f"- btcusdc_parallel_quote_capture_expected_rows: `{btcusdc_runbook.get('expected_rows_per_successful_capture')}`",
+        f"- btcusdc_parallel_quote_capture_expected_observed_after_success: `{btcusdc_runbook.get('expected_quote_observed_after_successful_capture')}`",
+        f"- btcusdc_parallel_quote_capture_expected_remaining_after_success: `{btcusdc_runbook.get('expected_remaining_samples_after_successful_capture')}`",
+        f"- btcusdc_parallel_quote_capture_expected_distinct_hours_after_success: `{btcusdc_runbook.get('expected_distinct_hours_after_successful_capture')}`",
+        f"- btcusdc_parallel_quote_capture_command_refreshes_market_data: `{btcusdc_runbook.get('command_includes_market_data_refresh')}`",
+        f"- btcusdc_parallel_pre_run_wait_status: `{btcusdc_pre_run_wait.get('status')}`",
+        f"- btcusdc_parallel_pre_run_wait_should_sleep: `{btcusdc_pre_run_wait.get('should_sleep')}`",
+        f"- btcusdc_parallel_pre_run_wait_seconds: `{btcusdc_pre_run_wait.get('wait_seconds')}`",
+        f"- btcusdc_parallel_pre_run_wait_next_kst_at: `{btcusdc_pre_run_wait.get('next_quote_coverage_kst_at')}`",
+        f"- btcusdc_parallel_pre_run_wait_selected_sleep_scope: `{btcusdc_pre_run_wait.get('selected_sleep_scope')}`",
+        f"- btcusdc_parallel_pre_run_wait_actual_sleep_seconds: `{btcusdc_pre_run_wait.get('actual_sleep_seconds')}`",
+        f"- btcusdc_parallel_pre_run_wait_target_window_missed: `{btcusdc_pre_run_wait.get('target_window_missed')}`",
+        f"- btcusdc_parallel_launch_status: `{btcusdc_gates.get('launch_status')}`",
+        f"- btcusdc_parallel_next_blocker: `{btcusdc_gates.get('next_blocker')}`",
+        f"- btcusdc_parallel_execution_parity_samples: `{btcusdc_gates.get('execution_parity_sample_count')}/{btcusdc_gates.get('execution_parity_required_samples')}`",
+        f"- btcusdc_parallel_execution_parity_missing: `{btcusdc_gates.get('execution_parity_missing_samples')}`",
+        f"- btcusdc_parallel_execution_parity_contract_symbol: `{btcusdc_gates.get('execution_parity_contract_symbol')}`",
+        f"- btcusdc_parallel_candidate_symbol_contract_mismatch: `{btcusdc_gates.get('candidate_symbol_contract_mismatch')}`",
+        f"- btcusdc_parallel_launch_gate_effect: `{btcusdc_lane.get('launch_gate_effect')}`",
+        f"- btcusdc_parallel_order_submission_allowed: `{btcusdc_safety.get('order_submission_allowed')}`",
+        f"- btcusdc_parallel_no_live_order_sent: `{btcusdc_lane.get('no_live_order_sent')}`",
         f"- launch_shadow_watch_brief_dependency_aware_status: `{brief_actionability.get('dependency_aware_status')}`",
         f"- launch_shadow_watch_brief_operator_next_status: `{brief_operator_next.get('status')}`",
         f"- launch_shadow_watch_brief_operator_primary_next: `{brief_operator_next.get('primary_next')}`",
@@ -916,6 +4509,20 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- recent_paper_apply_parity_review_blockers: `{recent_parity_review.get('blockers')}`",
         f"- recent_paper_apply_parity_review_next_actions: `{recent_parity_review.get('next_actions')}`",
         f"- recent_paper_apply_parity_review_recommended_command: `{recent_parity_review.get('recommended_command')}`",
+        f"- paper_lifecycle_diagnostics_status: `{paper_lifecycle_diagnostics.get('status')}`",
+        f"- paper_lifecycle_diagnostics_missing_stage: `{paper_lifecycle_diagnostics.get('missing_stage')}`",
+        f"- paper_lifecycle_diagnostics_blockers: `{paper_lifecycle_diagnostics.get('blockers')}`",
+        f"- paper_lifecycle_diagnostics_rows_available: `{paper_lifecycle_diagnostics.get('rows_available')}`",
+        f"- paper_lifecycle_diagnostics_actual_rows: `{paper_lifecycle_diagnostics.get('actual_paper_lifecycle_rows')}`",
+        f"- paper_lifecycle_diagnostics_latest_paper_fill_rows: `{paper_lifecycle_diagnostics.get('latest_paper_fill_rows')}`",
+        f"- paper_lifecycle_diagnostics_eligible_journal_rows: `{paper_lifecycle_diagnostics.get('eligible_journal_rows')}`",
+        f"- paper_lifecycle_diagnostics_safe_next_action: `{paper_lifecycle_diagnostics.get('safe_next_action')}`",
+        f"- execution_parity_ledger_status: `{execution_parity_ledger.get('status')}`",
+        f"- execution_parity_ledger_entry_count: `{execution_parity_ledger.get('entry_count')}`",
+        f"- execution_parity_ledger_progress_pct: `{execution_parity_ledger.get('progress_pct')}`",
+        f"- execution_parity_ledger_latest_event_type: `{latest_parity_event.get('event_type')}`",
+        f"- execution_parity_ledger_latest_credit_status: `{latest_parity_event.get('credit_status')}`",
+        f"- execution_parity_ledger_safe_next_action: `{execution_parity_ledger.get('safe_next_action')}`",
         f"- safe_next_action_status: `{safe_next_action.get('status')}`",
         f"- safe_next_action_type: `{primary_action.get('action_type')}`",
         f"- safe_next_action_can_run_now: `{primary_action.get('can_run_now')}`",
@@ -1848,6 +5455,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--canary-max-daily-loss-usdt", type=float, default=0.0)
     parser.add_argument("--canary-risk-caps-json", default=DEFAULT_CANARY_RISK_CAPS_PATH)
     parser.add_argument("--microstructure-recent-hours", type=float, default=24.0)
+    parser.add_argument(
+        "--disable-btcusdc-parallel-shadow-lane",
+        dest="enable_btcusdc_parallel_shadow_lane",
+        action="store_false",
+        default=True,
+        help="Disable the informational BTCUSDC no-live parallel shadow lane.",
+    )
+    parser.add_argument("--btcusdc-parallel-symbol", default=DEFAULT_BTCUSDC_PARALLEL_SYMBOL)
+    parser.add_argument("--btcusdc-parallel-sample-jsonl", default=DEFAULT_BTCUSDC_PARALLEL_SAMPLE_PATH)
+    parser.add_argument(
+        "--btcusdc-parallel-canary-risk-caps-json",
+        default=DEFAULT_BTCUSDC_PARALLEL_CANARY_RISK_CAPS_PATH,
+    )
+    parser.add_argument(
+        "--sleep-until-next-btcusdc-parallel-quote-window",
+        action="store_true",
+        help="When the BTCUSDC informational lane is enabled, wait until its next standard quote window.",
+    )
     parser.add_argument("--quiet", action="store_true")
     return parser.parse_args()
 
@@ -1860,18 +5485,37 @@ def _run_once(
     observed_hours: float,
     refresh_market_data_before_run: bool = True,
     force_quote_sample: bool = False,
+    symbol: str | None = None,
+    sample_jsonl: Path | None = None,
+    evidence_label: str | None = None,
+    canary_risk_caps_json: str | None = None,
 ) -> dict[str, Any]:
     evidence_root = _resolve(args.evidence_report_root)
-    evidence_dir = evidence_root / f"market_state_rotation_v6_launch_shadow_watch_{generated_at:%Y%m%d_%H%M%S}_i{iteration:03d}"
+    normalized_symbol = str(symbol or EXPECTED_SYMBOL).upper()
+    normalized_label = "".join(
+        char if char.isalnum() or char in {"-", "_"} else "_"
+        for char in str(evidence_label or "").strip()
+    )
+    evidence_stem = f"market_state_rotation_v6_launch_shadow_watch_{generated_at:%Y%m%d_%H%M%S}"
+    if normalized_label:
+        evidence_stem = f"{evidence_stem}_{normalized_label}"
+    evidence_dir = evidence_root / f"{evidence_stem}_i{iteration:03d}"
     manual_path = _resolve(args.manual_safety_evidence) if args.manual_safety_evidence else None
     effective_force_quote_sample = bool(args.force_quote_sample) or bool(force_quote_sample)
+    sample_jsonl_path = sample_jsonl if sample_jsonl is not None else _resolve(args.sample_jsonl)
+    effective_canary_caps_json = (
+        str(canary_risk_caps_json)
+        if canary_risk_caps_json is not None
+        else str(getattr(args, "canary_risk_caps_json", "") or "")
+    )
     report = run_evidence_cycle(
         source_backtest_report_path=_resolve(args.source_backtest_report),
         stress_report_path=_resolve(args.stress_report),
         walk_forward_report_path=_resolve(args.walk_forward_report),
         manual_evidence_path=manual_path,
-        sample_jsonl=_resolve(args.sample_jsonl),
+        sample_jsonl=sample_jsonl_path,
         report_dir=evidence_dir,
+        symbol=normalized_symbol,
         quote_samples_per_tick=max(0, int(args.quote_samples_per_tick)),
         adaptive_quote_cadence=not bool(args.disable_adaptive_quote_cadence),
         force_quote_sample=effective_force_quote_sample,
@@ -1889,13 +5533,15 @@ def _run_once(
         canary_max_notional_usdt=max(0.0, float(args.canary_max_notional_usdt)),
         canary_max_leverage=max(0.0, float(args.canary_max_leverage)),
         canary_max_daily_loss_usdt=max(0.0, float(args.canary_max_daily_loss_usdt)),
-        canary_risk_caps_path=_resolve(args.canary_risk_caps_json) if args.canary_risk_caps_json else None,
+        canary_risk_caps_path=_resolve(effective_canary_caps_json) if effective_canary_caps_json else None,
         shadow_runtime_observed_hours=max(0.0, float(observed_hours or 0.0)),
         shadow_runtime_required_hours=max(0.0, float(args.target_hours or 0.0)),
     )
     return {
         "iteration": iteration,
         "generated_at": generated_at.isoformat(),
+        "symbol": normalized_symbol,
+        "sample_jsonl": _display_path(sample_jsonl_path),
         "shadow_runtime_observed_hours": round(max(0.0, float(observed_hours or 0.0)), 4),
         "shadow_runtime_required_hours": max(0.0, float(args.target_hours or 0.0)),
         "evidence_report_dir": _display_path(evidence_dir),
@@ -1918,6 +5564,306 @@ def _run_once(
         "launch_safety_controls": dict(report.get("launch_safety_controls") or {}),
         "historical_gate_substitution": dict(report.get("historical_gate_substitution") or {}),
         "canary_risk_caps_config": dict(report.get("canary_risk_caps_config") or {}),
+    }
+
+
+def _parallel_btcusdc_shadow_enabled(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "enable_btcusdc_parallel_shadow_lane", False))
+
+
+def _parallel_btcusdc_sample_path(args: argparse.Namespace) -> Path:
+    configured = str(getattr(args, "btcusdc_parallel_sample_jsonl", "") or "").strip()
+    return _resolve(configured or DEFAULT_BTCUSDC_PARALLEL_SAMPLE_PATH)
+
+
+def _parallel_btcusdc_symbol(args: argparse.Namespace) -> str:
+    return str(getattr(args, "btcusdc_parallel_symbol", "") or DEFAULT_BTCUSDC_PARALLEL_SYMBOL).upper()
+
+
+def _parallel_btcusdc_canary_risk_caps_json(args: argparse.Namespace) -> str:
+    return str(
+        getattr(
+            args,
+            "btcusdc_parallel_canary_risk_caps_json",
+            DEFAULT_BTCUSDC_PARALLEL_CANARY_RISK_CAPS_PATH,
+        )
+        or ""
+    )
+
+
+def _parallel_btcusdc_quote_capture_command(args: argparse.Namespace, *, report_dir: str) -> str:
+    symbol = _parallel_btcusdc_symbol(args)
+    sample_path = _display_path(_parallel_btcusdc_sample_path(args))
+    caps_path = _parallel_btcusdc_canary_risk_caps_json(args)
+    parts = [
+        ".venv/bin/python",
+        "scripts/run_market_state_rotation_v6_evidence_cycle.py",
+        "--symbol",
+        symbol,
+        "--sample-jsonl",
+        sample_path,
+        "--quote-samples-per-tick",
+        str(max(1, int(getattr(args, "quote_samples_per_tick", 2) or 2))),
+        "--refresh-market-data-before-run",
+        "--historical-evidence-replay",
+        "--historical-lifecycle-replay",
+        "--report-dir",
+        report_dir,
+    ]
+    if caps_path:
+        parts.extend(["--canary-risk-caps-json", caps_path])
+    return " ".join(shlex.quote(part) for part in parts)
+
+
+def _btc_usdc_parallel_shadow_lane_summary(
+    *,
+    primary_run: dict[str, Any] | None,
+    candidate_run: dict[str, Any] | None,
+    candidate_microstructure_watch: dict[str, Any] | None = None,
+    enabled: bool,
+) -> dict[str, Any]:
+    primary = dict(primary_run or {})
+    candidate = dict(candidate_run or {})
+    candidate_collection = dict(candidate.get("collection_progress") or {})
+    primary_collection = dict(primary.get("collection_progress") or {})
+    candidate_launch = dict(candidate.get("launch_readiness") or {})
+    candidate_parity = dict(candidate.get("execution_parity_journal") or {})
+    candidate_parity_plan = dict(candidate_parity.get("collection_plan") or {})
+    candidate_contract = dict(candidate_parity.get("contract_report") or {})
+    candidate_contract_summary = dict(
+        candidate_contract.get("summary")
+        or candidate_contract.get("contract_summary")
+        or candidate_parity.get("contract_summary")
+        or {}
+    )
+    candidate_canary_caps = dict(candidate.get("canary_risk_caps_config") or {})
+    candidate_canary_safeguards = dict(candidate_canary_caps.get("safeguards") or {})
+    candidate_canary_required = dict(candidate_canary_caps.get("required_safeguards") or {})
+    candidate_micro = dict(candidate_microstructure_watch or {})
+    candidate_coverage_plan = dict(candidate_micro.get("coverage_plan") or {})
+    candidate_bridge_gate = dict(candidate.get("paper_bridge_apply_gate") or {})
+    candidate_preflight = dict(candidate.get("quote_cadence_preflight") or {})
+    candidate_symbol = str(candidate.get("symbol") or DEFAULT_BTCUSDC_PARALLEL_SYMBOL).upper()
+    contract_symbol = str(candidate_contract_summary.get("symbol") or "").upper()
+    candidate_symbol_contract_mismatch = contract_symbol not in {"", candidate_symbol}
+    candidate_quote_capture_command = str(candidate_coverage_plan.get("quote_capture_command") or "")
+    requested_quote_samples_per_tick = _int_or_default(
+        candidate_preflight.get("requested_quote_samples_per_tick"),
+        0,
+    )
+    if requested_quote_samples_per_tick <= 0 and candidate_quote_capture_command:
+        try:
+            command_parts = shlex.split(candidate_quote_capture_command)
+            quote_tick_arg = command_parts.index("--quote-samples-per-tick")
+            requested_quote_samples_per_tick = _int_or_default(
+                command_parts[quote_tick_arg + 1],
+                0,
+            )
+        except (ValueError, IndexError):
+            requested_quote_samples_per_tick = 0
+    expected_rows_per_successful_capture = max(requested_quote_samples_per_tick, 0) * 2
+    candidate_observed = _int_or_default(candidate_collection.get("quote_observed"), 0)
+    candidate_missing = _int_or_default(candidate_collection.get("quote_missing_samples"), 0)
+    candidate_distinct_hours = _int_or_default(candidate_collection.get("quote_distinct_hours"), 0)
+    candidate_missing_distinct_hours = max(
+        _int_or_default(candidate_coverage_plan.get("remaining_distinct_hours"), 0),
+        0,
+    )
+    next_kind = str(candidate_coverage_plan.get("next_quote_coverage_kind") or "")
+    next_success_advances_distinct_hour = next_kind in {
+        "missing_utc_hour_bucket",
+        "missing_hour_of_day_balance_bucket",
+    }
+    expected_distinct_hour_delta = 1 if next_success_advances_distinct_hour and candidate_missing_distinct_hours > 0 else 0
+    quote_capture_runbook_status = (
+        "coverage_complete"
+        if candidate_coverage_plan.get("status") == "coverage_complete"
+        else "capture_current_standard_window_now"
+        if candidate_coverage_plan.get("standard_capture_window_open") is True
+        else "wait_for_next_standard_capture_window"
+        if candidate_coverage_plan.get("next_quote_coverage_at")
+        else "quote_capture_window_unknown"
+    )
+    status = (
+        "parallel_btcusdc_shadow_lane_collecting"
+        if enabled and candidate
+        else "parallel_btcusdc_shadow_lane_enabled_no_run"
+        if enabled
+        else "parallel_btcusdc_shadow_lane_disabled"
+    )
+    return {
+        "schema_version": "market_state_rotation_v6_btcusdc_parallel_shadow_lane_v1",
+        "status": status,
+        "purpose": "evaluate_fee_optimized_btcusdc_maker_only_candidate_without_launch_promotion",
+        "launch_gate_effect": "informational_only_does_not_unlock_btcusdt_launch_or_live_trading",
+        "primary_symbol": str(primary.get("symbol") or EXPECTED_SYMBOL).upper() if primary else EXPECTED_SYMBOL,
+        "candidate_symbol": candidate_symbol if candidate else DEFAULT_BTCUSDC_PARALLEL_SYMBOL,
+        "candidate_readiness_status": (
+            "quote_shadow_collecting_contract_scope_still_btcusdt"
+            if candidate_symbol_contract_mismatch
+            else "quote_shadow_collecting_candidate_scope_aligned"
+            if candidate
+            else "not_started"
+        ),
+        "candidate_sample_jsonl": candidate.get("sample_jsonl"),
+        "candidate_evidence_report": candidate.get("evidence_report"),
+        "candidate_evidence_report_dir": candidate.get("evidence_report_dir"),
+        "candidate_canary_risk_caps": {
+            "status": candidate_canary_caps.get("status"),
+            "configured": candidate_canary_caps.get("configured"),
+            "path": candidate_canary_caps.get("path"),
+            "path_exists": candidate_canary_caps.get("path_exists"),
+            "required_scope_symbol": candidate_canary_required.get("scope_symbol"),
+            "configured_scope_symbol": candidate_canary_safeguards.get("scope_symbol"),
+            "errors": list(candidate_canary_caps.get("errors") or []),
+            "order_submission_allowed": candidate_canary_caps.get("order_submission_allowed") is True,
+            "no_live_order_sent": candidate_canary_caps.get("no_live_order_sent") is not False,
+        },
+        "candidate_quote_microstructure_watch": candidate_micro,
+        "candidate_quote_coverage_plan": {
+            "status": candidate_coverage_plan.get("status"),
+            "remaining_quote_samples": candidate_coverage_plan.get("remaining_quote_samples"),
+            "remaining_calendar_days": candidate_coverage_plan.get("remaining_calendar_days"),
+            "remaining_distinct_hours": candidate_coverage_plan.get("remaining_distinct_hours"),
+            "remaining_hour_of_day_bucket_count": candidate_coverage_plan.get(
+                "remaining_hour_of_day_bucket_count"
+            ),
+            "current_utc_date_missing": candidate_coverage_plan.get("current_utc_date_missing"),
+            "current_utc_hour_missing": candidate_coverage_plan.get("current_utc_hour_missing"),
+            "sample_count_incomplete": candidate_coverage_plan.get("sample_count_incomplete"),
+            "time_coverage_incomplete": candidate_coverage_plan.get("time_coverage_incomplete"),
+            "standard_capture_window_open": candidate_coverage_plan.get("standard_capture_window_open"),
+            "standard_capture_would_skip_duplicate_window": candidate_coverage_plan.get(
+                "standard_capture_would_skip_duplicate_window"
+            ),
+            "force_quote_sample_available": candidate_coverage_plan.get("force_quote_sample_available"),
+            "force_quote_sample_policy": candidate_coverage_plan.get("force_quote_sample_policy"),
+            "next_quote_coverage_kind": candidate_coverage_plan.get("next_quote_coverage_kind"),
+            "next_quote_coverage_at": candidate_coverage_plan.get("next_quote_coverage_at"),
+            "next_quote_coverage_kst_at": candidate_coverage_plan.get("next_quote_coverage_kst_at"),
+            "next_quote_coverage_wait_minutes": candidate_coverage_plan.get(
+                "next_quote_coverage_wait_minutes"
+            ),
+            "earliest_calendar_completion_kst": candidate_coverage_plan.get(
+                "earliest_calendar_completion_kst"
+            ),
+            "can_collect_now": candidate_coverage_plan.get("can_collect_now"),
+            "recommended_action": candidate_coverage_plan.get("recommended_action"),
+            "quote_capture_command": candidate_coverage_plan.get("quote_capture_command"),
+            "no_live_order_sent": candidate_coverage_plan.get("no_live_order_sent") is not False,
+        },
+        "candidate_quote_capture_runbook": {
+            "status": quote_capture_runbook_status,
+            "standard_capture_window_open": candidate_coverage_plan.get("standard_capture_window_open") is True,
+            "standard_capture_would_skip_duplicate_window": candidate_coverage_plan.get(
+                "standard_capture_would_skip_duplicate_window"
+            )
+            is True,
+            "next_standard_capture_utc_at": candidate_coverage_plan.get("next_quote_coverage_at"),
+            "next_standard_capture_kst_at": candidate_coverage_plan.get("next_quote_coverage_kst_at"),
+            "next_standard_capture_wait_minutes": candidate_coverage_plan.get(
+                "next_quote_coverage_wait_minutes"
+            ),
+            "next_standard_capture_kind": candidate_coverage_plan.get("next_quote_coverage_kind"),
+            "standard_capture_command": candidate_quote_capture_command or None,
+            "command_includes_market_data_refresh": "--refresh-market-data-before-run"
+            in candidate_quote_capture_command,
+            "command_includes_apply_paper_bridge": "--apply-paper-bridge" in candidate_quote_capture_command,
+            "command_includes_live_flag": "--live" in candidate_quote_capture_command,
+            "requested_quote_samples_per_tick": requested_quote_samples_per_tick,
+            "expected_rows_per_successful_capture": expected_rows_per_successful_capture,
+            "expected_quote_observed_after_successful_capture": candidate_observed
+            + expected_rows_per_successful_capture,
+            "expected_remaining_samples_after_successful_capture": max(
+                candidate_missing - expected_rows_per_successful_capture,
+                0,
+            ),
+            "expected_distinct_hour_delta_after_successful_capture": expected_distinct_hour_delta,
+            "expected_distinct_hours_after_successful_capture": candidate_distinct_hours
+            + expected_distinct_hour_delta,
+            "expected_remaining_distinct_hours_after_successful_capture": max(
+                candidate_missing_distinct_hours - expected_distinct_hour_delta,
+                0,
+            ),
+            "force_duplicate_window_policy": candidate_coverage_plan.get("force_quote_sample_policy"),
+            "repeat_policy": (
+                "run_one_standard_capture_after_each_missing_utc_hour_window_until_300_rows_"
+                "24_distinct_hours_and_30_calendar_days_are_observed"
+            ),
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        },
+        "fee_model": {
+            "venue": "binance_usdc_margined_perpetuals",
+            "maker_fee_rate": 0.0,
+            "maker_fee_unit": "fraction",
+            "maker_fee_bps": 0.0,
+            "requires_post_only_or_maker_only_reject": True,
+            "taker_fee_not_zero_assumption": True,
+            "fee_promotion_status": "operator_verified_until_further_notice_2026_03_30_update",
+            "fee_model_is_promotional_and_must_be_rechecked_before_live": True,
+        },
+        "candidate_quote_progress": {
+            "observed": candidate_collection.get("quote_observed"),
+            "required": candidate_collection.get("quote_required"),
+            "missing_samples": candidate_collection.get("quote_missing_samples"),
+            "distinct_hours": candidate_collection.get("quote_distinct_hours"),
+            "calendar_days": candidate_collection.get("quote_calendar_days"),
+            "captured_quote_rows_this_cycle": candidate_collection.get("captured_quote_rows_this_cycle"),
+            "quote_cadence_decision": candidate_preflight.get("decision"),
+            "effective_quote_samples_per_tick": candidate_preflight.get(
+                "effective_quote_samples_per_tick"
+            ),
+        },
+        "primary_quote_progress": {
+            "observed": primary_collection.get("quote_observed"),
+            "required": primary_collection.get("quote_required"),
+            "missing_samples": primary_collection.get("quote_missing_samples"),
+            "distinct_hours": primary_collection.get("quote_distinct_hours"),
+            "calendar_days": primary_collection.get("quote_calendar_days"),
+        },
+        "candidate_gates": {
+            "launch_status": candidate_launch.get("status"),
+            "next_blocker": dict(candidate_launch.get("next_blocker") or {}).get("gate"),
+            "fresh_signal_available": dict(candidate.get("decision_state") or {}).get("fresh_signal") is True,
+            "paper_apply_gate_status": candidate_bridge_gate.get("status"),
+            "execution_parity_status": candidate_parity.get("status"),
+            "execution_parity_sample_count": candidate_parity_plan.get("sample_count")
+            if candidate_parity_plan
+            else candidate_contract_summary.get("sample_count"),
+            "execution_parity_required_samples": candidate_parity_plan.get("required_samples")
+            if candidate_parity_plan
+            else candidate_contract_summary.get("min_sample_count"),
+            "execution_parity_missing_samples": candidate_parity_plan.get("missing_samples"),
+            "execution_parity_contract_symbol": candidate_contract_summary.get("symbol"),
+            "candidate_symbol_contract_mismatch": candidate_symbol_contract_mismatch,
+            "canary_risk_caps_status": candidate_canary_caps.get("status"),
+            "canary_risk_caps_configured": candidate_canary_caps.get("configured"),
+            "canary_risk_caps_path": candidate_canary_caps.get("path"),
+        },
+        "comparison": {
+            "quote_observed_delta_candidate_minus_primary": (
+                int(candidate_collection.get("quote_observed") or 0)
+                - int(primary_collection.get("quote_observed") or 0)
+            )
+            if candidate or primary
+            else None,
+            "candidate_collecting_separate_quote_book": bool(candidate),
+            "candidate_not_used_for_current_launch_readiness": True,
+            "btc_usdt_watch_preserved": True,
+        },
+        "safety": {
+            "shadow_only": True,
+            "paper_apply_allowed": False,
+            "auto_apply_allowed": False,
+            "live_order_submission_allowed": False,
+            "order_submission_allowed": False,
+            "force_signal_allowed": False,
+            "no_live_order_sent": candidate.get("no_live_order_sent") is not False
+            and primary.get("no_live_order_sent") is not False,
+        },
+        "no_live_order_sent": candidate.get("no_live_order_sent") is not False
+        and primary.get("no_live_order_sent") is not False,
     }
 
 
@@ -2038,6 +5984,188 @@ def _watch_progress(runs: list[dict[str, Any]], *, baseline_collection: dict[str
         ),
         "execution_parity_next_step_latest": latest_parity_plan.get("next_step"),
         "execution_parity_non_substitutable_latest": latest_parity_plan.get("non_substitutable") is True,
+    }
+
+
+def _fresh_signal_opportunity_memory(
+    *,
+    progress: dict[str, Any],
+    latest: dict[str, Any],
+    first_fresh_signal_paper_apply_runbook: dict[str, Any],
+    execution_parity_status_summary: dict[str, Any],
+    previous_payload: dict[str, Any] | None,
+    generated_at: datetime,
+) -> dict[str, Any]:
+    progress_state = dict(progress or {})
+    latest_gate = dict(latest.get("paper_bridge_apply_gate") or {})
+    latest_preflight = dict(latest_gate.get("execution_parity_preflight") or {})
+    runbook = dict(first_fresh_signal_paper_apply_runbook or {})
+    parity = dict(execution_parity_status_summary or {})
+    previous = dict(previous_payload or {})
+    previous_memory = dict(previous.get("fresh_signal_opportunity_memory") or {})
+    previous_runbook = dict(previous.get("first_fresh_signal_paper_apply_runbook") or {})
+    previous_fresh = dict(
+        previous.get("fresh_signal_status") or previous.get("fresh_signal") or {}
+    )
+    previous_paper = dict(
+        previous.get("paper_apply_status") or previous.get("paper_apply") or {}
+    )
+    previous_latest = dict(previous.get("latest_run") or {})
+    previous_gate = dict(previous_latest.get("paper_bridge_apply_gate") or {})
+    current_fresh_signal = (
+        progress_state.get("fresh_signal_seen") is True
+        or latest_gate.get("fresh_signal") is True
+        or runbook.get("fresh_signal") is True
+    )
+    current_paper_apply_available = (
+        progress_state.get("paper_apply_available_seen") is True
+        or latest_gate.get("can_request_paper_apply_now") is True
+        or runbook.get("paper_apply_allowed_now") is True
+    )
+
+    def _age_minutes(last_seen_at: Any) -> float | None:
+        parsed = _parse_dt(last_seen_at)
+        if parsed is None:
+            return None
+        age_seconds = max(
+            (generated_at.astimezone(UTC) - parsed.astimezone(UTC)).total_seconds(),
+            0.0,
+        )
+        return round(age_seconds / 60.0, 4)
+
+    if current_fresh_signal:
+        source_event_key = runbook.get("source_event_key") or latest_preflight.get("source_event_key")
+        source_event_ts = runbook.get("source_event_ts") or latest_preflight.get("source_event_ts")
+        status = (
+            "current_fresh_signal_paper_apply_ready"
+            if current_paper_apply_available
+            else "current_fresh_signal_seen_waiting_for_paper_apply_gate"
+        )
+        return {
+            "status": status,
+            "ever_seen": True,
+            "current_window_active": True,
+            "current_fresh_signal": True,
+            "paper_apply_available_now": current_paper_apply_available,
+            "last_seen_at": generated_at.isoformat(),
+            "last_seen_at_kst": generated_at.astimezone(KST).isoformat(),
+            "last_seen_source": "current_watch",
+            "source_event_key": source_event_key,
+            "source_event_ts": source_event_ts,
+            "bridge_action": runbook.get("bridge_action") or latest_gate.get("bridge_action"),
+            "apply_command_allowed_now": runbook.get("apply_command_allowed_now"),
+            "apply_command_when_gate_allows": runbook.get("apply_command_when_gate_allows"),
+            "post_apply_execution_parity_review_command": runbook.get(
+                "post_apply_execution_parity_review_command"
+            ),
+            "execution_parity_missing_samples": parity.get("missing_samples"),
+            "safe_next_action": (
+                "operator_review_current_signal_before_manual_paper_apply"
+                if current_paper_apply_available
+                else "inspect_paper_bridge_apply_gate_without_forcing_entry"
+            ),
+            "stale_signal_apply_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+
+    previous_signal_seen = (
+        previous_memory.get("ever_seen") is True
+        or previous_fresh.get("seen_during_watch") is True
+        or previous_fresh.get("available") is True
+        or previous_runbook.get("fresh_signal") is True
+        or previous_gate.get("fresh_signal") is True
+    )
+    if not previous_signal_seen:
+        return {
+            "status": "no_fresh_signal_seen_yet",
+            "ever_seen": False,
+            "current_window_active": False,
+            "current_fresh_signal": False,
+            "paper_apply_available_now": False,
+            "last_seen_at": None,
+            "last_seen_at_kst": None,
+            "last_seen_source": None,
+            "safe_next_action": "monitor_fresh_signal_without_forcing_entry",
+            "stale_signal_apply_allowed": False,
+            "auto_apply_allowed": False,
+            "force_signal_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+
+    last_seen_at = (
+        previous_memory.get("last_seen_at")
+        or previous_runbook.get("packet_generated_at")
+        or previous.get("completed_at")
+        or previous.get("generated_at")
+    )
+    previous_apply_ready = (
+        previous_memory.get("paper_apply_available_now") is True
+        or previous_paper.get("seen_during_watch") is True
+        or previous_paper.get("allowed_now") is True
+        or previous_runbook.get("paper_apply_allowed_now") is True
+        or previous_gate.get("can_request_paper_apply_now") is True
+    )
+    source_event_key = (
+        previous_memory.get("source_event_key")
+        or previous_runbook.get("source_event_key")
+        or dict(previous_gate.get("execution_parity_preflight") or {}).get("source_event_key")
+    )
+    source_event_ts = (
+        previous_memory.get("source_event_ts")
+        or previous_runbook.get("source_event_ts")
+        or dict(previous_gate.get("execution_parity_preflight") or {}).get("source_event_ts")
+    )
+    last_seen_dt = _parse_dt(last_seen_at)
+    last_seen_kst = last_seen_dt.astimezone(KST).isoformat() if last_seen_dt is not None else None
+    status = (
+        "previous_paper_apply_window_elapsed_without_recorded_apply"
+        if previous_apply_ready
+        else "previous_fresh_signal_expired_before_paper_apply_gate_opened"
+    )
+    return {
+        "status": status,
+        "ever_seen": True,
+        "current_window_active": False,
+        "current_fresh_signal": False,
+        "paper_apply_available_now": False,
+        "previous_paper_apply_available": previous_apply_ready,
+        "last_seen_at": last_seen_at,
+        "last_seen_at_kst": last_seen_kst,
+        "last_seen_age_minutes": _age_minutes(last_seen_at),
+        "last_seen_source": "previous_watch",
+        "carried_forward_from_previous_watch": True,
+        "source_event_key": source_event_key,
+        "source_event_ts": source_event_ts,
+        "bridge_action": (
+            previous_memory.get("bridge_action")
+            or previous_runbook.get("bridge_action")
+            or previous_gate.get("bridge_action")
+        ),
+        "apply_command_allowed_now": None,
+        "apply_command_when_gate_allows": (
+            previous_memory.get("apply_command_when_gate_allows")
+            or previous_runbook.get("apply_command_when_gate_allows")
+        ),
+        "post_apply_execution_parity_review_command": (
+            previous_memory.get("post_apply_execution_parity_review_command")
+            or previous_runbook.get("post_apply_execution_parity_review_command")
+        ),
+        "execution_parity_missing_samples": parity.get("missing_samples"),
+        "expired_window_outcome": (
+            "paper_apply_was_available_but_no_reviewed_apply_row_recorded"
+            if previous_apply_ready
+            else "fresh_signal_was_observed_but_apply_gate_never_opened_in_time"
+        ),
+        "safe_next_action": "wait_for_next_fresh_signal_and_rerun_pre_apply_dry_run",
+        "stale_signal_apply_allowed": False,
+        "auto_apply_allowed": False,
+        "force_signal_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": True,
     }
 
 
@@ -2732,7 +6860,33 @@ def _microstructure_coverage_plan(
         next_quote_coverage_kind = None
         next_quote_coverage_wait = None
 
-    if remaining_quote_samples > 0:
+    standard_capture_window_open = (
+        current_date_missing
+        or current_hour_missing
+        or (hour_of_day_balance_needed and current_hour_missing)
+    )
+    sample_count_incomplete = remaining_quote_samples > 0
+    time_coverage_incomplete = (
+        remaining_calendar_days > 0
+        or remaining_distinct_hours > 0
+        or remaining_hour_of_day_buckets > 0
+    )
+    standard_capture_would_skip_duplicate_window = (
+        sample_count_incomplete
+        and time_coverage_incomplete
+        and not standard_capture_window_open
+        and next_quote_coverage_at is not None
+    )
+
+    if sample_count_incomplete and standard_capture_window_open:
+        status = "quote_sample_count_incomplete_current_window_open"
+        recommended_action = "collect_quote_samples_now"
+        can_collect_now = bool(quote_capture_command)
+    elif sample_count_incomplete and standard_capture_would_skip_duplicate_window:
+        status = "quote_sample_count_incomplete_waiting_for_next_coverage_window"
+        recommended_action = "wait_until_next_quote_coverage_window"
+        can_collect_now = False
+    elif sample_count_incomplete:
         status = "quote_sample_count_incomplete"
         recommended_action = "collect_quote_samples_now"
         can_collect_now = bool(quote_capture_command)
@@ -2807,6 +6961,16 @@ def _microstructure_coverage_plan(
         "eligible_quote_samples": eligible_rows,
         "required_quote_samples": required_rows,
         "remaining_quote_samples": remaining_quote_samples,
+        "sample_count_incomplete": sample_count_incomplete,
+        "time_coverage_incomplete": time_coverage_incomplete,
+        "standard_capture_window_open": standard_capture_window_open,
+        "standard_capture_would_skip_duplicate_window": standard_capture_would_skip_duplicate_window,
+        "force_quote_sample_available": bool(quote_capture_command) and sample_count_incomplete,
+        "force_quote_sample_policy": (
+            "diagnostic_only_does_not_advance_distinct_hour_or_calendar_coverage"
+            if standard_capture_would_skip_duplicate_window
+            else "not_needed_for_current_window"
+        ),
         "can_collect_now": can_collect_now,
         "quote_capture_command": quote_capture_command,
         "recommended_action": recommended_action,
@@ -2821,15 +6985,17 @@ def _quote_microstructure_watch(
     latest_collection: dict[str, Any],
     previous_payload: dict[str, Any],
     recent_hours: float,
+    expected_symbol: str = EXPECTED_SYMBOL,
 ) -> dict[str, Any]:
     rows = _load_jsonl(sample_jsonl)
+    expected_symbol_value = str(expected_symbol or EXPECTED_SYMBOL).upper()
     quote_required = max(1, int(latest_collection.get("quote_required") or 300))
     min_calendar_days = max(1, int(latest_collection.get("quote_min_calendar_days") or 30))
     min_distinct_hours = max(1, int(latest_collection.get("quote_min_distinct_hours") or 24))
     audit = build_quote_shadow_audit_report(
         rows,
         input_sample_path=_display_path(sample_jsonl),
-        expected_symbol=EXPECTED_SYMBOL,
+        expected_symbol=expected_symbol_value,
         expected_strategy_family=EXPECTED_STRATEGY_FAMILY,
         required_quote_samples=quote_required,
         min_calendar_days=min_calendar_days,
@@ -2840,7 +7006,7 @@ def _quote_microstructure_watch(
     recent_audit = build_quote_shadow_audit_report(
         recent_rows,
         input_sample_path=_display_path(sample_jsonl),
-        expected_symbol=EXPECTED_SYMBOL,
+        expected_symbol=expected_symbol_value,
         expected_strategy_family=EXPECTED_STRATEGY_FAMILY,
         required_quote_samples=1,
         min_calendar_days=1,
@@ -3110,6 +7276,99 @@ def _pre_run_quote_window_wait_plan(
         ),
         "no_live_order_sent": True,
     }
+
+
+def _pre_run_btcusdc_parallel_quote_window_wait_plan(
+    *,
+    previous_payload: dict[str, Any],
+    generated_at: datetime,
+    enabled: bool,
+    parallel_lane_enabled: bool,
+    max_wait_seconds: float,
+    wakeup_buffer_seconds: float,
+) -> dict[str, Any]:
+    if not enabled:
+        return {
+            "status": "disabled",
+            "scope": "btcusdc_parallel_shadow_lane",
+            "should_sleep": False,
+            "wait_seconds": 0.0,
+            "no_live_order_sent": True,
+        }
+    if not parallel_lane_enabled:
+        return {
+            "status": "disabled_btcusdc_parallel_shadow_lane",
+            "scope": "btcusdc_parallel_shadow_lane",
+            "should_sleep": False,
+            "wait_seconds": 0.0,
+            "reason": "btcusdc_parallel_shadow_lane_disabled",
+            "no_live_order_sent": True,
+        }
+    lane = dict(previous_payload.get("btcusdc_parallel_shadow_lane") or {})
+    candidate_micro = dict(lane.get("candidate_quote_microstructure_watch") or {})
+    coverage_plan = dict(candidate_micro.get("coverage_plan") or {})
+    if not coverage_plan:
+        coverage_plan = dict(lane.get("candidate_quote_coverage_plan") or {})
+    if not coverage_plan:
+        return {
+            "status": "no_previous_btcusdc_coverage_plan",
+            "scope": "btcusdc_parallel_shadow_lane",
+            "should_sleep": False,
+            "wait_seconds": 0.0,
+            "reason": "run_watch_once_to_build_btcusdc_coverage_plan_first",
+            "no_live_order_sent": True,
+        }
+
+    plan = _pre_run_quote_window_wait_plan(
+        previous_payload={"microstructure_watch": {"coverage_plan": coverage_plan}},
+        generated_at=generated_at,
+        enabled=True,
+        max_wait_seconds=max_wait_seconds,
+        wakeup_buffer_seconds=wakeup_buffer_seconds,
+    )
+    runbook = dict(lane.get("candidate_quote_capture_runbook") or {})
+    plan.update(
+        {
+            "scope": "btcusdc_parallel_shadow_lane",
+            "candidate_symbol": lane.get("candidate_symbol") or DEFAULT_BTCUSDC_PARALLEL_SYMBOL,
+            "candidate_sample_jsonl": lane.get("candidate_sample_jsonl"),
+            "standard_capture_command": runbook.get("standard_capture_command")
+            or coverage_plan.get("quote_capture_command"),
+            "command_includes_market_data_refresh": runbook.get("command_includes_market_data_refresh")
+            is True,
+            "command_includes_apply_paper_bridge": runbook.get("command_includes_apply_paper_bridge")
+            is True,
+            "command_includes_live_flag": runbook.get("command_includes_live_flag") is True,
+            "expected_rows_per_successful_capture": runbook.get("expected_rows_per_successful_capture"),
+            "expected_quote_observed_after_successful_capture": runbook.get(
+                "expected_quote_observed_after_successful_capture"
+            ),
+            "expected_remaining_samples_after_successful_capture": runbook.get(
+                "expected_remaining_samples_after_successful_capture"
+            ),
+            "expected_distinct_hours_after_successful_capture": runbook.get(
+                "expected_distinct_hours_after_successful_capture"
+            ),
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+    )
+    return plan
+
+
+def _select_pre_run_quote_window_sleep_plan(
+    *,
+    primary_plan: dict[str, Any],
+    btcusdc_plan: dict[str, Any],
+) -> tuple[str | None, dict[str, Any]]:
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    if primary_plan.get("should_sleep") is True:
+        candidates.append(("primary", primary_plan))
+    if btcusdc_plan.get("should_sleep") is True:
+        candidates.append(("btcusdc_parallel_shadow_lane", btcusdc_plan))
+    if not candidates:
+        return None, {}
+    return min(candidates, key=lambda item: float(item[1].get("wait_seconds") or 0.0))
 
 
 def _finalize_pre_run_quote_window_sleep(
@@ -7001,6 +11260,368 @@ def _paper_apply_parity_review_state(
     }
 
 
+def _paper_lifecycle_row_diagnostics(
+    *,
+    latest: dict[str, Any],
+    paper_only_rehearsal: dict[str, Any],
+    recent_paper_apply: dict[str, Any],
+    recent_paper_review: dict[str, Any],
+    parity_review_state: dict[str, Any],
+    execution_parity_status_summary: dict[str, Any],
+) -> dict[str, Any]:
+    paper_gate = dict(latest.get("paper_bridge_apply_gate") or {})
+    signal_wait = dict(latest.get("signal_wait_plan") or {})
+    collection = dict(latest.get("collection_progress") or {})
+    rehearsal = dict(paper_only_rehearsal or {})
+    apply_report = dict(recent_paper_apply or {})
+    bridge_review = dict(recent_paper_review or {})
+    parity_review = dict(parity_review_state or {})
+    parity = dict(execution_parity_status_summary or {})
+    latest_paper_fill_rows = _int_or_default(collection.get("paper_fill_rows"), 0)
+    recent_paper_fill_rows = _int_or_default(apply_report.get("paper_fill_rows"), 0)
+    actual_lifecycle_rows = _int_or_default(
+        rehearsal.get("actual_paper_lifecycle_rows"),
+        0,
+    )
+    eligible_journal_rows = _int_or_default(parity.get("eligible_journal_rows"), 0)
+    parity_delta = _int_or_default(parity_review.get("actual_journal_row_delta"), 0)
+    parity_new_rows = _int_or_default(parity_review.get("new_journal_row_count"), 0)
+    fresh_signal = (
+        paper_gate.get("fresh_signal") is True
+        or signal_wait.get("fresh_signal") is True
+    )
+    paper_apply_available = paper_gate.get("can_request_paper_apply_now") is True
+    recent_apply_seen = apply_report.get("status") == "available"
+    recent_bridge_seen = bridge_review.get("status") == "available"
+    parity_review_blocks = parity_review.get("blocks_next_paper_apply") is True
+    rows_available = (
+        actual_lifecycle_rows > 0
+        or latest_paper_fill_rows > 0
+        or recent_paper_fill_rows > 0
+        or eligible_journal_rows > 0
+        or parity_delta > 0
+        or parity_new_rows > 0
+        or parity_review.get("credit_confirmed") is True
+    )
+    bridge_status = str(apply_report.get("bridge_status") or "").lower()
+    no_open_plan = bridge_status in {
+        "no_open_v6_paper_plan",
+        "blocked_no_open_v6_paper_plan",
+        "paper_apply_no_open_plan_not_credited",
+    }
+    parity_status = str(parity_review.get("status") or "")
+    if rows_available:
+        status = "paper_lifecycle_rows_available"
+        missing_stage = None
+        safe_next_action = "continue_execution_parity_collection_until_sample_floor"
+        blockers: list[str] = []
+    elif recent_apply_seen and no_open_plan:
+        status = "recent_paper_apply_no_open_v6_paper_plan"
+        missing_stage = "bridge_apply_no_open_plan"
+        safe_next_action = "wait_for_next_add_signal_or_existing_open_paper_plan_before_remove_credit"
+        blockers = ["recent_remove_paper_apply_found_no_open_v6_paper_plan"]
+    elif recent_apply_seen and parity_status in {
+        "missing_after_recent_paper_apply",
+        "stale_after_recent_paper_apply",
+    }:
+        status = "recent_paper_apply_waiting_for_post_apply_parity_review"
+        missing_stage = "post_apply_parity_review"
+        safe_next_action = (
+            list(parity_review.get("next_actions") or [])
+            or ["run_post_apply_parity_review_for_latest_paper_apply"]
+        )[0]
+        blockers = list(parity_review.get("blockers") or ["post_apply_parity_review_missing"])
+    elif recent_apply_seen and parity_review_blocks:
+        status = "recent_paper_apply_lifecycle_row_blocked_by_parity_review"
+        missing_stage = "paper_apply_parity_review"
+        safe_next_action = "resolve_paper_apply_parity_review_blocker_before_next_apply"
+        blockers = list(parity_review.get("blockers") or ["paper_apply_parity_review_blocker"])
+    elif recent_apply_seen:
+        status = "recent_paper_apply_lifecycle_row_missing"
+        missing_stage = (
+            "paper_fill_or_lifecycle_persistence"
+            if latest_paper_fill_rows <= 0 and recent_paper_fill_rows <= 0
+            else "execution_journal_credit"
+        )
+        safe_next_action = "inspect_paper_fill_collection_and_execution_journal_before_next_apply"
+        blockers = [f"{missing_stage}_missing"]
+    elif paper_apply_available:
+        status = "paper_apply_available_waiting_for_manual_operator_apply"
+        missing_stage = "operator_paper_apply_review"
+        safe_next_action = "operator_review_then_manual_paper_apply_only_if_backup_checks_pass"
+        blockers = ["manual_paper_apply_not_recorded"]
+    elif not fresh_signal:
+        status = "waiting_for_fresh_signal_before_first_paper_apply"
+        missing_stage = "current_fresh_signal"
+        safe_next_action = "monitor_fresh_signal_without_forcing_entry"
+        blockers = ["current_fresh_signal", "first_real_paper_lifecycle_row"]
+    else:
+        status = "waiting_for_paper_apply_report"
+        missing_stage = "paper_apply_report"
+        safe_next_action = "rerun_paper_bridge_dry_run_and_wait_for_manual_apply_record"
+        blockers = ["paper_apply_report_missing"]
+
+    return {
+        "status": status,
+        "missing_stage": missing_stage,
+        "blockers": blockers,
+        "fresh_signal": fresh_signal,
+        "paper_apply_available_now": paper_apply_available,
+        "recent_paper_apply_seen": recent_apply_seen,
+        "recent_paper_bridge_review_seen": recent_bridge_seen,
+        "recent_parity_review_status": parity_review.get("status"),
+        "recent_parity_review_blocks_next_apply": parity_review_blocks,
+        "rows_available": rows_available,
+        "actual_paper_lifecycle_rows": actual_lifecycle_rows,
+        "latest_paper_fill_rows": latest_paper_fill_rows,
+        "recent_paper_apply_paper_fill_rows": recent_paper_fill_rows,
+        "eligible_journal_rows": eligible_journal_rows,
+        "execution_parity_missing_samples": parity.get("missing_samples"),
+        "parity_actual_journal_row_delta": parity_review.get("actual_journal_row_delta"),
+        "parity_new_journal_row_count": parity_review.get("new_journal_row_count"),
+        "recent_paper_apply_report": apply_report.get("source_report"),
+        "recent_paper_apply_generated_at": apply_report.get("generated_at"),
+        "recent_paper_bridge_review_report": bridge_review.get("source_report"),
+        "recent_paper_bridge_review_generated_at": bridge_review.get("generated_at"),
+        "recent_parity_review_report": parity_review.get("source_report"),
+        "recommended_command": parity_review.get("recommended_command"),
+        "safe_next_action": safe_next_action,
+        "diagnostic_matrix": {
+            "fresh_signal_gate": "passed" if fresh_signal else "waiting",
+            "paper_apply_gate": "available" if paper_apply_available else "blocked",
+            "paper_apply_execution": (
+                "recent_apply_seen" if recent_apply_seen else "no_recent_apply_report"
+            ),
+            "paper_bridge_review": (
+                "recent_review_seen" if recent_bridge_seen else "no_recent_bridge_review"
+            ),
+            "paper_fill_collection": (
+                "rows_present"
+                if latest_paper_fill_rows > 0 or recent_paper_fill_rows > 0
+                else "zero_rows"
+            ),
+            "post_apply_parity_review": parity_review.get("status") or "unavailable",
+            "execution_journal": (
+                "rows_present" if eligible_journal_rows > 0 else "zero_eligible_rows"
+            ),
+        },
+        "stale_signal_apply_allowed": False,
+        "auto_apply_allowed": False,
+        "force_signal_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            apply_report.get("no_live_order_sent", True) is True
+            and bridge_review.get("no_live_order_sent", True) is True
+            and parity_review.get("no_live_order_sent", True) is True
+        ),
+    }
+
+
+def _execution_parity_evidence_ledger(
+    *,
+    latest: dict[str, Any],
+    paper_lifecycle_row_diagnostics: dict[str, Any],
+    recent_paper_apply: dict[str, Any],
+    recent_paper_review: dict[str, Any],
+    parity_review_state: dict[str, Any],
+    execution_parity_status_summary: dict[str, Any],
+    previous_payload: dict[str, Any] | None,
+    generated_at: datetime,
+    max_entries: int = 20,
+) -> dict[str, Any]:
+    paper_gate = dict(latest.get("paper_bridge_apply_gate") or {})
+    lifecycle = dict(paper_lifecycle_row_diagnostics or {})
+    apply_report = dict(recent_paper_apply or {})
+    bridge_review = dict(recent_paper_review or {})
+    parity_review = dict(parity_review_state or {})
+    parity = dict(execution_parity_status_summary or {})
+    previous = dict(previous_payload or {})
+    previous_ledger = dict(previous.get("execution_parity_evidence_ledger") or {})
+    previous_entries = [
+        dict(item)
+        for item in list(previous_ledger.get("entries") or [])
+        if isinstance(item, dict)
+    ]
+    required_samples = _int_or_default(parity.get("required_samples"), 0)
+    eligible_rows = _int_or_default(parity.get("eligible_journal_rows"), 0)
+    missing_samples = _int_or_default(parity.get("missing_samples"), 0)
+    progress_pct = (
+        round(min(max(eligible_rows / required_samples, 0.0), 1.0) * 100.0, 3)
+        if required_samples > 0
+        else (100.0 if missing_samples <= 0 else 0.0)
+    )
+    parity_delta = _int_or_default(parity_review.get("actual_journal_row_delta"), 0)
+    parity_new_rows = _int_or_default(parity_review.get("new_journal_row_count"), 0)
+    credit_confirmed = (
+        parity_review.get("credit_confirmed") is True
+        or parity_delta > 0
+        or parity_new_rows > 0
+    )
+    parity_review_status = str(parity_review.get("status") or "")
+    parity_review_available = bool(
+        parity_review_status
+        not in {
+            "",
+            "unavailable",
+            "missing_after_recent_paper_apply",
+            "stale_after_recent_paper_apply",
+        }
+        or (
+            parity_review.get("source_report")
+            and parity_review_status
+            not in {"missing_after_recent_paper_apply", "stale_after_recent_paper_apply"}
+        )
+    )
+    recent_apply_seen = apply_report.get("status") == "available"
+    current_apply_forecast_creditable = parity.get("will_credit_current_apply_after_operator_review") is True
+
+    def _entry_key(entry: dict[str, Any]) -> str:
+        return "|".join(
+            str(entry.get(part) or "")
+            for part in ("event_type", "source_report", "generated_at", "credit_status")
+        )
+
+    current_entry: dict[str, Any] | None = None
+    if parity_review_available:
+        credit_status = (
+            "credited"
+            if credit_confirmed
+            else "blocked"
+            if parity_review.get("blocks_next_paper_apply") is True
+            else "reviewed_no_credit"
+        )
+        current_entry = {
+            "event_type": "post_apply_parity_review",
+            "credit_status": credit_status,
+            "status": parity_review.get("status"),
+            "generated_at": parity_review.get("generated_at") or generated_at.isoformat(),
+            "source_report": parity_review.get("source_report"),
+            "recent_paper_apply_report": apply_report.get("source_report"),
+            "recent_paper_bridge_review_report": bridge_review.get("source_report"),
+            "expected_credit_from_before_forecast": parity_review.get(
+                "expected_credit_from_before_forecast"
+            ),
+            "actual_journal_row_delta": parity_review.get("actual_journal_row_delta"),
+            "new_journal_row_count": parity_review.get("new_journal_row_count"),
+            "credit_confirmed": credit_confirmed,
+            "blockers": list(parity_review.get("blockers") or []),
+            "next_actions": list(parity_review.get("next_actions") or []),
+            "order_submission_allowed": False,
+            "no_live_order_sent": parity_review.get("no_live_order_sent", True) is True,
+        }
+    elif recent_apply_seen:
+        current_entry = {
+            "event_type": "paper_apply",
+            "credit_status": (
+                "pending_post_apply_parity_review"
+                if lifecycle.get("missing_stage") == "post_apply_parity_review"
+                else "not_creditable_no_open_plan"
+                if lifecycle.get("missing_stage") == "bridge_apply_no_open_plan"
+                else "pending_execution_journal_credit"
+            ),
+            "status": apply_report.get("status"),
+            "generated_at": apply_report.get("generated_at") or generated_at.isoformat(),
+            "source_report": apply_report.get("source_report"),
+            "bridge_action": apply_report.get("bridge_action"),
+            "bridge_status": apply_report.get("bridge_status"),
+            "paper_fill_rows": apply_report.get("paper_fill_rows"),
+            "recommended_review_command": parity_review.get("recommended_command"),
+            "blockers": list(lifecycle.get("blockers") or []),
+            "order_submission_allowed": False,
+            "no_live_order_sent": apply_report.get("no_live_order_sent", True) is True,
+        }
+    elif paper_gate.get("can_request_paper_apply_now") is True or paper_gate.get("fresh_signal") is True:
+        current_entry = {
+            "event_type": "current_apply_forecast",
+            "credit_status": (
+                "forecast_creditable_after_operator_review"
+                if current_apply_forecast_creditable
+                else "forecast_not_creditable"
+            ),
+            "status": "paper_apply_available" if paper_gate.get("can_request_paper_apply_now") is True else "fresh_signal_seen",
+            "generated_at": generated_at.isoformat(),
+            "source_report": latest.get("evidence_report"),
+            "bridge_action": paper_gate.get("bridge_action"),
+            "source_event_key": dict(paper_gate.get("execution_parity_preflight") or {}).get(
+                "source_event_key"
+            ),
+            "will_credit_current_apply_after_operator_review": current_apply_forecast_creditable,
+            "blockers": list(dict(paper_gate.get("execution_parity_preflight") or {}).get("blockers") or []),
+            "order_submission_allowed": False,
+            "no_live_order_sent": True,
+        }
+
+    entries_by_key: dict[str, dict[str, Any]] = {}
+    for entry in previous_entries:
+        entries_by_key[_entry_key(entry)] = entry
+    if current_entry is not None:
+        entries_by_key[_entry_key(current_entry)] = current_entry
+    entries = sorted(
+        entries_by_key.values(),
+        key=lambda item: str(item.get("generated_at") or ""),
+        reverse=True,
+    )[: max(1, int(max_entries or 1))]
+    latest_entry = entries[0] if entries else None
+
+    if missing_samples <= 0:
+        status = "execution_parity_sample_floor_satisfied"
+        next_action = "hold_execution_parity_evidence_for_operator_promotion_review"
+    elif credit_confirmed:
+        status = "execution_parity_credit_recorded"
+        next_action = "continue_collecting_reviewed_paper_apply_rows"
+    elif parity_review.get("blocks_next_paper_apply") is True:
+        status = "execution_parity_credit_blocked_by_review"
+        next_action = "resolve_post_apply_parity_review_blocker"
+    elif recent_apply_seen and lifecycle.get("missing_stage") == "post_apply_parity_review":
+        status = "recent_paper_apply_pending_parity_review"
+        next_action = "run_post_apply_parity_review_before_next_paper_apply"
+    elif current_apply_forecast_creditable:
+        status = "current_apply_forecast_creditable_after_operator_review"
+        next_action = "operator_review_then_manual_paper_apply_if_backup_checks_pass"
+    elif eligible_rows > 0:
+        status = "collecting_execution_parity_rows"
+        next_action = "continue_collecting_reviewed_paper_lifecycle_rows"
+    else:
+        status = "waiting_for_first_creditable_paper_apply"
+        next_action = lifecycle.get("safe_next_action") or "wait_for_fresh_signal_and_manual_paper_apply"
+
+    return {
+        "status": status,
+        "generated_at": generated_at.isoformat(),
+        "required_samples": required_samples,
+        "eligible_journal_rows": eligible_rows,
+        "missing_samples": missing_samples,
+        "progress_pct": progress_pct,
+        "sample_floor_satisfied": missing_samples <= 0,
+        "latest_credit_event": latest_entry,
+        "entry_count": len(entries),
+        "entries": entries,
+        "carried_forward_entry_count": len(previous_entries),
+        "recent_paper_apply_seen": recent_apply_seen,
+        "recent_paper_apply_report": apply_report.get("source_report"),
+        "recent_paper_bridge_review_report": bridge_review.get("source_report"),
+        "recent_parity_review_status": parity_review.get("status"),
+        "recent_parity_review_report": parity_review.get("source_report"),
+        "recent_parity_review_blocks_next_apply": parity_review.get("blocks_next_paper_apply") is True,
+        "current_apply_forecast_creditable": current_apply_forecast_creditable,
+        "currently_creditable_actions": list(parity.get("currently_creditable_actions") or []),
+        "next_creditable_event_types": list(parity.get("next_creditable_event_types") or []),
+        "paper_lifecycle_status": lifecycle.get("status"),
+        "paper_lifecycle_missing_stage": lifecycle.get("missing_stage"),
+        "safe_next_action": next_action,
+        "backtest_substitution_allowed": False,
+        "synthetic_rows_allowed": False,
+        "auto_apply_allowed": False,
+        "force_signal_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": (
+            parity.get("no_live_order_sent") is not False
+            and lifecycle.get("no_live_order_sent") is not False
+            and all(entry.get("no_live_order_sent") is not False for entry in entries)
+        ),
+    }
+
+
 def _paper_apply_retry_blocker(
     latest: dict[str, Any],
     recent_paper_apply: dict[str, Any],
@@ -7549,6 +12170,925 @@ def _signal_monitor_summary(
         "order_submission_allowed": False,
         "no_live_order_sent": signal.get("no_live_order_sent") is not False
         and cadence.get("no_live_order_sent") is not False,
+    }
+
+
+def _heartbeat_sla_diagnostics(
+    *,
+    previous_completed_at: datetime | None,
+    current_completed_at: datetime,
+    interval_seconds: float,
+    watch_continuity: dict[str, Any],
+    signal_monitor: dict[str, Any],
+    signal_monitor_cadence_alignment: dict[str, Any],
+) -> dict[str, Any]:
+    continuity = dict(watch_continuity or {})
+    signal = dict(signal_monitor or {})
+    cadence = dict(signal_monitor_cadence_alignment or {})
+
+    monitor_interval_seconds = _number_or_none(signal.get("interval_seconds"))
+    monitor_interval_source = "signal_monitor.interval_seconds"
+    if monitor_interval_seconds is None or monitor_interval_seconds <= 0:
+        recommended_minutes = _number_or_none(
+            signal.get("recommended_monitor_interval_minutes")
+        )
+        monitor_interval_source = "signal_monitor.recommended_monitor_interval_minutes"
+        if recommended_minutes is None or recommended_minutes <= 0:
+            recommended_minutes = _number_or_none(
+                cadence.get("recommended_monitor_interval_minutes")
+            )
+            monitor_interval_source = (
+                "signal_monitor_cadence_alignment.recommended_monitor_interval_minutes"
+            )
+        monitor_interval_seconds = (
+            max(recommended_minutes * 60.0, 0.0)
+            if recommended_minutes is not None
+            else None
+        )
+
+    freshness_window_minutes = _number_or_none(
+        signal.get("signal_freshness_capture_window_minutes")
+    )
+    freshness_window_source = "signal_monitor.signal_freshness_capture_window_minutes"
+    if freshness_window_minutes is None or freshness_window_minutes <= 0:
+        freshness_window_minutes = _number_or_none(
+            cadence.get("signal_freshness_capture_window_minutes")
+        )
+        freshness_window_source = (
+            "signal_monitor_cadence_alignment.signal_freshness_capture_window_minutes"
+        )
+    fresh_signal_window_seconds = (
+        max(freshness_window_minutes * 60.0, 0.0)
+        if freshness_window_minutes is not None
+        else None
+    )
+    loop_interval_seconds = max(0.0, float(interval_seconds or 0.0))
+    expected_interval_seconds = (
+        monitor_interval_seconds
+        if monitor_interval_seconds is not None and monitor_interval_seconds > 0
+        else loop_interval_seconds
+        if loop_interval_seconds > 0
+        else _number_or_none(continuity.get("expected_interval_seconds"))
+    )
+    if expected_interval_seconds is not None and expected_interval_seconds <= 0:
+        expected_interval_seconds = None
+
+    base = {
+        "expected_interval_seconds": round(expected_interval_seconds, 3)
+        if expected_interval_seconds is not None
+        else None,
+        "loop_interval_seconds": round(loop_interval_seconds, 3),
+        "monitor_interval_seconds": round(monitor_interval_seconds, 3)
+        if monitor_interval_seconds is not None
+        else None,
+        "monitor_interval_source": monitor_interval_source
+        if monitor_interval_seconds is not None
+        else None,
+        "fresh_signal_window_seconds": round(fresh_signal_window_seconds, 3)
+        if fresh_signal_window_seconds is not None
+        else None,
+        "fresh_signal_window_minutes": round(fresh_signal_window_seconds / 60.0, 4)
+        if fresh_signal_window_seconds is not None
+        else None,
+        "fresh_signal_window_source": freshness_window_source
+        if fresh_signal_window_seconds is not None
+        else None,
+        "capped_to_fresh_signal_window": signal.get("capped_to_fresh_signal_window")
+        is True,
+        "watch_continuity_status": continuity.get("status"),
+        "watch_continuity_warning": continuity.get("warning"),
+        "order_submission_allowed": False,
+        "auto_apply_allowed": False,
+        "force_signal_allowed": False,
+        "stale_signal_apply_allowed": False,
+        "no_live_order_sent": True,
+    }
+    if previous_completed_at is None:
+        return {
+            **base,
+            "status": "no_previous_watch_baseline",
+            "actual_gap_seconds": None,
+            "actual_gap_minutes": None,
+            "monitor_grace_seconds": None,
+            "monitor_warning_threshold_seconds": None,
+            "within_monitor_interval": None,
+            "within_fresh_signal_window": None,
+            "missed_monitor_count_estimate": None,
+            "fresh_signal_window_risk": "unknown_no_previous_watch_baseline",
+            "safe_next_action": "establish_next_heartbeat_baseline_without_forcing_entry",
+        }
+    if expected_interval_seconds is None:
+        gap_seconds = max(
+            (
+                current_completed_at.astimezone(UTC)
+                - previous_completed_at.astimezone(UTC)
+            ).total_seconds(),
+            0.0,
+        )
+        return {
+            **base,
+            "status": "heartbeat_sla_not_applicable_no_monitor_interval",
+            "actual_gap_seconds": round(gap_seconds, 3),
+            "actual_gap_minutes": round(gap_seconds / 60.0, 3),
+            "monitor_grace_seconds": None,
+            "monitor_warning_threshold_seconds": None,
+            "within_monitor_interval": None,
+            "within_fresh_signal_window": (
+                gap_seconds <= fresh_signal_window_seconds
+                if fresh_signal_window_seconds is not None
+                else None
+            ),
+            "missed_monitor_count_estimate": None,
+            "fresh_signal_window_risk": (
+                "fresh_signal_window_still_covered"
+                if fresh_signal_window_seconds is not None
+                and gap_seconds <= fresh_signal_window_seconds
+                else "fresh_signal_window_unknown_no_capture_window"
+                if fresh_signal_window_seconds is None
+                else "fresh_signal_window_may_have_been_missed"
+            ),
+            "safe_next_action": "continue_watch_without_schedule_sla",
+        }
+
+    gap_seconds = max(
+        (
+            current_completed_at.astimezone(UTC) - previous_completed_at.astimezone(UTC)
+        ).total_seconds(),
+        0.0,
+    )
+    monitor_grace_seconds = max(60.0, expected_interval_seconds * 0.2)
+    monitor_threshold_seconds = expected_interval_seconds + monitor_grace_seconds
+    within_monitor_interval = gap_seconds <= monitor_threshold_seconds
+    within_fresh_signal_window = (
+        gap_seconds <= fresh_signal_window_seconds
+        if fresh_signal_window_seconds is not None
+        else None
+    )
+    missed_monitor_count = max(int(gap_seconds // expected_interval_seconds) - 1, 0)
+    gap_reset_required = (
+        continuity.get("status") == "gap_warning"
+        or continuity.get("warning") == "watch_gap_exceeded_threshold"
+    )
+    if gap_reset_required:
+        status = "heartbeat_gap_reset_required"
+        safe_next_action = "investigate_scheduler_gap_and_reestablish_monitor_baseline"
+    elif within_monitor_interval:
+        status = "heartbeat_on_schedule"
+        safe_next_action = "continue_capped_fresh_signal_monitor_cadence"
+    elif within_fresh_signal_window is True:
+        status = "heartbeat_late_but_within_fresh_signal_window"
+        safe_next_action = "run_next_watch_now_and_keep_monitor_cadence_tight"
+    else:
+        status = "heartbeat_late_may_miss_fresh_signal_window"
+        safe_next_action = "run_next_watch_now_and_treat_any_prior_signal_as_stale"
+
+    return {
+        **base,
+        "status": status,
+        "actual_gap_seconds": round(gap_seconds, 3),
+        "actual_gap_minutes": round(gap_seconds / 60.0, 3),
+        "monitor_grace_seconds": round(monitor_grace_seconds, 3),
+        "monitor_warning_threshold_seconds": round(monitor_threshold_seconds, 3),
+        "monitor_warning_threshold_minutes": round(monitor_threshold_seconds / 60.0, 3),
+        "within_monitor_interval": within_monitor_interval,
+        "within_fresh_signal_window": within_fresh_signal_window,
+        "missed_monitor_count_estimate": missed_monitor_count,
+        "fresh_signal_window_risk": (
+            "fresh_signal_window_still_covered"
+            if within_fresh_signal_window is True
+            else "fresh_signal_window_unknown_no_capture_window"
+            if within_fresh_signal_window is None
+            else "fresh_signal_window_may_have_been_missed"
+        ),
+        "gap_reset_required": gap_reset_required,
+        "safe_next_action": safe_next_action,
+    }
+
+
+def _heartbeat_sla_history(
+    *,
+    previous_payload: dict[str, Any] | None,
+    current_sla: dict[str, Any],
+    current_completed_at: datetime,
+    max_entries: int = 12,
+) -> dict[str, Any]:
+    previous = dict(previous_payload or {})
+    prior_history = dict(
+        previous.get("heartbeat_sla_history")
+        or previous.get("heartbeat_sla_trend")
+        or {}
+    )
+    entries: list[dict[str, Any]] = []
+    seen_completed_at: set[str] = set()
+    for raw_entry in list(prior_history.get("entries") or []):
+        if not isinstance(raw_entry, dict):
+            continue
+        completed_at = str(raw_entry.get("completed_at") or "").strip()
+        if not completed_at or completed_at in seen_completed_at:
+            continue
+        seen_completed_at.add(completed_at)
+        entries.append(
+            {
+                "completed_at": completed_at,
+                "status": raw_entry.get("status"),
+                "actual_gap_minutes": raw_entry.get("actual_gap_minutes"),
+                "within_monitor_interval": raw_entry.get("within_monitor_interval"),
+                "within_fresh_signal_window": raw_entry.get("within_fresh_signal_window"),
+                "fresh_signal_window_risk": raw_entry.get("fresh_signal_window_risk"),
+                "missed_monitor_count_estimate": raw_entry.get(
+                    "missed_monitor_count_estimate"
+                ),
+                "gap_reset_required": raw_entry.get("gap_reset_required") is True,
+                "no_live_order_sent": raw_entry.get("no_live_order_sent") is not False,
+            }
+        )
+    if not entries:
+        previous_sla = dict(
+            previous.get("heartbeat_sla_diagnostics")
+            or previous.get("heartbeat_sla")
+            or {}
+        )
+        previous_completed = str(previous.get("completed_at") or "").strip()
+        if previous_sla and previous_completed:
+            entries.append(
+                {
+                    "completed_at": previous_completed,
+                    "status": previous_sla.get("status"),
+                    "actual_gap_minutes": previous_sla.get("actual_gap_minutes"),
+                    "within_monitor_interval": previous_sla.get("within_monitor_interval"),
+                    "within_fresh_signal_window": previous_sla.get(
+                        "within_fresh_signal_window"
+                    ),
+                    "fresh_signal_window_risk": previous_sla.get(
+                        "fresh_signal_window_risk"
+                    ),
+                    "missed_monitor_count_estimate": previous_sla.get(
+                        "missed_monitor_count_estimate"
+                    ),
+                    "gap_reset_required": previous_sla.get("gap_reset_required") is True,
+                    "seeded_from_previous_single_sla": True,
+                    "no_live_order_sent": previous_sla.get("no_live_order_sent") is not False,
+                }
+            )
+            seen_completed_at.add(previous_completed)
+
+    current_entry = {
+        "completed_at": current_completed_at.astimezone(UTC).isoformat(),
+        "status": current_sla.get("status"),
+        "actual_gap_minutes": current_sla.get("actual_gap_minutes"),
+        "within_monitor_interval": current_sla.get("within_monitor_interval"),
+        "within_fresh_signal_window": current_sla.get("within_fresh_signal_window"),
+        "fresh_signal_window_risk": current_sla.get("fresh_signal_window_risk"),
+        "missed_monitor_count_estimate": current_sla.get("missed_monitor_count_estimate"),
+        "gap_reset_required": current_sla.get("gap_reset_required") is True,
+        "no_live_order_sent": current_sla.get("no_live_order_sent") is not False,
+    }
+    if current_entry["completed_at"] not in seen_completed_at:
+        entries.append(current_entry)
+    entries = entries[-max(1, int(max_entries or 1)) :]
+
+    def _is_late(entry: dict[str, Any]) -> bool:
+        return entry.get("within_monitor_interval") is False
+
+    def _missed_window(entry: dict[str, Any]) -> bool:
+        return (
+            entry.get("within_fresh_signal_window") is False
+            or entry.get("fresh_signal_window_risk")
+            == "fresh_signal_window_may_have_been_missed"
+        )
+
+    def _gap_reset(entry: dict[str, Any]) -> bool:
+        return entry.get("gap_reset_required") is True or entry.get("status") == (
+            "heartbeat_gap_reset_required"
+        )
+
+    late_count = sum(1 for entry in entries if _is_late(entry))
+    window_miss_count = sum(1 for entry in entries if _missed_window(entry))
+    gap_reset_count = sum(1 for entry in entries if _gap_reset(entry))
+    max_gap_minutes = max(
+        (
+            float(entry["actual_gap_minutes"])
+            for entry in entries
+            if _number_or_none(entry.get("actual_gap_minutes")) is not None
+        ),
+        default=None,
+    )
+
+    consecutive_late_count = 0
+    consecutive_window_miss_count = 0
+    for entry in reversed(entries):
+        if _is_late(entry):
+            consecutive_late_count += 1
+        else:
+            break
+    for entry in reversed(entries):
+        if _missed_window(entry):
+            consecutive_window_miss_count += 1
+        else:
+            break
+
+    if len(entries) == 1 and current_sla.get("status") == "no_previous_watch_baseline":
+        status = "heartbeat_sla_history_baseline_established"
+        safe_next_action = "establish_next_heartbeat_baseline_without_forcing_entry"
+    elif gap_reset_count:
+        status = "heartbeat_sla_gap_reset_seen_in_recent_history"
+        safe_next_action = "investigate_scheduler_gap_before_relying_on_signal_windows"
+    elif consecutive_window_miss_count >= 2 or window_miss_count >= 2:
+        status = "heartbeat_sla_repeated_fresh_window_risk"
+        safe_next_action = "tighten_or_repair_heartbeat_schedule_before_paper_apply"
+    elif window_miss_count:
+        status = "heartbeat_sla_fresh_window_risk_seen"
+        safe_next_action = "run_next_watch_now_and_verify_scheduler_delay"
+    elif consecutive_late_count >= 2 or late_count >= 2:
+        status = "heartbeat_sla_repeated_minor_lateness"
+        safe_next_action = "keep_monitor_cadence_tight_and_watch_next_gap"
+    elif late_count:
+        status = "heartbeat_sla_minor_lateness_seen"
+        safe_next_action = "run_next_watch_on_time_to_preserve_fresh_signal_window"
+    elif not entries:
+        status = "heartbeat_sla_history_empty"
+        safe_next_action = "establish_next_heartbeat_baseline_without_forcing_entry"
+    else:
+        status = "heartbeat_sla_history_clean"
+        safe_next_action = "continue_capped_fresh_signal_monitor_cadence"
+
+    return {
+        "status": status,
+        "window_size": max(1, int(max_entries or 1)),
+        "entry_count": len(entries),
+        "current_status": current_sla.get("status"),
+        "late_count": late_count,
+        "fresh_signal_window_miss_count": window_miss_count,
+        "gap_reset_count": gap_reset_count,
+        "consecutive_late_count": consecutive_late_count,
+        "consecutive_fresh_signal_window_miss_count": consecutive_window_miss_count,
+        "max_gap_minutes": round(max_gap_minutes, 3)
+        if max_gap_minutes is not None
+        else None,
+        "entries": entries,
+        "safe_next_action": safe_next_action,
+        "order_submission_allowed": False,
+        "auto_apply_allowed": False,
+        "force_signal_allowed": False,
+        "stale_signal_apply_allowed": False,
+        "no_live_order_sent": current_sla.get("no_live_order_sent") is not False
+        and all(entry.get("no_live_order_sent") is not False for entry in entries),
+    }
+
+
+def _heartbeat_sla_response_plan(
+    *,
+    current_sla: dict[str, Any],
+    history: dict[str, Any],
+    signal_monitor: dict[str, Any],
+) -> dict[str, Any]:
+    current = dict(current_sla or {})
+    trend = dict(history or {})
+    signal = dict(signal_monitor or {})
+    history_status = str(trend.get("status") or "")
+    current_status = str(current.get("status") or "")
+    monitor_interval_seconds = _number_or_none(current.get("monitor_interval_seconds"))
+    if monitor_interval_seconds is None:
+        monitor_interval_seconds = _number_or_none(signal.get("interval_seconds"))
+    fresh_window_seconds = _number_or_none(current.get("fresh_signal_window_seconds"))
+    if fresh_window_seconds is None:
+        freshness_minutes = _number_or_none(
+            signal.get("signal_freshness_capture_window_minutes")
+        )
+        fresh_window_seconds = (
+            freshness_minutes * 60.0 if freshness_minutes is not None else None
+        )
+    target_interval_seconds = monitor_interval_seconds
+    if target_interval_seconds is None and fresh_window_seconds is not None:
+        target_interval_seconds = max(fresh_window_seconds / 3.0, 60.0)
+    late_count = int(trend.get("late_count") or 0)
+    window_miss_count = int(trend.get("fresh_signal_window_miss_count") or 0)
+    gap_reset_count = int(trend.get("gap_reset_count") or 0)
+    consecutive_late_count = int(trend.get("consecutive_late_count") or 0)
+    consecutive_window_miss_count = int(
+        trend.get("consecutive_fresh_signal_window_miss_count") or 0
+    )
+
+    if (
+        "gap_reset" in history_status
+        or current_status == "heartbeat_gap_reset_required"
+        or gap_reset_count > 0
+    ):
+        status = "heartbeat_sla_response_scheduler_repair_required"
+        severity = "critical"
+        operator_notify = True
+        paper_apply_blocked_by_sla = True
+        primary_next_action = "repair_or_verify_heartbeat_scheduler_before_paper_apply"
+        rationale = "recent_watch_gap_reset_invalidates_fresh_signal_capture_assumptions"
+    elif (
+        "fresh_window_risk" in history_status
+        or current_status == "heartbeat_late_may_miss_fresh_signal_window"
+        or window_miss_count > 0
+        or consecutive_window_miss_count > 0
+    ):
+        status = "heartbeat_sla_response_fresh_window_recheck_required"
+        severity = "critical" if window_miss_count >= 2 else "degraded"
+        operator_notify = True
+        paper_apply_blocked_by_sla = True
+        primary_next_action = "rerun_watch_now_and_require_new_current_fresh_signal"
+        rationale = "recent_heartbeat_gap_may_have_missed_a_short_lived_fresh_signal"
+    elif (
+        "repeated_minor_lateness" in history_status
+        or consecutive_late_count >= 2
+        or late_count >= 2
+    ):
+        status = "heartbeat_sla_response_tighten_monitor_cadence"
+        severity = "degraded"
+        operator_notify = True
+        paper_apply_blocked_by_sla = False
+        primary_next_action = "tighten_heartbeat_schedule_and_watch_next_gap"
+        rationale = "recent_heartbeats_are_repeatedly_late_but_still_inside_fresh_window"
+    elif (
+        "minor_lateness" in history_status
+        or current_status == "heartbeat_late_but_within_fresh_signal_window"
+        or late_count > 0
+    ):
+        status = "heartbeat_sla_response_watch_next_interval"
+        severity = "watch"
+        operator_notify = False
+        paper_apply_blocked_by_sla = False
+        primary_next_action = "run_next_watch_on_time_to_preserve_fresh_signal_window"
+        rationale = "single_minor_late_heartbeat_still_inside_fresh_window"
+    elif "baseline" in history_status or current_status == "no_previous_watch_baseline":
+        status = "heartbeat_sla_response_baseline_pending"
+        severity = "info"
+        operator_notify = False
+        paper_apply_blocked_by_sla = False
+        primary_next_action = "establish_next_heartbeat_baseline_without_forcing_entry"
+        rationale = "first_watch_has_no_prior_gap_to_score"
+    else:
+        status = "heartbeat_sla_response_clean"
+        severity = "info"
+        operator_notify = False
+        paper_apply_blocked_by_sla = False
+        primary_next_action = "continue_capped_fresh_signal_monitor_cadence"
+        rationale = "recent_heartbeat_history_is_within_monitor_and_fresh_signal_windows"
+
+    return {
+        "status": status,
+        "severity": severity,
+        "operator_notify": operator_notify,
+        "paper_apply_blocked_by_sla": paper_apply_blocked_by_sla,
+        "primary_next_action": primary_next_action,
+        "rationale": rationale,
+        "history_status": history_status or None,
+        "current_sla_status": current_status or None,
+        "late_count": late_count,
+        "fresh_signal_window_miss_count": window_miss_count,
+        "gap_reset_count": gap_reset_count,
+        "consecutive_late_count": consecutive_late_count,
+        "consecutive_fresh_signal_window_miss_count": consecutive_window_miss_count,
+        "monitor_interval_seconds": round(monitor_interval_seconds, 3)
+        if monitor_interval_seconds is not None
+        else None,
+        "fresh_signal_window_seconds": round(fresh_window_seconds, 3)
+        if fresh_window_seconds is not None
+        else None,
+        "recommended_heartbeat_interval_seconds": round(target_interval_seconds, 3)
+        if target_interval_seconds is not None
+        else None,
+        "auto_schedule_change_allowed": False,
+        "automation_update_allowed": False,
+        "auto_apply_allowed": False,
+        "force_signal_allowed": False,
+        "stale_signal_apply_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": current.get("no_live_order_sent") is not False
+        and trend.get("no_live_order_sent") is not False,
+    }
+
+
+def _launch_shadow_watch_notification_decision(
+    *,
+    status: str,
+    latest_launch_state: dict[str, Any],
+    fresh_signal_status: dict[str, Any],
+    paper_apply_status: dict[str, Any],
+    heartbeat_sla_response_plan: dict[str, Any],
+    execution_parity_evidence_ledger: dict[str, Any],
+    live_violation_count: int = 0,
+) -> dict[str, Any]:
+    launch_state = dict(latest_launch_state or {})
+    fresh = dict(fresh_signal_status or {})
+    paper = dict(paper_apply_status or {})
+    heartbeat = dict(heartbeat_sla_response_plan or {})
+    parity_ledger = dict(execution_parity_evidence_ledger or {})
+    live_violation = int(live_violation_count or 0)
+    if live_violation > 0 or status == "blocked_live_order_violation_detected":
+        decision = "NOTIFY"
+        notification_status = "notify_live_order_violation_detected"
+        priority = "critical"
+        message = "Live-order safety violation detected; stop launch watch escalation and inspect evidence immediately."
+        reason = "live_violation_detected"
+        operator_action_required = True
+    elif paper.get("allowed_now") is True or paper.get("seen_during_watch") is True:
+        decision = "NOTIFY"
+        notification_status = "notify_manual_paper_apply_available"
+        priority = "high"
+        message = "Manual paper apply gate is available; review dry-run evidence before any paper-only action."
+        reason = "paper_apply_gate_available"
+        operator_action_required = True
+    elif fresh.get("seen_during_watch") is True or fresh.get("available") is True:
+        decision = "NOTIFY"
+        notification_status = "notify_fresh_signal_available"
+        priority = "high"
+        message = "Fresh signal observed; inspect paper bridge gate without enabling live trading."
+        reason = "fresh_signal_available"
+        operator_action_required = True
+    elif heartbeat.get("operator_notify") is True:
+        decision = "NOTIFY"
+        notification_status = "notify_heartbeat_sla_response"
+        priority = (
+            "critical"
+            if heartbeat.get("severity") == "critical"
+            else "normal"
+        )
+        message = (
+            "Heartbeat SLA requires scheduler or fresh-window recheck before paper apply."
+            if heartbeat.get("paper_apply_blocked_by_sla") is True
+            else "Heartbeat SLA is degraded; tighten the next monitor interval."
+        )
+        reason = heartbeat.get("status") or "heartbeat_sla_operator_notify"
+        operator_action_required = True
+    elif parity_ledger.get("status") == "execution_parity_sample_floor_satisfied":
+        decision = "NOTIFY"
+        notification_status = "notify_execution_parity_floor_satisfied"
+        priority = "normal"
+        message = "Execution parity sample floor is satisfied; review remaining launch gates."
+        reason = "execution_parity_floor_satisfied"
+        operator_action_required = True
+    else:
+        decision = "DONT_NOTIFY"
+        notification_status = (
+            "quiet_waiting_for_fresh_signal"
+            if launch_state.get("next_blocker_gate") == "current_fresh_signal"
+            else "quiet_no_operator_action_required"
+        )
+        priority = "quiet"
+        message = (
+            "Still waiting for a fresh signal; no operator action is needed."
+            if launch_state.get("next_blocker_gate") == "current_fresh_signal"
+            else "Launch shadow watch updated with no new operator action."
+        )
+        reason = "no_material_operator_event"
+        operator_action_required = False
+
+    return {
+        "status": notification_status,
+        "decision": decision,
+        "priority": priority,
+        "message": message,
+        "reason": reason,
+        "operator_action_required": operator_action_required,
+        "launch_status": launch_state.get("launch_status"),
+        "next_blocker": launch_state.get("next_blocker_gate"),
+        "fresh_signal_available": fresh.get("seen_during_watch") is True
+        or fresh.get("available") is True,
+        "paper_apply_available": paper.get("seen_during_watch") is True,
+        "paper_apply_allowed_now": paper.get("allowed_now") is True,
+        "heartbeat_sla_response_status": heartbeat.get("status"),
+        "heartbeat_sla_severity": heartbeat.get("severity"),
+        "execution_parity_ledger_status": parity_ledger.get("status"),
+        "live_violation_count": live_violation,
+        "auto_schedule_change_allowed": False,
+        "automation_update_allowed": False,
+        "auto_apply_allowed": False,
+        "force_signal_allowed": False,
+        "stale_signal_apply_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": live_violation == 0,
+    }
+
+
+def _notification_delivery_plan(
+    *,
+    previous_payload: dict[str, Any] | None,
+    current_decision: dict[str, Any],
+    current_completed_at: datetime,
+) -> dict[str, Any]:
+    current = dict(current_decision or {})
+    previous = dict(previous_payload or {})
+    previous_delivery = dict(
+        previous.get("notification_delivery_plan")
+        or previous.get("launch_shadow_watch_notification_delivery_plan")
+        or {}
+    )
+    previous_decision = dict(
+        previous.get("launch_shadow_watch_notification_decision")
+        or previous.get("notification_decision")
+        or {}
+    )
+
+    def _fingerprint(decision: dict[str, Any]) -> str:
+        fields = [
+            decision.get("status"),
+            decision.get("reason"),
+            decision.get("priority"),
+            decision.get("next_blocker"),
+            decision.get("fresh_signal_available"),
+            decision.get("paper_apply_allowed_now"),
+            decision.get("heartbeat_sla_response_status"),
+            decision.get("execution_parity_ledger_status"),
+            decision.get("live_violation_count"),
+        ]
+        return "|".join(str(item) for item in fields)
+
+    def _priority_rank(priority: Any) -> int:
+        return {"quiet": 0, "normal": 1, "high": 2, "critical": 3}.get(
+            str(priority or "").lower(),
+            0,
+        )
+
+    current_fingerprint = _fingerprint(current)
+    previous_fingerprint = (
+        previous_delivery.get("current_fingerprint")
+        or previous_delivery.get("notification_fingerprint")
+    )
+    if not previous_fingerprint and previous_decision:
+        previous_fingerprint = _fingerprint(previous_decision)
+    previous_priority = previous_delivery.get("priority") or previous_decision.get("priority")
+    current_priority = current.get("priority")
+    current_rank = _priority_rank(current_priority)
+    previous_rank = _priority_rank(previous_priority)
+    previous_notified_at = _parse_dt(
+        previous_delivery.get("last_notified_at")
+        or previous_delivery.get("emitted_at")
+        or (
+            previous.get("completed_at")
+            if previous_delivery.get("delivery_decision") == "NOTIFY"
+            else None
+        )
+    )
+    elapsed_since_last_notify_seconds = (
+        max(
+            (
+                current_completed_at.astimezone(UTC)
+                - previous_notified_at.astimezone(UTC)
+            ).total_seconds(),
+            0.0,
+        )
+        if previous_notified_at is not None
+        else None
+    )
+    cooldown_seconds = (
+        900.0
+        if current_rank >= 3
+        else 1800.0
+        if current_rank == 2
+        else 3600.0
+        if current_rank == 1
+        else None
+    )
+
+    if current.get("decision") != "NOTIFY":
+        delivery_decision = "DONT_NOTIFY"
+        status = "quiet_no_delivery_needed"
+        reason = current.get("reason") or "source_decision_dont_notify"
+        duplicate_suppressed = False
+        emitted_at = None
+        last_notified_at = (
+            previous_notified_at.astimezone(UTC).isoformat()
+            if previous_notified_at is not None
+            else None
+        )
+    elif previous_fingerprint != current_fingerprint:
+        delivery_decision = "NOTIFY"
+        status = (
+            "notify_priority_escalation"
+            if current_rank > previous_rank and previous_fingerprint
+            else "notify_new_material_event"
+        )
+        reason = "material_notification_fingerprint_changed"
+        duplicate_suppressed = False
+        emitted_at = current_completed_at.astimezone(UTC).isoformat()
+        last_notified_at = emitted_at
+    elif (
+        current_rank >= 3
+        and elapsed_since_last_notify_seconds is not None
+        and cooldown_seconds is not None
+        and elapsed_since_last_notify_seconds >= cooldown_seconds
+    ):
+        delivery_decision = "NOTIFY"
+        status = "notify_critical_repeat_after_cooldown"
+        reason = "critical_notification_cooldown_elapsed"
+        duplicate_suppressed = False
+        emitted_at = current_completed_at.astimezone(UTC).isoformat()
+        last_notified_at = emitted_at
+    else:
+        delivery_decision = "DONT_NOTIFY"
+        status = "suppress_duplicate_notification_within_cooldown"
+        reason = "same_material_notification_fingerprint"
+        duplicate_suppressed = True
+        emitted_at = None
+        last_notified_at = (
+            previous_notified_at.astimezone(UTC).isoformat()
+            if previous_notified_at is not None
+            else None
+        )
+
+    return {
+        "status": status,
+        "delivery_decision": delivery_decision,
+        "source_decision": current.get("decision"),
+        "priority": current_priority,
+        "message": current.get("message"),
+        "reason": reason,
+        "current_fingerprint": current_fingerprint,
+        "previous_fingerprint": previous_fingerprint,
+        "fingerprint_changed": previous_fingerprint != current_fingerprint,
+        "duplicate_notification_suppressed": duplicate_suppressed,
+        "cooldown_seconds": cooldown_seconds,
+        "elapsed_since_last_notify_seconds": round(elapsed_since_last_notify_seconds, 3)
+        if elapsed_since_last_notify_seconds is not None
+        else None,
+        "emitted_at": emitted_at,
+        "last_notified_at": last_notified_at,
+        "operator_action_required": current.get("operator_action_required") is True
+        and delivery_decision == "NOTIFY",
+        "auto_schedule_change_allowed": False,
+        "automation_update_allowed": False,
+        "auto_apply_allowed": False,
+        "force_signal_allowed": False,
+        "stale_signal_apply_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": current.get("no_live_order_sent") is not False,
+    }
+
+
+def _notification_delivery_history(
+    *,
+    previous_payload: dict[str, Any] | None,
+    current_delivery: dict[str, Any],
+    current_completed_at: datetime,
+    max_entries: int = 24,
+) -> dict[str, Any]:
+    previous = dict(previous_payload or {})
+    prior_history = dict(
+        previous.get("notification_delivery_history")
+        or previous.get("launch_shadow_watch_notification_delivery_history")
+        or {}
+    )
+    entries: list[dict[str, Any]] = []
+    seen_completed_at: set[str] = set()
+    for raw_entry in list(prior_history.get("entries") or []):
+        if not isinstance(raw_entry, dict):
+            continue
+        completed_at = str(raw_entry.get("completed_at") or "").strip()
+        if not completed_at or completed_at in seen_completed_at:
+            continue
+        seen_completed_at.add(completed_at)
+        entries.append(
+            {
+                "completed_at": completed_at,
+                "delivery_decision": raw_entry.get("delivery_decision"),
+                "status": raw_entry.get("status"),
+                "source_decision": raw_entry.get("source_decision"),
+                "priority": raw_entry.get("priority"),
+                "message": raw_entry.get("message"),
+                "reason": raw_entry.get("reason"),
+                "current_fingerprint": raw_entry.get("current_fingerprint"),
+                "fingerprint_changed": raw_entry.get("fingerprint_changed") is True,
+                "duplicate_notification_suppressed": raw_entry.get(
+                    "duplicate_notification_suppressed"
+                )
+                is True,
+                "emitted_at": raw_entry.get("emitted_at"),
+                "last_notified_at": raw_entry.get("last_notified_at"),
+                "no_live_order_sent": raw_entry.get("no_live_order_sent") is not False,
+            }
+        )
+    if not entries:
+        previous_delivery = dict(
+            previous.get("notification_delivery_plan")
+            or previous.get("launch_shadow_watch_notification_delivery_plan")
+            or {}
+        )
+        previous_completed = str(previous.get("completed_at") or "").strip()
+        if previous_delivery and previous_completed:
+            entries.append(
+                {
+                    "completed_at": previous_completed,
+                    "delivery_decision": previous_delivery.get("delivery_decision"),
+                    "status": previous_delivery.get("status"),
+                    "source_decision": previous_delivery.get("source_decision"),
+                    "priority": previous_delivery.get("priority"),
+                    "message": previous_delivery.get("message"),
+                    "reason": previous_delivery.get("reason"),
+                    "current_fingerprint": previous_delivery.get("current_fingerprint"),
+                    "fingerprint_changed": previous_delivery.get("fingerprint_changed")
+                    is True,
+                    "duplicate_notification_suppressed": previous_delivery.get(
+                        "duplicate_notification_suppressed"
+                    )
+                    is True,
+                    "emitted_at": previous_delivery.get("emitted_at"),
+                    "last_notified_at": previous_delivery.get("last_notified_at"),
+                    "seeded_from_previous_single_delivery": True,
+                    "no_live_order_sent": previous_delivery.get("no_live_order_sent")
+                    is not False,
+                }
+            )
+            seen_completed_at.add(previous_completed)
+
+    current_entry = {
+        "completed_at": current_completed_at.astimezone(UTC).isoformat(),
+        "delivery_decision": current_delivery.get("delivery_decision"),
+        "status": current_delivery.get("status"),
+        "source_decision": current_delivery.get("source_decision"),
+        "priority": current_delivery.get("priority"),
+        "message": current_delivery.get("message"),
+        "reason": current_delivery.get("reason"),
+        "current_fingerprint": current_delivery.get("current_fingerprint"),
+        "fingerprint_changed": current_delivery.get("fingerprint_changed") is True,
+        "duplicate_notification_suppressed": current_delivery.get(
+            "duplicate_notification_suppressed"
+        )
+        is True,
+        "emitted_at": current_delivery.get("emitted_at"),
+        "last_notified_at": current_delivery.get("last_notified_at"),
+        "no_live_order_sent": current_delivery.get("no_live_order_sent") is not False,
+    }
+    if current_entry["completed_at"] not in seen_completed_at:
+        entries.append(current_entry)
+    entries = entries[-max(1, int(max_entries or 1)) :]
+
+    notify_count = sum(1 for entry in entries if entry.get("delivery_decision") == "NOTIFY")
+    quiet_count = sum(1 for entry in entries if entry.get("source_decision") == "DONT_NOTIFY")
+    duplicate_suppressed_count = sum(
+        1 for entry in entries if entry.get("duplicate_notification_suppressed") is True
+    )
+    fingerprint_change_count = sum(
+        1 for entry in entries if entry.get("fingerprint_changed") is True
+    )
+    critical_notify_count = sum(
+        1
+        for entry in entries
+        if entry.get("delivery_decision") == "NOTIFY"
+        and str(entry.get("priority") or "").lower() == "critical"
+    )
+    consecutive_suppressed_count = 0
+    for entry in reversed(entries):
+        if entry.get("duplicate_notification_suppressed") is True:
+            consecutive_suppressed_count += 1
+        else:
+            break
+    last_notified = next(
+        (
+            entry
+            for entry in reversed(entries)
+            if entry.get("delivery_decision") == "NOTIFY"
+        ),
+        {},
+    )
+    last_suppressed = next(
+        (
+            entry
+            for entry in reversed(entries)
+            if entry.get("duplicate_notification_suppressed") is True
+        ),
+        {},
+    )
+    if current_delivery.get("delivery_decision") == "NOTIFY":
+        status = "notification_history_current_delivery_notified"
+    elif current_delivery.get("duplicate_notification_suppressed") is True:
+        status = "notification_history_duplicate_suppressed"
+    elif notify_count > 0:
+        status = "notification_history_prior_notifications"
+    else:
+        status = "notification_history_quiet"
+
+    return {
+        "status": status,
+        "window_size": max(1, int(max_entries or 1)),
+        "entry_count": len(entries),
+        "notify_count": notify_count,
+        "quiet_count": quiet_count,
+        "duplicate_suppressed_count": duplicate_suppressed_count,
+        "fingerprint_change_count": fingerprint_change_count,
+        "critical_notify_count": critical_notify_count,
+        "consecutive_duplicate_suppressed_count": consecutive_suppressed_count,
+        "last_delivery_decision": current_delivery.get("delivery_decision"),
+        "last_delivery_status": current_delivery.get("status"),
+        "last_notified_at": last_notified.get("emitted_at")
+        or current_delivery.get("last_notified_at"),
+        "last_notified_status": last_notified.get("status"),
+        "last_notified_priority": last_notified.get("priority"),
+        "last_suppressed_at": last_suppressed.get("completed_at"),
+        "last_suppressed_status": last_suppressed.get("status"),
+        "entries": entries,
+        "auto_schedule_change_allowed": False,
+        "automation_update_allowed": False,
+        "auto_apply_allowed": False,
+        "force_signal_allowed": False,
+        "stale_signal_apply_allowed": False,
+        "order_submission_allowed": False,
+        "no_live_order_sent": current_delivery.get("no_live_order_sent") is not False
+        and all(entry.get("no_live_order_sent") is not False for entry in entries),
     }
 
 
@@ -16186,11 +21726,14 @@ def _build_watch_summary(
     recent_paper_apply_parity_review: dict[str, Any] | None = None,
     recent_meta_router_promotion_gate: dict[str, Any] | None = None,
     pre_run_wait_plan: dict[str, Any] | None = None,
+    btcusdc_parallel_pre_run_wait_plan: dict[str, Any] | None = None,
+    pre_run_sleep_scope: str | None = None,
     pre_run_wait_incident_log: list[dict[str, Any]] | None = None,
     pre_run_market_data_refresh: dict[str, Any] | None = None,
     runtime_start_plan: dict[str, Any] | None = None,
     previous_payload: dict[str, Any] | None = None,
     evidence_report_root: Path | None = None,
+    btcusdc_parallel_shadow_lane: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     runtime_start = continuous_started_at or started_at
     observed_hours = round(max((completed_at - runtime_start).total_seconds(), 0.0) / 3600.0, 4)
@@ -16285,6 +21828,24 @@ def _build_watch_summary(
         safe_next_action_plan=safe_next_action_plan,
     )
     paper_only_rehearsal = _paper_only_rehearsal_summary(launch)
+    paper_lifecycle_row_diagnostics = _paper_lifecycle_row_diagnostics(
+        latest=latest,
+        paper_only_rehearsal=paper_only_rehearsal,
+        recent_paper_apply=dict(recent_paper_apply or {}),
+        recent_paper_review=dict(recent_paper_review or {}),
+        parity_review_state=parity_review_state,
+        execution_parity_status_summary=execution_parity_status_summary,
+    )
+    execution_parity_evidence_ledger = _execution_parity_evidence_ledger(
+        latest=latest,
+        paper_lifecycle_row_diagnostics=paper_lifecycle_row_diagnostics,
+        recent_paper_apply=dict(recent_paper_apply or {}),
+        recent_paper_review=dict(recent_paper_review or {}),
+        parity_review_state=parity_review_state,
+        execution_parity_status_summary=execution_parity_status_summary,
+        previous_payload=previous_payload,
+        generated_at=completed_at,
+    )
     scheduled_command_projection = _scheduled_command_projection(
         operator_handoff=operator_handoff,
         safe_next_action_plan=safe_next_action_plan,
@@ -16327,6 +21888,14 @@ def _build_watch_summary(
         safe_next_action_plan=safe_next_action_plan,
         execution_parity_status_summary=execution_parity_status_summary,
     )
+    fresh_signal_opportunity_memory = _fresh_signal_opportunity_memory(
+        progress=progress,
+        latest=latest,
+        first_fresh_signal_paper_apply_runbook=first_fresh_signal_paper_apply_runbook,
+        execution_parity_status_summary=execution_parity_status_summary,
+        previous_payload=previous_payload,
+        generated_at=completed_at,
+    )
     operator_review_decision_aid = _operator_review_decision_aid(
         operator_review_handoff_summary=operator_review_handoff_summary,
         remaining_work_closure_summary=remaining_work_closure_summary,
@@ -16364,6 +21933,30 @@ def _build_watch_summary(
         signal_wait_plan=dict(latest.get("signal_wait_plan") or {}),
         cadence_alignment=signal_monitor_cadence_alignment,
         safe_next_action_plan=safe_next_action_plan,
+    )
+    watch_continuity_summary = dict(runtime_start_plan or {}).get("watch_continuity") or _watch_continuity(
+        previous_completed_at=previous_completed_at,
+        current_completed_at=completed_at,
+        interval_seconds=interval_seconds,
+        previous_payload=previous_payload,
+    )
+    heartbeat_sla_diagnostics = _heartbeat_sla_diagnostics(
+        previous_completed_at=previous_completed_at,
+        current_completed_at=completed_at,
+        interval_seconds=interval_seconds,
+        watch_continuity=dict(watch_continuity_summary or {}),
+        signal_monitor=signal_monitor,
+        signal_monitor_cadence_alignment=signal_monitor_cadence_alignment,
+    )
+    heartbeat_sla_history = _heartbeat_sla_history(
+        previous_payload=previous_payload,
+        current_sla=heartbeat_sla_diagnostics,
+        current_completed_at=completed_at,
+    )
+    heartbeat_sla_response_plan = _heartbeat_sla_response_plan(
+        current_sla=heartbeat_sla_diagnostics,
+        history=heartbeat_sla_history,
+        signal_monitor=signal_monitor,
     )
     command_consistency_audit = _command_consistency_audit(
         safe_next_action_plan=safe_next_action_plan,
@@ -16445,8 +22038,17 @@ def _build_watch_summary(
     if latest:
         latest["paper_only_rehearsal"] = paper_only_rehearsal
         latest["signal_monitor"] = signal_monitor
+        latest["heartbeat_sla_diagnostics"] = heartbeat_sla_diagnostics
+        latest["heartbeat_sla_history"] = heartbeat_sla_history
+        latest["heartbeat_sla_response_plan"] = heartbeat_sla_response_plan
         latest["fresh_signal_blocker_diagnostics"] = fresh_signal_blocker_diagnostics
         latest["no_signal_resolution_summary"] = no_signal_resolution_summary
+        latest["fresh_signal_opportunity_memory"] = fresh_signal_opportunity_memory
+        latest["paper_lifecycle_row_diagnostics"] = paper_lifecycle_row_diagnostics
+        latest["execution_parity_evidence_ledger"] = execution_parity_evidence_ledger
+    btcusdc_parallel_shadow_lane_payload = dict(btcusdc_parallel_shadow_lane or {})
+    if latest and btcusdc_parallel_shadow_lane_payload:
+        latest["btcusdc_parallel_shadow_lane"] = btcusdc_parallel_shadow_lane_payload
     quote_progress = {
         "observed_start": progress.get("quote_observed_start"),
         "observed_latest": progress.get("quote_observed_latest"),
@@ -16534,6 +22136,29 @@ def _build_watch_summary(
         "quote_progress": quote_progress,
         "no_live_order_sent": live_violation_count == 0,
     }
+    notification_decision = _launch_shadow_watch_notification_decision(
+        status=status,
+        latest_launch_state=latest_launch_state,
+        fresh_signal_status=fresh_signal_status,
+        paper_apply_status=paper_apply_status,
+        heartbeat_sla_response_plan=heartbeat_sla_response_plan,
+        execution_parity_evidence_ledger=execution_parity_evidence_ledger,
+        live_violation_count=live_violation_count,
+    )
+    notification_delivery_plan = _notification_delivery_plan(
+        previous_payload=previous_payload,
+        current_decision=notification_decision,
+        current_completed_at=completed_at,
+    )
+    notification_delivery_history = _notification_delivery_history(
+        previous_payload=previous_payload,
+        current_delivery=notification_delivery_plan,
+        current_completed_at=completed_at,
+    )
+    if latest:
+        latest["launch_shadow_watch_notification_decision"] = notification_decision
+        latest["notification_delivery_plan"] = notification_delivery_plan
+        latest["notification_delivery_history"] = notification_delivery_history
     actionability_partition = dict(
         remaining_work_closure_summary.get("actionability_partition") or {}
     )
@@ -18470,12 +24095,61 @@ def _build_watch_summary(
             "rehearsal_available_now": paper_apply_status.get("rehearsal_available_now") is True,
             "remaining_gates": list(paper_apply_status.get("remaining_gates") or []),
         },
+        "fresh_signal_opportunity": {
+            "status": fresh_signal_opportunity_memory.get("status"),
+            "ever_seen": fresh_signal_opportunity_memory.get("ever_seen") is True,
+            "current_window_active": fresh_signal_opportunity_memory.get("current_window_active") is True,
+            "current_fresh_signal": fresh_signal_opportunity_memory.get("current_fresh_signal") is True,
+            "paper_apply_available_now": fresh_signal_opportunity_memory.get("paper_apply_available_now") is True,
+            "previous_paper_apply_available": fresh_signal_opportunity_memory.get(
+                "previous_paper_apply_available"
+            )
+            is True,
+            "last_seen_at": fresh_signal_opportunity_memory.get("last_seen_at"),
+            "last_seen_at_kst": fresh_signal_opportunity_memory.get("last_seen_at_kst"),
+            "last_seen_age_minutes": fresh_signal_opportunity_memory.get("last_seen_age_minutes"),
+            "source_event_key": fresh_signal_opportunity_memory.get("source_event_key"),
+            "bridge_action": fresh_signal_opportunity_memory.get("bridge_action"),
+            "expired_window_outcome": fresh_signal_opportunity_memory.get("expired_window_outcome"),
+            "safe_next_action": fresh_signal_opportunity_memory.get("safe_next_action"),
+            "stale_signal_apply_allowed": False,
+            "auto_apply_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": fresh_signal_opportunity_memory.get("no_live_order_sent") is not False,
+        },
         "paper_only_rehearsal": {
             "status": paper_only_rehearsal.get("status"),
             "system_ready": paper_only_rehearsal.get("system_ready") is True,
             "armed": paper_only_rehearsal.get("armed") is True,
             "remaining_gates": list(paper_only_rehearsal.get("remaining_gates") or []),
             "max_substitution_ready": paper_only_rehearsal.get("max_substitution_ready") is True,
+        },
+        "paper_lifecycle": {
+            "status": paper_lifecycle_row_diagnostics.get("status"),
+            "missing_stage": paper_lifecycle_row_diagnostics.get("missing_stage"),
+            "blockers": list(paper_lifecycle_row_diagnostics.get("blockers") or []),
+            "rows_available": paper_lifecycle_row_diagnostics.get("rows_available") is True,
+            "actual_paper_lifecycle_rows": paper_lifecycle_row_diagnostics.get(
+                "actual_paper_lifecycle_rows"
+            ),
+            "latest_paper_fill_rows": paper_lifecycle_row_diagnostics.get(
+                "latest_paper_fill_rows"
+            ),
+            "eligible_journal_rows": paper_lifecycle_row_diagnostics.get(
+                "eligible_journal_rows"
+            ),
+            "recent_paper_apply_seen": paper_lifecycle_row_diagnostics.get(
+                "recent_paper_apply_seen"
+            )
+            is True,
+            "recent_parity_review_status": paper_lifecycle_row_diagnostics.get(
+                "recent_parity_review_status"
+            ),
+            "safe_next_action": paper_lifecycle_row_diagnostics.get("safe_next_action"),
+            "auto_apply_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": paper_lifecycle_row_diagnostics.get("no_live_order_sent")
+            is not False,
         },
         "execution_parity": {
             "status": execution_parity_status_summary.get("status"),
@@ -18491,6 +24165,27 @@ def _build_watch_summary(
             )
             is True,
             "non_substitutable": execution_parity_status_summary.get("non_substitutable") is True,
+        },
+        "execution_parity_ledger": {
+            "status": execution_parity_evidence_ledger.get("status"),
+            "entry_count": execution_parity_evidence_ledger.get("entry_count"),
+            "eligible_journal_rows": execution_parity_evidence_ledger.get("eligible_journal_rows"),
+            "missing_samples": execution_parity_evidence_ledger.get("missing_samples"),
+            "progress_pct": execution_parity_evidence_ledger.get("progress_pct"),
+            "latest_credit_status": dict(
+                execution_parity_evidence_ledger.get("latest_credit_event") or {}
+            ).get("credit_status"),
+            "recent_parity_review_status": execution_parity_evidence_ledger.get(
+                "recent_parity_review_status"
+            ),
+            "paper_lifecycle_missing_stage": execution_parity_evidence_ledger.get(
+                "paper_lifecycle_missing_stage"
+            ),
+            "safe_next_action": execution_parity_evidence_ledger.get("safe_next_action"),
+            "backtest_substitution_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": execution_parity_evidence_ledger.get("no_live_order_sent")
+            is not False,
         },
         "signal_monitor": {
             "status": signal_monitor.get("status"),
@@ -18516,6 +24211,149 @@ def _build_watch_summary(
                 "next_monitor_retimestampted_after_current_iteration"
             )
             is True,
+        },
+        "heartbeat_sla": {
+            "status": heartbeat_sla_diagnostics.get("status"),
+            "actual_gap_minutes": heartbeat_sla_diagnostics.get("actual_gap_minutes"),
+            "monitor_interval_seconds": heartbeat_sla_diagnostics.get(
+                "monitor_interval_seconds"
+            ),
+            "fresh_signal_window_minutes": heartbeat_sla_diagnostics.get(
+                "fresh_signal_window_minutes"
+            ),
+            "within_monitor_interval": heartbeat_sla_diagnostics.get(
+                "within_monitor_interval"
+            ),
+            "within_fresh_signal_window": heartbeat_sla_diagnostics.get(
+                "within_fresh_signal_window"
+            ),
+            "missed_monitor_count_estimate": heartbeat_sla_diagnostics.get(
+                "missed_monitor_count_estimate"
+            ),
+            "fresh_signal_window_risk": heartbeat_sla_diagnostics.get(
+                "fresh_signal_window_risk"
+            ),
+            "safe_next_action": heartbeat_sla_diagnostics.get("safe_next_action"),
+            "auto_apply_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": heartbeat_sla_diagnostics.get("no_live_order_sent")
+            is not False,
+        },
+        "heartbeat_sla_history": {
+            "status": heartbeat_sla_history.get("status"),
+            "entry_count": heartbeat_sla_history.get("entry_count"),
+            "late_count": heartbeat_sla_history.get("late_count"),
+            "fresh_signal_window_miss_count": heartbeat_sla_history.get(
+                "fresh_signal_window_miss_count"
+            ),
+            "gap_reset_count": heartbeat_sla_history.get("gap_reset_count"),
+            "consecutive_late_count": heartbeat_sla_history.get(
+                "consecutive_late_count"
+            ),
+            "consecutive_fresh_signal_window_miss_count": heartbeat_sla_history.get(
+                "consecutive_fresh_signal_window_miss_count"
+            ),
+            "max_gap_minutes": heartbeat_sla_history.get("max_gap_minutes"),
+            "safe_next_action": heartbeat_sla_history.get("safe_next_action"),
+            "auto_apply_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": heartbeat_sla_history.get("no_live_order_sent")
+            is not False,
+        },
+        "heartbeat_sla_response": {
+            "status": heartbeat_sla_response_plan.get("status"),
+            "severity": heartbeat_sla_response_plan.get("severity"),
+            "operator_notify": heartbeat_sla_response_plan.get("operator_notify")
+            is True,
+            "paper_apply_blocked_by_sla": heartbeat_sla_response_plan.get(
+                "paper_apply_blocked_by_sla"
+            )
+            is True,
+            "primary_next_action": heartbeat_sla_response_plan.get(
+                "primary_next_action"
+            ),
+            "rationale": heartbeat_sla_response_plan.get("rationale"),
+            "recommended_heartbeat_interval_seconds": heartbeat_sla_response_plan.get(
+                "recommended_heartbeat_interval_seconds"
+            ),
+            "auto_schedule_change_allowed": False,
+            "automation_update_allowed": False,
+            "auto_apply_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": heartbeat_sla_response_plan.get("no_live_order_sent")
+            is not False,
+        },
+        "notification_decision": {
+            "status": notification_decision.get("status"),
+            "decision": notification_decision.get("decision"),
+            "priority": notification_decision.get("priority"),
+            "message": notification_decision.get("message"),
+            "reason": notification_decision.get("reason"),
+            "operator_action_required": notification_decision.get(
+                "operator_action_required"
+            )
+            is True,
+            "auto_schedule_change_allowed": False,
+            "automation_update_allowed": False,
+            "auto_apply_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": notification_decision.get("no_live_order_sent")
+            is not False,
+        },
+        "notification_delivery": {
+            "status": notification_delivery_plan.get("status"),
+            "delivery_decision": notification_delivery_plan.get("delivery_decision"),
+            "source_decision": notification_delivery_plan.get("source_decision"),
+            "priority": notification_delivery_plan.get("priority"),
+            "message": notification_delivery_plan.get("message"),
+            "duplicate_notification_suppressed": notification_delivery_plan.get(
+                "duplicate_notification_suppressed"
+            )
+            is True,
+            "fingerprint_changed": notification_delivery_plan.get(
+                "fingerprint_changed"
+            )
+            is True,
+            "cooldown_seconds": notification_delivery_plan.get("cooldown_seconds"),
+            "elapsed_since_last_notify_seconds": notification_delivery_plan.get(
+                "elapsed_since_last_notify_seconds"
+            ),
+            "emitted_at": notification_delivery_plan.get("emitted_at"),
+            "last_notified_at": notification_delivery_plan.get("last_notified_at"),
+            "auto_schedule_change_allowed": False,
+            "automation_update_allowed": False,
+            "auto_apply_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": notification_delivery_plan.get("no_live_order_sent")
+            is not False,
+        },
+        "notification_delivery_history": {
+            "status": notification_delivery_history.get("status"),
+            "entry_count": notification_delivery_history.get("entry_count"),
+            "notify_count": notification_delivery_history.get("notify_count"),
+            "quiet_count": notification_delivery_history.get("quiet_count"),
+            "duplicate_suppressed_count": notification_delivery_history.get(
+                "duplicate_suppressed_count"
+            ),
+            "fingerprint_change_count": notification_delivery_history.get(
+                "fingerprint_change_count"
+            ),
+            "critical_notify_count": notification_delivery_history.get(
+                "critical_notify_count"
+            ),
+            "consecutive_duplicate_suppressed_count": notification_delivery_history.get(
+                "consecutive_duplicate_suppressed_count"
+            ),
+            "last_notified_at": notification_delivery_history.get("last_notified_at"),
+            "last_suppressed_at": notification_delivery_history.get(
+                "last_suppressed_at"
+            ),
+            "auto_schedule_change_allowed": False,
+            "automation_update_allowed": False,
+            "auto_apply_allowed": False,
+            "order_submission_allowed": False,
+            "no_live_order_sent": notification_delivery_history.get("no_live_order_sent")
+            is not False,
         },
         "actionability": {
             "status": actionability_partition.get("status"),
@@ -18825,14 +24663,18 @@ def _build_watch_summary(
             "runtime_floor": dict(runtime_start_plan or {}).get("runtime_floor"),
             "no_live_order_sent": True,
         },
-        "watch_continuity": dict(runtime_start_plan or {}).get("watch_continuity")
-        or _watch_continuity(
-            previous_completed_at=previous_completed_at,
-            current_completed_at=completed_at,
-            interval_seconds=interval_seconds,
-        ),
+        "watch_continuity": watch_continuity_summary,
+        "heartbeat_sla_diagnostics": heartbeat_sla_diagnostics,
+        "heartbeat_sla_history": heartbeat_sla_history,
+        "heartbeat_sla_response_plan": heartbeat_sla_response_plan,
         "paper_only_rehearsal": paper_only_rehearsal,
         "latest_launch_state": latest_launch_state,
+        "launch_shadow_watch_notification_decision": notification_decision,
+        "launch_shadow_watch_notification_delivery_plan": notification_delivery_plan,
+        "launch_shadow_watch_notification_delivery_history": notification_delivery_history,
+        "notification_decision": notification_decision,
+        "notification_delivery_plan": notification_delivery_plan,
+        "notification_delivery_history": notification_delivery_history,
         "launch_shadow_watch_brief": launch_shadow_watch_brief,
         "launch_status": latest_launch_state.get("launch_status"),
         "launch_next_blocker": latest_launch_state.get("next_blocker_gate"),
@@ -18856,10 +24698,17 @@ def _build_watch_summary(
         "paper_apply_status": paper_apply_status,
         "paper_apply_available": paper_apply_status.get("seen_during_watch"),
         "signal_monitor": signal_monitor,
+        "heartbeat_sla": heartbeat_sla_diagnostics,
+        "heartbeat_sla_trend": heartbeat_sla_history,
+        "heartbeat_sla_response": heartbeat_sla_response_plan,
         "fresh_signal_blocker_diagnostics": fresh_signal_blocker_diagnostics,
         "no_signal_resolution_summary": no_signal_resolution_summary,
         "signal_monitor_cadence_alignment": signal_monitor_cadence_alignment,
         "pre_run_quote_window_wait_plan": dict(pre_run_wait_plan or {}),
+        "btcusdc_parallel_pre_run_quote_window_wait_plan": dict(
+            btcusdc_parallel_pre_run_wait_plan or {}
+        ),
+        "pre_run_quote_window_sleep_scope": pre_run_sleep_scope,
         "pre_run_quote_window_capture_outcome": pre_run_capture_outcome,
         "pre_run_quote_window_wait_incident_log": incident_log,
         "latest_pre_run_quote_window_wait_incident": dict(incident_log[-1]) if incident_log else None,
@@ -18888,6 +24737,7 @@ def _build_watch_summary(
         "baseline_collection_progress": dict(baseline_collection or latest.get("collection_progress") or {}),
         "progress": progress,
         "microstructure_watch": micro,
+        "btcusdc_parallel_shadow_lane": btcusdc_parallel_shadow_lane_payload,
         "canary_risk_caps_config": risk_caps,
         "operator_handoff": operator_handoff,
         "operator_work_queue": operator_work_queue,
@@ -18906,6 +24756,8 @@ def _build_watch_summary(
             or {}
         ),
         "first_fresh_signal_paper_apply_runbook": first_fresh_signal_paper_apply_runbook,
+        "fresh_signal_opportunity_memory": fresh_signal_opportunity_memory,
+        "paper_lifecycle_row_diagnostics": paper_lifecycle_row_diagnostics,
         "operator_review_decision_aid": operator_review_decision_aid,
         "operator_review_resolution_plan": operator_review_resolution_plan,
         "operator_review_readiness_matrix": dict(
@@ -18928,6 +24780,7 @@ def _build_watch_summary(
         "execution_parity_collection_plan": execution_parity_collection_plan,
         "execution_parity_eta_plan": execution_parity_eta,
         "execution_parity_status_summary": execution_parity_status_summary,
+        "execution_parity_evidence_ledger": execution_parity_evidence_ledger,
         "recent_paper_apply_result": dict(recent_paper_apply or {}),
         "recent_paper_bridge_review": dict(recent_paper_review or {}),
         "recent_paper_apply_parity_review": parity_review_state,
@@ -18965,17 +24818,37 @@ def run_launch_shadow_watch(
         max_wait_seconds=max(0.0, float(args.max_pre_run_wait_seconds)),
         wakeup_buffer_seconds=max(0.0, float(args.quote_window_wakeup_buffer_seconds)),
     )
-    if pre_run_wait_plan.get("should_sleep") is True:
+    btcusdc_parallel_pre_run_wait_plan = _pre_run_btcusdc_parallel_quote_window_wait_plan(
+        previous_payload=previous_payload,
+        generated_at=datetime.now(UTC),
+        enabled=bool(getattr(args, "sleep_until_next_btcusdc_parallel_quote_window", False)),
+        parallel_lane_enabled=_parallel_btcusdc_shadow_enabled(args),
+        max_wait_seconds=max(0.0, float(args.max_pre_run_wait_seconds)),
+        wakeup_buffer_seconds=max(0.0, float(args.quote_window_wakeup_buffer_seconds)),
+    )
+    pre_run_sleep_scope, selected_pre_run_wait_plan = _select_pre_run_quote_window_sleep_plan(
+        primary_plan=pre_run_wait_plan,
+        btcusdc_plan=btcusdc_parallel_pre_run_wait_plan,
+    )
+    if selected_pre_run_wait_plan.get("should_sleep") is True:
         sleep_started_at = datetime.now(UTC)
-        sleep_fn(max(0.0, float(pre_run_wait_plan.get("wait_seconds") or 0.0)))
-        pre_run_wait_plan = _finalize_pre_run_quote_window_sleep(
-            pre_run_wait_plan,
+        sleep_fn(max(0.0, float(selected_pre_run_wait_plan.get("wait_seconds") or 0.0)))
+        finalized_wait_plan = _finalize_pre_run_quote_window_sleep(
+            selected_pre_run_wait_plan,
             sleep_started_at=sleep_started_at,
             woke_at=datetime.now(UTC),
         )
+        finalized_wait_plan["selected_sleep_scope"] = pre_run_sleep_scope
+        if pre_run_sleep_scope == "btcusdc_parallel_shadow_lane":
+            btcusdc_parallel_pre_run_wait_plan = finalized_wait_plan
+        else:
+            pre_run_wait_plan = finalized_wait_plan
     pre_run_market_data_refresh: dict[str, Any] = {}
     if (
-        pre_run_wait_plan.get("actual_sleep_seconds") is not None
+        (
+            pre_run_wait_plan.get("actual_sleep_seconds") is not None
+            or btcusdc_parallel_pre_run_wait_plan.get("actual_sleep_seconds") is not None
+        )
         and not bool(getattr(args, "disable_market_data_refresh_after_quote_window_sleep", False))
     ):
         refresh_fn = market_data_refresh_fn or _refresh_runtime_market_data_cache
@@ -19005,19 +24878,70 @@ def run_launch_shadow_watch(
     refresh_before_evidence_run = not bool(getattr(args, "disable_market_data_refresh_before_evidence_run", False))
     pre_run_refresh_succeeded = pre_run_market_data_refresh.get("status") == "refreshed"
     pre_run_force_quote_sample = _pre_run_wait_force_quote_sample(pre_run_wait_plan)
+    btcusdc_pre_run_force_quote_sample = _pre_run_wait_force_quote_sample(
+        btcusdc_parallel_pre_run_wait_plan
+    )
     for idx in range(1, iterations + 1):
         generated_at = datetime.now(UTC)
         observed_hours = max((generated_at - continuous_started_at).total_seconds(), 0.0) / 3600.0
-        runs.append(
-            _run_once(
+        primary_run = _run_once(
+            args,
+            iteration=idx,
+            generated_at=generated_at,
+            observed_hours=observed_hours,
+            refresh_market_data_before_run=refresh_before_evidence_run
+            and not (idx == 1 and pre_run_refresh_succeeded),
+            force_quote_sample=pre_run_force_quote_sample and idx == 1,
+        )
+        runs.append(primary_run)
+        btcusdc_candidate_run: dict[str, Any] = {}
+        btcusdc_candidate_microstructure_watch: dict[str, Any] = {}
+        if _parallel_btcusdc_shadow_enabled(args):
+            btcusdc_candidate_run = _run_once(
                 args,
                 iteration=idx,
                 generated_at=generated_at,
                 observed_hours=observed_hours,
-                refresh_market_data_before_run=refresh_before_evidence_run
-                and not (idx == 1 and pre_run_refresh_succeeded),
-                force_quote_sample=pre_run_force_quote_sample and idx == 1,
+                refresh_market_data_before_run=False,
+                force_quote_sample=(pre_run_force_quote_sample or btcusdc_pre_run_force_quote_sample)
+                and idx == 1,
+                symbol=_parallel_btcusdc_symbol(args),
+                sample_jsonl=_parallel_btcusdc_sample_path(args),
+                evidence_label=_parallel_btcusdc_symbol(args),
+                canary_risk_caps_json=_parallel_btcusdc_canary_risk_caps_json(args),
             )
+            previous_btcusdc_lane = dict(previous_payload.get("btcusdc_parallel_shadow_lane") or {})
+            previous_btcusdc_micro = dict(
+                previous_btcusdc_lane.get("candidate_quote_microstructure_watch") or {}
+            )
+            btcusdc_quote_capture_report_dir = (
+                "reports/validation/diagnostics/"
+                f"market_state_rotation_v6_btcusdc_quote_capture_{generated_at:%Y%m%d_%H%M%S}"
+            )
+            btcusdc_quote_capture_command = _parallel_btcusdc_quote_capture_command(
+                args,
+                report_dir=btcusdc_quote_capture_report_dir,
+            )
+            btcusdc_candidate_microstructure_watch = _quote_microstructure_watch(
+                sample_jsonl=_parallel_btcusdc_sample_path(args),
+                generated_at=generated_at,
+                latest_collection=dict(btcusdc_candidate_run.get("collection_progress") or {}),
+                previous_payload={"microstructure_watch": previous_btcusdc_micro},
+                recent_hours=max(0.0, float(args.microstructure_recent_hours)),
+                expected_symbol=_parallel_btcusdc_symbol(args),
+            )
+            btcusdc_candidate_microstructure_watch["coverage_plan"] = _microstructure_coverage_plan(
+                coverage=dict(btcusdc_candidate_microstructure_watch.get("coverage") or {}),
+                latest_collection=dict(btcusdc_candidate_run.get("collection_progress") or {}),
+                microstructure_watch=btcusdc_candidate_microstructure_watch,
+                generated_at=generated_at,
+                quote_capture_command=btcusdc_quote_capture_command,
+            )
+        btcusdc_parallel_shadow_lane = _btc_usdc_parallel_shadow_lane_summary(
+            primary_run=primary_run,
+            candidate_run=btcusdc_candidate_run,
+            candidate_microstructure_watch=btcusdc_candidate_microstructure_watch,
+            enabled=_parallel_btcusdc_shadow_enabled(args),
         )
         if not baseline_collection:
             baseline_collection = dict(runs[0].get("collection_progress") or {})
@@ -19059,49 +24983,19 @@ def run_launch_shadow_watch(
             recent_paper_apply_parity_review=recent_paper_apply_parity_review,
             recent_meta_router_promotion_gate=recent_meta_router_promotion_gate,
             pre_run_wait_plan=pre_run_wait_plan,
+            btcusdc_parallel_pre_run_wait_plan=btcusdc_parallel_pre_run_wait_plan,
+            pre_run_sleep_scope=pre_run_sleep_scope,
             pre_run_wait_incident_log=pre_run_wait_incident_log,
             pre_run_market_data_refresh=pre_run_market_data_refresh,
             runtime_start_plan=runtime_start_plan,
             previous_payload=previous_payload,
             evidence_report_root=evidence_root,
+            btcusdc_parallel_shadow_lane=btcusdc_parallel_shadow_lane,
         )
-        _write_json(report_dir / "latest.json", summary)
-        _write_markdown(report_dir / "latest.md", summary)
+        summary = _write_watch_reports(report_dir, summary)
         if idx < iterations:
             sleep_fn(max(0.0, float(args.interval_seconds)))
-    return _build_watch_summary(
-        started_at=started_at,
-        completed_at=datetime.now(UTC),
-        runs=runs,
-        target_hours=max(0.0, float(args.target_hours)),
-        continuous_started_at=continuous_started_at,
-        baseline_collection=baseline_collection,
-        previous_completed_at=previous_completed_at,
-        interval_seconds=max(0.0, float(args.interval_seconds)),
-        microstructure_watch=microstructure_watch,
-        recent_paper_apply=_recent_paper_apply_result(
-            evidence_root=evidence_root,
-            current_at=datetime.now(UTC),
-        ),
-        recent_paper_review=_recent_paper_bridge_review(
-            evidence_root=evidence_root,
-            current_at=datetime.now(UTC),
-        ),
-        recent_paper_apply_parity_review=_recent_paper_apply_parity_review(
-            evidence_root=evidence_root,
-            current_at=datetime.now(UTC),
-        ),
-        recent_meta_router_promotion_gate=_recent_meta_router_promotion_gate(
-            evidence_root=evidence_root,
-            current_at=datetime.now(UTC),
-        ),
-        pre_run_wait_plan=pre_run_wait_plan,
-        pre_run_wait_incident_log=pre_run_wait_incident_log,
-        pre_run_market_data_refresh=pre_run_market_data_refresh,
-        runtime_start_plan=runtime_start_plan,
-        previous_payload=previous_payload,
-        evidence_report_root=evidence_root,
-    )
+    return summary
 
 
 def main() -> int:

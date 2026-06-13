@@ -347,6 +347,7 @@ def build_execution_parity_journal_report(
         journal_rows,
         input_walk_report=input_walk_report,
         input_execution_journal=input_execution_journal,
+        expected_symbol=str(symbol or EXPECTED_SYMBOL).upper(),
         expected_strategy_family=strategy_family,
         min_sample_count=max(1, int(min_sample_count)),
     )
