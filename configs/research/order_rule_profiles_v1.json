@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "status": "OFFLINE_CONTRACT_ONLY_NOT_BACKTEST_REGISTERED",
+  "scope": "Target-bearing R0/F0 research variants; no change to E005 or production",
+  "common": {
+    "tick": "0.1",
+    "atr_multiple": "3",
+    "structure_buffer_ticks": 1,
+    "decision_delay_ms": 60000,
+    "maximum_hold_ms": 604800000
+  },
+  "control": {
+    "reentry": "CONTINUING_NEXT_DECISION",
+    "target_anchor": "EPISODE_START",
+    "take_profit": "CLOSE_CONFIRM_MARKET",
+    "stop_basis": "ATR"
+  },
+  "single_axis_changes": {
+    "fresh_signal_reentry": {"reentry": "FRESH_EPISODE"},
+    "entry_decision_target": {"target_anchor": "ENTRY_DECISION"},
+    "intrabar_market_target": {"take_profit": "TOUCH_MARKET"},
+    "structural_stop": {"stop_basis": "STRUCTURE"},
+    "resting_limit_target": {"take_profit": "RESTING_LIMIT"}
+  },
+  "restrictions": [
+    "These are rule variants, not six new strategy candidates.",
+    "Control is a new contract, not an exact E005 reproduction: post-close observation, target geometry, and fill risk checks are explicit.",
+    "One axis at a time; no Cartesian optimization or performance-based parameter choice.",
+    "RESTING_LIMIT requires independent fill evidence; OHLC touch cannot approve a fill.",
+    "All profiles require flat position and reconciled closure/cancellation of all related orders before a new cycle.",
+    "ATR3, one-tick structure buffer and seven-day expiry are research settings, not optimal claims.",
+    "Account freshness, fee/margin checks, persistence and real-order routing remain external integration work."
+  ]
+}

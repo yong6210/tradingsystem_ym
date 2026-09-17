@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "policy_id": "BTCUSDC_1000_FORWARD_POLICY_V1",
+  "status": "POLICY_PROPOSAL",
+  "capital_usdc": 1000,
+  "metric": "365_TIMES_MEAN_NET_CALENDAR_DAILY_RETURN_PCT",
+  "economics": {
+    "absolute_hurdle_pct": 5,
+    "excess_hurdle_pp": 1,
+    "ci_half_width_pp": 2,
+    "operating_cost_usdc_per_year": null
+  },
+  "risk": {
+    "cycle_pct": 0.5,
+    "aggregate_pct": 1,
+    "daily_stop_pct": 2,
+    "warning_pct": 5,
+    "halt_pct": 8,
+    "max_observed_dd_pct": 8,
+    "max_underwater_days": 180
+  },
+  "inference": {
+    "family_alpha": 0.05,
+    "candidates": 1,
+    "hypotheses_per_candidate": 2,
+    "block_days": [28, 56],
+    "repetitions": 10000,
+    "seed": 17092026,
+    "evaluation_days": 730,
+    "stopping_rule": "FIXED_END_NO_PERFORMANCE_EXTENSION",
+    "comparison_scope": "ONE_PRESELECTED_CANDIDATE_AND_FROZEN_CONTROL"
+  },
+  "binding": {
+    "candidate_id": null,
+    "control_id": "T0_CONTROL_TO_BE_VERSION_PINNED",
+    "forward_start": null,
+    "last_inspected_end": "2026-09-01T00:00:00Z",
+    "source_hashes": {},
+    "source_roles": {
+      "candidate": null,
+      "control": null,
+      "engine": null,
+      "execution_assumptions": null,
+      "inspection_history": null
+    },
+    "calibration_report": null
+  }
+}
