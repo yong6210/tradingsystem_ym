@@ -162,3 +162,34 @@ def test_quote_shadow_audit_blocks_samples_concentrated_in_one_hour() -> None:
     assert report["distinct_hour_count"] == 1
     assert report["coverage"]["utc_hour_of_day_covered_count"] == 1
     assert "distinct_hours_missing" in report["blockers"]
+
+
+def test_quote_shadow_audit_rejects_invalid_values_instead_of_counting_them() -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    good = build_quote_shadow_row(
+        order_book=_book(), timestamp=base, symbol="BTCUSDT",
+        strategy_family="market_state_rotation_v6", decision_id="good",
+        side="long", order_notional_usdt=100, latency_ms=25,
+    )
+    mutations = [
+        {"spread_bps": float("nan")}, {"latency_ms": -1},
+        {"market_slippage_bps": float("inf")}, {"best_bid": 200000},
+        {"timestamp": "bad"}, {"timestamp": (base + timedelta(days=2)).isoformat()},
+        {"side": "invalid"}, {"depth_notional": 0}, {"latency_ms": True},
+        {"spread_bps": []}, {"timestamp": {}},
+    ]
+    for mutation in mutations:
+        report = build_quote_shadow_audit_report(
+            [good, {**good, **mutation}], required_quote_samples=2,
+            min_calendar_days=1, min_distinct_hours=1,
+            generated_at=base + timedelta(days=1),
+        )
+        assert report["overall_status"] == "FAIL", mutation
+        assert report["eligible_row_count"] == 1, mutation
+        assert report["schema_failure_count"] == 1, mutation
+
+
+def test_quote_shadow_audit_handles_non_mapping_row() -> None:
+    report = build_quote_shadow_audit_report([[]])
+    assert report["schema_failure_count"] == 1
+    assert report["overall_status"] == "FAIL"

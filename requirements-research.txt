@@ -1,0 +1,4 @@
+# Optional offline research runtime; production trading dependencies unchanged.
+# Versions used for the 2026-09-17 multi-strategy experiment (Python 3.12).
+numpy==2.3.5
+pandas==2.2.3

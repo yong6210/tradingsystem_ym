@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import sys
@@ -494,6 +495,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--days", type=int, default=365)
     parser.add_argument("--load-days", type=int, default=1825)
+    parser.add_argument("--local-data-dir", default=None,
+                        help="Use a validated prepare_local_kline_archives dataset without network downloads.")
     parser.add_argument("--exec-interval", default="5m")
     parser.add_argument("--scenario-intervals", default="1h,4h")
     parser.add_argument("--exchange-leverage", type=float, default=10.0)
@@ -5402,11 +5405,11 @@ def backtest_config(
 
         month = features.ts[exec_idx].strftime("%Y-%m")
         if month not in month_equity:
-            month_equity[month] = {"start": equity, "end": equity}
+            month_equity[month] = {"start": bar_start_equity, "end": equity}
         month_equity[month]["end"] = equity
         day = features.ts[exec_idx].strftime("%Y-%m-%d")
         if day not in day_equity:
-            day_equity[day] = {"start": equity, "end": equity}
+            day_equity[day] = {"start": bar_start_equity, "end": equity}
         day_equity[day]["end"] = equity
 
         if equity > peak:
@@ -6664,14 +6667,41 @@ def build_configs(
     return configs
 
 
+def _load_local_bars(directory: Path, symbol: str, interval: str) -> list[Bar]:
+    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    if manifest.get("status") != "PASS" or manifest.get("symbol") != symbol:
+        raise ValueError("local dataset is not validated for the requested symbol")
+    filename = f"{symbol}_{interval}.json"
+    expected_digest = manifest.get("artifacts", {}).get(filename)
+    if not expected_digest:
+        raise ValueError(f"local dataset has no validated interval: {interval}")
+    content = (directory / filename).read_bytes()
+    if hashlib.sha256(content).hexdigest() != expected_digest:
+        raise ValueError(f"local dataset checksum mismatch: {filename}")
+    payload = json.loads(content)
+    if payload.get("symbol") != symbol or payload.get("interval") != interval:
+        raise ValueError("local dataset identity mismatch")
+    return [Bar(ts=datetime.fromisoformat(row["ts"]), open_ms=row["open_ms"],
+                o=row["o"], h=row["h"], l=row["l"], c=row["c"], v=row["v"])
+            for row in payload["rows"]]
+
+
 def _load_feature_sets(args: argparse.Namespace) -> tuple[FeatureSet, dict[str, FeatureSet], dict[str, list[int]], dict[str, Any]]:
-    settings = get_settings()
-    base_url = str(args.base_url or settings.binance_rest_base_url or "https://fapi.binance.com").rstrip("/")
+    local_dir = getattr(args, "local_data_dir", None)
+    base_url = ""
+    if local_dir is None:
+        settings = get_settings()
+        base_url = str(args.base_url or settings.binance_rest_base_url or "https://fapi.binance.com").rstrip("/")
     cache_dir = Path(args.cache_dir)
     load_days = max(int(args.load_days), int(args.days))
     max_cache_age_minutes = getattr(args, "max_cache_age_minutes", None)
 
-    exec_bars = _load_bars(
+    def load_bars(**kwargs):
+        if local_dir is not None:
+            return _load_local_bars(Path(local_dir), kwargs["symbol"], kwargs["interval"])
+        return _load_bars(**kwargs)
+
+    exec_bars = load_bars(
         symbol=args.symbol,
         interval=args.exec_interval,
         days=load_days,
@@ -6686,7 +6716,7 @@ def _load_feature_sets(args: argparse.Namespace) -> tuple[FeatureSet, dict[str, 
     scenario_features: dict[str, FeatureSet] = {}
     scenario_maps: dict[str, list[int]] = {}
     for interval in _csv(args.scenario_intervals):
-        bars = _load_bars(
+        bars = load_bars(
             symbol=args.symbol,
             interval=interval,
             days=load_days,
@@ -6703,6 +6733,8 @@ def _load_feature_sets(args: argparse.Namespace) -> tuple[FeatureSet, dict[str, 
         scenario_maps[interval] = _map_closed_indices(exec_bars, bars, interval)
 
     meta = {
+        "data_source": "validated_local_archives" if local_dir is not None else "remote_cache",
+        "local_data_dir": str(Path(local_dir).resolve()) if local_dir is not None else None,
         "base_url": base_url,
         "exec_rows": len(exec_bars),
         "exec_start": exec_bars[0].ts.isoformat() if exec_bars else None,

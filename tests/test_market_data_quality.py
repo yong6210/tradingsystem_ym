@@ -399,3 +399,39 @@ def test_backfill_symbol_timeframes_prepends_1m_history_until_minimum_is_met() -
 
         assert summary["history_1m"] == 0
         assert history_fetches == 1
+
+
+@pytest.mark.parametrize("field", ["o", "h", "l", "c", "v"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_quality_gate_rejects_nonfinite_numbers(field, value) -> None:
+    candle = _candle(ts=_recent_base())
+    setattr(candle, field, value)
+    with pytest.raises(DataQualityError):
+        DataQualityGate().validate(candle, None)
+
+
+@pytest.mark.parametrize("close", [0.0, -1.0])
+def test_quality_gate_rejects_nonpositive_prices(close) -> None:
+    candle = _candle(ts=_recent_base(), close=close)
+    with pytest.raises(DataQualityError):
+        DataQualityGate().validate(candle, None)
+
+
+def test_candle_upsert_refreshes_loaded_identity_and_preserves_finality() -> None:
+    with SessionLocal() as db:
+        repo = CandleRepository(db)
+        ts = _recent_base()
+        initial = _candle(ts=ts, close=100.0)
+        initial.is_final = False
+        loaded = repo.upsert(initial)
+        final = repo.upsert(_candle(ts=ts, close=101.0))
+        assert final is loaded
+        assert loaded.c == 101.0
+        assert loaded.is_final is True
+        delayed_partial = _candle(ts=ts, close=99.0)
+        delayed_partial.is_final = False
+        returned = repo.upsert(delayed_partial)
+        db.flush()
+        db.expire_all()
+        assert returned.c == 101.0
+        assert returned.is_final is True

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 
 from app.core.config import CURRENT_MICRO_LIVE_USDT_ACTIVE_SYMBOLS, CURRENT_MICRO_LIVE_USDT_SYMBOLS, get_settings
 from app.db.models import Candle
@@ -67,6 +68,10 @@ class DataQualityGate:
         return ts.astimezone(timezone.utc)
 
     def validate(self, new: Candle, prev: Candle | None, *, allow_stale: bool = False) -> None:
+        if not all(isfinite(value) for value in (new.o, new.h, new.l, new.c, new.v)):
+            raise DataQualityError("nonfinite ohlcv value")
+        if min(new.o, new.h, new.l, new.c) <= 0:
+            raise DataQualityError("nonpositive price")
         if new.h < max(new.o, new.c) or new.l > min(new.o, new.c):
             raise DataQualityError("invalid ohlc bounds")
         if new.v < 0:

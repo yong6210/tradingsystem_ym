@@ -266,13 +266,32 @@ def build_quote_shadow_audit_report(
     schema_failures: list[dict[str, Any]] = []
     eligible_rows: list[dict[str, Any]] = []
     for idx, row in enumerate(rows):
-        missing = [field for field in REQUIRED_FIELDS if row.get(field) in {None, ""}]
+        if not isinstance(row, dict):
+            schema_failures.append({"row_index": idx, "invalid_fields": ["row"]})
+            continue
+        missing = [field for field in REQUIRED_FIELDS if row.get(field) is None or row.get(field) == ""]
         if missing:
             schema_failures.append({"row_index": idx, "missing_fields": missing})
             continue
         if str(row.get("symbol") or "").upper() != expected_symbol.upper():
             continue
         if str(row.get("strategy_family") or "") != expected_strategy_family:
+            continue
+        invalid = []
+        timestamp = _parse_ts(row.get("timestamp"))
+        if timestamp is None or timestamp > generated_at:
+            invalid.append("timestamp")
+        if row.get("side") not in ("long", "short"):
+            invalid.append("side")
+        for field in ("best_bid", "best_ask", "spread_bps", "market_slippage_bps", "depth_notional", "latency_ms"):
+            value = _safe_float(row.get(field), float("nan"))
+            minimum_inclusive = field in {"spread_bps", "market_slippage_bps", "latency_ms"}
+            if isinstance(row.get(field), bool) or not isfinite(value) or (value < 0 if minimum_inclusive else value <= 0):
+                invalid.append(field)
+        if not invalid and float(row["best_bid"]) > float(row["best_ask"]):
+            invalid.append("best_bid")
+        if invalid:
+            schema_failures.append({"row_index": idx, "invalid_fields": invalid})
             continue
         eligible_rows.append(row)
 

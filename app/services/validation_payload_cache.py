@@ -4,6 +4,7 @@ from collections.abc import Mapping
 import copy
 import hashlib
 import json
+from math import isfinite
 from pathlib import Path
 import time
 from typing import Any
@@ -77,7 +78,8 @@ class ValidationPayloadCacheService:
                 "validation_payload_cache_max_age_seconds",
                 VALIDATION_PAYLOAD_CACHE_MAX_AGE_SECONDS,
             )
-            return max(1.0, float(value))
+            parsed = float(value)
+            return max(1.0, parsed) if isfinite(parsed) else VALIDATION_PAYLOAD_CACHE_MAX_AGE_SECONDS
         except (TypeError, ValueError):
             return VALIDATION_PAYLOAD_CACHE_MAX_AGE_SECONDS
 
@@ -121,7 +123,7 @@ class ValidationPayloadCacheService:
         try:
             cache_mtime = path.stat().st_mtime
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             return None, None
         if not self.valid_payload(symbol, payload):
             return None, None
@@ -162,7 +164,7 @@ class ValidationPayloadCacheService:
         if self.stale_on_database_change() and self.stale_for_database(cache_mtime):
             return None
         READ_ONLY_RECOMPUTE_CACHE[cache_key] = (
-            time.monotonic() + READ_ONLY_RECOMPUTE_CACHE_TTL_SECONDS,
+            time.monotonic() + min(READ_ONLY_RECOMPUTE_CACHE_TTL_SECONDS, self.max_age_seconds() - age_seconds),
             copy.deepcopy(payload),
         )
         return payload
@@ -179,7 +181,7 @@ class ValidationPayloadCacheService:
         if not self.valid_payload(symbol, cached_payload):
             return
         READ_ONLY_RECOMPUTE_CACHE[cache_key] = (
-            time.monotonic() + READ_ONLY_RECOMPUTE_CACHE_TTL_SECONDS,
+            time.monotonic() + min(READ_ONLY_RECOMPUTE_CACHE_TTL_SECONDS, self.max_age_seconds()),
             cached_payload,
         )
         path = self.path(symbol)

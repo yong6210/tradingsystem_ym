@@ -119,20 +119,24 @@ class CandleRepository:
             upsert_stmt = sqlite_insert(Candle).values(**values).on_conflict_do_update(
                 index_elements=["symbol", "timeframe", "ts"],
                 set_=update_values,
+                where=Candle.is_final.is_(False) if not candle.is_final else None,
             )
             self.db.execute(upsert_stmt)
-            return self.db.scalar(stmt) or candle
+            return self.db.scalar(stmt.execution_options(populate_existing=True)) or candle
 
         if dialect_name == "postgresql":
             upsert_stmt = pg_insert(Candle).values(**values).on_conflict_do_update(
                 index_elements=["symbol", "timeframe", "ts"],
                 set_=update_values,
+                where=Candle.is_final.is_(False) if not candle.is_final else None,
             )
             self.db.execute(upsert_stmt)
-            return self.db.scalar(stmt) or candle
+            return self.db.scalar(stmt.execution_options(populate_existing=True)) or candle
 
         existing = self.db.scalar(stmt)
         if existing:
+            if existing.is_final and not candle.is_final:
+                return existing
             existing.o = candle.o
             existing.h = candle.h
             existing.l = candle.l

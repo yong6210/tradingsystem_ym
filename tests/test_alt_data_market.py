@@ -96,7 +96,13 @@ class _FakeHttpClient:
         return _FakeHttpResponse()
 
 
-def test_alt_data_market_service_backfills_three_series() -> None:
+def test_alt_data_market_service_backfills_three_series(monkeypatch) -> None:
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 1, 2, tzinfo=UTC).astimezone(tz)
+
+    monkeypatch.setattr("app.services.alt_data_market.datetime", FixedDatetime)
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
     session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)

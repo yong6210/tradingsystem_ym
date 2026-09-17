@@ -5,6 +5,14 @@ The current live posture is verification-first: runtime candidates can be surfac
 
 Primary audience: operators first, contributors second.
 
+Research redesign starts at [the research plan and development roadmap](docs/research/README.md). E001 now has a tested calculator and an initial diagnostic: no established 60-minute entry advantage. See the roadmap for exact scope and limitations.
+
+Code review and regression fixes (2026-09-08): [project review](docs/PROJECT_REVIEW_2026_09_08.md).
+Offline multi-strategy research (2026-09-17): [six strategy families, frozen comparisons, and unsuccessful combination results](docs/MULTISTRATEGY_RESEARCH_2026_09_17.md). Research code lives under `app/research`; its optional dependencies are in `requirements-research.txt`. These experiments do not change live strategy selection or authorize orders.
+
+Latest research follow-up: [inventory recycling, independent capital budgets, and maker/market execution comparison](docs/RECYCLING_PORTFOLIO_2026_09_17.md). Twenty retrospective runs; no profitable all-regime model established.
+The legacy runtime `walk_forward` payload now identifies itself as an empirical outcome summary, and Monte Carlo uses observed-return bootstrap sampling. Existing reports must be regenerated to reflect that calculation change.
+
 ## What This System Is
 
 Trading Engine v1 is a verification-first trading engine for operator-led automated trading.

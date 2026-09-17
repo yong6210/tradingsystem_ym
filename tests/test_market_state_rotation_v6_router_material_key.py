@@ -7,13 +7,8 @@ from scripts.run_market_state_rotation_v6_walk_forward_validation import _materi
 
 
 def _base_config() -> MarketStateConfig:
-    report = json.loads(
-        Path(
-            "reports/validation/diagnostics/market_state_rotation_v6_imp490_current_top_candidate_audit/"
-            "market_state_rotation_v6_walk_forward_BTCUSDT_5m_latest.json"
-        ).read_text(encoding="utf-8")
-    )
-    return MarketStateConfig(**report["folds"][0]["selected_train_result"]["config"])
+    config_path = Path(__file__).parent / "fixtures" / "market_state_v6_base_config.json"
+    return MarketStateConfig(**json.loads(config_path.read_text(encoding="utf-8")))
 
 
 def test_material_key_can_treat_observe_only_router_as_source_replay_equivalent() -> None:

@@ -13,6 +13,8 @@ class BacktestReport:
     p5_ev: float
     p50_ev: float
     p95_ev: float
+    method: str = "empirical_outcome_summary"
+    out_of_sample_validated: bool = False
 
 
 class BacktestService:
@@ -24,6 +26,12 @@ class BacktestService:
         return win * reward - loss
 
     def walk_forward(self, outcomes: list[ZoneOutcome], train_months: int = 3, test_months: int = 1) -> BacktestReport:
+        """Legacy outcome summary; no model is trained or tested on held-out windows.
+
+        Keep the method name for existing callers, but expose the actual methodology
+        in the report. Contract-faithful walk-forward proof lives in
+        HistoricalWalkForwardProofService.
+        """
         if not outcomes:
             return BacktestReport(trades=0, mean_ev=0.0, p5_ev=0.0, p50_ev=0.0, p95_ev=0.0)
 
@@ -39,17 +47,21 @@ class BacktestService:
             p95_ev=evs_sorted[int(0.95 * (len(evs_sorted) - 1))],
         )
 
-    def monte_carlo(self, outcomes: list[ZoneOutcome], simulations: int = 200) -> BacktestReport:
+    def monte_carlo(
+        self, outcomes: list[ZoneOutcome], simulations: int = 200, *, seed: int | None = None
+    ) -> BacktestReport:
+        """Bootstrap outcome-derived R values; these are not net exchange fill returns."""
+        if isinstance(simulations, bool) or not isinstance(simulations, int) or simulations < 1:
+            raise ValueError("simulations must be a positive integer")
         if not outcomes:
-            return BacktestReport(trades=0, mean_ev=0.0, p5_ev=0.0, p50_ev=0.0, p95_ev=0.0)
+            return BacktestReport(trades=0, mean_ev=0.0, p5_ev=0.0, p50_ev=0.0, p95_ev=0.0, method="iid_bootstrap_mean_ev")
 
         base = [self._trade_ev(o) for o in outcomes]
+        rng = random.Random(seed)
         runs: list[float] = []
         for _ in range(simulations):
-            sample = base[:]
-            random.shuffle(sample)
-            noisy = [x + random.uniform(-0.1, 0.1) for x in sample]
-            runs.append(sum(noisy) / len(noisy))
+            sample = rng.choices(base, k=len(base))
+            runs.append(sum(sample) / len(sample))
 
         s = sorted(runs)
         return BacktestReport(
@@ -58,4 +70,5 @@ class BacktestService:
             p5_ev=s[int(0.05 * (len(s) - 1))],
             p50_ev=s[int(0.50 * (len(s) - 1))],
             p95_ev=s[int(0.95 * (len(s) - 1))],
+            method="iid_bootstrap_mean_ev",
         )

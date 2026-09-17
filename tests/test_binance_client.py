@@ -728,3 +728,20 @@ def test_parse_force_order_event_tolerates_malformed_payload_shapes() -> None:
     assert BinanceFuturesClient._parse_force_order_event(["bad-row"]) is None
     assert BinanceFuturesClient._parse_force_order_event({"data": ["bad-row"]}) is None
     assert BinanceFuturesClient._parse_force_order_event({"data": {"e": "forceOrder", "o": ["bad-order"]}}) is None
+
+
+@pytest.mark.parametrize("index,value", [(i, v) for i in range(1, 6) for v in ["NaN", "Infinity", "-Infinity"]] + [(2, "90"), (3, "110"), (5, "-1"), (6, 1)])
+def test_kline_parser_rejects_invalid_market_values(index, value) -> None:
+    row = [1700000000000, "100", "101", "99", "100", "1", 1700000299999]
+    row[index] = value
+    assert BinanceFuturesClient._try_parse_kline_row("BTCUSDT", "5m", row) is None
+
+
+def test_rest_kline_only_final_after_close_time() -> None:
+    from datetime import datetime, timezone
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    row = [now_ms - 1000, "100", "101", "99", "100", "1", now_ms + 300000]
+    assert BinanceFuturesClient._parse_kline_row("BTCUSDT", "5m", row).is_final is False
+    row[0] = now_ms - 600000
+    row[6] = now_ms - 300000
+    assert BinanceFuturesClient._parse_kline_row("BTCUSDT", "5m", row).is_final is True

@@ -16086,6 +16086,13 @@ def test_launch_shadow_watch_reports_microstructure_trend_and_operator_handoff(m
     args.target_hours = 24.0
     sample_path = Path(args.sample_jsonl)
     now = datetime.now(UTC).replace(minute=30, second=0, microsecond=0)
+    # Freeze the watch clock too: minute=30 can otherwise put samples in the future.
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz)
+
+    monkeypatch.setattr(watch, "datetime", FixedDatetime)
     rows = [
         build_quote_shadow_row(
             order_book=_book(),

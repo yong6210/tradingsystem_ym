@@ -361,3 +361,48 @@ def test_validation_payload_cache_tracks_sqlite_pysqlite_artifacts(tmp_path) -> 
         tmp_path / "trading.db-wal",
         tmp_path / "trading.db-shm",
     ]
+
+
+
+def test_memory_cache_respects_short_configured_ttl(tmp_path, monkeypatch) -> None:
+    cache = ValidationPayloadCacheService(SimpleNamespace(
+        database_url=f"sqlite:///{tmp_path / 'db'}", strategy_version="v1",
+        validation_report_dir=str(tmp_path), validation_payload_cache_max_age_seconds=1,
+    ))
+    clock = [time.time(), time.monotonic()]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    monkeypatch.setattr(time, "monotonic", lambda: clock[1])
+    payload = {"symbol": "BTCUSDT", "validation_report": {}}
+    cache.store("BTCUSDT", payload)
+    clock[0] += 2
+    clock[1] += 2
+    assert cache.load("BTCUSDT") is None
+
+
+def test_disk_cache_memory_ttl_does_not_extend_remaining_lifetime(tmp_path, monkeypatch) -> None:
+    cache = ValidationPayloadCacheService(SimpleNamespace(
+        database_url=f"sqlite:///{tmp_path / 'db'}", strategy_version="v1",
+        validation_report_dir=str(tmp_path), validation_payload_cache_max_age_seconds=10,
+    ))
+    payload = {"symbol": "BTCUSDT", "validation_report": {}}
+    cache.store("BTCUSDT", payload)
+    READ_ONLY_RECOMPUTE_CACHE.pop(cache.key("BTCUSDT"))
+    clock = [time.time(), time.monotonic()]
+    os.utime(cache.path("BTCUSDT"), (clock[0] - 9, clock[0] - 9))
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    monkeypatch.setattr(time, "monotonic", lambda: clock[1])
+    assert cache.load("BTCUSDT") == payload
+    clock[0] += 2
+    clock[1] += 2
+    assert cache.load("BTCUSDT") is None
+
+
+def test_corrupt_utf8_cache_is_a_cache_miss(tmp_path) -> None:
+    cache = ValidationPayloadCacheService(SimpleNamespace(
+        database_url=f"sqlite:///{tmp_path / 'db'}", strategy_version="v1",
+        validation_report_dir=str(tmp_path),
+    ))
+    path = cache.path("BTCUSDT")
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"\xff")
+    assert cache.load("BTCUSDT") is None

@@ -19,6 +19,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from app.services.report_io import atomic_write_text
 from scripts.run_market_state_rotation_v6_evidence_cycle import (
     DEFAULT_CANARY_RISK_CAPS_PATH,
     DEFAULT_ENTRY_PROBE_FULL_WALK_FORWARD_GATE_REPORT,
@@ -94,8 +95,7 @@ def _display_path(path: Path) -> str:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default) + "\n")
 
 
 def _watch_snapshot_path(report_dir: Path, summary: dict[str, Any]) -> Path:

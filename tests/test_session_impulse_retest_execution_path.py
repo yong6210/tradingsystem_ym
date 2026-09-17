@@ -2212,10 +2212,22 @@ def test_stream_binance_klines_uses_empty_sir_route_without_legacy_fallback() ->
         assert auto_route_calls == [("BTCUSDC", ())]
 
 
+def _miss_detector_engine(db) -> StrategyEngine:
+    # Declare the detector preconditions instead of inheriting a private .env.
+    engine = StrategyEngine(db)
+    engine.settings.auto_trading_enabled = True
+    engine.settings.auto_trading_execution_mode = "MICRO_LIVE"
+    engine.settings.session_impulse_retest_enabled = True
+    engine.settings.session_impulse_retest_shadow_only = False
+    engine.settings.session_impulse_retest_miss_detector_enabled = True
+    engine.settings.binance_trade_live_enabled = False
+    return engine
+
+
 def test_session_impulse_retest_miss_detector_flags_missing_intent(tmp_path) -> None:
     init_db()
     with SessionLocal() as db:
-        engine = StrategyEngine(db)
+        engine = _miss_detector_engine(db)
         engine.settings.runtime_worker_heartbeat_dir = str(tmp_path)
         engine.settings.session_impulse_retest_enabled = True
         engine.settings.session_impulse_retest_allowed_symbols = "XRPUSDC"
@@ -2256,7 +2268,7 @@ def test_session_impulse_retest_miss_detector_flags_missing_intent(tmp_path) -> 
 def test_session_impulse_retest_miss_detector_filters_disallowed_live_direction(tmp_path) -> None:
     init_db()
     with SessionLocal() as db:
-        engine = StrategyEngine(db)
+        engine = _miss_detector_engine(db)
         engine.settings.runtime_worker_heartbeat_dir = str(tmp_path)
         engine.settings.session_impulse_retest_enabled = True
         engine.settings.session_impulse_retest_allowed_symbols = "XRPUSDC"
@@ -2294,7 +2306,7 @@ def test_session_impulse_retest_miss_detector_filters_disallowed_live_direction(
 def test_session_impulse_retest_miss_detector_flags_unobserved_runtime_plan(tmp_path) -> None:
     init_db()
     with SessionLocal() as db:
-        engine = StrategyEngine(db)
+        engine = _miss_detector_engine(db)
         engine.settings.session_impulse_retest_enabled = True
         engine.settings.session_impulse_retest_allowed_symbols = "SOLUSDC"
         engine.settings.auto_trading_allowed_symbols = "SOLUSDC"
@@ -2327,7 +2339,7 @@ def test_session_impulse_retest_miss_detector_flags_unobserved_runtime_plan(tmp_
 def test_session_impulse_retest_miss_detector_marks_trades_before_ws_start_without_false_miss(tmp_path) -> None:
     init_db()
     with SessionLocal() as db:
-        engine = StrategyEngine(db)
+        engine = _miss_detector_engine(db)
         engine.settings.runtime_worker_heartbeat_dir = str(tmp_path)
         engine.settings.session_impulse_retest_enabled = True
         engine.settings.session_impulse_retest_allowed_symbols = "SOLUSDC"
@@ -2369,7 +2381,7 @@ def test_session_impulse_retest_miss_detector_marks_trades_before_ws_start_witho
 def test_session_impulse_retest_miss_detector_ignores_malformed_ws_started_at(tmp_path) -> None:
     init_db()
     with SessionLocal() as db:
-        engine = StrategyEngine(db)
+        engine = _miss_detector_engine(db)
         engine.settings.runtime_worker_heartbeat_dir = str(tmp_path)
         engine.settings.session_impulse_retest_enabled = True
         engine.settings.session_impulse_retest_allowed_symbols = "SOLUSDC"
@@ -2406,7 +2418,7 @@ def test_session_impulse_retest_miss_detector_ignores_malformed_ws_started_at(tm
 def test_session_impulse_retest_miss_detector_skips_pre_start_trade_before_replay_observation(tmp_path) -> None:
     init_db()
     with SessionLocal() as db:
-        engine = StrategyEngine(db)
+        engine = _miss_detector_engine(db)
         engine.settings.runtime_worker_heartbeat_dir = str(tmp_path)
         engine.settings.session_impulse_retest_enabled = True
         engine.settings.session_impulse_retest_allowed_symbols = "SOLUSDC"
@@ -2450,7 +2462,7 @@ def test_session_impulse_retest_miss_detector_skips_pre_start_trade_before_repla
 def test_session_impulse_retest_miss_detector_counts_pre_start_intent_evidence(tmp_path) -> None:
     init_db()
     with SessionLocal() as db:
-        engine = StrategyEngine(db)
+        engine = _miss_detector_engine(db)
         engine.settings.runtime_worker_heartbeat_dir = str(tmp_path)
         engine.settings.session_impulse_retest_enabled = True
         engine.settings.session_impulse_retest_allowed_symbols = "BTCUSDC"
@@ -2524,7 +2536,7 @@ def test_session_impulse_retest_miss_detector_counts_pre_start_intent_evidence(t
 def test_session_impulse_retest_miss_detector_treats_existing_intent_as_observed(tmp_path) -> None:
     init_db()
     with SessionLocal() as db:
-        engine = StrategyEngine(db)
+        engine = _miss_detector_engine(db)
         engine.settings.runtime_worker_heartbeat_dir = str(tmp_path)
         engine.settings.session_impulse_retest_enabled = True
         engine.settings.session_impulse_retest_allowed_symbols = "SOLUSDC"
@@ -2560,7 +2572,7 @@ def test_session_impulse_retest_miss_detector_treats_existing_intent_as_observed
 def test_session_impulse_retest_miss_detector_disables_when_family_shadow_only() -> None:
     init_db()
     with SessionLocal() as db:
-        engine = StrategyEngine(db)
+        engine = _miss_detector_engine(db)
         engine.settings.session_impulse_retest_enabled = True
         engine.settings.session_impulse_retest_shadow_only = True
 
@@ -2578,7 +2590,7 @@ def test_session_impulse_retest_miss_detector_disables_when_family_shadow_only()
 def test_session_impulse_retest_miss_detector_disables_when_auto_trading_disabled() -> None:
     init_db()
     with SessionLocal() as db:
-        engine = StrategyEngine(db)
+        engine = _miss_detector_engine(db)
         engine.settings.session_impulse_retest_enabled = True
         engine.settings.auto_trading_enabled = False
 

@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "experiment_id": "E001-entry-information-v1",
+  "status": "design",
+  "question": "현재 평균회귀 진입 뒤의 방향 조정 가격 변화가 과거의 유사 시장 상태 비신호 대조군보다 유리한가?",
+  "evidence_kind": "retrospective_diagnostic",
+  "previously_inspected": true,
+  "dataset": {
+    "path": "data/historical/btcusdt_2023_2026_complete/manifest.json",
+    "sha256": "04ba859de3768883505ff5f3149dfc470278485c20932a5679bde094a5463971"
+  },
+  "references": [
+    {
+      "path": "app/research/multistrategy_audit.py",
+      "sha256": "5e1abe869d60731e18fc4b68c419b2e2883419c7e96780e883692bf64a2dbbb7"
+    },
+    {
+      "path": "docs/research/experiments/E001_ENTRY_INFORMATION.md",
+      "sha256": "34ccead925b838bf6494cbde973e040d45808df0235ba8d0894ed902efd24371"
+    }
+  ],
+  "signal_name": "inventory_rotation_v2",
+  "warmup_days": 90,
+  "decision_delay_minutes": 1,
+  "horizons_minutes": [
+    15,
+    60,
+    240,
+    1440
+  ],
+  "primary_horizon_minutes": 60,
+  "windows": [
+    {
+      "name": "2023",
+      "start": "2023-04-01T00:00:00Z",
+      "end": "2024-01-01T00:00:00Z"
+    },
+    {
+      "name": "2024",
+      "start": "2024-01-01T00:00:00Z",
+      "end": "2025-01-01T00:00:00Z"
+    },
+    {
+      "name": "2025",
+      "start": "2025-01-01T00:00:00Z",
+      "end": "2026-01-01T00:00:00Z"
+    },
+    {
+      "name": "2026",
+      "start": "2026-01-01T00:00:00Z",
+      "end": "2026-09-01T00:00:00Z"
+    }
+  ],
+  "matching": {
+    "lookback_days": 28,
+    "controls_per_signal": 5,
+    "random_seed": 17092026,
+    "utc_bucket_hours": 4,
+    "efficiency_ratio_edges": [
+      0,
+      0.1,
+      0.2,
+      0.25
+    ],
+    "volatility_ratio_edges": [
+      0,
+      0.0025,
+      0.005,
+      0.01
+    ],
+    "volatility_open_upper_bin": true
+  },
+  "bootstrap_block_days": 28,
+  "bootstrap_repetitions": 2000,
+  "costs": {
+    "taker_fee_bps": 5.0,
+    "slippage_bps": 2.0,
+    "interpretation": "Gross information test plus hypothetical two-sided market cost sensitivity; not an executable maker strategy."
+  }
+}

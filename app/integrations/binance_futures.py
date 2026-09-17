@@ -158,7 +158,7 @@ class BinanceFuturesClient:
             l=float(row[3]),
             c=float(row[4]),
             v=float(row[5]),
-            is_final=True,
+            is_final=int(row[6]) < BinanceFuturesClient._timestamp_ms(),
         )
 
     @staticmethod
@@ -168,6 +168,12 @@ class BinanceFuturesClient:
         except (TypeError, ValueError, OverflowError, IndexError, KeyError):
             return None
         if min(parsed.o, parsed.h, parsed.l, parsed.c) <= 0.0:
+            return None
+        if not all(isfinite(value) for value in (parsed.o, parsed.h, parsed.l, parsed.c, parsed.v)):
+            return None
+        if parsed.h < max(parsed.o, parsed.c) or parsed.l > min(parsed.o, parsed.c):
+            return None
+        if parsed.v < 0 or parsed.close_time < parsed.open_time:
             return None
         return parsed
 

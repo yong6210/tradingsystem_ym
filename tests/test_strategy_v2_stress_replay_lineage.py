@@ -2,12 +2,25 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import delete
 
 from app.db.models import Candle, ExecutionFill, Plan
 from app.db.repositories import CandleRepository, ExecutionFillRepository, PlanRepository
 from app.db.session import SessionLocal, init_db
 from app.services.strategy_v2_stress_replay_lineage import StrategyV2StressReplayLineageService
+
+
+@pytest.fixture(autouse=True)
+def _fixed_lineage_clock(monkeypatch):
+    # Keep the dated fill/candle fixtures inside the 180-day query window.
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 5, 1, tzinfo=timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr("app.db.repositories.datetime", FixedDatetime)
+    monkeypatch.setattr("app.services.strategy_v2_stress_replay_lineage.datetime", FixedDatetime)
 
 
 def test_stress_replay_lineage_reports_unavailable_without_closed_v2_trades() -> None:

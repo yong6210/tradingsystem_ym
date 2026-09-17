@@ -5,6 +5,7 @@ from pathlib import Path
 
 from scripts.check_operator_session_brief_automation import (
     END_LABEL,
+    ROOT_DIR,
     START_LABEL,
     _artifact_status,
     _state_artifact_required,
@@ -30,6 +31,7 @@ gui/501/com.yumin.trading.operator-brief-shift-start = {
     last exit code = 0
 }
 """
+    raw = raw.replace("/Users/yumin/Documents/trading", str(ROOT_DIR))
     status = parse_launchctl_print(START_LABEL, raw)
 
     assert status.healthy is True
