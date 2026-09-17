@@ -1,0 +1,31 @@
+{
+  "experiment_id": "E003-candidate-screen-v1",
+  "evidence_kind": "retrospective_descriptive_screen_not_selection",
+  "seed": 17092026,
+  "start": "2023-04-01T00:00:00Z",
+  "end": "2026-09-01T00:00:00Z",
+  "horizons": [60, 240, 1440],
+  "delay_minutes": 1,
+  "controls": 5,
+  "lookback_days": 28,
+  "bootstrap_days": 28,
+  "bootstrap_repetitions": 2000,
+  "matching_er_edges": [0, 0.1, 0.2, 0.3, 0.5, 1.000000001],
+  "matching_volatility_edges": [0, 0.0025, 0.005, 0.01],
+  "equity_usdc": 100,
+  "risk_fraction": 0.005,
+  "exposure_multiple": 1,
+  "minimum_qty_btc": 0.001,
+  "qty_step_btc": 0.001,
+  "minimum_notional_usdc": 50,
+  "taker_bps_per_side": 5,
+  "slippage_bps_per_side": 2,
+  "models": {
+    "S01": {"period": 240, "primary_minutes": 1440, "stop_atr": 3},
+    "S02": {"period": 60, "primary_minutes": 240, "stop_atr": 2.5},
+    "S04": {"period": 15, "primary_minutes": 60, "stop_atr": 4},
+    "S05": {"period": 15, "primary_minutes": 60, "stop_atr": 4},
+    "S07": {"period": 60, "primary_minutes": 60, "stop_atr": 2.5},
+    "S08": {"period": 60, "primary_minutes": 240, "stop_atr": 2.5}
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "profile_id": "binance_btcusdc_1000_v1",
+  "status": "design_not_live",
+  "initial_equity_usdc": 1000,
+  "automation": "fully_automated_target",
+  "cycle_risk_fraction": 0.005,
+  "aggregate_reserved_risk_fraction": 0.01,
+  "daily_loss_stop_fraction": 0.02,
+  "drawdown_warning_fraction": 0.05,
+  "drawdown_stop_fraction": 0.08,
+  "warning_risk_multiplier": 0.5,
+  "gross_notional_multiple": 1,
+  "baseline_max_positions": 1,
+  "baseline_additions": false,
+  "experimental_max_inventory_slots": 3,
+  "experimental_cycle_entry_quantity_multiple": 2,
+  "live_execution_enabled": false,
+  "notes": [
+    "Not a live configuration loader input.",
+    "Risk limits are triggers, not guarantees.",
+    "Existing E003 config remains frozen at 100 USDC.",
+    "Account filters, fees, margin and execution constraints require verification."
+  ]
+}
