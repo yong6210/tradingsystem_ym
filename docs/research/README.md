@@ -1,6 +1,30 @@
 # BTC 연구 재설계 — 여기서 시작
 
-상태: **E005~E013의 고정 비교/진단 완료 범위에서 신규 채택 모델 없음. 같은 수집 창의 오프라인 프로세스 재시작/새 세션까지 관련 고유908개 검사. 자료 품질 적격성·실제 체결·계정 조건·전진 모의 운용은 미완료.**
+상태: **E005~E013 고정 비교/진단에서 신규 채택 모델 없음. 동일 연결 저장·압축·정리와 직전 검증 상태를 잇는 증분 감사를 합성 검증했다. 장기 저장/목록/복구 비용 상한, 공개 확인·체결 비용·전진 검증은 남아 있다.**
+
+최신: [부모 감사 지연 검사 v1](PARENT_AUDIT_PHASE_V1.md). 수집 종료 후600ms 저장 지연을 기존 작업자가 성공으로 인정하는 결함을 재현하고, 새 별도 경로는500ms 한도를 직접 검사하도록 보완했다. 재연결 누적 회계/늦은 재시도 분기도 고정 사건으로 확인했다. 관련109개 통과, 기존 전체763개 실패 기록과 전체 승인 보류는 유지한다. 다음은 선택 경로의 전체 통합 검증과 장기 자원 비용 계약이다. [현재 우선순위](CURRENT_PRIORITIES.md).
+
+이전: [공간 확보 후 회귀 검사](../../reports/validation/storage_recovery_20260918/REPORT.md). 실제 여유 약38.5GiB를 확인했고16GiB 기준을 유지했다. 실행 계층763개 중761통과·실패2·오류0. 지난번 공간을 모의했던13개는 실제 공간 조건으로 통과했다. 기존 실패15개는 이번 실행에서 통과했지만 다른 재연결/지연 감시 검사2개가 실패해 전체 승인은 보류한다. 다음은 해당 두 사례의 고정 사건 재현과 지연 감시 확인이다. 장기 등록·실주문·전략 채택은 없다. [현재 우선순위](CURRENT_PRIORITIES.md).
+
+이전: [수집 실패 경계 v1](CAPTURE_FAILURE_BOUNDARY_V1.md), [검증 기록](../../reports/validation/capture_failure_boundary_20260918/verification.json). 실패 예산에 재저장하지 않고 원인을 보존하며, 늦은 준비와 정리 예외를 보완했다. 새 경로 관련58개 통과. 이전 실패15개는 동일 핵심 검증7·부분 검증4·미해결4로 구분하며 전체 회귀 승인은 보류한다. 실제 여유 공간이16GiB 예약보다 부족하고, 단위 검사의 공간 모의는 운영 승인이 아니다. 다음은 남은 고정 사건 통합 검증과 실제 용량/장기 비용 확인이다. 새 관측·실주문·전략 채택0. [현재 우선순위](CURRENT_PRIORITIES.md).
+
+이전: [세대 증분 감사 v1](INCREMENTAL_GENERATION_AUDIT_V1.md), [검증 기록](../../reports/validation/incremental_generation_20260918/verification.json). 고정 정상40초·높은 입력18초에서 논리 재생 기록량을 같은 자료의 원점 반복 방식보다66.87%/57.30% 줄였고 전체 재생17항목이 일치했다. 실제 SIGKILL8곳 복구/재복구 파일 변경0이다. 높은 입력의 대기열은 여전히 상한2에 닿았으며 장기 등록 준비 완료는 아니다. 수정 후 새 경로42개는 통과했으나 기존 전체 실행의 실패10·오류5가 있어 전체 회귀 승인은 보류한다. 취소 중 작업자 정리 허점을 수정했고, 다음은 시간 의존 검사와 실패 정리 경로 안정화다. 새 공개 관측·실주문·전략 채택0. [현재 우선순위](CURRENT_PRIORITIES.md).
+
+이전: [저장 세대 압축·정리 통합 v1](ARCHIVED_GENERATION_CAPTURE_V1.md), [검증 기록](../../reports/validation/archived_generation_20260918/verification.json). 정상40초77단위와 높은 입력량18초36단위에서 추가 연결·snapshot0, 수집 중 원본 정리, gzip 전용 재생17항목 일치, SIGKILL6곳 복구/재복구 파일 변경0을 확인했다. 세대별 총량은 정상22.60→5.05MB, 높은 입력량38.87→6.62MB로 감소했다. 다만 높은 입력량은 대기열 상한2개에 닿았고 이력 전체 반복 감사 비용이 남았다. 새 공개 관측/실주문·전략 채택은 없다. [현재 우선순위](CURRENT_PRIORITIES.md).
+
+이전: [동일 연결 세대 인계 v1](CONTINUOUS_GENERATION_CAPTURE_V1.md), [검증 기록](../../reports/validation/continuous_generation_20260918/verification.json). 고정40초80단위/5세대에서 추가 연결·snapshot0, 최대 전환16.76ms, 기존 재생17항목 일치, 실제 SIGKILL6곳 복구/재복구 파일 변경0을 확인했다. 합성 공동 적격99.8296%지만24시간 등록 자료가 아니며, raw 보존 경로여서 압축/정리 부하까지 검증한 결과는 아니다. 남은 필수 저장 통합/부하 검증을 마친 뒤 짧은 공개 확인과 체결·전진 전략 검증으로 이동한다. [현재 우선순위](CURRENT_PRIORITIES.md).
+
+이전: [유한 구간 회전 v1](ROLLING_RETAINED_CAPTURE_V1.md), [검증 기록](../../reports/validation/rolling_capture_20260918/verification.json). 고정40초에서76작업/5구간/구간당 최대16작업으로 기존62작업 한도를 넘기지 않았고, SIGKILL6곳의 복구·재복구를 확인했다. 다만 전환 공백2.155초로99.5% 품질 목표에 맞지 않아 이 회전 방식을 장기 기본안으로 채택하지 않는다. [다음 인계 설계와 채택 판단](ROLLING_RETAINED_CAPTURE_V1.md)에 따라 연결을 유지하는 저장 세대 전환으로 진행한다. 기존 기본 경로·120초 한도·24시간 미등록·전략 미채택 유지. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [수집 중 감사 완료 구간 전환 v1](RETAINED_FEED_COLLECTOR_V1.md), [검증 기록](../../reports/validation/retained_collector_20260918/verification.json). 수집/압축/감사 완료 영수증과 보관 원장을 연결하고 다음 raw 파일이 열린 상태의 SIGKILL6곳을 검증했다. 5곳은 혼합 소스 복구·재복구, 미등록1곳은 보존·거부다. 미확정 꼬리는 잘라내거나 적격 자료로 채택하지 않는다. 큰0.5초 구간은 통과했으나0.1초 구간은 여전히 대기열을 넘었다. 공개 연결을 새로 수행한 결과는 아니며120초·24시간 미등록·전략 미채택 유지. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [활성 기록기 보관 전환 v1](RETAINED_SEALED_JOURNAL_V1.md), [검증 기록](../../reports/validation/retained_journal_20260918/verification.json). 다음 파일을 쓰면서 앞선 확정 원본을 전환하고 원본/gzip으로 복구한다. 실제 SIGKILL4곳에서 prefix 보존·새 epoch 이어 쓰기·파일 번호 재사용 방지·반복 작업 무증가를 확인했다. 실제 collector/감사/작업 복구 통합과 기록 회전·부하 검증은 남아 있다. 최대120초·24시간 미등록·전략 미채택 유지. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [압축 보관 인식 감독기 v1](RETENTION_FEED_CAPTURE_V1.md), [검증 기록](../../reports/validation/retention_supervisor_20260918/verification.json). 외부 handle에 고정한 등록으로 원본 없는 자료의 gzip 복구를 분기한다. 실제 SIGKILL4곳과 반복 재시작에서 감사/품질 판정이 같고 새 연결·파일 증가가 없었다. 등록 전 중단은 보존 후 거부하며 자동 채택하지 않는다. 수집 중 정리·유한 기록 회전·대기열 부하는 남아 있다. 최대120초·24시간 미등록·전략 미채택 유지. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [보관 전환 비용 심사 v1](RETIREMENT_ADMISSION_V1.md), [검증 기록](../../reports/validation/retirement_admission_20260918/verification.json). 계획·복구 기록·2회 재생 비용까지 전환 전에 계산하고, 손해인 작은 사례는 파일 변경 없이 거부했다. 허용된2개 사례는 실제 전체 저장량이 예측과 일치했다. 큰 입력/0.1초 구간은 대기열 초과로 실패했으며 이를 보존했다. 다음은 전환된 자료의 감독기 복구, 활성 확정 구간 전환, 유한 기록 회전과 통합 부하다. 최대120초·24시간 미등록·전략 미채택 유지. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [종료 자료 압축 보관 전환 v1](CLOSED_CAPTURE_RETIREMENT_V1.md), [검증 기록](../../reports/validation/closed_capture_retirement_20260918/verification.json). 새 합성 원본만으로 SIGKILL9곳과 gzip 전용17개 의미 항목 일치를 확인했다. 작은 시험은 전체 기록 비용으로 공간이 늘었고 큰2초 합성 사례는 약77.6% 줄었다. 기존 자료는 보존했으며 수집 중 정리/하루 운용 인증은 아니다. 다음은 감독기 복구 통합·활성 확정 구간 전환과 유한 원장/체크포인트 회전이다. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
 
 최신: [재시작 감독 v1](RESTARTABLE_FEED_CAPTURE_V1.md), [검증 기록](../../reports/validation/restartable_feed_capture_20260918/verification.json). 실제 SIGKILL8개와 별도 프로세스 재개에서 최초 종료 시각·재시도 사용량·공백을 보존하고 새 호가 스냅샷부터 시작함을 확인했다. 합성 전송이며 OS 자동 재기동 서비스/새 공개 연결 검증은 아니다. 다음은 원본 보관 전환·장기 공간 한도와 새 경로의 부하/공개 확인이다. 전체 수집 창 최대120초·24시간 미등록·실주문0 유지. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
 
