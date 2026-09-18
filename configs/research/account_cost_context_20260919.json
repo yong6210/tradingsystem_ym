@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "context_id": "BTCUSDC_USER_REPORTED_ACCOUNT_COST_20260919",
+  "status": "RECORDED_INPUT_NOT_APPLIED_TO_FROZEN_RUNS",
+  "exchange": "Binance",
+  "symbol": "BTCUSDC",
+  "instrument": "PERPETUAL",
+  "capital_usdc": 1000,
+  "evidence": {
+    "source": "USER_MESSAGE",
+    "reported_date_kst": "2026-09-19",
+    "user_answer": "1. 0%, 0.025% / 2. 잘 모르겠음",
+    "interpretation_order": ["maker", "taker"],
+    "independently_verified_account_rate": false,
+    "historical_effective_start": null,
+    "promotion_end": null
+  },
+  "fees_per_fill": {
+    "maker": {"percent": 0, "basis_points": 0, "fraction": 0},
+    "taker": {"percent": 0.025, "basis_points": 2.5, "fraction": 0.00025},
+    "basis": "ABSOLUTE_EXECUTED_NOTIONAL",
+    "classification": "ACTUAL_LIQUIDITY_ROLE_PER_FILL_NOT_ORDER_LABEL",
+    "market_fallback_role": "TAKER",
+    "marketable_limit_role": "TAKER",
+    "passive_fill_evidence_required_for_maker_assumption": true
+  },
+  "research_budget": {
+    "user_preference": "UNDECIDED",
+    "working_policy": "FREE_SOURCES_FIRST",
+    "one_time_cap_usd": null,
+    "monthly_cap_usd": null,
+    "specific_purchase_authorized": false
+  },
+  "other_costs": {
+    "slippage_is_zero": false,
+    "historical_funding_is_zero": false,
+    "ongoing_operating_cost_usdc_per_year": null
+  },
+  "application": {
+    "frozen_historical_artifacts_changed": false,
+    "scheduled_e022_changed": false,
+    "live_order_configuration_changed": false,
+    "next_step": "REGISTER_ACCOUNT_FEE_SENSITIVITY_WITH_TAKER_2_5_BPS_AND_UNCHANGED_SIGNAL_RISK_SLIPPAGE_FUNDING",
+    "past_results_relabelled_as_account_specific": false,
+    "fee_difference_only_is_sufficient_recalculation": false,
+    "reason": "Fees affect sizing, minimum order eligibility and subsequent account paths; rerun the account before reporting revised performance."
+  }
+}
