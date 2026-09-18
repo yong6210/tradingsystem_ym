@@ -1,8 +1,60 @@
 # BTC 연구 재설계 — 여기서 시작
 
-상태: **E005~E011 고정 비교/진단에 이어 E012 위험 축소·최소 주문 제약 8회 진단 완료. 신규 채택 모델 없음. 관련 226개 검사 통과. 최근 8실험의 기록 해시 714회 대조 일치, 70개 계좌의 회복·일별 꼬리 지표 추가 검산 완료. 실제 체결·계정 조건·전진 모의 운용은 미완료.**
+상태: **E005~E013의 고정 비교/진단 완료 범위에서 신규 채택 모델 없음. 같은 수집 창의 오프라인 프로세스 재시작/새 세션까지 관련 고유908개 검사. 자료 품질 적격성·실제 체결·계정 조건·전진 모의 운용은 미완료.**
 
-[이번 검증 기록](../../reports/validation/evaluation_execution_contract_20260917/verification.json): 신규26개 포함226개 검사 통과, 기존714개 해시 대조 일치, 실제 주문0.
+최신: [재시작 감독 v1](RESTARTABLE_FEED_CAPTURE_V1.md), [검증 기록](../../reports/validation/restartable_feed_capture_20260918/verification.json). 실제 SIGKILL8개와 별도 프로세스 재개에서 최초 종료 시각·재시도 사용량·공백을 보존하고 새 호가 스냅샷부터 시작함을 확인했다. 합성 전송이며 OS 자동 재기동 서비스/새 공개 연결 검증은 아니다. 다음은 원본 보관 전환·장기 공간 한도와 새 경로의 부하/공개 확인이다. 전체 수집 창 최대120초·24시간 미등록·실주문0 유지. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [작업 인계·중단 복구 v1](DURABLE_SEALED_PIPELINE_V1.md), [검증 기록](../../reports/validation/durable_sealed_pipeline_20260918/verification.json). 실제 부모 SIGKILL12개 지점에서 인계 작업 복구와 반복 실행 시 중복 방지를 확인했다. 별도 부모 상실 작업자 종료도 검증했다. 새 조정기는 오프라인 검증이며 전체 원래 실행의 완전성·실시간 상태 복원·자료 품질 적격성을 인증하지 않는다. 다음은 복구/새 실시간 세션 감독·외부 영수증 보관, 원본 보관 전환과 장기 용량이다. 최대120초·24시간 미등록·실주문0 유지. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [공개 파이프라인 확인 v1](PUBLIC_PIPELINED_FEED_V1.md), [검증 기록](../../reports/validation/public_pipelined_feed_20260918/verification.json). 실제 공개12초·재연결1회에서 원본366개/감사125개 재생과12개 압축본 복원이 일치했다. 기록상 공동 적격 시간은8.275초로 자료 품질은 거부됐다. 다음은 통합 강제 종료·작업 재구성/복구, 이어 원본 보관 전환이다. [새 관측 이력](../../reports/validation/public_pipelined_feed_20260918/inspection_history.json)을 향후 전진 등록에 반영한다. 실주문·전략 채택은 없다.
+
+최신: [수집 파이프라인 v1](PIPELINED_FEED_COLLECTOR_V1.md), [검증 기록](../../reports/validation/pipelined_feed_collector_20260918/verification.json). 공용 예약 조정기를 실제 수집기 코드에 연결하고 오프라인 부하8개를 통과했다. 2,000개/초 설정4초의 생성/수신8,004개와 전체 재생 결과가 일치했다. 다음은 새 경로의 짧은 공개 수집 확인, 통합 중단·재구성/복구, 원본 보관 전환이다. 이번 Binance 접속·원본 삭제·전략 채택은 없다.
+
+최신: [별도 증분 감사 작업자 v1](BACKGROUND_INCREMENTAL_AUDIT_V1.md), [검증 기록](../../reports/validation/background_incremental_audit_20260918/verification.json). 계산은 자식, 체크포인트 저장은 부모가 맡는다. 부모 강제 종료4곳·작업자1회와 기존 공개8,577개 원본/898개 감사의 재생 일치를 확인했다. 다음은 실제 collector 연결·공용 예약 배정·압축/감사/수신 동시 부하다. 부모 검증/fsync는 동기이며 장기 운용·전략 채택은 아직 없다.
+
+최신: [구간별 상태 감사 v1](INCREMENTAL_FEED_AUDIT_V1.md), [검증 기록](../../reports/validation/incremental_feed_audit_20260918/verification.json). 시장 상태와 입력 위치를 함께 저장하고 원본/gzip으로 재개한다. 기존 공개8,577개 원본/898개 감사에서 전체 replay와17개 의미 항목이 일치했고 최종162회 재개·강제 종료4곳을 확인했다. 다음은 별도 감사 작업자와 부모 저장 연결, 실제 collector 통합·동시 부하다. 실시간 시장 상태 복원·원본 삭제·24시간 운용·전략 채택은 아직 없다.
+
+최신: [백그라운드 구간 압축 v1](BACKGROUND_SEGMENT_ARCHIVE_V1.md), [검증 기록](../../reports/validation/background_segment_archive_20260918/verification.json). 자식은 읽기·압축만 수행하고 부모가 공간 예약과 독립 복원 검증 후 등록한다. 부모 강제 종료8곳·자식 강제 종료1회,8.26MB 구간의 전체 복원을 확인했다. 다음은 압축/원본 공통 reader와 상태 감사, 실제 collector 연결·동시 부하다. 원본 삭제·24시간 운용·전략 채택은 아직 없다.
+
+최신: [확정 구간 인계 v1](SEALED_SEGMENT_HANDOFF_V1.md), [검증 기록](../../reports/validation/sealed_segment_handoff_20260918/verification.json). 저장 완료 ticket으로 활성 journal의 구간 하나만 검증하며9개 강제 종료 지점과 별도 reader/활성 writer 인계를 확인했다. 실제 수집기와 실시간 압축은 아직 미연결이다. 다음은 유한 압축 작업자·부모 저장 예약, 작은 단위 상태 감사, collector 연결·통합 부하 순서다. 원본 삭제·24시간 운용·전략 채택은 없다.
+
+최신: [압축 구간 등록·중단 복구](SEGMENT_ARCHIVE_V1.md), [검증 기록](../../reports/validation/segment_archive_20260918/verification.json). 공통 예산 안에서 압축/복원 검증 후 원자적으로 등록하며 미완료 파일은 자동 채택하지 않는다. 최종8개 강제 종료 지점과 기존9,475개 레코드의 바이트 일치를 확인했다. 다음은 수집 중 구간 확정·작업자 인계, 압축 구간을 사용하는 작은 단위 감사, 보관 전환의 복구/통합 부하다. 아직 실시간 압축·원본 정리·24시간 운용·전략 채택은 없다.
+
+최신: [저장량·부하·압축 가능성](STORAGE_ENVELOPE_V1.md), [검증 기록](../../reports/validation/storage_envelope_20260918/verification.json). 독립 생산자와 큰 장부를 사용한5개 고정 시험을 통과했고, 평균만으로 저장 용량을 판단하던 한계를 이동1초 관측량과 분리했다. 공간은 여전히 장기 가정에 부족하다. 기존 로그의 무손실 압축 가능성을 확인했으며 다음은 닫힌 작은 구간의 압축/원자적 등록/복구와 작은 단위 감사다. 실시간 압축·24시간 운용·새 전략 채택은 아직 없다.
+
+최신: [재연결과 백그라운드 감사](BACKGROUND_FEED_AUDIT_V1.md), [검증 기록](../../reports/validation/background_feed_audit_20260918/verification.json). 감사 중 재접속과 늦은 오류의 전체 실패 처리를 연결했다. 공개12초 확인에서 재접속1회·원본442개/감사136개를 검증했다. 다음은 저장 여유와 입력률 상한, 큰 장부/버스트/실제 저장과 감사의 동시 부하, 장기 감사 단위 검증이다. 최대120초 제한·24시간 등록 차단·전략 미채택은 유지한다. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [하루 분량 전체 파일 재생](FULL_FEED_REPLAY_V1.md), [검증 기록](../../reports/validation/full_feed_replay_20260918/verification.json). 원본311만/감사172만의 실제 합성 파일을 약186초·최대28.63MiB로 검증했고 기존 공개8개 epoch도 재생 결과가 일치했다. 새로 확인한 다음 병목은 재연결 전에 긴 감사 전체를 동기 실행하는 순서다. 이를 분리하고 저장 여유·버스트·실제 commit 지연을 확인해야 한다. 실제24시간 수집·전략 채택은 시작하지 않았다. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [공개 수집·감사 집계·용량 확인](COMPACT_FEED_AUDIT_V1.md), [검증 기록](../../reports/validation/feed_scale_20260918/verification.json).12/60/12초 공개 확인은 정상 종료됐고 기존 자료 포함 원본13,297개/감사1,349개의 재생 결과가 일치했다. 하루 합성 관찰172만 개의 구간 집계 메모리를 약24.53MiB로 제한했으며 전체 파일 하루 재생 비용은 미검증이다. 현재 물리 공간은 관측률2배 가정의 하루 용량보다 부족하다. 다음은 전체 재생 비용·저장 여유·단계적 시험 계획이며24시간 시험과 새 모델 채택은 미시작이다. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [감사 분할 저장·전체 예산·복구](SEGMENTED_FEED_STORAGE_V1.md), [검증 기록](../../reports/validation/segmented_feed_storage_20260918/verification.json). 원본·감사·부가 파일과 임시 파일을 한 예산으로 관리하고 실제 강제 종료10회·기존 감사150개 재생·재연결·32MiB 초과 저장을 확인했다. 새 경로의 공개 수집은 아직 없으며24시간 적격성도 미확정이다. 다음은 단기 공개 확인, 장기 감사 비용과 저장 여유 검증이다. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [저장·부하·초기화 진단](FEED_LOAD_DIAGNOSTICS_V1.md), [검증 기록](../../reports/validation/feed_load_v2_20260918/verification.json). 최종8개 오프라인 시나리오에서 동작/중단을 확인했다. 감사32MiB 한도는 이전 짧은 평균의 단순 연장상 약53분에 도달하고,2배 저장량은 당시 가용 공간을 초과한다. 다음은 감사 분할 저장·전체 저장 예산과 복구 검증이다. 기존9초 지연의 원인은 미확정이며24시간 기술 시험·새 전략 채택은 계속 차단한다. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신(2026-09-18): [유한 재연결·고정 종료·감사 영속화](BOUNDED_FEED_COLLECTOR_V1.md), [검증 기록](../../reports/validation/bounded_feed_v3_20260918/verification.json). 최종12초 공개 실행에서 재연결1회·새 snapshot 복구와 원본2,396개/감사150개 일치를 확인했다. 첫 실행의 긴 지연 실패는 보존했으며 완전한 원인 규명은 남아 있다. 다음은 저장·대기열·초기화 지연 부하 검증이다.24시간 시험·새 전략 채택은 아직 없다. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [통합 장애·재시작과 구간 감사](FEED_COVERAGE_RECOVERY_V1.md), [검증 기록](../../reports/validation/feed_coverage_recovery_v2_20260917/verification.json). 최종 SIGKILL4개 지점·두 채널 모의 재연결을 검증했고, 감사 유실·미확정 꼬리·재시작 공백이 평가에서 사라지지 않도록 했다. 기존12초의 기록·만료 규칙상 적격 시간은11.4585초이며 연속 정상 작동의 인증은 아니다. 다음은 실제 수집기의 유한 재연결·고정 종료·감사 영속화와 용량 검증이다.24시간 기술 시험·새 전략 채택은 아직 없다. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [공개 스트림·영속 저장 통합](DURABLE_MARKET_FEED_V1.md), [검증 기록](../../reports/validation/durable_market_feed_v2_20260917/verification.json). 수신·저장 완료·관찰 시각을 분리했고, 보완 후 원본2,374개와205개 관찰의 재생 일치를 확인했다. 다음은 통합 장애/재시작 및 연속 적격 구간 검증이다.24시간 기술 시험은 아직 시작하지 않았다. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [원본 영속 로그·프로세스 종료 복구](DURABLE_CAPTURE_LOG_V1.md), [검증 기록](../../reports/validation/durable_capture_log_20260917/verification.json). SIGKILL14회와 기존 원본5,217개 저장/재생을 검증했다. 미확정 꼬리를 보존하고 영속화 완료 순번을 구분한다. 다음은 public/market 통합 수집기와 영속 순번 연결이다.24시간 기술 시험은 아직 시작하지 않았다. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [전진 자료 계약·달력 시간 검사](FORWARD_DATA_CONTRACT_V1.md), [검증 기록](../../reports/validation/forward_data_contract_20260917/verification.json). 첫24시간 기술 시험의 기간·공백·저장·시계·비용 가정을 고정했다. 등록은 실행기/복구/용량/시계 증거 미비로 차단되며 아직 수집을 시작하지 않았다. 다음은 영속 원본 로그와 강제 종료 복구, 이후 market/public 통합이다. 수익성 확증과 별개인 준비 단계다. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [공개 호가 수집·재연결](PUBLIC_DEPTH_RECONNECT_V1.md), [검증 기록](../../reports/validation/public_depth_reconnect_v2_20260917/verification.json). 첫 시도의 종료 실패를 보존하고 수신 대기열 처리를 보완했다. 두 새 세션/스냅샷 복구와 호가116개 원본 재생 일치를 확인했다. 다음은 전진 자료의 수집·공백·저장·시계·비용 계약이다. 이 짧은 검증은 장기 체결률이나 전략 우위를 입증하지 않는다. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [공개 호가 L2 재생·오류 차단](PUBLIC_DEPTH_REPLAY_V1.md), [검증 기록](../../reports/validation/public_depth_replay_20260917/verification.json). 기존 단기 원본111개 갱신을 별도 수치 구현과 대조하고 동일 업데이트의 최우선 호가11건도 일치했다. 연결 공백·역순·잘못된 수량에서 장부 사용이 차단된다. 다음은 수집기 연결과 짧은 실제 공개 재연결 훈련이다. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [손절→비상 청산 전환](STOP_EXIT_HANDOFF_V1.md), [검증 기록](../../reports/validation/stop_exit_handoff_20260917/verification.json). 취소 응답과 원 주문 증거를 구분하고 부분 체결·전량 체결·응답 유실·재시작을 세 통합 훈련으로 대조했다. 실제 지연/보호 공백의 손실 상한을 보장하지는 않는다. 다음은 L2 호가 재생·공백/재연결 검사다. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [계좌 공통 청산 예약·대조](ACCOUNT_EXIT_ARBITRATION_V1.md), [검증 기록](../../reports/validation/account_exit_arbitration_20260917/verification.json). 일반 시장가 전환과 보호 청산의 중복 수량 사용을 차단하고 부분 체결·응답 유실·재시작을 함께 검사했다. 실제 계좌 조정기/공통 진입 위험 예산은 남아 있다. 다음은 활성 손절과 비상 청산의 취소·체결 경합 및 L2 자료 재생 검증이다. 최신 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다.
+
+최신: [보호 주문 원장·모의 전송](PROTECTION_EXECUTION_INTEGRATION_V1.md), [체결 자료 적격성](EXECUTION_DATA_FITNESS_2026_09_17.md), [검증 기록](../../reports/validation/protection_execution_integration_20260917/verification.json). 기존 BTCUSDC 호가340행은170회 관측의 양방향 계산이며 메이커 체결 검증용으로 부족하다. 실제 공개 스트림의 짧은 연결/순서 검사는 통과했다. 다음은 일반 시장가 전환·보호 경로의 공통 계좌 조정과 L2 재생 검증이며, 자세한 순서는 [현재 우선순위](CURRENT_PRIORITIES.md)를 따른다. 아래 작업 설명은 각 시점 기록이다.
+
+최신 작업: [E013 원 S07 방향 진단](experiments/E013_RESULTS_2026_09_17.md) 6회 완료, 신규 채택 없음. [보호 상태 감독](PROTECTION_SUPERVISOR_V1.md)은 실제 보호 확인과 요청을 구분하고 필요한 조치/로컬 경보를 영속화했다. 실제 보호 주문/비상 전송/외부 경보는 미연결이다. [결과별 판단과 다음 작업](DECISION_LOG_2026_09_17.md)을 현재 연구 방향으로 따른다.
+
+[이전 단계 검증 기록](../../reports/validation/evaluation_execution_contract_20260917/verification.json): 신규26개 포함226개 검사 통과, 기존714개 해시 대조 일치, 실제 주문0.
 
 최신 추가 작업: [전진 평가 정책·등록 검사](FORWARD_ACCEPTANCE_CONTRACT_V1.md), [시장가 위험 재승인 오프라인 통합](FALLBACK_RISK_INTEGRATION_V1.md). 정책은 초안/등록 차단이며 T0 정밀도 진단에서2년의 충분성을 확인하지 못했다. 일반 시장가 전환의 부분 체결·비용/예약 위험·전송 재검사·위험 경고 영속화를 연결했다. 보호 청산·실제 계정·경보 통합·전진 모의는 남아 있다.
 

@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "policy_id": "BTCUSDC_FORWARD_DATA_PILOT_V1",
+  "purpose": "DATA_QUALITY_ONLY",
+  "symbol": "BTCUSDC",
+  "duration_seconds": 86400,
+  "stop_rule": "FIXED_CALENDAR_END_RETAIN_FAILURES",
+  "feeds": {
+    "public": ["btcusdc@depth@100ms", "btcusdc@bookTicker"],
+    "market": ["btcusdc@aggTrade", "btcusdc@markPrice@1s"]
+  },
+  "quality": {
+    "required_evidence": ["l2", "market_connection", "mark", "clock", "durable_log"],
+    "min_joint_coverage_ppm": 995000,
+    "min_hourly_coverage_ppm": 990000,
+    "max_unavailable_seconds": 10,
+    "l2_max_age_ms": 1000,
+    "mark_max_age_ms": 3000,
+    "watchdog_period_ms": 250,
+    "max_loop_lag_ms": 500,
+    "max_wall_monotonic_drift_ms": 100,
+    "aggtrade_silence_is_gap": false,
+    "backfill_repairs_decision_history": false
+  },
+  "storage": {
+    "rotation_bytes": 134217728,
+    "hard_run_bytes": 68719476736,
+    "min_free_bytes": 17179869184,
+    "max_fsync_interval_ms": 1000,
+    "publish_requires_durable_prefix": true,
+    "retain_raw_errors_and_uncommitted_tail": true,
+    "retry_delays_seconds": [1, 2, 4, 8, 16, 30],
+    "retry_exhaustion": "STOP_RECORD_REMAINDER_UNAVAILABLE"
+  },
+  "execution_assumptions": {
+    "scope": "SENSITIVITY_ONLY_NOT_ACCOUNT_FEES",
+    "fee_bps_per_fill": {
+      "user_zero_maker": {"maker": 0, "taker": 5, "extra_adverse_market_slippage": 2},
+      "stress": {"maker": 2, "taker": 7, "extra_adverse_market_slippage": 5}
+    },
+    "limit_wait_ms": 3000,
+    "market_reference": "OBSERVED_OPPOSITE_L2_SWEEP_THEN_EXTRA_SLIPPAGE",
+    "insufficient_depth": "UNPRICEABLE_NOT_ZERO_COST",
+    "maker_models": ["NO_PASSIVE_FILL", "QUEUE_ASSUMPTION_REQUIRES_SEPARATE_VALIDATION"],
+    "touch_is_fill": false,
+    "cancel_ack_is_final": false,
+    "unknown_cost_is_zero": false,
+    "account_fee_evidence": null,
+    "operating_cost_usdc_per_year": null
+  },
+  "binding": {
+    "status": "UNREGISTERED",
+    "start_utc": null,
+    "registered_at_utc": null,
+    "last_inspected_end_utc": "2026-09-17T14:00:14.347625Z",
+    "source_hashes": {},
+    "roles": {
+      "collector": null,
+      "collector_tests": null,
+      "crash_recovery_evidence": null,
+      "capacity_evidence": null,
+      "clock_evidence": null,
+      "inspection_history": null
+    }
+  }
+}
