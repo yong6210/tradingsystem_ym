@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "request": {
+    "duration_ns": 86400000000000,
+    "rotation_ns": 8000000000,
+    "seal_ns": 500000000,
+    "transport": "PUBLIC"
+  },
+  "limits": {
+    "capture_bytes": 68719476736,
+    "free_reserve_bytes": 17179869184,
+    "capture_files": null,
+    "inventory_bytes": null,
+    "process_tree_rss_bytes": null,
+    "cold_records": null,
+    "cold_elapsed_ns": null,
+    "cold_rss_bytes": null
+  },
+  "envelope": {
+    "basis": "UNQUALIFIED",
+    "fixed_bytes": null,
+    "raw_bytes_per_generation": null,
+    "archive_bytes_per_generation": null,
+    "seed_bytes_per_generation": null,
+    "metadata_bytes_per_generation": null,
+    "metadata_bytes_per_unit": null,
+    "transient_bytes": null,
+    "failure_tail_bytes": null,
+    "validation_copy_bytes": null,
+    "fixed_files": null,
+    "files_per_generation": null,
+    "files_per_unit": null,
+    "transient_files": null,
+    "inventory_base_bytes": null,
+    "inventory_bytes_per_file": null,
+    "parent_other_peak_bytes": null,
+    "worker_tree_peak_bytes": null,
+    "cold_records_per_generation": null,
+    "cold_fixed_ns": null,
+    "cold_ns_per_generation": null,
+    "cold_peak_rss_bytes": null,
+    "max_parent_phase_ns": null,
+    "peak_pending_generations": null
+  }
+}
