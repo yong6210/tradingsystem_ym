@@ -1,0 +1,51 @@
+{
+  "id": "E051_BTC_INTRADAY_INVENTORY_V2",
+  "symbol": "BTCUSDC",
+  "start": "2024-09-01T00:00:00Z",
+  "end": "2026-09-01T00:00:00Z",
+  "initial_equity": 1000,
+  "exposure_caps": [
+    3
+  ],
+  "primary_cap": 3,
+  "fee_bps": 2.5,
+  "costs": {
+    "base": {
+      "slippage_bps": 2,
+      "extra_funding_bps": 0
+    },
+    "stress": {
+      "slippage_bps": 5,
+      "extra_funding_bps": 1
+    }
+  },
+  "monthly_operating_costs": [
+    0,
+    2
+  ],
+  "halt_drawdown": 0.04,
+  "max_initial_stop_risk": 0.005,
+  "max_hold_minutes": 1440,
+  "lot_step": 0.001,
+  "min_qty": 0.001,
+  "max_qty": 50,
+  "min_notional": 50,
+  "tick": 0.1,
+  "policy": {
+    "bias": "1h EMA20 versus EMA50; 4h close versus EMA20 with 3-bar EMA slope. Agreement is aligned; otherwise reduced exposure.",
+    "flip": "Fresh support/resistance rejection with 1m reversal and completed 3m candle + close-to-close confirmation. Long VWAP pullbacks only with positive 1h bias; shorts symmetric. Fresh opposite qualifying signal closes then reverses. No stored-direction-only initial entry or reentry.",
+    "levels": "Prior twenty 3m high/low (60m) and rolling 24h typical-price VWAP. These are explicit OHLCV proxies, not actual volume-at-price supply/demand or discretionary trader replication.",
+    "slices": "Initial two units, maintain one to four units; aligned direction up to 80% of exposure cap, other direction half that. One unit is capped by 0.5% initial account risk at a 3m 2ATR adverse stop and current minimum quantity. Freeze unit quantity and stop for each directional campaign; additions never widen stop or increase campaign risk beyond current 0.5% equity budget.",
+    "trim": "1m high/low touches prior 60m resistance/support within 0.15 ATR3, closes back inside with reversal candle, and net liquidation PnL per unit is positive; remove one unit, at most once per three minutes.",
+    "reload": "Only a fresh same-direction location signal, three-minute decision, sufficient room, risk/exposure budget. After trim require price improvement at least 15 bp from last trim and >=3 minutes.",
+    "exit": "Same fixed stop and max1440m as E050. After stop/time exit wait >=6 minutes and a new qualified location signal. Opposite fresh signal can close and reverse without that cooldown.",
+    "control": "Same exogenous direction signals and stop/time rules, fixed initial two units, no trims or reloads. Different exposure makes this a policy comparison, not an exposure-matched alpha estimate.",
+    "cost_gate": "Distance to opposite prior 60m level must be at least 4 ATR3 (2 x initial stop distance), and at least 45 bp (3 x assumed stress roundtrip fees + slippage), whichever larger. Same gate for base/stress. Geometric room is not predicted/guaranteed profit."
+  },
+  "execution": "All signals use completed bars available at least one full minute earlier. Market fills at next modeled minute open plus adverse tick/slippage; close-before-open for reversal, both at same reference open. No assumed passive fills. Funding before orders for positions held through settlement; events rounded up to next minute. Stop excursions are detected after completed bars, exited at subsequent modeled open, never filled at an unobserved stop price.",
+  "risk": "Observe mark-price open each minute and halt at 4% from observed mark-equity high water; complete minute high/low envelope reports conservative drawdown, so delayed exit may exceed threshold. Intraminute mark extrema ordering is unknown. Maintenance margin/account liquidation not validated. No actual leverage setting or orders.",
+  "study": "Eight continuous accounts at 3x: two policies x two trading costs x two operating costs. 192 independent one-month trials, with fresh capital per month explicitly diagnostic, not executable monthly loss resets. Paired with frozen E050 at same settings. One v2, no tuning after viewing v2 performance. Reused historical data, not independent validation.",
+  "minimum_room_fraction": 0.0045,
+  "reload_spacing_fraction": 0.0015,
+  "reentry_cooldown_minutes": 6
+}

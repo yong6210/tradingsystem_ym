@@ -1,0 +1,50 @@
+{
+  "id": "E053_TAKER_FLOW_INVENTORY",
+  "symbol": "BTCUSDC",
+  "start": "2024-09-01T00:00:00Z",
+  "end": "2026-09-01T00:00:00Z",
+  "initial_equity": 1000,
+  "exposure_cap": 3,
+  "campaign_risk": 0.005,
+  "fee_bps": 2.5,
+  "tick": 0.1,
+  "lot_step": 0.001,
+  "min_qty": 0.001,
+  "min_notional": 50,
+  "max_qty": 50,
+  "costs": {
+    "base": {
+      "slippage_bps": 2,
+      "extra_funding_bps": 0
+    },
+    "stress": {
+      "slippage_bps": 5,
+      "extra_funding_bps": 1
+    }
+  },
+  "monthly_operating_cost": 2,
+  "halt_drawdown": 0.04,
+  "diagnostic_halt_drawdown": 0.2,
+  "families": [
+    "flow_continuation",
+    "flow_absorption",
+    "flow_ridge"
+  ],
+  "signal_definitions": {
+    "flow_continuation": "Upper-timeframe aligned 3m taker imbalance >15% in candle direction, volume >1.5x20-bar mean. Mapped to aligned-entry state machine.",
+    "flow_absorption": "3m sweep/reclaim of prior60m extrema while aggressive imbalance points opposite candle reversal and volume >1.5x20-bar mean. Overlay on upper-direction inventory with60m override. Absorption is an OHLC/taker-flow proxy, not proven passive replenishment.",
+    "flow_ridge": "E052 monthly90-day ridge with 1-day label maturity embargo, extended by actual3/15/60m aggressive volume imbalance; fixed15bp forecast threshold."
+  },
+  "controller": "Full campaign capacity sized at entry using <=0.5% account risk, <=80% exposure cap and minimum step; start at50% of capacity. Inventory RSI3m14 requests100% for favorable RSI<=35,25% for adverseRSI>=65,otherwise50% after side normalization. Adjust only on3m decisions and fresh1m reversal. Keep at leastone minimum unit; reduce only profitable average-cost units; re-add after trim only15bp better. fixed_core holds initial quantity as control. Exposure differs between policies.",
+  "stops": "Two ATR3m14 from entry, never widen; stop observed from completed prior1m high/low, market exit at next open. Maximum24h except ridge60m. Wait6m after stop/time exit; confirmed direction reversal closes then opens at same reference open with two adverse fills. Quantity additions independently respect remaining campaign risk and filters.",
+  "study": "12 continuous and288 independently funded monthly accounts:3 families x2controllers x2costs, monthly operating2. All results, no best-hypothesis selection. Same E052 execution and4% risk halt. No diagnostic20 extension.",
+  "limitations": [
+    "User leverage unspecified,3x cap is research assumption and actual exposure smaller",
+    "User5% loss preference provisionally interpreted as account drawdown; risk20 diagnostic never deployable",
+    "Monthly50-100% is user-reported performance, not verified objective achieved",
+    "OHLCV levels and volume proxies are not actual orderbook or volume-at-price",
+    "No maker queue-fill assumptions, no martingale, no live orders",
+    "Historical data reused and current filters applied retrospectively; no independent holdout",
+    "Mark minute envelope and delayed execution are simulated; no real margin/liquidation/account verification"
+  ]
+}

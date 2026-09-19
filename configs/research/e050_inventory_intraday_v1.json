@@ -1,0 +1,22 @@
+{
+  "id": "E050_BTC_INTRADAY_INVENTORY_V1",
+  "symbol": "BTCUSDC", "start": "2024-09-01T00:00:00Z", "end": "2026-09-01T00:00:00Z",
+  "initial_equity": 1000, "exposure_caps": [1, 3, 5], "primary_cap": 3,
+  "fee_bps": 2.5, "costs": {"base": {"slippage_bps": 2, "extra_funding_bps": 0}, "stress": {"slippage_bps": 5, "extra_funding_bps": 1}},
+  "monthly_operating_costs": [0, 2], "halt_drawdown": 0.04,
+  "max_initial_stop_risk": 0.005, "max_hold_minutes": 1440,
+  "lot_step": 0.001, "min_qty": 0.001, "max_qty": 50, "min_notional": 50, "tick": 0.1,
+  "policy": {
+    "bias": "1h EMA20 versus EMA50; 4h close versus EMA20 with 3-bar EMA slope. Agreement is aligned; otherwise reduced exposure.",
+    "flip": "Completed 3m close breaks preceding ten 3m highs/lows and is above/below EMA21, confirmed by last observable 1m bullish/bearish candle. Opposite breakout closes and reverses; initial direction follows nonzero 1h bias.",
+    "levels": "Prior twenty 3m high/low (60m) and rolling 24h typical-price VWAP. These are explicit OHLCV proxies, not actual volume-at-price supply/demand or discretionary trader replication.",
+    "slices": "Initial two units, maintain one to four units; aligned direction up to 80% of exposure cap, other direction half that. One unit is capped by 0.5% initial account risk at a 3m 2ATR adverse stop and current minimum quantity. Freeze unit quantity and stop for each directional campaign; additions never widen stop or increase campaign risk beyond current 0.5% equity budget.",
+    "trim": "1m high/low touches prior 60m resistance/support within 0.15 ATR3, closes back inside with reversal candle, and net liquidation PnL per unit is positive; remove one unit, at most once per three minutes.",
+    "reload": "1m touches prior 60m support/resistance or 24h VWAP within 0.25 ATR3 and closes back across with reversal candle; add one unit if remaining risk and exposure permit; at most once per three minutes.",
+    "exit": "Completed 1m adverse extreme crosses campaign stop, or holding reaches 1440m: close. Reverse immediately only with a separately confirmed opposite signal; otherwise reenter on next eligible decision. Risk halt overrides all entries.",
+    "control": "Same exogenous direction signals and stop/time rules, fixed initial two units, no trims or reloads. Different exposure makes this a policy comparison, not an exposure-matched alpha estimate."
+  },
+  "execution": "All signals use completed bars available at least one full minute earlier. Market fills at next modeled minute open plus adverse tick/slippage; close-before-open for reversal, both at same reference open. No assumed passive fills. Funding before orders for positions held through settlement; events rounded up to next minute. Stop excursions are detected after completed bars, exited at subsequent modeled open, never filled at an unobserved stop price.",
+  "risk": "Observe mark-price open each minute and halt at 4% from observed mark-equity high water; complete minute high/low envelope reports conservative drawdown, so delayed exit may exceed threshold. Intraminute mark extrema ordering is unknown. Maintenance margin/account liquidation not validated. No actual leverage setting or orders.",
+  "study": "24 continuous accounts: two policies x three exposure caps x two trading costs x two operating costs. Additionally 192 independent one-month trials at 3x: 24 months x two policies x two costs x two operating costs. Each monthly trial starts with fresh 1000 and is NOT a continuously executable strategy or a drawdown reset permission. Report all months, including halted and zero-trade months. Historical data reused; exploratory, no parameter tuning."
+}

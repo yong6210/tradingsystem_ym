@@ -1,0 +1,23 @@
+{
+  "initial_equity": "10000",
+  "mode": "confirmed",
+  "policy": {
+    "campaign_fraction": "0.01",
+    "add_fraction": "0.25",
+    "buffer_atr": "0.10",
+    "minimum_rr": "1.5",
+    "max_adds": 2,
+    "observation_bars": 5,
+    "confirmation_ms": 540000,
+    "late_ms": 10000
+  },
+  "costs": {
+    "fee": "0.00025",
+    "slippage": "0.0002",
+    "tick": "0.01",
+    "step": "0.01",
+    "minimum_qty": "0.01",
+    "minimum_notional": "1"
+  },
+  "note": "Synthetic linear-contract accounting fixture. Costs, quantities and capacity are research inputs, not verified exchange settings. No live execution."
+}

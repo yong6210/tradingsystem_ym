@@ -1,0 +1,45 @@
+{
+  "id": "E056_CONTEXT_TIMING_SEPARATION_V2",
+  "symbol": "BTCUSDC",
+  "initial_equity": 1000,
+  "fee_bps": 2.5,
+  "tick": 0.1,
+  "lot_step": 0.001,
+  "monthly_operating": 2,
+  "halt_drawdown": 0.04,
+  "start": "2026-08-01T00:00:00Z",
+  "end": "2026-09-01T00:00:00Z",
+  "leverages": [
+    1,
+    3,
+    5
+  ],
+  "costs": {
+    "base": [
+      2,
+      0
+    ],
+    "stress": [
+      5,
+      1
+    ]
+  },
+  "policies": [
+    "baseline",
+    "context_only",
+    "context_timing",
+    "no_add"
+  ],
+  "profile": "Actual BTCUSDC aggregate executed quantities in fixed 50-USDC price bins; top five separated smoothed peaks, each zone peak +/- one bin. Full 15m buckets with one-minute delay; current UTC session, rolling 1/7/60 days, latest confirmed 4h swing anchor. Two following 4h bars must finish before recognizing swing; anchor starts at original swing bar open, known only after confirmation. Overlapping periods are not independent evidence.",
+  "direction": "Daily and 4h signs weight2, 1h and 15m weight1 define context only. A confirmed profile reaction may enter either side even against context. Counter-context additions capped at three tenths; otherwise five. This cap is a researcher assumption, not a user-confirmed rule.",
+  "controller": "E055 capital/fees/halts retained. Context_timing requires two completed 3m closes to distinguish reclaim versus retest, plus completed 1m candle direction and close improvement. Same-zone re-additions allowed after fresh confirmation and a better price than last add or last reduction. Full flip needs opposite context or failure of the tactical/root zone in addition to opposite timing. No-add disables increases. All numeric rules are fixed research assumptions. v2 replaces redundant close-change confirmation with two completed 1m closes outside the zone and current completed 1m close beyond the prior completed 1m high/low. v1 results preserved; no profitability-based parameter selection.",
+  "comparison": "24 one-month accounts: frozen E055 multiscale baseline plus context_only, context_timing and no_add, each x1/3/5 leverage xbase/stress. context_only shares new inventory/flip/counter-context rules but retains old candle reaction; isolates the additional timing check. Baseline must reproduce frozen E055 exactly. No parameter search.",
+  "limitations": [
+    "Reused historical August 2026, no fresh holdout",
+    "50-USDC bins and reaction rules are fixed researcher assumptions, not inferred user discretion",
+    "Trade volume is not outstanding orderbook liquidity or known holder cost basis",
+    "Average-cost PnL; newest allocation tracking inherits E054 pooled remnants",
+    "No validated exchange margin/liquidation or live fills",
+    "User leverage unspecified; 4% drawdown halt remains a provisional research guard"
+  ]
+}

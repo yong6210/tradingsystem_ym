@@ -1,0 +1,15 @@
+{
+  "status": "unapproved_research_candidate",
+  "purpose": "causal signal inspection only; not a trading or deployment configuration",
+  "policy": {
+    "trend_left": 1,
+    "trend_right": 1,
+    "zone_minutes": 60,
+    "zone_left": 1,
+    "zone_right": 1,
+    "zone_width_fraction": "0.10",
+    "minimum_zone_width": "2",
+    "reaction_buffer": "2",
+    "source": "cycling-signal-candidate-v01"
+  }
+}

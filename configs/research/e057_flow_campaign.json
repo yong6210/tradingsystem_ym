@@ -1,0 +1,47 @@
+{
+  "id": "E057_FLOW_CAMPAIGN_ADAPTIVE_SIZE",
+  "symbol": "BTCUSDC",
+  "initial_equity": 1000,
+  "fee_bps": 2.5,
+  "tick": 0.1,
+  "lot_step": 0.001,
+  "monthly_operating": 2,
+  "halt_drawdown": 0.04,
+  "start": "2026-08-01T00:00:00Z",
+  "end": "2026-09-01T00:00:00Z",
+  "leverages": [
+    1,
+    3,
+    5
+  ],
+  "costs": {
+    "base": [
+      2,
+      0
+    ],
+    "stress": [
+      5,
+      1
+    ]
+  },
+  "policies": [
+    "baseline",
+    "adaptive",
+    "tenth_cap",
+    "no_add"
+  ],
+  "profile": "Actual BTCUSDC aggregate executed quantities in fixed 50-USDC price bins; top five separated smoothed peaks, each zone peak +/- one bin. Full 15m buckets with one-minute delay; current UTC session, rolling 1/7/60 days, latest confirmed 4h swing anchor. Two following 4h bars must finish before recognizing swing; anchor starts at original swing bar open, known only after confirmation. Overlapping periods are not independent evidence.",
+  "direction": "4h close versus EMA20 and two-bar EMA slope establish initial flow. Daily/1h/15m agreement adjusts sizing quality, never unanimous entry gate. One-hour consecutive closes beyond fixed thesis profile invalidate campaign; tiny opposite reaction reduces inventory instead of flipping. No maximum holding time; sample end still liquidates.",
+  "controller": "Risk-based variable additions: quality combines profile overlap and context agreement. Tranche estimated risk 0.1%+0.3%*quality of current equity; tranche margin 5%+15%*quality. Aggregate campaign estimated loss allowance 1% of entry cash includes realized losses and remaining position loss at thesis edge; aggregate new-add margin cap60%. These are researcher assumptions and not guaranteed actual stop losses: hourly invalidation can execute beyond edge. Reduction fraction25%+35%*margin-load+20%*opposing-flow, bounded25..80%, rounded to lot step. No fixed tenths and no automatic five-to-three rule.",
+  "comparison": "24 accounts: frozen E056 v2 context_timing baseline vs adaptive vs tenth_cap (same dynamic engine, additionally caps each add to10% entry account margin) vs no_add (adaptive initial entry, no increases); each1/3/5 leverage andbase/stress. Same reused August2026. No parameter search.",
+  "limitations": [
+    "Reused historical August 2026, no fresh holdout",
+    "50-USDC bins and reaction rules are fixed researcher assumptions, not inferred user discretion",
+    "Trade volume is not outstanding orderbook liquidity or known holder cost basis",
+    "Average-cost PnL; newest allocation tracking inherits E054 pooled remnants",
+    "No validated exchange margin/liquidation or live fills",
+    "User leverage unspecified; 4% drawdown halt remains a provisional research guard"
+  ],
+  "campaign_risk": 0.01,
+  "margin_cap": 0.6
+}

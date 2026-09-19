@@ -1,0 +1,32 @@
+{
+  "controller": {
+    "initial_equity": "10000",
+    "mode": "no_add",
+    "costs": {
+      "fee": "0.00025",
+      "slippage": "0.0002",
+      "tick": "0.1",
+      "step": "0.001",
+      "minimum_qty": "0.001",
+      "minimum_notional": "50"
+    }
+  },
+  "adapter": {
+    "source": "official Binance BTCUSDC completed 1m trade candles",
+    "zone_ttl_minutes": 1440,
+    "zone_width_fraction": "0.10",
+    "initial_budget_fraction": "0.50",
+    "horizon_minutes": 60,
+    "reaction_minutes": 15,
+    "reaction_distance_fraction": "0.25",
+    "minimum_reached_fraction": "0.25",
+    "adverse_add_enabled": true
+  },
+  "simulation": {
+    "half_spread_bps": "0.5",
+    "participation": "0.01",
+    "equity_exposure_fraction": "0.60"
+  },
+  "scope": "Unoptimized trial pivot-reaction path; adverse adds only. Profit adds, splits, countertrend and reentry require separate adapters. Synthetic fills are not exchange executions. v02 separates observed signal quotes and simulated execution prices; admission keeps execution costs.",
+  "execution_model": "separated-v02"
+}

@@ -1,0 +1,16 @@
+{
+  "status": "unapproved_research_candidate",
+  "signals": {
+    "trend_left": 1, "trend_right": 1, "zone_minutes": 60,
+    "zone_left": 1, "zone_right": 1, "zone_width_fraction": "0.10",
+    "minimum_zone_width": "2", "reaction_buffer": "2", "source": "cycling-market-candidate-v01"
+  },
+  "costs": {"fee": "0.0004", "slippage": "0.0002", "tick": "0.1", "step": "0.001", "minimum_qty": "0.001", "minimum_notional": "5"},
+  "account": {
+    "equity": "10000", "leverage": "2", "maximum_quantity": "0.2",
+    "initial_reserve": "7000", "additional_reserve": "3000",
+    "stress_loss_budget": "1000", "stress_moves": ["2000", "3000"]
+  },
+  "execution": {"prior_volume_fraction": "0.01", "half_spread_bps": "0.5"},
+  "note": "All numbers are offline experiment inputs, not user-approved trading limits. No liquidation simulation. One reduction per latest-increase anchor."
+}

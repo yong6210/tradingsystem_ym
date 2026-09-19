@@ -1,0 +1,21 @@
+{
+  "id": "E049_WEEKLY_ROTATION_V1",
+  "classification": "EXPLORATORY_REUSED_HISTORY_NOT_OUT_OF_SAMPLE",
+  "start": "2024-09-01", "end_exclusive": "2026-09-01",
+  "symbols": ["BTCUSDC", "ETHUSDC", "SOLUSDC"],
+  "initial_equity": 1000,
+  "momentum_days": 28, "atr_days": 20, "atr_multiplier": 3,
+  "risk_fraction": 0.005, "max_notional_fraction": 0.5,
+  "account_halt_drawdown": 0.03,
+  "rebalance": "Monday 01:00 UTC; previous completed UTC daily bars only",
+  "selection": "highest positive 28-day close momentum; lexical tie break; otherwise cash; one long; BTC-only control",
+  "stop": "daily at 01 UTC, raise only to previous completed daily close minus 3 ATR; initial entry reference minus 3 ATR; no same-bar reentry after stop",
+  "sizing": "floor quantity to current market lot step; risk includes entry and stop exit fees/slippage; reject insufficient minimum notional; never round up",
+  "fee_bps_per_fill": 2.5,
+  "cost_cases": {"base": {"slippage_bps": 2, "extra_funding_bps": 0}, "stress": {"slippage_bps": 5, "extra_funding_bps": 1}},
+  "monthly_operating_cost_cases": [0, 2],
+  "intrahour_paths": ["OHLC", "OLHC"],
+  "funding": "actual signed funding times and mark prices, first within hour before open actions; input offset <=1000ms required; new orders modeled at hour+1s",
+  "account_halt": "3% from liquidation-equity high water, permanent cash; gap can exceed threshold; monthly costs continue; no automatic restart",
+  "limits": ["Research choices, not user-confirmed loss or cost definitions", "Current filters are scenario constraints, not reconstructed historical filters", "OHLC paths and assumed fills cannot establish executable intrabar stops or a 5% loss guarantee", "No account, margin, outage or liquidation validation", "Three assets selected now; selection/survivorship bias; old rotation research exists", "No parameter search or favorable-result selection; report all 16 account cases"]
+}

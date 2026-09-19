@@ -1,0 +1,21 @@
+{
+  "id":"E052_INVENTORY_LAB",
+  "symbol":"BTCUSDC", "start":"2024-09-01T00:00:00Z", "end":"2026-09-01T00:00:00Z",
+  "initial_equity":1000, "exposure_cap":3, "campaign_risk":0.005,
+  "fee_bps":2.5, "tick":0.1, "lot_step":0.001, "min_qty":0.001, "min_notional":50, "max_qty":50,
+  "costs":{"base":{"slippage_bps":2,"extra_funding_bps":0},"stress":{"slippage_bps":5,"extra_funding_bps":1}},
+  "monthly_operating_cost":2, "halt_drawdown":0.04, "diagnostic_halt_drawdown":0.20,
+  "families":["trend","range","sweep","retest","adaptive","ridge"],
+  "signal_definitions":{
+    "trend":"1h EMA20/50 direction agreeing with 4h close/EMA20; upper-timeframe direction directly controls entries and reversals, no lower-timeframe breakout override.",
+    "range":"1h 20-bar efficiency ratio <0.3; prior24h VWAP z-score beyond +/-1.5 and 1m reversal. Hold until opposite qualifying signal/stop/time limit.",
+    "sweep":"Upper-timeframe base plus completed3m false break of prior60m high/low and reclaim; opposite override persists up to60m or a new sweep, not just one 3m candle.",
+    "retest":"Upper-timeframe aligned retest of a previous3m close breakout beyond preceding3h range within following20 completed3m bars; never current-bar future high/low.",
+    "adaptive":"Efficiency ratio >=0.3 routes upper trend with sweep overrides; otherwise routes range-reversion. Overrides last up to60m.",
+    "ridge":"Monthly refit on preceding90days of3m-spaced observations; forward60m open-to-open return labels mature at least1day before month. Seven causal features, standardized/clipped8, fixed ridge penalty0.01; prediction beyond +/-15bp permits direction. Maximum60m holding, no hyperparameter search."
+  },
+  "controller":"Full campaign capacity sized at entry using <=0.5% account risk, <=80% exposure cap and minimum step; start at50% of capacity. Inventory RSI3m14 requests100% for favorable RSI<=35,25% for adverseRSI>=65,otherwise50% after side normalization. Adjust only on3m decisions and fresh1m reversal. Keep at leastone minimum unit; reduce only profitable average-cost units; re-add after trim only15bp better. fixed_core holds initial quantity as control. Exposure differs between policies.",
+  "stops":"Two ATR3m14 from entry, never widen; stop observed from completed prior1m high/low, market exit at next open. Maximum24h except ridge60m. Wait6m after stop/time exit; confirmed direction reversal closes then opens at same reference open with two adverse fills. Quantity additions independently respect remaining campaign risk and filters.",
+  "study":"24 continuous accounts:6families x2controllers x2costs with operating2. 576 independent monthly trials with same matrix for24months; fresh1000 per trial, never concatenate as executable returns. Additional6 diagnostic20%-halt trials:2026-08 inventory stress operating2, solely test whether4% early halt masks full-month signal behavior. These violate5% loss preference and cannot be promoted. All models reported; no selection of best historical winner.",
+  "limitations":["User leverage unspecified,3x cap is research assumption and actual exposure smaller","User5% loss preference provisionally interpreted as account drawdown; risk20 diagnostic never deployable","Monthly50-100% is user-reported performance, not verified objective achieved","OHLCV levels and volume proxies are not actual orderbook or volume-at-price","No maker queue-fill assumptions, no martingale, no live orders","Historical data reused and current filters applied retrospectively; no independent holdout","Mark minute envelope and delayed execution are simulated; no real margin/liquidation/account verification"]
+}
