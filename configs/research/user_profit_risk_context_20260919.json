@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "status": "RESEARCH_SELECTION_POLICY_NOT_DEPLOYED_RISK_CONTROL",
+  "capital_usdc": 1000,
+  "deployment_scope": "BINANCE_BTCUSDC_PERPETUAL",
+  "user_evidence": {
+    "date_kst": "2026-09-19",
+    "profit_priority": "아니 제일 중요한 수익이 안나면 무슨 의미야",
+    "loss_preference": "손실은 미정이야. 5%만 넘지 않았으면 좋겠어"
+  },
+  "risk_preference": {
+    "maximum_drawdown_fraction": 0.05,
+    "definition": "Peak-to-trough total account equity, including unrealized PnL, fees, funding and operating costs; external deposits/withdrawals require adjustment.",
+    "interpretation": "PROVISIONAL_ACCOUNT_DRAWDOWN_NOT_PER_TRADE_OR_DAILY_LOSS",
+    "user_confirmed_metric_definition": false,
+    "real_world_hard_guarantee": false,
+    "internal_halt_fraction": null,
+    "internal_halt_requirement": "Must be below 0.05 with an explicit execution-cost and gap allowance before new account simulation or deployment.",
+    "legacy_default_warning_fraction": 0.05,
+    "legacy_default_halt_fraction": 0.08,
+    "legacy_defaults_eligible_for_new_policy": false
+  },
+  "profit_objective": {
+    "primary": "Net USDC profit subject to the drawdown preference",
+    "user_monthly_profit_target_usdc": null,
+    "operating_cost_usdc_per_month": null,
+    "unknown_operating_cost_is_zero": false,
+    "report": ["net_profit_usdc", "annualized_return", "monthly_pnl_distribution", "maximum_drawdown", "longest_recovery", "break_even_operating_cost", "cost_stress", "profit_concentration"]
+  },
+  "research_decisions": {
+    "t0_incremental_variations": "PAUSED_BY_PROFITABILITY_RESET",
+    "equal_exposure_t0_diagnostic": "CANCELLED_AS_NEXT_TASK",
+    "leverage_increase_as_profit_solution": false,
+    "reuse_of_historical_data_is_independent_validation": false,
+    "combine_only_after_individual_net_profit_evidence": true,
+    "operational_expansion_before_economic_candidate": false
+  },
+  "application": {
+    "frozen_results_modified": false,
+    "legacy_engine_defaults_modified": false,
+    "live_configuration_modified": false,
+    "new_account_runs_completed_under_this_policy": 0
+  }
+}

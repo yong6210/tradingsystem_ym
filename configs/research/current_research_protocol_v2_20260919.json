@@ -1,0 +1,84 @@
+{
+  "schema_version": 2,
+  "created_at_utc": "2026-09-18T22:55:30.968352+00:00",
+  "status": "METHOD_RESET_PREPARATION_NO_NEW_PERFORMANCE_EXPERIMENT_REGISTERED",
+  "user_evidence": {
+    "method_reset_accepted": "어 그렇게 해야될 것 같아",
+    "profit_priority": "아니 제일 중요한 수익이 안나면 무슨 의미야",
+    "loss_preference": "손실은 미정이야. 5%만 넘지 않았으면 좋겠어"
+  },
+  "inherited_working_scope": {
+    "capital_usdc": 1000,
+    "instrument": "BINANCE_BTCUSDC_PERPETUAL",
+    "new_deployment_scope_authorized": false
+  },
+  "objectives": {
+    "profit_priority": true,
+    "monthly_net_profit_target_usdc": null,
+    "monthly_profit_target_status": "QUESTION_PENDING",
+    "loss_preference_fraction": 0.05,
+    "loss_metric_definition": null,
+    "loss_metric_user_confirmed": false,
+    "loss_definition_status": "QUESTION_PENDING",
+    "actual_incremental_monthly_operating_cost_usdc": null,
+    "operating_cost_status": "QUESTION_PENDING",
+    "unknown_operating_cost_equals_zero": false
+  },
+  "historical_assumptions": {
+    "cycle_risk_fractions": [
+      0.0025,
+      0.005
+    ],
+    "warning_fraction": 0.025,
+    "halt_fraction": 0.04,
+    "operating_scenarios_usdc_monthly": [
+      0,
+      2
+    ],
+    "user_requirements": false,
+    "automatically_apply_to_new_policy": false
+  },
+  "controls": {
+    "active_hypothesis_limit": 2,
+    "limit_origin": "RESEARCHER_WORK_SCOPE_NOT_STATISTICAL_OR_USER_RETURN_REQUIREMENT",
+    "new_performance_experiments": "PAUSED_UNTIL_QUESTION_SPECIFICATION_IS_COMPLETE",
+    "e048_status": "UNEXECUTED_DRAFT_PAUSED_BY_METHOD_RESET",
+    "registered_active_hypotheses": [],
+    "profitable_event_mean_is_sufficient_for_adoption": false,
+    "negative_arbitrary_event_window_rejects_whole_strategy": false,
+    "information_value_and_account_feasibility_reported_separately": true,
+    "complete_trade_policy_required": true,
+    "same_sample_direction_threshold_risk_rescue_search": false
+  },
+  "evidence_policy": {
+    "confirmed_reused_price_window": {
+      "start": "2024-09-01T00:00:00+00:00",
+      "end_exclusive": "2026-09-01T00:00:00+00:00"
+    },
+    "other_periods_unseen_status": "UNKNOWN_UNTIL_EXPOSURE_REVIEW",
+    "unseen_historical_holdout_identified": false,
+    "forward_start_rule": "AFTER_CANDIDATE_CODE_POLICY_AND_EVALUATION_PLAN_FREEZE_NOT_THIS_DOCUMENT_TIMESTAMP",
+    "candidate_freeze_at_utc": null,
+    "forward_window": null,
+    "new_source_on_old_prices_is_independent_validation": false
+  },
+  "next_work": [
+    "RECORD_USER_OBJECTIVES_WITH_UNKNOWN_VALUES_PRESERVED",
+    "SUMMARIZE_DATA_EXPOSURE_AND_RELEVANT_TRIAL_HISTORY",
+    "SPECIFY_AT_MOST_TWO_ECONOMIC_QUESTIONS_BEFORE_OUTCOME_RUNS"
+  ],
+  "application": {
+    "research_documentary_state_only": true,
+    "automatically_consumed_by_legacy_runners": false,
+    "frozen_sources_changed": false,
+    "live_configuration_changed": false,
+    "automation_changed": false,
+    "new_backtests": 0,
+    "new_market_requests": 0,
+    "actual_orders": 0
+  },
+  "documents": {
+    "protocol": "docs/research/RESEARCH_METHOD_V2_2026_09_19.md",
+    "question_template": "docs/research/RESEARCH_QUESTION_TEMPLATE_V2.md"
+  }
+}

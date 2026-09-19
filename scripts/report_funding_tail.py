@@ -1,0 +1,128 @@
+"""E043 result delivery and independent minimum-order feasibility arithmetic."""
+from decimal import Decimal as D,ROUND_CEILING,ROUND_FLOOR
+import json
+from pathlib import Path
+import sys
+ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
+import numpy as np
+import pandas as pd
+from app.research.data.btcusdc import load_public_bundle
+from scripts.run_direction_controls import load,lines,save,digest
+from scripts.run_time_exit_policy import check_hashes
+OUT=ROOT/'reports/validation/e043_funding_tail_20260919'
+REPORT=ROOT/'docs/research/experiments/E043_RESULTS_2026_09_19.md'
+
+
+def main():
+    s=load(OUT/'summary.json');v=load(OUT/'verification.json');e=load(OUT/'event_summary.json')
+    check_hashes(load(OUT/'registration.json')['source_hashes'])
+    for name,h in v['artifacts'].items():
+        if digest(OUT/name)!=h:raise ValueError('changed artifact '+name)
+    if not s['account_gate_pass'] or len(s['runs'])!=16:raise ValueError('delivery expects completed registered gate and account stage')
+    for key,value in s['runs'].items():
+        if key.endswith('OHLC') and value!=s['runs'][key[:-4]+'OLHC']:raise ValueError('separate path reporting required')
+    bundle=load_public_bundle(ROOT,ROOT/'data/historical/btcusdc_public_20260917')
+    rows=[r for r in load(OUT/'signals.json') if r['side']]
+    commands=load(OUT/'TAIL_decisions.json');sizing={}
+    for scenario in ('base','stress'):
+        key=scenario+'_TAIL_op0_OHLC';folder=OUT/key;m=s['runs'][key]['metrics']
+        if m['warned'] or m['drawdown_halted']:raise ValueError('simple cash audit needs unlatched op0 path')
+        trades={t['entry_time']:t for t in lines(folder/'trades.jsonl')}
+        rejected={r['time']:r for r in lines(folder/'rejections.jsonl')};events=lines(folder/'events.jsonl')
+        cost=s['settings']['costs'][scenario];risk=s['settings']['risk']
+        slip=D(str(cost['slippage_bps']))/10000;fee=D(str(cost['fee_bps']))/10000;tick=D(str(cost['tick']))
+        budget_fraction=D(str(risk['cycle_fraction']));step=D(str(risk['step']));checks=[]
+        for row in rows:
+            stamp=row['entry_time'];command=commands[str(row['entry_minute'])]
+            reference=D(str(bundle.trade.o.iloc[row['entry_minute']]))
+            entry=((reference*(1+slip)/tick).to_integral_value(rounding=ROUND_CEILING))*tick
+            stop=((D(str(command[1]))-D(str(risk['stop_atr']))*D(str(command[2])))/tick).to_integral_value(rounding=ROUND_FLOOR)*tick
+            stop_fill=((stop*(1-slip)/tick).to_integral_value(rounding=ROUND_FLOOR))*tick
+            loss_per=entry-stop_fill+(entry+stop_fill)*fee
+            quantity=(max(D(str(risk['minimum_qty'])),D(str(risk['minimum_notional']))/entry)/step).to_integral_value(rounding=ROUND_CEILING)*step
+            minimum_loss=quantity*loss_per;required=max(quantity*entry/D(str(risk['exposure_multiple'])),minimum_loss/budget_fraction)
+            earlier=[x for x in events if x['time']<stamp];cash=D(str(earlier[-1]['balance'])) if earlier else D(1000)
+            eligible=minimum_loss<=cash*budget_fraction and quantity*entry<=cash*D(str(risk['exposure_multiple']))
+            if eligible!=(stamp in trades):raise ValueError('independent minimum-lot eligibility differs')
+            if stamp in rejected:
+                if rejected[stamp]['reason']!='size_constraint' or abs(float(required)-rejected[stamp]['required_equity'])>1e-6:
+                    raise ValueError('required equity mismatch')
+            if stamp in trades:
+                t=trades[stamp]
+                if abs(float(D(str(t['quantity']))*loss_per)-t['planned_loss'])>1e-7:raise ValueError('planned loss mismatch')
+            checks.append(dict(time=stamp,cash=str(cash),minimum_quantity=str(quantity),minimum_planned_loss=str(minimum_loss),
+                budget=str(cash*budget_fraction),required_equity=str(required),eligible=eligible))
+        required=[float(r['required_equity']) for r in checks]
+        sizing[scenario]=dict(signals=len(rows),accepted=len(trades),size_rejected=len(rejected),
+            minimum_contract_required_equity_quantiles=dict(zip(('min','p25','median','p75','max'),map(float,np.quantile(required,[0,.25,.5,.75,1])))),
+            checks=checks)
+    save(OUT/'minimum_order_audit.json',dict(status='PASS_INDEPENDENT_DECIMAL_ALL_CANDIDATE_OP0_ENTRIES',
+        scenarios=sizing,capital_recommendation=False,portfolio_drawdown_forecast=False))
+    accounts=[]
+    for model in ('TAIL','LONG00'):
+        for op in (0,2):
+            for cost in ('base','stress'):
+                run=s['runs'][f'{cost}_{model}_op{op}_OHLC'];m=run['metrics'];d=run['diagnostics']
+                accounts.append(dict(model=model,monthly_cost=op,cost=cost,net=d['net_usdc'],dd=m['max_drawdown_pct'],
+                    trades=m['cycles'],longest_underwater_days=d['calendar_risk']['longest_underwater_days'],
+                    warned=m['warned'],halt=m['halt_time']))
+    text=['# E043 결과 — 낮은 펀딩 이후 반등은 사건 손익 양수, 계좌 수익은 부족','',
+        '**하위 펀딩 분위 뒤 매수하는 고정 규칙은 사건 단계에서 비용 후 평균이 양수였지만, 현재1,000 USDC 계좌 설정에서는 대부분 주문이 불가능했다. 월2 USDC 운영비 예시까지 감당할 수익 후보로 채택하지 않는다.** 이는 신호가 무조건 무효라는 결론도, 거래당 위험을 올리면 해결된다는 결론도 아니다.','',
+        f"기존 BTCUSDC 자료의 2024-09-01~2026-09-01 미만 평가다. 완전한 하루 보유가 가능한 정산 시각 {e['full_event_calendar']:,}개에서 하위10% 신호 {e['raw_tail_events']}개가 나왔고, 보유 중 {e['overlap_suppressed']}개를 제외해 {len(rows)}개 비중복 사건을 선택했다. 직전180일의 완료 정산540개로만 분위 계산, 정산 뒤2분 진입·다음 날 정산 시각+1분 청산을 고정했다. 창·분위·시간대·위험 배수를 검색하지 않았다.",'',
+        '## 사건당 경제성','',
+        '| 조건 | 가격 손익 bp | 전체 거래비용 bp | 순손익 bp | 같은 시간대 무조건 매수 bp | 후보−대조 bp | 순손익 탐색95% 구간 bp |',
+        '|---|---:|---:|---:|---:|---:|---:|']
+    event_rows=[]
+    for cost in ('base','stress'):
+        z=e['results'][cost];lo,hi=z['exploratory_interval_bps'][0]
+        text.append(f"| {cost} | {z['mean_gross_bps']:+.2f} | {z['mean_cost_bps']:.2f} | {z['mean_net_bps']:+.2f} | {z['matched_unconditional_mean_bps']:+.2f} | {z['matched_excess_bps']:+.2f} | [{lo:+.2f}, {hi:+.2f}] |")
+        event_rows.append(dict(cost=cost,events=z['active_events'],gross_bps=z['mean_gross_bps'],cost_bps=z['mean_cost_bps'],
+            net_bps=z['mean_net_bps'],matched_excess_bps=z['matched_excess_bps']))
+    text+=['',
+        'bp는 진입 기준 명목금액의1만분의1이며 계좌 수익률이 아니다. 편도 수수료2.5bp, 슬리피지2/5bp, 실제 펀딩 및 스트레스 정산당1bp를 반영했다. 선택에 쓴 정산은 진입 전이므로 그 지급을 받았다고 계산하지 않았다. 표의 비용에는 수수료·슬리피지·틱 반올림·펀딩이 포함되며 운영비는 아직 없다.','',
+        '사건 평균과 시각 가중 단순 매수 대비 차이가 양 비용 모두 양수여서 사전 조건에 따라 계좌 단계로 진행했다. 그러나 순익과 증분의28일 블록2000회 탐색구간은 모두0을 포함한다. 같은 표본의 여러 연구와 선택 편향을 보정한 통계 확증이 아니다. 대조는 시각 구성만 맞춘 것으로 직전 가격 하락이나 장세까지 통제하지 않았으며, 펀딩 자체의 인과효과를 입증하지 않는다. 겹치는 무조건 매수 사건들을 한 계좌의 복리 수익으로 합치지 않았다.','',
+        '스트레스 사건당 순익은 2024년 일부 −17.59bp(11회), 2025년 +12.65bp(87회), 2026년 일부 +8.85bp(54회)다. 기회가 없는 날을 포함한729일의 사건 손익 합/날짜 수는 기본+3.78bp, 스트레스+1.90bp다. 이것도 손절·수량을 적용한 계좌 일수익이 아니다.','',
+        '## 실제 수량·위험·운영비를 넣은 계좌','',
+        '| 규칙 | 월 운영비 가정 | 거래비용 | 2년 순익 USDC | 최대 낙폭 | 거래 수 | 최장 미회복 |',
+        '|---|---:|---|---:|---:|---:|---:|']
+    for r in accounts:text.append(f"| {r['model']} | {r['monthly_cost']} | {r['cost']} | {r['net']:+.2f} | {r['dd']:.2f}% | {r['trades']} | {r['longest_underwater_days']}일 |")
+    text+=['',
+        'TAIL은 후보, LONG00은 매일00시 정산 후 같은 길이로 매수하는 사전 고정 계좌 대조다. OHLC/OLHC 집계가 같아 표는 한 번만 표시하며 전체16계좌는 원문에 보존했다. 거래 위험0.25%, 경고2.5%, 중단4%, 일손실1%, 명목1배, 완료4시간ATR14의3배 보호손절과 최소수량0.001BTC를 적용했다. 두 규칙의 진입 날짜·거래 수가 달라 계좌 순익 차이를 신호만의 효과로 해석하지 않는다.','',
+        '**월 운영비0에서는 후보2년 순익이 기본+2.16/스트레스+1.61 USDC에 그쳤고, 월2에서는 −46.35/−46.60 USDC다.** 실제 운영비는 미정이고2 USDC는 연구 예시다. 월2의 후보 거래손익 자체는 +1.65/+1.40 USDC이나24개월 고정비48 USDC를 감당하지 못했다. 매매 중단 후에도 비용을 계속 지출하는 사전 가정을 유지했다. 미회복 기간에는 종료까지 회복하지 못한 기간이 포함된다.','',
+        '## 수익 신호가 계좌 수익으로 이어지지 않은 이유','',
+        '운영비0에서 두 비용 모두152개 후보 진입 중7개만 실행되고145개(95.4%)가 size_constraint로 거절됐다. 전체 기간 경고·낙폭 중단은 없었다. 따라서 이 경우 거래 부족을 손실 중단 탓으로 돌릴 수 없다. 현재 자산의0.25%는 약2.50 USDC이고, 최소0.001BTC라도3ATR 손절과 왕복 체결비용의 계획손실이 그보다 큰 날이 대부분이었다.','',
+        f"독립 Decimal 계산으로152개 진입 전 현금·최소수량·보호손절 비용·승인/거절을 두 비용 모두 대조했다. 경고 전0.25% 예산에서 최소 계약을 허용하는 필요 자산의 사건별 중앙값은 기본 {sizing['base']['minimum_contract_required_equity_quantiles']['median']:.2f}, 스트레스 {sizing['stress']['minimum_contract_required_equity_quantiles']['median']:.2f} USDC였다. 이는 수량 제약의 산술 설명이며 자본 증액 권고나 그 자본의 수익·낙폭 시뮬레이션이 아니다. 위험 배수를 높이면5% 조건이 유지된다는 근거도 아니다.",'',
+        '사용자가 말한 손실5%와 연구자가 정한 거래당0.25%·3ATR는 구분해야 한다. 이 설정에서의 계좌 부적합을 모든5% 낙폭 이하 전략의 불가능성으로 일반화하지 않는다. 반대로152개 사건의 평균을1,000 USDC 계좌 전체에 곱해 실현 가능한 수익으로 표시하지 않는다.','',
+        '## 결정과 다음 판단','',
+        '사건 단계의 양수 결과는 탐색 후보 기록으로 보존한다. 현재 계좌·운영비 설정의 채택, 기존 전략과 결합, 실운용 승격은 보류한다. E043을 구제하기 위한 같은 표본 분위·위험 배수·손절 검색은 하지 않는다. 다음 후보를 무작정 더 만들기 전에, 최소 계약과 사전 위험 설계에서 실제 진입 가능한지를 먼저 확인해야 한다. 실용 수익 확보는 여전히 미완료다.','',
+        '문헌은 BTCUSDT 펀딩과 현물 수익을 다루고 이번은 BTCUSDC 선물이다. 시장·표본·지연·보유 중복 제한이 달라 직접 복제가 아니며 문헌의 수익 수치를 우리 전략의 근거 수익으로 대입하지 않았다. 기존 자료 재사용이므로 새 자료 전진 검증도 아니다.','',
+        f"검증: 관련 {v['focused_tests']}개 검사, {e['full_event_calendar']:,}개 정산 신호의 독립 분위·보유 중복 검산, 미래 정산 변경 불변성, 별도 Decimal 사건 비용 산술,16계좌 원장·일평가·운영비 달력·허용 진입 목록·국소 손절, 최소 주문 산술을 확인했다. {v['source_hashes_unchanged']}개 소스 해시 유지. 실제 틱·마크 증거금·강제청산·전체 고점 경로의 독립 재현은 미포함이다. 실제 손실5% 보장은 아니다.",'',
+        '[사전 명세](E043_FUNDING_TAIL_REBOUND.md) · [전체 결과](../../../reports/validation/e043_funding_tail_20260919/summary.json) · [최소 주문 독립 검산](../../../reports/validation/e043_funding_tail_20260919/minimum_order_audit.json) · [계좌 검산](../../../reports/validation/e043_funding_tail_20260919/verification.json) · [가설의 원문 연구](https://www.aijmr.com/papers/2026/4/1493.pdf)']
+    with REPORT.open('x') as f:f.write('\n'.join(text)+'\n')
+    common={'label':'E043 고정 펀딩 하위분위 반등 검증',
+        'files':[{'label':'E043_RESULTS_2026_09_19.md'},{'label':'E043 summary.json'},{'label':'minimum_order_audit.json'}],
+        'caveats':['기존 자료 재사용, 미래 수익성 미확인.','월비용2는 예시, 실제 비용 미정.','5%는 잠정 계좌 낙폭 해석, 거래당0.25%와3ATR는 연구 가정.'],
+        'evidenceFlow':[{'kind':'validation','title':'신호와 실행 가능 수량 검산','detail':'독립 분위·펀딩 비용·16계좌 원장 및 모든152개 후보의 최소 계약 위험 산술 확인.'}]}
+    receipt={'schemaVersion':1,'items':[
+        {'id':'tail-events','title':'펀딩 하위분위 사건의 비용 후 평균','queries':[{'id':'events','source':{**common,
+            'metricDefinitions':[{'label':'사건 평균 순손익 bp','definition':'진입 명목금액으로 정규화한 비중복152개 사건의 비용 후 평균. 계좌 수익률이 아님.'}],
+            'filters':['180일 과거분포 하위10%, 정산2분 후 매수, 약24시간 보유'],
+            'caveats':common['caveats']+['순손익·증분 탐색구간은0을 포함. 시각 구성만 맞춘 대조.']},
+            'reportingPeriod':'2024-09-01~2026-09-01 미만 UTC',
+            'columns':[{'field':'cost','label':'조건'},{'field':'events','label':'사건 수'},{'field':'net_bps','label':'순손익 bp'},{'field':'matched_excess_bps','label':'시간대 대조 대비 bp'}],
+            'rows':event_rows}]},
+        {'id':'tail-account','title':'계좌 순익과 최소 주문 제약','queries':[{'id':'accounts','source':{**common,
+            'metricDefinitions':[{'label':'계좌 순익 USDC','definition':'최종 청산 자산−최초1,000, 표시한 운영비·거래비용 포함.'}],
+            'filters':['거래당0.25%·3ATR·최소0.001BTC, 월비용0/2','운영비0 후보152개 중145개 최소수량 위험 제약으로 거절']},
+            'reportingPeriod':'2024-09-01~2026-09-01 미만 UTC',
+            'columns':[{'field':'model','label':'규칙'},{'field':'monthly_cost','label':'월비용'},{'field':'cost','label':'거래비용'},
+                {'field':'net','label':'2년 순익 USDC'},{'field':'dd','label':'최대낙폭 %'},{'field':'trades','label':'거래 수'}],
+            'rows':accounts}]}]}
+    save(OUT/'delivery_sources.json',receipt)
+    save(OUT/'delivery_verification.json',dict(status='PASS_SCOPED_EVIDENCE_WITH_STATISTICAL_AND_EXECUTION_CAVEATS',
+        prior_verification_sha256=digest(OUT/'verification.json'),
+        artifact_hashes={str(p.relative_to(ROOT)):digest(p) for p in (REPORT,Path(__file__),OUT/'minimum_order_audit.json',OUT/'delivery_sources.json')}))
+    print(json.dumps({k:{n:x for n,x in z.items() if n!='checks'} for k,z in sizing.items()},indent=2));print(REPORT)
+
+
+if __name__=='__main__':main()

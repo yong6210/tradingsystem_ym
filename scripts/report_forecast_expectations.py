@@ -1,0 +1,130 @@
+"""Q003 report and source receipts; never emit a calibrated trading policy."""
+import hashlib
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+OUT = ROOT / 'reports/validation/q003_forecast_expectation_audit_20260919'
+REPORT = ROOT / 'docs/research/experiments/Q003_RESULTS_2026_09_19.md'
+
+
+def save(p, obj):
+    with p.open('x') as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+        f.write('\n')
+
+
+def main():
+    s = json.loads((OUT / 'summary.json').read_text())
+    v = json.loads((OUT / 'verification.json').read_text())
+    for name, expected in v['artifacts'].items():
+        assert hashlib.sha256((OUT / name).read_bytes()).hexdigest() == expected
+    labels = {'PRICE': '가격 특징 PRICE', 'FLOW': '가격+체결 압력 FLOW', 'MEAN180': '당시 과거 180일 평균', 'ZERO': '매일 0bp 예측'}
+    table = []
+    for name in ['PRICE', 'FLOW', 'MEAN180', 'ZERO']:
+        x = s['periods']['all'][name]
+        relative = f"{-100*x['mse_improvement_vs_MEAN180']:+.4f}%" if name in ('PRICE', 'FLOW') else '—'
+        table.append(f"| {labels[name]} | {x['mse_bps_squared']:.4f} | {x['mae_bps']:.4f} | {relative} |")
+    selected, bins, years = [], [], []
+    for name in ['PRICE', 'FLOW']:
+        x = s['selected'][name]['active']
+        selected.append(f"| {name} | {x['n']} | {x['forecast_direction_bps']:.4f} | {x['actual_direction_bps']:.4f} | {x['overstatement_bps']:.4f} | {x['base_net_bps']:.4f} | {x['stress_net_bps']:.4f} |")
+        for key, b in s['selected'][name]['bands'].items():
+            net = '해당 없음' if b['stress_net_bps'] is None else f"{b['stress_net_bps']:.4f}"
+            bins.append(f"| {name} | {key} | {b['n']} | {b['forecast_direction_bps']:.4f} | {b['actual_direction_bps']:.4f} | {net} |")
+    for year in ['2024', '2025', '2026']:
+        x = s['periods'][year]
+        years.append(f"| {year} | {x['PRICE']['n']} | {-100*x['PRICE']['mse_improvement_vs_MEAN180']:+.4f}% | {-100*x['FLOW']['mse_improvement_vs_MEAN180']:+.4f}% |")
+    text = f'''# Q003 결과 — 두 모델끼리의 개선과 예측 능력을 구분
+
+2026-09-19. **E040의 두 예측 모델은 전체 표본에서 당시 과거 평균보다 MSE가 컸다. FLOW가 PRICE보다 조금 나았다는 것만으로 추가 예측력이나 수익성을 입증할 수 없었다.** 이는 사후 진단이며 새 수익 모델을 만든 결과가 아니다.
+
+## 새로 확인한 비교
+
+기존 729일 순차 예측을 그대로 사용했다. 진입 경계는 2024-09-01~2026-08-30 UTC, 마지막 청산은 2026-08-31 UTC다. MEAN180은 각 예측 당시 원래 학습 구간의 성숙한 목표 180개 평균, ZERO는 가격 변화 0bp 예측이다. 매매 신호나 계좌 수익 대조가 아니다.
+
+| 예측 | MSE bp² | MAE bp | 과거 평균 대비 MSE 증가율 |
+|---|---:|---:|---:|
+{chr(10).join(table)}
+
+작을수록 오차가 작다. 양의 증가율은 더 큰 MSE다. 전체 표본에서 PRICE/FLOW 모두 두 단순 대조보다 MSE가 컸다. FLOW는 PRICE 대비 약 0.284% MSE 개선이라는 기존 사실을 유지하지만, 그 비교만으로 충분한 기준을 이겼다고 볼 수는 없다. MAE와 MSE는 다른 손실함수이며, 과거 평균보다 MAE가 조금 작다는 사실도 감추지 않는다.
+
+연도별 과거 평균 대비 MSE 증가율도 모두 표시한다.
+
+| 기간 | 날짜 수 | PRICE | FLOW |
+|---|---:|---:|---:|
+{chr(10).join(years)}
+
+2024/2026은 일부 기간이다. 모든 연도에서 두 모델이 열세였던 것은 아니다. 작은 오차 차이에 통계적 유의성을 부여하지 않으며 예측 불가능성을 증명한 결과도 아니다. [단순 평균 대조](https://scikit-learn.org/stable/modules/generated/sklearn.dummy.DummyRegressor.html)와 [학습 밖 예측 평가](https://otexts.com/fpp3/accuracy.html)는 비교 구조의 근거일 뿐 이 금융 모델의 수익성을 보증하지 않는다.
+
+## 예측값과 실제 이익의 차이
+
+아래는 원래 모델이 선택한 활성 거래만의 평균이며 bp 단위다. 예상은 abs(prediction), 실현 가격 이익은 원래 방향×실제 가격 수익이다. 서로 다른 거래일을 고른 두 모델의 차이를 순수 특징 효과로 해석하지 않는다.
+
+| 모델 | 거래일 | 예상 방향 이익 | 실현 가격 이익 | 예상−실현 | 기본 비용 후 | 스트레스 비용 후 |
+|---|---:|---:|---:|---:|---:|---:|
+{chr(10).join(selected)}
+
+예상−실현은 이 표본의 평균 격차이며, 진짜 기대값의 편향을 통계적으로 확정한 수치가 아니다. 비용은 기존 2.5bp/편도, 슬리피지 2/5bp, 역사적 펀딩과 추가 스트레스 펀딩을 유지했다. 계좌 수량·손절·운영비 이전의 이벤트 손익이므로 1,000 USDC 계좌에 그대로 곱하지 않는다. 이 활성 평균들은 E040에서 이미 알려진 결과를 재확인한 것이다.
+
+## 강한 예측 구간의 양수도 함께 보존
+
+H는 E040의 원래 비용 문턱이다. 이번 집계 전에 나눈 3개 구간을 모두 공개한다. 사전 구간을 적었다고 이미 본 시장 자료가 새 독립 검증이 되지는 않는다.
+
+| 모델 | 예측 크기 구간 | 날짜 수 | 예상 방향 bp | 실현 방향 bp | 스트레스 비용 후 bp |
+|---|---|---:|---:|---:|---:|
+{chr(10).join(bins)}
+
+inactive는 abs(p)≤H, H_to_2H는 H<abs(p)≤2H, above_2H는 abs(p)>2H다. 무거래 구간의 방향 값은 예측 진단이고 매매 수익은 아니다. 2H 초과 구간은 두 모델 모두 비용 후 평균 양수였다. **이 사실을 숨기지 않지만, 이제 문턱을 2H로 바꾸어 같은 과거 표본의 성공 전략으로 발표하지도 않는다.** 강한 구간만 남기는 규칙은 새로 선택한 정책이며, 자금·손절·회복·집중·새 자료 검증을 갖추지 않았다.
+
+## 접근 방법에서 수정한 부분
+
+1. 두 모델끼리의 작은 개선만 보지 않고 동일 시점의 단순 과거 평균/0 예측을 함께 비교한다.
+2. ‘예측값이 거래비용보다 큼’을 곧바로 비용 후 기대수익의 근거로 쓰지 않는다. 실제 선택 거래에서 예측 크기와 실현 손익을 별도로 확인한다.
+3. 보정이나 문턱 선택이 필요하면 과거의 순차 학습 밖 예측을 사용하되, 그 선택에 사용한 기록을 다시 독립 성과 검증으로 부르지 않는다. 최종 정책 고정 후의 새 자료에서 평가한다.
+
+이를 [예측 모델 검증 기준 추가 기록](../PREDICTIVE_MODEL_EVIDENCE_2026_09_19.md)에 반영했다. 문서적 연구 기준이며 기존 실행기에 자동 연결된 거래 차단 기능은 아니다. MSE를 거래 수익의 대체 목표로 삼거나 비예측 전략에 같은 MSE 합격선을 강제하지 않는다.
+
+## 완료 범위와 결정
+
+사전 고정 {v['frozen_hashes_unchanged']}개 해시를 확인하고 729일 평균 대조의 학습 범위를 날짜 기반으로 별도 검산했다. 1,458개 기존 예측의 intercept/목표 시각, 2,916개 비용 이벤트의 방향·gross·비용 항등식, 전체/연도별 오차와 구간 평균을 확인했다. float 계산과 Decimal 합·제곱합을 대조하고 5개 경계 테스트를 통과했다. 원시 분봉부터 다시 파싱하거나 실제 체결을 검증한 것은 아니다.
+
+**Q003은 종료한다.** E040 실패 판정, Q001 비용 시나리오, Q002 실행 자료 불충분, E048 보류를 유지한다. 새로운 모델/계좌 백테스트·시장 자료 수집·주문·예약은 없다. 수익 확보와 사용자 5% 손실 선호 검증은 여전히 미완료다. 월 목표·손실 정의·실제 운영비는 임의 확정하지 않았다.
+
+[명세](Q003_FORECAST_EXPECTATION_AUDIT.md) · [집계](../../../reports/validation/q003_forecast_expectation_audit_20260919/summary.json) · [과거 평균 대조](../../../reports/validation/q003_forecast_expectation_audit_20260919/daily_controls.json) · [검산](../../../reports/validation/q003_forecast_expectation_audit_20260919/verification.json).
+'''
+    with REPORT.open('x') as f:
+        f.write(text)
+    items = []
+    common = dict(label='E040 저장 예측·목표·비용 이벤트 / Q003 진단',
+        files=[dict(label='Q003_RESULTS_2026_09_19.md'), dict(label='summary.json'), dict(label='verification.json')],
+        executedAt=s['completed_at_utc'],
+        filters=['BTCUSDC 기존 729일 순차 예측 전수', '학습 구간·예측·방향·원래 비용 문턱 유지'],
+        caveats=['재사용 시장 자료의 사후 진단이며 독립 전진 검증이 아니다.',
+                 '예측 오차와 이벤트 평균은 계좌 순익·손실 한도 달성을 검증하지 않는다.'],
+        evidenceFlow=[dict(kind='validation', title='시간 범위와 산술 대조',
+            detail=f"{v['frozen_hashes_unchanged']}개 해시 보존. 과거 180일 대조와 저장 절편을 대조하고 float/Decimal로 오차·평균을 검산했다.")])
+    mse_source = dict(common, metricDefinitions=[dict(label='MSE', definition='예측−실제 목표 수익의 제곱을 동일 729일에 평균한 값. 단위 bp², 작을수록 예측 오차가 작다.')])
+    items.append(dict(id='q003-simple-baselines', title='기존 두 모델과 단순 예측의 오차 비교', queries=[dict(
+        id='mse-comparison', source=mse_source, reportingPeriod='2024-09-01~2026-08-30 진입 경계 UTC',
+        columns=[dict(field='model', label='예측'), dict(field='mse', label='MSE bp²')],
+        rows=[dict(model=labels[k], mse=s['periods']['all'][k]['mse_bps_squared']) for k in ['PRICE','FLOW','MEAN180','ZERO']])]))
+    active_source = dict(common, metricDefinitions=[dict(label='선택 거래의 방향별 bp', definition='원래 활성 거래의 평균 절대 예측값과 실제 방향×가격 수익을 비교한다. 순손익은 기존 거래비용 포함·운영비/계좌 손절 적용 전이다.')])
+    items.append(dict(id='q003-selected-expectations', title='예상 이익과 실현 손익의 격차', queries=[dict(
+        id='active-comparison', source=active_source, reportingPeriod='같은 기간 원래 활성 거래',
+        columns=[dict(field='model', label='모델'), dict(field='n', label='거래일'),
+                 dict(field='forecast', label='예상 bp'), dict(field='actual', label='실현 가격 bp'),
+                 dict(field='stress_net', label='스트레스 순손익 bp')],
+        rows=[dict(model=k, n=s['selected'][k]['active']['n'], forecast=s['selected'][k]['active']['forecast_direction_bps'],
+                   actual=s['selected'][k]['active']['actual_direction_bps'], stress_net=s['selected'][k]['active']['stress_net_bps']) for k in ['PRICE','FLOW']])]))
+    save(OUT / 'delivery_sources.json', dict(schemaVersion=1, items=items))
+    save(OUT / 'progress_addendum.json', dict(status='Q003_COMPLETE_DIAGNOSTIC',
+        next_predictive_model_standard='docs/research/PREDICTIVE_MODEL_EVIDENCE_2026_09_19.md',
+        new_predictive_model_registered=False, high_forecast_bin_adopted=False,
+        e040='STOP_UNCHANGED', q002='EXECUTION_EVIDENCE_INCOMPLETE', e048='PAUSED_UNEXECUTED',
+        user_unknowns_preserved=True, profit_verified=False, next='COMPLETE_POLICY_AND_SEPARATE_SELECTION_FROM_NEW_DATA_EVALUATION'))
+    print(REPORT)
+
+
+if __name__ == '__main__':
+    main()

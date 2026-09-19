@@ -1,0 +1,67 @@
+"""Report E039 cash-path economics from frozen artifacts."""
+import hashlib
+import json
+from pathlib import Path
+ROOT=Path(__file__).resolve().parents[1]
+OUT=ROOT/'reports/validation/e039_weekly_long_operations_20260919'
+
+
+def main():
+    s=json.loads((OUT/'summary.json').read_text());v=json.loads((OUT/'verification.json').read_text())
+    for name,h in v['artifacts'].items():
+        if hashlib.sha256((OUT/name).read_bytes()).hexdigest()!=h:raise ValueError('changed artifact '+name)
+    rows=[];bridges=[]
+    for cost in ('base','stress'):
+        for amount in (0,2):
+            r=s['runs'][f'{cost}_op{amount}_OHLC']
+            if r!=s['runs'][f'{cost}_op{amount}_OLHC']:raise ValueError('paths differ')
+            m,d=r['metrics'],r['diagnostics']
+            rows.append(dict(cost=cost,monthly_operating=amount,net=d['net_usdc'],dd=m['max_drawdown_pct'],
+                             cycles=m['cycles'],recovery=d['calendar_risk']['longest_underwater_days'],
+                             charges=m['operating_cost'],warned=m['warned']))
+        a,b=[s['runs'][f'{cost}_op{x}_OHLC'] for x in (0,2)]
+        bridges.append(dict(cost=cost,before=a['diagnostics']['net_usdc'],expense=b['metrics']['operating_cost'],
+                            fixed_path_subtraction=a['diagnostics']['net_usdc']-b['metrics']['operating_cost'],
+                            path_effect=b['diagnostics']['trading_net_before_operations']-a['diagnostics']['trading_net_before_operations'],
+                            after=b['diagnostics']['net_usdc']))
+    report=ROOT/'docs/research/experiments/E039_RESULTS_2026_09_19.md'
+    text=['# E039 결과 — 주간 매수 대조는 월 2 USDC 운영비 조건에서 미통과','',
+        '**주간 매수 대조를 새 자료 성과 검증·결합·실운용 단계로 승격하지 않는다.** 월 2 USDC를 실제 계좌에서 차감한 경우 기본·스트레스 모두 순손실이다. 2 USDC는 기존 연구의 비용 예시이며 실제 청구액이나 사용자 확정 비용이 아니다. 운영비가 다른 경우까지 수익 불가능성을 일반화하지 않는다.','',
+        'BTCUSDC, 초기 1,000 USDC, 2024-09-01~2026-09-01 미만 UTC 730일. E038 LONG의 주간 진입·청산, ATR 손절, 수량, 편도 수수료 0.025%, 슬리피지 2/5bp, 역사적 펀딩과 스트레스 정산당 1bp를 유지했다. 기존에 본 자료의 경제성 재계산이다.','',
+        '| 비용 | 월 운영비 USDC | 최종 순손익 USDC | 최대 낙폭 | 거래 | 최장 미회복 일수 |',
+        '|---|---:|---:|---:|---:|---:|']
+    for r in rows:text.append(f"| {r['cost']} | {r['monthly_operating']} | {r['net']:+.2f} | {r['dd']:.2f}% | {r['cycles']} | {r['recovery']} |")
+    text+=['','OHLC/OLHC 결과는 동일했다. 운영비 0은 E038 정확 재현용 대조이며 실제 무료 운영의 증거가 아니다. 월 2 USDC는 매월 1일 자정 선불로 총 24회/48 USDC를 차감했다. 무거래와 위험 중단 상태에도 고정 비용은 계속 발생하도록 정의했다.','',
+        '## 기존 참고치와 실제 계좌 차이','',
+        '| 비용 | 운영비 전 순익 | 48 USDC 단순 차감 | 주문·위험 경로 변화 효과 | 통합 순익 |','|---|---:|---:|---:|---:|']
+    for b in bridges:text.append(f"| {b['cost']} | {b['before']:+.2f} | {b['fixed_path_subtraction']:+.2f} | {b['path_effect']:+.2f} | {b['after']:+.2f} |")
+    text+=['',
+        '운영비는 잔고와 주문 위험 예산을 줄였다. 기본·스트레스 계좌 모두 2.5% 낙폭 경고에 도달해 이후 신규 위험 예산도 절반이 됐다. 최소 주문량 제약과 함께 거래 횟수·수량이 달라졌다. 비용 없이 38회였던 거래가 기본 31회, 스트레스 19회가 됐다. 표의 경로 변화 효과는 전체 차이의 회계 분해이며 각 매개 효과를 따로 분리한 인과 추정이 아니다.','',
+        '**E038의 월 약 2.23 USDC는 실제 운영비 손익분기점이 아니다.** 기존 경로 순익을 24로 나눈 참고치였으며, 월 2 USDC 통합 계좌에서 이미 손실임을 확인했다. 수수료·운영비를 최종 수익에서 단순 차감하는 계산만으로 후보를 승격하면 안 된다.','',
+        '기본 최장 미회복 기간은 175→257일, 스트레스는 218→671일로 늘었다. 2026년 1~8월에도 기본 −0.75%, 스트레스 −0.36%였다. 두 계좌 모두 4% 중단에는 이르지 않았지만 5% 낙폭 안에 머물렀다는 사실이 손실 전략의 채택 근거가 되지는 않는다.','',
+        '거래별 순손익에는 운영비를 배분하지 않았다. 기본 매매손익 47.51 − 운영비 48 = −0.49 USDC, 스트레스 31.18 − 48 = −16.82 USDC로 계좌와 연결한다. 월별·연도별 수익과 계좌 낙폭에는 운영비가 포함된다. 차감 시점은 기존 포지션 펀딩 후·위험과 주문 판단 전이며 그날 손실 기준 자산은 차감 전이다.','',
+        '## 검산과 결정','',
+        f"새 연구 전용 원장·엔진에서 비용 0의 네 계좌를 E038 원장·거래·일평가·거절·손절·지표와 정확 대조했다. 관련 {v['focused_tests']}개 검사를 통과했고 비용 보유 중 차감·수량 변경·일손실 차단·누적 중단 뒤 비용 지속을 검사했다. 전체 8계좌는 별도 Decimal 원장, 원문 일별 종가 평가, 24회 차감 달력 및 국소 손절 산식과 대조했다.",'',
+        '거래소 실체결, 증거금·강제청산, 계정 요율의 독립 확인 및 전체 계좌 최고점 경로의 별도 엔진 재현은 포함하지 않는다. 전역·동결 엔진과 실운용 설정은 바꾸지 않았다. 실제 미래 손실 5% 상한을 보장하지 않는다.','',
+        '**결정: DO_NOT_PROMOTE_UNDER_2_USDC_MONTHLY_COST.** 실제 운영비는 미정으로 유지한다. 더 낮은 비용·더 큰 위험·다른 요일/손절을 탐색해 이 후보를 합격시키지 않는다. 운영비 조건에서 필요조건을 잃었으므로 신규 시장 자료를 내려받아 이 후보를 구제하는 후속 평가도 진행하지 않았다. 새 자료 접근 가능 여부와 실시간 전진 검증은 이번에 확인되지 않았다.','',
+        '후속 연구는 거래비용·고정비를 감당할 충분한 순익 근거가 있는 후보를 먼저 확보하는 단계로 남는다. T0 미세 변형·수익 근거 없는 결합·운영 확대를 재개하지 않는다. 월 수익 목표와 실제 운영비가 미정이므로, 작은 양수만으로 실용성을 통과시킨다는 기준도 두지 않는다.','',
+        '[사전 규칙](E039_WEEKLY_LONG_OPERATING_COST.md) · [전체 결과](../../../reports/validation/e039_weekly_long_operations_20260919/summary.json) · [검산](../../../reports/validation/e039_weekly_long_operations_20260919/verification.json)']
+    with report.open('x') as f:f.write('\n'.join(text)+'\n')
+    receipt={'schemaVersion':1,'items':[{'id':'weekly-operations','title':'월 운영비를 반영한 주간 매수 계좌','queries':[{
+        'id':'e039','source':{'label':'E039 고정 주간 LONG와 월 운영비 계좌 재계산',
+        'files':[{'label':str(OUT/'summary.json')},{'label':str(OUT/'verification.json')},{'label':str(report)}],
+        'metricDefinitions':[{'label':'최종 순손익','definition':'청산 후 자산 − 최초 1,000 USDC. 수수료·슬리피지·펀딩 및 월 운영비 포함.'},
+                             {'label':'월 운영비','definition':'매월 1일 자정 선불. 2 USDC는 예시이고 실제 청구액 미정.'}],
+        'filters':['E038의 고정 주간 LONG, 사용자 편도 수수료 0.025%','월 운영비 0/2, 기본/스트레스, OHLC/OLHC 8계좌'],
+        'caveats':['기존 자료의 재계산이며 새로운 자료의 전진 성과가 아니다.','실제 운영비는 미정. 다른 비용까지 수익 불가능성을 일반화하지 않는다.',
+                   '가정된 두 봉내 경로는 실제 틱이 아니다.','연구 계좌의 최대 낙폭은 현실의 5% 손실 상한을 보장하지 않는다.'],
+        'evidenceFlow':[{'kind':'validation','title':'비용 차감과 계좌 변화 확인','detail':'0비용 E038 정확 재현, Decimal 원장·일평가·월 차감 달력·국소 손절 산식 대조.'}]},
+        'reportingPeriod':'2024-09-01~2026-09-01 미만 UTC',
+        'columns':[{'field':'cost','label':'거래비용'},{'field':'monthly_operating','label':'월 운영비 USDC'},
+                   {'field':'net','label':'계좌 순손익 USDC'},{'field':'dd','label':'최대 낙폭 %'},{'field':'cycles','label':'거래 수'}],
+        'rows':rows,'methods':[{'language':'calculation','code':'account_net = sum(trading_cycle_net) - operating_debits; 24 monthly debits enter equity before risk checks and sizing.'}]}]}]}
+    with (OUT/'delivery_sources.json').open('x') as f:json.dump(receipt,f,ensure_ascii=False,indent=2)
+    print(report)
+
+
+if __name__=='__main__':main()
