@@ -1,0 +1,16 @@
+{
+  "status": "development_followup_not_strategy_approval",
+  "start_utc": "2026-08-17T00:01:00Z",
+  "end_utc": "2026-08-24T04:00:00Z",
+  "history_reference_utc": "2026-08-15T00:00:00Z",
+  "original_side": -1,
+  "known_failure_utc": "2026-08-17T04:00:00Z",
+  "followup_days_after_failure": 7,
+  "selection": "continue_existing_inventory_case_fixed_seven_days_after_known_failure_without_profit_filter",
+  "return_condition": "first_current_support_original_side_with_basis_formed_strictly_after_failure",
+  "policies": ["exit_on_basis_failure", "half_on_failure_rest_on_opposition", "exit_on_opposition"],
+  "half_loss_fraction": "0.5",
+  "account_config": "configs/research/first_candidate_case_trial.json",
+  "new_exposure_allowed": false,
+  "actual_orders": false
+}

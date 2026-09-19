@@ -1,0 +1,26 @@
+{
+  "status": "frozen_development_review_trial_not_approved_strategy",
+  "selection_start": "2026-08-01T00:00:00Z",
+  "selection_end": "2026-09-01T00:00:00Z",
+  "case_hours": 24,
+  "history_days": [8, 16],
+  "structure_minutes": [15, 60, 240],
+  "structure_mode": "confirmed_path_opposition_retest",
+  "label_thresholds": {
+    "prior_trend_atr": 2,
+    "pullback_atr": 2,
+    "box_max_range_atr": 6,
+    "box_max_net_fraction": 0.25,
+    "box_min_reversals": 3,
+    "reversal_net_atr": 3,
+    "oneway_net_atr": 4,
+    "oneway_efficiency": 0.6
+  },
+  "selection": "first_chronological_nonduplicate_UTC_day_for_each_label_no_profit_filter",
+  "labels": ["rising_pullback", "falling_rebound", "range_cycles", "failed_break_return", "main_reversal_candidate", "oneway_adverse"],
+  "position_scenarios": ["flat", "hypothetical_long_006", "hypothetical_short_006"],
+  "target_policy": "nearest_available_unbroken_favorable_structural_price_not_a_volume_zone",
+  "account_config": "configs/research/first_candidate_case_trial.json",
+  "execute_orders": false,
+  "holdout": false
+}

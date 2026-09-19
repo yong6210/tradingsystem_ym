@@ -1,0 +1,12 @@
+{
+  "status": "development_policy_comparison_not_approved_strategy",
+  "start_utc": "2026-08-17T00:01:00Z",
+  "end_utc": "2026-08-18T00:01:00Z",
+  "history_reference_utc": "2026-08-15T00:00:00Z",
+  "policies": ["exit_on_basis_failure", "half_on_failure_rest_on_opposition", "exit_on_opposition"],
+  "account_config": "configs/research/first_candidate_case_trial.json",
+  "new_exposure_allowed": false,
+  "actual_orders": false,
+  "selection": "continue_prior_case_for_exactly_24_hours_no_profit_selection",
+  "half_loss_fraction": "0.5"
+}

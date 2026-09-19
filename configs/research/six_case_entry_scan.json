@@ -1,0 +1,15 @@
+{
+  "status": "registered_development_candidate_scan_not_approved_strategy",
+  "case_source": "reports/validation/market_basis_revision_20260919/review.json",
+  "labels": ["rising_pullback", "falling_rebound", "range_cycles", "failed_break_return", "main_reversal_candidate", "oneway_adverse"],
+  "selection": "earliest_UTC_entry_candidate_across_preselected_six_days_no_future_outcome_filter",
+  "observation_schedule": "all_15_minute_closes_all_first_reaction_times_and_original_checkpoints",
+  "market_state": "carry_each_existing_case_start_state_no_new_initial_direction",
+  "inventory": "flat_each_candidate_screen_no_fills_or_compounding",
+  "rules": "existing_basis_revision_current_support_and_action_review_unchanged",
+  "reaction_selection": "existing_preference_for_post_start_marker_then_first_available_contact",
+  "target": "existing_nearest_available_unbroken_structural_price_not_volume_zone",
+  "new_exposure_allowed": false,
+  "actual_orders": false,
+  "holdout": false
+}

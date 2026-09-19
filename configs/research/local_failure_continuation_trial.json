@@ -1,0 +1,20 @@
+{
+  "status": "registered_development_continuation_not_approved_strategy",
+  "selection": "same_audited_addition_then_retracement_then_adverse_extension_not_an_independent_no_retracement_case",
+  "start_utc": "2026-08-16T16:11:00Z",
+  "join_utc": "2026-08-17T03:59:00Z",
+  "end_utc": "2026-08-18T00:01:00Z",
+  "local_config": "configs/research/local_failure_inventory_trial.json",
+  "transition_config": "configs/research/transition_inventory_trial.json",
+  "local_policies": ["target_only", "half_at_local_failure_then_target", "half_at_support_loss_then_target"],
+  "exit_policies": ["exit_on_basis_failure", "half_on_failure_rest_on_opposition", "exit_on_opposition"],
+  "market_source": "reports/validation/market_transition_inventory_20260919/review.json",
+  "carry": "actual_remaining_inventory_average_cost_attribution_realized_pnl_peak_and_drawdown",
+  "join_requirement": "no_pending_intent_or_unfinished_local_reduction_at_join",
+  "exit_fraction": "0.5",
+  "new_exposure_allowed": false,
+  "actual_orders": false,
+  "holdout": false,
+  "sensitivity": "same_two_execution_models_with_003_liquidity_or_5bp_slippage_from_original_start",
+  "no_liquidity": "stop_at_join_if_pending_do_not_reset_or_force_transition"
+}

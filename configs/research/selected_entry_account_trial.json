@@ -1,0 +1,19 @@
+{
+  "status": "registered_conditional_account_not_approved_strategy",
+  "selection_source": "reports/validation/six_case_entry_scan_20260920/selection.json",
+  "decision_utc": "2026-08-16T16:09:00Z",
+  "end_utc": "2026-08-17T00:00:00Z",
+  "target_mark": "62966.6",
+  "account_config": "configs/research/first_candidate_case_trial.json",
+  "execution": "one_attempt_first_open_strictly_after_decision_recheck_direction_local_level_capacity_and_positive_net_room",
+  "unfilled_entry_remainder": "cancel_no_automatic_retry",
+  "market_rules": "existing_basis_revision_current_support",
+  "addition_rules": "existing_action_review_with_actual_position_and_last_growth_time",
+  "target_action": "after_completed_minute_touches_target_reduce_at_least_half_current_quantity_once",
+  "reduction_engine": "existing_local_failure_inventory_simulate_target_only_with_risk_priority",
+  "halt_on_unhandled_add_candidate": true,
+  "end_close": "mark_remaining_inventory_no_forced_exit",
+  "sensitivities": ["fee_4bp", "slippage_5bp", "liquidity_003", "no_liquidity"],
+  "actual_orders": false,
+  "holdout": false
+}
